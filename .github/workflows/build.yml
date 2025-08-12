@@ -40,11 +40,10 @@ jobs:
           version: 23.x
 
       - name: Install minimal stable with clippy and rustfmt
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          profile: default
           toolchain: stable
-          override: true
+          components: rustfmt
 
       - name: Format
         run: cargo fmt -- --check
@@ -63,11 +62,10 @@ jobs:
           version: 23.x
 
       - name: install minimal stable with clippy and rustfmt
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          profile: default
           toolchain: stable
-          override: true
+          components: clippy
 
       - uses: Swatinem/rust-cache@v2
 
@@ -103,11 +101,9 @@ jobs:
           version: 23.x
 
       - name: install minimal stable with clippy and rustfmt
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          profile: default
           toolchain: stable
-          override: true
 
       - uses: Swatinem/rust-cache@v2
 
