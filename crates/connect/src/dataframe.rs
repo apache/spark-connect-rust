@@ -2445,12 +2445,14 @@ mod tests {
 
         let df = spark.create_dataframe(&data)?;
 
-        let df = df.unpivot(
-            [col("id")],
-            Some(vec![col("int"), col("float")]),
-            "var",
-            "val",
-        );
+        let df = df
+            .unpivot(
+                [col("id")],
+                Some(vec![col("int"), col("float")]),
+                "var",
+                "val",
+            )
+            .select(vec![col("id"), col("var"), col("val").cast("float")]);
 
         let res = df.collect().await?;
 
