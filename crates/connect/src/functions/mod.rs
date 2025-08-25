@@ -166,6 +166,11 @@ pub fn expr(val: &str) -> Column {
     })
 }
 
+/// Returns an universally unique identifier (UUID) string. The value is returned as a canonical UUID 36-character string.
+pub fn uuid() -> Column {
+    invoke_func("uuid", vec![lit(random::<i32>())])
+}
+
 // Math Functions
 
 gen_func!(sqrt, [col: Column], "Computes the square root of the specified float value.");
@@ -1654,11 +1659,13 @@ mod tests {
     use super::*;
 
     use core::f64;
+    use regex::Regex;
     use std::sync::Arc;
 
     use arrow::{
         array::{
-            ArrayRef, BooleanArray, Float64Array, Int32Array, Int64Array, StringArray, StructArray,
+            Array, ArrayRef, BooleanArray, Float64Array, Int32Array, Int64Array, StringArray,
+            StructArray,
         },
         datatypes::{DataType, Field, Schema},
         record_batch::RecordBatch,
@@ -1900,6 +1907,24 @@ mod tests {
         Int32Array::from(vec![1]),
         false
     );
+
+    #[tokio::test]
+    async fn test_func_uuid() -> Result<(), SparkError> {
+        let spark = setup().await;
+
+        let df = spark.range(Some(1), 2, 1, Some(1));
+        let res = df.select([uuid().alias("uuid")]).collect().await?;
+        let res_column = res.column_by_name("uuid").unwrap();
+        let res_column = res_column.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(res_column.len(), 1);
+
+        let uuid = res_column.value(0);
+        let expect_pattern =
+            Regex::new("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$").unwrap();
+        assert!(expect_pattern.is_match(uuid));
+
+        Ok(())
+    }
 
     // math functions
     test_func!(
