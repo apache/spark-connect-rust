@@ -166,10 +166,7 @@ pub fn expr(val: &str) -> Column {
     })
 }
 
-/// Returns an universally unique identifier (UUID) string. The value is returned as a canonical UUID 36-character string.
-pub fn uuid() -> Column {
-    invoke_func("uuid", vec![lit(random::<i32>())])
-}
+gen_func!(uuid, [], "Returns an universally unique identifier (UUID) string. The value is returned as a canonical UUID 36-character string.");
 
 // Math Functions
 
