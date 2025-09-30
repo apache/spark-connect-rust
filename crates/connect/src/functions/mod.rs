@@ -1108,6 +1108,7 @@ gen_func!(stddev, [col: Column], "Alias for stddev_samp.");
 gen_func!(stddev_pop, [col: Column], "Returns population standard deviation of the expression in a group.");
 gen_func!(stddev_samp, [col: Column], "Returns the unbiased sample standard deviation of the expression in a group.");
 gen_func!(sum, [col: Column], "Returns the sum of all values in the expression.");
+
 /// "Returns the sum of distinct values in the expression."
 pub fn sum_distinct(col: impl Into<Column>) -> Column {
     Column::from(spark::Expression {
@@ -1121,6 +1122,7 @@ pub fn sum_distinct(col: impl Into<Column>) -> Column {
         )),
     })
 }
+
 gen_func!(var_pop, [col: Column], "Returns the population variance of the values in a group.");
 gen_func!(var_samp, [col: Column], "Returns the unbiased sample variance of the values in a group.");
 gen_func!(variance, [col: Column], "Alias for var_samp");
