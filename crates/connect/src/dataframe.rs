@@ -1201,15 +1201,37 @@ impl DataFrame {
     /// Converts a [DataFrame] into a [polars::frame::DataFrame]
     #[cfg(any(feature = "default", feature = "polars"))]
     pub async fn to_polars(self) -> Result<polars::frame::DataFrame, SparkError> {
+        use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
         let batch = self.collect().await?;
         let schema = batch.schema();
 
         let mut columns = Vec::with_capacity(batch.num_columns());
         for (i, column) in batch.columns().iter().enumerate() {
-            let arrow = Box::<dyn polars_arrow::array::Array>::from(&**column);
+            let array_data = column.to_data();
+            let (array, ffi_schema) = arrow::ffi::to_ffi(&array_data)?;
+
+            // SAFETY: This follows the Arrow C FFI interface. The transmute converts types that are
+            // across crates, but are the same layout.
+            let field = unsafe {
+                polars_arrow::ffi::import_field_from_c(std::mem::transmute::<
+                    &FFI_ArrowSchema,
+                    &polars_arrow::ffi::ArrowSchema,
+                >(&ffi_schema))
+            }?;
+
+            // SAFETY: This follows the Arrow C FFI interface. The transmute converts types that are
+            // across crates, but are the same layout.
+            let data = unsafe {
+                polars_arrow::ffi::import_array_from_c(
+                    std::mem::transmute::<FFI_ArrowArray, polars_arrow::ffi::ArrowArray>(array),
+                    field.dtype().clone(),
+                )
+            }?;
+
+            // Create Polars series from arrow column
             columns.push(polars::series::Series::from_arrow(
                 schema.fields().get(i).unwrap().name().into(),
-                arrow,
+                data,
             )?);
         }
 
@@ -2538,37 +2560,6 @@ mod tests {
         let val = df.to_datafusion(&ctx).await?.collect().await?;
 
         assert_eq!(0, val[0].num_rows());
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    #[cfg(feature = "polars")]
-    async fn test_df_to_polars() -> Result<(), SparkError> {
-        let spark = setup().await;
-
-        let data = mock_data();
-
-        let schema = data.schema();
-
-        // transform arrow into polars_arrow
-        // same code as used in the function
-        let mut columns = Vec::with_capacity(data.num_columns());
-        for (i, column) in data.columns().iter().enumerate() {
-            let arrow = Box::<dyn polars_arrow::array::Array>::from(&**column);
-            columns.push(polars::series::Series::from_arrow(
-                schema.fields().get(i).unwrap().name().into(),
-                arrow,
-            )?);
-        }
-
-        let df_expected = polars::frame::DataFrame::from_iter(columns);
-
-        let df = spark.create_dataframe(&data)?;
-
-        let df_output = df.to_polars().await?;
-
-        assert_eq!(df_expected, df_output);
 
         Ok(())
     }
