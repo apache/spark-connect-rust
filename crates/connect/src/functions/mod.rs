@@ -644,10 +644,17 @@ pub fn window(
 ) -> Column {
     let window_duration = lit(window_duration);
     match (slide_duration, start_time) {
-        (Some(sd), Some(st)) => invoke_func("window", vec![time_column.into(), window_duration, lit(sd), lit(st)]),
-        (Some(sd), None) => invoke_func("window", vec![time_column.into(), window_duration, lit(sd)]),
-        (None, Some(st)) => invoke_func("window", vec![time_column.into(), window_duration, lit(st) ]),
-        (None, None) => invoke_func("window", vec![time_column.into(), window_duration])
+        (Some(sd), Some(st)) => invoke_func(
+            "window",
+            vec![time_column.into(), window_duration, lit(sd), lit(st)],
+        ),
+        (Some(sd), None) => {
+            invoke_func("window", vec![time_column.into(), window_duration, lit(sd)])
+        }
+        (None, Some(st)) => {
+            invoke_func("window", vec![time_column.into(), window_duration, lit(st)])
+        }
+        (None, None) => invoke_func("window", vec![time_column.into(), window_duration]),
     }
 }
 
