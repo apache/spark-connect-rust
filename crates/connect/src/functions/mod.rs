@@ -56,6 +56,7 @@ macro_rules! gen_func {
         }
     };
 
+    
     // case for any iterable of cols as a single argument
     ($func_name:ident, [cols : $param_type:ty ], $doc:expr) => {
         #[doc = $doc]
