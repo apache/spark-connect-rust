@@ -644,37 +644,18 @@ pub fn window(
     start_time: Option<&str>,
 ) -> Column {
     let window_duration = lit(window_duration);
-
-    if slide_duration.is_some() & start_time.is_some() {
-        invoke_func(
+    match (slide_duration, start_time) {
+        (Some(sd), Some(st)) => invoke_func(
             "window",
-            vec![
-                time_column.into(),
-                window_duration,
-                lit(slide_duration.unwrap()),
-                lit(start_time.unwrap()),
-            ],
-        )
-    } else if slide_duration.is_some() & start_time.is_none() {
-        invoke_func(
-            "window",
-            vec![
-                time_column.into(),
-                window_duration,
-                lit(slide_duration.unwrap()),
-            ],
-        )
-    } else if slide_duration.is_none() & start_time.is_some() {
-        invoke_func(
-            "window",
-            vec![
-                time_column.into(),
-                window_duration,
-                lit(start_time.unwrap()),
-            ],
-        )
-    } else {
-        invoke_func("window", vec![time_column.into(), window_duration])
+            vec![time_column.into(), window_duration, lit(sd), lit(st)],
+        ),
+        (Some(sd), None) => {
+            invoke_func("window", vec![time_column.into(), window_duration, lit(sd)])
+        }
+        (None, Some(st)) => {
+            invoke_func("window", vec![time_column.into(), window_duration, lit(st)])
+        }
+        (None, None) => invoke_func("window", vec![time_column.into(), window_duration]),
     }
 }
 
