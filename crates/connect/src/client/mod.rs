@@ -78,6 +78,8 @@ pub(crate) struct AnalyzeHandler {
     pub(crate) same_semantics: Option<bool>,
     pub(crate) semantic_hash: Option<i32>,
     pub(crate) get_storage_level: Option<spark::StorageLevel>,
+    #[cfg(feature = "spark-41")]
+    pub(crate) json_ddl: Option<String>,
 }
 
 /// Client wrapper to handle submitting requests and handling responses from the [SparkConnectServiceClient]
@@ -159,6 +161,7 @@ where
 
         spark::ExecutePlanRequest {
             session_id: self.session_id(),
+            client_observed_server_side_session_id: None,
             user_context: self.user_context.clone(),
             operation_id: Some(operation_id),
             plan: None,
@@ -171,6 +174,7 @@ where
     pub fn analyze_plan_request_with_metadata(&self) -> spark::AnalyzePlanRequest {
         spark::AnalyzePlanRequest {
             session_id: self.session_id(),
+            client_observed_server_side_session_id: None,
             user_context: self.user_context.clone(),
             client_type: self.builder.user_agent.clone(),
             analyze: None,
@@ -203,6 +207,7 @@ where
 
         let req = spark::ReattachExecuteRequest {
             session_id: self.session_id(),
+            client_observed_server_side_session_id: None,
             user_context: self.user_context.clone(),
             operation_id: self.operation_id.clone().unwrap(),
             client_type: self.builder.user_agent.clone(),
@@ -275,6 +280,7 @@ where
 
         let req = spark::ReleaseExecuteRequest {
             session_id: self.session_id(),
+            client_observed_server_side_session_id: None,
             user_context: self.user_context.clone(),
             operation_id: self.operation_id.clone().unwrap(),
             client_type: self.builder.user_agent.clone(),
@@ -346,6 +352,8 @@ where
     ) -> Result<spark::ConfigResponse, SparkError> {
         let operation = spark::ConfigRequest {
             session_id: self.session_id(),
+            #[cfg(feature = "spark-41")]
+            client_observed_server_side_session_id: None,
             user_context: self.user_context.clone(),
             client_type: self.builder.user_agent.clone(),
             operation: Some(operation),
@@ -365,6 +373,8 @@ where
     ) -> Result<spark::InterruptResponse, SparkError> {
         let mut req = spark::InterruptRequest {
             session_id: self.session_id(),
+            #[cfg(feature = "spark-41")]
+            client_observed_server_side_session_id: None,
             user_context: self.user_context.clone(),
             client_type: self.builder.user_agent.clone(),
             interrupt_type: 0,
@@ -437,6 +447,22 @@ where
                 ResponseType::Extension(_) => {
                     unimplemented!("extension response types are not implemented")
                 }
+                ResponseType::StreamingQueryListenerEventsResult(_) => {
+                    unimplemented!("Streaming Query")
+                }
+                ResponseType::CreateResourceProfileCommandResult(_) => {
+                    unimplemented!("Resource Profile")
+                }
+                ResponseType::ExecutionProgress(_) => {
+                    // unimplemented!("Execution Progress")
+                }
+                ResponseType::CheckpointCommandResult(_) => {
+
+                }
+                ResponseType::MlCommandResult(_) => {}
+                ResponseType::PipelineEventResult(_) => {}
+                ResponseType::PipelineCommandResult(_) => {}
+                ResponseType::PipelineQueryFunctionExecutionSignal(_) => {}
             }
         }
         Ok(())
@@ -483,6 +509,10 @@ where
                 spark::analyze_plan_response::Result::Unpersist(_) => {}
                 spark::analyze_plan_response::Result::GetStorageLevel(level) => {
                     self.analyzer.get_storage_level = level.storage_level
+                }
+                #[cfg(feature = "spark-41")]
+                spark::analyze_plan_response::Result::JsonToDdl(ddl_json) => {
+                    self.analyzer.json_ddl = Some(ddl_json.ddl_string)
                 }
             }
         }

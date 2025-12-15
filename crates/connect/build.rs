@@ -17,8 +17,22 @@
 
 use std::fs;
 
+fn find_spark_version() -> &'static str {
+    let version = std::env::var("SPARK_VERSION").unwrap_or("4.1.0".to_string());
+    let version_triplet = version.splitn(3, '.').collect::<Vec<_>>();
+    match version_triplet[..3] {
+        ["3", "5", _] => "./protobuf/spark-3.5/",
+        _ => {
+            println!("cargo::rustc-cfg=spark41");
+            "./protobuf/spark-4.1/"
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let files = fs::read_dir("./protobuf/spark-3.5/spark/connect/")?;
+    let spark_version = find_spark_version();
+    let file_path = format!("{}spark/connect/", spark_version);
+    let files = fs::read_dir(&file_path)?;
 
     let mut file_paths: Vec<String> = vec![];
 
@@ -32,7 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_server(false)
         .build_client(true)
         .build_transport(true)
-        .compile_protos(file_paths.as_ref(), &["./protobuf/spark-3.5/".to_string()])?;
+        .compile_protos(file_paths.as_ref(), &[spark_version.to_string()])?;
 
     Ok(())
 }

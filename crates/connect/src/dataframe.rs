@@ -182,6 +182,8 @@ impl DataFrame {
     /// Selects column based on the column name specified as a regex and returns it as [Column].
     pub fn col_regex(self, col_name: &str) -> Column {
         let expr = spark::Expression {
+            #[cfg(feature = "spark-41")]
+            common: None,
             expr_type: Some(spark::expression::ExprType::UnresolvedRegex(
                 spark::expression::UnresolvedRegex {
                     col_name: col_name.to_string(),

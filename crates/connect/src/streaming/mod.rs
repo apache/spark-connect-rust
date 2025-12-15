@@ -100,6 +100,7 @@ impl DataStreamReader {
             common: Some(spark::RelationCommon {
                 source_info: "NA".to_string(),
                 plan_id: Some(1),
+                origin: None,
             }),
             rel_type: read_type,
         };
@@ -139,9 +140,10 @@ pub struct DataStreamWriter {
     format: Option<String>,
     output_mode: Option<OutputMode>,
     query_name: Option<String>,
-    trigger: Option<spark::write_stream_operation_start::Trigger>,
+    trigger: Option<Trigger>,
     partition_by: Vec<String>,
     write_options: HashMap<String, String>,
+    clustering_column_names: Vec<String>,
 }
 
 impl DataStreamWriter {
@@ -164,6 +166,7 @@ impl DataStreamWriter {
             trigger: None,
             partition_by: vec![],
             write_options: HashMap::new(),
+            clustering_column_names: vec![],
         }
     }
 
@@ -239,6 +242,7 @@ impl DataStreamWriter {
             foreach_writer: None,
             trigger: self.trigger,
             sink_destination: sink,
+            clustering_column_names: self.clustering_column_names,
         };
 
         let cmd = spark::command::CommandType::WriteStreamOperationStart(ops);

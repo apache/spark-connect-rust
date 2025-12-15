@@ -463,6 +463,7 @@ impl DataFrameReader {
             common: Some(spark::RelationCommon {
                 source_info: "NA".to_string(),
                 plan_id: Some(1),
+                origin: None,
             }),
             rel_type: read_type,
         };
@@ -495,6 +496,7 @@ impl DataFrameReader {
             common: Some(spark::RelationCommon {
                 source_info: "NA".to_string(),
                 plan_id: Some(1),
+                origin: None,
             }),
             rel_type: read_type,
         };
@@ -570,6 +572,7 @@ pub struct DataFrameWriter {
     partition_by: Vec<String>,
     sort_by: Vec<String>,
     write_options: HashMap<String, String>,
+    clustering_columns: Vec<String>,
 }
 
 impl DataFrameWriter {
@@ -592,6 +595,7 @@ impl DataFrameWriter {
             partition_by: vec![],
             sort_by: vec![],
             write_options: HashMap::new(),
+            clustering_columns: vec![],
         }
     }
 
@@ -676,6 +680,7 @@ impl DataFrameWriter {
             partitioning_columns: self.partition_by,
             bucket_by: self.bucket_by,
             options: self.write_options,
+            clustering_columns: self.clustering_columns,
             save_type: Some(spark::write_operation::SaveType::Path(path.to_string())),
         });
 
@@ -697,6 +702,7 @@ impl DataFrameWriter {
             partitioning_columns: self.partition_by,
             bucket_by: self.bucket_by,
             options: self.write_options,
+            clustering_columns: self.clustering_columns,
             save_type: Some(spark::write_operation::SaveType::Table(
                 spark::write_operation::SaveTable {
                     table_name: table_name.to_string(),
@@ -774,6 +780,8 @@ pub struct DataFrameWriterV2 {
     properties: HashMap<String, String>,
     partitioning: Vec<Expression>,
     overwrite_condition: Option<Expression>,
+    #[cfg(feature = "spark-41")]
+    clustering_columns: Vec<String>,
 }
 
 impl DataFrameWriterV2 {
@@ -786,6 +794,8 @@ impl DataFrameWriterV2 {
             properties: HashMap::new(),
             partitioning: vec![],
             overwrite_condition: None,
+            #[cfg(feature = "spark-41")]
+            clustering_columns: vec![],
         }
     }
 
@@ -807,6 +817,16 @@ impl DataFrameWriterV2 {
     pub fn table_property(mut self, property: &str, value: &str) -> Self {
         self.properties
             .insert(property.to_string(), value.to_string());
+        self
+    }
+
+    pub fn cluster_by_columns(mut self, clustering_columns: Vec<String>) -> Self {
+        self.clustering_columns.extend(clustering_columns);
+        self
+    }
+
+    pub fn cluster_by_column(mut self, clustering_column: &str) -> Self {
+        self.clustering_columns.push(clustering_column.to_string());
         self
     }
 
@@ -853,6 +873,8 @@ impl DataFrameWriterV2 {
             table_properties: self.properties,
             mode: 0,
             overwrite_condition: self.overwrite_condition,
+            #[cfg(feature = "spark-41")]
+            clustering_columns: self.clustering_columns,
         };
 
         builder.set_mode(mode);

@@ -64,6 +64,7 @@ impl RunTimeConfig {
                 key: key.into(),
                 value: Some(value.into()),
             }],
+            silent: None,
         });
         let operation = spark::config_request::Operation {
             op_type: Some(op_type),

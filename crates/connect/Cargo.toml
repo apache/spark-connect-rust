@@ -77,7 +77,8 @@ doctest = false
 [features]
 default = [
     "tokio",
-    "tonic"
+    "tonic",
+    "spark-41"
 ]
 
 tls = [
@@ -93,3 +94,6 @@ polars = [
     "dep:polars-arrow",
     "arrow/ffi"
 ]
+
+spark-35 = []
+spark-41 = []

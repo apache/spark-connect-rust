@@ -347,6 +347,8 @@ impl DataType {
             Self::String => spark::DataType {
                 kind: Some(spark::data_type::Kind::String(spark::data_type::String {
                     type_variation_reference,
+                    #[cfg(feature = "spark-41")]
+                    collation: "".to_string(),
                 })),
             },
             Self::Date => spark::DataType {
@@ -582,8 +584,32 @@ impl_to_proto_type!(i64, Long);
 impl_to_proto_type!(isize, Long);
 impl_to_proto_type!(f32, Float);
 impl_to_proto_type!(f64, Double);
-impl_to_proto_type!(&str, String);
-impl_to_proto_type!(String, String);
+
+impl From<&str> for spark::DataType {
+    fn from(_value: &str) -> spark::DataType {
+        spark::DataType {
+            kind: Some(spark::data_type::Kind::String(
+                spark::data_type::String {
+                    type_variation_reference: 0,
+                    collation: "UTF8_BINARY".to_string(),
+                },
+            )),
+        }
+    }
+}
+
+impl From<String> for spark::DataType {
+    fn from(_value: String) -> spark::DataType {
+        spark::DataType {
+            kind: Some(spark::data_type::Kind::String(
+                spark::data_type::String {
+                    type_variation_reference: 0,
+                    collation: "UTF8_BINARY".to_string(),
+                },
+            )),
+        }
+    }
+}
 
 impl From<&[u8]> for spark::DataType {
     fn from(_value: &[u8]) -> spark::DataType {

@@ -46,7 +46,6 @@ path = "src/readstream.rs"
 [[bin]]
 name = "databricks"
 path = "src/databricks.rs"
-required-feature = ["tls"]
 
 [dependencies]
 spark-connect-rs = { version = "0.0.2", path = "../crates/connect" }

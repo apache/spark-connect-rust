@@ -197,6 +197,9 @@ impl SparkSession {
             sql: sql_query.to_string(),
             args: HashMap::default(),
             pos_args: vec![],
+            named_arguments: HashMap::new(),
+            pos_arguments: vec![],
+            input: None,
         });
 
         let plan = LogicalPlanBuilder::plan_cmd(sql_cmd);

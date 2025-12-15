@@ -42,8 +42,8 @@ futures-util = { version = "0.3" }
 thiserror = { version = "2.0" }
 
 
-arrow = { version = "^56", features = ["prettyprint"] }
-arrow-ipc = { version = "^56" }
+arrow = { version = "^57", features = ["prettyprint"] }
+arrow-ipc = { version = "^57" }
 
 serde_json = { version = "1" }
 
@@ -57,6 +57,6 @@ regex = { version = "1" }
 
 chrono = { version = "0.4" }
 
-datafusion = { version = "50", default-features = false }
-polars = { version = "0.51", default-features = false }
-polars-arrow = { version = "0.51", default-features = false, features = ["arrow-format"]  }
+datafusion = { version = "51", default-features = false }
+polars = { version = "0.52", default-features = false }
+polars-arrow = { version = "0.52", default-features = false, features = ["arrow-format"]  }

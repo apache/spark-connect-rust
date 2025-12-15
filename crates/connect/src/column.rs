@@ -86,6 +86,7 @@ impl Column {
         };
 
         let expression = spark::Expression {
+            common: None,
             expr_type: Some(spark::expression::ExprType::Alias(Box::new(alias))),
         };
 
@@ -117,6 +118,7 @@ impl Column {
         };
 
         let expression = spark::Expression {
+            common: None,
             expr_type: Some(spark::expression::ExprType::SortOrder(Box::new(asc))),
         };
 
@@ -131,6 +133,7 @@ impl Column {
         };
 
         let expression = spark::Expression {
+            common: None,
             expr_type: Some(spark::expression::ExprType::SortOrder(Box::new(asc))),
         };
 
@@ -157,6 +160,7 @@ impl Column {
         };
 
         let expression = spark::Expression {
+            common: None,
             expr_type: Some(spark::expression::ExprType::SortOrder(Box::new(asc))),
         };
 
@@ -171,6 +175,7 @@ impl Column {
         };
 
         let expression = spark::Expression {
+            common: None,
             expr_type: Some(spark::expression::ExprType::SortOrder(Box::new(asc))),
         };
 
@@ -185,6 +190,7 @@ impl Column {
 
         for field in field_names {
             parent_col = spark::Expression {
+                common: None,
                 expr_type: Some(spark::expression::ExprType::UpdateFields(Box::new(
                     spark::expression::UpdateFields {
                         struct_expression: Some(Box::new(parent_col)),
@@ -200,6 +206,8 @@ impl Column {
 
     pub fn with_field(self, field_name: &str, col: impl Into<Column>) -> Column {
         let update_field = spark::Expression {
+            #[cfg(feature = "spark-41")]
+            common: None,
             expr_type: Some(spark::expression::ExprType::UpdateFields(Box::new(
                 spark::expression::UpdateFields {
                     struct_expression: Some(Box::new(self.expression)),
@@ -240,10 +248,14 @@ impl Column {
     pub fn cast(self, to_type: impl Into<CastToType>) -> Column {
         let cast = spark::expression::Cast {
             expr: Some(Box::new(self.expression)),
+            #[cfg(feature = "spark-41")]
+            eval_mode: 0,
             cast_to_type: Some(to_type.into()),
         };
 
         let expression = spark::Expression {
+            #[cfg(feature = "spark-41")]
+            common: None,
             expr_type: Some(spark::expression::ExprType::Cast(Box::new(cast))),
         };
 
@@ -364,6 +376,8 @@ impl Column {
         };
 
         let expression = spark::Expression {
+            #[cfg(feature = "spark-41")]
+            common: None,
             expr_type: Some(spark::expression::ExprType::Window(Box::new(window_expr))),
         };
 
@@ -382,6 +396,8 @@ impl From<spark::expression::Literal> for Column {
     /// Used for creating columns from a [spark::Expression]
     fn from(expression: spark::expression::Literal) -> Self {
         Self::from(spark::Expression {
+            #[cfg(feature = "spark-41")]
+            common: None,
             expr_type: Some(spark::expression::ExprType::Literal(expression)),
         })
     }
@@ -405,24 +421,36 @@ impl From<&str> for Column {
     fn from(value: &str) -> Self {
         let expression = match value {
             "*" => spark::Expression {
+                #[cfg(feature = "spark-41")]
+                common: None,
                 expr_type: Some(spark::expression::ExprType::UnresolvedStar(
                     spark::expression::UnresolvedStar {
                         unparsed_target: None,
+                        #[cfg(feature = "spark-41")]
+                        plan_id: None,
                     },
                 )),
             },
             value if value.ends_with(".*") => spark::Expression {
+                #[cfg(feature = "spark-41")]
+                common: None,
                 expr_type: Some(spark::expression::ExprType::UnresolvedStar(
                     spark::expression::UnresolvedStar {
                         unparsed_target: Some(value.to_string()),
+                        #[cfg(feature = "spark-41")]
+                        plan_id: None,
                     },
                 )),
             },
             _ => spark::Expression {
+                #[cfg(feature = "spark-41")]
+                common: None,
                 expr_type: Some(spark::expression::ExprType::UnresolvedAttribute(
                     spark::expression::UnresolvedAttribute {
                         unparsed_identifier: value.to_string(),
                         plan_id: None,
+                        #[cfg(feature = "spark-41")]
+                        is_metadata_column: None,
                     },
                 )),
             },

@@ -127,6 +127,8 @@ impl LogicalPlanBuilder {
             grouping_expressions: grouping_cols,
             aggregate_expressions: VecExpression::from_iter(agg_expression).expr,
             pivot,
+            #[cfg(feature = "spark-41")]
+            grouping_sets: vec![],
         };
 
         let agg_rel = RelType::Aggregate(Box::new(agg));
@@ -688,6 +690,8 @@ impl LogicalPlanBuilder {
         let expressions = cols
             .into_iter()
             .map(|col| spark::Expression {
+                #[cfg(feature = "spark-41")]
+                common: None,
                 expr_type: Some(spark::expression::ExprType::ExpressionString(
                     spark::expression::ExpressionString {
                         expression: col.as_ref().to_string(),
@@ -806,6 +810,8 @@ impl LogicalPlanBuilder {
         let rename_expr = RelType::WithColumnsRenamed(Box::new(spark::WithColumnsRenamed {
             input: self.relation_input(),
             rename_columns_map,
+            #[cfg(feature = "spark-41")]
+            renames: vec![],
         }));
 
         LogicalPlanBuilder::from(rename_expr)
@@ -834,6 +840,8 @@ impl From<spark::relation::RelType> for LogicalPlanBuilder {
             common: Some(RelationCommon {
                 source_info: "".to_string(),
                 plan_id: Some(plan_id),
+                #[cfg(spark41)]
+                origin: None,
             }),
             rel_type: Some(rel_type),
         };

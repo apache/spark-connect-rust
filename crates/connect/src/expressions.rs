@@ -106,7 +106,11 @@ impl ToFilterExpr for &str {
             },
         ));
 
-        Some(spark::Expression { expr_type })
+        Some(spark::Expression {
+            #[cfg(feature = "spark-41")]
+            common: None,
+            expr_type,
+        })
     }
 }
 
@@ -120,6 +124,11 @@ macro_rules! impl_to_literal {
         impl From<$type> for spark::expression::Literal {
             fn from(value: $type) -> spark::expression::Literal {
                 spark::expression::Literal {
+                    data_type: Some(spark::DataType {
+                        kind: Some(spark::data_type::Kind::$inner_type(
+                            spark::data_type::$inner_type::default(),
+                        )),
+                    }),
                     literal_type: Some(spark::expression::literal::LiteralType::$inner_type(value)),
                 }
             }
@@ -137,6 +146,8 @@ impl_to_literal!(String, String);
 impl From<&[u8]> for spark::expression::Literal {
     fn from(value: &[u8]) -> Self {
         spark::expression::Literal {
+            #[cfg(feature = "spark-41")]
+            data_type: Some(spark::DataType::from(2)),
             literal_type: Some(spark::expression::literal::LiteralType::Binary(Vec::from(
                 value,
             ))),
@@ -147,6 +158,8 @@ impl From<&[u8]> for spark::expression::Literal {
 impl From<i16> for spark::expression::Literal {
     fn from(value: i16) -> Self {
         spark::expression::Literal {
+            #[cfg(feature = "spark-41")]
+            data_type: Some(spark::DataType::from(5)),
             literal_type: Some(spark::expression::literal::LiteralType::Short(value as i32)),
         }
     }
@@ -155,6 +168,8 @@ impl From<i16> for spark::expression::Literal {
 impl<'a> From<&'a str> for spark::expression::Literal {
     fn from(value: &'a str) -> Self {
         spark::expression::Literal {
+            #[cfg(feature = "spark-41")]
+            data_type: Some(spark::DataType::from(11)),
             literal_type: Some(spark::expression::literal::LiteralType::String(
                 value.to_string(),
             )),
@@ -168,6 +183,8 @@ impl<Tz: chrono::TimeZone> From<chrono::DateTime<Tz>> for spark::expression::Lit
         let timestamp = value.timestamp_micros();
 
         spark::expression::Literal {
+            #[cfg(feature = "spark-41")]
+            data_type: Some(spark::DataType::from(15)),
             literal_type: Some(spark::expression::literal::LiteralType::Timestamp(
                 timestamp,
             )),
@@ -181,6 +198,8 @@ impl From<NaiveDateTime> for spark::expression::Literal {
         let timestamp = value.and_utc().timestamp_micros();
 
         spark::expression::Literal {
+            #[cfg(feature = "spark-41")]
+            data_type: Some(spark::DataType::from(16)),
             literal_type: Some(spark::expression::literal::LiteralType::TimestampNtz(
                 timestamp,
             )),
@@ -196,6 +215,7 @@ impl From<chrono::NaiveDate> for spark::expression::Literal {
             value.signed_duration_since(chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap());
 
         spark::expression::Literal {
+            data_type: Some(spark::DataType::from(14)),
             literal_type: Some(spark::expression::literal::LiteralType::Date(
                 days_since_unix_epoch.num_days() as i32,
             )),
@@ -216,11 +236,12 @@ where
         let elements = value.iter().map(|val| val.clone().into()).collect();
 
         let array_type = spark::expression::literal::Array {
-            element_type,
+            element_type: element_type.clone(),
             elements,
         };
 
         spark::expression::Literal {
+            data_type: element_type.clone(),
             literal_type: Some(spark::expression::literal::LiteralType::Array(array_type)),
         }
     }
@@ -239,11 +260,12 @@ where
         let elements = value.iter().map(|val| val.clone().into()).collect();
 
         let array_type = spark::expression::literal::Array {
-            element_type,
+            element_type: element_type.clone(),
             elements,
         };
 
         spark::expression::Literal {
+            data_type: element_type.clone(),
             literal_type: Some(spark::expression::literal::LiteralType::Array(array_type)),
         }
     }
