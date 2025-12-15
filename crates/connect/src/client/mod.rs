@@ -456,9 +456,7 @@ where
                 ResponseType::ExecutionProgress(_) => {
                     // unimplemented!("Execution Progress")
                 }
-                ResponseType::CheckpointCommandResult(_) => {
-
-                }
+                ResponseType::CheckpointCommandResult(_) => {}
                 ResponseType::MlCommandResult(_) => {}
                 ResponseType::PipelineEventResult(_) => {}
                 ResponseType::PipelineCommandResult(_) => {}

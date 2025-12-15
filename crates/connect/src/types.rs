@@ -588,12 +588,10 @@ impl_to_proto_type!(f64, Double);
 impl From<&str> for spark::DataType {
     fn from(_value: &str) -> spark::DataType {
         spark::DataType {
-            kind: Some(spark::data_type::Kind::String(
-                spark::data_type::String {
-                    type_variation_reference: 0,
-                    collation: "UTF8_BINARY".to_string(),
-                },
-            )),
+            kind: Some(spark::data_type::Kind::String(spark::data_type::String {
+                type_variation_reference: 0,
+                collation: "UTF8_BINARY".to_string(),
+            })),
         }
     }
 }
@@ -601,12 +599,10 @@ impl From<&str> for spark::DataType {
 impl From<String> for spark::DataType {
     fn from(_value: String) -> spark::DataType {
         spark::DataType {
-            kind: Some(spark::data_type::Kind::String(
-                spark::data_type::String {
-                    type_variation_reference: 0,
-                    collation: "UTF8_BINARY".to_string(),
-                },
-            )),
+            kind: Some(spark::data_type::Kind::String(spark::data_type::String {
+                type_variation_reference: 0,
+                collation: "UTF8_BINARY".to_string(),
+            })),
         }
     }
 }
