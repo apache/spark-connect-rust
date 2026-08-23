@@ -1,0 +1,15 @@
+[package]
+name = "spark-connect-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Generated Spark Connect protobuf/gRPC types (spark.connect.*)"
+
+[dependencies]
+tonic.workspace = true
+tonic-prost.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+
+[build-dependencies]
+tonic-prost-build.workspace = true

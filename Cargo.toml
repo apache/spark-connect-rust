@@ -16,47 +16,67 @@
 # under the License.
 
 [workspace]
-members = ["crates/*", "examples"]
 resolver = "2"
+members = [
+    "crates/spark-connect-proto",
+    "crates/spark-connect-core",
+    "crates/spark-connect",
+    "crates/pyspark-rs",
+    "examples",
+]
+# pyspark-rs is a Python extension (cdylib) built via maturin with the
+# `extension-module` feature; it does not link libpython for a normal cargo
+# build/test. The Rust-native `examples` crate links the pure-Rust core directly.
+# Both are excluded from default cargo operations so `cargo test`/`cargo build`
+# stay clean; build them explicitly with `cargo build -p pyspark-rs` (or maturin)
+# and `cargo build -p examples`.
+default-members = [
+    "crates/spark-connect-proto",
+    "crates/spark-connect-core",
+    "crates/spark-connect",
+]
 
 [workspace.package]
-authors = ["Steve Russo <64294847+sjrusso8@users.noreply.github.com>"]
-keywords = ["spark", "spark_connect"]
-readme = "README.md"
+version = "4.2.0"
 edition = "2021"
-homepage = "https://github.com/sjrusso8/spark-connect-rs"
-description = "Apache Spark Connect Client for Rust"
+rust-version = "1.82"
 license = "Apache-2.0"
-documentation = "https://docs.rs/spark-connect-rs"
-repository = "https://github.com/sjrusso8/spark-connect-rs"
-rust-version = "1.81"
+repository = "https://github.com/apache/spark-connect-rust"
+homepage = "https://spark.apache.org/"
+authors = ["Apache Spark <dev@spark.apache.org>"]
 
 [workspace.dependencies]
-tonic = { version ="0.11", default-features = false }
+# gRPC / protobuf.
+tonic = { version = "0.14" }
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
+prost = "0.14"
+prost-types = "0.14"
 
-tokio = { version = "1.44", default-features = false, features = ["macros"] }
-tower = { version = "0.5" }
+# async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
+tokio-stream = "0.1"
+futures = "0.3"
 
-futures-util = { version = "0.3" }
-thiserror = { version = "2.0" }
+# Arrow (result decoding). Keep in lockstep with pyarrow on the Python side.
+arrow = { version = "58", default-features = false, features = ["ipc", "prettyprint"] }
 
-http-body = { version = "0.4.6" }
+# DataFusion for the optional to_datafusion() conversion.
+# Pinned to 53 for arrow 58 compatibility.
+datafusion = { version = "53", default-features = false }
 
-arrow = { version = "55", features = ["prettyprint"] }
-arrow-ipc = { version = "55" }
+# Polars for the optional to_polars() conversion. Bridged via Arrow IPC bytes
+# (the `ipc` feature) rather than the polars-arrow/`arrow_rs` path, so polars'
+# vendored arrow need not match our arrow-rs version.
+polars = { version = "0.54", default-features = false, features = ["ipc"] }
 
-serde_json = { version = "1" }
+# PyO3. `extension-module` makes PyO3 skip linking libpython (symbols resolve at
+# import). Combined with `-undefined dynamic_lookup` (see .cargo/config.toml) the
+# cdylib links on macOS. pyspark-rs is excluded from default cargo operations.
+pyo3 = { version = "0.28", features = ["extension-module", "abi3-py39"] }
 
-prost = { version = "0.12" }
-prost-types = { version = "0.12" }
-
-rand = { version = "0.9" }
-uuid = { version = "1.16", features = ["v4"] }
-url = { version = "2.5" }
-regex = { version = "1" }
-
-chrono = { version = "0.4" }
-
-datafusion = { version = "47.0", default-features = false }
-polars = { version = "0.43", default-features = false }
-polars-arrow = { version = "0.43", default-features = false, features = ["arrow_rs"]  }
+# misc
+bytes = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+tracing = "0.1"

@@ -18,40 +18,30 @@
 // This example demonstrates creating a Spark DataFrame from a SQL command
 // and saving the results as a parquet and reading the new parquet file
 
-use spark_connect_rs::dataframe::SaveMode;
-use spark_connect_rs::{SparkSession, SparkSessionBuilder};
+use spark_connect::{SparkSession, SparkSessionBuilder};
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let spark: SparkSession = SparkSessionBuilder::remote("sc://127.0.0.1:15002/")
-        .build()
-        .await?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let spark: SparkSession = SparkSessionBuilder::default()
+        .remote("sc://127.0.0.1:15002/")
+        .get_or_create()?;
 
-    let df = spark.sql("select 'apple' as word, 123 as count").await?;
+    let df = spark.sql("select 'apple' as word, 123 as count")?;
 
-    df.write()
-        .mode(SaveMode::Overwrite)
-        .format("parquet")
-        .save("file:///tmp/spark-connect-write-example-output.parquet")
-        .await?;
+    df.write().format("parquet").mode("overwrite").save(Some(
+        "file:///tmp/spark-connect-write-example-output.parquet",
+    ));
 
-    let df = spark
-        .read()
-        .format("parquet")
-        .load(["file:///tmp/spark-connect-write-example-output.parquet"])?;
+    let df = spark.read().format("parquet").load(Some(
+        "file:///tmp/spark-connect-write-example-output.parquet",
+    ));
 
-    df.show(Some(100), None, None).await?;
+    df.show(100)?;
 
-    // +---------------+
-    // | show_string   |
-    // +---------------+
-    // | +-----+-----+ |
-    // | |word |count| |
-    // | +-----+-----+ |
-    // | |apple|123  | |
-    // | +-----+-----+ |
-    // |               |
-    // +---------------+
+    // +-----+-----+
+    // |word |count|
+    // +-----+-----+
+    // |apple|123  |
+    // +-----+-----+
 
     Ok(())
 }

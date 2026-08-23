@@ -1,0 +1,294 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+
+name: Python Connect Parity (Spark 4.2.0)
+
+# Mirrors Apache Spark's build_python_connect.yml approach, adapted for the
+# Rust-backed client: download the Spark 4.2.0 Connect server, start it, pull the
+# official v4.2.0 connect test files, and run them BOTH with the reference pyspark
+# client and with our client - the gate is "no regressions vs the reference".
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+env:
+  SPARK_VERSION: "4.2.0"
+  SPARK_CONNECT_TESTING_REMOTE: sc://localhost:15002
+  SPARK_TESTING: "1"
+  SPARK_SKIP_CONNECT_COMPAT_TESTS: "1"   # force remote-only (pure connect, no local JVM)
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Reference-vs-ours parity gate against a real Spark 4.2.0 Connect server.
+  # ---------------------------------------------------------------------------
+  connect-parity:
+    name: Connect parity vs reference (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          rustflags: ""
+          cache: true
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest pandas pyarrow numpy grpcio grpcio-status googleapis-common-protos cloudpickle zstandard py4j
+
+      - name: Build the Rust extension into the skin
+        # The parity diff drives both clients via PYTHONPATH (our ./python for ours,
+        # the spark checkout for reference), so we do NOT install a wheel (which would
+        # collide in site-packages with the reference pyspark). We just build the
+        # extension and drop it into python/pyspark so ./python is a working package.
+        run: |
+          cargo build -p pyspark-rs --release
+          cp target/release/lib_pyspark.so python/pyspark/_pyspark.so
+
+      - name: Cache Spark ${{ env.SPARK_VERSION }} distribution
+        uses: actions/cache@v4
+        with:
+          path: ~/spark-dist
+          key: spark-dist-${{ env.SPARK_VERSION }}-hadoop3
+
+      - name: Download Apache Spark ${{ env.SPARK_VERSION }} (Connect server)
+        id: spark-download
+        run: |
+          PKG="spark-${SPARK_VERSION}-bin-hadoop3"
+          if [ ! -d "${HOME}/spark-dist/${PKG}" ]; then
+            URL="https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/${PKG}.tgz"
+            mkdir -p "${HOME}/spark-dist"
+            echo "Downloading ${URL}"
+            wget -q -O "${HOME}/spark-dist/${PKG}.tgz" "${URL}"
+            tar -xzf "${HOME}/spark-dist/${PKG}.tgz" -C "${HOME}/spark-dist"
+            rm -f "${HOME}/spark-dist/${PKG}.tgz"
+          else
+            echo "Using cached Spark distribution."
+          fi
+          echo "SPARK_HOME=${HOME}/spark-dist/${PKG}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Spark ${{ env.SPARK_VERSION }} source (official test files)
+        uses: actions/cache@v4
+        with:
+          path: ~/spark-source
+          key: spark-source-${{ env.SPARK_VERSION }}
+
+      - name: Clone Apache Spark v${{ env.SPARK_VERSION }} (official test files + reference client)
+        id: spark-source
+        run: |
+          if [ ! -d "${HOME}/spark-source/python" ]; then
+            git clone --depth 1 --branch "v${SPARK_VERSION}" \
+              https://github.com/apache/spark.git "${HOME}/spark-source"
+          else
+            echo "Using cached Spark source."
+          fi
+          echo "SPARK_SOURCE=${HOME}/spark-source" >> "$GITHUB_OUTPUT"
+
+      - name: Start Spark Connect server
+        env:
+          # The server spawns Python workers for UDF/arrow/mapInPandas execution; they
+          # need pandas + pyarrow (installed above) plus pyspark (from SPARK_HOME/python).
+          PYSPARK_PYTHON: python
+          PYSPARK_DRIVER_PYTHON: python
+        run: |
+          SPARK_HOME="${{ steps.spark-download.outputs.SPARK_HOME }}"
+          echo "Starting Connect server on ${SPARK_CONNECT_TESTING_REMOTE}"
+          # Give the driver extra heap: the parity gate runs all 84 files serially against
+          # this one server (~2h), and a 1g default degrades late in the run (GC pressure),
+          # which is what made the streaming listener/observation files flake.
+          "${SPARK_HOME}/sbin/start-connect-server.sh" \
+            --packages "org.apache.spark:spark-connect_2.13:${SPARK_VERSION}" \
+            --driver-memory 3g \
+            --conf spark.sql.session.localRelationSizeLimit=1073741824 \
+            > /tmp/connect-server.log 2>&1 &
+          for i in $(seq 1 90); do
+            if (echo > /dev/tcp/localhost/15002) 2>/dev/null; then
+              echo "Connect server is up (after ${i}s)."; break
+            fi
+            if [ "$i" -eq 90 ]; then echo "Server failed to start:"; cat /tmp/connect-server.log; exit 1; fi
+            sleep 1
+          done
+
+      - name: Parity - reference client vs OUR Rust client (via transport injection)
+        id: parity
+        env:
+          PYTHONUNBUFFERED: "1"   # stream per-file progress into the live log
+          RUST_PYSPARK_SO: ${{ github.workspace }}/python/pyspark/_pyspark.so
+        run: |
+          # pipefail so the script's exit code (nonzero on regressions) gates the job -
+          # otherwise `| tee` would mask it and the gate would be falsely green.
+          set -o pipefail
+          # "ours" runs each official connect test through the Rust transport plugin
+          # (genuinely exercises our client); "reference" runs stock pyspark. Fails on
+          # any regression (a test the reference passes but ours fails).
+          # Runs the full SQL connect suite, including Python/pandas UDF and arrow
+          # modules (the server now has worker-capable Python via PYSPARK_PYTHON).
+          # Run serially (--jobs 1), matching Apache's own connect test runner
+          # (./python/run-tests --parallelism=1). The streaming-query-listener tests
+          # (e.g. test_parity_listener) wait on real server-pushed progress events and
+          # are timeout-sensitive; running files in parallel starves them under server
+          # contention and makes them exceed the per-file cap even though they pass when
+          # run alone. Serial execution removes that artifact without weakening the gate.
+          python scripts/rust_parity_diff.py \
+            --spark "${{ steps.spark-source.outputs.SPARK_SOURCE }}" \
+            --remote "${SPARK_CONNECT_TESTING_REMOTE}" \
+            --path-contains "sql/tests/connect" \
+            --jobs 1 \
+            2>&1 | tee /tmp/parity_diff.log
+
+      - name: Upload parity diff + server log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-diff-py${{ matrix.python-version }}
+          path: |
+            /tmp/parity_diff.log
+            /tmp/connect-server.log
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # E2E performance benchmark: our client vs reference, same 4.2.0 server.
+  # ---------------------------------------------------------------------------
+  connect-benchmark:
+    name: E2E benchmark vs reference
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          rustflags: ""
+          cache: true
+      - name: Install deps
+        run: |
+          sudo apt-get update && sudo apt-get install -y protobuf-compiler
+          python -m pip install --upgrade pip
+          python -m pip install pandas pyarrow numpy grpcio grpcio-status googleapis-common-protos cloudpickle zstandard py4j "pyspark==${SPARK_VERSION}"
+      - name: Build the Rust extension into the skin
+        # Build the extension into ./python/pyspark so our client is usable via
+        # PYTHONPATH. We do NOT install a wheel: our package and the reference
+        # pyspark both own the `pyspark` namespace and would collide in site-packages.
+        run: |
+          cargo build -p pyspark-rs --release
+          cp target/release/lib_pyspark.so python/pyspark/_pyspark.so
+      - name: Cache Spark ${{ env.SPARK_VERSION }} distribution
+        uses: actions/cache@v4
+        with:
+          path: ~/spark-dist
+          key: spark-dist-${{ env.SPARK_VERSION }}-hadoop3
+      - name: Cache Spark ${{ env.SPARK_VERSION }} source (official test files)
+        uses: actions/cache@v4
+        with:
+          path: ~/spark-source
+          key: spark-source-${{ env.SPARK_VERSION }}
+      - name: Download & start Spark ${{ env.SPARK_VERSION }} server
+        run: |
+          PKG="spark-${SPARK_VERSION}-bin-hadoop3"
+          if [ ! -d "${HOME}/spark-dist/${PKG}" ]; then
+            mkdir -p "${HOME}/spark-dist"
+            wget -q -O "/tmp/${PKG}.tgz" "https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/${PKG}.tgz"
+            tar -xzf "/tmp/${PKG}.tgz" -C "${HOME}/spark-dist"
+            rm -f "/tmp/${PKG}.tgz"
+          fi
+          if [ ! -d "${HOME}/spark-source/python" ]; then
+            git clone --depth 1 --branch "v${SPARK_VERSION}" https://github.com/apache/spark.git "${HOME}/spark-source"
+          fi
+          "${HOME}/spark-dist/${PKG}/sbin/start-connect-server.sh" \
+            --packages "org.apache.spark:spark-connect_2.13:${SPARK_VERSION}" > /tmp/server.log 2>&1 &
+          for i in $(seq 1 90); do (echo > /dev/tcp/localhost/15002) 2>/dev/null && break; sleep 1; done
+      - name: Benchmark reference client
+        run: |
+          # Reference uses the pip-installed pyspark 4.2.0 (no ./python on the path).
+          python scripts/benchmark_e2e.py --isolate --label reference --out /tmp/bench_reference.json
+      - name: Benchmark our client
+        run: |
+          # ./python shadows the installed pyspark, so this exercises our client.
+          PYTHONPATH="$(pwd)/python" \
+            python scripts/benchmark_e2e.py --isolate --label ours --out /tmp/bench_ours.json
+      - name: Compare
+        run: python scripts/benchmark_e2e.py --compare /tmp/bench_reference.json /tmp/bench_ours.json | tee /tmp/bench_compare.txt
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: |
+            /tmp/bench_reference.json
+            /tmp/bench_ours.json
+            /tmp/bench_compare.txt
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Rust checks - must be fully green.
+  # ---------------------------------------------------------------------------
+  rust-checks:
+    name: Rust checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          rustflags: ""
+          cache: true
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Cargo build
+        run: cargo build --release
+      - name: Cargo test
+        run: cargo test -p spark-connect -p spark-connect-core --release
+      - name: No-stub audit
+        run: bash scripts/audit_no_stubs.sh

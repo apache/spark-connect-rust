@@ -1,3 +1,4 @@
+#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -14,51 +15,134 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+#
 
-name: release to cargo
+# Release workflow for the Rust crates (crates.io) and the Python wheel (PyPI).
+#
+# Following the Apache Spark model, releases are cut by a committer from THEIR
+# OWN FORK, not from the canonical apache/ repository:
+#
+#   1. Enable GitHub Actions on your fork.
+#   2. Add the release secrets to the fork:
+#        - CARGO_REGISTRY_TOKEN  (crates.io API token)
+#        - PYPI_API_TOKEN        (PyPI API token)
+#   3. Bump the version in Cargo.toml and pyproject.toml (they must match).
+#   4. Dispatch this workflow with dry_run=true to rehearse (default), then push
+#      a matching `v<version>` tag (or dispatch with dry_run=false) to publish.
+#
+# A dry run builds and validates artifacts without publishing. A tag push (or an
+# explicit dry_run=false dispatch) publishes to crates.io and PyPI.
+
+name: Release
 
 on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and validate artifacts but do not publish"
+        type: boolean
+        default: true
   push:
     tags: ["v*"]
 
+permissions:
+  contents: read
+
 jobs:
-  validate-release-tag:
-    name: Validate git tag
-    runs-on: ubuntu-20.04
+  validate-version:
+    name: Validate version
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: compare git tag with cargo metadata
+      - name: Cargo and pyproject versions agree (and match the tag, if any)
         run: |
-          PUSHED_TAG=${GITHUB_REF##*/}
-          CURR_VER=$( grep version Cargo.toml | head -n 1 | awk '{print $3}' | tr -d '"' )
-          if [[ "${PUSHED_TAG}" != "v${CURR_VER}" ]]; then
-            echo "Cargo metadata has version set to ${CURR_VER}, but got pushed tag ${PUSHED_TAG}."
+          CARGO_VER=$(grep -m1 '^version' Cargo.toml | awk -F'"' '{print $2}')
+          PYPROJECT_VER=$(grep -m1 '^version' pyproject.toml | awk -F'"' '{print $2}')
+          echo "Cargo.toml=${CARGO_VER}  pyproject.toml=${PYPROJECT_VER}"
+          if [[ "${CARGO_VER}" != "${PYPROJECT_VER}" ]]; then
+            echo "::error::Cargo.toml (${CARGO_VER}) and pyproject.toml (${PYPROJECT_VER}) versions differ"
             exit 1
           fi
-        working-directory: ./crates
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF##*/}"
+            if [[ "${TAG}" != "v${CARGO_VER}" ]]; then
+              echo "::error::Pushed tag ${TAG} does not match version v${CARGO_VER}"
+              exit 1
+            fi
+          fi
 
-  release-crate:
-    needs: validate-release-tag
-    name: Release crate
-    runs-on: ubuntu-20.04
+  publish-crates:
+    name: Publish Rust crates to crates.io
+    needs: validate-version
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
         with:
-          profile: minimal
-          toolchain: stable
-          override: true
-
-      - name: install protoc
-        uses: arduino/setup-protoc@v2
-        with:
-          version: 23.x
-
-      - name: cargo publish rust
-        uses: actions-rs/cargo@v1
+          version: "23.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: cargo publish (dependency order)
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          # Publish leaf-first so each crate's path+version dependencies already
+          # exist on crates.io. Allow the index a moment to catch up between crates.
+          for crate in spark-connect-proto spark-connect-core spark-connect; do
+            echo "::group::cargo publish -p ${crate}"
+            cargo publish -p "${crate}"
+            echo "::endgroup::"
+            sleep 30
+          done
+
+  build-wheels:
+    name: Build wheel (${{ matrix.os }})
+    needs: validate-version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          command: publish
-          args: --token "${CARGO_REGISTRY_TOKEN}" --package spark-connect-rs --manifest-path ./Cargo.toml
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "23.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build abi3 wheel with maturin
+        # abi3-py39 produces a single wheel per platform valid for CPython 3.9+.
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out dist
+          manylinux: auto
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: dist/*.whl
+
+  publish-wheels:
+    name: Publish wheel to PyPI
+    needs: build-wheels
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          # Fork-based release: authenticate with the committer's PyPI token
+          # rather than repository-scoped Trusted Publishing.
+          password: ${{ secrets.PYPI_API_TOKEN }}
