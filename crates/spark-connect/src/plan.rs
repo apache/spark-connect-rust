@@ -1451,6 +1451,23 @@ fn value_to_proto_literal(v: &crate::row::Value) -> proto::expression::Literal {
         Value::Float(x) => LiteralType::Float(*x),
         Value::Double(x) => LiteralType::Double(*x),
         Value::String(s) => LiteralType::String(s.clone()),
+        Value::Date(d) => LiteralType::Date(*d),
+        Value::Timestamp(t) => LiteralType::Timestamp(*t),
+        Value::Decimal {
+            value,
+            precision,
+            scale,
+        } => {
+            let mut decimal = proto::expression::literal::Decimal::default();
+            decimal.value = value.clone();
+            if let Some(p) = precision {
+                decimal.precision = Some(*p);
+            }
+            if let Some(s) = scale {
+                decimal.scale = Some(*s);
+            }
+            LiteralType::Decimal(decimal)
+        }
         other => LiteralType::String(format!("{:?}", other)),
     });
     lit

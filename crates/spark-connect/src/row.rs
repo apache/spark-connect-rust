@@ -33,6 +33,12 @@ pub enum Value {
     Date(i32),
     /// Timestamp (microseconds since epoch)
     Timestamp(i64),
+    /// Decimal (string value with optional precision and scale)
+    Decimal {
+        value: String,
+        precision: Option<i32>,
+        scale: Option<i32>,
+    },
     /// Array of values
     List(Vec<Value>),
     /// Map of key-value pairs
@@ -107,6 +113,22 @@ impl fmt::Display for Value {
             Value::Binary(b) => write!(f, "{:?}", b),
             Value::Date(d) => write!(f, "{}", d),
             Value::Timestamp(t) => write!(f, "{}", t),
+            Value::Decimal {
+                value,
+                precision,
+                scale,
+            } => {
+                write!(f, "Decimal({}", value)?;
+                if let Some(p) = precision {
+                    write!(f, ",{})", p)?;
+                    if let Some(s) = scale {
+                        write!(f, "s={}", s)?;
+                    }
+                } else {
+                    write!(f, ")")?;
+                }
+                Ok(())
+            }
             Value::List(l) => {
                 write!(f, "[")?;
                 for (i, v) in l.iter().enumerate() {
@@ -272,5 +294,35 @@ mod tests {
 
         let s = Value::String("test".to_string());
         assert_eq!(s.as_str(), Some("test"));
+    }
+
+    #[test]
+    fn test_value_date_timestamp_decimal() {
+        // Test Date
+        let date_val = Value::Date(18993); // days since epoch
+        assert_eq!(date_val, Value::Date(18993));
+
+        // Test Timestamp
+        let ts_val = Value::Timestamp(1693526400000000); // micros since epoch
+        assert_eq!(ts_val, Value::Timestamp(1693526400000000));
+
+        // Test Decimal
+        let dec_val = Value::Decimal {
+            value: "123.45".to_string(),
+            precision: Some(5),
+            scale: Some(2),
+        };
+        match dec_val {
+            Value::Decimal {
+                value,
+                precision,
+                scale,
+            } => {
+                assert_eq!(value, "123.45");
+                assert_eq!(precision, Some(5));
+                assert_eq!(scale, Some(2));
+            }
+            _ => panic!("Expected Decimal variant"),
+        }
     }
 }

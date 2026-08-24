@@ -809,4 +809,63 @@ mod tests {
         let proto = col.to_proto();
         assert!(proto.expr_type.is_some());
     }
+
+    #[test]
+    fn test_literal_decimal() {
+        let lit = LiteralExpression::Decimal {
+            value: "123.45".to_string(),
+            precision: 5,
+            scale: 2,
+        };
+        let proto = lit.to_proto();
+        assert!(proto.expr_type.is_some());
+        if let Some(proto::expression::ExprType::Literal(literal)) = proto.expr_type {
+            if let Some(proto::expression::literal::LiteralType::Decimal(decimal)) =
+                literal.literal_type
+            {
+                assert_eq!(decimal.value, "123.45");
+                assert_eq!(decimal.precision, Some(5));
+                assert_eq!(decimal.scale, Some(2));
+            } else {
+                panic!("Expected decimal literal type");
+            }
+        } else {
+            panic!("Expected literal expression type");
+        }
+    }
+
+    #[test]
+    fn test_literal_date() {
+        let lit = LiteralExpression::Date(18993); // some days since epoch
+        let proto = lit.to_proto();
+        assert!(proto.expr_type.is_some());
+        if let Some(proto::expression::ExprType::Literal(literal)) = proto.expr_type {
+            if let Some(proto::expression::literal::LiteralType::Date(days)) = literal.literal_type
+            {
+                assert_eq!(days, 18993);
+            } else {
+                panic!("Expected date literal type");
+            }
+        } else {
+            panic!("Expected literal expression type");
+        }
+    }
+
+    #[test]
+    fn test_literal_timestamp() {
+        let lit = LiteralExpression::Timestamp(1693526400000000); // micros since epoch
+        let proto = lit.to_proto();
+        assert!(proto.expr_type.is_some());
+        if let Some(proto::expression::ExprType::Literal(literal)) = proto.expr_type {
+            if let Some(proto::expression::literal::LiteralType::Timestamp(micros)) =
+                literal.literal_type
+            {
+                assert_eq!(micros, 1693526400000000);
+            } else {
+                panic!("Expected timestamp literal type");
+            }
+        } else {
+            panic!("Expected literal expression type");
+        }
+    }
 }

@@ -4,6 +4,7 @@
 //! for building and executing streaming workloads.
 
 use std::collections::HashMap;
+use uuid;
 
 use spark_connect_core::error::{Result, SparkError};
 use spark_connect_core::runtime::block_on;
@@ -13,6 +14,7 @@ use crate::dataframe::DataFrame;
 use crate::plan::LogicalPlan;
 use crate::readwriter::ReadType;
 use crate::session::SparkSession;
+use crate::udf::PythonUDFPayload;
 
 /// DataStreamReader for reading streaming data from various sources.
 ///
@@ -239,6 +241,8 @@ pub struct DataStreamWriter {
     trigger: Option<Trigger>,
     path: Option<String>,
     table_name: Option<String>,
+    foreach_batch_payload: Option<PythonUDFPayload>,
+    foreach_payload: Option<PythonUDFPayload>,
 }
 
 impl DataStreamWriter {
@@ -256,6 +260,8 @@ impl DataStreamWriter {
             trigger: None,
             path: None,
             table_name: None,
+            foreach_batch_payload: None,
+            foreach_payload: None,
         }
     }
 
@@ -304,6 +310,18 @@ impl DataStreamWriter {
     /// Set the trigger type.
     pub fn trigger(mut self, trigger: Trigger) -> Self {
         self.trigger = Some(trigger);
+        self
+    }
+
+    /// Set a foreach batch function (PythonUDF payload).
+    pub fn foreach_batch(mut self, payload: PythonUDFPayload) -> Self {
+        self.foreach_batch_payload = Some(payload);
+        self
+    }
+
+    /// Set a foreach function (PythonUDF payload).
+    pub fn foreach(mut self, payload: PythonUDFPayload) -> Self {
+        self.foreach_payload = Some(payload);
         self
     }
 
@@ -378,6 +396,23 @@ impl DataStreamWriter {
             write_op.sink_destination = Some(
                 proto::write_stream_operation_start::SinkDestination::TableName(table.clone()),
             );
+        }
+
+        if let Some(foreach_batch) = &self.foreach_batch_payload {
+            let mut foreach_func = proto::StreamingForeachFunction::default();
+            foreach_func.function =
+                Some(proto::streaming_foreach_function::Function::PythonFunction(
+                    foreach_batch.to_proto(),
+                ));
+            write_op.foreach_batch = Some(foreach_func);
+        }
+
+        if let Some(foreach) = &self.foreach_payload {
+            let mut foreach_func = proto::StreamingForeachFunction::default();
+            foreach_func.function = Some(
+                proto::streaming_foreach_function::Function::PythonFunction(foreach.to_proto()),
+            );
+            write_op.foreach_writer = Some(foreach_func);
         }
 
         // Build the plan with the WriteStreamOperationStart command
@@ -793,6 +828,82 @@ impl StreamingQueryManager {
 
         self._execute_manager_command(cmd)?;
         Ok(())
+    }
+
+    /// Add a listener with a PythonUDF payload.
+    pub fn add_listener(&self, payload: PythonUDFPayload) -> Result<String> {
+        let listener_id = uuid::Uuid::new_v4().to_string();
+        let mut cmd = proto::StreamingQueryManagerCommand::default();
+        let mut listener_cmd =
+            proto::streaming_query_manager_command::StreamingQueryListenerCommand::default();
+        listener_cmd.python_listener_payload = Some(payload.to_proto());
+        listener_cmd.id = listener_id.clone();
+        cmd.command =
+            Some(proto::streaming_query_manager_command::Command::AddListener(listener_cmd));
+
+        let result = self._execute_manager_command(cmd)?;
+
+        if let Some(proto::streaming_query_manager_command_result::ResultType::AddListener(true)) =
+            result.result_type
+        {
+            Ok(listener_id)
+        } else {
+            Err(SparkError::connect_msg("Failed to add listener"))
+        }
+    }
+
+    /// Remove a listener by ID.
+    pub fn remove_listener(&self, listener_id: &str) -> Result<()> {
+        let mut cmd = proto::StreamingQueryManagerCommand::default();
+        let mut listener_cmd =
+            proto::streaming_query_manager_command::StreamingQueryListenerCommand::default();
+        listener_cmd.id = listener_id.to_string();
+        cmd.command =
+            Some(proto::streaming_query_manager_command::Command::RemoveListener(listener_cmd));
+
+        self._execute_manager_command(cmd)?;
+        Ok(())
+    }
+
+    /// Stream listener events from the server. This is a long-lived streaming call.
+    pub fn stream_listener_events(&self) -> Result<Vec<(i32, String)>> {
+        let mut cmd = proto::Command::default();
+        let listener_bus_cmd = proto::StreamingQueryListenerBusCommand::default();
+        // We need to send the command to the server and receive events
+        // This is a simplified implementation - the actual implementation would stream events
+        let mut listener_cmd =
+            proto::streaming_query_manager_command::StreamingQueryListenerCommand::default();
+
+        let mut plan = proto::Plan::default();
+        let streaming_cmd = proto::StreamingQueryListenerBusCommand::default();
+        cmd.command_type =
+            Some(proto::command::CommandType::StreamingQueryListenerBusCommand(streaming_cmd));
+        plan.op_type = Some(proto::plan::OpType::Command(cmd));
+
+        let request = proto::ExecutePlanRequest {
+            session_id: self.session.client().session_id().to_string(),
+            user_context: Some(proto::UserContext::default()),
+            plan: Some(plan),
+            ..Default::default()
+        };
+
+        let mut response_stream = block_on(self.session.client().execute_plan(request))?;
+        let mut events = vec![];
+
+        while let Some(resp) =
+            block_on(response_stream.message()).map_err(SparkError::from_grpc_status)?
+        {
+            if let Some(
+                proto::execute_plan_response::ResponseType::StreamingQueryListenerEventsResult(res),
+            ) = resp.response_type
+            {
+                for event in res.events {
+                    events.push((event.event_type as i32, event.event_json));
+                }
+            }
+        }
+
+        Ok(events)
     }
 
     /// Execute a streaming query manager command and return the result.
