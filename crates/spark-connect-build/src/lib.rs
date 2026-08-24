@@ -98,11 +98,16 @@ pub fn embed_wasm_udf(src_file: impl AsRef<Path>) -> PathBuf {
         .arg(&wasm_out)
         .status()
         .unwrap_or_else(|e| panic!("failed to invoke `{rustc}` for the wasm build: {e}"));
-    assert!(
-        status.success(),
-        "wasm32 build of {} failed",
-        src_abs.display()
-    );
+
+    if !status.success() {
+        eprintln!();
+        eprintln!("cargo:warning=wasm32 build of {} failed", src_abs.display());
+        eprintln!("cargo:warning=");
+        eprintln!("cargo:warning=The `wasm32-unknown-unknown` Rust target is required to build WASM UDF crates.");
+        eprintln!("cargo:warning=Install it with: rustup target add wasm32-unknown-unknown");
+        eprintln!();
+        panic!("wasm32 build of {} failed", src_abs.display());
+    }
 
     println!("cargo:rustc-env=WASM_UDFS_MODULE={}", wasm_out.display());
     println!("cargo:rerun-if-changed={}", src_abs.display());

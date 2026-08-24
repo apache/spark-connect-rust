@@ -24,12 +24,20 @@ members = [
     "crates/spark-connect-macros",
     "crates/spark-connect-build",
     "examples",
+]
+exclude = [
     "wasm-udfs",
     "wasm-udf-inline",
 ]
 # The Rust-native `examples` crate links the pure-Rust core directly; it is
 # excluded from default cargo operations so `cargo test`/`cargo build` stay
 # clean. Build it explicitly with `cargo build -p examples`.
+#
+# The `wasm-udfs` and `wasm-udf-inline` crates are excluded from the workspace
+# because they require the `wasm32-unknown-unknown` target, which may not be
+# available on all machines. They can still be built explicitly with
+# `cargo build --manifest-path wasm-udfs/Cargo.toml` (etc) in CI or when the
+# target is installed locally.
 default-members = [
     "crates/spark-connect-proto",
     "crates/spark-connect-core",

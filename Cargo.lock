@@ -4589,15 +4589,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wasm-udf-inline"
-version = "0.0.0"
-dependencies = [
- "apache-spark-connect",
- "apache-spark-connect-build",
- "apache-spark-connect-macros",
-]
-
-[[package]]
 name = "wasm-udfs"
 version = "0.0.0"
 dependencies = [
