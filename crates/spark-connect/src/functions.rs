@@ -163,6 +163,26 @@ pub fn window(col: Column, window_duration: &str) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.window` with an explicit slide duration and
+/// start time (a tumbling window is `slide_duration == window_duration`;
+/// `start_time` offsets the window boundaries, e.g. `"15 minutes"`).
+pub fn window_with_slide_and_start(
+    col: Column,
+    window_duration: &str,
+    slide_duration: &str,
+    start_time: &str,
+) -> Column {
+    func(
+        "window",
+        vec![
+            col.expression().clone(),
+            lit_str(window_duration),
+            lit_str(slide_duration),
+            lit_str(start_time),
+        ],
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.broadcast`.
 /// Marks a DataFrame as eligible for broadcast join (smaller table in a join).
 pub fn broadcast(df: DataFrame) -> DataFrame {
