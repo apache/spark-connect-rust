@@ -49,6 +49,9 @@ pub use resource::{
     ExecutorResourceRequests, ResourceProfile, ResourceProfileBuilder, TaskResourceRequests,
 };
 pub use session::{SparkSession, SparkSessionBuilder};
+/// Re-exported so fallible APIs (e.g. the `#[spark_wasm_udf]`-generated UDF
+/// constructors) can name the client's `Result`/error types.
+pub use spark_connect_core::error::{Result, SparkError};
 /// Re-exported so `persist(...)` / `storage_level()` have a public storage-level type.
 pub use spark_connect_proto::StorageLevel;
 pub use streaming::{

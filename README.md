@@ -92,9 +92,12 @@ apache-spark-connect-build  = "4.2"          # build.rs helper (build-dependency
 ### Write plain Rust functions
 
 Annotate a module of functions with `#[spark_wasm_udf]`. For each one it infers
-the Spark signature from the Rust types, exports it to WASM, and generates a
-self-contained constructor under `udf::<name>()` (the compiled module is
-embedded). A one-line `build.rs` compiles the module:
+the Spark signature from the Rust types, exports it to WASM, and generates
+self-contained constructors under `udf::` (the compiled module is embedded):
+a direct call `udf::<name>(col0, col1, ...)` that takes one column per argument
+(arity checked at compile time) and returns the result `Column`, plus a builder
+`udf::<name>_udf()` for advanced config. A one-line `build.rs` compiles the
+module:
 
 ```rust
 // src/main.rs
@@ -114,7 +117,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use spark_connect::SparkSessionBuilder;
     let spark = SparkSessionBuilder::default().remote("sc://localhost:15002").get_or_create()?;
     spark.range(5)?
-        .select(vec![col("id"), udf::add_one().call(vec![col("id")])?.alias("plus_one")])
+        .select(vec![col("id"), udf::add_one(col("id"))?.alias("plus_one")])
         .show(20)?;
     Ok(())
 }
@@ -135,7 +138,7 @@ cargo run -p wasm-udf-inline
 Two compiles are unavoidable — WASM is what ships to the executors — but the
 `build.rs` helper does the `wasm32` compile of the *same source* and embeds it,
 so there is no manual WASM step and no `.wasm` file to load. From another crate
-the constructors are `wasm_udfs::udf::add_one()` (see `wasm-udfs/` +
+the constructors are `wasm_udfs::udf::add_one(col("id"))?` (see `wasm-udfs/` +
 `examples/src/wasm_udf_macro.rs`).
 
 ### Supported types

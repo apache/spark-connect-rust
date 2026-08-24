@@ -41,23 +41,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Constructors from the `wasm-udfs` crate, grouped under `udf::`. Signatures
-    // are inferred and the wasm module is embedded — nothing to wire up here.
+    // are inferred and the wasm module is embedded — pass columns straight in
+    // (one per argument), nothing to wire up here.
     spark
         .range(5)?
         .select(vec![
             col("id"),
-            wasm_udfs::udf::add_one()
-                .call(vec![col("id")])?
-                .alias("id_plus_one"),
-            wasm_udfs::udf::celsius_to_fahrenheit()
-                .call(vec![col("id").cast(DataType::Double)])?
+            wasm_udfs::udf::add_one(col("id"))?.alias("id_plus_one"),
+            wasm_udfs::udf::celsius_to_fahrenheit(col("id").cast(DataType::Double))?
                 .alias("as_fahrenheit"),
-            wasm_udfs::udf::shout()
-                .call(vec![col("id").cast(string_type.clone())])?
-                .alias("shouted"),
-            wasm_udfs::udf::double_or_null()
-                .call(vec![col("id")])?
-                .alias("doubled"),
+            wasm_udfs::udf::shout(col("id").cast(string_type.clone()))?.alias("shouted"),
+            wasm_udfs::udf::double_or_null(col("id"))?.alias("doubled"),
         ])
         .show(20)?;
 
