@@ -19,14 +19,14 @@
 
 # Examples
 
-Set of examples that show off different features provided by `spark-connect-rs` client.
+Set of examples that show off different features provided by the Spark Connect Rust client.
 
-In order to build these examples, you must have the `protoc` protocol buffers compilter
-installed, along with the git submodule synced.
+In order to build these examples, you must have the `protoc` protocol buffers compiler
+installed.
 
 ```bash
-git clone https://github.com/sjrusso8/spark-connect-rs.git
-git submodule update --init --recursive
+# Build and run an example:
+cargo run --example <name>
 ```
 
 ### sql
@@ -71,7 +71,7 @@ Or if you are running a spark connect server location, run the below scripts fir
 If you are running a local spark connect server. The Delta Lake jars need to be added onto the server before it starts.
 
 ```bash
-$ $SPARK_HOME/sbin/start-connect-server.sh --packages "org.apache.spark:spark-connect_2.12:3.5.1,io.delta:delta-spark_2.12:3.0.0" \
+$ $SPARK_HOME/sbin/start-connect-server.sh --packages "org.apache.spark:spark-connect_2.13:4.2.0,io.delta:delta-spark_2.13:4.2.0" \
       --conf "spark.driver.extraJavaOptions=-Divy.cache.dir=/tmp -Divy.home=/tmp" \
       --conf "spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension" \
       --conf "spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog"

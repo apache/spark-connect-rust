@@ -19,14 +19,12 @@
 // and then adding transformations for 'select' & 'sort'
 // printing the results as "show(...)"
 
-use spark_connect_rs::{SparkSession, SparkSessionBuilder};
+use spark_connect::functions as F;
+use spark_connect::{lit_double, DataType};
+use spark_connect::{SparkSession, SparkSessionBuilder};
 
-use spark_connect_rs::functions as F;
-use spark_connect_rs::types::DataType;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let spark: SparkSession = SparkSessionBuilder::default().build().await?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let spark: SparkSession = SparkSessionBuilder::default().get_or_create()?;
 
     let path = "./datasets/people.csv";
 
@@ -35,31 +33,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .format("csv")
         .option("header", "True")
         .option("delimiter", ";")
-        .load([path])?;
+        .load(Some(path));
 
     // select columns and perform data manipulations
-    let df = df
-        .select([
-            F::col("name"),
-            F::col("age").cast(DataType::Integer).alias("age_int"),
-            (F::lit(3.0) + F::col("age_int")).alias("addition"),
-        ])
-        .sort([F::col("name").desc()]);
+    let df = df.select(vec![
+        F::col("name"),
+        F::col("age").cast(DataType::Integer).alias("age_int"),
+        (lit_double(3.0) + F::col("age_int")).alias("addition"),
+    ]);
 
-    df.show(Some(5), None, None).await?;
+    let df = df.sort(vec![F::col("name").desc().expression().clone()]);
+
+    df.show(5)?;
 
     // print results
-    // +--------------------------+
-    // | show_string              |
-    // +--------------------------+
-    // | +-----+-------+--------+ |
-    // | |name |age_int|addition| |
-    // | +-----+-------+--------+ |
-    // | |Jorge|30     |33.0    | |
-    // | |Bob  |32     |35.0    | |
-    // | +-----+-------+--------+ |
-    // |                          |
-    // +--------------------------+
+    // +-----+-------+--------+
+    // |name |age_int|addition|
+    // +-----+-------+--------+
+    // |Jorge|30     |33.0    |
+    // |Bob  |32     |35.0    |
+    // +-----+-------+--------+
 
     Ok(())
 }

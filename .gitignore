@@ -16,9 +16,25 @@
 # under the License.
 
 /target
+**/*.rs.bk
+Cargo.lock
+__pycache__/
+*.pyc
+.venv/
+/python/**/*.so
+/dist
+*.egg-info/
 
 .vscode
 *.ipynb
 
+# local dev Spark Connect server runtime state
+/.devserver/
+
 /spark-warehouse
 /artifacts
+
+# downloaded Spark distribution / pip package (never commit — CI downloads it)
+/pyspark-*.tar.gz
+/pyspark-[0-9]*/
+/spark-*-bin-*/

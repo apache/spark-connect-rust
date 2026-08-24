@@ -1,0 +1,68 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+
+name: Rust CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  rust-build-and-test:
+    name: Rust build and test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust-version: [stable]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ matrix.rust-version }}
+          rustflags: ""
+          cache: true
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Cargo build (non-pyspark crates only)
+        # Build only the non-extension crates; pyspark-rs is excluded from
+        # default-members and requires maturin/Python to build.
+        run: cargo build --release
+
+      - name: Cargo test (spark-connect and spark-connect-core)
+        # Test the core transport and pure-Rust client crates
+        run: cargo test -p spark-connect -p spark-connect-core --release
+
+      - name: Cargo build/test with optional conversion features (datafusion, polars)
+        # Exercises the to_datafusion()/to_polars() conversions, which are gated
+        # behind off-by-default features whose deps are pulled from crates.io.
+        run: |
+          cargo build -p spark-connect --features datafusion,polars --release
+          cargo test -p spark-connect --features datafusion,polars --release
+
+      - name: No-stub audit
+        # Enforce the "100% coverage, no followups" rule
+        run: bash scripts/audit_no_stubs.sh
