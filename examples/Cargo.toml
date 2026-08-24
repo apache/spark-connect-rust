@@ -48,6 +48,10 @@ name = "databricks"
 path = "src/databricks.rs"
 required-features = []
 
+[[bin]]
+name = "wasm_udf"
+path = "src/wasm_udf.rs"
+
 [dependencies]
 spark-connect = { package = "apache-spark-connect", path = "../crates/spark-connect" }
 

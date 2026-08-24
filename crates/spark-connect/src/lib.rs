@@ -22,6 +22,7 @@ pub mod table_arg;
 pub mod tvf;
 pub mod types;
 pub mod udf;
+pub mod wasm_udf;
 pub mod window;
 
 // Re-export commonly used types

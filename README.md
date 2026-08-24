@@ -72,6 +72,44 @@ See [`examples/`](examples) for more (SQL, readers/writers, streaming, Delta Lak
 cargo build -p apache-spark-connect --features datafusion,polars
 ```
 
+## Rust UDFs on Spark via WebAssembly (experimental)
+
+The `wasm_udf` module runs **Rust** user-defined functions on Spark, distributed
+on the executors, without any server-side plugin. A Rust function compiled to
+WebAssembly is packaged into a standard Spark `PythonUDF`: the WASM module and
+its signature are cloudpickled (**by value**, so nothing needs pre-deploying on
+the cluster) into a tiny Python runner that executes the module with `wasmtime`
+once per row.
+
+The API mirrors `pyspark.sql.functions.udf` — `udf(...)` returns a
+`UserDefinedFunction` you call on columns:
+
+```rust
+use spark_connect::functions::col;
+use spark_connect::types::DataType;
+use spark_connect::wasm_udf::{udf, WasmValType};
+
+// `run(i64) -> i64` compiled from Rust to wasm32.
+let wasm = std::fs::read("add_one.wasm")?;
+let add_one = udf("add_one", wasm, "run",
+    vec![WasmValType::I64], WasmValType::I64, DataType::Long);
+df.select(vec![col("id"), add_one.call(vec![col("id")])?.alias("plus_one")])
+    .show(20)?;
+```
+
+Requirements:
+
+- **Client** (building the command): a Python interpreter with `cloudpickle` and
+  `pyspark`, plus the `python/` directory on `PYTHONPATH` so `pyspark_wasm_udf`
+  is importable. Configure via `SPARK_CONNECT_PYTHON` /
+  `SPARK_CONNECT_WASM_PACKER_PATH`, or `UserDefinedFunction::with_packer`.
+- **Executors**: the `wasmtime` Python package installed.
+
+Scope: this prototype supports numeric scalar signatures (`i32`/`i64`/`f32`/`f64`)
+and atomic / `StringType` Spark output types. Widening to strings and nested
+types via the Arrow-based [`arrow-udf`](https://crates.io/crates/arrow-udf) ABI
+is planned follow-up. See `examples/src/wasm_udf.rs`.
+
 ## Building & testing
 
 Requires a Rust toolchain and `protobuf-compiler`.
