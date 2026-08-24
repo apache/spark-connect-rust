@@ -22,6 +22,8 @@ pub mod table_arg;
 pub mod tvf;
 pub mod types;
 pub mod udf;
+/// Run Rust UDFs on Spark via WebAssembly. Requires the `wasm-udf` feature.
+#[cfg(feature = "wasm-udf")]
 pub mod wasm_udf;
 pub mod window;
 

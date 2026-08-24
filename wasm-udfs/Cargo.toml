@@ -15,25 +15,23 @@
 # specific language governing permissions and limitations
 # under the License.
 
+# A reusable UDF crate: `#[spark_wasm_udf]` functions whose `<name>_udf()`
+# constructors other crates can call. `build.rs` compiles this crate's own
+# functions to wasm32 and embeds the module.
 [package]
 name = "wasm-udfs"
 version = "0.0.0"
 edition = "2021"
 publish = false
 
-[lib]
-# `cdylib` for the `wasm32` build (exports the UDF functions); `rlib` so the
-# host build can call the generated `<name>_udf(..)` constructors.
-crate-type = ["cdylib", "rlib"]
-
 [dependencies]
 spark-connect-macros = { package = "apache-spark-connect-macros", path = "../crates/spark-connect-macros", version = "4.2.0" }
 
-# Only needed by the host-side constructors the macro generates; never compiled
-# into the `wasm32` module (Spark Connect's gRPC stack does not target wasm).
+# Host-only: the macro-generated constructors (which need the `wasm-udf`
+# feature). Never compiled for wasm32.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-spark-connect = { package = "apache-spark-connect", path = "../crates/spark-connect", version = "4.2.0" }
+spark-connect = { package = "apache-spark-connect", path = "../crates/spark-connect", version = "4.2.0", features = ["wasm-udf"] }
 
-[profile.release]
-opt-level = "s"
-lto = true
+[build-dependencies]
+spark-connect-build = { package = "apache-spark-connect-build", path = "../crates/spark-connect-build", version = "4.2.0" }
+spark-connect-macros = { package = "apache-spark-connect-macros", path = "../crates/spark-connect-macros", version = "4.2.0" }

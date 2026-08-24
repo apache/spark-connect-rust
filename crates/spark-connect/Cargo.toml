@@ -18,8 +18,10 @@ thiserror.workspace = true
 tokio.workspace = true
 futures.workspace = true
 serde_json = "1.0"
-base64 = "0.21"
 uuid.workspace = true
+
+# Optional: only pulled in by the `wasm-udf` feature.
+base64 = { version = "0.21", optional = true }
 
 # Optional conversion features (off by default).
 datafusion = { workspace = true, optional = true }
@@ -29,6 +31,10 @@ polars = { workspace = true, optional = true }
 base64 = "0.21"
 
 [features]
+# Run Rust UDFs on Spark via WebAssembly (the `wasm_udf` module). Off by
+# default: only UDF users pay for the extra dependency and the runtime
+# preconditions (a Python packer on the client, `wasmtime` on the executors).
+wasm-udf = ["dep:base64"]
 # Convert a collected DataFrame into a datafusion::dataframe::DataFrame.
 datafusion = ["dep:datafusion"]
 # Convert a collected DataFrame into a polars::frame::DataFrame.

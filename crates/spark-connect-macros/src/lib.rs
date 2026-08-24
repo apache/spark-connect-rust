@@ -15,9 +15,10 @@ use syn::{parse_macro_input, FnArg, ItemFn, ReturnType, Type};
 /// * emits a `#[no_mangle] pub extern "C"` export **when compiled for
 ///   `wasm32`**, so the compiled module exports the function under its own
 ///   name, and
-/// * generates a `<name>_udf(module: &[u8]) -> UserDefinedFunction` constructor
-///   (on non-`wasm32` targets) with the argument/return types **inferred** from
-///   the signature, so callers write only the function.
+/// * generates a `<name>_udf() -> UserDefinedFunction` constructor (on
+///   non-`wasm32` targets) with the argument/return types **inferred** from the
+///   signature and the crate's own compiled wasm module embedded, so callers
+///   write only the function.
 ///
 /// ```ignore
 /// use spark_connect_macros::spark_wasm_udf;
@@ -25,9 +26,9 @@ use syn::{parse_macro_input, FnArg, ItemFn, ReturnType, Type};
 /// #[spark_wasm_udf]
 /// fn add_one(x: i64) -> i64 { x + 1 }
 ///
-/// // elsewhere (host build), `module` is the compiled `.wasm` bytes:
-/// let f = add_one_udf(module);              // signature auto-inferred
-/// df.select(vec![f.call(vec![col("id")])?]);
+/// // signature inferred + module embedded (build.rs calls
+/// // spark_connect_build::embed_wasm_udf):
+/// df.select(vec![add_one_udf().call(vec![col("id")])?]);
 /// ```
 ///
 /// Supported parameter/return types (this prototype): `i32`, `i64`, `f32`,
@@ -167,14 +168,16 @@ fn expand(func: ItemFn) -> Result<proc_macro2::TokenStream, syn::Error> {
             #impl_name(#(#forward_args),*)
         }
 
-        // Host-side constructor with the signature inferred from the function.
+        // Host-side constructor: signature inferred from the function, and the
+        // crate's own compiled wasm module embedded via the `WASM_UDFS_MODULE`
+        // env var that `spark_connect_build::embed_wasm_udf` sets in build.rs.
+        // Callers write neither the module bytes nor the signature.
         #[cfg(not(target_arch = "wasm32"))]
-        #vis fn #ctor_name(
-            module: &[u8],
-        ) -> ::spark_connect::wasm_udf::UserDefinedFunction {
+        #vis fn #ctor_name() -> ::spark_connect::wasm_udf::UserDefinedFunction {
+            const __MODULE: &[u8] = include_bytes!(env!("WASM_UDFS_MODULE"));
             ::spark_connect::wasm_udf::udf(
                 #udf_name,
-                module.to_vec(),
+                __MODULE.to_vec(),
                 #udf_name,
                 ::std::vec![#(#arg_valtypes),*],
                 #ret_valtype,

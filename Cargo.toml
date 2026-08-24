@@ -22,6 +22,7 @@ members = [
     "crates/spark-connect-core",
     "crates/spark-connect",
     "crates/spark-connect-macros",
+    "crates/spark-connect-build",
     "examples",
     "wasm-udfs",
     "wasm-udf-inline",
@@ -34,6 +35,7 @@ default-members = [
     "crates/spark-connect-core",
     "crates/spark-connect",
     "crates/spark-connect-macros",
+    "crates/spark-connect-build",
 ]
 
 [workspace.package]

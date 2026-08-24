@@ -74,79 +74,90 @@ cargo build -p apache-spark-connect --features datafusion,polars
 
 ## Rust UDFs on Spark via WebAssembly (experimental)
 
-The `wasm_udf` module runs **Rust** user-defined functions on Spark, distributed
-on the executors, without any server-side plugin. A Rust function compiled to
-WebAssembly is packaged into a standard Spark `PythonUDF`: the WASM module and
-its signature are cloudpickled (**by value**, so nothing needs pre-deploying on
-the cluster) into a tiny Python runner that executes the module with `wasmtime`
-once per row.
+Run **Rust** user-defined functions on Spark, distributed on the executors,
+without any server-side plugin. A Rust function compiled to WebAssembly is
+packaged into a standard Spark `PythonUDF`: the WASM module and its signature
+are cloudpickled (**by value**, so nothing needs pre-deploying on the cluster)
+into a tiny Python runner that executes the module with `wasmtime`.
 
-### Write a plain Rust function (recommended)
+This is **opt-in** — enable the `wasm-udf` feature. Users who don't run Rust
+UDFs pull none of the dependencies and need none of the preconditions below.
 
-`#[spark_wasm_udf]` (from `apache-spark-connect-macros`) turns an ordinary Rust
-function into a UDF: it exports the function when the crate is compiled to
-`wasm32`, and generates a `<name>_udf(module)` constructor with the Spark
-signature **inferred** from the Rust signature — so you write only the function.
+```toml
+apache-spark-connect  = { version = "4.2", features = ["wasm-udf"] }
+apache-spark-connect-macros = "4.2"          # the #[spark_wasm_udf] macro
+apache-spark-connect-build  = "4.2"          # build.rs helper (build-dependency)
+```
+
+### Write a plain Rust function
+
+You write only the function; `#[spark_wasm_udf]` infers the Spark signature,
+exports it to WASM, and generates a self-contained `<name>_udf()` constructor
+(module embedded). A one-line `build.rs` compiles it:
 
 ```rust
+// src/main.rs
 use spark_connect_macros::spark_wasm_udf;
 
 #[spark_wasm_udf]
-pub fn add_one(x: i64) -> i64 { x + 1 }   // signature inferred: (Long) -> Long
+pub fn add_one(x: i64) -> i64 { x + 1 }      // inferred: (Long) -> Long
+
+#[cfg(not(target_arch = "wasm32"))]
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use spark_connect::functions::col;
+    use spark_connect::SparkSessionBuilder;
+    let spark = SparkSessionBuilder::default().remote("sc://localhost:15002").get_or_create()?;
+    spark.range(5)?
+        .select(vec![col("id"), add_one_udf().call(vec![col("id")])?.alias("plus_one")])
+        .show(20)?;
+    Ok(())
+}
 ```
 
 ```rust
-// Host side: `module` is the compiled `.wasm`; the example's build.rs compiles
-// and embeds it, so `cargo run` needs no manual wasm build.
-let add_one = add_one_udf(WASM_MODULE);
-df.select(vec![col("id"), add_one.call(vec![col("id")])?.alias("plus_one")])
-    .show(20)?;
+// build.rs
+fn main() { spark_connect_build::embed_wasm_udf("src/main.rs"); }
 ```
 
-See `examples/src/wasm_udf_macro.rs` + the `wasm-udfs` crate, run with:
+Run it (the UDF and client are in one file; `wasm-udf-inline/` is this example):
 
 ```bash
 rustup target add wasm32-unknown-unknown
-cargo run -p examples --bin wasm_udf_macro --features wasm-udf-macro
+cargo run -p wasm-udf-inline
 ```
 
-**Single file.** The UDF and the client can live in one file — see
-`wasm-udf-inline/src/main.rs` (`cargo run -p wasm-udf-inline`). The function
-must still be compiled to WebAssembly (that's what ships to the executors), but
-its `build.rs` compiles the *same file* to `wasm32` and embeds it, so there is
-no separate crate. Note two compiles remain unavoidable (host + `wasm32`); only
-the source is unified.
+Two compiles are unavoidable — WASM is what ships to the executors — but the
+`build.rs` helper does the `wasm32` compile of the *same source* and embeds it,
+so there is no manual WASM step and no `.wasm` file to load. UDFs can also live
+in a reusable crate (see `wasm-udfs/` + `examples/src/wasm_udf_macro.rs`).
+
+### Preconditions (only when using Rust UDFs)
+
+Nothing here is needed unless the `wasm-udf` feature is enabled:
+
+- **Build machine**: the `wasm32-unknown-unknown` target
+  (`rustup target add wasm32-unknown-unknown`), and `apache-spark-connect-macros`
+  + `apache-spark-connect-build` as (build-)dependencies.
+- **Client** (building the UDF command): a Python interpreter with `cloudpickle`
+  and `pyspark`, plus the repo's `python/` directory importable as
+  `pyspark_wasm_udf`. Configure via `SPARK_CONNECT_PYTHON` /
+  `SPARK_CONNECT_WASM_PACKER_PATH`, or `UserDefinedFunction::with_packer`.
+- **Executors**: the `wasmtime` Python package installed.
+- **Spark**: 4.2.0+.
 
 ### Lower-level API
 
 `udf(...)` builds a `UserDefinedFunction` directly (mirrors
-`pyspark.sql.functions.udf`), if you prefer to load a prebuilt module and name
-the signature yourself:
+`pyspark.sql.functions.udf`) if you prefer to load a prebuilt module and name
+the signature yourself — see `examples/src/wasm_udf.rs`.
 
-```rust
-use spark_connect::functions::col;
-use spark_connect::types::DataType;
-use spark_connect::wasm_udf::{udf, WasmValType};
+### Type support
 
-let wasm = std::fs::read("add_one.wasm")?;
-let add_one = udf("add_one", wasm, "run",
-    vec![WasmValType::I64], WasmValType::I64, DataType::Long);
-df.select(vec![col("id"), add_one.call(vec![col("id")])?.alias("plus_one")])
-    .show(20)?;
-```
-
-Requirements:
-
-- **Client** (building the command): a Python interpreter with `cloudpickle` and
-  `pyspark`, plus the `python/` directory on `PYTHONPATH` so `pyspark_wasm_udf`
-  is importable. Configure via `SPARK_CONNECT_PYTHON` /
-  `SPARK_CONNECT_WASM_PACKER_PATH`, or `UserDefinedFunction::with_packer`.
-- **Executors**: the `wasmtime` Python package installed.
-
-Scope: this prototype supports numeric scalar signatures (`i32`/`i64`/`f32`/`f64`)
-and atomic / `StringType` Spark output types. Widening to strings and nested
-types via the Arrow-based [`arrow-udf`](https://crates.io/crates/arrow-udf) ABI
-is planned follow-up. See `examples/src/wasm_udf.rs`.
+This prototype supports **numeric scalar** signatures (`i32`/`i64`/`f32`/`f64`)
+and atomic / `StringType` Spark output types. Full type support (strings, binary,
+arrays, structs, maps) requires an Arrow-based WASM ABI (exchanging Arrow arrays
+across the boundary, à la [`arrow-udf`](https://crates.io/crates/arrow-udf)) and
+is planned follow-up, not yet implemented.
 
 ## Building & testing
 

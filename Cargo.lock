@@ -72,6 +72,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "apache-spark-connect-build"
+version = "4.2.0"
+
+[[package]]
 name = "apache-spark-connect-core"
 version = "4.2.0"
 dependencies = [
@@ -4589,6 +4593,7 @@ name = "wasm-udf-inline"
 version = "0.0.0"
 dependencies = [
  "apache-spark-connect",
+ "apache-spark-connect-build",
  "apache-spark-connect-macros",
 ]
 
@@ -4597,6 +4602,7 @@ name = "wasm-udfs"
 version = "0.0.0"
 dependencies = [
  "apache-spark-connect",
+ "apache-spark-connect-build",
  "apache-spark-connect-macros",
 ]
 
