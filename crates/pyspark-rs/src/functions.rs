@@ -128,6 +128,25 @@ pub fn register_functions(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<
     m.add_function(wrap_pyfunction!(pyfunc_transform_values, m)?)?;
     m.add_function(wrap_pyfunction!(pyfunc_map_filter, m)?)?;
     m.add_function(wrap_pyfunction!(pyfunc_map_zip_with, m)?)?;
+    m.add_function(wrap_pyfunction!(pyfunc_sha2, m)?)?;
+    m.add_function(wrap_pyfunction!(pyfunc_window, m)?)?;
+    m.add_function(wrap_pyfunction!(pyfunc_from_avro, m)?)?;
+    m.add_function(wrap_pyfunction!(pyfunc_from_avro_with_options, m)?)?;
+    m.add_function(wrap_pyfunction!(pyfunc_to_avro_with_schema, m)?)?;
+    m.add_function(wrap_pyfunction!(pyfunc_from_protobuf, m)?)?;
+    m.add_function(wrap_pyfunction!(pyfunc_from_protobuf_with_descriptor, m)?)?;
+    m.add_function(wrap_pyfunction!(pyfunc_from_protobuf_with_options, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        pyfunc_from_protobuf_with_descriptor_and_options,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(pyfunc_to_protobuf, m)?)?;
+    m.add_function(wrap_pyfunction!(pyfunc_to_protobuf_with_descriptor, m)?)?;
+    m.add_function(wrap_pyfunction!(pyfunc_to_protobuf_with_options, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        pyfunc_to_protobuf_with_descriptor_and_options,
+        m
+    )?)?;
     Ok(())
 }
 
@@ -460,4 +479,155 @@ fn pyfunc_map_zip_with(col1: &PyColumn, col2: &PyColumn, body_col: &PyColumn) ->
         ),
     ));
     PyColumn::new(result)
+}
+
+// ============================================================================
+// Mixed/special functions - dedicated bindings for non-generic dispatch
+// ============================================================================
+
+/// Wrapper for sha2(col, numbits).
+#[pyfunction]
+fn pyfunc_sha2(col: &PyColumn, numbits: i32) -> PyColumn {
+    PyColumn::new(spark_funcs::sha2(col.column.clone(), numbits))
+}
+
+/// Wrapper for window(col, window_duration).
+#[pyfunction]
+fn pyfunc_window(col: &PyColumn, window_duration: &str) -> PyColumn {
+    PyColumn::new(spark_funcs::window(col.column.clone(), window_duration))
+}
+
+/// Wrapper for from_avro(data, jsonFormatSchema).
+#[pyfunction]
+fn pyfunc_from_avro(data: &PyColumn, json_format_schema: &str) -> PyColumn {
+    PyColumn::new(spark_funcs::from_avro(
+        data.column.clone(),
+        json_format_schema,
+    ))
+}
+
+/// Wrapper for from_avro_with_options(data, jsonFormatSchema, options).
+#[pyfunction]
+fn pyfunc_from_avro_with_options(
+    data: &PyColumn,
+    json_format_schema: &str,
+    options: &PyColumn,
+) -> PyColumn {
+    PyColumn::new(spark_funcs::from_avro_with_options(
+        data.column.clone(),
+        json_format_schema,
+        options.column.clone(),
+    ))
+}
+
+/// Wrapper for to_avro_with_schema(data, jsonFormatSchema).
+#[pyfunction]
+fn pyfunc_to_avro_with_schema(data: &PyColumn, json_format_schema: &str) -> PyColumn {
+    PyColumn::new(spark_funcs::to_avro_with_schema(
+        data.column.clone(),
+        json_format_schema,
+    ))
+}
+
+/// Wrapper for from_protobuf(data, messageName).
+#[pyfunction]
+fn pyfunc_from_protobuf(data: &PyColumn, message_name: &str) -> PyColumn {
+    PyColumn::new(spark_funcs::from_protobuf(
+        data.column.clone(),
+        message_name,
+    ))
+}
+
+/// Wrapper for from_protobuf_with_descriptor(data, messageName, binaryDescriptorSet).
+#[pyfunction]
+fn pyfunc_from_protobuf_with_descriptor(
+    data: &PyColumn,
+    message_name: &str,
+    binary_descriptor_set: Vec<u8>,
+) -> PyColumn {
+    PyColumn::new(spark_funcs::from_protobuf_with_descriptor(
+        data.column.clone(),
+        message_name,
+        binary_descriptor_set,
+    ))
+}
+
+/// Wrapper for from_protobuf_with_options(data, messageName, options).
+#[pyfunction]
+fn pyfunc_from_protobuf_with_options(
+    data: &PyColumn,
+    message_name: &str,
+    options: &PyColumn,
+) -> PyColumn {
+    PyColumn::new(spark_funcs::from_protobuf_with_options(
+        data.column.clone(),
+        message_name,
+        options.column.clone(),
+    ))
+}
+
+/// Wrapper for from_protobuf_with_descriptor_and_options(data, messageName, binaryDescriptorSet, options).
+#[pyfunction]
+fn pyfunc_from_protobuf_with_descriptor_and_options(
+    data: &PyColumn,
+    message_name: &str,
+    binary_descriptor_set: Vec<u8>,
+    options: &PyColumn,
+) -> PyColumn {
+    PyColumn::new(spark_funcs::from_protobuf_with_descriptor_and_options(
+        data.column.clone(),
+        message_name,
+        binary_descriptor_set,
+        options.column.clone(),
+    ))
+}
+
+/// Wrapper for to_protobuf(data, messageName).
+#[pyfunction]
+fn pyfunc_to_protobuf(data: &PyColumn, message_name: &str) -> PyColumn {
+    PyColumn::new(spark_funcs::to_protobuf(data.column.clone(), message_name))
+}
+
+/// Wrapper for to_protobuf_with_descriptor(data, messageName, binaryDescriptorSet).
+#[pyfunction]
+fn pyfunc_to_protobuf_with_descriptor(
+    data: &PyColumn,
+    message_name: &str,
+    binary_descriptor_set: Vec<u8>,
+) -> PyColumn {
+    PyColumn::new(spark_funcs::to_protobuf_with_descriptor(
+        data.column.clone(),
+        message_name,
+        binary_descriptor_set,
+    ))
+}
+
+/// Wrapper for to_protobuf_with_options(data, messageName, options).
+#[pyfunction]
+fn pyfunc_to_protobuf_with_options(
+    data: &PyColumn,
+    message_name: &str,
+    options: &PyColumn,
+) -> PyColumn {
+    PyColumn::new(spark_funcs::to_protobuf_with_options(
+        data.column.clone(),
+        message_name,
+        options.column.clone(),
+    ))
+}
+
+/// Wrapper for to_protobuf_with_descriptor_and_options(data, messageName, binaryDescriptorSet, options).
+#[pyfunction]
+fn pyfunc_to_protobuf_with_descriptor_and_options(
+    data: &PyColumn,
+    message_name: &str,
+    binary_descriptor_set: Vec<u8>,
+    options: &PyColumn,
+) -> PyColumn {
+    PyColumn::new(spark_funcs::to_protobuf_with_descriptor_and_options(
+        data.column.clone(),
+        message_name,
+        binary_descriptor_set,
+        options.column.clone(),
+    ))
 }

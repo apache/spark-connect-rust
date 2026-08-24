@@ -77,6 +77,27 @@ skip_functions = {
     #   variant_delete(Column, Vec<Column>) -> Column  (variadic paths)
     "broadcast",
     "variant_delete",
+    # Mixed functions with dedicated pyfunc_* bindings:
+    #   sha2(Column, i32) -> Column
+    #   window(Column, &str) -> Column
+    #   from_avro(Column, &str) -> Column
+    #   from_avro_with_options(Column, &str, Column) -> Column
+    #   to_avro_with_schema(Column, &str) -> Column
+    #   from_protobuf(Column, &str) -> Column (and 3 variants)
+    #   to_protobuf(Column, &str) -> Column (and 3 variants)
+    "sha2",
+    "window",
+    "from_avro",
+    "from_avro_with_options",
+    "to_avro_with_schema",
+    "from_protobuf",
+    "from_protobuf_with_descriptor",
+    "from_protobuf_with_descriptor_and_options",
+    "from_protobuf_with_options",
+    "to_protobuf",
+    "to_protobuf_with_descriptor",
+    "to_protobuf_with_descriptor_and_options",
+    "to_protobuf_with_options",
 }
 
 # Categorize functions by their parameter types
