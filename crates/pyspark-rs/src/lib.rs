@@ -3,9 +3,12 @@
 mod catalog;
 mod column;
 mod dataframe;
+mod datasource;
 mod errors;
 mod functions;
 mod group;
+mod profiler;
+mod resource;
 mod row;
 mod session;
 mod transport;
@@ -15,11 +18,17 @@ mod window;
 use catalog::PyCatalog;
 use column::PyColumn;
 use dataframe::{
-    PyDataFrame, PyDataFrameNaFunctions, PyDataFrameWriter, PyDataFrameWriterV2, PyMergeIntoWriter,
-    PyWhenMatched, PyWhenNotMatched, PyWhenNotMatchedBySource,
+    PyDataFrame, PyDataFrameNaFunctions, PyDataFrameWriter, PyDataFrameWriterV2,
+    PyLocalRowIterator, PyMergeIntoWriter, PyWhenMatched, PyWhenNotMatched,
+    PyWhenNotMatchedBySource,
 };
+use datasource::PyDataSourceRegistration;
 use group::{PyCoGroupedData, PyGroupedData};
+use profiler::PyProfilerCollector;
 use pyo3::prelude::*;
+use resource::{
+    PyExecutorResourceRequests, PyResourceProfile, PyResourceProfileBuilder, PyTaskResourceRequests,
+};
 use row::PyRow;
 use session::{PySparkSession, PySparkSessionBuilder};
 use types::{
@@ -45,10 +54,21 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRow>()?;
     m.add_class::<PyGroupedData>()?;
     m.add_class::<PyCoGroupedData>()?;
+    m.add_class::<PyLocalRowIterator>()?;
     m.add_class::<transport::RustConnectStub>()?;
     m.add_class::<transport::ResponseStream>()?;
     m.add("RustRpcError", m.py().get_type::<transport::RustRpcError>())?;
     m.add_class::<PyCatalog>()?;
+
+    // Resource profile classes
+    m.add_class::<PyExecutorResourceRequests>()?;
+    m.add_class::<PyTaskResourceRequests>()?;
+    m.add_class::<PyResourceProfileBuilder>()?;
+    m.add_class::<PyResourceProfile>()?;
+
+    // Data source and profiler classes
+    m.add_class::<PyDataSourceRegistration>()?;
+    m.add_class::<PyProfilerCollector>()?;
 
     // Register DataType classes
     m.add_class::<PyDataType>()?;

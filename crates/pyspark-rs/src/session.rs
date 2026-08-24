@@ -8,7 +8,10 @@ use spark_connect::types::{DataType, StructField};
 
 use crate::catalog::PyCatalog;
 use crate::dataframe::PyDataFrame;
+use crate::datasource::PyDataSourceRegistration;
 use crate::errors::ResultExt;
+use crate::profiler::PyProfilerCollector;
+use crate::resource::PyResourceProfile;
 
 /// Python wrapper for a Spark session builder.
 ///
@@ -321,18 +324,31 @@ _UDFRegistration()
         self.session.clear_progress_handlers();
     }
 
-    /// Observed metrics from the last execution (where UDF-profiler results
-    /// surface when server-side profiling is enabled). Mirrors `SparkSession.profile`.
-    fn profile(&self, py: Python<'_>) -> Py<PyAny> {
-        let names: Vec<String> = self
-            .session
-            .profile()
-            .iter()
-            .map(|m| m.name.clone())
-            .collect();
-        PyList::new(py, names)
-            .map(|l| l.into_any().unbind())
-            .unwrap_or_else(|_| py.None())
+    /// Get the profiler collector for this session.
+    ///
+    /// Mirrors `SparkSession.profile`. Profile data is accumulated across query
+    /// executions and can be shown, dumped, or cleared via the returned collector.
+    #[getter]
+    fn profile(&self) -> PyProfilerCollector {
+        PyProfilerCollector::new(self.session.profiler())
+    }
+
+    /// Get the data source registration accessor.
+    ///
+    /// Mirrors `SparkSession.dataSource.register`. Used to register custom data sources.
+    #[getter]
+    fn dataSource(&self) -> PyDataSourceRegistration {
+        PyDataSourceRegistration::new(PySparkSession::new(self.session.clone()))
+    }
+
+    /// Build and register a resource profile with the server.
+    ///
+    /// Returns the server-assigned profile ID that can be used with `DataFrame.withResources()`.
+    #[pyo3(name = "buildResourceProfile")]
+    fn build_resource_profile(&self, profile: &PyResourceProfile) -> PyResult<i32> {
+        self.session
+            .build_resource_profile(&profile.inner)
+            .to_pyerr()
     }
 
     fn version(&self) -> PyResult<String> {

@@ -2,14 +2,14 @@
 
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
-use spark_connect::dataframe::DataFrame;
+use spark_connect::dataframe::{DataFrame, LocalRowIterator};
 use spark_connect::plan::JoinType;
 use spark_connect::udf::{eval_type, CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
 
 use crate::column::PyColumn;
 use crate::errors::ResultExt;
 use crate::group::PyGroupedData;
-use crate::row::PyRow;
+use crate::row::{value_to_py, PyRow};
 use crate::types::PyDataType;
 
 /// Python wrapper for a Spark DataFrame.
@@ -263,6 +263,23 @@ impl PyDataFrame {
         // Release the GIL across the blocking RPC so other Python threads run.
         let rows = py.detach(|| self.dataframe.collect()).to_pyerr()?;
         Ok(rows.into_iter().map(PyRow::new).collect())
+    }
+
+    /// Return an iterator over rows without materializing the entire result in memory.
+    ///
+    /// Mirrors `pyspark.sql.DataFrame.toLocalIterator(prefetchPartitions=False)`.
+    /// Yields Row objects lazily as batches are fetched from the server.
+    #[pyo3(name = "toLocalIterator")]
+    #[pyo3(signature = (prefetchPartitions=false))]
+    fn to_local_iterator(
+        &self,
+        py: Python<'_>,
+        prefetchPartitions: bool,
+    ) -> PyResult<PyLocalRowIterator> {
+        let iterator = py
+            .detach(|| self.dataframe.to_local_iterator(prefetchPartitions))
+            .to_pyerr()?;
+        Ok(PyLocalRowIterator::new(iterator))
     }
 
     /// Collect the DataFrame into a `pyarrow.Table`.
@@ -1022,4 +1039,41 @@ fn build_side_effect_udf(
         vec![],
         payload,
     ))
+}
+
+/// Python wrapper for LocalRowIterator yielding Row objects lazily.
+///
+/// Implements `__iter__` and `__next__` to make it a proper Python iterator.
+#[pyclass(name = "LocalRowIterator")]
+pub struct PyLocalRowIterator {
+    iterator: LocalRowIterator,
+}
+
+impl PyLocalRowIterator {
+    pub fn new(iterator: LocalRowIterator) -> Self {
+        PyLocalRowIterator { iterator }
+    }
+}
+
+#[pymethods]
+impl PyLocalRowIterator {
+    /// Make this object an iterator by returning self.
+    fn __iter__(slf: Bound<'_, Self>) -> Bound<'_, Self> {
+        slf
+    }
+
+    /// Fetch the next row from the iterator.
+    ///
+    /// Releases the GIL during the blocking fetch to allow other threads to run.
+    fn __next__(&mut self, py: Python<'_>) -> Option<PyRow> {
+        loop {
+            // Release the GIL while fetching from the Rust iterator (which may block on network I/O).
+            let next_result = py.detach(|| self.iterator.next());
+            match next_result {
+                Some(Ok(row)) => return Some(PyRow::new(row)),
+                Some(Err(_e)) => return None, // On error, stop iterating
+                None => return None,
+            }
+        }
+    }
 }
