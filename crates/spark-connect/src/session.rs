@@ -14,6 +14,7 @@ use spark_connect_proto as proto;
 use crate::catalog::Catalog;
 use crate::dataframe::DataFrame;
 use crate::plan::LogicalPlan;
+use crate::profiler::ProfilerCollector;
 use crate::row::{Row, Value};
 use crate::types::DataType;
 
@@ -52,6 +53,8 @@ pub struct SparkSession {
     progress_handlers: Arc<Mutex<Vec<(u64, ProgressHandler)>>>,
     /// Monotonic id source for `register_progress_handler`.
     progress_handler_id: Arc<AtomicU64>,
+    /// Profiler collector for accumulating profile results across executions.
+    profiler: Arc<ProfilerCollector>,
 }
 
 impl SparkSession {
@@ -64,6 +67,7 @@ impl SparkSession {
             last_execution: Arc::new(Mutex::new(None)),
             progress_handlers: Arc::new(Mutex::new(Vec::new())),
             progress_handler_id: Arc::new(AtomicU64::new(0)),
+            profiler: Arc::new(ProfilerCollector::new()),
         }
     }
 
@@ -167,12 +171,11 @@ impl SparkSession {
         self.last_execution.lock().unwrap().clone()
     }
 
-    /// Profiler accessor: the observed metrics from the most recent execution.
+    /// Raw observed metrics from the most recent execution only.
     ///
-    /// Mirrors the client-visible surface of `SparkSession.profile` — UDF/plan
-    /// profiler results are delivered by the server as observed metrics on the
-    /// execution response, which this exposes. (Server-side profiler *collection*
-    /// must be enabled on the server; when it is, results appear here.)
+    /// This is a low-level snapshot of the last execution's observed metrics. For
+    /// the profiler surface that mirrors `SparkSession.profile` (results accumulated
+    /// across executions, with show/dump/clear), use [`SparkSession::profiler`].
     pub fn profile(&self) -> Vec<proto::execute_plan_response::ObservedMetrics> {
         self.last_execution_info()
             .map(|i| i.observed_metrics)
@@ -195,6 +198,7 @@ impl SparkSession {
             last_execution: Arc::new(Mutex::new(None)),
             progress_handlers: Arc::new(Mutex::new(Vec::new())),
             progress_handler_id: Arc::new(AtomicU64::new(0)),
+            profiler: Arc::new(ProfilerCollector::new()),
         }
     }
 
@@ -414,6 +418,66 @@ impl SparkSession {
         )
     }
 
+    /// Build and register a ResourceProfile with the server.
+    ///
+    /// Sends a `CreateResourceProfileCommand` to the server with the specified executor
+    /// and task resource requests, and returns the server-assigned profile id.
+    /// The profile can then be used with `DataFrame.withResources(profile_id)`.
+    ///
+    /// Mirrors `pyspark.sql.SparkSession._build_resource_profile` (internal).
+    pub fn build_resource_profile(
+        &self,
+        profile: &crate::resource::ResourceProfile,
+    ) -> Result<i32> {
+        let mut cmd = proto::CreateResourceProfileCommand::default();
+        cmd.profile = Some(profile.proto().clone());
+
+        let responses = crate::dataframe::execute_command_collect(
+            self,
+            proto::command::CommandType::CreateResourceProfileCommand(cmd),
+        )?;
+
+        for resp in responses {
+            if let Some(
+                proto::execute_plan_response::ResponseType::CreateResourceProfileCommandResult(res),
+            ) = resp.response_type
+            {
+                return Ok(res.profile_id);
+            }
+        }
+
+        Err(SparkError::connect_msg(
+            "build_resource_profile: server returned no CreateResourceProfileCommandResult",
+        ))
+    }
+
+    /// Register a user-defined data source on the session so it can be referenced
+    /// in SQL queries.
+    ///
+    /// Mirrors the server-side effect of `pyspark.sql.SparkSession.dataSource.register`.
+    /// The data source is cloudpickled on the Python client and sent as a
+    /// `RegisterDataSource` command. Since Rust cannot cloudpickle Python classes, the
+    /// command bytes must be prepared on the client (typically by a Python wrapper).
+    pub fn register_data_source(
+        &self,
+        data_source: crate::datasource::CommonInlineUserDefinedDataSourceExpression,
+    ) -> Result<()> {
+        crate::dataframe::execute_command(
+            self,
+            proto::command::CommandType::RegisterDataSource(data_source.to_proto()),
+        )
+    }
+
+    /// Get the profiler collector for this session.
+    ///
+    /// Mirrors the client-visible surface of `SparkSession.profile`. Profile data is
+    /// accumulated across query executions and can be shown, dumped, or cleared via the
+    /// returned collector. Profile data is populated by the server only when UDF profiling
+    /// is enabled via `spark.python.profile*` or `spark.sql.pyspark.udf.profiler` configuration.
+    pub fn profiler(&self) -> Arc<ProfilerCollector> {
+        Arc::clone(&self.profiler)
+    }
+
     /// Stop this Spark session.
     pub fn stop(&self) -> Result<()> {
         block_on(self.client.release_session())?;
@@ -430,6 +494,7 @@ impl Clone for SparkSession {
             last_execution: Arc::clone(&self.last_execution),
             progress_handlers: Arc::clone(&self.progress_handlers),
             progress_handler_id: Arc::clone(&self.progress_handler_id),
+            profiler: Arc::clone(&self.profiler),
         }
     }
 }

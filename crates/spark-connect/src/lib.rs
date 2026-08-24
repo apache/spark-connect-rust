@@ -7,6 +7,7 @@ pub mod catalog;
 pub mod column;
 pub mod conf;
 pub mod dataframe;
+pub mod datasource;
 pub mod expression;
 pub mod functions;
 pub mod group;
@@ -14,7 +15,9 @@ pub mod merge;
 pub mod ml;
 pub mod observation;
 pub mod plan;
+pub mod profiler;
 pub mod readwriter;
+pub mod resource;
 pub mod row;
 pub mod session;
 pub mod streaming;
@@ -29,7 +32,8 @@ pub mod window;
 
 // Re-export commonly used types
 pub use column::{col, lit, lit_boolean, lit_double, lit_string, Column};
-pub use dataframe::DataFrame;
+pub use dataframe::{DataFrame, LocalRowIterator};
+pub use datasource::{CommonInlineUserDefinedDataSourceExpression, PythonDataSourcePayload};
 pub use expression::{
     Alias, CaseWhen, Cast, ColumnReference, Expression, LiteralExpression, SortOrder,
     UnresolvedFunction,
@@ -37,8 +41,12 @@ pub use expression::{
 pub use group::{CoGroupedData, GroupedData};
 pub use merge::MergeIntoWriter;
 pub use observation::Observation;
+pub use profiler::ProfilerCollector;
 pub use readwriter::{
     DataFrameReader, DataFrameWriter, DataFrameWriterV2, ReadType, SaveMode, TableSaveMethod,
+};
+pub use resource::{
+    ExecutorResourceRequests, ResourceProfile, ResourceProfileBuilder, TaskResourceRequests,
 };
 pub use session::{SparkSession, SparkSessionBuilder};
 /// Re-exported so `persist(...)` / `storage_level()` have a public storage-level type.
