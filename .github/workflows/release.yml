@@ -17,16 +17,21 @@
 # under the License.
 #
 
-# Release workflow for the Rust crates (crates.io).
+# Release workflow for the Rust crates (crates.io) and the Python wheel (PyPI).
 #
 # Following the Apache Spark model, releases are cut by a committer from THEIR
 # OWN FORK, not from the canonical apache/ repository:
 #
 #   1. Enable GitHub Actions on your fork.
-#   2. Add the CARGO_REGISTRY_TOKEN (crates.io API token) secret to the fork.
-#   3. Bump the version in Cargo.toml.
+#   2. Add the release secrets to the fork:
+#        - CARGO_REGISTRY_TOKEN  (crates.io API token)
+#        - PYPI_API_TOKEN        (PyPI API token)
+#   3. Bump the version in Cargo.toml and pyproject.toml (they must match).
 #   4. Dispatch this workflow with dry_run=true to rehearse (default), then push
 #      a matching `v<version>` tag (or dispatch with dry_run=false) to publish.
+#
+# A dry run builds and validates artifacts without publishing. A tag push (or an
+# explicit dry_run=false dispatch) publishes to crates.io and PyPI.
 
 name: Release
 
@@ -34,7 +39,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Validate the release without publishing"
+        description: "Build and validate artifacts but do not publish"
         type: boolean
         default: true
   push:
@@ -49,10 +54,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Cargo version matches the tag (if any)
+      - name: Cargo and pyproject versions agree (and match the tag, if any)
         run: |
           CARGO_VER=$(grep -m1 '^version' Cargo.toml | awk -F'"' '{print $2}')
-          echo "Cargo.toml version = ${CARGO_VER}"
+          PYPROJECT_VER=$(grep -m1 '^version' pyproject.toml | awk -F'"' '{print $2}')
+          echo "Cargo.toml=${CARGO_VER}  pyproject.toml=${PYPROJECT_VER}"
+          if [[ "${CARGO_VER}" != "${PYPROJECT_VER}" ]]; then
+            echo "::error::Cargo.toml (${CARGO_VER}) and pyproject.toml (${PYPROJECT_VER}) versions differ"
+            exit 1
+          fi
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             TAG="${GITHUB_REF##*/}"
             if [[ "${TAG}" != "v${CARGO_VER}" ]]; then
@@ -86,3 +96,53 @@ jobs:
             echo "::endgroup::"
             sleep 30
           done
+
+  build-wheels:
+    name: Build wheel (${{ matrix.os }})
+    needs: validate-version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "23.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build abi3 wheel with maturin
+        # abi3-py39 produces a single wheel per platform valid for CPython 3.9+.
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out dist
+          manylinux: auto
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: dist/*.whl
+
+  publish-wheels:
+    name: Publish wheel to PyPI
+    needs: build-wheels
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          # Fork-based release: authenticate with the committer's PyPI token
+          # rather than repository-scoped Trusted Publishing.
+          password: ${{ secrets.PYPI_API_TOKEN }}

@@ -1,0 +1,8 @@
+# The pyspark-rs cdylib is a CPython extension: python symbols are resolved by
+# the host interpreter at import time. Allow undefined symbols at link on macOS
+# (equivalent to what maturin/setuptools-rust do for extension modules).
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
