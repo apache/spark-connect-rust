@@ -130,6 +130,7 @@ pub fn register_functions(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<
     m.add_function(wrap_pyfunction!(pyfunc_map_zip_with, m)?)?;
     m.add_function(wrap_pyfunction!(pyfunc_sha2, m)?)?;
     m.add_function(wrap_pyfunction!(pyfunc_window, m)?)?;
+    m.add_function(wrap_pyfunction!(pyfunc_window_with_slide_and_start, m)?)?;
     m.add_function(wrap_pyfunction!(pyfunc_from_avro, m)?)?;
     m.add_function(wrap_pyfunction!(pyfunc_from_avro_with_options, m)?)?;
     m.add_function(wrap_pyfunction!(pyfunc_to_avro_with_schema, m)?)?;
@@ -495,6 +496,22 @@ fn pyfunc_sha2(col: &PyColumn, numbits: i32) -> PyColumn {
 #[pyfunction]
 fn pyfunc_window(col: &PyColumn, window_duration: &str) -> PyColumn {
     PyColumn::new(spark_funcs::window(col.column.clone(), window_duration))
+}
+
+/// Wrapper for window(col, window_duration, slide_duration, start_time).
+#[pyfunction]
+fn pyfunc_window_with_slide_and_start(
+    col: &PyColumn,
+    window_duration: &str,
+    slide_duration: &str,
+    start_time: &str,
+) -> PyColumn {
+    PyColumn::new(spark_funcs::window_with_slide_and_start(
+        col.column.clone(),
+        window_duration,
+        slide_duration,
+        start_time,
+    ))
 }
 
 /// Wrapper for from_avro(data, jsonFormatSchema).

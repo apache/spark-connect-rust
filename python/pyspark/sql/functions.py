@@ -23,6 +23,7 @@ _call_function = _functions.pyfunc_call_function
 # Mixed function bindings
 _pyfunc_sha2 = _functions.pyfunc_sha2
 _pyfunc_window = _functions.pyfunc_window
+_pyfunc_window_with_slide_and_start = _functions.pyfunc_window_with_slide_and_start
 _pyfunc_from_avro = _functions.pyfunc_from_avro
 _pyfunc_from_avro_with_options = _functions.pyfunc_from_avro_with_options
 _pyfunc_to_avro_with_schema = _functions.pyfunc_to_avro_with_schema
@@ -116,13 +117,18 @@ def window(time_column, window_duration, slide_duration=None, start_time=None):
     Args:
         time_column: the column containing timestamps
         window_duration: a string specifying the width of the window, e.g. '10 minutes'
-        slide_duration: optional, the slide interval
-        start_time: optional, the start time of the first window
+        slide_duration: optional, the slide interval. Defaults to ``window_duration``
+            (a tumbling window) when only ``start_time`` is given.
+        start_time: optional, the offset of the first window, e.g. '15 minutes'.
+            Defaults to '0 second'.
     """
-    # Note: core only supports the 2-arg version for now
-    if slide_duration is not None or start_time is not None:
-        raise NotImplementedError("slide_duration and start_time not yet supported")
-    return _pyfunc_window(_to_col(time_column), window_duration)
+    if slide_duration is None and start_time is None:
+        return _pyfunc_window(_to_col(time_column), window_duration)
+    slide = slide_duration if slide_duration is not None else window_duration
+    start = start_time if start_time is not None else "0 second"
+    return _pyfunc_window_with_slide_and_start(
+        _to_col(time_column), window_duration, slide, start
+    )
 
 def from_avro(data, json_format_schema):
     """Deserialize Avro data into a column.

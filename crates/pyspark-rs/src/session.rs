@@ -470,6 +470,39 @@ fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
         return Ok(Value::Binary(b));
     }
 
-    // For now, treat everything else as a string
-    Ok(Value::String(obj.to_string()))
+    // list / tuple -> array (recursively converted)
+    if let Ok(list) = obj.downcast::<pyo3::types::PyList>() {
+        let mut items = Vec::with_capacity(list.len());
+        for item in list.iter() {
+            items.push(py_to_value(&item)?);
+        }
+        return Ok(Value::List(items));
+    }
+    if let Ok(tuple) = obj.downcast::<pyo3::types::PyTuple>() {
+        let mut items = Vec::with_capacity(tuple.len());
+        for item in tuple.iter() {
+            items.push(py_to_value(&item)?);
+        }
+        return Ok(Value::List(items));
+    }
+
+    // dict -> map (keys coerced to their string form, values recursively converted)
+    if let Ok(dict) = obj.downcast::<pyo3::types::PyDict>() {
+        let mut map = std::collections::BTreeMap::new();
+        for (k, v) in dict.iter() {
+            map.insert(k.str()?.to_string(), py_to_value(&v)?);
+        }
+        return Ok(Value::Map(map));
+    }
+
+    // Anything else (e.g. datetime, Decimal, arbitrary objects) is not a supported
+    // literal; error rather than silently coercing to a wrong value.
+    let type_name = obj
+        .get_type()
+        .name()
+        .map(|n| n.to_string())
+        .unwrap_or_else(|_| "<unknown>".to_string());
+    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+        "unsupported value type for createDataFrame: {type_name}"
+    )))
 }
