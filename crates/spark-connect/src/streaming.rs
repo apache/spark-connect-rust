@@ -396,25 +396,39 @@ impl DataStreamWriter {
             ..Default::default()
         };
 
-        // Execute the plan
+        // Execute the plan and read the WriteStreamOperationStartResult, which carries
+        // the server-assigned query id / run id / name.
         let mut response_stream = block_on(self.session.client().execute_plan(request))?;
-
-        // Try to parse the response
-        // For now, we'll create a placeholder query with dummy IDs
-        // In a real implementation, we'd wait for the response and extract query IDs
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
-        let query_id = format!("{:x}", now);
-        let run_id = format!("{:x}", now);
+        let mut query_id = String::new();
+        let mut run_id = String::new();
+        let mut name = self.query_name.clone();
+        while let Some(resp) =
+            block_on(response_stream.message()).map_err(SparkError::from_grpc_status)?
+        {
+            if let Some(
+                proto::execute_plan_response::ResponseType::WriteStreamOperationStartResult(res),
+            ) = resp.response_type
+            {
+                if let Some(qid) = res.query_id {
+                    query_id = qid.id;
+                    run_id = qid.run_id;
+                }
+                if !res.name.is_empty() {
+                    name = Some(res.name);
+                }
+            }
+        }
+        if query_id.is_empty() {
+            return Err(SparkError::connect_msg(
+                "writeStream.start: server returned no WriteStreamOperationStartResult",
+            ));
+        }
 
         Ok(StreamingQuery {
             session: self.session,
             query_id,
             run_id,
-            name: self.query_name.clone(),
+            name,
         })
     }
 }

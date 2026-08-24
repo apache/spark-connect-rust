@@ -211,34 +211,6 @@ pub enum LogicalPlan {
         read_type: crate::readwriter::ReadType,
         is_streaming: bool,
     },
-    /// Cache: `df.cache()`.
-    Cache { input: Box<LogicalPlan> },
-    /// Persist: `df.persist(storage_level)`.
-    Persist { input: Box<LogicalPlan> },
-    /// Unpersist: `df.unpersist()`.
-    Unpersist { input: Box<LogicalPlan> },
-    /// Checkpoint: `df.checkpoint()`.
-    Checkpoint {
-        input: Box<LogicalPlan>,
-        eager: bool,
-    },
-    /// LocalCheckpoint: `df.localCheckpoint()`.
-    LocalCheckpoint {
-        input: Box<LogicalPlan>,
-        eager: bool,
-    },
-    /// CreateTempView: `df.createTempView(name)`.
-    CreateTempView {
-        input: Box<LogicalPlan>,
-        name: String,
-        replace: bool,
-        global: bool,
-    },
-    /// Explain: `df.explain(mode)`.
-    Explain {
-        input: Box<LogicalPlan>,
-        mode: String,
-    },
     /// WithWatermark: `df.withWatermark(timeColumn, delayThreshold)`.
     WithWatermark {
         input: Box<LogicalPlan>,
@@ -847,12 +819,14 @@ impl LogicalPlan {
                     Some(proto::relation::RelType::SubqueryAlias(Box::new(sq_alias)));
             }
 
-            LogicalPlan::LocalRelation { schema: _, data } => {
+            LogicalPlan::LocalRelation { schema, data } => {
                 let mut local = proto::LocalRelation::default();
-                // For now, we only populate the data field
                 if let Some(d) = data {
                     local.data = Some(d.clone().into());
                 }
+                // Carry the schema (JSON) so the server applies the user's column
+                // names/types; required when no Arrow `data` is provided (emptyDataFrame).
+                local.schema = Some(schema.json());
                 relation.rel_type = Some(proto::relation::RelType::LocalRelation(local));
             }
 
@@ -905,58 +879,6 @@ impl LogicalPlan {
                 }
 
                 relation.rel_type = Some(proto::relation::RelType::Read(read));
-            }
-
-            LogicalPlan::Cache { input } => {
-                // Cache is represented via Hint relation since CachedLocalRelation is for references
-                let mut hint = proto::Hint::default();
-                hint.input = Some(Box::new(input.to_proto()));
-                hint.name = "cache".to_string();
-                relation.rel_type = Some(proto::relation::RelType::Hint(Box::new(hint)));
-            }
-
-            LogicalPlan::Persist { input } => {
-                // Persist is represented via Hint relation
-                let mut hint = proto::Hint::default();
-                hint.input = Some(Box::new(input.to_proto()));
-                hint.name = "persist".to_string();
-                relation.rel_type = Some(proto::relation::RelType::Hint(Box::new(hint)));
-            }
-
-            LogicalPlan::Unpersist { input } => {
-                // Unpersist doesn't have a dedicated proto, so we pass through the input
-                return input.to_proto();
-            }
-
-            LogicalPlan::Checkpoint { input, eager: _ } => {
-                // Checkpoint maps to a simple wrapper; no dedicated proto exists
-                // We'll use Hint as a placeholder since Checkpoint has no proto
-                let mut hint = proto::Hint::default();
-                hint.input = Some(Box::new(input.to_proto()));
-                hint.name = "checkpoint".to_string();
-                relation.rel_type = Some(proto::relation::RelType::Hint(Box::new(hint)));
-            }
-
-            LogicalPlan::LocalCheckpoint { input, eager: _ } => {
-                let mut hint = proto::Hint::default();
-                hint.input = Some(Box::new(input.to_proto()));
-                hint.name = "localCheckpoint".to_string();
-                relation.rel_type = Some(proto::relation::RelType::Hint(Box::new(hint)));
-            }
-
-            LogicalPlan::CreateTempView {
-                input,
-                name: _,
-                replace: _,
-                global: _,
-            } => {
-                // For now, just pass through the input since CreateDataFrameView isn't a Relation
-                return input.to_proto();
-            }
-
-            LogicalPlan::Explain { input, mode: _ } => {
-                // Explain isn't a Relation type, so just pass through the input
-                return input.to_proto();
             }
 
             LogicalPlan::WithWatermark {
@@ -1632,6 +1554,18 @@ mod argfix_tests {
 
     fn base() -> LogicalPlan {
         range(0, 10, 1)
+    }
+
+    #[test]
+    fn local_relation_carries_schema() {
+        // Regression: LocalRelation dropped the explicit schema (`schema: _`), so
+        // createDataFrame(rows, schema) / emptyDataFrame lost the user's schema.
+        match rel_type(local_relation(DataType::Struct { fields: vec![] }, None)) {
+            proto::relation::RelType::LocalRelation(lr) => {
+                assert!(lr.schema.is_some(), "LocalRelation must carry the schema");
+            }
+            _ => panic!("expected LocalRelation"),
+        }
     }
     fn rel_type(p: LogicalPlan) -> proto::relation::RelType {
         p.to_proto().rel_type.expect("rel_type")

@@ -20,6 +20,8 @@ use spark_connect_proto::{
 use crate::artifact::{build_artifact_request_stream, FileArtifact, NamedArtifact};
 use crate::channel::ChannelBuilder;
 use crate::error::{Result, SparkError};
+use crate::reattach::ExecutePlanResponseReattachableIterator;
+use crate::retries::{RetryPolicy, RetryPolicyState};
 
 /// A Spark Connect client for communicating with a remote Spark server.
 ///
@@ -37,6 +39,8 @@ pub struct SparkConnectClient {
     metadata: Vec<(String, String)>,
     /// User-agent header.
     user_agent: String,
+    /// Retry policy applied to RPCs (exponential backoff on transient failures).
+    retry_policy: RetryPolicy,
 }
 
 impl SparkConnectClient {
@@ -90,6 +94,7 @@ impl SparkConnectClient {
             user_id: builder.user_id().map(String::from),
             metadata,
             user_agent,
+            retry_policy: RetryPolicy::default(),
         })
     }
 
@@ -110,6 +115,7 @@ impl SparkConnectClient {
             user_id: self.user_id.clone(),
             metadata: self.metadata.clone(),
             user_agent: self.user_agent.clone(),
+            retry_policy: self.retry_policy.clone(),
         }
     }
 
@@ -228,11 +234,70 @@ impl SparkConnectClient {
     ///
     /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.analyze_plan`.
     pub async fn analyze_plan(&self, request: AnalyzePlanRequest) -> Result<AnalyzePlanResponse> {
-        let mut req = Request::new(request);
-        self._attach_metadata(&mut req);
-        let resp = self.stub.clone().analyze_plan(req).await;
-        resp.map(Response::into_inner)
-            .map_err(|status| SparkError::from_grpc_status(status))
+        self.with_retry(|| {
+            let mut req = Request::new(request.clone());
+            self._attach_metadata(&mut req);
+            let mut stub = self.stub.clone();
+            async move { stub.analyze_plan(req).await.map(Response::into_inner) }
+        })
+        .await
+    }
+
+    /// Run a unary RPC closure with exponential-backoff retry on transient failures.
+    ///
+    /// Mirrors `pyspark.sql.connect.client.retries.Retrying` / `RetryPolicy`: retry
+    /// `UNAVAILABLE` (and cursor-disconnect) per the policy, sleeping the computed
+    /// backoff between attempts, then surface the last error.
+    async fn with_retry<T, Fut, F>(&self, mut op: F) -> Result<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<T, tonic::Status>>,
+    {
+        let mut state = RetryPolicyState::new(self.retry_policy.clone());
+        loop {
+            match op().await {
+                Ok(v) => return Ok(v),
+                Err(status) => {
+                    if self.retry_policy.can_retry(&status) {
+                        if let Some(wait_ms) = state.next_attempt(None) {
+                            tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                            continue;
+                        }
+                    }
+                    return Err(SparkError::from_grpc_status(status));
+                }
+            }
+        }
+    }
+
+    /// Execute a plan as a reattachable stream: retries the initial call and, if the
+    /// response stream drops mid-flight (e.g. `UNAVAILABLE` / `INVALID_CURSOR.DISCONNECTED`)
+    /// before `ResultComplete`, transparently resumes it with `ReattachExecute` from the
+    /// last observed `response_id`. Mirrors the reference reattachable execute path.
+    pub async fn execute_plan_reattachable(
+        &self,
+        request: ExecutePlanRequest,
+    ) -> Result<ReattachableResponseStream> {
+        let iter = ExecutePlanResponseReattachableIterator::new(request);
+        let start = iter.request().clone();
+        let stream = self
+            .with_retry(|| {
+                let mut req = Request::new(start.clone());
+                self._attach_metadata(&mut req);
+                let mut stub = self.stub.clone();
+                async move { stub.execute_plan(req).await.map(Response::into_inner) }
+            })
+            .await?;
+        Ok(ReattachableResponseStream {
+            stub: self.stub.clone(),
+            user_agent: self.user_agent.clone(),
+            user_id: self.user_id.clone(),
+            metadata: self.metadata.clone(),
+            retry_policy: self.retry_policy.clone(),
+            iter,
+            stream,
+            done: false,
+        })
     }
 
     /// Fetch enriched error details (full exception tree/stack trace) by error id.
@@ -254,22 +319,26 @@ impl SparkConnectClient {
     ///
     /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.config`.
     pub async fn config(&self, request: ConfigRequest) -> Result<ConfigResponse> {
-        let mut req = Request::new(request);
-        self._attach_metadata(&mut req);
-        let resp = self.stub.clone().config(req).await;
-        resp.map(Response::into_inner)
-            .map_err(|status| SparkError::from_grpc_status(status))
+        self.with_retry(|| {
+            let mut req = Request::new(request.clone());
+            self._attach_metadata(&mut req);
+            let mut stub = self.stub.clone();
+            async move { stub.config(req).await.map(Response::into_inner) }
+        })
+        .await
     }
 
     /// Interrupt running operations on this session.
     ///
     /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.interrupt`.
     pub async fn interrupt(&self, request: InterruptRequest) -> Result<InterruptResponse> {
-        let mut req = Request::new(request);
-        self._attach_metadata(&mut req);
-        let resp = self.stub.clone().interrupt(req).await;
-        resp.map(Response::into_inner)
-            .map_err(|status| SparkError::from_grpc_status(status))
+        self.with_retry(|| {
+            let mut req = Request::new(request.clone());
+            self._attach_metadata(&mut req);
+            let mut stub = self.stub.clone();
+            async move { stub.interrupt(req).await.map(Response::into_inner) }
+        })
+        .await
     }
 
     /// Get configuration values from the session.
@@ -720,6 +789,95 @@ impl SparkConnectClient {
             if let Ok(header_value) = MetadataValue::from_str(v) {
                 if let Ok(key) = tonic::metadata::MetadataKey::from_bytes(k.as_bytes()) {
                     let _ = metadata.insert(key, header_value);
+                }
+            }
+        }
+    }
+}
+
+/// A reattachable, retrying response stream for a reattachable ExecutePlan.
+///
+/// Drives the gRPC response stream and, on a transient mid-stream disconnect
+/// before `ResultComplete`, resumes it via `ReattachExecute` from the last
+/// observed `response_id` (with backoff). Mirrors
+/// `pyspark.sql.connect.client.reattach.ExecutePlanResponseReattachableIterator`.
+pub struct ReattachableResponseStream {
+    stub: SparkConnectServiceClient<Channel>,
+    user_agent: String,
+    user_id: Option<String>,
+    metadata: Vec<(String, String)>,
+    retry_policy: RetryPolicy,
+    iter: ExecutePlanResponseReattachableIterator,
+    stream: Streaming<ExecutePlanResponse>,
+    done: bool,
+}
+
+impl ReattachableResponseStream {
+    fn attach_metadata<T>(&self, req: &mut Request<T>) {
+        let metadata = req.metadata_mut();
+        if let Ok(v) = MetadataValue::from_str(&self.user_agent) {
+            let _ = metadata.insert("user-agent", v);
+        }
+        if let Some(user_id) = &self.user_id {
+            if let Ok(v) = MetadataValue::from_str(user_id) {
+                let _ = metadata.insert("user_id", v);
+            }
+        }
+        for (k, v) in &self.metadata {
+            if let Ok(v) = MetadataValue::from_str(v) {
+                if let Ok(key) = tonic::metadata::MetadataKey::from_bytes(k.as_bytes()) {
+                    let _ = metadata.insert(key, v);
+                }
+            }
+        }
+    }
+
+    /// Next response, transparently reattaching on a transient mid-stream drop.
+    pub async fn message(&mut self) -> Result<Option<ExecutePlanResponse>> {
+        if self.done {
+            return Ok(None);
+        }
+        loop {
+            match self.stream.message().await {
+                Ok(Some(resp)) => {
+                    self.iter.set_last_response_id(&resp).await;
+                    if self.iter.is_completed().await {
+                        self.done = true;
+                    }
+                    return Ok(Some(resp));
+                }
+                Ok(None) => {
+                    self.done = true;
+                    return Ok(None);
+                }
+                Err(status) => {
+                    // Only reattach a still-running execution on a retriable drop.
+                    if self.iter.is_completed().await || !self.retry_policy.can_retry(&status) {
+                        return Err(SparkError::from_grpc_status(status));
+                    }
+                    let mut state = RetryPolicyState::new(self.retry_policy.clone());
+                    loop {
+                        let reattach = self.iter.create_reattach_request().await;
+                        let mut req = Request::new(reattach);
+                        self.attach_metadata(&mut req);
+                        match self.stub.reattach_execute(req).await {
+                            Ok(r) => {
+                                self.stream = r.into_inner();
+                                break;
+                            }
+                            Err(e) => {
+                                if self.retry_policy.can_retry(&e) {
+                                    if let Some(w) = state.next_attempt(None) {
+                                        tokio::time::sleep(std::time::Duration::from_millis(w))
+                                            .await;
+                                        continue;
+                                    }
+                                }
+                                return Err(SparkError::from_grpc_status(e));
+                            }
+                        }
+                    }
+                    // Resume reading on the freshly reattached stream.
                 }
             }
         }

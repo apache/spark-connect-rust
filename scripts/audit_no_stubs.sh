@@ -13,7 +13,7 @@ cd "$(dirname "$0")/.."
 # deferrals always carry one of the markers below.
 PATTERN='unimplemented!\(|todo!\(|unreachable!\("(stub|todo|not)|TODO|FIXME|\bXXX\b|not[[:space:]]+yet[[:space:]]+implemented|stretch goal|for[[:space:]]+now|deferred|come back later|to be implemented|[Ff]uture implementation|[Ff]uture work|will be implemented|no-op placeholder|[Ii]n the future'
 
-hits=$(grep -rInE "$PATTERN" crates/*/src crates/*/build.rs 2>/dev/null)
+hits=$(grep -rIniE "$PATTERN" crates/*/src crates/*/build.rs 2>/dev/null)
 
 if [[ -n "$hits" ]]; then
   echo "NO-STUB AUDIT FAILED - remove these placeholders (implement fully):"

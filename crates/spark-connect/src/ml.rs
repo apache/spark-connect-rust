@@ -420,8 +420,7 @@ impl Transformer for StandardScalerModel {
         relation.common = Some(proto::RelationCommon::default());
         relation.rel_type = Some(proto::relation::RelType::MlRelation(Box::new(ml_relation)));
 
-        // Create a new plan from this relation
-        // For now, we use a placeholder plan type that will be handled by the executor
+        // Wrap the built MlRelation as the plan; its `to_proto` emits the relation as-is.
         let plan = LogicalPlan::MlTransform {
             ml_relation: relation,
         };

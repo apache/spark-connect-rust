@@ -39,6 +39,8 @@ pub use readwriter::{
     DataFrameReader, DataFrameWriter, DataFrameWriterV2, ReadType, SaveMode, TableSaveMethod,
 };
 pub use session::{SparkSession, SparkSessionBuilder};
+/// Re-exported so `persist(...)` / `storage_level()` have a public storage-level type.
+pub use spark_connect_proto::StorageLevel;
 pub use streaming::{
     DataStreamReader, DataStreamWriter, StreamingQuery, StreamingQueryManager, Trigger,
 };

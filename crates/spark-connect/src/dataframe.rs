@@ -438,12 +438,12 @@ impl DataFrame {
     /// Collect all rows into memory.
     pub fn collect(&self) -> Result<Vec<Row>> {
         let request = self.build_execute_request()?;
-        let mut stream = block_on(self.session.client().execute_plan(request))?;
+        let mut stream = block_on(self.session.client().execute_plan_reattachable(request))?;
 
         let mut rows = vec![];
         let mut info = ExecutionInfo::default();
         loop {
-            let resp = block_on(stream.message()).map_err(|e| SparkError::from_grpc_status(e))?;
+            let resp = block_on(stream.message())?;
             let Some(mut resp) = resp else {
                 break;
             };
@@ -478,12 +478,12 @@ impl DataFrame {
     /// foundation for `to_datafusion()` and `to_polars()` conversions.
     pub fn collect_record_batches(&self) -> Result<Vec<arrow::record_batch::RecordBatch>> {
         let request = self.build_execute_request()?;
-        let mut stream = block_on(self.session.client().execute_plan(request))?;
+        let mut stream = block_on(self.session.client().execute_plan_reattachable(request))?;
 
         let mut batches = vec![];
         let mut info = ExecutionInfo::default();
         loop {
-            let resp = block_on(stream.message()).map_err(|e| SparkError::from_grpc_status(e))?;
+            let resp = block_on(stream.message())?;
             let Some(mut resp) = resp else {
                 break;
             };
@@ -662,109 +662,164 @@ impl DataFrame {
         crate::streaming::DataStreamWriter::new(self.session.clone(), self.plan.clone())
     }
 
-    /// Cache this DataFrame in memory.
-    pub fn cache(&self) -> DataFrame {
-        let plan = LogicalPlan::Cache {
-            input: Box::new(self.plan.clone()),
-        };
-        DataFrame::new(self.session.clone(), plan)
+    /// The default `MEMORY_AND_DISK_DESER` storage level used by `cache()`.
+    fn memory_and_disk_deser() -> proto::StorageLevel {
+        proto::StorageLevel {
+            use_disk: true,
+            use_memory: true,
+            use_off_heap: false,
+            deserialized: true,
+            replication: 1,
+        }
     }
 
-    /// Persist this DataFrame using the default storage level.
-    pub fn persist(&self) -> DataFrame {
-        let plan = LogicalPlan::Persist {
-            input: Box::new(self.plan.clone()),
-        };
-        DataFrame::new(self.session.clone(), plan)
+    /// Build this DataFrame's plan as a proto `Relation` with plan ids assigned
+    /// (the shape the `Persist`/`Unpersist`/`GetStorageLevel` analyze ops take).
+    fn analyze_relation(&self) -> Result<proto::Relation> {
+        let mut relation = self.plan.to_proto();
+        assign_plan_ids(&mut relation, &self.session)?;
+        Ok(relation)
     }
 
-    /// Remove this DataFrame from cache.
-    pub fn unpersist(&self) -> DataFrame {
-        let plan = LogicalPlan::Unpersist {
-            input: Box::new(self.plan.clone()),
+    fn analyze_request(
+        &self,
+        analyze: proto::analyze_plan_request::Analyze,
+    ) -> proto::AnalyzePlanRequest {
+        proto::AnalyzePlanRequest {
+            session_id: self.session.client().session_id().to_string(),
+            user_context: Some(proto::UserContext::default()),
+            analyze: Some(analyze),
+            ..Default::default()
+        }
+    }
+
+    /// Cache this DataFrame with the default `MEMORY_AND_DISK_DESER` storage level.
+    ///
+    /// Mirrors `pyspark.sql.DataFrame.cache()`.
+    pub fn cache(&self) -> Result<DataFrame> {
+        self.persist(Self::memory_and_disk_deser())
+    }
+
+    /// Persist this DataFrame with the given storage level.
+    ///
+    /// Mirrors `pyspark.sql.DataFrame.persist(storageLevel)`.
+    pub fn persist(&self, storage_level: proto::StorageLevel) -> Result<DataFrame> {
+        let persist = proto::analyze_plan_request::Persist {
+            relation: Some(self.analyze_relation()?),
+            storage_level: Some(storage_level),
         };
-        DataFrame::new(self.session.clone(), plan)
+        let request = self.analyze_request(proto::analyze_plan_request::Analyze::Persist(persist));
+        block_on(self.session.client().analyze_plan(request))?;
+        Ok(self.clone())
+    }
+
+    /// Remove this DataFrame from cache. Mirrors `DataFrame.unpersist(blocking)`.
+    pub fn unpersist(&self, blocking: bool) -> Result<DataFrame> {
+        let unpersist = proto::analyze_plan_request::Unpersist {
+            relation: Some(self.analyze_relation()?),
+            blocking: Some(blocking),
+        };
+        let request =
+            self.analyze_request(proto::analyze_plan_request::Analyze::Unpersist(unpersist));
+        block_on(self.session.client().analyze_plan(request))?;
+        Ok(self.clone())
     }
 
     /// Checkpoint this DataFrame to disk.
-    pub fn checkpoint(&self) -> DataFrame {
-        let plan = LogicalPlan::Checkpoint {
-            input: Box::new(self.plan.clone()),
-            eager: true,
-        };
-        DataFrame::new(self.session.clone(), plan)
+    pub fn checkpoint(&self) -> Result<DataFrame> {
+        self.checkpoint_impl(false, true)
     }
 
     /// Create a local checkpoint of this DataFrame.
-    pub fn local_checkpoint(&self) -> DataFrame {
-        let plan = LogicalPlan::LocalCheckpoint {
-            input: Box::new(self.plan.clone()),
-            eager: true,
-        };
-        DataFrame::new(self.session.clone(), plan)
+    pub fn local_checkpoint(&self) -> Result<DataFrame> {
+        self.checkpoint_impl(true, true)
+    }
+
+    /// Execute a `CheckpointCommand` and return a DataFrame referencing the resulting
+    /// cached remote relation. Mirrors `DataFrame.checkpoint`/`localCheckpoint`, which
+    /// materialize server-side and return a handle to the checkpointed data.
+    fn checkpoint_impl(&self, local: bool, eager: bool) -> Result<DataFrame> {
+        let mut cmd = proto::CheckpointCommand::default();
+        cmd.relation = Some(self.plan.to_proto());
+        cmd.local = local;
+        cmd.eager = eager;
+        let responses = execute_command_collect(
+            &self.session,
+            proto::command::CommandType::CheckpointCommand(cmd),
+        )?;
+        for resp in &responses {
+            if let Some(proto::execute_plan_response::ResponseType::CheckpointCommandResult(res)) =
+                &resp.response_type
+            {
+                if let Some(rel) = &res.relation {
+                    return Ok(DataFrame::new(
+                        self.session.clone(),
+                        LogicalPlan::CachedRemoteRelation {
+                            relation_id: rel.relation_id.clone(),
+                        },
+                    ));
+                }
+            }
+        }
+        Err(SparkError::connect_msg(
+            "checkpoint: server returned no CheckpointCommandResult",
+        ))
     }
 
     /// Create a temporary view for this DataFrame.
     pub fn create_temp_view(&self, name: &str) -> Result<()> {
-        let plan = LogicalPlan::CreateTempView {
-            input: Box::new(self.plan.clone()),
-            name: name.to_string(),
-            replace: false,
-            global: false,
-        };
-        let df = DataFrame::new(self.session.clone(), plan);
-        // Execute the command by collecting (which triggers execution)
-        let _ = df.collect()?;
-        Ok(())
+        self.create_view(name, false, false)
     }
 
     /// Create or replace a temporary view for this DataFrame.
     pub fn create_or_replace_temp_view(&self, name: &str) -> Result<()> {
-        let plan = LogicalPlan::CreateTempView {
-            input: Box::new(self.plan.clone()),
-            name: name.to_string(),
-            replace: true,
-            global: false,
-        };
-        let df = DataFrame::new(self.session.clone(), plan);
-        let _ = df.collect()?;
-        Ok(())
+        self.create_view(name, true, false)
     }
 
     /// Create a global temporary view for this DataFrame.
     pub fn create_global_temp_view(&self, name: &str) -> Result<()> {
-        let plan = LogicalPlan::CreateTempView {
-            input: Box::new(self.plan.clone()),
-            name: name.to_string(),
-            replace: false,
-            global: true,
-        };
-        let df = DataFrame::new(self.session.clone(), plan);
-        let _ = df.collect()?;
-        Ok(())
+        self.create_view(name, false, true)
     }
 
     /// Create or replace a global temporary view for this DataFrame.
     pub fn create_or_replace_global_temp_view(&self, name: &str) -> Result<()> {
-        let plan = LogicalPlan::CreateTempView {
-            input: Box::new(self.plan.clone()),
-            name: name.to_string(),
-            replace: true,
-            global: true,
-        };
-        let df = DataFrame::new(self.session.clone(), plan);
-        let _ = df.collect()?;
-        Ok(())
+        self.create_view(name, true, true)
     }
 
-    /// Explain the execution plan of this DataFrame.
+    /// Build + execute a real `CreateDataFrameViewCommand` (was previously a
+    /// silent no-op that passed the query relation through and never created a view).
+    fn create_view(&self, name: &str, replace: bool, global: bool) -> Result<()> {
+        let mut input = self.plan.to_proto();
+        assign_plan_ids(&mut input, &self.session)?;
+        let mut cmd = proto::CreateDataFrameViewCommand::default();
+        cmd.input = Some(input);
+        cmd.name = name.to_string();
+        cmd.is_global = global;
+        cmd.replace = replace;
+        execute_command(
+            &self.session,
+            proto::command::CommandType::CreateDataframeView(cmd),
+        )
+    }
+
+    /// Print the execution plan to the console. Mirrors `pyspark.sql.DataFrame.explain`
+    /// (was previously a no-op that ran the query relation instead of an AnalyzePlan).
     pub fn explain(&self) -> Result<()> {
-        let plan = LogicalPlan::Explain {
-            input: Box::new(self.plan.clone()),
-            mode: "simple".to_string(),
-        };
-        let df = DataFrame::new(self.session.clone(), plan);
-        let _ = df.collect()?;
+        let mut relation = self.plan.to_proto();
+        assign_plan_ids(&mut relation, &self.session)?;
+        let mut plan = proto::Plan::default();
+        plan.op_type = Some(proto::plan::OpType::Root(relation));
+        let mut ex = proto::analyze_plan_request::Explain::default();
+        ex.plan = Some(plan);
+        ex.explain_mode = proto::analyze_plan_request::explain::ExplainMode::Simple as i32;
+        let mut request = proto::AnalyzePlanRequest::default();
+        request.session_id = self.session.client().session_id().to_string();
+        request.user_context = Some(proto::UserContext::default());
+        request.analyze = Some(proto::analyze_plan_request::Analyze::Explain(ex));
+        let response = block_on(self.session.client().analyze_plan(request))?;
+        if let Some(proto::analyze_plan_response::Result::Explain(e)) = response.result {
+            println!("{}", e.explain_string);
+        }
         Ok(())
     }
 
@@ -816,10 +871,23 @@ impl DataFrame {
         DataFrame::new(self.session.clone(), plan)
     }
 
-    /// Get input files for this DataFrame.
+    /// Get the input files for this DataFrame. Mirrors `pyspark.sql.DataFrame.inputFiles`.
     pub fn input_files(&self) -> Result<Vec<String>> {
-        // For now, return empty since this would require analyzing the plan
-        Ok(vec![])
+        let mut relation = self.plan.to_proto();
+        assign_plan_ids(&mut relation, &self.session)?;
+        let mut plan = proto::Plan::default();
+        plan.op_type = Some(proto::plan::OpType::Root(relation));
+        let mut inp = proto::analyze_plan_request::InputFiles::default();
+        inp.plan = Some(plan);
+        let mut request = proto::AnalyzePlanRequest::default();
+        request.session_id = self.session.client().session_id().to_string();
+        request.user_context = Some(proto::UserContext::default());
+        request.analyze = Some(proto::analyze_plan_request::Analyze::InputFiles(inp));
+        let response = block_on(self.session.client().analyze_plan(request))?;
+        match response.result {
+            Some(proto::analyze_plan_response::Result::InputFiles(f)) => Ok(f.files),
+            _ => Ok(vec![]),
+        }
     }
 
     /// Observe metrics on this DataFrame.
@@ -1061,17 +1129,29 @@ impl DataFrame {
         Ok(())
     }
 
-    /// Get the storage level of this DataFrame.
-    pub fn storage_level(&self) -> &str {
-        "MEMORY_AND_DISK"
+    /// Get the storage level of this DataFrame. Mirrors `DataFrame.storageLevel`.
+    pub fn storage_level(&self) -> Result<proto::StorageLevel> {
+        let get = proto::analyze_plan_request::GetStorageLevel {
+            relation: Some(self.analyze_relation()?),
+        };
+        let request =
+            self.analyze_request(proto::analyze_plan_request::Analyze::GetStorageLevel(get));
+        let response = block_on(self.session.client().analyze_plan(request))?;
+        match response.result {
+            Some(proto::analyze_plan_response::Result::GetStorageLevel(g)) => {
+                Ok(g.storage_level.unwrap_or_default())
+            }
+            _ => Ok(proto::StorageLevel::default()),
+        }
     }
 
-    /// Check if this DataFrame is cached.
-    pub fn is_cached(&self) -> bool {
-        matches!(
-            self.plan,
-            LogicalPlan::Cache { .. } | LogicalPlan::Persist { .. }
-        )
+    /// Check if this DataFrame is cached. Mirrors `DataFrame.is_cached`.
+    ///
+    /// Derived from the server-reported storage level (cached iff it uses memory
+    /// or disk), rather than inspecting the local plan.
+    pub fn is_cached(&self) -> Result<bool> {
+        let level = self.storage_level()?;
+        Ok(level.use_memory || level.use_disk)
     }
 
     /// Get dtypes (column names and types).
@@ -1414,6 +1494,15 @@ pub(crate) fn execute_command(
     session: &SparkSession,
     command_type: proto::command::CommandType,
 ) -> Result<()> {
+    execute_command_collect(session, command_type).map(|_| ())
+}
+
+/// Like `execute_command`, but returns the collected responses so callers can read
+/// a command result (e.g. `CheckpointCommandResult`, `WriteStreamOperationStartResult`).
+pub(crate) fn execute_command_collect(
+    session: &SparkSession,
+    command_type: proto::command::CommandType,
+) -> Result<Vec<proto::ExecutePlanResponse>> {
     let mut command = proto::Command::default();
     command.command_type = Some(command_type);
 
@@ -1426,15 +1515,17 @@ pub(crate) fn execute_command(
     request.tags = session.tags();
     request.plan = Some(plan);
 
-    let mut stream = block_on(session.client().execute_plan(request))?;
+    let mut stream = block_on(session.client().execute_plan_reattachable(request))?;
     // Drain the response stream so the command runs to completion server-side,
     // capturing any metrics/progress emitted along the way.
     let mut info = ExecutionInfo::default();
-    while let Some(mut resp) = block_on(stream.message()).map_err(SparkError::from_grpc_status)? {
+    let mut responses = Vec::new();
+    while let Some(mut resp) = block_on(stream.message())? {
         capture_execution(&mut resp, &mut info, session);
+        responses.push(resp);
     }
     session.record_execution(info);
-    Ok(())
+    Ok(responses)
 }
 
 /// Pull execution metrics/observed-metrics off a response and fire progress
@@ -1868,4 +1959,47 @@ fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> Result<Value
         "Unsupported Arrow type {:?} - cannot convert to Value",
         array.data_type()
     )))
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    use prost::Message;
+
+    #[test]
+    fn cache_default_is_memory_and_disk_deser() {
+        let sl = DataFrame::memory_and_disk_deser();
+        assert!(sl.use_memory && sl.use_disk && sl.deserialized);
+        assert!(!sl.use_off_heap);
+        assert_eq!(sl.replication, 1);
+    }
+
+    #[test]
+    fn persist_request_carries_storage_level_over_the_wire() {
+        // The reviewer's bug class: an argument dropped before it reaches the proto.
+        // Assert the storage level survives encode/decode inside the Persist analyze op.
+        let persist = proto::analyze_plan_request::Persist {
+            relation: None,
+            storage_level: Some(DataFrame::memory_and_disk_deser()),
+        };
+        let decoded =
+            proto::analyze_plan_request::Persist::decode(persist.encode_to_vec().as_slice())
+                .unwrap();
+        let sl = decoded
+            .storage_level
+            .expect("storage_level must be present");
+        assert!(sl.use_memory && sl.use_disk && sl.deserialized && sl.replication == 1);
+    }
+
+    #[test]
+    fn get_storage_level_response_maps_to_is_cached() {
+        // cached iff use_memory || use_disk (mirrors DataFrame.is_cached derivation)
+        let cached = proto::StorageLevel {
+            use_memory: true,
+            ..Default::default()
+        };
+        let uncached = proto::StorageLevel::default();
+        assert!(cached.use_memory || cached.use_disk);
+        assert!(!(uncached.use_memory || uncached.use_disk));
+    }
 }

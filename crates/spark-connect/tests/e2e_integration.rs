@@ -333,7 +333,8 @@ fn test_cache_persist() {
     let df = session
         .range(5)
         .expect("Failed to create range DataFrame")
-        .cache();
+        .cache()
+        .expect("Failed to cache DataFrame");
 
     let rows = df
         .collect()
@@ -343,7 +344,8 @@ fn test_cache_persist() {
     let df2 = session
         .range(3)
         .expect("Failed to create range DataFrame")
-        .persist();
+        .persist(spark_connect::StorageLevel::default())
+        .expect("Failed to persist DataFrame");
 
     let rows2 = df2
         .collect()
