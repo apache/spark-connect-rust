@@ -10,6 +10,7 @@ use crate::column::PyColumn;
 use crate::errors::ResultExt;
 use crate::group::PyGroupedData;
 use crate::row::{value_to_py, PyRow};
+use crate::streaming::PyDataStreamWriter;
 use crate::types::PyDataType;
 
 /// Python wrapper for a Spark DataFrame.
@@ -445,6 +446,13 @@ impl PyDataFrame {
         PyDataFrameWriterV2 {
             inner: Some(self.dataframe.write_to(table_name)),
         }
+    }
+
+    /// The streaming writer interface (`df.writeStream`).
+    #[pyo3(name = "writeStream")]
+    fn write_stream(&self) -> PyDataStreamWriter {
+        let writer = self.dataframe.write_stream();
+        PyDataStreamWriter::new(writer)
     }
 
     /// Null-handling functions (`df.na.drop()/fill()/replace()`).

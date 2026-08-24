@@ -11,6 +11,7 @@ mod profiler;
 mod resource;
 mod row;
 mod session;
+mod streaming;
 mod transport;
 mod types;
 mod window;
@@ -31,6 +32,10 @@ use resource::{
 };
 use row::PyRow;
 use session::{PySparkSession, PySparkSessionBuilder};
+use streaming::{
+    PyDataStreamReader, PyDataStreamWriter, PyStreamingQuery, PyStreamingQueryException,
+    PyStreamingQueryManager, PyStreamingQueryStatus, PyTrigger,
+};
 use types::{
     PyArrayType, PyBinaryType, PyBooleanType, PyByteType, PyDataType, PyDateType, PyDecimalType,
     PyDoubleType, PyFloatType, PyIntegerType, PyLongType, PyMapType, PyNullType, PyShortType,
@@ -59,6 +64,15 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<transport::ResponseStream>()?;
     m.add("RustRpcError", m.py().get_type::<transport::RustRpcError>())?;
     m.add_class::<PyCatalog>()?;
+
+    // Streaming classes
+    m.add_class::<PyDataStreamReader>()?;
+    m.add_class::<PyDataStreamWriter>()?;
+    m.add_class::<PyTrigger>()?;
+    m.add_class::<PyStreamingQuery>()?;
+    m.add_class::<PyStreamingQueryStatus>()?;
+    m.add_class::<PyStreamingQueryException>()?;
+    m.add_class::<PyStreamingQueryManager>()?;
 
     // Resource profile classes
     m.add_class::<PyExecutorResourceRequests>()?;

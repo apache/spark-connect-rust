@@ -12,6 +12,7 @@ use crate::datasource::PyDataSourceRegistration;
 use crate::errors::ResultExt;
 use crate::profiler::PyProfilerCollector;
 use crate::resource::PyResourceProfile;
+use crate::streaming::{PyDataStreamReader, PyStreamingQueryManager};
 
 /// Python wrapper for a Spark session builder.
 ///
@@ -233,6 +234,20 @@ impl PySparkSession {
     #[pyo3(name = "catalog")]
     fn catalog(&self) -> PyCatalog {
         PyCatalog::new(self.session.catalog())
+    }
+
+    /// Get the DataStreamReader for reading streaming data.
+    #[pyo3(name = "readStream")]
+    fn read_stream(&self) -> PyDataStreamReader {
+        let reader = self.session.read_stream();
+        PyDataStreamReader::new(reader)
+    }
+
+    /// Get the StreamingQueryManager for managing active streaming queries.
+    #[pyo3(name = "streams")]
+    fn streams(&self) -> PyStreamingQueryManager {
+        let manager = self.session.streams();
+        PyStreamingQueryManager::new(manager)
     }
 
     /// Stop this Spark session.

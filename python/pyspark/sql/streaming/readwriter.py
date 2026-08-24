@@ -15,40 +15,22 @@
 # limitations under the License.
 #
 
-from pyspark.sql.streaming.readwriter import (
-    DataStreamReader,
-    DataStreamWriter,
-    Trigger,
-)
-from pyspark.sql.streaming.query import (
-    StreamingQuery,
-    StreamingQueryManager,
-    StreamingQueryStatus,
-    StreamingQueryException,
-)
-from pyspark.sql.streaming.datasource import (
-    ReadLimit,
-    ReadAllAvailable,
-    ReadMinRows,
-    ReadMaxRows,
-    ReadMaxFiles,
-    ReadMaxBytes,
-    SupportsTriggerAvailableNow,
+"""
+Streaming data readers and writers.
+
+This module re-exports the PyO3-implemented streaming classes that provide
+the client-side API for reading and writing streaming data.
+"""
+
+from pyspark._pyspark import (
+    DataStreamReader as _DataStreamReader,
+    DataStreamWriter as _DataStreamWriter,
+    Trigger as _Trigger,
 )
 
-__all__ = [
-    "DataStreamReader",
-    "DataStreamWriter",
-    "Trigger",
-    "StreamingQuery",
-    "StreamingQueryManager",
-    "StreamingQueryStatus",
-    "StreamingQueryException",
-    "ReadLimit",
-    "ReadAllAvailable",
-    "ReadMinRows",
-    "ReadMaxRows",
-    "ReadMaxFiles",
-    "ReadMaxBytes",
-    "SupportsTriggerAvailableNow",
-]
+# Re-export the core classes from the Rust extension
+DataStreamReader = _DataStreamReader
+DataStreamWriter = _DataStreamWriter
+Trigger = _Trigger
+
+__all__ = ["DataStreamReader", "DataStreamWriter", "Trigger"]
