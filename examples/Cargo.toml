@@ -48,12 +48,6 @@ name = "databricks"
 path = "src/databricks.rs"
 required-features = []
 
-# Lower-level API (load a prebuilt module, name the signature yourself).
-[[bin]]
-name = "wasm_udf"
-path = "src/wasm_udf.rs"
-required-features = ["wasm-udf"]
-
 # The `#[spark_wasm_udf]` macro via the reusable `wasm-udfs` crate.
 [[bin]]
 name = "wasm_udf_macro"
@@ -65,8 +59,7 @@ spark-connect = { package = "apache-spark-connect", path = "../crates/spark-conn
 wasm-udfs = { path = "../wasm-udfs", optional = true }
 
 [features]
-# Enable the lower-level WASM UDF API (`wasm_udf` bin).
-wasm-udf = ["spark-connect/wasm-udf"]
 # Enable the macro example (`wasm_udf_macro` bin). Requires the
 # `wasm32-unknown-unknown` target, since `wasm-udfs`' build.rs compiles to WASM.
-wasm-udf-macro = ["dep:wasm-udfs", "wasm-udf"]
+# (Pulls in `wasm-udfs`, which enables `spark-connect/wasm-udf`.)
+wasm-udf-macro = ["dep:wasm-udfs"]

@@ -16,37 +16,142 @@
 #
 """Runtime for Rust UDFs compiled to WebAssembly and run on Spark.
 
-The Rust client (``spark_connect::wasm_udf``) does not build the Spark
-``PythonUDF`` command itself. Instead it invokes :mod:`pyspark_wasm_udf.pack`,
-which uses ``cloudpickle`` to serialize a :class:`WasmScalarUDF` instance
-**by value** into the command. Because the runner is embedded by value, the
-Spark executors do **not** need this package installed -- they only need the
-``wasmtime`` package to be importable.
+The Rust client (``spark_connect::wasm_udf``) invokes :mod:`pyspark_wasm_udf.pack`,
+which uses ``cloudpickle`` to serialize a :class:`WasmScalarUDF` **by value** into
+a Spark ``PythonUDF`` command. Because the runner is embedded by value, the Spark
+executors do **not** need this package installed -- only the ``wasmtime`` package.
 
 Spark's Python worker unpickles the ``(WasmScalarUDF, return_type)`` tuple and
-calls the instance once per input row (eval type ``SQL_ARROW_BATCHED_UDF``). On
-first call the instance instantiates the embedded ``.wasm`` module with
-``wasmtime`` and invokes the exported entrypoint.
+calls the instance once per input row. On first call the instance instantiates
+the embedded ``.wasm`` module with ``wasmtime`` and invokes the exported
+entrypoint.
 
-Scope: numeric scalar signatures only. Value-type tags are ``"i32"``, ``"i64"``,
-``"f32"`` and ``"f64"``. String/binary arguments need a memory-passing ABI and
-are not handled yet.
+The binary ABI (little-endian, matching ``spark_connect::wasm_udf::AbiType``):
+
+* ``i32``/``f32``: 4 bytes; ``i64``/``f64``: 8 bytes; ``bool``: 1 byte.
+* ``string``: ``u32`` byte-length then UTF-8; ``binary``: ``u32`` length then bytes.
+* ``array:<T>``: ``u32`` count then each element; ``option:<T>``: 1 tag byte
+  (0=None, 1=Some) then the value if present.
+* Arguments are concatenated into one buffer; the result is a single value.
+
+The module exports ``spark_udf_alloc(len)->ptr`` / ``spark_udf_dealloc(ptr,len)``
+and each UDF as ``fn(args_ptr, args_len) -> (ptr << 32 | len)`` of the result.
 """
 
-from typing import Any, List
+import struct
+from typing import Any, List, Tuple
 
-__all__ = ["WasmScalarUDF"]
+__all__ = ["WasmScalarUDF", "encode_args", "decode_value"]
 
-_INT_TAGS = ("i32", "i64")
-_FLOAT_TAGS = ("f32", "f64")
+
+# --- binary codec (the exact contract mirrored by the Rust runtime) ----------
+
+
+def _split(desc: str) -> Tuple[str, str]:
+    """Split ``"array:option:i64"`` into ``("array", "option:i64")``."""
+    head, _, tail = desc.partition(":")
+    return head, tail
+
+
+def _encode(out: bytearray, desc: str, value: Any) -> None:
+    kind, inner = _split(desc)
+    if kind == "option":
+        if value is None:
+            out.append(0)
+        else:
+            out.append(1)
+            _encode(out, inner, value)
+        return
+    if value is None:
+        raise ValueError(
+            f"null value for non-nullable WASM UDF argument of type {desc!r}; "
+            f"use Option<...> in the Rust signature"
+        )
+    if kind == "i32":
+        out.extend(struct.pack("<i", int(value)))
+    elif kind == "i64":
+        out.extend(struct.pack("<q", int(value)))
+    elif kind == "f32":
+        out.extend(struct.pack("<f", float(value)))
+    elif kind == "f64":
+        out.extend(struct.pack("<d", float(value)))
+    elif kind == "bool":
+        out.append(1 if value else 0)
+    elif kind == "string":
+        b = str(value).encode("utf-8")
+        out.extend(struct.pack("<I", len(b)))
+        out.extend(b)
+    elif kind == "binary":
+        b = bytes(value)
+        out.extend(struct.pack("<I", len(b)))
+        out.extend(b)
+    elif kind == "array":
+        out.extend(struct.pack("<I", len(value)))
+        for elem in value:
+            _encode(out, inner, elem)
+    else:
+        raise ValueError(f"unsupported WASM ABI type: {desc!r}")
+
+
+def _decode(buf: bytes, off: int, desc: str) -> Tuple[Any, int]:
+    kind, inner = _split(desc)
+    if kind == "option":
+        tag = buf[off]
+        off += 1
+        if tag == 0:
+            return None, off
+        return _decode(buf, off, inner)
+    if kind == "i32":
+        return struct.unpack_from("<i", buf, off)[0], off + 4
+    if kind == "i64":
+        return struct.unpack_from("<q", buf, off)[0], off + 8
+    if kind == "f32":
+        return struct.unpack_from("<f", buf, off)[0], off + 4
+    if kind == "f64":
+        return struct.unpack_from("<d", buf, off)[0], off + 8
+    if kind == "bool":
+        return (buf[off] != 0), off + 1
+    if kind == "string":
+        (n,) = struct.unpack_from("<I", buf, off)
+        off += 4
+        return buf[off : off + n].decode("utf-8"), off + n
+    if kind == "binary":
+        (n,) = struct.unpack_from("<I", buf, off)
+        off += 4
+        return bytes(buf[off : off + n]), off + n
+    if kind == "array":
+        (n,) = struct.unpack_from("<I", buf, off)
+        off += 4
+        items = []
+        for _ in range(n):
+            item, off = _decode(buf, off, inner)
+            items.append(item)
+        return items, off
+    raise ValueError(f"unsupported WASM ABI type: {desc!r}")
+
+
+def encode_args(arg_types: List[str], args: Tuple[Any, ...]) -> bytes:
+    """Encode a row's arguments into the ABI byte buffer."""
+    out = bytearray()
+    for desc, value in zip(arg_types, args):
+        _encode(out, desc, value)
+    return bytes(out)
+
+
+def decode_value(ret_type: str, buf: bytes) -> Any:
+    """Decode a single ABI-encoded value (the result buffer)."""
+    value, _ = _decode(buf, 0, ret_type)
+    return value
+
+
+# --- the picklable, per-row callable -----------------------------------------
 
 
 class WasmScalarUDF:
     """A per-row callable that runs a WASM export via ``wasmtime``.
 
-    Instances are serialized by value with cloudpickle, so all runtime state
-    (the wasmtime store/function) is created lazily on the executor rather than
-    captured at pickling time.
+    Serialized by value with cloudpickle; all live wasmtime state is created
+    lazily on the executor (never pickled).
     """
 
     def __init__(
@@ -60,21 +165,16 @@ class WasmScalarUDF:
         self.entrypoint = entrypoint
         self.arg_types = list(arg_types)
         self.ret_type = ret_type
-        # Runtime-only state; excluded from pickling (see __getstate__).
-        self._store = None
-        self._func = None
+        self._rt = None  # lazily-built wasmtime state
 
-    # Never pickle the live wasmtime handles -- they are not picklable and are
-    # rebuilt lazily on the executor.
     def __getstate__(self) -> dict:
         state = self.__dict__.copy()
-        state["_store"] = None
-        state["_func"] = None
+        state["_rt"] = None
         return state
 
-    def _ensure_instance(self) -> None:
-        if self._func is not None:
-            return
+    def _ensure(self):
+        if self._rt is not None:
+            return self._rt
         try:
             import wasmtime
         except ImportError as exc:  # pragma: no cover - depends on executor env
@@ -85,44 +185,47 @@ class WasmScalarUDF:
 
         engine = wasmtime.Engine()
         module = wasmtime.Module(engine, self.wasm)
-        self._store = wasmtime.Store(engine)
-        instance = wasmtime.Instance(self._store, module, [])
-        func = instance.exports(self._store).get(self.entrypoint)
-        if func is None:
-            raise ValueError(
-                f"WASM module does not export a function named "
-                f"'{self.entrypoint}'"
-            )
-        self._func = func
+        store = wasmtime.Store(engine)
+        instance = wasmtime.Instance(store, module, [])
+        exports = instance.exports(store)
 
-    @staticmethod
-    def _coerce_in(value: Any, tag: str) -> Any:
-        if value is None:
-            # WASM has no null; substitute a zero of the right kind. UDFs that
-            # must distinguish null should filter upstream.
-            return 0 if tag in _INT_TAGS else 0.0
-        if tag in _INT_TAGS:
-            return int(value)
-        if tag in _FLOAT_TAGS:
-            return float(value)
-        raise ValueError(f"unsupported WASM arg type tag: {tag!r}")
+        def need(name):
+            e = exports.get(name)
+            if e is None:
+                raise ValueError(f"WASM module does not export '{name}'")
+            return e
 
-    def _coerce_out(self, value: Any) -> Any:
-        if self.ret_type in _INT_TAGS:
-            return int(value)
-        if self.ret_type in _FLOAT_TAGS:
-            return float(value)
-        raise ValueError(f"unsupported WASM return type tag: {self.ret_type!r}")
+        self._rt = {
+            "store": store,
+            "memory": need("memory"),
+            "alloc": need("spark_udf_alloc"),
+            "dealloc": need("spark_udf_dealloc"),
+            "entry": need(self.entrypoint),
+        }
+        return self._rt
 
     def __call__(self, *args: Any) -> Any:
-        self._ensure_instance()
         if len(args) != len(self.arg_types):
             raise ValueError(
                 f"WASM UDF '{self.entrypoint}' expected {len(self.arg_types)} "
                 f"argument(s), got {len(args)}"
             )
-        coerced = [
-            self._coerce_in(v, tag) for v, tag in zip(args, self.arg_types)
-        ]
-        result = self._func(self._store, *coerced)
-        return self._coerce_out(result)
+        rt = self._ensure()
+        store, memory = rt["store"], rt["memory"]
+        alloc, dealloc, entry = rt["alloc"], rt["dealloc"], rt["entry"]
+
+        buf = encode_args(self.arg_types, args)
+        args_ptr = alloc(store, len(buf))
+        if buf:
+            memory.write(store, buf, args_ptr)
+
+        packed = entry(store, args_ptr, len(buf)) & 0xFFFFFFFFFFFFFFFF
+        res_ptr = (packed >> 32) & 0xFFFFFFFF
+        res_len = packed & 0xFFFFFFFF
+
+        res = bytes(memory.read(store, res_ptr, res_ptr + res_len))
+        value = decode_value(self.ret_type, res)
+
+        dealloc(store, args_ptr, len(buf))
+        dealloc(store, res_ptr, res_len)
+        return value

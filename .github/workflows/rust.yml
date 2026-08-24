@@ -54,15 +54,54 @@ jobs:
 
       - name: Cargo test (spark-connect and spark-connect-core)
         # Test the core transport and pure-Rust client crates
-        run: cargo test -p spark-connect -p spark-connect-core --release
+        run: cargo test -p apache-spark-connect -p apache-spark-connect-core --release
 
       - name: Cargo build/test with optional conversion features (datafusion, polars)
         # Exercises the to_datafusion()/to_polars() conversions, which are gated
         # behind off-by-default features whose deps are pulled from crates.io.
         run: |
-          cargo build -p spark-connect --features datafusion,polars --release
-          cargo test -p spark-connect --features datafusion,polars --release
+          cargo build -p apache-spark-connect --features datafusion,polars --release
+          cargo test -p apache-spark-connect --features datafusion,polars --release
 
       - name: No-stub audit
         # Enforce the "100% coverage, no followups" rule
         run: bash scripts/audit_no_stubs.sh
+
+  wasm-udf:
+    name: WASM UDF feature
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (+ wasm32 target)
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: wasm32-unknown-unknown
+          rustflags: ""
+          cache: true
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Install Python packer/runtime deps
+        # The client builds the UDF command via `python -m pyspark_wasm_udf.pack`
+        # (cloudpickle + pyspark); `wasmtime` is what the executors need at run
+        # time and lets a follow-up job exercise the module directly.
+        run: python -m pip install --upgrade cloudpickle pyspark wasmtime
+
+      - name: Feature-gated unit tests
+        run: cargo test -p apache-spark-connect --features wasm-udf
+
+      - name: Build the macro/build helpers and WASM UDF crates + examples
+        run: |
+          cargo build -p apache-spark-connect-macros -p apache-spark-connect-build
+          cargo build -p wasm-udfs -p wasm-udf-inline
+          cargo build -p examples --bin wasm_udf_macro --features examples/wasm-udf-macro
+
+      - name: Packer end-to-end (Rust -> cloudpickle command)
+        env:
+          SPARK_CONNECT_WASM_PACKER_PATH: ${{ github.workspace }}/python
+        run: cargo test -p apache-spark-connect --features wasm-udf -- --ignored packer_produces

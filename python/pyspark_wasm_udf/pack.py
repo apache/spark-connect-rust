@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Pack a WASM scalar UDF into a Spark ``PythonUDF`` command.
+"""Pack a WASM UDF into a Spark ``PythonUDF`` command.
 
 Invoked by the Rust client as ``python -m pyspark_wasm_udf.pack``. Reads a JSON
 spec from stdin and writes the raw cloudpickled ``command`` bytes to stdout.
@@ -22,21 +22,23 @@ spec from stdin and writes the raw cloudpickled ``command`` bytes to stdout.
 Input JSON (stdin)::
 
     {
-      "wasm_b64":   "<base64 of the .wasm module>",
-      "entrypoint": "run",
-      "arg_types":  ["i64", "i64"],
-      "ret_type":   "i64",
-      "output_type": "long"      # a Spark atomic type token, or "string"
+      "wasm_b64":    "<base64 of the .wasm module>",
+      "entrypoint":  "add_one",
+      "arg_types":   ["i64", "array:string", ...],   # ABI descriptors
+      "ret_type":    "i64",
+      "output_type": "long"                           # Spark type JSON value
     }
 
-The command mirrors ``pyspark.sql.connect.expressions.PythonUDF``, whose command
-is ``cloudpickle.dumps((func, output_type))``. We use the standalone PyPI
-``cloudpickle`` package (byte-for-byte the same as the copy bundled in
-``pyspark.cloudpickle``). The ``func`` here is a
-:class:`~pyspark_wasm_udf.WasmScalarUDF`, serialized **by value** via
-``cloudpickle.register_pickle_by_value`` so executors need not have this package
-installed. ``pyspark.sql.types`` is still required to build the output-type
-object the command carries.
+``output_type`` is Spark's canonical type-JSON value (a string like ``"long"``
+for atomic types, or an object like ``{"type": "array", ...}``); it is parsed
+generically with :func:`pyspark.sql.types._parse_datatype_json_value`, so any
+Spark type is supported without a token table.
+
+The command mirrors ``pyspark.sql.connect.expressions.PythonUDF``:
+``cloudpickle.dumps((func, output_type))``. We use the standalone PyPI
+``cloudpickle`` (byte-for-byte the same as ``pyspark.cloudpickle``) and register
+:mod:`pyspark_wasm_udf` for pickling **by value**, so executors need not have
+this package installed.
 """
 
 import base64
@@ -48,40 +50,7 @@ import cloudpickle
 import pyspark_wasm_udf
 from pyspark_wasm_udf import WasmScalarUDF
 
-from pyspark.sql.types import (
-    BinaryType,
-    BooleanType,
-    ByteType,
-    DataType,
-    DateType,
-    DoubleType,
-    FloatType,
-    IntegerType,
-    LongType,
-    NullType,
-    ShortType,
-    StringType,
-    TimestampNTZType,
-    TimestampType,
-)
-
-# Atomic Spark output types the prototype supports, keyed by the token the Rust
-# client sends (see `spark_connect::wasm_udf::output_type_token`).
-_OUTPUT_TYPES = {
-    "null": NullType,
-    "boolean": BooleanType,
-    "byte": ByteType,
-    "short": ShortType,
-    "integer": IntegerType,
-    "long": LongType,
-    "float": FloatType,
-    "double": DoubleType,
-    "binary": BinaryType,
-    "date": DateType,
-    "timestamp": TimestampType,
-    "timestamp_ntz": TimestampNTZType,
-    "string": StringType,
-}
+from pyspark.sql.types import _parse_datatype_json_value
 
 
 def build_command(spec: dict) -> bytes:
@@ -92,14 +61,10 @@ def build_command(spec: dict) -> bytes:
         spec["arg_types"],
         spec["ret_type"],
     )
+    # `output_type` is an already-parsed JSON value (str or dict), so use
+    # `_parse_datatype_json_value` (pure Python; no JVM), not the string form.
+    output_type = _parse_datatype_json_value(spec["output_type"])
 
-    token = spec["output_type"]
-    if token not in _OUTPUT_TYPES:
-        raise ValueError(f"unsupported output_type token: {token!r}")
-    output_type: DataType = _OUTPUT_TYPES[token]()
-
-    # Force by-value serialization of the runner class so the executors do not
-    # need `pyspark_wasm_udf` installed.
     cloudpickle.register_pickle_by_value(pyspark_wasm_udf)
     return cloudpickle.dumps((runner, output_type))
 

@@ -89,18 +89,24 @@ apache-spark-connect-macros = "4.2"          # the #[spark_wasm_udf] macro
 apache-spark-connect-build  = "4.2"          # build.rs helper (build-dependency)
 ```
 
-### Write a plain Rust function
+### Write plain Rust functions
 
-You write only the function; `#[spark_wasm_udf]` infers the Spark signature,
-exports it to WASM, and generates a self-contained `<name>_udf()` constructor
-(module embedded). A one-line `build.rs` compiles it:
+Annotate a module of functions with `#[spark_wasm_udf]`. For each one it infers
+the Spark signature from the Rust types, exports it to WASM, and generates a
+self-contained constructor under `udf::<name>()` (the compiled module is
+embedded). A one-line `build.rs` compiles the module:
 
 ```rust
 // src/main.rs
 use spark_connect_macros::spark_wasm_udf;
 
 #[spark_wasm_udf]
-pub fn add_one(x: i64) -> i64 { x + 1 }      // inferred: (Long) -> Long
+mod udfs {
+    pub fn add_one(x: i64) -> i64 { x + 1 }                         // (Long) -> Long
+    pub fn shout(s: String) -> String { format!("{}!", s.to_uppercase()) }
+    pub fn sum(xs: Vec<i64>) -> i64 { xs.iter().sum() }             // ArrayType arg
+    pub fn double_or_null(x: Option<i64>) -> Option<i64> { x.map(|v| v * 2) }
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -108,7 +114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use spark_connect::SparkSessionBuilder;
     let spark = SparkSessionBuilder::default().remote("sc://localhost:15002").get_or_create()?;
     spark.range(5)?
-        .select(vec![col("id"), add_one_udf().call(vec![col("id")])?.alias("plus_one")])
+        .select(vec![col("id"), udf::add_one().call(vec![col("id")])?.alias("plus_one")])
         .show(20)?;
     Ok(())
 }
@@ -119,7 +125,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn main() { spark_connect_build::embed_wasm_udf("src/main.rs"); }
 ```
 
-Run it (the UDF and client are in one file; `wasm-udf-inline/` is this example):
+Run it (the UDFs and client are in one file; `wasm-udf-inline/` is this example):
 
 ```bash
 rustup target add wasm32-unknown-unknown
@@ -128,8 +134,28 @@ cargo run -p wasm-udf-inline
 
 Two compiles are unavoidable — WASM is what ships to the executors — but the
 `build.rs` helper does the `wasm32` compile of the *same source* and embeds it,
-so there is no manual WASM step and no `.wasm` file to load. UDFs can also live
-in a reusable crate (see `wasm-udfs/` + `examples/src/wasm_udf_macro.rs`).
+so there is no manual WASM step and no `.wasm` file to load. From another crate
+the constructors are `wasm_udfs::udf::add_one()` (see `wasm-udfs/` +
+`examples/src/wasm_udf_macro.rs`).
+
+### Supported types
+
+Arguments and results cross the WASM boundary with a length-prefixed binary ABI
+(`spark_connect::wasm_udf::AbiType`), inferred from the Rust signature:
+
+| Rust        | Spark SQL type            |
+|-------------|---------------------------|
+| `i32`       | `IntegerType`             |
+| `i64`       | `LongType`                |
+| `f32`       | `FloatType`               |
+| `f64`       | `DoubleType`              |
+| `bool`      | `BooleanType`             |
+| `String`    | `StringType`              |
+| `Vec<u8>`   | `BinaryType`              |
+| `Vec<T>`    | `ArrayType` (of `T`)      |
+| `Option<T>` | nullable `T`              |
+
+These nest arbitrarily (e.g. `Vec<Option<String>>` → `ArrayType(StringType, nullable)`).
 
 ### Preconditions (only when using Rust UDFs)
 
@@ -147,17 +173,9 @@ Nothing here is needed unless the `wasm-udf` feature is enabled:
 
 ### Lower-level API
 
-`udf(...)` builds a `UserDefinedFunction` directly (mirrors
-`pyspark.sql.functions.udf`) if you prefer to load a prebuilt module and name
-the signature yourself — see `examples/src/wasm_udf.rs`.
-
-### Type support
-
-This prototype supports **numeric scalar** signatures (`i32`/`i64`/`f32`/`f64`)
-and atomic / `StringType` Spark output types. Full type support (strings, binary,
-arrays, structs, maps) requires an Arrow-based WASM ABI (exchanging Arrow arrays
-across the boundary, à la [`arrow-udf`](https://crates.io/crates/arrow-udf)) and
-is planned follow-up, not yet implemented.
+`spark_connect::wasm_udf::udf(name, module, entrypoint, arg_types, ret_type)`
+builds a `UserDefinedFunction` directly (mirrors `pyspark.sql.functions.udf`)
+if you prefer to load a prebuilt module and spell out the `AbiType`s yourself.
 
 ## Building & testing
 

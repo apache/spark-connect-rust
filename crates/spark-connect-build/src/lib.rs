@@ -65,6 +65,17 @@ pub fn embed_wasm_udf(src_file: impl AsRef<Path>) -> PathBuf {
         )
     });
 
+    // The macro's wasm export wrappers reference `crate::spark_wasm_rt` for the
+    // binary-ABI codec + allocator. Prepend that runtime and compile the
+    // combined source, so the module exports `spark_udf_alloc`/`_dealloc` once.
+    let user_src = std::fs::read_to_string(&src_abs)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", src_abs.display()));
+    // User source first so its crate-level `//!` docs stay at the top; the
+    // runtime is appended (item order does not affect name resolution).
+    let wrapper = out_dir.join(format!("{stem}_wasm_udf_wrapper.rs"));
+    std::fs::write(&wrapper, format!("{user_src}\n{WASM_RUNTIME}"))
+        .unwrap_or_else(|e| panic!("writing {}: {e}", wrapper.display()));
+
     let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
     let status = Command::new(&rustc)
         .args(["--edition", "2021", "--crate-type", "cdylib"])
@@ -82,7 +93,7 @@ pub fn embed_wasm_udf(src_file: impl AsRef<Path>) -> PathBuf {
         .arg(format!("dependency={}", deps_dir.display()))
         .arg("--extern")
         .arg(format!("spark_connect_macros={}", macro_dylib.display()))
-        .arg(&src_abs)
+        .arg(&wrapper)
         .arg("-o")
         .arg(&wasm_out)
         .status()
@@ -97,6 +108,95 @@ pub fn embed_wasm_udf(src_file: impl AsRef<Path>) -> PathBuf {
     println!("cargo:rerun-if-changed={}", src_abs.display());
     wasm_out
 }
+
+/// The runtime prepended to the wasm build: the exported allocator and the
+/// length-prefixed binary codec (`Abi`) the macro's export wrappers call. Must
+/// stay byte-compatible with `spark_connect::wasm_udf::AbiType` and the Python
+/// runner's codec in `pyspark_wasm_udf`.
+const WASM_RUNTIME: &str = r#"
+#[allow(dead_code)]
+pub mod spark_wasm_rt {
+    use std::alloc::{alloc as __alloc, dealloc as __dealloc, Layout};
+
+    #[no_mangle]
+    pub extern "C" fn spark_udf_alloc(len: u32) -> *mut u8 {
+        if len == 0 { return 1 as *mut u8; }
+        unsafe { __alloc(Layout::from_size_align(len as usize, 1).unwrap()) }
+    }
+    #[no_mangle]
+    pub extern "C" fn spark_udf_dealloc(ptr: *mut u8, len: u32) {
+        if len == 0 || ptr.is_null() { return; }
+        unsafe { __dealloc(ptr, Layout::from_size_align(len as usize, 1).unwrap()) }
+    }
+
+    pub struct Reader<'a> { b: &'a [u8], off: usize }
+    impl<'a> Reader<'a> {
+        pub fn new(b: &'a [u8]) -> Self { Reader { b, off: 0 } }
+        fn take(&mut self, n: usize) -> &'a [u8] {
+            let s = &self.b[self.off..self.off + n]; self.off += n; s
+        }
+        fn u32(&mut self) -> usize {
+            u32::from_le_bytes(self.take(4).try_into().unwrap()) as usize
+        }
+    }
+
+    pub trait Abi: Sized {
+        fn decode(r: &mut Reader) -> Self;
+        fn encode(&self, out: &mut Vec<u8>);
+    }
+
+    macro_rules! prim { ($t:ty, $n:expr) => {
+        impl Abi for $t {
+            fn decode(r: &mut Reader) -> Self { <$t>::from_le_bytes(r.take($n).try_into().unwrap()) }
+            fn encode(&self, out: &mut Vec<u8>) { out.extend_from_slice(&self.to_le_bytes()); }
+        }
+    }}
+    prim!(i32, 4); prim!(i64, 8); prim!(f32, 4); prim!(f64, 8);
+
+    impl Abi for bool {
+        fn decode(r: &mut Reader) -> Self { r.take(1)[0] != 0 }
+        fn encode(&self, out: &mut Vec<u8>) { out.push(*self as u8); }
+    }
+    impl Abi for u8 {
+        fn decode(r: &mut Reader) -> Self { r.take(1)[0] }
+        fn encode(&self, out: &mut Vec<u8>) { out.push(*self); }
+    }
+    impl Abi for String {
+        fn decode(r: &mut Reader) -> Self {
+            let n = r.u32();
+            String::from_utf8(r.take(n).to_vec()).unwrap()
+        }
+        fn encode(&self, out: &mut Vec<u8>) {
+            out.extend_from_slice(&(self.len() as u32).to_le_bytes());
+            out.extend_from_slice(self.as_bytes());
+        }
+    }
+    impl<T: Abi> Abi for Vec<T> {
+        fn decode(r: &mut Reader) -> Self {
+            let n = r.u32();
+            (0..n).map(|_| T::decode(r)).collect()
+        }
+        fn encode(&self, out: &mut Vec<u8>) {
+            out.extend_from_slice(&(self.len() as u32).to_le_bytes());
+            for x in self { x.encode(out); }
+        }
+    }
+    impl<T: Abi> Abi for Option<T> {
+        fn decode(r: &mut Reader) -> Self {
+            if r.take(1)[0] == 0 { None } else { Some(T::decode(r)) }
+        }
+        fn encode(&self, out: &mut Vec<u8>) {
+            match self { None => out.push(0), Some(v) => { out.push(1); v.encode(out); } }
+        }
+    }
+
+    pub fn finish(out: Vec<u8>) -> u64 {
+        let p = spark_udf_alloc(out.len() as u32);
+        unsafe { std::slice::from_raw_parts_mut(p, out.len()) }.copy_from_slice(&out);
+        ((p as u64) << 32) | (out.len() as u64)
+    }
+}
+"#;
 
 fn env(key: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| panic!("`{key}` is not set (call from a build script)"))

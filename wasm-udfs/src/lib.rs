@@ -17,32 +17,48 @@
 
 //! Example UDFs written as plain Rust functions.
 //!
-//! `#[spark_wasm_udf]` does the rest: when this crate is built for
-//! `wasm32-unknown-unknown` each function is exported from the module; when
-//! built for the host it also generates a `<name>_udf(module)` constructor with
-//! the Spark signature inferred from the Rust signature.
+//! `#[spark_wasm_udf]` exports each function to WebAssembly and generates a
+//! `udf::<name>()` constructor (with the Spark signature inferred). The
+//! functions show the range of supported types: scalars, `bool`, `String`,
+//! `Vec<T>` (array), and `Option<T>` (nullable).
 
 use spark_connect_macros::spark_wasm_udf;
 
-/// `add_one(x) = x + 1`.
 #[spark_wasm_udf]
-pub fn add_one(x: i64) -> i64 {
-    x + 1
-}
-
-/// Convert Celsius to Fahrenheit.
-#[spark_wasm_udf]
-pub fn celsius_to_fahrenheit(c: f64) -> f64 {
-    c * 9.0 / 5.0 + 32.0
-}
-
-/// Greatest common divisor.
-#[spark_wasm_udf]
-pub fn gcd(mut a: i64, mut b: i64) -> i64 {
-    while b != 0 {
-        let t = b;
-        b = a % b;
-        a = t;
+mod udfs {
+    /// `i64 -> i64`
+    pub fn add_one(x: i64) -> i64 {
+        x + 1
     }
-    a.abs()
+
+    /// `f64 -> f64`
+    pub fn celsius_to_fahrenheit(c: f64) -> f64 {
+        c * 9.0 / 5.0 + 32.0
+    }
+
+    /// `String -> String`
+    pub fn shout(s: String) -> String {
+        format!("{}!", s.to_uppercase())
+    }
+
+    /// `String -> bool`
+    pub fn is_palindrome(s: String) -> bool {
+        let chars: Vec<char> = s.chars().collect();
+        chars.iter().eq(chars.iter().rev())
+    }
+
+    /// `Vec<i64> -> i64` (array argument)
+    pub fn sum(xs: Vec<i64>) -> i64 {
+        xs.iter().sum()
+    }
+
+    /// `Vec<String> -> String` (array of strings)
+    pub fn join_words(words: Vec<String>) -> String {
+        words.join(" ")
+    }
+
+    /// `Option<i64> -> Option<i64>` (nullable in and out)
+    pub fn double_or_null(x: Option<i64>) -> Option<i64> {
+        x.map(|v| v * 2)
+    }
 }

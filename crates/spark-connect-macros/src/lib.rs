@@ -1,138 +1,115 @@
 //! Procedural macros for the Rust Spark Connect client.
 //!
-//! Currently provides [`macro@spark_wasm_udf`], which turns a plain Rust
-//! function into a Spark UDF that runs on the executors via WebAssembly.
+//! Provides [`macro@spark_wasm_udf`], which turns a module of plain Rust
+//! functions into Spark UDFs that run on the executors via WebAssembly.
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{parse_macro_input, FnArg, ItemFn, ReturnType, Type};
+use syn::{
+    parse_macro_input, FnArg, GenericArgument, Item, ItemFn, ItemMod, PathArguments, ReturnType,
+    Type,
+};
 
-/// Turn a plain Rust function into a Spark UDF backed by WebAssembly.
+/// Turn a module of plain Rust functions into Spark UDFs backed by WebAssembly.
 ///
-/// Applied to a numeric scalar function, it:
+/// Applied to a `mod`, for each free function inside it the macro:
 ///
-/// * keeps the function callable natively (renamed internally),
-/// * emits a `#[no_mangle] pub extern "C"` export **when compiled for
-///   `wasm32`**, so the compiled module exports the function under its own
-///   name, and
-/// * generates a `<name>_udf() -> UserDefinedFunction` constructor (on
-///   non-`wasm32` targets) with the argument/return types **inferred** from the
-///   signature and the crate's own compiled wasm module embedded, so callers
-///   write only the function.
+/// * keeps the function callable natively,
+/// * emits (when compiled for `wasm32`) a `#[no_mangle] extern "C"` export that
+///   decodes the arguments and encodes the result with the length-prefixed
+///   binary ABI (`spark_connect::wasm_udf::AbiType`), and
+/// * generates a constructor `udf::<name>() -> UserDefinedFunction` (on
+///   non-`wasm32` targets) with the Spark signature **inferred** from the Rust
+///   signature and the crate's own compiled wasm module embedded.
 ///
 /// ```ignore
 /// use spark_connect_macros::spark_wasm_udf;
 ///
 /// #[spark_wasm_udf]
-/// fn add_one(x: i64) -> i64 { x + 1 }
+/// mod udfs {
+///     pub fn add_one(x: i64) -> i64 { x + 1 }
+///     pub fn shout(s: String) -> String { format!("{}!", s.to_uppercase()) }
+/// }
 ///
-/// // signature inferred + module embedded (build.rs calls
-/// // spark_connect_build::embed_wasm_udf):
-/// df.select(vec![add_one_udf().call(vec![col("id")])?]);
+/// // callers (build.rs embeds the module):
+/// df.select(vec![udf::add_one().call(vec![col("id")])?]);
 /// ```
 ///
-/// Supported parameter/return types (this prototype): `i32`, `i64`, `f32`,
-/// `f64`. Anything else is a compile error.
+/// Supported types: `i32`, `i64`, `f32`, `f64`, `bool`, `String`, `Vec<u8>`
+/// (binary), `Vec<T>` (array), and `Option<T>` (nullable), nested arbitrarily.
 #[proc_macro_attribute]
 pub fn spark_wasm_udf(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    let func = parse_macro_input!(item as ItemFn);
-    match expand(func) {
+    let module = parse_macro_input!(item as ItemMod);
+    match expand(module) {
         Ok(ts) => ts.into(),
         Err(e) => e.to_compile_error().into(),
     }
 }
 
-/// One numeric type, mapped to both the WASM value type and the Spark type.
-struct NumericType {
-    wasm_valtype: proc_macro2::TokenStream,
-    spark_type: proc_macro2::TokenStream,
+/// Map a Rust type to a `spark_connect::wasm_udf::AbiType` constructor expr.
+fn abi_type(ty: &Type) -> Result<proc_macro2::TokenStream, syn::Error> {
+    let root = quote!(::spark_connect::wasm_udf::AbiType);
+    if let Some(ident) = path_ident(ty) {
+        match ident.as_str() {
+            "i32" => return Ok(quote!(#root::I32)),
+            "i64" => return Ok(quote!(#root::I64)),
+            "f32" => return Ok(quote!(#root::F32)),
+            "f64" => return Ok(quote!(#root::F64)),
+            "bool" => return Ok(quote!(#root::Bool)),
+            "String" => return Ok(quote!(#root::Str)),
+            _ => {}
+        }
+    }
+    if let Some(inner) = generic_inner(ty, "Vec") {
+        if path_ident(inner).as_deref() == Some("u8") {
+            return Ok(quote!(#root::Binary));
+        }
+        let inner = abi_type(inner)?;
+        return Ok(quote!(#root::Array(::std::boxed::Box::new(#inner))));
+    }
+    if let Some(inner) = generic_inner(ty, "Option") {
+        let inner = abi_type(inner)?;
+        return Ok(quote!(#root::Nullable(::std::boxed::Box::new(#inner))));
+    }
+    Err(syn::Error::new_spanned(
+        ty,
+        "#[spark_wasm_udf] supports i32/i64/f32/f64/bool/String/Vec<u8>/Vec<T>/Option<T> \
+         (use owned types, e.g. `String` not `&str`)",
+    ))
 }
 
-fn map_numeric(ty: &Type) -> Result<NumericType, syn::Error> {
-    let ident = match ty {
-        Type::Path(p) if p.qself.is_none() => p
-            .path
-            .get_ident()
-            .map(|i| i.to_string())
-            .ok_or_else(|| syn::Error::new_spanned(ty, "expected a plain numeric type"))?,
-        _ => {
-            return Err(syn::Error::new_spanned(
-                ty,
-                "expected a numeric scalar type (i32, i64, f32, f64)",
-            ))
-        }
+/// The last path segment ident of a plain type path (`i64`, `String`, ...).
+fn path_ident(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Path(p) if p.qself.is_none() => p.path.segments.last().map(|s| s.ident.to_string()),
+        _ => None,
+    }
+}
+
+/// If `ty` is `Wrapper<Inner>` (e.g. `Vec<T>`, `Option<T>`), return `Inner`.
+fn generic_inner<'a>(ty: &'a Type, wrapper: &str) -> Option<&'a Type> {
+    let Type::Path(p) = ty else { return None };
+    let seg = p.path.segments.last()?;
+    if seg.ident != wrapper {
+        return None;
+    }
+    let PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return None;
     };
-    let (w, s) = match ident.as_str() {
-        "i32" => ("I32", quote!(Integer)),
-        "i64" => ("I64", quote!(Long)),
-        "f32" => ("F32", quote!(Float)),
-        "f64" => ("F64", quote!(Double)),
-        other => {
-            return Err(syn::Error::new_spanned(
-                ty,
-                format!("#[spark_wasm_udf] supports only i32/i64/f32/f64 (got `{other}`)"),
-            ))
-        }
-    };
-    let w = format_ident!("{}", w);
-    Ok(NumericType {
-        wasm_valtype: quote!(::spark_connect::wasm_udf::WasmValType::#w),
-        spark_type: quote!(::spark_connect::types::DataType::#s),
+    args.args.iter().find_map(|a| match a {
+        GenericArgument::Type(t) => Some(t),
+        _ => None,
     })
 }
 
-fn expand(func: ItemFn) -> Result<proc_macro2::TokenStream, syn::Error> {
-    let vis = &func.vis;
-    let name = func.sig.ident.clone();
-    let udf_name = name.to_string();
-    let impl_name = format_ident!("__wasmudf_impl_{}", name);
-    let ctor_name = format_ident!("{}_udf", name);
+struct Udf {
+    name: syn::Ident,
+    export: syn::Ident,
+    arg_tys: Vec<Type>,
+    ret_ty: Type,
+}
 
-    // Infer argument types.
-    let mut arg_valtypes = Vec::new();
-    let mut wrapper_params = Vec::new();
-    let mut forward_args = Vec::new();
-    for (i, input) in func.sig.inputs.iter().enumerate() {
-        let ty = match input {
-            FnArg::Typed(pt) => &*pt.ty,
-            FnArg::Receiver(r) => {
-                return Err(syn::Error::new_spanned(
-                    r,
-                    "#[spark_wasm_udf] cannot be applied to methods (`self`)",
-                ))
-            }
-        };
-        // Reject non-numeric early with a clear message.
-        let nt = map_numeric(ty)?;
-        arg_valtypes.push(nt.wasm_valtype);
-        // Use fresh, pattern-free parameter names in the export wrapper so
-        // user patterns like `mut a` don't leak into the signature.
-        let p = format_ident!("arg{}", i);
-        wrapper_params.push(quote!(#p: #ty));
-        forward_args.push(quote!(#p));
-    }
-    if arg_valtypes.is_empty() {
-        return Err(syn::Error::new_spanned(
-            &func.sig,
-            "#[spark_wasm_udf] requires at least one argument",
-        ));
-    }
-
-    // Infer return type.
-    let ret_ty = match &func.sig.output {
-        ReturnType::Type(_, ty) => (**ty).clone(),
-        ReturnType::Default => {
-            return Err(syn::Error::new_spanned(
-                &func.sig,
-                "#[spark_wasm_udf] requires a return type",
-            ))
-        }
-    };
-    let ret = map_numeric(&ret_ty)?;
-    let ret_valtype = ret.wasm_valtype;
-    let ret_spark = ret.spark_type;
-
-    // Reject async / generics that would not survive the C ABI.
+fn collect_udf(func: &ItemFn) -> Result<Udf, syn::Error> {
     if func.sig.asyncness.is_some() {
         return Err(syn::Error::new_spanned(
             &func.sig,
@@ -145,44 +122,135 @@ fn expand(func: ItemFn) -> Result<proc_macro2::TokenStream, syn::Error> {
             "#[spark_wasm_udf] cannot be applied to generic functions",
         ));
     }
-
-    // The user's function body, kept callable natively under a private name.
-    let mut impl_fn = func.clone();
-    impl_fn.sig.ident = impl_name.clone();
-    impl_fn.vis = syn::Visibility::Inherited;
-
-    let doc = format!(
-        "WASM-exported entrypoint for the `{udf_name}` UDF (generated by \
-         #[spark_wasm_udf])."
-    );
-
-    Ok(quote! {
-        #[allow(dead_code)]
-        #impl_fn
-
-        // Exported from the compiled `.wasm` under `#udf_name`; a normal
-        // `extern "C"` fn otherwise.
-        #[doc = #doc]
-        #[cfg_attr(target_arch = "wasm32", no_mangle)]
-        #vis extern "C" fn #name(#(#wrapper_params),*) -> #ret_ty {
-            #impl_name(#(#forward_args),*)
+    let name = func.sig.ident.clone();
+    let mut arg_tys = Vec::new();
+    for input in &func.sig.inputs {
+        match input {
+            FnArg::Typed(pt) => arg_tys.push((*pt.ty).clone()),
+            FnArg::Receiver(r) => {
+                return Err(syn::Error::new_spanned(
+                    r,
+                    "#[spark_wasm_udf] cannot be applied to methods (`self`)",
+                ))
+            }
         }
+    }
+    if arg_tys.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &func.sig,
+            "#[spark_wasm_udf] requires at least one argument",
+        ));
+    }
+    let ret_ty = match &func.sig.output {
+        ReturnType::Type(_, ty) => (**ty).clone(),
+        ReturnType::Default => {
+            return Err(syn::Error::new_spanned(
+                &func.sig,
+                "#[spark_wasm_udf] requires a return type",
+            ))
+        }
+    };
+    let export = format_ident!("spark_udf_{}", name);
+    Ok(Udf {
+        name,
+        export,
+        arg_tys,
+        ret_ty,
+    })
+}
 
-        // Host-side constructor: signature inferred from the function, and the
-        // crate's own compiled wasm module embedded via the `WASM_UDFS_MODULE`
-        // env var that `spark_connect_build::embed_wasm_udf` sets in build.rs.
-        // Callers write neither the module bytes nor the signature.
+fn expand(mut module: ItemMod) -> Result<proc_macro2::TokenStream, syn::Error> {
+    let mod_ident = module.ident.clone();
+    let Some((_, items)) = &module.content else {
+        return Err(syn::Error::new_spanned(
+            &module,
+            "#[spark_wasm_udf] must be applied to an inline module with a body",
+        ));
+    };
+
+    let udfs: Vec<Udf> = items
+        .iter()
+        .filter_map(|it| match it {
+            Item::Fn(f) => Some(collect_udf(f)),
+            _ => None,
+        })
+        .collect::<Result<_, _>>()?;
+    if udfs.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &module,
+            "#[spark_wasm_udf] module contains no functions",
+        ));
+    }
+
+    // WASM export wrappers, injected into the module (compiled only for wasm32).
+    let mut wrappers = Vec::new();
+    for u in &udfs {
+        let Udf {
+            name,
+            export,
+            arg_tys,
+            ret_ty,
+        } = u;
+        let params: Vec<_> = arg_tys
+            .iter()
+            .map(|ty| quote!(<#ty as crate::spark_wasm_rt::Abi>::decode(&mut __r)))
+            .collect();
+        wrappers.push(quote! {
+            #[cfg(target_arch = "wasm32")]
+            #[no_mangle]
+            pub extern "C" fn #export(__ptr: *const u8, __len: u32) -> u64 {
+                let __b = unsafe { ::core::slice::from_raw_parts(__ptr, __len as usize) };
+                let mut __r = crate::spark_wasm_rt::Reader::new(__b);
+                let __out: #ret_ty = #name(#(#params),*);
+                let mut __o = ::std::vec::Vec::new();
+                crate::spark_wasm_rt::Abi::encode(&__out, &mut __o);
+                crate::spark_wasm_rt::finish(__o)
+            }
+        });
+    }
+    if let Some((_, content)) = &mut module.content {
+        for w in wrappers {
+            content.push(syn::parse2(w)?);
+        }
+    }
+
+    // Host-side constructors, grouped under `udf::<name>()`.
+    let mut ctors = Vec::new();
+    for u in &udfs {
+        let Udf {
+            name,
+            export,
+            arg_tys,
+            ret_ty,
+        } = u;
+        let name_str = name.to_string();
+        let export_str = export.to_string();
+        let arg_abis: Vec<_> = arg_tys.iter().map(abi_type).collect::<Result<_, _>>()?;
+        let ret_abi = abi_type(ret_ty)?;
+        ctors.push(quote! {
+            /// UDF constructor generated by `#[spark_wasm_udf]`.
+            pub fn #name() -> ::spark_connect::wasm_udf::UserDefinedFunction {
+                const __MODULE: &[u8] = include_bytes!(env!("WASM_UDFS_MODULE"));
+                ::spark_connect::wasm_udf::udf(
+                    #name_str,
+                    __MODULE.to_vec(),
+                    #export_str,
+                    ::std::vec![#(#arg_abis),*],
+                    #ret_abi,
+                )
+            }
+        });
+    }
+
+    let doc =
+        format!("UDF constructors generated by `#[spark_wasm_udf]` from module `{mod_ident}`.");
+    Ok(quote! {
+        #module
+
         #[cfg(not(target_arch = "wasm32"))]
-        #vis fn #ctor_name() -> ::spark_connect::wasm_udf::UserDefinedFunction {
-            const __MODULE: &[u8] = include_bytes!(env!("WASM_UDFS_MODULE"));
-            ::spark_connect::wasm_udf::udf(
-                #udf_name,
-                __MODULE.to_vec(),
-                #udf_name,
-                ::std::vec![#(#arg_valtypes),*],
-                #ret_valtype,
-                #ret_spark,
-            )
+        #[doc = #doc]
+        pub mod udf {
+            #(#ctors)*
         }
     })
 }

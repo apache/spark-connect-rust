@@ -10,61 +10,50 @@
 //! This module leverages that path to run **Rust** UDFs, distributed on the
 //! cluster, without touching the Spark server:
 //!
-//! 1. The user compiles their Rust function to a WebAssembly module
-//!    (`cargo build --target wasm32-unknown-unknown`, or `wasm32-wasip1`).
-//! 2. [`udf`] embeds the `.wasm` bytes and the function signature and invokes
-//!    the bundled Python packer (`python -m pyspark_wasm_udf.pack`), which uses
-//!    `cloudpickle` to serialize a `WasmScalarUDF` runner **by value** into the
-//!    `command`. Because it is serialized by value, the executors do **not**
-//!    need the `pyspark_wasm_udf` package -- only the `wasmtime` package.
+//! 1. The user compiles their Rust function to a WebAssembly module.
+//! 2. [`udf`] embeds the `.wasm` bytes and the signature and invokes the bundled
+//!    Python packer (`python -m pyspark_wasm_udf.pack`), which uses `cloudpickle`
+//!    to serialize a `WasmScalarUDF` runner **by value** into the `command`.
+//!    Because it is serialized by value, the executors do **not** need the
+//!    `pyspark_wasm_udf` package -- only the `wasmtime` package.
 //! 3. On each executor the runner instantiates the module with `wasmtime` and
 //!    invokes the exported entrypoint once per input row.
 //!
+//! # ABI
+//!
+//! Arguments and the result cross the WASM boundary as a little-endian,
+//! length-prefixed byte buffer (see [`AbiType`]): the runner encodes the row's
+//! arguments into linear memory (via the module's exported `spark_udf_alloc`),
+//! calls the entrypoint `fn(ptr, len) -> packed_ptr_len`, and decodes the
+//! result. This supports scalars, `bool`, strings, binary, arrays, and
+//! nullability — not just numbers.
+//!
 //! # API
 //!
-//! The API mirrors `pyspark.sql.functions.udf`: [`udf`] is the factory and
-//! returns a [`UserDefinedFunction`] you call on columns.
+//! Prefer the [`spark_wasm_udf`](https://docs.rs/apache-spark-connect-macros)
+//! macro, which writes the [`AbiType`]s and the constructor for you. This
+//! lower-level [`udf`] factory (mirroring `pyspark.sql.functions.udf`) is for
+//! loading a prebuilt module by hand:
 //!
 //! ```no_run
 //! use spark_connect::functions::col;
-//! use spark_connect::types::DataType;
-//! use spark_connect::wasm_udf::{udf, WasmValType};
+//! use spark_connect::wasm_udf::{udf, AbiType};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let wasm = std::fs::read("add_one.wasm")?;
-//! let add_one = udf("add_one", wasm, "run",
-//!     vec![WasmValType::I64], WasmValType::I64, DataType::Long);
-//! let c = add_one.call(vec![col("id")])?;   // -> Column
+//! let wasm = std::fs::read("shout.wasm")?;
+//! // fn shout(s: String) -> String
+//! let shout = udf("shout", wasm, "shout", vec![AbiType::Str], AbiType::Str);
+//! let c = shout.call(vec![col("name")])?;   // -> Column
 //! # Ok(()) }
 //! ```
 //!
 //! # Requirements
 //!
-//! Building the command requires, on the client machine only:
-//!   * a Python interpreter with `cloudpickle` and `pyspark` installed, and
-//!   * the `pyspark_wasm_udf` package importable (ship the repo's `python/`
-//!     directory, or point [`PythonPacker::pythonpath`] at it).
-//!
-//! The Spark executors need only the `wasmtime` Python package.
-//!
-//! # Scope
-//!
-//! This is a prototype. Only numeric scalar signatures are supported: the WASM
-//! value types [`WasmValType`] map to the Python scalars `wasmtime` exchanges
-//! directly. String/binary arguments require a memory-passing ABI and are left
-//! as follow-up work. Supported Spark output types are the atomic types plus
-//! `StringType`; other types return [`SparkError`].
-//!
-//! # Follow-up: Arrow-based ABI
-//!
-//! To widen type support beyond numeric scalars (strings, binary, nested
-//! types), a natural next step is to adopt the [`arrow-udf`] WASM ABI, where
-//! the module exchanges Arrow `RecordBatch`es (via the C Data Interface / IPC)
-//! instead of individual scalars. On this server-side path the executor-side
-//! runner would hand the arrow-optimized batch to the module and read an Arrow
-//! array back, letting Arrow handle the type mapping for every Spark type.
-//!
-//! [`arrow-udf`]: https://crates.io/crates/arrow-udf
+//! Building the command requires, on the client machine only, a Python
+//! interpreter with `cloudpickle` and `pyspark`, and the `pyspark_wasm_udf`
+//! package importable (ship the repo's `python/` directory, or point
+//! [`PythonPacker::pythonpath`] at it). The Spark executors need only the
+//! `wasmtime` Python package.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -76,26 +65,99 @@ use crate::column::Column;
 use crate::expression::Expression;
 use crate::types::DataType;
 use crate::udf::{eval_type, CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
-use spark_connect_core::error::{Result, SparkError};
+use spark_connect_core::error::Result;
 
-/// A WebAssembly value type, describing one slot of the exported function's
-/// signature as seen across the host/WASM boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WasmValType {
+/// The type of one WASM UDF argument or its result, describing how the value is
+/// encoded across the WASM boundary and which Spark SQL type it maps to.
+///
+/// Built for you by the `#[spark_wasm_udf]` macro from the Rust signature:
+///
+/// | Rust                | `AbiType`                     | Spark SQL type |
+/// |---------------------|-------------------------------|----------------|
+/// | `i32`               | `I32`                         | `IntegerType`  |
+/// | `i64`               | `I64`                         | `LongType`     |
+/// | `f32`               | `F32`                         | `FloatType`    |
+/// | `f64`               | `F64`                         | `DoubleType`   |
+/// | `bool`              | `Bool`                        | `BooleanType`  |
+/// | `String` / `&str`   | `Str`                         | `StringType`   |
+/// | `Vec<u8>`           | `Binary`                      | `BinaryType`   |
+/// | `Vec<T>`            | `Array(T)`                    | `ArrayType`    |
+/// | `Option<T>`         | `Nullable(T)`                 | (nullable `T`) |
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AbiType {
     I32,
     I64,
     F32,
     F64,
+    Bool,
+    /// UTF-8 string (`String` / `&str`).
+    Str,
+    /// Byte string (`Vec<u8>`).
+    Binary,
+    /// Homogeneous list (`Vec<T>`).
+    Array(Box<AbiType>),
+    /// Nullable value (`Option<T>`).
+    Nullable(Box<AbiType>),
 }
 
-impl WasmValType {
-    /// The tag the Python runner uses to coerce values (`"i32"`, `"i64"`, ...).
-    fn tag(self) -> &'static str {
+impl AbiType {
+    /// The descriptor string the Python runner uses to drive its codec, e.g.
+    /// `"i64"`, `"string"`, `"array:i64"`, `"option:string"`.
+    pub fn descriptor(&self) -> String {
         match self {
-            WasmValType::I32 => "i32",
-            WasmValType::I64 => "i64",
-            WasmValType::F32 => "f32",
-            WasmValType::F64 => "f64",
+            AbiType::I32 => "i32".to_string(),
+            AbiType::I64 => "i64".to_string(),
+            AbiType::F32 => "f32".to_string(),
+            AbiType::F64 => "f64".to_string(),
+            AbiType::Bool => "bool".to_string(),
+            AbiType::Str => "string".to_string(),
+            AbiType::Binary => "binary".to_string(),
+            AbiType::Array(inner) => format!("array:{}", inner.descriptor()),
+            AbiType::Nullable(inner) => format!("option:{}", inner.descriptor()),
+        }
+    }
+
+    /// The Spark [`DataType`] this maps to (used for the proto `output_type`).
+    pub fn to_data_type(&self) -> DataType {
+        match self {
+            AbiType::I32 => DataType::Integer,
+            AbiType::I64 => DataType::Long,
+            AbiType::F32 => DataType::Float,
+            AbiType::F64 => DataType::Double,
+            AbiType::Bool => DataType::Boolean,
+            AbiType::Str => DataType::String {
+                collation: "UTF8_BINARY".to_string(),
+            },
+            AbiType::Binary => DataType::Binary,
+            AbiType::Array(inner) => DataType::Array {
+                element_type: Box::new(inner.to_data_type()),
+                contains_null: matches!(**inner, AbiType::Nullable(_)),
+            },
+            // Nullability is tracked at the column/field level; the element type
+            // itself is what matters here.
+            AbiType::Nullable(inner) => inner.to_data_type(),
+        }
+    }
+
+    /// Spark's canonical type JSON (`DataType.jsonValue()` form), which the
+    /// packer parses with `_parse_datatype_json_value` — so any type maps
+    /// generically without a hand-maintained token table.
+    fn to_spark_json(&self) -> serde_json::Value {
+        use serde_json::json;
+        match self {
+            AbiType::I32 => json!("integer"),
+            AbiType::I64 => json!("long"),
+            AbiType::F32 => json!("float"),
+            AbiType::F64 => json!("double"),
+            AbiType::Bool => json!("boolean"),
+            AbiType::Str => json!("string"),
+            AbiType::Binary => json!("binary"),
+            AbiType::Array(inner) => json!({
+                "type": "array",
+                "elementType": inner.to_spark_json(),
+                "containsNull": matches!(**inner, AbiType::Nullable(_)),
+            }),
+            AbiType::Nullable(inner) => inner.to_spark_json(),
         }
     }
 }
@@ -132,6 +194,7 @@ impl PythonPacker {
     /// Run `python -m pyspark_wasm_udf.pack`, feeding `spec_json` on stdin and
     /// returning the raw `command` bytes from stdout.
     fn run(&self, spec_json: &str) -> Result<Vec<u8>> {
+        use spark_connect_core::error::SparkError;
         let mut cmd = Command::new(&self.python_exe);
         cmd.arg("-m")
             .arg("pyspark_wasm_udf.pack")
@@ -199,15 +262,12 @@ fn pathsep() -> &'static str {
 /// Create a Rust/WASM user-defined function, mirroring
 /// `pyspark.sql.functions.udf`.
 ///
-/// Where PySpark's `udf(f, returnType)` takes a Python callable, the WASM
-/// variant takes the compiled module plus its exported signature:
-///
 /// * `name` — the UDF name reported to Spark.
 /// * `wasm_module` — the raw bytes of the compiled `.wasm` module.
 /// * `entrypoint` — the exported function to invoke per row.
-/// * `arg_types` — the WASM value type of each argument, in order.
-/// * `ret_type` — the WASM value type returned by `entrypoint`.
-/// * `return_type` — the Spark [`DataType`] of the produced column.
+/// * `arg_types` — the [`AbiType`] of each argument, in order.
+/// * `ret_type` — the [`AbiType`] returned by `entrypoint`; also determines the
+///   Spark output type.
 ///
 /// The returned [`UserDefinedFunction`] is callable on columns via
 /// [`UserDefinedFunction::call`].
@@ -215,9 +275,8 @@ pub fn udf(
     name: impl Into<String>,
     wasm_module: impl Into<Vec<u8>>,
     entrypoint: impl Into<String>,
-    arg_types: Vec<WasmValType>,
-    ret_type: WasmValType,
-    return_type: DataType,
+    arg_types: Vec<AbiType>,
+    ret_type: AbiType,
 ) -> UserDefinedFunction {
     UserDefinedFunction {
         name: name.into(),
@@ -225,7 +284,6 @@ pub fn udf(
         entrypoint: entrypoint.into(),
         arg_types,
         ret_type,
-        return_type,
         deterministic: true,
         // Arrow-optimized Python UDF: func is still called once per row
         // (see pyspark worker `wrap_arrow_batch_udf`), but IO is Arrow.
@@ -237,19 +295,13 @@ pub fn udf(
 
 /// A Rust/WASM user-defined function, mirroring
 /// `pyspark.sql.udf.UserDefinedFunction`.
-///
-/// Construct one with [`udf`], then apply it to columns with
-/// [`UserDefinedFunction::call`], or register it on a session by name via
-/// [`SparkSession::register_function`](crate::session::SparkSession::register_function)
-/// after [`UserDefinedFunction::to_expression`].
 #[derive(Debug, Clone)]
 pub struct UserDefinedFunction {
     name: String,
     wasm_module: Vec<u8>,
     entrypoint: String,
-    arg_types: Vec<WasmValType>,
-    ret_type: WasmValType,
-    return_type: DataType,
+    arg_types: Vec<AbiType>,
+    ret_type: AbiType,
     deterministic: bool,
     eval_type: i32,
     python_ver: String,
@@ -264,10 +316,8 @@ impl UserDefinedFunction {
         self
     }
 
-    /// Override the Python evaluation type. Defaults to
-    /// [`SQL_ARROW_BATCHED_UDF`](eval_type::SQL_ARROW_BATCHED_UDF); the
-    /// row-at-a-time [`SQL_BATCHED_UDF`](eval_type::SQL_BATCHED_UDF) is also
-    /// compatible with the runner's per-row calling convention.
+    /// Override the Python evaluation type (default
+    /// [`SQL_ARROW_BATCHED_UDF`](eval_type::SQL_ARROW_BATCHED_UDF)).
     pub fn with_eval_type(mut self, value: i32) -> Self {
         self.eval_type = value;
         self
@@ -285,31 +335,32 @@ impl UserDefinedFunction {
         self
     }
 
-    /// Build the JSON spec handed to the Python packer. Validates that the
-    /// Spark output type is supported before spawning any process.
-    fn build_spec(&self) -> Result<String> {
-        let output_type = output_type_token(&self.return_type)?;
+    /// The Spark output [`DataType`], derived from the return [`AbiType`].
+    pub fn output_type(&self) -> DataType {
+        self.ret_type.to_data_type()
+    }
+
+    /// Build the JSON spec handed to the Python packer.
+    fn build_spec(&self) -> String {
         let spec = serde_json::json!({
             "wasm_b64": base64::engine::general_purpose::STANDARD.encode(&self.wasm_module),
             "entrypoint": self.entrypoint,
-            "arg_types": self.arg_types.iter().map(|t| t.tag()).collect::<Vec<_>>(),
-            "ret_type": self.ret_type.tag(),
-            "output_type": output_type,
+            "arg_types": self.arg_types.iter().map(|t| t.descriptor()).collect::<Vec<_>>(),
+            "ret_type": self.ret_type.descriptor(),
+            "output_type": self.ret_type.to_spark_json(),
         });
-        Ok(spec.to_string())
+        spec.to_string()
     }
 
-    /// Build the cloudpickle-compatible `command` bytes by invoking the packer:
-    /// a pickled `(WasmScalarUDF(...), return_type)` tuple.
+    /// Build the cloudpickle-compatible `command` bytes by invoking the packer.
     fn build_command(&self) -> Result<Vec<u8>> {
-        let spec = self.build_spec()?;
-        self.packer.run(&spec)
+        self.packer.run(&self.build_spec())
     }
 
     /// Build the [`PythonUDFPayload`] carrying the pickled command.
     pub fn to_payload(&self) -> Result<PythonUDFPayload> {
         Ok(PythonUDFPayload::new(
-            self.return_type.clone(),
+            self.output_type(),
             self.eval_type,
             self.build_command()?,
             self.python_ver.clone(),
@@ -341,40 +392,10 @@ impl UserDefinedFunction {
 }
 
 /// Default Python version tag, matching how pyspark reports it
-/// (`"%d.%d" % sys.version_info[:2]`). We cannot see the executors' interpreter,
-/// so we send a reasonable default; callers can override with
+/// (`"%d.%d" % sys.version_info[:2]`). Callers can override with
 /// [`UserDefinedFunction::with_python_ver`].
 fn default_python_ver() -> String {
     "3.11".to_string()
-}
-
-/// Map a Spark [`DataType`] to the token the Python packer understands.
-///
-/// Only atomic types plus `StringType` are supported in this prototype; other
-/// types return an error before any process is spawned.
-fn output_type_token(dt: &DataType) -> Result<&'static str> {
-    let token = match dt {
-        DataType::Null => "null",
-        DataType::Boolean => "boolean",
-        DataType::Byte => "byte",
-        DataType::Short => "short",
-        DataType::Integer => "integer",
-        DataType::Long => "long",
-        DataType::Float => "float",
-        DataType::Double => "double",
-        DataType::Binary => "binary",
-        DataType::Date => "date",
-        DataType::Timestamp => "timestamp",
-        DataType::TimestampNtz => "timestamp_ntz",
-        DataType::String { .. } => "string",
-        other => {
-            return Err(SparkError::connect_msg(format!(
-                "WASM UDF output type {other:?} is not supported yet; \
-                 use an atomic type or StringType"
-            )));
-        }
-    };
-    Ok(token)
 }
 
 #[cfg(test)]
@@ -382,13 +403,13 @@ mod tests {
     use super::*;
 
     fn sample() -> UserDefinedFunction {
+        // fn add_one(x: i64) -> i64
         udf(
             "add_one",
             vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00],
-            "run",
-            vec![WasmValType::I64],
-            WasmValType::I64,
-            DataType::Long,
+            "add_one",
+            vec![AbiType::I64],
+            AbiType::I64,
         )
     }
 
@@ -405,50 +426,71 @@ mod tests {
     }
 
     #[test]
-    fn build_spec_encodes_signature_and_wasm() {
-        let f = sample();
-        let spec: serde_json::Value = serde_json::from_str(&f.build_spec().unwrap()).unwrap();
-        assert_eq!(spec["entrypoint"], "run");
-        assert_eq!(spec["arg_types"], serde_json::json!(["i64"]));
-        assert_eq!(spec["ret_type"], "i64");
-        assert_eq!(spec["output_type"], "long");
-        // Base64 of the sample module bytes.
-        assert_eq!(spec["wasm_b64"], "AGFzbQEA");
-    }
-
-    #[test]
-    fn output_type_tokens() {
-        assert_eq!(output_type_token(&DataType::Long).unwrap(), "long");
-        assert_eq!(output_type_token(&DataType::Double).unwrap(), "double");
+    fn abitype_descriptors() {
+        assert_eq!(AbiType::I64.descriptor(), "i64");
+        assert_eq!(AbiType::Str.descriptor(), "string");
+        assert_eq!(AbiType::Binary.descriptor(), "binary");
         assert_eq!(
-            output_type_token(&DataType::String {
-                collation: "UTF8_BINARY".to_string()
-            })
-            .unwrap(),
-            "string"
+            AbiType::Array(Box::new(AbiType::I64)).descriptor(),
+            "array:i64"
+        );
+        assert_eq!(
+            AbiType::Nullable(Box::new(AbiType::Str)).descriptor(),
+            "option:string"
+        );
+        assert_eq!(
+            AbiType::Array(Box::new(AbiType::Nullable(Box::new(AbiType::I32)))).descriptor(),
+            "array:option:i32"
         );
     }
 
     #[test]
-    fn unsupported_output_type_errors() {
-        let err = output_type_token(&DataType::Array {
-            element_type: Box::new(DataType::Integer),
-            contains_null: true,
-        });
-        assert!(err.is_err());
+    fn abitype_to_data_type() {
+        assert_eq!(AbiType::I64.to_data_type(), DataType::Long);
+        assert_eq!(AbiType::Bool.to_data_type(), DataType::Boolean);
+        assert_eq!(AbiType::Binary.to_data_type(), DataType::Binary);
+        match AbiType::Array(Box::new(AbiType::Nullable(Box::new(AbiType::I64)))).to_data_type() {
+            DataType::Array {
+                element_type,
+                contains_null,
+            } => {
+                assert_eq!(*element_type, DataType::Long);
+                assert!(contains_null);
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn abitype_spark_json() {
+        assert_eq!(AbiType::I64.to_spark_json(), serde_json::json!("long"));
+        assert_eq!(
+            AbiType::Array(Box::new(AbiType::Str)).to_spark_json(),
+            serde_json::json!({"type": "array", "elementType": "string", "containsNull": false})
+        );
+    }
+
+    #[test]
+    fn build_spec_encodes_signature_and_wasm() {
+        let f = sample();
+        let spec: serde_json::Value = serde_json::from_str(&f.build_spec()).unwrap();
+        assert_eq!(spec["entrypoint"], "add_one");
+        assert_eq!(spec["arg_types"], serde_json::json!(["i64"]));
+        assert_eq!(spec["ret_type"], "i64");
+        assert_eq!(spec["output_type"], "long");
+        assert_eq!(spec["wasm_b64"], "AGFzbQEA");
     }
 
     /// End-to-end packer test. Requires a Python interpreter with `cloudpickle`
     /// + `pyspark` and the `pyspark_wasm_udf` package importable (set
     /// `SPARK_CONNECT_WASM_PACKER_PATH` to the repo's `python/` dir). Run with
-    /// `cargo test -- --ignored`.
+    /// `cargo test --features wasm-udf -- --ignored`.
     #[test]
     #[ignore]
     fn packer_produces_nonempty_command() {
         let f = sample();
         let cmd = f.build_command().expect("packer should succeed");
         assert!(!cmd.is_empty());
-        // cloudpickle output starts with the PROTO opcode (0x80).
-        assert_eq!(cmd[0], 0x80);
+        assert_eq!(cmd[0], 0x80); // cloudpickle PROTO opcode
     }
 }
