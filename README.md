@@ -81,15 +81,46 @@ its signature are cloudpickled (**by value**, so nothing needs pre-deploying on
 the cluster) into a tiny Python runner that executes the module with `wasmtime`
 once per row.
 
-The API mirrors `pyspark.sql.functions.udf` — `udf(...)` returns a
-`UserDefinedFunction` you call on columns:
+### Write a plain Rust function (recommended)
+
+`#[spark_wasm_udf]` (from `apache-spark-connect-macros`) turns an ordinary Rust
+function into a UDF: it exports the function when the crate is compiled to
+`wasm32`, and generates a `<name>_udf(module)` constructor with the Spark
+signature **inferred** from the Rust signature — so you write only the function.
+
+```rust
+use spark_connect_macros::spark_wasm_udf;
+
+#[spark_wasm_udf]
+pub fn add_one(x: i64) -> i64 { x + 1 }   // signature inferred: (Long) -> Long
+```
+
+```rust
+// Host side: `module` is the compiled `.wasm`; the example's build.rs compiles
+// and embeds it, so `cargo run` needs no manual wasm build.
+let add_one = add_one_udf(WASM_MODULE);
+df.select(vec![col("id"), add_one.call(vec![col("id")])?.alias("plus_one")])
+    .show(20)?;
+```
+
+See `examples/src/wasm_udf_macro.rs` + the `wasm-udfs` crate, run with:
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo run -p examples --bin wasm_udf_macro --features wasm-udf-macro
+```
+
+### Lower-level API
+
+`udf(...)` builds a `UserDefinedFunction` directly (mirrors
+`pyspark.sql.functions.udf`), if you prefer to load a prebuilt module and name
+the signature yourself:
 
 ```rust
 use spark_connect::functions::col;
 use spark_connect::types::DataType;
 use spark_connect::wasm_udf::{udf, WasmValType};
 
-// `run(i64) -> i64` compiled from Rust to wasm32.
 let wasm = std::fs::read("add_one.wasm")?;
 let add_one = udf("add_one", wasm, "run",
     vec![WasmValType::I64], WasmValType::I64, DataType::Long);

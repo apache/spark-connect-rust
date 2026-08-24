@@ -93,6 +93,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "apache-spark-connect-macros"
+version = "4.2.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "apache-spark-connect-proto"
 version = "4.2.0"
 dependencies = [
@@ -1499,6 +1508,7 @@ name = "examples"
 version = "0.0.0"
 dependencies = [
  "apache-spark-connect",
+ "wasm-udfs",
 ]
 
 [[package]]
@@ -4572,6 +4582,14 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "wasm-udfs"
+version = "0.0.0"
+dependencies = [
+ "apache-spark-connect",
+ "apache-spark-connect-macros",
 ]
 
 [[package]]

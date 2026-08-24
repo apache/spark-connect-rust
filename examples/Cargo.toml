@@ -52,7 +52,18 @@ required-features = []
 name = "wasm_udf"
 path = "src/wasm_udf.rs"
 
+# Uses the `#[spark_wasm_udf]` macro; `build.rs` compiles + embeds the module.
+[[bin]]
+name = "wasm_udf_macro"
+path = "src/wasm_udf_macro.rs"
+required-features = ["wasm-udf-macro"]
+
 [dependencies]
 spark-connect = { package = "apache-spark-connect", path = "../crates/spark-connect" }
+wasm-udfs = { path = "../wasm-udfs", optional = true }
 
 [features]
+# Enable the `#[spark_wasm_udf]` macro example. Requires the
+# `wasm32-unknown-unknown` target (`rustup target add wasm32-unknown-unknown`),
+# since `build.rs` compiles the `wasm-udfs` crate to WebAssembly.
+wasm-udf-macro = ["dep:wasm-udfs"]

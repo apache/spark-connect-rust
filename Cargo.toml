@@ -21,7 +21,9 @@ members = [
     "crates/spark-connect-proto",
     "crates/spark-connect-core",
     "crates/spark-connect",
+    "crates/spark-connect-macros",
     "examples",
+    "wasm-udfs",
 ]
 # The Rust-native `examples` crate links the pure-Rust core directly; it is
 # excluded from default cargo operations so `cargo test`/`cargo build` stay
@@ -30,6 +32,7 @@ default-members = [
     "crates/spark-connect-proto",
     "crates/spark-connect-core",
     "crates/spark-connect",
+    "crates/spark-connect-macros",
 ]
 
 [workspace.package]
