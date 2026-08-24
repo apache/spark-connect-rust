@@ -288,12 +288,14 @@ impl SparkConnectClient {
                 async move { stub.execute_plan(req).await.map(Response::into_inner) }
             })
             .await?;
+        let retry_policy = self.retry_policy.clone();
         Ok(ReattachableResponseStream {
             stub: self.stub.clone(),
             user_agent: self.user_agent.clone(),
             user_id: self.user_id.clone(),
             metadata: self.metadata.clone(),
-            retry_policy: self.retry_policy.clone(),
+            retry_state: RetryPolicyState::new(retry_policy.clone()),
+            retry_policy,
             iter,
             stream,
             done: false,
@@ -807,6 +809,7 @@ pub struct ReattachableResponseStream {
     user_id: Option<String>,
     metadata: Vec<(String, String)>,
     retry_policy: RetryPolicy,
+    retry_state: RetryPolicyState,
     iter: ExecutePlanResponseReattachableIterator,
     stream: Streaming<ExecutePlanResponse>,
     done: bool,
@@ -855,7 +858,6 @@ impl ReattachableResponseStream {
                     if self.iter.is_completed().await || !self.retry_policy.can_retry(&status) {
                         return Err(SparkError::from_grpc_status(status));
                     }
-                    let mut state = RetryPolicyState::new(self.retry_policy.clone());
                     loop {
                         let reattach = self.iter.create_reattach_request().await;
                         let mut req = Request::new(reattach);
@@ -867,7 +869,7 @@ impl ReattachableResponseStream {
                             }
                             Err(e) => {
                                 if self.retry_policy.can_retry(&e) {
-                                    if let Some(w) = state.next_attempt(None) {
+                                    if let Some(w) = self.retry_state.next_attempt(None) {
                                         tokio::time::sleep(std::time::Duration::from_millis(w))
                                             .await;
                                         continue;

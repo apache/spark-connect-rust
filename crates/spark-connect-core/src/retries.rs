@@ -27,6 +27,9 @@ pub struct RetryPolicy {
     pub recognize_server_retry_delay: bool,
     /// Maximum server-provided retry delay (in milliseconds).
     pub max_server_retry_delay_ms: Option<u64>,
+    /// Maximum cumulative elapsed time for retries (in milliseconds).
+    /// Defaults to 1 hour. Set to None to disable the ceiling.
+    pub max_retry_exception_elapsed_time_ms: Option<u64>,
 }
 
 impl Default for RetryPolicy {
@@ -40,6 +43,9 @@ impl Default for RetryPolicy {
             min_jitter_threshold_ms: 0,
             recognize_server_retry_delay: false,
             max_server_retry_delay_ms: None,
+            max_retry_exception_elapsed_time_ms: Some(
+                DEFAULT_MAX_RETRY_EXCEPTION_ELAPSED_TIME * 1000,
+            ),
         }
     }
 }
@@ -66,6 +72,7 @@ pub struct RetryPolicyState {
     policy: RetryPolicy,
     attempt: u32,
     next_wait_ms: f64,
+    started: std::time::Instant,
 }
 
 impl RetryPolicyState {
@@ -74,6 +81,7 @@ impl RetryPolicyState {
             next_wait_ms: policy.initial_backoff_ms as f64,
             policy,
             attempt: 0,
+            started: std::time::Instant::now(),
         }
     }
 
@@ -82,6 +90,13 @@ impl RetryPolicyState {
     /// Returns the number of milliseconds to wait, or None if no more retries are allowed.
     /// This is deterministic and doesn't perform any actual sleeping.
     pub fn next_attempt(&mut self, server_retry_delay_ms: Option<u64>) -> Option<u64> {
+        // Check if we've exceeded the elapsed-time ceiling
+        if let Some(max_ms) = self.policy.max_retry_exception_elapsed_time_ms {
+            if self.started.elapsed().as_millis() as u64 >= max_ms {
+                return None;
+            }
+        }
+
         // Check if we've exhausted the retry budget
         if let Some(max) = self.policy.max_retries {
             if self.attempt >= max {
@@ -168,6 +183,7 @@ mod tests {
             min_jitter_threshold_ms: 0,
             recognize_server_retry_delay: false,
             max_server_retry_delay_ms: None,
+            max_retry_exception_elapsed_time_ms: None,
         };
 
         let mut state = RetryPolicyState::new(policy);
@@ -218,6 +234,7 @@ mod tests {
             min_jitter_threshold_ms: 0,
             recognize_server_retry_delay: false,
             max_server_retry_delay_ms: None,
+            max_retry_exception_elapsed_time_ms: None,
         };
 
         let mut state = RetryPolicyState::new(policy);
@@ -237,6 +254,7 @@ mod tests {
             min_jitter_threshold_ms: 0,
             recognize_server_retry_delay: false,
             max_server_retry_delay_ms: None,
+            max_retry_exception_elapsed_time_ms: None,
         };
 
         let mut state = RetryPolicyState::new(policy);
@@ -257,6 +275,7 @@ mod tests {
             min_jitter_threshold_ms: 0,
             recognize_server_retry_delay: true,
             max_server_retry_delay_ms: Some(500),
+            max_retry_exception_elapsed_time_ms: None,
         };
 
         let mut state = RetryPolicyState::new(policy);
@@ -281,6 +300,7 @@ mod tests {
             min_jitter_threshold_ms: 0,
             recognize_server_retry_delay: false,
             max_server_retry_delay_ms: None,
+            max_retry_exception_elapsed_time_ms: None,
         };
 
         let mut state = RetryPolicyState::new(policy);
@@ -289,5 +309,49 @@ mod tests {
         assert_eq!(state.attempt(), 1);
         state.next_attempt(None);
         assert_eq!(state.attempt(), 2);
+    }
+
+    #[test]
+    fn test_elapsed_time_ceiling_exceeded() {
+        // With max_retry_exception_elapsed_time_ms: Some(0), next_attempt should
+        // immediately return None, enforcing the elapsed-time ceiling deterministically.
+        let policy = RetryPolicy {
+            max_retries: Some(10),
+            initial_backoff_ms: 50,
+            max_backoff_ms: None,
+            backoff_multiplier: 1.0,
+            jitter_ms: 0,
+            min_jitter_threshold_ms: 0,
+            recognize_server_retry_delay: false,
+            max_server_retry_delay_ms: None,
+            max_retry_exception_elapsed_time_ms: Some(0),
+        };
+
+        let mut state = RetryPolicyState::new(policy);
+        // Even with max_retries remaining, elapsed time ceiling exceeded so None.
+        assert_eq!(state.next_attempt(None), None);
+    }
+
+    #[test]
+    fn test_elapsed_time_ceiling_with_retries_allowed() {
+        // With max_retry_exception_elapsed_time_ms: Some(u64::MAX), retries should be
+        // limited by max_retries, not the elapsed-time ceiling.
+        let policy = RetryPolicy {
+            max_retries: Some(2),
+            initial_backoff_ms: 50,
+            max_backoff_ms: None,
+            backoff_multiplier: 1.0,
+            jitter_ms: 0,
+            min_jitter_threshold_ms: 0,
+            recognize_server_retry_delay: false,
+            max_server_retry_delay_ms: None,
+            max_retry_exception_elapsed_time_ms: Some(u64::MAX),
+        };
+
+        let mut state = RetryPolicyState::new(policy);
+        assert_eq!(state.next_attempt(None), Some(50));
+        assert_eq!(state.next_attempt(None), Some(50));
+        // max_retries exhausted
+        assert_eq!(state.next_attempt(None), None);
     }
 }
