@@ -8,9 +8,10 @@ use spark_connect::streaming::{
     DataStreamReader, DataStreamWriter, StreamingQuery, StreamingQueryException,
     StreamingQueryManager, StreamingQueryStatus, Trigger,
 };
+use spark_connect::udf::PythonUDFPayload;
 use std::collections::HashMap;
 
-use crate::dataframe::PyDataFrame;
+use crate::dataframe::{py_cloudpickle, py_version, PyDataFrame};
 use crate::errors::ResultExt;
 
 /// Python wrapper for DataStreamReader.
@@ -232,6 +233,30 @@ impl PyDataStreamWriter {
         let query = writer.to_table(table_name).to_pyerr()?;
         Ok(PyStreamingQuery::new(query))
     }
+
+    fn foreachBatch(&mut self, command: Vec<u8>, python_ver: &str) -> PyResult<PyDataStreamWriter> {
+        let payload = PythonUDFPayload::new(
+            spark_connect::types::DataType::Struct { fields: vec![] },
+            0, // No specific eval_type for streaming
+            command,
+            python_ver.to_string(),
+        );
+        Ok(PyDataStreamWriter {
+            inner: Some(self.take()?.foreach_batch(payload)),
+        })
+    }
+
+    fn foreach(&mut self, command: Vec<u8>, python_ver: &str) -> PyResult<PyDataStreamWriter> {
+        let payload = PythonUDFPayload::new(
+            spark_connect::types::DataType::Struct { fields: vec![] },
+            0, // No specific eval_type for streaming
+            command,
+            python_ver.to_string(),
+        );
+        Ok(PyDataStreamWriter {
+            inner: Some(self.take()?.foreach(payload)),
+        })
+    }
 }
 
 /// Python wrapper for StreamingQueryStatus.
@@ -400,5 +425,23 @@ impl PyStreamingQueryManager {
 
     fn resetTerminated(&self) -> PyResult<()> {
         self.inner.reset_terminated().to_pyerr()
+    }
+
+    fn addListener(&self, listener_payload: Vec<u8>, python_ver: &str) -> PyResult<String> {
+        let payload = PythonUDFPayload::new(
+            spark_connect::types::DataType::Struct { fields: vec![] },
+            0,
+            listener_payload,
+            python_ver.to_string(),
+        );
+        self.inner.add_listener(payload).to_pyerr()
+    }
+
+    fn removeListener(&self, listener_id: &str) -> PyResult<()> {
+        self.inner.remove_listener(listener_id).to_pyerr()
+    }
+
+    fn streamListenerEvents(&self) -> PyResult<Vec<(i32, String)>> {
+        self.inner.stream_listener_events().to_pyerr()
     }
 }

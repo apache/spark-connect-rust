@@ -33,11 +33,29 @@ pub fn value_to_py<'py>(py: Python<'py>, v: &Value) -> PyResult<Bound<'py, PyAny
         Value::Double(f) => (*f).into_pyobject(py)?.into_any(),
         Value::String(s) => s.as_str().into_pyobject(py)?.into_any(),
         Value::Binary(b) => PyBytes::new(py, b).into_any(),
-        // Date/Timestamp are surfaced as their raw integer encodings (days /
-        // microseconds since epoch); pyspark-typed datetime objects are a
-        // separate conversion layer.
-        Value::Date(d) => (*d as i64).into_pyobject(py)?.into_any(),
-        Value::Timestamp(t) => (*t).into_pyobject(py)?.into_any(),
+        Value::Date(d) => {
+            // Convert days-since-epoch (i32) to datetime.date
+            let date_mod = py.import("datetime")?;
+            let date_cls = date_mod.getattr("date")?;
+            // 719163 is the ordinal of 1970-01-01
+            let ordinal = (*d as i64) + 719163i64;
+            date_cls.call_method1("fromordinal", (ordinal,))?.into_any()
+        }
+        Value::Timestamp(t) => {
+            // Convert microseconds-since-epoch (i64) to datetime.datetime
+            let datetime_mod = py.import("datetime")?;
+            let datetime_cls = datetime_mod.getattr("datetime")?;
+            let seconds = *t as f64 / 1_000_000.0;
+            datetime_cls
+                .call_method1("fromtimestamp", (seconds,))?
+                .into_any()
+        }
+        Value::Decimal { value, .. } => {
+            // Convert to Python decimal.Decimal by instantiating the class
+            let decimal_mod = py.import("decimal")?;
+            let decimal_cls = decimal_mod.getattr("Decimal")?;
+            decimal_cls.call1((value.as_str(),))?.into_any()
+        }
         Value::List(items) => {
             let list = PyList::empty(py);
             for it in items {

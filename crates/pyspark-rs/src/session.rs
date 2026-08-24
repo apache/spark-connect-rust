@@ -495,8 +495,62 @@ fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
         return Ok(Value::Map(map));
     }
 
-    // Anything else (e.g. datetime, Decimal, arbitrary objects) is not a supported
-    // literal; error rather than silently coercing to a wrong value.
+    // Check for datetime.datetime (before datetime.date, since datetime is a subclass of date)
+    let py = obj.py();
+    let datetime_mod = py.import("datetime").ok();
+    if let Some(dt_mod) = &datetime_mod {
+        if let Ok(datetime_cls) = dt_mod.getattr("datetime") {
+            if obj.is_instance(&datetime_cls)? {
+                // Call .timestamp() to get POSIX seconds, then convert to microseconds
+                let timestamp_f64: f64 = obj.call_method0("timestamp")?.extract()?;
+                let micros = (timestamp_f64 * 1_000_000.0) as i64;
+                return Ok(Value::Timestamp(micros));
+            }
+        }
+    }
+
+    // Check for datetime.date (after datetime.datetime)
+    if let Some(dt_mod) = &datetime_mod {
+        if let Ok(date_cls) = dt_mod.getattr("date") {
+            if obj.is_instance(&date_cls)? {
+                // Get the ordinal and convert to days since epoch
+                let ordinal: i64 = obj.call_method0("toordinal")?.extract()?;
+                // 719163 is the ordinal of 1970-01-01
+                let days = (ordinal - 719163i64) as i32;
+                return Ok(Value::Date(days));
+            }
+        }
+    }
+
+    // Check for decimal.Decimal
+    let decimal_mod = py.import("decimal").ok();
+    if let Some(dec_mod) = &decimal_mod {
+        if let Ok(decimal_cls) = dec_mod.getattr("Decimal") {
+            if obj.is_instance(&decimal_cls)? {
+                // Get the string representation
+                let dec_str: String = obj.str()?.extract()?;
+                // Try to get precision and scale from as_tuple()
+                let as_tuple = obj.call_method0("as_tuple")?;
+                let mut scale: Option<i32> = None;
+                if let Ok(exp_obj) = as_tuple.get_item(2) {
+                    if !exp_obj.is_none() {
+                        if let Ok(exp) = exp_obj.extract::<i64>() {
+                            if exp <= 0 {
+                                scale = Some((-exp) as i32);
+                            }
+                        }
+                    }
+                }
+                return Ok(Value::Decimal {
+                    value: dec_str,
+                    precision: None,
+                    scale,
+                });
+            }
+        }
+    }
+
+    // Anything else is not a supported literal; error rather than silently coercing to a wrong value.
     let type_name = obj
         .get_type()
         .name()
