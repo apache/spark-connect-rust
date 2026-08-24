@@ -47,13 +47,13 @@ impl PySparkSessionBuilder {
 
     /// Build and get or create the session (`getOrCreate`).
     #[pyo3(name = "getOrCreate")]
-    fn get_or_create(&self) -> PyResult<PySparkSession> {
+    fn get_or_create(&self, py: Python<'_>) -> PyResult<PySparkSession> {
         let url = self.remote_url.clone().ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err("Must call .remote(url) before .getOrCreate()")
         })?;
 
         let builder = SparkSession::builder().remote(&url);
-        let session = builder.get_or_create().to_pyerr()?;
+        let session = py.detach(|| builder.get_or_create()).to_pyerr()?;
         *active_slot().lock().unwrap() = Some(session.clone());
         Ok(PySparkSession::new(session))
     }
@@ -251,8 +251,8 @@ impl PySparkSession {
     }
 
     /// Stop this Spark session.
-    fn stop(&self) -> PyResult<()> {
-        self.session.stop().to_pyerr()
+    fn stop(&self, py: Python<'_>) -> PyResult<()> {
+        py.detach(|| self.session.stop()).to_pyerr()
     }
 
     /// Get the UDF registration API. Returns a Python object that implements spark.udf.register.
@@ -360,14 +360,13 @@ _UDFRegistration()
     ///
     /// Returns the server-assigned profile ID that can be used with `DataFrame.withResources()`.
     #[pyo3(name = "buildResourceProfile")]
-    fn build_resource_profile(&self, profile: &PyResourceProfile) -> PyResult<i32> {
-        self.session
-            .build_resource_profile(&profile.inner)
+    fn build_resource_profile(&self, py: Python<'_>, profile: &PyResourceProfile) -> PyResult<i32> {
+        py.detach(|| self.session.build_resource_profile(&profile.inner))
             .to_pyerr()
     }
 
-    fn version(&self) -> PyResult<String> {
-        self.session.version().to_pyerr()
+    fn version(&self, py: Python<'_>) -> PyResult<String> {
+        py.detach(|| self.session.version()).to_pyerr()
     }
 
     fn table(&self, table_name: &str) -> PyResult<PyDataFrame> {
@@ -382,18 +381,19 @@ _UDFRegistration()
     }
 
     #[pyo3(name = "interruptAll")]
-    fn interrupt_all(&self) -> PyResult<Vec<String>> {
-        self.session.interrupt_all().to_pyerr()
+    fn interrupt_all(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        py.detach(|| self.session.interrupt_all()).to_pyerr()
     }
 
     #[pyo3(name = "interruptTag")]
-    fn interrupt_tag(&self, tag: &str) -> PyResult<Vec<String>> {
-        self.session.interrupt_tag(tag).to_pyerr()
+    fn interrupt_tag(&self, py: Python<'_>, tag: &str) -> PyResult<Vec<String>> {
+        py.detach(|| self.session.interrupt_tag(tag)).to_pyerr()
     }
 
     #[pyo3(name = "interruptOperation")]
-    fn interrupt_operation(&self, operation_id: &str) -> PyResult<Vec<String>> {
-        self.session.interrupt_operation(operation_id).to_pyerr()
+    fn interrupt_operation(&self, py: Python<'_>, operation_id: &str) -> PyResult<Vec<String>> {
+        py.detach(|| self.session.interrupt_operation(operation_id))
+            .to_pyerr()
     }
 
     #[pyo3(name = "addTag")]
@@ -417,14 +417,14 @@ _UDFRegistration()
     }
 
     #[pyo3(name = "addArtifacts")]
-    fn add_artifacts(&self, paths: Vec<String>) -> PyResult<()> {
+    fn add_artifacts(&self, py: Python<'_>, paths: Vec<String>) -> PyResult<()> {
         let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
-        self.session.add_artifacts(&refs).to_pyerr()
+        py.detach(|| self.session.add_artifacts(&refs)).to_pyerr()
     }
 
     #[pyo3(name = "addArtifact")]
-    fn add_artifact(&self, path: &str) -> PyResult<()> {
-        self.session.add_artifact(path).to_pyerr()
+    fn add_artifact(&self, py: Python<'_>, path: &str) -> PyResult<()> {
+        py.detach(|| self.session.add_artifact(path)).to_pyerr()
     }
 
     #[pyo3(name = "newSession")]
