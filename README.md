@@ -171,6 +171,15 @@ Nothing here is needed unless the `wasm-udf` feature is enabled:
 - **Executors**: the `wasmtime` Python package installed.
 - **Spark**: 4.2.0+.
 
+> **Two things to be explicit about.** (1) This is the one feature for which the
+> otherwise pure-Rust client needs a **Python interpreter at build time** — the UDF
+> command is cloudpickled by `python -m pyspark_wasm_udf.pack` (needing `cloudpickle`
+> + `pyspark`), reusing cloudpickle rather than reimplementing it. Users who never
+> build a Rust UDF pull none of this. (2) The goal is **capability, not speed**: the
+> execution path is Python worker → `wasmtime` → linear memory → per-row entrypoint,
+> so a WASM UDF should not be expected to beat a vectorized Arrow UDF — it exists
+> because Spark Connect has no native "run this Rust code" UDF type.
+
 ### Lower-level API
 
 `spark_connect::wasm_udf::udf(name, module, entrypoint, arg_types, ret_type)`
