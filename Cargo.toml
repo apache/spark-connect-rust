@@ -24,6 +24,7 @@ members = [
     "crates/spark-connect-macros",
     "examples",
     "wasm-udfs",
+    "wasm-udf-inline",
 ]
 # The Rust-native `examples` crate links the pure-Rust core directly; it is
 # excluded from default cargo operations so `cargo test`/`cargo build` stay

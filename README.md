@@ -110,6 +110,13 @@ rustup target add wasm32-unknown-unknown
 cargo run -p examples --bin wasm_udf_macro --features wasm-udf-macro
 ```
 
+**Single file.** The UDF and the client can live in one file — see
+`wasm-udf-inline/src/main.rs` (`cargo run -p wasm-udf-inline`). The function
+must still be compiled to WebAssembly (that's what ships to the executors), but
+its `build.rs` compiles the *same file* to `wasm32` and embeds it, so there is
+no separate crate. Note two compiles remain unavoidable (host + `wasm32`); only
+the source is unified.
+
 ### Lower-level API
 
 `udf(...)` builds a `UserDefinedFunction` directly (mirrors
