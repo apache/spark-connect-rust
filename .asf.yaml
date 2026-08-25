@@ -17,7 +17,7 @@
 ---
 github:
   description: "Apache Spark Connect Client for Rust (Rust core + Python wrapper)"
-  homepage: "https://spark.apache.org/"
+  homepage: "https://apache.github.io/spark-connect-rust/"
   labels:
     - spark
     - rust
