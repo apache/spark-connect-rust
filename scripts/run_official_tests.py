@@ -32,6 +32,22 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 DEFAULT_MANIFEST = REPO / "scripts" / "parity_known_failures.txt"
 
+# The only files whose failures are genuinely event-timing-driven: they wait on
+# real server-pushed events (streaming query progress/listener callbacks, observed
+# metrics) and can transiently exceed the per-file cap late in a long serial run on
+# a resource-starved single-node server, yet pass reliably in isolation. ONLY these
+# get retried; every other file is expected to be deterministic, so a
+# non-deterministic client bug there fails the gate on its first occurrence instead
+# of having to reproduce on every one of N attempts (which would let a 50%-flaky bug
+# through most runs). Basenames, matched exactly.
+FLAKY_FILES = {
+    "test_parity_streaming.py",
+    "test_parity_foreach_batch.py",
+    "test_parity_foreach.py",
+    "test_parity_listener.py",
+    "test_parity_observation.py",
+}
+
 _FAIL_RE = re.compile(r"^(?:FAILED|ERROR)\s+(\S+)")
 _COUNT_RE = {k: re.compile(rf"(\d+) {k}\b") for k in ("passed", "failed", "error", "skipped")}
 
@@ -81,7 +97,9 @@ def parse_counts(text: str):
     return c
 
 
-def run_ours(test_file: Path, spark_py: Path, remote: str, deselect, timeout: int):
+def run_ours(
+    test_file: Path, spark_py: Path, remote: str, deselect, timeout: int, select_only=False
+):
     env = dict(os.environ)
     env["SPARK_CONNECT_TESTING_REMOTE"] = remote
     env["SPARK_TESTING"] = "1"
@@ -97,7 +115,8 @@ def run_ours(test_file: Path, spark_py: Path, remote: str, deselect, timeout: in
     # in the plugin is rootdir-independent. Run from spark_py (as Apache's ./python/
     # run-tests does) with the file passed relative to it.
     rel_file = test_file.relative_to(spark_py).as_posix()
-    env["RUST_PARITY_DESELECT"] = "\n".join(deselect)
+    # select_only: run ONLY the listed tests (the drift check); otherwise deselect them.
+    env["RUST_PARITY_SELECT_ONLY" if select_only else "RUST_PARITY_DESELECT"] = "\n".join(deselect)
     args = [
         sys.executable,
         "-m",
@@ -138,12 +157,18 @@ def main():
         "--retries",
         type=int,
         default=2,
-        help="Re-run a file that shows failures up to this many more times; only a "
-        "failure that PERSISTS on every attempt counts. This distinguishes a genuine "
-        "problem from environmental flakiness - the streaming-query-listener/observation "
-        "tests wait on real server-pushed events and can transiently exceed the per-file "
-        "cap late in a long serial run when the single-node server is resource-starved, "
-        "yet pass reliably in isolation. A real regression still fails every attempt.",
+        help="Max extra attempts for the event-timing-driven files ONLY (see "
+        "FLAKY_FILES): the streaming-query-listener/observation tests wait on real "
+        "server-pushed events and can transiently exceed the per-file cap late in a "
+        "long serial run on a resource-starved single-node server, yet pass reliably "
+        "in isolation. All other files are treated as deterministic and get zero "
+        "retries, so a non-deterministic client bug there is not masked by re-running.",
+    )
+    ap.add_argument(
+        "--no-drift-check",
+        action="store_true",
+        help="Skip the post-run check that re-runs skiplisted tests to report any that "
+        "now pass (candidates to remove from the manifest).",
     )
     args = ap.parse_args()
 
@@ -170,11 +195,15 @@ def main():
             return tf.name, None, [], True, 1  # skipped whole file
         deselect = per_file.get(rel, [])
         counts, failed_ids = run_ours(tf, spark_py, args.remote, deselect, args.timeout)
-        # Re-run a flagged file fresh: a genuine failure persists, a flake clears.
+        # Retry ONLY the event-timing-driven files (see FLAKY_FILES): for them a flake
+        # clears on a fresh run while a genuine failure persists. Deterministic files
+        # are NOT retried, so a non-deterministic bug there surfaces immediately rather
+        # than needing to reproduce on every attempt.
+        retries = args.retries if tf.name in FLAKY_FILES else 0
         attempts = 1
         while (
             counts.get("failed", 0) + counts.get("error", 0) or counts.get("timeout")
-        ) and attempts <= args.retries:
+        ) and attempts <= retries:
             attempts += 1
             counts, failed_ids = run_ours(tf, spark_py, args.remote, deselect, args.timeout)
         return tf.name, counts, failed_ids, False, attempts
@@ -201,6 +230,34 @@ def main():
         if bad:
             failures.append((name, failed_ids or ["<timeout>"]))
     ex.shutdown()
+
+    # Drift check: re-run the skiplisted tests (selecting ONLY them) and report any
+    # that now PASS. Without this the manifest can only rot toward less coverage - a
+    # test stays skipped forever and a later regression in a skiplisted area is
+    # invisible. This never fails the gate (a genuine environmental skip keeps
+    # failing here); it only surfaces entries to remove so the list stays honest.
+    if not args.no_drift_check:
+        now_passing = []
+        files_by_rel = {tf.relative_to(spark_py).as_posix(): tf for tf in files}
+        for rel, suffixes in sorted(per_file.items()):
+            tf = files_by_rel.get(rel)
+            if tf is None:
+                continue
+            counts, _ = run_ours(
+                tf, spark_py, args.remote, suffixes, args.timeout, select_only=True
+            )
+            # All selected tests passed (none failed/errored, and some ran).
+            if counts.get("passed", 0) and not (
+                counts.get("failed", 0) + counts.get("error", 0) or counts.get("timeout")
+            ):
+                now_passing.append((rel, counts.get("passed", 0), counts.get("skipped", 0)))
+        if now_passing:
+            print(
+                "\nDrift check: skiplisted tests that now PASS (candidates to remove "
+                "from\nscripts/parity_known_failures.txt so the gate exercises them):"
+            )
+            for rel, npass, nskip in now_passing:
+                print(f"  {rel}: {npass} passed, {nskip} skipped")
 
     print(f"\n{len(failures)} file(s) with unexpected failures out of {len(files)}.")
     if failures:

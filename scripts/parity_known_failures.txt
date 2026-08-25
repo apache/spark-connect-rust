@@ -1,43 +1,41 @@
-# Known environmental failures in the official Spark Connect test suite.
-# These FAIL for reasons outside our client: test-only classes absent from the
-# Spark *distribution* (e.g. InMemoryCatalog for `testcat`), and Spark 4.2's new
-# TIME type / time functions the pinned server build does not fully support.
-# They are deselected so the gate tracks genuine client regressions only.
-# One `nodeid  # reason` per line; the nodeid is RELATIVE to <spark>/python and must
-# match pytest's node id (run_official_tests.py runs pytest from there). Regenerate
-# with scripts/gen_parity_skiplist.py on a version bump.
-pyspark/sql/tests/connect/arrow/test_parity_arrow_python_udf.py::ArrowPythonUDFParityLegacyTests::test_udf_with_input_file_name  # reference also fails (environmental)
-pyspark/sql/tests/connect/arrow/test_parity_arrow_python_udf.py::ArrowPythonUDFParityNonLegacyTests::test_udf_with_input_file_name  # reference also fails (environmental)
-pyspark/sql/tests/connect/arrow/test_parity_arrow_python_udf.py::ArrowPythonUDFParityTests::test_udf_with_input_file_name  # reference also fails (environmental)
-pyspark/sql/tests/connect/arrow/test_parity_arrow_python_udf.py::UDFParityTests::test_udf_with_input_file_name  # reference also fails (environmental)
-pyspark/sql/tests/connect/arrow/test_parity_arrow_python_udf.py::ArrowPythonUDFParityLegacyTests::test_type_coercion_string_to_numeric  # legacy arrow UDF string->numeric coercion differs on the pinned server build
-pyspark/sql/tests/connect/arrow/test_parity_arrow_udf_grouped_agg.py::GroupedAggArrowPythonUDFParityTests::test_time_min  # reference also fails (environmental)
-pyspark/sql/tests/connect/arrow/test_parity_arrow_udf_scalar.py::ScalarArrowPythonUDFParityTests::test_arrow_udf_output_times  # reference also fails (environmental)
-pyspark/sql/tests/connect/arrow/test_parity_arrow_udf_window.py::WindowArrowPythonUDFParityTests::test_time_min  # reference also fails (environmental)
-pyspark/sql/tests/connect/pandas/streaming/test_parity_pandas_transform_with_state.py::TransformWithStateInPandasParityTests::test_transform_with_state_chaining_ops  # reference also fails (environmental)
-pyspark/sql/tests/connect/pandas/streaming/test_parity_transform_with_state.py::TransformWithStateInPySparkParityTests::test_transform_with_state_chaining_ops  # reference also fails (environmental)
-pyspark/sql/tests/connect/pandas/test_parity_pandas_udf_scalar.py::PandasUDFScalarParityTests::test_vectorized_udf_invalid_length  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_collection.py::DataFrameCollectionParityTests::test_collect_time  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_column.py::ColumnParityTests::test_column_date_time_op  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_column.py::ColumnParityTestsWithNonStrictDFColResolution::test_column_date_time_op  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_dataframe.py::DataFrameParityTests::test_metadata_column  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_current_time  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_enum_literals  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_hour  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_lit_time  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_make_time  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_make_timestamp  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_make_timestamp_ntz  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_minute  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_second  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_time_diff  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_time_trunc  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_to_time  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_try_make_timestamp  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_try_make_timestamp_ltz  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_try_make_timestamp_ntz  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_try_to_time  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_resources.py::ResourceProfileParityTests::test_map_in_arrow_with_profile  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_resources.py::ResourceProfileParityTests::test_map_in_pandas_with_profile  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_sql.py::SQLParityTests::test_lit_time  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_types.py::TypesParityTests::test_infer_schema_specification  # reference also fails (environmental)
+# Known environmental failures in the official Spark Connect test suite - tests that
+# fail for reasons OUTSIDE our client, deselected so the gate tracks genuine client
+# regressions only. Each line is `<relpath>::Class::method  # <captured reason>`; the
+# relpath is relative to <spark>/python. run_official_tests.py's drift check re-runs
+# these and reports any that start passing, so the list cannot silently rot toward
+# less coverage. Regenerate with scripts/gen_parity_skiplist.py on a version bump.
+#
+# The bulk are Spark 4.2.0's new TIME type, which the pinned server *distribution*
+# rejects with UNSUPPORTED_TIME_TYPE; the rest need test-only classes (InMemoryCatalog)
+# or cluster features (TaskResourceProfiles) absent from a single-node local server.
+pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_current_time  # [UNSUPPORTED_TIME_TYPE] the pinned Spark 4.2.0 server build does not support the TIME data type
+pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_enum_literals  # [UNSUPPORTED_TIME_TYPE] the pinned Spark 4.2.0 server build does not support the TIME data type
+pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_hour  # [UNSUPPORTED_TIME_TYPE] the pinned Spark 4.2.0 server build does not support the TIME data type
+pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_lit_time  # [UNSUPPORTED_TIME_TYPE] the pinned Spark 4.2.0 server build does not support the TIME data type
+pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_make_time  # [UNSUPPORTED_TIME_TYPE] the pinned Spark 4.2.0 server build does not support the TIME data type
+pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_make_timestamp  # [UNSUPPORTED_TIME_TYPE] the pinned Spark 4.2.0 server build does not support the TIME data type
+pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_make_timestamp_ntz  # [UNSUPPORTED_TIME_TYPE] the pinned Spark 4.2.0 server build does not support the TIME data type
+pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_minute  # [UNSUPPORTED_TIME_TYPE] the pinned Spark 4.2.0 server build does not support the TIME data type
+pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_second  # [UNSUPPORTED_TIME_TYPE] the pinned Spark 4.2.0 server build does not support the TIME data type
+pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_time_diff  # [UNSUPPORTED_TIME_TYPE] the pinned Spark 4.2.0 server build does not support the TIME data type
+pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_time_trunc  # [UNSUPPORTED_TIME_TYPE] the pinned Spark 4.2.0 server build does not support the TIME data type
+pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_to_time  # [UNSUPPORTED_TIME_TYPE] the pinned Spark 4.2.0 server build does not support the TIME data type
+pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_try_make_timestamp  # [UNSUPPORTED_TIME_TYPE] the pinned Spark 4.2.0 server build does not support the TIME data type
+pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_try_make_timestamp_ltz  # [UNSUPPORTED_TIME_TYPE] the pinned Spark 4.2.0 server build does not support the TIME data type
+pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_try_make_timestamp_ntz  # [UNSUPPORTED_TIME_TYPE] the pinned Spark 4.2.0 server build does not support the TIME data type
+pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_try_to_time  # [UNSUPPORTED_TIME_TYPE] the pinned Spark 4.2.0 server build does not support the TIME data type
+pyspark/sql/tests/connect/test_parity_column.py::ColumnParityTests::test_column_date_time_op  # [UNSUPPORTED_TIME_TYPE] the pinned Spark 4.2.0 server build does not support the TIME data type
+pyspark/sql/tests/connect/test_parity_column.py::ColumnParityTestsWithNonStrictDFColResolution::test_column_date_time_op  # [UNSUPPORTED_TIME_TYPE] the pinned Spark 4.2.0 server build does not support the TIME data type
+pyspark/sql/tests/connect/test_parity_collection.py::DataFrameCollectionParityTests::test_collect_time  # [UNSUPPORTED_TIME_TYPE] the pinned Spark 4.2.0 server build does not support the TIME data type
+pyspark/sql/tests/connect/test_parity_sql.py::SQLParityTests::test_lit_time  # [UNSUPPORTED_TIME_TYPE] the pinned Spark 4.2.0 server build does not support the TIME data type
+pyspark/sql/tests/connect/test_parity_types.py::TypesParityTests::test_infer_schema_specification  # [UNSUPPORTED_TIME_TYPE] the pinned Spark 4.2.0 server build does not support the TIME data type
+pyspark/sql/tests/connect/arrow/test_parity_arrow_udf_grouped_agg.py::GroupedAggArrowPythonUDFParityTests::test_time_min  # [UNSUPPORTED_TIME_TYPE] the pinned Spark 4.2.0 server build does not support the TIME data type
+pyspark/sql/tests/connect/arrow/test_parity_arrow_udf_scalar.py::ScalarArrowPythonUDFParityTests::test_arrow_udf_output_times  # [UNSUPPORTED_TIME_TYPE] the pinned Spark 4.2.0 server build does not support the TIME data type
+pyspark/sql/tests/connect/arrow/test_parity_arrow_udf_window.py::WindowArrowPythonUDFParityTests::test_time_min  # [UNSUPPORTED_TIME_TYPE] the pinned Spark 4.2.0 server build does not support the TIME data type
+pyspark/sql/tests/connect/test_parity_dataframe.py::DataFrameParityTests::test_metadata_column  # requires InMemoryCatalog for 'testcat' - a test-only catalog class absent from the Spark distribution
+pyspark/sql/tests/connect/test_parity_resources.py::ResourceProfileParityTests::test_map_in_arrow_with_profile  # [SparkException] TaskResourceProfiles unsupported on this single-node local server (Standalone/YARN/K8s only)
+pyspark/sql/tests/connect/test_parity_resources.py::ResourceProfileParityTests::test_map_in_pandas_with_profile  # [SparkException] TaskResourceProfiles unsupported on this single-node local server (Standalone/YARN/K8s only)
+pyspark/sql/tests/connect/pandas/test_parity_pandas_udf_scalar.py::PandasUDFScalarParityTests::test_vectorized_udf_invalid_length  # vectorized-UDF output-length mismatch is not raised on this worker path (behavioral gap, not a PR regression)
+pyspark/sql/tests/connect/pandas/streaming/test_parity_transform_with_state.py::TransformWithStateInPySparkParityTests::test_transform_with_state_chaining_ops  # stateful transformWithState chaining needs a working worker state-store path; environmental in single-node pure-Connect
+pyspark/sql/tests/connect/pandas/streaming/test_parity_pandas_transform_with_state.py::TransformWithStateInPandasParityTests::test_transform_with_state_chaining_ops  # stateful transformWithState chaining needs a working worker state-store path; environmental in single-node pure-Connect
+pyspark/sql/tests/connect/arrow/test_parity_arrow_python_udf.py::ArrowPythonUDFParityLegacyTests::test_type_coercion_string_to_numeric  # legacy arrow-UDF string->numeric coercion is arrow/pandas-version dependent (fails in the CI image; passes on some local builds)
