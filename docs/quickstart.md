@@ -37,7 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 Add a filter and select specific columns:
 
 ```rust
-use spark_connect::functions as f;
+use spark_connect::{functions as f, lit};
 
 let df = spark.range(100)?;
 df

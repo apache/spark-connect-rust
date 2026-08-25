@@ -64,6 +64,8 @@ The server listens on port `15002` by default. To use a different port, add `--c
 To connect to a remote Spark Connect server:
 
 ```rust
+use spark_connect::SparkSessionBuilder;
+
 let spark = SparkSessionBuilder::default()
     .remote("sc://spark.example.com:15002/;token=YOUR_TOKEN")
     .get_or_create()?;
@@ -72,6 +74,8 @@ let spark = SparkSessionBuilder::default()
 Replace `spark.example.com`, the port, and authentication parameters as needed. If TLS is required:
 
 ```rust
+use spark_connect::SparkSessionBuilder;
+
 let spark = SparkSessionBuilder::default()
     .remote("sc://spark.example.com:15002/;use_ssl=true;token=YOUR_TOKEN")
     .get_or_create()?;

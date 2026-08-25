@@ -26,6 +26,12 @@ on:
       - "docs/**"
       - "mkdocs.yml"
       - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - ".github/workflows/docs.yml"
+      - "crates/**"
   workflow_dispatch:
 
 # `mkdocs gh-deploy` builds the site and pushes it to the `gh-pages` branch,
@@ -39,6 +45,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # PR-time validation (no deploy): catch nav/link/config regressions with
+  # `mkdocs build --strict`, and compile the self-contained Rust snippets in the
+  # guides against the crate so a doc example can't drift out of sync with the API
+  # (the class of bug that shipped `lit`/`SparkSessionBuilder` examples that did not
+  # compile). Runs on forks and non-master refs, where the deploy job never runs.
+  validate:
+    name: Validate docs (strict build + snippet compile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install MkDocs Material
+        run: pip install "mkdocs-material==9.*"
+      - name: mkdocs build --strict
+        run: mkdocs build --strict
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+      - name: Compile the guides' Rust snippets
+        run: python scripts/check_doc_snippets.py
+
   build-and-deploy:
     name: Build and deploy the docs site
     runs-on: ubuntu-latest
