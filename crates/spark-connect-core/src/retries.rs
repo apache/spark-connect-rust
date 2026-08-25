@@ -263,7 +263,8 @@ mod tests {
         };
         let mut state = RetryPolicyState::new(policy);
         let w = state.next_attempt(None).expect("first retry allowed");
-        assert!((100..140).contains(&w), "expected 100..140 with jitter, got {w}");
+        // jitter is [0, 40); base 100 + jitter, rounded up, lands in [100, 140].
+        assert!((100..=140).contains(&w), "expected 100..=140 with jitter, got {w}");
         assert_eq!(state.attempt(), 1);
     }
 
