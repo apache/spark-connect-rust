@@ -44,11 +44,29 @@ _fail = []
 
 
 def ck(label, fn):
-    """Run one operation independently; record ok/fail, never abort the run."""
+    """Run one operation independently; record ok/fail, never abort the run.
+
+    This only proves the call does not raise. For correctness (the bug class this
+    client has hit is *silently wrong values*, e.g. a nullary ``F.struct()``
+    returning an empty struct and throwing nothing), use ``ckv`` below, which
+    asserts the actual result.
+    """
     try:
         fn()
         _ok.append(label)
     except Exception as e:  # noqa: BLE001 - best-effort surface exercise
+        _fail.append(f"{label}: {type(e).__name__}: {str(e)[:110]}")
+
+
+def ckv(label, fn, expected):
+    """Like ``ck`` but assert ``fn() == expected`` - catches silently-wrong values."""
+    try:
+        got = fn()
+        if got != expected:
+            _fail.append(f"{label}: expected {expected!r}, got {got!r}")
+        else:
+            _ok.append(label)
+    except Exception as e:  # noqa: BLE001
         _fail.append(f"{label}: {type(e).__name__}: {str(e)[:110]}")
 
 
@@ -455,6 +473,64 @@ def main():
         spark.streams.resetTerminated()
 
     ck("streaming.rate", _streaming)
+
+    # ---- correctness assertions (catch silently-wrong values, not just exceptions) ---
+    # These pin actual results for the operations most prone to returning wrong-but-
+    # non-throwing data - especially the variadic functions whose bug was an empty
+    # result with no exception.
+    ckv("val.range.count", lambda: spark.range(5).count(), 5)
+    ckv("val.range.rows", lambda: [r.id for r in spark.range(3).collect()], [0, 1, 2])
+    ckv("val.df.count", lambda: df.count(), 4)
+    ckv("val.filter.count", lambda: df.filter(F.col("id") > 1).count(), 3)
+    ckv("val.distinct.count", lambda: df.select("id").distinct().count(), 3)
+    ckv(
+        "val.groupby.sum",
+        lambda: {r.id: r.s for r in df.groupBy("id").agg(F.sum("val").alias("s")).collect()},
+        {1: 10.0, 2: 50.0, 3: 40.0},
+    )
+    ckv("val.union.count", lambda: df.union(other).count(), 8)
+    ckv("val.join.count", lambda: df.select("id").join(other.select("id"), "id").count(), 6)
+    # The variadic-function bug class: these must return populated results.
+    ckv(
+        "val.struct",
+        # dict(...) normalizes whether the nested struct comes back as a Row or a dict;
+        # the point is it is *populated* (the nullary-F.struct bug returned {}).
+        lambda: dict(
+            spark.range(1)
+            .select(F.struct(F.lit(1).alias("a"), F.lit("x").alias("b")).alias("s"))
+            .collect()[0]["s"]
+        ),
+        {"a": 1, "b": "x"},
+    )
+    ckv(
+        "val.array",
+        lambda: spark.range(1)
+        .select(F.array(F.lit(1), F.lit(2), F.lit(3)).alias("a"))
+        .collect()[0]["a"],
+        [1, 2, 3],
+    )
+    ckv(
+        "val.coalesce",
+        lambda: spark.range(1)
+        .select(F.coalesce(F.lit(None), F.lit(7)).alias("c"))
+        .collect()[0]["c"],
+        7,
+    )
+    ckv(
+        "val.concat",
+        lambda: spark.range(1)
+        .select(F.concat(F.lit("a"), F.lit("b")).alias("c"))
+        .collect()[0]["c"],
+        "ab",
+    )
+    ckv(
+        "val.create_map",
+        lambda: spark.range(1)
+        .select(F.create_map(F.lit("k"), F.lit(9)).alias("m"))
+        .collect()[0]["m"],
+        {"k": 9},
+    )
+    ckv("val.sql.lit", lambda: spark.sql("SELECT 1 AS a").collect()[0]["a"], 1)
 
     ck("session.stop", lambda: spark.stop())
 
