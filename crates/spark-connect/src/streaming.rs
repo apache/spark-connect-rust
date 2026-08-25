@@ -661,7 +661,14 @@ impl StreamingQuery {
         }
     }
 
-    /// Execute a streaming query command and return the result.
+    /// Execute a streaming query command and return the parsed result.
+    ///
+    /// The server replies on the execute-plan stream with a
+    /// `StreamingQueryCommandResult` in the `response_type` oneof; we drain the
+    /// stream (via the shared collector, so metrics/progress are captured too) and
+    /// return the first such result. Earlier this discarded the stream and returned
+    /// a default, so every status/isActive/explain/exception/progress call saw an
+    /// empty result — status/isActive then failed with "Missing status".
     fn _execute_command(
         &self,
         mut cmd: proto::StreamingQueryCommand,
@@ -671,19 +678,20 @@ impl StreamingQuery {
         query_id.run_id = self.run_id.clone();
         cmd.query_id = Some(query_id);
 
-        let mut plan = proto::Plan::default();
-        let mut exec_cmd = proto::Command::default();
-        exec_cmd.command_type = Some(proto::command::CommandType::StreamingQueryCommand(cmd));
-        plan.op_type = Some(proto::plan::OpType::Command(exec_cmd));
+        let responses = crate::dataframe::execute_command_collect(
+            &self.session,
+            proto::command::CommandType::StreamingQueryCommand(cmd),
+        )?;
 
-        let request = proto::ExecutePlanRequest {
-            session_id: self.session.client().session_id().to_string(),
-            user_context: Some(proto::UserContext::default()),
-            plan: Some(plan),
-            ..Default::default()
-        };
+        for resp in responses {
+            if let Some(
+                proto::execute_plan_response::ResponseType::StreamingQueryCommandResult(result),
+            ) = resp.response_type
+            {
+                return Ok(result);
+            }
+        }
 
-        let _response_stream = block_on(self.session.client().execute_plan(request))?;
         Ok(proto::StreamingQueryCommandResult::default())
     }
 }
@@ -956,26 +964,32 @@ impl StreamingQueryManager {
         })
     }
 
-    /// Execute a streaming query manager command and return the result.
+    /// Execute a streaming query manager command and return the parsed result.
+    ///
+    /// Like `StreamingQuery::_execute_command`, the server's reply carries a
+    /// `StreamingQueryManagerCommandResult` in the response stream; drain it and
+    /// return the first such result (was discarded before, so active/get/etc.
+    /// always saw an empty result).
     fn _execute_manager_command(
         &self,
         cmd: proto::StreamingQueryManagerCommand,
     ) -> Result<proto::StreamingQueryManagerCommandResult> {
-        let mut plan = proto::Plan::default();
-        let mut exec_cmd = proto::Command::default();
-        exec_cmd.command_type = Some(proto::command::CommandType::StreamingQueryManagerCommand(
-            cmd,
-        ));
-        plan.op_type = Some(proto::plan::OpType::Command(exec_cmd));
+        let responses = crate::dataframe::execute_command_collect(
+            &self.session,
+            proto::command::CommandType::StreamingQueryManagerCommand(cmd),
+        )?;
 
-        let request = proto::ExecutePlanRequest {
-            session_id: self.session.client().session_id().to_string(),
-            user_context: Some(proto::UserContext::default()),
-            plan: Some(plan),
-            ..Default::default()
-        };
+        for resp in responses {
+            if let Some(
+                proto::execute_plan_response::ResponseType::StreamingQueryManagerCommandResult(
+                    result,
+                ),
+            ) = resp.response_type
+            {
+                return Ok(result);
+            }
+        }
 
-        let _response_stream = block_on(self.session.client().execute_plan(request))?;
         Ok(proto::StreamingQueryManagerCommandResult::default())
     }
 }

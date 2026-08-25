@@ -278,6 +278,115 @@ def main():
     ck("catalog.table", lambda: spark.table("v_e2e2").count())
     ck("catalog.dropTempView", lambda: spark.catalog.dropTempView("v_e2e2"))
 
+    # ---- functions: build every function once (covers functions.rs) -------------
+    def _build_all_functions():
+        ci, cs, cd = F.col("id"), F.col("name"), F.col("val")
+        lit1 = F.lit(1)
+        variants = [
+            (ci,),
+            (ci, cd),
+            (ci, cd, ci),
+            (ci, cs),
+            (ci, "x"),
+            (ci, 1),
+            (cs,),
+            ("x",),
+            (lit1,),
+            (),
+            (ci, ci, ci, ci),
+            (cs, cs),
+        ]
+        built = 0
+        for name in dir(F):
+            if name.startswith("_"):
+                continue
+            fn = getattr(F, name)
+            if not callable(fn):
+                continue
+            for a in variants:
+                try:
+                    fn(*a)
+                    built += 1
+                    break
+                except Exception:  # noqa: BLE001 - wrong arity/type; try the next shape
+                    continue
+        assert built > 400, f"only {built} functions built"
+
+    ck("functions.build_all", _build_all_functions)
+
+    # ---- window frame specs -----------------------------------------------------
+    ck(
+        "window.rowsBetween",
+        lambda: df.select(
+            F.sum("val").over(
+                Window.partitionBy("id")
+                .orderBy("val")
+                .rowsBetween(Window.unboundedPreceding, Window.currentRow)
+            )
+        ).collect(),
+    )
+    ck(
+        "window.rangeBetween",
+        lambda: df.select(
+            F.sum("val").over(
+                Window.partitionBy("id")
+                .orderBy("val")
+                .rangeBetween(Window.unboundedPreceding, Window.currentRow)
+            )
+        ).collect(),
+    )
+
+    # ---- session extras ---------------------------------------------------------
+    ck("session.sessionId", lambda: spark.sessionId)
+    ck("session.newSession", lambda: spark.newSession())
+    ck("session.cloneSession", lambda: spark.cloneSession())
+    ck("session.emptyDataFrame", lambda: spark.emptyDataFrame().count())
+    ck("session.range_full", lambda: spark.range(0, 10, 2, 2).count())
+    ck("session.addTag", lambda: spark.addTag("e2e-tag"))
+    ck("session.getTags", lambda: spark.getTags())
+    ck("session.removeTag", lambda: spark.removeTag("e2e-tag"))
+    ck("session.clearTags", lambda: spark.clearTags())
+    ck("session.interruptAll", lambda: spark.interruptAll())
+    ck("session.getActiveSession", lambda: SparkSession.getActiveSession())
+    ck("session.profile", lambda: spark.profile)
+    ck("session.dataSource", lambda: spark.dataSource)
+
+    # ---- resource profile -------------------------------------------------------
+    def _resource():
+        from pyspark.resource import (
+            ExecutorResourceRequests,
+            ResourceProfileBuilder,
+            TaskResourceRequests,
+        )
+
+        rpb = ResourceProfileBuilder()
+        rpb.require(ExecutorResourceRequests().cores(2))
+        rpb.require(TaskResourceRequests().cpus(1))
+        _ = rpb.build
+
+    ck("resource.profile", _resource)
+
+    # ---- streaming (rate source, best effort) -----------------------------------
+    def _streaming():
+        import time
+
+        sdf = spark.readStream.format("rate").option("rowsPerSecond", 1).load()
+        assert sdf.isStreaming
+        q = (
+            sdf.writeStream.format("memory")
+            .queryName("e2e_stream")
+            .outputMode("append")
+            .trigger(processingTime="1 second")
+            .start()
+        )
+        time.sleep(2)
+        _ = (q.id, q.name, q.isActive, q.status, q.recentProgress)
+        q.stop()
+        _ = spark.streams.active
+        spark.streams.resetTerminated()
+
+    ck("streaming.rate", _streaming)
+
     ck("session.stop", lambda: spark.stop())
 
     total = len(_ok) + len(_fail)

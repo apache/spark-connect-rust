@@ -49,9 +49,10 @@ impl PyDataStreamReader {
         })
     }
 
-    fn option(&mut self, key: &str, value: &str) -> PyResult<PyDataStreamReader> {
+    fn option(&mut self, key: &str, value: &Bound<'_, PyAny>) -> PyResult<PyDataStreamReader> {
+        let v = value.str()?.to_string();
         Ok(PyDataStreamReader {
-            inner: Some(self.take()?.option(key, value)),
+            inner: Some(self.take()?.option(key, &v)),
         })
     }
 
@@ -178,9 +179,10 @@ impl PyDataStreamWriter {
         })
     }
 
-    fn option(&mut self, key: &str, value: &str) -> PyResult<PyDataStreamWriter> {
+    fn option(&mut self, key: &str, value: &Bound<'_, PyAny>) -> PyResult<PyDataStreamWriter> {
+        let v = value.str()?.to_string();
         Ok(PyDataStreamWriter {
-            inner: Some(self.take()?.option(key, value)),
+            inner: Some(self.take()?.option(key, &v)),
         })
     }
 
