@@ -453,7 +453,21 @@ def main():
         ).collect(),
     )
 
-    # ---- streaming (rate source, best effort) -----------------------------------
+    # ---- DataStreamReader: option/options/schema variants -----------------------
+    ck(
+        "readStream.options",
+        lambda: spark.readStream.format("rate").options(rowsPerSecond="1").load().isStreaming,
+    )
+    ck(
+        "readStream.schema",
+        lambda: spark.readStream.format("rate")
+        .schema("timestamp timestamp, value long")
+        .option("rowsPerSecond", 1)
+        .load()
+        .isStreaming,
+    )
+
+    # ---- streaming query: exercise the full StreamingQuery/manager surface -------
     def _streaming():
         import time
 
@@ -467,12 +481,33 @@ def main():
             .start()
         )
         time.sleep(2)
-        _ = (q.id, q.name, q.isActive, q.status, q.recentProgress)
+        # Read-only StreamingQuery surface (all reachable without a Python worker).
+        # NB: not processAllAvailable() - it blocks forever on an unbounded rate source.
+        _ = (q.id, q.runId, q.name, q.isActive, q.status, q.recentProgress, q.lastProgress)
+        _ = q.explain()
+        _ = q.exception()
+        _ = q.awaitTermination(0.2)
+        # StreamingQueryManager surface.
+        mgr = spark.streams
+        _ = mgr.active
+        _ = mgr.get(q.id)
+        _ = mgr.awaitAnyTermination(0.2)
         q.stop()
-        _ = spark.streams.active
-        spark.streams.resetTerminated()
+        mgr.resetTerminated()
 
-    ck("streaming.rate", _streaming)
+    ck("streaming.query_surface", _streaming)
+
+    # ---- Trigger variants + writer options (no query started) -------------------
+    def _trigger_variants():
+        base = spark.readStream.format("rate").option("rowsPerSecond", 1).load()
+        # Each builds a distinct Trigger/DataStreamWriter without starting.
+        _ = base.writeStream.trigger(once=True)
+        _ = base.writeStream.trigger(availableNow=True)
+        _ = base.writeStream.trigger(continuous="1 second")
+        _ = base.writeStream.format("memory").options(truncate="false")
+        _ = base.writeStream.partitionBy("value")
+
+    ck("streaming.trigger_variants", _trigger_variants)
 
     # ---- correctness assertions (catch silently-wrong values, not just exceptions) ---
     # These pin actual results for the operations most prone to returning wrong-but-

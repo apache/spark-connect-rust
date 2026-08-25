@@ -56,12 +56,15 @@ impl PyDataStreamReader {
         })
     }
 
-    fn options(&mut self, options: &Bound<'_, PyDict>) -> PyResult<PyDataStreamReader> {
+    // Mirrors reference `DataStreamReader.options(**options)`: keyword args, with
+    // values coerced to their string form (so ints/bools work like the reference).
+    #[pyo3(signature = (**options))]
+    fn options(&mut self, options: Option<&Bound<'_, PyDict>>) -> PyResult<PyDataStreamReader> {
         let mut opts = HashMap::new();
-        for (k, v) in options.iter() {
-            let key: String = k.extract()?;
-            let val: String = v.extract()?;
-            opts.insert(key, val);
+        if let Some(options) = options {
+            for (k, v) in options.iter() {
+                opts.insert(k.str()?.to_string(), v.str()?.to_string());
+            }
         }
         Ok(PyDataStreamReader {
             inner: Some(self.take()?.options(opts)),
@@ -186,12 +189,15 @@ impl PyDataStreamWriter {
         })
     }
 
-    fn options(&mut self, options: &Bound<'_, PyDict>) -> PyResult<PyDataStreamWriter> {
+    // Mirrors reference `DataStreamWriter.options(**options)`: keyword args, values
+    // coerced to string.
+    #[pyo3(signature = (**options))]
+    fn options(&mut self, options: Option<&Bound<'_, PyDict>>) -> PyResult<PyDataStreamWriter> {
         let mut opts = HashMap::new();
-        for (k, v) in options.iter() {
-            let key: String = k.extract()?;
-            let val: String = v.extract()?;
-            opts.insert(key, val);
+        if let Some(options) = options {
+            for (k, v) in options.iter() {
+                opts.insert(k.str()?.to_string(), v.str()?.to_string());
+            }
         }
         Ok(PyDataStreamWriter {
             inner: Some(self.take()?.options(opts)),
@@ -441,9 +447,10 @@ impl PyStreamingQuery {
         self.inner.process_all_available().to_pyerr()
     }
 
-    fn explain(&self, extended: Option<bool>) -> PyResult<String> {
-        let ext = extended.unwrap_or(false);
-        self.inner.explain(ext).to_pyerr()
+    // Mirrors reference `StreamingQuery.explain(extended=False)` - the arg is optional.
+    #[pyo3(signature = (extended=false))]
+    fn explain(&self, extended: bool) -> PyResult<String> {
+        self.inner.explain(extended).to_pyerr()
     }
 
     fn exception(&self) -> PyResult<Option<PyStreamingQueryException>> {

@@ -1160,12 +1160,18 @@ impl PyDataFrameWriter {
         })
     }
 
-    fn options(
-        &mut self,
-        options: std::collections::HashMap<String, String>,
-    ) -> PyResult<PyDataFrameWriter> {
+    // Mirrors reference `DataFrameWriter.options(**options)`: keyword args, values
+    // coerced to string (so ints/bools work).
+    #[pyo3(signature = (**options))]
+    fn options(&mut self, options: Option<&Bound<'_, PyDict>>) -> PyResult<PyDataFrameWriter> {
+        let mut map = std::collections::HashMap::new();
+        if let Some(options) = options {
+            for (k, v) in options.iter() {
+                map.insert(k.str()?.to_string(), v.str()?.to_string());
+            }
+        }
         Ok(PyDataFrameWriter {
-            inner: Some(self.take()?.options(options)),
+            inner: Some(self.take()?.options(map)),
         })
     }
 
@@ -1254,12 +1260,17 @@ impl PyDataFrameWriterV2 {
         })
     }
 
-    fn options(
-        &mut self,
-        options: std::collections::HashMap<String, String>,
-    ) -> PyResult<PyDataFrameWriterV2> {
+    // Mirrors reference `DataFrameWriterV2.options(**options)`.
+    #[pyo3(signature = (**options))]
+    fn options(&mut self, options: Option<&Bound<'_, PyDict>>) -> PyResult<PyDataFrameWriterV2> {
+        let mut map = std::collections::HashMap::new();
+        if let Some(options) = options {
+            for (k, v) in options.iter() {
+                map.insert(k.str()?.to_string(), v.str()?.to_string());
+            }
+        }
         Ok(PyDataFrameWriterV2 {
-            inner: Some(self.take()?.options(options)),
+            inner: Some(self.take()?.options(map)),
         })
     }
 

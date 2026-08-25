@@ -50,11 +50,15 @@ impl PyDataFrameReader {
         Ok(PyDataFrameReader::new(self.take()?.option(key, &v)))
     }
 
-    /// Set multiple read options from a mapping.
-    fn options(&mut self, options: &Bound<'_, PyDict>) -> PyResult<PyDataFrameReader> {
-        let mut map = HashMap::with_capacity(options.len());
-        for (k, v) in options.iter() {
-            map.insert(k.extract::<String>()?, v.str()?.to_string());
+    /// Set multiple read options. Mirrors reference `DataFrameReader.options(**options)`
+    /// - keyword args, values coerced to their string form.
+    #[pyo3(signature = (**options))]
+    fn options(&mut self, options: Option<&Bound<'_, PyDict>>) -> PyResult<PyDataFrameReader> {
+        let mut map = HashMap::new();
+        if let Some(options) = options {
+            for (k, v) in options.iter() {
+                map.insert(k.str()?.to_string(), v.str()?.to_string());
+            }
         }
         Ok(PyDataFrameReader::new(self.take()?.options(map)))
     }
