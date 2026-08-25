@@ -47,7 +47,7 @@ jobs:
   # Reference-vs-ours parity gate against a real Spark 4.2.0 Connect server.
   # ---------------------------------------------------------------------------
   connect-parity:
-    name: Connect parity vs reference (Python ${{ matrix.python-version }})
+    name: Connect parity (official suite via our client, Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -153,7 +153,7 @@ jobs:
           SPARK_HOME="${{ steps.spark-download.outputs.SPARK_HOME }}"
           echo "Starting Connect server on ${SPARK_CONNECT_TESTING_REMOTE}"
           # Give the driver extra heap: the parity gate runs all 84 files serially against
-          # this one server (~2h), and a 1g default degrades late in the run (GC pressure),
+          # this one server, and a 1g default degrades late in the run (GC pressure),
           # which is what made the streaming listener/observation files flake.
           "${SPARK_HOME}/sbin/start-connect-server.sh" \
             --packages "org.apache.spark:spark-connect_2.13:${SPARK_VERSION}" \
@@ -168,40 +168,40 @@ jobs:
             sleep 1
           done
 
-      - name: Parity - reference client vs OUR Rust client (via transport injection)
+      - name: Parity - official connect suite through OUR Rust client
         id: parity
         env:
           PYTHONUNBUFFERED: "1"   # stream per-file progress into the live log
           RUST_PYSPARK_SO: ${{ github.workspace }}/python/pyspark/_pyspark.so
         run: |
-          # pipefail so the script's exit code (nonzero on regressions) gates the job -
-          # otherwise `| tee` would mask it and the gate would be falsely green.
+          # pipefail so the script's exit code (nonzero on any unexpected failure) gates
+          # the job - otherwise `| tee` would mask it and the gate would be falsely green.
           set -o pipefail
-          # "ours" runs each official connect test through the Rust transport plugin
-          # (genuinely exercises our client); "reference" runs stock pyspark. Fails on
-          # any regression (a test the reference passes but ours fails).
-          # Runs the full SQL connect suite, including Python/pandas UDF and arrow
-          # modules (the server now has worker-capable Python via PYSPARK_PYTHON).
+          # Run the official connect suite ONLY through the Rust transport plugin (which
+          # genuinely exercises our client), requiring every test to pass except the
+          # checked-in manifest of known *environmental* failures (scripts/
+          # parity_known_failures.txt) - tests the reference client also fails in this
+          # single-node pure-Connect environment. Now that the client is at full parity we
+          # no longer run the reference client on every file just to derive that baseline,
+          # which roughly halves this job. Regenerate the manifest with
+          # scripts/gen_parity_skiplist.py when the pinned Spark version bumps.
           # Run serially (--jobs 1), matching Apache's own connect test runner
-          # (./python/run-tests --parallelism=1). The streaming-query-listener tests
-          # (e.g. test_parity_listener) wait on real server-pushed progress events and
-          # are timeout-sensitive; running files in parallel starves them under server
-          # contention and makes them exceed the per-file cap even though they pass when
-          # run alone. Serial execution removes that artifact without weakening the gate.
-          python scripts/rust_parity_diff.py \
+          # (./python/run-tests --parallelism=1): the streaming-query-listener tests wait
+          # on real server-pushed progress events and are timeout-sensitive, so parallel
+          # runs starve them under server contention. Serial removes that artifact.
+          python scripts/run_official_tests.py \
             --spark "${{ steps.spark-source.outputs.SPARK_SOURCE }}" \
             --remote "${SPARK_CONNECT_TESTING_REMOTE}" \
-            --path-contains "sql/tests/connect" \
             --jobs 1 \
-            2>&1 | tee /tmp/parity_diff.log
+            2>&1 | tee /tmp/parity_ours.log
 
-      - name: Upload parity diff + server log
+      - name: Upload parity log + server log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: parity-diff-py${{ matrix.python-version }}
+          name: parity-ours-py${{ matrix.python-version }}
           path: |
-            /tmp/parity_diff.log
+            /tmp/parity_ours.log
             /tmp/connect-server.log
           if-no-files-found: warn
 
