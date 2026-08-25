@@ -1,0 +1,22 @@
+[package]
+name = "pyspark-rs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PyO3 bindings exposing the Rust Spark Connect client as a drop-in pyspark package"
+# The Python extension (cdylib) is distributed as a PyPI wheel, not on crates.io.
+publish = false
+
+[lib]
+name = "_pyspark"
+crate-type = ["cdylib"]
+
+[dependencies]
+spark-connect = { package = "apache-spark-connect", path = "../spark-connect" }
+spark-connect-core = { package = "apache-spark-connect-core", path = "../spark-connect-core" }
+spark-connect-proto = { package = "apache-spark-connect-proto", path = "../spark-connect-proto" }
+pyo3.workspace = true
+arrow.workspace = true
+tokio.workspace = true
+prost.workspace = true
+tonic.workspace = true

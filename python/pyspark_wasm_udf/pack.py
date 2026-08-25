@@ -45,7 +45,7 @@ import base64
 import json
 import sys
 
-import cloudpickle
+from pyspark import cloudpickle
 
 import pyspark_wasm_udf
 from pyspark_wasm_udf import WasmScalarUDF

@@ -1,0 +1,65 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "pyspark-client-rust"
+version = "4.2.0"
+description = "Rust-backed drop-in replacement for pyspark.sql.connect — full API parity with native performance"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "Apache-2.0"}
+authors = [{name = "Apache Spark", email = "dev@spark.apache.org"}]
+keywords = ["pyspark", "spark", "connect", "rust"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Rust",
+    "Topic :: Software Development :: Libraries",
+]
+
+dependencies = [
+    "pandas>=1.0.0",
+    "pyarrow>=10.0.0",
+    "numpy>=1.16.0",
+]
+# cloudpickle is vendored at pyspark/cloudpickle (matching Apache Spark's own
+# bundling), so it is intentionally NOT an external dependency.
+
+[project.optional-dependencies]
+grpc = ["grpcio>=1.48.0"]
+all = ["grpcio>=1.48.0"]
+
+[project.urls]
+Homepage = "https://spark.apache.org/"
+Repository = "https://github.com/apache/spark-connect-rust"
+"Bug Tracker" = "https://issues.apache.org/jira/browse/SPARK"
+
+[tool.ruff]
+# Lint only our authored tooling/scripts. The python/pyspark tree is largely vendored
+# from Apache Spark (pandas-on-Spark, the drop-in skin) and must stay
+# byte-compatible with upstream, so it is intentionally excluded from our linter.
+line-length = 100
+target-version = "py39"
+extend-exclude = ["python/pyspark", "target", ".claude"]
+include = ["scripts/**/*.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]  # line length handled by the formatter, not enforced hard
+
+[tool.maturin]
+# Mixed Python/Rust layout: the pure-Python drop-in skin lives under python/pyspark,
+# and the PyO3 extension is placed inside it as pyspark._pyspark.
+python-source = "python"
+module-name = "pyspark._pyspark"
+manifest-path = "crates/pyspark-rs/Cargo.toml"
+# Use abi3 for a stable ABI compatible across Python 3.9+.
+features = ["pyo3/abi3-py39", "pyo3/extension-module"]
