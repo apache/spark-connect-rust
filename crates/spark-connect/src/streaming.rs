@@ -388,9 +388,13 @@ impl DataStreamWriter {
         }
 
         if let Some(path) = &self.path {
-            write_op.sink_destination = Some(
-                proto::write_stream_operation_start::SinkDestination::Path(path.clone()),
-            );
+            // A memory/console/foreach sink has no path; only set the destination for a
+            // real (non-empty) path so those sinks send an unset sink_destination.
+            if !path.is_empty() {
+                write_op.sink_destination = Some(
+                    proto::write_stream_operation_start::SinkDestination::Path(path.clone()),
+                );
+            }
         }
 
         if let Some(table) = &self.table_name {

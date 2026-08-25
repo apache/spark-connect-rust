@@ -2027,6 +2027,26 @@ fn decode_arrow_record_batches(
 }
 
 /// Extract a value at a specific index from an Arrow array.
+/// Format an unscaled `i128` and scale as a decimal string (e.g. 150, scale 2 -> "1.50").
+fn i128_to_decimal_string(unscaled: i128, scale: i32) -> String {
+    if scale <= 0 {
+        return unscaled.to_string();
+    }
+    let scale = scale as usize;
+    let neg = unscaled < 0;
+    let mut digits = unscaled.unsigned_abs().to_string();
+    if digits.len() <= scale {
+        digits = format!("{}{}", "0".repeat(scale - digits.len() + 1), digits);
+    }
+    let point = digits.len() - scale;
+    let s = format!("{}.{}", &digits[..point], &digits[point..]);
+    if neg {
+        format!("-{s}")
+    } else {
+        s
+    }
+}
+
 fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> Result<Value> {
     use arrow::array::*;
 
@@ -2085,13 +2105,14 @@ fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> Result<Value
         })?;
         return Ok(Value::Long(i64_val));
     }
-    // Decimal128 -> scaled f64 (Double).
+    // Decimal128 -> Value::Decimal (exact, not lossy f64), preserving precision/scale.
     if let Some(arr) = array.as_any().downcast_ref::<Decimal128Array>() {
-        let unscaled = arr.value(index);
-        let scale = arr.scale() as u32;
-        let divisor = 10f64.powi(scale as i32);
-        let value = (unscaled as f64) / divisor;
-        return Ok(Value::Double(value));
+        let scale = arr.scale() as i32;
+        return Ok(Value::Decimal {
+            value: i128_to_decimal_string(arr.value(index), scale),
+            precision: Some(arr.precision() as i32),
+            scale: Some(scale),
+        });
     }
     // Large / view string & binary variants.
     if let Some(arr) = array.as_any().downcast_ref::<LargeStringArray>() {

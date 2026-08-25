@@ -607,6 +607,9 @@ fn schema_to_arrow_fields(schema: &DataType) -> Result<Vec<arrow::datatypes::Fie
                     DataType::Binary => ArrowDataType::Binary,
                     DataType::Date => ArrowDataType::Date32,
                     DataType::Timestamp => ArrowDataType::Timestamp(TimeUnit::Microsecond, None),
+                    DataType::Decimal { precision, scale } => {
+                        ArrowDataType::Decimal128(*precision as u8, *scale as i8)
+                    }
                     _ => {
                         return Err(SparkError::connect_msg(
                             "Unsupported type for Arrow conversion",
@@ -759,6 +762,90 @@ fn build_arrow_array(rows: &[Row], field_idx: usize) -> Result<Arc<dyn arrow::ar
                 .collect();
             Ok(Arc::new(BinaryArray::from(values?)))
         }
+        Value::Date(_) => {
+            let values: Result<Vec<Option<i32>>> = rows
+                .iter()
+                .map(|r| {
+                    r.get(field_idx)
+                        .map(|v| match v {
+                            Value::Date(d) => Ok(*d),
+                            _ => Err(SparkError::connect_msg("Type mismatch in row data")),
+                        })
+                        .transpose()
+                })
+                .collect();
+            Ok(Arc::new(Date32Array::from(values?)))
+        }
+        Value::Timestamp(_) => {
+            let values: Result<Vec<Option<i64>>> = rows
+                .iter()
+                .map(|r| {
+                    r.get(field_idx)
+                        .map(|v| match v {
+                            Value::Timestamp(t) => Ok(*t),
+                            _ => Err(SparkError::connect_msg("Type mismatch in row data")),
+                        })
+                        .transpose()
+                })
+                .collect();
+            Ok(Arc::new(TimestampMicrosecondArray::from(values?)))
+        }
+        Value::Decimal { scale, .. } => {
+            // Column-wide precision/scale come from the first value (Spark decimals in a
+            // column share one precision/scale). Each value's string is parsed to an
+            // unscaled i128 at that scale.
+            let col_scale = scale.unwrap_or(0);
+            let values: Result<Vec<Option<i128>>> = rows
+                .iter()
+                .map(|r| {
+                    r.get(field_idx)
+                        .map(|v| match v {
+                            Value::Decimal { value, .. } => {
+                                decimal_str_to_unscaled(value, col_scale)
+                            }
+                            _ => Err(SparkError::connect_msg("Type mismatch in row data")),
+                        })
+                        .transpose()
+                })
+                .collect();
+            let arr = Decimal128Array::from(values?)
+                .with_precision_and_scale(38, col_scale as i8)
+                .map_err(|e| SparkError::connect_msg(format!("decimal build: {e}")))?;
+            Ok(Arc::new(arr))
+        }
         _ => Err(SparkError::connect_msg("Unsupported value type")),
     }
+}
+
+/// Parse a decimal string (e.g. "-1.50") into an unscaled `i128` at the given scale
+/// (e.g. scale 2 → -150). Pads/truncates the fractional part to `scale` digits.
+fn decimal_str_to_unscaled(s: &str, scale: i32) -> Result<i128> {
+    let s = s.trim();
+    let (neg, s) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s.strip_prefix('+').unwrap_or(s)),
+    };
+    let (int_part, frac_part) = match s.split_once('.') {
+        Some((i, f)) => (i, f),
+        None => (s, ""),
+    };
+    let scale = scale.max(0) as usize;
+    let mut digits = String::with_capacity(int_part.len() + scale);
+    digits.push_str(int_part);
+    // Pad or truncate the fractional digits to exactly `scale`.
+    let frac: String = frac_part
+        .chars()
+        .chain(std::iter::repeat('0'))
+        .take(scale)
+        .collect();
+    digits.push_str(&frac);
+    let digits = digits.trim_start_matches('0');
+    let mag: i128 = if digits.is_empty() {
+        0
+    } else {
+        digits
+            .parse::<i128>()
+            .map_err(|e| SparkError::connect_msg(format!("invalid decimal '{s}': {e}")))?
+    };
+    Ok(if neg { -mag } else { mag })
 }

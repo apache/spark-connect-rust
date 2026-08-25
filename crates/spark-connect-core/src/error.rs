@@ -338,7 +338,7 @@ impl SparkError {
             // Decode grpc-status-details-bin as a google.rpc.Status with Any-packed ErrorInfo.
             match parse_error_info_from_details(&details) {
                 Some((error_class, params, sql_state, server_stacktrace)) => Self {
-                    kind: classify_error_kind(&error_class),
+                    kind: classify_error_kind_with_classes(&error_class, &params),
                     error_class,
                     params,
                     message,
@@ -490,6 +490,48 @@ fn parse_error_info_from_details(
     }
 
     None
+}
+
+/// Classify a server error into a `SparkErrorKind`, preferring the JVM exception-class
+/// hierarchy (the `classes` metadata, e.g. `["org.apache.spark.sql.AnalysisException",…]`)
+/// over the error-condition name. Spark's analysis errors are named `UNRESOLVED_COLUMN`,
+/// `TABLE_OR_VIEW_NOT_FOUND`, … — none start with "ANALYSIS" — so classifying by the
+/// condition string alone mislabels them as generic runtime errors and breaks
+/// `except AnalysisException:`.
+fn classify_error_kind_with_classes(
+    error_class: &str,
+    params: &BTreeMap<String, String>,
+) -> SparkErrorKind {
+    if let Some(classes) = params.get("classes") {
+        // Most-specific first; the string holds the whole hierarchy.
+        let checks: &[(&str, SparkErrorKind)] = &[
+            ("AnalysisException", SparkErrorKind::Analysis),
+            ("ParseException", SparkErrorKind::Parse),
+            ("StreamingQueryException", SparkErrorKind::StreamingQuery),
+            ("SparkUpgradeException", SparkErrorKind::SparkUpgrade),
+            ("NumberFormatException", SparkErrorKind::NumberFormat),
+            (
+                "ArrayIndexOutOfBoundsException",
+                SparkErrorKind::ArrayIndexOutOfBounds,
+            ),
+            ("DateTimeException", SparkErrorKind::DateTime),
+            ("ArithmeticException", SparkErrorKind::Arithmetic),
+            (
+                "UnsupportedOperationException",
+                SparkErrorKind::UnsupportedOperation,
+            ),
+            ("IllegalArgumentException", SparkErrorKind::IllegalArgument),
+            ("NoSuchElementException", SparkErrorKind::SparkNoSuchElement),
+            ("PythonException", SparkErrorKind::Python),
+            ("SparkRuntimeException", SparkErrorKind::SparkRuntime),
+        ];
+        for (needle, kind) in checks {
+            if classes.contains(needle) {
+                return *kind;
+            }
+        }
+    }
+    classify_error_kind(error_class)
 }
 
 /// Classify error_class string into a SparkErrorKind.
