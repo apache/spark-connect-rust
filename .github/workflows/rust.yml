@@ -122,6 +122,15 @@ jobs:
           cargo build -p examples --bin wasm_udf_macro --features examples/wasm-udf-macro
 
       - name: Packer end-to-end (Rust -> cloudpickle command)
+        # The packer runs `python -m pyspark_wasm_udf.pack`, which imports the
+        # reference `pyspark` (installed above) for `pyspark.cloudpickle` and
+        # `pyspark.sql.types._parse_datatype_json_value`, and produces a
+        # reference `DataType` the executors unpickle. Put *only* the
+        # `pyspark_wasm_udf` package on the packer path (not ./python, whose
+        # `pyspark` skin is Rust-backed and would shadow the reference).
         env:
-          SPARK_CONNECT_WASM_PACKER_PATH: ${{ github.workspace }}/python
-        run: cargo test -p apache-spark-connect --features wasm-udf -- --ignored packer_produces
+          SPARK_CONNECT_WASM_PACKER_PATH: ${{ github.workspace }}/.packer
+        run: |
+          mkdir -p .packer
+          cp -r python/pyspark_wasm_udf .packer/
+          cargo test -p apache-spark-connect --features wasm-udf -- --ignored packer_produces

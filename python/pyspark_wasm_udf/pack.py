@@ -35,10 +35,10 @@ generically with :func:`pyspark.sql.types._parse_datatype_json_value`, so any
 Spark type is supported without a token table.
 
 The command mirrors ``pyspark.sql.connect.expressions.PythonUDF``:
-``cloudpickle.dumps((func, output_type))``. We use the standalone PyPI
-``cloudpickle`` (byte-for-byte the same as ``pyspark.cloudpickle``) and register
-:mod:`pyspark_wasm_udf` for pickling **by value**, so executors need not have
-this package installed.
+``cloudpickle.dumps((func, output_type))``. We use the bundled
+``pyspark.cloudpickle`` (the same cloudpickle the reference client ships) and
+register :mod:`pyspark_wasm_udf` for pickling **by value**, so executors need not
+have this package installed.
 """
 
 import base64
