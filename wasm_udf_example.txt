@@ -1,0 +1,175 @@
+================================================================================
+Rust WASM UDF on Spark — end-user example
+================================================================================
+
+Run a Rust user-defined function on Spark, distributed on the executors, with no
+server-side plugin. You write plain Rust functions; the toolchain compiles them
+to WebAssembly, embeds the module, and ships it inside a normal Spark PythonUDF.
+Executors need only the `wasmtime` Python package.
+
+An end user writes THREE small files.
+
+
+--------------------------------------------------------------------------------
+1. src/main.rs  — write plain Rust functions and use them
+--------------------------------------------------------------------------------
+
+    use spark_connect_macros::spark_wasm_udf;
+
+    // Your UDFs — just plain Rust functions. Annotate the module; that's it.
+    #[spark_wasm_udf]
+    mod udfs {
+        pub fn add_one(x: i64) -> i64 {
+            x + 1
+        }
+
+        pub fn shout(s: String) -> String {
+            format!("{}!", s.to_uppercase())
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn main() -> Result<(), Box<dyn std::error::Error>> {
+        use spark_connect::functions::col;
+        use spark_connect::{SparkSession, SparkSessionBuilder};
+
+        let spark: SparkSession = SparkSessionBuilder::default()
+            .remote("sc://127.0.0.1:15002/")
+            .get_or_create()?;
+
+        // Pass columns straight in — one per argument. The macro generated
+        // udf::add_one / udf::shout: signature inferred, wasm module embedded.
+        spark
+            .range(5)?
+            .select(vec![
+                col("id"),
+                udf::add_one(col("id"))?.alias("id_plus_one"),
+                udf::shout(col("id").cast(spark_connect::types::DataType::String {
+                    collation: "UTF8_BINARY".to_string(),
+                }))?
+                .alias("shouted"),
+            ])
+            .show(20)?;
+
+        Ok(())
+    }
+
+
+--------------------------------------------------------------------------------
+2. build.rs  — one line
+--------------------------------------------------------------------------------
+
+    fn main() {
+        spark_connect_build::embed_wasm_udf("src/main.rs");
+    }
+
+
+--------------------------------------------------------------------------------
+3. Cargo.toml  — dependencies
+--------------------------------------------------------------------------------
+
+    [dependencies]
+    spark-connect-macros = { package = "apache-spark-connect-macros", version = "4.2" }
+
+    # client is host-only; not pulled into the wasm build
+    [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+    spark-connect = { package = "apache-spark-connect", version = "4.2", features = ["wasm-udf"] }
+
+    [build-dependencies]
+    spark-connect-build  = { package = "apache-spark-connect-build",  version = "4.2" }
+    spark-connect-macros = { package = "apache-spark-connect-macros", version = "4.2" }
+
+
+--------------------------------------------------------------------------------
+Run it
+--------------------------------------------------------------------------------
+
+    rustup target add wasm32-unknown-unknown           # once
+    export SPARK_CONNECT_WASM_PACKER_PATH=$PWD/python   # so the client finds the packer
+    cargo run
+
+Output (against a Spark 4.2.0 Connect server on :15002, wasmtime on executors):
+
+    +---+-----------+-------+
+    | id|id_plus_one|shouted|
+    +---+-----------+-------+
+    |  0|          1|     0!|
+    |  1|          2|     1!|
+    |  2|          3|     2!|
+    ...
+    +---+-----------+-------+
+
+
+--------------------------------------------------------------------------------
+The end-user mental model
+--------------------------------------------------------------------------------
+
+    They write                  They call                   They never touch
+    -----------------------     ------------------------    ------------------------
+    fn add_one(x: i64) -> i64   udf::add_one(col("id"))?    WASM bytes, the ABI,
+                                                            a .wasm file, the Spark
+                                                            type of the UDF
+
+The macro infers the Spark signature from the Rust types ((Long) -> Long),
+build.rs compiles the SAME source to WASM and embeds it, and the client ships it
+inside a normal Spark PythonUDF. Arity is checked at compile time: add_one takes
+one column; a two-arg UDF would be udf::concat(col("a"), col("b"))?.
+
+
+--------------------------------------------------------------------------------
+Supported argument / result types (inferred; nest arbitrarily)
+--------------------------------------------------------------------------------
+
+    Rust          Spark SQL type
+    ----------    ---------------------
+    i32           IntegerType
+    i64           LongType
+    f32           FloatType
+    f64           DoubleType
+    bool          BooleanType
+    String        StringType
+    Vec<u8>       BinaryType
+    Vec<T>        ArrayType (of T)
+    Option<T>     nullable T
+
+e.g. Vec<Option<String>> -> ArrayType(StringType, nullable).
+
+
+--------------------------------------------------------------------------------
+Two other shapes
+--------------------------------------------------------------------------------
+
+- UDFs as a reusable crate, called from any client:
+      wasm_udfs::udf::add_one(col("id"))?
+  (see wasm-udfs/ + examples/src/wasm_udf_macro.rs)
+
+- Advanced config via the builder accessor:
+      udf::add_one_udf().as_nondeterministic().call(vec![col("id")])?
+
+
+--------------------------------------------------------------------------------
+Caveat (see review finding #3 on PR #50)
+--------------------------------------------------------------------------------
+
+The UDF currently reports Python "3.11" to Spark by default. If your executors
+run a different Python minor version, set it explicitly until the default is
+fixed to derive from the packer's Python:
+
+    udf::add_one_udf().with_python_ver("3.10").call(vec![col("id")])?
+
+
+--------------------------------------------------------------------------------
+Preconditions (only when using Rust UDFs; nothing here unless `wasm-udf` is on)
+--------------------------------------------------------------------------------
+
+- Build machine: wasm32-unknown-unknown target; apache-spark-connect-macros +
+  apache-spark-connect-build as (build-)dependencies.
+- Client (building the UDF command): a Python interpreter with `cloudpickle`
+  and `pyspark`, plus the repo's python/ directory importable as
+  `pyspark_wasm_udf` (SPARK_CONNECT_PYTHON / SPARK_CONNECT_WASM_PACKER_PATH, or
+  UserDefinedFunction::with_packer).
+- Executors: the `wasmtime` Python package installed.
+- Spark: 4.2.0+.
+
+The single-file example above lives in the repo at wasm-udf-inline/.
+================================================================================

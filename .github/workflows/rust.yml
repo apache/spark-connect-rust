@@ -1,0 +1,108 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+
+name: Rust CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  rust-build-and-test:
+    name: Rust build and test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust-version: [stable]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ matrix.rust-version }}
+          rustflags: ""
+          cache: true
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Cargo build (non-pyspark crates only)
+        # Build only the non-extension crates; pyspark-rs is excluded from
+        # default-members and requires maturin/Python to build.
+        run: cargo build --release
+
+      - name: Cargo test (spark-connect and spark-connect-core)
+        # Test the core transport and pure-Rust client crates
+        run: cargo test -p apache-spark-connect -p apache-spark-connect-core --release
+
+      - name: Cargo build/test with optional conversion features (datafusion, polars)
+        # Exercises the to_datafusion()/to_polars() conversions, which are gated
+        # behind off-by-default features whose deps are pulled from crates.io.
+        run: |
+          cargo build -p apache-spark-connect --features datafusion,polars --release
+          cargo test -p apache-spark-connect --features datafusion,polars --release
+
+      - name: No-stub audit
+        # Enforce the "100% coverage, no followups" rule
+        run: bash scripts/audit_no_stubs.sh
+
+  wasm-udf:
+    name: WASM UDF feature
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (+ wasm32 target)
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: wasm32-unknown-unknown
+          rustflags: ""
+          cache: true
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Install Python packer/runtime deps
+        # The client builds the UDF command via `python -m pyspark_wasm_udf.pack`
+        # (cloudpickle + pyspark); `wasmtime` is what the executors need at run
+        # time and lets a follow-up job exercise the module directly.
+        run: python -m pip install --upgrade cloudpickle pyspark wasmtime
+
+      - name: Feature-gated unit tests
+        run: cargo test -p apache-spark-connect --features wasm-udf
+
+      - name: Build the macro/build helpers and WASM UDF crates + examples
+        run: |
+          cargo build -p apache-spark-connect-macros -p apache-spark-connect-build
+          cargo build --manifest-path wasm-udfs/Cargo.toml
+          cargo build --manifest-path wasm-udf-inline/Cargo.toml
+          cargo build -p examples --bin wasm_udf_macro --features examples/wasm-udf-macro
+
+      - name: Packer end-to-end (Rust -> cloudpickle command)
+        env:
+          SPARK_CONNECT_WASM_PACKER_PATH: ${{ github.workspace }}/python
+        run: cargo test -p apache-spark-connect --features wasm-udf -- --ignored packer_produces

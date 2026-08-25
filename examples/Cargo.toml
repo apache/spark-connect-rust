@@ -46,11 +46,20 @@ path = "src/readstream.rs"
 [[bin]]
 name = "databricks"
 path = "src/databricks.rs"
-required-feature = ["tls"]
+required-features = []
+
+# The `#[spark_wasm_udf]` macro via the reusable `wasm-udfs` crate.
+[[bin]]
+name = "wasm_udf_macro"
+path = "src/wasm_udf_macro.rs"
+required-features = ["wasm-udf-macro"]
 
 [dependencies]
-spark-connect-rs = { version = "0.0.2", path = "../crates/connect" }
-tokio = { workspace = true, features = ["rt-multi-thread"] }
+spark-connect = { package = "apache-spark-connect", path = "../crates/spark-connect" }
+wasm-udfs = { path = "../wasm-udfs", optional = true }
 
 [features]
-tls = ["spark-connect-rs/tls"]
+# Enable the macro example (`wasm_udf_macro` bin). Requires the
+# `wasm32-unknown-unknown` target, since `wasm-udfs`' build.rs compiles to WASM.
+# (Pulls in `wasm-udfs`, which enables `spark-connect/wasm-udf`.)
+wasm-udf-macro = ["dep:wasm-udfs"]

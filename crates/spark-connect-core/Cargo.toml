@@ -1,0 +1,28 @@
+[package]
+name = "apache-spark-connect-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Spark Connect client transport: gRPC channel, retries, reattach, artifacts, config, errors"
+
+[lib]
+name = "spark_connect_core"
+
+[dependencies]
+spark-connect-proto = { package = "apache-spark-connect-proto", path = "../spark-connect-proto", version = "4.2.0" }
+tonic = { workspace = true, features = ["tls-ring", "tls-native-roots"] }
+prost.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+futures.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+serde_json = "1"
+regex = "1"
+prost-types.workspace = true
+crc32fast = "1"
+
+[dev-dependencies]
+tempfile = "3"

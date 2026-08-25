@@ -33,3 +33,10 @@ repos:
       - id: fmt
       - id: cargo-check
       - id: clippy
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.0
+    hooks:
+      - id: ruff-check
+        args: [--fix, "scripts/"]
+      - id: ruff-format
+        args: ["scripts/"]
