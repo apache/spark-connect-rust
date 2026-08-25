@@ -64,11 +64,21 @@ jobs:
           java-version: "17"
 
       - name: Install Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        # rustup is preinstalled; avoid third-party toolchain actions (ASF Actions
+        # policy allowlists actions/* only).
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache cargo & target
+        uses: actions/cache@v4
         with:
-          toolchain: stable
-          rustflags: ""
-          cache: true
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-parity-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-parity-
 
       - name: Install system dependencies
         run: |
@@ -206,11 +216,19 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Cache cargo & target
+        uses: actions/cache@v4
         with:
-          toolchain: stable
-          rustflags: ""
-          cache: true
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-bench-
       - name: Install deps
         run: |
           sudo apt-get update && sudo apt-get install -y protobuf-compiler
@@ -278,17 +296,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Cache cargo & target
+        uses: actions/cache@v4
         with:
-          toolchain: stable
-          rustflags: ""
-          cache: true
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-checks-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-checks-
       - name: Install system dependencies
         run: |
           sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Cargo build
         run: cargo build --release
       - name: Cargo test
-        run: cargo test -p spark-connect -p spark-connect-core --release
+        run: cargo test -p apache-spark-connect -p apache-spark-connect-core --release
       - name: No-stub audit
         run: bash scripts/audit_no_stubs.sh
