@@ -103,6 +103,7 @@ skip_functions = {
 # Categorize functions by their parameter types
 no_args = []
 single_col = []
+variadic_cols = []
 multiple_cols = []
 str_only = []
 mixed = []
@@ -114,7 +115,9 @@ for name, fn in functions.items():
         no_args.append(name)
     elif fn["param_count"] == 1:
         param_type = fn["params"][0]["type"]
-        if "Column" in param_type:
+        if "Vec<Column>" in param_type:
+            variadic_cols.append(name)
+        elif "Column" in param_type:
             single_col.append(name)
         elif "&str" in param_type or "str" in param_type:
             str_only.append(name)
@@ -151,6 +154,11 @@ for name in single_col:
     )
     rust_arms.append(f"                Ok(spark_funcs::{fn['full_name']}(args[0].clone()))")
     rust_arms.append("            },")
+
+# Variadic (Vec<Column>) functions - forward all column args
+for name in variadic_cols:
+    fn = functions[name]
+    rust_arms.append(f'            "{name}" => Ok(spark_funcs::{fn["full_name"]}(args.clone())),')
 
 # String-only functions - convert first arg to string literal
 for name in str_only:

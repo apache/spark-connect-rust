@@ -744,49 +744,8 @@ pub(crate) fn decode_arrow_batch(
     Ok(rows)
 }
 
-/// Extract a value at a specific index from an Arrow array.
+/// Extract a value at a row index from an Arrow array. Delegates to the single,
+/// comprehensive decoder in `dataframe` so catalog results support every type too.
 fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> Result<Value> {
-    use arrow::array::*;
-
-    if array.is_null(index) {
-        return Ok(Value::Null);
-    }
-
-    if let Some(arr) = array.as_any().downcast_ref::<BooleanArray>() {
-        return Ok(Value::Bool(arr.value(index)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Int8Array>() {
-        return Ok(Value::Byte(arr.value(index)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Int16Array>() {
-        return Ok(Value::Short(arr.value(index)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Int32Array>() {
-        return Ok(Value::Integer(arr.value(index)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Int64Array>() {
-        return Ok(Value::Long(arr.value(index)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Float32Array>() {
-        return Ok(Value::Float(arr.value(index)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Float64Array>() {
-        return Ok(Value::Double(arr.value(index)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<StringArray>() {
-        return Ok(Value::String(arr.value(index).to_string()));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<BinaryArray>() {
-        return Ok(Value::Binary(arr.value(index).to_vec()));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Date32Array>() {
-        return Ok(Value::Date(arr.value(index)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<TimestampMicrosecondArray>() {
-        return Ok(Value::Timestamp(arr.value(index)));
-    }
-
-    Err(SparkError::connect_msg(
-        "Unsupported Arrow type - cannot convert to Value",
-    ))
+    crate::dataframe::arrow_value_at(array, index)
 }

@@ -134,17 +134,26 @@ pub fn desc_nulls_last(col: Column) -> Column {
     col.desc_nulls_last()
 }
 
-/// Mirrors `pyspark.sql.functions.array` (variadic; call with no args here).
-pub fn array() -> Column {
-    func("array", vec![])
+/// Mirrors `pyspark.sql.functions.array` (variadic over the given columns).
+pub fn array(cols: Vec<Column>) -> Column {
+    func(
+        "array",
+        cols.iter().map(|c| c.expression().clone()).collect(),
+    )
 }
-/// Mirrors `pyspark.sql.functions.concat`.
-pub fn concat() -> Column {
-    func("concat", vec![])
+/// Mirrors `pyspark.sql.functions.concat` (variadic over the given columns).
+pub fn concat(cols: Vec<Column>) -> Column {
+    func(
+        "concat",
+        cols.iter().map(|c| c.expression().clone()).collect(),
+    )
 }
-/// Mirrors `pyspark.sql.functions.coalesce`.
-pub fn coalesce() -> Column {
-    func("coalesce", vec![])
+/// Mirrors `pyspark.sql.functions.coalesce` (variadic over the given columns).
+pub fn coalesce(cols: Vec<Column>) -> Column {
+    func(
+        "coalesce",
+        cols.iter().map(|c| c.expression().clone()).collect(),
+    )
 }
 /// Mirrors `pyspark.sql.functions.arrays_zip`.
 pub fn arrays_zip() -> Column {

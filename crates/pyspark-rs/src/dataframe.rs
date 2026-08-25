@@ -260,8 +260,25 @@ impl PyDataFrame {
     }
 
     /// Repartition.
-    fn repartition(&self, num_partitions: i32) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.repartition(num_partitions))
+    #[pyo3(signature = (num_partitions, *cols))]
+    fn repartition(
+        &self,
+        _py: Python<'_>,
+        num_partitions: i32,
+        cols: Vec<Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        if cols.is_empty() {
+            Ok(PyDataFrame::new(self.dataframe.repartition(num_partitions)))
+        } else {
+            let exprs: Vec<_> = to_column_list(cols)?
+                .iter()
+                .map(|c| c.expression().clone())
+                .collect();
+            Ok(PyDataFrame::new(
+                self.dataframe
+                    .repartition_by_expressions(num_partitions, exprs),
+            ))
+        }
     }
 
     /// Coalesce.
@@ -397,14 +414,27 @@ impl PyDataFrame {
         PyDataFrame::new(self.dataframe.dropna(Some(how), thresh, refs))
     }
 
-    /// Fill null values with a numeric value.
+    /// Fill null values. `value` may be a scalar (optionally over `subset`) or a
+    /// {column: value} mapping, mirroring `pyspark.sql.DataFrame.fillna`.
     #[pyo3(signature = (value, subset=None))]
-    fn fillna(&self, value: i64, subset: Option<Vec<String>>) -> PyDataFrame {
-        let owned = subset;
-        let refs = owned
+    fn fillna(
+        &self,
+        value: &Bound<'_, PyAny>,
+        subset: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        if let Ok(d) = value.downcast::<PyDict>() {
+            let mut pairs = Vec::with_capacity(d.len());
+            for (k, v) in d.iter() {
+                pairs.push((k.extract::<String>()?, crate::session::py_to_value(&v)?));
+            }
+            return Ok(PyDataFrame::new(self.dataframe.fillna_map(pairs)));
+        }
+        let val = crate::session::py_to_value(value)?;
+        let owned = to_subset(subset)?;
+        let refs: Option<Vec<&str>> = owned
             .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect());
-        PyDataFrame::new(self.dataframe.fillna(value, refs))
+        Ok(PyDataFrame::new(self.dataframe.fillna_value(val, refs)))
     }
 
     /// Statistical functions (`df.stat`).
@@ -599,9 +629,24 @@ impl PyDataFrame {
     }
 
     /// Alias for first.
-    fn head(&self, py: Python<'_>) -> PyResult<Option<PyRow>> {
-        let row = py.detach(|| self.dataframe.first()).to_pyerr()?;
-        Ok(row.map(PyRow::new))
+    #[pyo3(signature = (n=None))]
+    fn head(&self, py: Python<'_>, n: Option<i32>) -> PyResult<Py<PyAny>> {
+        use pyo3::IntoPyObjectExt;
+        match n {
+            // head() -> the first Row (or None), matching reference pyspark.
+            None => {
+                let row = py.detach(|| self.dataframe.first()).to_pyerr()?;
+                row.map(PyRow::new).into_py_any(py)
+            }
+            // head(n) -> a list of the first n Rows.
+            Some(k) => {
+                let rows = py.detach(|| self.dataframe.limit(k).collect()).to_pyerr()?;
+                rows.into_iter()
+                    .map(PyRow::new)
+                    .collect::<Vec<_>>()
+                    .into_py_any(py)
+            }
+        }
     }
 
     /// Get the first n rows.
@@ -819,17 +864,78 @@ impl PyDataFrameNaFunctions {
         PyDataFrame::new(self.inner.fill(value, subset_refs))
     }
 
-    #[pyo3(signature = (to_replace, subset=None))]
+    /// Replace values, mirroring `DataFrameNaFunctions.replace`:
+    /// `replace([old...], [new...], subset)`, `replace({old: new}, subset)`, or
+    /// `replace(old, new, subset)`.
+    #[pyo3(signature = (to_replace, value=None, subset=None))]
     fn replace(
         &self,
-        to_replace: Vec<(String, String)>,
-        subset: Option<Vec<String>>,
-    ) -> PyDataFrame {
-        let subset_refs: Option<Vec<&str>> = subset
+        to_replace: &Bound<'_, PyAny>,
+        value: Option<&Bound<'_, PyAny>>,
+        subset: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let pairs = build_replacement_pairs(to_replace, value)?;
+        let owned = to_subset(subset)?;
+        let subset_refs: Option<Vec<&str>> = owned
             .as_ref()
             .map(|v| v.iter().map(String::as_str).collect());
-        PyDataFrame::new(self.inner.replace(to_replace, subset_refs))
+        Ok(PyDataFrame::new(self.inner.replace(pairs, subset_refs)))
     }
+}
+
+/// Coerce a `subset` argument (a str column name, a list of names, or None) to
+/// an owned Vec<String>, mirroring reference pyspark which accepts either.
+fn to_subset(subset: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Vec<String>>> {
+    match subset {
+        None => Ok(None),
+        Some(s) => {
+            if let Ok(name) = s.extract::<String>() {
+                Ok(Some(vec![name]))
+            } else {
+                Ok(Some(s.extract::<Vec<String>>()?))
+            }
+        }
+    }
+}
+
+/// Build (old, new) string replacement pairs from the reference `replace` forms.
+fn build_replacement_pairs(
+    to_replace: &Bound<'_, PyAny>,
+    value: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Vec<(String, String)>> {
+    use pyo3::exceptions::PyValueError;
+    use pyo3::types::{PyDict, PyList};
+    if let Ok(d) = to_replace.downcast::<PyDict>() {
+        let mut pairs = Vec::with_capacity(d.len());
+        for (k, v) in d.iter() {
+            pairs.push((k.str()?.to_string(), v.str()?.to_string()));
+        }
+        return Ok(pairs);
+    }
+    if let Ok(olds) = to_replace.downcast::<PyList>() {
+        let val = value.ok_or_else(|| {
+            PyValueError::new_err("replace with a list to_replace requires a value list")
+        })?;
+        let news = val
+            .downcast::<PyList>()
+            .map_err(|_| PyValueError::new_err("value must be a list when to_replace is a list"))?;
+        if olds.len() != news.len() {
+            return Err(PyValueError::new_err(
+                "to_replace and value lists must be the same length",
+            ));
+        }
+        let mut pairs = Vec::with_capacity(olds.len());
+        for (a, b) in olds.iter().zip(news.iter()) {
+            pairs.push((a.str()?.to_string(), b.str()?.to_string()));
+        }
+        return Ok(pairs);
+    }
+    let val =
+        value.ok_or_else(|| PyValueError::new_err("replace with a scalar requires a value"))?;
+    Ok(vec![(
+        to_replace.str()?.to_string(),
+        val.str()?.to_string(),
+    )])
 }
 
 /// Python wrapper for `MergeIntoWriter` (`df.mergeInto(...)`).

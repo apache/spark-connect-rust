@@ -556,13 +556,27 @@ fn rows_to_arrow_ipc(rows: &[Row], schema: &DataType) -> Result<Vec<u8>> {
 
     // Build column arrays from rows
     let mut columns = vec![];
-    let num_fields = match schema {
-        DataType::Struct { fields } => fields.len(),
+    let fields = match schema {
+        DataType::Struct { fields } => fields,
         _ => return Err(SparkError::connect_msg("Schema is not a struct type")),
     };
 
-    for field_idx in 0..num_fields {
-        let array = build_arrow_array(&rows, field_idx)?;
+    // Coerce each value to its declared field type so the built arrays match the
+    // Arrow schema (e.g. a Python int decodes as Long but "a int" wants Int32).
+    let coerced: Vec<Row> = rows
+        .iter()
+        .map(|r| {
+            let vals: Vec<Value> = fields
+                .iter()
+                .enumerate()
+                .map(|(i, f)| coerce_value(r.get(i), &f.data_type))
+                .collect();
+            Row::new(r.fields().to_vec(), vals)
+        })
+        .collect();
+
+    for field_idx in 0..fields.len() {
+        let array = build_arrow_array(&coerced, field_idx)?;
         columns.push(array);
     }
 
@@ -603,17 +617,25 @@ fn schema_to_arrow_fields(schema: &DataType) -> Result<Vec<arrow::datatypes::Fie
                     DataType::Long => ArrowDataType::Int64,
                     DataType::Float => ArrowDataType::Float32,
                     DataType::Double => ArrowDataType::Float64,
-                    DataType::String { .. } => ArrowDataType::Utf8,
+                    // CHAR/VARCHAR are string-backed on the wire.
+                    DataType::String { .. } | DataType::Char { .. } | DataType::Varchar { .. } => {
+                        ArrowDataType::Utf8
+                    }
                     DataType::Binary => ArrowDataType::Binary,
                     DataType::Date => ArrowDataType::Date32,
-                    DataType::Timestamp => ArrowDataType::Timestamp(TimeUnit::Microsecond, None),
+                    // TIMESTAMP (LTZ) and TIMESTAMP_NTZ are both micros; NTZ carries no zone.
+                    DataType::Timestamp => {
+                        ArrowDataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
+                    }
+                    DataType::TimestampNtz => ArrowDataType::Timestamp(TimeUnit::Microsecond, None),
+                    DataType::Time { .. } => ArrowDataType::Time64(TimeUnit::Microsecond),
                     DataType::Decimal { precision, scale } => {
                         ArrowDataType::Decimal128(*precision as u8, *scale as i8)
                     }
-                    _ => {
-                        return Err(SparkError::connect_msg(
-                            "Unsupported type for Arrow conversion",
-                        ))
+                    other => {
+                        return Err(SparkError::connect_msg(format!(
+                            "Unsupported type for Arrow createDataFrame conversion: {other:?}"
+                        )))
                     }
                 };
                 arrow_fields.push(Field::new(&field.name, arrow_type, field.nullable));
@@ -621,6 +643,30 @@ fn schema_to_arrow_fields(schema: &DataType) -> Result<Vec<arrow::datatypes::Fie
             Ok(arrow_fields)
         }
         _ => Err(SparkError::connect_msg("Schema is not a struct")),
+    }
+}
+
+/// Coerce a value to a declared field type (numeric widening/narrowing from the
+/// Python-inferred type). Non-numeric or already-matching values pass through, so an
+/// explicit `createDataFrame` schema produces arrays that match the Arrow schema.
+fn coerce_value(v: Option<&Value>, target: &DataType) -> Value {
+    let v = match v {
+        Some(v) => v,
+        None => return Value::Null,
+    };
+    match (target, v) {
+        (_, Value::Null) => Value::Null,
+        (DataType::Byte, Value::Long(n)) => Value::Byte(*n as i8),
+        (DataType::Byte, Value::Integer(n)) => Value::Byte(*n as i8),
+        (DataType::Short, Value::Long(n)) => Value::Short(*n as i16),
+        (DataType::Short, Value::Integer(n)) => Value::Short(*n as i16),
+        (DataType::Integer, Value::Long(n)) => Value::Integer(*n as i32),
+        (DataType::Long, Value::Integer(n)) => Value::Long(*n as i64),
+        (DataType::Float, Value::Double(f)) => Value::Float(*f as f32),
+        (DataType::Double, Value::Long(n)) => Value::Double(*n as f64),
+        (DataType::Double, Value::Integer(n)) => Value::Double(*n as f64),
+        (DataType::Double, Value::Float(f)) => Value::Double(*f as f64),
+        _ => v.clone(),
     }
 }
 

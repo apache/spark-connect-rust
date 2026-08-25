@@ -82,6 +82,38 @@ pub fn value_to_py<'py>(py: Python<'py>, v: &Value) -> PyResult<Bound<'py, PyAny
 
 #[pymethods]
 impl PyRow {
+    /// Construct a Row, mirroring `pyspark.sql.Row`:
+    /// `Row(name=value, ...)` yields named fields; `Row(v1, v2, ...)` yields
+    /// positional fields named `_1`, `_2`, ....
+    #[new]
+    #[pyo3(signature = (*args, **kwargs))]
+    fn __new__(
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        if let Some(kw) = kwargs {
+            if !args.is_empty() {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "Row cannot mix positional and keyword arguments",
+                ));
+            }
+            let mut fields = Vec::with_capacity(kw.len());
+            let mut values = Vec::with_capacity(kw.len());
+            for (k, v) in kw.iter() {
+                fields.push(k.extract::<String>()?);
+                values.push(crate::session::py_to_value(&v)?);
+            }
+            Ok(PyRow::new(Row::new(fields, values)))
+        } else {
+            let mut values = Vec::with_capacity(args.len());
+            for v in args.iter() {
+                values.push(crate::session::py_to_value(&v)?);
+            }
+            let fields = (0..values.len()).map(|i| format!("_{}", i + 1)).collect();
+            Ok(PyRow::new(Row::new(fields, values)))
+        }
+    }
+
     /// Number of fields.
     fn __len__(&self) -> usize {
         self.row.len()

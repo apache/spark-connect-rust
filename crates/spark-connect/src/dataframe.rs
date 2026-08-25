@@ -1038,6 +1038,21 @@ impl DataFrame {
         DataFrame::new(self.session.clone(), plan)
     }
 
+    /// Repartition into `num_partitions` by hashing the given column expressions.
+    /// Mirrors `df.repartition(numPartitions, *cols)`.
+    pub fn repartition_by_expressions(
+        &self,
+        num_partitions: i32,
+        columns: Vec<Expression>,
+    ) -> DataFrame {
+        let plan = LogicalPlan::RepartitionByExpression {
+            input: Box::new(self.plan.clone()),
+            num_partitions,
+            expressions: columns,
+        };
+        DataFrame::new(self.session.clone(), plan)
+    }
+
     /// Alias for to_df().
     pub fn to_schema(&self, column_names: Vec<&str>) -> DataFrame {
         self.to_df(column_names)
@@ -1157,6 +1172,18 @@ impl DataFrame {
             input: Box::new(self.plan.clone()),
             fill_value: value,
             columns,
+        };
+        DataFrame::new(self.session.clone(), plan)
+    }
+
+    /// Fill NA values per column from `(column, value)` pairs.
+    /// Mirrors `df.fillna({col: value, ...})`.
+    pub fn fillna_map(&self, pairs: Vec<(String, crate::row::Value)>) -> DataFrame {
+        let (cols, values): (Vec<String>, Vec<crate::row::Value>) = pairs.into_iter().unzip();
+        let plan = LogicalPlan::NAFillColumns {
+            input: Box::new(self.plan.clone()),
+            cols,
+            values,
         };
         DataFrame::new(self.session.clone(), plan)
     }
@@ -2047,7 +2074,7 @@ fn i128_to_decimal_string(unscaled: i128, scale: i32) -> String {
     }
 }
 
-fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> Result<Value> {
+pub(crate) fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> Result<Value> {
     use arrow::array::*;
 
     if array.is_null(index) {
@@ -2170,11 +2197,76 @@ fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> Result<Value
         }
         return Ok(Value::Map(map));
     }
+    // Decimal256 -> exact string-preserving Decimal (Arrow formats with the scale).
+    if let Some(arr) = array.as_any().downcast_ref::<Decimal256Array>() {
+        return Ok(Value::Decimal {
+            value: arr.value_as_string(index),
+            precision: Some(arr.precision() as i32),
+            scale: Some(arr.scale() as i32),
+        });
+    }
+    if let Some(arr) = array.as_any().downcast_ref::<FixedSizeBinaryArray>() {
+        return Ok(Value::Binary(arr.value(index).to_vec()));
+    }
+    // TimeType (no dedicated Value): render as an ISO time string, normalized to micros.
+    if let Some(arr) = array.as_any().downcast_ref::<Time64MicrosecondArray>() {
+        return Ok(Value::String(micros_to_time_string(arr.value(index))));
+    }
+    if let Some(arr) = array.as_any().downcast_ref::<Time64NanosecondArray>() {
+        return Ok(Value::String(micros_to_time_string(
+            arr.value(index) / 1_000,
+        )));
+    }
+    if let Some(arr) = array.as_any().downcast_ref::<Time32MillisecondArray>() {
+        return Ok(Value::String(micros_to_time_string(
+            arr.value(index) as i64 * 1_000,
+        )));
+    }
+    if let Some(arr) = array.as_any().downcast_ref::<Time32SecondArray>() {
+        return Ok(Value::String(micros_to_time_string(
+            arr.value(index) as i64 * 1_000_000,
+        )));
+    }
+    // Interval types (no dedicated Value): render a compact string.
+    if let Some(arr) = array.as_any().downcast_ref::<IntervalYearMonthArray>() {
+        let months = arr.value(index);
+        return Ok(Value::String(format!(
+            "{}-{}",
+            months / 12,
+            (months % 12).abs()
+        )));
+    }
+    if let Some(arr) = array.as_any().downcast_ref::<IntervalDayTimeArray>() {
+        let v = arr.value(index);
+        return Ok(Value::String(format!(
+            "{} days {} ms",
+            v.days, v.milliseconds
+        )));
+    }
+    if let Some(arr) = array.as_any().downcast_ref::<IntervalMonthDayNanoArray>() {
+        let v = arr.value(index);
+        return Ok(Value::String(format!(
+            "{} months {} days {} ns",
+            v.months, v.days, v.nanoseconds
+        )));
+    }
 
     Err(SparkError::connect_msg(format!(
         "Unsupported Arrow type {:?} - cannot convert to Value",
         array.data_type()
     )))
+}
+
+/// Render microseconds-since-midnight as an ISO time string `HH:MM:SS[.ffffff]`.
+fn micros_to_time_string(micros: i64) -> String {
+    let total_secs = micros.div_euclid(1_000_000);
+    let us = micros.rem_euclid(1_000_000);
+    let (h, m, s) = (total_secs / 3600, (total_secs % 3600) / 60, total_secs % 60);
+    if us == 0 {
+        format!("{h:02}:{m:02}:{s:02}")
+    } else {
+        format!("{h:02}:{m:02}:{s:02}.{us:06}")
+    }
 }
 
 #[cfg(test)]

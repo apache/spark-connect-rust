@@ -128,55 +128,87 @@ impl PySparkSession {
         data: &Bound<'_, PyList>,
         schema: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        // Parse the data into rows
-        let mut rows = vec![];
-        let mut num_cols: Option<usize> = None;
+        use crate::row::PyRow;
+        use crate::types::PyDataType;
 
+        // Resolve the schema: a list of column names (types inferred), a DDL string or
+        // a StructType (names + types explicit), or None (names from Row / default).
+        enum Spec {
+            None,
+            Names(Vec<String>),
+            Struct(Vec<StructField>),
+        }
+        let spec = match schema {
+            None => Spec::None,
+            Some(s) => {
+                if let Ok(names) = s.extract::<Vec<String>>() {
+                    Spec::Names(names)
+                } else if let Ok(dt) = s.extract::<PyRef<PyDataType>>() {
+                    match &dt.inner {
+                        DataType::Struct { fields } => Spec::Struct(fields.clone()),
+                        _ => {
+                            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                                "createDataFrame schema DataType must be a StructType",
+                            ))
+                        }
+                    }
+                } else if let Ok(ddl) = s.extract::<String>() {
+                    match DataType::from_ddl(&ddl).to_pyerr()? {
+                        DataType::Struct { fields } => Spec::Struct(fields),
+                        _ => {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                "DDL schema must describe a struct, e.g. \"a int, b string\"",
+                            ))
+                        }
+                    }
+                } else {
+                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                        "schema must be a list of column names, a DDL string, or a StructType",
+                    ));
+                }
+            }
+        };
+
+        let spec_names: Option<Vec<String>> = match &spec {
+            Spec::Names(n) => Some(n.clone()),
+            Spec::Struct(f) => Some(f.iter().map(|x| x.name.clone()).collect()),
+            Spec::None => None,
+        };
+
+        // Parse each item into values; a list/tuple carries no names, a Row carries its own.
+        let mut rows: Vec<Row> = vec![];
         for item in data.iter() {
-            let row_list = if let Ok(lst) = item.cast::<PyList>() {
-                lst.iter().collect::<Vec<_>>()
-            } else {
-                // Try to extract as tuple
-                if let Ok(tuple) = item.cast::<pyo3::types::PyTuple>() {
-                    tuple.iter().collect::<Vec<_>>()
+            let (values, row_names): (Vec<Value>, Option<Vec<String>>) =
+                if let Ok(pyrow) = item.extract::<PyRef<PyRow>>() {
+                    (
+                        pyrow.row.values().to_vec(),
+                        Some(pyrow.row.fields().to_vec()),
+                    )
+                } else if let Ok(lst) = item.cast::<PyList>() {
+                    (
+                        lst.iter()
+                            .map(|v| py_to_value(&v))
+                            .collect::<PyResult<_>>()?,
+                        None,
+                    )
+                } else if let Ok(tuple) = item.cast::<pyo3::types::PyTuple>() {
+                    (
+                        tuple
+                            .iter()
+                            .map(|v| py_to_value(&v))
+                            .collect::<PyResult<_>>()?,
+                        None,
+                    )
                 } else {
                     return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                        "Each row must be a list or tuple",
+                        "Each row must be a list, tuple, or Row",
                     ));
-                }
-            };
-
-            if let Some(nc) = num_cols {
-                if row_list.len() != nc {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        "All rows must have the same number of columns",
-                    ));
-                }
-            } else {
-                num_cols = Some(row_list.len());
-            }
-
-            let mut values = vec![];
-            for val_py in row_list {
-                let val = py_to_value(&val_py)?;
-                values.push(val);
-            }
-
-            let field_names = if let Some(schema_obj) = schema {
-                // Parse schema to get field names
-                if let Ok(names) = schema_obj.extract::<Vec<String>>() {
-                    names
-                } else {
-                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                        "Schema must be a list of strings",
-                    ));
-                }
-            } else {
-                // Generate default names
-                (0..values.len()).map(|i| format!("col{}", i)).collect()
-            };
-
-            rows.push(Row::new(field_names, values));
+                };
+            let names = spec_names
+                .clone()
+                .or(row_names)
+                .unwrap_or_else(|| (0..values.len()).map(|i| format!("col{}", i)).collect());
+            rows.push(Row::new(names, values));
         }
 
         if rows.is_empty() {
@@ -185,37 +217,31 @@ impl PySparkSession {
             ));
         }
 
-        // Build the schema. Field NAMES come from the explicit list (or default
-        // col0/col1/...); field TYPES are INFERRED from the first row's values (Spark
-        // infers types from data). Forcing every field to String would mismatch the
-        // Arrow arrays built from the actual values (int/date/decimal/...).
-        let names: Vec<String> = if let Some(schema_obj) = schema {
-            schema_obj.extract::<Vec<String>>().map_err(|_| {
-                PyErr::new::<pyo3::exceptions::PyTypeError, _>("Schema must be a list of strings")
-            })?
-        } else {
-            rows[0].fields().to_vec()
+        // An explicit struct schema wins; otherwise infer field types from the first row.
+        let schema_dtype = match spec {
+            Spec::Struct(fields) => DataType::Struct { fields },
+            _ => {
+                let fields: Vec<StructField> = rows[0]
+                    .fields()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| StructField {
+                        name: name.clone(),
+                        data_type: rows[0].get(i).map(value_to_datatype).unwrap_or(
+                            DataType::String {
+                                collation: "UTF8_BINARY".to_string(),
+                            },
+                        ),
+                        nullable: true,
+                        metadata: Default::default(),
+                    })
+                    .collect();
+                DataType::Struct { fields }
+            }
         };
-        let fields: Vec<StructField> = names
-            .into_iter()
-            .enumerate()
-            .map(|(i, name)| StructField {
-                name,
-                data_type: rows[0]
-                    .get(i)
-                    .map(value_to_datatype)
-                    .unwrap_or(DataType::String {
-                        collation: "UTF8_BINARY".to_string(),
-                    }),
-                nullable: true,
-                metadata: Default::default(),
-            })
-            .collect();
-        let schema_dtype = DataType::Struct { fields };
 
-        let df = self
-            .session
-            .create_dataframe(rows, schema_dtype)
+        let df = py
+            .detach(|| self.session.create_dataframe(rows, schema_dtype))
             .to_pyerr()?;
         Ok(PyDataFrame::new(df))
     }

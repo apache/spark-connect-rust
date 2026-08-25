@@ -169,6 +169,12 @@ pub enum LogicalPlan {
         fill_value: crate::row::Value,
         columns: Vec<String>,
     },
+    /// NAFill with a per-column value: `df.fillna({col: value, ...})`.
+    NAFillColumns {
+        input: Box<LogicalPlan>,
+        cols: Vec<String>,
+        values: Vec<crate::row::Value>,
+    },
     /// NADrop: `df.dropna(how, thresh, subset)`.
     NADrop {
         input: Box<LogicalPlan>,
@@ -765,6 +771,22 @@ impl LogicalPlan {
                 na_fill.input = Some(Box::new(input.to_proto()));
                 na_fill.cols.extend(columns.clone());
                 na_fill.values.push(value_to_proto_literal(fill_value));
+                relation.rel_type = Some(proto::relation::RelType::FillNa(Box::new(na_fill)));
+            }
+
+            LogicalPlan::NAFillColumns {
+                input,
+                cols,
+                values,
+            } => {
+                // Per-column fill: cols[i] is filled with values[i] (Spark aligns them
+                // positionally when both are non-empty).
+                let mut na_fill = proto::NaFill::default();
+                na_fill.input = Some(Box::new(input.to_proto()));
+                na_fill.cols.extend(cols.clone());
+                na_fill
+                    .values
+                    .extend(values.iter().map(value_to_proto_literal));
                 relation.rel_type = Some(proto::relation::RelType::FillNa(Box::new(na_fill)));
             }
 

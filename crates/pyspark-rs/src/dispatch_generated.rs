@@ -3,9 +3,6 @@
 pub fn call_builtin(name: &str, args: Vec<spark_connect::column::Column>) -> PyResult<spark_connect::column::Column> {
     use spark_connect::functions as spark_funcs;
     match name {
-            "array" => Ok(spark_funcs::array()),
-            "concat" => Ok(spark_funcs::concat()),
-            "coalesce" => Ok(spark_funcs::coalesce()),
             "arrays_zip" => Ok(spark_funcs::arrays_zip()),
             "create_map" => Ok(spark_funcs::create_map()),
             "curdate" => Ok(spark_funcs::curdate()),
@@ -1161,6 +1158,9 @@ pub fn call_builtin(name: &str, args: Vec<spark_connect::column::Column>) -> PyR
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
                 Ok(spark_funcs::tuple_union_agg_integer(args[0].clone()))
             },
+            "array" => Ok(spark_funcs::array(args.clone())),
+            "concat" => Ok(spark_funcs::concat(args.clone())),
+            "coalesce" => Ok(spark_funcs::coalesce(args.clone())),
             "add_months" => {
                 if args.len() < 2 { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!("Missing required arguments for add_months: expected at least 2, got {}", args.len()))); }
                 Ok(spark_funcs::add_months(args[0].clone(), args[1].clone()))
@@ -1964,6 +1964,11 @@ pub fn call_builtin(name: &str, args: Vec<spark_connect::column::Column>) -> PyR
             "tuple_union_theta_integer" => {
                 if args.len() < 2 { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!("Missing required arguments for tuple_union_theta_integer: expected at least 2, got {}", args.len()))); }
                 Ok(spark_funcs::tuple_union_theta_integer(args[0].clone(), args[1].clone()))
+            },
+            "window_with_slide_and_start" => {
+                // Mixed/special case: trying generic handling
+                // TODO: special handling for window_with_slide_and_start
+                Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(format!("Function window_with_slide_and_start not yet implemented in dispatch")))
             },
         _ => Err(PyErr::new::<pyo3::exceptions::PyNameError, _>(
             format!("Unknown function: {}", name)
