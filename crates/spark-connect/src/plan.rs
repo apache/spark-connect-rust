@@ -588,12 +588,21 @@ impl LogicalPlan {
                         };
                         sort.order.push(sort_order);
                     } else {
-                        // Fallback: convert to Expression proto then wrap
                         let expr_proto = expr.to_proto();
                         if let Some(proto::expression::ExprType::SortOrder(so)) =
                             expr_proto.expr_type
                         {
                             sort.order.push(*so);
+                        } else {
+                            // A bare column (not a SortOrder): default to ascending,
+                            // nulls first - matching reference pyspark's sort/orderBy.
+                            // Without this the column was dropped, leaving an empty
+                            // order and an invalid Sort plan.
+                            let mut sort_order = proto::expression::SortOrder::default();
+                            sort_order.child = Some(Box::new(expr_proto));
+                            sort_order.direction = 1i32; // ascending
+                            sort_order.null_ordering = 1i32; // nulls first
+                            sort.order.push(sort_order);
                         }
                     }
                 }
