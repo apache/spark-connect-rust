@@ -56,7 +56,7 @@ required-features = ["wasm-udf-macro"]
 
 [dependencies]
 spark-connect = { package = "apache-spark-connect", path = "../crates/spark-connect" }
-wasm-udfs = { path = "../wasm-udfs", optional = true }
+wasm-udfs = { path = "wasm-udfs", optional = true }
 
 [features]
 # Enable the macro example (`wasm_udf_macro` bin). Requires the

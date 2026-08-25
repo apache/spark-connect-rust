@@ -27,19 +27,20 @@ members = [
     "examples",
 ]
 exclude = [
-    "wasm-udfs",
-    "wasm-udf-inline",
+    "examples/wasm-udfs",
+    "examples/wasm-udf-inline",
 ]
 # `pyspark-rs` (the CPython extension cdylib, built via maturin) and the
 # Rust-native `examples` crate both link the pure-Rust core directly; both are
 # workspace members but excluded from `default-members` so `cargo test`/`cargo build`
 # stay clean. Build them explicitly (`cargo build -p pyspark-rs` / `-p examples`).
 #
-# The `wasm-udfs` and `wasm-udf-inline` crates are excluded from the workspace
-# entirely because they require the `wasm32-unknown-unknown` target, which may not
-# be installed on every machine (so `cargo test --workspace` stays green without it).
-# Build them explicitly with `cargo build --manifest-path wasm-udfs/Cargo.toml` (etc)
-# in CI or when the target is installed locally.
+# The `examples/wasm-udfs` and `examples/wasm-udf-inline` crates are excluded from
+# the workspace entirely because they require the `wasm32-unknown-unknown` target,
+# which may not be installed on every machine (so `cargo test --workspace` stays
+# green without it). Build them explicitly with
+# `cargo build --manifest-path examples/wasm-udfs/Cargo.toml` (etc) in CI or when
+# the target is installed locally.
 default-members = [
     "crates/spark-connect-proto",
     "crates/spark-connect-core",

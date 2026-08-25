@@ -18,6 +18,12 @@
 # Single-file WASM UDF example: the UDF *and* the client live in `src/main.rs`.
 # `build.rs` (via the spark-connect-build helper) compiles that same file to a
 # wasm32 module and embeds it.
+
+# Standalone crate with its own workspace root: it lives under `examples/` but is
+# excluded from the root workspace because it targets `wasm32-unknown-unknown`.
+# (Nothing in the root workspace depends on it, so its own `[workspace]` is safe.)
+[workspace]
+
 [package]
 name = "wasm-udf-inline"
 version = "0.0.0"
@@ -25,16 +31,16 @@ edition = "2021"
 publish = false
 
 [dependencies]
-spark-connect-macros = { package = "apache-spark-connect-macros", path = "../crates/spark-connect-macros", version = "4.2.0" }
+spark-connect-macros = { package = "apache-spark-connect-macros", path = "../../crates/spark-connect-macros", version = "4.2.0" }
 
 # Host-only: the client + the macro-generated constructors (which need the
 # `wasm-udf` feature). Never compiled for wasm32.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-spark-connect = { package = "apache-spark-connect", path = "../crates/spark-connect", version = "4.2.0", features = ["wasm-udf"] }
+spark-connect = { package = "apache-spark-connect", path = "../../crates/spark-connect", version = "4.2.0", features = ["wasm-udf"] }
 
 [build-dependencies]
 # The build helper that compiles + embeds the wasm module.
-spark-connect-build = { package = "apache-spark-connect-build", path = "../crates/spark-connect-build", version = "4.2.0" }
+spark-connect-build = { package = "apache-spark-connect-build", path = "../../crates/spark-connect-build", version = "4.2.0" }
 # Forces the proc-macro to be built before build.rs runs, so the helper can find
 # its dylib to feed the wasm `rustc` invocation.
-spark-connect-macros = { package = "apache-spark-connect-macros", path = "../crates/spark-connect-macros", version = "4.2.0" }
+spark-connect-macros = { package = "apache-spark-connect-macros", path = "../../crates/spark-connect-macros", version = "4.2.0" }

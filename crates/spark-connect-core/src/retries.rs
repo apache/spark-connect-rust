@@ -51,6 +51,19 @@ impl Default for RetryPolicy {
 }
 
 impl RetryPolicy {
+    /// A policy that performs a single attempt with no retries.
+    ///
+    /// Used by the transport-injection stub, which is a drop-in for the grpcio stub: the
+    /// reference client layers its own `GrpcRetryHandler` (configured by the client-side
+    /// retry policy) on top, so retrying here too would double-retry and ignore that
+    /// policy - e.g. a `max_retries=0` client would still see our 15-retry backoff.
+    pub fn no_retries() -> Self {
+        Self {
+            max_retries: Some(0),
+            ..Self::default()
+        }
+    }
+
     /// Whether a failed RPC is retryable under this policy.
     ///
     /// Mirrors `pyspark.sql.connect.client.retries.DefaultPolicy.can_retry`:

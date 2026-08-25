@@ -21,6 +21,7 @@ use tokio::sync::Notify;
 
 use spark_connect_core::channel::ChannelBuilder;
 use spark_connect_core::client::SparkConnectClient;
+use spark_connect_core::retries::RetryPolicy;
 use spark_connect_core::runtime::block_on;
 use spark_connect_proto as proto;
 
@@ -166,9 +167,15 @@ impl RustConnectStub {
         let builder = ChannelBuilder::parse(url).map_err(err)?;
         // Release the GIL during the connect handshake so a slow/unresponsive server
         // can't wedge the whole interpreter (incl. signal handling / Ctrl-C).
-        let client = py
+        let mut client = py
             .detach(|| block_on(SparkConnectClient::connect(&builder)))
             .map_err(err)?;
+        // This stub is a drop-in for the grpcio stub: a single RPC per call. The reference
+        // client wraps calls in its own GrpcRetryHandler (per the client-side retry
+        // policy), so retrying inside our client too would double-retry and ignore that
+        // policy - a `max_retries=0` client would otherwise hit our 15-retry backoff and
+        // hang against an unreachable server instead of failing fast with UNAVAILABLE.
+        client.set_retry_policy(RetryPolicy::no_retries());
         Ok(Self {
             client,
             cancel: Arc::new(Notify::new()),
