@@ -87,6 +87,10 @@ skip_functions = {
     #   to_protobuf(Column, &str) -> Column (and 3 variants)
     "sha2",
     "window",
+    # window(Column, windowDuration, slideDuration, startTime): string args, so it is
+    # hand-wired via pyfunc_window_with_slide_and_start (functions.py), not the generic
+    # Vec<Column> dispatch.
+    "window_with_slide_and_start",
     "from_avro",
     "from_avro_with_options",
     "to_avro_with_schema",

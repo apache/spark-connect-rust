@@ -1965,11 +1965,6 @@ pub fn call_builtin(name: &str, args: Vec<spark_connect::column::Column>) -> PyR
                 if args.len() < 2 { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!("Missing required arguments for tuple_union_theta_integer: expected at least 2, got {}", args.len()))); }
                 Ok(spark_funcs::tuple_union_theta_integer(args[0].clone(), args[1].clone()))
             },
-            "window_with_slide_and_start" => {
-                // Mixed/special case: trying generic handling
-                // TODO: special handling for window_with_slide_and_start
-                Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(format!("Function window_with_slide_and_start not yet implemented in dispatch")))
-            },
         _ => Err(PyErr::new::<pyo3::exceptions::PyNameError, _>(
             format!("Unknown function: {}", name)
         )),
