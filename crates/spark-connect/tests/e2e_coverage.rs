@@ -529,3 +529,45 @@ fn read_write_roundtrip_surface() {
         .unwrap();
     assert_eq!(s.read().parquet(&p("partitioned")).count().unwrap(), 5);
 }
+
+#[test]
+fn artifact_and_tag_surface() {
+    if !should_run() {
+        return;
+    }
+    let s = session();
+
+    // --- Artifact API: uploads real files, exercising the client-side chunking /
+    // CRC32 / batched-request path in spark-connect-core::artifact + the session
+    // wrappers. ---
+    let dir = std::env::temp_dir().join(format!("cov_artifacts_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let f1 = dir.join("a.txt");
+    let f2 = dir.join("b.txt");
+    std::fs::write(&f1, b"hello artifact one").unwrap();
+    // A larger file to exercise the multi-chunk path (well over one gRPC chunk).
+    std::fs::write(&f2, vec![b'x'; 512 * 1024]).unwrap();
+
+    s.add_artifact(f1.to_str().unwrap()).expect("add_artifact");
+    s.add_artifacts(&[f1.to_str().unwrap(), f2.to_str().unwrap()])
+        .expect("add_artifacts");
+    // copyFromLocalToFs: exercises the client-side named-artifact upload
+    // (forward_to_fs/...). A single-node server rejects a *local* destination, but the
+    // client upload code we're covering runs before that, so tolerate the server error.
+    let dest = dir.join("copied.txt");
+    let _ = s.copy_from_local_to_fs(f1.to_str().unwrap(), dest.to_str().unwrap());
+
+    // --- Tag API: full lifecycle (add several, read, interrupt-by-tag, remove, clear). ---
+    s.clear_tags();
+    s.add_tag("tag-alpha").unwrap();
+    s.add_tag("tag-beta").unwrap();
+    let tags = s.get_tags();
+    assert!(tags.contains(&"tag-alpha".to_string()));
+    assert!(tags.contains(&"tag-beta".to_string()));
+    // interrupt operations carrying a tag (none running -> empty list, but exercises it).
+    let _ = s.interrupt_tag("tag-alpha").unwrap();
+    s.remove_tag("tag-alpha");
+    assert!(!s.get_tags().contains(&"tag-alpha".to_string()));
+    s.clear_tags();
+    assert!(s.get_tags().is_empty());
+}
