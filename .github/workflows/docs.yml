@@ -71,6 +71,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
+      - name: Build the crate (snippet check compiles against its rlib)
+        run: cargo build -p apache-spark-connect
       - name: Compile the guides' Rust snippets
         run: python scripts/check_doc_snippets.py
 
