@@ -132,17 +132,7 @@ needed server-side. See `python/pyspark_wasm_udf/` and the example crates
 
 ## Getting started with Spark Connect server
 
-You can run a Spark Connect server locally for development in two ways:
-
-### Option 1: Docker Compose (recommended)
-
-The repo includes a `docker-compose.yml` that starts a Spark Connect server on port 15002:
-
-```bash
-docker compose up --build -d
-```
-
-### Option 2: Local Spark distribution
+Run a Spark Connect server locally for development:
 
 1. [Download Spark 4.2.0](https://spark.apache.org/downloads.html) and unzip it
 2. Set `SPARK_HOME` to the unzipped directory
@@ -160,9 +150,11 @@ The server listens on `sc://localhost:15002` by default.
 
 ### Sample data
 
-The repo includes sample datasets in `examples/datasets/` (people.csv, employees.json,
-kv1.txt, etc.) mounted at `/opt/spark/work-dir/datasets` in the Docker container for use
-in tests and examples.
+Sample datasets used by the examples live in `examples/datasets/` (people.csv,
+employees.json, kv1.txt, etc.). The reader/deltalake examples load them by a path
+relative to the **server's** working directory (e.g. `./datasets/people.csv`), so
+start the Spark Connect server from the `examples/` directory (where `./datasets`
+resolves), or adjust the path in the example to point at the data.
 
 ## Continuous integration
 

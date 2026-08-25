@@ -65,10 +65,8 @@ cargo run --bin readstream
 
 Read a file into a dataframe, save the result as a deltalake table, and append a new record to the table.
 
-**Prerequisite** the spark cluster must be started with the deltalake package. The `docker-compose.yml` provided in the repo has deltalake pre-installed.
-Or if you are running a spark connect server location, run the below scripts first
-
-If you are running a local spark connect server. The Delta Lake jars need to be added onto the server before it starts.
+**Prerequisite** the spark cluster must be started with the deltalake package.
+The Delta Lake jars need to be added onto the server before it starts:
 
 ```bash
 $ $SPARK_HOME/sbin/start-connect-server.sh --packages "org.apache.spark:spark-connect_2.13:4.2.0,io.delta:delta-spark_2.13:4.2.0" \
