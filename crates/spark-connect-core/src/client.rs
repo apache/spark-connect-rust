@@ -23,6 +23,28 @@ use crate::error::{Result, SparkError};
 use crate::reattach::ExecutePlanResponseReattachableIterator;
 use crate::retries::{RetryPolicy, RetryPolicyState};
 
+/// How long to wait for the lazy gRPC channel to become ready before surfacing a
+/// retriable `UNAVAILABLE`. tonic's lazy channel waits indefinitely for an unreachable
+/// or unresolvable host (unlike grpcio, which fails fast), so without this bound a call
+/// to a down server would hang forever instead of raising `UNAVAILABLE`.
+const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Wait for `grpc` to become ready, bounded by [`READY_TIMEOUT`], mapping any failure
+/// (or the timeout) to a gRPC `UNAVAILABLE` error. This matches how grpcio reports an
+/// unreachable server, so the reference client raises `SparkConnectGrpcException` with
+/// `UNAVAILABLE` rather than hanging on a channel that never connects.
+async fn wait_ready(grpc: &mut tonic::client::Grpc<Channel>) -> Result<()> {
+    match tokio::time::timeout(READY_TIMEOUT, grpc.ready()).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(SparkError::from_grpc_status(tonic::Status::unavailable(
+            format!("channel not ready: {e}"),
+        ))),
+        Err(_elapsed) => Err(SparkError::from_grpc_status(tonic::Status::unavailable(
+            "channel not ready: connection timed out",
+        ))),
+    }
+}
+
 /// A Spark Connect client for communicating with a remote Spark server.
 ///
 /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient`.
@@ -71,11 +93,13 @@ impl SparkConnectClient {
                 .map_err(|e| SparkError::connect_msg(format!("Invalid endpoint: {}", e)))?
                 .tls_config(tls_config)
                 .map_err(|e| SparkError::connect_msg(format!("Failed to configure TLS: {}", e)))?
+                .connect_timeout(READY_TIMEOUT)
                 .connect_lazy()
         } else {
             // Plaintext connection (for localhost development)
             tonic::transport::Channel::from_shared(format!("http://{endpoint}"))
                 .map_err(|e| SparkError::connect_msg(format!("Invalid endpoint: {}", e)))?
+                .connect_timeout(READY_TIMEOUT)
                 .connect_lazy()
         };
 
@@ -124,6 +148,15 @@ impl SparkConnectClient {
         self.user_id.as_deref()
     }
 
+    /// Override the retry policy applied to this client's RPCs.
+    ///
+    /// The transport-injection stub sets this to [`RetryPolicy::no_retries`] so it behaves
+    /// like the single-shot grpcio stub the reference client expects (which does its own
+    /// retrying on top); see that constructor for why double-retrying is wrong there.
+    pub fn set_retry_policy(&mut self, policy: RetryPolicy) {
+        self.retry_policy = policy;
+    }
+
     /// Execute a plan and return a stream of responses.
     ///
     /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.execute_plan`.
@@ -145,9 +178,7 @@ impl SparkConnectClient {
     /// the reference client built.
     pub async fn execute_plan_raw(&self, request: Vec<u8>) -> Result<Streaming<Vec<u8>>> {
         let mut grpc = tonic::client::Grpc::new(self.channel.clone());
-        grpc.ready()
-            .await
-            .map_err(|e| SparkError::connect_msg(format!("channel not ready: {e}")))?;
+        wait_ready(&mut grpc).await?;
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
         let path = tonic::codegen::http::uri::PathAndQuery::from_static(
@@ -163,9 +194,7 @@ impl SparkConnectClient {
     /// ReattachExecute, byte-exact passthrough returning a raw response stream.
     pub async fn reattach_execute_raw(&self, request: Vec<u8>) -> Result<Streaming<Vec<u8>>> {
         let mut grpc = tonic::client::Grpc::new(self.channel.clone());
-        grpc.ready()
-            .await
-            .map_err(|e| SparkError::connect_msg(format!("channel not ready: {e}")))?;
+        wait_ready(&mut grpc).await?;
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
         let path = tonic::codegen::http::uri::PathAndQuery::from_static(
@@ -215,9 +244,7 @@ impl SparkConnectClient {
     /// reference client, which never re-decodes the request it built).
     pub async fn analyze_plan_raw(&self, request: Vec<u8>) -> Result<Vec<u8>> {
         let mut grpc = tonic::client::Grpc::new(self.channel.clone());
-        grpc.ready()
-            .await
-            .map_err(|e| SparkError::connect_msg(format!("channel not ready: {e}")))?;
+        wait_ready(&mut grpc).await?;
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
         let path = tonic::codegen::http::uri::PathAndQuery::from_static(
