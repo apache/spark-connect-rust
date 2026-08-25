@@ -449,6 +449,7 @@ impl PyDataFrame {
     }
 
     /// The streaming writer interface (`df.writeStream`).
+    #[getter]
     #[pyo3(name = "writeStream")]
     fn write_stream(&self) -> PyDataStreamWriter {
         let writer = self.dataframe.write_stream();
@@ -976,8 +977,11 @@ impl PyDataFrameWriterV2 {
 
 /// cloudpickle an arbitrary Python object to bytes (mirrors the scalar UDF path,
 /// where the client serializes the callable for server-side execution).
+///
+/// Uses the bundled `pyspark.cloudpickle` (the skin vendors it, matching the worker's
+/// `pyspark.cloudpickle`), so there is no external `cloudpickle` runtime dependency.
 pub(crate) fn py_cloudpickle(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
-    let cp = py.import("cloudpickle")?;
+    let cp = py.import("pyspark.cloudpickle")?;
     cp.call_method1("dumps", (obj,))?.extract()
 }
 

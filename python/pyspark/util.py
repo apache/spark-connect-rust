@@ -1,7 +1,16 @@
 """PySpark utilities for Rust-backed client."""
 import os
+import sys
+import traceback
+from typing import TextIO
 
 _is_remote_only = None
+
+
+def print_exec(stream: TextIO) -> None:
+    """Print the current exception traceback to ``stream`` (used by serializers)."""
+    ei = sys.exc_info()
+    traceback.print_exception(ei[0], ei[1], ei[2], None, stream)
 
 
 def is_remote_only() -> bool:

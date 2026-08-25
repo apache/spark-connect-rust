@@ -45,7 +45,13 @@ from pyspark._pyspark import (
 )
 
 if TYPE_CHECKING:
-    from pyspark.sql.connect.session import SparkSession
+    from pyspark.sql.session import SparkSession
+
+# StreamingQueryEventType values (spark.connect.StreamingQueryEventType); the Rust
+# listener stream yields these as the event_type int alongside each event's JSON.
+_QUERY_PROGRESS_EVENT = 1
+_QUERY_TERMINATED_EVENT = 2
+_QUERY_IDLE_EVENT = 3
 
 # Re-export the core classes from the Rust extension
 StreamingQuery = _StreamingQuery
@@ -157,14 +163,12 @@ class StreamingQueryListenerBus:
         QueryProgressEvent, QueryIdleEvent, QueryTerminatedEvent
     ]:
         """Deserialize a listener event from JSON."""
-        from pyspark.sql.connect import proto
-
         j = json.loads(event_json)
-        if event_type == proto.StreamingQueryEventType.QUERY_PROGRESS_EVENT:
+        if event_type == _QUERY_PROGRESS_EVENT:
             return QueryProgressEvent.fromJson(j)
-        elif event_type == proto.StreamingQueryEventType.QUERY_TERMINATED_EVENT:
+        elif event_type == _QUERY_TERMINATED_EVENT:
             return QueryTerminatedEvent.fromJson(j)
-        elif event_type == proto.StreamingQueryEventType.QUERY_IDLE_EVENT:
+        elif event_type == _QUERY_IDLE_EVENT:
             return QueryIdleEvent.fromJson(j)
         else:
             raise ValueError(f"Unknown event type: {event_type}")
@@ -189,12 +193,22 @@ class StreamingQueryListenerBus:
                 warnings.warn(f"Listener callback raised exception: {e}")
 
 
-class StreamingQueryManager(_StreamingQueryManager):
-    """Wrapper around the Rust StreamingQueryManager with Python-side listener bus."""
+class StreamingQueryManager:
+    """Python-side listener-bus wrapper around the Rust StreamingQueryManager.
+
+    Composition (not subclassing: the PyO3 ``_StreamingQueryManager`` is not a valid
+    base type). Wrap the object returned by ``spark.streams`` to use the client-side
+    listener bus: ``StreamingQueryManager(spark.streams).addListener(...)``.
+    """
 
     def __init__(self, inner: _StreamingQueryManager) -> None:
         self.inner = inner
         self._sqlb = StreamingQueryListenerBus(self)
+
+    def __getattr__(self, name: str) -> Any:
+        # Delegate the plain manager API (active/get/awaitAnyTermination/resetTerminated)
+        # to the wrapped Rust manager.
+        return getattr(self.inner, name)
 
     def close(self) -> None:
         """Close the listener bus."""

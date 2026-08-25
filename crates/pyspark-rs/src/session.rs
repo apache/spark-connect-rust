@@ -185,43 +185,33 @@ impl PySparkSession {
             ));
         }
 
-        // Build schema
-        let schema_dtype = if let Some(schema_obj) = schema {
-            if let Ok(names) = schema_obj.extract::<Vec<String>>() {
-                // Build a struct with string fields
-                let fields: Vec<StructField> = names
-                    .into_iter()
-                    .map(|name| StructField {
-                        name,
-                        data_type: DataType::String {
-                            collation: "UTF8_BINARY".to_string(),
-                        },
-                        nullable: true,
-                        metadata: Default::default(),
-                    })
-                    .collect();
-                DataType::Struct { fields }
-            } else {
-                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                    "Schema must be a list of strings",
-                ));
-            }
+        // Build the schema. Field NAMES come from the explicit list (or default
+        // col0/col1/...); field TYPES are INFERRED from the first row's values (Spark
+        // infers types from data). Forcing every field to String would mismatch the
+        // Arrow arrays built from the actual values (int/date/decimal/...).
+        let names: Vec<String> = if let Some(schema_obj) = schema {
+            schema_obj.extract::<Vec<String>>().map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyTypeError, _>("Schema must be a list of strings")
+            })?
         } else {
-            // Generate default schema with string types
-            let names = &rows[0].fields();
-            let fields: Vec<StructField> = names
-                .iter()
-                .map(|name| StructField {
-                    name: name.clone(),
-                    data_type: DataType::String {
-                        collation: "UTF8_BINARY".to_string(),
-                    },
-                    nullable: true,
-                    metadata: Default::default(),
-                })
-                .collect();
-            DataType::Struct { fields }
+            rows[0].fields().to_vec()
         };
+        let fields: Vec<StructField> = names
+            .into_iter()
+            .enumerate()
+            .map(|(i, name)| StructField {
+                name,
+                data_type: rows[0]
+                    .get(i)
+                    .map(value_to_datatype)
+                    .unwrap_or(DataType::String {
+                        collation: "UTF8_BINARY".to_string(),
+                    }),
+                nullable: true,
+                metadata: Default::default(),
+            })
+            .collect();
+        let schema_dtype = DataType::Struct { fields };
 
         let df = self
             .session
@@ -236,14 +226,16 @@ impl PySparkSession {
         PyCatalog::new(self.session.catalog())
     }
 
-    /// Get the DataStreamReader for reading streaming data.
+    /// Get the DataStreamReader for reading streaming data (`spark.readStream`).
+    #[getter]
     #[pyo3(name = "readStream")]
     fn read_stream(&self) -> PyDataStreamReader {
         let reader = self.session.read_stream();
         PyDataStreamReader::new(reader)
     }
 
-    /// Get the StreamingQueryManager for managing active streaming queries.
+    /// Get the StreamingQueryManager for managing active streaming queries (`spark.streams`).
+    #[getter]
     #[pyo3(name = "streams")]
     fn streams(&self) -> PyStreamingQueryManager {
         let manager = self.session.streams();
@@ -435,6 +427,35 @@ _UDFRegistration()
     #[pyo3(name = "cloneSession")]
     fn clone_session(&self) -> PySparkSession {
         PySparkSession::new(self.session.clone_session())
+    }
+}
+
+/// Infer the Spark `DataType` for a `createDataFrame` column from its (first) value.
+/// Scalars, Date/Timestamp, and Decimal map precisely; Null and nested collections
+/// fall back to String (createDataFrame here does not deep-infer nested schemas).
+fn value_to_datatype(v: &Value) -> DataType {
+    let utf8 = || DataType::String {
+        collation: "UTF8_BINARY".to_string(),
+    };
+    match v {
+        Value::Bool(_) => DataType::Boolean,
+        Value::Byte(_) => DataType::Byte,
+        Value::Short(_) => DataType::Short,
+        Value::Integer(_) => DataType::Integer,
+        Value::Long(_) => DataType::Long,
+        Value::Float(_) => DataType::Float,
+        Value::Double(_) => DataType::Double,
+        Value::String(_) => utf8(),
+        Value::Binary(_) => DataType::Binary,
+        Value::Date(_) => DataType::Date,
+        Value::Timestamp(_) => DataType::Timestamp,
+        Value::Decimal {
+            precision, scale, ..
+        } => DataType::Decimal {
+            precision: precision.unwrap_or(38),
+            scale: scale.unwrap_or(0),
+        },
+        _ => utf8(),
     }
 }
 

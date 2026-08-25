@@ -67,6 +67,7 @@ impl PyDataStreamReader {
         })
     }
 
+    #[pyo3(signature = (path=None))]
     fn load(&mut self, path: Option<&str>) -> PyResult<PyDataFrame> {
         let df = self.take()?.load(path);
         Ok(PyDataFrame::new(df))
@@ -217,15 +218,39 @@ impl PyDataStreamWriter {
         })
     }
 
-    fn trigger(&mut self, trigger: &PyTrigger) -> PyResult<PyDataStreamWriter> {
+    /// `DataStreamWriter.trigger(...)`: mirrors the reference keyword API — exactly one
+    /// of `processingTime` / `once` / `availableNow` / `continuous` is given.
+    #[pyo3(signature = (processingTime=None, once=None, availableNow=None, continuous=None))]
+    fn trigger(
+        &mut self,
+        processingTime: Option<&str>,
+        once: Option<bool>,
+        availableNow: Option<bool>,
+        continuous: Option<&str>,
+    ) -> PyResult<PyDataStreamWriter> {
+        let trigger = if let Some(interval) = processingTime {
+            Trigger::ProcessingTime(interval.to_string())
+        } else if once == Some(true) {
+            Trigger::Once
+        } else if availableNow == Some(true) {
+            Trigger::AvailableNow
+        } else if let Some(interval) = continuous {
+            Trigger::Continuous(interval.to_string())
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "trigger() requires exactly one of processingTime, once, availableNow, continuous",
+            ));
+        };
         Ok(PyDataStreamWriter {
-            inner: Some(self.take()?.trigger(trigger.get())),
+            inner: Some(self.take()?.trigger(trigger)),
         })
     }
 
-    fn start(&mut self, path: &str) -> PyResult<PyStreamingQuery> {
+    #[pyo3(signature = (path=None))]
+    fn start(&mut self, path: Option<&str>) -> PyResult<PyStreamingQuery> {
         let writer = self.take()?;
-        let query = writer.start(path).to_pyerr()?;
+        // Memory/console/foreach sinks take no path; the core treats "" as unset.
+        let query = writer.start(path.unwrap_or("")).to_pyerr()?;
         Ok(PyStreamingQuery::new(query))
     }
 
@@ -235,24 +260,54 @@ impl PyDataStreamWriter {
         Ok(PyStreamingQuery::new(query))
     }
 
-    fn foreachBatch(&mut self, command: Vec<u8>, python_ver: &str) -> PyResult<PyDataStreamWriter> {
+    /// `DataStreamWriter.foreachBatch(func)`: cloudpickle the `(batch_df, batch_id)`
+    /// function (via the bundled `pyspark.cloudpickle`) and attach it as the
+    /// foreach-batch sink. Pickling happens here so the Python skin can re-export this
+    /// class directly rather than subclassing a (non-subclassable) PyO3 type.
+    fn foreachBatch(
+        &mut self,
+        py: Python<'_>,
+        func: &Bound<'_, PyAny>,
+    ) -> PyResult<PyDataStreamWriter> {
+        let command = crate::dataframe::py_cloudpickle(py, func)?;
         let payload = PythonUDFPayload::new(
             spark_connect::types::DataType::Struct { fields: vec![] },
-            0, // No specific eval_type for streaming
+            0, // eval type is unused for the streaming foreach sinks
             command,
-            python_ver.to_string(),
+            crate::dataframe::py_version(py),
         );
         Ok(PyDataStreamWriter {
             inner: Some(self.take()?.foreach_batch(payload)),
         })
     }
 
-    fn foreach(&mut self, command: Vec<u8>, python_ver: &str) -> PyResult<PyDataStreamWriter> {
+    /// `DataStreamWriter.foreach(f)`: wrap the row handler as the reference client does
+    /// — `(f, None, serializer, serializer)` with `AutoBatchedSerializer(CPickleSerializer())`
+    /// — and cloudpickle it so the worker deserializes it against its own
+    /// `pyspark.serializers`. Built here to avoid a Python subclass of the PyO3 class.
+    fn foreach(&mut self, py: Python<'_>, f: &Bound<'_, PyAny>) -> PyResult<PyDataStreamWriter> {
+        let serializers = py.import("pyspark.serializers")?;
+        let cpickle = serializers.getattr("CPickleSerializer")?.call0()?;
+        let serializer = serializers
+            .getattr("AutoBatchedSerializer")?
+            .call1((cpickle,))?;
+        // (func, return_type=None, input_serializer, output_serializer) — the shape the
+        // worker's foreach runner expects; the same serializer instance is used twice.
+        let command_tuple = pyo3::types::PyTuple::new(
+            py,
+            [
+                f.clone(),
+                py.None().into_bound(py),
+                serializer.clone(),
+                serializer,
+            ],
+        )?;
+        let command = crate::dataframe::py_cloudpickle(py, command_tuple.as_any())?;
         let payload = PythonUDFPayload::new(
             spark_connect::types::DataType::Struct { fields: vec![] },
-            0, // No specific eval_type for streaming
+            0,
             command,
-            python_ver.to_string(),
+            crate::dataframe::py_version(py),
         );
         Ok(PyDataStreamWriter {
             inner: Some(self.take()?.foreach(payload)),

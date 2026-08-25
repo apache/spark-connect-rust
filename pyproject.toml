@@ -29,8 +29,9 @@ dependencies = [
     "pandas>=1.0.0",
     "pyarrow>=10.0.0",
     "numpy>=1.16.0",
-    "cloudpickle>=3.0.0",
 ]
+# cloudpickle is vendored at pyspark/cloudpickle (matching Apache Spark's own
+# bundling), so it is intentionally NOT an external dependency.
 
 [project.optional-dependencies]
 grpc = ["grpcio>=1.48.0"]
