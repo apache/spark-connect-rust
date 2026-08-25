@@ -16,6 +16,9 @@
 # under the License.
 
 /target
+# The workspace-excluded WASM example crates build to their own target/ dirs.
+/examples/wasm-udfs/target
+/examples/wasm-udf-inline/target
 **/*.rs.bk
 Cargo.lock
 __pycache__/

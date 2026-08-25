@@ -117,8 +117,8 @@ jobs:
       - name: Build the macro/build helpers and WASM UDF crates + examples
         run: |
           cargo build -p apache-spark-connect-macros -p apache-spark-connect-build
-          cargo build --manifest-path wasm-udfs/Cargo.toml
-          cargo build --manifest-path wasm-udf-inline/Cargo.toml
+          cargo build --manifest-path examples/wasm-udfs/Cargo.toml
+          cargo build --manifest-path examples/wasm-udf-inline/Cargo.toml
           cargo build -p examples --bin wasm_udf_macro --features examples/wasm-udf-macro
 
       - name: Packer end-to-end (Rust -> cloudpickle command)
