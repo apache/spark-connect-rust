@@ -160,8 +160,9 @@ The server listens on `sc://localhost:15002` by default.
 
 ### Sample data
 
-The repo includes sample datasets in `datasets/` (people.csv, employees.json, kv1.txt, etc.)
-mounted at `/opt/spark/work-dir/datasets` in the Docker container for use in tests and examples.
+The repo includes sample datasets in `examples/datasets/` (people.csv, employees.json,
+kv1.txt, etc.) mounted at `/opt/spark/work-dir/datasets` in the Docker container for use
+in tests and examples.
 
 ## Continuous integration
 

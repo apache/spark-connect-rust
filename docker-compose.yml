@@ -30,4 +30,6 @@ services:
       - "4040:4040"
       - "15002:15002"
     volumes:
-      - ./datasets:/opt/spark/work-dir/datasets
+      # Mount target is unchanged (/opt/spark/work-dir/datasets), so the
+      # server-side `./datasets/...` paths used by the examples keep working.
+      - ./examples/datasets:/opt/spark/work-dir/datasets
