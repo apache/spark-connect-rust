@@ -466,3 +466,66 @@ fn catalog_ddl_surface() {
     let _ = c.clear_cache();
     let _ = c.refresh_by_path("/tmp/nonexistent");
 }
+
+#[test]
+fn read_write_roundtrip_surface() {
+    if !should_run() {
+        return;
+    }
+    let s = session();
+    let dir = std::env::temp_dir().join(format!("cov_rw_{}", std::process::id()));
+    let p = |name: &str| dir.join(name).to_string_lossy().into_owned();
+    let df = s.range(5).unwrap();
+
+    // Writer: format/mode/option + each concrete sink, then read back and verify rows.
+    df.write().mode("overwrite").parquet(&p("pq")).unwrap();
+    assert_eq!(s.read().parquet(&p("pq")).count().unwrap(), 5);
+    df.write().mode("overwrite").json(&p("js")).unwrap();
+    assert_eq!(s.read().json(&p("js")).count().unwrap(), 5);
+    df.write()
+        .mode("overwrite")
+        .option("header", "true")
+        .csv(&p("csv"))
+        .unwrap();
+    assert_eq!(
+        s.read()
+            .option("header", "true")
+            .csv(&p("csv"))
+            .count()
+            .unwrap(),
+        5
+    );
+    df.write().mode("overwrite").orc(&p("orc")).unwrap();
+    assert_eq!(s.read().orc(&p("orc")).count().unwrap(), 5);
+
+    // Text sink needs a single string column.
+    let text_df = s
+        .sql("SELECT CAST(id AS STRING) AS value FROM range(3)")
+        .unwrap();
+    text_df.write().mode("overwrite").text(&p("txt")).unwrap();
+    assert_eq!(s.read().text(&p("txt")).count().unwrap(), 3);
+
+    // format(...).save(...) + load(...), and partitioning/bucketing builders.
+    df.write()
+        .format("parquet")
+        .mode("overwrite")
+        .save(Some(&p("saved")))
+        .unwrap();
+    assert_eq!(
+        s.read()
+            .format("parquet")
+            .load(Some(&p("saved")))
+            .count()
+            .unwrap(),
+        5
+    );
+    // partition_by needs a non-partition column too (can't partition by every column).
+    let two_col = s.sql("SELECT id, id * 2 AS v FROM range(5)").unwrap();
+    two_col
+        .write()
+        .mode("overwrite")
+        .partition_by(vec!["id".to_string()])
+        .parquet(&p("partitioned"))
+        .unwrap();
+    assert_eq!(s.read().parquet(&p("partitioned")).count().unwrap(), 5);
+}
