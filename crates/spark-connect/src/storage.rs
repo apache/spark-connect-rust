@@ -109,4 +109,28 @@ mod tests {
         let s = StorageLevel::none();
         assert!(!s.use_disk && !s.use_memory && !s.use_off_heap && !s.deserialized);
     }
+
+    #[test]
+    fn every_preset_matches_its_flags_and_replication() {
+        // Exercise the remaining presets so all StorageLevelExt methods are covered.
+        let s = StorageLevel::disk_only();
+        assert!(s.use_disk && !s.use_memory && !s.use_off_heap && !s.deserialized);
+        assert_eq!(s.replication, 1);
+
+        let s = StorageLevel::disk_only_2();
+        assert!(s.use_disk && !s.use_memory);
+        assert_eq!(s.replication, 2);
+
+        let s = StorageLevel::memory_only();
+        assert!(s.use_memory && !s.use_disk && !s.use_off_heap);
+        assert_eq!(s.replication, 1);
+
+        let s = StorageLevel::memory_only_2();
+        assert!(s.use_memory && !s.use_disk);
+        assert_eq!(s.replication, 2);
+
+        let s = StorageLevel::memory_and_disk_2();
+        assert!(s.use_disk && s.use_memory);
+        assert_eq!(s.replication, 2);
+    }
 }

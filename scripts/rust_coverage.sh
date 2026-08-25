@@ -38,7 +38,9 @@ source <(cargo llvm-cov show-env --export-prefix)
 
 echo "==> Rust unit + integration tests (pure-Rust crates)"
 # e2e_integration self-gates on SPARK_REMOTE; golden/unit tests always run.
-cargo test -p apache-spark-connect-core -p apache-spark-connect
+# --include-ignored runs the server-gated integration_test.rs cases too (they are
+# #[ignore] so a serverless `cargo test` skips them) to cover the live-RPC paths.
+cargo test -p apache-spark-connect-core -p apache-spark-connect -- --include-ignored
 
 echo "==> Building instrumented pyspark-rs extension into the skin"
 cargo build -p pyspark-rs

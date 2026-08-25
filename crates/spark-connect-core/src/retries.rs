@@ -237,6 +237,60 @@ mod tests {
     }
 
     #[test]
+    fn test_no_retries_policy_allows_a_single_attempt() {
+        // no_retries() (max_retries = 0) means the first/only attempt is never retried,
+        // so the very first next_attempt() already returns None.
+        let policy = RetryPolicy::no_retries();
+        assert_eq!(policy.max_retries, Some(0));
+        let mut state = RetryPolicyState::new(policy);
+        assert_eq!(state.next_attempt(None), None);
+    }
+
+    #[test]
+    fn test_next_attempt_adds_jitter_above_threshold() {
+        // With jitter enabled and the threshold met, the returned wait is the base
+        // backoff plus a (rounded-up) jitter contribution in [0, jitter_ms).
+        let policy = RetryPolicy {
+            max_retries: Some(3),
+            initial_backoff_ms: 100,
+            max_backoff_ms: Some(1000),
+            backoff_multiplier: 2.0,
+            jitter_ms: 40,
+            min_jitter_threshold_ms: 10,
+            recognize_server_retry_delay: false,
+            max_server_retry_delay_ms: None,
+            max_retry_exception_elapsed_time_ms: None,
+        };
+        let mut state = RetryPolicyState::new(policy);
+        let w = state.next_attempt(None).expect("first retry allowed");
+        assert!((100..140).contains(&w), "expected 100..140 with jitter, got {w}");
+        assert_eq!(state.attempt(), 1);
+    }
+
+    #[test]
+    fn test_next_attempt_honors_server_retry_delay() {
+        // recognize_server_retry_delay=true raises the wait to the server-provided delay
+        // (capped by max_server_retry_delay_ms).
+        let policy = RetryPolicy {
+            max_retries: Some(3),
+            initial_backoff_ms: 100,
+            max_backoff_ms: Some(10_000),
+            backoff_multiplier: 2.0,
+            jitter_ms: 0,
+            min_jitter_threshold_ms: 0,
+            recognize_server_retry_delay: true,
+            max_server_retry_delay_ms: Some(5_000),
+            max_retry_exception_elapsed_time_ms: None,
+        };
+        let mut state = RetryPolicyState::new(policy);
+        // Server asks for 2s; that exceeds the 100ms base backoff, so it wins.
+        assert_eq!(state.next_attempt(Some(2_000)), Some(2_000));
+        // A server delay above the cap is clamped to max_server_retry_delay_ms.
+        let w = state.next_attempt(Some(9_999)).expect("second retry allowed");
+        assert!(w <= 5_000, "server delay must be clamped to the cap, got {w}");
+    }
+
+    #[test]
     fn test_retry_policy_respects_max_retries() {
         let policy = RetryPolicy {
             max_retries: Some(2),

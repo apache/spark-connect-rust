@@ -26,8 +26,9 @@ concurrency:
 
 # Mirrors Apache Spark's build_python_connect.yml approach, adapted for the
 # Rust-backed client: download the Spark 4.2.0 Connect server, start it, pull the
-# official v4.2.0 connect test files, and run them BOTH with the reference pyspark
-# client and with our client - the gate is "no regressions vs the reference".
+# official v4.2.0 connect test files, and run them through our client - the gate is
+# "every test passes except the checked-in known-environmental-failures manifest".
+# A separate job enforces Rust test coverage across all crates.
 
 on:
   push:
@@ -44,7 +45,8 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Reference-vs-ours parity gate against a real Spark 4.2.0 Connect server.
+  # Parity gate: the official connect suite through our client, against a real
+  # Spark 4.2.0 Connect server (see scripts/run_official_tests.py).
   # ---------------------------------------------------------------------------
   connect-parity:
     name: Connect parity (official suite via our client, Python ${{ matrix.python-version }})
@@ -323,3 +325,94 @@ jobs:
         run: cargo test -p apache-spark-connect -p apache-spark-connect-core --release
       - name: No-stub audit
         run: bash scripts/audit_no_stubs.sh
+
+  # ---------------------------------------------------------------------------
+  # Rust test coverage gate: all crates, including the pyspark-rs PyO3 layer
+  # (which has no Rust tests of its own and is exercised by the Python suite).
+  # See scripts/rust_coverage.sh. The generated proto crate is excluded.
+  # ---------------------------------------------------------------------------
+  rust-coverage:
+    name: Rust coverage (all crates incl. pyspark-rs)
+    runs-on: ubuntu-latest
+    env:
+      COVERAGE_MIN: "100"   # required line coverage %; the goal is full coverage
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Install Rust toolchain (+ llvm-tools)
+        run: |
+          rustup toolchain install stable --profile minimal --component llvm-tools-preview
+          rustup default stable
+      - name: Cache cargo & target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-cov-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-cov-
+      - name: Install system + Python deps
+        run: |
+          sudo apt-get update && sudo apt-get install -y protobuf-compiler
+          python -m pip install --upgrade pip
+          python -m pip install pytest pandas pyarrow numpy grpcio grpcio-status googleapis-common-protos cloudpickle zstandard py4j
+      - name: Install cargo-llvm-cov
+        # Prebuilt binary from GitHub releases: avoids a from-source `cargo install`
+        # and third-party actions (ASF policy allowlists actions/* only; curl in a run
+        # step is fine).
+        run: |
+          ver=$(curl -fsSL https://api.github.com/repos/taiki-e/cargo-llvm-cov/releases/latest \
+                | grep -m1 '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+          curl -fsSL "https://github.com/taiki-e/cargo-llvm-cov/releases/download/${ver}/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$HOME/.cargo/bin"
+      - name: Cache Spark distribution + source
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/spark-dist
+            ~/spark-source
+          key: spark-dist-src-${{ env.SPARK_VERSION }}
+      - name: Download & start Spark server
+        env:
+          # Server workers need pandas/pyarrow (installed above) for UDF/arrow execution.
+          PYSPARK_PYTHON: python
+          PYSPARK_DRIVER_PYTHON: python
+        run: |
+          PKG="spark-${SPARK_VERSION}-bin-hadoop3"
+          if [ ! -d "${HOME}/spark-dist/${PKG}" ]; then
+            mkdir -p "${HOME}/spark-dist"
+            wget -q -O "/tmp/${PKG}.tgz" "https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/${PKG}.tgz"
+            tar -xzf "/tmp/${PKG}.tgz" -C "${HOME}/spark-dist"
+            rm -f "/tmp/${PKG}.tgz"
+          fi
+          if [ ! -d "${HOME}/spark-source/python" ]; then
+            git clone --depth 1 --branch "v${SPARK_VERSION}" https://github.com/apache/spark.git "${HOME}/spark-source"
+          fi
+          "${HOME}/spark-dist/${PKG}/sbin/start-connect-server.sh" \
+            --packages "org.apache.spark:spark-connect_2.13:${SPARK_VERSION}" \
+            --driver-memory 3g \
+            --conf spark.sql.session.localRelationSizeLimit=1073741824 > /tmp/connect-server.log 2>&1 &
+          for i in $(seq 1 90); do (echo > /dev/tcp/localhost/15002) 2>/dev/null && break; sleep 1; done
+      - name: Measure coverage (fail under COVERAGE_MIN)
+        env:
+          SPARK_REMOTE: sc://localhost:15002
+          SPARK_SOURCE: ${{ github.workspace }}/../spark-source
+          RUST_PY: python
+          COV_HTML: "1"
+        run: |
+          SPARK_SOURCE="${HOME}/spark-source" bash scripts/rust_coverage.sh "${COVERAGE_MIN}"
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-coverage-html
+          path: target/llvm-cov/html
+          if-no-files-found: warn
