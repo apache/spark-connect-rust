@@ -169,7 +169,7 @@ The script sets these for test execution:
 The module name might not match the actual file. Check:
 1. Module is listed in `tests/official/connect_test_modules.txt`
 2. Module exists under `<spark>/python/pyspark/**/tests/connect/**/`
-3. Module name matches test file (e.g., `test_connect_basic` → `test_connect_basic.py`)
+3. Module name matches test file (e.g., `test_connect_basic` -> `test_connect_basic.py`)
 
 ### "Connection refused" to Spark Connect server
 
@@ -193,21 +193,21 @@ Check environment differences:
 3. **Dependencies**: All versions in `requirements-connect-test.txt` installed
 4. **Connect server**: Same configuration as local testing
 
-## Integration with docs/design/ACCEPTANCE.md
+## Integration with acceptance.md
 
 This gate is part of the broader **Acceptance Criteria**:
 - **Baseline**: Validates official tests pass with reference client
 - **Gating**: Required before shipping our package
 - **Cadence**: Runs in CI on every merge
 
-See `docs/design/ACCEPTANCE.md` for the full acceptance criteria framework.
+See `acceptance.md` for the full acceptance criteria framework.
 
 ## Files
 
 - `tests/official/connect_test_modules.txt` - Manifest of all 371 test modules
 - `scripts/run_official_connect_tests.py` - Script to execute tests
 - `requirements-connect-test.txt` - Pip dependencies
-- `docs/design/OFFICIAL_TESTS.md` - This document
+- `official-tests.md` - This document
 
 ## References
 

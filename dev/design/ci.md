@@ -8,8 +8,8 @@ This document describes the GitHub Actions CI pipeline for the Spark Connect Rus
 
 The CI consists of two main workflows:
 
-1. **Rust CI** (`.github/workflows/rust.yml`) — Build and test the pure-Rust crates
-2. **Python Connect Tests** (`.github/workflows/build_python_connect.yml`) — Build the PyO3 wheel and run Spark Connect integration tests
+1. **Rust CI** (`.github/workflows/rust.yml`) - Build and test the pure-Rust crates
+2. **Python Connect Tests** (`.github/workflows/build_python_connect.yml`) - Build the PyO3 wheel and run Spark Connect integration tests
 
 Both workflows run on every push to main/master and on all pull requests.
 
@@ -21,7 +21,7 @@ This workflow validates the pure-Rust implementation:
 
 - **Build**: Compiles `spark-connect`, `spark-connect-core`, and `spark-connect-proto` crates (pyspark-rs is excluded from default cargo operations because it requires maturin + Python environment)
 - **Test**: Runs `cargo test` on `spark-connect` and `spark-connect-core`
-- **No-stub audit**: Runs `scripts/audit_no_stubs.sh` to enforce the "100% coverage, zero stubs" rule (see [ARCHITECTURE.md](./ARCHITECTURE.md))
+- **No-stub audit**: Runs `scripts/audit_no_stubs.sh` to enforce the "100% coverage, zero stubs" rule (see [Design notes](architecture.md))
 
 ### Key steps
 
@@ -45,8 +45,8 @@ This workflow builds the PyO3 extension and runs the official Apache Spark Conne
 The job is matrix-tested across Python versions (3.9, 3.11) to ensure broad compatibility.
 
 **Expected behavior**:
-- Many tests will fail initially — this is intentional and documents the work remaining
-- Each failure corresponds to a gap in parity (see `docs/parity/inventory.csv`)
+- Many tests will fail initially - this is intentional and documents the work remaining
+- Each failure corresponds to a gap in parity (see `dev/parity/inventory.csv`)
 - The workflow remains stable (doesn't flake) because it's deterministic (pinned Spark version)
 - As features are implemented and marked `verified` in the parity ledger, test failures will turn green
 - **Final goal**: 100% of Connect test suite passing
@@ -107,10 +107,10 @@ These logs are available in the workflow run artifacts for debugging failures.
 ### Expected test modules
 
 The workflow currently runs:
-- `test_connect_column` — Column and expression operations
-- `test_connect_functions` — SQL functions
-- `test_connect_dataframe` — DataFrame operations
-- `test_connect_udf` — Python and pandas UDFs
+- `test_connect_column` - Column and expression operations
+- `test_connect_functions` - SQL functions
+- `test_connect_dataframe` - DataFrame operations
+- `test_connect_udf` - Python and pandas UDFs
 
 Additional modules can be added as parity improves (e.g., `test_connect_readwriter`, `test_connect_udf_batch`, etc.).
 
@@ -119,7 +119,7 @@ Additional modules can be added as parity improves (e.g., `test_connect_readwrit
 Each failing test is a **gap in parity**. The fix process:
 
 1. **Identify the gap**: Read the test failure and corresponding official code
-2. **Locate the ledger row**: Find the symbol in `docs/parity/inventory.csv`
+2. **Locate the ledger row**: Find the symbol in `dev/parity/inventory.csv`
 3. **Implement the feature**: Code the missing functionality in the Rust crate
 4. **Update ledger status**: Mark the row `done` (or `verified` if a golden proto is included)
 5. **Verify locally**: Run `scripts/run_official_connect_tests.py` with `--target-pyspark ./python`
@@ -127,7 +127,7 @@ Each failing test is a **gap in parity**. The fix process:
 
 ## Continuous improvement
 
-The parity ledger (`docs/parity/inventory.csv`) is the source of truth:
+The parity ledger (`dev/parity/inventory.csv`) is the source of truth:
 - **todo**: Not started
 - **wip**: In progress, not testable yet
 - **done**: Implemented, test(s) passing but not yet officially verified
@@ -167,9 +167,9 @@ To run the Connect test suite locally:
 
 ## References
 
-- [ARCHITECTURE.md](./ARCHITECTURE.md) — System design, parity strategy, no-stub rule
-- [ACCEPTANCE.md](./ACCEPTANCE.md) — Acceptance criteria and definition of done
-- [pyproject.toml](../../pyproject.toml) — Maturin build configuration
-- [scripts/run_official_connect_tests.py](../../scripts/run_official_connect_tests.py) — Test runner utility
-- [scripts/audit_no_stubs.sh](../../scripts/audit_no_stubs.sh) — No-stub audit gate
-- [Apache Spark Workflow](https://github.com/apache/spark/blob/master/.github/workflows/build_python_connect.yml) — Reference implementation
+- [Design notes](architecture.md) - System design, parity strategy, no-stub rule
+- [Acceptance criteria](acceptance.md) - Acceptance criteria and definition of done
+- [pyproject.toml](https://github.com/apache/spark-connect-rust/blob/master/pyproject.toml) - Maturin build configuration
+- [scripts/run_official_connect_tests.py](https://github.com/apache/spark-connect-rust/blob/master/scripts/run_official_connect_tests.py) - Test runner utility
+- [scripts/audit_no_stubs.sh](https://github.com/apache/spark-connect-rust/blob/master/scripts/audit_no_stubs.sh) - No-stub audit gate
+- [Apache Spark Workflow](https://github.com/apache/spark/blob/master/.github/workflows/build_python_connect.yml) - Reference implementation

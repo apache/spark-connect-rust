@@ -19,173 +19,73 @@
 
 # Spark Connect Rust Client
 
-A Rust rewrite of the PySpark **Spark Connect** client (`pyspark.sql.connect.*`),
-exposed through PyO3 as a drop-in `pyspark` package. It speaks the same Spark
-Connect gRPC/protobuf protocol and returns the same results, so existing
-Spark Connect code runs unchanged against the same server - with the plan
-building, transport, and Arrow decoding done in Rust.
+A fast, native **Rust** client for **Apache Spark Connect** - and a drop-in
+`pyspark` replacement. It builds `spark.connect` protobuf plans, manages the gRPC
+channel, and decodes Arrow results in Rust, speaking the same protocol and
+returning the same results as the reference client.
 
-**Supported Spark version:** Apache Spark **4.2.0 and later**. The crate and wheel
-version tracks the Spark release it targets (starting at `4.2.0`), so the version
-number tells you which Spark it speaks.
+[![PyPI](https://img.shields.io/pypi/v/pyspark-client-rust?color=c2410c&label=pyspark-client-rust)](https://pypi.org/project/pyspark-client-rust/)
+![Spark](https://img.shields.io/badge/Apache%20Spark-4.2.0%2B-c2410c)
+![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 
-## Why
+## 📖 Documentation
 
-The reference Spark Connect client is pure Python: it builds protobuf plans,
-manages the gRPC channel, and decodes Arrow results in Python. This project moves
-that work into Rust while keeping a byte-for-byte compatible Python surface, so it
-can be a **drop-in replacement** - same imports, same API, same server.
+**Full documentation lives at
+[apache.github.io/spark-connect-rust](https://apache.github.io/spark-connect-rust/)**
+- installation, quickstart, the DataFrame / Columns / SQL / Reading &
+Writing / Streaming / Catalog / Types API, [Rust UDFs via
+WebAssembly](https://apache.github.io/spark-connect-rust/udfs/), and the
+[architecture](https://apache.github.io/spark-connect-rust/architecture/).
 
-## Architecture
+## Install
 
-A Cargo workspace of four crates plus a Python skin:
-
-| Component | Path | Responsibility |
-|---|---|---|
-| `apache-spark-connect-proto` | `crates/spark-connect-proto` | gRPC/protobuf codegen for `spark.connect.*` |
-| `apache-spark-connect-core` | `crates/spark-connect-core` | Transport: channel, retries, reattach, artifacts, errors |
-| `apache-spark-connect` | `crates/spark-connect` | DataFrame API: session, dataframe, column, functions, plan, group, catalog, window, readwriter, streaming, udf, types |
-| `pyspark-rs` | `crates/pyspark-rs` | PyO3 bindings - builds the `_pyspark` extension module |
-| Python skin | `python/pyspark` | The drop-in `pyspark` package (+ vendored `pyspark.pandas`, `cloudpickle`, `pyspark.testing`) |
-
-See [`docs/design/ARCHITECTURE.md`](docs/design/ARCHITECTURE.md) for detail.
-
-## Installation
-
-`pyspark-client-rust` is a **complete drop-in** for the reference `pyspark`
-Spark Connect client: install it and existing Spark Connect code runs unchanged
-— same imports, same API, same server.
+**Python** - a faster, drop-in replacement for the
+[`pyspark-client`](https://pypi.org/project/pyspark-client/) PyPI package
+(uninstall any existing `pyspark` / `pyspark-client` first):
 
 ```bash
 pip install pyspark-client-rust
 ```
 
-### Build from source
+Your Spark Connect code then runs unchanged; use it exactly like
+[PySpark](https://spark.apache.org/docs/latest/api/python/).
 
-Requires a Rust toolchain, `protobuf-compiler`, and Python 3.9+.
+**Rust** - the native crate:
 
-```bash
-# Build the wheel (mixed Python/Rust layout via maturin) and install it:
-maturin build --release --out dist
-pip install dist/pyspark_client_rust-*.whl
+```toml
+[dependencies]
+apache-spark-connect = "4.2"
 ```
 
-For local development without maturin, build the extension and copy it into the skin:
-
-```bash
-cargo build -p pyspark-rs --release
-cp target/release/lib_pyspark.dylib python/pyspark/_pyspark.so   # .so/.dylib per platform
-PYTHONPATH=python python -c "from pyspark.sql import SparkSession; ..."
-```
-
-## Usage
-
-Identical to the reference Spark Connect client:
-
-```python
-from pyspark.sql import SparkSession, functions as sf
-
-spark = SparkSession.builder.remote("sc://localhost:15002").getOrCreate()
-
-df = (
-    spark.range(0, 1_000_000)
-    .select((sf.col("id") * 2).alias("x"))
-    .filter(sf.col("x") % 3 == 0)
-)
-print(df.count())
-df.groupBy((sf.col("x") % 10).alias("k")).agg(sf.sum("x"), sf.avg("x")).show()
-```
-
-### Rust usage (native)
-
-The pure-Rust API is synchronous and mirrors PySpark's surface:
+## Quickstart (Rust)
 
 ```rust
-use spark_connect::session::SparkSession;
-use spark_connect::functions as f;
+use spark_connect::{SparkSession, functions as f, lit};
 
-fn main() -> Result<()> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let spark = SparkSession::builder()
         .remote("sc://localhost:15002")
         .get_or_create()?;
-    
+
     let df = spark
-        .range(0, 1_000_000)?
-        .select(vec![f::col("id") * 2])?
-        .filter(f::col("id") % 3 == 0)?;
-    
-    println!("Count: {}", df.count()?);
-    df.show(10)?;
-    
+        .range(1_000_000)?
+        .select(vec![(f::col("id") * lit(2)).alias("x")])
+        .filter((f::col("x") % lit(3)).eq(lit(0)));
+
+    println!("count = {}", df.count()?);
+    df.show(20)?;
     Ok(())
 }
 ```
 
-### Rust UDFs via WebAssembly
+See the [documentation](https://apache.github.io/spark-connect-rust/) for the full
+API, running a Spark Connect server, and more.
 
-Python UDFs run as normal. In addition, a Rust function can be compiled to
-WebAssembly and shipped as a UDF: the `.wasm` bytes are embedded in a cloudpickled
-Python shim and executed on the worker via `wasmtime`, so no Rust toolchain is
-needed server-side. See `python/pyspark_wasm_udf/` and the example crates
-`examples/wasm-udf-inline/` (single-file) and `examples/wasm-udfs/` +
-`examples/src/wasm_udf_macro.rs` (reusable crate).
+## Contributing
 
-## Getting started with Spark Connect server
-
-Run a Spark Connect server locally for development:
-
-1. [Download Spark 4.2.0](https://spark.apache.org/downloads.html) and unzip it
-2. Set `SPARK_HOME` to the unzipped directory
-3. Start the server with:
-
-```bash
-$SPARK_HOME/sbin/start-connect-server.sh \
-  --packages "org.apache.spark:spark-connect_2.13:4.2.0,io.delta:delta-spark_2.13:4.2.0" \
-  --conf "spark.driver.extraJavaOptions=-Divy.cache.dir=/tmp -Divy.home=/tmp" \
-  --conf "spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension" \
-  --conf "spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog"
-```
-
-The server listens on `sc://localhost:15002` by default.
-
-### Sample data
-
-Sample datasets used by the examples live in `examples/datasets/` (people.csv,
-employees.json, kv1.txt, etc.). The reader/deltalake examples load them by a path
-relative to the **server's** working directory (e.g. `./datasets/people.csv`), so
-start the Spark Connect server from the `examples/` directory (where `./datasets`
-resolves), or adjust the path in the example to point at the data.
-
-## Continuous integration
-
-- **Build & test** - Rust build/test via `cargo test`
-- **Golden-proto tests** - Validate the plan/expression protos this client builds
-  (`plan.rs` and friends) byte-for-byte against the reference client. This is what
-  guards plan-building correctness.
-- **Parity gate** - Runs the official Apache Spark connect test suite against this
-  client. The suite drives the standard pyspark public API but routes plan-building
-  through *upstream* pyspark (via `rust_transport_plugin.py`), so it exercises our
-  **transport and Arrow result paths** end-to-end against a real server — not our
-  own `plan.rs` (that is the golden-proto tests' job). Together the two gates cover
-  plan-building and transport respectively.
-- **Benchmark** - End-to-end performance vs reference client
-- **Lint** - `rustfmt --check`, `clippy`, and `ruff` for Python tooling
-
-## Development
-
-```bash
-cargo fmt --all                 # format Rust
-cargo clippy --workspace        # lint Rust
-ruff check scripts/             # lint our Python tooling
-ruff format scripts/
-```
-
-`ruff` is intentionally scoped to `scripts/`; the `python/pyspark` tree is largely
-vendored from Apache Spark and kept byte-compatible with upstream.
-
-Remaining parity work is tracked mechanically in the parity ledger at
-`docs/parity/inventory.csv`; the official Apache Spark connect test suite is the
-authoritative gate.
+Issues are tracked in ASF JIRA under
+[SPARK](https://issues.apache.org/jira/browse/SPARK) (GitHub Issues are disabled).
+See the [contributing guide](https://apache.github.io/spark-connect-rust/contributing/).
 
 ## License
 
