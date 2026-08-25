@@ -21,13 +21,18 @@ impl PyStatFunctions {
 #[pymethods]
 impl PyStatFunctions {
     /// Pearson correlation between two numeric columns.
-    fn corr(&self, col1: &str, col2: &str) -> PyResult<f64> {
-        self.stat.corr(col1, col2).to_pyerr()
+    ///
+    /// `corr`/`cov` execute a plan (server round-trip via `scalar()`), so release
+    /// the GIL across the call - otherwise a Python thread is blocked for the whole
+    /// RPC. (`crosstab`/`freq_items`/`approx_quantile` return lazy DataFrames and do
+    /// no I/O here, so they need no detach.)
+    fn corr(&self, py: Python<'_>, col1: &str, col2: &str) -> PyResult<f64> {
+        py.detach(|| self.stat.corr(col1, col2)).to_pyerr()
     }
 
     /// Sample covariance between two numeric columns.
-    fn cov(&self, col1: &str, col2: &str) -> PyResult<f64> {
-        self.stat.cov(col1, col2).to_pyerr()
+    fn cov(&self, py: Python<'_>, col1: &str, col2: &str) -> PyResult<f64> {
+        py.detach(|| self.stat.cov(col1, col2)).to_pyerr()
     }
 
     /// Contingency table (cross-tabulation) of two columns.

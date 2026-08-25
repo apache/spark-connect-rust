@@ -407,3 +407,31 @@ fn test_with_watermark() {
     // Just verify that the method doesn't fail
     let _schema = df.schema().expect("Failed to get schema");
 }
+
+#[test]
+fn test_to_arrow_full_path() {
+    // Full server -> collect -> Arrow IPC path for DataFrame::to_arrow (the
+    // conversion logic itself is unit-tested in dataframe.rs::conversion_tests).
+    if !should_run() {
+        println!("Skipping test_to_arrow_full_path - set SPARK_REMOTE to run");
+        return;
+    }
+    use arrow::ipc::reader::FileReader;
+    use std::io::Cursor;
+
+    let remote_url =
+        std::env::var("SPARK_REMOTE").unwrap_or_else(|_| "sc://localhost:15002".to_string());
+    let session = SparkSession::builder()
+        .remote(&remote_url)
+        .get_or_create()
+        .expect("Failed to create session");
+
+    let ipc = session
+        .range(5)
+        .expect("range")
+        .to_arrow()
+        .expect("to_arrow");
+    let reader = FileReader::try_new(Cursor::new(ipc), None).expect("valid Arrow IPC file");
+    let rows: usize = reader.map(|b| b.expect("batch").num_rows()).sum();
+    assert_eq!(rows, 5, "to_arrow must round-trip all 5 rows of range(5)");
+}

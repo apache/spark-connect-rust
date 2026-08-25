@@ -1501,29 +1501,7 @@ impl DataFrame {
     /// back with `arrow::ipc::reader::FileReader` (or handed to pyarrow, polars,
     /// etc.). An empty result yields a valid IPC file with an empty schema.
     pub fn to_arrow(&self) -> Result<Vec<u8>> {
-        use arrow::ipc::writer::FileWriter;
-
-        let batches = self.collect_record_batches()?;
-        let schema = match batches.first() {
-            Some(batch) => batch.schema(),
-            None => std::sync::Arc::new(arrow::datatypes::Schema::empty()),
-        };
-
-        let mut buf: Vec<u8> = Vec::new();
-        {
-            let mut writer = FileWriter::try_new(&mut buf, schema.as_ref()).map_err(|e| {
-                SparkError::connect_msg(format!("Arrow IPC writer init failed: {e}"))
-            })?;
-            for batch in &batches {
-                writer
-                    .write(batch)
-                    .map_err(|e| SparkError::connect_msg(format!("Arrow IPC write failed: {e}")))?;
-            }
-            writer
-                .finish()
-                .map_err(|e| SparkError::connect_msg(format!("Arrow IPC finish failed: {e}")))?;
-        }
-        Ok(buf)
+        record_batches_to_ipc(&self.collect_record_batches()?)
     }
 
     /// Convert to a DataFusion DataFrame.
@@ -1546,19 +1524,7 @@ impl DataFrame {
         &self,
         ctx: &datafusion::prelude::SessionContext,
     ) -> Result<datafusion::dataframe::DataFrame> {
-        let batches = self.collect_record_batches()?;
-
-        if batches.is_empty() {
-            return Err(SparkError::connect_msg(
-                "Cannot create DataFusion DataFrame from empty result",
-            ));
-        }
-
-        // Use DataFusion's API to create a DataFrame from record batches.
-        // The schema is extracted from the first batch automatically.
-        ctx.read_batches(batches).map_err(|e| {
-            SparkError::connect_msg(format!("Failed to create DataFusion DataFrame: {}", e))
-        })
+        record_batches_to_datafusion(ctx, self.collect_record_batches()?)
     }
 
     /// Convert a collected DataFrame into a [`polars::frame::DataFrame`].
@@ -1574,34 +1540,7 @@ impl DataFrame {
     /// crate's arrow-rs version.
     #[cfg(feature = "polars")]
     pub fn to_polars(&self) -> Result<polars::frame::DataFrame> {
-        use arrow::ipc::writer::FileWriter;
-        use polars::prelude::{IpcReader, SerReader};
-        use std::io::Cursor;
-
-        let batches = self.collect_record_batches()?;
-        if batches.is_empty() {
-            return Ok(polars::frame::DataFrame::empty());
-        }
-
-        let schema = batches[0].schema();
-        let mut buf: Vec<u8> = Vec::new();
-        {
-            let mut writer = FileWriter::try_new(&mut buf, schema.as_ref()).map_err(|e| {
-                SparkError::connect_msg(format!("Arrow IPC writer init failed: {e}"))
-            })?;
-            for batch in &batches {
-                writer
-                    .write(batch)
-                    .map_err(|e| SparkError::connect_msg(format!("Arrow IPC write failed: {e}")))?;
-            }
-            writer
-                .finish()
-                .map_err(|e| SparkError::connect_msg(format!("Arrow IPC finish failed: {e}")))?;
-        }
-
-        IpcReader::new(Cursor::new(buf))
-            .finish()
-            .map_err(|e| SparkError::connect_msg(format!("Failed to create Polars DataFrame: {e}")))
+        record_batches_to_polars(&self.collect_record_batches()?)
     }
 
     /// Repartition by ID.
@@ -2074,6 +2013,88 @@ fn i128_to_decimal_string(unscaled: i128, scale: i32) -> String {
     }
 }
 
+/// Serialize record batches to Arrow IPC (file format) bytes. Shared by
+/// [`DataFrame::to_arrow`] and [`DataFrame::to_polars`]; an empty input yields a
+/// valid empty-schema IPC file.
+fn record_batches_to_ipc(batches: &[arrow::record_batch::RecordBatch]) -> Result<Vec<u8>> {
+    use arrow::ipc::writer::FileWriter;
+    let schema = match batches.first() {
+        Some(b) => b.schema(),
+        None => std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+    };
+    let mut buf: Vec<u8> = Vec::new();
+    {
+        let mut writer = FileWriter::try_new(&mut buf, schema.as_ref())
+            .map_err(|e| SparkError::connect_msg(format!("Arrow IPC writer init failed: {e}")))?;
+        for batch in batches {
+            writer
+                .write(batch)
+                .map_err(|e| SparkError::connect_msg(format!("Arrow IPC write failed: {e}")))?;
+        }
+        writer
+            .finish()
+            .map_err(|e| SparkError::connect_msg(format!("Arrow IPC finish failed: {e}")))?;
+    }
+    Ok(buf)
+}
+
+/// Build a DataFusion DataFrame from record batches (the conversion behind
+/// [`DataFrame::to_datafusion`], factored out so it is unit-testable without a
+/// live server).
+#[cfg(feature = "datafusion")]
+fn record_batches_to_datafusion(
+    ctx: &datafusion::prelude::SessionContext,
+    batches: Vec<arrow::record_batch::RecordBatch>,
+) -> Result<datafusion::dataframe::DataFrame> {
+    if batches.is_empty() {
+        return Err(SparkError::connect_msg(
+            "Cannot create DataFusion DataFrame from empty result",
+        ));
+    }
+    ctx.read_batches(batches)
+        .map_err(|e| SparkError::connect_msg(format!("Failed to create DataFusion DataFrame: {e}")))
+}
+
+/// Build a Polars DataFrame from record batches by bridging through Arrow IPC
+/// bytes (so polars' vendored arrow need not match this crate's arrow-rs). The
+/// conversion behind [`DataFrame::to_polars`], factored out for unit testing.
+#[cfg(feature = "polars")]
+fn record_batches_to_polars(
+    batches: &[arrow::record_batch::RecordBatch],
+) -> Result<polars::frame::DataFrame> {
+    use polars::prelude::{IpcReader, SerReader};
+    use std::io::Cursor;
+    if batches.is_empty() {
+        return Ok(polars::frame::DataFrame::empty());
+    }
+    let buf = record_batches_to_ipc(batches)?;
+    IpcReader::new(Cursor::new(buf))
+        .finish()
+        .map_err(|e| SparkError::connect_msg(format!("Failed to create Polars DataFrame: {e}")))
+}
+
+/// Render a decoded map key ([`Value`]) as its natural scalar string, since
+/// `Value::Map` keys are `String`. Numeric/boolean keys use their value (`1`,
+/// `true`), decimals their preserved digits; non-scalar keys (rare) fall back to
+/// Debug. This must never use the enum's Debug form for scalars - a `map<int,…>`
+/// key has to be "1", not "Integer(1)".
+fn map_key_to_string(v: Value) -> String {
+    match v {
+        Value::String(s) => s,
+        Value::Bool(b) => b.to_string(),
+        Value::Byte(x) => x.to_string(),
+        Value::Short(x) => x.to_string(),
+        Value::Integer(x) => x.to_string(),
+        Value::Long(x) => x.to_string(),
+        Value::Float(x) => x.to_string(),
+        Value::Double(x) => x.to_string(),
+        Value::Date(d) => d.to_string(),
+        Value::Timestamp(t) => t.to_string(),
+        Value::Decimal { value, .. } => value,
+        other => format!("{other:?}"),
+    }
+}
+
 pub(crate) fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> Result<Value> {
     use arrow::array::*;
 
@@ -2189,10 +2210,10 @@ pub(crate) fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> R
         let vals = entries.column(1);
         let mut map = std::collections::BTreeMap::new();
         for i in 0..entries.len() {
-            let k = match arrow_value_at(keys.as_ref(), i)? {
-                Value::String(s) => s,
-                other => format!("{other:?}"),
-            };
+            // A map key stringifies to its natural scalar form (e.g. `1`, `true`,
+            // `1.5`), not the Rust enum's Debug output - a `map<int,string>` key must
+            // be "1", never "Integer(1)".
+            let k = map_key_to_string(arrow_value_at(keys.as_ref(), i)?);
             map.insert(k, arrow_value_at(vals.as_ref(), i)?);
         }
         return Ok(Value::Map(map));
@@ -2319,5 +2340,111 @@ mod cache_tests {
         let iter: LocalRowIterator;
         // This test just verifies the type exists and is constructible.
         // A true integration test would create an actual stream.
+    }
+}
+
+/// Deterministic tests for the collected-data conversions (`to_arrow`,
+/// `to_datafusion`, `to_polars`). These exercise the conversion logic on
+/// synthetic RecordBatches, so they need no live server and run in CI's
+/// `--features datafusion,polars` job. The full server->collect->convert path is
+/// covered separately by the server-gated e2e_integration tests.
+#[cfg(test)]
+mod conversion_tests {
+    use super::*;
+    use arrow::array::{Int64Array, StringArray};
+    use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use std::sync::Arc;
+
+    fn sample_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", ArrowDataType::Int64, false),
+            Field::new("name", ArrowDataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2, 3])),
+                Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn to_arrow_ipc_round_trips() {
+        use arrow::ipc::reader::FileReader;
+        use std::io::Cursor;
+
+        let ipc = record_batches_to_ipc(&[sample_batch()]).expect("ipc encode");
+        let reader = FileReader::try_new(Cursor::new(ipc), None).expect("ipc decode");
+        let batches: Vec<_> = reader.map(|b| b.unwrap()).collect();
+        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total, 3, "round-trip must preserve all rows");
+        assert_eq!(batches[0].num_columns(), 2);
+        let ids = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(ids.values(), &[1, 2, 3]);
+    }
+
+    #[test]
+    fn to_arrow_ipc_empty_is_valid() {
+        // An empty result must still be a valid, readable IPC file.
+        use arrow::ipc::reader::FileReader;
+        use std::io::Cursor;
+        let ipc = record_batches_to_ipc(&[]).expect("empty ipc");
+        let reader = FileReader::try_new(Cursor::new(ipc), None).expect("empty ipc decode");
+        assert_eq!(reader.map(|b| b.unwrap().num_rows()).sum::<usize>(), 0);
+    }
+
+    #[cfg(feature = "datafusion")]
+    #[test]
+    fn to_datafusion_preserves_rows_and_columns() {
+        use datafusion::prelude::SessionContext;
+        use spark_connect_core::runtime::block_on;
+
+        let ctx = SessionContext::new();
+        let df = record_batches_to_datafusion(&ctx, vec![sample_batch()]).expect("to datafusion");
+        // Collect (async) and assert shape survives the conversion - uses only the
+        // stable arrow RecordBatch API so it is not tied to a datafusion version.
+        let collected = block_on(df.collect()).expect("collect datafusion");
+        assert_eq!(collected.iter().map(|b| b.num_rows()).sum::<usize>(), 3);
+        assert_eq!(collected[0].num_columns(), 2);
+    }
+
+    #[cfg(feature = "datafusion")]
+    #[test]
+    fn to_datafusion_empty_errors() {
+        use datafusion::prelude::SessionContext;
+        let ctx = SessionContext::new();
+        assert!(record_batches_to_datafusion(&ctx, vec![]).is_err());
+    }
+
+    #[cfg(feature = "polars")]
+    #[test]
+    fn to_polars_preserves_shape() {
+        // height()/width() are stable across polars versions; asserting shape proves
+        // the Arrow-IPC bridge carried all rows and columns through.
+        let pdf = record_batches_to_polars(&[sample_batch()]).expect("to polars");
+        assert_eq!(
+            pdf.height(),
+            3,
+            "row count must survive the Arrow-IPC bridge"
+        );
+        assert_eq!(
+            pdf.width(),
+            2,
+            "column count must survive the Arrow-IPC bridge"
+        );
+    }
+
+    #[cfg(feature = "polars")]
+    #[test]
+    fn to_polars_empty_is_empty() {
+        let pdf = record_batches_to_polars(&[]).expect("empty polars");
+        assert_eq!(pdf.height(), 0);
     }
 }

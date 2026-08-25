@@ -580,6 +580,9 @@ impl LogicalPlan {
                 order,
                 is_global,
             } => {
+                // Use the generated proto enum constants rather than bare 1/2 magic
+                // numbers, so a future proto reorder can't silently change meaning.
+                use proto::expression::sort_order::{NullOrdering as PbNulls, SortDirection};
                 let mut sort = proto::Sort::default();
                 sort.input = Some(Box::new(input.to_proto()));
                 for expr in order {
@@ -587,10 +590,16 @@ impl LogicalPlan {
                     if let Expression::SortOrder(so) = expr {
                         let mut sort_order = proto::expression::SortOrder::default();
                         sort_order.child = Some(Box::new(so.child.to_proto()));
-                        sort_order.direction = if so.ascending { 1i32 } else { 2i32 };
+                        sort_order.direction = if so.ascending {
+                            SortDirection::Ascending as i32
+                        } else {
+                            SortDirection::Descending as i32
+                        };
                         sort_order.null_ordering = match so.null_ordering {
-                            crate::expression::NullOrdering::First => 1i32,
-                            crate::expression::NullOrdering::Last => 2i32,
+                            crate::expression::NullOrdering::First => {
+                                PbNulls::SortNullsFirst as i32
+                            }
+                            crate::expression::NullOrdering::Last => PbNulls::SortNullsLast as i32,
                         };
                         sort.order.push(sort_order);
                     } else {
@@ -606,8 +615,8 @@ impl LogicalPlan {
                             // order and an invalid Sort plan.
                             let mut sort_order = proto::expression::SortOrder::default();
                             sort_order.child = Some(Box::new(expr_proto));
-                            sort_order.direction = 1i32; // ascending
-                            sort_order.null_ordering = 1i32; // nulls first
+                            sort_order.direction = SortDirection::Ascending as i32;
+                            sort_order.null_ordering = PbNulls::SortNullsFirst as i32;
                             sort.order.push(sort_order);
                         }
                     }
