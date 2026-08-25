@@ -449,7 +449,8 @@ _UDFRegistration()
         self.session.clear_tags()
     }
 
-    #[pyo3(name = "addArtifacts")]
+    // Mirrors reference `SparkSession.addArtifacts(*path)` - variadic positional paths.
+    #[pyo3(name = "addArtifacts", signature = (*paths))]
     fn add_artifacts(&self, py: Python<'_>, paths: Vec<String>) -> PyResult<()> {
         let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
         py.detach(|| self.session.add_artifacts(&refs)).to_pyerr()

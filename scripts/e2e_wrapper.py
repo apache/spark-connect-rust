@@ -365,9 +365,24 @@ def main():
     ck("session.removeTag", lambda: spark.removeTag("e2e-tag"))
     ck("session.clearTags", lambda: spark.clearTags())
     ck("session.interruptAll", lambda: spark.interruptAll())
+    ck("session.interruptTag", lambda: spark.interruptTag("e2e-tag"))
     ck("session.getActiveSession", lambda: SparkSession.getActiveSession())
     ck("session.profile", lambda: spark.profile)
     ck("session.dataSource", lambda: spark.dataSource)
+
+    # ---- artifact upload (client-side chunking/CRC path) ------------------------
+    def _artifacts():
+        art_dir = tempfile.mkdtemp()
+        f1 = os.path.join(art_dir, "e2e_artifact_a.txt")
+        f2 = os.path.join(art_dir, "e2e_artifact_b.txt")
+        with open(f1, "w") as fh:
+            fh.write("drop-in artifact one")
+        with open(f2, "wb") as fh:
+            fh.write(b"y" * (256 * 1024))  # exercise the multi-chunk path
+        spark.addArtifact(f1)
+        spark.addArtifacts(f1, f2)
+
+    ck("session.addArtifact", _artifacts)
 
     # ---- resource profile -------------------------------------------------------
     def _resource():
