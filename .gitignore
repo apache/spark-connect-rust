@@ -41,3 +41,7 @@ __pycache__/
 /pyspark-*.tar.gz
 /pyspark-[0-9]*/
 /spark-*-bin-*/
+
+# Coverage / test artifacts
+*.profraw
+derby.log

@@ -278,11 +278,19 @@ fn test_decimal_round() {
     // The SQL literal 3.14159 decodes as DECIMAL(6,5) in Spark (not DOUBLE).
     match row2.get(0).expect("No value") {
         Value::Double(d) => {
-            assert!((d - 3.14159).abs() < 0.00001, "Expected ~3.14159, got {}", d);
+            assert!(
+                (d - 3.14159).abs() < 0.00001,
+                "Expected ~3.14159, got {}",
+                d
+            );
         }
         Value::Decimal { value, .. } => {
             let d: f64 = value.parse().expect("decimal value parses as f64");
-            assert!((d - 3.14159).abs() < 0.00001, "Expected ~3.14159, got {}", value);
+            assert!(
+                (d - 3.14159).abs() < 0.00001,
+                "Expected ~3.14159, got {}",
+                value
+            );
         }
         other => panic!("Expected Double/Decimal, got {:?}", other),
     }

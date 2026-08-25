@@ -101,7 +101,7 @@ def run_ours(test_file: Path, spark_py: Path, remote: str, deselect, timeout: in
     except subprocess.TimeoutExpired:
         return {"passed": 0, "failed": 0, "error": 0, "skipped": 0, "timeout": True}, []
     counts = parse_counts(text)
-    failed_ids = [m.group(1) for m in map(_FAIL_RE.match, (l.strip() for l in text.splitlines())) if m]
+    failed_ids = [m.group(1) for m in map(_FAIL_RE.match, (ln.strip() for ln in text.splitlines())) if m]
     return counts, failed_ids
 
 
@@ -180,7 +180,7 @@ def main():
     if failures:
         print("\nUnexpected failures (a regression, or a new environmental failure to add\n"
               "to scripts/parity_known_failures.txt via scripts/gen_parity_skiplist.py):")
-        for name, ids in failures:
+        for _name, ids in failures:
             for nid in ids:
                 print(f"  {nid}")
         return 1

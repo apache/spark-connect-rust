@@ -264,7 +264,10 @@ mod tests {
         let mut state = RetryPolicyState::new(policy);
         let w = state.next_attempt(None).expect("first retry allowed");
         // jitter is [0, 40); base 100 + jitter, rounded up, lands in [100, 140].
-        assert!((100..=140).contains(&w), "expected 100..=140 with jitter, got {w}");
+        assert!(
+            (100..=140).contains(&w),
+            "expected 100..=140 with jitter, got {w}"
+        );
         assert_eq!(state.attempt(), 1);
     }
 
@@ -287,8 +290,13 @@ mod tests {
         // Server asks for 2s; that exceeds the 100ms base backoff, so it wins.
         assert_eq!(state.next_attempt(Some(2_000)), Some(2_000));
         // A server delay above the cap is clamped to max_server_retry_delay_ms.
-        let w = state.next_attempt(Some(9_999)).expect("second retry allowed");
-        assert!(w <= 5_000, "server delay must be clamped to the cap, got {w}");
+        let w = state
+            .next_attempt(Some(9_999))
+            .expect("second retry allowed");
+        assert!(
+            w <= 5_000,
+            "server delay must be clamped to the cap, got {w}"
+        );
     }
 
     #[test]
