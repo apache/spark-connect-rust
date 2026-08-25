@@ -2,15 +2,18 @@
 
 mod catalog;
 mod column;
+mod conf;
 mod dataframe;
 mod datasource;
 mod errors;
 mod functions;
 mod group;
 mod profiler;
+mod readwriter;
 mod resource;
 mod row;
 mod session;
+mod stat;
 mod streaming;
 mod transport;
 mod types;
@@ -18,6 +21,7 @@ mod window;
 
 use catalog::PyCatalog;
 use column::PyColumn;
+use conf::PyRuntimeConf;
 use dataframe::{
     PyDataFrame, PyDataFrameNaFunctions, PyDataFrameWriter, PyDataFrameWriterV2,
     PyLocalRowIterator, PyMergeIntoWriter, PyWhenMatched, PyWhenNotMatched,
@@ -27,11 +31,13 @@ use datasource::PyDataSourceRegistration;
 use group::{PyCoGroupedData, PyGroupedData};
 use profiler::PyProfilerCollector;
 use pyo3::prelude::*;
+use readwriter::PyDataFrameReader;
 use resource::{
     PyExecutorResourceRequests, PyResourceProfile, PyResourceProfileBuilder, PyTaskResourceRequests,
 };
 use row::PyRow;
 use session::{PySparkSession, PySparkSessionBuilder};
+use stat::PyStatFunctions;
 use streaming::{
     PyDataStreamReader, PyDataStreamWriter, PyListenerEventStream, PyStreamingQuery,
     PyStreamingQueryException, PyStreamingQueryManager, PyStreamingQueryStatus, PyTrigger,
@@ -64,6 +70,9 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<transport::ResponseStream>()?;
     m.add("RustRpcError", m.py().get_type::<transport::RustRpcError>())?;
     m.add_class::<PyCatalog>()?;
+    m.add_class::<PyRuntimeConf>()?;
+    m.add_class::<PyDataFrameReader>()?;
+    m.add_class::<PyStatFunctions>()?;
 
     // Streaming classes
     m.add_class::<PyDataStreamReader>()?;

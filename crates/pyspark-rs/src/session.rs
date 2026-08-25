@@ -220,10 +220,25 @@ impl PySparkSession {
         Ok(PyDataFrame::new(df))
     }
 
-    /// Get the catalog API.
+    /// Get the catalog API (`spark.catalog`).
+    #[getter]
     #[pyo3(name = "catalog")]
     fn catalog(&self) -> PyCatalog {
         PyCatalog::new(self.session.catalog())
+    }
+
+    /// Runtime configuration (`spark.conf`).
+    #[getter]
+    #[pyo3(name = "conf")]
+    fn conf(&self) -> crate::conf::PyRuntimeConf {
+        crate::conf::PyRuntimeConf::new(self.session.conf())
+    }
+
+    /// DataFrameReader for batch reads (`spark.read`).
+    #[getter]
+    #[pyo3(name = "read")]
+    fn read(&self) -> crate::readwriter::PyDataFrameReader {
+        crate::readwriter::PyDataFrameReader::new(self.session.read())
     }
 
     /// Get the DataStreamReader for reading streaming data (`spark.readStream`).

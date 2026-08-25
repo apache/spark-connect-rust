@@ -393,6 +393,13 @@ impl PyDataFrame {
         PyDataFrame::new(self.dataframe.fillna(value, refs))
     }
 
+    /// Statistical functions (`df.stat`).
+    #[getter]
+    #[pyo3(name = "stat")]
+    fn stat(&self) -> crate::stat::PyStatFunctions {
+        crate::stat::PyStatFunctions::new(self.dataframe.stat())
+    }
+
     /// Aggregate over the whole DataFrame (shorthand for `groupBy().agg(...)`).
     ///
     /// Mirrors `pyspark.sql.DataFrame.agg(*exprs)`.
