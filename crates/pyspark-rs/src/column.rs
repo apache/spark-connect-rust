@@ -35,11 +35,13 @@ impl PyColumn {
     }
 
     /// Check if NULL.
+    #[pyo3(name = "isNull")]
     fn is_null(&self) -> PyColumn {
         PyColumn::new(self.column.clone().is_null())
     }
 
     /// Check if NOT NULL.
+    #[pyo3(name = "isNotNull")]
     fn is_not_null(&self) -> PyColumn {
         PyColumn::new(self.column.clone().is_not_null())
     }
@@ -239,6 +241,7 @@ impl PyColumn {
     }
 
     /// Get field by name (for struct/nested types).
+    #[pyo3(name = "getField")]
     fn get_field(&self, name: &str) -> PyColumn {
         PyColumn::new(self.column.clone().get_field(name))
     }

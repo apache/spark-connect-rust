@@ -1,7 +1,7 @@
 //! PyO3 wrapper for spark_connect::dataframe::DataFrame.
 
 use pyo3::prelude::*;
-use pyo3::types::PyTuple;
+use pyo3::types::{PyDict, PyTuple};
 use spark_connect::dataframe::{DataFrame, LocalRowIterator};
 use spark_connect::plan::JoinType;
 use spark_connect::udf::{eval_type, CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
@@ -70,7 +70,8 @@ impl PyDataFrame {
         PyDataFrame::new(self.dataframe.filter(condition.column.clone()))
     }
 
-    /// Alias for filter.
+    /// Alias for filter (reference pyspark name is `where`).
+    #[pyo3(name = "where")]
     fn where_(&self, condition: &PyColumn) -> PyDataFrame {
         PyDataFrame::new(self.dataframe.filter(condition.column.clone()))
     }
@@ -83,6 +84,24 @@ impl PyDataFrame {
     /// Rename a column.
     fn withColumnRenamed(&self, existing: &str, new: &str) -> PyDataFrame {
         PyDataFrame::new(self.dataframe.with_column_renamed(existing, new))
+    }
+
+    /// Add or replace multiple columns from a {name: Column} mapping.
+    #[pyo3(name = "withColumns")]
+    fn with_columns(&self, cols: &Bound<'_, PyDict>) -> PyResult<PyDataFrame> {
+        let mut pairs = Vec::with_capacity(cols.len());
+        for (k, v) in cols.iter() {
+            let name: String = k.extract()?;
+            let pycol = v.extract::<PyRef<PyColumn>>()?;
+            pairs.push((name, pycol.column.clone()));
+        }
+        Ok(PyDataFrame::new(self.dataframe.with_columns(pairs)))
+    }
+
+    /// Specify a relation hint (e.g. "broadcast"), with optional string parameters.
+    #[pyo3(signature = (name, *parameters))]
+    fn hint(&self, name: &str, parameters: Vec<String>) -> PyDataFrame {
+        PyDataFrame::new(self.dataframe.hint(name, parameters))
     }
 
     /// Drop columns.
@@ -213,6 +232,12 @@ impl PyDataFrame {
     /// Intersect with another DataFrame.
     fn intersect(&self, other: &PyDataFrame) -> PyDataFrame {
         PyDataFrame::new(self.dataframe.intersect(&other.dataframe))
+    }
+
+    /// Intersect keeping duplicates (reference pyspark `intersectAll`).
+    #[pyo3(name = "intersectAll")]
+    fn intersect_all(&self, other: &PyDataFrame) -> PyDataFrame {
+        PyDataFrame::new(self.dataframe.intersect_all(&other.dataframe))
     }
 
     /// Subtract another DataFrame.
