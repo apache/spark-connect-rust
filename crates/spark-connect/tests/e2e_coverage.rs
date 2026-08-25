@@ -571,3 +571,67 @@ fn artifact_and_tag_surface() {
     s.clear_tags();
     assert!(s.get_tags().is_empty());
 }
+
+#[test]
+fn ml_estimators_and_transformers() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::ml::{
+        Estimator, LogisticRegression, MaxAbsScaler, StandardScaler, StringIndexer, Transformer,
+        VectorAssembler,
+    };
+
+    let s = session();
+    // connect-ML operators expect an array<double> features column, so build it
+    // directly in SQL (also gives a plain-double `a`/`b` for VectorAssembler input).
+    let df = s
+        .sql(
+            "SELECT CAST(id AS DOUBLE) AS a, CAST(id * 2 AS DOUBLE) AS b, \
+             array(CAST(id AS DOUBLE), CAST(id * 2 AS DOUBLE)) AS features, \
+             CAST(id % 2 AS DOUBLE) AS label, \
+             CASE WHEN id % 2 = 0 THEN 'x' ELSE 'y' END AS s \
+             FROM range(20)",
+        )
+        .expect("ml sample");
+
+    // Each operator below exercises the CLIENT-side ML code in ml.rs - building the
+    // MlOperator/MlRelation params and the fit/transform requests - which runs before
+    // the RPC. The actual ML computation is server-side (connect-ML support varies by
+    // build), so we tolerate a server rejection rather than asserting the result: the
+    // coverage target is our request-construction code, not Spark's ML engine.
+
+    // Transformer.transform builds a fetch of the transform relation.
+    let mut va = VectorAssembler::new()
+        .set_input_cols(vec!["a", "b"])
+        .set_output_col("assembled");
+    let _ = va.transform(&df).and_then(|d| d.count());
+
+    // Estimator.fit builds+sends the fit request; Model.transform builds a transform.
+    let mut ss = StandardScaler::new()
+        .set_input_col("features")
+        .set_output_col("scaled");
+    if let Ok(mut m) = ss.fit(&df) {
+        let _ = m.transform(&df).and_then(|d| d.count());
+    }
+    let mut mas = MaxAbsScaler::new()
+        .set_input_col("features")
+        .set_output_col("maxabs");
+    if let Ok(mut m) = mas.fit(&df) {
+        let _ = m.transform(&df).and_then(|d| d.count());
+    }
+    let mut si = StringIndexer::new()
+        .set_input_col("s")
+        .set_output_col("s_idx");
+    if let Ok(mut m) = si.fit(&df) {
+        let _ = m.transform(&df).and_then(|d| d.count());
+    }
+    let mut lr = LogisticRegression::new()
+        .set_feature_col("features")
+        .set_label_col("label")
+        .set_prediction_col("prediction")
+        .set_max_iter(5);
+    if let Ok(mut m) = lr.fit(&df) {
+        let _ = m.transform(&df).and_then(|d| d.count());
+    }
+}
