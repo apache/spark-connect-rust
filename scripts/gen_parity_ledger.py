@@ -10,11 +10,12 @@ Rust rewrite so nothing is silently dropped.
 Usage:
     python scripts/gen_parity_ledger.py \
         --src ~/workspace/origin/spark/python/pyspark \
-        --out docs/parity
+        --out dev/parity
 
-Status of each item is tracked in ``docs/parity/status.csv`` (hand/tool edited);
-this script only (re)generates the *inventory* (``docs/parity/inventory.csv``)
-and never clobbers status.
+Each item's ``status`` and ``notes`` live in the columns of the ledger itself
+(``dev/parity/inventory.csv``, hand/tool edited). When regenerating, this script
+reads back any existing ``status``/``notes`` for a symbol and preserves them, so
+it never clobbers curated status.
 """
 
 from __future__ import annotations
@@ -108,7 +109,7 @@ def walk_file(path: Path, rel: str, rows: list[dict]) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", required=True, help="pyspark package root")
-    ap.add_argument("--out", default="docs/parity")
+    ap.add_argument("--out", default="dev/parity")
     args = ap.parse_args()
 
     src = Path(os.path.expanduser(args.src))

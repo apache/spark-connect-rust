@@ -51,7 +51,7 @@ and correctness starts high because the protos are the reference's.
 
 **Coverage boundary (read this before claiming "the official suite validates parity").**
 Because plan-building is routed through *upstream* pyspark (`rust_transport_plugin.py`),
-this harness exercises our **transport + Arrow result** paths — not our own plan builder
+this harness exercises our **transport + Arrow result** paths - not our own plan builder
 (`spark-connect::plan` and the expression/function encoders). Those never run under the
 official suite. Plan-building correctness is instead covered by the **golden-proto tests**,
 which assert the protos *our* client emits are byte-for-byte identical to the reference's.

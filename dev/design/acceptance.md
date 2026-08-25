@@ -10,10 +10,10 @@ as the pure-Python `pyspark-client` replacement, must pass the **same** tests.
 
 1. Builds Spark from source (SBT) and starts a Connect server via
    `./sbin/start-connect-server.sh` (with protobuf + avro jars).
-2. `pip install pyspark*client-*.tar.gz` — the pure-Python client package.
+2. `pip install pyspark*client-*.tar.gz` - the pure-Python client package.
    **This is what we replace.** Then installs grpcio 1.76, protobuf 6.33.5,
    pandas 2.3.3, pyarrow (implied), scipy, plotly, mlflow, torch, scikit-learn, …
-3. **Deletes `pyspark.zip` and `py4j` zip** so there is *no* JVM/Py4J path — the
+3. **Deletes `pyspark.zip` and `py4j` zip** so there is *no* JVM/Py4J path - the
    client is pure and talks only gRPC. Our package must likewise need no JVM.
 4. Runs, with `SPARK_CONNECT_TESTING_REMOTE=sc://localhost`:
    - `./python/run-tests --parallelism=1 --python-executables=python3 --modules pyspark-connect,pyspark-ml-connect`
@@ -25,7 +25,7 @@ as the pure-Python `pyspark-client` replacement, must pass the **same** tests.
 ## Scope
 
 **371 connect test files** under `python/pyspark/**/tests/connect/**` (SQL,
-client, arrow, pandas, streaming, ml, resource). Most are `test_parity_*` — they
+client, arrow, pandas, streaming, ml, resource). Most are `test_parity_*` - they
 run the classic PySpark test body over a Connect session, so passing them means
 behavioral parity with classic PySpark, not just API shape.
 

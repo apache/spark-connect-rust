@@ -1,0 +1,105 @@
+site_name: Spark Connect Rust Client
+site_description: >-
+  A Rust rewrite of the PySpark Spark Connect client - a drop-in `pyspark`
+  package backed by a native Rust core.
+site_url: https://apache.github.io/spark-connect-rust/
+repo_url: https://github.com/apache/spark-connect-rust
+repo_name: apache/spark-connect-rust
+edit_uri: edit/master/docs/
+copyright: >-
+  Copyright © The Apache Software Foundation. Apache Spark, Spark, and the Spark
+  logo are trademarks of the Apache Software Foundation.
+
+theme:
+  name: material
+  icon:
+    logo: material/language-rust
+    repo: fontawesome/brands/github
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.top
+    - navigation.instant
+    - navigation.instant.progress
+    - navigation.footer
+    - toc.follow
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - search.highlight
+    - search.suggest
+  font:
+    text: Inter
+    code: JetBrains Mono
+  # Slate & rust-ember. Exact brand colors are CSS custom properties in
+  # stylesheets/extra.css (hence `primary: custom` / `accent: custom`).
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+extra_css:
+  - stylesheets/extra.css
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/apache/spark-connect-rust
+      name: Source on GitHub
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/pyspark-client-rust/
+      name: pyspark-client-rust on PyPI
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+      use_pygments: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+
+nav:
+  - Home: index.md
+  - Get started:
+      - Installation: installation.md
+      - Quickstart: quickstart.md
+      - Configuration and Connection: configuration.md
+  - Guides:
+      - DataFrames: dataframes.md
+      - Columns and Functions: columns-and-functions.md
+      - SQL: sql.md
+      - Reading and Writing: data-sources.md
+      - Structured Streaming: streaming.md
+      - Catalog: catalog.md
+      - Types and Schemas: types.md
+      - Rust UDFs via WebAssembly: udfs.md
+  - Architecture: architecture.md
+  - Reference:
+      - Examples: examples.md
+      - Compatibility: compatibility.md
+      - Troubleshooting: troubleshooting.md
+      - Contributing: contributing.md
