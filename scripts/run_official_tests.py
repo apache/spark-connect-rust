@@ -88,6 +88,13 @@ def run_ours(test_file: Path, spark_py: Path, remote: str, deselect, timeout: in
     env["SPARK_SKIP_CONNECT_COMPAT_TESTS"] = "1"
     env["PYTHONPATH"] = os.pathsep.join([str(REPO / "scripts"), str(spark_py)])
     env["RUST_PYSPARK_SO"] = os.environ["RUST_PYSPARK_SO"]
+    # Run pytest from spark_py (as Apache's own `./python/run-tests` does) and pass the
+    # test file *relative* to it. pytest computes node ids relative to its rootdir, so
+    # only a relative path lets `--deselect <relpath>::Class::test` match the collected
+    # node id: an absolute path yields a `../../..`-prefixed node id that never matches,
+    # which silently voided the entire known-failures manifest. The manifest keys are
+    # exactly these `pyspark/sql/tests/connect/...` relative paths.
+    rel_file = test_file.relative_to(spark_py).as_posix()
     args = [
         sys.executable,
         "-m",
@@ -101,10 +108,12 @@ def run_ours(test_file: Path, spark_py: Path, remote: str, deselect, timeout: in
         "rust_transport_plugin",
     ]
     for suffix in deselect:
-        args += ["--deselect", f"{test_file}::{suffix}"]
-    args.append(str(test_file))
+        args += ["--deselect", f"{rel_file}::{suffix}"]
+    args.append(rel_file)
     try:
-        r = subprocess.run(args, env=env, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(
+            args, env=env, cwd=str(spark_py), capture_output=True, text=True, timeout=timeout
+        )
         text = r.stdout + "\n" + r.stderr
     except subprocess.TimeoutExpired:
         return {"passed": 0, "failed": 0, "error": 0, "skipped": 0, "timeout": True}, []

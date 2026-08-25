@@ -1,8 +1,11 @@
 # Known environmental failures in the official Spark Connect test suite.
-# These tests FAIL with the *reference* pyspark client too, in this
-# single-node pure-Connect CI environment, so they are skipped for our
-# client as well (they are not client regressions). One `nodeid  # reason`
-# per line; regenerate with scripts/gen_parity_skiplist.py on a version bump.
+# These FAIL for reasons outside our client: test-only classes absent from the
+# Spark *distribution* (e.g. InMemoryCatalog for `testcat`), and Spark 4.2's new
+# TIME type / time functions the pinned server build does not fully support.
+# They are deselected so the gate tracks genuine client regressions only.
+# One `nodeid  # reason` per line; the nodeid is RELATIVE to <spark>/python and must
+# match pytest's node id (run_official_tests.py runs pytest from there). Regenerate
+# with scripts/gen_parity_skiplist.py on a version bump.
 pyspark/sql/tests/connect/arrow/test_parity_arrow_python_udf.py::ArrowPythonUDFParityLegacyTests::test_udf_with_input_file_name  # reference also fails (environmental)
 pyspark/sql/tests/connect/arrow/test_parity_arrow_python_udf.py::ArrowPythonUDFParityNonLegacyTests::test_udf_with_input_file_name  # reference also fails (environmental)
 pyspark/sql/tests/connect/arrow/test_parity_arrow_python_udf.py::ArrowPythonUDFParityTests::test_udf_with_input_file_name  # reference also fails (environmental)
@@ -13,43 +16,13 @@ pyspark/sql/tests/connect/arrow/test_parity_arrow_udf_window.py::WindowArrowPyth
 pyspark/sql/tests/connect/pandas/streaming/test_parity_pandas_transform_with_state.py::TransformWithStateInPandasParityTests::test_transform_with_state_chaining_ops  # reference also fails (environmental)
 pyspark/sql/tests/connect/pandas/streaming/test_parity_transform_with_state.py::TransformWithStateInPySparkParityTests::test_transform_with_state_chaining_ops  # reference also fails (environmental)
 pyspark/sql/tests/connect/pandas/test_parity_pandas_udf_scalar.py::PandasUDFScalarParityTests::test_vectorized_udf_invalid_length  # reference also fails (environmental)
-pyspark/sql/tests/connect/streaming/test_parity_foreach_batch.py::StreamingForeachBatchParityTests::test_accessing_spark_session  # reference also fails (environmental)
-pyspark/sql/tests/connect/streaming/test_parity_foreach_batch.py::StreamingForeachBatchParityTests::test_accessing_spark_session_through_df  # reference also fails (environmental)
-pyspark/sql/tests/connect/streaming/test_parity_foreach_batch.py::StreamingForeachBatchParityTests::test_nested_dataframes  # reference also fails (environmental)
-pyspark/sql/tests/connect/streaming/test_parity_foreach_batch.py::StreamingForeachBatchParityTests::test_streaming_foreach_batch  # reference also fails (environmental)
-pyspark/sql/tests/connect/streaming/test_parity_foreach_batch.py::StreamingForeachBatchParityTests::test_streaming_foreach_batch_external_column  # reference also fails (environmental)
-pyspark/sql/tests/connect/streaming/test_parity_foreach_batch.py::StreamingForeachBatchParityTests::test_streaming_foreach_batch_import  # reference also fails (environmental)
-pyspark/sql/tests/connect/streaming/test_parity_foreach_batch.py::StreamingForeachBatchParityTests::test_streaming_foreach_batch_path_access  # reference also fails (environmental)
-pyspark/sql/tests/connect/streaming/test_parity_foreach_batch.py::StreamingForeachBatchParityTests::test_streaming_foreach_batch_propagates_python_errors  # reference also fails (environmental)
-pyspark/sql/tests/connect/streaming/test_parity_foreach_batch.py::StreamingForeachBatchParityTests::test_streaming_foreach_batch_spark_session  # reference also fails (environmental)
-pyspark/sql/tests/connect/streaming/test_parity_foreach_batch.py::StreamingForeachBatchParityTests::test_streaming_foreach_batch_tempview  # reference also fails (environmental)
-pyspark/sql/tests/connect/streaming/test_parity_streaming.py::StreamingParityTests::test_query_manager_await_termination  # reference also fails (environmental)
-pyspark/sql/tests/connect/streaming/test_parity_streaming.py::StreamingParityTests::test_stream_await_termination  # reference also fails (environmental)
-pyspark/sql/tests/connect/streaming/test_parity_streaming.py::StreamingParityTests::test_stream_exception  # reference also fails (environmental)
-pyspark/sql/tests/connect/streaming/test_parity_streaming.py::StreamingParityTests::test_stream_read_options  # reference also fails (environmental)
-pyspark/sql/tests/connect/streaming/test_parity_streaming.py::StreamingParityTests::test_stream_read_options_overwrite  # reference also fails (environmental)
-pyspark/sql/tests/connect/streaming/test_parity_streaming.py::StreamingParityTests::test_stream_real_time_trigger  # reference also fails (environmental)
-pyspark/sql/tests/connect/streaming/test_parity_streaming.py::StreamingParityTests::test_stream_save_options  # reference also fails (environmental)
-pyspark/sql/tests/connect/streaming/test_parity_streaming.py::StreamingParityTests::test_stream_save_options_overwrite  # reference also fails (environmental)
-pyspark/sql/tests/connect/streaming/test_parity_streaming.py::StreamingParityTests::test_stream_status_and_progress  # reference also fails (environmental)
-pyspark/sql/tests/connect/streaming/test_parity_streaming.py::StreamingParityTests::test_streaming_drop_duplicate_within_watermark  # reference also fails (environmental)
-pyspark/sql/tests/connect/streaming/test_parity_streaming.py::StreamingParityTests::test_streaming_progress  # reference also fails (environmental)
-pyspark/sql/tests/connect/streaming/test_parity_streaming.py::StreamingParityTests::test_streaming_query_functions_basic  # reference also fails (environmental)
 pyspark/sql/tests/connect/test_parity_collection.py::DataFrameCollectionParityTests::test_collect_time  # reference also fails (environmental)
 pyspark/sql/tests/connect/test_parity_column.py::ColumnParityTests::test_column_date_time_op  # reference also fails (environmental)
 pyspark/sql/tests/connect/test_parity_column.py::ColumnParityTestsWithNonStrictDFColResolution::test_column_date_time_op  # reference also fails (environmental)
 pyspark/sql/tests/connect/test_parity_dataframe.py::DataFrameParityTests::test_metadata_column  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_datasources.py::DataSourcesParityTests::test_encoding_json  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_datasources.py::DataSourcesParityTests::test_linesep_json  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_datasources.py::DataSourcesParityTests::test_linesep_text  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_datasources.py::DataSourcesParityTests::test_multiline_csv  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_datasources.py::DataSourcesParityTests::test_multiline_json  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_datasources.py::DataSourcesParityTests::test_read_multiple_orc_file  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_datasources.py::DataSourcesParityTests::test_read_text_file_list  # reference also fails (environmental)
 pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_current_time  # reference also fails (environmental)
 pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_enum_literals  # reference also fails (environmental)
 pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_hour  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_input_file_name_udf  # reference also fails (environmental)
 pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_lit_time  # reference also fails (environmental)
 pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_make_time  # reference also fails (environmental)
 pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_make_timestamp  # reference also fails (environmental)
@@ -67,4 +40,3 @@ pyspark/sql/tests/connect/test_parity_resources.py::ResourceProfileParityTests::
 pyspark/sql/tests/connect/test_parity_resources.py::ResourceProfileParityTests::test_map_in_pandas_with_profile  # reference also fails (environmental)
 pyspark/sql/tests/connect/test_parity_sql.py::SQLParityTests::test_lit_time  # reference also fails (environmental)
 pyspark/sql/tests/connect/test_parity_types.py::TypesParityTests::test_infer_schema_specification  # reference also fails (environmental)
-pyspark/sql/tests/connect/test_parity_udf.py::UDFParityTests::test_udf_with_input_file_name  # reference also fails (environmental)
