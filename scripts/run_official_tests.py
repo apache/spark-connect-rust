@@ -46,6 +46,9 @@ FLAKY_FILES = {
     "test_parity_foreach.py",
     "test_parity_listener.py",
     "test_parity_observation.py",
+    # Stateful structured-streaming (transformWithState) - also event-driven.
+    "test_parity_transform_with_state.py",
+    "test_parity_pandas_transform_with_state.py",
 }
 
 _FAIL_RE = re.compile(r"^(?:FAILED|ERROR)\s+(\S+)")
