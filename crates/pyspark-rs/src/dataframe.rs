@@ -46,6 +46,16 @@ fn to_column_list(_args: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<spark_connect::c
     Ok(cols)
 }
 
+/// Resolve a filter/where condition: a Column, or a SQL string parsed via `expr`.
+fn cond_column(condition: &Bound<'_, PyAny>) -> PyResult<spark_connect::column::Column> {
+    if let Ok(c) = condition.extract::<PyRef<PyColumn>>() {
+        Ok(c.column.clone())
+    } else {
+        let s: String = condition.extract()?;
+        Ok(spark_connect::functions::expr(&s))
+    }
+}
+
 #[pymethods]
 impl PyDataFrame {
     /// Select columns (accepts Column objects or string names).
@@ -65,15 +75,19 @@ impl PyDataFrame {
         PyDataFrame::new(self.dataframe.select(columns))
     }
 
-    /// Filter rows by a condition.
-    fn filter(&self, condition: &PyColumn) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.filter(condition.column.clone()))
+    /// Filter rows by a Column condition or a SQL-string condition.
+    fn filter(&self, condition: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        Ok(PyDataFrame::new(
+            self.dataframe.filter(cond_column(condition)?),
+        ))
     }
 
     /// Alias for filter (reference pyspark name is `where`).
     #[pyo3(name = "where")]
-    fn where_(&self, condition: &PyColumn) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.filter(condition.column.clone()))
+    fn where_(&self, condition: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        Ok(PyDataFrame::new(
+            self.dataframe.filter(cond_column(condition)?),
+        ))
     }
 
     /// Add or replace a column.
@@ -398,6 +412,66 @@ impl PyDataFrame {
     #[pyo3(name = "stat")]
     fn stat(&self) -> crate::stat::PyStatFunctions {
         crate::stat::PyStatFunctions::new(self.dataframe.stat())
+    }
+
+    /// Unpivot (wide-to-long). `values=None` unpivots all non-id columns.
+    #[pyo3(signature = (ids, values=None, var_name="variable", value_name="value"))]
+    fn unpivot(
+        &self,
+        ids: Vec<String>,
+        values: Option<Vec<String>>,
+        var_name: &str,
+        value_name: &str,
+    ) -> PyDataFrame {
+        let id_refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+        let owned = values;
+        let val_refs = owned
+            .as_ref()
+            .map(|v| v.iter().map(|s| s.as_str()).collect());
+        PyDataFrame::new(self.dataframe.melt(id_refs, val_refs, var_name, value_name))
+    }
+
+    /// Alias for unpivot.
+    #[pyo3(signature = (ids, values=None, var_name="variable", value_name="value"))]
+    fn melt(
+        &self,
+        ids: Vec<String>,
+        values: Option<Vec<String>>,
+        var_name: &str,
+        value_name: &str,
+    ) -> PyDataFrame {
+        let id_refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+        let owned = values;
+        let val_refs = owned
+            .as_ref()
+            .map(|v| v.iter().map(|s| s.as_str()).collect());
+        PyDataFrame::new(self.dataframe.melt(id_refs, val_refs, var_name, value_name))
+    }
+
+    /// Persist the DataFrame. A storage-level argument is accepted for API parity;
+    /// the default (MEMORY_AND_DISK) is used.
+    #[pyo3(signature = (storage_level=None))]
+    fn persist(
+        &self,
+        py: Python<'_>,
+        storage_level: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        use spark_connect::storage::StorageLevelExt;
+        let _ = storage_level;
+        let level = spark_connect_proto::StorageLevel::memory_and_disk();
+        let df = py.detach(|| self.dataframe.persist(level)).to_pyerr()?;
+        Ok(PyDataFrame::new(df))
+    }
+
+    /// Column access by attribute (`df.colname` -> Column), mirroring reference pyspark.
+    /// Names beginning with `_` raise AttributeError so normal attribute lookup works.
+    fn __getattr__(&self, name: &str) -> PyResult<PyColumn> {
+        if name.starts_with('_') {
+            return Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+                name.to_string(),
+            ));
+        }
+        Ok(PyColumn::new(spark_connect::functions::col(name)))
     }
 
     /// Aggregate over the whole DataFrame (shorthand for `groupBy().agg(...)`).

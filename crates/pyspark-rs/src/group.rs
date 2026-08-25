@@ -39,6 +39,27 @@ impl PyGroupedData {
         Ok(PyDataFrame::new(df))
     }
 
+    /// Pivot on a column; `values=None` auto-discovers the distinct pivot values.
+    #[pyo3(signature = (pivot_col, values=None))]
+    fn pivot(
+        &self,
+        pivot_col: &str,
+        values: Option<Vec<Bound<'_, PyAny>>>,
+    ) -> PyResult<PyGroupedData> {
+        let pcol = spark_connect::functions::col(pivot_col);
+        let vals = match values {
+            None => None,
+            Some(vs) => {
+                let mut out = Vec::with_capacity(vs.len());
+                for v in &vs {
+                    out.push(crate::session::py_to_value(v)?);
+                }
+                Some(out)
+            }
+        };
+        Ok(PyGroupedData::new(self.grouped_data.pivot(pcol, vals)))
+    }
+
     /// Sum values in each group.
     #[pyo3(signature = (*cols))]
     fn sum(&self, _py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {

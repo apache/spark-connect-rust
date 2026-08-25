@@ -475,7 +475,7 @@ fn value_to_datatype(v: &Value) -> DataType {
 }
 
 /// Convert a Python value to a Rust Value.
-fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
+pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     // Check for None
     if obj.is_none() {
         return Ok(Value::Null);
