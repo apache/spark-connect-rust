@@ -17,13 +17,13 @@
 # limitations under the License.
 #
 
-# Utility for creating well-formed pull request merges and pushing them to Apache
-# Spark.
-#   usage: ./merge_spark_pr.py    (see config env vars below)
+# Utility for creating well-formed pull request merges and pushing them to
+# apache/spark-connect-rust.
+#   usage: ./merge_connect_rust_pr.py    (see config env vars below)
 #
-# This utility assumes you already have a local Spark git folder and that you
-# have added remotes corresponding to both (i) the github apache Spark
-# mirror and (ii) the apache git repo.
+# This utility assumes you already have a local spark-connect-rust git folder and
+# that you have added remotes corresponding to both (i) the github apache
+# spark-connect-rust repo and (ii) the apache git repo.
 
 import json
 import os
@@ -88,8 +88,8 @@ def get_json(url):
         if "X-RateLimit-Remaining" in e.headers and e.headers["X-RateLimit-Remaining"] == "0":
             print_error(
                 "Exceeded the GitHub API rate limit; see the instructions in "
-                + "dev/merge_spark_pr.py to configure an OAuth token for making authenticated "
-                + "GitHub requests."
+                + "dev/merge_connect_rust_pr.py to configure an OAuth token for making "
+                + "authenticated GitHub requests."
             )
         elif e.code == 401:
             print_error(
@@ -180,7 +180,7 @@ def merge_pr(pr_num, target_ref, title, body, pr_repo_desc):
     merge_message_flags += ["-m", title]
     if body is not None:
         # We remove @ symbols from the body to avoid triggering e-mails
-        # to people every time someone creates a public fork of Spark.
+        # to people every time someone creates a public fork of the repo.
         merge_message_flags += ["-m", body.replace("@", "")]
 
     committer_name = run_cmd("git config --get user.name").strip()
@@ -472,7 +472,7 @@ def assign_issue(issue: int, assignee: str) -> bool:
 
 
 def resolve_jira_issues(title, merge_branches, comment):
-    jira_ids = re.findall("SPARK-[0-9]{4,5}", title)
+    jira_ids = re.findall("SPARK-[0-9]{4,7}", title)
 
     if len(jira_ids) == 0:
         resolve_jira_issue(merge_branches, comment)
@@ -607,6 +607,10 @@ def main():
     # Assumes branch names can be sorted lexicographically
     branch_names = sorted(branch_names, reverse=True)
     branch_iter = iter(branch_names)
+    # Default branch offered for cherry-picks/backports. spark-connect-rust may have no
+    # `branch-*` release branches yet, so fall back to "master" rather than indexing an
+    # empty list (which would raise IndexError as an eagerly-evaluated default below).
+    default_pick_branch = branch_names[0] if branch_names else "master"
 
     pr_num = bold_input("Which pull request would you like to merge? (e.g. 34): ")
     pr = get_json("%s/pulls/%s" % (GITHUB_API_BASE, pr_num))
@@ -681,7 +685,7 @@ def main():
             fail("Couldn't find any merge commit for #%s, you may need to update HEAD." % pr_num)
 
         print("Found commit %s:\n%s" % (merge_hash, message))
-        cherry_pick(pr_num, merge_hash, next(branch_iter, branch_names[0]))
+        cherry_pick(pr_num, merge_hash, next(branch_iter, default_pick_branch))
         sys.exit(0)
 
     if not bool(pr["mergeable"]):
@@ -692,7 +696,7 @@ def main():
         continue_maybe(msg)
 
     if asf_jira is not None:
-        jira_ids = re.findall("SPARK-[0-9]{4,5}", title)
+        jira_ids = re.findall("SPARK-[0-9]{4,7}", title)
         for jira_id in jira_ids:
             try:
                 print_jira_issue_summary(asf_jira.issue(jira_id))
@@ -710,7 +714,7 @@ def main():
     pick_prompt = "Would you like to pick %s into another branch?" % merge_hash
     while bold_input("\n%s (y/N): " % pick_prompt).lower() == "y":
         merged_refs = merged_refs + [
-            cherry_pick(pr_num, merge_hash, next(branch_iter, branch_names[0]))
+            cherry_pick(pr_num, merge_hash, next(branch_iter, default_pick_branch))
         ]
 
     if asf_jira is not None:
