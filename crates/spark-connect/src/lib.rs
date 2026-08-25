@@ -20,6 +20,7 @@ pub mod readwriter;
 pub mod resource;
 pub mod row;
 pub mod session;
+pub mod storage;
 pub mod streaming;
 pub mod table_arg;
 pub mod tvf;
@@ -54,6 +55,8 @@ pub use session::{SparkSession, SparkSessionBuilder};
 pub use spark_connect_core::error::{Result, SparkError};
 /// Re-exported so `persist(...)` / `storage_level()` have a public storage-level type.
 pub use spark_connect_proto::StorageLevel;
+/// Named `StorageLevel` presets (`MEMORY_AND_DISK`, `DISK_ONLY`, ...) mirroring `pyspark.StorageLevel`.
+pub use storage::StorageLevelExt;
 pub use streaming::{
     DataStreamReader, DataStreamWriter, StreamingQuery, StreamingQueryManager, Trigger,
 };
