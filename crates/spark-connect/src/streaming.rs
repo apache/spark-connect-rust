@@ -684,9 +684,9 @@ impl StreamingQuery {
         )?;
 
         for resp in responses {
-            if let Some(
-                proto::execute_plan_response::ResponseType::StreamingQueryCommandResult(result),
-            ) = resp.response_type
+            if let Some(proto::execute_plan_response::ResponseType::StreamingQueryCommandResult(
+                result,
+            )) = resp.response_type
             {
                 return Ok(result);
             }

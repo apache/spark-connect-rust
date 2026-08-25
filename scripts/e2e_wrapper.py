@@ -366,6 +366,75 @@ def main():
 
     ck("resource.profile", _resource)
 
+    # ---- Column: remaining surface ----------------------------------------------
+    cid = F.col("id")
+    ck("col.asc_nulls", lambda: df.sort(cid.asc_nulls_first(), cid.asc_nulls_last()).collect())
+    ck(
+        "col.desc_nulls",
+        lambda: df.sort(cid.desc(), cid.desc_nulls_first(), cid.desc_nulls_last()).collect(),
+    )
+    ck("col.bitwiseXOR", lambda: df.select(cid.bitwiseXOR(F.lit(1))).collect())
+    ck("col.eqNullSafe", lambda: df.select(cid.eqNullSafe(F.lit(1))).collect())
+    ck("col.ilike", lambda: df.select(F.col("name").ilike("A%")).collect())
+    ck("col.isNaN", lambda: df.select(F.col("val").isNaN()).collect())
+    ck("col.alias", lambda: df.select(cid.alias("renamed")).collect())
+
+    def _struct_fields():
+        s = df.select(F.struct(F.col("id"), F.col("name"), F.col("val")).alias("s"))
+        # withField adds/replaces a field; dropFields removes one (leaving others).
+        s.select(F.col("s").withField("z", F.lit(1))).collect()
+        s.select(F.col("s").dropFields("id")).collect()
+
+    ck("col.withField/dropFields", _struct_fields)
+
+    # ---- Catalog: full surface --------------------------------------------------
+    df.createOrReplaceTempView("cat_view")
+    ck("catalog.currentCatalog", lambda: spark.catalog.currentCatalog())
+    ck("catalog.listCatalogs", lambda: spark.catalog.listCatalogs())
+    ck("catalog.databaseExists", lambda: spark.catalog.databaseExists("default"))
+    ck("catalog.functionExists", lambda: spark.catalog.functionExists("abs"))
+    ck("catalog.getDatabase", lambda: spark.catalog.getDatabase("default"))
+    ck("catalog.listColumns", lambda: spark.catalog.listColumns("cat_view"))
+    ck("catalog.listFunctions", lambda: spark.catalog.listFunctions())
+    ck("catalog.getTable", lambda: spark.catalog.getTable("cat_view"))
+    ck("catalog.cacheTable", lambda: spark.catalog.cacheTable("cat_view"))
+    ck("catalog.uncacheTable", lambda: spark.catalog.uncacheTable("cat_view"))
+    ck("catalog.setCurrentDatabase", lambda: spark.catalog.setCurrentDatabase("default"))
+
+    # ---- DataFrame: remaining surface -------------------------------------------
+    ck("df.alias", lambda: df.alias("d2").select("id").collect())
+    ck("df.toArrow", lambda: df.limit(2).toArrow())
+    ck("df.toLocalIterator", lambda: list(df.limit(2).toLocalIterator()))
+    ck("df.executionInfo", lambda: (df.limit(1).collect(), df.executionInfo))
+
+    # ---- DataFrameWriter: remaining formats -------------------------------------
+    ck("write.orc", lambda: df.write.mode("overwrite").orc(os.path.join(d, "o")))
+    ck("read.orc", lambda: spark.read.orc(os.path.join(d, "o")).count())
+    ck(
+        "write.text",
+        lambda: df.select(F.col("name")).write.mode("overwrite").text(os.path.join(d, "txt")),
+    )
+    ck("read.text", lambda: spark.read.text(os.path.join(d, "txt")).count())
+    ck("read.load", lambda: spark.read.format("parquet").load(os.path.join(d, "p")).count())
+    ck(
+        "write.saveAsTable",
+        lambda: df.write.mode("overwrite").saveAsTable("e2e_saved_table"),
+    )
+    ck("read.table.saved", lambda: spark.table("e2e_saved_table").count())
+
+    # ---- Window standalone builders ---------------------------------------------
+    ck("window.orderBy", lambda: F.row_number().over(Window.orderBy("id")))
+    ck(
+        "window.rangeBetween.unbounded",
+        lambda: df.select(
+            F.sum("val").over(
+                Window.orderBy("id").rangeBetween(
+                    Window.unboundedPreceding, Window.unboundedFollowing
+                )
+            )
+        ).collect(),
+    )
+
     # ---- streaming (rate source, best effort) -----------------------------------
     def _streaming():
         import time

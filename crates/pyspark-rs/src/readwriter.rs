@@ -84,4 +84,14 @@ impl PyDataFrameReader {
     fn csv(&mut self, path: &str) -> PyResult<PyDataFrame> {
         Ok(PyDataFrame::new(self.take()?.csv(path)))
     }
+
+    /// Read ORC file(s).
+    fn orc(&mut self, path: &str) -> PyResult<PyDataFrame> {
+        Ok(PyDataFrame::new(self.take()?.orc(path)))
+    }
+
+    /// Read text file(s) (one `value` string column per line).
+    fn text(&mut self, path: &str) -> PyResult<PyDataFrame> {
+        Ok(PyDataFrame::new(self.take()?.text(path)))
+    }
 }

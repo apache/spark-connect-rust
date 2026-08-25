@@ -156,12 +156,15 @@ pub fn coalesce(cols: Vec<Column>) -> Column {
     )
 }
 /// Mirrors `pyspark.sql.functions.arrays_zip`.
-pub fn arrays_zip() -> Column {
-    func("arrays_zip", vec![])
+pub fn arrays_zip(cols: Vec<Column>) -> Column {
+    func(
+        "arrays_zip",
+        cols.iter().map(|c| c.expression().clone()).collect(),
+    )
 }
 /// Mirrors `pyspark.sql.functions.create_map`.
-pub fn create_map() -> Column {
-    func("map", vec![])
+pub fn create_map(cols: Vec<Column>) -> Column {
+    func("map", cols.iter().map(|c| c.expression().clone()).collect())
 }
 
 /// Mirrors `pyspark.sql.functions.window` (column + interval string).
@@ -258,18 +261,24 @@ pub fn e() -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.elt`.
-pub fn elt() -> Column {
-    func("elt", vec![])
+pub fn elt(cols: Vec<Column>) -> Column {
+    func("elt", cols.iter().map(|c| c.expression().clone()).collect())
 }
 
 /// Mirrors `pyspark.sql.functions.grouping_id`.
-pub fn grouping_id() -> Column {
-    func("grouping_id", vec![])
+pub fn grouping_id(cols: Vec<Column>) -> Column {
+    func(
+        "grouping_id",
+        cols.iter().map(|c| c.expression().clone()).collect(),
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.hash`.
-pub fn hash() -> Column {
-    func("hash", vec![])
+pub fn hash(cols: Vec<Column>) -> Column {
+    func(
+        "hash",
+        cols.iter().map(|c| c.expression().clone()).collect(),
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.input_file_block_length`.
@@ -288,8 +297,11 @@ pub fn input_file_name() -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.java_method`.
-pub fn java_method() -> Column {
-    func("java_method", vec![])
+pub fn java_method(cols: Vec<Column>) -> Column {
+    func(
+        "java_method",
+        cols.iter().map(|c| c.expression().clone()).collect(),
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.localtimestamp`.
@@ -340,8 +352,11 @@ pub fn make_ym_interval() -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.map_concat`.
-pub fn map_concat() -> Column {
-    func("map_concat", vec![])
+pub fn map_concat(cols: Vec<Column>) -> Column {
+    func(
+        "map_concat",
+        cols.iter().map(|c| c.expression().clone()).collect(),
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.monotonically_increasing_id`.
@@ -350,8 +365,11 @@ pub fn monotonically_increasing_id() -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.named_struct`.
-pub fn named_struct() -> Column {
-    func("named_struct", vec![])
+pub fn named_struct(cols: Vec<Column>) -> Column {
+    func(
+        "named_struct",
+        cols.iter().map(|c| c.expression().clone()).collect(),
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.now`.
@@ -385,8 +403,11 @@ pub fn rank() -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.reflect`.
-pub fn reflect() -> Column {
-    func("reflect", vec![])
+pub fn reflect(cols: Vec<Column>) -> Column {
+    func(
+        "reflect",
+        cols.iter().map(|c| c.expression().clone()).collect(),
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.row_number`.
@@ -405,13 +426,19 @@ pub fn spark_partition_id() -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.stack`.
-pub fn stack() -> Column {
-    func("stack", vec![])
+pub fn stack(cols: Vec<Column>) -> Column {
+    func(
+        "stack",
+        cols.iter().map(|c| c.expression().clone()).collect(),
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.struct`.
-pub fn r#struct() -> Column {
-    func("struct", vec![])
+pub fn r#struct(cols: Vec<Column>) -> Column {
+    func(
+        "struct",
+        cols.iter().map(|c| c.expression().clone()).collect(),
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.try_make_interval`.
@@ -435,8 +462,11 @@ pub fn try_make_interval() -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.try_reflect`.
-pub fn try_reflect() -> Column {
-    func("try_reflect", vec![])
+pub fn try_reflect(cols: Vec<Column>) -> Column {
+    func(
+        "try_reflect",
+        cols.iter().map(|c| c.expression().clone()).collect(),
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.unix_timestamp`.
@@ -455,8 +485,11 @@ pub fn version() -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.xxhash64`.
-pub fn xxhash64() -> Column {
-    func("xxhash64", vec![])
+pub fn xxhash64(cols: Vec<Column>) -> Column {
+    func(
+        "xxhash64",
+        cols.iter().map(|c| c.expression().clone()).collect(),
+    )
 }
 
 // ============================================================================

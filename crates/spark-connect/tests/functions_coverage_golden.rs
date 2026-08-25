@@ -43,8 +43,12 @@ fn every_function_builder_serializes() {
     let _ = spark_funcs::coalesce(vec![c(), c()])
         .to_proto()
         .encode_to_vec();
-    let _ = spark_funcs::arrays_zip().to_proto().encode_to_vec();
-    let _ = spark_funcs::create_map().to_proto().encode_to_vec();
+    let _ = spark_funcs::arrays_zip(vec![c(), c()])
+        .to_proto()
+        .encode_to_vec();
+    let _ = spark_funcs::create_map(vec![c(), c()])
+        .to_proto()
+        .encode_to_vec();
     let _ = spark_funcs::window(c(), "x").to_proto().encode_to_vec();
     let _ = spark_funcs::window_with_slide_and_start(c(), "x", "x", "x")
         .to_proto()
@@ -59,9 +63,11 @@ fn every_function_builder_serializes() {
     let _ = spark_funcs::current_user().to_proto().encode_to_vec();
     let _ = spark_funcs::dense_rank().to_proto().encode_to_vec();
     let _ = spark_funcs::e().to_proto().encode_to_vec();
-    let _ = spark_funcs::elt().to_proto().encode_to_vec();
-    let _ = spark_funcs::grouping_id().to_proto().encode_to_vec();
-    let _ = spark_funcs::hash().to_proto().encode_to_vec();
+    let _ = spark_funcs::elt(vec![c(), c()]).to_proto().encode_to_vec();
+    let _ = spark_funcs::grouping_id(vec![c(), c()])
+        .to_proto()
+        .encode_to_vec();
+    let _ = spark_funcs::hash(vec![c(), c()]).to_proto().encode_to_vec();
     let _ = spark_funcs::input_file_block_length()
         .to_proto()
         .encode_to_vec();
@@ -69,34 +75,50 @@ fn every_function_builder_serializes() {
         .to_proto()
         .encode_to_vec();
     let _ = spark_funcs::input_file_name().to_proto().encode_to_vec();
-    let _ = spark_funcs::java_method().to_proto().encode_to_vec();
+    let _ = spark_funcs::java_method(vec![c(), c()])
+        .to_proto()
+        .encode_to_vec();
     let _ = spark_funcs::localtimestamp().to_proto().encode_to_vec();
     let _ = spark_funcs::make_dt_interval().to_proto().encode_to_vec();
     let _ = spark_funcs::make_interval().to_proto().encode_to_vec();
     let _ = spark_funcs::make_ym_interval().to_proto().encode_to_vec();
-    let _ = spark_funcs::map_concat().to_proto().encode_to_vec();
+    let _ = spark_funcs::map_concat(vec![c(), c()])
+        .to_proto()
+        .encode_to_vec();
     let _ = spark_funcs::monotonically_increasing_id()
         .to_proto()
         .encode_to_vec();
-    let _ = spark_funcs::named_struct().to_proto().encode_to_vec();
+    let _ = spark_funcs::named_struct(vec![c(), c()])
+        .to_proto()
+        .encode_to_vec();
     let _ = spark_funcs::now().to_proto().encode_to_vec();
     let _ = spark_funcs::percent_rank().to_proto().encode_to_vec();
     let _ = spark_funcs::pi().to_proto().encode_to_vec();
     let _ = spark_funcs::rand().to_proto().encode_to_vec();
     let _ = spark_funcs::randn().to_proto().encode_to_vec();
     let _ = spark_funcs::rank().to_proto().encode_to_vec();
-    let _ = spark_funcs::reflect().to_proto().encode_to_vec();
+    let _ = spark_funcs::reflect(vec![c(), c()])
+        .to_proto()
+        .encode_to_vec();
     let _ = spark_funcs::row_number().to_proto().encode_to_vec();
     let _ = spark_funcs::session_user().to_proto().encode_to_vec();
     let _ = spark_funcs::spark_partition_id().to_proto().encode_to_vec();
-    let _ = spark_funcs::stack().to_proto().encode_to_vec();
-    let _ = spark_funcs::r#struct().to_proto().encode_to_vec();
+    let _ = spark_funcs::stack(vec![c(), c()])
+        .to_proto()
+        .encode_to_vec();
+    let _ = spark_funcs::r#struct(vec![c(), c()])
+        .to_proto()
+        .encode_to_vec();
     let _ = spark_funcs::try_make_interval().to_proto().encode_to_vec();
-    let _ = spark_funcs::try_reflect().to_proto().encode_to_vec();
+    let _ = spark_funcs::try_reflect(vec![c(), c()])
+        .to_proto()
+        .encode_to_vec();
     let _ = spark_funcs::unix_timestamp().to_proto().encode_to_vec();
     let _ = spark_funcs::user().to_proto().encode_to_vec();
     let _ = spark_funcs::version().to_proto().encode_to_vec();
-    let _ = spark_funcs::xxhash64().to_proto().encode_to_vec();
+    let _ = spark_funcs::xxhash64(vec![c(), c()])
+        .to_proto()
+        .encode_to_vec();
     let _ = spark_funcs::abs(c()).to_proto().encode_to_vec();
     let _ = spark_funcs::acos(c()).to_proto().encode_to_vec();
     let _ = spark_funcs::acosh(c()).to_proto().encode_to_vec();
