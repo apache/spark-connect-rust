@@ -19,6 +19,11 @@
 
 name: Python Connect Parity (Spark 4.2.0)
 
+# Cancel an in-progress run when a newer commit supersedes it (per workflow + ref).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 # Mirrors Apache Spark's build_python_connect.yml approach, adapted for the
 # Rust-backed client: download the Spark 4.2.0 Connect server, start it, pull the
 # official v4.2.0 connect test files, and run them BOTH with the reference pyspark
