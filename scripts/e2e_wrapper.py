@@ -91,7 +91,7 @@ def main():
     ck("df.withColumnsRenamed", lambda: df.withColumnsRenamed({"id": "identifier"}).collect())
     ck("df.drop", lambda: df.drop("val").collect())
     ck("df.toDF", lambda: df.toDF("c1", "c2", "c3").collect())
-    ck("df.colRegex", lambda: df.select(df.colRegex("`.*`")).collect())
+    ck("df.colRegex", lambda: df.colRegex("`.*`").collect())
 
     # ---- filter / sort / limit --------------------------------------------------
     ck("df.filter.col", lambda: df.filter(F.col("id") > 1).collect())
@@ -119,9 +119,10 @@ def main():
     # ---- join -------------------------------------------------------------------
     a = df.select(F.col("id").alias("id"), "name")
     b = df.select(F.col("id").alias("id"), "val")
+    b2 = df.select(F.col("id").alias("id2"), "val")
     ck("df.join.on", lambda: a.join(b, "id").collect())
     ck("df.join.how", lambda: a.join(b, on="id", how="left").collect())
-    ck("df.join.cond", lambda: a.join(b, F.col("id") == F.col("id"), "inner").collect())
+    ck("df.join.cond", lambda: a.join(b2, F.col("id") == F.col("id2"), "inner").collect())
     ck("df.crossJoin", lambda: a.crossJoin(b.limit(1)).collect())
     ck("df.hint", lambda: a.hint("broadcast").join(b, "id").collect())
 
@@ -190,9 +191,10 @@ def main():
         F.col("name").endswith("z"), F.col("name").substr(1, 2)).collect())
     ck("col.cast", lambda: df.select(c.cast("int")).collect())
     ck("col.when", lambda: df.select(F.when(c > 15, "hi").otherwise("lo")).collect())
-    ck("col.bitwise", lambda: df.select(c.bitwiseAND(F.lit(1)), c.bitwiseOR(F.lit(1))).collect())
+    ck("col.bitwise", lambda: df.select(
+        F.col("id").bitwiseAND(F.lit(1)), F.col("id").bitwiseOR(F.lit(1))).collect())
     ck("col.getField", lambda: hasattr(F.col("x"), "getField"))
-    ck("col.sortmods", lambda: df.select(F.col("id").asc(), F.col("id").desc()).collect())
+    ck("col.sortmods", lambda: df.sort(F.col("id").asc()).sort(F.col("id").desc()).collect())
 
     # ---- functions --------------------------------------------------------------
     ck("fn.math", lambda: df.select(

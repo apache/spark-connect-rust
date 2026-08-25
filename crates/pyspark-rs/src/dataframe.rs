@@ -1047,9 +1047,10 @@ impl PyDataFrameWriter {
         })
     }
 
-    fn option(&mut self, key: &str, value: &str) -> PyResult<PyDataFrameWriter> {
+    fn option(&mut self, key: &str, value: &Bound<'_, PyAny>) -> PyResult<PyDataFrameWriter> {
+        let v = value.str()?.to_string();
         Ok(PyDataFrameWriter {
-            inner: Some(self.take()?.option(key, value)),
+            inner: Some(self.take()?.option(key, &v)),
         })
     }
 
