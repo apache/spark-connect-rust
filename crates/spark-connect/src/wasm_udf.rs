@@ -537,9 +537,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_python_version_output() {
+    fn parse_python_version_output_trims_whitespace() {
         // Test that we correctly parse Python version strings from stdout
-        // (with potential trailing whitespace/newline)
+        // (with potential trailing whitespace/newline). Note: this test must not be
+        // named `parse_python_version_output`, or it would shadow the function under
+        // test (imported via `use super::*`) and fail to compile.
         assert_eq!(
             parse_python_version_output("3.11\n"),
             Some("3.11".to_string())
