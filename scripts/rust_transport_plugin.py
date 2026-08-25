@@ -169,6 +169,35 @@ class _RustStub:
         self._c.close()
 
 
+def pytest_collection_modifyitems(config, items):
+    """Deselect the known-environmental tests named in ``RUST_PARITY_DESELECT``.
+
+    run_official_tests.py passes the manifest's ``Class::method`` suffixes for the
+    file being run (newline-separated). We match on the node-id *suffix* rather than
+    handing pytest a full ``--deselect <path>::...`` argument: pytest's --deselect
+    compares against a node id computed relative to its rootdir, which varies between
+    a Spark *dist* tree (rootdir = python/) and a *source clone* (rootdir may be the
+    repo root, prefixing ids with ``python/``). Suffix matching is immune to that, so
+    the manifest applies identically everywhere. Only one file runs per invocation,
+    so a ``Class::method`` suffix cannot collide across files.
+    """
+    raw = os.environ.get("RUST_PARITY_DESELECT", "")
+    suffixes = [s.strip() for s in raw.splitlines() if s.strip()]
+    if not suffixes:
+        return
+    keep, drop = [], []
+    for item in items:
+        nid = item.nodeid
+        # Match "…::Class::method" (or a parametrized "…::Class::method[param]").
+        if any(nid.endswith(s) or f"::{s}[" in nid for s in suffixes):
+            drop.append(item)
+        else:
+            keep.append(item)
+    if drop:
+        config.hook.pytest_deselected(items=drop)
+        items[:] = keep
+
+
 def pytest_configure(config):
     import pyspark.sql.connect.client.core as core
 
