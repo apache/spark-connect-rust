@@ -75,8 +75,14 @@ def main():
     ck("session.read", lambda: spark.read)
     ck("session.catalog.prop", lambda: spark.catalog.currentDatabase())
     ck("session.udf", lambda: spark.udf)
-    ck("session.createDataFrame.names", lambda: spark.createDataFrame([(1, "a")], ["i", "s"]).count())
-    ck("session.createDataFrame.ddl", lambda: spark.createDataFrame([(1, "a")], "i int, s string").count())
+    ck(
+        "session.createDataFrame.names",
+        lambda: spark.createDataFrame([(1, "a")], ["i", "s"]).count(),
+    )
+    ck(
+        "session.createDataFrame.ddl",
+        lambda: spark.createDataFrame([(1, "a")], "i int, s string").count(),
+    )
     ck("session.createDataFrame.rows", lambda: spark.createDataFrame([Row(x=1), Row(x=2)]).count())
 
     # ---- DataFrame projection / columns ----------------------------------------
@@ -186,31 +192,66 @@ def main():
     ck("col.between", lambda: df.select(c.between(0, 100)).collect())
     ck("col.isin", lambda: df.select(F.col("name").isin("a", "b")).collect())
     ck("col.like", lambda: df.select(F.col("name").like("a%"), F.col("name").rlike("^a")).collect())
-    ck("col.strfns", lambda: df.select(
-        F.col("name").contains("a"), F.col("name").startswith("a"),
-        F.col("name").endswith("z"), F.col("name").substr(1, 2)).collect())
+    ck(
+        "col.strfns",
+        lambda: df.select(
+            F.col("name").contains("a"),
+            F.col("name").startswith("a"),
+            F.col("name").endswith("z"),
+            F.col("name").substr(1, 2),
+        ).collect(),
+    )
     ck("col.cast", lambda: df.select(c.cast("int")).collect())
     ck("col.when", lambda: df.select(F.when(c > 15, "hi").otherwise("lo")).collect())
-    ck("col.bitwise", lambda: df.select(
-        F.col("id").bitwiseAND(F.lit(1)), F.col("id").bitwiseOR(F.lit(1))).collect())
+    ck(
+        "col.bitwise",
+        lambda: df.select(
+            F.col("id").bitwiseAND(F.lit(1)), F.col("id").bitwiseOR(F.lit(1))
+        ).collect(),
+    )
     ck("col.getField", lambda: hasattr(F.col("x"), "getField"))
     ck("col.sortmods", lambda: df.sort(F.col("id").asc()).sort(F.col("id").desc()).collect())
 
     # ---- functions --------------------------------------------------------------
-    ck("fn.math", lambda: df.select(
-        F.abs(c), F.sqrt(c), F.round(c, 1), F.ceil(c), F.floor(c)).collect())
-    ck("fn.string", lambda: df.select(
-        F.upper(F.col("name")), F.lower(F.col("name")), F.length(F.col("name")),
-        F.concat(F.col("name"), F.lit("!")), F.concat_ws("-", F.col("name"), F.col("name"))).collect())
-    ck("fn.cond", lambda: df.select(
-        F.coalesce(c, F.lit(0.0)), F.greatest(F.col("id"), F.lit(5)),
-        F.least(F.col("id"), F.lit(5))).collect())
-    ck("fn.gen", lambda: df.select(
-        F.current_date(), F.current_timestamp(), F.monotonically_increasing_id()).collect())
+    ck(
+        "fn.math",
+        lambda: df.select(F.abs(c), F.sqrt(c), F.round(c, 1), F.ceil(c), F.floor(c)).collect(),
+    )
+    ck(
+        "fn.string",
+        lambda: df.select(
+            F.upper(F.col("name")),
+            F.lower(F.col("name")),
+            F.length(F.col("name")),
+            F.concat(F.col("name"), F.lit("!")),
+            F.concat_ws("-", F.col("name"), F.col("name")),
+        ).collect(),
+    )
+    ck(
+        "fn.cond",
+        lambda: df.select(
+            F.coalesce(c, F.lit(0.0)),
+            F.greatest(F.col("id"), F.lit(5)),
+            F.least(F.col("id"), F.lit(5)),
+        ).collect(),
+    )
+    ck(
+        "fn.gen",
+        lambda: df.select(
+            F.current_date(), F.current_timestamp(), F.monotonically_increasing_id()
+        ).collect(),
+    )
     w = Window.partitionBy("id").orderBy("val")
-    ck("fn.window", lambda: df.select(
-        F.row_number().over(w), F.rank().over(w), F.dense_rank().over(w),
-        F.lag("val").over(w), F.lead("val").over(w)).collect())
+    ck(
+        "fn.window",
+        lambda: df.select(
+            F.row_number().over(w),
+            F.rank().over(w),
+            F.dense_rank().over(w),
+            F.lag("val").over(w),
+            F.lead("val").over(w),
+        ).collect(),
+    )
 
     # ---- read / write -----------------------------------------------------------
     d = tempfile.mkdtemp()
@@ -218,9 +259,15 @@ def main():
     ck("read.parquet", lambda: spark.read.parquet(os.path.join(d, "p")).count())
     ck("write.json", lambda: df.write.mode("overwrite").json(os.path.join(d, "j")))
     ck("read.json", lambda: spark.read.json(os.path.join(d, "j")).count())
-    ck("write.csv", lambda: df.write.mode("overwrite").option("header", True).csv(os.path.join(d, "c")))
+    ck(
+        "write.csv",
+        lambda: df.write.mode("overwrite").option("header", True).csv(os.path.join(d, "c")),
+    )
     ck("read.csv", lambda: spark.read.option("header", True).csv(os.path.join(d, "c")).count())
-    ck("write.save", lambda: df.write.format("parquet").mode("overwrite").save(os.path.join(d, "s")))
+    ck(
+        "write.save",
+        lambda: df.write.format("parquet").mode("overwrite").save(os.path.join(d, "s")),
+    )
 
     # ---- catalog ----------------------------------------------------------------
     ck("catalog.currentDatabase", lambda: spark.catalog.currentDatabase())

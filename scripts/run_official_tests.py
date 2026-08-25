@@ -89,8 +89,16 @@ def run_ours(test_file: Path, spark_py: Path, remote: str, deselect, timeout: in
     env["PYTHONPATH"] = os.pathsep.join([str(REPO / "scripts"), str(spark_py)])
     env["RUST_PYSPARK_SO"] = os.environ["RUST_PYSPARK_SO"]
     args = [
-        sys.executable, "-m", "pytest", "-q", "-rfE", "--tb=short",
-        "-p", "no:cacheprovider", "-p", "rust_transport_plugin",
+        sys.executable,
+        "-m",
+        "pytest",
+        "-q",
+        "-rfE",
+        "--tb=short",
+        "-p",
+        "no:cacheprovider",
+        "-p",
+        "rust_transport_plugin",
     ]
     for suffix in deselect:
         args += ["--deselect", f"{test_file}::{suffix}"]
@@ -101,15 +109,18 @@ def run_ours(test_file: Path, spark_py: Path, remote: str, deselect, timeout: in
     except subprocess.TimeoutExpired:
         return {"passed": 0, "failed": 0, "error": 0, "skipped": 0, "timeout": True}, []
     counts = parse_counts(text)
-    failed_ids = [m.group(1) for m in map(_FAIL_RE.match, (ln.strip() for ln in text.splitlines())) if m]
+    failed_ids = [
+        m.group(1) for m in map(_FAIL_RE.match, (ln.strip() for ln in text.splitlines())) if m
+    ]
     return counts, failed_ids
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--spark", required=True, help="Spark source tree (has python/)")
-    ap.add_argument("--remote", default=os.environ.get(
-        "SPARK_CONNECT_TESTING_REMOTE", "sc://localhost:15002"))
+    ap.add_argument(
+        "--remote", default=os.environ.get("SPARK_CONNECT_TESTING_REMOTE", "sc://localhost:15002")
+    )
     ap.add_argument("--manifest", default=str(DEFAULT_MANIFEST))
     ap.add_argument("--jobs", type=int, default=1)
     ap.add_argument("--timeout", type=int, default=360)
@@ -137,8 +148,11 @@ def main():
 
     per_file, whole_file = load_manifest(Path(args.manifest))
     n_skip = sum(len(v) for v in per_file.values())
-    print(f"Discovered {len(files)} connect test files; manifest skips "
-          f"{n_skip} tests + {len(whole_file)} whole files.\n", flush=True)
+    print(
+        f"Discovered {len(files)} connect test files; manifest skips "
+        f"{n_skip} tests + {len(whole_file)} whole files.\n",
+        flush=True,
+    )
 
     def work(tf: Path):
         rel = tf.relative_to(spark_py).as_posix()
@@ -148,8 +162,9 @@ def main():
         counts, failed_ids = run_ours(tf, spark_py, args.remote, deselect, args.timeout)
         # Re-run a flagged file fresh: a genuine failure persists, a flake clears.
         attempts = 1
-        while (counts.get("failed", 0) + counts.get("error", 0) or counts.get("timeout")) \
-                and attempts <= args.retries:
+        while (
+            counts.get("failed", 0) + counts.get("error", 0) or counts.get("timeout")
+        ) and attempts <= args.retries:
             attempts += 1
             counts, failed_ids = run_ours(tf, spark_py, args.remote, deselect, args.timeout)
         return tf.name, counts, failed_ids, False, attempts
@@ -168,7 +183,8 @@ def main():
         print(
             f"[{done}/{len(files)}] {tag:<10} {name:<48} "
             f"p={counts['passed']} f={counts['failed']} e={counts['error']} "
-            f"skip={counts['skipped']}" + (" TIMEOUT" if counts.get("timeout") else "")
+            f"skip={counts['skipped']}"
+            + (" TIMEOUT" if counts.get("timeout") else "")
             + retry_note,
             flush=True,
         )
@@ -178,8 +194,10 @@ def main():
 
     print(f"\n{len(failures)} file(s) with unexpected failures out of {len(files)}.")
     if failures:
-        print("\nUnexpected failures (a regression, or a new environmental failure to add\n"
-              "to scripts/parity_known_failures.txt via scripts/gen_parity_skiplist.py):")
+        print(
+            "\nUnexpected failures (a regression, or a new environmental failure to add\n"
+            "to scripts/parity_known_failures.txt via scripts/gen_parity_skiplist.py):"
+        )
         for _name, ids in failures:
             for nid in ids:
                 print(f"  {nid}")

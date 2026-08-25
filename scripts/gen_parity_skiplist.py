@@ -64,8 +64,15 @@ def reference_failures(test_file: Path, spark_py: Path, remote: str, timeout: in
     # -rfE prints a short-summary line per failure/error with its reason; --tb=no keeps
     # output compact; -p no:cacheprovider avoids writing a .pytest_cache.
     args = [
-        sys.executable, "-m", "pytest", "-q", "-rfE", "--tb=no",
-        "-p", "no:cacheprovider", str(test_file),
+        sys.executable,
+        "-m",
+        "pytest",
+        "-q",
+        "-rfE",
+        "--tb=no",
+        "-p",
+        "no:cacheprovider",
+        str(test_file),
     ]
     try:
         r = subprocess.run(args, env=env, capture_output=True, text=True, timeout=timeout)
@@ -96,8 +103,9 @@ def reference_failures(test_file: Path, spark_py: Path, remote: str, timeout: in
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--spark", required=True, help="Spark source tree (has python/)")
-    ap.add_argument("--remote", default=os.environ.get(
-        "SPARK_CONNECT_TESTING_REMOTE", "sc://localhost:15002"))
+    ap.add_argument(
+        "--remote", default=os.environ.get("SPARK_CONNECT_TESTING_REMOTE", "sc://localhost:15002")
+    )
     ap.add_argument("--out", default=str(DEFAULT_OUT))
     ap.add_argument("--timeout", type=int, default=360)
     args = ap.parse_args()
@@ -107,8 +115,7 @@ def main():
     if not files:
         print("!! no connect test files found under", spark_py)
         return 2
-    print(f"Scanning {len(files)} connect test files with the reference client...\n",
-          flush=True)
+    print(f"Scanning {len(files)} connect test files with the reference client...\n", flush=True)
 
     all_failures = {}
     for i, tf in enumerate(files, 1):
