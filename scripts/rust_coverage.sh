@@ -30,6 +30,15 @@ CRATES=(-p apache-spark-connect-core -p apache-spark-connect -p pyspark-rs)
 # The generated protobuf crate has no hand-written logic worth covering.
 IGNORE='--ignore-filename-regex=(/target/|spark-connect-proto/|/tests/|dispatch_generated\.rs)'
 
+# Pin one target for the whole run when cross-building the extension: the Rust tests,
+# the extension, and the merged report must all use the SAME architecture, or the
+# report cannot map the (Python-driven) extension's profiles onto the test objects.
+# In CI this is unset (native == the Python arch); locally set COV_EXT_TARGET to the
+# Python's arch (e.g. x86_64-apple-darwin for x86_64 conda on an arm64 mac).
+if [ -n "${COV_EXT_TARGET:-}" ]; then
+  export CARGO_BUILD_TARGET="$COV_EXT_TARGET"
+fi
+
 echo "==> Preparing instrumented build environment"
 cargo llvm-cov clean --workspace
 # Export RUSTFLAGS / LLVM_PROFILE_FILE / etc. into this shell so every subsequent

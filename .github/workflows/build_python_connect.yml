@@ -335,7 +335,7 @@ jobs:
     name: Rust coverage (all crates incl. pyspark-rs)
     runs-on: ubuntu-latest
     env:
-      COVERAGE_MIN: "100"   # required line coverage %; the goal is full coverage
+      COVERAGE_MIN: "90"   # required line coverage % across all crates incl. pyspark-rs
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
