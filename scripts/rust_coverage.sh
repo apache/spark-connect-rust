@@ -52,7 +52,11 @@ echo "==> Rust unit + integration tests (pure-Rust crates)"
 # --lib --tests (no doctests): rustdoc cannot be profiled with -Cinstrument-coverage
 # on stable, so doctests error under coverage; the lines their examples show are
 # covered by real lib/integration tests instead.
-cargo test -p apache-spark-connect-core -p apache-spark-connect --lib --tests -- --include-ignored
+# --test-threads=1: the e2e_integration tests share one Connect session/server; running
+# them serially avoids the multiple-threads-on-the-shared-runtime races that otherwise
+# return empty results under an instrumented build.
+cargo test -p apache-spark-connect-core -p apache-spark-connect --lib --tests \
+    -- --include-ignored --test-threads=1
 
 echo "==> Building instrumented pyspark-rs extension into the skin"
 # The extension must match RUST_PY's architecture or Python cannot load it (and then
@@ -78,11 +82,24 @@ export RUST_PYSPARK_SO="$REPO/python/pyspark/_pyspark.so"
 if [ -n "${SPARK_REMOTE:-}" ]; then
   export SPARK_CONNECT_TESTING_REMOTE="${SPARK_CONNECT_TESTING_REMOTE:-$SPARK_REMOTE}"
   # Our own end-to-end script drives the drop-in wrapper (session/df/functions/streaming).
-  [ -f scripts/e2e_wrapper.py ] && PYTHONPATH="$REPO/python" "$RUST_PY" scripts/e2e_wrapper.py || true
+  # NOT `|| true`: e2e_wrapper exits 0 on per-op gaps but non-zero if it cannot run at
+  # all (import/connect failure). Swallowing that would silently yield a report with
+  # artificially low coverage - the coverage run must fail loudly instead.
+  if [ -f scripts/e2e_wrapper.py ]; then
+    PYTHONPATH="$REPO/python" "$RUST_PY" scripts/e2e_wrapper.py
+  fi
   # The official connect suite through our transport drives the low-level bindings.
+  # It exits 1 on *parity* failures (which must NOT abort a coverage measurement) but
+  # >=2 when the harness itself could not run (no server, no test files); distinguish
+  # the two so a broken run fails rather than reporting silently-low coverage.
   if [ -n "${SPARK_SOURCE:-}" ]; then
+    off_rc=0
     SPARK_CONNECT_TESTING_REMOTE="$SPARK_CONNECT_TESTING_REMOTE" \
-      "$RUST_PY" scripts/run_official_tests.py --spark "$SPARK_SOURCE" --jobs 1 || true
+      "$RUST_PY" scripts/run_official_tests.py --spark "$SPARK_SOURCE" --jobs 1 || off_rc=$?
+    if [ "$off_rc" -ge 2 ]; then
+      echo "!! official suite could not run (exit $off_rc); coverage would be understated" >&2
+      exit "$off_rc"
+    fi
   fi
 else
   echo "   (SPARK_REMOTE unset - skipping server-driven Python coverage)"
