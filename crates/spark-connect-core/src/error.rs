@@ -405,11 +405,7 @@ impl SparkError {
     ///
     /// Mirrors `PySparkException.getMessage()` from PySpark.
     pub fn get_message(&self) -> String {
-        if let Some(condition) = self.get_condition() {
-            format!("[{}] {}", condition, self.message())
-        } else {
-            self.message()
-        }
+        self.message()
     }
 
     /// Get the query contexts where this error occurred.
@@ -1026,7 +1022,7 @@ mod tests {
         );
         assert_eq!(
             err.get_message(),
-            "[CANNOT_BE_NONE] [CANNOT_BE_NONE] Argument `x` cannot be None."
+            "[CANNOT_BE_NONE] Argument `x` cannot be None."
         );
 
         // Test without error class

@@ -2078,7 +2078,11 @@ fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> Result<Value
         return Ok(Value::Long(arr.value(index) as i64));
     }
     if let Some(arr) = array.as_any().downcast_ref::<UInt64Array>() {
-        return Ok(Value::Long(arr.value(index) as i64));
+        let val = arr.value(index);
+        let i64_val = i64::try_from(val).map_err(|_| {
+            SparkError::connect_msg(format!("UInt64 value {} exceeds i64 range", val))
+        })?;
+        return Ok(Value::Long(i64_val));
     }
     // Decimal128 -> scaled f64 (Double).
     if let Some(arr) = array.as_any().downcast_ref::<Decimal128Array>() {

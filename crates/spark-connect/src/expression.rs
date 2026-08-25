@@ -84,7 +84,7 @@ impl Expression {
                 expr.expr_type = Some(proto::expression::ExprType::UnresolvedRegex(
                     proto::expression::UnresolvedRegex {
                         col_name: col_name.clone(),
-                        plan_id: Some(0),
+                        plan_id: None,
                     },
                 ));
                 expr

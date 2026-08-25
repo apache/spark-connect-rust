@@ -395,7 +395,49 @@ impl UserDefinedFunction {
 /// (`"%d.%d" % sys.version_info[:2]`). Callers can override with
 /// [`UserDefinedFunction::with_python_ver`].
 fn default_python_ver() -> String {
-    "3.11".to_string()
+    // Try to detect the Python version from the interpreter used by PythonPacker
+    let python_exe = std::env::var("SPARK_CONNECT_PYTHON")
+        .or_else(|_| std::env::var("PYSPARK_PYTHON"))
+        .unwrap_or_else(|_| "python3".to_string());
+
+    match detect_python_version(&python_exe) {
+        Some(version) => version,
+        None => {
+            // Fallback to a reasonable default if detection fails
+            "3.11".to_string()
+        }
+    }
+}
+
+/// Detect the Python version by running the interpreter.
+/// Returns MAJOR.MINOR format (e.g., "3.11"), or None if detection fails.
+fn detect_python_version(python_exe: &str) -> Option<String> {
+    use std::process::Command;
+
+    let output = Command::new(python_exe)
+        .arg("-c")
+        .arg("import sys;print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    String::from_utf8(output.stdout)
+        .ok()
+        .and_then(|s| parse_python_version_output(&s))
+}
+
+/// Parse Python version output (MAJOR.MINOR format).
+/// Handles whitespace and newlines.
+fn parse_python_version_output(output: &str) -> Option<String> {
+    let trimmed = output.trim().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
 }
 
 #[cfg(test)]
@@ -492,5 +534,26 @@ mod tests {
         let cmd = f.build_command().expect("packer should succeed");
         assert!(!cmd.is_empty());
         assert_eq!(cmd[0], 0x80); // cloudpickle PROTO opcode
+    }
+
+    #[test]
+    fn parse_python_version_output() {
+        // Test that we correctly parse Python version strings from stdout
+        // (with potential trailing whitespace/newline)
+        assert_eq!(
+            parse_python_version_output("3.11\n"),
+            Some("3.11".to_string())
+        );
+        assert_eq!(
+            parse_python_version_output("3.12"),
+            Some("3.12".to_string())
+        );
+        assert_eq!(
+            parse_python_version_output("3.9\n\n"),
+            Some("3.9".to_string())
+        );
+        // Empty or invalid output
+        assert_eq!(parse_python_version_output(""), None);
+        assert_eq!(parse_python_version_output("   \n"), None);
     }
 }
