@@ -437,3 +437,40 @@ fn test_fillna_string_value_assertion() {
         "fill value must be String('N/A') in proto"
     );
 }
+
+#[test]
+fn test_grouping_sets_preserved_assertion() {
+    // Regression: grouping_sets([[a,b],[a]]) must serialize as GROUP_TYPE_GROUPING_SETS
+    // with the explicit sets preserved — not flattened into a plain group-by (the old
+    // bug combined all columns and used GROUPBY, silently losing the set structure).
+    let base = plan::range(0, 10, 1);
+    let sets = vec![
+        vec![col("a").expression().clone(), col("b").expression().clone()],
+        vec![col("a").expression().clone()],
+    ];
+    let grouping_expressions = vec![col("a").expression().clone(), col("b").expression().clone()];
+    let df_plan =
+        plan::aggregate_with_grouping_sets(base, grouping_expressions, vec![], sets.clone());
+    let relation = plan_to_relation(df_plan);
+
+    let agg = match relation.rel_type {
+        Some(proto::relation::RelType::Aggregate(ref a)) => a,
+        _ => panic!("expected Aggregate relation for grouping sets"),
+    };
+
+    // **ASSERTION**: group_type must be GROUPING_SETS, not GROUPBY.
+    assert_eq!(
+        agg.group_type,
+        proto::aggregate::GroupType::GroupingSets as i32,
+        "group_type must be GROUPING_SETS; if flattened to GROUPBY the sets are lost"
+    );
+
+    // **ASSERTION**: the explicit sets are preserved (2 sets, of sizes 2 and 1).
+    assert_eq!(
+        agg.grouping_sets.len(),
+        2,
+        "both grouping sets must be serialized; if dropped this is 0"
+    );
+    assert_eq!(agg.grouping_sets[0].grouping_set.len(), 2);
+    assert_eq!(agg.grouping_sets[1].grouping_set.len(), 1);
+}

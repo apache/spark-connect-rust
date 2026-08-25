@@ -53,6 +53,9 @@ pub enum LogicalPlan {
         aggregate_expressions: Vec<Expression>,
         pivot_col: Option<Expression>,
         pivot_values: Vec<Expression>,
+        /// Explicit grouping sets (each inner Vec is one set of grouping expressions),
+        /// used when `group_type == GroupingSets`. Empty otherwise.
+        grouping_sets: Vec<Vec<Expression>>,
     },
     /// A join: `df.join(other, on)`.
     Join {
@@ -338,6 +341,7 @@ pub enum AggregateGroupType {
     Rollup,
     Cube,
     Pivot,
+    GroupingSets,
 }
 
 /// Join type.
@@ -412,6 +416,7 @@ impl LogicalPlan {
                 aggregate_expressions,
                 pivot_col,
                 pivot_values,
+                grouping_sets,
             } => {
                 let mut agg = proto::Aggregate::default();
                 agg.input = Some(Box::new(input.to_proto()));
@@ -420,9 +425,22 @@ impl LogicalPlan {
                     AggregateGroupType::Rollup => proto::aggregate::GroupType::Rollup as i32,
                     AggregateGroupType::Cube => proto::aggregate::GroupType::Cube as i32,
                     AggregateGroupType::Pivot => proto::aggregate::GroupType::Pivot as i32,
+                    AggregateGroupType::GroupingSets => {
+                        proto::aggregate::GroupType::GroupingSets as i32
+                    }
                 };
                 for expr in grouping_expressions {
                     agg.grouping_expressions.push(expr.to_proto());
+                }
+                // Explicit grouping sets (group_type == GroupingSets). Each set is
+                // serialized as its own `GroupingSets` message; without this the sets
+                // would be lost and the query would degrade to a plain group-by.
+                for set in grouping_sets {
+                    let mut gs = proto::aggregate::GroupingSets::default();
+                    for e in set {
+                        gs.grouping_set.push(e.to_proto());
+                    }
+                    agg.grouping_sets.push(gs);
                 }
                 for expr in aggregate_expressions {
                     agg.aggregate_expressions.push(expr.to_proto());
@@ -1208,6 +1226,7 @@ pub fn aggregate(
         aggregate_expressions,
         pivot_col: None,
         pivot_values: vec![],
+        grouping_sets: vec![],
     }
 }
 
@@ -1227,6 +1246,25 @@ pub fn aggregate_with_pivot(
         aggregate_expressions,
         pivot_col: Some(pivot_col),
         pivot_values,
+        grouping_sets: vec![],
+    }
+}
+
+/// Create an Aggregate plan with explicit grouping sets.
+pub fn aggregate_with_grouping_sets(
+    input: LogicalPlan,
+    grouping_expressions: Vec<Expression>,
+    aggregate_expressions: Vec<Expression>,
+    grouping_sets: Vec<Vec<Expression>>,
+) -> LogicalPlan {
+    LogicalPlan::Aggregate {
+        input: Box::new(input),
+        group_type: AggregateGroupType::GroupingSets,
+        grouping_expressions,
+        aggregate_expressions,
+        pivot_col: None,
+        pivot_values: vec![],
+        grouping_sets,
     }
 }
 

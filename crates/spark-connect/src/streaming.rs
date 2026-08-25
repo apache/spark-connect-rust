@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use uuid;
 
+use spark_connect_core::client::ReattachableResponseStream;
 use spark_connect_core::error::{Result, SparkError};
 use spark_connect_core::runtime::block_on;
 use spark_connect_proto as proto;
@@ -699,6 +700,61 @@ pub struct StreamingQueryException {
     pub error_class: String,
 }
 
+/// An iterator over streaming query listener events from the server.
+/// Yields events incrementally as they arrive, without buffering the entire stream.
+pub struct ListenerEventStream {
+    stream: ReattachableResponseStream,
+    buffered_events: std::vec::IntoIter<(i32, String)>,
+    done: bool,
+}
+
+impl Iterator for ListenerEventStream {
+    type Item = Result<(i32, String)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // First, yield any buffered events from the last response
+        if let Some(event) = self.buffered_events.next() {
+            return Some(Ok(event));
+        }
+
+        if self.done {
+            return None;
+        }
+
+        loop {
+            match block_on(self.stream.message()) {
+                Ok(Some(resp)) => {
+                    if let Some(
+                        proto::execute_plan_response::ResponseType::StreamingQueryListenerEventsResult(res),
+                    ) = resp.response_type
+                    {
+                        if !res.events.is_empty() {
+                            let mut events = vec![];
+                            for event in res.events {
+                                events.push((event.event_type as i32, event.event_json));
+                            }
+                            self.buffered_events = events.into_iter();
+                            // Yield the first buffered event
+                            if let Some(event) = self.buffered_events.next() {
+                                return Some(Ok(event));
+                            }
+                        }
+                    }
+                    // Keep pulling for events if this response had none
+                }
+                Ok(None) => {
+                    self.done = true;
+                    return None;
+                }
+                Err(e) => {
+                    self.done = true;
+                    return Some(Err(e.into()));
+                }
+            }
+        }
+    }
+}
+
 /// Manager for active streaming queries.
 ///
 /// Mirrors `pyspark.sql.connect.streaming.StreamingQueryManager`.
@@ -865,19 +921,19 @@ impl StreamingQueryManager {
         Ok(())
     }
 
-    /// Stream listener events from the server. This is a long-lived streaming call.
-    pub fn stream_listener_events(&self) -> Result<Vec<(i32, String)>> {
+    /// Stream listener events from the server incrementally (live).
+    /// Returns a ListenerEventStream that yields events as they arrive.
+    pub fn listener_event_stream(&self) -> Result<ListenerEventStream> {
         let mut cmd = proto::Command::default();
-        let listener_bus_cmd = proto::StreamingQueryListenerBusCommand::default();
-        // We need to send the command to the server and receive events
-        // This is a simplified implementation - the actual implementation would stream events
-        let mut listener_cmd =
-            proto::streaming_query_manager_command::StreamingQueryListenerCommand::default();
+        let mut listener_bus_cmd = proto::StreamingQueryListenerBusCommand::default();
+        // Subscribe to receive events via the oneof command field
+        listener_bus_cmd.command = Some(
+            proto::streaming_query_listener_bus_command::Command::AddListenerBusListener(true),
+        );
+        cmd.command_type =
+            Some(proto::command::CommandType::StreamingQueryListenerBusCommand(listener_bus_cmd));
 
         let mut plan = proto::Plan::default();
-        let streaming_cmd = proto::StreamingQueryListenerBusCommand::default();
-        cmd.command_type =
-            Some(proto::command::CommandType::StreamingQueryListenerBusCommand(streaming_cmd));
         plan.op_type = Some(proto::plan::OpType::Command(cmd));
 
         let request = proto::ExecutePlanRequest {
@@ -887,23 +943,13 @@ impl StreamingQueryManager {
             ..Default::default()
         };
 
-        let mut response_stream = block_on(self.session.client().execute_plan(request))?;
-        let mut events = vec![];
+        let response_stream = block_on(self.session.client().execute_plan_reattachable(request))?;
 
-        while let Some(resp) =
-            block_on(response_stream.message()).map_err(SparkError::from_grpc_status)?
-        {
-            if let Some(
-                proto::execute_plan_response::ResponseType::StreamingQueryListenerEventsResult(res),
-            ) = resp.response_type
-            {
-                for event in res.events {
-                    events.push((event.event_type as i32, event.event_json));
-                }
-            }
-        }
-
-        Ok(events)
+        Ok(ListenerEventStream {
+            stream: response_stream,
+            buffered_events: vec![].into_iter(),
+            done: false,
+        })
     }
 
     /// Execute a streaming query manager command and return the result.

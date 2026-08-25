@@ -41,6 +41,9 @@ pub struct GroupedData {
     pivot_col: Option<Expression>,
     /// Explicit pivot values (literals), set by [`GroupedData::pivot`].
     pivot_values: Vec<Expression>,
+    /// Explicit grouping sets, set by [`GroupedData::new_grouping_sets`]. Each inner
+    /// Vec is one grouping set. Only meaningful when `group_type == GroupingSets`.
+    grouping_sets: Vec<Vec<Column>>,
 }
 
 impl GroupedData {
@@ -56,6 +59,34 @@ impl GroupedData {
             group_type,
             pivot_col: None,
             pivot_values: vec![],
+            grouping_sets: vec![],
+        }
+    }
+
+    /// Create a GroupedData for `GROUPING SETS`. `grouping_sets` holds each explicit
+    /// set of grouping columns; the grouping expressions become the (de-duplicated)
+    /// union of all columns referenced across the sets.
+    pub(crate) fn new_grouping_sets(dataframe: DataFrame, grouping_sets: Vec<Vec<Column>>) -> Self {
+        // Union of all columns across the sets, de-duplicated by their proto encoding
+        // (Expression is not Eq/Hash), preserving first-seen order.
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        let mut group_cols: Vec<Column> = Vec::new();
+        for set in &grouping_sets {
+            for col in set {
+                let key = prost::Message::encode_to_vec(&col.expression().clone().to_proto());
+                if !seen.contains(&key) {
+                    seen.push(key);
+                    group_cols.push(col.clone());
+                }
+            }
+        }
+        GroupedData {
+            dataframe,
+            group_cols,
+            group_type: AggregateGroupType::GroupingSets,
+            pivot_col: None,
+            pivot_values: vec![],
+            grouping_sets,
         }
     }
 
@@ -76,6 +107,7 @@ impl GroupedData {
             group_type: AggregateGroupType::Pivot,
             pivot_col: Some(pivot_col.expression().clone()),
             pivot_values,
+            grouping_sets: vec![],
         }
     }
 
@@ -240,6 +272,13 @@ impl GroupedData {
             .map(|col| col.expression().clone())
             .collect();
 
+        // Explicit grouping sets → each set as its own list of grouping expressions.
+        let grouping_sets: Vec<Vec<Expression>> = self
+            .grouping_sets
+            .iter()
+            .map(|set| set.iter().map(|c| c.expression().clone()).collect())
+            .collect();
+
         let plan = LogicalPlan::Aggregate {
             input: Box::new(self.dataframe.plan.clone()),
             group_type: self.group_type,
@@ -247,6 +286,7 @@ impl GroupedData {
             aggregate_expressions: expressions,
             pivot_col: self.pivot_col.clone(),
             pivot_values: self.pivot_values.clone(),
+            grouping_sets,
         };
 
         DataFrame::new(self.dataframe.session.clone(), plan)

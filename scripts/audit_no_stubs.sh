@@ -11,7 +11,7 @@ cd "$(dirname "$0")/.."
 # do NOT match bare "stub"/"placeholder" (they appear in legitimate identifiers
 # like a tonic client field or in `<param_name>` substitution comments); real
 # deferrals always carry one of the markers below.
-PATTERN='unimplemented!\(|todo!\(|unreachable!\("(stub|todo|not)|TODO|FIXME|\bXXX\b|not[[:space:]]+yet[[:space:]]+implemented|stretch goal|for[[:space:]]+now|deferred|come back later|to be implemented|[Ff]uture implementation|[Ff]uture work|will be implemented|no-op placeholder|[Ii]n the future'
+PATTERN='unimplemented!\(|todo!\(|unreachable!\("(stub|todo|not)|TODO|FIXME|\bXXX\b|not[[:space:]]+yet[[:space:]]+implemented|stretch goal|for[[:space:]]+now|deferred|come back later|to be implemented|[Ff]uture implementation|[Ff]uture work|will be implemented|no-op placeholder|[Ii]n the future|simplified implementation|actual implementation would|real implementation would|in a real implementation|placeholder implementation|this is a stub'
 
 hits=$(grep -rIniE "$PATTERN" crates/*/src crates/*/build.rs 2>/dev/null)
 

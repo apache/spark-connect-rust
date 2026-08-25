@@ -713,6 +713,7 @@ impl DataFrame {
             aggregate_expressions: vec![count_expr],
             pivot_col: None,
             pivot_values: vec![],
+            grouping_sets: vec![],
         };
         let agg_df = DataFrame::new(self.session.clone(), plan);
 
@@ -1115,6 +1116,7 @@ impl DataFrame {
             aggregate_expressions: expressions,
             pivot_col: None,
             pivot_values: vec![],
+            grouping_sets: vec![],
         };
         DataFrame::new(self.session.clone(), plan)
     }
@@ -1244,12 +1246,11 @@ impl DataFrame {
         crate::group::GroupedData::new(self.clone(), group_cols, AggregateGroupType::Cube)
     }
 
-    /// Group by with grouping sets.
+    /// Group by with grouping sets. Each inner `Vec<Column>` is one grouping set;
+    /// the sets are preserved on the wire (`GROUP_TYPE_GROUPING_SETS` + the
+    /// `grouping_sets` field) rather than flattened into a single group-by.
     pub fn grouping_sets(&self, group_cols: Vec<Vec<Column>>) -> crate::group::GroupedData {
-        // For grouping sets, we combine all columns as if they were all grouping keys
-        // The actual grouping set semantics would be handled by the server
-        let combined: Vec<Column> = group_cols.into_iter().flatten().collect();
-        crate::group::GroupedData::new(self.clone(), combined, AggregateGroupType::GroupBy)
+        crate::group::GroupedData::new_grouping_sets(self.clone(), group_cols)
     }
 
     /// Sort within partitions (local sort).
