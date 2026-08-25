@@ -274,6 +274,125 @@ impl PyDataFrame {
         Ok(PyGroupedData::new(self.dataframe.group_by(columns)))
     }
 
+    /// Rollup multi-dimensional aggregation.
+    #[pyo3(signature = (*cols))]
+    fn rollup(&self, _py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyGroupedData> {
+        Ok(PyGroupedData::new(
+            self.dataframe.rollup(to_column_list(cols)?),
+        ))
+    }
+
+    /// Cube multi-dimensional aggregation.
+    #[pyo3(signature = (*cols))]
+    fn cube(&self, _py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyGroupedData> {
+        Ok(PyGroupedData::new(
+            self.dataframe.cube(to_column_list(cols)?),
+        ))
+    }
+
+    /// Sort within each partition.
+    #[pyo3(name = "sortWithinPartitions", signature = (*cols))]
+    fn sort_within_partitions(
+        &self,
+        _py: Python<'_>,
+        cols: Vec<Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let exprs: Vec<_> = to_column_list(cols)?
+            .iter()
+            .map(|c| c.expression().clone())
+            .collect();
+        Ok(PyDataFrame::new(
+            self.dataframe.sort_within_partitions(exprs),
+        ))
+    }
+
+    /// Except all (keeps duplicates).
+    #[pyo3(name = "exceptAll")]
+    fn except_all(&self, other: &PyDataFrame) -> PyDataFrame {
+        PyDataFrame::new(self.dataframe.except_all(&other.dataframe))
+    }
+
+    /// Rename multiple columns from an {old: new} mapping.
+    #[pyo3(name = "withColumnsRenamed")]
+    fn with_columns_renamed(
+        &self,
+        renames: std::collections::HashMap<String, String>,
+    ) -> PyDataFrame {
+        PyDataFrame::new(
+            self.dataframe
+                .with_columns_renamed(renames.into_iter().collect()),
+        )
+    }
+
+    /// Select columns whose names match a regex.
+    #[pyo3(name = "colRegex")]
+    fn col_regex(&self, col_name: &str) -> PyDataFrame {
+        PyDataFrame::new(self.dataframe.col_regex(col_name))
+    }
+
+    /// Basic statistics for the given columns (count/mean/stddev/min/max).
+    #[pyo3(signature = (*cols))]
+    fn describe(&self, _py: Python<'_>, cols: Vec<String>) -> PyDataFrame {
+        let refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
+        PyDataFrame::new(self.dataframe.describe(refs))
+    }
+
+    /// Summary statistics (percentiles etc.).
+    #[pyo3(signature = (*statistics))]
+    fn summary(&self, _py: Python<'_>, statistics: Vec<String>) -> PyDataFrame {
+        let refs: Vec<&str> = statistics.iter().map(|s| s.as_str()).collect();
+        PyDataFrame::new(self.dataframe.summary(refs))
+    }
+
+    /// Persist with the default MEMORY_AND_DISK storage level.
+    fn cache(&self, py: Python<'_>) -> PyResult<PyDataFrame> {
+        let df = py.detach(|| self.dataframe.cache()).to_pyerr()?;
+        Ok(PyDataFrame::new(df))
+    }
+
+    /// Mark the DataFrame as non-persistent.
+    #[pyo3(signature = (blocking=false))]
+    fn unpersist(&self, py: Python<'_>, blocking: bool) -> PyResult<PyDataFrame> {
+        let df = py
+            .detach(|| self.dataframe.unpersist(blocking))
+            .to_pyerr()?;
+        Ok(PyDataFrame::new(df))
+    }
+
+    /// Print the plan (the extended/mode flags are accepted for API parity).
+    #[pyo3(signature = (extended=false, mode=None))]
+    fn explain(&self, py: Python<'_>, extended: bool, mode: Option<String>) -> PyResult<()> {
+        let _ = (extended, mode);
+        py.detach(|| self.dataframe.explain()).to_pyerr()
+    }
+
+    /// Register this DataFrame as a temporary view.
+    #[pyo3(name = "createOrReplaceTempView")]
+    fn create_or_replace_temp_view(&self, py: Python<'_>, name: &str) -> PyResult<()> {
+        py.detach(|| self.dataframe.create_or_replace_temp_view(name))
+            .to_pyerr()
+    }
+
+    /// Drop rows containing nulls.
+    #[pyo3(signature = (how="any", thresh=None, subset=None))]
+    fn dropna(&self, how: &str, thresh: Option<i32>, subset: Option<Vec<String>>) -> PyDataFrame {
+        let owned = subset;
+        let refs = owned
+            .as_ref()
+            .map(|v| v.iter().map(|s| s.as_str()).collect());
+        PyDataFrame::new(self.dataframe.dropna(Some(how), thresh, refs))
+    }
+
+    /// Fill null values with a numeric value.
+    #[pyo3(signature = (value, subset=None))]
+    fn fillna(&self, value: i64, subset: Option<Vec<String>>) -> PyDataFrame {
+        let owned = subset;
+        let refs = owned
+            .as_ref()
+            .map(|v| v.iter().map(|s| s.as_str()).collect());
+        PyDataFrame::new(self.dataframe.fillna(value, refs))
+    }
+
     /// Aggregate over the whole DataFrame (shorthand for `groupBy().agg(...)`).
     ///
     /// Mirrors `pyspark.sql.DataFrame.agg(*exprs)`.
