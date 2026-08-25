@@ -5,14 +5,15 @@ use pyo3::types::PyDict;
 use spark_connect::dataframe::DataFrame;
 use spark_connect::session::SparkSession;
 use spark_connect::streaming::{
-    DataStreamReader, DataStreamWriter, StreamingQuery, StreamingQueryException,
-    StreamingQueryManager, StreamingQueryStatus, Trigger,
+    DataStreamReader, DataStreamWriter, ListenerEventStream, StreamingQuery,
+    StreamingQueryException, StreamingQueryManager, StreamingQueryStatus, Trigger,
 };
 use spark_connect::udf::PythonUDFPayload;
 use std::collections::HashMap;
 
 use crate::dataframe::{py_cloudpickle, py_version, PyDataFrame};
 use crate::errors::ResultExt;
+use spark_connect_core::runtime::block_on;
 
 /// Python wrapper for DataStreamReader.
 #[pyclass(name = "DataStreamReader")]
@@ -441,7 +442,50 @@ impl PyStreamingQueryManager {
         self.inner.remove_listener(listener_id).to_pyerr()
     }
 
-    fn streamListenerEvents(&self) -> PyResult<Vec<(i32, String)>> {
-        self.inner.stream_listener_events().to_pyerr()
+    fn streamListenerEvents(&self) -> PyResult<PyListenerEventStream> {
+        let stream = self.inner.listener_event_stream().to_pyerr()?;
+        Ok(PyListenerEventStream::new(stream))
+    }
+}
+
+/// Python wrapper for ListenerEventStream.
+/// Implements `__iter__` and `__next__` to yield (event_type: i32, event_json: String) tuples.
+#[pyclass(name = "ListenerEventStream")]
+pub struct PyListenerEventStream {
+    inner: Option<ListenerEventStream>,
+}
+
+impl PyListenerEventStream {
+    pub fn new(stream: ListenerEventStream) -> Self {
+        PyListenerEventStream {
+            inner: Some(stream),
+        }
+    }
+}
+
+#[pymethods]
+impl PyListenerEventStream {
+    fn __iter__(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
+        slf
+    }
+
+    fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<(i32, String)>> {
+        let Some(stream) = self.inner.as_mut() else {
+            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "ListenerEventStream already consumed",
+            ));
+        };
+        // The listener bus blocks in `next()` waiting for the server's next event
+        // (arbitrarily far apart on a live query), so release the GIL across it —
+        // otherwise the daemon thread would freeze the whole interpreter between
+        // events. Mirrors `PyLocalRowIterator::__next__`.
+        match py.detach(|| stream.next()) {
+            Some(Ok((event_type, event_json))) => Ok(Some((event_type, event_json))),
+            Some(Err(e)) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Error reading listener events: {}",
+                e
+            ))),
+            None => Ok(None),
+        }
     }
 }

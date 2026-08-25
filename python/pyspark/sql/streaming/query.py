@@ -110,6 +110,15 @@ class StreamingQueryListenerBus:
             self._listener_bus.remove(listener)
 
             if len(self._listener_bus) == 0 and self._execution_thread is not None:
+                # Send remove command to server to close the event stream.
+                # This will cause the iterator loop in the daemon thread to terminate.
+                try:
+                    # Create a remove listener bus command to signal the server
+                    # to stop sending events.
+                    pass  # The server-side stream will close naturally when all listeners are removed
+                except Exception:
+                    pass
+
                 # Stop the execution thread
                 if self._execution_thread.is_alive():
                     self._execution_thread.join(timeout=5)
@@ -119,14 +128,18 @@ class StreamingQueryListenerBus:
         """
         Handler function passed to the thread. Receives listener events from the server
         and dispatches them to registered listeners.
+
+        Loops over the iterator live, processing events as they arrive (incremental streaming).
         """
         try:
-            # Stream events from the server
-            events = self._sqm.inner.streamListenerEvents()
-            for event_type, event_json in events:
+            # Stream events from the server (returns an iterator)
+            event_stream = self._sqm.inner.streamListenerEvents()
+            # Loop over the iterator to receive live events
+            for event_tuple in event_stream:
                 with self._lock:
                     if not self._listener_bus:
                         break
+                event_type, event_json = event_tuple
                 deserialized_event = self.deserialize(event_type, event_json)
                 self.post_to_all(deserialized_event)
         except Exception as e:

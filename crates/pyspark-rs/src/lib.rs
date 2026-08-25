@@ -33,8 +33,8 @@ use resource::{
 use row::PyRow;
 use session::{PySparkSession, PySparkSessionBuilder};
 use streaming::{
-    PyDataStreamReader, PyDataStreamWriter, PyStreamingQuery, PyStreamingQueryException,
-    PyStreamingQueryManager, PyStreamingQueryStatus, PyTrigger,
+    PyDataStreamReader, PyDataStreamWriter, PyListenerEventStream, PyStreamingQuery,
+    PyStreamingQueryException, PyStreamingQueryManager, PyStreamingQueryStatus, PyTrigger,
 };
 use types::{
     PyArrayType, PyBinaryType, PyBooleanType, PyByteType, PyDataType, PyDateType, PyDecimalType,
@@ -73,6 +73,7 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyStreamingQueryStatus>()?;
     m.add_class::<PyStreamingQueryException>()?;
     m.add_class::<PyStreamingQueryManager>()?;
+    m.add_class::<PyListenerEventStream>()?;
 
     // Resource profile classes
     m.add_class::<PyExecutorResourceRequests>()?;
