@@ -40,15 +40,28 @@ echo "==> Rust unit + integration tests (pure-Rust crates)"
 # e2e_integration self-gates on SPARK_REMOTE; golden/unit tests always run.
 # --include-ignored runs the server-gated integration_test.rs cases too (they are
 # #[ignore] so a serverless `cargo test` skips them) to cover the live-RPC paths.
-cargo test -p apache-spark-connect-core -p apache-spark-connect -- --include-ignored
+# --lib --tests (no doctests): rustdoc cannot be profiled with -Cinstrument-coverage
+# on stable, so doctests error under coverage; the lines their examples show are
+# covered by real lib/integration tests instead.
+cargo test -p apache-spark-connect-core -p apache-spark-connect --lib --tests -- --include-ignored
 
 echo "==> Building instrumented pyspark-rs extension into the skin"
-cargo build -p pyspark-rs
-# Linux CI produces lib_pyspark.so; macOS produces lib_pyspark.dylib.
-if [ -f target/debug/lib_pyspark.so ]; then
-  cp target/debug/lib_pyspark.so python/pyspark/_pyspark.so
+# The extension must match RUST_PY's architecture or Python cannot load it (and then
+# no coverage is recorded for pyspark-rs). In CI the native build already matches
+# (x86_64 Linux + x86_64 Python). Locally, set COV_EXT_TARGET to cross-build, e.g.
+# COV_EXT_TARGET=x86_64-apple-darwin for an x86_64 conda Python on an arm64 mac.
+if [ -n "${COV_EXT_TARGET:-}" ]; then
+  cargo build -p pyspark-rs --target "$COV_EXT_TARGET"
+  ext_dir="target/${COV_EXT_TARGET}/debug"
 else
-  cp target/debug/lib_pyspark.dylib python/pyspark/_pyspark.so
+  cargo build -p pyspark-rs
+  ext_dir="target/debug"
+fi
+# Linux produces lib_pyspark.so; macOS produces lib_pyspark.dylib.
+if [ -f "${ext_dir}/lib_pyspark.so" ]; then
+  cp "${ext_dir}/lib_pyspark.so" python/pyspark/_pyspark.so
+else
+  cp "${ext_dir}/lib_pyspark.dylib" python/pyspark/_pyspark.so
 fi
 
 echo "==> Python suite against the instrumented extension (exercises pyspark-rs)"
