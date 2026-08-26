@@ -125,10 +125,29 @@ impl Clone for RuntimeConf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::SparkSession;
+
+    fn session() -> SparkSession {
+        SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .expect("failed to build session")
+    }
 
     #[test]
-    fn test_runtime_conf_creation() {
-        // This test verifies that RuntimeConf can be created.
-        // A full end-to-end test requires a running Spark Connect server.
+    fn runtime_conf_creation() {
+        let spark = session();
+        let conf = spark.conf();
+        // Verify that conf was created successfully (no network call)
+        let _ = conf.clone();
+    }
+
+    #[test]
+    fn runtime_conf_clone() {
+        let spark = session();
+        let conf1 = spark.conf();
+        let conf2 = conf1.clone();
+        // Both should share the same underlying client
+        let _ = (conf1, conf2);
     }
 }

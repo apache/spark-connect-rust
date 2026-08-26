@@ -741,4 +741,161 @@ mod tests {
         assert_eq!(op.mode, proto::write_operation_v2::Mode::Overwrite as i32);
         assert!(op.overwrite_condition.is_some());
     }
+
+    #[test]
+    fn v1_write_operation_cluster_by() {
+        let spark = session();
+        let df = spark.range(3).unwrap();
+        let op = df
+            .write()
+            .format("parquet")
+            .cluster_by(vec!["col1".to_string(), "col2".to_string()])
+            .build_write_operation(Some(proto::write_operation::SaveType::Path(
+                "/tmp/out".to_string(),
+            )))
+            .unwrap();
+
+        assert_eq!(op.clustering_columns, vec!["col1", "col2"]);
+    }
+
+    #[test]
+    fn v2_write_operation_cluster_by() {
+        let spark = session();
+        let df = spark.range(3).unwrap();
+        let op = df
+            .write_to("t")
+            .cluster_by(vec!["col1".to_string(), "col2".to_string()])
+            .build_operation(proto::write_operation_v2::Mode::Create, None)
+            .unwrap();
+
+        assert_eq!(op.clustering_columns, vec!["col1", "col2"]);
+    }
+
+    #[test]
+    fn reader_jdbc_with_options() {
+        let spark = session();
+        let reader = spark.read();
+        let df = reader
+            .option("url", "jdbc:mysql://localhost:3306/db")
+            .option("user", "root")
+            .option("password", "secret")
+            .jdbc("jdbc:mysql://localhost:3306/db", "table_name", None);
+
+        match &df.plan {
+            LogicalPlan::Read {
+                read_type: ReadType::DataSource {
+                    options,
+                    format,
+                    ..
+                },
+                ..
+            } => {
+                assert_eq!(format.as_deref(), Some("jdbc"));
+                assert_eq!(
+                    options.get("url").map(String::as_str),
+                    Some("jdbc:mysql://localhost:3306/db")
+                );
+                assert_eq!(options.get("user").map(String::as_str), Some("root"));
+                assert_eq!(options.get("password").map(String::as_str), Some("secret"));
+            }
+            _ => panic!("expected Read plan"),
+        }
+    }
+
+    #[test]
+    fn reader_jdbc_with_predicates() {
+        let spark = session();
+        let reader = spark.read();
+        let predicates = vec!["col1 > 10".to_string(), "col2 = 'value'".to_string()];
+        let df = reader.jdbc("jdbc:mysql://localhost/db", "table", Some(predicates.clone()));
+
+        match &df.plan {
+            LogicalPlan::Read {
+                read_type: ReadType::DataSource { predicates: preds, .. },
+                ..
+            } => {
+                assert_eq!(preds.len(), 2);
+            }
+            _ => panic!("expected Read plan with predicates"),
+        }
+    }
+
+    #[test]
+    fn v1_write_partition_and_cluster() {
+        let spark = session();
+        let df = spark.range(3).unwrap();
+        let op = df
+            .write()
+            .format("delta")
+            .partition_by(vec!["date".to_string()])
+            .cluster_by(vec!["user_id".to_string()])
+            .build_write_operation(Some(proto::write_operation::SaveType::Path(
+                "/tmp/data".to_string(),
+            )))
+            .unwrap();
+
+        assert_eq!(op.partitioning_columns, vec!["date"]);
+        assert_eq!(op.clustering_columns, vec!["user_id"]);
+    }
+
+    #[test]
+    fn v1_write_bucket_by() {
+        let spark = session();
+        let df = spark.range(3).unwrap();
+        let op = df
+            .write()
+            .format("parquet")
+            .bucket_by(10, vec!["col1".to_string()])
+            .build_write_operation(Some(proto::write_operation::SaveType::Path(
+                "/tmp/out".to_string(),
+            )))
+            .unwrap();
+
+        assert!(op.bucket_by.is_some());
+        let bucket_by = op.bucket_by.unwrap();
+        assert_eq!(bucket_by.num_buckets, 10);
+        assert_eq!(bucket_by.bucket_column_names, vec!["col1"]);
+    }
+
+    #[test]
+    fn v1_write_sort_by() {
+        let spark = session();
+        let df = spark.range(3).unwrap();
+        let op = df
+            .write()
+            .format("parquet")
+            .sort_by(vec!["col1".to_string()])
+            .build_write_operation(Some(proto::write_operation::SaveType::Path(
+                "/tmp/out".to_string(),
+            )))
+            .unwrap();
+
+        assert_eq!(op.sort_column_names, vec!["col1"]);
+    }
+
+    #[test]
+    fn reader_format_options() {
+        let spark = session();
+        let mut opts = std::collections::HashMap::new();
+        opts.insert("delimiter".to_string(), ";".to_string());
+        opts.insert("header".to_string(), "true".to_string());
+
+        let df = spark.read().format("csv").options(opts).load(Some("/data.csv"));
+
+        match &df.plan {
+            LogicalPlan::Read {
+                read_type: ReadType::DataSource {
+                    options,
+                    format,
+                    ..
+                },
+                ..
+            } => {
+                assert_eq!(format.as_deref(), Some("csv"));
+                assert_eq!(options.get("delimiter").map(String::as_str), Some(";"));
+                assert_eq!(options.get("header").map(String::as_str), Some("true"));
+            }
+            _ => panic!("expected Read plan"),
+        }
+    }
 }

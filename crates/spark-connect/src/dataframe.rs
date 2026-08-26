@@ -2542,3 +2542,88 @@ mod conversion_tests {
         assert_eq!(pdf.height(), 0);
     }
 }
+
+#[cfg(test)]
+mod plan_construction_tests {
+    use super::*;
+    use crate::session::SparkSession;
+
+    fn session() -> SparkSession {
+        SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .expect("failed to build session")
+    }
+
+    #[test]
+    fn with_watermark_plan() {
+        let spark = session();
+        let df = spark.range(3).unwrap();
+        let result = df.with_watermark("timestamp", "1 minute");
+        match &result.plan {
+            LogicalPlan::WithWatermark {
+                time_column,
+                delay_threshold,
+                ..
+            } => {
+                assert_eq!(time_column, "timestamp");
+                assert_eq!(delay_threshold, "1 minute");
+            }
+            _ => panic!("expected WithWatermark plan"),
+        }
+    }
+
+    #[test]
+    fn with_metadata_plan() {
+        let spark = session();
+        let df = spark.range(3).unwrap();
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("key".to_string(), "value".to_string());
+        let result = df.with_metadata("col", metadata);
+        match &result.plan {
+            LogicalPlan::WithColumnMetadata {
+                column_name,
+                metadata_json,
+                ..
+            } => {
+                assert_eq!(column_name, "col");
+                assert!(!metadata_json.is_empty());
+            }
+            _ => panic!("expected WithColumnMetadata plan"),
+        }
+    }
+
+    #[test]
+    fn random_split_plan() {
+        let spark = session();
+        let df = spark.range(10).unwrap();
+        let dfs = df.random_split(vec![0.7, 0.3], None);
+        assert_eq!(dfs.len(), 2);
+        // Each split is a different DataFrame with its own plan
+        for split_df in &dfs {
+            match &split_df.plan {
+                LogicalPlan::Sample {
+                    with_replacement: false,
+                    ..
+                } => {
+                    // Plan is correct
+                }
+                _ => panic!("expected Sample plan"),
+            }
+        }
+    }
+
+    #[test]
+    fn replace_plan() {
+        let spark = session();
+        let df = spark.range(3).unwrap();
+        let replacements = vec![("old".to_string(), "new".to_string())];
+        let result = df.replace(replacements, Some(vec!["col"]));
+        match &result.plan {
+            LogicalPlan::NAReplace { replacements, .. } => {
+                assert_eq!(replacements.len(), 1);
+            }
+            _ => panic!("expected NAReplace plan"),
+        }
+    }
+}

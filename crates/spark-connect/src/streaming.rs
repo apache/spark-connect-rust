@@ -993,3 +993,154 @@ impl StreamingQueryManager {
         Ok(proto::StreamingQueryManagerCommandResult::default())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::SparkSession;
+
+    fn session() -> SparkSession {
+        SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .expect("failed to build session")
+    }
+
+    #[test]
+    fn stream_reader_format_option() {
+        let spark = session();
+        let reader = spark.read_stream();
+        let reader = reader.format("kafka").option("brokers", "localhost:9092");
+        assert_eq!(reader.format, Some("kafka".to_string()));
+        assert_eq!(reader.options.get("brokers"), Some(&"localhost:9092".to_string()));
+    }
+
+    #[test]
+    fn stream_reader_schema() {
+        let spark = session();
+        let reader = spark.read_stream();
+        let reader = reader.schema("id INT, name STRING".to_string());
+        assert_eq!(reader.schema, "id INT, name STRING");
+    }
+
+    #[test]
+    fn stream_reader_source_name() {
+        let spark = session();
+        let reader = spark.read_stream();
+        let reader = reader.name("my_source");
+        assert_eq!(reader.source_name, Some("my_source".to_string()));
+    }
+
+    #[test]
+    fn stream_reader_load_creates_streaming_dataframe() {
+        let spark = session();
+        let reader = spark.read_stream().format("kafka");
+        let df = reader.load(Some("/path/to/data"));
+        assert!(matches!(&df.plan, crate::plan::LogicalPlan::Read { is_streaming: true, .. }));
+    }
+
+    #[test]
+    fn stream_reader_json() {
+        let spark = session();
+        let reader = spark.read_stream();
+        let df = reader.json("/path/to/json");
+        // Verify that the plan has the streaming flag set
+        match &df.plan {
+            crate::plan::LogicalPlan::Read { is_streaming, .. } => {
+                assert!(*is_streaming);
+            }
+            _ => panic!("expected Read plan with streaming"),
+        }
+    }
+
+    #[test]
+    fn stream_writer_format_output_mode() {
+        let spark = session();
+        let df = spark.read_stream().format("kafka").load(None);
+        let writer = df.write_stream();
+        let writer = writer.format("parquet").output_mode("append");
+        assert_eq!(writer.format, Some("parquet".to_string()));
+        assert_eq!(writer.output_mode, Some("append".to_string()));
+    }
+
+    #[test]
+    fn stream_writer_partition_by() {
+        let spark = session();
+        let df = spark.read_stream().format("kafka").load(None);
+        let writer = df.write_stream();
+        let writer = writer.partition_by(vec!["date", "region"]);
+        assert_eq!(writer.partitioning_columns, vec!["date", "region"]);
+    }
+
+    #[test]
+    fn stream_writer_cluster_by() {
+        let spark = session();
+        let df = spark.read_stream().format("kafka").load(None);
+        let writer = df.write_stream();
+        let writer = writer.cluster_by(vec!["user_id", "session_id"]);
+        assert_eq!(writer.clustering_columns, vec!["user_id", "session_id"]);
+    }
+
+    #[test]
+    fn stream_writer_query_name() {
+        let spark = session();
+        let df = spark.read_stream().format("kafka").load(None);
+        let writer = df.write_stream();
+        let writer = writer.query_name("my_query");
+        assert_eq!(writer.query_name, Some("my_query".to_string()));
+    }
+
+    #[test]
+    fn stream_writer_trigger_processing_time() {
+        let spark = session();
+        let df = spark.read_stream().format("kafka").load(None);
+        let writer = df.write_stream();
+        let trigger = Trigger::ProcessingTime("10 seconds".to_string());
+        let writer = writer.trigger(trigger);
+        assert!(writer.trigger.is_some());
+    }
+
+    #[test]
+    fn stream_writer_trigger_once() {
+        let spark = session();
+        let df = spark.read_stream().format("kafka").load(None);
+        let writer = df.write_stream();
+        let trigger = Trigger::Once;
+        let writer = writer.trigger(trigger);
+        assert!(writer.trigger.is_some());
+    }
+
+    #[test]
+    fn stream_writer_trigger_available_now() {
+        let spark = session();
+        let df = spark.read_stream().format("kafka").load(None);
+        let writer = df.write_stream();
+        let trigger = Trigger::AvailableNow;
+        let writer = writer.trigger(trigger);
+        assert!(writer.trigger.is_some());
+    }
+
+    #[test]
+    fn stream_writer_trigger_continuous() {
+        let spark = session();
+        let df = spark.read_stream().format("kafka").load(None);
+        let writer = df.write_stream();
+        let trigger = Trigger::Continuous("1 minute".to_string());
+        let writer = writer.trigger(trigger);
+        assert!(writer.trigger.is_some());
+    }
+
+    #[test]
+    fn stream_writer_option_options() {
+        let spark = session();
+        let df = spark.read_stream().format("kafka").load(None);
+        let writer = df.write_stream();
+        let writer = writer.option("key1", "val1");
+        assert_eq!(writer.options.get("key1"), Some(&"val1".to_string()));
+
+        let mut opts = std::collections::HashMap::new();
+        opts.insert("key2".to_string(), "val2".to_string());
+        let writer = writer.options(opts);
+        assert_eq!(writer.options.get("key2"), Some(&"val2".to_string()));
+    }
+}

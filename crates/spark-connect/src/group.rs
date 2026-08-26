@@ -519,3 +519,166 @@ impl CoGroupedData {
         DataFrame::new(self.left.dataframe.session.clone(), plan)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::SparkSession;
+
+    fn session() -> SparkSession {
+        SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .expect("failed to build session")
+    }
+
+    #[test]
+    fn group_count_plan() {
+        let spark = session();
+        let df = spark.range(10).unwrap();
+        let grouped = df.group_by(vec![crate::column::col("id")]);
+        let result = grouped.count();
+        match &result.plan {
+            LogicalPlan::Aggregate {
+                group_type: AggregateGroupType::GroupBy,
+                ..
+            } => {
+                // Plan structure is correct
+            }
+            _ => panic!("expected Aggregate plan with GroupBy"),
+        }
+    }
+
+    #[test]
+    fn group_sum_plan() {
+        let spark = session();
+        let df = spark.range(10).unwrap();
+        let grouped = df.group_by(vec![crate::column::col("id")]);
+        let result = grouped.sum(vec!["id"]);
+        match &result.plan {
+            LogicalPlan::Aggregate {
+                group_type: AggregateGroupType::GroupBy,
+                aggregate_expressions,
+                ..
+            } => {
+                assert!(!aggregate_expressions.is_empty());
+            }
+            _ => panic!("expected Aggregate plan"),
+        }
+    }
+
+    #[test]
+    fn group_agg_plan() {
+        let spark = session();
+        let df = spark.range(10).unwrap();
+        let grouped = df.group_by(vec![crate::column::col("id")]);
+        let exprs = vec![crate::functions::sum(crate::column::col("id"))
+            .expression()
+            .clone()];
+        let result = grouped.agg(exprs);
+        match &result.plan {
+            LogicalPlan::Aggregate {
+                group_type: AggregateGroupType::GroupBy,
+                ..
+            } => {
+                // Plan structure is correct
+            }
+            _ => panic!("expected Aggregate plan"),
+        }
+    }
+
+    #[test]
+    fn pivot_plan() {
+        let spark = session();
+        let df = spark.range(10).unwrap();
+        let grouped = df.group_by(vec![crate::column::col("id")]);
+        let pivot_grouped = grouped.pivot(crate::column::col("category"), None);
+        assert_eq!(pivot_grouped.group_type, AggregateGroupType::Pivot);
+        assert!(pivot_grouped.pivot_col.is_some());
+    }
+
+    #[test]
+    fn stat_crosstab_plan() {
+        let spark = session();
+        let df = spark.range(10).unwrap();
+        let stats = df.stat();
+        let result = stats.crosstab("col1", "col2");
+        match &result.plan {
+            LogicalPlan::StatCrosstab { .. } => {
+                // Plan is correct
+            }
+            _ => panic!("expected StatCrosstab plan"),
+        }
+    }
+
+    #[test]
+    fn stat_freq_items_plan() {
+        let spark = session();
+        let df = spark.range(10).unwrap();
+        let stats = df.stat();
+        let result = stats.freq_items(vec!["col1", "col2"], 0.25);
+        match &result.plan {
+            LogicalPlan::StatFreqItems {
+                columns,
+                support,
+                ..
+            } => {
+                assert_eq!(columns.len(), 2);
+                assert_eq!(*support, 0.25);
+            }
+            _ => panic!("expected StatFreqItems plan"),
+        }
+    }
+
+    #[test]
+    fn stat_approx_quantile_plan() {
+        let spark = session();
+        let df = spark.range(10).unwrap();
+        let stats = df.stat();
+        let result = stats.approx_quantile(vec!["col1"], vec![0.25, 0.75], 0.05);
+        match &result.plan {
+            LogicalPlan::StatApproxQuantile {
+                columns,
+                probabilities,
+                relative_error,
+                ..
+            } => {
+                assert_eq!(columns.len(), 1);
+                assert_eq!(probabilities.len(), 2);
+                assert_eq!(*relative_error, 0.05);
+            }
+            _ => panic!("expected StatApproxQuantile plan"),
+        }
+    }
+
+    #[test]
+    fn stat_sample_by_plan() {
+        let spark = session();
+        let df = spark.range(10).unwrap();
+        let stats = df.stat();
+        let fractions = vec![
+            (
+                Expression::Literal(crate::expression::LiteralExpression::string("A")),
+                0.5,
+            ),
+            (
+                Expression::Literal(crate::expression::LiteralExpression::string("B")),
+                0.3,
+            ),
+        ];
+        let result = stats.sample_by("category", fractions, Some(42));
+        match &result.plan {
+            LogicalPlan::StatSampleBy {
+                col,
+                seed,
+                fractions,
+                ..
+            } => {
+                assert_eq!(col, "category");
+                assert_eq!(*seed, Some(42));
+                assert_eq!(fractions.len(), 2);
+            }
+            _ => panic!("expected StatSampleBy plan"),
+        }
+    }
+}

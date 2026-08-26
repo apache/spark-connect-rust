@@ -894,3 +894,88 @@ fn decimal_str_to_unscaled(s: &str, scale: i32) -> Result<i128> {
     };
     Ok(if neg { -mag } else { mag })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session() -> SparkSession {
+        SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .expect("failed to build session")
+    }
+
+    #[test]
+    fn session_is_not_stopped_initially() {
+        let spark = session();
+        assert!(!spark.is_stopped());
+    }
+
+    #[test]
+    fn session_id_is_set() {
+        let spark = session();
+        let session_id = spark.session_id();
+        assert!(!session_id.is_empty());
+    }
+
+    #[test]
+    fn session_builder_without_remote_fails() {
+        let result = SparkSessionBuilder::new().get_or_create();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn session_tags_add_and_remove() {
+        let spark = session();
+        spark.add_tag("test_tag").unwrap();
+        let tags = spark.get_tags();
+        assert!(tags.contains(&"test_tag".to_string()));
+
+        spark.remove_tag("test_tag");
+        let tags = spark.get_tags();
+        assert!(!tags.contains(&"test_tag".to_string()));
+    }
+
+    #[test]
+    fn session_tags_cannot_be_empty() {
+        let spark = session();
+        let result = spark.add_tag("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn session_tags_cannot_contain_comma() {
+        let spark = session();
+        let result = spark.add_tag("tag,with,comma");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn session_tags_clear() {
+        let spark = session();
+        spark.add_tag("tag1").unwrap();
+        spark.add_tag("tag2").unwrap();
+        spark.clear_tags();
+        assert!(spark.get_tags().is_empty());
+    }
+
+    #[test]
+    fn session_tags_no_duplicates() {
+        let spark = session();
+        spark.add_tag("tag").unwrap();
+        spark.add_tag("tag").unwrap();
+        let tags = spark.get_tags();
+        assert_eq!(tags.len(), 1);
+    }
+
+    #[test]
+    fn session_clone_shares_state() {
+        let spark1 = session();
+        spark1.add_tag("test").unwrap();
+        let spark2 = spark1.clone();
+        // Both should have the same tag
+        let tags = spark2.get_tags();
+        assert!(tags.contains(&"test".to_string()));
+    }
+}
