@@ -631,7 +631,7 @@ impl Catalog {
         let mut rows = vec![];
 
         loop {
-            let resp = block_on(stream.message()).map_err(|e| SparkError::from_grpc_status(e))?;
+            let resp = block_on(stream.message()).map_err(SparkError::from_grpc_status)?;
             let Some(resp) = resp else {
                 break;
             };

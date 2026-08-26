@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use crate::column::Column;
 use crate::expression::Expression;
-use crate::types::{DataType, StructField};
+use crate::types::DataType;
 use crate::udf::CommonInlineUserDefinedFunctionExpression;
 
 /// Parameters for the `transformWithState` / `transformWithStateInPandas` operators

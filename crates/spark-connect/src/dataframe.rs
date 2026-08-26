@@ -1711,7 +1711,7 @@ impl DataFrame {
 
     /// Register this DataFrame as a temporary table (deprecated - use createTempView).
     pub fn register_temp_table(&self, name: &str) -> Result<()> {
-        let _df = self.create_temp_view(name)?;
+        self.create_temp_view(name)?;
         Ok(())
     }
 

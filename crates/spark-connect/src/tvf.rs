@@ -10,7 +10,6 @@ use crate::plan::LogicalPlan;
 use crate::session::SparkSession;
 use crate::types::DataType;
 use spark_connect_core::error::Result;
-use spark_connect_proto as proto;
 
 /// Table-valued functions for Spark SQL.
 ///

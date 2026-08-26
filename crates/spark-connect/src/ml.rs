@@ -1612,7 +1612,7 @@ mod tests {
         ];
 
         for transformer in transformers {
-            assert!(transformer.params().params.is_empty() || true);
+            assert!(transformer.params().params.is_empty());
         }
     }
 

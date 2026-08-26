@@ -3,6 +3,8 @@
 //! This crate provides the core data types and operations for interacting with
 //! Apache Spark via the Spark Connect protocol.
 
+#![allow(clippy::result_large_err)] // SparkError is large; changing the type would break the API
+
 pub mod catalog;
 pub mod column;
 pub mod conf;

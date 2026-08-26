@@ -1460,7 +1460,7 @@ fn split_map_parts(s: &str) -> Result<Vec<&str>> {
     let mut parts = Vec::new();
     let mut start = 0;
 
-    for (i, c) in s.chars().enumerate() {
+    for (i, c) in s.char_indices() {
         match c {
             '<' | '(' => depth += 1,
             '>' | ')' => depth -= 1,
@@ -1529,7 +1529,7 @@ fn split_struct_fields(s: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut start = 0;
 
-    for (i, c) in s.chars().enumerate() {
+    for (i, c) in s.char_indices() {
         match c {
             '<' | '(' => depth += 1,
             '>' | ')' => depth -= 1,
@@ -1548,7 +1548,7 @@ fn split_struct_fields(s: &str) -> Vec<&str> {
 /// Find the position of an unbracketed colon
 fn find_unbracketed_colon(s: &str) -> Option<usize> {
     let mut depth = 0;
-    for (i, c) in s.chars().enumerate() {
+    for (i, c) in s.char_indices() {
         match c {
             '<' | '(' => depth += 1,
             '>' | ')' => depth -= 1,

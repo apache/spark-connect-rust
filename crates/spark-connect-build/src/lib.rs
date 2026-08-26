@@ -14,10 +14,8 @@
 //!
 //! # Example `build.rs`
 //!
-//! ```no_run
-//! fn main() {
-//!     spark_connect_build::embed_wasm_udf("src/main.rs");
-//! }
+//! ```ignore
+//! spark_connect_build::embed_wasm_udf("src/main.rs");
 //! ```
 
 use std::path::{Path, PathBuf};

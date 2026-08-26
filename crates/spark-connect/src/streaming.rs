@@ -429,7 +429,7 @@ impl DataStreamWriter {
         plan.op_type = Some(proto::plan::OpType::Command(cmd));
 
         // Create ExecutePlanRequest
-        let mut request = proto::ExecutePlanRequest {
+        let request = proto::ExecutePlanRequest {
             session_id: self.session.client().session_id().to_string(),
             user_context: Some(proto::UserContext::default()),
             plan: Some(plan),
@@ -743,7 +743,7 @@ impl Iterator for ListenerEventStream {
                         if !res.events.is_empty() {
                             let mut events = vec![];
                             for event in res.events {
-                                events.push((event.event_type as i32, event.event_json));
+                                events.push((event.event_type, event.event_json));
                             }
                             self.buffered_events = events.into_iter();
                             // Yield the first buffered event
@@ -760,7 +760,7 @@ impl Iterator for ListenerEventStream {
                 }
                 Err(e) => {
                     self.done = true;
-                    return Some(Err(e.into()));
+                    return Some(Err(e));
                 }
             }
         }

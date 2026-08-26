@@ -79,7 +79,7 @@ impl DataFrameReader {
     }
 
     /// Read from a named table.
-    pub fn table(mut self, table_name: &str) -> DataFrame {
+    pub fn table(self, table_name: &str) -> DataFrame {
         let plan = LogicalPlan::Read {
             read_type: ReadType::NamedTable {
                 table_name: table_name.to_string(),

@@ -11,7 +11,6 @@ use spark_connect_core::error::{Result, SparkError};
 use spark_connect_core::runtime::block_on;
 use spark_connect_proto as proto;
 
-use crate::catalog::Catalog;
 use crate::dataframe::DataFrame;
 use crate::plan::LogicalPlan;
 use crate::profiler::ProfilerCollector;
@@ -557,7 +556,6 @@ fn rows_to_arrow_ipc(rows: &[Row], schema: &DataType) -> Result<Vec<u8>> {
     use arrow::datatypes::Schema as ArrowSchema;
     use arrow::ipc::writer::StreamWriter;
     use arrow::record_batch::RecordBatch;
-    use std::io::Cursor;
 
     if rows.is_empty() {
         return Ok(vec![]);
