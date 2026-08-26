@@ -28,6 +28,20 @@ impl PyDataFrameReader {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("DataFrameReader already consumed")
         })
     }
+
+    /// Take the inner reader and apply per-call `**options` (skipping None,
+    /// lowercasing bools) before a format-specific read.
+    fn take_with_opts(&mut self, options: Option<&Bound<'_, PyDict>>) -> PyResult<DataFrameReader> {
+        let mut r = self.take()?;
+        if let Some(opts) = options {
+            for (k, v) in opts.iter() {
+                if let Some(val) = crate::coerce_option_value(&v)? {
+                    r = r.option(&k.str()?.to_string(), &val);
+                }
+            }
+        }
+        Ok(r)
+    }
 }
 
 #[pymethods]
@@ -80,33 +94,45 @@ impl PyDataFrameReader {
     }
 
     /// Read JSON file(s).
-    fn json(&mut self, path: &str) -> PyResult<PyDataFrame> {
-        Ok(PyDataFrame::new(self.take()?.json(path)))
+    #[pyo3(signature = (path, **options))]
+    fn json(&mut self, path: &str, options: Option<&Bound<'_, PyDict>>) -> PyResult<PyDataFrame> {
+        Ok(PyDataFrame::new(self.take_with_opts(options)?.json(path)))
     }
 
     /// Read Parquet file(s).
-    fn parquet(&mut self, path: &str) -> PyResult<PyDataFrame> {
-        Ok(PyDataFrame::new(self.take()?.parquet(path)))
+    #[pyo3(signature = (path, **options))]
+    fn parquet(
+        &mut self,
+        path: &str,
+        options: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyDataFrame> {
+        Ok(PyDataFrame::new(
+            self.take_with_opts(options)?.parquet(path),
+        ))
     }
 
     /// Read CSV file(s).
-    fn csv(&mut self, path: &str) -> PyResult<PyDataFrame> {
-        Ok(PyDataFrame::new(self.take()?.csv(path)))
+    #[pyo3(signature = (path, **options))]
+    fn csv(&mut self, path: &str, options: Option<&Bound<'_, PyDict>>) -> PyResult<PyDataFrame> {
+        Ok(PyDataFrame::new(self.take_with_opts(options)?.csv(path)))
     }
 
     /// Read ORC file(s).
-    fn orc(&mut self, path: &str) -> PyResult<PyDataFrame> {
-        Ok(PyDataFrame::new(self.take()?.orc(path)))
+    #[pyo3(signature = (path, **options))]
+    fn orc(&mut self, path: &str, options: Option<&Bound<'_, PyDict>>) -> PyResult<PyDataFrame> {
+        Ok(PyDataFrame::new(self.take_with_opts(options)?.orc(path)))
     }
 
     /// Read text file(s) (one `value` string column per line).
-    fn text(&mut self, path: &str) -> PyResult<PyDataFrame> {
-        Ok(PyDataFrame::new(self.take()?.text(path)))
+    #[pyo3(signature = (path, **options))]
+    fn text(&mut self, path: &str, options: Option<&Bound<'_, PyDict>>) -> PyResult<PyDataFrame> {
+        Ok(PyDataFrame::new(self.take_with_opts(options)?.text(path)))
     }
 
     /// Read XML file(s).
-    fn xml(&mut self, path: &str) -> PyResult<PyDataFrame> {
-        Ok(PyDataFrame::new(self.take()?.xml(path)))
+    #[pyo3(signature = (path, **options))]
+    fn xml(&mut self, path: &str, options: Option<&Bound<'_, PyDict>>) -> PyResult<PyDataFrame> {
+        Ok(PyDataFrame::new(self.take_with_opts(options)?.xml(path)))
     }
 
     /// Read from a JDBC source. `predicates` optionally partitions the read.
