@@ -14,8 +14,8 @@ toolchain server-side.
 
 Annotate a module of functions with `#[spark_wasm_udf]`. For each function the
 macro infers the Spark signature from the Rust types, exports it to WASM, and
-generates a constructor under `udf::` - a direct call `udf::<name>(col0, col1,
-...)` (one column per argument, **arity checked at compile time**) that returns the
+generates a constructor under `udf::` - a direct call `udf::<name>(col0, col1, ...)`
+(one column per argument, **arity checked at compile time**) that returns the
 result `Column`. A one-line `build.rs` compiles the module.
 
 ```rust,ignore
@@ -77,7 +77,6 @@ Run it:
 
 ```bash
 rustup target add wasm32-unknown-unknown            # once
-export SPARK_CONNECT_WASM_PACKER_PATH=$PWD/python    # so the client finds the packer
 cargo run
 ```
 
@@ -103,8 +102,7 @@ Arguments and results cross the WASM boundary with a length-prefixed binary ABI
 | `Vec<T>`    | `ArrayType` (of `T`) |
 | `Option<T>` | nullable `T`         |
 
-These nest arbitrarily - e.g. `Vec<Option<String>>` -> `ArrayType(StringType,
-nullable)`.
+These nest arbitrarily - e.g. `Vec<Option<String>>` -> `ArrayType(StringType, nullable)`.
 
 ## How it works
 
