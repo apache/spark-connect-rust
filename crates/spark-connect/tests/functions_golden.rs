@@ -1,4 +1,4 @@
-//! Golden parity test for all 440 `functions.*` builders.
+//! Golden parity test for the captured `functions.*` builders.
 //!
 //! Each function is constructed with canonical column/string arguments, serialized
 //! to protobuf, normalized, and compared byte-for-byte against the reference
@@ -15,7 +15,15 @@ use spark_connect_proto as proto;
 
 /// Random-seed functions whose trailing `long` seed is non-deterministic
 /// (PySpark picks a random seed when none is supplied). We zero it on both sides.
-const RANDOM_SEED_FUNCS: &[&str] = &["rand", "randn", "randstr", "shuffle", "uniform"];
+const RANDOM_SEED_FUNCS: &[&str] = &[
+    "rand",
+    "randn",
+    "randstr",
+    "shuffle",
+    "uniform",
+    // count_min_sketch carries a trailing random Long seed that differs per run.
+    "count_min_sketch",
+];
 
 /// Recursively clear run-to-run noise: `common` (Python origin) everywhere,
 /// attribute/regex `plan_id`, and random seeds inside random-seed functions.
@@ -98,7 +106,7 @@ fn load_goldens() -> HashMap<String, proto::Expression> {
 }
 
 #[test]
-fn all_440_golden_function_cases_pass() {
+fn all_golden_function_cases_pass() {
     use spark_connect::column::Column;
     use spark_connect::expression::{ColumnReference, Expression};
     use spark_connect::functions::*;
@@ -108,6 +116,14 @@ fn all_440_golden_function_cases_pass() {
     let b = || Column::new(Expression::ColumnReference(ColumnReference::new("b")));
     let c = || Column::new(Expression::ColumnReference(ColumnReference::new("c")));
     let d = || Column::new(Expression::ColumnReference(ColumnReference::new("d")));
+    // Helpers for the generated (auto-captured) cases below: cx(name) is a column
+    // reference by arbitrary name; il(n) is an Integer literal column.
+    let cx = |n: &str| Column::new(Expression::ColumnReference(ColumnReference::new(n)));
+    let il = |n: i32| {
+        Column::new(Expression::Literal(
+            spark_connect::expression::LiteralExpression::int(n),
+        ))
+    };
 
     let cases: Vec<(&str, Column)> = vec![
         ("abs", abs(a())),
@@ -550,6 +566,143 @@ fn all_440_golden_function_cases_pass() {
         ("year", year(a())),
         ("years", years(a())),
         ("zeroifnull", zeroifnull(a())),
+        ("bitmap_and_agg", bitmap_and_agg(a())),
+        ("chr", chr(a())),
+        ("current_path", current_path()),
+        ("current_time", current_time()),
+        ("is_valid_variant", is_valid_variant(a())),
+        ("kll_merge_agg_bigint", kll_merge_agg_bigint(a())),
+        ("kll_merge_agg_double", kll_merge_agg_double(a())),
+        ("kll_merge_agg_float", kll_merge_agg_float(a())),
+        ("kll_sketch_agg_bigint", kll_sketch_agg_bigint(a())),
+        ("kll_sketch_agg_double", kll_sketch_agg_double(a())),
+        ("kll_sketch_agg_float", kll_sketch_agg_float(a())),
+        ("kll_sketch_get_n_bigint", kll_sketch_get_n_bigint(a())),
+        ("kll_sketch_get_n_double", kll_sketch_get_n_double(a())),
+        ("kll_sketch_get_n_float", kll_sketch_get_n_float(a())),
+        (
+            "kll_sketch_get_quantile_bigint",
+            kll_sketch_get_quantile_bigint(a(), b()),
+        ),
+        (
+            "kll_sketch_get_quantile_double",
+            kll_sketch_get_quantile_double(a(), b()),
+        ),
+        (
+            "kll_sketch_get_quantile_float",
+            kll_sketch_get_quantile_float(a(), b()),
+        ),
+        (
+            "kll_sketch_get_rank_bigint",
+            kll_sketch_get_rank_bigint(a(), b()),
+        ),
+        (
+            "kll_sketch_get_rank_double",
+            kll_sketch_get_rank_double(a(), b()),
+        ),
+        (
+            "kll_sketch_get_rank_float",
+            kll_sketch_get_rank_float(a(), b()),
+        ),
+        ("kll_sketch_merge_bigint", kll_sketch_merge_bigint(a(), b())),
+        ("kll_sketch_merge_double", kll_sketch_merge_double(a(), b())),
+        ("kll_sketch_merge_float", kll_sketch_merge_float(a(), b())),
+        (
+            "kll_sketch_to_string_bigint",
+            kll_sketch_to_string_bigint(a()),
+        ),
+        (
+            "kll_sketch_to_string_double",
+            kll_sketch_to_string_double(a()),
+        ),
+        (
+            "kll_sketch_to_string_float",
+            kll_sketch_to_string_float(a()),
+        ),
+        ("make_time", make_time(a(), b(), c())),
+        ("quote", quote(a())),
+        ("st_asbinary", st_asbinary(a())),
+        ("st_geogfromwkb", st_geogfromwkb(a())),
+        ("st_geomfromwkb", st_geomfromwkb(a())),
+        ("st_setsrid", st_setsrid(a(), b())),
+        ("st_srid", st_srid(a())),
+        ("theta_difference", theta_difference(a(), b())),
+        ("theta_intersection", theta_intersection(a(), b())),
+        ("theta_intersection_agg", theta_intersection_agg(a())),
+        ("theta_sketch_agg", theta_sketch_agg(a())),
+        ("theta_sketch_estimate", theta_sketch_estimate(a())),
+        ("theta_union", theta_union(a(), b())),
+        ("theta_union_agg", theta_union_agg(a())),
+        ("time_bucket", time_bucket(a(), b())),
+        ("time_diff", time_diff(a(), b(), c())),
+        ("time_from_micros", time_from_micros(a())),
+        ("time_from_millis", time_from_millis(a())),
+        ("time_from_seconds", time_from_seconds(a())),
+        ("time_to_micros", time_to_micros(a())),
+        ("time_to_millis", time_to_millis(a())),
+        ("time_to_seconds", time_to_seconds(a())),
+        ("time_trunc", time_trunc(a(), b())),
+        ("to_time", to_time(a())),
+        ("try_to_date", try_to_date(a())),
+        ("try_to_time", try_to_time(a())),
+        ("tuple_difference_double", tuple_difference_double(a(), b())),
+        (
+            "tuple_difference_integer",
+            tuple_difference_integer(a(), b()),
+        ),
+        (
+            "tuple_difference_theta_double",
+            tuple_difference_theta_double(a(), b()),
+        ),
+        (
+            "tuple_difference_theta_integer",
+            tuple_difference_theta_integer(a(), b()),
+        ),
+        (
+            "tuple_intersection_agg_double",
+            tuple_intersection_agg_double(a()),
+        ),
+        (
+            "tuple_intersection_agg_integer",
+            tuple_intersection_agg_integer(a()),
+        ),
+        (
+            "tuple_intersection_double",
+            tuple_intersection_double(a(), b()),
+        ),
+        (
+            "tuple_intersection_integer",
+            tuple_intersection_integer(a(), b()),
+        ),
+        (
+            "tuple_intersection_theta_double",
+            tuple_intersection_theta_double(a(), b()),
+        ),
+        (
+            "tuple_intersection_theta_integer",
+            tuple_intersection_theta_integer(a(), b()),
+        ),
+        (
+            "tuple_sketch_estimate_double",
+            tuple_sketch_estimate_double(a()),
+        ),
+        (
+            "tuple_sketch_estimate_integer",
+            tuple_sketch_estimate_integer(a()),
+        ),
+        (
+            "tuple_sketch_summary_double",
+            tuple_sketch_summary_double(a()),
+        ),
+        (
+            "tuple_sketch_summary_integer",
+            tuple_sketch_summary_integer(a()),
+        ),
+        ("tuple_sketch_theta_double", tuple_sketch_theta_double(a())),
+        (
+            "tuple_sketch_theta_integer",
+            tuple_sketch_theta_integer(a()),
+        ),
     ];
 
     let total = cases.len();
@@ -578,6 +731,6 @@ fn all_440_golden_function_cases_pass() {
         total,
         failures.join("\n")
     );
-    assert_eq!(total, 440, "expected exactly 440 cases, got {total}");
+    assert_eq!(total, 508, "expected exactly 508 cases, got {total}");
     println!("all {total} golden function cases passed");
 }
