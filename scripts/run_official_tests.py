@@ -52,7 +52,12 @@ FLAKY_FILES = {
 }
 
 _FAIL_RE = re.compile(r"^(?:FAILED|ERROR)\s+(\S+)")
-_COUNT_RE = {k: re.compile(rf"(\d+) {k}\b") for k in ("passed", "failed", "error", "skipped")}
+# NB: pytest pluralizes "error" -> "errors" in the summary; `error\b` would miss it
+# (no word boundary between "r" and "s"), so match an optional trailing "s".
+_COUNT_RE = {
+    k: re.compile(rf"(\d+) {k}{'s?' if k == 'error' else ''}\b")
+    for k in ("passed", "failed", "error", "skipped")
+}
 
 
 def discover(spark_py: Path):
@@ -139,8 +144,15 @@ def run_ours(
         )
         text = r.stdout + "\n" + r.stderr
     except subprocess.TimeoutExpired:
-        return {"passed": 0, "failed": 0, "error": 0, "skipped": 0, "timeout": True}, []
+        return {"passed": 0, "failed": 0, "error": 0, "skipped": 0, "timeout": True, "rc": -1}, []
     counts = parse_counts(text)
+    # Gate on pytest's exit code, NOT just the scraped summary: a plugin/extension load
+    # failure, collection/import error, or mid-file crash exits nonzero with NO summary
+    # line, which would otherwise parse as all-zeros and score the file (and the whole
+    # gate) a vacuous "ok" while testing nothing. pytest exit codes: 0=all passed,
+    # 1=tests failed, 2=interrupted, 3=internal error, 4=usage error, 5=no tests
+    # collected. 5 is fine here (a fully-deselected file legitimately collects nothing).
+    counts["rc"] = 0 if r.returncode == 5 else r.returncode
     failed_ids = [
         m.group(1) for m in map(_FAIL_RE.match, (ln.strip() for ln in text.splitlines())) if m
     ]
@@ -192,6 +204,17 @@ def main():
         flush=True,
     )
 
+    def is_bad(counts):
+        # A file failed if pytest exited nonzero (covers failures, errors, collection/
+        # plugin/usage errors, crashes - even when no summary line is printed), it timed
+        # out, or the scraped counts show failures/errors (defense in depth).
+        return bool(
+            counts.get("rc", 0)
+            or counts.get("timeout")
+            or counts.get("failed", 0)
+            or counts.get("error", 0)
+        )
+
     def work(tf: Path):
         rel = tf.relative_to(spark_py).as_posix()
         if rel in whole_file:
@@ -204,9 +227,7 @@ def main():
         # than needing to reproduce on every attempt.
         retries = args.retries if tf.name in FLAKY_FILES else 0
         attempts = 1
-        while (
-            counts.get("failed", 0) + counts.get("error", 0) or counts.get("timeout")
-        ) and attempts <= retries:
+        while is_bad(counts) and attempts <= retries:
             attempts += 1
             counts, failed_ids = run_ours(tf, spark_py, args.remote, deselect, args.timeout)
         return tf.name, counts, failed_ids, False, attempts
@@ -219,19 +240,24 @@ def main():
         if skipped_file:
             print(f"[{done}/{len(files)}] skip(env)  {name}", flush=True)
             continue
-        bad = counts.get("failed", 0) + counts.get("error", 0) or counts.get("timeout")
+        bad = is_bad(counts)
         tag = "FAIL" if bad else "ok"
         retry_note = f" (after {attempts} attempts)" if attempts > 1 else ""
+        rc = counts.get("rc", 0)
+        # Surface a nonzero exit with no failures/errors (e.g. plugin load / collection
+        # error, exit 4/2/3) so a vacuous "no summary line" run is not mistaken for ok.
+        rc_note = f" rc={rc}" if rc and not (counts.get("failed") or counts.get("error")) else ""
         print(
             f"[{done}/{len(files)}] {tag:<10} {name:<48} "
             f"p={counts['passed']} f={counts['failed']} e={counts['error']} "
             f"skip={counts['skipped']}"
             + (" TIMEOUT" if counts.get("timeout") else "")
+            + rc_note
             + retry_note,
             flush=True,
         )
         if bad:
-            failures.append((name, failed_ids or ["<timeout>"]))
+            failures.append((name, failed_ids or [f"<no summary; pytest rc={rc}>"]))
     ex.shutdown()
 
     # Drift check: re-run the skiplisted tests (selecting ONLY them) and report any
@@ -249,10 +275,8 @@ def main():
             counts, _ = run_ours(
                 tf, spark_py, args.remote, suffixes, args.timeout, select_only=True
             )
-            # All selected tests passed (none failed/errored, and some ran).
-            if counts.get("passed", 0) and not (
-                counts.get("failed", 0) + counts.get("error", 0) or counts.get("timeout")
-            ):
+            # All selected tests passed (some ran, and pytest exited clean).
+            if counts.get("passed", 0) and not is_bad(counts):
                 now_passing.append((rel, counts.get("passed", 0), counts.get("skipped", 0)))
         if now_passing:
             print(
