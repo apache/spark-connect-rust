@@ -173,14 +173,6 @@ jobs:
           print(f"Python coverage: {coverage_pct:.1f}% ({color})")
           PYTHON_EOF
 
-      - name: Ensure badges directory exists
-        run: mkdir -p badges
-
-      - name: Copy badges to output directory
-        run: |
-          cp coverage-rust-badge.json badges/coverage-rust.json
-          cp coverage-python-badge.json badges/coverage-python.json
-
       - name: Check if badges branch exists
         id: check-badges-branch
         run: |
@@ -209,13 +201,12 @@ jobs:
             git rm -rf .
           fi
 
-          # Copy new badges into the branch
-          mkdir -p badges
-          cp coverage-rust-badge.json badges/coverage-rust.json
-          cp coverage-python-badge.json badges/coverage-python.json
+          # Copy new badges into the branch root (not in a subdirectory)
+          cp coverage-rust-badge.json coverage-rust.json
+          cp coverage-python-badge.json coverage-python.json
 
           # Commit and push
-          git add badges/
+          git add coverage-rust.json coverage-python.json
           git commit -m "ci: update coverage badges" || echo "No changes to commit"
           git push -f origin badges
 
@@ -225,6 +216,6 @@ jobs:
         with:
           name: coverage-badges
           path: |
-            badges/coverage-rust.json
-            badges/coverage-python.json
+            coverage-rust-badge.json
+            coverage-python-badge.json
           retention-days: 5
