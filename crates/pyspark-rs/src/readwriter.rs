@@ -103,4 +103,20 @@ impl PyDataFrameReader {
     fn text(&mut self, path: &str) -> PyResult<PyDataFrame> {
         Ok(PyDataFrame::new(self.take()?.text(path)))
     }
+
+    /// Read XML file(s).
+    fn xml(&mut self, path: &str) -> PyResult<PyDataFrame> {
+        Ok(PyDataFrame::new(self.take()?.xml(path)))
+    }
+
+    /// Read from a JDBC source. `predicates` optionally partitions the read.
+    #[pyo3(signature = (url, table, predicates=None))]
+    fn jdbc(
+        &mut self,
+        url: &str,
+        table: &str,
+        predicates: Option<Vec<String>>,
+    ) -> PyResult<PyDataFrame> {
+        Ok(PyDataFrame::new(self.take()?.jdbc(url, table, predicates)))
+    }
 }

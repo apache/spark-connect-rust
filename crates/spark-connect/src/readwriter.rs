@@ -200,6 +200,28 @@ impl DataFrameReader {
         DataFrame::new(self.session, plan)
     }
 
+    /// Read XML file(s). Mirrors `DataFrameReader.xml`.
+    pub fn xml(mut self, path: &str) -> DataFrame {
+        self.format = Some("xml".to_string());
+        let paths = vec![path.to_string()];
+        let plan = LogicalPlan::Read {
+            read_type: ReadType::DataSource {
+                format: self.format.clone(),
+                schema: if self.schema.is_empty() {
+                    None
+                } else {
+                    Some(self.schema.clone())
+                },
+                options: self.options.clone(),
+                paths,
+                predicates: vec![],
+                source_name: None,
+            },
+            is_streaming: false,
+        };
+        DataFrame::new(self.session, plan)
+    }
+
     /// Read from JDBC data source.
     pub fn jdbc(mut self, url: &str, table: &str, predicates: Option<Vec<String>>) -> DataFrame {
         self.format = Some("jdbc".to_string());
@@ -451,6 +473,12 @@ impl DataFrameWriter {
     /// Write as text.
     pub fn text(mut self, path: &str) -> Result<()> {
         self.format = Some("text".to_string());
+        self.save(Some(path))
+    }
+
+    /// Write as XML. Mirrors `DataFrameWriter.xml`.
+    pub fn xml(mut self, path: &str) -> Result<()> {
+        self.format = Some("xml".to_string());
         self.save(Some(path))
     }
 }

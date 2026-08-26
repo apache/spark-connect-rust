@@ -1273,6 +1273,10 @@ impl PyDataFrameWriter {
     fn text(&mut self, path: &str) -> PyResult<()> {
         self.take()?.text(path).to_pyerr()
     }
+
+    fn xml(&mut self, path: &str) -> PyResult<()> {
+        self.take()?.xml(path).to_pyerr()
+    }
 }
 
 /// Python wrapper for the V2 `DataFrameWriter` (`df.writeTo`).

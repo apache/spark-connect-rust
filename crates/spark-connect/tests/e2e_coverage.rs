@@ -856,6 +856,25 @@ fn read_write_roundtrip_surface() {
     tolerate(df.write_to("cov_rw_v2").overwrite(col("id").gt(lit(0))));
     tolerate(df.write_to("cov_rw_v2").overwrite_partitions());
 
+    // XML round-trip (Spark 4.2 has native XML support); jdbc builds a lazy plan
+    // (executing it needs a real DB, so just cover the builder).
+    df.write()
+        .mode("overwrite")
+        .option("rowTag", "row")
+        .xml(&p("xml"))
+        .unwrap();
+    assert_eq!(
+        s.read()
+            .option("rowTag", "row")
+            .xml(&p("xml"))
+            .count()
+            .unwrap(),
+        5
+    );
+    let _ = s
+        .read()
+        .jdbc("jdbc:h2:mem:covtest", "t", Some(vec!["1=1".to_string()]));
+
     // Cleanup managed tables.
     for t in ["cov_rw_tbl", "cov_rw_bucketed", "cov_rw_v2"] {
         let _ = s
