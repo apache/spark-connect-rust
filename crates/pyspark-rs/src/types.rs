@@ -222,6 +222,25 @@ impl PyDecimalType {
     fn new(precision: i32, scale: i32) -> Self {
         PyDecimalType { precision, scale }
     }
+    #[getter]
+    fn precision(&self) -> i32 {
+        self.precision
+    }
+    #[getter]
+    fn scale(&self) -> i32 {
+        self.scale
+    }
+    fn __repr__(&self) -> String {
+        format!("DecimalType({},{})", self.precision, self.scale)
+    }
+    #[pyo3(name = "simpleString")]
+    fn simple_string(&self) -> String {
+        format!("decimal({},{})", self.precision, self.scale)
+    }
+    #[pyo3(name = "typeName")]
+    fn type_name(&self) -> &'static str {
+        "decimal"
+    }
 }
 
 #[pyclass(name = "StringType")]
