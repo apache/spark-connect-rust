@@ -3943,8 +3943,13 @@ pub fn unix_nanos(col: Column) -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.uuid`.
+///
+/// The reference client seeds the expression with a (random) `long` argument so
+/// the result is stable per query plan; we emit a fixed seed literal, matching
+/// the `rand`/`randn` builders. The seed is treated as run-to-run noise by the
+/// golden test (see `RANDOM_SEED_FUNCS`).
 pub fn uuid() -> Column {
-    func("uuid", vec![])
+    func("uuid", vec![lit_long(1214072022411175128)])
 }
 
 /// Mirrors `pyspark.sql.functions.variant_array_append`.
@@ -4115,18 +4120,34 @@ pub fn tuple_intersection_theta_integer(col1: Column, col2: Column) -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.tuple_sketch_agg_double`.
+///
+/// The reference client materializes the default `nom_entries` (lgK = 12) and
+/// `mode` ("sum") arguments into the call, so we emit them here too for parity.
 pub fn tuple_sketch_agg_double(key: Column, summary: Column) -> Column {
     func(
         "tuple_sketch_agg_double",
-        vec![key.expression().clone(), summary.expression().clone()],
+        vec![
+            key.expression().clone(),
+            summary.expression().clone(),
+            lit_int(12),
+            lit_str("sum"),
+        ],
     )
 }
 
 /// Mirrors `pyspark.sql.functions.tuple_sketch_agg_integer`.
+///
+/// As with the double variant, the reference client materializes the default
+/// `nom_entries` (lgK = 12) and `mode` ("sum") arguments.
 pub fn tuple_sketch_agg_integer(key: Column, summary: Column) -> Column {
     func(
         "tuple_sketch_agg_integer",
-        vec![key.expression().clone(), summary.expression().clone()],
+        vec![
+            key.expression().clone(),
+            summary.expression().clone(),
+            lit_int(12),
+            lit_str("sum"),
+        ],
     )
 }
 

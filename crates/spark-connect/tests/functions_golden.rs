@@ -23,6 +23,8 @@ const RANDOM_SEED_FUNCS: &[&str] = &[
     "uniform",
     // count_min_sketch carries a trailing random Long seed that differs per run.
     "count_min_sketch",
+    // uuid carries a trailing random Long seed (stable within a plan, random across).
+    "uuid",
 ];
 
 /// Recursively clear run-to-run noise: `common` (Python origin) everywhere,
@@ -116,14 +118,6 @@ fn all_golden_function_cases_pass() {
     let b = || Column::new(Expression::ColumnReference(ColumnReference::new("b")));
     let c = || Column::new(Expression::ColumnReference(ColumnReference::new("c")));
     let d = || Column::new(Expression::ColumnReference(ColumnReference::new("d")));
-    // Helpers for the generated (auto-captured) cases below: cx(name) is a column
-    // reference by arbitrary name; il(n) is an Integer literal column.
-    let cx = |n: &str| Column::new(Expression::ColumnReference(ColumnReference::new(n)));
-    let il = |n: i32| {
-        Column::new(Expression::Literal(
-            spark_connect::expression::LiteralExpression::int(n),
-        ))
-    };
 
     let cases: Vec<(&str, Column)> = vec![
         ("abs", abs(a())),
@@ -703,6 +697,12 @@ fn all_golden_function_cases_pass() {
             "tuple_sketch_theta_integer",
             tuple_sketch_theta_integer(a()),
         ),
+        ("tuple_sketch_agg_double", tuple_sketch_agg_double(a(), b())),
+        (
+            "tuple_sketch_agg_integer",
+            tuple_sketch_agg_integer(a(), b()),
+        ),
+        ("uuid", uuid()),
     ];
 
     let total = cases.len();
@@ -731,6 +731,6 @@ fn all_golden_function_cases_pass() {
         total,
         failures.join("\n")
     );
-    assert_eq!(total, 508, "expected exactly 508 cases, got {total}");
+    assert_eq!(total, 511, "expected exactly 511 cases, got {total}");
     println!("all {total} golden function cases passed");
 }
