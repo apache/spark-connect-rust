@@ -144,6 +144,82 @@ fn catalog_surface() {
     let _ = c.set_current_database("default");
 }
 
+/// The database/pattern-qualified and metadata catalog variants that
+/// catalog_surface doesn't reach (100% catalog API coverage).
+#[test]
+fn catalog_extras_surface() {
+    if !should_run() {
+        return;
+    }
+    let s = session();
+    let c = s.catalog();
+
+    // set_current_catalog: round-trip through the current value so we don't
+    // disturb other tests sharing this session.
+    let cur_cat = c.current_catalog().unwrap();
+    c.set_current_catalog(&cur_cat).unwrap();
+
+    s.range(3)
+        .unwrap()
+        .create_or_replace_temp_view("cov_view2")
+        .unwrap();
+
+    // Database-qualified table variants.
+    let _ = c
+        .list_tables_in_database("default")
+        .unwrap()
+        .collect()
+        .unwrap();
+    let _ = c
+        .list_tables_with_pattern(Some("default"), Some("*"))
+        .unwrap()
+        .collect()
+        .unwrap();
+    let _ = c
+        .get_table_with_database("cov_view2", None)
+        .unwrap()
+        .collect()
+        .unwrap();
+    assert!(c.table_exists_with_database("cov_view2", None).unwrap());
+    let _ = c
+        .list_columns_with_database("cov_view2", None)
+        .unwrap()
+        .collect()
+        .unwrap();
+
+    // Function variants.
+    let _ = c.get_function("abs").unwrap().collect().unwrap();
+    let _ = c
+        .get_function_with_database("abs", None)
+        .unwrap()
+        .collect()
+        .unwrap();
+    assert!(c.function_exists_with_database("abs", None).unwrap());
+    let _ = c
+        .list_functions_in_database("default")
+        .unwrap()
+        .collect()
+        .unwrap();
+    let _ = c
+        .list_functions_with_pattern(Some("default"), Some("*"))
+        .unwrap()
+        .collect()
+        .unwrap();
+
+    // dropGlobalTempView for a non-existent view returns false (no error).
+    assert!(!c.drop_global_temp_view("no_such_global_view").unwrap());
+
+    // Cache-maintenance ops (no-op-safe against a temp view / whole catalog).
+    let _ = c.refresh_table("cov_view2");
+    let _ = c.clear_cache();
+
+    // create_table / create_external_table: the client builds and submits the
+    // catalog command; with a bogus source the server rejects it, but the client
+    // serialization path runs either way. Accept success or a server error.
+    let _ = c.create_table("cov_created_tbl", None, Some("parquet"), Some("desc"));
+    let _ = c.create_external_table("cov_ext_tbl", None, Some("parquet"));
+}
+
 #[test]
 fn session_surface() {
     if !should_run() {
