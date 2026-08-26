@@ -28,6 +28,20 @@ fn wset_opt(
     }
 }
 
+/// Flatten `*cols` args that are each a str or a list of str (pyspark
+/// partitionBy/bucketBy/sortBy accept both forms).
+fn flatten_str_cols(cols: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<String>> {
+    let mut out = Vec::new();
+    for c in cols {
+        if let Ok(one) = c.extract::<String>() {
+            out.push(one);
+        } else {
+            out.extend(c.extract::<Vec<String>>()?);
+        }
+    }
+    Ok(out)
+}
+
 /// Python wrapper for a Spark DataFrame.
 #[pyclass(name = "DataFrame")]
 pub struct PyDataFrame {
@@ -1456,9 +1470,9 @@ impl PyDataFrameWriter {
     }
 
     #[pyo3(name = "partitionBy", signature = (*cols))]
-    fn partition_by(&mut self, cols: Vec<String>) -> PyResult<PyDataFrameWriter> {
+    fn partition_by(&mut self, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrameWriter> {
         Ok(PyDataFrameWriter {
-            inner: Some(self.take()?.partition_by(cols)),
+            inner: Some(self.take()?.partition_by(flatten_str_cols(cols)?)),
         })
     }
 

@@ -214,14 +214,17 @@ impl PySparkSession {
                     Spec::Names(names)
                 } else {
                     // Any DataType object (StructType, PyDataType) or a DDL string,
-                    // resolved through the shared converter; it must be a struct.
+                    // resolved through the shared converter. A struct becomes the
+                    // schema directly; a scalar AtomicType becomes a single "value"
+                    // column (matching pyspark createDataFrame(data, AtomicType())).
                     match crate::types::py_to_data_type(s)? {
                         DataType::Struct { fields } => Spec::Struct(fields),
-                        _ => {
-                            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                                "createDataFrame schema must be a StructType (or a struct DDL string), a list of column names, or None",
-                            ))
-                        }
+                        atomic => Spec::Struct(vec![spark_connect::types::StructField {
+                            name: "value".to_string(),
+                            data_type: atomic,
+                            nullable: true,
+                            metadata: std::collections::BTreeMap::new(),
+                        }]),
                     }
                 }
             }
