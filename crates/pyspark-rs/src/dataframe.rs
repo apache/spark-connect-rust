@@ -245,9 +245,13 @@ impl PyDataFrame {
         PyDataFrame::new(self.dataframe.union(&other.dataframe))
     }
 
-    /// Union by name.
-    fn unionByName(&self, other: &PyDataFrame) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.union_by_name(&other.dataframe))
+    /// Union by name, optionally filling columns missing on one side with null.
+    #[pyo3(signature = (other, allowMissingColumns=false))]
+    fn unionByName(&self, other: &PyDataFrame, allowMissingColumns: bool) -> PyDataFrame {
+        PyDataFrame::new(
+            self.dataframe
+                .union_by_name_opt(&other.dataframe, allowMissingColumns),
+        )
     }
 
     /// Intersect with another DataFrame.
@@ -723,14 +727,56 @@ impl PyDataFrame {
         self.dataframe.columns().to_pyerr()
     }
 
-    /// Get the last n rows as a DataFrame (lazy evaluation).
-    fn tail(&self, n: i32) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.tail(n))
+    /// Get the last `num` rows as a list of Rows (eager, like pyspark `tail`).
+    fn tail(&self, py: Python<'_>, num: i32) -> PyResult<Vec<PyRow>> {
+        let rows = py
+            .detach(|| self.dataframe.tail(num).collect())
+            .to_pyerr()?;
+        Ok(rows.into_iter().map(PyRow::new).collect())
     }
 
-    /// Sample a fraction of rows.
-    fn sample(&self, fraction: f64, seed: Option<i64>) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.sample(fraction, seed))
+    /// Sample a fraction of rows. Mirrors `DataFrame.sample(withReplacement=None,
+    /// fraction=None, seed=None)` including the legacy positional form
+    /// `sample(fraction)` (where the first positional arg is the fraction).
+    #[pyo3(signature = (with_replacement=None, fraction=None, seed=None))]
+    fn sample(
+        &self,
+        with_replacement: Option<&Bound<'_, PyAny>>,
+        fraction: Option<f64>,
+        seed: Option<i64>,
+    ) -> PyResult<PyDataFrame> {
+        // Resolve the (withReplacement, fraction) overloads exactly like pyspark:
+        // if the first positional is a float and no fraction was given, it IS the
+        // fraction (legacy `sample(0.5)`); otherwise it's the bool withReplacement.
+        let (replace, frac) = match (with_replacement, fraction) {
+            (Some(w), None) => {
+                if let Ok(f) = w.extract::<f64>() {
+                    (false, f) // legacy sample(fraction)
+                } else {
+                    let b = w.extract::<bool>().map_err(|_| {
+                        PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                            "withReplacement must be a bool, or pass fraction as a float",
+                        )
+                    })?;
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "sample requires a fraction (got withReplacement={b} with no fraction)",
+                    )));
+                }
+            }
+            (Some(w), Some(f)) => {
+                let b = w.extract::<bool>().unwrap_or(false);
+                (b, f)
+            }
+            (None, Some(f)) => (false, f),
+            (None, None) => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "sample requires a fraction",
+                ))
+            }
+        };
+        Ok(PyDataFrame::new(
+            self.dataframe.sample_opt(frac, replace, seed),
+        ))
     }
 
     /// Check if the DataFrame is empty.

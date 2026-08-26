@@ -449,13 +449,20 @@ impl DataFrame {
 
     /// Union by name.
     pub fn union_by_name(&self, other: &DataFrame) -> DataFrame {
+        self.union_by_name_opt(other, false)
+    }
+
+    /// `unionByName` with the `allowMissingColumns` option (columns present in only
+    /// one side are filled with null rather than rejected). Mirrors
+    /// `DataFrame.unionByName(other, allowMissingColumns=False)`.
+    pub fn union_by_name_opt(&self, other: &DataFrame, allow_missing_columns: bool) -> DataFrame {
         let plan = LogicalPlan::SetOperation {
             left: Box::new(self.plan.clone()),
             right: Box::new(other.plan.clone()),
             set_op_type: SetOpType::Union,
             is_all: true,
             by_name: true,
-            allow_missing_columns: false,
+            allow_missing_columns,
         };
         DataFrame::new(self.session.clone(), plan)
     }
@@ -593,11 +600,22 @@ impl DataFrame {
 
     /// Sample rows.
     pub fn sample(&self, fraction: f64, seed: Option<i64>) -> DataFrame {
+        self.sample_opt(fraction, false, seed)
+    }
+
+    /// `sample` with the `withReplacement` option. Mirrors
+    /// `DataFrame.sample(withReplacement, fraction, seed)`.
+    pub fn sample_opt(
+        &self,
+        fraction: f64,
+        with_replacement: bool,
+        seed: Option<i64>,
+    ) -> DataFrame {
         let plan = LogicalPlan::Sample {
             input: Box::new(self.plan.clone()),
             lower_bound: 0.0,
             upper_bound: fraction,
-            with_replacement: false,
+            with_replacement,
             seed,
         };
         DataFrame::new(self.session.clone(), plan)

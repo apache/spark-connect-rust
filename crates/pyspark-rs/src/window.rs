@@ -20,6 +20,28 @@ impl PyFrameBound {
     }
 }
 
+/// pyspark uses plain integer frame bounds with sentinel extremes; mirror them.
+const UNBOUNDED_PRECEDING: i64 = i64::MIN;
+const UNBOUNDED_FOLLOWING: i64 = i64::MAX;
+
+/// Resolve a frame-bound argument that is either a plain int (pyspark style, with
+/// sentinel extremes and negative=preceding/positive=following) or a `FrameBound`.
+fn to_frame_bound(v: &Bound<'_, PyAny>) -> PyResult<FrameBound> {
+    if let Ok(fb) = v.extract::<PyFrameBound>() {
+        return Ok(fb.bound);
+    }
+    let n: i64 = v.extract().map_err(|_| {
+        PyErr::new::<pyo3::exceptions::PyTypeError, _>("frame bound must be an int or FrameBound")
+    })?;
+    Ok(match n {
+        UNBOUNDED_PRECEDING => FrameBound::UnboundedPreceding,
+        UNBOUNDED_FOLLOWING => FrameBound::UnboundedFollowing,
+        0 => FrameBound::CurrentRow,
+        n if n < 0 => FrameBound::Preceding(-n),
+        n => FrameBound::Following(n),
+    })
+}
+
 #[pymethods]
 impl PyFrameBound {
     fn __repr__(&self) -> String {
@@ -81,22 +103,30 @@ impl PyWindowSpec {
         Ok(PyWindowSpec::new(new_spec))
     }
 
-    /// Define a ROWS frame between start and end bounds.
-    fn rowsBetween(&self, start: &PyFrameBound, end: &PyFrameBound) -> PyWindowSpec {
+    /// Define a ROWS frame between start and end bounds (ints or FrameBounds).
+    fn rowsBetween(
+        &self,
+        start: &Bound<'_, PyAny>,
+        end: &Bound<'_, PyAny>,
+    ) -> PyResult<PyWindowSpec> {
         let new_spec = self
             .spec
             .clone()
-            .rows_between(start.bound.clone(), end.bound.clone());
-        PyWindowSpec::new(new_spec)
+            .rows_between(to_frame_bound(start)?, to_frame_bound(end)?);
+        Ok(PyWindowSpec::new(new_spec))
     }
 
-    /// Define a RANGE frame between start and end bounds.
-    fn rangeBetween(&self, start: &PyFrameBound, end: &PyFrameBound) -> PyWindowSpec {
+    /// Define a RANGE frame between start and end bounds (ints or FrameBounds).
+    fn rangeBetween(
+        &self,
+        start: &Bound<'_, PyAny>,
+        end: &Bound<'_, PyAny>,
+    ) -> PyResult<PyWindowSpec> {
         let new_spec = self
             .spec
             .clone()
-            .range_between(start.bound.clone(), end.bound.clone());
-        PyWindowSpec::new(new_spec)
+            .range_between(to_frame_bound(start)?, to_frame_bound(end)?);
+        Ok(PyWindowSpec::new(new_spec))
     }
 
     fn __repr__(&self) -> String {
@@ -110,22 +140,22 @@ pub struct PyWindow;
 
 #[pymethods]
 impl PyWindow {
-    /// UNBOUNDED PRECEDING frame bound.
+    /// UNBOUNDED PRECEDING sentinel (matches pyspark's integer value).
     #[classattr]
-    fn unboundedPreceding() -> PyFrameBound {
-        PyFrameBound::new(FrameBound::UnboundedPreceding)
+    fn unboundedPreceding() -> i64 {
+        UNBOUNDED_PRECEDING
     }
 
-    /// CURRENT ROW frame bound.
+    /// CURRENT ROW sentinel.
     #[classattr]
-    fn currentRow() -> PyFrameBound {
-        PyFrameBound::new(FrameBound::CurrentRow)
+    fn currentRow() -> i64 {
+        0
     }
 
-    /// UNBOUNDED FOLLOWING frame bound.
+    /// UNBOUNDED FOLLOWING sentinel (matches pyspark's integer value).
     #[classattr]
-    fn unboundedFollowing() -> PyFrameBound {
-        PyFrameBound::new(FrameBound::UnboundedFollowing)
+    fn unboundedFollowing() -> i64 {
+        UNBOUNDED_FOLLOWING
     }
 
     /// Create a WindowSpec partitioned by the given columns.
@@ -165,16 +195,16 @@ impl PyWindow {
 
     /// Create a WindowSpec with a ROWS frame between the given bounds.
     #[staticmethod]
-    fn rowsBetween(start: &PyFrameBound, end: &PyFrameBound) -> PyWindowSpec {
-        let spec = WindowSpec::new().rows_between(start.bound.clone(), end.bound.clone());
-        PyWindowSpec::new(spec)
+    fn rowsBetween(start: &Bound<'_, PyAny>, end: &Bound<'_, PyAny>) -> PyResult<PyWindowSpec> {
+        let spec = WindowSpec::new().rows_between(to_frame_bound(start)?, to_frame_bound(end)?);
+        Ok(PyWindowSpec::new(spec))
     }
 
     /// Create a WindowSpec with a RANGE frame between the given bounds.
     #[staticmethod]
-    fn rangeBetween(start: &PyFrameBound, end: &PyFrameBound) -> PyWindowSpec {
-        let spec = WindowSpec::new().range_between(start.bound.clone(), end.bound.clone());
-        PyWindowSpec::new(spec)
+    fn rangeBetween(start: &Bound<'_, PyAny>, end: &Bound<'_, PyAny>) -> PyResult<PyWindowSpec> {
+        let spec = WindowSpec::new().range_between(to_frame_bound(start)?, to_frame_bound(end)?);
+        Ok(PyWindowSpec::new(spec))
     }
 
     fn __repr__(&self) -> String {

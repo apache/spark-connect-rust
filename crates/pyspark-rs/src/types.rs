@@ -64,7 +64,9 @@ pub struct PyDecimalType {
 
 #[pymethods]
 impl PyDecimalType {
+    /// `DecimalType(precision=10, scale=0)` - defaults match pyspark.
     #[new]
+    #[pyo3(signature = (precision=10, scale=0))]
     fn new(precision: i32, scale: i32) -> Self {
         PyDecimalType { precision, scale }
     }

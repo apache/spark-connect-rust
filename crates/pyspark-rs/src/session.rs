@@ -1,7 +1,7 @@
 //! PyO3 wrapper for Spark Connect sessions.
 
 use pyo3::prelude::*;
-use pyo3::types::PyList;
+use pyo3::types::{PyDict, PyList};
 use spark_connect::row::{Row, Value};
 use spark_connect::session::SparkSession;
 use spark_connect::types::{DataType, StructField};
@@ -22,11 +22,16 @@ use crate::streaming::{PyDataStreamReader, PyStreamingQueryManager};
 #[derive(Clone)]
 pub struct PySparkSessionBuilder {
     remote_url: Option<String>,
+    /// Runtime configs set via `.config(...)`, applied after the session connects.
+    configs: Vec<(String, String)>,
 }
 
 impl PySparkSessionBuilder {
     pub fn new() -> Self {
-        PySparkSessionBuilder { remote_url: None }
+        PySparkSessionBuilder {
+            remote_url: None,
+            configs: Vec::new(),
+        }
     }
 }
 
@@ -39,9 +44,52 @@ impl PySparkSessionBuilder {
         b
     }
 
-    /// `appName` - accepted for API parity; Connect derives the app name server-side.
+    /// Set a config option, or several via `map`. Mirrors
+    /// `SparkSession.Builder.config(key=None, value=None, *, map=None)`. `spark.remote`
+    /// sets the connect endpoint; other keys are applied as runtime confs on connect.
+    #[pyo3(signature = (key=None, value=None, map=None))]
+    fn config(
+        &self,
+        key: Option<&str>,
+        value: Option<&Bound<'_, PyAny>>,
+        map: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PySparkSessionBuilder> {
+        let mut b = self.clone();
+        if let Some(k) = key {
+            let v = match value {
+                Some(v) => crate::coerce_option_value(v)?.unwrap_or_default(),
+                None => String::new(),
+            };
+            b.set_conf(k, v);
+        }
+        if let Some(m) = map {
+            for (k, v) in m.iter() {
+                let ks = k.str()?.to_string();
+                let vs = crate::coerce_option_value(&v)?.unwrap_or_default();
+                b.set_conf(&ks, vs);
+            }
+        }
+        Ok(b)
+    }
+
+    /// `appName` - accepted for API parity; a Connect client cannot rename an
+    /// already-running remote server, so this is a no-op (chainable), matching
+    /// pyspark's Connect behavior.
     #[pyo3(name = "appName")]
     fn app_name(&self, _name: &str) -> PySparkSessionBuilder {
+        self.clone()
+    }
+
+    /// `master` - not applicable to a remote Connect session (no local cluster to
+    /// point at); accepted and ignored for API parity, like pyspark Connect.
+    fn master(&self, _url: &str) -> PySparkSessionBuilder {
+        self.clone()
+    }
+
+    /// `enableHiveSupport` - a no-op for a Connect client (the remote server's
+    /// catalog is fixed); accepted for API parity.
+    #[pyo3(name = "enableHiveSupport")]
+    fn enable_hive_support(&self) -> PySparkSessionBuilder {
         self.clone()
     }
 
@@ -54,8 +102,30 @@ impl PySparkSessionBuilder {
 
         let builder = SparkSession::builder().remote(&url);
         let session = py.detach(|| builder.get_or_create()).to_pyerr()?;
+        // Apply builder configs as runtime confs now that we have a session.
+        let conf = session.conf();
+        for (k, v) in &self.configs {
+            py.detach(|| conf.set(k, v)).to_pyerr()?;
+        }
         *active_slot().lock().unwrap() = Some(session.clone());
         Ok(PySparkSession::new(session))
+    }
+
+    /// `create()` - builds a brand-new session. For Connect this is equivalent to
+    /// getOrCreate against the configured remote.
+    fn create(&self, py: Python<'_>) -> PyResult<PySparkSession> {
+        self.get_or_create(py)
+    }
+}
+
+impl PySparkSessionBuilder {
+    /// Record a config pair, capturing `spark.remote` as the endpoint.
+    fn set_conf(&mut self, key: &str, value: String) {
+        if key == "spark.remote" {
+            self.remote_url = Some(value);
+        } else {
+            self.configs.push((key.to_string(), value));
+        }
     }
 }
 
