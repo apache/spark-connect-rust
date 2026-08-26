@@ -27,10 +27,9 @@ returning the same results as the reference client.
 [![PyPI](https://img.shields.io/pypi/v/pyspark-client-rust?color=c2410c&label=pyspark-client-rust)](https://pypi.org/project/pyspark-client-rust/)
 ![Spark](https://img.shields.io/badge/Apache%20Spark-4.2.0%2B-c2410c)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
-<!-- Coverage badges are published by .github/workflows/coverage.yml to the `badges` branch.
-     Replace <OWNER>/<REPO> with this repository's GitHub org/name to activate them. -->
-[![Rust coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/<OWNER>/<REPO>/badges/coverage-rust.json)](https://github.com/<OWNER>/<REPO>/actions/workflows/coverage.yml)
-[![Python coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/<OWNER>/<REPO>/badges/coverage-python.json)](https://github.com/<OWNER>/<REPO>/actions/workflows/coverage.yml)
+<!-- Coverage badges are published by .github/workflows/coverage.yml to the `badges` branch. -->
+[![Rust coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/apache/spark-connect-rust/badges/coverage-rust.json)](https://github.com/apache/spark-connect-rust/actions/workflows/coverage.yml)
+[![Python coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/apache/spark-connect-rust/badges/coverage-python.json)](https://github.com/apache/spark-connect-rust/actions/workflows/coverage.yml)
 
 ## 📖 Documentation
 
@@ -84,6 +83,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 See the [documentation](https://apache.github.io/spark-connect-rust/) for the full
 API, running a Spark Connect server, and more.
+
+## API Parity & Drop-in Replacement
+
+The Python drop-in (`pyspark-client-rust`) achieves **100% public-API parity with
+PySpark 4.2.0**. The Rust client (crate `apache-spark-connect`) has the same
+parity and supports the complete DataFrame, SQL, Streaming, Catalog, and Type
+system. The two internal APIs intentionally absent (`Column.to_plan` and
+`SparkSession.client`) are implementation details and not part of the public
+interface.
+
+## User-Defined Functions (UDFs)
+
+Rust UDFs are compiled to WebAssembly and registered directly via SQL:
+
+```rust
+use spark_connect::{SparkSession, UserDefinedFunction};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let spark = SparkSession::builder().remote("sc://localhost:15002").get_or_create()?;
+
+    // Define and register a WASM UDF in SQL
+    UserDefinedFunction::new("square")
+        .inputs(vec!["x: Double"])
+        .returns("Double")
+        .source(r#"x * x"#)
+        .register(&spark)?;
+
+    // Use it in SQL
+    spark.sql("SELECT square(id) as squared FROM range(10)")?.show()?;
+    Ok(())
+}
+```
+
+See the [WASM UDF guide](https://apache.github.io/spark-connect-rust/udfs/) for
+more examples and the SQL registration API.
 
 ## Contributing
 
