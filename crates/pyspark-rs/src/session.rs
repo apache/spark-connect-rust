@@ -37,6 +37,13 @@ impl PySparkSessionBuilder {
 
 #[pymethods]
 impl PySparkSessionBuilder {
+    /// Construct a fresh builder, so `SparkSession.Builder()` works like pyspark
+    /// (in addition to the `SparkSession.builder` class attribute).
+    #[new]
+    fn py_new() -> Self {
+        PySparkSessionBuilder::new()
+    }
+
     /// Set the remote Spark Connect server URL. Returns the builder (chainable).
     fn remote(&self, url: &str) -> PySparkSessionBuilder {
         let mut b = self.clone();
@@ -84,6 +91,18 @@ impl PySparkSessionBuilder {
     /// point at); accepted and ignored for API parity, like pyspark Connect.
     fn master(&self, _url: &str) -> PySparkSessionBuilder {
         self.clone()
+    }
+
+    /// `channelBuilder` - customizing the underlying gRPC channel is a Python-transport
+    /// concept; this client uses a native Rust transport configured via `remote(url)`,
+    /// so a custom Python channel builder is not supported. Mirrors the API surface.
+    #[pyo3(name = "channelBuilder")]
+    #[allow(unused_variables)]
+    fn channel_builder(&self, channelBuilder: &Bound<'_, PyAny>) -> PyResult<PySparkSessionBuilder> {
+        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            "channelBuilder is not supported: this client uses a native Rust transport; \
+             configure the endpoint via .remote(url) instead",
+        ))
     }
 
     /// `enableHiveSupport` - a no-op for a Connect client (the remote server's
@@ -392,8 +411,38 @@ _UDFRegistration()
     }
 
     #[pyo3(name = "sessionId")]
+    fn session_id_camel(&self) -> String {
+        self.session.session_id().to_string()
+    }
+
+    /// The session id (property form, mirrors `SparkSession.session_id`).
+    #[getter]
     fn session_id(&self) -> String {
         self.session.session_id().to_string()
+    }
+
+    /// Whether this session has been stopped. Mirrors `SparkSession.is_stopped`.
+    #[getter]
+    fn is_stopped(&self) -> bool {
+        self.session.is_stopped()
+    }
+
+    /// The builder CLASS, reached as `SparkSession.Builder` (mirrors pyspark, which
+    /// exposes the nested `Builder` type so `SparkSession.Builder()` works).
+    #[classattr]
+    #[allow(non_snake_case)]
+    fn Builder(py: Python<'_>) -> Py<pyo3::types::PyType> {
+        py.get_type::<PySparkSessionBuilder>().unbind()
+    }
+
+    /// UDTF registration accessor, mirroring `SparkSession.udtf.register(name, cls)`.
+    /// Returns a registration object whose `register` cloudpickles the Python UDTF
+    /// class and returns a bound, name-registered table function.
+    #[getter]
+    fn udtf<'a>(&self, py: Python<'a>) -> PyResult<Bound<'a, PyAny>> {
+        py.import("pyspark.sql.udtf")?
+            .getattr("UDTFRegistration")?
+            .call0()
     }
 
     /// The active session for this process, or None. Mirrors `SparkSession.getActiveSession`.

@@ -45,3 +45,7 @@ __pycache__/
 # Coverage / test artifacts
 *.profraw
 derby.log
+
+# stray local build dirs from offline proto builds
+/wasm-udfs/
+/wasm-udf-inline/

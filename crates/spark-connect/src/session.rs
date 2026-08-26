@@ -2,7 +2,7 @@
 //!
 //! Provides the entry point for DataFrame operations and SQL queries.
 
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use spark_connect_core::channel::ChannelBuilder;
@@ -55,6 +55,9 @@ pub struct SparkSession {
     progress_handler_id: Arc<AtomicU64>,
     /// Profiler collector for accumulating profile results across executions.
     profiler: Arc<ProfilerCollector>,
+    /// Whether `stop()` has been called on this session (shared across clones).
+    /// Backs `is_stopped`.
+    stopped: Arc<AtomicBool>,
 }
 
 impl SparkSession {
@@ -68,6 +71,7 @@ impl SparkSession {
             progress_handlers: Arc::new(Mutex::new(Vec::new())),
             progress_handler_id: Arc::new(AtomicU64::new(0)),
             profiler: Arc::new(ProfilerCollector::new()),
+            stopped: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -199,6 +203,7 @@ impl SparkSession {
             progress_handlers: Arc::new(Mutex::new(Vec::new())),
             progress_handler_id: Arc::new(AtomicU64::new(0)),
             profiler: Arc::new(ProfilerCollector::new()),
+            stopped: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -481,7 +486,14 @@ impl SparkSession {
     /// Stop this Spark session.
     pub fn stop(&self) -> Result<()> {
         block_on(self.client.release_session())?;
+        self.stopped.store(true, Ordering::SeqCst);
         Ok(())
+    }
+
+    /// Whether `stop()` has been called on this session. Mirrors
+    /// `pyspark.sql.connect.session.SparkSession.is_stopped`.
+    pub fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
     }
 }
 
@@ -495,6 +507,7 @@ impl Clone for SparkSession {
             progress_handlers: Arc::clone(&self.progress_handlers),
             progress_handler_id: Arc::clone(&self.progress_handler_id),
             profiler: Arc::clone(&self.profiler),
+            stopped: Arc::clone(&self.stopped),
         }
     }
 }

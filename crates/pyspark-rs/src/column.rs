@@ -46,6 +46,13 @@ impl PyColumn {
         PyColumn::new(self.column.clone().name(name))
     }
 
+    /// Mark this column as an outer reference (for correlated subqueries / lateral
+    /// joins). Mirrors `Column.outer()`, which returns the same expression — outer
+    /// resolution is performed server-side via the plan id.
+    fn outer(&self) -> PyColumn {
+        PyColumn::new(self.column.clone())
+    }
+
     /// Cast to a different type. Accepts a `DataType` or a DDL type string,
     /// matching `pyspark.sql.Column.cast`.
     fn cast(&self, data_type: &Bound<'_, PyAny>) -> PyResult<PyColumn> {

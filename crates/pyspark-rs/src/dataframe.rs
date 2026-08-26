@@ -8,6 +8,7 @@ use spark_connect::udf::{eval_type, CommonInlineUserDefinedFunctionExpression, P
 
 use crate::column::PyColumn;
 use crate::errors::ResultExt;
+use crate::functions::to_column;
 use crate::group::PyGroupedData;
 use crate::row::{value_to_py, PyRow};
 use crate::streaming::PyDataStreamWriter;
@@ -448,10 +449,15 @@ impl PyDataFrame {
         PyDataFrame::new(self.dataframe.drop_duplicates_within_watermark(refs))
     }
 
-    /// Convert each row to a JSON string (list of strings). Mirrors `toJSON`.
-    #[pyo3(name = "toJSON")]
-    fn to_json(&self, py: Python<'_>) -> PyResult<Vec<String>> {
-        py.detach(|| self.dataframe.to_json()).to_pyerr()
+    /// `toJSON()` returns an RDD in classic PySpark; Spark Connect has no RDD, so
+    /// the official Connect client raises NotImplementedError - we match that exactly.
+    /// (Use `df.select(to_json(struct("*")))` for a JSON-string DataFrame.)
+    #[pyo3(name = "toJSON", signature = (use_unicode=true))]
+    #[allow(unused_variables)]
+    fn to_json(&self, use_unicode: bool) -> PyResult<()> {
+        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            "toJSON() is not supported for Spark Connect (it returns an RDD)",
+        ))
     }
 
     /// Whether this DataFrame is semantically equal to `other`.
@@ -675,6 +681,255 @@ impl PyDataFrame {
         let columns = to_column_list(exprs)?;
         let e: Vec<_> = columns.iter().map(|c| c.expression().clone()).collect();
         Ok(PyDataFrame::new(self.dataframe.observe(&name, e)))
+    }
+
+    /// Register as a temporary view (session-scoped).
+    #[pyo3(name = "createTempView")]
+    fn create_temp_view(&self, py: Python<'_>, name: &str) -> PyResult<()> {
+        py.detach(|| self.dataframe.create_temp_view(name)).to_pyerr()
+    }
+
+    /// Register as a global temporary view.
+    #[pyo3(name = "createGlobalTempView")]
+    fn create_global_temp_view(&self, py: Python<'_>, name: &str) -> PyResult<()> {
+        py.detach(|| self.dataframe.create_global_temp_view(name))
+            .to_pyerr()
+    }
+
+    /// Register as (or replace) a global temporary view.
+    #[pyo3(name = "createOrReplaceGlobalTempView")]
+    fn create_or_replace_global_temp_view(&self, py: Python<'_>, name: &str) -> PyResult<()> {
+        py.detach(|| self.dataframe.create_or_replace_global_temp_view(name))
+            .to_pyerr()
+    }
+
+    /// Deprecated alias for createOrReplaceTempView.
+    #[pyo3(name = "registerTempTable")]
+    fn register_temp_table(&self, py: Python<'_>, name: &str) -> PyResult<()> {
+        py.detach(|| self.dataframe.register_temp_table(name)).to_pyerr()
+    }
+
+    /// Reliable checkpoint (materialize + truncate lineage).
+    #[pyo3(signature = (eager=true))]
+    #[allow(unused_variables)]
+    fn checkpoint(&self, py: Python<'_>, eager: bool) -> PyResult<PyDataFrame> {
+        Ok(PyDataFrame::new(
+            py.detach(|| self.dataframe.checkpoint()).to_pyerr()?,
+        ))
+    }
+
+    /// Local checkpoint.
+    #[pyo3(name = "localCheckpoint", signature = (eager=true))]
+    #[allow(unused_variables)]
+    fn local_checkpoint(&self, py: Python<'_>, eager: bool) -> PyResult<PyDataFrame> {
+        Ok(PyDataFrame::new(
+            py.detach(|| self.dataframe.local_checkpoint()).to_pyerr()?,
+        ))
+    }
+
+    /// Pearson correlation (or `method`) between two columns.
+    #[pyo3(signature = (col1, col2, method=None))]
+    #[allow(unused_variables)]
+    fn corr(&self, py: Python<'_>, col1: &str, col2: &str, method: Option<&str>) -> PyResult<f64> {
+        py.detach(|| self.dataframe.stat().corr(col1, col2)).to_pyerr()
+    }
+
+    /// Sample covariance between two columns.
+    fn cov(&self, py: Python<'_>, col1: &str, col2: &str) -> PyResult<f64> {
+        py.detach(|| self.dataframe.stat().cov(col1, col2)).to_pyerr()
+    }
+
+    /// Stratified sample without replacement per key.
+    #[pyo3(name = "sampleBy", signature = (col, fractions, seed=None))]
+    fn sample_by(
+        &self,
+        col: &str,
+        fractions: &Bound<'_, PyDict>,
+        seed: Option<i64>,
+    ) -> PyResult<PyDataFrame> {
+        let mut fr = Vec::with_capacity(fractions.len());
+        for (k, v) in fractions.iter() {
+            let key = to_column(&k)?.expression().clone();
+            fr.push((key, v.extract::<f64>()?));
+        }
+        Ok(PyDataFrame::new(self.dataframe.stat().sample_by(col, fr, seed)))
+    }
+
+    /// Replace values. `to_replace` may be a {old: new} dict, or a value/list with `value`.
+    #[pyo3(signature = (to_replace, value=None, subset=None))]
+    fn replace(
+        &self,
+        to_replace: &Bound<'_, PyAny>,
+        value: Option<&Bound<'_, PyAny>>,
+        subset: Option<Vec<String>>,
+    ) -> PyResult<PyDataFrame> {
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        if let Ok(d) = to_replace.downcast::<PyDict>() {
+            for (k, v) in d.iter() {
+                pairs.push((k.str()?.to_string(), v.str()?.to_string()));
+            }
+        } else if let (Ok(olds), Some(val)) =
+            (to_replace.extract::<Vec<Bound<'_, PyAny>>>(), value)
+        {
+            if let Ok(news) = val.extract::<Vec<Bound<'_, PyAny>>>() {
+                for (o, n) in olds.iter().zip(news.iter()) {
+                    pairs.push((o.str()?.to_string(), n.str()?.to_string()));
+                }
+            } else {
+                for o in olds {
+                    pairs.push((o.str()?.to_string(), val.str()?.to_string()));
+                }
+            }
+        } else if let Some(val) = value {
+            pairs.push((to_replace.str()?.to_string(), val.str()?.to_string()));
+        }
+        let subset_refs: Option<Vec<&str>> =
+            subset.as_ref().map(|s| s.iter().map(|x| x.as_str()).collect());
+        Ok(PyDataFrame::new(self.dataframe.replace(pairs, subset_refs)))
+    }
+
+    /// Reconcile to a target schema (StructType or DDL string).
+    fn to(&self, schema: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let dt = crate::types::py_to_data_type(schema)?;
+        Ok(PyDataFrame::new(self.dataframe.to(dt)))
+    }
+
+    /// Set metadata (a dict) on a column.
+    #[pyo3(name = "withMetadata")]
+    fn with_metadata(
+        &self,
+        columnName: &str,
+        metadata: std::collections::HashMap<String, String>,
+    ) -> PyDataFrame {
+        PyDataFrame::new(self.dataframe.with_metadata(columnName, metadata))
+    }
+
+    /// Define an event-time watermark.
+    #[pyo3(name = "withWatermark")]
+    fn with_watermark(&self, eventTime: &str, delayThreshold: &str) -> PyDataFrame {
+        PyDataFrame::new(self.dataframe.with_watermark(eventTime, delayThreshold))
+    }
+
+    /// Randomly split into multiple DataFrames by the given weights.
+    #[pyo3(name = "randomSplit", signature = (weights, seed=None))]
+    fn random_split(&self, weights: Vec<f64>, seed: Option<i64>) -> Vec<PyDataFrame> {
+        self.dataframe
+            .random_split(weights, seed)
+            .into_iter()
+            .map(PyDataFrame::new)
+            .collect()
+    }
+
+    /// The list of files that make up this DataFrame.
+    #[pyo3(name = "inputFiles")]
+    fn input_files(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        py.detach(|| self.dataframe.input_files()).to_pyerr()
+    }
+
+    /// Whether collect/take can run without a Spark job (a local relation).
+    #[pyo3(name = "isLocal")]
+    fn is_local(&self) -> bool {
+        self.dataframe.is_local()
+    }
+
+    /// Whether this (cached) DataFrame is cached.
+    #[pyo3(name = "is_cached")]
+    #[getter]
+    fn is_cached(&self, py: Python<'_>) -> PyResult<bool> {
+        py.detach(|| self.dataframe.is_cached()).to_pyerr()
+    }
+
+    /// Whether this DataFrame contains one or more sources that continuously return data.
+    #[pyo3(name = "isStreaming")]
+    #[getter]
+    fn is_streaming(&self) -> bool {
+        self.dataframe.is_streaming()
+    }
+
+    /// The storage level currently in use for this DataFrame.
+    #[pyo3(name = "storageLevel")]
+    #[getter]
+    fn storage_level(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let sl = py.detach(|| self.dataframe.storage_level()).to_pyerr()?;
+        let cls = py
+            .import("pyspark.storagelevel")?
+            .getattr("StorageLevel")?;
+        Ok(cls
+            .call1((
+                sl.use_disk,
+                sl.use_memory,
+                sl.use_off_heap,
+                sl.deserialized,
+                sl.replication,
+            ))?
+            .unbind())
+    }
+
+    /// The SparkSession that created this DataFrame.
+    #[pyo3(name = "sparkSession")]
+    #[getter]
+    fn spark_session(&self) -> crate::session::PySparkSession {
+        crate::session::PySparkSession::new(self.dataframe.spark_session())
+    }
+
+    /// Not supported on Spark Connect — `DataFrame.rdd` requires the legacy RDD API.
+    #[getter]
+    fn rdd(&self) -> PyResult<()> {
+        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            "rdd() is not supported for Spark Connect",
+        ))
+    }
+
+    /// Whether the (scalar-subquery) DataFrame would return at least one row.
+    fn exists(&self, py: Python<'_>) -> PyResult<bool> {
+        py.detach(|| self.dataframe.exists()).to_pyerr()
+    }
+
+    /// Return the single scalar value produced by this (scalar-subquery) DataFrame.
+    fn scalar(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match py.detach(|| self.dataframe.scalar()).to_pyerr()? {
+            Some(v) => Ok(value_to_py(py, &v)?.unbind()),
+            None => Ok(py.None()),
+        }
+    }
+
+    /// Convert to a table alias for use as a table argument.
+    #[pyo3(name = "asTable")]
+    fn as_table(&self, alias: &str) -> PyDataFrame {
+        PyDataFrame::new(self.dataframe.as_table(alias))
+    }
+
+    /// Deprecated alias for dropDuplicates.
+    #[pyo3(name = "drop_duplicates", signature = (subset=None))]
+    fn drop_duplicates(&self, subset: Option<Vec<String>>) -> PyDataFrame {
+        let refs: Option<Vec<&str>> =
+            subset.as_ref().map(|s| s.iter().map(|x| x.as_str()).collect());
+        PyDataFrame::new(self.dataframe.drop_duplicates(refs))
+    }
+
+    /// Alias for groupBy.
+    #[pyo3(signature = (*cols))]
+    fn groupby(&self, py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyGroupedData> {
+        self.groupBy(py, cols)
+    }
+
+    /// Apply a function to this DataFrame and return its result:
+    /// `df.transform(func, *args, **kwargs)` == `func(df, *args, **kwargs)`.
+    #[pyo3(signature = (func, *args, **kwargs))]
+    fn transform(
+        &self,
+        py: Python<'_>,
+        func: &Bound<'_, PyAny>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let this = Py::new(py, PyDataFrame::new(self.dataframe.clone()))?;
+        let mut call_args: Vec<Py<PyAny>> = vec![this.into_any()];
+        for a in args.iter() {
+            call_args.push(a.unbind());
+        }
+        let tuple = PyTuple::new(py, call_args)?;
+        Ok(func.call(tuple, kwargs)?.unbind())
     }
 
     /// Unpivot (wide-to-long). `values=None` unpivots all non-id columns.
@@ -1490,6 +1745,32 @@ impl PyDataFrameWriter {
         })
     }
 
+    #[pyo3(name = "clusterBy", signature = (*cols))]
+    fn cluster_by(&mut self, cols: Vec<String>) -> PyResult<PyDataFrameWriter> {
+        Ok(PyDataFrameWriter {
+            inner: Some(self.take()?.cluster_by(cols)),
+        })
+    }
+
+    /// Write to an external JDBC table. Connection details go through `properties`.
+    #[pyo3(signature = (url, table, mode=None, properties=None))]
+    fn jdbc(
+        &mut self,
+        url: &str,
+        table: &str,
+        mode: Option<&str>,
+        properties: Option<std::collections::HashMap<String, String>>,
+    ) -> PyResult<()> {
+        let mut w = self.take()?.format("jdbc").option("url", url).option("dbtable", table);
+        if let Some(m) = mode {
+            w = w.mode(m);
+        }
+        if let Some(props) = properties {
+            w = w.options(props);
+        }
+        w.save(None).to_pyerr()
+    }
+
     #[pyo3(signature = (path=None))]
     fn save(&mut self, path: Option<String>) -> PyResult<()> {
         self.take()?.save(path.as_deref()).to_pyerr()
@@ -1755,6 +2036,13 @@ impl PyDataFrameWriterV2 {
         let columns = to_column_list(cols)?;
         Ok(PyDataFrameWriterV2 {
             inner: Some(self.take()?.partition_by(columns)),
+        })
+    }
+
+    #[pyo3(name = "clusterBy", signature = (*cols))]
+    fn cluster_by(&mut self, cols: Vec<String>) -> PyResult<PyDataFrameWriterV2> {
+        Ok(PyDataFrameWriterV2 {
+            inner: Some(self.take()?.cluster_by(cols)),
         })
     }
 

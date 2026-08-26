@@ -389,6 +389,19 @@ impl UserDefinedFunction {
             Box::new(expr),
         )))
     }
+
+    /// Register this UDF by name on `session` so it can be referenced from SQL
+    /// (`session.sql("SELECT my_udf(col) FROM ...")`) as well as the DataFrame API.
+    ///
+    /// Mirrors `spark.udf.register(name, my_udf)`: the cloudpickled WASM runner is
+    /// shipped by value inside a `RegisterFunction` command, so the Spark executors
+    /// only need the `wasmtime` Python package (not `pyspark_wasm_udf`). Returns once
+    /// the server has registered the function.
+    pub fn register(&self, session: &crate::session::SparkSession) -> Result<()> {
+        // No bound arguments: registration installs the function definition by name;
+        // arguments are supplied at each SQL/DataFrame call site.
+        session.register_function(self.to_expression(vec![])?)
+    }
 }
 
 /// Default Python version tag, matching how pyspark reports it

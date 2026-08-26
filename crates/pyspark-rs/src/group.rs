@@ -138,6 +138,19 @@ impl PyGroupedData {
         Ok(PyDataFrame::new(self.grouped_data.apply_in_pandas(udf)))
     }
 
+    /// Deprecated grouped-map apply: `apply(udf)` where `udf` is a
+    /// `SQL_GROUPED_MAP_PANDAS_UDF` pandas UDF. Delegates to `applyInPandas` with the
+    /// UDF's wrapped function and return type (mirrors the official Connect API).
+    fn apply(&self, py: Python<'_>, udf: Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let func = udf.getattr("func").map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "apply() expects a pandas_udf of type SQL_GROUPED_MAP_PANDAS_UDF",
+            )
+        })?;
+        let schema = udf.getattr("returnType")?;
+        self.apply_in_pandas(py, func, schema)
+    }
+
     /// `GroupedData.applyInArrow`.
     #[pyo3(name = "applyInArrow")]
     fn apply_in_arrow(
