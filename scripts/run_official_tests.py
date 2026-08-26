@@ -49,11 +49,18 @@ FLAKY_FILES = {
     # Stateful structured-streaming (transformWithState) - also event-driven.
     "test_parity_transform_with_state.py",
     "test_parity_pandas_transform_with_state.py",
-    # Arrow Python UDFs spawn pyarrow Python workers; their interpreter/worker
-    # startup can transiently exceed the per-file cap under a loaded serial run
-    # (observed as a whole-file TIMEOUT with p=0 - a spawn stall, not a logic
-    # failure, which would surface as f>0). Retry rather than flake the gate.
-    "test_parity_arrow_python_udf.py",
+}
+
+# Files that are deterministic and pass, but are legitimately SLOW: they run many
+# tests that each spawn a Python/pyarrow worker on the server, so the whole file takes
+# far longer than a normal one. They are not flaky (retrying at the same cap can't help
+# a file that simply needs more wall-clock), so instead of retrying them we give them a
+# larger per-file timeout. Reference point: the reference client runs the full
+# arrow-python-udf file (320 passed, 64 skipped) in ~120s and our client matches that
+# locally; a shared CI runner is several times slower, hence the generous cap. The
+# earlier whole-file TIMEOUT (p=0) was this file exceeding the 360s default, not a hang.
+SLOW_FILE_TIMEOUTS = {
+    "test_parity_arrow_python_udf.py": 1200,
 }
 
 _FAIL_RE = re.compile(r"^(?:FAILED|ERROR)\s+(\S+)")
@@ -225,7 +232,10 @@ def main():
         if rel in whole_file:
             return tf.name, None, [], True, 1  # skipped whole file
         deselect = per_file.get(rel, [])
-        counts, failed_ids = run_ours(tf, spark_py, args.remote, deselect, args.timeout)
+        # Slow-but-deterministic files get a larger per-file timeout (see
+        # SLOW_FILE_TIMEOUTS); everything else uses the default cap.
+        file_timeout = SLOW_FILE_TIMEOUTS.get(tf.name, args.timeout)
+        counts, failed_ids = run_ours(tf, spark_py, args.remote, deselect, file_timeout)
         # Retry ONLY the event-timing-driven files (see FLAKY_FILES): for them a flake
         # clears on a fresh run while a genuine failure persists. Deterministic files
         # are NOT retried, so a non-deterministic bug there surfaces immediately rather
@@ -234,7 +244,7 @@ def main():
         attempts = 1
         while is_bad(counts) and attempts <= retries:
             attempts += 1
-            counts, failed_ids = run_ours(tf, spark_py, args.remote, deselect, args.timeout)
+            counts, failed_ids = run_ours(tf, spark_py, args.remote, deselect, file_timeout)
         return tf.name, counts, failed_ids, False, attempts
 
     failures = []  # (file, [nodeids])
