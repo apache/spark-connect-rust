@@ -15,8 +15,10 @@ from pyspark.ml.connect.classification import LogisticRegression
 from pyspark.ml.connect.evaluation import (
     RegressionEvaluator,
     BinaryClassificationEvaluator,
+    MulticlassClassificationEvaluator,
 )
 from pyspark.ml.connect.pipeline import Pipeline
+from pyspark.ml.connect.tuning import CrossValidator, CrossValidatorModel
 from pyspark._pyspark import MLModel
 
 __all__ = [
@@ -28,5 +30,8 @@ __all__ = [
     "RegressionEvaluator",
     "BinaryClassificationEvaluator",
     "Pipeline",
+    "MulticlassClassificationEvaluator",
+    "CrossValidator",
+    "CrossValidatorModel",
     "MLModel",
 ]

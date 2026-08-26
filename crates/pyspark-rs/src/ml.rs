@@ -7,8 +7,9 @@
 
 use pyo3::prelude::*;
 use spark_connect::ml::{
-    BinaryClassificationEvaluator, Estimator, Evaluator, LogisticRegression, MaxAbsScaler, Model,
-    Pipeline, RegressionEvaluator, StandardScaler, StringIndexer, Transformer, VectorAssembler,
+    BinaryClassificationEvaluator, CrossValidator, Estimator, Evaluator, LogisticRegression,
+    MaxAbsScaler, Model, MulticlassClassificationEvaluator, Pipeline, RegressionEvaluator,
+    StandardScaler, StringIndexer, Transformer, VectorAssembler,
 };
 
 use crate::dataframe::PyDataFrame;
@@ -376,6 +377,106 @@ impl PyPipeline {
         let refs: Vec<&str> = stages.iter().map(|x| x.as_str()).collect();
         PyPipeline {
             inner: self.inner.clone().set_stages(refs),
+        }
+    }
+    fn fit(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<PyMLModel> {
+        let mut e = self.inner.clone();
+        let model = py.detach(|| e.fit(&df.dataframe)).to_pyerr()?;
+        Ok(PyMLModel { model })
+    }
+}
+
+/// MulticlassClassificationEvaluator.
+#[pyclass(name = "MulticlassClassificationEvaluator")]
+pub struct PyMulticlassClassificationEvaluator {
+    inner: MulticlassClassificationEvaluator,
+}
+
+#[pymethods]
+impl PyMulticlassClassificationEvaluator {
+    #[new]
+    #[pyo3(signature = (labelCol=None, predictionCol=None, metricName=None))]
+    #[allow(non_snake_case)]
+    fn new(
+        labelCol: Option<String>,
+        predictionCol: Option<String>,
+        metricName: Option<String>,
+    ) -> Self {
+        let mut e = MulticlassClassificationEvaluator::new();
+        if let Some(c) = labelCol {
+            e = e.set_label_col(&c);
+        }
+        if let Some(c) = predictionCol {
+            e = e.set_prediction_col(&c);
+        }
+        if let Some(m) = metricName {
+            e = e.set_metric_name(&m);
+        }
+        PyMulticlassClassificationEvaluator { inner: e }
+    }
+    #[pyo3(name = "setLabelCol")]
+    fn set_label_col(&self, col: &str) -> Self {
+        PyMulticlassClassificationEvaluator {
+            inner: self.inner.clone().set_label_col(col),
+        }
+    }
+    #[pyo3(name = "setPredictionCol")]
+    fn set_prediction_col(&self, col: &str) -> Self {
+        PyMulticlassClassificationEvaluator {
+            inner: self.inner.clone().set_prediction_col(col),
+        }
+    }
+    #[pyo3(name = "setMetricName")]
+    fn set_metric_name(&self, metric: &str) -> Self {
+        PyMulticlassClassificationEvaluator {
+            inner: self.inner.clone().set_metric_name(metric),
+        }
+    }
+    fn evaluate(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<f64> {
+        py.detach(|| self.inner.evaluate(&df.dataframe)).to_pyerr()
+    }
+}
+
+/// CrossValidator (k-fold tuning).
+#[pyclass(name = "CrossValidator")]
+pub struct PyCrossValidator {
+    inner: CrossValidator,
+}
+
+#[pymethods]
+impl PyCrossValidator {
+    #[new]
+    #[pyo3(signature = (numFolds=None, parallelism=None, seed=None))]
+    #[allow(non_snake_case)]
+    fn new(numFolds: Option<i32>, parallelism: Option<i32>, seed: Option<i64>) -> Self {
+        let mut e = CrossValidator::new();
+        if let Some(n) = numFolds {
+            e = e.set_num_folds(n);
+        }
+        if let Some(p) = parallelism {
+            e = e.set_parallelism(p);
+        }
+        if let Some(s) = seed {
+            e = e.set_seed(s);
+        }
+        PyCrossValidator { inner: e }
+    }
+    #[pyo3(name = "setNumFolds")]
+    fn set_num_folds(&self, num_folds: i32) -> Self {
+        PyCrossValidator {
+            inner: self.inner.clone().set_num_folds(num_folds),
+        }
+    }
+    #[pyo3(name = "setParallelism")]
+    fn set_parallelism(&self, parallelism: i32) -> Self {
+        PyCrossValidator {
+            inner: self.inner.clone().set_parallelism(parallelism),
+        }
+    }
+    #[pyo3(name = "setSeed")]
+    fn set_seed(&self, seed: i64) -> Self {
+        PyCrossValidator {
+            inner: self.inner.clone().set_seed(seed),
         }
     }
     fn fit(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<PyMLModel> {

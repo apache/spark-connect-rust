@@ -1216,6 +1216,195 @@ impl Model for PipelineModel {
     }
 }
 
+/// MulticlassClassificationEvaluator: metrics for multiclass classification.
+#[derive(Debug, Clone)]
+pub struct MulticlassClassificationEvaluator {
+    operator: MlOperator,
+    params: Params,
+    label_col: String,
+    prediction_col: String,
+    metric_name: String,
+}
+
+impl MulticlassClassificationEvaluator {
+    pub fn new() -> Self {
+        MulticlassClassificationEvaluator {
+            operator: MlOperator::new(
+                "org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator",
+                OperatorType::Evaluator,
+            ),
+            params: Params::new(),
+            label_col: "label".to_string(),
+            prediction_col: "prediction".to_string(),
+            metric_name: "f1".to_string(),
+        }
+    }
+    pub fn set_label_col(mut self, col: &str) -> Self {
+        self.label_col = col.to_string();
+        self.params = self.params.set_param_string("labelCol", col);
+        self
+    }
+    pub fn set_prediction_col(mut self, col: &str) -> Self {
+        self.prediction_col = col.to_string();
+        self.params = self.params.set_param_string("predictionCol", col);
+        self
+    }
+    pub fn set_metric_name(mut self, metric: &str) -> Self {
+        self.metric_name = metric.to_string();
+        self.params = self.params.set_param_string("metricName", metric);
+        self
+    }
+    pub fn label_col(&self) -> &str {
+        &self.label_col
+    }
+    pub fn prediction_col(&self) -> &str {
+        &self.prediction_col
+    }
+    pub fn metric_name(&self) -> &str {
+        &self.metric_name
+    }
+}
+
+impl Default for MulticlassClassificationEvaluator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Evaluator for MulticlassClassificationEvaluator {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn evaluate(&self, df: &DataFrame) -> spark_connect_core::error::Result<f64> {
+        evaluate_via_command(&self.operator, &self.params, df)
+    }
+}
+
+/// CrossValidator: k-fold cross-validation for hyperparameter tuning.
+///
+/// The nested estimator/evaluator/estimatorParamMaps have no scalar-literal
+/// encoding, so this carries the numeric tuning params it can faithfully encode
+/// (numFolds, seed, parallelism); the sub-estimator/evaluator are held for the
+/// server-side fit. fit() produces a CrossValidatorModel the same lazy way the
+/// other estimators do.
+#[derive(Debug, Clone)]
+pub struct CrossValidator {
+    operator: MlOperator,
+    params: Params,
+    num_folds: i32,
+    parallelism: i32,
+    seed: Option<i64>,
+}
+
+impl CrossValidator {
+    pub fn new() -> Self {
+        CrossValidator {
+            operator: MlOperator::new(
+                "org.apache.spark.ml.tuning.CrossValidator",
+                OperatorType::Estimator,
+            ),
+            params: Params::new(),
+            num_folds: 3,
+            parallelism: 1,
+            seed: None,
+        }
+    }
+    pub fn set_num_folds(mut self, num_folds: i32) -> Self {
+        self.num_folds = num_folds;
+        self.params = self.params.set_param_int("numFolds", num_folds as i64);
+        self
+    }
+    pub fn set_parallelism(mut self, parallelism: i32) -> Self {
+        self.parallelism = parallelism;
+        self.params = self.params.set_param_int("parallelism", parallelism as i64);
+        self
+    }
+    pub fn set_seed(mut self, seed: i64) -> Self {
+        self.seed = Some(seed);
+        self.params = self.params.set_param_int("seed", seed);
+        self
+    }
+    pub fn num_folds(&self) -> i32 {
+        self.num_folds
+    }
+    pub fn parallelism(&self) -> i32 {
+        self.parallelism
+    }
+}
+
+impl Default for CrossValidator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Estimator for CrossValidator {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+    fn fit_impl(&mut self, _df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
+        let model = CrossValidatorModel {
+            operator: MlOperator::with_uid(
+                &self.operator.name,
+                &self.operator.uid,
+                OperatorType::Model,
+            ),
+            params: self.params.clone(),
+        };
+        Ok(Box::new(model))
+    }
+}
+
+/// CrossValidatorModel: the best model selected by CrossValidator.fit.
+#[derive(Debug, Clone)]
+pub struct CrossValidatorModel {
+    operator: MlOperator,
+    params: Params,
+}
+
+impl Transformer for CrossValidatorModel {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+    fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
+        let ml_relation = self.build_ml_relation(&df.plan);
+        let mut relation = proto::Relation::default();
+        relation.common = Some(proto::RelationCommon::default());
+        relation.rel_type = Some(proto::relation::RelType::MlRelation(Box::new(ml_relation)));
+        let plan = LogicalPlan::MlTransform {
+            ml_relation: relation,
+        };
+        Ok(DataFrame::new(df.session.clone(), plan))
+    }
+}
+
+impl Model for CrossValidatorModel {
+    fn clone_box(&self) -> Box<dyn Model> {
+        Box::new(self.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
