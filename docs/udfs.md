@@ -14,11 +14,11 @@ toolchain server-side.
 
 Annotate a module of functions with `#[spark_wasm_udf]`. For each function the
 macro infers the Spark signature from the Rust types, exports it to WASM, and
-generates a constructor under `udf::` - a direct call `udf::<name>(col0, col1,
-...)` (one column per argument, **arity checked at compile time**) that returns the
+generates a constructor under `udf::` - a direct call `udf::<name>(col0, col1, ...)`
+(one column per argument, **arity checked at compile time**) that returns the
 result `Column`. A one-line `build.rs` compiles the module.
 
-```rust,ignore
+```{.rust .no-run}
 // src/main.rs
 use spark_connect_macros::spark_wasm_udf;
 
@@ -52,7 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-```rust,ignore
+```{.rust .no-run}
 // build.rs
 fn main() {
     spark_connect_build::embed_wasm_udf("src/main.rs");
@@ -77,7 +77,6 @@ Run it:
 
 ```bash
 rustup target add wasm32-unknown-unknown            # once
-export SPARK_CONNECT_WASM_PACKER_PATH=$PWD/python    # so the client finds the packer
 cargo run
 ```
 
@@ -103,8 +102,7 @@ Arguments and results cross the WASM boundary with a length-prefixed binary ABI
 | `Vec<T>`    | `ArrayType` (of `T`) |
 | `Option<T>` | nullable `T`         |
 
-These nest arbitrarily - e.g. `Vec<Option<String>>` -> `ArrayType(StringType,
-nullable)`.
+These nest arbitrarily - e.g. `Vec<Option<String>>` -> `ArrayType(StringType, nullable)`.
 
 ## How it works
 
@@ -143,7 +141,7 @@ Nothing here is needed unless the `wasm-udf` feature is enabled:
 For non-deterministic UDFs or custom packer configuration, the macro also
 generates a builder `udf::<name>_udf()`:
 
-```rust,ignore
+```{.rust .no-run}
 udf::add_one_udf()
     .as_nondeterministic()
     .call(vec![col("id")])?;
@@ -152,7 +150,7 @@ udf::add_one_udf()
 If you'd rather load a prebuilt module and spell out the types yourself, the
 lower-level factory mirrors `pyspark.sql.functions.udf`:
 
-```rust,ignore
+```{.rust .no-run}
 use spark_connect::wasm_udf::{udf, AbiType};
 
 let wasm = std::fs::read("shout.wasm")?;
