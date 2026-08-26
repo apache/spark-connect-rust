@@ -20,9 +20,10 @@
 # Spark Connect Rust Client
 
 A fast, native **Rust** client for **Apache Spark Connect** - and a drop-in
-`pyspark` replacement. It builds `spark.connect` protobuf plans, manages the gRPC
-channel, and decodes Arrow results in Rust, speaking the same protocol and
-returning the same results as the reference client.
+`pyspark` replacement with **100% public-API parity with PySpark 4.2.0**. It
+builds `spark.connect` protobuf plans, manages the gRPC channel, and decodes
+Arrow results in Rust, speaking the same protocol and returning the same results
+as the reference client.
 
 [![PyPI](https://img.shields.io/pypi/v/pyspark-client-rust?color=c2410c&label=pyspark-client-rust)](https://pypi.org/project/pyspark-client-rust/)
 ![Spark](https://img.shields.io/badge/Apache%20Spark-4.2.0%2B-c2410c)
@@ -84,64 +85,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 See the [documentation](https://apache.github.io/spark-connect-rust/) for the full
 API, running a Spark Connect server, and more.
 
-## API Parity & Drop-in Replacement
-
-The Python drop-in (`pyspark-client-rust`) achieves **100% public-API parity with
-PySpark 4.2.0**. The Rust client (crate `apache-spark-connect`) has the same
-parity and supports the complete DataFrame, SQL, Streaming, Catalog, and Type
-system. The two internal APIs intentionally absent (`Column.to_plan` and
-`SparkSession.client`) are implementation details and not part of the public
-interface.
-
 ## User-Defined Functions (UDFs)
 
-Write UDFs as plain Rust functions and use them right away — define and call
-in one file, the way UDFs work in other languages. `#[spark_wasm_udf]` infers
-each Spark signature from the Rust types, compiles the module to WebAssembly,
-embeds it, and generates a `udf::*()` constructor per function. The runner is
-cloudpickled by value, so executors need only the `wasmtime` Python package —
-nothing to pre-deploy:
+Write UDFs as plain Rust functions and call them directly — `#[spark_wasm_udf]`
+compiles them to WebAssembly and ships them to the executors:
 
 ```rust
-use spark_connect::functions::col;
-use spark_connect::{SparkSession, SparkSessionBuilder};
-use spark_connect_macros::spark_wasm_udf;
-
-// The UDFs — plain Rust functions. That's all you write.
 #[spark_wasm_udf]
 mod udfs {
     pub fn add_one(x: i64) -> i64 { x + 1 }
-    pub fn shout(s: String) -> String { format!("{}!", s.to_uppercase()) }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let spark: SparkSession =
-        SparkSessionBuilder::default().remote("sc://localhost:15002").get_or_create()?;
-
-    // DataFrame API — pass columns straight in (one per argument, arity checked
-    // at compile time). No wasm bytes or signatures to spell out by hand.
-    spark
-        .range(5)?
-        .select(vec![col("id"), udf::add_one(col("id"))?.alias("id_plus_one")])
-        .show(20)?;
-
-    // ...or register by name and call from SQL (mirrors spark.udf.register):
-    spark.udf().register("shout", &udf::shout_udf())?;
-    spark.sql("SELECT shout(name) FROM people")?.show(20)?;
-    Ok(())
-}
-```
-
-A one-line `build.rs` compiles the module for `wasm32` and embeds it:
-
-```rust
-// build.rs
-fn main() { spark_connect_build::embed_wasm_udf("src/main.rs"); }
+spark.range(5)?.select(vec![udf::add_one(col("id"))?]).show(20)?;
 ```
 
 See the [WASM UDF guide](https://apache.github.io/spark-connect-rust/udfs/) for
-supported types, non-deterministic UDFs, and the lower-level factory (load a
-prebuilt `.wasm` and spell out the types yourself).
+the full setup, SQL registration, supported types, and more.
 
 ## Contributing
 
