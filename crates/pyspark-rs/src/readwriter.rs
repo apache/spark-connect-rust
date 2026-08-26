@@ -135,14 +135,42 @@ impl PyDataFrameReader {
         Ok(PyDataFrame::new(self.take_with_opts(options)?.xml(path)))
     }
 
-    /// Read from a JDBC source. `predicates` optionally partitions the read.
-    #[pyo3(signature = (url, table, predicates=None))]
+    /// Read from a JDBC source. Mirrors `DataFrameReader.jdbc(url, table,
+    /// column=None, lowerBound=None, upperBound=None, numPartitions=None,
+    /// predicates=None, properties=None)`: the column/bound/partition args and the
+    /// connection `properties` are threaded as reader options (connect represents
+    /// them that way); `predicates` stays the partitioning predicate list.
+    #[pyo3(signature = (url, table, column=None, lowerBound=None, upperBound=None, numPartitions=None, predicates=None, properties=None))]
+    #[allow(non_snake_case, clippy::too_many_arguments)]
     fn jdbc(
         &mut self,
         url: &str,
         table: &str,
+        column: Option<String>,
+        lowerBound: Option<&Bound<'_, PyAny>>,
+        upperBound: Option<&Bound<'_, PyAny>>,
+        numPartitions: Option<i32>,
         predicates: Option<Vec<String>>,
+        properties: Option<HashMap<String, String>>,
     ) -> PyResult<PyDataFrame> {
-        Ok(PyDataFrame::new(self.take()?.jdbc(url, table, predicates)))
+        let mut r = self.take()?;
+        if let Some(c) = column {
+            r = r.option("partitionColumn", &c);
+        }
+        if let Some(lb) = lowerBound {
+            r = r.option("lowerBound", &lb.str()?.to_string());
+        }
+        if let Some(ub) = upperBound {
+            r = r.option("upperBound", &ub.str()?.to_string());
+        }
+        if let Some(n) = numPartitions {
+            r = r.option("numPartitions", &n.to_string());
+        }
+        if let Some(props) = properties {
+            for (k, v) in props {
+                r = r.option(&k, &v);
+            }
+        }
+        Ok(PyDataFrame::new(r.jdbc(url, table, predicates)))
     }
 }
