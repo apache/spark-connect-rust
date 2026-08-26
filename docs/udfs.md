@@ -18,7 +18,7 @@ generates a constructor under `udf::` - a direct call `udf::<name>(col0, col1, .
 (one column per argument, **arity checked at compile time**) that returns the
 result `Column`. A one-line `build.rs` compiles the module.
 
-```rust,ignore
+```rust
 // src/main.rs
 use spark_connect_macros::spark_wasm_udf;
 
@@ -52,7 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-```rust,ignore
+```rust
 // build.rs
 fn main() {
     spark_connect_build::embed_wasm_udf("src/main.rs");
@@ -141,7 +141,7 @@ Nothing here is needed unless the `wasm-udf` feature is enabled:
 For non-deterministic UDFs or custom packer configuration, the macro also
 generates a builder `udf::<name>_udf()`:
 
-```rust,ignore
+```rust
 udf::add_one_udf()
     .as_nondeterministic()
     .call(vec![col("id")])?;
@@ -150,7 +150,7 @@ udf::add_one_udf()
 If you'd rather load a prebuilt module and spell out the types yourself, the
 lower-level factory mirrors `pyspark.sql.functions.udf`:
 
-```rust,ignore
+```rust
 use spark_connect::wasm_udf::{udf, AbiType};
 
 let wasm = std::fs::read("shout.wasm")?;
