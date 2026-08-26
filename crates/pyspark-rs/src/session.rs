@@ -318,6 +318,25 @@ impl PySparkSession {
         crate::conf::PyRuntimeConf::new(self.session.conf())
     }
 
+    /// Table-valued functions namespace (`spark.tvf`).
+    #[getter]
+    #[pyo3(name = "tvf")]
+    fn tvf(&self) -> crate::tvf::PyTableValuedFunction {
+        crate::tvf::PyTableValuedFunction::new(self.session.tvf())
+    }
+
+    /// Copy a local file to the Spark-managed filesystem (`copyFromLocalToFs`).
+    #[pyo3(name = "copyFromLocalToFs")]
+    fn copy_from_local_to_fs(
+        &self,
+        py: Python<'_>,
+        local_path: &str,
+        dest_path: &str,
+    ) -> PyResult<()> {
+        py.detach(|| self.session.copy_from_local_to_fs(local_path, dest_path))
+            .to_pyerr()
+    }
+
     /// DataFrameReader for batch reads (`spark.read`).
     #[getter]
     #[pyo3(name = "read")]

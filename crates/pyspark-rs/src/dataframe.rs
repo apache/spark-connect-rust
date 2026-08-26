@@ -643,6 +643,26 @@ impl PyDataFrame {
         Ok(quantiles)
     }
 
+    /// Observe named metrics on the stream/df. `observation` is an Observation
+    /// object or a name string; the remaining args are aggregate metric columns.
+    /// Mirrors `DataFrame.observe(observation, *exprs)`.
+    #[pyo3(signature = (observation, *exprs))]
+    fn observe(
+        &self,
+        observation: &Bound<'_, PyAny>,
+        exprs: Vec<Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let name =
+            if let Ok(obs) = observation.extract::<PyRef<crate::observation::PyObservation>>() {
+                obs.inner.name().to_string()
+            } else {
+                observation.extract::<String>()?
+            };
+        let columns = to_column_list(exprs)?;
+        let e: Vec<_> = columns.iter().map(|c| c.expression().clone()).collect();
+        Ok(PyDataFrame::new(self.dataframe.observe(&name, e)))
+    }
+
     /// Unpivot (wide-to-long). `values=None` unpivots all non-id columns.
     #[pyo3(signature = (ids, values=None, var_name="variable", value_name="value"))]
     fn unpivot(

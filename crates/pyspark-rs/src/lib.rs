@@ -27,6 +27,7 @@ mod errors;
 mod functions;
 mod group;
 mod ml;
+mod observation;
 mod profiler;
 mod readwriter;
 mod resource;
@@ -35,6 +36,7 @@ mod session;
 mod stat;
 mod streaming;
 mod transport;
+mod tvf;
 mod types;
 mod window;
 
@@ -147,6 +149,10 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyWindow>()?;
     m.add_class::<PyWindowSpec>()?;
     m.add_class::<PyFrameBound>()?;
+
+    // Register TVF + Observation
+    m.add_class::<tvf::PyTableValuedFunction>()?;
+    m.add_class::<observation::PyObservation>()?;
 
     // Register ML classes (pyspark.ml.connect)
     m.add_class::<ml::PyMLModel>()?;
