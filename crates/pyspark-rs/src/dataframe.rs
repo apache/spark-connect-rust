@@ -414,11 +414,38 @@ impl PyDataFrame {
         Ok(PyDataFrame::new(df))
     }
 
-    /// Print the plan (the extended/mode flags are accepted for API parity).
-    #[pyo3(signature = (extended=false, mode=None))]
-    fn explain(&self, py: Python<'_>, extended: bool, mode: Option<String>) -> PyResult<()> {
-        let _ = (extended, mode);
-        py.detach(|| self.dataframe.explain()).to_pyerr()
+    /// Print the plan. Mirrors `DataFrame.explain(extended=None, mode=None)`:
+    /// `extended` may be a bool or a mode string; `mode` is a mode string; setting
+    /// both is an error.
+    #[pyo3(signature = (extended=None, mode=None))]
+    fn explain(
+        &self,
+        py: Python<'_>,
+        extended: Option<&Bound<'_, PyAny>>,
+        mode: Option<String>,
+    ) -> PyResult<()> {
+        let resolved: String = match (extended, mode.as_deref()) {
+            (Some(_), Some(_)) => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "extended and mode cannot be set together",
+                ))
+            }
+            (None, None) => "simple".to_string(),
+            (None, Some(m)) => m.to_string(),
+            (Some(e), None) => {
+                if let Ok(b) = e.extract::<bool>() {
+                    if b { "extended" } else { "simple" }.to_string()
+                } else if let Ok(s) = e.extract::<String>() {
+                    s
+                } else {
+                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                        "extended must be a bool or a mode string",
+                    ));
+                }
+            }
+        };
+        py.detach(|| self.dataframe.explain_mode(&resolved))
+            .to_pyerr()
     }
 
     /// Register this DataFrame as a temporary view.

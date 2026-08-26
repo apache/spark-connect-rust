@@ -2,7 +2,7 @@
 //!
 //! Provides transformations and actions for working with distributed data.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use spark_connect_core::client::ReattachableResponseStream;
 use spark_connect_core::error::{Result, SparkError};
@@ -1000,13 +1000,34 @@ impl DataFrame {
     /// Print the execution plan to the console. Mirrors `pyspark.sql.DataFrame.explain`
     /// (was previously a no-op that ran the query relation instead of an AnalyzePlan).
     pub fn explain(&self) -> Result<()> {
+        self.explain_mode("simple")
+    }
+
+    /// Print the execution plan in a specific mode. Mirrors the `mode` argument of
+    /// `pyspark.sql.DataFrame.explain`: one of "simple", "extended", "codegen",
+    /// "cost", "formatted" (case-insensitive).
+    pub fn explain_mode(&self, mode: &str) -> Result<()> {
+        use proto::analyze_plan_request::explain::ExplainMode;
+        let explain_mode = match mode.to_lowercase().as_str() {
+            "simple" => ExplainMode::Simple,
+            "extended" => ExplainMode::Extended,
+            "codegen" => ExplainMode::Codegen,
+            "cost" => ExplainMode::Cost,
+            "formatted" => ExplainMode::Formatted,
+            other => {
+                return Err(SparkError::value(
+                    "UNSUPPORTED_EXPLAIN_MODE",
+                    &[("mode", other)],
+                ))
+            }
+        };
         let mut relation = self.plan.to_proto();
         assign_plan_ids(&mut relation, &self.session)?;
         let mut plan = proto::Plan::default();
         plan.op_type = Some(proto::plan::OpType::Root(relation));
         let mut ex = proto::analyze_plan_request::Explain::default();
         ex.plan = Some(plan);
-        ex.explain_mode = proto::analyze_plan_request::explain::ExplainMode::Simple as i32;
+        ex.explain_mode = explain_mode as i32;
         let mut request = proto::AnalyzePlanRequest::default();
         request.session_id = self.session.client().session_id().to_string();
         request.user_context = Some(proto::UserContext::default());
@@ -1601,32 +1622,25 @@ impl DataFrame {
         Ok(row.get(0).cloned())
     }
 
-    /// Transpose the DataFrame (swap rows and columns).
+    /// Transpose the DataFrame: swap rows and columns (server-side `Transpose`
+    /// relation). Mirrors `pyspark.sql.connect.dataframe.DataFrame.transpose()`
+    /// with no index column (the server uses the first column as the header).
     pub fn transpose(&self) -> Result<DataFrame> {
-        // Transpose collects all data and swaps rows/columns
-        let rows = self.collect()?;
-        let _num_cols = self.columns()?.len();
-        let _num_rows = rows.len();
-
-        // Create new schema with transposed dimensions
-        let metadata = BTreeMap::new();
-        let _transposed_schema = DataType::Struct {
-            fields: (0.._num_rows)
-                .map(|i| {
-                    use crate::types::StructField;
-                    StructField {
-                        name: format!("col{}", i),
-                        data_type: DataType::String {
-                            collation: "UTF-8".to_string(),
-                        },
-                        nullable: true,
-                        metadata: metadata.clone(),
-                    }
-                })
-                .collect(),
+        let plan = LogicalPlan::Transpose {
+            input: Box::new(self.plan.clone()),
+            index_columns: vec![],
         };
+        Ok(DataFrame::new(self.session.clone(), plan))
+    }
 
-        Ok(self.clone())
+    /// Transpose using an explicit index column as the transposed header.
+    /// Mirrors `DataFrame.transpose(indexColumn)`.
+    pub fn transpose_with_index(&self, index_column: Column) -> Result<DataFrame> {
+        let plan = LogicalPlan::Transpose {
+            input: Box::new(self.plan.clone()),
+            index_columns: vec![index_column.expression().clone()],
+        };
+        Ok(DataFrame::new(self.session.clone(), plan))
     }
 
     /// Zip this DataFrame with another DataFrame by row number.
@@ -1639,13 +1653,6 @@ impl DataFrame {
             plan,
             session: self.session.clone(),
         })
-    }
-
-    /// Zip with index (add row number column).
-    pub fn zip_with_index(&self) -> Result<DataFrame> {
-        // Uses row_number() window function to add sequential indices
-        let _ = self.collect()?;
-        Ok(self.clone())
     }
 
     /// Register this DataFrame as a temporary table (deprecated - use createTempView).

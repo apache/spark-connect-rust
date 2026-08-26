@@ -300,6 +300,12 @@ pub enum LogicalPlan {
     /// evaluated lazily so `.collect()` returns the server's rows - including zero
     /// rows for an empty database, which must not be an error.
     Catalog { catalog: proto::Catalog },
+    /// Transpose: swap rows and columns. `index_columns` optionally names the
+    /// column(s) used as the transposed header (empty = server default).
+    Transpose {
+        input: Box<LogicalPlan>,
+        index_columns: Vec<Expression>,
+    },
     /// MapPartitions: `DataFrame.mapInPandas` / `mapInArrow` (also backs foreach).
     MapPartitions {
         input: Box<LogicalPlan>,
@@ -1127,6 +1133,16 @@ impl LogicalPlan {
             }
             LogicalPlan::Catalog { catalog } => {
                 relation.rel_type = Some(proto::relation::RelType::Catalog(catalog.clone()));
+                return relation;
+            }
+            LogicalPlan::Transpose {
+                input,
+                index_columns,
+            } => {
+                let mut transpose = proto::Transpose::default();
+                transpose.input = Some(Box::new(input.to_proto()));
+                transpose.index_columns = index_columns.iter().map(|e| e.to_proto()).collect();
+                relation.rel_type = Some(proto::relation::RelType::Transpose(Box::new(transpose)));
                 return relation;
             }
             LogicalPlan::MapPartitions {

@@ -683,8 +683,27 @@ fn dataframe_extra_surface() {
         .collect()
         .unwrap();
 
-    // transpose collects + swaps; lateral_join (uncorrelated => cross-like).
-    let _ = df.select(vec![col("id")]).transpose();
+    // transpose actually swaps rows/columns (server-side Transpose relation): a
+    // (k, x, y) frame with rows a/b transposes so the x/y columns become the 2 rows
+    // and the first column's values (a, b) become the headers.
+    let tdf = s
+        .sql("SELECT * FROM VALUES ('a',1,2),('b',3,4) AS t(k, x, y)")
+        .unwrap();
+    let transposed = tdf.transpose().unwrap();
+    assert_eq!(transposed.count().unwrap(), 2);
+    let tcols = transposed.columns().unwrap();
+    assert!(tcols.contains(&"a".to_string()) && tcols.contains(&"b".to_string()));
+    // transpose_with_index picks an explicit header column.
+    assert_eq!(
+        tdf.transpose_with_index(col("k")).unwrap().count().unwrap(),
+        2
+    );
+
+    // explain in every mode (simple/extended/codegen/cost/formatted).
+    for m in ["simple", "extended", "codegen", "cost", "formatted"] {
+        df.explain_mode(m).unwrap();
+    }
+
     let _ = df.lateral_join(&s.range(2).unwrap(), None, JoinType::Inner);
 
     // Cleanup the views/tables.
