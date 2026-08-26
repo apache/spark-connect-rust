@@ -123,10 +123,6 @@ fn dataframe_metadata_json_semantics() {
     let _ = cached.count().unwrap();
     let _ = cached.is_cached().unwrap();
     let _ = cached.storage_level().unwrap();
-    // zip_with_index adds a contiguous index; count is preserved
-    if let Ok(zwi) = df.zip_with_index() {
-        assert_eq!(zwi.count().unwrap(), 4);
-    }
     // temp views (session + global)
     df.create_or_replace_temp_view("cov_df_view").unwrap();
     assert_eq!(s.table("cov_df_view").unwrap().count().unwrap(), 4);

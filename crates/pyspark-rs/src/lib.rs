@@ -61,9 +61,11 @@ use streaming::{
     PyStreamingQueryException, PyStreamingQueryManager, PyStreamingQueryStatus, PyTrigger,
 };
 use types::{
-    PyArrayType, PyBinaryType, PyBooleanType, PyByteType, PyDataType, PyDateType, PyDecimalType,
-    PyDoubleType, PyFloatType, PyIntegerType, PyLongType, PyMapType, PyNullType, PyShortType,
-    PyStringType, PyStructField, PyStructType, PyTimestampNTZType, PyTimestampType,
+    PyArrayType, PyBinaryType, PyBooleanType, PyByteType, PyCalendarIntervalType, PyCharType,
+    PyDataType, PyDateType, PyDayTimeIntervalType, PyDecimalType, PyDoubleType, PyFloatType,
+    PyIntegerType, PyLongType, PyMapType, PyNullType, PyShortType, PyStringType, PyStructField,
+    PyStructType, PyTimeType, PyTimestampNTZType, PyTimestampType, PyVarcharType, PyVariantType,
+    PyYearMonthIntervalType,
 };
 use window::{PyFrameBound, PyWindow, PyWindowSpec};
 
@@ -132,6 +134,13 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyMapType>()?;
     m.add_class::<PyStructField>()?;
     m.add_class::<PyStructType>()?;
+    m.add_class::<PyCharType>()?;
+    m.add_class::<PyVarcharType>()?;
+    m.add_class::<PyTimeType>()?;
+    m.add_class::<PyCalendarIntervalType>()?;
+    m.add_class::<PyYearMonthIntervalType>()?;
+    m.add_class::<PyDayTimeIntervalType>()?;
+    m.add_class::<PyVariantType>()?;
 
     // Register Window classes
     m.add_class::<PyWindow>()?;

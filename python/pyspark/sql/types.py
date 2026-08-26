@@ -8,7 +8,9 @@ try:
     from pyspark._pyspark import (
         DataType, NullType, BooleanType, ByteType, ShortType, IntegerType, LongType,
         FloatType, DoubleType, DecimalType, StringType, BinaryType, DateType,
-        TimestampType, TimestampNTZType, ArrayType, MapType, StructField, StructType
+        TimestampType, TimestampNTZType, ArrayType, MapType, StructField, StructType,
+        CharType, VarcharType, TimeType, CalendarIntervalType, YearMonthIntervalType,
+        DayTimeIntervalType, VariantType,
     )
 except ImportError:
     # Fallback: define minimal stubs for testing purposes
@@ -110,4 +112,11 @@ __all__ = [
     "MapType",
     "StructField",
     "StructType",
+    "CharType",
+    "VarcharType",
+    "TimeType",
+    "CalendarIntervalType",
+    "YearMonthIntervalType",
+    "DayTimeIntervalType",
+    "VariantType",
 ]

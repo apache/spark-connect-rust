@@ -521,6 +521,186 @@ impl PyStructType {
     }
 }
 
+#[pyclass(name = "CharType")]
+pub struct PyCharType {
+    pub length: i32,
+}
+
+#[pymethods]
+impl PyCharType {
+    #[new]
+    fn new(length: i32) -> Self {
+        PyCharType { length }
+    }
+    fn __repr__(&self) -> String {
+        format!("CharType({})", self.length)
+    }
+    #[pyo3(name = "simpleString")]
+    fn simple_string(&self) -> String {
+        format!("char({})", self.length)
+    }
+    #[pyo3(name = "typeName")]
+    fn type_name(&self) -> &'static str {
+        "char"
+    }
+}
+
+#[pyclass(name = "VarcharType")]
+pub struct PyVarcharType {
+    pub length: i32,
+}
+
+#[pymethods]
+impl PyVarcharType {
+    #[new]
+    fn new(length: i32) -> Self {
+        PyVarcharType { length }
+    }
+    fn __repr__(&self) -> String {
+        format!("VarcharType({})", self.length)
+    }
+    #[pyo3(name = "simpleString")]
+    fn simple_string(&self) -> String {
+        format!("varchar({})", self.length)
+    }
+    #[pyo3(name = "typeName")]
+    fn type_name(&self) -> &'static str {
+        "varchar"
+    }
+}
+
+#[pyclass(name = "TimeType")]
+pub struct PyTimeType {
+    pub precision: i32,
+}
+
+#[pymethods]
+impl PyTimeType {
+    /// `TimeType(precision=6)` (microsecond precision default), matching pyspark 4.2.
+    #[new]
+    #[pyo3(signature = (precision=6))]
+    fn new(precision: i32) -> Self {
+        PyTimeType { precision }
+    }
+    fn __repr__(&self) -> String {
+        format!("TimeType({})", self.precision)
+    }
+    #[pyo3(name = "simpleString")]
+    fn simple_string(&self) -> String {
+        format!("time({})", self.precision)
+    }
+    #[pyo3(name = "typeName")]
+    fn type_name(&self) -> &'static str {
+        "time"
+    }
+}
+
+#[pyclass(name = "CalendarIntervalType")]
+pub struct PyCalendarIntervalType;
+
+#[pymethods]
+impl PyCalendarIntervalType {
+    #[new]
+    fn new() -> Self {
+        PyCalendarIntervalType
+    }
+    fn __repr__(&self) -> String {
+        "CalendarIntervalType()".to_string()
+    }
+    #[pyo3(name = "simpleString")]
+    fn simple_string(&self) -> &'static str {
+        "interval"
+    }
+    #[pyo3(name = "typeName")]
+    fn type_name(&self) -> &'static str {
+        "calendarinterval"
+    }
+}
+
+#[pyclass(name = "YearMonthIntervalType")]
+pub struct PyYearMonthIntervalType {
+    pub start_field: i32,
+    pub end_field: i32,
+}
+
+#[pymethods]
+impl PyYearMonthIntervalType {
+    /// Fields: YEAR=0, MONTH=1. Defaults to the full YEAR..MONTH range.
+    #[new]
+    #[pyo3(signature = (startField=None, endField=None))]
+    #[allow(non_snake_case)]
+    fn new(startField: Option<i32>, endField: Option<i32>) -> Self {
+        let start = startField.unwrap_or(0);
+        PyYearMonthIntervalType {
+            start_field: start,
+            end_field: endField.unwrap_or(if startField.is_some() { start } else { 1 }),
+        }
+    }
+    fn __repr__(&self) -> String {
+        format!(
+            "YearMonthIntervalType({}, {})",
+            self.start_field, self.end_field
+        )
+    }
+    #[pyo3(name = "typeName")]
+    fn type_name(&self) -> &'static str {
+        "yearmonthinterval"
+    }
+}
+
+#[pyclass(name = "DayTimeIntervalType")]
+pub struct PyDayTimeIntervalType {
+    pub start_field: i32,
+    pub end_field: i32,
+}
+
+#[pymethods]
+impl PyDayTimeIntervalType {
+    /// Fields: DAY=0, HOUR=1, MINUTE=2, SECOND=3. Defaults to the full DAY..SECOND range.
+    #[new]
+    #[pyo3(signature = (startField=None, endField=None))]
+    #[allow(non_snake_case)]
+    fn new(startField: Option<i32>, endField: Option<i32>) -> Self {
+        let start = startField.unwrap_or(0);
+        PyDayTimeIntervalType {
+            start_field: start,
+            end_field: endField.unwrap_or(if startField.is_some() { start } else { 3 }),
+        }
+    }
+    fn __repr__(&self) -> String {
+        format!(
+            "DayTimeIntervalType({}, {})",
+            self.start_field, self.end_field
+        )
+    }
+    #[pyo3(name = "typeName")]
+    fn type_name(&self) -> &'static str {
+        "daytimeinterval"
+    }
+}
+
+#[pyclass(name = "VariantType")]
+pub struct PyVariantType;
+
+#[pymethods]
+impl PyVariantType {
+    #[new]
+    fn new() -> Self {
+        PyVariantType
+    }
+    fn __repr__(&self) -> String {
+        "VariantType()".to_string()
+    }
+    #[pyo3(name = "simpleString")]
+    fn simple_string(&self) -> &'static str {
+        "variant"
+    }
+    #[pyo3(name = "typeName")]
+    fn type_name(&self) -> &'static str {
+        "variant"
+    }
+}
+
 /// Convert a Python DataType object (any of the type classes) or a DDL string into
 /// the core `DataType`. Mirrors pyspark accepting `Union[DataType, str]` everywhere.
 pub(crate) fn py_to_data_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
@@ -591,6 +771,35 @@ pub(crate) fn py_to_data_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
         return Ok(DataType::Struct {
             fields: st.fields.clone(),
         });
+    }
+    if let Ok(c) = obj.extract::<PyRef<PyCharType>>() {
+        return Ok(DataType::Char { length: c.length });
+    }
+    if let Ok(v) = obj.extract::<PyRef<PyVarcharType>>() {
+        return Ok(DataType::Varchar { length: v.length });
+    }
+    if let Ok(t) = obj.extract::<PyRef<PyTimeType>>() {
+        return Ok(DataType::Time {
+            precision: t.precision,
+        });
+    }
+    if obj.extract::<PyRef<PyCalendarIntervalType>>().is_ok() {
+        return Ok(DataType::CalendarInterval);
+    }
+    if let Ok(i) = obj.extract::<PyRef<PyYearMonthIntervalType>>() {
+        return Ok(DataType::YearMonthInterval {
+            start_field: i.start_field,
+            end_field: i.end_field,
+        });
+    }
+    if let Ok(i) = obj.extract::<PyRef<PyDayTimeIntervalType>>() {
+        return Ok(DataType::DayTimeInterval {
+            start_field: i.start_field,
+            end_field: i.end_field,
+        });
+    }
+    if obj.extract::<PyRef<PyVariantType>>().is_ok() {
+        return Ok(DataType::Variant);
     }
     if let Ok(s) = obj.extract::<String>() {
         return DataType::from_ddl(&s).map_err(|e| {
