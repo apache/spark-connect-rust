@@ -550,6 +550,46 @@ impl PyDataFrame {
         crate::stat::PyStatFunctions::new(self.dataframe.stat())
     }
 
+    /// `df.crosstab(col1, col2)` - pyspark exposes it on DataFrame as well as
+    /// `df.stat.crosstab`.
+    fn crosstab(&self, col1: &str, col2: &str) -> PyDataFrame {
+        PyDataFrame::new(self.dataframe.stat().crosstab(col1, col2))
+    }
+
+    /// `df.freqItems(cols, support=0.01)` (also on df.stat).
+    #[pyo3(name = "freqItems", signature = (cols, support=0.01))]
+    fn freq_items(&self, cols: Vec<String>, support: f64) -> PyDataFrame {
+        let refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
+        PyDataFrame::new(self.dataframe.stat().freq_items(refs, support))
+    }
+
+    /// `df.approxQuantile(col, probabilities, relativeError)` -> list[float]
+    /// (also on df.stat). The server returns one row whose column is the
+    /// array(-of-arrays) of quantiles; for a single column we return the inner list.
+    #[pyo3(name = "approxQuantile")]
+    fn approx_quantile(
+        &self,
+        py: Python<'_>,
+        col: &str,
+        probabilities: Vec<f64>,
+        relative_error: f64,
+    ) -> PyResult<Vec<f64>> {
+        use spark_connect::row::Value;
+        let df = self
+            .dataframe
+            .stat()
+            .approx_quantile(vec![col], probabilities, relative_error);
+        let rows = py.detach(|| df.collect()).to_pyerr()?;
+        let quantiles = match rows.first().and_then(|r| r.get(0)) {
+            Some(Value::List(outer)) => match outer.first() {
+                Some(Value::List(inner)) => inner.iter().filter_map(|v| v.as_f64()).collect(),
+                _ => outer.iter().filter_map(|v| v.as_f64()).collect(),
+            },
+            _ => Vec::new(),
+        };
+        Ok(quantiles)
+    }
+
     /// Unpivot (wide-to-long). `values=None` unpivots all non-id columns.
     #[pyo3(signature = (ids, values=None, var_name="variable", value_name="value"))]
     fn unpivot(
