@@ -1724,4 +1724,99 @@ mod tests {
         assert!(matches!(scaled.plan, LogicalPlan::MlTransform { .. }));
         let _cloned = model.clone_box();
     }
+
+    #[test]
+    fn multiclass_evaluator_creation_and_getters() {
+        let e = MulticlassClassificationEvaluator::new()
+            .set_label_col("y")
+            .set_prediction_col("p")
+            .set_metric_name("accuracy");
+        assert_eq!(e.label_col(), "y");
+        assert_eq!(e.prediction_col(), "p");
+        assert_eq!(e.metric_name(), "accuracy");
+        assert_eq!(e.operator().op_type, OperatorType::Evaluator);
+        assert_eq!(
+            e.operator().name,
+            "org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator"
+        );
+        assert_eq!(
+            MulticlassClassificationEvaluator::default().metric_name(),
+            "f1"
+        );
+    }
+
+    #[test]
+    fn cross_validator_creation_getters_and_fit() {
+        let cv = CrossValidator::new()
+            .set_num_folds(5)
+            .set_parallelism(2)
+            .set_seed(42);
+        assert_eq!(cv.num_folds(), 5);
+        assert_eq!(cv.parallelism(), 2);
+        assert_eq!(cv.operator().op_type, OperatorType::Estimator);
+        assert_eq!(
+            cv.operator().name,
+            "org.apache.spark.ml.tuning.CrossValidator"
+        );
+        assert!(cv.params().get_param("numFolds").is_some());
+        assert!(cv.params().get_param("seed").is_some());
+        assert_eq!(CrossValidator::default().num_folds(), 3);
+
+        // fit builds a CrossValidatorModel; its transform yields an MlTransform plan.
+        let s = offline_session();
+        let df = s.range(3).unwrap();
+        let mut cv2 = CrossValidator::new().set_num_folds(2);
+        let mut model = cv2.fit(&df).unwrap();
+        let out = model.transform(&df).unwrap();
+        assert!(matches!(out.plan, LogicalPlan::MlTransform { .. }));
+        let _ = model.clone_box();
+    }
+
+    #[test]
+    fn all_estimators_fit_and_models_transform() {
+        let s = offline_session();
+        let df = s.range(3).unwrap();
+        // Each estimator fits locally and its model transform builds a plan; this
+        // exercises fit_impl + transform_impl + clone_box for every model type.
+        let mut mas = MaxAbsScaler::new().set_input_col("f").set_output_col("o");
+        assert_eq!(mas.input_col(), "f");
+        let mut m = mas.fit(&df).unwrap();
+        assert!(matches!(
+            m.transform(&df).unwrap().plan,
+            LogicalPlan::MlTransform { .. }
+        ));
+        let _ = m.clone_box();
+
+        let mut si = StringIndexer::new().set_input_col("s").set_output_col("si");
+        assert_eq!(si.output_col(), "si");
+        let mut m = si.fit(&df).unwrap();
+        let _ = m.transform(&df).unwrap();
+        let _ = m.clone_box();
+
+        let mut lr = LogisticRegression::new()
+            .set_feature_col("features")
+            .set_label_col("label")
+            .set_prediction_col("pred")
+            .set_max_iter(7);
+        assert_eq!(lr.feature_col(), "features");
+        assert_eq!(lr.label_col(), "label");
+        assert_eq!(lr.prediction_col(), "pred");
+        assert_eq!(lr.max_iter(), 7);
+        let mut m = lr.fit(&df).unwrap();
+        let _ = m.transform(&df).unwrap();
+        let _ = m.clone_box();
+
+        let mut pipe = Pipeline::new().set_stages(vec!["a", "b"]);
+        assert_eq!(pipe.stages().len(), 2);
+        let mut m = pipe.fit(&df).unwrap();
+        let _ = m.transform(&df).unwrap();
+        let _ = m.clone_box();
+
+        // VectorAssembler transformer.
+        let mut va = VectorAssembler::new()
+            .set_input_cols(vec!["a", "b"])
+            .set_output_col("v");
+        assert_eq!(va.input_cols().len(), 2);
+        let _ = va.transform(&df).unwrap();
+    }
 }
