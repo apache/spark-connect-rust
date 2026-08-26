@@ -695,12 +695,12 @@ fn build_arrow_array(
     match first_val {
         Value::Null => Ok(Arc::new(NullArray::new(rows.len()))),
         Value::Bool(_) => {
-            let values: Result<Vec<_>> = rows
+            let values: Result<Vec<Option<bool>>> = rows
                 .iter()
-                .map(|r| {
-                    r.get(field_idx)
-                        .and_then(|v| v.as_bool())
-                        .ok_or_else(|| SparkError::connect_msg("Type mismatch in row data"))
+                .map(|r| match r.get(field_idx) {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(Value::Bool(b)) => Ok(Some(*b)),
+                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
             Ok(Arc::new(BooleanArray::from(values?)))
@@ -708,13 +708,10 @@ fn build_arrow_array(
         Value::Byte(_) => {
             let values: Result<Vec<_>> = rows
                 .iter()
-                .map(|r| {
-                    r.get(field_idx)
-                        .map(|v| match v {
-                            Value::Byte(b) => Ok(*b),
-                            _ => Err(SparkError::connect_msg("Type mismatch in row data")),
-                        })
-                        .transpose()
+                .map(|r| match r.get(field_idx) {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(Value::Byte(b)) => Ok(Some(*b)),
+                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
             Ok(Arc::new(Int8Array::from(values?)))
@@ -722,13 +719,10 @@ fn build_arrow_array(
         Value::Short(_) => {
             let values: Result<Vec<_>> = rows
                 .iter()
-                .map(|r| {
-                    r.get(field_idx)
-                        .map(|v| match v {
-                            Value::Short(s) => Ok(*s),
-                            _ => Err(SparkError::connect_msg("Type mismatch in row data")),
-                        })
-                        .transpose()
+                .map(|r| match r.get(field_idx) {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(Value::Short(s)) => Ok(Some(*s)),
+                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
             Ok(Arc::new(Int16Array::from(values?)))
@@ -736,13 +730,10 @@ fn build_arrow_array(
         Value::Integer(_) => {
             let values: Result<Vec<_>> = rows
                 .iter()
-                .map(|r| {
-                    r.get(field_idx)
-                        .map(|v| match v {
-                            Value::Integer(i) => Ok(*i),
-                            _ => Err(SparkError::connect_msg("Type mismatch in row data")),
-                        })
-                        .transpose()
+                .map(|r| match r.get(field_idx) {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(Value::Integer(i)) => Ok(Some(*i)),
+                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
             Ok(Arc::new(Int32Array::from(values?)))
@@ -750,13 +741,10 @@ fn build_arrow_array(
         Value::Long(_) => {
             let values: Result<Vec<_>> = rows
                 .iter()
-                .map(|r| {
-                    r.get(field_idx)
-                        .map(|v| match v {
-                            Value::Long(l) => Ok(*l),
-                            _ => Err(SparkError::connect_msg("Type mismatch in row data")),
-                        })
-                        .transpose()
+                .map(|r| match r.get(field_idx) {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(Value::Long(l)) => Ok(Some(*l)),
+                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
             Ok(Arc::new(Int64Array::from(values?)))
@@ -764,13 +752,10 @@ fn build_arrow_array(
         Value::Float(_) => {
             let values: Result<Vec<_>> = rows
                 .iter()
-                .map(|r| {
-                    r.get(field_idx)
-                        .map(|v| match v {
-                            Value::Float(f) => Ok(*f),
-                            _ => Err(SparkError::connect_msg("Type mismatch in row data")),
-                        })
-                        .transpose()
+                .map(|r| match r.get(field_idx) {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(Value::Float(f)) => Ok(Some(*f)),
+                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
             Ok(Arc::new(Float32Array::from(values?)))
@@ -778,13 +763,10 @@ fn build_arrow_array(
         Value::Double(_) => {
             let values: Result<Vec<_>> = rows
                 .iter()
-                .map(|r| {
-                    r.get(field_idx)
-                        .map(|v| match v {
-                            Value::Double(d) => Ok(*d),
-                            _ => Err(SparkError::connect_msg("Type mismatch in row data")),
-                        })
-                        .transpose()
+                .map(|r| match r.get(field_idx) {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(Value::Double(d)) => Ok(Some(*d)),
+                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
             Ok(Arc::new(Float64Array::from(values?)))
@@ -792,13 +774,10 @@ fn build_arrow_array(
         Value::String(_) => {
             let values: Result<Vec<_>> = rows
                 .iter()
-                .map(|r| {
-                    r.get(field_idx)
-                        .map(|v| match v {
-                            Value::String(s) => Ok(s.as_str()),
-                            _ => Err(SparkError::connect_msg("Type mismatch in row data")),
-                        })
-                        .transpose()
+                .map(|r| match r.get(field_idx) {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(Value::String(s)) => Ok(Some(s.as_str())),
+                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
             Ok(Arc::new(StringArray::from(values?)))
@@ -806,13 +785,10 @@ fn build_arrow_array(
         Value::Binary(_) => {
             let values: Result<Vec<_>> = rows
                 .iter()
-                .map(|r| {
-                    r.get(field_idx)
-                        .map(|v| match v {
-                            Value::Binary(b) => Ok(b.as_slice()),
-                            _ => Err(SparkError::connect_msg("Type mismatch in row data")),
-                        })
-                        .transpose()
+                .map(|r| match r.get(field_idx) {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(Value::Binary(b)) => Ok(Some(b.as_slice())),
+                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
             Ok(Arc::new(BinaryArray::from(values?)))
@@ -820,13 +796,10 @@ fn build_arrow_array(
         Value::Date(_) => {
             let values: Result<Vec<Option<i32>>> = rows
                 .iter()
-                .map(|r| {
-                    r.get(field_idx)
-                        .map(|v| match v {
-                            Value::Date(d) => Ok(*d),
-                            _ => Err(SparkError::connect_msg("Type mismatch in row data")),
-                        })
-                        .transpose()
+                .map(|r| match r.get(field_idx) {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(Value::Date(d)) => Ok(Some(*d)),
+                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
             Ok(Arc::new(Date32Array::from(values?)))
@@ -834,13 +807,10 @@ fn build_arrow_array(
         Value::Timestamp(_) => {
             let values: Result<Vec<Option<i64>>> = rows
                 .iter()
-                .map(|r| {
-                    r.get(field_idx)
-                        .map(|v| match v {
-                            Value::Timestamp(t) => Ok(*t),
-                            _ => Err(SparkError::connect_msg("Type mismatch in row data")),
-                        })
-                        .transpose()
+                .map(|r| match r.get(field_idx) {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(Value::Timestamp(t)) => Ok(Some(*t)),
+                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
             // `Value::Timestamp` covers both TIMESTAMP (LTZ) and TIMESTAMP_NTZ; the
@@ -862,15 +832,12 @@ fn build_arrow_array(
             let col_scale = scale.unwrap_or(0);
             let values: Result<Vec<Option<i128>>> = rows
                 .iter()
-                .map(|r| {
-                    r.get(field_idx)
-                        .map(|v| match v {
-                            Value::Decimal { value, .. } => {
-                                decimal_str_to_unscaled(value, col_scale)
-                            }
-                            _ => Err(SparkError::connect_msg("Type mismatch in row data")),
-                        })
-                        .transpose()
+                .map(|r| match r.get(field_idx) {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(Value::Decimal { value, .. }) => {
+                        decimal_str_to_unscaled(value, col_scale).map(Some)
+                    }
+                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
             let arr = Decimal128Array::from(values?)

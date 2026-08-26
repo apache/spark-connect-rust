@@ -730,6 +730,90 @@ fn create_dataframe_typed_schemas() {
             .unwrap(),
         2
     );
+
+    // Exercise every primitive Arrow-array builder arm in one round-trip: bool,
+    // byte, short, int, long, double, string, binary, date, decimal - and a null
+    // in each. createDataFrame builds a local Arrow relation for these, so a
+    // successful collect proves each arm produces a server-acceptable array.
+    let all_schema = DataType::Struct {
+        fields: vec![
+            field("b", DataType::Boolean),
+            field("bt", DataType::Byte),
+            field("sh", DataType::Short),
+            field("i", DataType::Integer),
+            field("l", DataType::Long),
+            field("d", DataType::Double),
+            field(
+                "s",
+                DataType::String {
+                    collation: "UTF8_BINARY".into(),
+                },
+            ),
+            field("bin", DataType::Binary),
+            field("dt", DataType::Date),
+            field(
+                "dec",
+                DataType::Decimal {
+                    precision: 38,
+                    scale: 2,
+                },
+            ),
+        ],
+    };
+    let names: Vec<String> = vec![
+        "b".into(),
+        "bt".into(),
+        "sh".into(),
+        "i".into(),
+        "l".into(),
+        "d".into(),
+        "s".into(),
+        "bin".into(),
+        "dt".into(),
+        "dec".into(),
+    ];
+    let row0 = Row::new(
+        names.clone(),
+        vec![
+            Value::Bool(true),
+            Value::Byte(7),
+            Value::Short(300),
+            Value::Integer(70_000),
+            Value::Long(5_000_000_000),
+            Value::Double(2.5),
+            Value::String("hello".into()),
+            Value::Binary(vec![1u8, 2, 3]),
+            Value::Date(19_000), // days since epoch
+            Value::Decimal {
+                value: "-1.50".into(),
+                precision: Some(38),
+                scale: Some(2),
+            },
+        ],
+    );
+    // A second row with a null in every column exercises the null-handling path.
+    let row1 = Row::new(names.clone(), vec![Value::Null; 10]);
+    let df = s
+        .create_dataframe(vec![row0, row1], all_schema)
+        .expect("createDataFrame all primitive types");
+    let rows = df.collect().unwrap();
+    assert_eq!(rows.len(), 2);
+    // Spot-check the non-null row round-tripped correctly.
+    let r = &rows[0];
+    assert_eq!(r.get_by_name("b").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(r.get_by_name("bt").and_then(|v| v.as_i64()), Some(7));
+    assert_eq!(r.get_by_name("sh").and_then(|v| v.as_i64()), Some(300));
+    assert_eq!(r.get_by_name("i").and_then(|v| v.as_i64()), Some(70_000));
+    assert_eq!(
+        r.get_by_name("l").and_then(|v| v.as_i64()),
+        Some(5_000_000_000)
+    );
+    assert_eq!(r.get_by_name("d").and_then(|v| v.as_f64()), Some(2.5));
+    assert_eq!(r.get_by_name("s").and_then(|v| v.as_str()), Some("hello"));
+    assert_eq!(
+        r.get_by_name("bin").and_then(|v| v.as_bytes()),
+        Some(&[1u8, 2, 3][..])
+    );
 }
 
 #[test]
