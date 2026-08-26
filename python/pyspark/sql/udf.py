@@ -59,25 +59,18 @@ class UserDefinedFunction:
         Call the UDF with Column arguments.
         Returns a Column representing the UDF call.
         """
-        from pyspark._pyspark.functions import _make_udf
-        from pyspark._pyspark.types import PyDataType
+        from pyspark import _pyspark
 
-        # Convert returnType to PyDataType if needed
-        if not isinstance(self.returnType, PyDataType):
-            # Wrap the returnType in a PyDataType
-            ret_type_obj = PyDataType()
-            ret_type_obj._set_type(self.returnType)
-        else:
-            ret_type_obj = self.returnType
-
-        return _make_udf(
+        # pyfunc_make_udf accepts any DataType object or DDL string as the return type
+        # and builds the proto output type; the pickled command carries (func, returnType)
+        # for the server-side Python worker.
+        return _pyspark.functions.pyfunc_make_udf(
             self.name,
-            ret_type_obj,
+            self.returnType,
             self.evalType,
             self.command,
             self.python_ver,
             *args,
-            **kwargs,
         )
 
 

@@ -31,12 +31,15 @@ mod dispatch {
 #[pyo3(signature = (name, return_type, eval_type, command_bytes, python_ver, *args))]
 fn pyfunc_make_udf(
     name: String,
-    return_type: &PyDataType,
+    return_type: &Bound<'_, PyAny>,
     eval_type: i32,
     command_bytes: Vec<u8>,
     python_ver: String,
     args: Vec<Bound<'_, PyAny>>,
 ) -> PyResult<PyColumn> {
+    // Accept any DataType object (our type classes / DataType) or a DDL string.
+    let return_data_type = crate::types::py_to_data_type(return_type)?;
+
     // Convert all arguments to Columns
     let mut col_args = Vec::new();
     for arg in args {
@@ -50,12 +53,7 @@ fn pyfunc_make_udf(
         .collect();
 
     // Create the Python UDF payload
-    let python_udf = PythonUDFPayload::new(
-        return_type.inner.clone(),
-        eval_type,
-        command_bytes,
-        python_ver,
-    );
+    let python_udf = PythonUDFPayload::new(return_data_type, eval_type, command_bytes, python_ver);
 
     // Create the UDF expression
     let udf_expr = CommonInlineUserDefinedFunctionExpression::new(

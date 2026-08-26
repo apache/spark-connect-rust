@@ -4,6 +4,16 @@ use pyo3::prelude::*;
 use spark_connect::types::{DataType, StructField};
 use std::collections::BTreeMap;
 
+/// Make a DataType picklable so it round-trips to an official-pyspark UDF worker:
+/// pickle reconstructs it via `pyspark.sql.types._parse_datatype_json_string(json)`
+/// (session-free, present in both our shim and the worker's official pyspark).
+fn type_reduce(py: Python<'_>, json: &str) -> PyResult<(Py<PyAny>, (String,))> {
+    let f = py
+        .import("pyspark.sql.types")?
+        .getattr("_parse_datatype_json_string")?;
+    Ok((f.unbind(), (json.to_string(),)))
+}
+
 /// Python wrapper for any DataType.
 #[pyclass(name = "DataType")]
 pub struct PyDataType {
@@ -37,6 +47,9 @@ pub struct PyNullType;
 
 #[pymethods]
 impl PyNullType {
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        type_reduce(py, "\"void\"")
+    }
     #[new]
     fn new() -> Self {
         PyNullType
@@ -59,6 +72,9 @@ pub struct PyBooleanType;
 
 #[pymethods]
 impl PyBooleanType {
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        type_reduce(py, "\"boolean\"")
+    }
     #[new]
     fn new() -> Self {
         PyBooleanType
@@ -81,6 +97,9 @@ pub struct PyByteType;
 
 #[pymethods]
 impl PyByteType {
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        type_reduce(py, "\"byte\"")
+    }
     #[new]
     fn new() -> Self {
         PyByteType
@@ -103,6 +122,9 @@ pub struct PyShortType;
 
 #[pymethods]
 impl PyShortType {
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        type_reduce(py, "\"short\"")
+    }
     #[new]
     fn new() -> Self {
         PyShortType
@@ -125,6 +147,9 @@ pub struct PyIntegerType;
 
 #[pymethods]
 impl PyIntegerType {
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        type_reduce(py, "\"integer\"")
+    }
     #[new]
     fn new() -> Self {
         PyIntegerType
@@ -147,6 +172,9 @@ pub struct PyLongType;
 
 #[pymethods]
 impl PyLongType {
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        type_reduce(py, "\"long\"")
+    }
     #[new]
     fn new() -> Self {
         PyLongType
@@ -169,6 +197,9 @@ pub struct PyFloatType;
 
 #[pymethods]
 impl PyFloatType {
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        type_reduce(py, "\"float\"")
+    }
     #[new]
     fn new() -> Self {
         PyFloatType
@@ -191,6 +222,9 @@ pub struct PyDoubleType;
 
 #[pymethods]
 impl PyDoubleType {
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        type_reduce(py, "\"double\"")
+    }
     #[new]
     fn new() -> Self {
         PyDoubleType
@@ -216,6 +250,13 @@ pub struct PyDecimalType {
 
 #[pymethods]
 impl PyDecimalType {
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        let dt = DataType::Decimal {
+            precision: self.precision,
+            scale: self.scale,
+        };
+        type_reduce(py, &dt.json())
+    }
     /// `DecimalType(precision=10, scale=0)` - defaults match pyspark.
     #[new]
     #[pyo3(signature = (precision=10, scale=0))]
@@ -248,6 +289,9 @@ pub struct PyStringType;
 
 #[pymethods]
 impl PyStringType {
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        type_reduce(py, "\"string\"")
+    }
     #[new]
     fn new() -> Self {
         PyStringType
@@ -270,6 +314,9 @@ pub struct PyBinaryType;
 
 #[pymethods]
 impl PyBinaryType {
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        type_reduce(py, "\"binary\"")
+    }
     #[new]
     fn new() -> Self {
         PyBinaryType
@@ -292,6 +339,9 @@ pub struct PyDateType;
 
 #[pymethods]
 impl PyDateType {
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        type_reduce(py, "\"date\"")
+    }
     #[new]
     fn new() -> Self {
         PyDateType
@@ -314,6 +364,9 @@ pub struct PyTimestampType;
 
 #[pymethods]
 impl PyTimestampType {
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        type_reduce(py, "\"timestamp\"")
+    }
     #[new]
     fn new() -> Self {
         PyTimestampType
@@ -336,6 +389,9 @@ pub struct PyTimestampNTZType;
 
 #[pymethods]
 impl PyTimestampNTZType {
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        type_reduce(py, "\"timestamp_ntz\"")
+    }
     #[new]
     fn new() -> Self {
         PyTimestampNTZType
@@ -361,6 +417,13 @@ pub struct PyArrayType {
 
 #[pymethods]
 impl PyArrayType {
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        let dt = DataType::Array {
+            element_type: Box::new(self.element_type.clone()),
+            contains_null: self.contains_null,
+        };
+        type_reduce(py, &dt.json())
+    }
     #[new]
     #[pyo3(signature = (element_type, contains_null=true))]
     fn new(element_type: &Bound<'_, PyAny>, contains_null: bool) -> PyResult<Self> {
@@ -391,6 +454,14 @@ pub struct PyMapType {
 
 #[pymethods]
 impl PyMapType {
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        let dt = DataType::Map {
+            key_type: Box::new(self.key_type.clone()),
+            value_type: Box::new(self.value_type.clone()),
+            value_contains_null: self.value_contains_null,
+        };
+        type_reduce(py, &dt.json())
+    }
     #[new]
     #[pyo3(signature = (key_type, value_type, value_contains_null=true))]
     fn new(
@@ -469,6 +540,12 @@ pub struct PyStructType {
 
 #[pymethods]
 impl PyStructType {
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        let dt = DataType::Struct {
+            fields: self.fields.clone(),
+        };
+        type_reduce(py, &dt.json())
+    }
     /// `StructType(fields=None)` where each field is a `StructField` (matching
     /// pyspark). A list of DDL field strings is also accepted for convenience.
     #[new]
@@ -547,6 +624,12 @@ pub struct PyCharType {
 
 #[pymethods]
 impl PyCharType {
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        let dt = DataType::Char {
+            length: self.length,
+        };
+        type_reduce(py, &dt.json())
+    }
     #[new]
     fn new(length: i32) -> Self {
         PyCharType { length }
@@ -571,6 +654,12 @@ pub struct PyVarcharType {
 
 #[pymethods]
 impl PyVarcharType {
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        let dt = DataType::Varchar {
+            length: self.length,
+        };
+        type_reduce(py, &dt.json())
+    }
     #[new]
     fn new(length: i32) -> Self {
         PyVarcharType { length }
@@ -595,6 +684,12 @@ pub struct PyTimeType {
 
 #[pymethods]
 impl PyTimeType {
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        let dt = DataType::Time {
+            precision: self.precision,
+        };
+        type_reduce(py, &dt.json())
+    }
     /// `TimeType(precision=6)` (microsecond precision default), matching pyspark 4.2.
     #[new]
     #[pyo3(signature = (precision=6))]
@@ -619,6 +714,9 @@ pub struct PyCalendarIntervalType;
 
 #[pymethods]
 impl PyCalendarIntervalType {
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        type_reduce(py, "\"calendarinterval\"")
+    }
     #[new]
     fn new() -> Self {
         PyCalendarIntervalType
@@ -644,6 +742,13 @@ pub struct PyYearMonthIntervalType {
 
 #[pymethods]
 impl PyYearMonthIntervalType {
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        let dt = DataType::YearMonthInterval {
+            start_field: self.start_field,
+            end_field: self.end_field,
+        };
+        type_reduce(py, &dt.json())
+    }
     /// Fields: YEAR=0, MONTH=1. Defaults to the full YEAR..MONTH range.
     #[new]
     #[pyo3(signature = (startField=None, endField=None))]
@@ -675,6 +780,13 @@ pub struct PyDayTimeIntervalType {
 
 #[pymethods]
 impl PyDayTimeIntervalType {
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        let dt = DataType::DayTimeInterval {
+            start_field: self.start_field,
+            end_field: self.end_field,
+        };
+        type_reduce(py, &dt.json())
+    }
     /// Fields: DAY=0, HOUR=1, MINUTE=2, SECOND=3. Defaults to the full DAY..SECOND range.
     #[new]
     #[pyo3(signature = (startField=None, endField=None))]
@@ -703,6 +815,9 @@ pub struct PyVariantType;
 
 #[pymethods]
 impl PyVariantType {
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        type_reduce(py, "\"variant\"")
+    }
     #[new]
     fn new() -> Self {
         PyVariantType

@@ -119,4 +119,34 @@ __all__ = [
     "YearMonthIntervalType",
     "DayTimeIntervalType",
     "VariantType",
+    "_parse_datatype_json_string",
 ]
+
+
+def _parse_datatype_json_string(json_string):
+    """Reconstruct a DataType from its Spark JSON (client-side; UDF workers use the
+    official pyspark function of the same name). Handles the atomic + decimal forms
+    our __reduce__ emits; raises for anything else so it never silently mis-parses."""
+    import json as _json
+    import re as _re
+
+    v = _json.loads(json_string)
+    if isinstance(v, str):
+        atomic = {
+            "void": NullType, "null": NullType, "boolean": BooleanType, "byte": ByteType,
+            "short": ShortType, "integer": IntegerType, "long": LongType, "float": FloatType,
+            "double": DoubleType, "string": StringType, "binary": BinaryType, "date": DateType,
+            "timestamp": TimestampType, "timestamp_ntz": TimestampNTZType, "variant": VariantType,
+        }
+        if v in atomic:
+            return atomic[v]()
+        m = _re.match(r"decimal\((\d+),\s*(\d+)\)", v)
+        if m:
+            return DecimalType(int(m.group(1)), int(m.group(2)))
+        m = _re.match(r"char\((\d+)\)", v)
+        if m:
+            return CharType(int(m.group(1)))
+        m = _re.match(r"varchar\((\d+)\)", v)
+        if m:
+            return VarcharType(int(m.group(1)))
+    raise ValueError(f"cannot parse datatype json: {json_string!r}")
