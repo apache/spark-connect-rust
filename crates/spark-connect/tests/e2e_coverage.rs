@@ -652,6 +652,68 @@ fn read_write_roundtrip_surface() {
         .parquet(&p("partitioned"))
         .unwrap();
     assert_eq!(s.read().parquet(&p("partitioned")).count().unwrap(), 5);
+
+    // saveAsTable + insertInto (managed-table sinks), then read back via table().
+    let _ = s.sql("DROP TABLE IF EXISTS cov_rw_tbl").unwrap().collect();
+    df.write()
+        .mode("overwrite")
+        .save_as_table("cov_rw_tbl")
+        .unwrap();
+    assert_eq!(s.table("cov_rw_tbl").unwrap().count().unwrap(), 5);
+    df.write().insert_into("cov_rw_tbl").unwrap();
+    assert_eq!(s.table("cov_rw_tbl").unwrap().count().unwrap(), 10);
+
+    // bucket_by + sort_by are only valid with saveAsTable.
+    let _ = s
+        .sql("DROP TABLE IF EXISTS cov_rw_bucketed")
+        .unwrap()
+        .collect();
+    df.write()
+        .mode("overwrite")
+        .bucket_by(2, vec!["id".to_string()])
+        .sort_by(vec!["id".to_string()])
+        .save_as_table("cov_rw_bucketed")
+        .unwrap();
+    assert_eq!(s.table("cov_rw_bucketed").unwrap().count().unwrap(), 5);
+
+    // options(map) plural form on the reader.
+    let mut opts = HashMap::new();
+    opts.insert("header".to_string(), "true".to_string());
+    assert_eq!(s.read().options(opts).csv(&p("csv")).count().unwrap(), 5);
+
+    // DataFrameWriterV2: create works on the session catalog; append / replace /
+    // create_or_replace / overwrite / overwrite_partitions require a v2 catalog,
+    // which the default (v1) catalog isn't - the server rejects them. Either way
+    // the client build+submit path runs, which is what we're covering here.
+    let _ = s.sql("DROP TABLE IF EXISTS cov_rw_v2").unwrap().collect();
+    df.write_to("cov_rw_v2").using("parquet").create().unwrap();
+    assert_eq!(s.table("cov_rw_v2").unwrap().count().unwrap(), 5);
+    fn tolerate<E: std::fmt::Debug>(r: Result<(), E>) {
+        if let Err(e) = r {
+            let m = format!("{e:?}");
+            assert!(
+                m.contains("v1 table") || m.contains("UNSUPPORTED_FEATURE"),
+                "unexpected v2 write error: {m}"
+            );
+        }
+    }
+    tolerate(df.write_to("cov_rw_v2").append());
+    tolerate(
+        df.write_to("cov_rw_v2")
+            .using("parquet")
+            .create_or_replace(),
+    );
+    tolerate(df.write_to("cov_rw_v2").using("parquet").replace());
+    tolerate(df.write_to("cov_rw_v2").overwrite(col("id").gt(lit(0))));
+    tolerate(df.write_to("cov_rw_v2").overwrite_partitions());
+
+    // Cleanup managed tables.
+    for t in ["cov_rw_tbl", "cov_rw_bucketed", "cov_rw_v2"] {
+        let _ = s
+            .sql(&format!("DROP TABLE IF EXISTS {t}"))
+            .unwrap()
+            .collect();
+    }
 }
 
 #[test]
