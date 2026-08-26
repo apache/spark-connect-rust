@@ -95,29 +95,34 @@ interface.
 
 ## User-Defined Functions (UDFs)
 
-Rust UDFs are compiled to WebAssembly and registered directly via SQL:
+Rust UDFs are compiled to WebAssembly, shipped to the executors, and can be used
+via the DataFrame API or registered by name for SQL. The runner is cloudpickled
+by value, so executors need only the `wasmtime` Python package:
 
 ```rust
-use spark_connect::{SparkSession, UserDefinedFunction};
+use spark_connect::functions::col;
+use spark_connect::wasm_udf::{udf, AbiType};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let spark = SparkSession::builder().remote("sc://localhost:15002").get_or_create()?;
 
-    // Define and register a WASM UDF in SQL
-    UserDefinedFunction::new("square")
-        .inputs(vec!["x: Double"])
-        .returns("Double")
-        .source(r#"x * x"#)
-        .register(&spark)?;
+    // Load a prebuilt module: fn shout(s: String) -> String
+    let wasm = std::fs::read("shout.wasm")?;
+    let shout = udf("shout", wasm, "shout", vec![AbiType::Str], AbiType::Str);
 
-    // Use it in SQL
-    spark.sql("SELECT square(id) as squared FROM range(10)")?.show()?;
+    // DataFrame API:
+    let df = spark.range(0, 3)?.select(vec![shout.call(vec![col("id").cast_str("string")])?])?;
+    df.show(20)?;
+
+    // ...or register by name (same effect as spark.udf.register) and call from SQL:
+    shout.register(&spark)?;
+    spark.sql("SELECT shout(name) FROM people")?.show(20)?;
     Ok(())
 }
 ```
 
 See the [WASM UDF guide](https://apache.github.io/spark-connect-rust/udfs/) for
-more examples and the SQL registration API.
+building modules with the `spark_wasm_udf` macro and more examples.
 
 ## Contributing
 
