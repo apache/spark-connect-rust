@@ -199,7 +199,6 @@ impl PySparkSession {
         schema: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         use crate::row::PyRow;
-        use crate::types::PyDataType;
 
         // Resolve the schema: a list of column names (types inferred), a DDL string or
         // a StructType (names + types explicit), or None (names from Row / default).
@@ -213,28 +212,17 @@ impl PySparkSession {
             Some(s) => {
                 if let Ok(names) = s.extract::<Vec<String>>() {
                     Spec::Names(names)
-                } else if let Ok(dt) = s.extract::<PyRef<PyDataType>>() {
-                    match &dt.inner {
-                        DataType::Struct { fields } => Spec::Struct(fields.clone()),
-                        _ => {
-                            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                                "createDataFrame schema DataType must be a StructType",
-                            ))
-                        }
-                    }
-                } else if let Ok(ddl) = s.extract::<String>() {
-                    match DataType::from_ddl(&ddl).to_pyerr()? {
+                } else {
+                    // Any DataType object (StructType, PyDataType) or a DDL string,
+                    // resolved through the shared converter; it must be a struct.
+                    match crate::types::py_to_data_type(s)? {
                         DataType::Struct { fields } => Spec::Struct(fields),
                         _ => {
-                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                                "DDL schema must describe a struct, e.g. \"a int, b string\"",
+                            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                                "createDataFrame schema must be a StructType (or a struct DDL string), a list of column names, or None",
                             ))
                         }
                     }
-                } else {
-                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                        "schema must be a list of column names, a DDL string, or a StructType",
-                    ));
                 }
             }
         };

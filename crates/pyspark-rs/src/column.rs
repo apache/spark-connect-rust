@@ -37,11 +37,13 @@ impl PyColumn {
     /// Cast to a different type. Accepts a `DataType` or a DDL type string,
     /// matching `pyspark.sql.Column.cast`.
     fn cast(&self, data_type: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
-        if let Ok(dt) = data_type.extract::<PyRef<crate::types::PyDataType>>() {
-            Ok(PyColumn::new(self.column.clone().cast(dt.inner.clone())))
-        } else {
-            let s: String = data_type.extract()?;
+        // A DDL string keeps the unparsed type_str form (reference cast("int"));
+        // any DataType object is converted to a typed cast.
+        if let Ok(s) = data_type.extract::<String>() {
             Ok(PyColumn::new(self.column.clone().cast_str(&s)))
+        } else {
+            let dt = crate::types::py_to_data_type(data_type)?;
+            Ok(PyColumn::new(self.column.clone().cast(dt)))
         }
     }
 
@@ -54,13 +56,11 @@ impl PyColumn {
     /// Mirrors `pyspark.sql.Column.try_cast`.
     #[pyo3(name = "try_cast")]
     fn try_cast(&self, data_type: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
-        if let Ok(dt) = data_type.extract::<PyRef<crate::types::PyDataType>>() {
-            Ok(PyColumn::new(
-                self.column.clone().try_cast(dt.inner.clone()),
-            ))
-        } else {
-            let s: String = data_type.extract()?;
+        if let Ok(s) = data_type.extract::<String>() {
             Ok(PyColumn::new(self.column.clone().try_cast_str(&s)))
+        } else {
+            let dt = crate::types::py_to_data_type(data_type)?;
+            Ok(PyColumn::new(self.column.clone().try_cast(dt)))
         }
     }
 

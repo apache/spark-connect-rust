@@ -336,77 +336,270 @@ impl PyTimestampNTZType {
 
 #[pyclass(name = "ArrayType")]
 pub struct PyArrayType {
-    pub element_type_str: String,
+    pub element_type: DataType,
     pub contains_null: bool,
 }
 
 #[pymethods]
 impl PyArrayType {
     #[new]
-    fn new(element_type: String, contains_null: Option<bool>) -> Self {
-        PyArrayType {
-            element_type_str: element_type,
-            contains_null: contains_null.unwrap_or(true),
-        }
+    #[pyo3(signature = (element_type, contains_null=true))]
+    fn new(element_type: &Bound<'_, PyAny>, contains_null: bool) -> PyResult<Self> {
+        Ok(PyArrayType {
+            element_type: py_to_data_type(element_type)?,
+            contains_null,
+        })
+    }
+    fn __repr__(&self) -> String {
+        format!("ArrayType({})", self.element_type.simple_string())
+    }
+    #[pyo3(name = "simpleString")]
+    fn simple_string(&self) -> String {
+        format!("array<{}>", self.element_type.simple_string())
+    }
+    #[pyo3(name = "typeName")]
+    fn type_name(&self) -> &'static str {
+        "array"
     }
 }
 
 #[pyclass(name = "MapType")]
 pub struct PyMapType {
-    pub key_type_str: String,
-    pub value_type_str: String,
+    pub key_type: DataType,
+    pub value_type: DataType,
     pub value_contains_null: bool,
 }
 
 #[pymethods]
 impl PyMapType {
     #[new]
-    fn new(key_type: String, value_type: String, value_contains_null: Option<bool>) -> Self {
-        PyMapType {
-            key_type_str: key_type,
-            value_type_str: value_type,
-            value_contains_null: value_contains_null.unwrap_or(true),
-        }
+    #[pyo3(signature = (key_type, value_type, value_contains_null=true))]
+    fn new(
+        key_type: &Bound<'_, PyAny>,
+        value_type: &Bound<'_, PyAny>,
+        value_contains_null: bool,
+    ) -> PyResult<Self> {
+        Ok(PyMapType {
+            key_type: py_to_data_type(key_type)?,
+            value_type: py_to_data_type(value_type)?,
+            value_contains_null,
+        })
+    }
+    #[pyo3(name = "simpleString")]
+    fn simple_string(&self) -> String {
+        format!(
+            "map<{},{}>",
+            self.key_type.simple_string(),
+            self.value_type.simple_string()
+        )
+    }
+    #[pyo3(name = "typeName")]
+    fn type_name(&self) -> &'static str {
+        "map"
     }
 }
 
 #[pyclass(name = "StructField")]
 pub struct PyStructField {
-    pub name: String,
-    pub data_type_str: String,
-    pub nullable: bool,
+    pub(crate) field: StructField,
 }
 
 #[pymethods]
 impl PyStructField {
     #[new]
-    fn new(name: String, data_type_str: String, nullable: Option<bool>) -> Self {
-        PyStructField {
-            name,
-            data_type_str,
-            nullable: nullable.unwrap_or(true),
-        }
+    #[pyo3(signature = (name, dataType, nullable=true, metadata=None))]
+    #[allow(non_snake_case)]
+    fn new(
+        name: String,
+        dataType: &Bound<'_, PyAny>,
+        nullable: bool,
+        metadata: Option<std::collections::HashMap<String, String>>,
+    ) -> PyResult<Self> {
+        let md: BTreeMap<String, String> = metadata.unwrap_or_default().into_iter().collect();
+        Ok(PyStructField {
+            field: StructField {
+                name,
+                data_type: py_to_data_type(dataType)?,
+                nullable,
+                metadata: md,
+            },
+        })
+    }
+    #[getter]
+    fn name(&self) -> String {
+        self.field.name.clone()
+    }
+    #[getter]
+    fn nullable(&self) -> bool {
+        self.field.nullable
+    }
+    fn __repr__(&self) -> String {
+        format!(
+            "StructField('{}', {}, {})",
+            self.field.name,
+            self.field.data_type.simple_string(),
+            self.field.nullable
+        )
     }
 }
 
 #[pyclass(name = "StructType")]
 pub struct PyStructType {
-    pub fields_str: String,
+    pub(crate) fields: Vec<StructField>,
 }
 
 #[pymethods]
 impl PyStructType {
+    /// `StructType(fields=None)` where each field is a `StructField` (matching
+    /// pyspark). A list of DDL field strings is also accepted for convenience.
     #[new]
-    fn new(fields: Option<Vec<String>>) -> Self {
-        let fields_str = if let Some(f) = fields {
-            format!("struct<{}>", f.join(","))
+    #[pyo3(signature = (fields=None))]
+    fn new(fields: Option<Vec<Bound<'_, PyAny>>>) -> PyResult<Self> {
+        let mut out = Vec::new();
+        if let Some(fs) = fields {
+            for f in fs {
+                if let Ok(sf) = f.extract::<PyRef<PyStructField>>() {
+                    out.push(sf.field.clone());
+                } else if let Ok(s) = f.extract::<String>() {
+                    // "name type" DDL fragment.
+                    let dt = DataType::from_ddl(&format!("struct<{s}>")).map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "invalid struct field '{s}': {e:?}"
+                        ))
+                    })?;
+                    if let DataType::Struct { fields } = dt {
+                        out.extend(fields);
+                    }
+                } else {
+                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                        "StructType fields must be StructField objects or DDL strings",
+                    ));
+                }
+            }
+        }
+        Ok(PyStructType { fields: out })
+    }
+
+    /// Append a field (pyspark `StructType.add`). Chainable is not required here.
+    #[pyo3(signature = (field, data_type=None, nullable=true))]
+    fn add(
+        &mut self,
+        field: &Bound<'_, PyAny>,
+        data_type: Option<&Bound<'_, PyAny>>,
+        nullable: bool,
+    ) -> PyResult<()> {
+        if let Ok(sf) = field.extract::<PyRef<PyStructField>>() {
+            self.fields.push(sf.field.clone());
         } else {
-            "struct<>".to_string()
-        };
-        PyStructType { fields_str }
+            let name: String = field.extract()?;
+            let dt = match data_type {
+                Some(d) => py_to_data_type(d)?,
+                None => DataType::String {
+                    collation: "UTF8_BINARY".to_string(),
+                },
+            };
+            self.fields.push(StructField {
+                name,
+                data_type: dt,
+                nullable,
+                metadata: BTreeMap::new(),
+            });
+        }
+        Ok(())
+    }
+
+    #[pyo3(name = "simpleString")]
+    fn simple_string(&self) -> String {
+        DataType::Struct {
+            fields: self.fields.clone(),
+        }
+        .simple_string()
     }
 
     fn __repr__(&self) -> String {
-        self.fields_str.clone()
+        self.simple_string()
     }
+}
+
+/// Convert a Python DataType object (any of the type classes) or a DDL string into
+/// the core `DataType`. Mirrors pyspark accepting `Union[DataType, str]` everywhere.
+pub(crate) fn py_to_data_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
+    if let Ok(d) = obj.extract::<PyRef<PyDataType>>() {
+        return Ok(d.inner.clone());
+    }
+    if obj.extract::<PyRef<PyNullType>>().is_ok() {
+        return Ok(DataType::Null);
+    }
+    if obj.extract::<PyRef<PyBooleanType>>().is_ok() {
+        return Ok(DataType::Boolean);
+    }
+    if obj.extract::<PyRef<PyByteType>>().is_ok() {
+        return Ok(DataType::Byte);
+    }
+    if obj.extract::<PyRef<PyShortType>>().is_ok() {
+        return Ok(DataType::Short);
+    }
+    if obj.extract::<PyRef<PyIntegerType>>().is_ok() {
+        return Ok(DataType::Integer);
+    }
+    if obj.extract::<PyRef<PyLongType>>().is_ok() {
+        return Ok(DataType::Long);
+    }
+    if obj.extract::<PyRef<PyFloatType>>().is_ok() {
+        return Ok(DataType::Float);
+    }
+    if obj.extract::<PyRef<PyDoubleType>>().is_ok() {
+        return Ok(DataType::Double);
+    }
+    if obj.extract::<PyRef<PyStringType>>().is_ok() {
+        return Ok(DataType::String {
+            collation: "UTF8_BINARY".to_string(),
+        });
+    }
+    if obj.extract::<PyRef<PyBinaryType>>().is_ok() {
+        return Ok(DataType::Binary);
+    }
+    if obj.extract::<PyRef<PyDateType>>().is_ok() {
+        return Ok(DataType::Date);
+    }
+    if obj.extract::<PyRef<PyTimestampType>>().is_ok() {
+        return Ok(DataType::Timestamp);
+    }
+    if obj.extract::<PyRef<PyTimestampNTZType>>().is_ok() {
+        return Ok(DataType::TimestampNtz);
+    }
+    if let Ok(d) = obj.extract::<PyRef<PyDecimalType>>() {
+        return Ok(DataType::Decimal {
+            precision: d.precision,
+            scale: d.scale,
+        });
+    }
+    if let Ok(a) = obj.extract::<PyRef<PyArrayType>>() {
+        return Ok(DataType::Array {
+            element_type: Box::new(a.element_type.clone()),
+            contains_null: a.contains_null,
+        });
+    }
+    if let Ok(m) = obj.extract::<PyRef<PyMapType>>() {
+        return Ok(DataType::Map {
+            key_type: Box::new(m.key_type.clone()),
+            value_type: Box::new(m.value_type.clone()),
+            value_contains_null: m.value_contains_null,
+        });
+    }
+    if let Ok(st) = obj.extract::<PyRef<PyStructType>>() {
+        return Ok(DataType::Struct {
+            fields: st.fields.clone(),
+        });
+    }
+    if let Ok(s) = obj.extract::<String>() {
+        return DataType::from_ddl(&s).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "invalid type string '{s}': {e:?}"
+            ))
+        });
+    }
+    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+        "expected a DataType or a DDL type string",
+    ))
 }
