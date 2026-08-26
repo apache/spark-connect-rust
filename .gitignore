@@ -49,3 +49,7 @@ derby.log
 # stray local build dirs from offline proto builds
 /wasm-udfs/
 /wasm-udf-inline/
+
+# python coverage data
+.coverage
+python/.coverage

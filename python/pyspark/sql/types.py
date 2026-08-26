@@ -12,7 +12,7 @@ try:
         CharType, VarcharType, TimeType, CalendarIntervalType, YearMonthIntervalType,
         DayTimeIntervalType, VariantType,
     )
-except ImportError:
+except ImportError:  # pragma: no cover - defensive fallback when the extension is absent
     # Fallback: define minimal stubs for testing purposes
     class DataType:
         """Base class for all data types."""

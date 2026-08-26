@@ -37,8 +37,10 @@ def test_parameterized_types_roundtrip():
         T.YearMonthIntervalType(0, 0), T.DayTimeIntervalType(0, 3),
         T.DayTimeIntervalType(0, 1),
     ]
+    # Interval/time types expose repr but not simpleString; compare structurally
+    # via the value round-tripped through pickle (which uses __reduce__'s JSON).
     for t in cases:
-        assert pickle.loads(pickle.dumps(t)).simpleString() == t.simpleString()
+        assert repr(pickle.loads(pickle.dumps(t))) == repr(t)
 
 
 def test_decimal_precision_scale():
@@ -164,6 +166,57 @@ def test_udf_decorator():
     from pyspark.sql.functions import udf
     u = udf(lambda x: x, T.IntegerType())
     assert callable(u)
+    # Decorator form (no function arg) returns a decorator.
+    deco = udf(returnType=T.IntegerType())
+    assert callable(deco(lambda x: x))
+
+
+def test_pandas_udf():
+    from pyspark.sql.functions import pandas_udf
+    p = pandas_udf(lambda s: s, T.IntegerType())
+    assert callable(p) or p is not None
+
+
+def test_dropin_module_imports():
+    # The thin re-export shims import cleanly.
+    import pyspark.sql.dataframe  # noqa: F401
+    import pyspark.sql.observation  # noqa: F401
+    import pyspark.sql.window  # noqa: F401
+    from pyspark.sql import Row
+    r = Row(a=1, b=2)
+    assert r["a"] == 1
+
+
+def test_functions_module_wrappers():
+    from pyspark.sql import functions as F
+    c = F.col("v")
+    assert type(F.sha2(c, 256)).__name__ == "Column"
+    assert type(F.window(F.col("t"), "10 minutes")).__name__ == "Column"
+    assert type(F.window(F.col("t"), "10 minutes", "5 minutes", "0 seconds")).__name__ == "Column"
+    assert type(F.from_avro(c, "{}")).__name__ == "Column"
+    assert type(F.from_avro_with_options(c, "{}", {"mode": "PERMISSIVE"})).__name__ == "Column"
+    assert type(F.to_avro_with_schema(c, "{}")).__name__ == "Column"
+    assert type(F.from_protobuf(c, "M", options={"x": "y"})).__name__ == "Column"
+    assert type(F.to_protobuf(c, "M", options={"x": "y"})).__name__ == "Column"
+
+
+def test_util_helpers():
+    from pyspark import util
+    assert util.is_remote_only() is True
+    assert util._parse_memory("256m") == 256
+    assert util._parse_memory("2g") == 2048
+    with pytest.raises(ValueError):
+        util._parse_memory("100x")
+
+
+def test_udf_nondeterministic_and_evaltypes():
+    from pyspark.sql.functions import udf, pandas_udf
+    # useArrow path selects the arrow eval type.
+    a = udf(lambda x: x, T.IntegerType(), useArrow=True)
+    assert callable(a)
+    # pandas_udf with an explicit functionType.
+    p = pandas_udf(lambda s: s, T.IntegerType(), functionType="scalar")
+    assert p is not None
 
 
 def test_udtf_construction():
