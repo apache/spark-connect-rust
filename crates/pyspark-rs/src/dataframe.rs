@@ -13,6 +13,21 @@ use crate::row::{value_to_py, PyRow};
 use crate::streaming::PyDataStreamWriter;
 use crate::types::PyDataType;
 
+/// Apply a single writer option (skipping None; bool->"true"/"false").
+fn wset_opt(
+    w: spark_connect::readwriter::DataFrameWriter,
+    name: &str,
+    v: Option<&Bound<'_, PyAny>>,
+) -> PyResult<spark_connect::readwriter::DataFrameWriter> {
+    match v {
+        Some(x) => match crate::coerce_option_value(x)? {
+            Some(sv) => Ok(w.option(name, &sv)),
+            None => Ok(w),
+        },
+        None => Ok(w),
+    }
+}
+
 /// Python wrapper for a Spark DataFrame.
 #[pyclass(name = "DataFrame")]
 pub struct PyDataFrame {
@@ -1456,28 +1471,190 @@ impl PyDataFrameWriter {
         self.take()?.insert_into(table_name).to_pyerr()
     }
 
-    fn parquet(&mut self, path: &str) -> PyResult<()> {
-        self.take()?.parquet(path).to_pyerr()
+    /// Write as PARQUET - full pyspark signature; each named option is
+    /// applied when provided.
+    #[pyo3(signature = (path, mode=None, partitionBy=None, compression=None))]
+    #[allow(non_snake_case, clippy::too_many_arguments)]
+    fn parquet(
+        &mut self,
+        path: &str,
+        mode: Option<&Bound<'_, PyAny>>,
+        partitionBy: Option<&Bound<'_, PyAny>>,
+        compression: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        let mut w = self.take()?;
+        if let Some(m) = mode {
+            w = w.mode(&m.str()?.to_string());
+        }
+        if let Some(pb) = partitionBy {
+            let cols: Vec<String> = if let Ok(one) = pb.extract::<String>() {
+                vec![one]
+            } else {
+                pb.extract::<Vec<String>>()?
+            };
+            w = w.partition_by(cols);
+        }
+        w = wset_opt(w, "compression", compression)?;
+        w.parquet(path).to_pyerr()
     }
 
-    fn json(&mut self, path: &str) -> PyResult<()> {
-        self.take()?.json(path).to_pyerr()
+    /// Write as JSON - full pyspark signature; each named option is
+    /// applied when provided.
+    #[pyo3(signature = (path, mode=None, compression=None, dateFormat=None, timestampFormat=None, lineSep=None, encoding=None, ignoreNullFields=None))]
+    #[allow(non_snake_case, clippy::too_many_arguments)]
+    fn json(
+        &mut self,
+        path: &str,
+        mode: Option<&Bound<'_, PyAny>>,
+        compression: Option<&Bound<'_, PyAny>>,
+        dateFormat: Option<&Bound<'_, PyAny>>,
+        timestampFormat: Option<&Bound<'_, PyAny>>,
+        lineSep: Option<&Bound<'_, PyAny>>,
+        encoding: Option<&Bound<'_, PyAny>>,
+        ignoreNullFields: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        let mut w = self.take()?;
+        if let Some(m) = mode {
+            w = w.mode(&m.str()?.to_string());
+        }
+        w = wset_opt(w, "compression", compression)?;
+        w = wset_opt(w, "dateFormat", dateFormat)?;
+        w = wset_opt(w, "timestampFormat", timestampFormat)?;
+        w = wset_opt(w, "lineSep", lineSep)?;
+        w = wset_opt(w, "encoding", encoding)?;
+        w = wset_opt(w, "ignoreNullFields", ignoreNullFields)?;
+        w.json(path).to_pyerr()
     }
 
-    fn csv(&mut self, path: &str) -> PyResult<()> {
-        self.take()?.csv(path).to_pyerr()
+    /// Write as CSV - full pyspark signature; each named option is
+    /// applied when provided.
+    #[pyo3(signature = (path, mode=None, compression=None, sep=None, quote=None, escape=None, header=None, nullValue=None, escapeQuotes=None, quoteAll=None, dateFormat=None, timestampFormat=None, ignoreLeadingWhiteSpace=None, ignoreTrailingWhiteSpace=None, charToEscapeQuoteEscaping=None, encoding=None, emptyValue=None, lineSep=None))]
+    #[allow(non_snake_case, clippy::too_many_arguments)]
+    fn csv(
+        &mut self,
+        path: &str,
+        mode: Option<&Bound<'_, PyAny>>,
+        compression: Option<&Bound<'_, PyAny>>,
+        sep: Option<&Bound<'_, PyAny>>,
+        quote: Option<&Bound<'_, PyAny>>,
+        escape: Option<&Bound<'_, PyAny>>,
+        header: Option<&Bound<'_, PyAny>>,
+        nullValue: Option<&Bound<'_, PyAny>>,
+        escapeQuotes: Option<&Bound<'_, PyAny>>,
+        quoteAll: Option<&Bound<'_, PyAny>>,
+        dateFormat: Option<&Bound<'_, PyAny>>,
+        timestampFormat: Option<&Bound<'_, PyAny>>,
+        ignoreLeadingWhiteSpace: Option<&Bound<'_, PyAny>>,
+        ignoreTrailingWhiteSpace: Option<&Bound<'_, PyAny>>,
+        charToEscapeQuoteEscaping: Option<&Bound<'_, PyAny>>,
+        encoding: Option<&Bound<'_, PyAny>>,
+        emptyValue: Option<&Bound<'_, PyAny>>,
+        lineSep: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        let mut w = self.take()?;
+        if let Some(m) = mode {
+            w = w.mode(&m.str()?.to_string());
+        }
+        w = wset_opt(w, "compression", compression)?;
+        w = wset_opt(w, "sep", sep)?;
+        w = wset_opt(w, "quote", quote)?;
+        w = wset_opt(w, "escape", escape)?;
+        w = wset_opt(w, "header", header)?;
+        w = wset_opt(w, "nullValue", nullValue)?;
+        w = wset_opt(w, "escapeQuotes", escapeQuotes)?;
+        w = wset_opt(w, "quoteAll", quoteAll)?;
+        w = wset_opt(w, "dateFormat", dateFormat)?;
+        w = wset_opt(w, "timestampFormat", timestampFormat)?;
+        w = wset_opt(w, "ignoreLeadingWhiteSpace", ignoreLeadingWhiteSpace)?;
+        w = wset_opt(w, "ignoreTrailingWhiteSpace", ignoreTrailingWhiteSpace)?;
+        w = wset_opt(w, "charToEscapeQuoteEscaping", charToEscapeQuoteEscaping)?;
+        w = wset_opt(w, "encoding", encoding)?;
+        w = wset_opt(w, "emptyValue", emptyValue)?;
+        w = wset_opt(w, "lineSep", lineSep)?;
+        w.csv(path).to_pyerr()
     }
 
-    fn orc(&mut self, path: &str) -> PyResult<()> {
-        self.take()?.orc(path).to_pyerr()
+    /// Write as ORC - full pyspark signature; each named option is
+    /// applied when provided.
+    #[pyo3(signature = (path, mode=None, partitionBy=None, compression=None))]
+    #[allow(non_snake_case, clippy::too_many_arguments)]
+    fn orc(
+        &mut self,
+        path: &str,
+        mode: Option<&Bound<'_, PyAny>>,
+        partitionBy: Option<&Bound<'_, PyAny>>,
+        compression: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        let mut w = self.take()?;
+        if let Some(m) = mode {
+            w = w.mode(&m.str()?.to_string());
+        }
+        if let Some(pb) = partitionBy {
+            let cols: Vec<String> = if let Ok(one) = pb.extract::<String>() {
+                vec![one]
+            } else {
+                pb.extract::<Vec<String>>()?
+            };
+            w = w.partition_by(cols);
+        }
+        w = wset_opt(w, "compression", compression)?;
+        w.orc(path).to_pyerr()
     }
 
-    fn text(&mut self, path: &str) -> PyResult<()> {
-        self.take()?.text(path).to_pyerr()
+    /// Write as TEXT - full pyspark signature; each named option is
+    /// applied when provided.
+    #[pyo3(signature = (path, compression=None, lineSep=None))]
+    #[allow(non_snake_case, clippy::too_many_arguments)]
+    fn text(
+        &mut self,
+        path: &str,
+        compression: Option<&Bound<'_, PyAny>>,
+        lineSep: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        let mut w = self.take()?;
+        w = wset_opt(w, "compression", compression)?;
+        w = wset_opt(w, "lineSep", lineSep)?;
+        w.text(path).to_pyerr()
     }
 
-    fn xml(&mut self, path: &str) -> PyResult<()> {
-        self.take()?.xml(path).to_pyerr()
+    /// Write as XML - full pyspark signature; each named option is
+    /// applied when provided.
+    #[pyo3(signature = (path, rowTag=None, mode=None, attributePrefix=None, valueTag=None, rootTag=None, declaration=None, arrayElementName=None, nullValue=None, dateFormat=None, timestampFormat=None, compression=None, encoding=None, validateName=None))]
+    #[allow(non_snake_case, clippy::too_many_arguments)]
+    fn xml(
+        &mut self,
+        path: &str,
+        rowTag: Option<&Bound<'_, PyAny>>,
+        mode: Option<&Bound<'_, PyAny>>,
+        attributePrefix: Option<&Bound<'_, PyAny>>,
+        valueTag: Option<&Bound<'_, PyAny>>,
+        rootTag: Option<&Bound<'_, PyAny>>,
+        declaration: Option<&Bound<'_, PyAny>>,
+        arrayElementName: Option<&Bound<'_, PyAny>>,
+        nullValue: Option<&Bound<'_, PyAny>>,
+        dateFormat: Option<&Bound<'_, PyAny>>,
+        timestampFormat: Option<&Bound<'_, PyAny>>,
+        compression: Option<&Bound<'_, PyAny>>,
+        encoding: Option<&Bound<'_, PyAny>>,
+        validateName: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        let mut w = self.take()?;
+        w = wset_opt(w, "rowTag", rowTag)?;
+        if let Some(m) = mode {
+            w = w.mode(&m.str()?.to_string());
+        }
+        w = wset_opt(w, "attributePrefix", attributePrefix)?;
+        w = wset_opt(w, "valueTag", valueTag)?;
+        w = wset_opt(w, "rootTag", rootTag)?;
+        w = wset_opt(w, "declaration", declaration)?;
+        w = wset_opt(w, "arrayElementName", arrayElementName)?;
+        w = wset_opt(w, "nullValue", nullValue)?;
+        w = wset_opt(w, "dateFormat", dateFormat)?;
+        w = wset_opt(w, "timestampFormat", timestampFormat)?;
+        w = wset_opt(w, "compression", compression)?;
+        w = wset_opt(w, "encoding", encoding)?;
+        w = wset_opt(w, "validateName", validateName)?;
+        w.xml(path).to_pyerr()
     }
 }
 
