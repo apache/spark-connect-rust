@@ -27,6 +27,10 @@ returning the same results as the reference client.
 [![PyPI](https://img.shields.io/pypi/v/pyspark-client-rust?color=c2410c&label=pyspark-client-rust)](https://pypi.org/project/pyspark-client-rust/)
 ![Spark](https://img.shields.io/badge/Apache%20Spark-4.2.0%2B-c2410c)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
+<!-- Coverage badges are published by .github/workflows/coverage.yml to the `badges` branch.
+     Replace <OWNER>/<REPO> with this repository's GitHub org/name to activate them. -->
+[![Rust coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/<OWNER>/<REPO>/badges/coverage-rust.json)](https://github.com/<OWNER>/<REPO>/actions/workflows/coverage.yml)
+[![Python coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/<OWNER>/<REPO>/badges/coverage-python.json)](https://github.com/<OWNER>/<REPO>/actions/workflows/coverage.yml)
 
 ## 📖 Documentation
 
