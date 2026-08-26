@@ -1485,13 +1485,18 @@ impl DataFrame {
         DataFrame::new(self.session.clone(), plan)
     }
 
-    /// Add metadata to a column.
-    pub fn with_metadata(
-        &self,
-        column_name: &str,
-        _metadata: HashMap<String, String>,
-    ) -> DataFrame {
-        self.alias(&format!("with_metadata_{}", column_name))
+    /// Set metadata on an existing column.
+    ///
+    /// Mirrors `pyspark.sql.connect.dataframe.DataFrame.withMetadata`: the column is
+    /// re-selected with the given metadata attached (serialized to a JSON map).
+    pub fn with_metadata(&self, column_name: &str, metadata: HashMap<String, String>) -> DataFrame {
+        let metadata_json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
+        let plan = LogicalPlan::WithColumnMetadata {
+            input: Box::new(self.plan.clone()),
+            column_name: column_name.to_string(),
+            metadata_json,
+        };
+        DataFrame::new(self.session.clone(), plan)
     }
 
     /// Get the Spark session.
@@ -1569,9 +1574,16 @@ impl DataFrame {
         self.repartition(num_partitions)
     }
 
-    /// Convert to a DataFrame with a specific schema.
-    pub fn to(&self, _schema: DataType) -> DataFrame {
-        self.clone()
+    /// Reconcile this DataFrame to a new schema: reorder/select columns by name
+    /// and cast them to the target types.
+    ///
+    /// Mirrors `pyspark.sql.connect.dataframe.DataFrame.to` (a `ToSchema` relation).
+    pub fn to(&self, schema: DataType) -> DataFrame {
+        let plan = LogicalPlan::ToSchema {
+            input: Box::new(self.plan.clone()),
+            schema,
+        };
+        DataFrame::new(self.session.clone(), plan)
     }
 
     /// Check if the DataFrame exists (is not empty).

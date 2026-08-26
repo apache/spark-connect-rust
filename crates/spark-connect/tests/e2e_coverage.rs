@@ -587,6 +587,116 @@ fn dataframe_more_surface() {
     let _ = persisted.unpersist(false).unwrap();
 }
 
+/// Further DataFrame methods not reached by the two surfaces above, including the
+/// `to` (schema reconcile) and `with_metadata` paths that were previously stubs.
+#[test]
+fn dataframe_extra_surface() {
+    use spark_connect::plan::JoinType;
+    use spark_connect::row::Value;
+    use spark_connect::types::{DataType, StructField};
+    use std::collections::BTreeMap;
+
+    if !should_run() {
+        return;
+    }
+    let s = session();
+    let df = sample(&s); // (id long, name string, val double)
+
+    // broadcast hint, sort (distinct from order_by), single-column rename.
+    assert_eq!(df.broadcast().count().unwrap(), 4);
+    let _ = df
+        .sort(vec![col("id").expression().clone()])
+        .collect()
+        .unwrap();
+    let renamed = df.with_column_renamed("val", "value");
+    assert!(renamed.columns().unwrap().contains(&"value".to_string()));
+
+    // grouping_sets aggregation.
+    let _ = df
+        .grouping_sets(vec![vec![col("id")], vec![]])
+        .agg(vec![f::sum(col("val")).expression().clone()])
+        .collect()
+        .unwrap();
+
+    // repartition variants + spark_session round-trip.
+    assert_eq!(
+        df.repartition_by_expressions(2, vec![col("id").expression().clone()])
+            .count()
+            .unwrap(),
+        4
+    );
+    assert_eq!(df.repartition_by_id(2).count().unwrap(), 4);
+    assert_eq!(df.spark_session().range(2).unwrap().count().unwrap(), 2);
+
+    // metadata_column just builds a Column (client-side); temp-view registration.
+    let _ = df.metadata_column("_metadata");
+    df.create_temp_view("cov_ctv").unwrap();
+    df.create_global_temp_view("cov_cgtv").unwrap();
+    df.register_temp_table("cov_rtt").unwrap();
+
+    // to(schema): reconcile by name to a reordered subset schema.
+    let target = DataType::Struct {
+        fields: vec![
+            StructField {
+                name: "val".into(),
+                data_type: DataType::Double,
+                nullable: true,
+                metadata: BTreeMap::new(),
+            },
+            StructField {
+                name: "id".into(),
+                data_type: DataType::Long,
+                nullable: true,
+                metadata: BTreeMap::new(),
+            },
+        ],
+    };
+    let reconciled = df.to(target);
+    assert_eq!(
+        reconciled.columns().unwrap(),
+        vec!["val".to_string(), "id".to_string()]
+    );
+
+    // with_metadata: attach metadata to a column; data/columns are preserved.
+    let mut meta = HashMap::new();
+    meta.insert("comment".to_string(), "the id column".to_string());
+    let with_meta = df.with_metadata("id", meta);
+    assert_eq!(with_meta.count().unwrap(), 4);
+    assert_eq!(with_meta.columns().unwrap(), df.columns().unwrap());
+
+    // na-fill variants over a typed, all-null-second-row frame.
+    let na_df = s
+        .sql("SELECT * FROM VALUES (1.0,'a',true),(NULL,NULL,NULL) AS t(d, s, b)")
+        .unwrap();
+    assert_eq!(
+        na_df.fillna_double(0.0, Some(vec!["d"])).count().unwrap(),
+        2
+    );
+    let _ = na_df.fillna_string("z", Some(vec!["s"])).collect().unwrap();
+    let _ = na_df.fillna_bool(false, Some(vec!["b"])).collect().unwrap();
+    let _ = na_df
+        .fillna_value(Value::Double(1.0), Some(vec!["d"]))
+        .collect()
+        .unwrap();
+    let _ = na_df
+        .fillna_map(vec![("d".to_string(), Value::Double(9.0))])
+        .collect()
+        .unwrap();
+
+    // transpose collects + swaps; lateral_join (uncorrelated => cross-like).
+    let _ = df.select(vec![col("id")]).transpose();
+    let _ = df.lateral_join(&s.range(2).unwrap(), None, JoinType::Inner);
+
+    // Cleanup the views/tables.
+    for stmt in [
+        "DROP VIEW IF EXISTS cov_ctv",
+        "DROP VIEW IF EXISTS cov_rtt",
+        "DROP VIEW IF EXISTS global_temp.cov_cgtv",
+    ] {
+        let _ = s.sql(stmt).unwrap().collect();
+    }
+}
+
 #[test]
 fn catalog_ddl_surface() {
     if !should_run() {

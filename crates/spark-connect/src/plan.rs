@@ -129,6 +129,14 @@ pub enum LogicalPlan {
         column_names: Vec<String>,
         columns: Vec<Column>,
     },
+    /// WithColumnMetadata: set metadata (a JSON map) on a single existing column.
+    /// Mirrors `DataFrame.withMetadata` - a `WithColumns` whose one alias re-aliases
+    /// the column to itself, carrying the metadata JSON.
+    WithColumnMetadata {
+        input: Box<LogicalPlan>,
+        column_name: String,
+        metadata_json: String,
+    },
     /// WithColumnsRenamed: `df.withColumnRenamed(old, new)` or `df.withColumnsRenamed(...)`.
     WithColumnsRenamed {
         input: Box<LogicalPlan>,
@@ -696,6 +704,24 @@ impl LogicalPlan {
                     alias.name = vec![name.clone()];
                     wc.aliases.push(alias);
                 }
+                relation.rel_type = Some(proto::relation::RelType::WithColumns(Box::new(wc)));
+            }
+
+            LogicalPlan::WithColumnMetadata {
+                input,
+                column_name,
+                metadata_json,
+            } => {
+                let mut wc = proto::WithColumns::default();
+                wc.input = Some(Box::new(input.to_proto()));
+                let col_expr = crate::expression::Expression::ColumnReference(
+                    crate::expression::ColumnReference::new(column_name.clone()),
+                );
+                let mut alias = proto::expression::Alias::default();
+                alias.expr = Some(Box::new(col_expr.to_proto()));
+                alias.name = vec![column_name.clone()];
+                alias.metadata = Some(metadata_json.clone());
+                wc.aliases.push(alias);
                 relation.rel_type = Some(proto::relation::RelType::WithColumns(Box::new(wc)));
             }
 
