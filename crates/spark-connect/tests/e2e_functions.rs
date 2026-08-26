@@ -113,3 +113,52 @@ fn aggregate_functions() {
     assert_eq!(row.get_by_name("mn").and_then(|v| v.as_f64()), Some(10.0));
     assert_eq!(row.get_by_name("c").and_then(|v| v.as_i64()), Some(3));
 }
+
+#[test]
+fn optional_arg_function_variants() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::column::{lit, lit_double, lit_string};
+    let s = session();
+    let df = s.range(1).unwrap();
+    let v = |c: Column| {
+        df.select(vec![c]).collect().unwrap()[0]
+            .get(0)
+            .cloned()
+            .unwrap()
+    };
+
+    // round/bround with an explicit scale.
+    assert_eq!(
+        v(f::round_scale(lit_double(3.14159), lit(2))).as_f64(),
+        Some(3.14)
+    );
+    assert_eq!(
+        v(f::bround_scale(lit_double(2.5), lit(0))).as_f64(),
+        Some(2.0)
+    );
+    // ceil/floor with scale return DECIMAL; just assert they evaluate non-null.
+    assert!(!v(f::ceil_scale(lit_double(2.1), lit(1))).is_null());
+    assert!(!v(f::floor_scale(lit_double(2.9), lit(1))).is_null());
+    // trim/ltrim/rtrim with a trim string (arg order: trim string first).
+    assert_eq!(
+        v(f::trim_with(lit_string("xxhixx"), lit_string("x"))).as_str(),
+        Some("hi")
+    );
+    assert_eq!(
+        v(f::ltrim_with(lit_string("xxhi"), lit_string("x"))).as_str(),
+        Some("hi")
+    );
+    assert_eq!(
+        v(f::rtrim_with(lit_string("hixx"), lit_string("x"))).as_str(),
+        Some("hi")
+    );
+    // to_binary with an explicit format.
+    assert!(!v(f::to_binary_format(lit_string("41"), lit_string("hex"))).is_null());
+    // approx_count_distinct with a relative-standard-deviation literal.
+    assert_eq!(
+        v(f::approx_count_distinct_rsd(col("id"), lit_double(0.05))).as_i64(),
+        Some(1)
+    );
+}

@@ -526,6 +526,14 @@ pub fn approx_count_distinct(col1: Column) -> Column {
     func("approx_count_distinct", vec![col1.expression().clone()])
 }
 
+/// 2-arg variant (see the reference optional argument).
+pub fn approx_count_distinct_rsd(col1: Column, rsd: Column) -> Column {
+    func(
+        "approx_count_distinct",
+        vec![col1.expression().clone(), rsd.expression().clone()],
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.array_agg`.
 pub fn array_agg(col1: Column) -> Column {
     func("array_agg", vec![col1.expression().clone()])
@@ -681,6 +689,14 @@ pub fn bround(col1: Column) -> Column {
     func("bround", vec![col1.expression().clone()])
 }
 
+/// 2-arg variant (see the reference optional argument).
+pub fn bround_scale(col1: Column, scale: Column) -> Column {
+    func(
+        "bround",
+        vec![col1.expression().clone(), scale.expression().clone()],
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.btrim`.
 pub fn btrim(col1: Column) -> Column {
     func("btrim", vec![col1.expression().clone()])
@@ -699,6 +715,14 @@ pub fn cbrt(col1: Column) -> Column {
 /// Mirrors `pyspark.sql.functions.ceil`.
 pub fn ceil(col1: Column) -> Column {
     func("ceil", vec![col1.expression().clone()])
+}
+
+/// 2-arg variant (see the reference optional argument).
+pub fn ceil_scale(col1: Column, scale: Column) -> Column {
+    func(
+        "ceil",
+        vec![col1.expression().clone(), scale.expression().clone()],
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.ceiling`.
@@ -874,6 +898,14 @@ pub fn flatten(col1: Column) -> Column {
 /// Mirrors `pyspark.sql.functions.floor`.
 pub fn floor(col1: Column) -> Column {
     func("floor", vec![col1.expression().clone()])
+}
+
+/// 2-arg variant (see the reference optional argument).
+pub fn floor_scale(col1: Column, scale: Column) -> Column {
+    func(
+        "floor",
+        vec![col1.expression().clone(), scale.expression().clone()],
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.format_string`.
@@ -1059,6 +1091,14 @@ pub fn ltrim(col1: Column) -> Column {
     func("ltrim", vec![col1.expression().clone()])
 }
 
+/// 2-arg variant (see the reference optional argument).
+pub fn ltrim_with(col1: Column, trim: Column) -> Column {
+    func(
+        "ltrim",
+        vec![trim.expression().clone(), col1.expression().clone()],
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.make_valid_utf8`.
 pub fn make_valid_utf8(col1: Column) -> Column {
     func("make_valid_utf8", vec![col1.expression().clone()])
@@ -1241,9 +1281,25 @@ pub fn round(col1: Column) -> Column {
     func("round", vec![col1.expression().clone()])
 }
 
+/// 2-arg variant (see the reference optional argument).
+pub fn round_scale(col1: Column, scale: Column) -> Column {
+    func(
+        "round",
+        vec![col1.expression().clone(), scale.expression().clone()],
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.rtrim`.
 pub fn rtrim(col1: Column) -> Column {
     func("rtrim", vec![col1.expression().clone()])
+}
+
+/// 2-arg variant (see the reference optional argument).
+pub fn rtrim_with(col1: Column, trim: Column) -> Column {
+    func(
+        "rtrim",
+        vec![trim.expression().clone(), col1.expression().clone()],
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.schema_of_csv`.
@@ -1453,6 +1509,14 @@ pub fn to_binary(col1: Column) -> Column {
     func("to_binary", vec![col1.expression().clone()])
 }
 
+/// 2-arg variant (see the reference optional argument).
+pub fn to_binary_format(col1: Column, format: Column) -> Column {
+    func(
+        "to_binary",
+        vec![col1.expression().clone(), format.expression().clone()],
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.to_csv`.
 pub fn to_csv(col1: Column) -> Column {
     func("to_csv", vec![col1.expression().clone()])
@@ -1501,6 +1565,15 @@ pub fn to_xml(col1: Column) -> Column {
 /// Mirrors `pyspark.sql.functions.trim`.
 pub fn trim(col1: Column) -> Column {
     func("trim", vec![col1.expression().clone()])
+}
+
+/// 2-arg variant (see the reference optional argument).
+pub fn trim_with(col1: Column, trim: Column) -> Column {
+    // pyspark emits the trim string first, then the column: TRIM(trimStr FROM col).
+    func(
+        "trim",
+        vec![trim.expression().clone(), col1.expression().clone()],
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.try_avg`.
