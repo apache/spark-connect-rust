@@ -1136,10 +1136,14 @@ impl DataFrame {
         DataFrame::new(self.session.clone(), plan)
     }
 
-    /// Select with SQL expressions.
+    /// Select with SQL expressions, mirroring `DataFrame.selectExpr`.
+    ///
+    /// Each string is parsed as a SQL expression (e.g. `"id + 1 AS x"`), not treated
+    /// as a bare column name - so it must go through `functions::expr` (an
+    /// `ExpressionString` the server parses), not `col` (an unresolved attribute,
+    /// which made `selectExpr("id + 1 AS x")` fail to resolve).
     pub fn select_expr(&self, exprs: Vec<&str>) -> DataFrame {
-        use crate::column::col;
-        let cols: Vec<Column> = exprs.iter().map(|expr| col(expr)).collect();
+        let cols: Vec<Column> = exprs.iter().map(|e| crate::functions::expr(e)).collect();
         self.select(cols)
     }
 
@@ -1400,11 +1404,28 @@ impl DataFrame {
         format!("{:?}", self.plan) == format!("{:?}", other.plan)
     }
 
-    /// Convert to JSON format.
+    /// Convert each row to a JSON object string, mirroring `DataFrame.toJSON()`.
+    ///
+    /// Reference pyspark produces `{"col":val,...}` per row by applying the server's
+    /// `to_json(struct(*))`, not a client-side row rendering (which previously emitted
+    /// Rust list syntax like `[1, a]`). Build that projection and collect the strings.
     pub fn to_json(&self) -> Result<Vec<String>> {
-        let rows = self.collect()?;
-        let json_rows = rows.iter().map(|r| r.to_string()).collect();
-        Ok(json_rows)
+        let cols: Vec<Column> = self
+            .columns()?
+            .iter()
+            .map(|c| crate::column::col(c))
+            .collect();
+        let json_col = crate::functions::to_json(crate::functions::r#struct(cols));
+        let rows = self.select(vec![json_col]).collect()?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                r.get(0)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect())
     }
 
     /// Union all rows (alias for union with all=true).
