@@ -48,16 +48,34 @@ impl PyStatFunctions {
     }
 
     /// Approximate quantiles of a column at the given probabilities.
+    ///
+    /// Mirrors reference `DataFrameStatFunctions.approxQuantile(col, probabilities,
+    /// relativeError)`, which returns a `list[float]` (the quantiles) - not a
+    /// DataFrame. The server returns a single row whose one column is the
+    /// `array<double>` of quantiles; collect it (releasing the GIL for the RPC) and
+    /// return that list.
     #[pyo3(name = "approxQuantile")]
     fn approx_quantile(
         &self,
+        py: Python<'_>,
         col: &str,
         probabilities: Vec<f64>,
         relative_error: f64,
-    ) -> PyDataFrame {
-        PyDataFrame::new(
-            self.stat
-                .approx_quantile(vec![col], probabilities, relative_error),
-        )
+    ) -> PyResult<Vec<f64>> {
+        use spark_connect::row::Value;
+        let df = self
+            .stat
+            .approx_quantile(vec![col], probabilities, relative_error);
+        let rows = py.detach(|| df.collect()).to_pyerr()?;
+        // The server returns a single row, col 0 = array-of-arrays (one inner array of
+        // quantiles per input column); for a single column we return that inner array.
+        let quantiles = match rows.first().and_then(|r| r.get(0)) {
+            Some(Value::List(outer)) => match outer.first() {
+                Some(Value::List(inner)) => inner.iter().filter_map(|v| v.as_f64()).collect(),
+                _ => outer.iter().filter_map(|v| v.as_f64()).collect(),
+            },
+            _ => Vec::new(),
+        };
+        Ok(quantiles)
     }
 }

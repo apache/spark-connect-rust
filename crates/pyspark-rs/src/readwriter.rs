@@ -44,20 +44,25 @@ impl PyDataFrameReader {
         ))
     }
 
-    /// Set a single read option (value coerced to its string form).
+    /// Set a single read option. `None` leaves the option unset (not the string
+    /// "None"); booleans lowercase to "true"/"false" (reference `to_str` semantics).
     fn option(&mut self, key: &str, value: &Bound<'_, PyAny>) -> PyResult<PyDataFrameReader> {
-        let v = value.str()?.to_string();
-        Ok(PyDataFrameReader::new(self.take()?.option(key, &v)))
+        match crate::coerce_option_value(value)? {
+            Some(v) => Ok(PyDataFrameReader::new(self.take()?.option(key, &v))),
+            None => Ok(PyDataFrameReader::new(self.take()?)),
+        }
     }
 
     /// Set multiple read options. Mirrors reference `DataFrameReader.options(**options)`
-    /// - keyword args, values coerced to their string form.
+    /// - keyword args; `None` values are skipped and booleans lowercased.
     #[pyo3(signature = (**options))]
     fn options(&mut self, options: Option<&Bound<'_, PyDict>>) -> PyResult<PyDataFrameReader> {
         let mut map = HashMap::new();
         if let Some(options) = options {
             for (k, v) in options.iter() {
-                map.insert(k.str()?.to_string(), v.str()?.to_string());
+                if let Some(val) = crate::coerce_option_value(&v)? {
+                    map.insert(k.str()?.to_string(), val);
+                }
             }
         }
         Ok(PyDataFrameReader::new(self.take()?.options(map)))

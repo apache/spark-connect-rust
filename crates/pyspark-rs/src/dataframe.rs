@@ -112,10 +112,17 @@ impl PyDataFrame {
         Ok(PyDataFrame::new(self.dataframe.with_columns(pairs)))
     }
 
-    /// Specify a relation hint (e.g. "broadcast"), with optional string parameters.
+    /// Specify a relation hint (e.g. "broadcast"), with optional parameters. Reference
+    /// hint params may be ints (e.g. `df.hint("rebalance", 3)`), not just strings, so
+    /// accept any value and stringify it; the core parses a numeric string back into a
+    /// long literal, matching reference semantics.
     #[pyo3(signature = (name, *parameters))]
-    fn hint(&self, name: &str, parameters: Vec<String>) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.hint(name, parameters))
+    fn hint(&self, name: &str, parameters: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        let params: Vec<String> = parameters
+            .iter()
+            .map(|p| Ok(p.str()?.to_string()))
+            .collect::<PyResult<_>>()?;
+        Ok(PyDataFrame::new(self.dataframe.hint(name, params)))
     }
 
     /// Drop columns.
@@ -259,24 +266,41 @@ impl PyDataFrame {
         PyDataFrame::new(self.dataframe.subtract(&other.dataframe))
     }
 
-    /// Repartition.
+    /// Repartition. Mirrors reference `repartition(numPartitions, *cols)` where the
+    /// first argument may instead be a Column/str - `df.repartition("country")` /
+    /// `df.repartition(col("country"))` repartition by that column at the default
+    /// partition count (no explicit number).
     #[pyo3(signature = (num_partitions, *cols))]
     fn repartition(
         &self,
-        _py: Python<'_>,
-        num_partitions: i32,
+        py: Python<'_>,
+        num_partitions: Bound<'_, PyAny>,
         cols: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        if cols.is_empty() {
-            Ok(PyDataFrame::new(self.dataframe.repartition(num_partitions)))
-        } else {
+        // First arg is an int -> a partition count; otherwise it's a partition column
+        // (str/Column) and the count defaults to the server's (passed as 0 = unset).
+        if let Ok(n) = num_partitions.extract::<i32>() {
+            if cols.is_empty() {
+                return Ok(PyDataFrame::new(self.dataframe.repartition(n)));
+            }
             let exprs: Vec<_> = to_column_list(cols)?
                 .iter()
                 .map(|c| c.expression().clone())
                 .collect();
             Ok(PyDataFrame::new(
-                self.dataframe
-                    .repartition_by_expressions(num_partitions, exprs),
+                self.dataframe.repartition_by_expressions(n, exprs),
+            ))
+        } else {
+            // Column-first form: the first arg is itself a partition column.
+            let mut all = vec![num_partitions];
+            all.extend(cols);
+            let _ = py;
+            let exprs: Vec<_> = to_column_list(all)?
+                .iter()
+                .map(|c| c.expression().clone())
+                .collect();
+            Ok(PyDataFrame::new(
+                self.dataframe.repartition_by_expressions(0, exprs),
             ))
         }
     }
@@ -487,8 +511,20 @@ impl PyDataFrame {
         storage_level: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         use spark_connect::storage::StorageLevelExt;
-        let _ = storage_level;
-        let level = spark_connect_proto::StorageLevel::memory_and_disk();
+        // Honor the requested StorageLevel instead of always using MEMORY_AND_DISK.
+        // A pyspark StorageLevel exposes useDisk/useMemory/useOffHeap/deserialized/
+        // replication; map them onto the proto. Default (None) is MEMORY_AND_DISK_DESER,
+        // matching reference DataFrame.persist().
+        let level = match storage_level {
+            Some(obj) => spark_connect_proto::StorageLevel {
+                use_disk: obj.getattr("useDisk")?.extract()?,
+                use_memory: obj.getattr("useMemory")?.extract()?,
+                use_off_heap: obj.getattr("useOffHeap")?.extract()?,
+                deserialized: obj.getattr("deserialized")?.extract()?,
+                replication: obj.getattr("replication")?.extract()?,
+            },
+            None => spark_connect_proto::StorageLevel::memory_and_disk_deser(),
+        };
         let df = py.detach(|| self.dataframe.persist(level)).to_pyerr()?;
         Ok(PyDataFrame::new(df))
     }
@@ -1154,20 +1190,27 @@ impl PyDataFrameWriter {
     }
 
     fn option(&mut self, key: &str, value: &Bound<'_, PyAny>) -> PyResult<PyDataFrameWriter> {
-        let v = value.str()?.to_string();
-        Ok(PyDataFrameWriter {
-            inner: Some(self.take()?.option(key, &v)),
-        })
+        // None -> option left unset; bools -> "true"/"false" (reference `to_str`).
+        match crate::coerce_option_value(value)? {
+            Some(v) => Ok(PyDataFrameWriter {
+                inner: Some(self.take()?.option(key, &v)),
+            }),
+            None => Ok(PyDataFrameWriter {
+                inner: Some(self.take()?),
+            }),
+        }
     }
 
-    // Mirrors reference `DataFrameWriter.options(**options)`: keyword args, values
-    // coerced to string (so ints/bools work).
+    // Mirrors reference `DataFrameWriter.options(**options)`: keyword args; None values
+    // skipped, booleans lowercased.
     #[pyo3(signature = (**options))]
     fn options(&mut self, options: Option<&Bound<'_, PyDict>>) -> PyResult<PyDataFrameWriter> {
         let mut map = std::collections::HashMap::new();
         if let Some(options) = options {
             for (k, v) in options.iter() {
-                map.insert(k.str()?.to_string(), v.str()?.to_string());
+                if let Some(val) = crate::coerce_option_value(&v)? {
+                    map.insert(k.str()?.to_string(), val);
+                }
             }
         }
         Ok(PyDataFrameWriter {

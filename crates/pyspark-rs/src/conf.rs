@@ -22,9 +22,11 @@ impl PyRuntimeConf {
 // Python thread stays blocked for the whole call.
 #[pymethods]
 impl PyRuntimeConf {
-    /// Set a configuration value (the value is coerced to its string form).
+    /// Set a configuration value. A bool lowercases to "true"/"false" (reference
+    /// `to_str`); other values use their `str()`. (`None` would be unusual here;
+    /// coerce_option_value maps it to no value, so fall back to "null".)
     fn set(&self, py: Python<'_>, key: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
-        let v = value.str()?.to_string(); // Python conversion needs the GIL
+        let v = crate::coerce_option_value(value)?.unwrap_or_else(|| "null".to_string());
         py.detach(|| self.conf.set(key, &v)).to_pyerr()
     }
 

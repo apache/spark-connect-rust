@@ -635,3 +635,73 @@ fn ml_estimators_and_transformers() {
         let _ = m.transform(&df).and_then(|d| d.count());
     }
 }
+
+#[test]
+fn create_dataframe_typed_schemas() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::row::{Row, Value};
+    use spark_connect::types::{DataType, StructField};
+    use std::collections::BTreeMap;
+
+    let s = session();
+    let field = |name: &str, dt: DataType| StructField {
+        name: name.to_string(),
+        data_type: dt,
+        nullable: true,
+        metadata: BTreeMap::new(),
+    };
+
+    // Regression: a TIMESTAMP (LTZ) column must build an Arrow array whose timezone
+    // matches the schema (UTC), or RecordBatch::try_new rejects it.
+    let ts_schema = DataType::Struct {
+        fields: vec![field("a", DataType::Timestamp)],
+    };
+    let ts_rows = vec![
+        Row::new(
+            vec!["a".into()],
+            vec![Value::Timestamp(1_577_836_800_000_000)],
+        ),
+        Row::new(
+            vec!["a".into()],
+            vec![Value::Timestamp(1_577_923_200_000_000)],
+        ),
+    ];
+    let df = s
+        .create_dataframe(ts_rows, ts_schema)
+        .expect("createDataFrame TIMESTAMP");
+    assert_eq!(df.count().unwrap(), 2);
+
+    // TIMESTAMP_NTZ (no zone) must still work.
+    let ntz_schema = DataType::Struct {
+        fields: vec![field("a", DataType::TimestampNtz)],
+    };
+    let ntz_rows = vec![Row::new(
+        vec!["a".into()],
+        vec![Value::Timestamp(1_577_836_800_000_000)],
+    )];
+    assert_eq!(
+        s.create_dataframe(ntz_rows, ntz_schema)
+            .unwrap()
+            .count()
+            .unwrap(),
+        1
+    );
+
+    // Float target from an int value (coerce_value must widen Long/Integer -> Float).
+    let f_schema = DataType::Struct {
+        fields: vec![field("a", DataType::Float)],
+    };
+    let f_rows = vec![
+        Row::new(vec!["a".into()], vec![Value::Long(1)]),
+        Row::new(vec!["a".into()], vec![Value::Long(2)]),
+    ];
+    assert_eq!(
+        s.create_dataframe(f_rows, f_schema)
+            .unwrap()
+            .count()
+            .unwrap(),
+        2
+    );
+}

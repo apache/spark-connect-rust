@@ -109,13 +109,14 @@ fn test_hint_with_parameters_assertion() {
     );
 
     // Further validate that the parameters are correctly typed:
-    // "10" should become a Long(10) literal, "name" should become a String literal.
+    // "10" should become an Integer(10) literal (int32, matching reference lit(int)),
+    // "name" should become a String literal.
     match hint.parameters[0].expr_type.as_ref() {
         Some(proto::expression::ExprType::Literal(lit)) => {
             let lit_type = lit.literal_type.clone().unwrap();
             assert!(
-                matches!(lit_type, proto::expression::literal::LiteralType::Long(10)),
-                "first param '10' should be Long(10) literal"
+                matches!(lit_type, proto::expression::literal::LiteralType::Integer(10)),
+                "first param '10' should be Integer(10) literal"
             );
         }
         _ => panic!("expected literal for first parameter"),

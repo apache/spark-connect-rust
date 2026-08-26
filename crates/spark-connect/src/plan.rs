@@ -662,7 +662,14 @@ impl LogicalPlan {
             } => {
                 let mut repart = proto::RepartitionByExpression::default();
                 repart.input = Some(Box::new(input.to_proto()));
-                repart.num_partitions = Some(*num_partitions);
+                // num_partitions is optional in the proto: <= 0 means "unset" so the
+                // server uses the default (the `df.repartition(*cols)` column-only form,
+                // where no partition count is given). A real count is always positive.
+                repart.num_partitions = if *num_partitions > 0 {
+                    Some(*num_partitions)
+                } else {
+                    None
+                };
                 for expr in expressions {
                     repart.partition_exprs.push(expr.to_proto());
                 }
@@ -734,11 +741,13 @@ impl LogicalPlan {
                 hint.input = Some(Box::new(input.to_proto()));
                 hint.name = name.clone();
                 // Hint parameters are literal Expressions (e.g. `REPARTITION 10`).
-                // An integer-looking parameter becomes a Long literal, otherwise a
-                // String literal.
+                // An integer-looking parameter becomes an Integer (int32) literal -
+                // matching reference pyspark's `lit(int)` - otherwise a String literal.
+                // (A Long literal is rejected as a partitionNum by e.g. the REBALANCE
+                // hint, which expects an integral int.)
                 for p in parameters {
-                    let lit = if let Ok(n) = p.parse::<i64>() {
-                        crate::expression::LiteralExpression::long(n)
+                    let lit = if let Ok(n) = p.parse::<i32>() {
+                        crate::expression::LiteralExpression::int(n)
                     } else {
                         crate::expression::LiteralExpression::string(p.clone())
                     };
@@ -1696,12 +1705,13 @@ mod argfix_tests {
         match rel_type(p) {
             proto::relation::RelType::Hint(h) => {
                 assert_eq!(h.parameters.len(), 2, "parameters must be forwarded");
-                // First param "10" -> Long(10) literal.
+                // First param "10" -> Integer(10) literal (int32, matching reference
+                // pyspark's lit(int); a Long is rejected by the REBALANCE hint).
                 let lit = match h.parameters[0].expr_type.as_ref().unwrap() {
                     proto::expression::ExprType::Literal(l) => l.literal_type.clone().unwrap(),
                     _ => panic!("expected literal param"),
                 };
-                assert!(matches!(lit, LiteralType::Long(10)));
+                assert!(matches!(lit, LiteralType::Integer(10)));
             }
             _ => panic!("expected Hint"),
         }

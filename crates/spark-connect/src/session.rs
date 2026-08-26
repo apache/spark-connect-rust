@@ -576,7 +576,7 @@ fn rows_to_arrow_ipc(rows: &[Row], schema: &DataType) -> Result<Vec<u8>> {
         .collect();
 
     for field_idx in 0..fields.len() {
-        let array = build_arrow_array(&coerced, field_idx)?;
+        let array = build_arrow_array(&coerced, field_idx, Some(&fields[field_idx].data_type))?;
         columns.push(array);
     }
 
@@ -662,7 +662,12 @@ fn coerce_value(v: Option<&Value>, target: &DataType) -> Value {
         (DataType::Short, Value::Integer(n)) => Value::Short(*n as i16),
         (DataType::Integer, Value::Long(n)) => Value::Integer(*n as i32),
         (DataType::Long, Value::Integer(n)) => Value::Long(*n as i64),
+        // Float target from any narrower numeric (a Python int decodes as Long/Integer
+        // but "a float" wants Float32); without these, an Int64Array is built against a
+        // Float32 field and RecordBatch::try_new rejects the mismatch.
         (DataType::Float, Value::Double(f)) => Value::Float(*f as f32),
+        (DataType::Float, Value::Long(n)) => Value::Float(*n as f32),
+        (DataType::Float, Value::Integer(n)) => Value::Float(*n as f32),
         (DataType::Double, Value::Long(n)) => Value::Double(*n as f64),
         (DataType::Double, Value::Integer(n)) => Value::Double(*n as f64),
         (DataType::Double, Value::Float(f)) => Value::Double(*f as f64),
@@ -671,7 +676,11 @@ fn coerce_value(v: Option<&Value>, target: &DataType) -> Value {
 }
 
 /// Build an Arrow array for a specific field across all rows.
-fn build_arrow_array(rows: &[Row], field_idx: usize) -> Result<Arc<dyn arrow::array::Array>> {
+fn build_arrow_array(
+    rows: &[Row],
+    field_idx: usize,
+    target: Option<&DataType>,
+) -> Result<Arc<dyn arrow::array::Array>> {
     use arrow::array::*;
 
     if rows.is_empty() {
@@ -834,7 +843,17 @@ fn build_arrow_array(rows: &[Row], field_idx: usize) -> Result<Arc<dyn arrow::ar
                         .transpose()
                 })
                 .collect();
-            Ok(Arc::new(TimestampMicrosecondArray::from(values?)))
+            // `Value::Timestamp` covers both TIMESTAMP (LTZ) and TIMESTAMP_NTZ; the
+            // Arrow array must carry the timezone the schema declares, or
+            // `RecordBatch::try_new` rejects it (LTZ schema field = Timestamp(_, UTC),
+            // NTZ = Timestamp(_, None)). Default to UTC unless the target is NTZ.
+            let arr = TimestampMicrosecondArray::from(values?);
+            let arr = if matches!(target, Some(DataType::TimestampNtz)) {
+                arr
+            } else {
+                arr.with_timezone("UTC")
+            };
+            Ok(Arc::new(arr))
         }
         Value::Decimal { scale, .. } => {
             // Column-wide precision/scale come from the first value (Spark decimals in a
