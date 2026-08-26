@@ -465,6 +465,32 @@ fn catalog_ddl_surface() {
     // These can be no-ops or errors depending on the catalog; exercise the paths.
     let _ = c.clear_cache();
     let _ = c.refresh_by_path("/tmp/nonexistent");
+
+    // create_table (from a written Parquet dir) + refresh + recover_partitions. Tolerate
+    // server-side limitations (recover on a non-partitioned table, etc.); the coverage
+    // target is the client-side catalog request path.
+    let dir = std::env::temp_dir().join(format!("cov_ct_{}", std::process::id()));
+    let path = dir.join("t").to_string_lossy().into_owned();
+    s.range(4)
+        .unwrap()
+        .write()
+        .mode("overwrite")
+        .parquet(&path)
+        .unwrap();
+    let _ = s
+        .sql("DROP TABLE IF EXISTS cov_created_tbl")
+        .unwrap()
+        .collect();
+    if let Ok(created) = c.create_table("cov_created_tbl", Some(&path), Some("parquet"), None) {
+        let _ = created.count();
+        let _ = c.refresh_table("cov_created_tbl");
+        let _ = c.recover_partitions("cov_created_tbl");
+        let _ = c.is_cached("cov_created_tbl");
+    }
+    let _ = s
+        .sql("DROP TABLE IF EXISTS cov_created_tbl")
+        .unwrap()
+        .collect();
 }
 
 #[test]
