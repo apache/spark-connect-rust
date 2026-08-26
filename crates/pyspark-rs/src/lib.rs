@@ -26,6 +26,7 @@ mod datasource;
 mod errors;
 mod functions;
 mod group;
+mod ml;
 mod profiler;
 mod readwriter;
 mod resource;
@@ -146,6 +147,17 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyWindow>()?;
     m.add_class::<PyWindowSpec>()?;
     m.add_class::<PyFrameBound>()?;
+
+    // Register ML classes (pyspark.ml.connect)
+    m.add_class::<ml::PyMLModel>()?;
+    m.add_class::<ml::PyStandardScaler>()?;
+    m.add_class::<ml::PyMaxAbsScaler>()?;
+    m.add_class::<ml::PyStringIndexer>()?;
+    m.add_class::<ml::PyVectorAssembler>()?;
+    m.add_class::<ml::PyLogisticRegression>()?;
+    m.add_class::<ml::PyRegressionEvaluator>()?;
+    m.add_class::<ml::PyBinaryClassificationEvaluator>()?;
+    m.add_class::<ml::PyPipeline>()?;
 
     // Register functions as a submodule
     let functions_module = PyModule::new(_py, "functions")?;
