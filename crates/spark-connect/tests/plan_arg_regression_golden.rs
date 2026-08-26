@@ -115,7 +115,10 @@ fn test_hint_with_parameters_assertion() {
         Some(proto::expression::ExprType::Literal(lit)) => {
             let lit_type = lit.literal_type.clone().unwrap();
             assert!(
-                matches!(lit_type, proto::expression::literal::LiteralType::Integer(10)),
+                matches!(
+                    lit_type,
+                    proto::expression::literal::LiteralType::Integer(10)
+                ),
                 "first param '10' should be Integer(10) literal"
             );
         }

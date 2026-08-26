@@ -15,7 +15,10 @@ fn should_run() -> bool {
 }
 fn session() -> SparkSession {
     let url = std::env::var("SPARK_REMOTE").unwrap_or_else(|_| "sc://localhost:15002".to_string());
-    SparkSession::builder().remote(&url).get_or_create().expect("session")
+    SparkSession::builder()
+        .remote(&url)
+        .get_or_create()
+        .expect("session")
 }
 fn base(s: &SparkSession) -> DataFrame {
     s.sql(
@@ -40,7 +43,9 @@ fn bools(v: &[Value]) -> Vec<Option<bool>> {
     v.iter().map(|x| x.as_bool()).collect()
 }
 fn strs(v: &[Value]) -> Vec<Option<String>> {
-    v.iter().map(|x| x.as_str().map(|s| s.to_string())).collect()
+    v.iter()
+        .map(|x| x.as_str().map(|s| s.to_string()))
+        .collect()
 }
 
 #[test]
@@ -50,28 +55,79 @@ fn column_arithmetic_and_comparison() {
     }
     let s = session();
     let df = base(&s);
-    assert_eq!(i64s(&one(&df, col("id").add(lit(1)))), vec![Some(2), Some(3), Some(4)]);
-    assert_eq!(i64s(&one(&df, col("id").sub(lit(1)))), vec![Some(0), Some(1), Some(2)]);
-    assert_eq!(i64s(&one(&df, col("id").mul(lit(2)))), vec![Some(2), Some(4), Some(6)]);
-    assert_eq!(i64s(&one(&df, col("id").modulo(lit(2)))), vec![Some(1), Some(0), Some(1)]);
-    assert_eq!(i64s(&one(&df, col("id").neg())), vec![Some(-1), Some(-2), Some(-3)]);
+    assert_eq!(
+        i64s(&one(&df, col("id").add(lit(1)))),
+        vec![Some(2), Some(3), Some(4)]
+    );
+    assert_eq!(
+        i64s(&one(&df, col("id").sub(lit(1)))),
+        vec![Some(0), Some(1), Some(2)]
+    );
+    assert_eq!(
+        i64s(&one(&df, col("id").mul(lit(2)))),
+        vec![Some(2), Some(4), Some(6)]
+    );
+    assert_eq!(
+        i64s(&one(&df, col("id").modulo(lit(2)))),
+        vec![Some(1), Some(0), Some(1)]
+    );
+    assert_eq!(
+        i64s(&one(&df, col("id").neg())),
+        vec![Some(-1), Some(-2), Some(-3)]
+    );
     // comparisons
-    assert_eq!(bools(&one(&df, col("id").gt(lit(1)))), vec![Some(false), Some(true), Some(true)]);
-    assert_eq!(bools(&one(&df, col("id").ge(lit(2)))), vec![Some(false), Some(true), Some(true)]);
-    assert_eq!(bools(&one(&df, col("id").lt(lit(2)))), vec![Some(true), Some(false), Some(false)]);
-    assert_eq!(bools(&one(&df, col("id").le(lit(2)))), vec![Some(true), Some(true), Some(false)]);
-    assert_eq!(bools(&one(&df, col("id").eq(lit(2)))), vec![Some(false), Some(true), Some(false)]);
-    assert_eq!(bools(&one(&df, col("id").ne(lit(2)))), vec![Some(true), Some(false), Some(true)]);
+    assert_eq!(
+        bools(&one(&df, col("id").gt(lit(1)))),
+        vec![Some(false), Some(true), Some(true)]
+    );
+    assert_eq!(
+        bools(&one(&df, col("id").ge(lit(2)))),
+        vec![Some(false), Some(true), Some(true)]
+    );
+    assert_eq!(
+        bools(&one(&df, col("id").lt(lit(2)))),
+        vec![Some(true), Some(false), Some(false)]
+    );
+    assert_eq!(
+        bools(&one(&df, col("id").le(lit(2)))),
+        vec![Some(true), Some(true), Some(false)]
+    );
+    assert_eq!(
+        bools(&one(&df, col("id").eq(lit(2)))),
+        vec![Some(false), Some(true), Some(false)]
+    );
+    assert_eq!(
+        bools(&one(&df, col("id").ne(lit(2)))),
+        vec![Some(true), Some(false), Some(true)]
+    );
     // boolean combinators
     let big_and_small = col("id").gt(lit(1)).and(col("id").lt(lit(3)));
-    assert_eq!(bools(&one(&df, big_and_small)), vec![Some(false), Some(true), Some(false)]);
+    assert_eq!(
+        bools(&one(&df, big_and_small)),
+        vec![Some(false), Some(true), Some(false)]
+    );
     let one_or_three = col("id").eq(lit(1)).or(col("id").eq(lit(3)));
-    assert_eq!(bools(&one(&df, one_or_three)), vec![Some(true), Some(false), Some(true)]);
-    assert_eq!(bools(&one(&df, col("id").gt(lit(1)).not())), vec![Some(true), Some(false), Some(false)]);
+    assert_eq!(
+        bools(&one(&df, one_or_three)),
+        vec![Some(true), Some(false), Some(true)]
+    );
+    assert_eq!(
+        bools(&one(&df, col("id").gt(lit(1)).not())),
+        vec![Some(true), Some(false), Some(false)]
+    );
     // bitwise
-    assert_eq!(i64s(&one(&df, col("id").bitwise_and(lit(1)))), vec![Some(1), Some(0), Some(1)]);
-    assert_eq!(i64s(&one(&df, col("id").bitwise_or(lit(4)))), vec![Some(5), Some(6), Some(7)]);
-    assert_eq!(i64s(&one(&df, col("id").bitwise_xor(lit(1)))), vec![Some(0), Some(3), Some(2)]);
+    assert_eq!(
+        i64s(&one(&df, col("id").bitwise_and(lit(1)))),
+        vec![Some(1), Some(0), Some(1)]
+    );
+    assert_eq!(
+        i64s(&one(&df, col("id").bitwise_or(lit(4)))),
+        vec![Some(5), Some(6), Some(7)]
+    );
+    assert_eq!(
+        i64s(&one(&df, col("id").bitwise_xor(lit(1)))),
+        vec![Some(0), Some(3), Some(2)]
+    );
 }
 
 #[test]
@@ -94,18 +150,36 @@ fn column_string_and_null_and_cast() {
         bools(&one(&df, col("name").endswith(lit_string("e")))),
         vec![Some(true), Some(false), None]
     );
-    assert_eq!(bools(&one(&df, col("name").like("a%"))), vec![Some(true), Some(false), None]);
-    assert_eq!(bools(&one(&df, col("name").rlike("^a"))), vec![Some(true), Some(false), None]);
-    assert_eq!(bools(&one(&df, col("name").ilike("A%"))), vec![Some(true), Some(false), None]);
+    assert_eq!(
+        bools(&one(&df, col("name").like("a%"))),
+        vec![Some(true), Some(false), None]
+    );
+    assert_eq!(
+        bools(&one(&df, col("name").rlike("^a"))),
+        vec![Some(true), Some(false), None]
+    );
+    assert_eq!(
+        bools(&one(&df, col("name").ilike("A%"))),
+        vec![Some(true), Some(false), None]
+    );
     // substr is 1-indexed
     assert_eq!(
         strs(&one(&df, col("name").substr(lit(1), lit(3)))),
         vec![Some("app".into()), Some("ban".into()), None]
     );
-    assert_eq!(strs(&one(&df, f::upper(col("name")))), vec![Some("APPLE".into()), Some("BANANA".into()), None]);
+    assert_eq!(
+        strs(&one(&df, f::upper(col("name")))),
+        vec![Some("APPLE".into()), Some("BANANA".into()), None]
+    );
     // null handling
-    assert_eq!(bools(&one(&df, col("name").is_null())), vec![Some(false), Some(false), Some(true)]);
-    assert_eq!(bools(&one(&df, col("name").is_not_null())), vec![Some(true), Some(true), Some(false)]);
+    assert_eq!(
+        bools(&one(&df, col("name").is_null())),
+        vec![Some(false), Some(false), Some(true)]
+    );
+    assert_eq!(
+        bools(&one(&df, col("name").is_not_null())),
+        vec![Some(true), Some(true), Some(false)]
+    );
     // eqNullSafe: null-safe equality
     assert_eq!(
         bools(&one(&df, col("name").eq_null_safe(lit_string("apple")))),
@@ -113,10 +187,16 @@ fn column_string_and_null_and_cast() {
     );
     // casts: double -> int
     assert_eq!(
-        i64s(&one(&df, col("val").cast(spark_connect::types::DataType::Integer))),
+        i64s(&one(
+            &df,
+            col("val").cast(spark_connect::types::DataType::Integer)
+        )),
         vec![Some(10), Some(20), Some(30)]
     );
-    assert_eq!(i64s(&one(&df, col("val").cast_str("int"))), vec![Some(10), Some(20), Some(30)]);
+    assert_eq!(
+        i64s(&one(&df, col("val").cast_str("int"))),
+        vec![Some(10), Some(20), Some(30)]
+    );
 }
 
 #[test]
@@ -146,8 +226,7 @@ fn column_membership_conditional_window() {
     let _ = one(&df, lit_double(1.5));
     let _ = one(&df, lit_boolean(true));
     // sort-order builders + window (over)
-    let w = Window::partition_by(vec![col("id").expression().clone()])
-        .order_by(vec![]);
+    let w = Window::partition_by(vec![col("id").expression().clone()]).order_by(vec![]);
     let _ = one(&df, f::sum(col("val")).over(w));
     // asc/desc builders exercised through order_by
     let _ = df
