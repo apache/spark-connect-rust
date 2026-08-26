@@ -74,6 +74,15 @@ impl Column {
         }
     }
 
+    /// `Column.try_cast` with a DDL type string.
+    pub fn try_cast_str(self, type_name: &str) -> Column {
+        Column {
+            expr: Expression::Cast(Box::new(
+                Cast::new_str(self.expr, type_name).with_eval_mode(CastEvalMode::Try),
+            )),
+        }
+    }
+
     /// Mirrors `pyspark.sql.column.Column.isNull`.
     pub fn is_null(self) -> Column {
         Column {

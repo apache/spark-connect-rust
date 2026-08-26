@@ -29,9 +29,46 @@ impl PyColumn {
         PyColumn::new(self.column.clone().alias(name))
     }
 
-    /// Cast to a different type (using string DDL).
-    fn cast(&self, type_name: &str) -> PyColumn {
-        PyColumn::new(self.column.clone().cast_str(type_name))
+    /// Alias for `alias` (pyspark `Column.name`).
+    fn name(&self, name: &str) -> PyColumn {
+        PyColumn::new(self.column.clone().name(name))
+    }
+
+    /// Cast to a different type. Accepts a `DataType` or a DDL type string,
+    /// matching `pyspark.sql.Column.cast`.
+    fn cast(&self, data_type: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
+        if let Ok(dt) = data_type.extract::<PyRef<crate::types::PyDataType>>() {
+            Ok(PyColumn::new(self.column.clone().cast(dt.inner.clone())))
+        } else {
+            let s: String = data_type.extract()?;
+            Ok(PyColumn::new(self.column.clone().cast_str(&s)))
+        }
+    }
+
+    /// Alias for `cast` (pyspark `Column.astype`).
+    fn astype(&self, data_type: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
+        self.cast(data_type)
+    }
+
+    /// Try to cast, yielding NULL on failure. Accepts a `DataType` or DDL string.
+    /// Mirrors `pyspark.sql.Column.try_cast`.
+    #[pyo3(name = "try_cast")]
+    fn try_cast(&self, data_type: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
+        if let Ok(dt) = data_type.extract::<PyRef<crate::types::PyDataType>>() {
+            Ok(PyColumn::new(
+                self.column.clone().try_cast(dt.inner.clone()),
+            ))
+        } else {
+            let s: String = data_type.extract()?;
+            Ok(PyColumn::new(self.column.clone().try_cast_str(&s)))
+        }
+    }
+
+    /// Get an item from a list/map by key (pyspark `Column.getItem`).
+    #[pyo3(name = "getItem")]
+    fn get_item(&self, key: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
+        let key_col = py_obj_to_column(key)?;
+        Ok(PyColumn::new(self.column.clone().get_item(key_col)))
     }
 
     /// Check if NULL.
