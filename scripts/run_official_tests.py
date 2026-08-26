@@ -49,6 +49,11 @@ FLAKY_FILES = {
     # Stateful structured-streaming (transformWithState) - also event-driven.
     "test_parity_transform_with_state.py",
     "test_parity_pandas_transform_with_state.py",
+    # Arrow Python UDFs spawn pyarrow Python workers; their interpreter/worker
+    # startup can transiently exceed the per-file cap under a loaded serial run
+    # (observed as a whole-file TIMEOUT with p=0 - a spawn stall, not a logic
+    # failure, which would surface as f>0). Retry rather than flake the gate.
+    "test_parity_arrow_python_udf.py",
 }
 
 _FAIL_RE = re.compile(r"^(?:FAILED|ERROR)\s+(\S+)")
