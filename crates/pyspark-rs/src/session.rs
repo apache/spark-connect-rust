@@ -1,7 +1,7 @@
 //! PyO3 wrapper for Spark Connect sessions.
 
 use pyo3::prelude::*;
-use pyo3::types::PyList;
+use pyo3::types::{PyDict, PyList};
 use spark_connect::row::{Row, Value};
 use spark_connect::session::SparkSession;
 use spark_connect::types::{DataType, StructField};
@@ -22,16 +22,28 @@ use crate::streaming::{PyDataStreamReader, PyStreamingQueryManager};
 #[derive(Clone)]
 pub struct PySparkSessionBuilder {
     remote_url: Option<String>,
+    /// Runtime configs set via `.config(...)`, applied after the session connects.
+    configs: Vec<(String, String)>,
 }
 
 impl PySparkSessionBuilder {
     pub fn new() -> Self {
-        PySparkSessionBuilder { remote_url: None }
+        PySparkSessionBuilder {
+            remote_url: None,
+            configs: Vec::new(),
+        }
     }
 }
 
 #[pymethods]
 impl PySparkSessionBuilder {
+    /// Construct a fresh builder, so `SparkSession.Builder()` works like pyspark
+    /// (in addition to the `SparkSession.builder` class attribute).
+    #[new]
+    fn py_new() -> Self {
+        PySparkSessionBuilder::new()
+    }
+
     /// Set the remote Spark Connect server URL. Returns the builder (chainable).
     fn remote(&self, url: &str) -> PySparkSessionBuilder {
         let mut b = self.clone();
@@ -39,9 +51,67 @@ impl PySparkSessionBuilder {
         b
     }
 
-    /// `appName` - accepted for API parity; Connect derives the app name server-side.
+    /// Set a config option, or several via `map`. Mirrors
+    /// `SparkSession.Builder.config(key=None, value=None, *, map=None)`. `spark.remote`
+    /// sets the connect endpoint; other keys are applied as runtime confs on connect.
+    #[pyo3(signature = (key=None, value=None, map=None))]
+    fn config(
+        &self,
+        key: Option<&str>,
+        value: Option<&Bound<'_, PyAny>>,
+        map: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PySparkSessionBuilder> {
+        let mut b = self.clone();
+        if let Some(k) = key {
+            let v = match value {
+                Some(v) => crate::coerce_option_value(v)?.unwrap_or_default(),
+                None => String::new(),
+            };
+            b.set_conf(k, v);
+        }
+        if let Some(m) = map {
+            for (k, v) in m.iter() {
+                let ks = k.str()?.to_string();
+                let vs = crate::coerce_option_value(&v)?.unwrap_or_default();
+                b.set_conf(&ks, vs);
+            }
+        }
+        Ok(b)
+    }
+
+    /// `appName` - accepted for API parity; a Connect client cannot rename an
+    /// already-running remote server, so this is a no-op (chainable), matching
+    /// pyspark's Connect behavior.
     #[pyo3(name = "appName")]
     fn app_name(&self, _name: &str) -> PySparkSessionBuilder {
+        self.clone()
+    }
+
+    /// `master` - not applicable to a remote Connect session (no local cluster to
+    /// point at); accepted and ignored for API parity, like pyspark Connect.
+    fn master(&self, _url: &str) -> PySparkSessionBuilder {
+        self.clone()
+    }
+
+    /// `channelBuilder` - customizing the underlying gRPC channel is a Python-transport
+    /// concept; this client uses a native Rust transport configured via `remote(url)`,
+    /// so a custom Python channel builder is not supported. Mirrors the API surface.
+    #[pyo3(name = "channelBuilder")]
+    #[allow(unused_variables)]
+    fn channel_builder(
+        &self,
+        channelBuilder: &Bound<'_, PyAny>,
+    ) -> PyResult<PySparkSessionBuilder> {
+        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            "channelBuilder is not supported: this client uses a native Rust transport; \
+             configure the endpoint via .remote(url) instead",
+        ))
+    }
+
+    /// `enableHiveSupport` - a no-op for a Connect client (the remote server's
+    /// catalog is fixed); accepted for API parity.
+    #[pyo3(name = "enableHiveSupport")]
+    fn enable_hive_support(&self) -> PySparkSessionBuilder {
         self.clone()
     }
 
@@ -54,8 +124,30 @@ impl PySparkSessionBuilder {
 
         let builder = SparkSession::builder().remote(&url);
         let session = py.detach(|| builder.get_or_create()).to_pyerr()?;
+        // Apply builder configs as runtime confs now that we have a session.
+        let conf = session.conf();
+        for (k, v) in &self.configs {
+            py.detach(|| conf.set(k, v)).to_pyerr()?;
+        }
         *active_slot().lock().unwrap() = Some(session.clone());
         Ok(PySparkSession::new(session))
+    }
+
+    /// `create()` - builds a brand-new session. For Connect this is equivalent to
+    /// getOrCreate against the configured remote.
+    fn create(&self, py: Python<'_>) -> PyResult<PySparkSession> {
+        self.get_or_create(py)
+    }
+}
+
+impl PySparkSessionBuilder {
+    /// Record a config pair, capturing `spark.remote` as the endpoint.
+    fn set_conf(&mut self, key: &str, value: String) {
+        if key == "spark.remote" {
+            self.remote_url = Some(value);
+        } else {
+            self.configs.push((key.to_string(), value));
+        }
     }
 }
 
@@ -128,55 +220,78 @@ impl PySparkSession {
         data: &Bound<'_, PyList>,
         schema: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        // Parse the data into rows
-        let mut rows = vec![];
-        let mut num_cols: Option<usize> = None;
+        use crate::row::PyRow;
 
+        // Resolve the schema: a list of column names (types inferred), a DDL string or
+        // a StructType (names + types explicit), or None (names from Row / default).
+        enum Spec {
+            None,
+            Names(Vec<String>),
+            Struct(Vec<StructField>),
+        }
+        let spec = match schema {
+            None => Spec::None,
+            Some(s) => {
+                if let Ok(names) = s.extract::<Vec<String>>() {
+                    Spec::Names(names)
+                } else {
+                    // Any DataType object (StructType, PyDataType) or a DDL string,
+                    // resolved through the shared converter. A struct becomes the
+                    // schema directly; a scalar AtomicType becomes a single "value"
+                    // column (matching pyspark createDataFrame(data, AtomicType())).
+                    match crate::types::py_to_data_type(s)? {
+                        DataType::Struct { fields } => Spec::Struct(fields),
+                        atomic => Spec::Struct(vec![spark_connect::types::StructField {
+                            name: "value".to_string(),
+                            data_type: atomic,
+                            nullable: true,
+                            metadata: std::collections::BTreeMap::new(),
+                        }]),
+                    }
+                }
+            }
+        };
+
+        let spec_names: Option<Vec<String>> = match &spec {
+            Spec::Names(n) => Some(n.clone()),
+            Spec::Struct(f) => Some(f.iter().map(|x| x.name.clone()).collect()),
+            Spec::None => None,
+        };
+
+        // Parse each item into values; a list/tuple carries no names, a Row carries its own.
+        let mut rows: Vec<Row> = vec![];
         for item in data.iter() {
-            let row_list = if let Ok(lst) = item.cast::<PyList>() {
-                lst.iter().collect::<Vec<_>>()
-            } else {
-                // Try to extract as tuple
-                if let Ok(tuple) = item.cast::<pyo3::types::PyTuple>() {
-                    tuple.iter().collect::<Vec<_>>()
+            let (values, row_names): (Vec<Value>, Option<Vec<String>>) =
+                if let Ok(pyrow) = item.extract::<PyRef<PyRow>>() {
+                    (
+                        pyrow.row.values().to_vec(),
+                        Some(pyrow.row.fields().to_vec()),
+                    )
+                } else if let Ok(lst) = item.cast::<PyList>() {
+                    (
+                        lst.iter()
+                            .map(|v| py_to_value(&v))
+                            .collect::<PyResult<_>>()?,
+                        None,
+                    )
+                } else if let Ok(tuple) = item.cast::<pyo3::types::PyTuple>() {
+                    (
+                        tuple
+                            .iter()
+                            .map(|v| py_to_value(&v))
+                            .collect::<PyResult<_>>()?,
+                        None,
+                    )
                 } else {
                     return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                        "Each row must be a list or tuple",
+                        "Each row must be a list, tuple, or Row",
                     ));
-                }
-            };
-
-            if let Some(nc) = num_cols {
-                if row_list.len() != nc {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        "All rows must have the same number of columns",
-                    ));
-                }
-            } else {
-                num_cols = Some(row_list.len());
-            }
-
-            let mut values = vec![];
-            for val_py in row_list {
-                let val = py_to_value(&val_py)?;
-                values.push(val);
-            }
-
-            let field_names = if let Some(schema_obj) = schema {
-                // Parse schema to get field names
-                if let Ok(names) = schema_obj.extract::<Vec<String>>() {
-                    names
-                } else {
-                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                        "Schema must be a list of strings",
-                    ));
-                }
-            } else {
-                // Generate default names
-                (0..values.len()).map(|i| format!("col{}", i)).collect()
-            };
-
-            rows.push(Row::new(field_names, values));
+                };
+            let names = spec_names
+                .clone()
+                .or(row_names)
+                .unwrap_or_else(|| (0..values.len()).map(|i| format!("col{}", i)).collect());
+            rows.push(Row::new(names, values));
         }
 
         if rows.is_empty() {
@@ -185,45 +300,73 @@ impl PySparkSession {
             ));
         }
 
-        // Build the schema. Field NAMES come from the explicit list (or default
-        // col0/col1/...); field TYPES are INFERRED from the first row's values (Spark
-        // infers types from data). Forcing every field to String would mismatch the
-        // Arrow arrays built from the actual values (int/date/decimal/...).
-        let names: Vec<String> = if let Some(schema_obj) = schema {
-            schema_obj.extract::<Vec<String>>().map_err(|_| {
-                PyErr::new::<pyo3::exceptions::PyTypeError, _>("Schema must be a list of strings")
-            })?
-        } else {
-            rows[0].fields().to_vec()
+        // An explicit struct schema wins; otherwise infer field types from the first row.
+        let schema_dtype = match spec {
+            Spec::Struct(fields) => DataType::Struct { fields },
+            _ => {
+                let fields: Vec<StructField> = rows[0]
+                    .fields()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| StructField {
+                        name: name.clone(),
+                        data_type: rows[0].get(i).map(value_to_datatype).unwrap_or(
+                            DataType::String {
+                                collation: "UTF8_BINARY".to_string(),
+                            },
+                        ),
+                        nullable: true,
+                        metadata: Default::default(),
+                    })
+                    .collect();
+                DataType::Struct { fields }
+            }
         };
-        let fields: Vec<StructField> = names
-            .into_iter()
-            .enumerate()
-            .map(|(i, name)| StructField {
-                name,
-                data_type: rows[0]
-                    .get(i)
-                    .map(value_to_datatype)
-                    .unwrap_or(DataType::String {
-                        collation: "UTF8_BINARY".to_string(),
-                    }),
-                nullable: true,
-                metadata: Default::default(),
-            })
-            .collect();
-        let schema_dtype = DataType::Struct { fields };
 
-        let df = self
-            .session
-            .create_dataframe(rows, schema_dtype)
+        let df = py
+            .detach(|| self.session.create_dataframe(rows, schema_dtype))
             .to_pyerr()?;
         Ok(PyDataFrame::new(df))
     }
 
-    /// Get the catalog API.
+    /// Get the catalog API (`spark.catalog`).
+    #[getter]
     #[pyo3(name = "catalog")]
     fn catalog(&self) -> PyCatalog {
         PyCatalog::new(self.session.catalog())
+    }
+
+    /// Runtime configuration (`spark.conf`).
+    #[getter]
+    #[pyo3(name = "conf")]
+    fn conf(&self) -> crate::conf::PyRuntimeConf {
+        crate::conf::PyRuntimeConf::new(self.session.conf())
+    }
+
+    /// Table-valued functions namespace (`spark.tvf`).
+    #[getter]
+    #[pyo3(name = "tvf")]
+    fn tvf(&self) -> crate::tvf::PyTableValuedFunction {
+        crate::tvf::PyTableValuedFunction::new(self.session.tvf())
+    }
+
+    /// Copy a local file to the Spark-managed filesystem (`copyFromLocalToFs`).
+    #[pyo3(name = "copyFromLocalToFs")]
+    fn copy_from_local_to_fs(
+        &self,
+        py: Python<'_>,
+        local_path: &str,
+        dest_path: &str,
+    ) -> PyResult<()> {
+        py.detach(|| self.session.copy_from_local_to_fs(local_path, dest_path))
+            .to_pyerr()
+    }
+
+    /// DataFrameReader for batch reads (`spark.read`).
+    #[getter]
+    #[pyo3(name = "read")]
+    fn read(&self) -> crate::readwriter::PyDataFrameReader {
+        crate::readwriter::PyDataFrameReader::new(self.session.read())
     }
 
     /// Get the DataStreamReader for reading streaming data (`spark.readStream`).
@@ -271,8 +414,38 @@ _UDFRegistration()
     }
 
     #[pyo3(name = "sessionId")]
+    fn session_id_camel(&self) -> String {
+        self.session.session_id().to_string()
+    }
+
+    /// The session id (property form, mirrors `SparkSession.session_id`).
+    #[getter]
     fn session_id(&self) -> String {
         self.session.session_id().to_string()
+    }
+
+    /// Whether this session has been stopped. Mirrors `SparkSession.is_stopped`.
+    #[getter]
+    fn is_stopped(&self) -> bool {
+        self.session.is_stopped()
+    }
+
+    /// The builder CLASS, reached as `SparkSession.Builder` (mirrors pyspark, which
+    /// exposes the nested `Builder` type so `SparkSession.Builder()` works).
+    #[classattr]
+    #[allow(non_snake_case)]
+    fn Builder(py: Python<'_>) -> Py<pyo3::types::PyType> {
+        py.get_type::<PySparkSessionBuilder>().unbind()
+    }
+
+    /// UDTF registration accessor, mirroring `SparkSession.udtf.register(name, cls)`.
+    /// Returns a registration object whose `register` cloudpickles the Python UDTF
+    /// class and returns a bound, name-registered table function.
+    #[getter]
+    fn udtf<'a>(&self, py: Python<'a>) -> PyResult<Bound<'a, PyAny>> {
+        py.import("pyspark.sql.udtf")?
+            .getattr("UDTFRegistration")?
+            .call0()
     }
 
     /// The active session for this process, or None. Mirrors `SparkSession.getActiveSession`.
@@ -408,7 +581,8 @@ _UDFRegistration()
         self.session.clear_tags()
     }
 
-    #[pyo3(name = "addArtifacts")]
+    // Mirrors reference `SparkSession.addArtifacts(*path)` - variadic positional paths.
+    #[pyo3(name = "addArtifacts", signature = (*paths))]
     fn add_artifacts(&self, py: Python<'_>, paths: Vec<String>) -> PyResult<()> {
         let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
         py.detach(|| self.session.add_artifacts(&refs)).to_pyerr()
@@ -460,7 +634,7 @@ fn value_to_datatype(v: &Value) -> DataType {
 }
 
 /// Convert a Python value to a Rust Value.
-fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
+pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     // Check for None
     if obj.is_none() {
         return Ok(Value::Null);

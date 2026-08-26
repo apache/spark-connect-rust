@@ -253,12 +253,17 @@ fn test_decimal_round() {
     assert_eq!(rows.len(), 1, "Expected 1 row");
     let row = &rows[0];
 
+    // A SQL decimal literal (3.14159) is DECIMAL in Spark, so ROUND(.., 2) yields
+    // DECIMAL(4,2)=3.14 - not DOUBLE. Accept either, checking the numeric value.
     match row.get(0).expect("No value") {
         Value::Double(d) => {
-            // 3.14159 rounded to 2 decimals should be approximately 3.14
             assert!((d - 3.14).abs() < 0.01, "Expected ~3.14, got {}", d);
         }
-        other => panic!("Expected Double, got {:?}", other),
+        Value::Decimal { value, .. } => {
+            let d: f64 = value.parse().expect("decimal value parses as f64");
+            assert!((d - 3.14).abs() < 0.01, "Expected ~3.14, got {}", value);
+        }
+        other => panic!("Expected Double/Decimal, got {:?}", other),
     }
 
     // Also test with lit(3.14159) to ensure literal decoding works
@@ -270,16 +275,24 @@ fn test_decimal_round() {
     assert_eq!(rows2.len(), 1, "Expected 1 row");
     let row2 = &rows2[0];
 
+    // The SQL literal 3.14159 decodes as DECIMAL(6,5) in Spark (not DOUBLE).
     match row2.get(0).expect("No value") {
         Value::Double(d) => {
-            // The literal 3.14159 should decode as approximately 3.14159
             assert!(
                 (d - 3.14159).abs() < 0.00001,
                 "Expected ~3.14159, got {}",
                 d
             );
         }
-        other => panic!("Expected Double, got {:?}", other),
+        Value::Decimal { value, .. } => {
+            let d: f64 = value.parse().expect("decimal value parses as f64");
+            assert!(
+                (d - 3.14159).abs() < 0.00001,
+                "Expected ~3.14159, got {}",
+                value
+            );
+        }
+        other => panic!("Expected Double/Decimal, got {:?}", other),
     }
 }
 
@@ -393,4 +406,32 @@ fn test_with_watermark() {
 
     // Just verify that the method doesn't fail
     let _schema = df.schema().expect("Failed to get schema");
+}
+
+#[test]
+fn test_to_arrow_full_path() {
+    // Full server -> collect -> Arrow IPC path for DataFrame::to_arrow (the
+    // conversion logic itself is unit-tested in dataframe.rs::conversion_tests).
+    if !should_run() {
+        println!("Skipping test_to_arrow_full_path - set SPARK_REMOTE to run");
+        return;
+    }
+    use arrow::ipc::reader::FileReader;
+    use std::io::Cursor;
+
+    let remote_url =
+        std::env::var("SPARK_REMOTE").unwrap_or_else(|_| "sc://localhost:15002".to_string());
+    let session = SparkSession::builder()
+        .remote(&remote_url)
+        .get_or_create()
+        .expect("Failed to create session");
+
+    let ipc = session
+        .range(5)
+        .expect("range")
+        .to_arrow()
+        .expect("to_arrow");
+    let reader = FileReader::try_new(Cursor::new(ipc), None).expect("valid Arrow IPC file");
+    let rows: usize = reader.map(|b| b.expect("batch").num_rows()).sum();
+    assert_eq!(rows, 5, "to_arrow must round-trip all 5 rows of range(5)");
 }

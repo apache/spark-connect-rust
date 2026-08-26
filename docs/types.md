@@ -60,7 +60,7 @@ let df = spark.read()
 Convert a column to a different type with `.cast()`:
 
 ```rust
-use spark_connect::types::DataType;
+use spark_connect::{col, types::DataType};
 
 // Cast to LongType
 let df = df.with_column("id", col("id").cast(DataType::Long));

@@ -3,7 +3,6 @@
 //! Mirroring `pyspark.sql.observation.Observation`.
 
 use crate::dataframe::DataFrame;
-use crate::expression::Expression;
 use std::collections::HashMap;
 
 /// An Observation for collecting metrics from a DataFrame.

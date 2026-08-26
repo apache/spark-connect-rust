@@ -1,0 +1,13 @@
+# Known environmental failures in the official Spark Connect test suite - tests that
+# fail in the CI environment for reasons OUTSIDE our client, deselected so the gate
+# tracks genuine client regressions only. Each line is
+# `<relpath>::Class::method  # <reason>` (relpath relative to <spark>/python).
+# run_official_tests.py's drift check re-runs these every run and reports any that
+# start passing, so the list cannot silently rot. Regenerate with
+# scripts/gen_parity_skiplist.py on a version bump.
+#
+# NB: many more tests fail against an *older local* Spark dist that lacks the 4.2.0
+# TIME type (UNSUPPORTED_TIME_TYPE); those pass in CI, so they are intentionally NOT
+# listed here - the CI drift check confirmed it. Keep this list to the CI reality.
+pyspark/sql/tests/connect/test_parity_dataframe.py::DataFrameParityTests::test_metadata_column  # requires InMemoryCatalog for 'testcat' - a test-only catalog class absent from the Spark distribution
+pyspark/sql/tests/connect/arrow/test_parity_arrow_python_udf.py::ArrowPythonUDFParityLegacyTests::test_type_coercion_string_to_numeric  # legacy arrow-UDF string->numeric coercion is arrow/pandas-version dependent (fails in the CI image)

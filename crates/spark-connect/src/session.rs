@@ -2,7 +2,7 @@
 //!
 //! Provides the entry point for DataFrame operations and SQL queries.
 
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use spark_connect_core::channel::ChannelBuilder;
@@ -11,7 +11,6 @@ use spark_connect_core::error::{Result, SparkError};
 use spark_connect_core::runtime::block_on;
 use spark_connect_proto as proto;
 
-use crate::catalog::Catalog;
 use crate::dataframe::DataFrame;
 use crate::plan::LogicalPlan;
 use crate::profiler::ProfilerCollector;
@@ -55,6 +54,9 @@ pub struct SparkSession {
     progress_handler_id: Arc<AtomicU64>,
     /// Profiler collector for accumulating profile results across executions.
     profiler: Arc<ProfilerCollector>,
+    /// Whether `stop()` has been called on this session (shared across clones).
+    /// Backs `is_stopped`.
+    stopped: Arc<AtomicBool>,
 }
 
 impl SparkSession {
@@ -68,6 +70,7 @@ impl SparkSession {
             progress_handlers: Arc::new(Mutex::new(Vec::new())),
             progress_handler_id: Arc::new(AtomicU64::new(0)),
             profiler: Arc::new(ProfilerCollector::new()),
+            stopped: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -199,6 +202,7 @@ impl SparkSession {
             progress_handlers: Arc::new(Mutex::new(Vec::new())),
             progress_handler_id: Arc::new(AtomicU64::new(0)),
             profiler: Arc::new(ProfilerCollector::new()),
+            stopped: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -481,7 +485,14 @@ impl SparkSession {
     /// Stop this Spark session.
     pub fn stop(&self) -> Result<()> {
         block_on(self.client.release_session())?;
+        self.stopped.store(true, Ordering::SeqCst);
         Ok(())
+    }
+
+    /// Whether `stop()` has been called on this session. Mirrors
+    /// `pyspark.sql.connect.session.SparkSession.is_stopped`.
+    pub fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
     }
 }
 
@@ -495,6 +506,7 @@ impl Clone for SparkSession {
             progress_handlers: Arc::clone(&self.progress_handlers),
             progress_handler_id: Arc::clone(&self.progress_handler_id),
             profiler: Arc::clone(&self.profiler),
+            stopped: Arc::clone(&self.stopped),
         }
     }
 }
@@ -544,7 +556,6 @@ fn rows_to_arrow_ipc(rows: &[Row], schema: &DataType) -> Result<Vec<u8>> {
     use arrow::datatypes::Schema as ArrowSchema;
     use arrow::ipc::writer::StreamWriter;
     use arrow::record_batch::RecordBatch;
-    use std::io::Cursor;
 
     if rows.is_empty() {
         return Ok(vec![]);
@@ -556,13 +567,27 @@ fn rows_to_arrow_ipc(rows: &[Row], schema: &DataType) -> Result<Vec<u8>> {
 
     // Build column arrays from rows
     let mut columns = vec![];
-    let num_fields = match schema {
-        DataType::Struct { fields } => fields.len(),
+    let fields = match schema {
+        DataType::Struct { fields } => fields,
         _ => return Err(SparkError::connect_msg("Schema is not a struct type")),
     };
 
-    for field_idx in 0..num_fields {
-        let array = build_arrow_array(&rows, field_idx)?;
+    // Coerce each value to its declared field type so the built arrays match the
+    // Arrow schema (e.g. a Python int decodes as Long but "a int" wants Int32).
+    let coerced: Vec<Row> = rows
+        .iter()
+        .map(|r| {
+            let vals: Vec<Value> = fields
+                .iter()
+                .enumerate()
+                .map(|(i, f)| coerce_value(r.get(i), &f.data_type))
+                .collect();
+            Row::new(r.fields().to_vec(), vals)
+        })
+        .collect();
+
+    for field_idx in 0..fields.len() {
+        let array = build_arrow_array(&coerced, field_idx, Some(&fields[field_idx].data_type))?;
         columns.push(array);
     }
 
@@ -603,17 +628,25 @@ fn schema_to_arrow_fields(schema: &DataType) -> Result<Vec<arrow::datatypes::Fie
                     DataType::Long => ArrowDataType::Int64,
                     DataType::Float => ArrowDataType::Float32,
                     DataType::Double => ArrowDataType::Float64,
-                    DataType::String { .. } => ArrowDataType::Utf8,
+                    // CHAR/VARCHAR are string-backed on the wire.
+                    DataType::String { .. } | DataType::Char { .. } | DataType::Varchar { .. } => {
+                        ArrowDataType::Utf8
+                    }
                     DataType::Binary => ArrowDataType::Binary,
                     DataType::Date => ArrowDataType::Date32,
-                    DataType::Timestamp => ArrowDataType::Timestamp(TimeUnit::Microsecond, None),
+                    // TIMESTAMP (LTZ) and TIMESTAMP_NTZ are both micros; NTZ carries no zone.
+                    DataType::Timestamp => {
+                        ArrowDataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
+                    }
+                    DataType::TimestampNtz => ArrowDataType::Timestamp(TimeUnit::Microsecond, None),
+                    DataType::Time { .. } => ArrowDataType::Time64(TimeUnit::Microsecond),
                     DataType::Decimal { precision, scale } => {
                         ArrowDataType::Decimal128(*precision as u8, *scale as i8)
                     }
-                    _ => {
-                        return Err(SparkError::connect_msg(
-                            "Unsupported type for Arrow conversion",
-                        ))
+                    other => {
+                        return Err(SparkError::connect_msg(format!(
+                            "Unsupported type for Arrow createDataFrame conversion: {other:?}"
+                        )))
                     }
                 };
                 arrow_fields.push(Field::new(&field.name, arrow_type, field.nullable));
@@ -624,8 +657,41 @@ fn schema_to_arrow_fields(schema: &DataType) -> Result<Vec<arrow::datatypes::Fie
     }
 }
 
+/// Coerce a value to a declared field type (numeric widening/narrowing from the
+/// Python-inferred type). Non-numeric or already-matching values pass through, so an
+/// explicit `createDataFrame` schema produces arrays that match the Arrow schema.
+fn coerce_value(v: Option<&Value>, target: &DataType) -> Value {
+    let v = match v {
+        Some(v) => v,
+        None => return Value::Null,
+    };
+    match (target, v) {
+        (_, Value::Null) => Value::Null,
+        (DataType::Byte, Value::Long(n)) => Value::Byte(*n as i8),
+        (DataType::Byte, Value::Integer(n)) => Value::Byte(*n as i8),
+        (DataType::Short, Value::Long(n)) => Value::Short(*n as i16),
+        (DataType::Short, Value::Integer(n)) => Value::Short(*n as i16),
+        (DataType::Integer, Value::Long(n)) => Value::Integer(*n as i32),
+        (DataType::Long, Value::Integer(n)) => Value::Long(*n as i64),
+        // Float target from any narrower numeric (a Python int decodes as Long/Integer
+        // but "a float" wants Float32); without these, an Int64Array is built against a
+        // Float32 field and RecordBatch::try_new rejects the mismatch.
+        (DataType::Float, Value::Double(f)) => Value::Float(*f as f32),
+        (DataType::Float, Value::Long(n)) => Value::Float(*n as f32),
+        (DataType::Float, Value::Integer(n)) => Value::Float(*n as f32),
+        (DataType::Double, Value::Long(n)) => Value::Double(*n as f64),
+        (DataType::Double, Value::Integer(n)) => Value::Double(*n as f64),
+        (DataType::Double, Value::Float(f)) => Value::Double(*f as f64),
+        _ => v.clone(),
+    }
+}
+
 /// Build an Arrow array for a specific field across all rows.
-fn build_arrow_array(rows: &[Row], field_idx: usize) -> Result<Arc<dyn arrow::array::Array>> {
+fn build_arrow_array(
+    rows: &[Row],
+    field_idx: usize,
+    target: Option<&DataType>,
+) -> Result<Arc<dyn arrow::array::Array>> {
     use arrow::array::*;
 
     if rows.is_empty() {
@@ -640,12 +706,12 @@ fn build_arrow_array(rows: &[Row], field_idx: usize) -> Result<Arc<dyn arrow::ar
     match first_val {
         Value::Null => Ok(Arc::new(NullArray::new(rows.len()))),
         Value::Bool(_) => {
-            let values: Result<Vec<_>> = rows
+            let values: Result<Vec<Option<bool>>> = rows
                 .iter()
-                .map(|r| {
-                    r.get(field_idx)
-                        .and_then(|v| v.as_bool())
-                        .ok_or_else(|| SparkError::connect_msg("Type mismatch in row data"))
+                .map(|r| match r.get(field_idx) {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(Value::Bool(b)) => Ok(Some(*b)),
+                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
             Ok(Arc::new(BooleanArray::from(values?)))
@@ -653,13 +719,10 @@ fn build_arrow_array(rows: &[Row], field_idx: usize) -> Result<Arc<dyn arrow::ar
         Value::Byte(_) => {
             let values: Result<Vec<_>> = rows
                 .iter()
-                .map(|r| {
-                    r.get(field_idx)
-                        .map(|v| match v {
-                            Value::Byte(b) => Ok(*b),
-                            _ => Err(SparkError::connect_msg("Type mismatch in row data")),
-                        })
-                        .transpose()
+                .map(|r| match r.get(field_idx) {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(Value::Byte(b)) => Ok(Some(*b)),
+                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
             Ok(Arc::new(Int8Array::from(values?)))
@@ -667,13 +730,10 @@ fn build_arrow_array(rows: &[Row], field_idx: usize) -> Result<Arc<dyn arrow::ar
         Value::Short(_) => {
             let values: Result<Vec<_>> = rows
                 .iter()
-                .map(|r| {
-                    r.get(field_idx)
-                        .map(|v| match v {
-                            Value::Short(s) => Ok(*s),
-                            _ => Err(SparkError::connect_msg("Type mismatch in row data")),
-                        })
-                        .transpose()
+                .map(|r| match r.get(field_idx) {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(Value::Short(s)) => Ok(Some(*s)),
+                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
             Ok(Arc::new(Int16Array::from(values?)))
@@ -681,13 +741,10 @@ fn build_arrow_array(rows: &[Row], field_idx: usize) -> Result<Arc<dyn arrow::ar
         Value::Integer(_) => {
             let values: Result<Vec<_>> = rows
                 .iter()
-                .map(|r| {
-                    r.get(field_idx)
-                        .map(|v| match v {
-                            Value::Integer(i) => Ok(*i),
-                            _ => Err(SparkError::connect_msg("Type mismatch in row data")),
-                        })
-                        .transpose()
+                .map(|r| match r.get(field_idx) {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(Value::Integer(i)) => Ok(Some(*i)),
+                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
             Ok(Arc::new(Int32Array::from(values?)))
@@ -695,13 +752,10 @@ fn build_arrow_array(rows: &[Row], field_idx: usize) -> Result<Arc<dyn arrow::ar
         Value::Long(_) => {
             let values: Result<Vec<_>> = rows
                 .iter()
-                .map(|r| {
-                    r.get(field_idx)
-                        .map(|v| match v {
-                            Value::Long(l) => Ok(*l),
-                            _ => Err(SparkError::connect_msg("Type mismatch in row data")),
-                        })
-                        .transpose()
+                .map(|r| match r.get(field_idx) {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(Value::Long(l)) => Ok(Some(*l)),
+                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
             Ok(Arc::new(Int64Array::from(values?)))
@@ -709,13 +763,10 @@ fn build_arrow_array(rows: &[Row], field_idx: usize) -> Result<Arc<dyn arrow::ar
         Value::Float(_) => {
             let values: Result<Vec<_>> = rows
                 .iter()
-                .map(|r| {
-                    r.get(field_idx)
-                        .map(|v| match v {
-                            Value::Float(f) => Ok(*f),
-                            _ => Err(SparkError::connect_msg("Type mismatch in row data")),
-                        })
-                        .transpose()
+                .map(|r| match r.get(field_idx) {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(Value::Float(f)) => Ok(Some(*f)),
+                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
             Ok(Arc::new(Float32Array::from(values?)))
@@ -723,13 +774,10 @@ fn build_arrow_array(rows: &[Row], field_idx: usize) -> Result<Arc<dyn arrow::ar
         Value::Double(_) => {
             let values: Result<Vec<_>> = rows
                 .iter()
-                .map(|r| {
-                    r.get(field_idx)
-                        .map(|v| match v {
-                            Value::Double(d) => Ok(*d),
-                            _ => Err(SparkError::connect_msg("Type mismatch in row data")),
-                        })
-                        .transpose()
+                .map(|r| match r.get(field_idx) {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(Value::Double(d)) => Ok(Some(*d)),
+                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
             Ok(Arc::new(Float64Array::from(values?)))
@@ -737,13 +785,10 @@ fn build_arrow_array(rows: &[Row], field_idx: usize) -> Result<Arc<dyn arrow::ar
         Value::String(_) => {
             let values: Result<Vec<_>> = rows
                 .iter()
-                .map(|r| {
-                    r.get(field_idx)
-                        .map(|v| match v {
-                            Value::String(s) => Ok(s.as_str()),
-                            _ => Err(SparkError::connect_msg("Type mismatch in row data")),
-                        })
-                        .transpose()
+                .map(|r| match r.get(field_idx) {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(Value::String(s)) => Ok(Some(s.as_str())),
+                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
             Ok(Arc::new(StringArray::from(values?)))
@@ -751,13 +796,10 @@ fn build_arrow_array(rows: &[Row], field_idx: usize) -> Result<Arc<dyn arrow::ar
         Value::Binary(_) => {
             let values: Result<Vec<_>> = rows
                 .iter()
-                .map(|r| {
-                    r.get(field_idx)
-                        .map(|v| match v {
-                            Value::Binary(b) => Ok(b.as_slice()),
-                            _ => Err(SparkError::connect_msg("Type mismatch in row data")),
-                        })
-                        .transpose()
+                .map(|r| match r.get(field_idx) {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(Value::Binary(b)) => Ok(Some(b.as_slice())),
+                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
             Ok(Arc::new(BinaryArray::from(values?)))
@@ -765,13 +807,10 @@ fn build_arrow_array(rows: &[Row], field_idx: usize) -> Result<Arc<dyn arrow::ar
         Value::Date(_) => {
             let values: Result<Vec<Option<i32>>> = rows
                 .iter()
-                .map(|r| {
-                    r.get(field_idx)
-                        .map(|v| match v {
-                            Value::Date(d) => Ok(*d),
-                            _ => Err(SparkError::connect_msg("Type mismatch in row data")),
-                        })
-                        .transpose()
+                .map(|r| match r.get(field_idx) {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(Value::Date(d)) => Ok(Some(*d)),
+                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
             Ok(Arc::new(Date32Array::from(values?)))
@@ -779,16 +818,23 @@ fn build_arrow_array(rows: &[Row], field_idx: usize) -> Result<Arc<dyn arrow::ar
         Value::Timestamp(_) => {
             let values: Result<Vec<Option<i64>>> = rows
                 .iter()
-                .map(|r| {
-                    r.get(field_idx)
-                        .map(|v| match v {
-                            Value::Timestamp(t) => Ok(*t),
-                            _ => Err(SparkError::connect_msg("Type mismatch in row data")),
-                        })
-                        .transpose()
+                .map(|r| match r.get(field_idx) {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(Value::Timestamp(t)) => Ok(Some(*t)),
+                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
-            Ok(Arc::new(TimestampMicrosecondArray::from(values?)))
+            // `Value::Timestamp` covers both TIMESTAMP (LTZ) and TIMESTAMP_NTZ; the
+            // Arrow array must carry the timezone the schema declares, or
+            // `RecordBatch::try_new` rejects it (LTZ schema field = Timestamp(_, UTC),
+            // NTZ = Timestamp(_, None)). Default to UTC unless the target is NTZ.
+            let arr = TimestampMicrosecondArray::from(values?);
+            let arr = if matches!(target, Some(DataType::TimestampNtz)) {
+                arr
+            } else {
+                arr.with_timezone("UTC")
+            };
+            Ok(Arc::new(arr))
         }
         Value::Decimal { scale, .. } => {
             // Column-wide precision/scale come from the first value (Spark decimals in a
@@ -797,15 +843,12 @@ fn build_arrow_array(rows: &[Row], field_idx: usize) -> Result<Arc<dyn arrow::ar
             let col_scale = scale.unwrap_or(0);
             let values: Result<Vec<Option<i128>>> = rows
                 .iter()
-                .map(|r| {
-                    r.get(field_idx)
-                        .map(|v| match v {
-                            Value::Decimal { value, .. } => {
-                                decimal_str_to_unscaled(value, col_scale)
-                            }
-                            _ => Err(SparkError::connect_msg("Type mismatch in row data")),
-                        })
-                        .transpose()
+                .map(|r| match r.get(field_idx) {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(Value::Decimal { value, .. }) => {
+                        decimal_str_to_unscaled(value, col_scale).map(Some)
+                    }
+                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
             let arr = Decimal128Array::from(values?)
@@ -848,4 +891,89 @@ fn decimal_str_to_unscaled(s: &str, scale: i32) -> Result<i128> {
             .map_err(|e| SparkError::connect_msg(format!("invalid decimal '{s}': {e}")))?
     };
     Ok(if neg { -mag } else { mag })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session() -> SparkSession {
+        SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .expect("failed to build session")
+    }
+
+    #[test]
+    fn session_is_not_stopped_initially() {
+        let spark = session();
+        assert!(!spark.is_stopped());
+    }
+
+    #[test]
+    fn session_id_is_set() {
+        let spark = session();
+        let session_id = spark.session_id();
+        assert!(!session_id.is_empty());
+    }
+
+    #[test]
+    fn session_builder_without_remote_fails() {
+        let result = SparkSessionBuilder::new().get_or_create();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn session_tags_add_and_remove() {
+        let spark = session();
+        spark.add_tag("test_tag").unwrap();
+        let tags = spark.get_tags();
+        assert!(tags.contains(&"test_tag".to_string()));
+
+        spark.remove_tag("test_tag");
+        let tags = spark.get_tags();
+        assert!(!tags.contains(&"test_tag".to_string()));
+    }
+
+    #[test]
+    fn session_tags_cannot_be_empty() {
+        let spark = session();
+        let result = spark.add_tag("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn session_tags_cannot_contain_comma() {
+        let spark = session();
+        let result = spark.add_tag("tag,with,comma");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn session_tags_clear() {
+        let spark = session();
+        spark.add_tag("tag1").unwrap();
+        spark.add_tag("tag2").unwrap();
+        spark.clear_tags();
+        assert!(spark.get_tags().is_empty());
+    }
+
+    #[test]
+    fn session_tags_no_duplicates() {
+        let spark = session();
+        spark.add_tag("tag").unwrap();
+        spark.add_tag("tag").unwrap();
+        let tags = spark.get_tags();
+        assert_eq!(tags.len(), 1);
+    }
+
+    #[test]
+    fn session_clone_shares_state() {
+        let spark1 = session();
+        spark1.add_tag("test").unwrap();
+        let spark2 = spark1.clone();
+        // Both should have the same tag
+        let tags = spark2.get_tags();
+        assert!(tags.contains(&"test".to_string()));
+    }
 }

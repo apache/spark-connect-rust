@@ -134,25 +134,37 @@ pub fn desc_nulls_last(col: Column) -> Column {
     col.desc_nulls_last()
 }
 
-/// Mirrors `pyspark.sql.functions.array` (variadic; call with no args here).
-pub fn array() -> Column {
-    func("array", vec![])
+/// Mirrors `pyspark.sql.functions.array` (variadic over the given columns).
+pub fn array(cols: Vec<Column>) -> Column {
+    func(
+        "array",
+        cols.iter().map(|c| c.expression().clone()).collect(),
+    )
 }
-/// Mirrors `pyspark.sql.functions.concat`.
-pub fn concat() -> Column {
-    func("concat", vec![])
+/// Mirrors `pyspark.sql.functions.concat` (variadic over the given columns).
+pub fn concat(cols: Vec<Column>) -> Column {
+    func(
+        "concat",
+        cols.iter().map(|c| c.expression().clone()).collect(),
+    )
 }
-/// Mirrors `pyspark.sql.functions.coalesce`.
-pub fn coalesce() -> Column {
-    func("coalesce", vec![])
+/// Mirrors `pyspark.sql.functions.coalesce` (variadic over the given columns).
+pub fn coalesce(cols: Vec<Column>) -> Column {
+    func(
+        "coalesce",
+        cols.iter().map(|c| c.expression().clone()).collect(),
+    )
 }
 /// Mirrors `pyspark.sql.functions.arrays_zip`.
-pub fn arrays_zip() -> Column {
-    func("arrays_zip", vec![])
+pub fn arrays_zip(cols: Vec<Column>) -> Column {
+    func(
+        "arrays_zip",
+        cols.iter().map(|c| c.expression().clone()).collect(),
+    )
 }
 /// Mirrors `pyspark.sql.functions.create_map`.
-pub fn create_map() -> Column {
-    func("map", vec![])
+pub fn create_map(cols: Vec<Column>) -> Column {
+    func("map", cols.iter().map(|c| c.expression().clone()).collect())
 }
 
 /// Mirrors `pyspark.sql.functions.window` (column + interval string).
@@ -249,18 +261,24 @@ pub fn e() -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.elt`.
-pub fn elt() -> Column {
-    func("elt", vec![])
+pub fn elt(cols: Vec<Column>) -> Column {
+    func("elt", cols.iter().map(|c| c.expression().clone()).collect())
 }
 
 /// Mirrors `pyspark.sql.functions.grouping_id`.
-pub fn grouping_id() -> Column {
-    func("grouping_id", vec![])
+pub fn grouping_id(cols: Vec<Column>) -> Column {
+    func(
+        "grouping_id",
+        cols.iter().map(|c| c.expression().clone()).collect(),
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.hash`.
-pub fn hash() -> Column {
-    func("hash", vec![])
+pub fn hash(cols: Vec<Column>) -> Column {
+    func(
+        "hash",
+        cols.iter().map(|c| c.expression().clone()).collect(),
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.input_file_block_length`.
@@ -279,8 +297,11 @@ pub fn input_file_name() -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.java_method`.
-pub fn java_method() -> Column {
-    func("java_method", vec![])
+pub fn java_method(cols: Vec<Column>) -> Column {
+    func(
+        "java_method",
+        cols.iter().map(|c| c.expression().clone()).collect(),
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.localtimestamp`.
@@ -331,8 +352,11 @@ pub fn make_ym_interval() -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.map_concat`.
-pub fn map_concat() -> Column {
-    func("map_concat", vec![])
+pub fn map_concat(cols: Vec<Column>) -> Column {
+    func(
+        "map_concat",
+        cols.iter().map(|c| c.expression().clone()).collect(),
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.monotonically_increasing_id`.
@@ -341,8 +365,11 @@ pub fn monotonically_increasing_id() -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.named_struct`.
-pub fn named_struct() -> Column {
-    func("named_struct", vec![])
+pub fn named_struct(cols: Vec<Column>) -> Column {
+    func(
+        "named_struct",
+        cols.iter().map(|c| c.expression().clone()).collect(),
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.now`.
@@ -376,8 +403,11 @@ pub fn rank() -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.reflect`.
-pub fn reflect() -> Column {
-    func("reflect", vec![])
+pub fn reflect(cols: Vec<Column>) -> Column {
+    func(
+        "reflect",
+        cols.iter().map(|c| c.expression().clone()).collect(),
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.row_number`.
@@ -396,13 +426,19 @@ pub fn spark_partition_id() -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.stack`.
-pub fn stack() -> Column {
-    func("stack", vec![])
+pub fn stack(cols: Vec<Column>) -> Column {
+    func(
+        "stack",
+        cols.iter().map(|c| c.expression().clone()).collect(),
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.struct`.
-pub fn r#struct() -> Column {
-    func("struct", vec![])
+pub fn r#struct(cols: Vec<Column>) -> Column {
+    func(
+        "struct",
+        cols.iter().map(|c| c.expression().clone()).collect(),
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.try_make_interval`.
@@ -426,8 +462,11 @@ pub fn try_make_interval() -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.try_reflect`.
-pub fn try_reflect() -> Column {
-    func("try_reflect", vec![])
+pub fn try_reflect(cols: Vec<Column>) -> Column {
+    func(
+        "try_reflect",
+        cols.iter().map(|c| c.expression().clone()).collect(),
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.unix_timestamp`.
@@ -446,8 +485,11 @@ pub fn version() -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.xxhash64`.
-pub fn xxhash64() -> Column {
-    func("xxhash64", vec![])
+pub fn xxhash64(cols: Vec<Column>) -> Column {
+    func(
+        "xxhash64",
+        cols.iter().map(|c| c.expression().clone()).collect(),
+    )
 }
 
 // ============================================================================
@@ -482,6 +524,14 @@ pub fn approxCountDistinct(col1: Column) -> Column {
 /// Mirrors `pyspark.sql.functions.approx_count_distinct`.
 pub fn approx_count_distinct(col1: Column) -> Column {
     func("approx_count_distinct", vec![col1.expression().clone()])
+}
+
+/// 2-arg variant (see the reference optional argument).
+pub fn approx_count_distinct_rsd(col1: Column, rsd: Column) -> Column {
+    func(
+        "approx_count_distinct",
+        vec![col1.expression().clone(), rsd.expression().clone()],
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.array_agg`.
@@ -639,6 +689,14 @@ pub fn bround(col1: Column) -> Column {
     func("bround", vec![col1.expression().clone()])
 }
 
+/// 2-arg variant (see the reference optional argument).
+pub fn bround_scale(col1: Column, scale: Column) -> Column {
+    func(
+        "bround",
+        vec![col1.expression().clone(), scale.expression().clone()],
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.btrim`.
 pub fn btrim(col1: Column) -> Column {
     func("btrim", vec![col1.expression().clone()])
@@ -657,6 +715,14 @@ pub fn cbrt(col1: Column) -> Column {
 /// Mirrors `pyspark.sql.functions.ceil`.
 pub fn ceil(col1: Column) -> Column {
     func("ceil", vec![col1.expression().clone()])
+}
+
+/// 2-arg variant (see the reference optional argument).
+pub fn ceil_scale(col1: Column, scale: Column) -> Column {
+    func(
+        "ceil",
+        vec![col1.expression().clone(), scale.expression().clone()],
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.ceiling`.
@@ -832,6 +898,14 @@ pub fn flatten(col1: Column) -> Column {
 /// Mirrors `pyspark.sql.functions.floor`.
 pub fn floor(col1: Column) -> Column {
     func("floor", vec![col1.expression().clone()])
+}
+
+/// 2-arg variant (see the reference optional argument).
+pub fn floor_scale(col1: Column, scale: Column) -> Column {
+    func(
+        "floor",
+        vec![col1.expression().clone(), scale.expression().clone()],
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.format_string`.
@@ -1017,6 +1091,14 @@ pub fn ltrim(col1: Column) -> Column {
     func("ltrim", vec![col1.expression().clone()])
 }
 
+/// 2-arg variant (see the reference optional argument).
+pub fn ltrim_with(col1: Column, trim: Column) -> Column {
+    func(
+        "ltrim",
+        vec![trim.expression().clone(), col1.expression().clone()],
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.make_valid_utf8`.
 pub fn make_valid_utf8(col1: Column) -> Column {
     func("make_valid_utf8", vec![col1.expression().clone()])
@@ -1199,9 +1281,25 @@ pub fn round(col1: Column) -> Column {
     func("round", vec![col1.expression().clone()])
 }
 
+/// 2-arg variant (see the reference optional argument).
+pub fn round_scale(col1: Column, scale: Column) -> Column {
+    func(
+        "round",
+        vec![col1.expression().clone(), scale.expression().clone()],
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.rtrim`.
 pub fn rtrim(col1: Column) -> Column {
     func("rtrim", vec![col1.expression().clone()])
+}
+
+/// 2-arg variant (see the reference optional argument).
+pub fn rtrim_with(col1: Column, trim: Column) -> Column {
+    func(
+        "rtrim",
+        vec![trim.expression().clone(), col1.expression().clone()],
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.schema_of_csv`.
@@ -1411,6 +1509,14 @@ pub fn to_binary(col1: Column) -> Column {
     func("to_binary", vec![col1.expression().clone()])
 }
 
+/// 2-arg variant (see the reference optional argument).
+pub fn to_binary_format(col1: Column, format: Column) -> Column {
+    func(
+        "to_binary",
+        vec![col1.expression().clone(), format.expression().clone()],
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.to_csv`.
 pub fn to_csv(col1: Column) -> Column {
     func("to_csv", vec![col1.expression().clone()])
@@ -1459,6 +1565,15 @@ pub fn to_xml(col1: Column) -> Column {
 /// Mirrors `pyspark.sql.functions.trim`.
 pub fn trim(col1: Column) -> Column {
     func("trim", vec![col1.expression().clone()])
+}
+
+/// 2-arg variant (see the reference optional argument).
+pub fn trim_with(col1: Column, trim: Column) -> Column {
+    // pyspark emits the trim string first, then the column: TRIM(trimStr FROM col).
+    func(
+        "trim",
+        vec![trim.expression().clone(), col1.expression().clone()],
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.try_avg`.
@@ -3901,8 +4016,13 @@ pub fn unix_nanos(col: Column) -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.uuid`.
+///
+/// The reference client seeds the expression with a (random) `long` argument so
+/// the result is stable per query plan; we emit a fixed seed literal, matching
+/// the `rand`/`randn` builders. The seed is treated as run-to-run noise by the
+/// golden test (see `RANDOM_SEED_FUNCS`).
 pub fn uuid() -> Column {
-    func("uuid", vec![])
+    func("uuid", vec![lit_long(1214072022411175128)])
 }
 
 /// Mirrors `pyspark.sql.functions.variant_array_append`.
@@ -4073,18 +4193,34 @@ pub fn tuple_intersection_theta_integer(col1: Column, col2: Column) -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.tuple_sketch_agg_double`.
+///
+/// The reference client materializes the default `nom_entries` (lgK = 12) and
+/// `mode` ("sum") arguments into the call, so we emit them here too for parity.
 pub fn tuple_sketch_agg_double(key: Column, summary: Column) -> Column {
     func(
         "tuple_sketch_agg_double",
-        vec![key.expression().clone(), summary.expression().clone()],
+        vec![
+            key.expression().clone(),
+            summary.expression().clone(),
+            lit_int(12),
+            lit_str("sum"),
+        ],
     )
 }
 
 /// Mirrors `pyspark.sql.functions.tuple_sketch_agg_integer`.
+///
+/// As with the double variant, the reference client materializes the default
+/// `nom_entries` (lgK = 12) and `mode` ("sum") arguments.
 pub fn tuple_sketch_agg_integer(key: Column, summary: Column) -> Column {
     func(
         "tuple_sketch_agg_integer",
-        vec![key.expression().clone(), summary.expression().clone()],
+        vec![
+            key.expression().clone(),
+            summary.expression().clone(),
+            lit_int(12),
+            lit_str("sum"),
+        ],
     )
 }
 

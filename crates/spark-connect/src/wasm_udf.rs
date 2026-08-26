@@ -11,11 +11,12 @@
 //! cluster, without touching the Spark server:
 //!
 //! 1. The user compiles their Rust function to a WebAssembly module.
-//! 2. [`udf`] embeds the `.wasm` bytes and the signature and invokes the bundled
-//!    Python packer (`python -m pyspark_wasm_udf.pack`), which uses `cloudpickle`
-//!    to serialize a `WasmScalarUDF` runner **by value** into the `command`.
-//!    Because it is serialized by value, the executors do **not** need the
-//!    `pyspark_wasm_udf` package -- only the `wasmtime` package.
+//! 2. [`udf`] embeds the `.wasm` bytes and the signature and runs a packer script
+//!    **embedded in this crate** as `python -c` (so it executes as `__main__`),
+//!    which uses `cloudpickle` to serialize a `WasmScalarUDF` runner **by value**
+//!    into the `command`. Running it as `__main__` is what makes cloudpickle embed
+//!    the runner by value, so there is no separate `pyspark_wasm_udf` pip package to
+//!    install on the client and the executors need only the `wasmtime` package.
 //! 3. On each executor the runner instantiates the module with `wasmtime` and
 //!    invokes the exported entrypoint once per input row.
 //!
@@ -50,9 +51,9 @@
 //! # Requirements
 //!
 //! Building the command requires, on the client machine only, a Python
-//! interpreter with `cloudpickle` and `pyspark`, and the `pyspark_wasm_udf`
-//! package importable (ship the repo's `python/` directory, or point
-//! [`PythonPacker::pythonpath`] at it). The Spark executors need only the
+//! interpreter with `pyspark` importable (for its vendored `cloudpickle` and the
+//! pure-Python type parser). The packer script itself is embedded in this crate, so
+//! nothing extra needs installing — and the Spark executors need only the
 //! `wasmtime` Python package.
 
 use std::io::Write;
@@ -162,6 +163,13 @@ impl AbiType {
     }
 }
 
+/// The packer script, embedded at compile time. Run as `python -c <this>` (so it
+/// executes as `__main__`), which makes cloudpickle serialize the `WasmScalarUDF`
+/// runner by value automatically — no `pyspark_wasm_udf` pip package is needed on
+/// the client (only a Python interpreter with `pyspark`) or on the executors (only
+/// `wasmtime`).
+const PACKER_SRC: &str = include_str!("wasm_packer.py");
+
 /// How to invoke the Python packer that turns a WASM UDF into the cloudpickled
 /// `command` bytes.
 #[derive(Debug, Clone)]
@@ -169,8 +177,9 @@ pub struct PythonPacker {
     /// The Python executable to run (default: `$SPARK_CONNECT_PYTHON`, else
     /// `$PYSPARK_PYTHON`, else `python3`).
     pub python_exe: String,
-    /// Directories prepended to `PYTHONPATH` so `pyspark_wasm_udf` is
-    /// importable (default: `$SPARK_CONNECT_WASM_PACKER_PATH` if set).
+    /// Extra directories prepended to `PYTHONPATH` (e.g. to locate `pyspark` if it
+    /// is not already importable by `python_exe`); default `$SPARK_CONNECT_WASM_PACKER_PATH`
+    /// if set. The packer itself is embedded in the crate, so this is only for deps.
     pub pythonpath: Vec<PathBuf>,
 }
 
@@ -191,13 +200,14 @@ impl Default for PythonPacker {
 }
 
 impl PythonPacker {
-    /// Run `python -m pyspark_wasm_udf.pack`, feeding `spec_json` on stdin and
-    /// returning the raw `command` bytes from stdout.
+    /// Run the embedded packer via `python -c <PACKER_SRC>`, feeding `spec_json` on
+    /// stdin and returning the raw `command` bytes from stdout. Running it as `-c`
+    /// (i.e. `__main__`) is what lets cloudpickle embed the runner by value.
     fn run(&self, spec_json: &str) -> Result<Vec<u8>> {
         use spark_connect_core::error::SparkError;
         let mut cmd = Command::new(&self.python_exe);
-        cmd.arg("-m")
-            .arg("pyspark_wasm_udf.pack")
+        cmd.arg("-c")
+            .arg(PACKER_SRC)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -389,6 +399,47 @@ impl UserDefinedFunction {
             Box::new(expr),
         )))
     }
+
+    /// Build the registration expression for this UDF under `name` (no bound
+    /// arguments — arguments are supplied at each SQL/DataFrame call site).
+    fn registration_expression(
+        &self,
+        name: &str,
+    ) -> Result<CommonInlineUserDefinedFunctionExpression> {
+        Ok(CommonInlineUserDefinedFunctionExpression::new(
+            name.to_string(),
+            self.deterministic,
+            vec![],
+            self.to_payload()?,
+        ))
+    }
+}
+
+/// UDF registration accessor, returned by [`crate::session::SparkSession::udf`] and
+/// mirroring `pyspark.sql.SparkSession.udf`.
+pub struct UdfRegistration<'a> {
+    session: &'a crate::session::SparkSession,
+}
+
+impl<'a> UdfRegistration<'a> {
+    /// Register `udf` under `name` so it can be called from SQL
+    /// (`spark.sql("SELECT name(col) ...")`) and the DataFrame API.
+    ///
+    /// Mirrors `spark.udf.register(name, udf)`: the cloudpickled WASM runner is shipped
+    /// by value inside a `RegisterFunction` command, so the Spark executors only need
+    /// the `wasmtime` Python package (not `pyspark_wasm_udf`).
+    pub fn register(&self, name: &str, udf: &UserDefinedFunction) -> Result<()> {
+        self.session
+            .register_function(udf.registration_expression(name)?)
+    }
+}
+
+impl crate::session::SparkSession {
+    /// UDF registration accessor. Mirrors `pyspark.sql.SparkSession.udf`, so a WASM
+    /// UDF is registered with `spark.udf().register("name", &udf)`.
+    pub fn udf(&self) -> UdfRegistration<'_> {
+        UdfRegistration { session: self }
+    }
 }
 
 /// Default Python version tag, matching how pyspark reports it
@@ -523,9 +574,10 @@ mod tests {
         assert_eq!(spec["wasm_b64"], "AGFzbQEA");
     }
 
-    /// End-to-end packer test. Requires a Python interpreter with `cloudpickle`
-    /// + `pyspark` and the `pyspark_wasm_udf` package importable (set
-    /// `SPARK_CONNECT_WASM_PACKER_PATH` to the repo's `python/` dir). Run with
+    /// End-to-end packer test. Requires only a Python interpreter with `pyspark`
+    /// importable (for its vendored `cloudpickle` + the pure-Python type parser);
+    /// the packer script is embedded in the crate. Point `python_exe` at that
+    /// interpreter via `$SPARK_CONNECT_PYTHON`. Run with
     /// `cargo test --features wasm-udf -- --ignored`.
     #[test]
     #[ignore]

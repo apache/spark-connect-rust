@@ -6,6 +6,8 @@
 //!
 //! Baseline protocol version: see `proto/PROTO_VERSION.txt` / `proto/SPARK_SHA.txt`.
 
+#![allow(clippy::large_enum_variant)] // Generated protobuf code has large enum variants
+
 // tonic-build emits `google.protobuf` well-known types referenced by the schema.
 pub mod spark {
     pub mod connect {

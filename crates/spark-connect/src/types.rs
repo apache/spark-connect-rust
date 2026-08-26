@@ -209,7 +209,10 @@ impl DataType {
                 format!("decimal({},{})", precision, scale)
             }
             DataType::String { collation } => {
-                if collation == "UTF8_BINARY" {
+                // The default collation (empty, or the explicit UTF8_BINARY) renders as
+                // plain "string"; only a non-default collation adds " collate <name>".
+                // Previously an empty collation produced the malformed "string collate ".
+                if collation.is_empty() || collation == "UTF8_BINARY" {
                     "string".to_string()
                 } else {
                     format!("string collate {}", collation)
@@ -999,7 +1002,20 @@ fn parse_json_object(obj: &serde_json::Map<String, serde_json::Value>) -> Result
                     let metadata = field_map
                         .get("metadata")
                         .and_then(|v| v.as_object())
-                        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.to_string())).collect())
+                        .map(|m| {
+                            m.iter()
+                                .map(|(k, v)| {
+                                    // Store the raw string for string-valued metadata (a bare
+                                    // "v", not the re-serialized "\"v\""), matching the proto
+                                    // path; fall back to the JSON text for non-string values.
+                                    let val = v
+                                        .as_str()
+                                        .map(str::to_string)
+                                        .unwrap_or_else(|| v.to_string());
+                                    (k.clone(), val)
+                                })
+                                .collect()
+                        })
                         .unwrap_or_default();
 
                     fields.push(StructField {
@@ -1444,7 +1460,7 @@ fn split_map_parts(s: &str) -> Result<Vec<&str>> {
     let mut parts = Vec::new();
     let mut start = 0;
 
-    for (i, c) in s.chars().enumerate() {
+    for (i, c) in s.char_indices() {
         match c {
             '<' | '(' => depth += 1,
             '>' | ')' => depth -= 1,
@@ -1513,7 +1529,7 @@ fn split_struct_fields(s: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut start = 0;
 
-    for (i, c) in s.chars().enumerate() {
+    for (i, c) in s.char_indices() {
         match c {
             '<' | '(' => depth += 1,
             '>' | ')' => depth -= 1,
@@ -1532,7 +1548,7 @@ fn split_struct_fields(s: &str) -> Vec<&str> {
 /// Find the position of an unbracketed colon
 fn find_unbracketed_colon(s: &str) -> Option<usize> {
     let mut depth = 0;
-    for (i, c) in s.chars().enumerate() {
+    for (i, c) in s.char_indices() {
         match c {
             '<' | '(' => depth += 1,
             '>' | ')' => depth -= 1,

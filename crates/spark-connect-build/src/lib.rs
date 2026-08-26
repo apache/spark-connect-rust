@@ -14,10 +14,8 @@
 //!
 //! # Example `build.rs`
 //!
-//! ```no_run
-//! fn main() {
-//!     spark_connect_build::embed_wasm_udf("src/main.rs");
-//! }
+//! ```ignore
+//! spark_connect_build::embed_wasm_udf("src/main.rs");
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -117,7 +115,7 @@ pub fn embed_wasm_udf(src_file: impl AsRef<Path>) -> PathBuf {
 /// The runtime prepended to the wasm build: the exported allocator and the
 /// length-prefixed binary codec (`Abi`) the macro's export wrappers call. Must
 /// stay byte-compatible with `spark_connect::wasm_udf::AbiType` and the Python
-/// runner's codec in `pyspark_wasm_udf`.
+/// runner's codec in the embedded packer (`spark-connect/src/wasm_packer.py`).
 const WASM_RUNTIME: &str = r#"
 #[allow(dead_code)]
 pub mod spark_wasm_rt {

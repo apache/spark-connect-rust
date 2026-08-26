@@ -24,22 +24,80 @@ fn py_obj_to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
 
 #[pymethods]
 impl PyColumn {
-    /// Alias the column.
-    fn alias(&self, name: &str) -> PyColumn {
-        PyColumn::new(self.column.clone().alias(name))
+    /// Alias the column, optionally attaching column metadata (a dict), mirroring
+    /// `Column.alias(name, metadata=...)`.
+    #[pyo3(signature = (name, metadata=None))]
+    fn alias(
+        &self,
+        name: &str,
+        metadata: Option<std::collections::HashMap<String, String>>,
+    ) -> PyColumn {
+        match metadata {
+            None => PyColumn::new(self.column.clone().alias(name)),
+            Some(m) => {
+                let md: std::collections::BTreeMap<String, String> = m.into_iter().collect();
+                PyColumn::new(self.column.clone().alias_with_metadata(name, md))
+            }
+        }
     }
 
-    /// Cast to a different type (using string DDL).
-    fn cast(&self, type_name: &str) -> PyColumn {
-        PyColumn::new(self.column.clone().cast_str(type_name))
+    /// Alias for `alias` (pyspark `Column.name`).
+    fn name(&self, name: &str) -> PyColumn {
+        PyColumn::new(self.column.clone().name(name))
+    }
+
+    /// Mark this column as an outer reference (for correlated subqueries / lateral
+    /// joins). Mirrors `Column.outer()`, which returns the same expression — outer
+    /// resolution is performed server-side via the plan id.
+    fn outer(&self) -> PyColumn {
+        PyColumn::new(self.column.clone())
+    }
+
+    /// Cast to a different type. Accepts a `DataType` or a DDL type string,
+    /// matching `pyspark.sql.Column.cast`.
+    fn cast(&self, data_type: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
+        // A DDL string keeps the unparsed type_str form (reference cast("int"));
+        // any DataType object is converted to a typed cast.
+        if let Ok(s) = data_type.extract::<String>() {
+            Ok(PyColumn::new(self.column.clone().cast_str(&s)))
+        } else {
+            let dt = crate::types::py_to_data_type(data_type)?;
+            Ok(PyColumn::new(self.column.clone().cast(dt)))
+        }
+    }
+
+    /// Alias for `cast` (pyspark `Column.astype`).
+    fn astype(&self, data_type: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
+        self.cast(data_type)
+    }
+
+    /// Try to cast, yielding NULL on failure. Accepts a `DataType` or DDL string.
+    /// Mirrors `pyspark.sql.Column.try_cast`.
+    #[pyo3(name = "try_cast")]
+    fn try_cast(&self, data_type: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
+        if let Ok(s) = data_type.extract::<String>() {
+            Ok(PyColumn::new(self.column.clone().try_cast_str(&s)))
+        } else {
+            let dt = crate::types::py_to_data_type(data_type)?;
+            Ok(PyColumn::new(self.column.clone().try_cast(dt)))
+        }
+    }
+
+    /// Get an item from a list/map by key (pyspark `Column.getItem`).
+    #[pyo3(name = "getItem")]
+    fn get_item(&self, key: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
+        let key_col = py_obj_to_column(key)?;
+        Ok(PyColumn::new(self.column.clone().get_item(key_col)))
     }
 
     /// Check if NULL.
+    #[pyo3(name = "isNull")]
     fn is_null(&self) -> PyColumn {
         PyColumn::new(self.column.clone().is_null())
     }
 
     /// Check if NOT NULL.
+    #[pyo3(name = "isNotNull")]
     fn is_not_null(&self) -> PyColumn {
         PyColumn::new(self.column.clone().is_not_null())
     }
@@ -239,6 +297,7 @@ impl PyColumn {
     }
 
     /// Get field by name (for struct/nested types).
+    #[pyo3(name = "getField")]
     fn get_field(&self, name: &str) -> PyColumn {
         PyColumn::new(self.column.clone().get_field(name))
     }

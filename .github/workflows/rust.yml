@@ -111,9 +111,10 @@ jobs:
           sudo apt-get install -y protobuf-compiler
 
       - name: Install Python packer/runtime deps
-        # The client builds the UDF command via `python -m pyspark_wasm_udf.pack`
-        # (cloudpickle + pyspark); `wasmtime` is what the executors need at run
-        # time and lets a follow-up job exercise the module directly.
+        # The client builds the UDF command by running the packer embedded in the
+        # crate as `python -c` (needs `pyspark` for its vendored cloudpickle + the
+        # pure-Python type parser); `wasmtime` is what the executors need at run time
+        # and lets a follow-up job exercise the module directly.
         run: python -m pip install --upgrade cloudpickle pyspark wasmtime
 
       - name: Feature-gated unit tests
@@ -127,15 +128,9 @@ jobs:
           cargo build -p examples --bin wasm_udf_macro --features examples/wasm-udf-macro
 
       - name: Packer end-to-end (Rust -> cloudpickle command)
-        # The packer runs `python -m pyspark_wasm_udf.pack`, which imports the
+        # The packer is embedded in the crate and run as `python -c`; it imports the
         # reference `pyspark` (installed above) for `pyspark.cloudpickle` and
-        # `pyspark.sql.types._parse_datatype_json_value`, and produces a
-        # reference `DataType` the executors unpickle. Put *only* the
-        # `pyspark_wasm_udf` package on the packer path (not ./python, whose
-        # `pyspark` skin is Rust-backed and would shadow the reference).
-        env:
-          SPARK_CONNECT_WASM_PACKER_PATH: ${{ github.workspace }}/.packer
-        run: |
-          mkdir -p .packer
-          cp -r python/pyspark_wasm_udf .packer/
-          cargo test -p apache-spark-connect --features wasm-udf -- --ignored packer_produces
+        # `pyspark.sql.types._parse_datatype_json_value`, and produces a reference
+        # `DataType` the executors unpickle. No separate `pyspark_wasm_udf` package
+        # is needed on any path now, so just run the ignored end-to-end test.
+        run: cargo test -p apache-spark-connect --features wasm-udf -- --ignored packer_produces

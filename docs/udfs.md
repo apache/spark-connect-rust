@@ -18,7 +18,7 @@ generates a constructor under `udf::` - a direct call `udf::<name>(col0, col1,
 ...)` (one column per argument, **arity checked at compile time**) that returns the
 result `Column`. A one-line `build.rs` compiles the module.
 
-```rust
+```rust,ignore
 // src/main.rs
 use spark_connect_macros::spark_wasm_udf;
 
@@ -52,7 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-```rust
+```rust,ignore
 // build.rs
 fn main() {
     spark_connect_build::embed_wasm_udf("src/main.rs");
@@ -130,10 +130,11 @@ Nothing here is needed unless the `wasm-udf` feature is enabled:
 - **Build machine** - the `wasm32-unknown-unknown` target (`rustup target add
   wasm32-unknown-unknown`), plus `apache-spark-connect-macros` and
   `apache-spark-connect-build` as (build-)dependencies.
-- **Client** (building the UDF command) - a Python interpreter with `cloudpickle`
-  and `pyspark`, and the repo's `python/` directory importable as
-  `pyspark_wasm_udf` (point `SPARK_CONNECT_WASM_PACKER_PATH` at it, or set
-  `SPARK_CONNECT_PYTHON`).
+- **Client** (building the UDF command) - a Python interpreter with `pyspark`
+  importable (used for its vendored `cloudpickle` and the pure-Python type
+  parser). The packer script is embedded in the crate and run as `python -c`, so
+  there is nothing extra to install or put on a path; point `SPARK_CONNECT_PYTHON`
+  at the interpreter if it isn't your default `python3`.
 - **Executors** - the `wasmtime` Python package.
 - **Spark** - 4.2.0+.
 
@@ -142,7 +143,7 @@ Nothing here is needed unless the `wasm-udf` feature is enabled:
 For non-deterministic UDFs or custom packer configuration, the macro also
 generates a builder `udf::<name>_udf()`:
 
-```rust
+```rust,ignore
 udf::add_one_udf()
     .as_nondeterministic()
     .call(vec![col("id")])?;
@@ -151,7 +152,7 @@ udf::add_one_udf()
 If you'd rather load a prebuilt module and spell out the types yourself, the
 lower-level factory mirrors `pyspark.sql.functions.udf`:
 
-```rust
+```rust,ignore
 use spark_connect::wasm_udf::{udf, AbiType};
 
 let wasm = std::fs::read("shout.wasm")?;

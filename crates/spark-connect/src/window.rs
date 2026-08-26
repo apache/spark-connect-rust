@@ -125,3 +125,114 @@ impl Window {
         WindowSpec::new().range_between(start, end)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::expression::{ColumnReference, NullOrdering, SortOrder};
+
+    fn col(name: &str) -> Expression {
+        Expression::ColumnReference(ColumnReference::new(name))
+    }
+
+    fn sort(name: &str) -> SortOrder {
+        SortOrder {
+            child: col(name),
+            ascending: true,
+            null_ordering: NullOrdering::First,
+        }
+    }
+
+    #[test]
+    fn new_and_default_are_empty() {
+        let w = WindowSpec::new();
+        assert!(w.partition_spec.is_empty());
+        assert!(w.order_spec.is_empty());
+        assert!(w.frame_spec.is_none());
+        assert_eq!(WindowSpec::default(), w);
+    }
+
+    #[test]
+    fn spec_builders_chain() {
+        let w = WindowSpec::new()
+            .partition_by(vec![col("a"), col("b")])
+            .order_by(vec![sort("c")]);
+        assert_eq!(w.partition_spec.len(), 2);
+        assert_eq!(w.order_spec.len(), 1);
+    }
+
+    #[test]
+    fn rows_between_sets_row_frame() {
+        let w = WindowSpec::new().rows_between(FrameBound::Preceding(1), FrameBound::Following(2));
+        assert_eq!(
+            w.frame_spec,
+            Some((
+                FrameType::Row,
+                FrameBound::Preceding(1),
+                FrameBound::Following(2)
+            ))
+        );
+    }
+
+    #[test]
+    fn range_between_sets_range_frame() {
+        let w =
+            WindowSpec::new().range_between(FrameBound::UnboundedPreceding, FrameBound::CurrentRow);
+        assert_eq!(
+            w.frame_spec,
+            Some((
+                FrameType::Range,
+                FrameBound::UnboundedPreceding,
+                FrameBound::CurrentRow
+            ))
+        );
+    }
+
+    #[test]
+    fn a_later_frame_replaces_an_earlier_one() {
+        let w = WindowSpec::new()
+            .rows_between(FrameBound::UnboundedPreceding, FrameBound::CurrentRow)
+            .range_between(FrameBound::CurrentRow, FrameBound::UnboundedFollowing);
+        assert_eq!(
+            w.frame_spec,
+            Some((
+                FrameType::Range,
+                FrameBound::CurrentRow,
+                FrameBound::UnboundedFollowing
+            ))
+        );
+    }
+
+    #[test]
+    fn window_static_constructors_match_spec_builders() {
+        assert_eq!(
+            Window::partition_by(vec![col("a")]),
+            WindowSpec::new().partition_by(vec![col("a")])
+        );
+        assert_eq!(
+            Window::order_by(vec![sort("a")]),
+            WindowSpec::new().order_by(vec![sort("a")])
+        );
+        assert_eq!(
+            Window::rows_between(FrameBound::Preceding(1), FrameBound::CurrentRow),
+            WindowSpec::new().rows_between(FrameBound::Preceding(1), FrameBound::CurrentRow)
+        );
+        assert_eq!(
+            Window::range_between(FrameBound::CurrentRow, FrameBound::Following(3)),
+            WindowSpec::new().range_between(FrameBound::CurrentRow, FrameBound::Following(3))
+        );
+    }
+
+    #[test]
+    fn frame_bound_constants() {
+        assert_eq!(
+            Window::unbounded_preceding(),
+            FrameBound::UnboundedPreceding
+        );
+        assert_eq!(Window::current_row(), FrameBound::CurrentRow);
+        assert_eq!(
+            Window::unbounded_following(),
+            FrameBound::UnboundedFollowing
+        );
+    }
+}

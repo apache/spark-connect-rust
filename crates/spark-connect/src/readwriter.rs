@@ -79,7 +79,7 @@ impl DataFrameReader {
     }
 
     /// Read from a named table.
-    pub fn table(mut self, table_name: &str) -> DataFrame {
+    pub fn table(self, table_name: &str) -> DataFrame {
         let plan = LogicalPlan::Read {
             read_type: ReadType::NamedTable {
                 table_name: table_name.to_string(),
@@ -181,6 +181,28 @@ impl DataFrameReader {
     /// Read text data.
     pub fn text(mut self, path: &str) -> DataFrame {
         self.format = Some("text".to_string());
+        let paths = vec![path.to_string()];
+        let plan = LogicalPlan::Read {
+            read_type: ReadType::DataSource {
+                format: self.format.clone(),
+                schema: if self.schema.is_empty() {
+                    None
+                } else {
+                    Some(self.schema.clone())
+                },
+                options: self.options.clone(),
+                paths,
+                predicates: vec![],
+                source_name: None,
+            },
+            is_streaming: false,
+        };
+        DataFrame::new(self.session, plan)
+    }
+
+    /// Read XML file(s). Mirrors `DataFrameReader.xml`.
+    pub fn xml(mut self, path: &str) -> DataFrame {
+        self.format = Some("xml".to_string());
         let paths = vec![path.to_string()];
         let plan = LogicalPlan::Read {
             read_type: ReadType::DataSource {
@@ -304,6 +326,7 @@ pub struct DataFrameWriter {
     mode: SaveMode,
     options: HashMap<String, String>,
     partition_cols: Vec<String>,
+    cluster_cols: Vec<String>,
     bucket_cols: Vec<String>,
     sort_cols: Vec<String>,
     num_buckets: Option<i32>,
@@ -319,10 +342,17 @@ impl DataFrameWriter {
             mode: SaveMode::ErrorIfExists,
             options: HashMap::new(),
             partition_cols: vec![],
+            cluster_cols: vec![],
             bucket_cols: vec![],
             sort_cols: vec![],
             num_buckets: None,
         }
+    }
+
+    /// Cluster the output by the given columns (liquid clustering).
+    pub fn cluster_by(mut self, cols: Vec<String>) -> Self {
+        self.cluster_cols = cols;
+        self
     }
 
     /// Set the save mode.
@@ -381,6 +411,7 @@ impl DataFrameWriter {
         op.mode = self.mode.to_proto();
         op.sort_column_names = self.sort_cols.clone();
         op.partitioning_columns = self.partition_cols.clone();
+        op.clustering_columns = self.cluster_cols.clone();
         op.options = self.options.clone();
         op.save_type = save_type;
         if let Some(num_buckets) = self.num_buckets {
@@ -453,6 +484,12 @@ impl DataFrameWriter {
         self.format = Some("text".to_string());
         self.save(Some(path))
     }
+
+    /// Write as XML. Mirrors `DataFrameWriter.xml`.
+    pub fn xml(mut self, path: &str) -> Result<()> {
+        self.format = Some("xml".to_string());
+        self.save(Some(path))
+    }
 }
 
 /// DataFrameWriterV2 for the v2 write API (`DataFrame.writeTo`).
@@ -466,6 +503,7 @@ pub struct DataFrameWriterV2 {
     options: HashMap<String, String>,
     table_properties: HashMap<String, String>,
     partition_cols: Vec<Column>,
+    cluster_cols: Vec<String>,
 }
 
 impl DataFrameWriterV2 {
@@ -479,7 +517,14 @@ impl DataFrameWriterV2 {
             options: HashMap::new(),
             table_properties: HashMap::new(),
             partition_cols: vec![],
+            cluster_cols: vec![],
         }
+    }
+
+    /// Cluster the output table by the given columns (liquid clustering).
+    pub fn cluster_by(mut self, cols: Vec<String>) -> Self {
+        self.cluster_cols = cols;
+        self
     }
 
     /// Specify the underlying output data source provider (e.g. "parquet").
@@ -524,6 +569,7 @@ impl DataFrameWriterV2 {
         op.table_name = self.table_name.clone();
         op.provider = self.provider.clone();
         op.partitioning_columns = self.partition_cols.iter().map(|c| c.to_proto()).collect();
+        op.clustering_columns = self.cluster_cols.clone();
         op.options = self.options.clone();
         op.table_properties = self.table_properties.clone();
         op.mode = mode as i32;
@@ -694,5 +740,171 @@ mod tests {
             .unwrap();
         assert_eq!(op.mode, proto::write_operation_v2::Mode::Overwrite as i32);
         assert!(op.overwrite_condition.is_some());
+    }
+
+    #[test]
+    fn v1_write_operation_cluster_by() {
+        let spark = session();
+        let df = spark.range(3).unwrap();
+        let op = df
+            .write()
+            .format("parquet")
+            .cluster_by(vec!["col1".to_string(), "col2".to_string()])
+            .build_write_operation(Some(proto::write_operation::SaveType::Path(
+                "/tmp/out".to_string(),
+            )))
+            .unwrap();
+
+        assert_eq!(op.clustering_columns, vec!["col1", "col2"]);
+    }
+
+    #[test]
+    fn v2_write_operation_cluster_by() {
+        let spark = session();
+        let df = spark.range(3).unwrap();
+        let op = df
+            .write_to("t")
+            .cluster_by(vec!["col1".to_string(), "col2".to_string()])
+            .build_operation(proto::write_operation_v2::Mode::Create, None)
+            .unwrap();
+
+        assert_eq!(op.clustering_columns, vec!["col1", "col2"]);
+    }
+
+    #[test]
+    fn reader_jdbc_with_options() {
+        let spark = session();
+        let reader = spark.read();
+        let df = reader
+            .option("url", "jdbc:mysql://localhost:3306/db")
+            .option("user", "root")
+            .option("password", "secret")
+            .jdbc("jdbc:mysql://localhost:3306/db", "table_name", None);
+
+        match &df.plan {
+            LogicalPlan::Read {
+                read_type:
+                    ReadType::DataSource {
+                        options, format, ..
+                    },
+                ..
+            } => {
+                assert_eq!(format.as_deref(), Some("jdbc"));
+                assert_eq!(
+                    options.get("url").map(String::as_str),
+                    Some("jdbc:mysql://localhost:3306/db")
+                );
+                assert_eq!(options.get("user").map(String::as_str), Some("root"));
+                assert_eq!(options.get("password").map(String::as_str), Some("secret"));
+            }
+            _ => panic!("expected Read plan"),
+        }
+    }
+
+    #[test]
+    fn reader_jdbc_with_predicates() {
+        let spark = session();
+        let reader = spark.read();
+        let predicates = vec!["col1 > 10".to_string(), "col2 = 'value'".to_string()];
+        let df = reader.jdbc(
+            "jdbc:mysql://localhost/db",
+            "table",
+            Some(predicates.clone()),
+        );
+
+        match &df.plan {
+            LogicalPlan::Read {
+                read_type:
+                    ReadType::DataSource {
+                        predicates: preds, ..
+                    },
+                ..
+            } => {
+                assert_eq!(preds.len(), 2);
+            }
+            _ => panic!("expected Read plan with predicates"),
+        }
+    }
+
+    #[test]
+    fn v1_write_partition_and_cluster() {
+        let spark = session();
+        let df = spark.range(3).unwrap();
+        let op = df
+            .write()
+            .format("delta")
+            .partition_by(vec!["date".to_string()])
+            .cluster_by(vec!["user_id".to_string()])
+            .build_write_operation(Some(proto::write_operation::SaveType::Path(
+                "/tmp/data".to_string(),
+            )))
+            .unwrap();
+
+        assert_eq!(op.partitioning_columns, vec!["date"]);
+        assert_eq!(op.clustering_columns, vec!["user_id"]);
+    }
+
+    #[test]
+    fn v1_write_bucket_by() {
+        let spark = session();
+        let df = spark.range(3).unwrap();
+        let op = df
+            .write()
+            .format("parquet")
+            .bucket_by(10, vec!["col1".to_string()])
+            .build_write_operation(Some(proto::write_operation::SaveType::Path(
+                "/tmp/out".to_string(),
+            )))
+            .unwrap();
+
+        assert!(op.bucket_by.is_some());
+        let bucket_by = op.bucket_by.unwrap();
+        assert_eq!(bucket_by.num_buckets, 10);
+        assert_eq!(bucket_by.bucket_column_names, vec!["col1"]);
+    }
+
+    #[test]
+    fn v1_write_sort_by() {
+        let spark = session();
+        let df = spark.range(3).unwrap();
+        let op = df
+            .write()
+            .format("parquet")
+            .sort_by(vec!["col1".to_string()])
+            .build_write_operation(Some(proto::write_operation::SaveType::Path(
+                "/tmp/out".to_string(),
+            )))
+            .unwrap();
+
+        assert_eq!(op.sort_column_names, vec!["col1"]);
+    }
+
+    #[test]
+    fn reader_format_options() {
+        let spark = session();
+        let mut opts = std::collections::HashMap::new();
+        opts.insert("delimiter".to_string(), ";".to_string());
+        opts.insert("header".to_string(), "true".to_string());
+
+        let df = spark
+            .read()
+            .format("csv")
+            .options(opts)
+            .load(Some("/data.csv"));
+
+        match &df.plan {
+            LogicalPlan::Read {
+                read_type:
+                    ReadType::DataSource {
+                        options, format, ..
+                    },
+                ..
+            } => {
+                assert_eq!(format.as_deref(), Some("csv"));
+                assert_eq!(options.get("delimiter").map(String::as_str), Some(";"));
+                assert_eq!(options.get("header").map(String::as_str), Some("true"));
+            }
+            _ => panic!("expected Read plan"),
+        }
     }
 }

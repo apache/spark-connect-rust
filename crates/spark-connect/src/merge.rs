@@ -217,3 +217,134 @@ impl WhenNotMatchedBySource {
         self.writer
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::SparkSession;
+
+    fn session() -> SparkSession {
+        SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .expect("failed to build session")
+    }
+
+    #[test]
+    fn merge_into_when_matched_update() {
+        let spark = session();
+        let df = spark.range(3).unwrap();
+        let mut assignments = std::collections::HashMap::new();
+        assignments.insert("col1".to_string(), crate::column::col("new_val"));
+
+        let writer = df
+            .merge_into("target_table", crate::column::col("id"))
+            .when_matched(None)
+            .update(assignments);
+
+        assert_eq!(writer.matched_actions.len(), 1);
+        assert_eq!(writer.not_matched_actions.len(), 0);
+    }
+
+    #[test]
+    fn merge_into_when_matched_delete() {
+        let spark = session();
+        let df = spark.range(3).unwrap();
+
+        let writer = df
+            .merge_into("target_table", crate::column::col("id"))
+            .when_matched(None)
+            .delete();
+
+        assert_eq!(writer.matched_actions.len(), 1);
+    }
+
+    #[test]
+    fn merge_into_when_matched_update_all() {
+        let spark = session();
+        let df = spark.range(3).unwrap();
+
+        let writer = df
+            .merge_into("target_table", crate::column::col("id"))
+            .when_matched(None)
+            .update_all();
+
+        assert_eq!(writer.matched_actions.len(), 1);
+    }
+
+    #[test]
+    fn merge_into_when_not_matched_insert() {
+        let spark = session();
+        let df = spark.range(3).unwrap();
+        let mut assignments = std::collections::HashMap::new();
+        assignments.insert("col1".to_string(), crate::column::col("val"));
+
+        let writer = df
+            .merge_into("target_table", crate::column::col("id"))
+            .when_not_matched(None)
+            .insert(assignments);
+
+        assert_eq!(writer.not_matched_actions.len(), 1);
+        assert_eq!(writer.matched_actions.len(), 0);
+    }
+
+    #[test]
+    fn merge_into_when_not_matched_insert_all() {
+        let spark = session();
+        let df = spark.range(3).unwrap();
+
+        let writer = df
+            .merge_into("target_table", crate::column::col("id"))
+            .when_not_matched(None)
+            .insert_all();
+
+        assert_eq!(writer.not_matched_actions.len(), 1);
+    }
+
+    #[test]
+    fn merge_into_when_not_matched_by_source() {
+        let spark = session();
+        let df = spark.range(3).unwrap();
+
+        let writer = df
+            .merge_into("target_table", crate::column::col("id"))
+            .when_not_matched_by_source(None)
+            .delete();
+
+        assert_eq!(writer.not_matched_by_source_actions.len(), 1);
+    }
+
+    #[test]
+    fn merge_into_multiple_clauses() {
+        let spark = session();
+        let df = spark.range(3).unwrap();
+        let mut assign1 = std::collections::HashMap::new();
+        assign1.insert("col1".to_string(), crate::column::col("val1"));
+        let mut assign2 = std::collections::HashMap::new();
+        assign2.insert("col2".to_string(), crate::column::col("val2"));
+
+        let writer = df
+            .merge_into("target_table", crate::column::col("id"))
+            .when_matched(None)
+            .update(assign1)
+            .when_not_matched(None)
+            .insert(assign2);
+
+        assert_eq!(writer.matched_actions.len(), 1);
+        assert_eq!(writer.not_matched_actions.len(), 1);
+    }
+
+    #[test]
+    fn merge_into_with_schema_evolution() {
+        let spark = session();
+        let df = spark.range(3).unwrap();
+
+        let writer = df
+            .merge_into("target_table", crate::column::col("id"))
+            .with_schema_evolution()
+            .when_matched(None)
+            .update_all();
+
+        assert!(writer.schema_evolution);
+    }
+}

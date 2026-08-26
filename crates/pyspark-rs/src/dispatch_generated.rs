@@ -3,11 +3,6 @@
 pub fn call_builtin(name: &str, args: Vec<spark_connect::column::Column>) -> PyResult<spark_connect::column::Column> {
     use spark_connect::functions as spark_funcs;
     match name {
-            "array" => Ok(spark_funcs::array()),
-            "concat" => Ok(spark_funcs::concat()),
-            "coalesce" => Ok(spark_funcs::coalesce()),
-            "arrays_zip" => Ok(spark_funcs::arrays_zip()),
-            "create_map" => Ok(spark_funcs::create_map()),
             "curdate" => Ok(spark_funcs::curdate()),
             "current_catalog" => Ok(spark_funcs::current_catalog()),
             "current_database" => Ok(spark_funcs::current_database()),
@@ -18,38 +13,27 @@ pub fn call_builtin(name: &str, args: Vec<spark_connect::column::Column>) -> PyR
             "current_user" => Ok(spark_funcs::current_user()),
             "dense_rank" => Ok(spark_funcs::dense_rank()),
             "e" => Ok(spark_funcs::e()),
-            "elt" => Ok(spark_funcs::elt()),
-            "grouping_id" => Ok(spark_funcs::grouping_id()),
-            "hash" => Ok(spark_funcs::hash()),
             "input_file_block_length" => Ok(spark_funcs::input_file_block_length()),
             "input_file_block_start" => Ok(spark_funcs::input_file_block_start()),
             "input_file_name" => Ok(spark_funcs::input_file_name()),
-            "java_method" => Ok(spark_funcs::java_method()),
             "localtimestamp" => Ok(spark_funcs::localtimestamp()),
             "make_dt_interval" => Ok(spark_funcs::make_dt_interval()),
             "make_interval" => Ok(spark_funcs::make_interval()),
             "make_ym_interval" => Ok(spark_funcs::make_ym_interval()),
-            "map_concat" => Ok(spark_funcs::map_concat()),
             "monotonically_increasing_id" => Ok(spark_funcs::monotonically_increasing_id()),
-            "named_struct" => Ok(spark_funcs::named_struct()),
             "now" => Ok(spark_funcs::now()),
             "percent_rank" => Ok(spark_funcs::percent_rank()),
             "pi" => Ok(spark_funcs::pi()),
             "rand" => Ok(spark_funcs::rand()),
             "randn" => Ok(spark_funcs::randn()),
             "rank" => Ok(spark_funcs::rank()),
-            "reflect" => Ok(spark_funcs::reflect()),
             "row_number" => Ok(spark_funcs::row_number()),
             "session_user" => Ok(spark_funcs::session_user()),
             "spark_partition_id" => Ok(spark_funcs::spark_partition_id()),
-            "stack" => Ok(spark_funcs::stack()),
-            "struct" => Ok(spark_funcs::r#struct()),
             "try_make_interval" => Ok(spark_funcs::try_make_interval()),
-            "try_reflect" => Ok(spark_funcs::try_reflect()),
             "unix_timestamp" => Ok(spark_funcs::unix_timestamp()),
             "user" => Ok(spark_funcs::user()),
             "version" => Ok(spark_funcs::version()),
-            "xxhash64" => Ok(spark_funcs::xxhash64()),
             "current_path" => Ok(spark_funcs::current_path()),
             "current_time" => Ok(spark_funcs::current_time()),
             "uuid" => Ok(spark_funcs::uuid()),
@@ -99,7 +83,7 @@ pub fn call_builtin(name: &str, args: Vec<spark_connect::column::Column>) -> PyR
             },
             "approx_count_distinct" => {
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
-                Ok(spark_funcs::approx_count_distinct(args[0].clone()))
+                if args.len() >= 2 { Ok(spark_funcs::approx_count_distinct_rsd(args[0].clone(), args[1].clone())) } else { Ok(spark_funcs::approx_count_distinct(args[0].clone())) }
             },
             "array_agg" => {
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
@@ -219,7 +203,7 @@ pub fn call_builtin(name: &str, args: Vec<spark_connect::column::Column>) -> PyR
             },
             "bround" => {
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
-                Ok(spark_funcs::bround(args[0].clone()))
+                if args.len() >= 2 { Ok(spark_funcs::bround_scale(args[0].clone(), args[1].clone())) } else { Ok(spark_funcs::bround(args[0].clone())) }
             },
             "btrim" => {
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
@@ -235,7 +219,7 @@ pub fn call_builtin(name: &str, args: Vec<spark_connect::column::Column>) -> PyR
             },
             "ceil" => {
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
-                Ok(spark_funcs::ceil(args[0].clone()))
+                if args.len() >= 2 { Ok(spark_funcs::ceil_scale(args[0].clone(), args[1].clone())) } else { Ok(spark_funcs::ceil(args[0].clone())) }
             },
             "ceiling" => {
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
@@ -371,7 +355,7 @@ pub fn call_builtin(name: &str, args: Vec<spark_connect::column::Column>) -> PyR
             },
             "floor" => {
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
-                Ok(spark_funcs::floor(args[0].clone()))
+                if args.len() >= 2 { Ok(spark_funcs::floor_scale(args[0].clone(), args[1].clone())) } else { Ok(spark_funcs::floor(args[0].clone())) }
             },
             "format_string" => {
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
@@ -515,7 +499,7 @@ pub fn call_builtin(name: &str, args: Vec<spark_connect::column::Column>) -> PyR
             },
             "ltrim" => {
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
-                Ok(spark_funcs::ltrim(args[0].clone()))
+                if args.len() >= 2 { Ok(spark_funcs::ltrim_with(args[0].clone(), args[1].clone())) } else { Ok(spark_funcs::ltrim(args[0].clone())) }
             },
             "make_valid_utf8" => {
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
@@ -643,11 +627,11 @@ pub fn call_builtin(name: &str, args: Vec<spark_connect::column::Column>) -> PyR
             },
             "round" => {
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
-                Ok(spark_funcs::round(args[0].clone()))
+                if args.len() >= 2 { Ok(spark_funcs::round_scale(args[0].clone(), args[1].clone())) } else { Ok(spark_funcs::round(args[0].clone())) }
             },
             "rtrim" => {
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
-                Ok(spark_funcs::rtrim(args[0].clone()))
+                if args.len() >= 2 { Ok(spark_funcs::rtrim_with(args[0].clone(), args[1].clone())) } else { Ok(spark_funcs::rtrim(args[0].clone())) }
             },
             "schema_of_csv" => {
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
@@ -799,7 +783,7 @@ pub fn call_builtin(name: &str, args: Vec<spark_connect::column::Column>) -> PyR
             },
             "to_binary" => {
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
-                Ok(spark_funcs::to_binary(args[0].clone()))
+                if args.len() >= 2 { Ok(spark_funcs::to_binary_format(args[0].clone(), args[1].clone())) } else { Ok(spark_funcs::to_binary(args[0].clone())) }
             },
             "to_csv" => {
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
@@ -839,7 +823,7 @@ pub fn call_builtin(name: &str, args: Vec<spark_connect::column::Column>) -> PyR
             },
             "trim" => {
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
-                Ok(spark_funcs::trim(args[0].clone()))
+                if args.len() >= 2 { Ok(spark_funcs::trim_with(args[0].clone(), args[1].clone())) } else { Ok(spark_funcs::trim(args[0].clone())) }
             },
             "try_avg" => {
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
@@ -1161,6 +1145,22 @@ pub fn call_builtin(name: &str, args: Vec<spark_connect::column::Column>) -> PyR
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
                 Ok(spark_funcs::tuple_union_agg_integer(args[0].clone()))
             },
+            "array" => Ok(spark_funcs::array(args.clone())),
+            "concat" => Ok(spark_funcs::concat(args.clone())),
+            "coalesce" => Ok(spark_funcs::coalesce(args.clone())),
+            "arrays_zip" => Ok(spark_funcs::arrays_zip(args.clone())),
+            "create_map" => Ok(spark_funcs::create_map(args.clone())),
+            "elt" => Ok(spark_funcs::elt(args.clone())),
+            "grouping_id" => Ok(spark_funcs::grouping_id(args.clone())),
+            "hash" => Ok(spark_funcs::hash(args.clone())),
+            "java_method" => Ok(spark_funcs::java_method(args.clone())),
+            "map_concat" => Ok(spark_funcs::map_concat(args.clone())),
+            "named_struct" => Ok(spark_funcs::named_struct(args.clone())),
+            "reflect" => Ok(spark_funcs::reflect(args.clone())),
+            "stack" => Ok(spark_funcs::stack(args.clone())),
+            "struct" => Ok(spark_funcs::r#struct(args.clone())),
+            "try_reflect" => Ok(spark_funcs::try_reflect(args.clone())),
+            "xxhash64" => Ok(spark_funcs::xxhash64(args.clone())),
             "add_months" => {
                 if args.len() < 2 { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!("Missing required arguments for add_months: expected at least 2, got {}", args.len()))); }
                 Ok(spark_funcs::add_months(args[0].clone(), args[1].clone()))

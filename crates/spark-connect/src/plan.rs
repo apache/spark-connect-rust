@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use crate::column::Column;
 use crate::expression::Expression;
-use crate::types::{DataType, StructField};
+use crate::types::DataType;
 use crate::udf::CommonInlineUserDefinedFunctionExpression;
 
 /// Parameters for the `transformWithState` / `transformWithStateInPandas` operators
@@ -129,6 +129,14 @@ pub enum LogicalPlan {
         column_names: Vec<String>,
         columns: Vec<Column>,
     },
+    /// WithColumnMetadata: set metadata (a JSON map) on a single existing column.
+    /// Mirrors `DataFrame.withMetadata` - a `WithColumns` whose one alias re-aliases
+    /// the column to itself, carrying the metadata JSON.
+    WithColumnMetadata {
+        input: Box<LogicalPlan>,
+        column_name: String,
+        metadata_json: String,
+    },
     /// WithColumnsRenamed: `df.withColumnRenamed(old, new)` or `df.withColumnsRenamed(...)`.
     WithColumnsRenamed {
         input: Box<LogicalPlan>,
@@ -168,6 +176,12 @@ pub enum LogicalPlan {
         input: Box<LogicalPlan>,
         fill_value: crate::row::Value,
         columns: Vec<String>,
+    },
+    /// NAFill with a per-column value: `df.fillna({col: value, ...})`.
+    NAFillColumns {
+        input: Box<LogicalPlan>,
+        cols: Vec<String>,
+        values: Vec<crate::row::Value>,
     },
     /// NADrop: `df.dropna(how, thresh, subset)`.
     NADrop {
@@ -282,6 +296,16 @@ pub enum LogicalPlan {
     },
     /// ML Transformation: wraps an MlRelation proto directly.
     MlTransform { ml_relation: proto::Relation },
+    /// A catalog operation exposed as a relation (e.g. `listTables`, `listColumns`),
+    /// evaluated lazily so `.collect()` returns the server's rows - including zero
+    /// rows for an empty database, which must not be an error.
+    Catalog { catalog: proto::Catalog },
+    /// Transpose: swap rows and columns. `index_columns` optionally names the
+    /// column(s) used as the transposed header (empty = server default).
+    Transpose {
+        input: Box<LogicalPlan>,
+        index_columns: Vec<Expression>,
+    },
     /// MapPartitions: `DataFrame.mapInPandas` / `mapInArrow` (also backs foreach).
     MapPartitions {
         input: Box<LogicalPlan>,
@@ -574,6 +598,9 @@ impl LogicalPlan {
                 order,
                 is_global,
             } => {
+                // Use the generated proto enum constants rather than bare 1/2 magic
+                // numbers, so a future proto reorder can't silently change meaning.
+                use proto::expression::sort_order::{NullOrdering as PbNulls, SortDirection};
                 let mut sort = proto::Sort::default();
                 sort.input = Some(Box::new(input.to_proto()));
                 for expr in order {
@@ -581,19 +608,34 @@ impl LogicalPlan {
                     if let Expression::SortOrder(so) = expr {
                         let mut sort_order = proto::expression::SortOrder::default();
                         sort_order.child = Some(Box::new(so.child.to_proto()));
-                        sort_order.direction = if so.ascending { 1i32 } else { 2i32 };
+                        sort_order.direction = if so.ascending {
+                            SortDirection::Ascending as i32
+                        } else {
+                            SortDirection::Descending as i32
+                        };
                         sort_order.null_ordering = match so.null_ordering {
-                            crate::expression::NullOrdering::First => 1i32,
-                            crate::expression::NullOrdering::Last => 2i32,
+                            crate::expression::NullOrdering::First => {
+                                PbNulls::SortNullsFirst as i32
+                            }
+                            crate::expression::NullOrdering::Last => PbNulls::SortNullsLast as i32,
                         };
                         sort.order.push(sort_order);
                     } else {
-                        // Fallback: convert to Expression proto then wrap
                         let expr_proto = expr.to_proto();
                         if let Some(proto::expression::ExprType::SortOrder(so)) =
                             expr_proto.expr_type
                         {
                             sort.order.push(*so);
+                        } else {
+                            // A bare column (not a SortOrder): default to ascending,
+                            // nulls first - matching reference pyspark's sort/orderBy.
+                            // Without this the column was dropped, leaving an empty
+                            // order and an invalid Sort plan.
+                            let mut sort_order = proto::expression::SortOrder::default();
+                            sort_order.child = Some(Box::new(expr_proto));
+                            sort_order.direction = SortDirection::Ascending as i32;
+                            sort_order.null_ordering = PbNulls::SortNullsFirst as i32;
+                            sort.order.push(sort_order);
                         }
                     }
                 }
@@ -638,7 +680,14 @@ impl LogicalPlan {
             } => {
                 let mut repart = proto::RepartitionByExpression::default();
                 repart.input = Some(Box::new(input.to_proto()));
-                repart.num_partitions = Some(*num_partitions);
+                // num_partitions is optional in the proto: <= 0 means "unset" so the
+                // server uses the default (the `df.repartition(*cols)` column-only form,
+                // where no partition count is given). A real count is always positive.
+                repart.num_partitions = if *num_partitions > 0 {
+                    Some(*num_partitions)
+                } else {
+                    None
+                };
                 for expr in expressions {
                     repart.partition_exprs.push(expr.to_proto());
                 }
@@ -661,6 +710,24 @@ impl LogicalPlan {
                     alias.name = vec![name.clone()];
                     wc.aliases.push(alias);
                 }
+                relation.rel_type = Some(proto::relation::RelType::WithColumns(Box::new(wc)));
+            }
+
+            LogicalPlan::WithColumnMetadata {
+                input,
+                column_name,
+                metadata_json,
+            } => {
+                let mut wc = proto::WithColumns::default();
+                wc.input = Some(Box::new(input.to_proto()));
+                let col_expr = crate::expression::Expression::ColumnReference(
+                    crate::expression::ColumnReference::new(column_name.clone()),
+                );
+                let mut alias = proto::expression::Alias::default();
+                alias.expr = Some(Box::new(col_expr.to_proto()));
+                alias.name = vec![column_name.clone()];
+                alias.metadata = Some(metadata_json.clone());
+                wc.aliases.push(alias);
                 relation.rel_type = Some(proto::relation::RelType::WithColumns(Box::new(wc)));
             }
 
@@ -710,11 +777,13 @@ impl LogicalPlan {
                 hint.input = Some(Box::new(input.to_proto()));
                 hint.name = name.clone();
                 // Hint parameters are literal Expressions (e.g. `REPARTITION 10`).
-                // An integer-looking parameter becomes a Long literal, otherwise a
-                // String literal.
+                // An integer-looking parameter becomes an Integer (int32) literal -
+                // matching reference pyspark's `lit(int)` - otherwise a String literal.
+                // (A Long literal is rejected as a partitionNum by e.g. the REBALANCE
+                // hint, which expects an integral int.)
                 for p in parameters {
-                    let lit = if let Ok(n) = p.parse::<i64>() {
-                        crate::expression::LiteralExpression::long(n)
+                    let lit = if let Ok(n) = p.parse::<i32>() {
+                        crate::expression::LiteralExpression::int(n)
                     } else {
                         crate::expression::LiteralExpression::string(p.clone())
                     };
@@ -756,6 +825,22 @@ impl LogicalPlan {
                 na_fill.input = Some(Box::new(input.to_proto()));
                 na_fill.cols.extend(columns.clone());
                 na_fill.values.push(value_to_proto_literal(fill_value));
+                relation.rel_type = Some(proto::relation::RelType::FillNa(Box::new(na_fill)));
+            }
+
+            LogicalPlan::NAFillColumns {
+                input,
+                cols,
+                values,
+            } => {
+                // Per-column fill: cols[i] is filled with values[i] (Spark aligns them
+                // positionally when both are non-empty).
+                let mut na_fill = proto::NaFill::default();
+                na_fill.input = Some(Box::new(input.to_proto()));
+                na_fill.cols.extend(cols.clone());
+                na_fill
+                    .values
+                    .extend(values.iter().map(value_to_proto_literal));
                 relation.rel_type = Some(proto::relation::RelType::FillNa(Box::new(na_fill)));
             }
 
@@ -1045,6 +1130,20 @@ impl LogicalPlan {
 
             LogicalPlan::MlTransform { ml_relation } => {
                 return ml_relation.clone();
+            }
+            LogicalPlan::Catalog { catalog } => {
+                relation.rel_type = Some(proto::relation::RelType::Catalog(catalog.clone()));
+                return relation;
+            }
+            LogicalPlan::Transpose {
+                input,
+                index_columns,
+            } => {
+                let mut transpose = proto::Transpose::default();
+                transpose.input = Some(Box::new(input.to_proto()));
+                transpose.index_columns = index_columns.iter().map(|e| e.to_proto()).collect();
+                relation.rel_type = Some(proto::relation::RelType::Transpose(Box::new(transpose)));
+                return relation;
             }
             LogicalPlan::MapPartitions {
                 input,
@@ -1656,12 +1755,13 @@ mod argfix_tests {
         match rel_type(p) {
             proto::relation::RelType::Hint(h) => {
                 assert_eq!(h.parameters.len(), 2, "parameters must be forwarded");
-                // First param "10" -> Long(10) literal.
+                // First param "10" -> Integer(10) literal (int32, matching reference
+                // pyspark's lit(int); a Long is rejected by the REBALANCE hint).
                 let lit = match h.parameters[0].expr_type.as_ref().unwrap() {
                     proto::expression::ExprType::Literal(l) => l.literal_type.clone().unwrap(),
                     _ => panic!("expected literal param"),
                 };
-                assert!(matches!(lit, LiteralType::Long(10)));
+                assert!(matches!(lit, LiteralType::Integer(10)));
             }
             _ => panic!("expected Hint"),
         }

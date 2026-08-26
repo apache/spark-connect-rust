@@ -27,6 +27,9 @@ returning the same results as the reference client.
 [![PyPI](https://img.shields.io/pypi/v/pyspark-client-rust?color=c2410c&label=pyspark-client-rust)](https://pypi.org/project/pyspark-client-rust/)
 ![Spark](https://img.shields.io/badge/Apache%20Spark-4.2.0%2B-c2410c)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
+<!-- Coverage badges are published by .github/workflows/coverage.yml to the `badges` branch. -->
+[![Rust coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/apache/spark-connect-rust/badges/coverage-rust.json)](https://github.com/apache/spark-connect-rust/actions/workflows/coverage.yml)
+[![Python coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/apache/spark-connect-rust/badges/coverage-python.json)](https://github.com/apache/spark-connect-rust/actions/workflows/coverage.yml)
 
 ## 📖 Documentation
 
@@ -80,6 +83,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 See the [documentation](https://apache.github.io/spark-connect-rust/) for the full
 API, running a Spark Connect server, and more.
+
+## API Parity & Drop-in Replacement
+
+The Python drop-in (`pyspark-client-rust`) achieves **100% public-API parity with
+PySpark 4.2.0**. The Rust client (crate `apache-spark-connect`) has the same
+parity and supports the complete DataFrame, SQL, Streaming, Catalog, and Type
+system. The two internal APIs intentionally absent (`Column.to_plan` and
+`SparkSession.client`) are implementation details and not part of the public
+interface.
+
+## User-Defined Functions (UDFs)
+
+Rust UDFs are compiled to WebAssembly, shipped to the executors, and can be used
+via the DataFrame API or registered by name for SQL. The runner is cloudpickled
+by value, so executors need only the `wasmtime` Python package:
+
+```rust
+use spark_connect::functions::col;
+use spark_connect::wasm_udf::{udf, AbiType};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let spark = SparkSession::builder().remote("sc://localhost:15002").get_or_create()?;
+
+    // Load a prebuilt module: fn shout(s: String) -> String
+    let wasm = std::fs::read("shout.wasm")?;
+    let shout = udf("shout", wasm, "shout", vec![AbiType::Str], AbiType::Str);
+
+    // DataFrame API:
+    let df = spark.range(0, 3)?.select(vec![shout.call(vec![col("id").cast_str("string")])?])?;
+    df.show(20)?;
+
+    // ...or register by name and call from SQL (mirrors spark.udf.register):
+    spark.udf().register("shout", &shout)?;
+    spark.sql("SELECT shout(name) FROM people")?.show(20)?;
+    Ok(())
+}
+```
+
+See the [WASM UDF guide](https://apache.github.io/spark-connect-rust/udfs/) for
+building modules with the `spark_wasm_udf` macro and more examples.
 
 ## Contributing
 

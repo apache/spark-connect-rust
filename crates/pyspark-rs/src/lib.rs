@@ -1,23 +1,48 @@
 //! PyO3 bindings for the Rust Spark Connect client.
 
+use pyo3::prelude::*;
+use pyo3::types::PyBool;
+
+/// Coerce a Python option value the way reference pyspark's `to_str` does:
+/// `None` -> `None` (the option is left unset, NOT the literal string "None"), a
+/// bool -> lowercase `"true"`/`"false"` (not Python's `"True"`/`"False"`), and
+/// everything else -> its `str()`. Used by every reader/writer/conf `option(s)`
+/// binding so option handling matches the reference client.
+pub(crate) fn coerce_option_value(v: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+    if v.is_none() {
+        return Ok(None);
+    }
+    if let Ok(b) = v.downcast::<PyBool>() {
+        return Ok(Some(if b.is_true() { "true" } else { "false" }.to_string()));
+    }
+    Ok(Some(v.str()?.to_string()))
+}
+
 mod catalog;
 mod column;
+mod conf;
 mod dataframe;
 mod datasource;
 mod errors;
 mod functions;
 mod group;
+mod ml;
+mod observation;
 mod profiler;
+mod readwriter;
 mod resource;
 mod row;
 mod session;
+mod stat;
 mod streaming;
 mod transport;
+mod tvf;
 mod types;
 mod window;
 
 use catalog::PyCatalog;
 use column::PyColumn;
+use conf::PyRuntimeConf;
 use dataframe::{
     PyDataFrame, PyDataFrameNaFunctions, PyDataFrameWriter, PyDataFrameWriterV2,
     PyLocalRowIterator, PyMergeIntoWriter, PyWhenMatched, PyWhenNotMatched,
@@ -27,19 +52,23 @@ use datasource::PyDataSourceRegistration;
 use group::{PyCoGroupedData, PyGroupedData};
 use profiler::PyProfilerCollector;
 use pyo3::prelude::*;
+use readwriter::PyDataFrameReader;
 use resource::{
     PyExecutorResourceRequests, PyResourceProfile, PyResourceProfileBuilder, PyTaskResourceRequests,
 };
 use row::PyRow;
 use session::{PySparkSession, PySparkSessionBuilder};
+use stat::PyStatFunctions;
 use streaming::{
     PyDataStreamReader, PyDataStreamWriter, PyListenerEventStream, PyStreamingQuery,
     PyStreamingQueryException, PyStreamingQueryManager, PyStreamingQueryStatus, PyTrigger,
 };
 use types::{
-    PyArrayType, PyBinaryType, PyBooleanType, PyByteType, PyDataType, PyDateType, PyDecimalType,
-    PyDoubleType, PyFloatType, PyIntegerType, PyLongType, PyMapType, PyNullType, PyShortType,
-    PyStringType, PyStructField, PyStructType, PyTimestampNTZType, PyTimestampType,
+    PyArrayType, PyBinaryType, PyBooleanType, PyByteType, PyCalendarIntervalType, PyCharType,
+    PyDataType, PyDateType, PyDayTimeIntervalType, PyDecimalType, PyDoubleType, PyFloatType,
+    PyIntegerType, PyLongType, PyMapType, PyNullType, PyShortType, PyStringType, PyStructField,
+    PyStructType, PyTimeType, PyTimestampNTZType, PyTimestampType, PyVarcharType, PyVariantType,
+    PyYearMonthIntervalType,
 };
 use window::{PyFrameBound, PyWindow, PyWindowSpec};
 
@@ -64,6 +93,9 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<transport::ResponseStream>()?;
     m.add("RustRpcError", m.py().get_type::<transport::RustRpcError>())?;
     m.add_class::<PyCatalog>()?;
+    m.add_class::<PyRuntimeConf>()?;
+    m.add_class::<PyDataFrameReader>()?;
+    m.add_class::<PyStatFunctions>()?;
 
     // Streaming classes
     m.add_class::<PyDataStreamReader>()?;
@@ -105,11 +137,35 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyMapType>()?;
     m.add_class::<PyStructField>()?;
     m.add_class::<PyStructType>()?;
+    m.add_class::<PyCharType>()?;
+    m.add_class::<PyVarcharType>()?;
+    m.add_class::<PyTimeType>()?;
+    m.add_class::<PyCalendarIntervalType>()?;
+    m.add_class::<PyYearMonthIntervalType>()?;
+    m.add_class::<PyDayTimeIntervalType>()?;
+    m.add_class::<PyVariantType>()?;
 
     // Register Window classes
     m.add_class::<PyWindow>()?;
     m.add_class::<PyWindowSpec>()?;
     m.add_class::<PyFrameBound>()?;
+
+    // Register TVF + Observation
+    m.add_class::<tvf::PyTableValuedFunction>()?;
+    m.add_class::<observation::PyObservation>()?;
+
+    // Register ML classes (pyspark.ml.connect)
+    m.add_class::<ml::PyMLModel>()?;
+    m.add_class::<ml::PyStandardScaler>()?;
+    m.add_class::<ml::PyMaxAbsScaler>()?;
+    m.add_class::<ml::PyStringIndexer>()?;
+    m.add_class::<ml::PyVectorAssembler>()?;
+    m.add_class::<ml::PyLogisticRegression>()?;
+    m.add_class::<ml::PyRegressionEvaluator>()?;
+    m.add_class::<ml::PyBinaryClassificationEvaluator>()?;
+    m.add_class::<ml::PyPipeline>()?;
+    m.add_class::<ml::PyMulticlassClassificationEvaluator>()?;
+    m.add_class::<ml::PyCrossValidator>()?;
 
     // Register functions as a submodule
     let functions_module = PyModule::new(_py, "functions")?;

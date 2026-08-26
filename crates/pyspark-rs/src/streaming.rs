@@ -49,18 +49,29 @@ impl PyDataStreamReader {
         })
     }
 
-    fn option(&mut self, key: &str, value: &str) -> PyResult<PyDataStreamReader> {
-        Ok(PyDataStreamReader {
-            inner: Some(self.take()?.option(key, value)),
-        })
+    fn option(&mut self, key: &str, value: &Bound<'_, PyAny>) -> PyResult<PyDataStreamReader> {
+        // None -> option left unset; bools -> "true"/"false" (reference `to_str`).
+        match crate::coerce_option_value(value)? {
+            Some(v) => Ok(PyDataStreamReader {
+                inner: Some(self.take()?.option(key, &v)),
+            }),
+            None => Ok(PyDataStreamReader {
+                inner: Some(self.take()?),
+            }),
+        }
     }
 
-    fn options(&mut self, options: &Bound<'_, PyDict>) -> PyResult<PyDataStreamReader> {
+    // Mirrors reference `DataStreamReader.options(**options)`: keyword args; None values
+    // skipped, booleans lowercased.
+    #[pyo3(signature = (**options))]
+    fn options(&mut self, options: Option<&Bound<'_, PyDict>>) -> PyResult<PyDataStreamReader> {
         let mut opts = HashMap::new();
-        for (k, v) in options.iter() {
-            let key: String = k.extract()?;
-            let val: String = v.extract()?;
-            opts.insert(key, val);
+        if let Some(options) = options {
+            for (k, v) in options.iter() {
+                if let Some(val) = crate::coerce_option_value(&v)? {
+                    opts.insert(k.str()?.to_string(), val);
+                }
+            }
         }
         Ok(PyDataStreamReader {
             inner: Some(self.take()?.options(opts)),
@@ -178,18 +189,29 @@ impl PyDataStreamWriter {
         })
     }
 
-    fn option(&mut self, key: &str, value: &str) -> PyResult<PyDataStreamWriter> {
-        Ok(PyDataStreamWriter {
-            inner: Some(self.take()?.option(key, value)),
-        })
+    fn option(&mut self, key: &str, value: &Bound<'_, PyAny>) -> PyResult<PyDataStreamWriter> {
+        // None -> option left unset; bools -> "true"/"false" (reference `to_str`).
+        match crate::coerce_option_value(value)? {
+            Some(v) => Ok(PyDataStreamWriter {
+                inner: Some(self.take()?.option(key, &v)),
+            }),
+            None => Ok(PyDataStreamWriter {
+                inner: Some(self.take()?),
+            }),
+        }
     }
 
-    fn options(&mut self, options: &Bound<'_, PyDict>) -> PyResult<PyDataStreamWriter> {
+    // Mirrors reference `DataStreamWriter.options(**options)`: keyword args; None values
+    // skipped, booleans lowercased.
+    #[pyo3(signature = (**options))]
+    fn options(&mut self, options: Option<&Bound<'_, PyDict>>) -> PyResult<PyDataStreamWriter> {
         let mut opts = HashMap::new();
-        for (k, v) in options.iter() {
-            let key: String = k.extract()?;
-            let val: String = v.extract()?;
-            opts.insert(key, val);
+        if let Some(options) = options {
+            for (k, v) in options.iter() {
+                if let Some(val) = crate::coerce_option_value(&v)? {
+                    opts.insert(k.str()?.to_string(), val);
+                }
+            }
         }
         Ok(PyDataStreamWriter {
             inner: Some(self.take()?.options(opts)),
@@ -439,9 +461,10 @@ impl PyStreamingQuery {
         self.inner.process_all_available().to_pyerr()
     }
 
-    fn explain(&self, extended: Option<bool>) -> PyResult<String> {
-        let ext = extended.unwrap_or(false);
-        self.inner.explain(ext).to_pyerr()
+    // Mirrors reference `StreamingQuery.explain(extended=False)` - the arg is optional.
+    #[pyo3(signature = (extended=false))]
+    fn explain(&self, extended: bool) -> PyResult<String> {
+        self.inner.explain(extended).to_pyerr()
     }
 
     fn exception(&self) -> PyResult<Option<PyStreamingQueryException>> {

@@ -39,6 +39,27 @@ impl PyGroupedData {
         Ok(PyDataFrame::new(df))
     }
 
+    /// Pivot on a column; `values=None` auto-discovers the distinct pivot values.
+    #[pyo3(signature = (pivot_col, values=None))]
+    fn pivot(
+        &self,
+        pivot_col: &str,
+        values: Option<Vec<Bound<'_, PyAny>>>,
+    ) -> PyResult<PyGroupedData> {
+        let pcol = spark_connect::functions::col(pivot_col);
+        let vals = match values {
+            None => None,
+            Some(vs) => {
+                let mut out = Vec::with_capacity(vs.len());
+                for v in &vs {
+                    out.push(crate::session::py_to_value(v)?);
+                }
+                Some(out)
+            }
+        };
+        Ok(PyGroupedData::new(self.grouped_data.pivot(pcol, vals)))
+    }
+
     /// Sum values in each group.
     #[pyo3(signature = (*cols))]
     fn sum(&self, _py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
@@ -115,6 +136,19 @@ impl PyGroupedData {
             eval_type::SQL_GROUPED_MAP_PANDAS_UDF,
         )?;
         Ok(PyDataFrame::new(self.grouped_data.apply_in_pandas(udf)))
+    }
+
+    /// Deprecated grouped-map apply: `apply(udf)` where `udf` is a
+    /// `SQL_GROUPED_MAP_PANDAS_UDF` pandas UDF. Delegates to `applyInPandas` with the
+    /// UDF's wrapped function and return type (mirrors the official Connect API).
+    fn apply(&self, py: Python<'_>, udf: Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let func = udf.getattr("func").map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "apply() expects a pandas_udf of type SQL_GROUPED_MAP_PANDAS_UDF",
+            )
+        })?;
+        let schema = udf.getattr("returnType")?;
+        self.apply_in_pandas(py, func, schema)
     }
 
     /// `GroupedData.applyInArrow`.

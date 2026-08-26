@@ -2,7 +2,7 @@
 //!
 //! Provides transformations and actions for working with distributed data.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use spark_connect_core::client::ReattachableResponseStream;
 use spark_connect_core::error::{Result, SparkError};
@@ -449,13 +449,20 @@ impl DataFrame {
 
     /// Union by name.
     pub fn union_by_name(&self, other: &DataFrame) -> DataFrame {
+        self.union_by_name_opt(other, false)
+    }
+
+    /// `unionByName` with the `allowMissingColumns` option (columns present in only
+    /// one side are filled with null rather than rejected). Mirrors
+    /// `DataFrame.unionByName(other, allowMissingColumns=False)`.
+    pub fn union_by_name_opt(&self, other: &DataFrame, allow_missing_columns: bool) -> DataFrame {
         let plan = LogicalPlan::SetOperation {
             left: Box::new(self.plan.clone()),
             right: Box::new(other.plan.clone()),
             set_op_type: SetOpType::Union,
             is_all: true,
             by_name: true,
-            allow_missing_columns: false,
+            allow_missing_columns,
         };
         DataFrame::new(self.session.clone(), plan)
     }
@@ -593,11 +600,22 @@ impl DataFrame {
 
     /// Sample rows.
     pub fn sample(&self, fraction: f64, seed: Option<i64>) -> DataFrame {
+        self.sample_opt(fraction, false, seed)
+    }
+
+    /// `sample` with the `withReplacement` option. Mirrors
+    /// `DataFrame.sample(withReplacement, fraction, seed)`.
+    pub fn sample_opt(
+        &self,
+        fraction: f64,
+        with_replacement: bool,
+        seed: Option<i64>,
+    ) -> DataFrame {
         let plan = LogicalPlan::Sample {
             input: Box::new(self.plan.clone()),
             lower_bound: 0.0,
             upper_bound: fraction,
-            with_replacement: false,
+            with_replacement,
             seed,
         };
         DataFrame::new(self.session.clone(), plan)
@@ -1000,13 +1018,34 @@ impl DataFrame {
     /// Print the execution plan to the console. Mirrors `pyspark.sql.DataFrame.explain`
     /// (was previously a no-op that ran the query relation instead of an AnalyzePlan).
     pub fn explain(&self) -> Result<()> {
+        self.explain_mode("simple")
+    }
+
+    /// Print the execution plan in a specific mode. Mirrors the `mode` argument of
+    /// `pyspark.sql.DataFrame.explain`: one of "simple", "extended", "codegen",
+    /// "cost", "formatted" (case-insensitive).
+    pub fn explain_mode(&self, mode: &str) -> Result<()> {
+        use proto::analyze_plan_request::explain::ExplainMode;
+        let explain_mode = match mode.to_lowercase().as_str() {
+            "simple" => ExplainMode::Simple,
+            "extended" => ExplainMode::Extended,
+            "codegen" => ExplainMode::Codegen,
+            "cost" => ExplainMode::Cost,
+            "formatted" => ExplainMode::Formatted,
+            other => {
+                return Err(SparkError::value(
+                    "UNSUPPORTED_EXPLAIN_MODE",
+                    &[("mode", other)],
+                ))
+            }
+        };
         let mut relation = self.plan.to_proto();
         assign_plan_ids(&mut relation, &self.session)?;
         let mut plan = proto::Plan::default();
         plan.op_type = Some(proto::plan::OpType::Root(relation));
         let mut ex = proto::analyze_plan_request::Explain::default();
         ex.plan = Some(plan);
-        ex.explain_mode = proto::analyze_plan_request::explain::ExplainMode::Simple as i32;
+        ex.explain_mode = explain_mode as i32;
         let mut request = proto::AnalyzePlanRequest::default();
         request.session_id = self.session.client().session_id().to_string();
         request.user_context = Some(proto::UserContext::default());
@@ -1034,6 +1073,21 @@ impl DataFrame {
             input: Box::new(self.plan.clone()),
             num_partitions: Some(num_partitions),
             partition_exprs: columns,
+        };
+        DataFrame::new(self.session.clone(), plan)
+    }
+
+    /// Repartition into `num_partitions` by hashing the given column expressions.
+    /// Mirrors `df.repartition(numPartitions, *cols)`.
+    pub fn repartition_by_expressions(
+        &self,
+        num_partitions: i32,
+        columns: Vec<Expression>,
+    ) -> DataFrame {
+        let plan = LogicalPlan::RepartitionByExpression {
+            input: Box::new(self.plan.clone()),
+            num_partitions,
+            expressions: columns,
         };
         DataFrame::new(self.session.clone(), plan)
     }
@@ -1121,10 +1175,14 @@ impl DataFrame {
         DataFrame::new(self.session.clone(), plan)
     }
 
-    /// Select with SQL expressions.
+    /// Select with SQL expressions, mirroring `DataFrame.selectExpr`.
+    ///
+    /// Each string is parsed as a SQL expression (e.g. `"id + 1 AS x"`), not treated
+    /// as a bare column name - so it must go through `functions::expr` (an
+    /// `ExpressionString` the server parses), not `col` (an unresolved attribute,
+    /// which made `selectExpr("id + 1 AS x")` fail to resolve).
     pub fn select_expr(&self, exprs: Vec<&str>) -> DataFrame {
-        use crate::column::col;
-        let cols: Vec<Column> = exprs.iter().map(|expr| col(expr)).collect();
+        let cols: Vec<Column> = exprs.iter().map(|e| crate::functions::expr(e)).collect();
         self.select(cols)
     }
 
@@ -1157,6 +1215,18 @@ impl DataFrame {
             input: Box::new(self.plan.clone()),
             fill_value: value,
             columns,
+        };
+        DataFrame::new(self.session.clone(), plan)
+    }
+
+    /// Fill NA values per column from `(column, value)` pairs.
+    /// Mirrors `df.fillna({col: value, ...})`.
+    pub fn fillna_map(&self, pairs: Vec<(String, crate::row::Value)>) -> DataFrame {
+        let (cols, values): (Vec<String>, Vec<crate::row::Value>) = pairs.into_iter().unzip();
+        let plan = LogicalPlan::NAFillColumns {
+            input: Box::new(self.plan.clone()),
+            cols,
+            values,
         };
         DataFrame::new(self.session.clone(), plan)
     }
@@ -1358,26 +1428,79 @@ impl DataFrame {
         }
     }
 
-    /// Compute the semantic hash of this DataFrame's plan.
-    pub fn semantic_hash(&self) -> i64 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        format!("{:?}", self.plan).hash(&mut hasher);
-        hasher.finish() as i64
+    /// Compute the server-side semantic hash of this DataFrame's logical plan,
+    /// mirroring `DataFrame.semanticHash()` (an AnalyzePlan request).
+    pub fn semantic_hash(&self) -> Result<i32> {
+        let mut relation = self.plan.to_proto();
+        assign_plan_ids(&mut relation, &self.session)?;
+        let mut plan = proto::Plan::default();
+        plan.op_type = Some(proto::plan::OpType::Root(relation));
+        let mut request = proto::AnalyzePlanRequest::default();
+        request.session_id = self.session.client().session_id().to_string();
+        request.user_context = Some(proto::UserContext::default());
+        request.analyze = Some(proto::analyze_plan_request::Analyze::SemanticHash(
+            proto::analyze_plan_request::SemanticHash { plan: Some(plan) },
+        ));
+        let resp = block_on(self.session.client().analyze_plan(request))?;
+        match resp.result {
+            Some(proto::analyze_plan_response::Result::SemanticHash(h)) => Ok(h.result),
+            _ => Err(SparkError::connect_msg(
+                "AnalyzePlan response did not contain a semantic hash",
+            )),
+        }
     }
 
-    /// Check if two DataFrames have the same semantics (same logical plan).
-    pub fn same_semantics(&self, other: &DataFrame) -> bool {
-        format!("{:?}", self.plan) == format!("{:?}", other.plan)
+    /// Whether two DataFrames have the same semantics, mirroring
+    /// `DataFrame.sameSemantics(other)` (a server-side AnalyzePlan comparison).
+    pub fn same_semantics(&self, other: &DataFrame) -> Result<bool> {
+        let mut self_rel = self.plan.to_proto();
+        assign_plan_ids(&mut self_rel, &self.session)?;
+        let mut other_rel = other.plan.to_proto();
+        assign_plan_ids(&mut other_rel, &other.session)?;
+        let mut target_plan = proto::Plan::default();
+        target_plan.op_type = Some(proto::plan::OpType::Root(self_rel));
+        let mut other_plan = proto::Plan::default();
+        other_plan.op_type = Some(proto::plan::OpType::Root(other_rel));
+        let mut request = proto::AnalyzePlanRequest::default();
+        request.session_id = self.session.client().session_id().to_string();
+        request.user_context = Some(proto::UserContext::default());
+        request.analyze = Some(proto::analyze_plan_request::Analyze::SameSemantics(
+            proto::analyze_plan_request::SameSemantics {
+                target_plan: Some(target_plan),
+                other_plan: Some(other_plan),
+            },
+        ));
+        let resp = block_on(self.session.client().analyze_plan(request))?;
+        match resp.result {
+            Some(proto::analyze_plan_response::Result::SameSemantics(r)) => Ok(r.result),
+            _ => Err(SparkError::connect_msg(
+                "AnalyzePlan response did not contain a sameSemantics result",
+            )),
+        }
     }
 
-    /// Convert to JSON format.
+    /// Convert each row to a JSON object string, mirroring `DataFrame.toJSON()`.
+    ///
+    /// Reference pyspark produces `{"col":val,...}` per row by applying the server's
+    /// `to_json(struct(*))`, not a client-side row rendering (which previously emitted
+    /// Rust list syntax like `[1, a]`). Build that projection and collect the strings.
     pub fn to_json(&self) -> Result<Vec<String>> {
-        let rows = self.collect()?;
-        let json_rows = rows.iter().map(|r| r.to_string()).collect();
-        Ok(json_rows)
+        let cols: Vec<Column> = self
+            .columns()?
+            .iter()
+            .map(|c| crate::column::col(c))
+            .collect();
+        let json_col = crate::functions::to_json(crate::functions::r#struct(cols));
+        let rows = self.select(vec![json_col]).collect()?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                r.get(0)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect())
     }
 
     /// Union all rows (alias for union with all=true).
@@ -1437,13 +1560,18 @@ impl DataFrame {
         DataFrame::new(self.session.clone(), plan)
     }
 
-    /// Add metadata to a column.
-    pub fn with_metadata(
-        &self,
-        column_name: &str,
-        _metadata: HashMap<String, String>,
-    ) -> DataFrame {
-        self.alias(&format!("with_metadata_{}", column_name))
+    /// Set metadata on an existing column.
+    ///
+    /// Mirrors `pyspark.sql.connect.dataframe.DataFrame.withMetadata`: the column is
+    /// re-selected with the given metadata attached (serialized to a JSON map).
+    pub fn with_metadata(&self, column_name: &str, metadata: HashMap<String, String>) -> DataFrame {
+        let metadata_json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
+        let plan = LogicalPlan::WithColumnMetadata {
+            input: Box::new(self.plan.clone()),
+            column_name: column_name.to_string(),
+            metadata_json,
+        };
+        DataFrame::new(self.session.clone(), plan)
     }
 
     /// Get the Spark session.
@@ -1474,29 +1602,7 @@ impl DataFrame {
     /// back with `arrow::ipc::reader::FileReader` (or handed to pyarrow, polars,
     /// etc.). An empty result yields a valid IPC file with an empty schema.
     pub fn to_arrow(&self) -> Result<Vec<u8>> {
-        use arrow::ipc::writer::FileWriter;
-
-        let batches = self.collect_record_batches()?;
-        let schema = match batches.first() {
-            Some(batch) => batch.schema(),
-            None => std::sync::Arc::new(arrow::datatypes::Schema::empty()),
-        };
-
-        let mut buf: Vec<u8> = Vec::new();
-        {
-            let mut writer = FileWriter::try_new(&mut buf, schema.as_ref()).map_err(|e| {
-                SparkError::connect_msg(format!("Arrow IPC writer init failed: {e}"))
-            })?;
-            for batch in &batches {
-                writer
-                    .write(batch)
-                    .map_err(|e| SparkError::connect_msg(format!("Arrow IPC write failed: {e}")))?;
-            }
-            writer
-                .finish()
-                .map_err(|e| SparkError::connect_msg(format!("Arrow IPC finish failed: {e}")))?;
-        }
-        Ok(buf)
+        record_batches_to_ipc(&self.collect_record_batches()?)
     }
 
     /// Convert to a DataFusion DataFrame.
@@ -1519,19 +1625,7 @@ impl DataFrame {
         &self,
         ctx: &datafusion::prelude::SessionContext,
     ) -> Result<datafusion::dataframe::DataFrame> {
-        let batches = self.collect_record_batches()?;
-
-        if batches.is_empty() {
-            return Err(SparkError::connect_msg(
-                "Cannot create DataFusion DataFrame from empty result",
-            ));
-        }
-
-        // Use DataFusion's API to create a DataFrame from record batches.
-        // The schema is extracted from the first batch automatically.
-        ctx.read_batches(batches).map_err(|e| {
-            SparkError::connect_msg(format!("Failed to create DataFusion DataFrame: {}", e))
-        })
+        record_batches_to_datafusion(ctx, self.collect_record_batches()?)
     }
 
     /// Convert a collected DataFrame into a [`polars::frame::DataFrame`].
@@ -1547,34 +1641,7 @@ impl DataFrame {
     /// crate's arrow-rs version.
     #[cfg(feature = "polars")]
     pub fn to_polars(&self) -> Result<polars::frame::DataFrame> {
-        use arrow::ipc::writer::FileWriter;
-        use polars::prelude::{IpcReader, SerReader};
-        use std::io::Cursor;
-
-        let batches = self.collect_record_batches()?;
-        if batches.is_empty() {
-            return Ok(polars::frame::DataFrame::empty());
-        }
-
-        let schema = batches[0].schema();
-        let mut buf: Vec<u8> = Vec::new();
-        {
-            let mut writer = FileWriter::try_new(&mut buf, schema.as_ref()).map_err(|e| {
-                SparkError::connect_msg(format!("Arrow IPC writer init failed: {e}"))
-            })?;
-            for batch in &batches {
-                writer
-                    .write(batch)
-                    .map_err(|e| SparkError::connect_msg(format!("Arrow IPC write failed: {e}")))?;
-            }
-            writer
-                .finish()
-                .map_err(|e| SparkError::connect_msg(format!("Arrow IPC finish failed: {e}")))?;
-        }
-
-        IpcReader::new(Cursor::new(buf))
-            .finish()
-            .map_err(|e| SparkError::connect_msg(format!("Failed to create Polars DataFrame: {e}")))
+        record_batches_to_polars(&self.collect_record_batches()?)
     }
 
     /// Repartition by ID.
@@ -1582,9 +1649,16 @@ impl DataFrame {
         self.repartition(num_partitions)
     }
 
-    /// Convert to a DataFrame with a specific schema.
-    pub fn to(&self, _schema: DataType) -> DataFrame {
-        self.clone()
+    /// Reconcile this DataFrame to a new schema: reorder/select columns by name
+    /// and cast them to the target types.
+    ///
+    /// Mirrors `pyspark.sql.connect.dataframe.DataFrame.to` (a `ToSchema` relation).
+    pub fn to(&self, schema: DataType) -> DataFrame {
+        let plan = LogicalPlan::ToSchema {
+            input: Box::new(self.plan.clone()),
+            schema,
+        };
+        DataFrame::new(self.session.clone(), plan)
     }
 
     /// Check if the DataFrame exists (is not empty).
@@ -1602,32 +1676,25 @@ impl DataFrame {
         Ok(row.get(0).cloned())
     }
 
-    /// Transpose the DataFrame (swap rows and columns).
+    /// Transpose the DataFrame: swap rows and columns (server-side `Transpose`
+    /// relation). Mirrors `pyspark.sql.connect.dataframe.DataFrame.transpose()`
+    /// with no index column (the server uses the first column as the header).
     pub fn transpose(&self) -> Result<DataFrame> {
-        // Transpose collects all data and swaps rows/columns
-        let rows = self.collect()?;
-        let _num_cols = self.columns()?.len();
-        let _num_rows = rows.len();
-
-        // Create new schema with transposed dimensions
-        let metadata = BTreeMap::new();
-        let _transposed_schema = DataType::Struct {
-            fields: (0.._num_rows)
-                .map(|i| {
-                    use crate::types::StructField;
-                    StructField {
-                        name: format!("col{}", i),
-                        data_type: DataType::String {
-                            collation: "UTF-8".to_string(),
-                        },
-                        nullable: true,
-                        metadata: metadata.clone(),
-                    }
-                })
-                .collect(),
+        let plan = LogicalPlan::Transpose {
+            input: Box::new(self.plan.clone()),
+            index_columns: vec![],
         };
+        Ok(DataFrame::new(self.session.clone(), plan))
+    }
 
-        Ok(self.clone())
+    /// Transpose using an explicit index column as the transposed header.
+    /// Mirrors `DataFrame.transpose(indexColumn)`.
+    pub fn transpose_with_index(&self, index_column: Column) -> Result<DataFrame> {
+        let plan = LogicalPlan::Transpose {
+            input: Box::new(self.plan.clone()),
+            index_columns: vec![index_column.expression().clone()],
+        };
+        Ok(DataFrame::new(self.session.clone(), plan))
     }
 
     /// Zip this DataFrame with another DataFrame by row number.
@@ -1642,16 +1709,9 @@ impl DataFrame {
         })
     }
 
-    /// Zip with index (add row number column).
-    pub fn zip_with_index(&self) -> Result<DataFrame> {
-        // Uses row_number() window function to add sequential indices
-        let _ = self.collect()?;
-        Ok(self.clone())
-    }
-
     /// Register this DataFrame as a temporary table (deprecated - use createTempView).
     pub fn register_temp_table(&self, name: &str) -> Result<()> {
-        let _df = self.create_temp_view(name)?;
+        self.create_temp_view(name)?;
         Ok(())
     }
 
@@ -2047,7 +2107,89 @@ fn i128_to_decimal_string(unscaled: i128, scale: i32) -> String {
     }
 }
 
-fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> Result<Value> {
+/// Serialize record batches to Arrow IPC (file format) bytes. Shared by
+/// [`DataFrame::to_arrow`] and [`DataFrame::to_polars`]; an empty input yields a
+/// valid empty-schema IPC file.
+fn record_batches_to_ipc(batches: &[arrow::record_batch::RecordBatch]) -> Result<Vec<u8>> {
+    use arrow::ipc::writer::FileWriter;
+    let schema = match batches.first() {
+        Some(b) => b.schema(),
+        None => std::sync::Arc::new(arrow::datatypes::Schema::empty()),
+    };
+    let mut buf: Vec<u8> = Vec::new();
+    {
+        let mut writer = FileWriter::try_new(&mut buf, schema.as_ref())
+            .map_err(|e| SparkError::connect_msg(format!("Arrow IPC writer init failed: {e}")))?;
+        for batch in batches {
+            writer
+                .write(batch)
+                .map_err(|e| SparkError::connect_msg(format!("Arrow IPC write failed: {e}")))?;
+        }
+        writer
+            .finish()
+            .map_err(|e| SparkError::connect_msg(format!("Arrow IPC finish failed: {e}")))?;
+    }
+    Ok(buf)
+}
+
+/// Build a DataFusion DataFrame from record batches (the conversion behind
+/// [`DataFrame::to_datafusion`], factored out so it is unit-testable without a
+/// live server).
+#[cfg(feature = "datafusion")]
+fn record_batches_to_datafusion(
+    ctx: &datafusion::prelude::SessionContext,
+    batches: Vec<arrow::record_batch::RecordBatch>,
+) -> Result<datafusion::dataframe::DataFrame> {
+    if batches.is_empty() {
+        return Err(SparkError::connect_msg(
+            "Cannot create DataFusion DataFrame from empty result",
+        ));
+    }
+    ctx.read_batches(batches)
+        .map_err(|e| SparkError::connect_msg(format!("Failed to create DataFusion DataFrame: {e}")))
+}
+
+/// Build a Polars DataFrame from record batches by bridging through Arrow IPC
+/// bytes (so polars' vendored arrow need not match this crate's arrow-rs). The
+/// conversion behind [`DataFrame::to_polars`], factored out for unit testing.
+#[cfg(feature = "polars")]
+fn record_batches_to_polars(
+    batches: &[arrow::record_batch::RecordBatch],
+) -> Result<polars::frame::DataFrame> {
+    use polars::prelude::{IpcReader, SerReader};
+    use std::io::Cursor;
+    if batches.is_empty() {
+        return Ok(polars::frame::DataFrame::empty());
+    }
+    let buf = record_batches_to_ipc(batches)?;
+    IpcReader::new(Cursor::new(buf))
+        .finish()
+        .map_err(|e| SparkError::connect_msg(format!("Failed to create Polars DataFrame: {e}")))
+}
+
+/// Render a decoded map key ([`Value`]) as its natural scalar string, since
+/// `Value::Map` keys are `String`. Numeric/boolean keys use their value (`1`,
+/// `true`), decimals their preserved digits; non-scalar keys (rare) fall back to
+/// Debug. This must never use the enum's Debug form for scalars - a `map<int,…>`
+/// key has to be "1", not "Integer(1)".
+fn map_key_to_string(v: Value) -> String {
+    match v {
+        Value::String(s) => s,
+        Value::Bool(b) => b.to_string(),
+        Value::Byte(x) => x.to_string(),
+        Value::Short(x) => x.to_string(),
+        Value::Integer(x) => x.to_string(),
+        Value::Long(x) => x.to_string(),
+        Value::Float(x) => x.to_string(),
+        Value::Double(x) => x.to_string(),
+        Value::Date(d) => d.to_string(),
+        Value::Timestamp(t) => t.to_string(),
+        Value::Decimal { value, .. } => value,
+        other => format!("{other:?}"),
+    }
+}
+
+pub(crate) fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> Result<Value> {
     use arrow::array::*;
 
     if array.is_null(index) {
@@ -2162,19 +2304,84 @@ fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> Result<Value
         let vals = entries.column(1);
         let mut map = std::collections::BTreeMap::new();
         for i in 0..entries.len() {
-            let k = match arrow_value_at(keys.as_ref(), i)? {
-                Value::String(s) => s,
-                other => format!("{other:?}"),
-            };
+            // A map key stringifies to its natural scalar form (e.g. `1`, `true`,
+            // `1.5`), not the Rust enum's Debug output - a `map<int,string>` key must
+            // be "1", never "Integer(1)".
+            let k = map_key_to_string(arrow_value_at(keys.as_ref(), i)?);
             map.insert(k, arrow_value_at(vals.as_ref(), i)?);
         }
         return Ok(Value::Map(map));
+    }
+    // Decimal256 -> exact string-preserving Decimal (Arrow formats with the scale).
+    if let Some(arr) = array.as_any().downcast_ref::<Decimal256Array>() {
+        return Ok(Value::Decimal {
+            value: arr.value_as_string(index),
+            precision: Some(arr.precision() as i32),
+            scale: Some(arr.scale() as i32),
+        });
+    }
+    if let Some(arr) = array.as_any().downcast_ref::<FixedSizeBinaryArray>() {
+        return Ok(Value::Binary(arr.value(index).to_vec()));
+    }
+    // TimeType (no dedicated Value): render as an ISO time string, normalized to micros.
+    if let Some(arr) = array.as_any().downcast_ref::<Time64MicrosecondArray>() {
+        return Ok(Value::String(micros_to_time_string(arr.value(index))));
+    }
+    if let Some(arr) = array.as_any().downcast_ref::<Time64NanosecondArray>() {
+        return Ok(Value::String(micros_to_time_string(
+            arr.value(index) / 1_000,
+        )));
+    }
+    if let Some(arr) = array.as_any().downcast_ref::<Time32MillisecondArray>() {
+        return Ok(Value::String(micros_to_time_string(
+            arr.value(index) as i64 * 1_000,
+        )));
+    }
+    if let Some(arr) = array.as_any().downcast_ref::<Time32SecondArray>() {
+        return Ok(Value::String(micros_to_time_string(
+            arr.value(index) as i64 * 1_000_000,
+        )));
+    }
+    // Interval types (no dedicated Value): render a compact string.
+    if let Some(arr) = array.as_any().downcast_ref::<IntervalYearMonthArray>() {
+        let months = arr.value(index);
+        return Ok(Value::String(format!(
+            "{}-{}",
+            months / 12,
+            (months % 12).abs()
+        )));
+    }
+    if let Some(arr) = array.as_any().downcast_ref::<IntervalDayTimeArray>() {
+        let v = arr.value(index);
+        return Ok(Value::String(format!(
+            "{} days {} ms",
+            v.days, v.milliseconds
+        )));
+    }
+    if let Some(arr) = array.as_any().downcast_ref::<IntervalMonthDayNanoArray>() {
+        let v = arr.value(index);
+        return Ok(Value::String(format!(
+            "{} months {} days {} ns",
+            v.months, v.days, v.nanoseconds
+        )));
     }
 
     Err(SparkError::connect_msg(format!(
         "Unsupported Arrow type {:?} - cannot convert to Value",
         array.data_type()
     )))
+}
+
+/// Render microseconds-since-midnight as an ISO time string `HH:MM:SS[.ffffff]`.
+fn micros_to_time_string(micros: i64) -> String {
+    let total_secs = micros.div_euclid(1_000_000);
+    let us = micros.rem_euclid(1_000_000);
+    let (h, m, s) = (total_secs / 3600, (total_secs % 3600) / 60, total_secs % 60);
+    if us == 0 {
+        format!("{h:02}:{m:02}:{s:02}")
+    } else {
+        format!("{h:02}:{m:02}:{s:02}.{us:06}")
+    }
 }
 
 #[cfg(test)]
@@ -2227,5 +2434,418 @@ mod cache_tests {
         let iter: LocalRowIterator;
         // This test just verifies the type exists and is constructible.
         // A true integration test would create an actual stream.
+    }
+}
+
+/// Deterministic tests for the collected-data conversions (`to_arrow`,
+/// `to_datafusion`, `to_polars`). These exercise the conversion logic on
+/// synthetic RecordBatches, so they need no live server and run in CI's
+/// `--features datafusion,polars` job. The full server->collect->convert path is
+/// covered separately by the server-gated e2e_integration tests.
+#[cfg(test)]
+mod conversion_tests {
+    use super::*;
+    use arrow::array::{Int64Array, StringArray};
+    use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use std::sync::Arc;
+
+    fn sample_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", ArrowDataType::Int64, false),
+            Field::new("name", ArrowDataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2, 3])),
+                Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn to_arrow_ipc_round_trips() {
+        use arrow::ipc::reader::FileReader;
+        use std::io::Cursor;
+
+        let ipc = record_batches_to_ipc(&[sample_batch()]).expect("ipc encode");
+        let reader = FileReader::try_new(Cursor::new(ipc), None).expect("ipc decode");
+        let batches: Vec<_> = reader.map(|b| b.unwrap()).collect();
+        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total, 3, "round-trip must preserve all rows");
+        assert_eq!(batches[0].num_columns(), 2);
+        let ids = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(ids.values(), &[1, 2, 3]);
+    }
+
+    #[test]
+    fn to_arrow_ipc_empty_is_valid() {
+        // An empty result must still be a valid, readable IPC file.
+        use arrow::ipc::reader::FileReader;
+        use std::io::Cursor;
+        let ipc = record_batches_to_ipc(&[]).expect("empty ipc");
+        let reader = FileReader::try_new(Cursor::new(ipc), None).expect("empty ipc decode");
+        assert_eq!(reader.map(|b| b.unwrap().num_rows()).sum::<usize>(), 0);
+    }
+
+    #[cfg(feature = "datafusion")]
+    #[test]
+    fn to_datafusion_preserves_rows_and_columns() {
+        use datafusion::prelude::SessionContext;
+        use spark_connect_core::runtime::block_on;
+
+        let ctx = SessionContext::new();
+        let df = record_batches_to_datafusion(&ctx, vec![sample_batch()]).expect("to datafusion");
+        // Collect (async) and assert shape survives the conversion - uses only the
+        // stable arrow RecordBatch API so it is not tied to a datafusion version.
+        let collected = block_on(df.collect()).expect("collect datafusion");
+        assert_eq!(collected.iter().map(|b| b.num_rows()).sum::<usize>(), 3);
+        assert_eq!(collected[0].num_columns(), 2);
+    }
+
+    #[cfg(feature = "datafusion")]
+    #[test]
+    fn to_datafusion_empty_errors() {
+        use datafusion::prelude::SessionContext;
+        let ctx = SessionContext::new();
+        assert!(record_batches_to_datafusion(&ctx, vec![]).is_err());
+    }
+
+    #[cfg(feature = "polars")]
+    #[test]
+    fn to_polars_preserves_shape() {
+        // height()/width() are stable across polars versions; asserting shape proves
+        // the Arrow-IPC bridge carried all rows and columns through.
+        let pdf = record_batches_to_polars(&[sample_batch()]).expect("to polars");
+        assert_eq!(
+            pdf.height(),
+            3,
+            "row count must survive the Arrow-IPC bridge"
+        );
+        assert_eq!(
+            pdf.width(),
+            2,
+            "column count must survive the Arrow-IPC bridge"
+        );
+    }
+
+    #[cfg(feature = "polars")]
+    #[test]
+    fn to_polars_empty_is_empty() {
+        let pdf = record_batches_to_polars(&[]).expect("empty polars");
+        assert_eq!(pdf.height(), 0);
+    }
+}
+
+#[cfg(test)]
+mod plan_construction_tests {
+    use super::*;
+    use crate::session::SparkSession;
+
+    fn session() -> SparkSession {
+        SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .expect("failed to build session")
+    }
+
+    #[test]
+    fn with_watermark_plan() {
+        let spark = session();
+        let df = spark.range(3).unwrap();
+        let result = df.with_watermark("timestamp", "1 minute");
+        match &result.plan {
+            LogicalPlan::WithWatermark {
+                time_column,
+                delay_threshold,
+                ..
+            } => {
+                assert_eq!(time_column, "timestamp");
+                assert_eq!(delay_threshold, "1 minute");
+            }
+            _ => panic!("expected WithWatermark plan"),
+        }
+    }
+
+    #[test]
+    fn with_metadata_plan() {
+        let spark = session();
+        let df = spark.range(3).unwrap();
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("key".to_string(), "value".to_string());
+        let result = df.with_metadata("col", metadata);
+        match &result.plan {
+            LogicalPlan::WithColumnMetadata {
+                column_name,
+                metadata_json,
+                ..
+            } => {
+                assert_eq!(column_name, "col");
+                assert!(!metadata_json.is_empty());
+            }
+            _ => panic!("expected WithColumnMetadata plan"),
+        }
+    }
+
+    #[test]
+    fn random_split_plan() {
+        let spark = session();
+        let df = spark.range(10).unwrap();
+        let dfs = df.random_split(vec![0.7, 0.3], None);
+        assert_eq!(dfs.len(), 2);
+        // Each split is a different DataFrame with its own plan
+        for split_df in &dfs {
+            match &split_df.plan {
+                LogicalPlan::Sample {
+                    with_replacement: false,
+                    ..
+                } => {
+                    // Plan is correct
+                }
+                _ => panic!("expected Sample plan"),
+            }
+        }
+    }
+
+    #[test]
+    fn replace_plan() {
+        let spark = session();
+        let df = spark.range(3).unwrap();
+        let replacements = vec![("old".to_string(), "new".to_string())];
+        let result = df.replace(replacements, Some(vec!["col"]));
+        match &result.plan {
+            LogicalPlan::NAReplace { replacements, .. } => {
+                assert_eq!(replacements.len(), 1);
+            }
+            _ => panic!("expected NAReplace plan"),
+        }
+    }
+
+    /// Exercise every plan-building builder AND its `plan.to_proto()` arm offline
+    /// (the gRPC channel connects lazily, so no server is contacted). This pins the
+    /// large builder set in dataframe.rs and the matching to_proto arms in plan.rs.
+    #[test]
+    fn builders_construct_and_serialize() {
+        use crate::functions::col;
+        use crate::types::{DataType, StructField};
+
+        let spark = session();
+        let df = spark.range(5).unwrap();
+        let df2 = spark.range(5).unwrap();
+        let e = || col("id").expression().clone();
+        let ser = |d: &DataFrame| {
+            build_input_relation(d.plan(), &spark).expect("plan serializes to a relation");
+        };
+
+        ser(&df.select(vec![col("id")]));
+        ser(&df.filter(col("id")));
+        ser(&df.where_(col("id")));
+        ser(&df.with_column("x", col("id")));
+        ser(&df.with_column_renamed("id", "y"));
+        ser(&df.drop(vec!["id"]));
+        ser(&df.limit(3));
+        ser(&df.offset(1));
+        ser(&df.distinct());
+        ser(&df.drop_duplicates(Some(vec!["id"])));
+        ser(&df.sort(vec![e()]));
+        ser(&df.order_by(vec![e()]));
+        ser(&df.sort_within_partitions(vec![e()]));
+        ser(&df.cross_join(&df2));
+        ser(&df.union(&df2));
+        ser(&df.union_all(&df2));
+        ser(&df.union_by_name(&df2));
+        ser(&df.intersect(&df2));
+        ser(&df.intersect_all(&df2));
+        ser(&df.subtract(&df2));
+        ser(&df.except_all(&df2));
+        ser(&df.repartition(4));
+        ser(&df.coalesce(2));
+        ser(&df.repartition_by_range(3, vec![e()]));
+        ser(&df.hint("broadcast", vec![]));
+        ser(&df.to_df(vec!["a"]));
+        ser(&df.alias("t"));
+        ser(&df.sample(0.5, Some(1)));
+        ser(&df.select_expr(vec!["id + 1"]));
+        ser(&df.col_regex("id"));
+        ser(&df.describe(vec!["id"]));
+        ser(&df.summary(vec!["count"]));
+        ser(&df.as_table("t2"));
+        ser(&df.to(DataType::Struct {
+            fields: vec![StructField {
+                name: "id".to_string(),
+                data_type: DataType::Long,
+                nullable: true,
+                metadata: std::collections::BTreeMap::new(),
+            }],
+        }));
+        ser(&df.unpivot(vec![col("id")], None, "var", "val"));
+        ser(&df.melt(vec!["id"], None, "var", "val"));
+        ser(&df.group_by(vec![col("id")]).agg(vec![e()]));
+        ser(&df.rollup(vec![col("id")]).agg(vec![e()]));
+        ser(&df.cube(vec![col("id")]).agg(vec![e()]));
+        ser(&df.grouping_sets(vec![vec![col("id")]]).agg(vec![e()]));
+        ser(&df.with_watermark("id", "1 minute"));
+        let mut md = std::collections::HashMap::new();
+        md.insert("k".to_string(), "v".to_string());
+        ser(&df.with_metadata("id", md));
+        ser(&df.replace(vec![("a".to_string(), "b".to_string())], None));
+        ser(&df.stat().crosstab("id", "id"));
+        ser(&df.stat().freq_items(vec!["id"], 0.5));
+    }
+
+    /// Streaming reader terminal builders (serialize their plans) + the writer builder
+    /// chain across every Trigger variant (setters only; no server-side start()).
+    #[test]
+    fn streaming_reader_and_writer_builders() {
+        use crate::streaming::Trigger;
+        let spark = session();
+        let ser = |d: &DataFrame| {
+            build_input_relation(d.plan(), &spark).expect("stream plan serializes");
+        };
+        ser(&spark
+            .read_stream()
+            .format("rate")
+            .option("rowsPerSecond", "5")
+            .load(None));
+        ser(&spark.read_stream().schema("value long").json("/tmp/in"));
+        ser(&spark.read_stream().parquet("/tmp/in"));
+        ser(&spark.read_stream().csv("/tmp/in"));
+        ser(&spark.read_stream().orc("/tmp/in"));
+        ser(&spark.read_stream().text("/tmp/in"));
+        ser(&spark.read_stream().format("rate").table("t"));
+
+        let base = spark.range(3).unwrap();
+        for trig in [
+            Trigger::ProcessingTime("1 second".to_string()),
+            Trigger::Once,
+            Trigger::AvailableNow,
+            Trigger::Continuous("1 second".to_string()),
+        ] {
+            let _w = base
+                .write_stream()
+                .output_mode("append")
+                .format("console")
+                .option("k", "v")
+                .partition_by(vec!["id"])
+                .cluster_by(vec!["id"])
+                .query_name("q")
+                .trigger(trig);
+        }
+    }
+
+    /// Every Column operator/method builds an expression; serialize each proto to pin
+    /// the column.rs bodies and the expression.rs to_proto arms.
+    #[test]
+    fn column_operations_and_expressions() {
+        use crate::functions::col;
+        let a = || col("a");
+        let b = || col("b");
+        let exprs = vec![
+            a().add(b()),
+            a().sub(b()),
+            a().mul(b()),
+            a().div(b()),
+            a().modulo(b()),
+            a().and(b()),
+            a().or(b()),
+            a().not(),
+            a().neg(),
+            a().eq(b()),
+            a().ne(b()),
+            a().gt(b()),
+            a().lt(b()),
+            a().ge(b()),
+            a().le(b()),
+            a().bitwise_and(b()),
+            a().bitwise_or(b()),
+            a().bitwise_xor(b()),
+            a().eq_null_safe(b()),
+            a().is_null(),
+            a().is_not_null(),
+            a().is_nan(),
+            a().like("x%"),
+            a().rlike("x.*"),
+            a().ilike("x%"),
+            a().contains(b()),
+            a().startswith(b()),
+            a().endswith(b()),
+            a().substr(b(), b()),
+            a().between(b(), b()),
+            a().isin(vec![b()]),
+            a().get_field("f"),
+            a().get_item(b()),
+            a().with_field("f", b()),
+            a().drop_fields(vec!["f"]),
+            a().asc(),
+            a().asc_nulls_first(),
+            a().asc_nulls_last(),
+            a().desc(),
+            a().desc_nulls_first(),
+            a().desc_nulls_last(),
+            a().alias("x"),
+            a().name("y"),
+            a().cast_str("int"),
+            a().try_cast_str("int"),
+            a().astype(crate::types::DataType::Integer),
+            a().when(b(), b()).otherwise(b()),
+        ];
+        for e in &exprs {
+            let _ = e.to_proto();
+        }
+    }
+
+    /// Construct the exotic plan variants (Zip, Transpose, NearestByJoin,
+    /// MapPartitions, GroupMap, CoGroupMap, CommonInlineUdtf) and serialize each so
+    /// their to_proto arms in plan.rs are pinned.
+    #[test]
+    fn exotic_plan_variants_serialize() {
+        use crate::functions::col;
+        use crate::types::DataType;
+        use crate::udf::{CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
+
+        let spark = session();
+        let ser = |d: &DataFrame| {
+            build_input_relation(d.plan(), &spark).expect("exotic plan serializes");
+        };
+        let df = spark.range(5).unwrap();
+        let df2 = spark.range(5).unwrap();
+
+        ser(&df.zip(&df2).unwrap());
+        ser(&df.transpose().unwrap());
+        ser(&df.transpose_with_index(col("id")).unwrap());
+        ser(&df.nearest_by_join(&df2, col("id"), 5, "inner", "asc", "inner"));
+
+        let udf = || {
+            CommonInlineUserDefinedFunctionExpression::new(
+                "f".to_string(),
+                true,
+                vec![],
+                PythonUDFPayload::new(DataType::Integer, 200, vec![1, 2, 3], "3.11".to_string()),
+            )
+        };
+        ser(&df.map_in_pandas(udf(), false));
+        ser(&df.map_in_arrow(udf(), false));
+        ser(&df.group_by(vec![col("id")]).apply_in_pandas(udf()));
+        ser(&df.group_by(vec![col("id")]).apply_in_arrow(udf()));
+        let g1 = df.group_by(vec![col("id")]);
+        let g2 = df2.group_by(vec![col("id")]);
+        ser(&g1.cogroup(&g2).apply_in_pandas(udf()));
+
+        let udtf_df = spark.tvf().udtf(
+            "myudtf",
+            vec![],
+            Some(DataType::Integer),
+            300,
+            vec![1, 2],
+            "3.11".to_string(),
+            true,
+        );
+        ser(&udtf_df);
     }
 }

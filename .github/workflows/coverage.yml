@@ -1,0 +1,230 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+
+name: Coverage
+
+# Cancel an in-progress run when a newer commit supersedes it (per workflow + ref).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  coverage:
+    name: Measure and publish coverage badges
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Needed to push to badges branch
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for badges branch operations
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache cargo & target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-coverage-
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate Rust coverage report
+        run: |
+          cargo llvm-cov --no-cfg-coverage -p apache-spark-connect \
+            --json --output-path coverage-rust.json
+
+      - name: Parse Rust coverage and create badge JSON
+        # Extract line coverage % from llvm-cov JSON output and convert to shields.io
+        # endpoint format. Parse the JSON, extract the "line" coverage percentage,
+        # and generate the endpoint badge structure.
+        run: |
+          python3 << 'PYTHON_EOF'
+          import json
+
+          # Read the llvm-cov output
+          with open("coverage-rust.json", "r") as f:
+              data = json.load(f)
+
+          # Extract line coverage percentage (or region if line not available)
+          coverage_pct = None
+          if "data" in data and len(data["data"]) > 0:
+              coverage_obj = data["data"][0]
+              if "line_coverage_percent" in coverage_obj:
+                  coverage_pct = coverage_obj["line_coverage_percent"]
+              elif "region_coverage_percent" in coverage_obj:
+                  coverage_pct = coverage_obj["region_coverage_percent"]
+
+          if coverage_pct is None:
+              coverage_pct = 0
+
+          # Determine color based on coverage threshold
+          if coverage_pct >= 80:
+              color = "green"
+          elif coverage_pct >= 60:
+              color = "yellow"
+          else:
+              color = "red"
+
+          # Create shields.io endpoint JSON format
+          badge_json = {
+              "schemaVersion": 1,
+              "label": "rust coverage",
+              "message": f"{coverage_pct:.1f}%",
+              "color": color
+          }
+
+          with open("coverage-rust-badge.json", "w") as f:
+              json.dump(badge_json, f)
+
+          print(f"Rust coverage: {coverage_pct:.1f}% ({color})")
+          PYTHON_EOF
+
+      - name: Install Python and dependencies
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Python build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install maturin pytest coverage
+
+      - name: Build Python extension
+        run: |
+          cargo build -p pyspark-rs --release
+          cp target/release/lib_pyspark.so python/pyspark/_pyspark.so
+
+      - name: Measure Python coverage with offline test suite
+        run: |
+          cd python && PYTHONPATH=$(pwd) python -m coverage run --rcfile=.coveragerc -m pytest tests/test_dropin_offline.py
+          PYTHONPATH=$(pwd) python -m coverage json --rcfile=.coveragerc -o coverage-python.json
+
+      - name: Parse Python coverage and create badge JSON
+        run: |
+          python3 << 'PYTHON_EOF'
+          import json
+
+          # Read the coverage JSON output
+          with open("python/coverage-python.json", "r") as f:
+              data = json.load(f)
+
+          # Extract percent covered from totals
+          coverage_pct = data["totals"]["percent_covered"]
+
+          # Determine color based on coverage threshold
+          if coverage_pct >= 90:
+              color = "green"
+          elif coverage_pct >= 75:
+              color = "yellow"
+          else:
+              color = "red"
+
+          # Create shields.io endpoint JSON format
+          badge_json = {
+              "schemaVersion": 1,
+              "label": "python coverage",
+              "message": f"{coverage_pct:.1f}%",
+              "color": color
+          }
+
+          with open("coverage-python-badge.json", "w") as f:
+              json.dump(badge_json, f)
+
+          print(f"Python coverage: {coverage_pct:.1f}% ({color})")
+          PYTHON_EOF
+
+      - name: Ensure badges directory exists
+        run: mkdir -p badges
+
+      - name: Copy badges to output directory
+        run: |
+          cp coverage-rust-badge.json badges/coverage-rust.json
+          cp coverage-python-badge.json badges/coverage-python.json
+
+      - name: Check if badges branch exists
+        id: check-badges-branch
+        run: |
+          if git rev-parse --verify origin/badges > /dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create/update badges branch (orphan)
+        if: github.event_name == 'push' && github.repository == 'apache/spark-connect-rust' && github.ref == 'refs/heads/master'
+        run: |
+          # Commit the badges to the badges branch (orphan, contains only badge files).
+          # This approach uses git directly: checkout/create the orphan badges branch,
+          # copy in the badge files, and force-push (badges branch is always ephemeral).
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+
+          # Fetch badges branch if it exists
+          if git rev-parse --verify origin/badges > /dev/null 2>&1; then
+            git fetch origin badges:badges
+            git checkout badges
+          else
+            # Create orphan branch (no parent commits)
+            git checkout --orphan badges
+            git rm -rf .
+          fi
+
+          # Copy new badges into the branch
+          mkdir -p badges
+          cp coverage-rust-badge.json badges/coverage-rust.json
+          cp coverage-python-badge.json badges/coverage-python.json
+
+          # Commit and push
+          git add badges/
+          git commit -m "ci: update coverage badges" || echo "No changes to commit"
+          git push -f origin badges
+
+      - name: Upload coverage reports as artifacts (for PR preview)
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-badges
+          path: |
+            badges/coverage-rust.json
+            badges/coverage-python.json
+          retention-days: 5

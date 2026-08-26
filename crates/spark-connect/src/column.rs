@@ -40,6 +40,19 @@ impl Column {
         }
     }
 
+    /// `Column.alias(name, metadata=...)` - attaches column metadata, serialized to
+    /// a JSON map (matching the reference client's `json.dumps(metadata)`).
+    pub fn alias_with_metadata(
+        self,
+        name: &str,
+        metadata: std::collections::BTreeMap<String, String>,
+    ) -> Column {
+        let json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
+        Column {
+            expr: Expression::Alias(Box::new(Alias::new(self.expr, name).with_metadata(json))),
+        }
+    }
+
     /// Mirrors `pyspark.sql.column.Column.name` (alias for `alias`).
     pub fn name(self, name: &str) -> Column {
         self.alias(name)
@@ -70,6 +83,15 @@ impl Column {
         Column {
             expr: Expression::Cast(Box::new(
                 Cast::new(self.expr, to_type).with_eval_mode(CastEvalMode::Try),
+            )),
+        }
+    }
+
+    /// `Column.try_cast` with a DDL type string.
+    pub fn try_cast_str(self, type_name: &str) -> Column {
+        Column {
+            expr: Expression::Cast(Box::new(
+                Cast::new_str(self.expr, type_name).with_eval_mode(CastEvalMode::Try),
             )),
         }
     }

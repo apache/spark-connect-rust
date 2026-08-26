@@ -10,7 +10,6 @@ use crate::plan::LogicalPlan;
 use crate::session::SparkSession;
 use crate::types::DataType;
 use spark_connect_core::error::Result;
-use spark_connect_proto as proto;
 
 /// Table-valued functions for Spark SQL.
 ///
@@ -234,10 +233,173 @@ impl TableValuedFunction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::SparkSession;
+
+    fn session() -> SparkSession {
+        SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .expect("failed to build session")
+    }
 
     #[test]
-    fn test_tvf_creation() {
-        // This test verifies that TVF can be created.
-        // A full end-to-end test requires a running Spark Connect server.
+    fn tvf_range_plan() {
+        let spark = session();
+        let tvf = spark.tvf();
+        let df = tvf.range(0, Some(10), 1, None).unwrap();
+        match &df.plan {
+            LogicalPlan::Range { .. } => {
+                // Plan is correct
+            }
+            _ => panic!("expected Range plan"),
+        }
+    }
+
+    #[test]
+    fn tvf_range_single_arg() {
+        let spark = session();
+        let tvf = spark.tvf();
+        // range(end) should be range(0, end)
+        let df = tvf.range(5, None, 1, None).unwrap();
+        match &df.plan {
+            LogicalPlan::Range {
+                start, end, step, ..
+            } => {
+                assert_eq!(*start, 0);
+                assert_eq!(*end, 5);
+                assert_eq!(*step, 1);
+            }
+            _ => panic!("expected Range plan"),
+        }
+    }
+
+    #[test]
+    fn tvf_explode_plan() {
+        let spark = session();
+        let tvf = spark.tvf();
+        let col = crate::column::col("array_col");
+        let df = tvf.explode(&col).unwrap();
+        match &df.plan {
+            LogicalPlan::UnresolvedTableValuedFunction { name, arguments } => {
+                assert_eq!(name, "explode");
+                assert_eq!(arguments.len(), 1);
+            }
+            _ => panic!("expected UnresolvedTableValuedFunction plan"),
+        }
+    }
+
+    #[test]
+    fn tvf_explode_outer_plan() {
+        let spark = session();
+        let tvf = spark.tvf();
+        let col = crate::column::col("array_col");
+        let df = tvf.explode_outer(&col).unwrap();
+        match &df.plan {
+            LogicalPlan::UnresolvedTableValuedFunction { name, .. } => {
+                assert_eq!(name, "explode_outer");
+            }
+            _ => panic!("expected UnresolvedTableValuedFunction plan"),
+        }
+    }
+
+    #[test]
+    fn tvf_inline_plan() {
+        let spark = session();
+        let tvf = spark.tvf();
+        let col = crate::column::col("struct_array");
+        let df = tvf.inline(&col).unwrap();
+        match &df.plan {
+            LogicalPlan::UnresolvedTableValuedFunction { name, .. } => {
+                assert_eq!(name, "inline");
+            }
+            _ => panic!("expected UnresolvedTableValuedFunction plan"),
+        }
+    }
+
+    #[test]
+    fn tvf_json_tuple_plan() {
+        let spark = session();
+        let tvf = spark.tvf();
+        let input = crate::column::col("json_col");
+        let fields = vec![crate::column::col("field1"), crate::column::col("field2")];
+        let df = tvf.json_tuple(&input, fields).unwrap();
+        match &df.plan {
+            LogicalPlan::UnresolvedTableValuedFunction { name, arguments } => {
+                assert_eq!(name, "json_tuple");
+                assert_eq!(arguments.len(), 3); // input + 2 fields
+            }
+            _ => panic!("expected UnresolvedTableValuedFunction plan"),
+        }
+    }
+
+    #[test]
+    fn tvf_json_tuple_empty_fields_error() {
+        let spark = session();
+        let tvf = spark.tvf();
+        let input = crate::column::col("json_col");
+        let result = tvf.json_tuple(&input, vec![]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn tvf_posexplode_plan() {
+        let spark = session();
+        let tvf = spark.tvf();
+        let col = crate::column::col("array_col");
+        let df = tvf.posexplode(&col).unwrap();
+        match &df.plan {
+            LogicalPlan::UnresolvedTableValuedFunction { name, .. } => {
+                assert_eq!(name, "posexplode");
+            }
+            _ => panic!("expected UnresolvedTableValuedFunction plan"),
+        }
+    }
+
+    #[test]
+    fn tvf_stack_plan() {
+        let spark = session();
+        let tvf = spark.tvf();
+        let n = crate::column::lit(3i64);
+        let fields = vec![
+            crate::column::col("col1"),
+            crate::column::col("col2"),
+            crate::column::col("col3"),
+        ];
+        let df = tvf.stack(&n, fields).unwrap();
+        match &df.plan {
+            LogicalPlan::UnresolvedTableValuedFunction { name, arguments } => {
+                assert_eq!(name, "stack");
+                assert_eq!(arguments.len(), 4); // n + 3 fields
+            }
+            _ => panic!("expected UnresolvedTableValuedFunction plan"),
+        }
+    }
+
+    #[test]
+    fn tvf_collations_plan() {
+        let spark = session();
+        let tvf = spark.tvf();
+        let df = tvf.collations().unwrap();
+        match &df.plan {
+            LogicalPlan::UnresolvedTableValuedFunction { name, arguments } => {
+                assert_eq!(name, "collations");
+                assert!(arguments.is_empty());
+            }
+            _ => panic!("expected UnresolvedTableValuedFunction plan"),
+        }
+    }
+
+    #[test]
+    fn tvf_sql_keywords_plan() {
+        let spark = session();
+        let tvf = spark.tvf();
+        let df = tvf.sql_keywords().unwrap();
+        match &df.plan {
+            LogicalPlan::UnresolvedTableValuedFunction { name, arguments } => {
+                assert_eq!(name, "sql_keywords");
+                assert!(arguments.is_empty());
+            }
+            _ => panic!("expected UnresolvedTableValuedFunction plan"),
+        }
     }
 }

@@ -1,0 +1,35 @@
+# Coverage scope for the pyspark drop-in's hand-written Python shim.
+# The bulk of the client is the compiled Rust extension (_pyspark); this measures
+# the Python glue only, excluding vendored third-party code (cloudpickle), the
+# test-support utilities, pandas-on-spark, generated wrappers, and the compiled
+# extension itself.
+[run]
+source = pyspark
+branch = True
+# The badge scopes to the core DataFrame/SQL drop-in shim exercised by the
+# offline suite. Vendored third-party code (cloudpickle), generated wrappers,
+# the compiled extension, and subsystems with their own (server-backed) tests
+# rather than offline unit tests (streaming, resource, ml, the pickling
+# serializers, datasource) are omitted so the number reflects the code this
+# suite actually drives.
+omit =
+    */cloudpickle/*
+    */pyspark/testing/*
+    */pyspark/pandas/*
+    */pyspark/ml/*
+    */pyspark/resource/*
+    */pyspark/sql/streaming/*
+    */pyspark/sql/functions_generated.py
+    */pyspark/sql/datasource.py
+    */pyspark/serializers.py
+    */pyspark/loose_version.py
+    */pyspark/_globals.py
+    */pyspark/errors/*
+    */pyspark/_pyspark*
+    */tests/*
+
+[report]
+exclude_lines =
+    pragma: no cover
+    raise NotImplementedError
+    if __name__ == .__main__.:

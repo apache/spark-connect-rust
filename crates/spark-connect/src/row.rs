@@ -289,7 +289,9 @@ mod tests {
         let i = Value::Integer(42);
         assert_eq!(i.as_i64(), Some(42));
 
+        #[allow(clippy::approx_constant)]
         let d = Value::Double(3.14);
+        #[allow(clippy::approx_constant)]
         assert_eq!(d.as_f64(), Some(3.14));
 
         let s = Value::String("test".to_string());
@@ -324,5 +326,113 @@ mod tests {
             }
             _ => panic!("Expected Decimal variant"),
         }
+    }
+
+    #[test]
+    fn as_i64_covers_all_integer_widths_and_rejects_others() {
+        assert_eq!(Value::Byte(7).as_i64(), Some(7));
+        assert_eq!(Value::Short(300).as_i64(), Some(300));
+        assert_eq!(Value::Integer(70_000).as_i64(), Some(70_000));
+        assert_eq!(Value::Long(5_000_000_000).as_i64(), Some(5_000_000_000));
+        assert_eq!(Value::Double(1.0).as_i64(), None);
+        assert_eq!(Value::Null.as_i64(), None);
+    }
+
+    #[test]
+    fn as_f64_covers_float_and_double_and_rejects_others() {
+        assert_eq!(Value::Float(1.5).as_f64(), Some(1.5));
+        assert_eq!(Value::Double(2.5).as_f64(), Some(2.5));
+        assert_eq!(Value::Long(3).as_f64(), None);
+    }
+
+    #[test]
+    fn scalar_accessors_reject_wrong_types() {
+        assert_eq!(Value::Integer(1).as_bool(), None);
+        assert_eq!(Value::Bool(true).as_str(), None);
+        assert_eq!(Value::String("x".into()).as_bytes(), None);
+        assert_eq!(Value::Binary(vec![1, 2]).as_bytes(), Some(&[1u8, 2][..]));
+    }
+
+    #[test]
+    fn is_null_reflects_variant() {
+        assert!(Value::Null.is_null());
+        assert!(!Value::Integer(0).is_null());
+    }
+
+    #[test]
+    fn display_covers_every_value_variant() {
+        assert_eq!(Value::Null.to_string(), "NULL");
+        assert_eq!(Value::Bool(true).to_string(), "true");
+        assert_eq!(Value::Byte(1).to_string(), "1");
+        assert_eq!(Value::Short(2).to_string(), "2");
+        assert_eq!(Value::Integer(3).to_string(), "3");
+        assert_eq!(Value::Long(4).to_string(), "4");
+        assert_eq!(Value::Float(1.5).to_string(), "1.5");
+        assert_eq!(Value::Double(2.5).to_string(), "2.5");
+        assert_eq!(Value::String("hi".into()).to_string(), "hi");
+        assert_eq!(Value::Binary(vec![1, 2]).to_string(), "[1, 2]");
+        assert_eq!(Value::Date(19_000).to_string(), "19000");
+        assert_eq!(Value::Timestamp(123).to_string(), "123");
+        assert_eq!(
+            Value::List(vec![Value::Integer(1), Value::Integer(2)]).to_string(),
+            "[1, 2]"
+        );
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("k".to_string(), Value::Integer(9));
+        assert_eq!(Value::Map(m).to_string(), "{k: 9}");
+        assert_eq!(
+            Value::Struct(vec![("a".to_string(), Value::Integer(1))]).to_string(),
+            "(a=1)"
+        );
+    }
+
+    #[test]
+    fn display_decimal_with_and_without_precision() {
+        assert_eq!(
+            Value::Decimal {
+                value: "123.45".into(),
+                precision: Some(5),
+                scale: Some(2),
+            }
+            .to_string(),
+            "Decimal(123.45,5)s=2"
+        );
+        assert_eq!(
+            Value::Decimal {
+                value: "7".into(),
+                precision: None,
+                scale: None,
+            }
+            .to_string(),
+            "Decimal(7)"
+        );
+    }
+
+    #[test]
+    fn row_helpers_and_display() {
+        let empty = Row::empty();
+        assert!(empty.is_empty());
+        assert_eq!(empty.len(), 0);
+
+        let row = Row::new(
+            vec!["a".to_string(), "b".to_string()],
+            vec![Value::Integer(1), Value::String("x".to_string())],
+        );
+        assert!(!row.is_empty());
+        assert_eq!(row.get(5), None);
+        assert_eq!(row.get_unchecked(0), &Value::Integer(1));
+        assert_eq!(row.fields(), &["a".to_string(), "b".to_string()]);
+        assert_eq!(row.values().len(), 2);
+        assert_eq!(row.to_string(), "[1, x]");
+        assert_eq!(
+            row.into_values(),
+            vec![Value::Integer(1), Value::String("x".to_string())]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "same length")]
+    fn row_new_rejects_mismatched_lengths() {
+        let _ = Row::new(vec!["a".to_string()], vec![]);
     }
 }
