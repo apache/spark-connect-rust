@@ -400,6 +400,44 @@ impl PyDataFrame {
         ))
     }
 
+    /// Grouping sets aggregation: `groupingSets([[a, b], [a], []])`.
+    #[pyo3(name = "groupingSets")]
+    fn grouping_sets(&self, sets: Vec<Vec<Bound<'_, PyAny>>>) -> PyResult<PyGroupedData> {
+        let mut out: Vec<Vec<spark_connect::column::Column>> = Vec::with_capacity(sets.len());
+        for s in sets {
+            out.push(to_column_list(s)?);
+        }
+        Ok(PyGroupedData::new(self.dataframe.grouping_sets(out)))
+    }
+
+    /// Drop duplicates within the event-time watermark.
+    #[pyo3(name = "dropDuplicatesWithinWatermark", signature = (subset=None))]
+    fn drop_duplicates_within_watermark(&self, subset: Option<Vec<String>>) -> PyDataFrame {
+        let refs: Option<Vec<&str>> = subset
+            .as_ref()
+            .map(|names| names.iter().map(|s| s.as_str()).collect());
+        PyDataFrame::new(self.dataframe.drop_duplicates_within_watermark(refs))
+    }
+
+    /// Convert each row to a JSON string (list of strings). Mirrors `toJSON`.
+    #[pyo3(name = "toJSON")]
+    fn to_json(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        py.detach(|| self.dataframe.to_json()).to_pyerr()
+    }
+
+    /// Whether this DataFrame is semantically equal to `other`.
+    #[pyo3(name = "sameSemantics")]
+    fn same_semantics(&self, py: Python<'_>, other: &PyDataFrame) -> PyResult<bool> {
+        py.detach(|| self.dataframe.same_semantics(&other.dataframe))
+            .to_pyerr()
+    }
+
+    /// The server-side hash of this DataFrame's logical plan.
+    #[pyo3(name = "semanticHash")]
+    fn semantic_hash(&self, py: Python<'_>) -> PyResult<i32> {
+        py.detach(|| self.dataframe.semantic_hash()).to_pyerr()
+    }
+
     /// Sort within each partition.
     #[pyo3(name = "sortWithinPartitions", signature = (*cols))]
     fn sort_within_partitions(

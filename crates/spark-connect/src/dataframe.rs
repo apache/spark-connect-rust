@@ -1428,19 +1428,55 @@ impl DataFrame {
         }
     }
 
-    /// Compute the semantic hash of this DataFrame's plan.
-    pub fn semantic_hash(&self) -> i64 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        format!("{:?}", self.plan).hash(&mut hasher);
-        hasher.finish() as i64
+    /// Compute the server-side semantic hash of this DataFrame's logical plan,
+    /// mirroring `DataFrame.semanticHash()` (an AnalyzePlan request).
+    pub fn semantic_hash(&self) -> Result<i32> {
+        let mut relation = self.plan.to_proto();
+        assign_plan_ids(&mut relation, &self.session)?;
+        let mut plan = proto::Plan::default();
+        plan.op_type = Some(proto::plan::OpType::Root(relation));
+        let mut request = proto::AnalyzePlanRequest::default();
+        request.session_id = self.session.client().session_id().to_string();
+        request.user_context = Some(proto::UserContext::default());
+        request.analyze = Some(proto::analyze_plan_request::Analyze::SemanticHash(
+            proto::analyze_plan_request::SemanticHash { plan: Some(plan) },
+        ));
+        let resp = block_on(self.session.client().analyze_plan(request))?;
+        match resp.result {
+            Some(proto::analyze_plan_response::Result::SemanticHash(h)) => Ok(h.result),
+            _ => Err(SparkError::connect_msg(
+                "AnalyzePlan response did not contain a semantic hash",
+            )),
+        }
     }
 
-    /// Check if two DataFrames have the same semantics (same logical plan).
-    pub fn same_semantics(&self, other: &DataFrame) -> bool {
-        format!("{:?}", self.plan) == format!("{:?}", other.plan)
+    /// Whether two DataFrames have the same semantics, mirroring
+    /// `DataFrame.sameSemantics(other)` (a server-side AnalyzePlan comparison).
+    pub fn same_semantics(&self, other: &DataFrame) -> Result<bool> {
+        let mut self_rel = self.plan.to_proto();
+        assign_plan_ids(&mut self_rel, &self.session)?;
+        let mut other_rel = other.plan.to_proto();
+        assign_plan_ids(&mut other_rel, &other.session)?;
+        let mut target_plan = proto::Plan::default();
+        target_plan.op_type = Some(proto::plan::OpType::Root(self_rel));
+        let mut other_plan = proto::Plan::default();
+        other_plan.op_type = Some(proto::plan::OpType::Root(other_rel));
+        let mut request = proto::AnalyzePlanRequest::default();
+        request.session_id = self.session.client().session_id().to_string();
+        request.user_context = Some(proto::UserContext::default());
+        request.analyze = Some(proto::analyze_plan_request::Analyze::SameSemantics(
+            proto::analyze_plan_request::SameSemantics {
+                target_plan: Some(target_plan),
+                other_plan: Some(other_plan),
+            },
+        ));
+        let resp = block_on(self.session.client().analyze_plan(request))?;
+        match resp.result {
+            Some(proto::analyze_plan_response::Result::SameSemantics(r)) => Ok(r.result),
+            _ => Err(SparkError::connect_msg(
+                "AnalyzePlan response did not contain a sameSemantics result",
+            )),
+        }
     }
 
     /// Convert each row to a JSON object string, mirroring `DataFrame.toJSON()`.
