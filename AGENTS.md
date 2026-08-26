@@ -256,18 +256,21 @@ Do not rely on the previous version's suite. When bumping to vX.Y.Z:
 
 ## 8. WASM UDFs
 
-- `python/pyspark_wasm_udf/pack.py` is a **client-side** packer: the Rust client
-  shells out to `python -m pyspark_wasm_udf.pack`, which cloudpickles the WASM
-  runner **by value** into the UDF command. Executors need only `wasmtime`
-  (not `pyspark_wasm_udf`). Client also needs `cloudpickle` + `pyspark`.
+- The packer is a Python script **embedded in the crate**
+  (`crates/spark-connect/src/wasm_packer.py`, pulled in with `include_str!`). The
+  Rust client runs it as `python -c <src>` (so it executes as `__main__`), which
+  makes cloudpickle serialize the `WasmScalarUDF` runner **by value** into the UDF
+  command. Because it runs as `__main__` there is **no** separate `pyspark_wasm_udf`
+  pip package: the client needs only a Python interpreter with `pyspark` (for its
+  vendored `cloudpickle` + `pyspark.sql.types._parse_datatype_json_value`), and the
+  executors need only `wasmtime`. If the packer's ABI/codec changes, keep it
+  byte-compatible with `spark_connect::wasm_udf::AbiType` and the build-time runtime
+  in `apache-spark-connect-build`.
 - Registration mirrors pyspark: `spark.udf().register("name", &udf)` (a
   session-side `UdfRegistration` handle), then callable from SQL.
-- Distribution: bundle `pyspark_wasm_udf` into the `pyspark-client-rust` wheel
-  (maturin `python-source` — ensure it's included) so `pip install
-  pyspark-client-rust` + the crate is all a client needs. The client Python
-  dependency could be removed entirely by pre-baking the cloudpickled runner
-  template per Python version and emitting the varying bytes with a Rust pickle
-  writer; executor Python+wasmtime is intrinsic to Spark and cannot be removed.
+- Removing Python on the client entirely would mean pre-baking the cloudpickled
+  runner template per Python version and emitting the varying bytes with a Rust
+  pickle writer; executor Python+wasmtime is intrinsic to Spark and cannot be removed.
 
 ## 9. Condensed checklist
 

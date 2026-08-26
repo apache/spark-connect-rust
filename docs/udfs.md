@@ -130,10 +130,11 @@ Nothing here is needed unless the `wasm-udf` feature is enabled:
 - **Build machine** - the `wasm32-unknown-unknown` target (`rustup target add
   wasm32-unknown-unknown`), plus `apache-spark-connect-macros` and
   `apache-spark-connect-build` as (build-)dependencies.
-- **Client** (building the UDF command) - a Python interpreter with `cloudpickle`
-  and `pyspark`, and the repo's `python/` directory importable as
-  `pyspark_wasm_udf` (point `SPARK_CONNECT_WASM_PACKER_PATH` at it, or set
-  `SPARK_CONNECT_PYTHON`).
+- **Client** (building the UDF command) - a Python interpreter with `pyspark`
+  importable (used for its vendored `cloudpickle` and the pure-Python type
+  parser). The packer script is embedded in the crate and run as `python -c`, so
+  there is nothing extra to install or put on a path; point `SPARK_CONNECT_PYTHON`
+  at the interpreter if it isn't your default `python3`.
 - **Executors** - the `wasmtime` Python package.
 - **Spark** - 4.2.0+.
 
