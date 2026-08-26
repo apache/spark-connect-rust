@@ -731,3 +731,46 @@ fn create_dataframe_typed_schemas() {
         2
     );
 }
+
+#[test]
+fn udf_builders_client_side() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::types::DataType;
+    use spark_connect::udf::{CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
+
+    let s = session();
+    let df = s.range(4).unwrap();
+    let empty_struct = || DataType::Struct { fields: vec![] };
+    // A dummy cloudpickle-less payload: we build the plans (client-side) but never
+    // collect(), so the server/worker never runs the UDF - the coverage target is our
+    // request-building in group.rs / dataframe.rs, which the reference client owns too.
+    let udf = || {
+        CommonInlineUserDefinedFunctionExpression::new(
+            "f".to_string(),
+            true,
+            vec![],
+            PythonUDFPayload::new(empty_struct(), 200, vec![1, 2, 3], "3.11".to_string()),
+        )
+    };
+
+    // GroupedData UDF applies (all lazy plan builders).
+    let gd = df.group_by(vec![col("id")]);
+    let _ = gd.apply_in_pandas(udf());
+    let _ = gd.apply_in_arrow(udf());
+    let _ = gd.apply_in_pandas_with_state(udf(), empty_struct(), "append", "");
+    let _ = gd.transform_with_state(udf(), "append", "NoTime", None, None);
+    let _ =
+        gd.transform_with_state_in_pandas(udf(), empty_struct(), "append", "NoTime", None, None);
+
+    // Cogroup + apply.
+    let gd2 = s.range(4).unwrap().group_by(vec![col("id")]);
+    let cg = gd.cogroup(&gd2);
+    let _ = cg.apply_in_pandas(udf());
+    let _ = cg.apply_in_arrow(udf());
+
+    // DataFrame mapInPandas / mapInArrow (barrier off/on).
+    let _ = df.map_in_pandas(udf(), false);
+    let _ = df.map_in_arrow(udf(), true);
+}
