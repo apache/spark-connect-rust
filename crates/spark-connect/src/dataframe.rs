@@ -2626,4 +2626,226 @@ mod plan_construction_tests {
             _ => panic!("expected NAReplace plan"),
         }
     }
+
+    /// Exercise every plan-building builder AND its `plan.to_proto()` arm offline
+    /// (the gRPC channel connects lazily, so no server is contacted). This pins the
+    /// large builder set in dataframe.rs and the matching to_proto arms in plan.rs.
+    #[test]
+    fn builders_construct_and_serialize() {
+        use crate::functions::col;
+        use crate::types::{DataType, StructField};
+
+        let spark = session();
+        let df = spark.range(5).unwrap();
+        let df2 = spark.range(5).unwrap();
+        let e = || col("id").expression().clone();
+        let ser = |d: &DataFrame| {
+            build_input_relation(d.plan(), &spark).expect("plan serializes to a relation");
+        };
+
+        ser(&df.select(vec![col("id")]));
+        ser(&df.filter(col("id")));
+        ser(&df.where_(col("id")));
+        ser(&df.with_column("x", col("id")));
+        ser(&df.with_column_renamed("id", "y"));
+        ser(&df.drop(vec!["id"]));
+        ser(&df.limit(3));
+        ser(&df.offset(1));
+        ser(&df.distinct());
+        ser(&df.drop_duplicates(Some(vec!["id"])));
+        ser(&df.sort(vec![e()]));
+        ser(&df.order_by(vec![e()]));
+        ser(&df.sort_within_partitions(vec![e()]));
+        ser(&df.cross_join(&df2));
+        ser(&df.union(&df2));
+        ser(&df.union_all(&df2));
+        ser(&df.union_by_name(&df2));
+        ser(&df.intersect(&df2));
+        ser(&df.intersect_all(&df2));
+        ser(&df.subtract(&df2));
+        ser(&df.except_all(&df2));
+        ser(&df.repartition(4));
+        ser(&df.coalesce(2));
+        ser(&df.repartition_by_range(3, vec![e()]));
+        ser(&df.hint("broadcast", vec![]));
+        ser(&df.to_df(vec!["a"]));
+        ser(&df.alias("t"));
+        ser(&df.sample(0.5, Some(1)));
+        ser(&df.select_expr(vec!["id + 1"]));
+        ser(&df.col_regex("id"));
+        ser(&df.describe(vec!["id"]));
+        ser(&df.summary(vec!["count"]));
+        ser(&df.as_table("t2"));
+        ser(&df.to(DataType::Struct {
+            fields: vec![StructField {
+                name: "id".to_string(),
+                data_type: DataType::Long,
+                nullable: true,
+                metadata: std::collections::BTreeMap::new(),
+            }],
+        }));
+        ser(&df.unpivot(vec![col("id")], None, "var", "val"));
+        ser(&df.melt(vec!["id"], None, "var", "val"));
+        ser(&df.group_by(vec![col("id")]).agg(vec![e()]));
+        ser(&df.rollup(vec![col("id")]).agg(vec![e()]));
+        ser(&df.cube(vec![col("id")]).agg(vec![e()]));
+        ser(&df.grouping_sets(vec![vec![col("id")]]).agg(vec![e()]));
+        ser(&df.with_watermark("id", "1 minute"));
+        let mut md = std::collections::HashMap::new();
+        md.insert("k".to_string(), "v".to_string());
+        ser(&df.with_metadata("id", md));
+        ser(&df.replace(vec![("a".to_string(), "b".to_string())], None));
+        ser(&df.stat().crosstab("id", "id"));
+        ser(&df.stat().freq_items(vec!["id"], 0.5));
+    }
+
+    /// Streaming reader terminal builders (serialize their plans) + the writer builder
+    /// chain across every Trigger variant (setters only; no server-side start()).
+    #[test]
+    fn streaming_reader_and_writer_builders() {
+        use crate::streaming::Trigger;
+        let spark = session();
+        let ser = |d: &DataFrame| {
+            build_input_relation(d.plan(), &spark).expect("stream plan serializes");
+        };
+        ser(&spark
+            .read_stream()
+            .format("rate")
+            .option("rowsPerSecond", "5")
+            .load(None));
+        ser(&spark.read_stream().schema("value long").json("/tmp/in"));
+        ser(&spark.read_stream().parquet("/tmp/in"));
+        ser(&spark.read_stream().csv("/tmp/in"));
+        ser(&spark.read_stream().orc("/tmp/in"));
+        ser(&spark.read_stream().text("/tmp/in"));
+        ser(&spark.read_stream().format("rate").table("t"));
+
+        let base = spark.range(3).unwrap();
+        for trig in [
+            Trigger::ProcessingTime("1 second".to_string()),
+            Trigger::Once,
+            Trigger::AvailableNow,
+            Trigger::Continuous("1 second".to_string()),
+        ] {
+            let _w = base
+                .write_stream()
+                .output_mode("append")
+                .format("console")
+                .option("k", "v")
+                .partition_by(vec!["id"])
+                .cluster_by(vec!["id"])
+                .query_name("q")
+                .trigger(trig);
+        }
+    }
+
+    /// Every Column operator/method builds an expression; serialize each proto to pin
+    /// the column.rs bodies and the expression.rs to_proto arms.
+    #[test]
+    fn column_operations_and_expressions() {
+        use crate::functions::col;
+        let a = || col("a");
+        let b = || col("b");
+        let exprs = vec![
+            a().add(b()),
+            a().sub(b()),
+            a().mul(b()),
+            a().div(b()),
+            a().modulo(b()),
+            a().and(b()),
+            a().or(b()),
+            a().not(),
+            a().neg(),
+            a().eq(b()),
+            a().ne(b()),
+            a().gt(b()),
+            a().lt(b()),
+            a().ge(b()),
+            a().le(b()),
+            a().bitwise_and(b()),
+            a().bitwise_or(b()),
+            a().bitwise_xor(b()),
+            a().eq_null_safe(b()),
+            a().is_null(),
+            a().is_not_null(),
+            a().is_nan(),
+            a().like("x%"),
+            a().rlike("x.*"),
+            a().ilike("x%"),
+            a().contains(b()),
+            a().startswith(b()),
+            a().endswith(b()),
+            a().substr(b(), b()),
+            a().between(b(), b()),
+            a().isin(vec![b()]),
+            a().get_field("f"),
+            a().get_item(b()),
+            a().with_field("f", b()),
+            a().drop_fields(vec!["f"]),
+            a().asc(),
+            a().asc_nulls_first(),
+            a().asc_nulls_last(),
+            a().desc(),
+            a().desc_nulls_first(),
+            a().desc_nulls_last(),
+            a().alias("x"),
+            a().name("y"),
+            a().cast_str("int"),
+            a().try_cast_str("int"),
+            a().astype(crate::types::DataType::Integer),
+            a().when(b(), b()).otherwise(b()),
+        ];
+        for e in &exprs {
+            let _ = e.to_proto();
+        }
+    }
+
+    /// Construct the exotic plan variants (Zip, Transpose, NearestByJoin,
+    /// MapPartitions, GroupMap, CoGroupMap, CommonInlineUdtf) and serialize each so
+    /// their to_proto arms in plan.rs are pinned.
+    #[test]
+    fn exotic_plan_variants_serialize() {
+        use crate::functions::col;
+        use crate::types::DataType;
+        use crate::udf::{CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
+
+        let spark = session();
+        let ser = |d: &DataFrame| {
+            build_input_relation(d.plan(), &spark).expect("exotic plan serializes");
+        };
+        let df = spark.range(5).unwrap();
+        let df2 = spark.range(5).unwrap();
+
+        ser(&df.zip(&df2).unwrap());
+        ser(&df.transpose().unwrap());
+        ser(&df.transpose_with_index(col("id")).unwrap());
+        ser(&df.nearest_by_join(&df2, col("id"), 5, "inner", "asc", "inner"));
+
+        let udf = || {
+            CommonInlineUserDefinedFunctionExpression::new(
+                "f".to_string(),
+                true,
+                vec![],
+                PythonUDFPayload::new(DataType::Integer, 200, vec![1, 2, 3], "3.11".to_string()),
+            )
+        };
+        ser(&df.map_in_pandas(udf(), false));
+        ser(&df.map_in_arrow(udf(), false));
+        ser(&df.group_by(vec![col("id")]).apply_in_pandas(udf()));
+        ser(&df.group_by(vec![col("id")]).apply_in_arrow(udf()));
+        let g1 = df.group_by(vec![col("id")]);
+        let g2 = df2.group_by(vec![col("id")]);
+        ser(&g1.cogroup(&g2).apply_in_pandas(udf()));
+
+        let udtf_df = spark.tvf().udtf(
+            "myudtf",
+            vec![],
+            Some(DataType::Integer),
+            300,
+            vec![1, 2],
+            "3.11".to_string(),
+            true,
+        );
+        ser(&udtf_df);
+    }
 }

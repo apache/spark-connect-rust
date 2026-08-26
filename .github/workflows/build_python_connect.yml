@@ -51,6 +51,9 @@ jobs:
   connect-parity:
     name: Connect parity (official suite via our client, Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    # The official suite runs serially (--jobs 1) and takes ~45-60 min; bound the job so
+    # a genuinely hung test fails it instead of running to GitHub's 6-hour default.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:

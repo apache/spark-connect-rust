@@ -196,3 +196,115 @@ fn struct_field_helpers() {
     assert_eq!(dt.field_names().unwrap(), vec!["x", "y"]);
     assert_eq!(dt.names().unwrap(), vec!["x", "y"]);
 }
+
+/// Exercise the accessor + proto/json arms for the special variants (Udt, Unparsed,
+/// Geometry, Geography) that the round-trip lists above don't assert on. Just calling
+/// each pins the corresponding match arms.
+#[test]
+fn special_variant_arms() {
+    let variants = [
+        DataType::Udt {
+            type_str: "com.example.MyUDT".to_string(),
+            jvm_class: Some("com.example.MyUDT".to_string()),
+            python_class: Some("mymod.MyUDT".to_string()),
+            serialized_python_class: Some("<pickle>".to_string()),
+            sql_type: Some(Box::new(DataType::Integer)),
+        },
+        DataType::Udt {
+            type_str: "com.example.Bare".to_string(),
+            jvm_class: None,
+            python_class: None,
+            serialized_python_class: None,
+            sql_type: None,
+        },
+        DataType::Unparsed {
+            data_type_string: "some_custom_ddl_type".to_string(),
+        },
+        DataType::Geometry { srid: 4326 },
+        DataType::Geometry { srid: -1 },
+        DataType::Geography { srid: 4326 },
+        DataType::Geography { srid: -1 },
+    ];
+    for dt in &variants {
+        // Accessors + both serializations must not panic for any variant.
+        let _ = dt.type_name();
+        let _ = dt.simple_string();
+        let _ = dt.need_conversion();
+        let _ = dt.json_value();
+        let _ = dt.json();
+        let proto = dt.to_proto();
+        // from_proto may not perfectly round-trip these edge types; just exercise it.
+        let _ = DataType::from_proto(&proto);
+    }
+}
+
+/// Exercise the DDL parser across the full grammar it accepts. Calling `from_ddl` on
+/// each form pins the large `parse_datatype_string` body; a few are asserted to the
+/// expected type.
+#[test]
+fn from_ddl_full_grammar() {
+    let forms = [
+        "void",
+        "boolean",
+        "byte",
+        "tinyint",
+        "short",
+        "smallint",
+        "int",
+        "integer",
+        "long",
+        "bigint",
+        "float",
+        "double",
+        "string",
+        "binary",
+        "date",
+        "timestamp",
+        "timestamp_ntz",
+        "decimal",
+        "decimal(5)",
+        "decimal(10,2)",
+        "char(3)",
+        "varchar(20)",
+        "interval year",
+        "interval month",
+        "interval year to month",
+        "interval day",
+        "interval hour",
+        "interval minute",
+        "interval second",
+        "interval day to second",
+        "interval day to hour",
+        "interval hour to minute",
+        "interval minute to second",
+        "array<int>",
+        "array<array<string>>",
+        "map<string,int>",
+        "map<string,array<int>>",
+        "struct<a:int,b:string>",
+        "struct<a:int,b:struct<c:double>>",
+        "a int, b string, c array<int>",
+    ];
+    for s in forms {
+        // Exercise the parser; some exotic forms may return Err — that path is fine too.
+        let _ = DataType::from_ddl(s);
+    }
+    // A few concrete expectations.
+    assert_eq!(DataType::from_ddl("bigint").unwrap(), DataType::Long);
+    assert_eq!(DataType::from_ddl("int").unwrap(), DataType::Integer);
+    assert!(matches!(
+        DataType::from_ddl("array<int>").unwrap(),
+        DataType::Array { .. }
+    ));
+    assert!(matches!(
+        DataType::from_ddl("map<string,int>").unwrap(),
+        DataType::Map { .. }
+    ));
+    assert!(matches!(
+        DataType::from_ddl("struct<a:int,b:string>").unwrap(),
+        DataType::Struct { .. }
+    ));
+    // Malformed input must error, not panic.
+    assert!(DataType::from_ddl("array<").is_err());
+    assert!(DataType::from_ddl("struct<a:>").is_err());
+}
