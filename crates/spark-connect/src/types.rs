@@ -209,7 +209,10 @@ impl DataType {
                 format!("decimal({},{})", precision, scale)
             }
             DataType::String { collation } => {
-                if collation == "UTF8_BINARY" {
+                // The default collation (empty, or the explicit UTF8_BINARY) renders as
+                // plain "string"; only a non-default collation adds " collate <name>".
+                // Previously an empty collation produced the malformed "string collate ".
+                if collation.is_empty() || collation == "UTF8_BINARY" {
                     "string".to_string()
                 } else {
                     format!("string collate {}", collation)
