@@ -447,6 +447,45 @@ fn streaming_surface() {
         .partition_by(vec!["value"])
         .cluster_by(vec!["value"])
         .output_mode("complete");
+
+    // Streaming file-source readers + name(): all build lazy streaming plans
+    // (no execution until start), so is_streaming() is a client-side check.
+    let schema = "value long";
+    assert!(s
+        .read_stream()
+        .name("rate")
+        .format("rate")
+        .load(None)
+        .is_streaming());
+    for df in [
+        s.read_stream().schema(schema).json("/tmp/cov_s_json"),
+        s.read_stream().schema(schema).parquet("/tmp/cov_s_pq"),
+        s.read_stream().schema(schema).orc("/tmp/cov_s_orc"),
+        s.read_stream()
+            .schema(schema)
+            .option("header", "true")
+            .csv("/tmp/cov_s_csv"),
+        s.read_stream()
+            .schema("value string")
+            .text("/tmp/cov_s_txt"),
+    ] {
+        assert!(df.is_streaming());
+    }
+
+    // process_all_available drains a rate stream feeding a memory sink, then stop.
+    let q2 = s
+        .read_stream()
+        .format("rate")
+        .option("rowsPerSecond", "5")
+        .load(None)
+        .write_stream()
+        .format("memory")
+        .query_name("cov_rs_drain")
+        .output_mode("append")
+        .start("")
+        .expect("start drain query");
+    q2.process_all_available().unwrap();
+    q2.stop().unwrap();
 }
 
 #[test]
