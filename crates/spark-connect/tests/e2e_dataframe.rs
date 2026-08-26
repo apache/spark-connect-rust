@@ -107,9 +107,9 @@ fn dataframe_metadata_json_semantics() {
         one.scalar().unwrap(),
         Some(spark_connect::row::Value::Integer(42))
     );
-    // semantics
-    assert!(df.same_semantics(&df4(&s)));
-    let _ = df.semantic_hash();
+    // semantics (server-backed AnalyzePlan): two identical plans are equal
+    assert!(df.same_semantics(&df4(&s)).unwrap());
+    let _ = df.semantic_hash().unwrap();
     // flags
     assert!(!df.is_streaming());
     let _ = df.is_local();
