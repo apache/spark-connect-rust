@@ -294,6 +294,46 @@ pub trait Evaluator: Send + Sync {
     fn evaluate(&self, _df: &DataFrame) -> spark_connect_core::error::Result<f64>;
 }
 
+/// Run an evaluator against a dataset via the ML `Evaluate` command and return the
+/// scalar metric.
+///
+/// Mirrors `pyspark.ml.connect` evaluator.evaluate: build an `MlCommand::Evaluate`
+/// carrying the evaluator operator, its params, and the dataset relation, submit
+/// it, and read the returned metric literal from the `MlCommandResult`.
+fn evaluate_via_command(
+    operator: &MlOperator,
+    params: &Params,
+    df: &DataFrame,
+) -> spark_connect_core::error::Result<f64> {
+    let dataset = crate::dataframe::build_input_relation(&df.plan, &df.session)?;
+    let evaluate = proto::ml_command::Evaluate {
+        evaluator: Some(operator.to_proto()),
+        params: Some(params.to_proto()),
+        dataset: Some(dataset),
+    };
+    let mut ml_command = proto::MlCommand::default();
+    ml_command.command = Some(proto::ml_command::Command::Evaluate(evaluate));
+
+    let responses = crate::dataframe::execute_command_collect(
+        &df.session,
+        proto::command::CommandType::MlCommand(ml_command),
+    )?;
+    for resp in responses {
+        if let Some(proto::execute_plan_response::ResponseType::MlCommandResult(result)) =
+            resp.response_type
+        {
+            if let Some(proto::ml_command_result::ResultType::Param(lit)) = result.result_type {
+                if let Some(proto::expression::literal::LiteralType::Double(v)) = lit.literal_type {
+                    return Ok(v);
+                }
+            }
+        }
+    }
+    Err(spark_connect_core::error::SparkError::connect_msg(
+        "evaluate: server returned no metric",
+    ))
+}
+
 /// Concrete implementation: StandardScaler Estimator.
 ///
 /// Scales features to have mean 0 and standard deviation 1.
@@ -986,8 +1026,8 @@ impl Evaluator for RegressionEvaluator {
         &self.params
     }
 
-    fn evaluate(&self, _df: &DataFrame) -> spark_connect_core::error::Result<f64> {
-        Ok(0.0)
+    fn evaluate(&self, df: &DataFrame) -> spark_connect_core::error::Result<f64> {
+        evaluate_via_command(&self.operator, &self.params, df)
     }
 }
 
@@ -1061,8 +1101,8 @@ impl Evaluator for BinaryClassificationEvaluator {
         &self.params
     }
 
-    fn evaluate(&self, _df: &DataFrame) -> spark_connect_core::error::Result<f64> {
-        Ok(0.0)
+    fn evaluate(&self, df: &DataFrame) -> spark_connect_core::error::Result<f64> {
+        evaluate_via_command(&self.operator, &self.params, df)
     }
 }
 
@@ -1424,5 +1464,75 @@ mod tests {
                 name
             );
         }
+    }
+
+    // gRPC connects lazily, so a session builds offline; fit/transform on the ML
+    // operators only build plans (no RPC until collect), so these run server-free.
+    fn offline_session() -> SparkSession {
+        SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .expect("session")
+    }
+
+    #[test]
+    fn params_int_and_proto_roundtrip() {
+        let p = Params::new()
+            .set_param_int("maxIter", 7)
+            .set_param_string("inputCol", "x");
+        assert!(p.get_param("maxIter").is_some());
+        assert!(p.get_param("missing").is_none());
+
+        let proto_p = p.to_proto();
+        assert!(proto_p.params.contains_key("maxIter"));
+        let back = Params::from_proto(&proto_p);
+        assert!(back.get_param("inputCol").is_some());
+        assert!(back.get_param("maxIter").is_some());
+    }
+
+    #[test]
+    fn ml_operator_with_uid_and_proto_roundtrip() {
+        let op = MlOperator::with_uid("test.Op", "uid-123", OperatorType::Model);
+        assert_eq!(op.uid, "uid-123");
+        let proto_op = op.to_proto();
+        assert_eq!(proto_op.uid, "uid-123");
+        let back = MlOperator::from_proto(&proto_op);
+        assert_eq!(back.name, "test.Op");
+        assert_eq!(back.op_type, OperatorType::Model);
+    }
+
+    #[test]
+    fn operator_type_proto_roundtrip_all_variants() {
+        for t in [
+            OperatorType::Estimator,
+            OperatorType::Transformer,
+            OperatorType::Evaluator,
+            OperatorType::Model,
+        ] {
+            assert_eq!(OperatorType::from_proto(t.to_proto() as i32), t);
+        }
+    }
+
+    #[test]
+    fn transform_and_fit_build_ml_transform_plans() {
+        let s = offline_session();
+        let df = s.range(3).unwrap();
+
+        // A Transformer builds an MlTransform relation plan (no RPC).
+        let mut va = VectorAssembler::new()
+            .set_input_cols(vec!["id"])
+            .set_output_col("v");
+        let out = va.transform(&df).unwrap();
+        assert!(matches!(out.plan, LogicalPlan::MlTransform { .. }));
+
+        // StandardScaler fits locally into a model; the model transform also builds
+        // an MlTransform plan, and Model::clone_box works.
+        let mut ss = StandardScaler::new()
+            .set_input_col("features")
+            .set_output_col("scaled");
+        let mut model = ss.fit(&df).unwrap();
+        let scaled = model.transform(&df).unwrap();
+        assert!(matches!(scaled.plan, LogicalPlan::MlTransform { .. }));
+        let _cloned = model.clone_box();
     }
 }

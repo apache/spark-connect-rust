@@ -969,6 +969,35 @@ fn ml_estimators_and_transformers() {
     if let Ok(mut m) = lr.fit(&df) {
         let _ = m.transform(&df).and_then(|d| d.count());
     }
+
+    // RegressionEvaluator.evaluate now sends a real MlCommand::Evaluate and reads
+    // the metric back (previously a stub returning 0.0). With prediction == label
+    // the RMSE is exactly 0.
+    use spark_connect::ml::{
+        BinaryClassificationEvaluator, Evaluator, Pipeline, RegressionEvaluator,
+    };
+    let eval_df = s
+        .sql("SELECT CAST(id AS DOUBLE) AS label, CAST(id AS DOUBLE) AS prediction FROM range(10)")
+        .expect("eval df");
+    let reg_eval = RegressionEvaluator::new()
+        .set_label_col("label")
+        .set_prediction_col("prediction")
+        .set_metric_name("rmse");
+    assert_eq!(reg_eval.evaluate(&eval_df).unwrap(), 0.0);
+
+    // BinaryClassificationEvaluator: the client build+submit path runs; the server
+    // needs a vector score column for a real AUC, so tolerate a shape rejection.
+    let bin_eval = BinaryClassificationEvaluator::new()
+        .set_label_col("label")
+        .set_score_col("prediction")
+        .set_metric_name("areaUnderROC");
+    let _ = bin_eval.evaluate(&eval_df);
+
+    // Pipeline estimator builds+fits (stages carried as params); tolerate server ML.
+    let mut pipeline = Pipeline::new().set_stages(vec!["scaler", "lr"]);
+    if let Ok(mut m) = pipeline.fit(&df) {
+        let _ = m.transform(&df).and_then(|d| d.count());
+    }
 }
 
 #[test]
