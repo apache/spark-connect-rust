@@ -288,6 +288,10 @@ pub enum LogicalPlan {
     },
     /// ML Transformation: wraps an MlRelation proto directly.
     MlTransform { ml_relation: proto::Relation },
+    /// A catalog operation exposed as a relation (e.g. `listTables`, `listColumns`),
+    /// evaluated lazily so `.collect()` returns the server's rows - including zero
+    /// rows for an empty database, which must not be an error.
+    Catalog { catalog: proto::Catalog },
     /// MapPartitions: `DataFrame.mapInPandas` / `mapInArrow` (also backs foreach).
     MapPartitions {
         input: Box<LogicalPlan>,
@@ -1094,6 +1098,10 @@ impl LogicalPlan {
 
             LogicalPlan::MlTransform { ml_relation } => {
                 return ml_relation.clone();
+            }
+            LogicalPlan::Catalog { catalog } => {
+                relation.rel_type = Some(proto::relation::RelType::Catalog(catalog.clone()));
+                return relation;
             }
             LogicalPlan::MapPartitions {
                 input,

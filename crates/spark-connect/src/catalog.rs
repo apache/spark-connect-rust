@@ -9,7 +9,6 @@ use spark_connect_proto as proto;
 use crate::dataframe::DataFrame;
 use crate::row::{Row, Value};
 use crate::session::SparkSession;
-use crate::types::DataType;
 
 /// Catalog provides access to database and table metadata.
 ///
@@ -647,32 +646,16 @@ impl Catalog {
         Ok(rows)
     }
 
-    /// Helper: execute a catalog operation and return as DataFrame.
+    /// Helper: expose a catalog operation as a lazy DataFrame.
+    ///
+    /// The catalog op is a relation on the server, so we wrap it in a plan and let
+    /// `.collect()` (or any downstream op) evaluate it. This preserves the real
+    /// server-side schema and row data - and, crucially, returns an empty result
+    /// for an empty database (e.g. `listTables` with no tables) rather than erroring.
     fn execute_catalog_as_dataframe(&self, catalog: &proto::Catalog) -> Result<DataFrame> {
-        let rows = self.execute_catalog(catalog)?;
-
-        if rows.is_empty() {
-            return Err(SparkError::connect_msg(
-                "Catalog operation returned no rows",
-            ));
-        }
-
-        let fields: Vec<crate::types::StructField> = rows[0]
-            .fields()
-            .iter()
-            .map(|name| crate::types::StructField {
-                name: name.clone(),
-                data_type: DataType::String {
-                    collation: "UTF8_BINARY".to_string(),
-                },
-                nullable: true,
-                metadata: std::collections::BTreeMap::new(),
-            })
-            .collect();
-
-        let schema = DataType::Struct { fields };
-        let plan = crate::plan::LogicalPlan::LocalRelation { schema, data: None };
-
+        let plan = crate::plan::LogicalPlan::Catalog {
+            catalog: catalog.clone(),
+        };
         Ok(DataFrame::new(self.session.clone(), plan))
     }
 
