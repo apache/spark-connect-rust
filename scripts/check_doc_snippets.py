@@ -27,8 +27,13 @@ common "continue from an earlier block" fragments type-check) and is run through
 ``rustc`` against the already-built ``apache-spark-connect`` rlib. Only compilation
 (type-checking) is performed - snippets are never executed, so no server is needed.
 
-A block that must be skipped (pseudo-code, or a deliberate compile-error example)
-can be fenced as ```rust,ignore``` and it is not checked.
+A block that must be skipped (pseudo-code, a deliberate compile-error example, or
+a snippet that needs a feature/macro the snippet harness doesn't build - e.g. the
+`wasm-udf` `#[spark_wasm_udf]` examples) should be fenced as ```{.rust .no-run}```.
+That brace form still renders as a Rust code block in mkdocs/superfences (unlike
+```rust,ignore```, whose comma makes superfences drop the fence entirely and print
+the backticks literally), and it is not matched by the checker below, so it is not
+compiled.
 
 Usage:
     cargo build -p apache-spark-connect
@@ -48,8 +53,8 @@ REPO = Path(__file__).resolve().parent.parent
 RLIB = REPO / "target" / "debug" / "libspark_connect.rlib"
 DEPS = REPO / "target" / "debug" / "deps"
 
-# ```rust``` (checked) vs ```rust,ignore``` / ```rust,no_run``` (skipped). We only
-# check plain ```rust``` fences.
+# ```rust``` (checked) vs ```{.rust .no-run}``` (rendered but skipped). We only check
+# plain ```rust``` fences; any info string with a comma/space/brace is left alone.
 _BLOCK = re.compile(r"^```rust\s*$\n(.*?)^```\s*$", re.DOTALL | re.MULTILINE)
 
 # Harness: bind the identifiers the fragments assume from earlier blocks. `use`
