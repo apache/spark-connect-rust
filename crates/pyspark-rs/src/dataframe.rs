@@ -46,6 +46,24 @@ fn to_column_list(_args: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<spark_connect::c
     Ok(cols)
 }
 
+/// Map a pyspark `how` string to a JoinType (shared by join / lateralJoin).
+fn parse_join_type(how: &str) -> PyResult<JoinType> {
+    Ok(match how.to_lowercase().as_str() {
+        "inner" => JoinType::Inner,
+        "left" | "leftouter" | "left_outer" => JoinType::LeftOuter,
+        "right" | "rightouter" | "right_outer" => JoinType::RightOuter,
+        "outer" | "full" | "fullouter" | "full_outer" => JoinType::FullOuter,
+        "cross" => JoinType::Cross,
+        "left_semi" | "leftsemi" | "semi" => JoinType::LeftSemi,
+        "left_anti" | "leftanti" | "anti" => JoinType::LeftAnti,
+        other => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Invalid join type: {other}"
+            )))
+        }
+    })
+}
+
 /// Resolve a filter/where condition: a Column, or a SQL string parsed via `expr`.
 fn cond_column(condition: &Bound<'_, PyAny>) -> PyResult<spark_connect::column::Column> {
     if let Ok(c) = condition.extract::<PyRef<PyColumn>>() {
@@ -184,21 +202,7 @@ impl PyDataFrame {
         on: Option<Bound<'_, PyAny>>,
         how: Option<&str>,
     ) -> PyResult<PyDataFrame> {
-        let join_type = match how.unwrap_or("inner").to_lowercase().as_str() {
-            "inner" => JoinType::Inner,
-            "left" | "leftouter" | "left_outer" => JoinType::LeftOuter,
-            "right" | "rightouter" | "right_outer" => JoinType::RightOuter,
-            "outer" | "full" | "fullouter" | "full_outer" => JoinType::FullOuter,
-            "cross" => JoinType::Cross,
-            "left_semi" | "leftsemi" | "semi" => JoinType::LeftSemi,
-            "left_anti" | "leftanti" | "anti" => JoinType::LeftAnti,
-            other => {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Invalid join type: {}",
-                    other
-                )))
-            }
-        };
+        let join_type = parse_join_type(how.unwrap_or("inner"))?;
 
         // Resolve `on`: None | Column | str | list[str].
         if let Some(bound) = on {
@@ -238,6 +242,53 @@ impl PyDataFrame {
     /// Cross join.
     fn crossJoin(&self, other: &PyDataFrame) -> PyDataFrame {
         PyDataFrame::new(self.dataframe.cross_join(&other.dataframe))
+    }
+
+    /// Lateral (correlated) join. `on` is an optional Column condition; `how`
+    /// mirrors `join` (default inner). Mirrors `DataFrame.lateralJoin`.
+    #[pyo3(signature = (other, on=None, how=None))]
+    fn lateralJoin(
+        &self,
+        other: &PyDataFrame,
+        on: Option<PyRef<PyColumn>>,
+        how: Option<&str>,
+    ) -> PyResult<PyDataFrame> {
+        let join_type = parse_join_type(how.unwrap_or("inner"))?;
+        let on_col = on.map(|c| c.column.clone());
+        Ok(PyDataFrame::new(self.dataframe.lateral_join(
+            &other.dataframe,
+            on_col,
+            join_type,
+        )))
+    }
+
+    /// Transpose (swap rows/columns). `indexColumn` optionally names the header
+    /// column. Mirrors `DataFrame.transpose(indexColumn=None)`.
+    #[pyo3(signature = (indexColumn=None))]
+    #[allow(non_snake_case)]
+    fn transpose(&self, indexColumn: Option<PyRef<PyColumn>>) -> PyResult<PyDataFrame> {
+        let df = match indexColumn {
+            Some(c) => self.dataframe.transpose_with_index(c.column.clone()),
+            None => self.dataframe.transpose(),
+        }
+        .to_pyerr()?;
+        Ok(PyDataFrame::new(df))
+    }
+
+    /// Repartition into `numPartitions` by a range partitioning on the given
+    /// columns. Mirrors `DataFrame.repartitionByRange(numPartitions, *cols)`.
+    #[pyo3(signature = (numPartitions, *cols))]
+    #[allow(non_snake_case)]
+    fn repartitionByRange(
+        &self,
+        numPartitions: i32,
+        cols: Vec<Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let columns = to_column_list(cols)?;
+        let exprs: Vec<_> = columns.iter().map(|c| c.expression().clone()).collect();
+        Ok(PyDataFrame::new(
+            self.dataframe.repartition_by_range(numPartitions, exprs),
+        ))
     }
 
     /// Union with another DataFrame.
