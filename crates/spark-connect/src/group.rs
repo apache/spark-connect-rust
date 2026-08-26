@@ -619,9 +619,7 @@ mod tests {
         let result = stats.freq_items(vec!["col1", "col2"], 0.25);
         match &result.plan {
             LogicalPlan::StatFreqItems {
-                columns,
-                support,
-                ..
+                columns, support, ..
             } => {
                 assert_eq!(columns.len(), 2);
                 assert_eq!(*support, 0.25);

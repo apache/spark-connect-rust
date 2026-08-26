@@ -26,9 +26,9 @@ concurrency:
 
 on:
   push:
-    branches: [master, main]
+    branches: [master]
   pull_request:
-    branches: [master, main]
+    branches: [master]
 
 env:
   CARGO_TERM_COLOR: always
@@ -134,32 +134,43 @@ jobs:
           cargo build -p pyspark-rs --release
           cp target/release/lib_pyspark.so python/pyspark/_pyspark.so
 
-      - name: Create Python coverage badge
-        # TODO: When a Python test suite exists in python/, run:
-        #       cd python && coverage run -m pytest ... && coverage report --json
-        # For now, this is a placeholder that generates a badge with unknown coverage.
+      - name: Measure Python coverage with offline test suite
+        run: |
+          cd python && PYTHONPATH=$(pwd) python -m coverage run --rcfile=.coveragerc -m pytest tests/test_dropin_offline.py
+          PYTHONPATH=$(pwd) python -m coverage json --rcfile=.coveragerc -o coverage-python.json
+
+      - name: Parse Python coverage and create badge JSON
         run: |
           python3 << 'PYTHON_EOF'
           import json
-          import os
 
-          # TODO: Replace with actual coverage measurement when Python tests are available.
-          # For now, generate a placeholder badge indicating no measurement.
-          coverage_pct = None
-          color = "lightgrey"
-          message = "no tests"
+          # Read the coverage JSON output
+          with open("python/coverage-python.json", "r") as f:
+              data = json.load(f)
 
+          # Extract percent covered from totals
+          coverage_pct = data["totals"]["percent_covered"]
+
+          # Determine color based on coverage threshold
+          if coverage_pct >= 90:
+              color = "green"
+          elif coverage_pct >= 75:
+              color = "yellow"
+          else:
+              color = "red"
+
+          # Create shields.io endpoint JSON format
           badge_json = {
               "schemaVersion": 1,
               "label": "python coverage",
-              "message": message,
+              "message": f"{coverage_pct:.1f}%",
               "color": color
           }
 
           with open("coverage-python-badge.json", "w") as f:
               json.dump(badge_json, f)
 
-          print(f"Python coverage: {message} (no test suite available yet)")
+          print(f"Python coverage: {coverage_pct:.1f}% ({color})")
           PYTHON_EOF
 
       - name: Ensure badges directory exists
@@ -180,7 +191,7 @@ jobs:
           fi
 
       - name: Create/update badges branch (orphan)
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        if: github.event_name == 'push' && github.repository == 'apache/spark-connect-rust' && github.ref == 'refs/heads/master'
         run: |
           # Commit the badges to the badges branch (orphan, contains only badge files).
           # This approach uses git directly: checkout/create the orphan badges branch,

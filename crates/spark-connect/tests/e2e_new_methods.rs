@@ -54,7 +54,8 @@ fn temp_views_and_register() {
     // create_global_temp_view again should error (already exists) — exercise the err path.
     let _ = df.create_global_temp_view("e2e_gtv");
 
-    df.register_temp_table("e2e_rtt").expect("register_temp_table");
+    df.register_temp_table("e2e_rtt")
+        .expect("register_temp_table");
     let _ = spark.sql("SELECT * FROM e2e_rtt").and_then(|d| d.collect());
 }
 
@@ -175,7 +176,10 @@ fn session_stop_marks_is_stopped() {
     }
     // Use a fresh session so stopping it doesn't affect other tests.
     let url = std::env::var("SPARK_REMOTE").unwrap_or_else(|_| "sc://localhost:15002".to_string());
-    let spark = SparkSession::builder().remote(&url).get_or_create().expect("session");
+    let spark = SparkSession::builder()
+        .remote(&url)
+        .get_or_create()
+        .expect("session");
     let side = spark.new_session();
     assert!(!side.is_stopped());
     side.stop().expect("stop");

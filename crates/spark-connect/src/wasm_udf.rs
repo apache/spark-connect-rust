@@ -390,17 +390,45 @@ impl UserDefinedFunction {
         )))
     }
 
-    /// Register this UDF by name on `session` so it can be referenced from SQL
-    /// (`session.sql("SELECT my_udf(col) FROM ...")`) as well as the DataFrame API.
+    /// Build the registration expression for this UDF under `name` (no bound
+    /// arguments — arguments are supplied at each SQL/DataFrame call site).
+    fn registration_expression(
+        &self,
+        name: &str,
+    ) -> Result<CommonInlineUserDefinedFunctionExpression> {
+        Ok(CommonInlineUserDefinedFunctionExpression::new(
+            name.to_string(),
+            self.deterministic,
+            vec![],
+            self.to_payload()?,
+        ))
+    }
+}
+
+/// UDF registration accessor, returned by [`crate::session::SparkSession::udf`] and
+/// mirroring `pyspark.sql.SparkSession.udf`.
+pub struct UdfRegistration<'a> {
+    session: &'a crate::session::SparkSession,
+}
+
+impl<'a> UdfRegistration<'a> {
+    /// Register `udf` under `name` so it can be called from SQL
+    /// (`spark.sql("SELECT name(col) ...")`) and the DataFrame API.
     ///
-    /// Mirrors `spark.udf.register(name, my_udf)`: the cloudpickled WASM runner is
-    /// shipped by value inside a `RegisterFunction` command, so the Spark executors
-    /// only need the `wasmtime` Python package (not `pyspark_wasm_udf`). Returns once
-    /// the server has registered the function.
-    pub fn register(&self, session: &crate::session::SparkSession) -> Result<()> {
-        // No bound arguments: registration installs the function definition by name;
-        // arguments are supplied at each SQL/DataFrame call site.
-        session.register_function(self.to_expression(vec![])?)
+    /// Mirrors `spark.udf.register(name, udf)`: the cloudpickled WASM runner is shipped
+    /// by value inside a `RegisterFunction` command, so the Spark executors only need
+    /// the `wasmtime` Python package (not `pyspark_wasm_udf`).
+    pub fn register(&self, name: &str, udf: &UserDefinedFunction) -> Result<()> {
+        self.session
+            .register_function(udf.registration_expression(name)?)
+    }
+}
+
+impl crate::session::SparkSession {
+    /// UDF registration accessor. Mirrors `pyspark.sql.SparkSession.udf`, so a WASM
+    /// UDF is registered with `spark.udf().register("name", &udf)`.
+    pub fn udf(&self) -> UdfRegistration<'_> {
+        UdfRegistration { session: self }
     }
 }
 

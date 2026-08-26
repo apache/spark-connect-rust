@@ -114,8 +114,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let df = spark.range(0, 3)?.select(vec![shout.call(vec![col("id").cast_str("string")])?])?;
     df.show(20)?;
 
-    // ...or register by name (same effect as spark.udf.register) and call from SQL:
-    shout.register(&spark)?;
+    // ...or register by name and call from SQL (mirrors spark.udf.register):
+    spark.udf().register("shout", &shout)?;
     spark.sql("SELECT shout(name) FROM people")?.show(20)?;
     Ok(())
 }

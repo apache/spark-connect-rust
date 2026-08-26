@@ -264,10 +264,7 @@ mod tests {
         let df = tvf.range(5, None, 1, None).unwrap();
         match &df.plan {
             LogicalPlan::Range {
-                start,
-                end,
-                step,
-                ..
+                start, end, step, ..
             } => {
                 assert_eq!(*start, 0);
                 assert_eq!(*end, 5);
@@ -284,10 +281,7 @@ mod tests {
         let col = crate::column::col("array_col");
         let df = tvf.explode(&col).unwrap();
         match &df.plan {
-            LogicalPlan::UnresolvedTableValuedFunction {
-                name,
-                arguments,
-            } => {
+            LogicalPlan::UnresolvedTableValuedFunction { name, arguments } => {
                 assert_eq!(name, "explode");
                 assert_eq!(arguments.len(), 1);
             }
@@ -331,10 +325,7 @@ mod tests {
         let fields = vec![crate::column::col("field1"), crate::column::col("field2")];
         let df = tvf.json_tuple(&input, fields).unwrap();
         match &df.plan {
-            LogicalPlan::UnresolvedTableValuedFunction {
-                name,
-                arguments,
-            } => {
+            LogicalPlan::UnresolvedTableValuedFunction { name, arguments } => {
                 assert_eq!(name, "json_tuple");
                 assert_eq!(arguments.len(), 3); // input + 2 fields
             }
@@ -377,10 +368,7 @@ mod tests {
         ];
         let df = tvf.stack(&n, fields).unwrap();
         match &df.plan {
-            LogicalPlan::UnresolvedTableValuedFunction {
-                name,
-                arguments,
-            } => {
+            LogicalPlan::UnresolvedTableValuedFunction { name, arguments } => {
                 assert_eq!(name, "stack");
                 assert_eq!(arguments.len(), 4); // n + 3 fields
             }
@@ -394,10 +382,7 @@ mod tests {
         let tvf = spark.tvf();
         let df = tvf.collations().unwrap();
         match &df.plan {
-            LogicalPlan::UnresolvedTableValuedFunction {
-                name,
-                arguments,
-            } => {
+            LogicalPlan::UnresolvedTableValuedFunction { name, arguments } => {
                 assert_eq!(name, "collations");
                 assert!(arguments.is_empty());
             }
@@ -411,10 +396,7 @@ mod tests {
         let tvf = spark.tvf();
         let df = tvf.sql_keywords().unwrap();
         match &df.plan {
-            LogicalPlan::UnresolvedTableValuedFunction {
-                name,
-                arguments,
-            } => {
+            LogicalPlan::UnresolvedTableValuedFunction { name, arguments } => {
                 assert_eq!(name, "sql_keywords");
                 assert!(arguments.is_empty());
             }

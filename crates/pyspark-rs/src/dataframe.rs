@@ -686,7 +686,8 @@ impl PyDataFrame {
     /// Register as a temporary view (session-scoped).
     #[pyo3(name = "createTempView")]
     fn create_temp_view(&self, py: Python<'_>, name: &str) -> PyResult<()> {
-        py.detach(|| self.dataframe.create_temp_view(name)).to_pyerr()
+        py.detach(|| self.dataframe.create_temp_view(name))
+            .to_pyerr()
     }
 
     /// Register as a global temporary view.
@@ -706,7 +707,8 @@ impl PyDataFrame {
     /// Deprecated alias for createOrReplaceTempView.
     #[pyo3(name = "registerTempTable")]
     fn register_temp_table(&self, py: Python<'_>, name: &str) -> PyResult<()> {
-        py.detach(|| self.dataframe.register_temp_table(name)).to_pyerr()
+        py.detach(|| self.dataframe.register_temp_table(name))
+            .to_pyerr()
     }
 
     /// Reliable checkpoint (materialize + truncate lineage).
@@ -731,12 +733,14 @@ impl PyDataFrame {
     #[pyo3(signature = (col1, col2, method=None))]
     #[allow(unused_variables)]
     fn corr(&self, py: Python<'_>, col1: &str, col2: &str, method: Option<&str>) -> PyResult<f64> {
-        py.detach(|| self.dataframe.stat().corr(col1, col2)).to_pyerr()
+        py.detach(|| self.dataframe.stat().corr(col1, col2))
+            .to_pyerr()
     }
 
     /// Sample covariance between two columns.
     fn cov(&self, py: Python<'_>, col1: &str, col2: &str) -> PyResult<f64> {
-        py.detach(|| self.dataframe.stat().cov(col1, col2)).to_pyerr()
+        py.detach(|| self.dataframe.stat().cov(col1, col2))
+            .to_pyerr()
     }
 
     /// Stratified sample without replacement per key.
@@ -752,7 +756,9 @@ impl PyDataFrame {
             let key = to_column(&k)?.expression().clone();
             fr.push((key, v.extract::<f64>()?));
         }
-        Ok(PyDataFrame::new(self.dataframe.stat().sample_by(col, fr, seed)))
+        Ok(PyDataFrame::new(
+            self.dataframe.stat().sample_by(col, fr, seed),
+        ))
     }
 
     /// Replace values. `to_replace` may be a {old: new} dict, or a value/list with `value`.
@@ -768,8 +774,7 @@ impl PyDataFrame {
             for (k, v) in d.iter() {
                 pairs.push((k.str()?.to_string(), v.str()?.to_string()));
             }
-        } else if let (Ok(olds), Some(val)) =
-            (to_replace.extract::<Vec<Bound<'_, PyAny>>>(), value)
+        } else if let (Ok(olds), Some(val)) = (to_replace.extract::<Vec<Bound<'_, PyAny>>>(), value)
         {
             if let Ok(news) = val.extract::<Vec<Bound<'_, PyAny>>>() {
                 for (o, n) in olds.iter().zip(news.iter()) {
@@ -783,8 +788,9 @@ impl PyDataFrame {
         } else if let Some(val) = value {
             pairs.push((to_replace.str()?.to_string(), val.str()?.to_string()));
         }
-        let subset_refs: Option<Vec<&str>> =
-            subset.as_ref().map(|s| s.iter().map(|x| x.as_str()).collect());
+        let subset_refs: Option<Vec<&str>> = subset
+            .as_ref()
+            .map(|s| s.iter().map(|x| x.as_str()).collect());
         Ok(PyDataFrame::new(self.dataframe.replace(pairs, subset_refs)))
     }
 
@@ -851,9 +857,7 @@ impl PyDataFrame {
     #[getter]
     fn storage_level(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let sl = py.detach(|| self.dataframe.storage_level()).to_pyerr()?;
-        let cls = py
-            .import("pyspark.storagelevel")?
-            .getattr("StorageLevel")?;
+        let cls = py.import("pyspark.storagelevel")?.getattr("StorageLevel")?;
         Ok(cls
             .call1((
                 sl.use_disk,
@@ -902,8 +906,9 @@ impl PyDataFrame {
     /// Deprecated alias for dropDuplicates.
     #[pyo3(name = "drop_duplicates", signature = (subset=None))]
     fn drop_duplicates(&self, subset: Option<Vec<String>>) -> PyDataFrame {
-        let refs: Option<Vec<&str>> =
-            subset.as_ref().map(|s| s.iter().map(|x| x.as_str()).collect());
+        let refs: Option<Vec<&str>> = subset
+            .as_ref()
+            .map(|s| s.iter().map(|x| x.as_str()).collect());
         PyDataFrame::new(self.dataframe.drop_duplicates(refs))
     }
 
@@ -1761,7 +1766,11 @@ impl PyDataFrameWriter {
         mode: Option<&str>,
         properties: Option<std::collections::HashMap<String, String>>,
     ) -> PyResult<()> {
-        let mut w = self.take()?.format("jdbc").option("url", url).option("dbtable", table);
+        let mut w = self
+            .take()?
+            .format("jdbc")
+            .option("url", url)
+            .option("dbtable", table);
         if let Some(m) = mode {
             w = w.mode(m);
         }

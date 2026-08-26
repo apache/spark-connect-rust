@@ -20,7 +20,7 @@
 # For connect-only mode, re-export DataFrame from the Rust-backed client
 try:
     from pyspark._pyspark import DataFrame  # noqa: F401
-except ImportError:
+except ImportError:  # pragma: no cover - defensive fallback when the extension is absent
     # Fallback to upstream
     from pyspark.sql.dataframe import DataFrame as _DataFrame  # noqa: F401
     DataFrame = _DataFrame

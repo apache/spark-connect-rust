@@ -98,7 +98,10 @@ impl PySparkSessionBuilder {
     /// so a custom Python channel builder is not supported. Mirrors the API surface.
     #[pyo3(name = "channelBuilder")]
     #[allow(unused_variables)]
-    fn channel_builder(&self, channelBuilder: &Bound<'_, PyAny>) -> PyResult<PySparkSessionBuilder> {
+    fn channel_builder(
+        &self,
+        channelBuilder: &Bound<'_, PyAny>,
+    ) -> PyResult<PySparkSessionBuilder> {
         Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
             "channelBuilder is not supported: this client uses a native Rust transport; \
              configure the endpoint via .remote(url) instead",

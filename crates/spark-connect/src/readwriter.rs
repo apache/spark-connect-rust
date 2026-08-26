@@ -783,11 +783,10 @@ mod tests {
 
         match &df.plan {
             LogicalPlan::Read {
-                read_type: ReadType::DataSource {
-                    options,
-                    format,
-                    ..
-                },
+                read_type:
+                    ReadType::DataSource {
+                        options, format, ..
+                    },
                 ..
             } => {
                 assert_eq!(format.as_deref(), Some("jdbc"));
@@ -807,11 +806,18 @@ mod tests {
         let spark = session();
         let reader = spark.read();
         let predicates = vec!["col1 > 10".to_string(), "col2 = 'value'".to_string()];
-        let df = reader.jdbc("jdbc:mysql://localhost/db", "table", Some(predicates.clone()));
+        let df = reader.jdbc(
+            "jdbc:mysql://localhost/db",
+            "table",
+            Some(predicates.clone()),
+        );
 
         match &df.plan {
             LogicalPlan::Read {
-                read_type: ReadType::DataSource { predicates: preds, .. },
+                read_type:
+                    ReadType::DataSource {
+                        predicates: preds, ..
+                    },
                 ..
             } => {
                 assert_eq!(preds.len(), 2);
@@ -880,15 +886,18 @@ mod tests {
         opts.insert("delimiter".to_string(), ";".to_string());
         opts.insert("header".to_string(), "true".to_string());
 
-        let df = spark.read().format("csv").options(opts).load(Some("/data.csv"));
+        let df = spark
+            .read()
+            .format("csv")
+            .options(opts)
+            .load(Some("/data.csv"));
 
         match &df.plan {
             LogicalPlan::Read {
-                read_type: ReadType::DataSource {
-                    options,
-                    format,
-                    ..
-                },
+                read_type:
+                    ReadType::DataSource {
+                        options, format, ..
+                    },
                 ..
             } => {
                 assert_eq!(format.as_deref(), Some("csv"));

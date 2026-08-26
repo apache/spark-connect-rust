@@ -1012,7 +1012,10 @@ mod tests {
         let reader = spark.read_stream();
         let reader = reader.format("kafka").option("brokers", "localhost:9092");
         assert_eq!(reader.format, Some("kafka".to_string()));
-        assert_eq!(reader.options.get("brokers"), Some(&"localhost:9092".to_string()));
+        assert_eq!(
+            reader.options.get("brokers"),
+            Some(&"localhost:9092".to_string())
+        );
     }
 
     #[test]
@@ -1036,7 +1039,13 @@ mod tests {
         let spark = session();
         let reader = spark.read_stream().format("kafka");
         let df = reader.load(Some("/path/to/data"));
-        assert!(matches!(&df.plan, crate::plan::LogicalPlan::Read { is_streaming: true, .. }));
+        assert!(matches!(
+            &df.plan,
+            crate::plan::LogicalPlan::Read {
+                is_streaming: true,
+                ..
+            }
+        ));
     }
 
     #[test]

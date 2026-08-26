@@ -1002,7 +1002,20 @@ fn parse_json_object(obj: &serde_json::Map<String, serde_json::Value>) -> Result
                     let metadata = field_map
                         .get("metadata")
                         .and_then(|v| v.as_object())
-                        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.to_string())).collect())
+                        .map(|m| {
+                            m.iter()
+                                .map(|(k, v)| {
+                                    // Store the raw string for string-valued metadata (a bare
+                                    // "v", not the re-serialized "\"v\""), matching the proto
+                                    // path; fall back to the JSON text for non-string values.
+                                    let val = v
+                                        .as_str()
+                                        .map(str::to_string)
+                                        .unwrap_or_else(|| v.to_string());
+                                    (k.clone(), val)
+                                })
+                                .collect()
+                        })
                         .unwrap_or_default();
 
                     fields.push(StructField {

@@ -231,5 +231,83 @@ def test_udtf_construction():
     assert isinstance(Echo, UserDefinedTableFunction)
     assert Echo.name == "Echo"
     reg = UDTFRegistration()
-    r = reg.register("echo", Echo)
+    # register a plain class -> wraps it
+    r = reg.register("echo", Echo.func, returnType="a int")
     assert r.name == "echo"
+    # register an existing UserDefinedTableFunction -> renames in place
+    r2 = reg.register("echo2", Echo)
+    assert r2.name == "echo2" and r2 is Echo
+
+
+def test_udtf_call_without_session_raises():
+    from pyspark.sql.udtf import UserDefinedTableFunction
+    from pyspark.sql import SparkSession
+    # Ensure no active session, then calling must raise a clear error.
+    prev = SparkSession.getActiveSession()
+    if prev is not None:
+        pytest.skip("an active session exists in this process")
+
+    @__import__("pyspark.sql.udtf", fromlist=["udtf"]).udtf(returnType="a int")
+    class T2:
+        def eval(self, n):
+            yield (n,)
+
+    with pytest.raises(RuntimeError):
+        T2(1)
+
+
+def test_spark_conf_stub():
+    from pyspark import SparkConf
+    c = SparkConf().set("a", "1").setAll({"b": "2", "c": "3"})
+    assert c.get("a") == "1"
+    assert dict(c.getAll())["b"] == "2"
+    c.remove("a")
+    assert c.get("a", "default") == "default"
+    c.remove("nonexistent")  # removing an absent key is a no-op
+
+
+def test_sql_is_remote():
+    import pyspark.sql as S
+    assert S.is_remote() is True
+
+
+def test_functions_protobuf_descriptor_branches():
+    from pyspark.sql import functions as F
+    c = F.col("v")
+    # descriptor-file and binary-descriptor-set branches
+    assert type(F.from_protobuf(c, "M", desc_file_path="/tmp/x.desc")).__name__ == "Column"
+    assert type(F.from_protobuf(c, "M", binary_descriptor_set=b"\x00")).__name__ == "Column"
+    assert type(F.to_protobuf(c, "M", desc_file_path="/tmp/x.desc")).__name__ == "Column"
+    assert type(F.to_protobuf(c, "M", binary_descriptor_set=b"\x00")).__name__ == "Column"
+
+
+def test_udf_defaults_and_registration():
+    from pyspark.sql.functions import udf, pandas_udf
+    # returnType defaults to StringType
+    u = udf(lambda x: x)
+    assert callable(u)
+    p = pandas_udf(lambda s: s)  # default returnType
+    assert p is not None
+    # pandas_udf grouped_map/other functionType branches
+    for ft in ["scalar", "grouped_map", "grouped_agg"]:
+        assert pandas_udf(lambda s: s, T.IntegerType(), functionType=ft) is not None
+    # UDFRegistration.register returns a UDF
+    from pyspark.sql.udf import UDFRegistration
+    reg = UDFRegistration(object())
+    r = reg.register("f", lambda x: x + 1, T.IntegerType())
+    assert r.name == "f"
+    r2 = reg.register("g", lambda x: x)  # returnType default
+    assert r2.name == "g"
+
+
+def test_util_print_exec_and_skip_env(monkeypatch):
+    import io
+    from pyspark import util
+    try:
+        raise ValueError("boom")
+    except ValueError:
+        buf = io.StringIO()
+        util.print_exec(buf)
+        assert "ValueError" in buf.getvalue()
+    monkeypatch.setenv("SPARK_SKIP_CONNECT_COMPAT_TESTS", "1")
+    assert util.is_remote_only() is True

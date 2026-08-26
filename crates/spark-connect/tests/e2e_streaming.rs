@@ -63,7 +63,9 @@ fn streaming_rate_to_memory_query_lifecycle() {
     let _recent = query.recent_progress().expect("recent_progress");
 
     // Give it a moment then stop and reset.
-    let _ = query.await_termination(Some(1.0)).expect("await_termination timeout");
+    let _ = query
+        .await_termination(Some(1.0))
+        .expect("await_termination timeout");
     query.stop().expect("stop");
     let _ = query.exception().expect("exception after stop");
     mgr.reset_terminated().expect("reset_terminated");
@@ -77,7 +79,9 @@ fn streaming_available_now_to_table() {
     }
     let spark = session();
     // Drop any leftover table from a previous run.
-    let _ = spark.sql("DROP TABLE IF EXISTS e2e_stream_tbl").and_then(|d| d.collect());
+    let _ = spark
+        .sql("DROP TABLE IF EXISTS e2e_stream_tbl")
+        .and_then(|d| d.collect());
 
     let df = spark
         .read_stream()
@@ -99,5 +103,7 @@ fn streaming_available_now_to_table() {
         let _ = q.await_termination(Some(5.0));
         let _ = q.stop();
     }
-    let _ = spark.sql("DROP TABLE IF EXISTS e2e_stream_tbl").and_then(|d| d.collect());
+    let _ = spark
+        .sql("DROP TABLE IF EXISTS e2e_stream_tbl")
+        .and_then(|d| d.collect());
 }
