@@ -24,9 +24,21 @@ fn py_obj_to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
 
 #[pymethods]
 impl PyColumn {
-    /// Alias the column.
-    fn alias(&self, name: &str) -> PyColumn {
-        PyColumn::new(self.column.clone().alias(name))
+    /// Alias the column, optionally attaching column metadata (a dict), mirroring
+    /// `Column.alias(name, metadata=...)`.
+    #[pyo3(signature = (name, metadata=None))]
+    fn alias(
+        &self,
+        name: &str,
+        metadata: Option<std::collections::HashMap<String, String>>,
+    ) -> PyColumn {
+        match metadata {
+            None => PyColumn::new(self.column.clone().alias(name)),
+            Some(m) => {
+                let md: std::collections::BTreeMap<String, String> = m.into_iter().collect();
+                PyColumn::new(self.column.clone().alias_with_metadata(name, md))
+            }
+        }
     }
 
     /// Alias for `alias` (pyspark `Column.name`).
