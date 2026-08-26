@@ -95,34 +95,53 @@ interface.
 
 ## User-Defined Functions (UDFs)
 
-Rust UDFs are compiled to WebAssembly, shipped to the executors, and can be used
-via the DataFrame API or registered by name for SQL. The runner is cloudpickled
-by value, so executors need only the `wasmtime` Python package:
+Write UDFs as plain Rust functions and use them right away — define and call
+in one file, the way UDFs work in other languages. `#[spark_wasm_udf]` infers
+each Spark signature from the Rust types, compiles the module to WebAssembly,
+embeds it, and generates a `udf::*()` constructor per function. The runner is
+cloudpickled by value, so executors need only the `wasmtime` Python package —
+nothing to pre-deploy:
 
 ```rust
 use spark_connect::functions::col;
-use spark_connect::wasm_udf::{udf, AbiType};
+use spark_connect::{SparkSession, SparkSessionBuilder};
+use spark_connect_macros::spark_wasm_udf;
+
+// The UDFs — plain Rust functions. That's all you write.
+#[spark_wasm_udf]
+mod udfs {
+    pub fn add_one(x: i64) -> i64 { x + 1 }
+    pub fn shout(s: String) -> String { format!("{}!", s.to_uppercase()) }
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let spark = SparkSession::builder().remote("sc://localhost:15002").get_or_create()?;
+    let spark: SparkSession =
+        SparkSessionBuilder::default().remote("sc://localhost:15002").get_or_create()?;
 
-    // Load a prebuilt module: fn shout(s: String) -> String
-    let wasm = std::fs::read("shout.wasm")?;
-    let shout = udf("shout", wasm, "shout", vec![AbiType::Str], AbiType::Str);
-
-    // DataFrame API:
-    let df = spark.range(0, 3)?.select(vec![shout.call(vec![col("id").cast_str("string")])?])?;
-    df.show(20)?;
+    // DataFrame API — pass columns straight in (one per argument, arity checked
+    // at compile time). No wasm bytes or signatures to spell out by hand.
+    spark
+        .range(5)?
+        .select(vec![col("id"), udf::add_one(col("id"))?.alias("id_plus_one")])
+        .show(20)?;
 
     // ...or register by name and call from SQL (mirrors spark.udf.register):
-    spark.udf().register("shout", &shout)?;
+    spark.udf().register("shout", &udf::shout_udf())?;
     spark.sql("SELECT shout(name) FROM people")?.show(20)?;
     Ok(())
 }
 ```
 
+A one-line `build.rs` compiles the module for `wasm32` and embeds it:
+
+```rust
+// build.rs
+fn main() { spark_connect_build::embed_wasm_udf("src/main.rs"); }
+```
+
 See the [WASM UDF guide](https://apache.github.io/spark-connect-rust/udfs/) for
-building modules with the `spark_wasm_udf` macro and more examples.
+supported types, non-deterministic UDFs, and the lower-level factory (load a
+prebuilt `.wasm` and spell out the types yourself).
 
 ## Contributing
 
