@@ -170,6 +170,20 @@ jobs:
             sleep 1
           done
 
+      - name: Rust behavioral e2e tests (against the live server)
+        # These assert results against a live server and otherwise self-gate on
+        # SPARK_REMOTE, so they no-op in the server-less rust.yml job. Run them here,
+        # where a Spark 4.2.0 Connect server is already up, so the drop-in behavior
+        # (functions/columns/dataframe/tvf/catalog/session/streaming/merge/ml/artifact)
+        # is actually verified in CI. Serial: they share the one server session.
+        env:
+          SPARK_REMOTE: sc://localhost:15002
+        run: |
+          cargo test -p apache-spark-connect \
+            --test e2e_functions --test e2e_columns --test e2e_dataframe \
+            --test e2e_coverage --test e2e_integration \
+            -- --test-threads=1
+
       - name: Parity - official connect suite through OUR Rust client
         id: parity
         env:

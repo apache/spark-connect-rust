@@ -1297,19 +1297,28 @@ impl PyDataFrameWriterV2 {
         })
     }
 
-    fn option(&mut self, key: &str, value: &str) -> PyResult<PyDataFrameWriterV2> {
-        Ok(PyDataFrameWriterV2 {
-            inner: Some(self.take()?.option(key, value)),
-        })
+    // None -> option left unset; bools -> "true"/"false" (reference `to_str`), same as
+    // the other reader/writer option bindings.
+    fn option(&mut self, key: &str, value: &Bound<'_, PyAny>) -> PyResult<PyDataFrameWriterV2> {
+        match crate::coerce_option_value(value)? {
+            Some(v) => Ok(PyDataFrameWriterV2 {
+                inner: Some(self.take()?.option(key, &v)),
+            }),
+            None => Ok(PyDataFrameWriterV2 {
+                inner: Some(self.take()?),
+            }),
+        }
     }
 
-    // Mirrors reference `DataFrameWriterV2.options(**options)`.
+    // Mirrors reference `DataFrameWriterV2.options(**options)`; None skipped, bools lowercased.
     #[pyo3(signature = (**options))]
     fn options(&mut self, options: Option<&Bound<'_, PyDict>>) -> PyResult<PyDataFrameWriterV2> {
         let mut map = std::collections::HashMap::new();
         if let Some(options) = options {
             for (k, v) in options.iter() {
-                map.insert(k.str()?.to_string(), v.str()?.to_string());
+                if let Some(val) = crate::coerce_option_value(&v)? {
+                    map.insert(k.str()?.to_string(), val);
+                }
             }
         }
         Ok(PyDataFrameWriterV2 {
