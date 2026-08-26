@@ -78,6 +78,28 @@ fn tvf_surface() {
     // Server-catalog TVFs (no args).
     assert!(tvf.collations().unwrap().count().unwrap() > 0);
     assert!(tvf.sql_keywords().unwrap().count().unwrap() > 0);
+
+    // variant_explode / variant_explode_outer over a 2-key JSON object -> 2 rows.
+    let variant = f::parse_json(lit_string(r#"{"a":1,"b":2}"#));
+    assert_eq!(tvf.variant_explode(&variant).unwrap().count().unwrap(), 2);
+    assert_eq!(
+        tvf.variant_explode_outer(&variant)
+            .unwrap()
+            .count()
+            .unwrap(),
+        2
+    );
+
+    // python_worker_logs: the client builds + submits the TVF; the server either
+    // returns rows or reports the feature is disabled (a server-side config
+    // toggle). Either outcome exercises the client path, so accept both.
+    match tvf.python_worker_logs().and_then(|d| d.collect()) {
+        Ok(_) => {}
+        Err(e) => assert!(
+            format!("{e:?}").contains("FEATURE_NOT_ENABLED"),
+            "unexpected python_worker_logs error: {e:?}"
+        ),
+    }
 }
 
 #[test]
