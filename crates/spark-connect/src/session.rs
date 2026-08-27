@@ -552,7 +552,6 @@ impl Default for SparkSessionBuilder {
 /// Convert Arrow RecordBatch data to IPC bytes.
 /// Used by createDataFrame to package local data.
 fn rows_to_arrow_ipc(rows: &[Row], schema: &DataType) -> Result<Vec<u8>> {
-    use arrow::array::*;
     use arrow::datatypes::Schema as ArrowSchema;
     use arrow::ipc::writer::StreamWriter;
     use arrow::record_batch::RecordBatch;
