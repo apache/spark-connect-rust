@@ -24,10 +24,7 @@ fn normalize_expression(e: &mut proto::Expression) {
     use proto::expression::ExprType as T;
     e.common = None;
     if let Some(t) = e.expr_type.as_mut() {
-        match t {
-            T::Literal(_) => {}
-            _ => {}
-        }
+        if let T::Literal(_) = t {}
     }
 }
 

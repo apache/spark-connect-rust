@@ -220,7 +220,6 @@ impl WhenNotMatchedBySource {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::session::SparkSession;
 
     fn session() -> SparkSession {

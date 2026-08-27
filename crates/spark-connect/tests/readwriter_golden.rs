@@ -14,11 +14,8 @@ fn normalize_relation(r: &mut proto::Relation) {
     r.common = None;
     if let Some(_rel_type) = &mut r.rel_type {
         use proto::relation::RelType;
-        match _rel_type {
-            RelType::Read(_read) => {
-                // No recursive normalization needed for Read
-            }
-            _ => {}
+        if let RelType::Read(_read) = _rel_type {
+            // No recursive normalization needed for Read
         }
     }
 }

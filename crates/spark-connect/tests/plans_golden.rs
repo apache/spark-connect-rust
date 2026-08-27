@@ -25,7 +25,7 @@ fn normalize_relation(r: &mut proto::Relation) {
     if let Some(rel_type) = &mut r.rel_type {
         use proto::relation::RelType;
         match rel_type {
-            RelType::Range(range) => {}
+            RelType::Range(_range) => {}
             RelType::Sql(_) => {}
             RelType::Project(proj) => {
                 if let Some(input) = &mut proj.input {

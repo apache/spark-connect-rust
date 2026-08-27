@@ -291,7 +291,7 @@ mod tests {
 
         #[allow(clippy::approx_constant)]
         let d = Value::Double(3.14);
-        #[allow(clippy::approx_constant)]
+
         assert_eq!(d.as_f64(), Some(3.14));
 
         let s = Value::String("test".to_string());

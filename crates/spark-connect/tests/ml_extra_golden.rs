@@ -90,7 +90,7 @@ fn test_vector_assembler_operator_name() {
 
 #[test]
 fn test_vector_assembler_proto() {
-    let mut assembler = VectorAssembler::new()
+    let assembler = VectorAssembler::new()
         .set_input_cols(vec!["col1", "col2"])
         .set_output_col("vector");
 
