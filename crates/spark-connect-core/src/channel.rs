@@ -29,6 +29,7 @@ pub const PARAM_GRPC_KEEPALIVE_ENABLED: &str = "grpc_keepalive_enabled";
 pub const PARAM_GRPC_KEEPALIVE_TIME_MS: &str = "grpc_keepalive_time_ms";
 pub const PARAM_GRPC_KEEPALIVE_TIMEOUT_MS: &str = "grpc_keepalive_timeout_ms";
 pub const PARAM_GRPC_KEEPALIVE_WITHOUT_CALLS: &str = "grpc_keepalive_without_calls";
+pub const PARAM_GRPC_MAX_MESSAGE_SIZE: &str = "grpc_max_message_size";
 
 const GRPC_DEFAULT_KEEPALIVE_ENABLED: bool = true;
 const GRPC_DEFAULT_KEEPALIVE_TIME_MS: i64 = 60 * 1000;
@@ -197,6 +198,24 @@ impl ChannelBuilder {
             PARAM_GRPC_KEEPALIVE_WITHOUT_CALLS,
             GRPC_DEFAULT_KEEPALIVE_WITHOUT_CALLS,
         )
+    }
+
+    /// The gRPC max message size (bytes) to apply to en/decoding, from
+    /// `grpc_max_message_size` (default [`GRPC_MAX_MESSAGE_LENGTH_DEFAULT`], 128 MiB).
+    ///
+    /// A non-positive value falls back to the default rather than becoming a 0-byte cap.
+    /// This mirrors the reference `ChannelBuilder`, which raises tonic's 4 MiB default so
+    /// a large Arrow `collect()` result does not hit a spurious decode-size error.
+    pub fn max_message_size(&self) -> usize {
+        let v = self.int_param(
+            PARAM_GRPC_MAX_MESSAGE_SIZE,
+            GRPC_MAX_MESSAGE_LENGTH_DEFAULT as i64,
+        );
+        if v <= 0 {
+            GRPC_MAX_MESSAGE_LENGTH_DEFAULT
+        } else {
+            v as usize
+        }
     }
 
     /// The user-agent string, matching Python's format and 2048-char cap.
@@ -377,6 +396,19 @@ mod tests {
         assert_eq!(c.keepalive_time_ms(), 30000);
         assert_eq!(c.keepalive_timeout_ms(), 20000); // default
         assert!(c.keepalive_enabled());
+    }
+
+    #[test]
+    fn max_message_size_default_and_override() {
+        // Default is 128 MiB, not tonic's 4 MiB.
+        let c = ChannelBuilder::parse("sc://localhost").unwrap();
+        assert_eq!(c.max_message_size(), GRPC_MAX_MESSAGE_LENGTH_DEFAULT);
+        // An explicit value is honored.
+        let c = ChannelBuilder::parse("sc://localhost/;grpc_max_message_size=1048576").unwrap();
+        assert_eq!(c.max_message_size(), 1048576);
+        // A non-positive value falls back to the default rather than a 0-byte cap.
+        let c = ChannelBuilder::parse("sc://localhost/;grpc_max_message_size=-1").unwrap();
+        assert_eq!(c.max_message_size(), GRPC_MAX_MESSAGE_LENGTH_DEFAULT);
     }
 
     #[test]
