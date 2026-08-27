@@ -12,7 +12,6 @@ use uuid::Uuid;
 
 use crate::dataframe::DataFrame;
 use crate::plan::LogicalPlan;
-use crate::session::SparkSession;
 
 /// ML parameter handling: stores name -> literal value mappings.
 ///
@@ -418,8 +417,6 @@ impl Estimator for StandardScaler {
                 OperatorType::Model,
             ),
             params: self.params.clone(),
-            input_col: self.input_col.clone(),
-            output_col: self.output_col.clone(),
         };
         Ok(Box::new(model))
     }
@@ -430,8 +427,6 @@ impl Estimator for StandardScaler {
 pub struct StandardScalerModel {
     operator: MlOperator,
     params: Params,
-    input_col: String,
-    output_col: String,
 }
 
 impl Transformer for StandardScalerModel {
@@ -1408,6 +1403,8 @@ impl Model for CrossValidatorModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Used only by the tests below (the non-test build does not reference it).
+    use crate::session::SparkSession;
 
     #[test]
     fn test_params_creation() {
