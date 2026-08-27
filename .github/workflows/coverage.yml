@@ -84,14 +84,19 @@ jobs:
           with open("coverage-rust.json", "r") as f:
               data = json.load(f)
 
-          # Extract line coverage percentage (or region if line not available)
+          # cargo-llvm-cov emits the llvm "export" format: the summary lives under
+          # data[0].totals.{lines,regions,functions}.percent. The previous code read
+          # data[0].line_coverage_percent, a key that does not exist, so it always fell
+          # back to 0 and the badge showed 0.0%. Use line coverage, falling back to
+          # region then function coverage.
           coverage_pct = None
-          if "data" in data and len(data["data"]) > 0:
-              coverage_obj = data["data"][0]
-              if "line_coverage_percent" in coverage_obj:
-                  coverage_pct = coverage_obj["line_coverage_percent"]
-              elif "region_coverage_percent" in coverage_obj:
-                  coverage_pct = coverage_obj["region_coverage_percent"]
+          if data.get("data"):
+              totals = data["data"][0].get("totals", {})
+              for key in ("lines", "regions", "functions"):
+                  metric = totals.get(key)
+                  if isinstance(metric, dict) and "percent" in metric:
+                      coverage_pct = metric["percent"]
+                      break
 
           if coverage_pct is None:
               coverage_pct = 0
