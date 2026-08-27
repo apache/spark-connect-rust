@@ -70,7 +70,7 @@ jobs:
       - name: Generate Rust coverage report
         run: |
           cargo llvm-cov --no-cfg-coverage -p apache-spark-connect \
-            --json --output-path coverage-rust.json
+            --json --output-path coverage-rust-llvm.json
 
       - name: Parse Rust coverage and create badge JSON
         # Extract line coverage % from llvm-cov JSON output and convert to shields.io
@@ -80,8 +80,12 @@ jobs:
           python3 << 'PYTHON_EOF'
           import json
 
-          # Read the llvm-cov output
-          with open("coverage-rust.json", "r") as f:
+          # Read the llvm-cov output. NB: this report is named coverage-rust-llvm.json,
+          # NOT coverage-rust.json - the latter is the badge file published at the root of
+          # the `badges` branch, and an untracked working-tree coverage-rust.json here
+          # makes the later `git checkout badges` abort ("untracked working tree files
+          # would be overwritten"). Keeping the raw report under a distinct name avoids it.
+          with open("coverage-rust-llvm.json", "r") as f:
               data = json.load(f)
 
           # cargo-llvm-cov emits the llvm "export" format: the summary lives under
