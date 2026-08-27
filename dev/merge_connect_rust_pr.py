@@ -307,11 +307,16 @@ def resolve_jira_issue(merge_branches, comment, default_jira_id=""):
         choose_jira_assignee(issue)
 
     versions = asf_jira.project_versions("SPARK")
-    # Consider only x.y.z, unreleased, unarchived versions
+    # Consider only connect-rust-x.y.z, unreleased, unarchived versions. spark-connect-rust
+    # ships on its own `connect-rust-*` version line rather than the core Spark x.y.z versions,
+    # so that its JIRAs are tracked in the connect-rust release notes instead of leaking into
+    # the core Spark release notes.
     versions = [
         x
         for x in versions
-        if not x.raw["released"] and not x.raw["archived"] and re.match(r"\d+\.\d+\.\d+", x.name)
+        if not x.raw["released"]
+        and not x.raw["archived"]
+        and re.match(r"connect-rust-\d+\.\d+\.\d+", x.name)
     ]
     versions = sorted(versions, key=lambda x: x.name, reverse=True)
 
