@@ -69,6 +69,13 @@ the Rust and Python sides, no stubs, green CI.
   — resolves the JIRA, and pushes to the `apache` remote's `master`. It is
   interactive; drive it by piping the prompt answers on stdin (e.g. the PR number,
   then `y`/`n`/blank for the confirmations, author default, and "Push to apache?").
+- **JIRA version convention: always `connect-rust-x.y.z`, never the core Spark
+  `x.y.z` line.** When you file a JIRA for spark-connect-rust, set **both** the
+  *Affects Version/s* and the *Fix Version/s* to a `connect-rust-x.y.z` version
+  (e.g. `connect-rust-0.1.0`, `connect-rust-4.2.0`) — never a core Spark version.
+  This keeps connect-rust work in its own release notes instead of leaking into
+  core Spark's. `dev/create_spark_jira.py` and `dev/merge_connect_rust_pr.py`
+  already follow this; keep it consistent when editing tickets by hand.
 
 ## 1. Environment setup
 
