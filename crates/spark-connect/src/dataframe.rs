@@ -2232,6 +2232,11 @@ pub(crate) fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> R
         return Ok(Value::Null);
     }
 
+    // A NullType column arrives as an all-null NullArray; every element is Null.
+    if array.as_any().downcast_ref::<NullArray>().is_some() {
+        return Ok(Value::Null);
+    }
+
     // Try each array type
     if let Some(arr) = array.as_any().downcast_ref::<BooleanArray>() {
         return Ok(Value::Bool(arr.value(index)));

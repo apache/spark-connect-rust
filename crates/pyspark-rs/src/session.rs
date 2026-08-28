@@ -747,7 +747,44 @@ fn value_to_datatype(v: &Value) -> DataType {
             precision: precision.unwrap_or(38),
             scale: scale.unwrap_or(0),
         },
-        _ => utf8(),
+        // Nested inference (schema=None): infer element/field/value types recursively so a
+        // list/dict/Row value produces the right Array/Struct/Map type.
+        Value::List(items) => {
+            let element_type = items
+                .iter()
+                .find(|x| !matches!(x, Value::Null))
+                .map(value_to_datatype)
+                .unwrap_or_else(utf8);
+            DataType::Array {
+                element_type: Box::new(element_type),
+                contains_null: true,
+            }
+        }
+        Value::Struct(fields) => DataType::Struct {
+            fields: fields
+                .iter()
+                .map(|(n, val)| spark_connect::types::StructField {
+                    name: n.clone(),
+                    data_type: value_to_datatype(val),
+                    nullable: true,
+                    metadata: Default::default(),
+                })
+                .collect(),
+        },
+        Value::Map(m) => {
+            let value_type = m
+                .values()
+                .find(|x| !matches!(x, Value::Null))
+                .map(value_to_datatype)
+                .unwrap_or_else(utf8);
+            DataType::Map {
+                key_type: Box::new(utf8()),
+                value_type: Box::new(value_type),
+                value_contains_null: true,
+            }
+        }
+        Value::Variant { .. } => DataType::Variant,
+        Value::Null => utf8(),
     }
 }
 
@@ -761,6 +798,12 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     // Check for bool (before int because bool is a subclass of int in Python)
     if let Ok(b) = obj.extract::<bool>() {
         return Ok(Value::Bool(b));
+    }
+
+    // Check for decimal.Decimal BEFORE int/float: Decimal defines __float__/__int__, so
+    // extract::<f64>()/<i64>() would succeed and mis-tag a Decimal as Double/Long.
+    if let Some(v) = decimal_to_value(obj)? {
+        return Ok(v);
     }
 
     // Check for int
@@ -855,34 +898,6 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
         }
     }
 
-    // Check for decimal.Decimal
-    let decimal_mod = py.import("decimal").ok();
-    if let Some(dec_mod) = &decimal_mod {
-        if let Ok(decimal_cls) = dec_mod.getattr("Decimal") {
-            if obj.is_instance(&decimal_cls)? {
-                // Get the string representation
-                let dec_str: String = obj.str()?.extract()?;
-                // Try to get precision and scale from as_tuple()
-                let as_tuple = obj.call_method0("as_tuple")?;
-                let mut scale: Option<i32> = None;
-                if let Ok(exp_obj) = as_tuple.get_item(2) {
-                    if !exp_obj.is_none() {
-                        if let Ok(exp) = exp_obj.extract::<i64>() {
-                            if exp <= 0 {
-                                scale = Some((-exp) as i32);
-                            }
-                        }
-                    }
-                }
-                return Ok(Value::Decimal {
-                    value: dec_str,
-                    precision: None,
-                    scale,
-                });
-            }
-        }
-    }
-
     // Anything else is not a supported literal; error rather than silently coercing to a wrong value.
     let type_name = obj
         .get_type()
@@ -892,4 +907,36 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
         "unsupported value type for createDataFrame: {type_name}"
     )))
+}
+
+/// If `obj` is a `decimal.Decimal`, return it as a `Value::Decimal` (string value + scale
+/// from `as_tuple()`); otherwise `None`. Checked before int/float in `py_to_value` because
+/// Decimal defines `__float__`/`__int__`.
+fn decimal_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Option<Value>> {
+    let py = obj.py();
+    let dec_mod = match py.import("decimal") {
+        Ok(m) => m,
+        Err(_) => return Ok(None),
+    };
+    let decimal_cls = dec_mod.getattr("Decimal")?;
+    if !obj.is_instance(&decimal_cls)? {
+        return Ok(None);
+    }
+    let dec_str: String = obj.str()?.extract()?;
+    let as_tuple = obj.call_method0("as_tuple")?;
+    let mut scale: Option<i32> = None;
+    if let Ok(exp_obj) = as_tuple.get_item(2) {
+        if !exp_obj.is_none() {
+            if let Ok(exp) = exp_obj.extract::<i64>() {
+                if exp <= 0 {
+                    scale = Some((-exp) as i32);
+                }
+            }
+        }
+    }
+    Ok(Some(Value::Decimal {
+        value: dec_str,
+        precision: None,
+        scale,
+    }))
 }

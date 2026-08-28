@@ -882,7 +882,7 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
             };
             Ok(Arc::new(arr))
         }
-        DataType::Decimal { scale, .. } => {
+        DataType::Decimal { precision, scale } => {
             let col_scale = *scale;
             let vals: Result<Vec<Option<i128>>> = values
                 .iter()
@@ -894,8 +894,10 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
                     _ => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
+            // Use the DECLARED precision/scale so the array matches the Arrow schema field
+            // (Decimal128(precision, scale)); hardcoding 38 mismatched a DecimalType(10, 2).
             let arr = Decimal128Array::from(vals?)
-                .with_precision_and_scale(38, col_scale as i8)
+                .with_precision_and_scale(*precision as u8, col_scale as i8)
                 .map_err(|e| SparkError::connect_msg(format!("decimal build: {e}")))?;
             Ok(Arc::new(arr))
         }
