@@ -778,9 +778,13 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
         return Ok(Value::String(s));
     }
 
-    // Check for bytes
-    if let Ok(b) = obj.extract::<Vec<u8>>() {
-        return Ok(Value::Binary(b));
+    // Check for bytes/bytearray SPECIFICALLY (not `extract::<Vec<u8>>()`, which also
+    // matches a Python list of small ints like [1,2,3] and would mis-tag arrays as binary).
+    if let Ok(b) = obj.downcast::<pyo3::types::PyBytes>() {
+        return Ok(Value::Binary(b.as_bytes().to_vec()));
+    }
+    if let Ok(ba) = obj.downcast::<pyo3::types::PyByteArray>() {
+        return Ok(Value::Binary(ba.to_vec()));
     }
 
     // list / tuple -> array (recursively converted)
@@ -797,6 +801,22 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
             items.push(py_to_value(&item)?);
         }
         return Ok(Value::List(items));
+    }
+
+    // pyspark Row -> struct: its named fields (values already core Values), so a nested
+    // Row inside createDataFrame data (e.g. Row(s=Row(x=1))) converts recursively.
+    if let Ok(pyrow) = obj.extract::<PyRef<crate::row::PyRow>>() {
+        let fields = pyrow.row.fields();
+        let values = pyrow.row.values();
+        let mut out = Vec::with_capacity(values.len());
+        for (i, v) in values.iter().enumerate() {
+            let name = fields
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| format!("_{}", i + 1));
+            out.push((name, v.clone()));
+        }
+        return Ok(Value::Struct(out));
     }
 
     // dict -> map (keys coerced to their string form, values recursively converted)
