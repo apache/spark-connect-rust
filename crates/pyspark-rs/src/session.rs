@@ -93,19 +93,48 @@ impl PySparkSessionBuilder {
         self.clone()
     }
 
-    /// `channelBuilder` - customizing the underlying gRPC channel is a Python-transport
-    /// concept; this client uses a native Rust transport configured via `remote(url)`,
-    /// so a custom Python channel builder is not supported. Mirrors the API surface.
+    /// `channelBuilder` - accept a Spark Connect ChannelBuilder and reconstruct an
+    /// `sc://` connection URL from its endpoint (host/port) and connection params, then
+    /// use it as the native-transport remote. Mirrors `SparkSession.Builder.channelBuilder`
+    /// (custom gRPC channels/interceptors themselves are a Python-transport concept and
+    /// do not apply to the native Rust transport, but the endpoint + params are honored).
     #[pyo3(name = "channelBuilder")]
-    #[allow(unused_variables)]
+    #[allow(non_snake_case)]
     fn channel_builder(
         &self,
         channelBuilder: &Bound<'_, PyAny>,
     ) -> PyResult<PySparkSessionBuilder> {
-        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-            "channelBuilder is not supported: this client uses a native Rust transport; \
-             configure the endpoint via .remote(url) instead",
-        ))
+        // Endpoint: prefer the builder's host/port (DefaultChannelBuilder exposes both).
+        let host: String = channelBuilder
+            .getattr("host")
+            .and_then(|h| h.extract::<String>())
+            .map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "channelBuilder must expose a `host` (e.g. DefaultChannelBuilder); \
+                     otherwise configure the endpoint via .remote(url)",
+                )
+            })?;
+        let port: i64 = channelBuilder
+            .getattr("port")
+            .and_then(|p| p.extract::<i64>())
+            .unwrap_or(15002);
+        let mut url = format!("sc://{host}:{port}");
+        // Preserve connection params (token/use_ssl/user_id/...) if present as `_params`.
+        if let Ok(params) = channelBuilder.getattr("_params") {
+            if let Ok(dict) = params.downcast::<pyo3::types::PyDict>() {
+                if !dict.is_empty() {
+                    let mut parts: Vec<String> = Vec::new();
+                    for (k, v) in dict.iter() {
+                        parts.push(format!("{}={}", k.str()?, v.str()?));
+                    }
+                    url.push_str("/;");
+                    url.push_str(&parts.join(";"));
+                }
+            }
+        }
+        let mut b = self.clone();
+        b.remote_url = Some(url);
+        Ok(b)
     }
 
     /// `enableHiveSupport` - a no-op for a Connect client (the remote server's

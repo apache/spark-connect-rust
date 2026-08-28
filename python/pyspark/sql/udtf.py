@@ -102,6 +102,26 @@ def udtf(
     return _udtf_decorator
 
 
+def arrow_udtf(
+    cls: Optional[Type] = None,
+    *,
+    returnType: Optional[Any] = None,
+) -> Any:
+    """Create an Arrow-based user-defined table function (UDTF).
+
+    Mirrors ``pyspark.sql.functions.arrow_udtf``: like :func:`udtf` but the handler
+    operates on Arrow data (``SQL_ARROW_TABLE_UDF``).
+    """
+    def _arrow_udtf_decorator(handler: Type) -> UserDefinedTableFunction:
+        return UserDefinedTableFunction(
+            handler, returnType=returnType, evalType=SQL_ARROW_TABLE_UDF
+        )
+
+    if cls is not None:
+        return _arrow_udtf_decorator(cls)
+    return _arrow_udtf_decorator
+
+
 class UDTFRegistration:
     """Registration accessor mirroring ``SparkSession.udtf``."""
 

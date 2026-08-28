@@ -122,10 +122,49 @@ def test_session_builder_class_constructor():
     assert type(b).__name__ == "SparkSessionBuilder"
 
 
-def test_channel_builder_unsupported():
+def test_channel_builder_uses_endpoint():
+    # channelBuilder reconstructs an sc:// URL from the builder's host/port (+ params)
+    # for the native transport, returning a configured Builder (no longer raises).
     from pyspark.sql import SparkSession
-    with pytest.raises(NotImplementedError):
+
+    class CB:
+        host = "localhost"
+        port = 15002
+        _params = {"use_ssl": "false"}
+
+    b = SparkSession.builder.channelBuilder(CB())
+    assert type(b).__name__ == "SparkSessionBuilder"
+    # A builder without a host is a clear error (not a silent misconfig).
+    with pytest.raises(ValueError):
         SparkSession.builder.channelBuilder(object())
+
+
+def test_functions_udtf_and_arrow_decorators():
+    from pyspark.sql import functions as F
+    from pyspark.sql.types import IntegerType
+
+    # functions.udtf / arrow_udtf build UserDefinedTableFunctions (with the right evalType).
+    @F.udtf(returnType="a int")
+    class Echo:
+        def eval(self, n):
+            for i in range(n):
+                yield (i,)
+
+    assert type(Echo).__name__ == "UserDefinedTableFunction"
+    assert Echo.evalType == 300  # SQL_TABLE_UDF
+
+    @F.arrow_udtf(returnType="a int")
+    class AEcho:
+        def eval(self, n):
+            yield (n,)
+
+    assert AEcho.evalType == 301  # SQL_ARROW_TABLE_UDF
+
+    # functions.arrow_udf builds an Arrow scalar UDF.
+    au = F.arrow_udf(lambda x: x, IntegerType())
+    assert callable(au)
+    aui = F.arrow_udf(lambda x: x, IntegerType(), functionType="scalar_iter")
+    assert callable(aui)
 
 
 # --------------------------------------------------------------------------- functions / columns

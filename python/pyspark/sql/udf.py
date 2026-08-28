@@ -181,6 +181,41 @@ def pandas_udf(
         return _pandas_udf_decorator
 
 
+def arrow_udf(
+    f: Optional[Callable[..., Any]] = None,
+    returnType: Optional[DataType] = None,
+    functionType: str = "scalar",
+) -> Any:
+    """
+    Create an Arrow user-defined function, mirroring ``pyspark.sql.functions.arrow_udf``.
+
+    Arrow UDFs transfer data via Arrow and operate on ``pyarrow.Array`` values. This is
+    the Arrow analogue of :func:`pandas_udf`.
+
+    Parameters
+    ----------
+    f : callable, optional
+        The Python function to wrap.
+    returnType : DataType, optional
+        Return type; defaults to StringType().
+    functionType : str, optional
+        "scalar" (default) or "scalar_iter".
+    """
+    if returnType is None:
+        returnType = StringType()
+
+    # SQL_SCALAR_ARROW_UDF = 250, SQL_SCALAR_ARROW_ITER_UDF = 251.
+    eval_type_map = {"scalar": 250, "scalar_iter": 251}
+    evalType = eval_type_map.get(functionType, 250)
+
+    def _arrow_udf_decorator(func):
+        return UserDefinedFunction(func, returnType, evalType)
+
+    if f is not None:
+        return _arrow_udf_decorator(f)
+    return _arrow_udf_decorator
+
+
 class UDFRegistration:
     """
     Wrapper for user-defined function registration (spark.udf.register).
