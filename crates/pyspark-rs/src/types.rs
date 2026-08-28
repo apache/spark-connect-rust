@@ -14,16 +14,70 @@ fn type_reduce(py: Python<'_>, json: &str) -> PyResult<(Py<PyAny>, (String,))> {
     Ok((f.unbind(), (json.to_string(),)))
 }
 
-/// Python wrapper for any DataType.
-#[pyclass(name = "DataType")]
+/// Python wrapper for any DataType. This is the base of the type-class hierarchy
+/// (mirroring pyspark's `DataType`); concrete type classes extend it (directly or via
+/// the intermediate abstract bases below), so `isinstance(dt, DataType)` and the object
+/// model (simpleString/typeName/json/...) are inherited from here via `self.inner`.
+#[pyclass(subclass, name = "DataType")]
 pub struct PyDataType {
     pub(crate) inner: DataType,
+}
+
+/// The abstract intermediate base classes of the type hierarchy (mirror pyspark's
+/// AtomicType/NumericType/IntegralType/... ). They carry no data — a concrete type's
+/// `__new__` builds the initializer chain `PyDataType{inner} -> ... -> Concrete` — but
+/// existing so `isinstance(dt, NumericType)` etc. work with the reference MRO.
+macro_rules! abstract_type {
+    ($ty:ident, $name:literal, $parent:ty) => {
+        #[pyclass(subclass, name = $name, extends = $parent)]
+        pub struct $ty;
+    };
+}
+abstract_type!(PyAtomicType, "AtomicType", PyDataType);
+abstract_type!(PyNumericType, "NumericType", PyAtomicType);
+abstract_type!(PyIntegralType, "IntegralType", PyNumericType);
+abstract_type!(PyFractionalType, "FractionalType", PyNumericType);
+abstract_type!(PyDatetimeType, "DatetimeType", PyAtomicType);
+abstract_type!(PyAnyTimeType, "AnyTimeType", PyDatetimeType);
+abstract_type!(PyAnsiIntervalType, "AnsiIntervalType", PyAtomicType);
+abstract_type!(PySpatialType, "SpatialType", PyAtomicType);
+
+/// Build the `PyClassInitializer` chain for a concrete type: the base `PyDataType`
+/// carries `inner`; each intermediate abstract base and finally the concrete unit
+/// value are stacked on top. Usage: `init_chain!(inner_expr, Concrete, [Mid1, Mid2, ...])`.
+macro_rules! init_chain {
+    ($inner:expr, $concrete:ident, [$($mid:ident),*]) => {
+        pyo3::PyClassInitializer::from(PyDataType { inner: $inner })
+            $(.add_subclass($mid))*
+            .add_subclass($concrete)
+    };
+    // Variant carrying a concrete value (parameterized types).
+    ($inner:expr, $concrete_val:expr, [$($mid:ident),*], value) => {
+        pyo3::PyClassInitializer::from(PyDataType { inner: $inner })
+            $(.add_subclass($mid))*
+            .add_subclass($concrete_val)
+    };
 }
 
 impl PyDataType {
     pub fn new(inner: DataType) -> Self {
         PyDataType { inner }
     }
+}
+
+/// Construct a `StructType` Python object (with its full base chain) from fields.
+fn py_new_struct(py: Python<'_>, fields: Vec<StructField>) -> PyResult<Py<PyStructType>> {
+    Py::new(
+        py,
+        init_chain!(
+            DataType::Struct {
+                fields: fields.clone(),
+            },
+            PyStructType { fields },
+            [],
+            value
+        ),
+    )
 }
 
 #[pymethods]
@@ -77,7 +131,7 @@ impl PyDataType {
 }
 
 // Define concrete type classes
-#[pyclass(name = "NullType")]
+#[pyclass(name = "NullType", extends = PyDataType)]
 pub struct PyNullType;
 
 #[pymethods]
@@ -116,8 +170,8 @@ impl PyNullType {
         type_reduce(py, "\"void\"")
     }
     #[new]
-    fn new() -> Self {
-        PyNullType
+    fn new() -> pyo3::PyClassInitializer<Self> {
+        init_chain!(DataType::Null, PyNullType, [])
     }
     fn __repr__(&self) -> String {
         "NullType()".to_string()
@@ -132,7 +186,7 @@ impl PyNullType {
     }
 }
 
-#[pyclass(name = "BooleanType")]
+#[pyclass(name = "BooleanType", extends = PyAtomicType)]
 pub struct PyBooleanType;
 
 #[pymethods]
@@ -171,8 +225,8 @@ impl PyBooleanType {
         type_reduce(py, "\"boolean\"")
     }
     #[new]
-    fn new() -> Self {
-        PyBooleanType
+    fn new() -> pyo3::PyClassInitializer<Self> {
+        init_chain!(DataType::Boolean, PyBooleanType, [PyAtomicType])
     }
     fn __repr__(&self) -> String {
         "BooleanType()".to_string()
@@ -187,7 +241,7 @@ impl PyBooleanType {
     }
 }
 
-#[pyclass(name = "ByteType")]
+#[pyclass(name = "ByteType", extends = PyIntegralType)]
 pub struct PyByteType;
 
 #[pymethods]
@@ -226,8 +280,8 @@ impl PyByteType {
         type_reduce(py, "\"byte\"")
     }
     #[new]
-    fn new() -> Self {
-        PyByteType
+    fn new() -> pyo3::PyClassInitializer<Self> {
+        init_chain!(DataType::Byte, PyByteType, [PyAtomicType, PyNumericType, PyIntegralType])
     }
     fn __repr__(&self) -> String {
         "ByteType()".to_string()
@@ -242,7 +296,7 @@ impl PyByteType {
     }
 }
 
-#[pyclass(name = "ShortType")]
+#[pyclass(name = "ShortType", extends = PyIntegralType)]
 pub struct PyShortType;
 
 #[pymethods]
@@ -281,8 +335,8 @@ impl PyShortType {
         type_reduce(py, "\"short\"")
     }
     #[new]
-    fn new() -> Self {
-        PyShortType
+    fn new() -> pyo3::PyClassInitializer<Self> {
+        init_chain!(DataType::Short, PyShortType, [PyAtomicType, PyNumericType, PyIntegralType])
     }
     fn __repr__(&self) -> String {
         "ShortType()".to_string()
@@ -297,7 +351,7 @@ impl PyShortType {
     }
 }
 
-#[pyclass(name = "IntegerType")]
+#[pyclass(name = "IntegerType", extends = PyIntegralType)]
 pub struct PyIntegerType;
 
 #[pymethods]
@@ -336,8 +390,12 @@ impl PyIntegerType {
         type_reduce(py, "\"integer\"")
     }
     #[new]
-    fn new() -> Self {
-        PyIntegerType
+    fn new() -> pyo3::PyClassInitializer<Self> {
+        init_chain!(
+            DataType::Integer,
+            PyIntegerType,
+            [PyAtomicType, PyNumericType, PyIntegralType]
+        )
     }
     fn __repr__(&self) -> String {
         "IntegerType()".to_string()
@@ -352,7 +410,7 @@ impl PyIntegerType {
     }
 }
 
-#[pyclass(name = "LongType")]
+#[pyclass(name = "LongType", extends = PyIntegralType)]
 pub struct PyLongType;
 
 #[pymethods]
@@ -391,8 +449,8 @@ impl PyLongType {
         type_reduce(py, "\"long\"")
     }
     #[new]
-    fn new() -> Self {
-        PyLongType
+    fn new() -> pyo3::PyClassInitializer<Self> {
+        init_chain!(DataType::Long, PyLongType, [PyAtomicType, PyNumericType, PyIntegralType])
     }
     fn __repr__(&self) -> String {
         "LongType()".to_string()
@@ -407,7 +465,7 @@ impl PyLongType {
     }
 }
 
-#[pyclass(name = "FloatType")]
+#[pyclass(name = "FloatType", extends = PyFractionalType)]
 pub struct PyFloatType;
 
 #[pymethods]
@@ -446,8 +504,8 @@ impl PyFloatType {
         type_reduce(py, "\"float\"")
     }
     #[new]
-    fn new() -> Self {
-        PyFloatType
+    fn new() -> pyo3::PyClassInitializer<Self> {
+        init_chain!(DataType::Float, PyFloatType, [PyAtomicType, PyNumericType, PyFractionalType])
     }
     fn __repr__(&self) -> String {
         "FloatType()".to_string()
@@ -462,7 +520,7 @@ impl PyFloatType {
     }
 }
 
-#[pyclass(name = "DoubleType")]
+#[pyclass(name = "DoubleType", extends = PyFractionalType)]
 pub struct PyDoubleType;
 
 #[pymethods]
@@ -501,8 +559,8 @@ impl PyDoubleType {
         type_reduce(py, "\"double\"")
     }
     #[new]
-    fn new() -> Self {
-        PyDoubleType
+    fn new() -> pyo3::PyClassInitializer<Self> {
+        init_chain!(DataType::Double, PyDoubleType, [PyAtomicType, PyNumericType, PyFractionalType])
     }
     fn __repr__(&self) -> String {
         "DoubleType()".to_string()
@@ -517,7 +575,7 @@ impl PyDoubleType {
     }
 }
 
-#[pyclass(name = "DecimalType")]
+#[pyclass(name = "DecimalType", extends = PyFractionalType)]
 pub struct PyDecimalType {
     pub precision: i32,
     pub scale: i32,
@@ -565,8 +623,13 @@ impl PyDecimalType {
     /// `DecimalType(precision=10, scale=0)` - defaults match pyspark.
     #[new]
     #[pyo3(signature = (precision=10, scale=0))]
-    fn new(precision: i32, scale: i32) -> Self {
-        PyDecimalType { precision, scale }
+    fn new(precision: i32, scale: i32) -> pyo3::PyClassInitializer<Self> {
+        init_chain!(
+            DataType::Decimal { precision, scale },
+            PyDecimalType { precision, scale },
+            [PyAtomicType, PyNumericType, PyFractionalType],
+            value
+        )
     }
     #[getter]
     fn precision(&self) -> i32 {
@@ -589,7 +652,7 @@ impl PyDecimalType {
     }
 }
 
-#[pyclass(name = "StringType")]
+#[pyclass(name = "StringType", extends = PyAtomicType)]
 pub struct PyStringType;
 
 #[pymethods]
@@ -628,8 +691,8 @@ impl PyStringType {
         type_reduce(py, "\"string\"")
     }
     #[new]
-    fn new() -> Self {
-        PyStringType
+    fn new() -> pyo3::PyClassInitializer<Self> {
+        init_chain!(DataType::String { collation: "UTF8_BINARY".to_string() }, PyStringType, [PyAtomicType])
     }
     fn __repr__(&self) -> String {
         "StringType()".to_string()
@@ -644,7 +707,7 @@ impl PyStringType {
     }
 }
 
-#[pyclass(name = "BinaryType")]
+#[pyclass(name = "BinaryType", extends = PyAtomicType)]
 pub struct PyBinaryType;
 
 #[pymethods]
@@ -683,8 +746,8 @@ impl PyBinaryType {
         type_reduce(py, "\"binary\"")
     }
     #[new]
-    fn new() -> Self {
-        PyBinaryType
+    fn new() -> pyo3::PyClassInitializer<Self> {
+        init_chain!(DataType::Binary, PyBinaryType, [PyAtomicType])
     }
     fn __repr__(&self) -> String {
         "BinaryType()".to_string()
@@ -699,7 +762,7 @@ impl PyBinaryType {
     }
 }
 
-#[pyclass(name = "DateType")]
+#[pyclass(name = "DateType", extends = PyDatetimeType)]
 pub struct PyDateType;
 
 #[pymethods]
@@ -738,8 +801,8 @@ impl PyDateType {
         type_reduce(py, "\"date\"")
     }
     #[new]
-    fn new() -> Self {
-        PyDateType
+    fn new() -> pyo3::PyClassInitializer<Self> {
+        init_chain!(DataType::Date, PyDateType, [PyAtomicType, PyDatetimeType])
     }
     fn __repr__(&self) -> String {
         "DateType()".to_string()
@@ -754,7 +817,7 @@ impl PyDateType {
     }
 }
 
-#[pyclass(name = "TimestampType")]
+#[pyclass(name = "TimestampType", extends = PyDatetimeType)]
 pub struct PyTimestampType;
 
 #[pymethods]
@@ -793,8 +856,8 @@ impl PyTimestampType {
         type_reduce(py, "\"timestamp\"")
     }
     #[new]
-    fn new() -> Self {
-        PyTimestampType
+    fn new() -> pyo3::PyClassInitializer<Self> {
+        init_chain!(DataType::Timestamp, PyTimestampType, [PyAtomicType, PyDatetimeType])
     }
     fn __repr__(&self) -> String {
         "TimestampType()".to_string()
@@ -809,7 +872,7 @@ impl PyTimestampType {
     }
 }
 
-#[pyclass(name = "TimestampNTZType")]
+#[pyclass(name = "TimestampNTZType", extends = PyDatetimeType)]
 pub struct PyTimestampNTZType;
 
 #[pymethods]
@@ -848,8 +911,8 @@ impl PyTimestampNTZType {
         type_reduce(py, "\"timestamp_ntz\"")
     }
     #[new]
-    fn new() -> Self {
-        PyTimestampNTZType
+    fn new() -> pyo3::PyClassInitializer<Self> {
+        init_chain!(DataType::TimestampNtz, PyTimestampNTZType, [PyAtomicType, PyDatetimeType])
     }
     fn __repr__(&self) -> String {
         "TimestampNTZType()".to_string()
@@ -864,7 +927,7 @@ impl PyTimestampNTZType {
     }
 }
 
-#[pyclass(name = "ArrayType")]
+#[pyclass(name = "ArrayType", extends = PyDataType)]
 pub struct PyArrayType {
     pub element_type: DataType,
     pub contains_null: bool,
@@ -911,11 +974,23 @@ impl PyArrayType {
     }
     #[new]
     #[pyo3(signature = (element_type, contains_null=true))]
-    fn new(element_type: &Bound<'_, PyAny>, contains_null: bool) -> PyResult<Self> {
-        Ok(PyArrayType {
-            element_type: py_to_data_type(element_type)?,
-            contains_null,
-        })
+    fn new(
+        element_type: &Bound<'_, PyAny>,
+        contains_null: bool,
+    ) -> PyResult<pyo3::PyClassInitializer<Self>> {
+        let et = py_to_data_type(element_type)?;
+        Ok(init_chain!(
+            DataType::Array {
+                element_type: Box::new(et.clone()),
+                contains_null,
+            },
+            PyArrayType {
+                element_type: et,
+                contains_null,
+            },
+            [],
+            value
+        ))
     }
     fn __repr__(&self) -> String {
         format!("ArrayType({})", self.element_type.simple_string())
@@ -930,7 +1005,7 @@ impl PyArrayType {
     }
 }
 
-#[pyclass(name = "MapType")]
+#[pyclass(name = "MapType", extends = PyDataType)]
 pub struct PyMapType {
     pub key_type: DataType,
     pub value_type: DataType,
@@ -983,12 +1058,23 @@ impl PyMapType {
         key_type: &Bound<'_, PyAny>,
         value_type: &Bound<'_, PyAny>,
         value_contains_null: bool,
-    ) -> PyResult<Self> {
-        Ok(PyMapType {
-            key_type: py_to_data_type(key_type)?,
-            value_type: py_to_data_type(value_type)?,
-            value_contains_null,
-        })
+    ) -> PyResult<pyo3::PyClassInitializer<Self>> {
+        let kt = py_to_data_type(key_type)?;
+        let vt = py_to_data_type(value_type)?;
+        Ok(init_chain!(
+            DataType::Map {
+                key_type: Box::new(kt.clone()),
+                value_type: Box::new(vt.clone()),
+                value_contains_null,
+            },
+            PyMapType {
+                key_type: kt,
+                value_type: vt,
+                value_contains_null,
+            },
+            [],
+            value
+        ))
     }
     #[pyo3(name = "simpleString")]
     fn simple_string(&self) -> String {
@@ -1136,7 +1222,7 @@ impl PyStructField {
     }
 }
 
-#[pyclass(name = "StructType")]
+#[pyclass(name = "StructType", extends = PyDataType)]
 pub struct PyStructType {
     pub(crate) fields: Vec<StructField>,
 }
@@ -1183,7 +1269,7 @@ impl PyStructType {
     /// pyspark). A list of DDL field strings is also accepted for convenience.
     #[new]
     #[pyo3(signature = (fields=None))]
-    fn new(fields: Option<Vec<Bound<'_, PyAny>>>) -> PyResult<Self> {
+    fn new(fields: Option<Vec<Bound<'_, PyAny>>>) -> PyResult<pyo3::PyClassInitializer<Self>> {
         let mut out = Vec::new();
         if let Some(fs) = fields {
             for f in fs {
@@ -1206,7 +1292,14 @@ impl PyStructType {
                 }
             }
         }
-        Ok(PyStructType { fields: out })
+        Ok(init_chain!(
+            DataType::Struct {
+                fields: out.clone(),
+            },
+            PyStructType { fields: out },
+            [],
+            value
+        ))
     }
 
     /// Append a field (pyspark `StructType.add`). Chainable is not required here.
@@ -1279,17 +1372,16 @@ impl PyStructType {
 
     /// A copy with all fields made nullable (recursively). Mirrors `StructType.toNullable()`.
     #[pyo3(name = "toNullable")]
-    fn __st_to_nullable(&self) -> PyStructType {
-        let nullable = DataType::Struct {
+    fn __st_to_nullable(&self, py: Python<'_>) -> PyResult<Py<PyStructType>> {
+        let fields = match (DataType::Struct {
             fields: self.fields.clone(),
-        }
-        .to_nullable();
-        match nullable {
-            DataType::Struct { fields } => PyStructType { fields },
-            _ => PyStructType {
-                fields: self.fields.clone(),
-            },
-        }
+        })
+        .to_nullable()
+        {
+            DataType::Struct { fields } => fields,
+            _ => self.fields.clone(),
+        };
+        py_new_struct(py, fields)
     }
 
     /// Build a StructType from its JSON value. Mirrors `StructType.fromJson`.
@@ -1299,7 +1391,7 @@ impl PyStructType {
         _cls: &Bound<'_, pyo3::types::PyType>,
         py: Python<'_>,
         data: &Bound<'_, PyAny>,
-    ) -> PyResult<PyStructType> {
+    ) -> PyResult<Py<PyStructType>> {
         let s: String = py
             .import("json")?
             .getattr("dumps")?
@@ -1308,7 +1400,7 @@ impl PyStructType {
         match DataType::from_json_str(&s)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
         {
-            DataType::Struct { fields } => Ok(PyStructType { fields }),
+            DataType::Struct { fields } => py_new_struct(py, fields),
             _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "fromJson did not produce a StructType",
             )),
@@ -1320,7 +1412,7 @@ impl PyStructType {
     }
 }
 
-#[pyclass(name = "CharType")]
+#[pyclass(name = "CharType", extends = PyAtomicType)]
 pub struct PyCharType {
     pub length: i32,
 }
@@ -1364,8 +1456,13 @@ impl PyCharType {
         type_reduce(py, &dt.json())
     }
     #[new]
-    fn new(length: i32) -> Self {
-        PyCharType { length }
+    fn new(length: i32) -> pyo3::PyClassInitializer<Self> {
+        init_chain!(
+            DataType::Char { length },
+            PyCharType { length },
+            [PyAtomicType],
+            value
+        )
     }
     fn __repr__(&self) -> String {
         format!("CharType({})", self.length)
@@ -1380,7 +1477,7 @@ impl PyCharType {
     }
 }
 
-#[pyclass(name = "VarcharType")]
+#[pyclass(name = "VarcharType", extends = PyAtomicType)]
 pub struct PyVarcharType {
     pub length: i32,
 }
@@ -1424,8 +1521,13 @@ impl PyVarcharType {
         type_reduce(py, &dt.json())
     }
     #[new]
-    fn new(length: i32) -> Self {
-        PyVarcharType { length }
+    fn new(length: i32) -> pyo3::PyClassInitializer<Self> {
+        init_chain!(
+            DataType::Varchar { length },
+            PyVarcharType { length },
+            [PyAtomicType],
+            value
+        )
     }
     fn __repr__(&self) -> String {
         format!("VarcharType({})", self.length)
@@ -1440,7 +1542,7 @@ impl PyVarcharType {
     }
 }
 
-#[pyclass(name = "TimeType")]
+#[pyclass(name = "TimeType", extends = PyAnyTimeType)]
 pub struct PyTimeType {
     pub precision: i32,
 }
@@ -1486,8 +1588,13 @@ impl PyTimeType {
     /// `TimeType(precision=6)` (microsecond precision default), matching pyspark 4.2.
     #[new]
     #[pyo3(signature = (precision=6))]
-    fn new(precision: i32) -> Self {
-        PyTimeType { precision }
+    fn new(precision: i32) -> pyo3::PyClassInitializer<Self> {
+        init_chain!(
+            DataType::Time { precision },
+            PyTimeType { precision },
+            [PyAtomicType, PyDatetimeType, PyAnyTimeType],
+            value
+        )
     }
     fn __repr__(&self) -> String {
         format!("TimeType({})", self.precision)
@@ -1502,7 +1609,7 @@ impl PyTimeType {
     }
 }
 
-#[pyclass(name = "CalendarIntervalType")]
+#[pyclass(name = "CalendarIntervalType", extends = PyDataType)]
 pub struct PyCalendarIntervalType;
 
 #[pymethods]
@@ -1541,8 +1648,8 @@ impl PyCalendarIntervalType {
         type_reduce(py, "\"calendarinterval\"")
     }
     #[new]
-    fn new() -> Self {
-        PyCalendarIntervalType
+    fn new() -> pyo3::PyClassInitializer<Self> {
+        init_chain!(DataType::CalendarInterval, PyCalendarIntervalType, [])
     }
     fn __repr__(&self) -> String {
         "CalendarIntervalType()".to_string()
@@ -1557,7 +1664,7 @@ impl PyCalendarIntervalType {
     }
 }
 
-#[pyclass(name = "YearMonthIntervalType")]
+#[pyclass(name = "YearMonthIntervalType", extends = PyAnsiIntervalType)]
 pub struct PyYearMonthIntervalType {
     pub start_field: i32,
     pub end_field: i32,
@@ -1606,12 +1713,21 @@ impl PyYearMonthIntervalType {
     #[new]
     #[pyo3(signature = (startField=None, endField=None))]
     #[allow(non_snake_case)]
-    fn new(startField: Option<i32>, endField: Option<i32>) -> Self {
+    fn new(startField: Option<i32>, endField: Option<i32>) -> pyo3::PyClassInitializer<Self> {
         let start = startField.unwrap_or(0);
-        PyYearMonthIntervalType {
-            start_field: start,
-            end_field: endField.unwrap_or(if startField.is_some() { start } else { 1 }),
-        }
+        let end = endField.unwrap_or(if startField.is_some() { start } else { 1 });
+        init_chain!(
+            DataType::YearMonthInterval {
+                start_field: start,
+                end_field: end,
+            },
+            PyYearMonthIntervalType {
+                start_field: start,
+                end_field: end,
+            },
+            [PyAtomicType, PyAnsiIntervalType],
+            value
+        )
     }
     fn __repr__(&self) -> String {
         format!(
@@ -1625,7 +1741,7 @@ impl PyYearMonthIntervalType {
     }
 }
 
-#[pyclass(name = "DayTimeIntervalType")]
+#[pyclass(name = "DayTimeIntervalType", extends = PyAnsiIntervalType)]
 pub struct PyDayTimeIntervalType {
     pub start_field: i32,
     pub end_field: i32,
@@ -1674,12 +1790,21 @@ impl PyDayTimeIntervalType {
     #[new]
     #[pyo3(signature = (startField=None, endField=None))]
     #[allow(non_snake_case)]
-    fn new(startField: Option<i32>, endField: Option<i32>) -> Self {
+    fn new(startField: Option<i32>, endField: Option<i32>) -> pyo3::PyClassInitializer<Self> {
         let start = startField.unwrap_or(0);
-        PyDayTimeIntervalType {
-            start_field: start,
-            end_field: endField.unwrap_or(if startField.is_some() { start } else { 3 }),
-        }
+        let end = endField.unwrap_or(if startField.is_some() { start } else { 3 });
+        init_chain!(
+            DataType::DayTimeInterval {
+                start_field: start,
+                end_field: end,
+            },
+            PyDayTimeIntervalType {
+                start_field: start,
+                end_field: end,
+            },
+            [PyAtomicType, PyAnsiIntervalType],
+            value
+        )
     }
     fn __repr__(&self) -> String {
         format!(
@@ -1693,7 +1818,7 @@ impl PyDayTimeIntervalType {
     }
 }
 
-#[pyclass(name = "VariantType")]
+#[pyclass(name = "VariantType", extends = PyAtomicType)]
 pub struct PyVariantType;
 
 #[pymethods]
@@ -1732,8 +1857,8 @@ impl PyVariantType {
         type_reduce(py, "\"variant\"")
     }
     #[new]
-    fn new() -> Self {
-        PyVariantType
+    fn new() -> pyo3::PyClassInitializer<Self> {
+        init_chain!(DataType::Variant, PyVariantType, [PyAtomicType])
     }
     fn __repr__(&self) -> String {
         "VariantType()".to_string()

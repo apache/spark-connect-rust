@@ -269,6 +269,36 @@ def test_functions_module_wrappers():
     assert type(F.to_protobuf(c, "M", options={"x": "y"})).__name__ == "Column"
 
 
+def test_type_class_hierarchy():
+    # The concrete type classes have the reference MRO, and isinstance works up the
+    # whole chain (DataType / AtomicType / NumericType / IntegralType / ...).
+    assert [c.__name__ for c in T.IntegerType.__mro__ if c.__name__ != "object"] == [
+        "IntegerType", "IntegralType", "NumericType", "AtomicType", "DataType",
+    ]
+    it = T.IntegerType()
+    assert isinstance(it, T.DataType)
+    assert isinstance(it, T.AtomicType)
+    assert isinstance(it, T.NumericType)
+    assert isinstance(it, T.IntegralType)
+    assert not isinstance(it, T.FractionalType)
+
+    assert isinstance(T.DoubleType(), T.FractionalType)
+    assert isinstance(T.DecimalType(10, 2), T.FractionalType)
+    assert isinstance(T.DateType(), T.DatetimeType)
+    assert isinstance(T.TimeType(6), T.AnyTimeType)
+    assert isinstance(T.DayTimeIntervalType(), T.AnsiIntervalType)
+    assert isinstance(T.StringType(), T.AtomicType)
+    # Complex types are DataType but not AtomicType.
+    for c in (T.ArrayType(T.IntegerType()), T.MapType(T.StringType(), T.IntegerType()),
+              T.StructType([T.StructField("a", T.IntegerType())]), T.NullType()):
+        assert isinstance(c, T.DataType)
+        assert not isinstance(c, T.AtomicType)
+    # issubclass relationships.
+    assert issubclass(T.IntegerType, T.NumericType)
+    assert issubclass(T.NumericType, T.AtomicType)
+    assert issubclass(T.AtomicType, T.DataType)
+
+
 def test_datatype_object_model():
     # json / jsonValue / typeName / simpleString / needConversion match official pyspark.
     assert T.IntegerType().typeName() == "integer"

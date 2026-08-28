@@ -11,6 +11,9 @@ try:
         TimestampType, TimestampNTZType, ArrayType, MapType, StructField, StructType,
         CharType, VarcharType, TimeType, CalendarIntervalType, YearMonthIntervalType,
         DayTimeIntervalType, VariantType,
+        # Abstract base classes of the type hierarchy.
+        AtomicType, NumericType, IntegralType, FractionalType, DatetimeType,
+        AnyTimeType, AnsiIntervalType, SpatialType,
     )
 except ImportError:  # pragma: no cover - defensive fallback when the extension is absent
     # Fallback: define minimal stubs for testing purposes

@@ -64,11 +64,12 @@ use streaming::{
     PyStreamingQueryException, PyStreamingQueryManager, PyStreamingQueryStatus, PyTrigger,
 };
 use types::{
-    PyArrayType, PyBinaryType, PyBooleanType, PyByteType, PyCalendarIntervalType, PyCharType,
-    PyDataType, PyDateType, PyDayTimeIntervalType, PyDecimalType, PyDoubleType, PyFloatType,
-    PyIntegerType, PyLongType, PyMapType, PyNullType, PyShortType, PyStringType, PyStructField,
-    PyStructType, PyTimeType, PyTimestampNTZType, PyTimestampType, PyVarcharType, PyVariantType,
-    PyYearMonthIntervalType,
+    PyAnsiIntervalType, PyAnyTimeType, PyArrayType, PyAtomicType, PyBinaryType, PyBooleanType,
+    PyByteType, PyCalendarIntervalType, PyCharType, PyDataType, PyDateType, PyDatetimeType,
+    PyDayTimeIntervalType, PyDecimalType, PyDoubleType, PyFloatType, PyFractionalType,
+    PyIntegerType, PyIntegralType, PyLongType, PyMapType, PyNullType, PyNumericType, PyShortType,
+    PySpatialType, PyStringType, PyStructField, PyStructType, PyTimeType, PyTimestampNTZType,
+    PyTimestampType, PyVarcharType, PyVariantType, PyYearMonthIntervalType,
 };
 use window::{PyFrameBound, PyWindow, PyWindowSpec};
 
@@ -119,6 +120,15 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Register DataType classes
     m.add_class::<PyDataType>()?;
+    // Abstract intermediate base classes (type hierarchy).
+    m.add_class::<PyAtomicType>()?;
+    m.add_class::<PyNumericType>()?;
+    m.add_class::<PyIntegralType>()?;
+    m.add_class::<PyFractionalType>()?;
+    m.add_class::<PyDatetimeType>()?;
+    m.add_class::<PyAnyTimeType>()?;
+    m.add_class::<PyAnsiIntervalType>()?;
+    m.add_class::<PySpatialType>()?;
     m.add_class::<PyNullType>()?;
     m.add_class::<PyBooleanType>()?;
     m.add_class::<PyByteType>()?;
