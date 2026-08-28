@@ -5,6 +5,30 @@ use spark_connect::column::Column;
 
 use crate::functions::to_column;
 
+/// Raise a `pyspark.errors` exception (`class_name`) carrying the given `error_class`
+/// condition and message parameters, mirroring the reference Column guard-rails.
+fn raise_pyspark(
+    py: Python<'_>,
+    class_name: &str,
+    error_class: &str,
+    params: &[(&str, &str)],
+) -> PyErr {
+    use pyo3::types::PyDict;
+    let build = || -> PyResult<PyErr> {
+        let cls = py.import("pyspark.errors")?.getattr(class_name)?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("errorClass", error_class)?;
+        let mp = PyDict::new(py);
+        for (k, v) in params {
+            mp.set_item(*k, *v)?;
+        }
+        kwargs.set_item("messageParameters", mp)?;
+        let exc = cls.call((), Some(&kwargs))?;
+        Ok(PyErr::from_value(exc))
+    };
+    build().unwrap_or_else(|e| e)
+}
+
 /// Python wrapper for a Spark Column.
 #[pyclass(name = "Column")]
 pub struct PyColumn {
@@ -339,6 +363,58 @@ impl PyColumn {
     fn __ror__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
         let o = to_column(&other.bind(py))?;
         Ok(PyColumn::new(o.or(self.column.clone())))
+    }
+
+    /// `col ** other`. Mirrors `Column.__pow__` = `power(self, other)`.
+    /// (`modulo` is part of Python's ternary pow protocol; Spark has no 3-arg pow.)
+    fn __pow__(&self, py: Python<'_>, other: Py<PyAny>, _modulo: Py<PyAny>) -> PyResult<PyColumn> {
+        let o = to_column(&other.bind(py))?;
+        Ok(PyColumn::new(spark_connect::functions::pow(
+            self.column.clone(),
+            o,
+        )))
+    }
+
+    /// `other ** col`. Mirrors `Column.__rpow__` = `power(other, self)`.
+    fn __rpow__(&self, py: Python<'_>, other: Py<PyAny>, _modulo: Py<PyAny>) -> PyResult<PyColumn> {
+        let o = to_column(&other.bind(py))?;
+        Ok(PyColumn::new(spark_connect::functions::pow(
+            o,
+            self.column.clone(),
+        )))
+    }
+
+    // --- guard-rails: mirror the reference Column, which raises helpful errors rather
+    // than silently doing the wrong thing for these Python protocol hooks. ---
+
+    /// `x in col` is not supported. Mirrors `Column.__contains__`.
+    fn __contains__(&self, py: Python<'_>, _item: Py<PyAny>) -> PyResult<()> {
+        Err(raise_pyspark(
+            py,
+            "PySparkValueError",
+            "CANNOT_APPLY_IN_FOR_COLUMN",
+            &[],
+        ))
+    }
+
+    /// A Column is not iterable. Mirrors `Column.__iter__`.
+    fn __iter__(&self, py: Python<'_>) -> PyResult<()> {
+        Err(raise_pyspark(
+            py,
+            "PySparkTypeError",
+            "NOT_ITERABLE",
+            &[("objectName", "Column")],
+        ))
+    }
+
+    /// `bool(col)` / `if col:` is not supported. Mirrors `Column.__bool__`/`__nonzero__`.
+    fn __bool__(&self, py: Python<'_>) -> PyResult<bool> {
+        Err(raise_pyspark(
+            py,
+            "PySparkValueError",
+            "CANNOT_CONVERT_COLUMN_INTO_BOOL",
+            &[],
+        ))
     }
 
     // --- named Column methods (PySpark camelCase) ---

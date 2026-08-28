@@ -80,6 +80,34 @@ fn py_new_struct(py: Python<'_>, fields: Vec<StructField>) -> PyResult<Py<PyStru
     )
 }
 
+/// Parse a type-JSON dict (as passed to `<Type>.fromJson`) into a core `DataType`.
+/// The dict may omit the top-level `"type"` key (each `fromJson` is a classmethod on a
+/// specific type), so inject `default_type` when it is absent before handing the object
+/// to the core JSON parser.
+fn from_json_dict(
+    py: Python<'_>,
+    json: &Bound<'_, PyAny>,
+    default_type: &str,
+) -> PyResult<DataType> {
+    use pyo3::types::PyDict;
+    let value: Bound<'_, PyAny> = if let Ok(d) = json.downcast::<PyDict>() {
+        let d = d.copy()?;
+        if !d.contains("type")? {
+            d.set_item("type", default_type)?;
+        }
+        d.into_any()
+    } else {
+        json.clone()
+    };
+    let s: String = py
+        .import("json")?
+        .getattr("dumps")?
+        .call1((value,))?
+        .extract()?;
+    DataType::from_json_str(&s)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+}
+
 #[pymethods]
 impl PyDataType {
     /// Allow instantiating the base and, crucially, pure-Python subclasses of it
@@ -704,10 +732,24 @@ impl PyDecimalType {
 }
 
 #[pyclass(name = "StringType", extends = PyAtomicType)]
-pub struct PyStringType;
+pub struct PyStringType {
+    pub collation: String,
+}
 
 #[pymethods]
 impl PyStringType {
+    // Collation providers, mirroring `StringType.providerSpark/providerICU/providers`.
+    #[classattr]
+    #[allow(non_upper_case_globals)]
+    const providerSpark: &'static str = "spark";
+    #[classattr]
+    #[allow(non_upper_case_globals)]
+    const providerICU: &'static str = "icu";
+    #[classattr]
+    fn providers() -> Vec<&'static str> {
+        vec!["spark", "icu"]
+    }
+
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
@@ -741,28 +783,59 @@ impl PyStringType {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
-        type_reduce(py, "\"string\"")
+        let dt = DataType::String {
+            collation: self.collation.clone(),
+        };
+        type_reduce(py, &dt.json())
     }
     #[new]
-    fn new() -> pyo3::PyClassInitializer<Self> {
+    #[pyo3(signature = (collation="UTF8_BINARY".to_string()))]
+    fn new(collation: String) -> pyo3::PyClassInitializer<Self> {
         init_chain!(
             DataType::String {
-                collation: "UTF8_BINARY".to_string()
+                collation: collation.clone()
             },
-            PyStringType,
-            [PyAtomicType]
+            PyStringType { collation },
+            [PyAtomicType],
+            value
         )
     }
     fn __repr__(&self) -> String {
-        "StringType()".to_string()
+        if self.collation == "UTF8_BINARY" {
+            "StringType()".to_string()
+        } else {
+            format!("StringType('{}')", self.collation)
+        }
     }
     #[pyo3(name = "simpleString")]
-    fn simple_string(&self) -> &'static str {
-        "string"
+    fn simple_string(&self) -> String {
+        if self.collation == "UTF8_BINARY" {
+            "string".to_string()
+        } else {
+            format!("string collate {}", self.collation)
+        }
     }
     #[pyo3(name = "typeName")]
     fn type_name(&self) -> &'static str {
         "string"
+    }
+
+    /// Provider ("spark" for UTF8*, else "icu") for a collation name.
+    /// Mirrors `StringType.collationProvider`.
+    #[classmethod]
+    #[pyo3(name = "collationProvider")]
+    fn collation_provider(_cls: &Bound<'_, pyo3::types::PyType>, collation_name: &str) -> String {
+        if collation_name.starts_with("UTF8") {
+            "spark".to_string()
+        } else {
+            "icu".to_string()
+        }
+    }
+
+    /// Whether this is the default UTF8_BINARY collation. Mirrors `StringType.isUTF8BinaryCollation`.
+    #[pyo3(name = "isUTF8BinaryCollation")]
+    fn is_utf8_binary_collation(&self) -> bool {
+        self.collation == "UTF8_BINARY"
     }
 }
 
@@ -1049,21 +1122,23 @@ impl PyArrayType {
         };
         type_reduce(py, &dt.json())
     }
+    // Kwargs mirror the reference: ArrayType(elementType, containsNull=True).
     #[new]
-    #[pyo3(signature = (element_type, contains_null=true))]
+    #[pyo3(signature = (elementType, containsNull=true))]
+    #[allow(non_snake_case)]
     fn new(
-        element_type: &Bound<'_, PyAny>,
-        contains_null: bool,
+        elementType: &Bound<'_, PyAny>,
+        containsNull: bool,
     ) -> PyResult<pyo3::PyClassInitializer<Self>> {
-        let et = py_to_data_type(element_type)?;
+        let et = py_to_data_type(elementType)?;
         Ok(init_chain!(
             DataType::Array {
                 element_type: Box::new(et.clone()),
-                contains_null,
+                contains_null: containsNull,
             },
             PyArrayType {
                 element_type: et,
-                contains_null,
+                contains_null: containsNull,
             },
             [],
             value
@@ -1079,6 +1154,33 @@ impl PyArrayType {
     #[pyo3(name = "typeName")]
     fn type_name(&self) -> &'static str {
         "array"
+    }
+
+    /// A copy with all nullability fields set true (recursively). Mirrors `ArrayType.toNullable()`.
+    #[pyo3(name = "toNullable")]
+    fn __at_to_nullable(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let dt = (DataType::Array {
+            element_type: Box::new(self.element_type.clone()),
+            contains_null: self.contains_null,
+        })
+        .to_nullable();
+        data_type_to_py(py, &dt)
+    }
+
+    /// Build an ArrayType from its JSON value. Mirrors `ArrayType.fromJson`.
+    #[classmethod]
+    #[pyo3(name = "fromJson")]
+    #[pyo3(signature = (json, fieldPath="".to_string(), collationsMap=None))]
+    fn __at_from_json(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        py: Python<'_>,
+        json: &Bound<'_, PyAny>,
+        fieldPath: String,
+        collationsMap: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = (fieldPath, collationsMap);
+        let dt = from_json_dict(py, json, "array")?;
+        data_type_to_py(py, &dt)
     }
 }
 
@@ -1131,25 +1233,27 @@ impl PyMapType {
         };
         type_reduce(py, &dt.json())
     }
+    // Kwargs mirror the reference: MapType(keyType, valueType, valueContainsNull=True).
     #[new]
-    #[pyo3(signature = (key_type, value_type, value_contains_null=true))]
+    #[pyo3(signature = (keyType, valueType, valueContainsNull=true))]
+    #[allow(non_snake_case)]
     fn new(
-        key_type: &Bound<'_, PyAny>,
-        value_type: &Bound<'_, PyAny>,
-        value_contains_null: bool,
+        keyType: &Bound<'_, PyAny>,
+        valueType: &Bound<'_, PyAny>,
+        valueContainsNull: bool,
     ) -> PyResult<pyo3::PyClassInitializer<Self>> {
-        let kt = py_to_data_type(key_type)?;
-        let vt = py_to_data_type(value_type)?;
+        let kt = py_to_data_type(keyType)?;
+        let vt = py_to_data_type(valueType)?;
         Ok(init_chain!(
             DataType::Map {
                 key_type: Box::new(kt.clone()),
                 value_type: Box::new(vt.clone()),
-                value_contains_null,
+                value_contains_null: valueContainsNull,
             },
             PyMapType {
                 key_type: kt,
                 value_type: vt,
-                value_contains_null,
+                value_contains_null: valueContainsNull,
             },
             [],
             value
@@ -1166,6 +1270,34 @@ impl PyMapType {
     #[pyo3(name = "typeName")]
     fn type_name(&self) -> &'static str {
         "map"
+    }
+
+    /// A copy with all nullability fields set true (recursively). Mirrors `MapType.toNullable()`.
+    #[pyo3(name = "toNullable")]
+    fn __mt_to_nullable(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let dt = (DataType::Map {
+            key_type: Box::new(self.key_type.clone()),
+            value_type: Box::new(self.value_type.clone()),
+            value_contains_null: self.value_contains_null,
+        })
+        .to_nullable();
+        data_type_to_py(py, &dt)
+    }
+
+    /// Build a MapType from its JSON value. Mirrors `MapType.fromJson`.
+    #[classmethod]
+    #[pyo3(name = "fromJson")]
+    #[pyo3(signature = (json, fieldPath="".to_string(), collationsMap=None))]
+    fn __mt_from_json(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        py: Python<'_>,
+        json: &Bound<'_, PyAny>,
+        fieldPath: String,
+        collationsMap: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = (fieldPath, collationsMap);
+        let dt = from_json_dict(py, json, "map")?;
+        data_type_to_py(py, &dt)
     }
 }
 
@@ -2244,8 +2376,11 @@ pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAn
             DataType::String {
                 collation: collation.clone()
             },
-            PyStringType,
-            [PyAtomicType]
+            PyStringType {
+                collation: collation.clone()
+            },
+            [PyAtomicType],
+            value
         )),
         DataType::Binary => obj!(init_chain!(DataType::Binary, PyBinaryType, [PyAtomicType])),
         DataType::Date => obj!(init_chain!(
@@ -2441,9 +2576,9 @@ pub(crate) fn py_to_data_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
     if obj.extract::<PyRef<PyDoubleType>>().is_ok() {
         return Ok(DataType::Double);
     }
-    if obj.extract::<PyRef<PyStringType>>().is_ok() {
+    if let Ok(s) = obj.extract::<PyRef<PyStringType>>() {
         return Ok(DataType::String {
-            collation: "UTF8_BINARY".to_string(),
+            collation: s.collation.clone(),
         });
     }
     if obj.extract::<PyRef<PyBinaryType>>().is_ok() {
