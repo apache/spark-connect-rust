@@ -240,7 +240,8 @@ impl Column {
 
     /// Mirrors `pyspark.sql.column.Column.isin`: membership test against the
     /// given values (pass literals via `lit(..)` or other columns).
-    pub fn isin(self, values: Vec<Column>) -> Column {
+    pub fn isin<C: Into<Column>>(self, values: impl IntoIterator<Item = C>) -> Column {
+        let values: Vec<Column> = values.into_iter().map(Into::into).collect();
         let mut args = Vec::with_capacity(values.len() + 1);
         args.push(self.expr);
         args.extend(values.into_iter().map(|c| c.expr));
@@ -651,6 +652,24 @@ impl Not for Column {
 pub fn col(name: &str) -> Column {
     Column {
         expr: Expression::ColumnReference(ColumnReference::new(name)),
+    }
+}
+
+// A string is accepted anywhere a `Column` is (resolved as a column reference), so the
+// ergonomic `impl IntoIterator<Item = impl Into<Column>>` APIs accept `["a", "b"]` too.
+impl From<&str> for Column {
+    fn from(name: &str) -> Column {
+        col(name)
+    }
+}
+impl From<String> for Column {
+    fn from(name: String) -> Column {
+        col(&name)
+    }
+}
+impl From<&String> for Column {
+    fn from(name: &String) -> Column {
+        col(name)
     }
 }
 

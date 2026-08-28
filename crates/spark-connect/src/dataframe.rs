@@ -210,7 +210,8 @@ impl DataFrame {
     }
 
     /// Select specific columns.
-    pub fn select(&self, columns: Vec<Column>) -> DataFrame {
+    pub fn select<C: Into<Column>>(&self, columns: impl IntoIterator<Item = C>) -> DataFrame {
+        let columns: Vec<Column> = columns.into_iter().map(Into::into).collect();
         let plan = LogicalPlan::Project {
             input: Box::new(self.plan.clone()),
             columns,
@@ -622,7 +623,11 @@ impl DataFrame {
     }
 
     /// Group by columns for aggregation.
-    pub fn group_by(&self, group_cols: Vec<Column>) -> crate::group::GroupedData {
+    pub fn group_by<C: Into<Column>>(
+        &self,
+        group_cols: impl IntoIterator<Item = C>,
+    ) -> crate::group::GroupedData {
+        let group_cols: Vec<Column> = group_cols.into_iter().map(Into::into).collect();
         crate::group::GroupedData::new(self.clone(), group_cols, AggregateGroupType::GroupBy)
     }
 
@@ -1307,12 +1312,20 @@ impl DataFrame {
     }
 
     /// Group by with rollup.
-    pub fn rollup(&self, group_cols: Vec<Column>) -> crate::group::GroupedData {
+    pub fn rollup<C: Into<Column>>(
+        &self,
+        group_cols: impl IntoIterator<Item = C>,
+    ) -> crate::group::GroupedData {
+        let group_cols: Vec<Column> = group_cols.into_iter().map(Into::into).collect();
         crate::group::GroupedData::new(self.clone(), group_cols, AggregateGroupType::Rollup)
     }
 
     /// Group by with cube.
-    pub fn cube(&self, group_cols: Vec<Column>) -> crate::group::GroupedData {
+    pub fn cube<C: Into<Column>>(
+        &self,
+        group_cols: impl IntoIterator<Item = C>,
+    ) -> crate::group::GroupedData {
+        let group_cols: Vec<Column> = group_cols.into_iter().map(Into::into).collect();
         crate::group::GroupedData::new(self.clone(), group_cols, AggregateGroupType::Cube)
     }
 
@@ -1543,13 +1556,16 @@ impl DataFrame {
     }
 
     /// Unpivot columns (like melt).
-    pub fn unpivot(
+    pub fn unpivot<C: Into<Column>, D: Into<Column>>(
         &self,
-        ids: Vec<Column>,
-        values: Option<Vec<Column>>,
+        ids: impl IntoIterator<Item = C>,
+        values: Option<impl IntoIterator<Item = D>>,
         variable_column_name: &str,
         value_column_name: &str,
     ) -> DataFrame {
+        let ids: Vec<Column> = ids.into_iter().map(Into::into).collect();
+        let values: Option<Vec<Column>> =
+            values.map(|v| v.into_iter().map(Into::into).collect());
         let plan = LogicalPlan::Unpivot {
             input: Box::new(self.plan.clone()),
             ids,
@@ -2701,7 +2717,7 @@ mod plan_construction_tests {
                 metadata: std::collections::BTreeMap::new(),
             }],
         }));
-        ser(&df.unpivot(vec![col("id")], None, "var", "val"));
+        ser(&df.unpivot(vec![col("id")], None::<Vec<Column>>, "var", "val"));
         ser(&df.melt(vec!["id"], None, "var", "val"));
         ser(&df.group_by(vec![col("id")]).agg(vec![e()]));
         ser(&df.rollup(vec![col("id")]).agg(vec![e()]));

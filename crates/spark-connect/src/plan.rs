@@ -1317,10 +1317,13 @@ pub fn sql(query: impl Into<String>) -> LogicalPlan {
 }
 
 /// Create a Project plan.
-pub fn project(input: LogicalPlan, columns: Vec<Column>) -> LogicalPlan {
+pub fn project<C: Into<Column>>(
+    input: LogicalPlan,
+    columns: impl IntoIterator<Item = C>,
+) -> LogicalPlan {
     LogicalPlan::Project {
         input: Box::new(input),
-        columns,
+        columns: columns.into_iter().map(Into::into).collect(),
     }
 }
 

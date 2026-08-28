@@ -99,7 +99,8 @@ pub fn cast(_col: Column, to_col: Column) -> Column {
 
 /// Mirrors `pyspark.sql.functions.call_function`: builds a `CallFunction`
 /// expression carrying the argument columns.
-pub fn call_function(name: &str, args: Vec<Column>) -> Column {
+pub fn call_function<C: Into<Column>>(name: &str, args: impl IntoIterator<Item = C>) -> Column {
+    let args: Vec<Column> = args.into_iter().map(Into::into).collect();
     let arg_exprs = args.iter().map(|c| c.expression().clone()).collect();
     Column::new(Expression::CallFunction(Box::new(CallFunctionWrapper::new(
         name, arg_exprs,
@@ -108,7 +109,8 @@ pub fn call_function(name: &str, args: Vec<Column>) -> Column {
 
 /// Mirrors `pyspark.sql.functions.call_udf` = `_invoke_function(udfName, *cols)`
 /// (an `UnresolvedFunction` call).
-pub fn call_udf(name: &str, args: Vec<Column>) -> Column {
+pub fn call_udf<C: Into<Column>>(name: &str, args: impl IntoIterator<Item = C>) -> Column {
+    let args: Vec<Column> = args.into_iter().map(Into::into).collect();
     func(name, args.iter().map(|c| c.expression().clone()).collect())
 }
 
@@ -138,35 +140,40 @@ pub fn desc_nulls_last(col: Column) -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.array` (variadic over the given columns).
-pub fn array(cols: Vec<Column>) -> Column {
+pub fn array<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func(
         "array",
         cols.iter().map(|c| c.expression().clone()).collect(),
     )
 }
 /// Mirrors `pyspark.sql.functions.concat` (variadic over the given columns).
-pub fn concat(cols: Vec<Column>) -> Column {
+pub fn concat<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func(
         "concat",
         cols.iter().map(|c| c.expression().clone()).collect(),
     )
 }
 /// Mirrors `pyspark.sql.functions.coalesce` (variadic over the given columns).
-pub fn coalesce(cols: Vec<Column>) -> Column {
+pub fn coalesce<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func(
         "coalesce",
         cols.iter().map(|c| c.expression().clone()).collect(),
     )
 }
 /// Mirrors `pyspark.sql.functions.arrays_zip`.
-pub fn arrays_zip(cols: Vec<Column>) -> Column {
+pub fn arrays_zip<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func(
         "arrays_zip",
         cols.iter().map(|c| c.expression().clone()).collect(),
     )
 }
 /// Mirrors `pyspark.sql.functions.create_map`.
-pub fn create_map(cols: Vec<Column>) -> Column {
+pub fn create_map<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func("map", cols.iter().map(|c| c.expression().clone()).collect())
 }
 
@@ -264,12 +271,14 @@ pub fn e() -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.elt`.
-pub fn elt(cols: Vec<Column>) -> Column {
+pub fn elt<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func("elt", cols.iter().map(|c| c.expression().clone()).collect())
 }
 
 /// Mirrors `pyspark.sql.functions.grouping_id`.
-pub fn grouping_id(cols: Vec<Column>) -> Column {
+pub fn grouping_id<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func(
         "grouping_id",
         cols.iter().map(|c| c.expression().clone()).collect(),
@@ -277,7 +286,8 @@ pub fn grouping_id(cols: Vec<Column>) -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.hash`.
-pub fn hash(cols: Vec<Column>) -> Column {
+pub fn hash<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func(
         "hash",
         cols.iter().map(|c| c.expression().clone()).collect(),
@@ -300,7 +310,8 @@ pub fn input_file_name() -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.java_method`.
-pub fn java_method(cols: Vec<Column>) -> Column {
+pub fn java_method<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func(
         "java_method",
         cols.iter().map(|c| c.expression().clone()).collect(),
@@ -355,7 +366,8 @@ pub fn make_ym_interval() -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.map_concat`.
-pub fn map_concat(cols: Vec<Column>) -> Column {
+pub fn map_concat<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func(
         "map_concat",
         cols.iter().map(|c| c.expression().clone()).collect(),
@@ -368,7 +380,8 @@ pub fn monotonically_increasing_id() -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.named_struct`.
-pub fn named_struct(cols: Vec<Column>) -> Column {
+pub fn named_struct<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func(
         "named_struct",
         cols.iter().map(|c| c.expression().clone()).collect(),
@@ -406,7 +419,8 @@ pub fn rank() -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.reflect`.
-pub fn reflect(cols: Vec<Column>) -> Column {
+pub fn reflect<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func(
         "reflect",
         cols.iter().map(|c| c.expression().clone()).collect(),
@@ -429,7 +443,8 @@ pub fn spark_partition_id() -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.stack`.
-pub fn stack(cols: Vec<Column>) -> Column {
+pub fn stack<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func(
         "stack",
         cols.iter().map(|c| c.expression().clone()).collect(),
@@ -437,7 +452,8 @@ pub fn stack(cols: Vec<Column>) -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.struct`.
-pub fn r#struct(cols: Vec<Column>) -> Column {
+pub fn r#struct<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func(
         "struct",
         cols.iter().map(|c| c.expression().clone()).collect(),
@@ -465,7 +481,8 @@ pub fn try_make_interval() -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.try_reflect`.
-pub fn try_reflect(cols: Vec<Column>) -> Column {
+pub fn try_reflect<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func(
         "try_reflect",
         cols.iter().map(|c| c.expression().clone()).collect(),
@@ -488,7 +505,8 @@ pub fn version() -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.xxhash64`.
-pub fn xxhash64(cols: Vec<Column>) -> Column {
+pub fn xxhash64<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func(
         "xxhash64",
         cols.iter().map(|c| c.expression().clone()).collect(),
@@ -4041,9 +4059,9 @@ pub fn variant_array_append(v: Column, path: Column, value: Column) -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.variant_delete`.
-pub fn variant_delete(v: Column, paths: Vec<Column>) -> Column {
+pub fn variant_delete<C: Into<Column>>(v: Column, paths: impl IntoIterator<Item = C>) -> Column {
     let mut args = vec![v.expression().clone()];
-    args.extend(paths.into_iter().map(|c| c.expression().clone()));
+    args.extend(paths.into_iter().map(|c| c.into().expression().clone()));
     func("variant_delete", args)
 }
 

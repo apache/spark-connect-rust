@@ -41,10 +41,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let df = spark.read().table("samples.nyctaxi.trips");
 
     // select columns and filter
-    let df = df.select(vec![col("pickup_zip"), col("fare_amount")]);
+    let df = df.select([col("pickup_zip"), col("fare_amount")]);
 
     // groupby the pickup
-    let grouped = df.group_by(vec![col("pickup_zip")]);
+    let grouped = df.group_by([col("pickup_zip")]);
 
     // average the fare amount and order by the top 10 zip codes
     let df = grouped.agg(vec![avg(col("fare_amount"))

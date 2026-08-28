@@ -36,7 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .load(Some(path));
 
     // select columns and perform data manipulations
-    let df = df.select(vec![
+    let df = df.select([
         F::col("name"),
         F::col("age").cast(DataType::Integer).alias("age_int"),
         (lit_double(3.0) + F::col("age_int")).alias("addition"),

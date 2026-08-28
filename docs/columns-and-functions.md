@@ -89,7 +89,7 @@ The `functions` module provides hundreds of operations across string, math, date
 |----------|-------|---------|
 | `upper` | `f::upper(f::col("col"))` | Convert to uppercase |
 | `lower` | `f::lower(f::col("col"))` | Convert to lowercase |
-| `concat` | `f::concat(vec![...])` | Concatenate strings |
+| `concat` | `f::concat([...])` | Concatenate strings |
 | `substring` | `f::substring(f::col("col"), 1, 3)` | Extract substring |
 | `length` | `f::length(f::col("col"))` | String length |
 | `trim` | `f::trim(f::col("col"))` | Remove leading/trailing spaces |
@@ -151,7 +151,7 @@ let expr = when(f::col("phone").is_not_null(), f::col("phone"))
 
 | Function | Usage | Purpose |
 |----------|-------|---------|
-| `array` | `f::array(vec![...])` | Create array |
+| `array` | `f::array([...])` | Create array |
 | `explode` | `f::explode(f::col("arr"))` | Expand array to rows |
 | `size` | `f::size(f::col("arr"))` | Array/map size |
 | `element_at` | `f::element_at(...)` | Get array element |

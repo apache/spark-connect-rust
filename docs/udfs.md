@@ -43,7 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the compiled module is embedded; there is no `.wasm` file to load.
     spark
         .range(5)?
-        .select(vec![
+        .select([
             col("id"),
             udf::add_one(col("id"))?.alias("plus_one"),
         ])

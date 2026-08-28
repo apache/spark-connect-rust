@@ -102,7 +102,7 @@ let raw = spark.sql("SELECT * FROM raw_data")?;
 // Transform with DataFrame API
 let cleaned = raw
     .filter(f::col("value").gt(lit(0)))
-    .select(vec![f::col("id"), f::col("value")])
+    .select([f::col("id"), f::col("value")])
     .with_column("scaled", f::col("value") * lit(2));
 
 // Register result for SQL

@@ -16,7 +16,7 @@ let df = spark.read()
     .load(Some("data.csv"));
 
 df
-    .group_by(vec![f::col("category")])
+    .group_by([f::col("category")])
     .agg(vec![
         f::sum(f::col("amount")).expression().clone(),
         f::avg(f::col("price")).expression().clone(),
@@ -36,10 +36,10 @@ let df = spark.sql(
 )?;
 
 df
-    .select(vec![f::explode(
+    .select([f::explode(
         f::split(f::col("line"), lit_string(" "))
     ).alias("word")])
-    .group_by(vec![f::col("word")])
+    .group_by([f::col("word")])
     .agg(vec![f::count(f::col("word")).expression().clone()])
     .show(20)?;
 ```
@@ -59,7 +59,7 @@ let orders = spark.range(3)?
 
 users
     .join(&orders, Some(f::col("id").eq(f::col("user_id"))), JoinType::Inner)
-    .select(vec![f::col("name"), f::col("amount")])
+    .select([f::col("name"), f::col("amount")])
     .show(20)?;
 ```
 

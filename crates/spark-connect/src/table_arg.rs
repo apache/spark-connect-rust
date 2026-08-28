@@ -64,7 +64,10 @@ impl TableArg {
     /// let table_arg = TableArg::new(df)
     ///     .partition_by(vec![col("key")])?;
     /// ```
-    pub fn partition_by(mut self, cols: Vec<Column>) -> Result<Self> {
+    pub fn partition_by<C: Into<Column>>(
+        mut self,
+        cols: impl IntoIterator<Item = C>,
+    ) -> Result<Self> {
         if self.is_partitioned() {
             return Err(SparkError::value(
                 "ILLEGAL_ARGUMENT",
@@ -73,7 +76,7 @@ impl TableArg {
         }
 
         for col in cols {
-            self.partition_spec.push(col.expression().clone());
+            self.partition_spec.push(col.into().expression().clone());
         }
 
         Ok(self)
@@ -94,7 +97,7 @@ impl TableArg {
     ///     .partition_by(vec![col("key")])?
     ///     .order_by(vec![col("value")])?;
     /// ```
-    pub fn order_by(mut self, cols: Vec<Column>) -> Result<Self> {
+    pub fn order_by<C: Into<Column>>(mut self, cols: impl IntoIterator<Item = C>) -> Result<Self> {
         if !self.is_partitioned() {
             return Err(SparkError::value(
                 "ILLEGAL_ARGUMENT",
@@ -106,7 +109,7 @@ impl TableArg {
         }
 
         for col in cols {
-            self.order_spec.push(col.expression().clone());
+            self.order_spec.push(col.into().expression().clone());
         }
 
         Ok(self)

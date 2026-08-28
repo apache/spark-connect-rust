@@ -563,8 +563,8 @@ impl DataFrameWriterV2 {
     }
 
     /// Partition the output table by the given columns.
-    pub fn partition_by(mut self, columns: Vec<Column>) -> Self {
-        self.partition_cols = columns;
+    pub fn partition_by<C: Into<Column>>(mut self, columns: impl IntoIterator<Item = C>) -> Self {
+        self.partition_cols = columns.into_iter().map(Into::into).collect();
         self
     }
 

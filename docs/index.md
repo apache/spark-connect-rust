@@ -92,7 +92,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let df = spark
         .range(1_000_000)?
-        .select(vec![(f::col("id") * lit(2)).alias("x")])
+        .select([(f::col("id") * lit(2)).alias("x")])
         .filter((f::col("x") % lit(3)).eq(lit(0)));
 
     println!("count = {}", df.count()?);

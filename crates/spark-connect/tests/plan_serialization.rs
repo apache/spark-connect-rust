@@ -121,3 +121,23 @@ fn relation_changes_maps_to_correct_proto() {
         other => panic!("expected RelationChanges, got {other:?}"),
     }
 }
+
+#[test]
+fn column_list_apis_accept_arrays_vecs_and_strings() {
+    // The IntoIterator<Item = impl Into<Column>> APIs accept arrays of Columns, arrays
+    // of &str (via From<&str> for Column), and Vec — all producing the same Project.
+    use spark_connect_proto::relation::RelType;
+    let by_cols = plan::project(base(), [col("a"), col("b")]).to_proto();
+    let by_strs = plan::project(base(), ["a", "b"]).to_proto();
+    let by_vec = plan::project(base(), vec![col("a")]).to_proto();
+    for (rel, n) in [(by_cols, 2usize), (by_strs, 2), (by_vec, 1)] {
+        match rel.rel_type {
+            Some(RelType::Project(p)) => assert_eq!(p.expressions.len(), n),
+            other => panic!("expected Project, got {other:?}"),
+        }
+    }
+    // functions builders accept the same ergonomic forms.
+    let _ = spark_connect::functions::array([col("a"), col("b")]);
+    let _ = spark_connect::functions::array(["a", "b"]);
+    let _ = col("x").isin([col("y"), col("z")]);
+}
