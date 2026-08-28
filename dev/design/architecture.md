@@ -9,7 +9,7 @@ hot paths (plan building, gRPC transport, Arrow decode) in Rust.
 
 ## Source of truth
 
-- **Protocol**: Spark Connect protobuf `v4.1.0` - vendored under
+- **Protocol**: Spark Connect protobuf `v4.2.0` - vendored under
   `crates/spark-connect-proto/proto/`, SHA pinned in `proto/SPARK_SHA.txt`.
   Developed and validated against Apache Spark 4.2.0 (wire-compatible).
 - **Python reference**: `python/pyspark/sql/connect/**` (+ `sql/types.py`,
