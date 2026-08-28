@@ -281,6 +281,40 @@ fn catalog_ddl_v420_surface() {
     assert!(!c.database_exists(db).unwrap());
 }
 
+/// Typed catalog result structs (Table/Database/Function/Column/CatalogMetadata) parsed
+/// from the catalog queries. Mirrors pyspark's List[Table] etc.
+#[test]
+fn catalog_typed_results_surface() {
+    if !should_run() {
+        return;
+    }
+    let s = session();
+    let c = s.catalog();
+    s.range(3)
+        .unwrap()
+        .create_or_replace_temp_view("cov_typed_view")
+        .unwrap();
+
+    let cats = c.list_catalogs_typed(None).unwrap();
+    assert!(!cats.is_empty() && !cats[0].name.is_empty());
+    let dbs = c.list_databases_typed(None).unwrap();
+    assert!(dbs.iter().any(|d| d.name == "default"));
+    assert_eq!(c.get_database_typed("default").unwrap().name, "default");
+
+    let tables = c.list_tables_typed(None, None).unwrap();
+    let v = tables.iter().find(|t| t.name == "cov_typed_view").unwrap();
+    assert!(v.is_temporary);
+    assert_eq!(c.get_table_typed("cov_typed_view").unwrap().name, "cov_typed_view");
+
+    let funcs = c.list_functions_typed(None, None).unwrap();
+    assert!(!funcs.is_empty());
+    assert_eq!(c.get_function_typed("abs").unwrap().name, "abs");
+
+    let cols = c.list_columns_typed("cov_typed_view", None).unwrap();
+    assert_eq!(cols.len(), 1);
+    assert_eq!(cols[0].name, "id");
+}
+
 #[test]
 fn session_surface() {
     if !should_run() {

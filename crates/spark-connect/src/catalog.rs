@@ -10,6 +10,111 @@ use crate::dataframe::DataFrame;
 use crate::row::{Row, Value};
 use crate::session::SparkSession;
 
+/// Metadata result classes returned by the typed catalog methods, mirroring
+/// `pyspark.sql.catalog.{CatalogMetadata,Database,Table,Column,Function,TablePartition}`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CatalogMetadata {
+    pub name: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Database {
+    pub name: String,
+    pub catalog: Option<String>,
+    pub description: Option<String>,
+    pub location_uri: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Table {
+    pub name: String,
+    pub catalog: Option<String>,
+    pub namespace: Option<Vec<String>>,
+    pub description: Option<String>,
+    pub table_type: String,
+    pub is_temporary: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Column {
+    pub name: String,
+    pub description: Option<String>,
+    pub data_type: String,
+    pub nullable: bool,
+    pub is_partition: bool,
+    pub is_bucket: bool,
+    pub is_cluster: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Function {
+    pub name: String,
+    pub catalog: Option<String>,
+    pub namespace: Option<Vec<String>>,
+    pub description: Option<String>,
+    pub class_name: String,
+    pub is_temporary: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TablePartition {
+    pub partition: String,
+}
+
+// Row-parsing helpers for the typed catalog results.
+fn row_str(row: &Row, i: usize) -> String {
+    row.get(i).and_then(|v| v.as_str()).unwrap_or("").to_string()
+}
+fn row_opt_str(row: &Row, i: usize) -> Option<String> {
+    match row.get(i) {
+        Some(v) if !v.is_null() => v.as_str().map(|s| s.to_string()),
+        _ => None,
+    }
+}
+fn row_bool(row: &Row, i: usize) -> bool {
+    row.get(i).and_then(|v| v.as_bool()).unwrap_or(false)
+}
+fn row_opt_namespace(row: &Row, i: usize) -> Option<Vec<String>> {
+    match row.get(i) {
+        Some(Value::List(items)) => Some(
+            items
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+fn parse_database(r: &Row) -> Database {
+    Database {
+        name: row_str(r, 0),
+        catalog: row_opt_str(r, 1),
+        description: row_opt_str(r, 2),
+        location_uri: row_str(r, 3),
+    }
+}
+fn parse_table(r: &Row) -> Table {
+    Table {
+        name: row_str(r, 0),
+        catalog: row_opt_str(r, 1),
+        namespace: row_opt_namespace(r, 2),
+        description: row_opt_str(r, 3),
+        table_type: row_str(r, 4),
+        is_temporary: row_bool(r, 5),
+    }
+}
+fn parse_function(r: &Row) -> Function {
+    Function {
+        name: row_str(r, 0),
+        catalog: row_opt_str(r, 1),
+        namespace: row_opt_namespace(r, 2),
+        description: row_opt_str(r, 3),
+        class_name: row_str(r, 4),
+        is_temporary: row_bool(r, 5),
+    }
+}
+
 /// Catalog provides access to database and table metadata.
 ///
 /// Mirrors `pyspark.sql.connect.catalog.Catalog`.
@@ -796,6 +901,98 @@ impl Catalog {
     }
 
     /// Helper: execute a catalog operation and return results as Rows.
+    // ---- Typed catalog results (mirror pyspark's List[Table]/List[Database]/... ) ----
+    // Each reuses the DataFrame-returning method, collects the rows, and parses them
+    // into the metadata structs above (column order matches the reference client).
+
+    /// Typed `listCatalogs` -> `Vec<CatalogMetadata>`.
+    pub fn list_catalogs_typed(&self, pattern: Option<&str>) -> Result<Vec<CatalogMetadata>> {
+        let rows = self.list_catalogs_with_pattern(pattern)?.collect()?;
+        Ok(rows
+            .iter()
+            .map(|r| CatalogMetadata {
+                name: row_str(r, 0),
+                description: row_opt_str(r, 1),
+            })
+            .collect())
+    }
+
+    /// Typed `listDatabases` -> `Vec<Database>`.
+    pub fn list_databases_typed(&self, pattern: Option<&str>) -> Result<Vec<Database>> {
+        let rows = self.list_databases_with_pattern(pattern)?.collect()?;
+        Ok(rows.iter().map(parse_database).collect())
+    }
+
+    /// Typed `getDatabase` -> `Database`.
+    pub fn get_database_typed(&self, db_name: &str) -> Result<Database> {
+        let rows = self.get_database(db_name)?.collect()?;
+        rows.first()
+            .map(parse_database)
+            .ok_or_else(|| SparkError::connect_msg("getDatabase returned no result"))
+    }
+
+    /// Typed `listTables` -> `Vec<Table>`.
+    pub fn list_tables_typed(&self, db_name: Option<&str>, pattern: Option<&str>) -> Result<Vec<Table>> {
+        let rows = self.list_tables_with_pattern(db_name, pattern)?.collect()?;
+        Ok(rows.iter().map(parse_table).collect())
+    }
+
+    /// Typed `getTable` -> `Table`.
+    pub fn get_table_typed(&self, table_name: &str) -> Result<Table> {
+        let rows = self.get_table(table_name)?.collect()?;
+        rows.first()
+            .map(parse_table)
+            .ok_or_else(|| SparkError::connect_msg("getTable returned no result"))
+    }
+
+    /// Typed `listFunctions` -> `Vec<Function>`.
+    pub fn list_functions_typed(&self, db_name: Option<&str>, pattern: Option<&str>) -> Result<Vec<Function>> {
+        let rows = self.list_functions_with_pattern(db_name, pattern)?.collect()?;
+        Ok(rows.iter().map(parse_function).collect())
+    }
+
+    /// Typed `getFunction` -> `Function`.
+    pub fn get_function_typed(&self, function_name: &str) -> Result<Function> {
+        let rows = self.get_function(function_name)?.collect()?;
+        rows.first()
+            .map(parse_function)
+            .ok_or_else(|| SparkError::connect_msg("getFunction returned no result"))
+    }
+
+    /// Typed `listColumns` -> `Vec<Column>`.
+    pub fn list_columns_typed(&self, table_name: &str, db_name: Option<&str>) -> Result<Vec<Column>> {
+        let rows = self.list_columns_with_database(table_name, db_name)?.collect()?;
+        Ok(rows
+            .iter()
+            .map(|r| Column {
+                name: row_str(r, 0),
+                description: row_opt_str(r, 1),
+                data_type: row_str(r, 2),
+                nullable: row_bool(r, 3),
+                is_partition: row_bool(r, 4),
+                is_bucket: row_bool(r, 5),
+                is_cluster: row_bool(r, 6),
+            })
+            .collect())
+    }
+
+    /// Typed `listPartitions` -> `Vec<TablePartition>`.
+    pub fn list_partitions_typed(&self, table_name: &str) -> Result<Vec<TablePartition>> {
+        let rows = self.list_partitions(table_name)?.collect()?;
+        Ok(rows
+            .iter()
+            .map(|r| TablePartition {
+                partition: row_str(r, 0),
+            })
+            .collect())
+    }
+
+    /// Typed `listViews` -> `Vec<Table>` (views share the Table result shape).
+    pub fn list_views_typed(&self, db_name: Option<&str>, pattern: Option<&str>) -> Result<Vec<Table>> {
+        let rows = self.list_views(db_name, pattern)?.collect()?;
+        Ok(rows.iter().map(parse_table).collect())
+    }
+
     fn execute_catalog(&self, catalog: &proto::Catalog) -> Result<Vec<Row>> {
         let request = self.build_execute_catalog_request(catalog)?;
         let mut stream = block_on(self.session.client().execute_plan(request))?;

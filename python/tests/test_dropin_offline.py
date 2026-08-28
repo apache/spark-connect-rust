@@ -465,6 +465,19 @@ def test_udf_udtf_determinism_and_extras():
     assert T.StructField.fromDDL("b: string").simpleString() == "b:string"
 
 
+def test_catalog_result_classes():
+    # The catalog metadata result classes are Rust-backed and importable; the Table
+    # `database` property derives from a single-element namespace.
+    from pyspark.sql.catalog import (
+        Catalog, CatalogMetadata, Database, Table, Column, Function, TablePartition,
+    )
+    import pyspark._pyspark as p
+    # Rust-backed (defined in the extension module).
+    for cls in (CatalogMetadata, Database, Table, Function, TablePartition):
+        assert cls.__module__ == "builtins", f"{cls.__name__} should be Rust-backed"
+    assert Column is p.CatalogColumn
+
+
 def test_reexport_paths():
     from pyspark import StorageLevel
     assert StorageLevel.MEMORY_ONLY is not None
