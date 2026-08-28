@@ -14,6 +14,7 @@ use spark_connect_proto as proto;
 /// Supports partitioning, ordering, and single-partition modes.
 /// Mirrors `pyspark.sql.connect.table_arg.TableArg`.
 #[allow(dead_code)]
+#[derive(Clone)]
 pub struct TableArg {
     /// The underlying DataFrame/plan
     plan: LogicalPlan,

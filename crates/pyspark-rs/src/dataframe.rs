@@ -56,7 +56,9 @@ impl PyDataFrame {
 }
 
 /// Helper to convert arguments to a vector of Columns.
-fn to_column_list(_args: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<spark_connect::column::Column>> {
+pub(crate) fn to_column_list(
+    _args: Vec<Bound<'_, PyAny>>,
+) -> PyResult<Vec<spark_connect::column::Column>> {
     let mut cols = vec![];
     for arg in _args {
         // Try as PyColumn first
@@ -925,10 +927,13 @@ impl PyDataFrame {
         }
     }
 
-    /// Convert to a table alias for use as a table argument.
+    /// Return a `TableArg` wrapping this DataFrame, for use as a table-valued function
+    /// argument. Mirrors `DataFrame.asTable()`.
     #[pyo3(name = "asTable")]
-    fn as_table(&self, alias: &str) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.as_table(alias))
+    fn as_table(&self) -> crate::tablearg::PyTableArg {
+        crate::tablearg::PyTableArg::new(spark_connect::table_arg::TableArg::new(
+            self.dataframe.clone(),
+        ))
     }
 
     /// Deprecated alias for dropDuplicates.

@@ -509,6 +509,13 @@ def test_catalog_result_classes():
     assert Column is p.CatalogColumn
 
 
+def test_table_arg_class():
+    import pyspark._pyspark as p
+    assert hasattr(p, "TableArg")
+    for m in ("partitionBy", "orderBy", "withSinglePartition"):
+        assert hasattr(p.TableArg, m)
+
+
 def test_python_eval_type_constants():
     from pyspark.util import PythonEvalType
     assert PythonEvalType.SQL_BATCHED_UDF == 100
