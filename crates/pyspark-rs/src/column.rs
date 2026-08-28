@@ -313,13 +313,14 @@ impl PyColumn {
         PyColumn::new(self.column.clone().over(window_spec.spec.clone()))
     }
 
-    /// String representation.
+    /// String representation, mirroring `pyspark.sql.connect.column.Column.__repr__`
+    /// (`Column<'<expr>'>`). pandas-on-Spark's `spark_column_equals` relies on this.
     fn __repr__(&self) -> String {
-        "Column()".to_string()
+        format!("Column<'{}'>", self.column.expression().render())
     }
 
     fn __str__(&self) -> String {
-        "Column()".to_string()
+        self.__repr__()
     }
 
     // --- reverse arithmetic/logical dunders (operand order swapped) ---

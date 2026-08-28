@@ -64,6 +64,68 @@ pub enum Expression {
 }
 
 impl Expression {
+    /// Render this expression to a human-readable string, mirroring the
+    /// `__repr__` of `pyspark.sql.connect.expressions.*`.
+    ///
+    /// This is what `Column.__repr__` wraps as `Column<'...'>`. pandas-on-Spark's
+    /// `spark_column_equals` compares these strings (after stripping backticks) to
+    /// decide column equality, so the rendering must be deterministic and mirror
+    /// PySpark's format for the common operators.
+    pub fn render(&self) -> String {
+        match self {
+            Expression::Literal(lit) => lit.render(),
+            Expression::ColumnReference(col_ref) => col_ref.name.clone(),
+            Expression::UnresolvedFunction(func) => func.render(),
+            Expression::UnresolvedStar(target) => match target {
+                Some(t) => t.clone(),
+                None => "*".to_string(),
+            },
+            Expression::Alias(alias) => {
+                let name = if alias.names.len() == 1 {
+                    alias.names[0].clone()
+                } else {
+                    format!("({})", alias.names.join(", "))
+                };
+                format!("{} AS {}", alias.child.render(), name)
+            }
+            Expression::Cast(cast) => {
+                let type_str = match &cast.target {
+                    CastTarget::Type(dt) => dt.simple_string(),
+                    CastTarget::TypeStr(s) => s.clone(),
+                };
+                format!("CAST({} AS {})", cast.child.render(), type_str)
+            }
+            Expression::DirectShufflePartitionId(child) => {
+                format!("DIRECT_SHUFFLE_PARTITION_ID({})", child.render())
+            }
+            Expression::UnresolvedRegex(col_name) => col_name.clone(),
+            Expression::SortOrder(sort) => sort.render(),
+            Expression::CaseWhen(case_when) => case_when.render(),
+            Expression::UnresolvedExtractValue(ev) => {
+                format!("{}[{}]", ev.child.render(), ev.extraction.render())
+            }
+            Expression::UpdateFields(uf) => match &uf.value_expression {
+                Some(v) => format!(
+                    "update_field({}, {}, {})",
+                    uf.struct_expression.render(),
+                    uf.field_name,
+                    v.render()
+                ),
+                None => format!(
+                    "drop_field({}, {})",
+                    uf.struct_expression.render(),
+                    uf.field_name
+                ),
+            },
+            Expression::SQLExpression(sql) => sql.clone(),
+            Expression::CallFunction(_) => format!("{self:?}"),
+            Expression::WindowExpression(_) => format!("{self:?}"),
+            Expression::LambdaFunction(lf) => format!("{lf:?}"),
+            Expression::UnresolvedNamedLambdaVariable(var) => format!("{var:?}"),
+            Expression::CommonInlineUserDefinedFunction(_) => format!("{self:?}"),
+        }
+    }
+
     /// Converts the expression to a Spark Connect protobuf expression.
     pub fn to_proto(&self) -> proto::Expression {
         match self {
@@ -223,6 +285,36 @@ impl LiteralExpression {
         literal.literal_type = Some(literal_type);
         expr.expr_type = Some(proto::expression::ExprType::Literal(literal));
         expr
+    }
+
+    /// Render the literal value, mirroring `LiteralExpression.__repr__`.
+    pub fn render(&self) -> String {
+        match self {
+            LiteralExpression::Null(_) => "NULL".to_string(),
+            LiteralExpression::Boolean(b) => {
+                if *b {
+                    "true".to_string()
+                } else {
+                    "false".to_string()
+                }
+            }
+            LiteralExpression::Byte(v)
+            | LiteralExpression::Short(v)
+            | LiteralExpression::Integer(v) => v.to_string(),
+            LiteralExpression::Long(v) => v.to_string(),
+            LiteralExpression::Float(v) => v.to_string(),
+            LiteralExpression::Double(v) => v.to_string(),
+            LiteralExpression::Decimal { value, .. } => value.clone(),
+            LiteralExpression::String(v) => v.clone(),
+            LiteralExpression::Binary(v) => format!("{v:?}"),
+            LiteralExpression::Date(v) => v.to_string(),
+            LiteralExpression::Timestamp(v) | LiteralExpression::TimestampNtz(v) => v.to_string(),
+            LiteralExpression::Time { nano, .. } => nano.to_string(),
+            LiteralExpression::Array { elements, .. } => {
+                let inner: Vec<String> = elements.iter().map(|e| e.render()).collect();
+                format!("[{}]", inner.join(", "))
+            }
+        }
     }
 
     /// Construct a null literal of a specific type.
@@ -398,6 +490,33 @@ impl UnresolvedFunction {
         }
     }
 
+    /// Render this function call, mirroring `UnresolvedFunction.__repr__`:
+    /// binary operators render infix as `(a op b)`, the unary `not`/negate render
+    /// prefixed, everything else as `name(arg, arg, ...)`.
+    pub fn render(&self) -> String {
+        const INFIX_OPS: &[&str] = &[
+            "+", "-", "*", "/", "%", "==", "!=", "<", "<=", ">", ">=", "and", "or", "&", "|", "^",
+            "<=>",
+        ];
+        if self.args.len() == 2 && INFIX_OPS.contains(&self.name.as_str()) {
+            return format!(
+                "({} {} {})",
+                self.args[0].render(),
+                self.name,
+                self.args[1].render()
+            );
+        }
+        if self.args.len() == 1 {
+            match self.name.as_str() {
+                "not" => return format!("(NOT {})", self.args[0].render()),
+                "negative" | "negate" => return format!("(- {})", self.args[0].render()),
+                _ => {}
+            }
+        }
+        let inner: Vec<String> = self.args.iter().map(|a| a.render()).collect();
+        format!("{}({})", self.name, inner.join(", "))
+    }
+
     pub fn to_proto(&self) -> proto::Expression {
         let mut expr = proto::Expression::default();
         let mut func = proto::expression::UnresolvedFunction::default();
@@ -530,6 +649,16 @@ pub enum NullOrdering {
 }
 
 impl SortOrder {
+    /// Render this sort order, mirroring `SortOrder.__repr__`.
+    pub fn render(&self) -> String {
+        let dir = if self.ascending { "ASC" } else { "DESC" };
+        let nulls = match self.null_ordering {
+            NullOrdering::First => "NULLS FIRST",
+            NullOrdering::Last => "NULLS LAST",
+        };
+        format!("{} {} {}", self.child.render(), dir, nulls)
+    }
+
     pub fn asc_nulls_first(child: Expression) -> Self {
         Self {
             child,
@@ -594,6 +723,19 @@ impl CaseWhen {
     pub fn with_else(mut self, else_expr: Expression) -> Self {
         self.else_expr = Some(Box::new(else_expr));
         self
+    }
+
+    /// Render this CASE WHEN, mirroring `CaseWhen.__repr__`.
+    pub fn render(&self) -> String {
+        let mut parts = vec!["CASE".to_string()];
+        for (cond, value) in &self.branches {
+            parts.push(format!("WHEN {} THEN {}", cond.render(), value.render()));
+        }
+        if let Some(else_expr) = &self.else_expr {
+            parts.push(format!("ELSE {}", else_expr.render()));
+        }
+        parts.push("END".to_string());
+        parts.join(" ")
     }
 
     pub fn to_proto(&self) -> proto::Expression {
@@ -812,6 +954,67 @@ impl UnresolvedNamedLambdaVariable {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn col(name: &str) -> Expression {
+        Expression::ColumnReference(ColumnReference::new(name))
+    }
+
+    #[test]
+    fn test_render_matches_pyspark_connect_format() {
+        // Column reference and literal.
+        assert_eq!(col("x").render(), "x");
+        assert_eq!(
+            Expression::Literal(LiteralExpression::Integer(0)).render(),
+            "0"
+        );
+        assert_eq!(
+            Expression::Literal(LiteralExpression::null(DataType::Integer)).render(),
+            "NULL"
+        );
+
+        // Binary operators render infix, mirroring UnresolvedFunction.__repr__.
+        let add = Expression::UnresolvedFunction(UnresolvedFunction::new(
+            "+",
+            vec![col("x"), Expression::Literal(LiteralExpression::Integer(1))],
+        ));
+        assert_eq!(add.render(), "(x + 1)");
+
+        let eq =
+            Expression::UnresolvedFunction(UnresolvedFunction::new("==", vec![col("a"), col("b")]));
+        assert_eq!(eq.render(), "(a == b)");
+
+        // Unary not.
+        let neq = Expression::UnresolvedFunction(UnresolvedFunction::new("not", vec![eq.clone()]));
+        assert_eq!(neq.render(), "(NOT (a == b))");
+
+        // Non-operator function renders as name(args).
+        let f = Expression::UnresolvedFunction(UnresolvedFunction::new(
+            "coalesce",
+            vec![col("a"), col("b")],
+        ));
+        assert_eq!(f.render(), "coalesce(a, b)");
+
+        // Alias, cast, star.
+        assert_eq!(
+            Expression::Alias(Box::new(Alias::new(col("x"), "y"))).render(),
+            "x AS y"
+        );
+        assert_eq!(
+            Expression::Cast(Box::new(Cast {
+                child: col("x"),
+                target: CastTarget::TypeStr("int".to_string()),
+                eval_mode: None,
+            }))
+            .render(),
+            "CAST(x AS int)"
+        );
+        assert_eq!(Expression::UnresolvedStar(None).render(), "*");
+
+        // Equal expressions render identically; different ones differ
+        // (the property spark_column_equals relies on).
+        assert_eq!(add.render(), add.render());
+        assert_ne!(add.render(), eq.render());
+    }
 
     #[test]
     fn test_literal_integer() {

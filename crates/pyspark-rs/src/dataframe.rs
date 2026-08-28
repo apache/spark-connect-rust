@@ -57,8 +57,18 @@ impl PyDataFrame {
 
 /// Helper to convert arguments to a vector of Columns.
 pub(crate) fn to_column_list(
-    _args: Vec<Bound<'_, PyAny>>,
+    mut _args: Vec<Bound<'_, PyAny>>,
 ) -> PyResult<Vec<spark_connect::column::Column>> {
+    // pyspark unpacks a single list/tuple argument: df.select(["a", "b"]) == df.select("a","b").
+    // (A single Column/str stays as-is.)
+    if _args.len() == 1 {
+        let only = &_args[0];
+        if only.is_instance_of::<pyo3::types::PyList>()
+            || only.is_instance_of::<pyo3::types::PyTuple>()
+        {
+            _args = only.try_iter()?.collect::<PyResult<Vec<_>>>()?;
+        }
+    }
     let mut cols = vec![];
     for arg in _args {
         // Try as PyColumn first
@@ -1102,6 +1112,18 @@ impl PyDataFrame {
         let table = self.to_arrow(py)?;
         let df = table.bind(py).call_method0("to_pandas")?;
         Ok(df.unbind())
+    }
+
+    /// Internal Arrow-based pandas conversion used by pandas-on-Spark
+    /// (`pyspark.sql.connect.dataframe.DataFrame._to_pandas`). Accepts and ignores
+    /// keyword options such as `pandasStructHandlingMode`; delegates to `toPandas`.
+    #[pyo3(signature = (**_kwargs))]
+    fn _to_pandas(
+        &self,
+        py: Python<'_>,
+        _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.toPandas(py)
     }
 
     /// Get the count of rows.
