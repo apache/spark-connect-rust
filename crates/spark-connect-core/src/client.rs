@@ -105,7 +105,11 @@ impl SparkConnectClient {
 
         let stub = SparkConnectServiceClient::new(channel.clone());
 
-        let metadata = builder.metadata().into_iter().collect();
+        let metadata = builder
+            .metadata()
+            .into_iter()
+            .map(|(k, v)| (k, v))
+            .collect();
 
         Ok(Self {
             channel,
@@ -164,7 +168,7 @@ impl SparkConnectClient {
         self._attach_metadata(&mut req);
         let resp = self.stub.clone().execute_plan(req).await;
         resp.map(Response::into_inner)
-            .map_err(SparkError::from_grpc_status)
+            .map_err(|status| SparkError::from_grpc_status(status))
     }
 
     /// Execute a plan, forwarding raw request bytes and returning a raw response stream.
@@ -214,7 +218,7 @@ impl SparkConnectClient {
         self._attach_metadata(&mut req);
         let resp = self.stub.clone().reattach_execute(req).await;
         resp.map(Response::into_inner)
-            .map_err(SparkError::from_grpc_status)
+            .map_err(|status| SparkError::from_grpc_status(status))
     }
 
     /// Release a (portion of a) running execution's response stream.
@@ -228,7 +232,7 @@ impl SparkConnectClient {
         self._attach_metadata(&mut req);
         let resp = self.stub.clone().release_execute(req).await;
         resp.map(Response::into_inner)
-            .map_err(SparkError::from_grpc_status)
+            .map_err(|status| SparkError::from_grpc_status(status))
     }
 
     /// Analyze a plan, forwarding the raw request bytes without decoding them.
@@ -337,7 +341,7 @@ impl SparkConnectClient {
         self._attach_metadata(&mut req);
         let resp = self.stub.clone().fetch_error_details(req).await;
         resp.map(Response::into_inner)
-            .map_err(SparkError::from_grpc_status)
+            .map_err(|status| SparkError::from_grpc_status(status))
     }
 
     /// Update or fetch configurations.
@@ -627,7 +631,8 @@ impl SparkConnectClient {
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
         let resp = self.stub.clone().release_session(req).await;
-        resp.map(|_| ()).map_err(SparkError::from_grpc_status)
+        resp.map(|_| ())
+            .map_err(|status| SparkError::from_grpc_status(status))
     }
 
     /// Add artifacts to this session.
@@ -706,7 +711,7 @@ impl SparkConnectClient {
             .clone()
             .add_artifacts(req)
             .await
-            .map_err(SparkError::from_grpc_status)?
+            .map_err(|e| SparkError::from_grpc_status(e))?
             .into_inner();
 
         // Check that all artifacts were successfully received
@@ -741,7 +746,7 @@ impl SparkConnectClient {
             .clone()
             .add_artifacts(req)
             .await
-            .map_err(SparkError::from_grpc_status)?
+            .map_err(|e| SparkError::from_grpc_status(e))?
             .into_inner();
         for summary in response.artifacts {
             if !summary.is_crc_successful {
@@ -776,7 +781,7 @@ impl SparkConnectClient {
             .clone()
             .artifact_status(req)
             .await
-            .map_err(SparkError::from_grpc_status)?
+            .map_err(|e| SparkError::from_grpc_status(e))?
             .into_inner();
 
         // Build map of artifact name -> exists status
@@ -933,7 +938,7 @@ mod tests {
     async fn test_metadata_headers() {
         let builder = ChannelBuilder::parse("sc://localhost/;custom_header=custom_value").unwrap();
         let client = SparkConnectClient::connect(&builder).await.unwrap();
-        assert!(client.user_agent.contains("spark/"));
+        assert_eq!(client.user_agent.contains("spark/"), true);
     }
 
     #[test]

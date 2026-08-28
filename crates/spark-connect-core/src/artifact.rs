@@ -5,8 +5,6 @@
 //! computes CRC32 per artifact, and supports the artifact_status flow for checking
 //! cached artifacts.
 
-#![allow(clippy::result_large_err)] // SparkError is large; changing the type would break the API
-
 use bytes::Bytes;
 use crc32fast::Hasher;
 use std::io::{Cursor, Read};
@@ -185,7 +183,7 @@ fn build_chunked_artifact_requests(
 ) -> Result<Vec<AddArtifactsRequest>> {
     let mut requests = Vec::new();
     let total_size = artifact.data.size()? as i64;
-    let num_chunks = (total_size as usize).div_ceil(CHUNK_SIZE);
+    let num_chunks = (total_size as usize + CHUNK_SIZE - 1) / CHUNK_SIZE;
 
     let mut stream = artifact.data.stream()?;
     let mut first_chunk = true;

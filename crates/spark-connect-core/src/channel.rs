@@ -5,8 +5,6 @@
 //! reproduces CPython's `urllib.parse.urlparse` semantics for the `params`
 //! component (the segment after the first `;` following the last `/`).
 
-#![allow(clippy::result_large_err)] // SparkError is large; changing the type would break the API
-
 use std::collections::BTreeMap;
 
 use crate::error::{Result, SparkError};
@@ -256,7 +254,7 @@ impl ChannelBuilder {
 /// CPython `urllib.parse._splitparams`: params begin at the first `;` at or
 /// after the last `/`; if there is no `/`, at the first `;` anywhere.
 fn split_params(path: &str) -> (&str, &str) {
-    let search_from = path.rfind('/');
+    let search_from = path.rfind('/').map(|i| i + 0);
     let semi = match search_from {
         Some(last_slash) => path[last_slash..].find(';').map(|i| last_slash + i),
         None => path.find(';'),
