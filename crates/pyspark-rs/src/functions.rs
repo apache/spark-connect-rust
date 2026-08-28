@@ -116,16 +116,10 @@ pub fn register_functions(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<
     m.add_function(wrap_pyfunction!(pyfunc_call_function, m)?)?;
     m.add_function(wrap_pyfunction!(pyfunc_make_udf, m)?)?;
     m.add_function(wrap_pyfunction!(pyfunc_make_udtf, m)?)?;
-    m.add_function(wrap_pyfunction!(pyfunc_transform, m)?)?;
-    m.add_function(wrap_pyfunction!(pyfunc_filter, m)?)?;
-    m.add_function(wrap_pyfunction!(pyfunc_exists, m)?)?;
-    m.add_function(wrap_pyfunction!(pyfunc_forall, m)?)?;
-    m.add_function(wrap_pyfunction!(pyfunc_aggregate, m)?)?;
-    m.add_function(wrap_pyfunction!(pyfunc_zip_with, m)?)?;
-    m.add_function(wrap_pyfunction!(pyfunc_transform_keys, m)?)?;
-    m.add_function(wrap_pyfunction!(pyfunc_transform_values, m)?)?;
-    m.add_function(wrap_pyfunction!(pyfunc_map_filter, m)?)?;
-    m.add_function(wrap_pyfunction!(pyfunc_map_zip_with, m)?)?;
+    m.add_function(wrap_pyfunction!(pyfunc_named_lambda_variable, m)?)?;
+    m.add_function(wrap_pyfunction!(pyfunc_lambda_function, m)?)?;
+    m.add_function(wrap_pyfunction!(pyfunc_call_named_function, m)?)?;
+    m.add_function(wrap_pyfunction!(pyfunc_invoke_function, m)?)?;
     m.add_function(wrap_pyfunction!(pyfunc_sha2, m)?)?;
     m.add_function(wrap_pyfunction!(pyfunc_window, m)?)?;
     m.add_function(wrap_pyfunction!(pyfunc_window_with_slide_and_start, m)?)?;
@@ -263,221 +257,71 @@ fn pyfunc_call_function(name: String, args: Vec<Bound<'_, PyAny>>) -> PyResult<P
 }
 
 // ============================================================================
-// Higher-Order Functions (HOF)
+// Higher-Order Function (HOF) primitives
+//
+// The lambda machinery mirrors pyspark.sql.connect.functions._create_lambda /
+// _invoke_higher_order_function: the Python wrapper (functions.py) generates fresh
+// variable names, builds placeholder Columns via `pyfunc_named_lambda_variable`,
+// invokes the user's lambda to obtain the body Column, then wraps it with
+// `pyfunc_lambda_function` and passes it as an argument to `pyfunc_call_function`.
 // ============================================================================
 
-use spark_connect::expression::{LambdaFunction, UnresolvedNamedLambdaVariable};
+use spark_connect::expression::{
+    CallFunctionWrapper, LambdaFunction, UnresolvedNamedLambdaVariable,
+};
 
-/// Wrapper for transform(col, lambda) - accepts a body Column as-is (already built by Python wrapper).
+/// Build a Column wrapping an `UnresolvedNamedLambdaVariable` with the given name.
+/// Mirrors `UnresolvedNamedLambdaVariable([name])` on the Python side.
 #[pyfunction]
-fn pyfunc_transform(col: &PyColumn, body_col: &PyColumn) -> PyColumn {
-    let lambda = LambdaFunction::new(
-        body_col.column.expression().clone(),
-        vec![UnresolvedNamedLambdaVariable::new("x")],
-    );
-    let result = Column::new(Expression::UnresolvedFunction(
-        spark_connect::expression::UnresolvedFunction::new(
-            "transform",
-            vec![
-                col.column.expression().clone(),
-                Expression::LambdaFunction(Box::new(lambda)),
-            ],
-        ),
-    ));
-    PyColumn::new(result)
+fn pyfunc_named_lambda_variable(name: String) -> PyColumn {
+    PyColumn::new(Column::new(Expression::UnresolvedNamedLambdaVariable(
+        UnresolvedNamedLambdaVariable::new(name),
+    )))
 }
 
-/// Wrapper for filter(col, lambda).
+/// Build a Column wrapping a `LambdaFunction` from a body Column and its argument
+/// variable names. Mirrors `LambdaFunction(body._expr, arg_exprs)`.
 #[pyfunction]
-fn pyfunc_filter(col: &PyColumn, body_col: &PyColumn) -> PyColumn {
-    let lambda = LambdaFunction::new(
-        body_col.column.expression().clone(),
-        vec![UnresolvedNamedLambdaVariable::new("x")],
-    );
-    let result = Column::new(Expression::UnresolvedFunction(
-        spark_connect::expression::UnresolvedFunction::new(
-            "filter",
-            vec![
-                col.column.expression().clone(),
-                Expression::LambdaFunction(Box::new(lambda)),
-            ],
-        ),
-    ));
-    PyColumn::new(result)
+fn pyfunc_lambda_function(body: &PyColumn, arg_names: Vec<String>) -> PyColumn {
+    let args = arg_names
+        .into_iter()
+        .map(UnresolvedNamedLambdaVariable::new)
+        .collect();
+    let lambda = LambdaFunction::new(body.column.expression().clone(), args);
+    PyColumn::new(Column::new(Expression::LambdaFunction(Box::new(lambda))))
 }
 
-/// Wrapper for exists(col, lambda).
+/// Build a Column wrapping a `CallFunction` expression (a named function call
+/// carrying its argument columns). Mirrors `functions.call_function`.
 #[pyfunction]
-fn pyfunc_exists(col: &PyColumn, body_col: &PyColumn) -> PyColumn {
-    let lambda = LambdaFunction::new(
-        body_col.column.expression().clone(),
-        vec![UnresolvedNamedLambdaVariable::new("x")],
-    );
-    let result = Column::new(Expression::UnresolvedFunction(
-        spark_connect::expression::UnresolvedFunction::new(
-            "exists",
-            vec![
-                col.column.expression().clone(),
-                Expression::LambdaFunction(Box::new(lambda)),
-            ],
-        ),
-    ));
-    PyColumn::new(result)
+#[pyo3(signature = (name, *args))]
+fn pyfunc_call_named_function(name: String, args: Vec<Bound<'_, PyAny>>) -> PyResult<PyColumn> {
+    let mut arg_exprs = Vec::with_capacity(args.len());
+    for arg in args {
+        arg_exprs.push(to_column(&arg)?.expression().clone());
+    }
+    let result = Column::new(Expression::CallFunction(Box::new(CallFunctionWrapper::new(
+        name, arg_exprs,
+    ))));
+    Ok(PyColumn::new(result))
 }
 
-/// Wrapper for forall(col, lambda).
+/// Build a Column wrapping an `UnresolvedFunction` for ANY name, unconditionally
+/// (not gated by the builtin dispatch allowlist). Mirrors
+/// `pyspark.sql.connect.functions._invoke_function(name, *args)` — used for
+/// higher-order functions, `call_udf`, and functions like `cume_dist` that are
+/// not part of the generated dispatch.
 #[pyfunction]
-fn pyfunc_forall(col: &PyColumn, body_col: &PyColumn) -> PyColumn {
-    let lambda = LambdaFunction::new(
-        body_col.column.expression().clone(),
-        vec![UnresolvedNamedLambdaVariable::new("x")],
-    );
+#[pyo3(signature = (name, *args))]
+fn pyfunc_invoke_function(name: String, args: Vec<Bound<'_, PyAny>>) -> PyResult<PyColumn> {
+    let mut arg_exprs = Vec::with_capacity(args.len());
+    for arg in args {
+        arg_exprs.push(to_column(&arg)?.expression().clone());
+    }
     let result = Column::new(Expression::UnresolvedFunction(
-        spark_connect::expression::UnresolvedFunction::new(
-            "forall",
-            vec![
-                col.column.expression().clone(),
-                Expression::LambdaFunction(Box::new(lambda)),
-            ],
-        ),
+        spark_connect::expression::UnresolvedFunction::new(name, arg_exprs),
     ));
-    PyColumn::new(result)
-}
-
-/// Wrapper for aggregate(col, init, lambda).
-#[pyfunction]
-fn pyfunc_aggregate(col: &PyColumn, init: &PyColumn, body_col: &PyColumn) -> PyColumn {
-    let lambda = LambdaFunction::new(
-        body_col.column.expression().clone(),
-        vec![
-            UnresolvedNamedLambdaVariable::new("acc"),
-            UnresolvedNamedLambdaVariable::new("x"),
-        ],
-    );
-    let result = Column::new(Expression::UnresolvedFunction(
-        spark_connect::expression::UnresolvedFunction::new(
-            "aggregate",
-            vec![
-                col.column.expression().clone(),
-                init.column.expression().clone(),
-                Expression::LambdaFunction(Box::new(lambda)),
-            ],
-        ),
-    ));
-    PyColumn::new(result)
-}
-
-/// Wrapper for zip_with(col1, col2, lambda).
-#[pyfunction]
-fn pyfunc_zip_with(col1: &PyColumn, col2: &PyColumn, body_col: &PyColumn) -> PyColumn {
-    let lambda = LambdaFunction::new(
-        body_col.column.expression().clone(),
-        vec![
-            UnresolvedNamedLambdaVariable::new("x"),
-            UnresolvedNamedLambdaVariable::new("y"),
-        ],
-    );
-    let result = Column::new(Expression::UnresolvedFunction(
-        spark_connect::expression::UnresolvedFunction::new(
-            "zip_with",
-            vec![
-                col1.column.expression().clone(),
-                col2.column.expression().clone(),
-                Expression::LambdaFunction(Box::new(lambda)),
-            ],
-        ),
-    ));
-    PyColumn::new(result)
-}
-
-/// Wrapper for transform_keys(col, lambda).
-#[pyfunction]
-fn pyfunc_transform_keys(col: &PyColumn, body_col: &PyColumn) -> PyColumn {
-    let lambda = LambdaFunction::new(
-        body_col.column.expression().clone(),
-        vec![
-            UnresolvedNamedLambdaVariable::new("k"),
-            UnresolvedNamedLambdaVariable::new("v"),
-        ],
-    );
-    let result = Column::new(Expression::UnresolvedFunction(
-        spark_connect::expression::UnresolvedFunction::new(
-            "transform_keys",
-            vec![
-                col.column.expression().clone(),
-                Expression::LambdaFunction(Box::new(lambda)),
-            ],
-        ),
-    ));
-    PyColumn::new(result)
-}
-
-/// Wrapper for transform_values(col, lambda).
-#[pyfunction]
-fn pyfunc_transform_values(col: &PyColumn, body_col: &PyColumn) -> PyColumn {
-    let lambda = LambdaFunction::new(
-        body_col.column.expression().clone(),
-        vec![
-            UnresolvedNamedLambdaVariable::new("k"),
-            UnresolvedNamedLambdaVariable::new("v"),
-        ],
-    );
-    let result = Column::new(Expression::UnresolvedFunction(
-        spark_connect::expression::UnresolvedFunction::new(
-            "transform_values",
-            vec![
-                col.column.expression().clone(),
-                Expression::LambdaFunction(Box::new(lambda)),
-            ],
-        ),
-    ));
-    PyColumn::new(result)
-}
-
-/// Wrapper for map_filter(col, lambda).
-#[pyfunction]
-fn pyfunc_map_filter(col: &PyColumn, body_col: &PyColumn) -> PyColumn {
-    let lambda = LambdaFunction::new(
-        body_col.column.expression().clone(),
-        vec![
-            UnresolvedNamedLambdaVariable::new("k"),
-            UnresolvedNamedLambdaVariable::new("v"),
-        ],
-    );
-    let result = Column::new(Expression::UnresolvedFunction(
-        spark_connect::expression::UnresolvedFunction::new(
-            "map_filter",
-            vec![
-                col.column.expression().clone(),
-                Expression::LambdaFunction(Box::new(lambda)),
-            ],
-        ),
-    ));
-    PyColumn::new(result)
-}
-
-/// Wrapper for map_zip_with(col1, col2, lambda).
-#[pyfunction]
-fn pyfunc_map_zip_with(col1: &PyColumn, col2: &PyColumn, body_col: &PyColumn) -> PyColumn {
-    let lambda = LambdaFunction::new(
-        body_col.column.expression().clone(),
-        vec![
-            UnresolvedNamedLambdaVariable::new("k"),
-            UnresolvedNamedLambdaVariable::new("v1"),
-            UnresolvedNamedLambdaVariable::new("v2"),
-        ],
-    );
-    let result = Column::new(Expression::UnresolvedFunction(
-        spark_connect::expression::UnresolvedFunction::new(
-            "map_zip_with",
-            vec![
-                col1.column.expression().clone(),
-                col2.column.expression().clone(),
-                Expression::LambdaFunction(Box::new(lambda)),
-            ],
-        ),
-    ));
-    PyColumn::new(result)
+    Ok(PyColumn::new(result))
 }
 
 // ============================================================================

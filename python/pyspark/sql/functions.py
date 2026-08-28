@@ -229,6 +229,158 @@ for name in dir(_gen_module):
     if not name.startswith('_'):
         globals()[name] = getattr(_gen_module, name)
 
+# ---------------------------------------------------------------------------
+# Higher-order functions.
+#
+# Mirrors pyspark.sql.connect.functions._get_lambda_parameters / _create_lambda /
+# _invoke_higher_order_function exactly: a monotonic counter yields fresh variable
+# names (``x_0``, ``y_1`` ...), placeholder Columns wrap UnresolvedNamedLambdaVariable,
+# the user's callable is invoked to build the body, and the resulting LambdaFunction
+# is passed as an argument to an UnresolvedFunction call. Defined AFTER the generated
+# import so they take precedence over any generic wrapper.
+# ---------------------------------------------------------------------------
+import inspect as _inspect
+from pyspark.errors import PySparkValueError as _PySparkValueError
+
+_named_lambda_variable = _functions.pyfunc_named_lambda_variable
+_lambda_function = _functions.pyfunc_lambda_function
+_call_named_function = _functions.pyfunc_call_named_function
+# Generic UnresolvedFunction invoker for ANY name (not gated by the builtin
+# dispatch allowlist). Mirrors pyspark.sql.connect.functions._invoke_function.
+_invoke_function = _functions.pyfunc_invoke_function
+
+# Global monotonic counter, mirroring UnresolvedNamedLambdaVariable._nextVarNameId.
+_lambda_var_name_id = [0]
+
+
+def _fresh_lambda_var_name(name):
+    _id = _lambda_var_name_id[0]
+    _lambda_var_name_id[0] += 1
+    return f"{name}_{_id}"
+
+
+def _get_lambda_parameters(f):
+    parameters = list(_inspect.signature(f).parameters.values())
+    supported_parameter_types = {
+        _inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        _inspect.Parameter.POSITIONAL_ONLY,
+    }
+    if not (1 <= len(parameters) <= 3):
+        raise _PySparkValueError(
+            errorClass="WRONG_NUM_ARGS_FOR_HIGHER_ORDER_FUNCTION",
+            messageParameters={"func_name": f.__name__, "num_args": str(len(parameters))},
+        )
+    if not all(p.kind in supported_parameter_types for p in parameters):
+        raise _PySparkValueError(
+            errorClass="UNSUPPORTED_PARAM_TYPE_FOR_HIGHER_ORDER_FUNCTION",
+            messageParameters={"func_name": f.__name__},
+        )
+    return parameters
+
+
+def _create_lambda(f):
+    parameters = _get_lambda_parameters(f)
+    arg_names = ["x", "y", "z"][: len(parameters)]
+    var_names = [_fresh_lambda_var_name(n) for n in arg_names]
+    arg_cols = [_named_lambda_variable(v) for v in var_names]
+    result = f(*arg_cols)
+    if not isinstance(result, _pyspark.Column):
+        raise _PySparkValueError(
+            errorClass="HIGHER_ORDER_FUNCTION_SHOULD_RETURN_COLUMN",
+            messageParameters={"func_name": f.__name__, "return_type": type(result).__name__},
+        )
+    return _lambda_function(result, var_names)
+
+
+def _invoke_higher_order_function(name, cols, funs):
+    _cols = [_to_col(c) for c in cols]
+    _funs = [_create_lambda(f) for f in funs]
+    return _invoke_function(name, *_cols, *_funs)
+
+
+def transform(col, f):
+    return _invoke_higher_order_function("transform", [col], [f])
+
+
+def exists(col, f):
+    return _invoke_higher_order_function("exists", [col], [f])
+
+
+def forall(col, f):
+    return _invoke_higher_order_function("forall", [col], [f])
+
+
+def filter(col, f):  # noqa: A001  (shadows builtin, as in official pyspark)
+    return _invoke_higher_order_function("filter", [col], [f])
+
+
+def aggregate(col, initialValue, merge, finish=None):
+    if finish is not None:
+        return _invoke_higher_order_function("aggregate", [col, initialValue], [merge, finish])
+    return _invoke_higher_order_function("aggregate", [col, initialValue], [merge])
+
+
+def reduce(col, initialValue, merge, finish=None):
+    if finish is not None:
+        return _invoke_higher_order_function("reduce", [col, initialValue], [merge, finish])
+    return _invoke_higher_order_function("reduce", [col, initialValue], [merge])
+
+
+def zip_with(left, right, f):
+    return _invoke_higher_order_function("zip_with", [left, right], [f])
+
+
+def transform_keys(col, f):
+    return _invoke_higher_order_function("transform_keys", [col], [f])
+
+
+def transform_values(col, f):
+    return _invoke_higher_order_function("transform_values", [col], [f])
+
+
+def map_filter(col, f):
+    return _invoke_higher_order_function("map_filter", [col], [f])
+
+
+def map_zip_with(col1, col2, f):
+    return _invoke_higher_order_function("map_zip_with", [col1, col2], [f])
+
+
+# Misc functions mirroring pyspark.sql.connect.functions.
+
+def cume_dist():
+    return _invoke_function("cume_dist")
+
+
+# ``column`` is an alias of ``col`` (matches pyspark.sql.functions).
+column = _pyfunc_col
+
+
+def call_udf(udfName, *cols):
+    # Mirrors _invoke_function(udfName, *cols): an UnresolvedFunction call.
+    return _invoke_function(udfName, *[_to_col(c) for c in cols])
+
+
+def call_function(funcName, *cols):
+    # Mirrors ConnectColumn(CallFunction(funcName, expressions)).
+    return _call_named_function(funcName, *[_to_col(c) for c in cols])
+
+
+def broadcast(df):
+    from pyspark.errors import PySparkTypeError
+
+    if not isinstance(df, _pyspark.DataFrame):
+        raise PySparkTypeError(
+            errorClass="NOT_EXPECTED_TYPE",
+            messageParameters={
+                "expected_type": "DataFrame",
+                "arg_name": "df",
+                "arg_type": type(df).__name__,
+            },
+        )
+    return df.hint("broadcast")
+
+
 # Build __all__ with all function names
 __all__ = [
     "col",

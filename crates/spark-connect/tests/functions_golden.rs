@@ -182,8 +182,8 @@ fn all_golden_function_cases_pass() {
         ("bround", bround(a())),
         ("btrim", btrim(a())),
         ("bucket", bucket(a(), b())),
-        ("call_function", call_function("x")),
-        ("call_udf", call_udf("x")),
+        ("call_function", call_function("x", vec![])),
+        ("call_udf", call_udf("x", vec![])),
         ("cardinality", cardinality(a())),
         ("cast", cast(a(), b())),
         ("cbrt", cbrt(a())),
@@ -733,4 +733,36 @@ fn all_golden_function_cases_pass() {
     );
     assert_eq!(total, 511, "expected exactly 511 cases, got {total}");
     println!("all {total} golden function cases passed");
+}
+
+/// `call_function` (CallFunction proto) and `call_udf` (UnresolvedFunction proto)
+/// must carry their column arguments. Regression test for the previous
+/// implementations that dropped all arguments.
+#[test]
+fn call_function_and_call_udf_carry_arguments() {
+    use proto::expression::ExprType;
+    use spark_connect::column::Column;
+    use spark_connect::expression::{ColumnReference, Expression};
+    use spark_connect::functions::{call_function, call_udf};
+
+    let a = || Column::new(Expression::ColumnReference(ColumnReference::new("a")));
+    let b = || Column::new(Expression::ColumnReference(ColumnReference::new("b")));
+
+    let cf = call_function("my_fn", vec![a(), b()]).to_proto();
+    match cf.expr_type.expect("expr_type") {
+        ExprType::CallFunction(c) => {
+            assert_eq!(c.function_name, "my_fn");
+            assert_eq!(c.arguments.len(), 2, "call_function must carry its 2 args");
+        }
+        other => panic!("expected CallFunction, got {other:?}"),
+    }
+
+    let cu = call_udf("my_udf", vec![a()]).to_proto();
+    match cu.expr_type.expect("expr_type") {
+        ExprType::UnresolvedFunction(f) => {
+            assert_eq!(f.function_name, "my_udf");
+            assert_eq!(f.arguments.len(), 1, "call_udf must carry its arg");
+        }
+        other => panic!("expected UnresolvedFunction, got {other:?}"),
+    }
 }

@@ -200,6 +200,67 @@ def test_functions_module_wrappers():
     assert type(F.to_protobuf(c, "M", options={"x": "y"})).__name__ == "Column"
 
 
+def test_higher_order_functions():
+    from pyspark.sql import functions as F
+
+    def is_col(x):
+        return type(x).__name__ == "Column"
+
+    # Every higher-order function builds a Column via the lambda machinery.
+    assert is_col(F.transform("arr", lambda x: x + 1))
+    assert is_col(F.transform("arr", lambda x, i: x + i))  # 2-arg (element, index)
+    assert is_col(F.filter("arr", lambda x: x > 0))
+    assert is_col(F.filter("arr", lambda x, i: i > 0))
+    assert is_col(F.exists("arr", lambda x: x > 0))
+    assert is_col(F.forall("arr", lambda x: x > 0))
+    assert is_col(F.aggregate("arr", F.lit(0), lambda acc, x: acc + x))
+    assert is_col(F.aggregate("arr", F.lit(0), lambda acc, x: acc + x, lambda acc: acc * 2))
+    assert is_col(F.reduce("arr", F.lit(0), lambda acc, x: acc + x))
+    assert is_col(F.zip_with("a", "b", lambda x, y: x + y))
+    assert is_col(F.transform_keys("m", lambda k, v: k))
+    assert is_col(F.transform_values("m", lambda k, v: v + 1))
+    assert is_col(F.map_filter("m", lambda k, v: v > 0))
+    assert is_col(F.map_zip_with("m1", "m2", lambda k, v1, v2: v1 + v2))
+    # Nested lambdas must get distinct fresh variable names (no collision).
+    assert is_col(F.transform("arr", lambda x: F.transform(x, lambda y: y + 1)))
+
+
+def test_higher_order_function_validation():
+    from pyspark.sql import functions as F
+    from pyspark.errors import PySparkValueError
+
+    # arity must be 1..3
+    with pytest.raises(PySparkValueError):
+        F.transform("arr", lambda: 1)
+    with pytest.raises(PySparkValueError):
+        F.transform("arr", lambda a, b, c, d: a)
+    # the lambda must return a Column
+    with pytest.raises(PySparkValueError):
+        F.transform("arr", lambda x: 123)
+
+
+def test_misc_functions():
+    from pyspark.sql import functions as F
+
+    def is_col(x):
+        return type(x).__name__ == "Column"
+
+    assert is_col(F.cume_dist())
+    assert is_col(F.column("a"))
+    assert is_col(F.call_udf("my_udf", F.col("a"), F.col("b")))
+    assert is_col(F.call_udf("my_udf", "a", "b"))  # str args coerced to columns
+    assert is_col(F.call_function("my_fn", F.col("a")))
+    assert is_col(F.call_function("my_fn", "a"))
+
+
+def test_broadcast_type_check():
+    from pyspark.sql import functions as F
+    from pyspark.errors import PySparkTypeError
+
+    with pytest.raises(PySparkTypeError):
+        F.broadcast("not a dataframe")
+
+
 def test_util_helpers():
     from pyspark import util
     assert util.is_remote_only() is True

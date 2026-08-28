@@ -97,16 +97,19 @@ pub fn cast(_col: Column, to_col: Column) -> Column {
     to_col
 }
 
-/// Mirrors `pyspark.sql.functions.call_function`.
-pub fn call_function(name: &str) -> Column {
-    Column::new(Expression::CallFunction(Box::new(
-        CallFunctionWrapper::new(name),
-    )))
+/// Mirrors `pyspark.sql.functions.call_function`: builds a `CallFunction`
+/// expression carrying the argument columns.
+pub fn call_function(name: &str, args: Vec<Column>) -> Column {
+    let arg_exprs = args.iter().map(|c| c.expression().clone()).collect();
+    Column::new(Expression::CallFunction(Box::new(CallFunctionWrapper::new(
+        name, arg_exprs,
+    ))))
 }
 
-/// Mirrors `pyspark.sql.functions.call_udf`.
-pub fn call_udf(name: &str) -> Column {
-    func(name, vec![])
+/// Mirrors `pyspark.sql.functions.call_udf` = `_invoke_function(udfName, *cols)`
+/// (an `UnresolvedFunction` call).
+pub fn call_udf(name: &str, args: Vec<Column>) -> Column {
+    func(name, args.iter().map(|c| c.expression().clone()).collect())
 }
 
 /// Mirrors `pyspark.sql.functions.asc`.

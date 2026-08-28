@@ -599,16 +599,21 @@ impl CaseWhen {
 }
 
 /// Wrapper for `spark.connect.CallFunction` protobuf message.
+///
+/// Mirrors `pyspark.sql.connect.expressions.CallFunction`: a named function call
+/// carrying its argument expressions.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CallFunctionWrapper {
     pub function_name: String,
+    pub arguments: Vec<Expression>,
 }
 
 impl CallFunctionWrapper {
-    /// Create a new CallFunctionWrapper.
-    pub fn new(function_name: impl Into<String>) -> Self {
+    /// Create a new CallFunctionWrapper with the given argument expressions.
+    pub fn new(function_name: impl Into<String>, arguments: Vec<Expression>) -> Self {
         CallFunctionWrapper {
             function_name: function_name.into(),
+            arguments,
         }
     }
 
@@ -618,7 +623,7 @@ impl CallFunctionWrapper {
         expr.expr_type = Some(proto::expression::ExprType::CallFunction(
             proto::CallFunction {
                 function_name: self.function_name.clone(),
-                arguments: vec![],
+                arguments: self.arguments.iter().map(|a| a.to_proto()).collect(),
             },
         ));
         expr
