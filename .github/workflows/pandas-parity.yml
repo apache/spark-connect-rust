@@ -101,7 +101,11 @@ jobs:
           python -m pip install --upgrade pip
           # scipy is required by the pandas-on-Spark correlation tests (corr method='spearman'/
           # 'kendall', corrwith); it is part of Apache Spark's own pandas test environment.
-          python -m pip install pytest pandas pyarrow numpy scipy grpcio grpcio-status googleapis-common-protos cloudpickle zstandard py4j pyyaml
+          # pandas is pinned < 3.0.0: Spark 4.2.0's pandas-on-Spark code targets pandas 2.x and
+          # explicitly warns that >= 3.0.0 is not yet fully supported (e.g. test_frame_loc_setitem
+          # hits an upstream pandas-3-only no-op branch). Testing the supported version, matching
+          # Apache's own pandas test environment.
+          python -m pip install pytest 'pandas>=2.2,<3.0' pyarrow numpy scipy grpcio grpcio-status googleapis-common-protos cloudpickle zstandard py4j pyyaml
 
       - name: Build the Rust extension into the skin
         # The parity diff drives both clients via PYTHONPATH (our ./python for ours,
@@ -161,10 +165,18 @@ jobs:
           SPARK_HOME="${{ steps.spark-download.outputs.SPARK_HOME }}"
           echo "Starting Connect server on ${SPARK_CONNECT_TESTING_REMOTE}"
           # Give the driver extra heap for the pandas tests which are I/O heavy.
+          # Pin the server timezone to UTC (and match it on the client via TZ=UTC below).
+          # The pandas tests compare against pure-pandas (tz-naive wall-clock) results, which
+          # only round-trip through Spark when the client's local timezone equals the server's
+          # spark.sql.session.timeZone. Real pyspark fails these too when the two differ, so this
+          # aligns them rather than papering over a client bug.
           "${SPARK_HOME}/sbin/start-connect-server.sh" \
             --packages "org.apache.spark:spark-connect_2.13:${SPARK_VERSION}" \
             --driver-memory 3g \
             --conf spark.sql.session.localRelationSizeLimit=1073741824 \
+            --conf spark.sql.session.timeZone=UTC \
+            --conf spark.driver.extraJavaOptions=-Duser.timezone=UTC \
+            --conf spark.executor.extraJavaOptions=-Duser.timezone=UTC \
             > /tmp/connect-server.log 2>&1 &
           for i in $(seq 1 90); do
             if (echo > /dev/tcp/localhost/15002) 2>/dev/null; then
@@ -178,6 +190,7 @@ jobs:
         id: pandas-parity
         env:
           PYTHONUNBUFFERED: "1"   # stream per-file progress into the live log
+          TZ: UTC                 # match the server's spark.sql.session.timeZone (see server startup)
           PYTHONPATH: ${{ github.workspace }}/scripts:${{ steps.spark-source.outputs.SPARK_SOURCE }}/python
           RUST_PYSPARK_SO: ${{ github.workspace }}/python/pyspark/_pyspark.so
         working-directory: ${{ steps.spark-source.outputs.SPARK_SOURCE }}/python
