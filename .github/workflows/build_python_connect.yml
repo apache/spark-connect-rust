@@ -472,6 +472,11 @@ jobs:
   rust-checks:
     name: Rust checks
     runs-on: ubuntu-latest
+    # Hard-fail on any compiler warning in our workspace crates (cargo caps dependency
+    # lints to `allow`, so third-party deps are unaffected). Job-scoped on purpose: the
+    # parity job above builds the pyspark-rs extension, which this must not gate.
+    env:
+      RUSTFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain

@@ -51,7 +51,10 @@ fn format_literal(literal: &proto::expression::Literal) -> String {
 struct ProfileResult {
     /// The accumulated profile data (typically a string representation).
     pub data: String,
-    /// Metadata about the profile (e.g., profile type, timestamp).
+    /// Metadata about the profile (e.g., profile type, timestamp). Collected from the
+    /// profiler responses (see `collect_profiles`) for parity with pyspark; retained for
+    /// a future `show()`/`dump()` that surfaces it, hence not read yet.
+    #[allow(dead_code)]
     pub metadata: HashMap<String, String>,
 }
 

@@ -6,6 +6,8 @@
 //! non-deterministic noise (common/origin, attribute plan_id) on BOTH sides, then
 //! require byte-equality. A required case that is missing or mismatches FAILS the test.
 
+#![allow(dead_code)] // golden-test helpers are copy-shared across suites; each binary uses a subset
+
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
