@@ -29,6 +29,7 @@ mod functions;
 mod group;
 mod ml;
 mod observation;
+mod pipelines;
 mod profiler;
 mod readwriter;
 mod resource;
@@ -114,6 +115,15 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDataFrameReader>()?;
     m.add_class::<PyStatFunctions>()?;
     m.add_class::<storagelevel::PyStorageLevel>()?;
+
+    // Spark Declarative Pipelines (SDP) command execution
+    m.add_class::<pipelines::PyPipelineRunStream>()?;
+    m.add_function(wrap_pyfunction!(pipelines::pipeline_create_dataflow_graph, m)?)?;
+    m.add_function(wrap_pyfunction!(pipelines::pipeline_define_output, m)?)?;
+    m.add_function(wrap_pyfunction!(pipelines::pipeline_define_flow, m)?)?;
+    m.add_function(wrap_pyfunction!(pipelines::pipeline_define_auto_cdc_flow, m)?)?;
+    m.add_function(wrap_pyfunction!(pipelines::pipeline_define_sql_graph_elements, m)?)?;
+    m.add_function(wrap_pyfunction!(pipelines::pipeline_start_run, m)?)?;
 
     // Streaming classes
     m.add_class::<PyDataStreamReader>()?;
