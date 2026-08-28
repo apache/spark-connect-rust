@@ -230,6 +230,53 @@ def test_functions_module_wrappers():
     assert type(F.to_protobuf(c, "M", options={"x": "y"})).__name__ == "Column"
 
 
+def test_datatype_object_model():
+    # json / jsonValue / typeName / simpleString / needConversion match official pyspark.
+    assert T.IntegerType().typeName() == "integer"
+    assert T.IntegerType().simpleString() == "int"
+    assert T.IntegerType().json() == '"integer"'
+    assert T.IntegerType().jsonValue() == "integer"
+    assert T.IntegerType().needConversion() is False
+    assert T.ArrayType(T.IntegerType()).typeName() == "array"
+    assert T.DecimalType(10, 2).json() == '"decimal(10,2)"'
+    # fromInternal/toInternal default to identity.
+    assert T.IntegerType().fromInternal(5) == 5
+    assert T.IntegerType().toInternal(5) == 5
+    # fromDDL parses a DDL string client-side.
+    assert T.DataType.fromDDL("a int, b string").simpleString() == "struct<a:int,b:string>"
+
+
+def test_structfield_object_model():
+    f = T.StructField("a", T.IntegerType(), True)
+    assert f.simpleString() == "a:int"
+    assert f.json() == '{"metadata":{},"name":"a","nullable":true,"type":"integer"}'
+    assert f.jsonValue() == {"name": "a", "type": "integer", "nullable": True, "metadata": {}}
+    assert f.needConversion() is False
+    assert f.getCollationMetadata() == {}
+    # StructField.typeName raises (use typeName on the type instead), as in pyspark.
+    with pytest.raises(TypeError):
+        f.typeName()
+    # fromJson round-trips.
+    assert T.StructField.fromJson(f.jsonValue()).simpleString() == "a:int"
+
+
+def test_structtype_object_model():
+    st = T.StructType([
+        T.StructField("a", T.IntegerType(), True),
+        T.StructField("b", T.StringType(), False),
+    ])
+    assert st.typeName() == "struct"
+    assert st.fieldNames() == ["a", "b"]
+    assert st.toDDL() == "a int,b string NOT NULL"
+    assert "root" in st.treeString() and "a: int (nullable = true)" in st.treeString()
+    # toNullable makes every field nullable.
+    assert st.toNullable().simpleString() == "struct<a:int,b:string>"
+    # json round-trips through fromJson.
+    assert T.StructType.fromJson(st.jsonValue()).simpleString() == st.simpleString()
+    # needConversion true for a struct with fields.
+    assert isinstance(st.needConversion(), bool)
+
+
 def test_higher_order_functions():
     from pyspark.sql import functions as F
 

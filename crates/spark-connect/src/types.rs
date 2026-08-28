@@ -412,6 +412,13 @@ impl DataType {
         parse_json_value(value, None)
     }
 
+    /// Parses a JSON string into a DataType (convenience over [`from_json`]).
+    pub fn from_json_str(s: &str) -> Result<DataType> {
+        let value: serde_json::Value = serde_json::from_str(s)
+            .map_err(|e| SparkError::value("INVALID_JSON", &[("detail", &e.to_string())]))?;
+        DataType::from_json(&value)
+    }
+
     /// Converts to a protobuf DataType, mirroring
     /// `pyspark.sql.connect.types.pyspark_types_to_proto_types`.
     pub fn to_proto(&self) -> spark_connect_proto::DataType {
@@ -769,6 +776,34 @@ impl StructField {
             "metadata": self.metadata,
         })
     }
+
+    /// Parses a StructField from its JSON string, mirroring `StructField.fromJson`.
+    pub fn from_json_str(s: &str) -> Result<StructField> {
+        let v: serde_json::Value = serde_json::from_str(s)
+            .map_err(|e| SparkError::value("INVALID_JSON", &[("detail", &e.to_string())]))?;
+        let name = v
+            .get("name")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| SparkError::value("INVALID_JSON", &[("detail", "missing field name")]))?
+            .to_string();
+        let nullable = v.get("nullable").and_then(|x| x.as_bool()).unwrap_or(true);
+        let data_type =
+            DataType::from_json(v.get("type").unwrap_or(&serde_json::Value::Null))?;
+        let mut metadata = BTreeMap::new();
+        if let Some(md) = v.get("metadata").and_then(|x| x.as_object()) {
+            for (k, val) in md {
+                if let Some(sv) = val.as_str() {
+                    metadata.insert(k.clone(), sv.to_string());
+                }
+            }
+        }
+        Ok(StructField {
+            name,
+            data_type,
+            nullable,
+            metadata,
+        })
+    }
 }
 
 /// Helper methods for StructType operations, mirroring `pyspark.sql.types.StructType`.
@@ -791,6 +826,96 @@ impl DataType {
     /// Alias for `field_names()`, also mirroring pyspark's `names` attribute.
     pub fn names(&self) -> Result<Vec<String>> {
         self.field_names()
+    }
+
+    /// DDL string for a StructType, mirroring `StructType.toDDL()`:
+    /// comma-separated `name type[ NOT NULL][ COMMENT '...']` per field.
+    pub fn to_ddl(&self) -> Result<String> {
+        match self {
+            DataType::Struct { fields } => Ok(fields
+                .iter()
+                .map(|f| {
+                    let mut s = format!("{} {}", f.name, f.data_type.simple_string());
+                    if !f.nullable {
+                        s.push_str(" NOT NULL");
+                    }
+                    if let Some(comment) = f.metadata.get("comment") {
+                        s.push_str(&format!(" COMMENT '{}'", comment.replace('\'', "\\'")));
+                    }
+                    s
+                })
+                .collect::<Vec<_>>()
+                .join(",")),
+            _ => Err(SparkError::value(
+                "INVALID_TYPE",
+                &[("detail", "toDDL() can only be called on StructType")],
+            )),
+        }
+    }
+
+    /// Tree-string for a StructType, mirroring `StructType.treeString()`.
+    pub fn tree_string(&self) -> Result<String> {
+        match self {
+            DataType::Struct { .. } => {
+                let mut out = String::from("root\n");
+                self.append_tree(&mut out, " |");
+                Ok(out)
+            }
+            _ => Err(SparkError::value(
+                "INVALID_TYPE",
+                &[("detail", "treeString() can only be called on StructType")],
+            )),
+        }
+    }
+
+    fn append_tree(&self, out: &mut String, prefix: &str) {
+        if let DataType::Struct { fields } = self {
+            for f in fields {
+                out.push_str(&format!(
+                    "{}-- {}: {} (nullable = {})\n",
+                    prefix,
+                    f.name,
+                    f.data_type.simple_string(),
+                    f.nullable
+                ));
+                if matches!(f.data_type, DataType::Struct { .. }) {
+                    f.data_type
+                        .append_tree(out, &format!("{}    |", prefix.trim_end_matches('|')));
+                }
+            }
+        }
+    }
+
+    /// Return a copy with every field made nullable (recursively), mirroring
+    /// `StructType.toNullable()`.
+    pub fn to_nullable(&self) -> DataType {
+        match self {
+            DataType::Struct { fields } => DataType::Struct {
+                fields: fields
+                    .iter()
+                    .map(|f| StructField {
+                        name: f.name.clone(),
+                        data_type: f.data_type.to_nullable(),
+                        nullable: true,
+                        metadata: f.metadata.clone(),
+                    })
+                    .collect(),
+            },
+            DataType::Array { element_type, .. } => DataType::Array {
+                element_type: Box::new(element_type.to_nullable()),
+                contains_null: true,
+            },
+            DataType::Map {
+                key_type,
+                value_type,
+                ..
+            } => DataType::Map {
+                key_type: Box::new(key_type.to_nullable()),
+                value_type: Box::new(value_type.to_nullable()),
+                value_contains_null: true,
+            },
+            other => other.clone(),
+        }
     }
 
     /// Adds a field to a StructType, mirroring `StructType.add()`.

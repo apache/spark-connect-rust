@@ -28,6 +28,41 @@ impl PyDataType {
 
 #[pymethods]
 impl PyDataType {
+
+    // --- DataType object-model methods (v4.2.0 parity) ---
+    #[pyo3(name = "json")]
+    fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Ok(py_to_data_type(slf.as_any())?.json())
+    }
+    #[pyo3(name = "jsonValue")]
+    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let v = py_to_data_type(slf.as_any())?.json_value();
+        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+    }
+    #[pyo3(name = "needConversion")]
+    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[pyo3(name = "toInternal")]
+    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[classmethod]
+    #[pyo3(name = "fromDDL")]
+    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
+        DataType::from_ddl(ddl)
+            .map(PyDataType::new)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
+    #[pyo3(name = "typeName")]
+    fn __dt_type_name(&self) -> String {
+        self.inner.type_name()
+    }
+
     fn __repr__(&self) -> String {
         self.inner.simple_string()
     }
@@ -47,6 +82,36 @@ pub struct PyNullType;
 
 #[pymethods]
 impl PyNullType {
+
+    // --- DataType object-model methods (v4.2.0 parity) ---
+    #[pyo3(name = "json")]
+    fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Ok(py_to_data_type(slf.as_any())?.json())
+    }
+    #[pyo3(name = "jsonValue")]
+    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let v = py_to_data_type(slf.as_any())?.json_value();
+        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+    }
+    #[pyo3(name = "needConversion")]
+    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[pyo3(name = "toInternal")]
+    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[classmethod]
+    #[pyo3(name = "fromDDL")]
+    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
+        DataType::from_ddl(ddl)
+            .map(PyDataType::new)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"void\"")
     }
@@ -72,6 +137,36 @@ pub struct PyBooleanType;
 
 #[pymethods]
 impl PyBooleanType {
+
+    // --- DataType object-model methods (v4.2.0 parity) ---
+    #[pyo3(name = "json")]
+    fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Ok(py_to_data_type(slf.as_any())?.json())
+    }
+    #[pyo3(name = "jsonValue")]
+    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let v = py_to_data_type(slf.as_any())?.json_value();
+        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+    }
+    #[pyo3(name = "needConversion")]
+    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[pyo3(name = "toInternal")]
+    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[classmethod]
+    #[pyo3(name = "fromDDL")]
+    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
+        DataType::from_ddl(ddl)
+            .map(PyDataType::new)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"boolean\"")
     }
@@ -97,6 +192,36 @@ pub struct PyByteType;
 
 #[pymethods]
 impl PyByteType {
+
+    // --- DataType object-model methods (v4.2.0 parity) ---
+    #[pyo3(name = "json")]
+    fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Ok(py_to_data_type(slf.as_any())?.json())
+    }
+    #[pyo3(name = "jsonValue")]
+    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let v = py_to_data_type(slf.as_any())?.json_value();
+        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+    }
+    #[pyo3(name = "needConversion")]
+    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[pyo3(name = "toInternal")]
+    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[classmethod]
+    #[pyo3(name = "fromDDL")]
+    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
+        DataType::from_ddl(ddl)
+            .map(PyDataType::new)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"byte\"")
     }
@@ -122,6 +247,36 @@ pub struct PyShortType;
 
 #[pymethods]
 impl PyShortType {
+
+    // --- DataType object-model methods (v4.2.0 parity) ---
+    #[pyo3(name = "json")]
+    fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Ok(py_to_data_type(slf.as_any())?.json())
+    }
+    #[pyo3(name = "jsonValue")]
+    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let v = py_to_data_type(slf.as_any())?.json_value();
+        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+    }
+    #[pyo3(name = "needConversion")]
+    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[pyo3(name = "toInternal")]
+    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[classmethod]
+    #[pyo3(name = "fromDDL")]
+    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
+        DataType::from_ddl(ddl)
+            .map(PyDataType::new)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"short\"")
     }
@@ -147,6 +302,36 @@ pub struct PyIntegerType;
 
 #[pymethods]
 impl PyIntegerType {
+
+    // --- DataType object-model methods (v4.2.0 parity) ---
+    #[pyo3(name = "json")]
+    fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Ok(py_to_data_type(slf.as_any())?.json())
+    }
+    #[pyo3(name = "jsonValue")]
+    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let v = py_to_data_type(slf.as_any())?.json_value();
+        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+    }
+    #[pyo3(name = "needConversion")]
+    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[pyo3(name = "toInternal")]
+    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[classmethod]
+    #[pyo3(name = "fromDDL")]
+    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
+        DataType::from_ddl(ddl)
+            .map(PyDataType::new)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"integer\"")
     }
@@ -172,6 +357,36 @@ pub struct PyLongType;
 
 #[pymethods]
 impl PyLongType {
+
+    // --- DataType object-model methods (v4.2.0 parity) ---
+    #[pyo3(name = "json")]
+    fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Ok(py_to_data_type(slf.as_any())?.json())
+    }
+    #[pyo3(name = "jsonValue")]
+    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let v = py_to_data_type(slf.as_any())?.json_value();
+        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+    }
+    #[pyo3(name = "needConversion")]
+    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[pyo3(name = "toInternal")]
+    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[classmethod]
+    #[pyo3(name = "fromDDL")]
+    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
+        DataType::from_ddl(ddl)
+            .map(PyDataType::new)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"long\"")
     }
@@ -197,6 +412,36 @@ pub struct PyFloatType;
 
 #[pymethods]
 impl PyFloatType {
+
+    // --- DataType object-model methods (v4.2.0 parity) ---
+    #[pyo3(name = "json")]
+    fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Ok(py_to_data_type(slf.as_any())?.json())
+    }
+    #[pyo3(name = "jsonValue")]
+    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let v = py_to_data_type(slf.as_any())?.json_value();
+        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+    }
+    #[pyo3(name = "needConversion")]
+    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[pyo3(name = "toInternal")]
+    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[classmethod]
+    #[pyo3(name = "fromDDL")]
+    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
+        DataType::from_ddl(ddl)
+            .map(PyDataType::new)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"float\"")
     }
@@ -222,6 +467,36 @@ pub struct PyDoubleType;
 
 #[pymethods]
 impl PyDoubleType {
+
+    // --- DataType object-model methods (v4.2.0 parity) ---
+    #[pyo3(name = "json")]
+    fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Ok(py_to_data_type(slf.as_any())?.json())
+    }
+    #[pyo3(name = "jsonValue")]
+    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let v = py_to_data_type(slf.as_any())?.json_value();
+        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+    }
+    #[pyo3(name = "needConversion")]
+    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[pyo3(name = "toInternal")]
+    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[classmethod]
+    #[pyo3(name = "fromDDL")]
+    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
+        DataType::from_ddl(ddl)
+            .map(PyDataType::new)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"double\"")
     }
@@ -250,6 +525,36 @@ pub struct PyDecimalType {
 
 #[pymethods]
 impl PyDecimalType {
+
+    // --- DataType object-model methods (v4.2.0 parity) ---
+    #[pyo3(name = "json")]
+    fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Ok(py_to_data_type(slf.as_any())?.json())
+    }
+    #[pyo3(name = "jsonValue")]
+    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let v = py_to_data_type(slf.as_any())?.json_value();
+        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+    }
+    #[pyo3(name = "needConversion")]
+    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[pyo3(name = "toInternal")]
+    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[classmethod]
+    #[pyo3(name = "fromDDL")]
+    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
+        DataType::from_ddl(ddl)
+            .map(PyDataType::new)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         let dt = DataType::Decimal {
             precision: self.precision,
@@ -289,6 +594,36 @@ pub struct PyStringType;
 
 #[pymethods]
 impl PyStringType {
+
+    // --- DataType object-model methods (v4.2.0 parity) ---
+    #[pyo3(name = "json")]
+    fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Ok(py_to_data_type(slf.as_any())?.json())
+    }
+    #[pyo3(name = "jsonValue")]
+    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let v = py_to_data_type(slf.as_any())?.json_value();
+        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+    }
+    #[pyo3(name = "needConversion")]
+    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[pyo3(name = "toInternal")]
+    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[classmethod]
+    #[pyo3(name = "fromDDL")]
+    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
+        DataType::from_ddl(ddl)
+            .map(PyDataType::new)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"string\"")
     }
@@ -314,6 +649,36 @@ pub struct PyBinaryType;
 
 #[pymethods]
 impl PyBinaryType {
+
+    // --- DataType object-model methods (v4.2.0 parity) ---
+    #[pyo3(name = "json")]
+    fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Ok(py_to_data_type(slf.as_any())?.json())
+    }
+    #[pyo3(name = "jsonValue")]
+    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let v = py_to_data_type(slf.as_any())?.json_value();
+        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+    }
+    #[pyo3(name = "needConversion")]
+    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[pyo3(name = "toInternal")]
+    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[classmethod]
+    #[pyo3(name = "fromDDL")]
+    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
+        DataType::from_ddl(ddl)
+            .map(PyDataType::new)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"binary\"")
     }
@@ -339,6 +704,36 @@ pub struct PyDateType;
 
 #[pymethods]
 impl PyDateType {
+
+    // --- DataType object-model methods (v4.2.0 parity) ---
+    #[pyo3(name = "json")]
+    fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Ok(py_to_data_type(slf.as_any())?.json())
+    }
+    #[pyo3(name = "jsonValue")]
+    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let v = py_to_data_type(slf.as_any())?.json_value();
+        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+    }
+    #[pyo3(name = "needConversion")]
+    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[pyo3(name = "toInternal")]
+    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[classmethod]
+    #[pyo3(name = "fromDDL")]
+    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
+        DataType::from_ddl(ddl)
+            .map(PyDataType::new)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"date\"")
     }
@@ -364,6 +759,36 @@ pub struct PyTimestampType;
 
 #[pymethods]
 impl PyTimestampType {
+
+    // --- DataType object-model methods (v4.2.0 parity) ---
+    #[pyo3(name = "json")]
+    fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Ok(py_to_data_type(slf.as_any())?.json())
+    }
+    #[pyo3(name = "jsonValue")]
+    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let v = py_to_data_type(slf.as_any())?.json_value();
+        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+    }
+    #[pyo3(name = "needConversion")]
+    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[pyo3(name = "toInternal")]
+    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[classmethod]
+    #[pyo3(name = "fromDDL")]
+    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
+        DataType::from_ddl(ddl)
+            .map(PyDataType::new)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"timestamp\"")
     }
@@ -389,6 +814,36 @@ pub struct PyTimestampNTZType;
 
 #[pymethods]
 impl PyTimestampNTZType {
+
+    // --- DataType object-model methods (v4.2.0 parity) ---
+    #[pyo3(name = "json")]
+    fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Ok(py_to_data_type(slf.as_any())?.json())
+    }
+    #[pyo3(name = "jsonValue")]
+    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let v = py_to_data_type(slf.as_any())?.json_value();
+        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+    }
+    #[pyo3(name = "needConversion")]
+    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[pyo3(name = "toInternal")]
+    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[classmethod]
+    #[pyo3(name = "fromDDL")]
+    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
+        DataType::from_ddl(ddl)
+            .map(PyDataType::new)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"timestamp_ntz\"")
     }
@@ -417,6 +872,36 @@ pub struct PyArrayType {
 
 #[pymethods]
 impl PyArrayType {
+
+    // --- DataType object-model methods (v4.2.0 parity) ---
+    #[pyo3(name = "json")]
+    fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Ok(py_to_data_type(slf.as_any())?.json())
+    }
+    #[pyo3(name = "jsonValue")]
+    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let v = py_to_data_type(slf.as_any())?.json_value();
+        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+    }
+    #[pyo3(name = "needConversion")]
+    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[pyo3(name = "toInternal")]
+    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[classmethod]
+    #[pyo3(name = "fromDDL")]
+    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
+        DataType::from_ddl(ddl)
+            .map(PyDataType::new)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         let dt = DataType::Array {
             element_type: Box::new(self.element_type.clone()),
@@ -454,6 +939,36 @@ pub struct PyMapType {
 
 #[pymethods]
 impl PyMapType {
+
+    // --- DataType object-model methods (v4.2.0 parity) ---
+    #[pyo3(name = "json")]
+    fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Ok(py_to_data_type(slf.as_any())?.json())
+    }
+    #[pyo3(name = "jsonValue")]
+    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let v = py_to_data_type(slf.as_any())?.json_value();
+        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+    }
+    #[pyo3(name = "needConversion")]
+    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[pyo3(name = "toInternal")]
+    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[classmethod]
+    #[pyo3(name = "fromDDL")]
+    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
+        DataType::from_ddl(ddl)
+            .map(PyDataType::new)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         let dt = DataType::Map {
             key_type: Box::new(self.key_type.clone()),
@@ -496,6 +1011,66 @@ pub struct PyStructField {
 
 #[pymethods]
 impl PyStructField {
+
+    // --- StructField object-model methods (v4.2.0 parity), operating on the field
+    // itself (a StructField is not a DataType, so these do not go through
+    // py_to_data_type). ---
+    #[pyo3(name = "simpleString")]
+    fn __sf_simple_string(&self) -> String {
+        self.field.simple_string()
+    }
+    #[pyo3(name = "typeName")]
+    fn __sf_type_name(&self) -> PyResult<String> {
+        // Mirrors pyspark: StructField.typeName raises; use typeName on the type.
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "StructField does not have typeName. Use typeName on its type explicitly instead.",
+        ))
+    }
+    #[pyo3(name = "json")]
+    fn __sf_json(&self) -> String {
+        self.field.json_value().to_string()
+    }
+    #[pyo3(name = "jsonValue")]
+    fn __sf_json_value<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let v = self.field.json_value();
+        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+    }
+    #[pyo3(name = "needConversion")]
+    fn __sf_need_conversion(&self) -> bool {
+        self.field.data_type.need_conversion()
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __sf_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[pyo3(name = "toInternal")]
+    fn __sf_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    /// Collation metadata for the field (empty when the field has no collations).
+    #[pyo3(name = "getCollationMetadata")]
+    fn __sf_get_collation_metadata<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        Ok(pyo3::types::PyDict::new(py))
+    }
+    #[classmethod]
+    #[pyo3(name = "fromJson")]
+    fn __sf_from_json(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        py: Python<'_>,
+        data: &Bound<'_, PyAny>,
+    ) -> PyResult<PyStructField> {
+        let s: String = py
+            .import("json")?
+            .getattr("dumps")?
+            .call1((data,))?
+            .extract()?;
+        let field = StructField::from_json_str(&s)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyStructField { field })
+    }
     #[new]
     #[pyo3(signature = (name, dataType, nullable=true, metadata=None))]
     #[allow(non_snake_case)]
@@ -540,6 +1115,36 @@ pub struct PyStructType {
 
 #[pymethods]
 impl PyStructType {
+
+    // --- DataType object-model methods (v4.2.0 parity) ---
+    #[pyo3(name = "json")]
+    fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Ok(py_to_data_type(slf.as_any())?.json())
+    }
+    #[pyo3(name = "jsonValue")]
+    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let v = py_to_data_type(slf.as_any())?.json_value();
+        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+    }
+    #[pyo3(name = "needConversion")]
+    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[pyo3(name = "toInternal")]
+    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[classmethod]
+    #[pyo3(name = "fromDDL")]
+    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
+        DataType::from_ddl(ddl)
+            .map(PyDataType::new)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         let dt = DataType::Struct {
             fields: self.fields.clone(),
@@ -612,6 +1217,76 @@ impl PyStructType {
         .simple_string()
     }
 
+    /// `StructType.typeName()` == "struct".
+    #[pyo3(name = "typeName")]
+    fn __st_type_name(&self) -> &'static str {
+        "struct"
+    }
+
+    /// Field names in order. Mirrors `StructType.fieldNames()`.
+    #[pyo3(name = "fieldNames")]
+    fn __st_field_names(&self) -> Vec<String> {
+        self.fields.iter().map(|f| f.name.clone()).collect()
+    }
+
+    /// DDL string. Mirrors `StructType.toDDL()`.
+    #[pyo3(name = "toDDL")]
+    fn __st_to_ddl(&self) -> PyResult<String> {
+        DataType::Struct {
+            fields: self.fields.clone(),
+        }
+        .to_ddl()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
+
+    /// Tree string. Mirrors `StructType.treeString()`.
+    #[pyo3(name = "treeString")]
+    fn __st_tree_string(&self) -> PyResult<String> {
+        DataType::Struct {
+            fields: self.fields.clone(),
+        }
+        .tree_string()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
+
+    /// A copy with all fields made nullable (recursively). Mirrors `StructType.toNullable()`.
+    #[pyo3(name = "toNullable")]
+    fn __st_to_nullable(&self) -> PyStructType {
+        let nullable = DataType::Struct {
+            fields: self.fields.clone(),
+        }
+        .to_nullable();
+        match nullable {
+            DataType::Struct { fields } => PyStructType { fields },
+            _ => PyStructType {
+                fields: self.fields.clone(),
+            },
+        }
+    }
+
+    /// Build a StructType from its JSON value. Mirrors `StructType.fromJson`.
+    #[classmethod]
+    #[pyo3(name = "fromJson")]
+    fn __st_from_json(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        py: Python<'_>,
+        data: &Bound<'_, PyAny>,
+    ) -> PyResult<PyStructType> {
+        let s: String = py
+            .import("json")?
+            .getattr("dumps")?
+            .call1((data,))?
+            .extract()?;
+        match DataType::from_json_str(&s)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
+        {
+            DataType::Struct { fields } => Ok(PyStructType { fields }),
+            _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "fromJson did not produce a StructType",
+            )),
+        }
+    }
+
     fn __repr__(&self) -> String {
         self.simple_string()
     }
@@ -624,6 +1299,36 @@ pub struct PyCharType {
 
 #[pymethods]
 impl PyCharType {
+
+    // --- DataType object-model methods (v4.2.0 parity) ---
+    #[pyo3(name = "json")]
+    fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Ok(py_to_data_type(slf.as_any())?.json())
+    }
+    #[pyo3(name = "jsonValue")]
+    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let v = py_to_data_type(slf.as_any())?.json_value();
+        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+    }
+    #[pyo3(name = "needConversion")]
+    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[pyo3(name = "toInternal")]
+    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[classmethod]
+    #[pyo3(name = "fromDDL")]
+    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
+        DataType::from_ddl(ddl)
+            .map(PyDataType::new)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         let dt = DataType::Char {
             length: self.length,
@@ -654,6 +1359,36 @@ pub struct PyVarcharType {
 
 #[pymethods]
 impl PyVarcharType {
+
+    // --- DataType object-model methods (v4.2.0 parity) ---
+    #[pyo3(name = "json")]
+    fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Ok(py_to_data_type(slf.as_any())?.json())
+    }
+    #[pyo3(name = "jsonValue")]
+    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let v = py_to_data_type(slf.as_any())?.json_value();
+        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+    }
+    #[pyo3(name = "needConversion")]
+    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[pyo3(name = "toInternal")]
+    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[classmethod]
+    #[pyo3(name = "fromDDL")]
+    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
+        DataType::from_ddl(ddl)
+            .map(PyDataType::new)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         let dt = DataType::Varchar {
             length: self.length,
@@ -684,6 +1419,36 @@ pub struct PyTimeType {
 
 #[pymethods]
 impl PyTimeType {
+
+    // --- DataType object-model methods (v4.2.0 parity) ---
+    #[pyo3(name = "json")]
+    fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Ok(py_to_data_type(slf.as_any())?.json())
+    }
+    #[pyo3(name = "jsonValue")]
+    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let v = py_to_data_type(slf.as_any())?.json_value();
+        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+    }
+    #[pyo3(name = "needConversion")]
+    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[pyo3(name = "toInternal")]
+    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[classmethod]
+    #[pyo3(name = "fromDDL")]
+    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
+        DataType::from_ddl(ddl)
+            .map(PyDataType::new)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         let dt = DataType::Time {
             precision: self.precision,
@@ -714,6 +1479,36 @@ pub struct PyCalendarIntervalType;
 
 #[pymethods]
 impl PyCalendarIntervalType {
+
+    // --- DataType object-model methods (v4.2.0 parity) ---
+    #[pyo3(name = "json")]
+    fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Ok(py_to_data_type(slf.as_any())?.json())
+    }
+    #[pyo3(name = "jsonValue")]
+    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let v = py_to_data_type(slf.as_any())?.json_value();
+        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+    }
+    #[pyo3(name = "needConversion")]
+    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[pyo3(name = "toInternal")]
+    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[classmethod]
+    #[pyo3(name = "fromDDL")]
+    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
+        DataType::from_ddl(ddl)
+            .map(PyDataType::new)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"calendarinterval\"")
     }
@@ -742,6 +1537,36 @@ pub struct PyYearMonthIntervalType {
 
 #[pymethods]
 impl PyYearMonthIntervalType {
+
+    // --- DataType object-model methods (v4.2.0 parity) ---
+    #[pyo3(name = "json")]
+    fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Ok(py_to_data_type(slf.as_any())?.json())
+    }
+    #[pyo3(name = "jsonValue")]
+    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let v = py_to_data_type(slf.as_any())?.json_value();
+        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+    }
+    #[pyo3(name = "needConversion")]
+    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[pyo3(name = "toInternal")]
+    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[classmethod]
+    #[pyo3(name = "fromDDL")]
+    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
+        DataType::from_ddl(ddl)
+            .map(PyDataType::new)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         let dt = DataType::YearMonthInterval {
             start_field: self.start_field,
@@ -780,6 +1605,36 @@ pub struct PyDayTimeIntervalType {
 
 #[pymethods]
 impl PyDayTimeIntervalType {
+
+    // --- DataType object-model methods (v4.2.0 parity) ---
+    #[pyo3(name = "json")]
+    fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Ok(py_to_data_type(slf.as_any())?.json())
+    }
+    #[pyo3(name = "jsonValue")]
+    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let v = py_to_data_type(slf.as_any())?.json_value();
+        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+    }
+    #[pyo3(name = "needConversion")]
+    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[pyo3(name = "toInternal")]
+    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[classmethod]
+    #[pyo3(name = "fromDDL")]
+    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
+        DataType::from_ddl(ddl)
+            .map(PyDataType::new)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         let dt = DataType::DayTimeInterval {
             start_field: self.start_field,
@@ -815,6 +1670,36 @@ pub struct PyVariantType;
 
 #[pymethods]
 impl PyVariantType {
+
+    // --- DataType object-model methods (v4.2.0 parity) ---
+    #[pyo3(name = "json")]
+    fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Ok(py_to_data_type(slf.as_any())?.json())
+    }
+    #[pyo3(name = "jsonValue")]
+    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let v = py_to_data_type(slf.as_any())?.json_value();
+        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+    }
+    #[pyo3(name = "needConversion")]
+    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[pyo3(name = "toInternal")]
+    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[classmethod]
+    #[pyo3(name = "fromDDL")]
+    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
+        DataType::from_ddl(ddl)
+            .map(PyDataType::new)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"variant\"")
     }
