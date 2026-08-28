@@ -385,6 +385,16 @@ For every method matching a pyspark name:
 
 # 15. Architectural constraints and known blockers
 
+- **Cloudpickled-and-server-executed APIs stay Python — do NOT rewrite them in Rust.** UDFs,
+  `pandas_udf`, `UserDefinedType`, `DataSource`, and `StatefulProcessor` (+ ValueState/ListState/
+  MapState/StatefulProcessorHandle and the state clients) are all serialized with cloudpickle and
+  *executed on the server's Python worker* (real pyspark). The user subclasses them in Python; the
+  client only imports/cloudpickles them. A Rust class would (a) break the cloudpickle round-trip
+  (the server reconstructs by module path and expects the Python class) and (b) never run on the
+  client anyway, so it buys nothing. What IS Rust-backed is the client-side METHOD that builds the
+  proto carrying the pickled object: `registerDataSource`, `GroupedData.transformWithState[InPandas]`,
+  `createDataFrame(..., udf)`, etc. General rule: proto-building → Rust; cloudpickled Python code that
+  runs server-side → vendored Python.
 - **Row materialization:** PyO3 cannot subclass `tuple`, so our `Row` is not a tuple subclass.
   Some pandas-on-Spark code assumes a tuple-`Row` with mutable `__fields__`. Full fidelity
   likely requires adopting the upstream Python tuple-`Row` at collect boundaries.
