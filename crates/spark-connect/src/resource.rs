@@ -277,4 +277,20 @@ mod tests {
         let task_cpus = profile.proto_profile.task_resources.get("cpus").unwrap();
         assert_eq!(task_cpus.amount, 1.0);
     }
+
+    #[test]
+    fn off_heap_memory_and_profile_accessors() {
+        let reqs = ExecutorResourceRequests::new()
+            .off_heap_memory(1024)
+            .cores(2);
+        assert_eq!(reqs.resources.get("offHeap").unwrap().amount, 1024);
+
+        let profile = ResourceProfileBuilder::new()
+            .executor_resources(reqs)
+            .build();
+        // id() is None before the profile is registered with the server.
+        assert!(profile.id().is_none());
+        // proto() exposes the underlying proto with both resource entries.
+        assert_eq!(profile.proto().executor_resources.len(), 2);
+    }
 }

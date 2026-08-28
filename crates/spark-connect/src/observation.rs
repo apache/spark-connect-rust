@@ -55,4 +55,22 @@ mod tests {
         assert_eq!(obs.name(), "test_obs");
         assert!(obs.get().is_empty());
     }
+
+    #[test]
+    fn set_metrics_and_dataframe() {
+        let mut obs = Observation::new("o");
+        let mut m = HashMap::new();
+        m.insert("k".to_string(), "v".to_string());
+        obs.set_metrics(m);
+        assert_eq!(obs.get().get("k").map(|s| s.as_str()), Some("v"));
+
+        // set_dataframe just stores the handle; a session-less plan is enough
+        // (no RPC is made here).
+        let spark = crate::session::SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .expect("session");
+        let df = spark.range(3).unwrap();
+        obs.set_dataframe(df);
+    }
 }

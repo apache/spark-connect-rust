@@ -2849,3 +2849,251 @@ mod plan_construction_tests {
         ser(&udtf_df);
     }
 }
+
+/// Deterministic coverage of the private Arrow-array -> `Value` converter
+/// (`arrow_value_at`) and its formatting helpers. Builds a one-element array of
+/// each Arrow type and asserts the decoded `Value` variant, so the large per-type
+/// match runs without a live server (the server->collect->decode path is covered
+/// separately by the server-gated e2e_integration tests).
+#[cfg(test)]
+mod arrow_value_tests {
+    use super::*;
+    use arrow::array::*;
+    use arrow::datatypes::{
+        i256, DataType as ArrowDataType, Field, Int32Type, IntervalDayTime, IntervalMonthDayNano,
+    };
+    use std::sync::Arc;
+
+    #[test]
+    fn primitives_and_signed_ints() {
+        assert!(matches!(
+            arrow_value_at(&BooleanArray::from(vec![true]), 0).unwrap(),
+            Value::Bool(true)
+        ));
+        assert!(matches!(
+            arrow_value_at(&Int8Array::from(vec![1i8]), 0).unwrap(),
+            Value::Byte(1)
+        ));
+        assert!(matches!(
+            arrow_value_at(&Int16Array::from(vec![1i16]), 0).unwrap(),
+            Value::Short(1)
+        ));
+        assert!(matches!(
+            arrow_value_at(&Int32Array::from(vec![1i32]), 0).unwrap(),
+            Value::Integer(1)
+        ));
+        assert!(matches!(
+            arrow_value_at(&Int64Array::from(vec![1i64]), 0).unwrap(),
+            Value::Long(1)
+        ));
+        assert!(matches!(
+            arrow_value_at(&Float32Array::from(vec![1.0f32]), 0).unwrap(),
+            Value::Float(_)
+        ));
+        assert!(matches!(
+            arrow_value_at(&Float64Array::from(vec![1.0f64]), 0).unwrap(),
+            Value::Double(_)
+        ));
+        assert!(matches!(
+            arrow_value_at(&StringArray::from(vec!["x"]), 0).unwrap(),
+            Value::String(_)
+        ));
+        assert!(matches!(
+            arrow_value_at(&BinaryArray::from_iter_values([b"x".as_ref()]), 0).unwrap(),
+            Value::Binary(_)
+        ));
+        assert!(matches!(
+            arrow_value_at(&Date32Array::from(vec![1i32]), 0).unwrap(),
+            Value::Date(1)
+        ));
+        assert!(matches!(
+            arrow_value_at(&TimestampMicrosecondArray::from(vec![1i64]), 0).unwrap(),
+            Value::Timestamp(1)
+        ));
+    }
+
+    #[test]
+    fn unsigned_ints() {
+        assert!(matches!(
+            arrow_value_at(&UInt8Array::from(vec![1u8]), 0).unwrap(),
+            Value::Short(1)
+        ));
+        assert!(matches!(
+            arrow_value_at(&UInt16Array::from(vec![1u16]), 0).unwrap(),
+            Value::Integer(1)
+        ));
+        assert!(matches!(
+            arrow_value_at(&UInt32Array::from(vec![1u32]), 0).unwrap(),
+            Value::Long(1)
+        ));
+        assert!(matches!(
+            arrow_value_at(&UInt64Array::from(vec![1u64]), 0).unwrap(),
+            Value::Long(1)
+        ));
+    }
+
+    #[test]
+    fn decimals_128_and_256() {
+        let d128 = Decimal128Array::from(vec![12345i128])
+            .with_precision_and_scale(10, 2)
+            .unwrap();
+        assert!(matches!(
+            arrow_value_at(&d128, 0).unwrap(),
+            Value::Decimal { .. }
+        ));
+        let d256 = Decimal256Array::from(vec![i256::from_i128(12345)])
+            .with_precision_and_scale(10, 2)
+            .unwrap();
+        assert!(matches!(
+            arrow_value_at(&d256, 0).unwrap(),
+            Value::Decimal { .. }
+        ));
+    }
+
+    #[test]
+    fn large_and_view_bytes() {
+        assert!(matches!(
+            arrow_value_at(&LargeStringArray::from_iter_values(["x"]), 0).unwrap(),
+            Value::String(_)
+        ));
+        assert!(matches!(
+            arrow_value_at(&LargeBinaryArray::from_iter_values([b"x".as_ref()]), 0).unwrap(),
+            Value::Binary(_)
+        ));
+        assert!(matches!(
+            arrow_value_at(&StringViewArray::from_iter_values(["x"]), 0).unwrap(),
+            Value::String(_)
+        ));
+        assert!(matches!(
+            arrow_value_at(&BinaryViewArray::from_iter_values([b"x".as_ref()]), 0).unwrap(),
+            Value::Binary(_)
+        ));
+    }
+
+    #[test]
+    fn timestamps_and_date64() {
+        assert!(matches!(
+            arrow_value_at(&TimestampSecondArray::from(vec![1i64]), 0).unwrap(),
+            Value::Timestamp(_)
+        ));
+        assert!(matches!(
+            arrow_value_at(&TimestampMillisecondArray::from(vec![1i64]), 0).unwrap(),
+            Value::Timestamp(_)
+        ));
+        assert!(matches!(
+            arrow_value_at(&TimestampNanosecondArray::from(vec![1000i64]), 0).unwrap(),
+            Value::Timestamp(_)
+        ));
+        assert!(matches!(
+            arrow_value_at(&Date64Array::from(vec![86_400_000i64]), 0).unwrap(),
+            Value::Date(_)
+        ));
+    }
+
+    #[test]
+    fn time_types_render_as_string() {
+        assert!(matches!(
+            arrow_value_at(&Time64MicrosecondArray::from(vec![1i64]), 0).unwrap(),
+            Value::String(_)
+        ));
+        assert!(matches!(
+            arrow_value_at(&Time64NanosecondArray::from(vec![1000i64]), 0).unwrap(),
+            Value::String(_)
+        ));
+        assert!(matches!(
+            arrow_value_at(&Time32MillisecondArray::from(vec![1i32]), 0).unwrap(),
+            Value::String(_)
+        ));
+        assert!(matches!(
+            arrow_value_at(&Time32SecondArray::from(vec![1i32]), 0).unwrap(),
+            Value::String(_)
+        ));
+    }
+
+    #[test]
+    fn interval_types_render_as_string() {
+        assert!(matches!(
+            arrow_value_at(&IntervalYearMonthArray::from(vec![13i32]), 0).unwrap(),
+            Value::String(_)
+        ));
+        let dt = IntervalDayTimeArray::from(vec![IntervalDayTime::new(1, 100)]);
+        assert!(matches!(arrow_value_at(&dt, 0).unwrap(), Value::String(_)));
+        let mdn = IntervalMonthDayNanoArray::from(vec![IntervalMonthDayNano::new(1, 2, 3)]);
+        assert!(matches!(arrow_value_at(&mdn, 0).unwrap(), Value::String(_)));
+    }
+
+    #[test]
+    fn fixed_size_binary() {
+        let arr = FixedSizeBinaryArray::try_from_iter(vec![vec![1u8, 2u8]].into_iter()).unwrap();
+        assert!(matches!(arrow_value_at(&arr, 0).unwrap(), Value::Binary(_)));
+    }
+
+    #[test]
+    fn nested_list_struct_map() {
+        let list =
+            ListArray::from_iter_primitive::<Int32Type, _, _>(vec![Some(vec![Some(1), Some(2)])]);
+        assert!(matches!(arrow_value_at(&list, 0).unwrap(), Value::List(_)));
+
+        let field = Arc::new(Field::new("a", ArrowDataType::Int32, false));
+        let col: ArrayRef = Arc::new(Int32Array::from(vec![1]));
+        let s = StructArray::from(vec![(field, col)]);
+        assert!(matches!(arrow_value_at(&s, 0).unwrap(), Value::Struct(_)));
+
+        let mut b = MapBuilder::new(None, StringBuilder::new(), Int32Builder::new());
+        b.keys().append_value("k");
+        b.values().append_value(1);
+        b.append(true).unwrap();
+        let m = b.finish();
+        assert!(matches!(arrow_value_at(&m, 0).unwrap(), Value::Map(_)));
+    }
+
+    #[test]
+    fn null_element_and_unsupported_type() {
+        let with_null = Int32Array::from(vec![None as Option<i32>]);
+        assert!(matches!(
+            arrow_value_at(&with_null, 0).unwrap(),
+            Value::Null
+        ));
+        // Duration has no dedicated Value arm -> the final unsupported-type Err.
+        let dur = DurationSecondArray::from(vec![1i64]);
+        assert!(arrow_value_at(&dur, 0).is_err());
+    }
+
+    #[test]
+    fn map_key_to_string_covers_scalar_arms() {
+        assert_eq!(map_key_to_string(Value::String("x".to_string())), "x");
+        assert_eq!(map_key_to_string(Value::Bool(true)), "true");
+        assert_eq!(map_key_to_string(Value::Byte(1)), "1");
+        assert_eq!(map_key_to_string(Value::Short(2)), "2");
+        assert_eq!(map_key_to_string(Value::Integer(3)), "3");
+        assert_eq!(map_key_to_string(Value::Long(4)), "4");
+        assert_eq!(map_key_to_string(Value::Float(1.5)), "1.5");
+        assert_eq!(map_key_to_string(Value::Double(2.5)), "2.5");
+        assert_eq!(map_key_to_string(Value::Date(5)), "5");
+        assert_eq!(map_key_to_string(Value::Timestamp(6)), "6");
+        assert_eq!(
+            map_key_to_string(Value::Decimal {
+                value: "7.5".to_string(),
+                precision: None,
+                scale: None,
+            }),
+            "7.5"
+        );
+        // Non-scalar key falls back to the Debug form.
+        let _ = map_key_to_string(Value::List(vec![]));
+    }
+
+    #[test]
+    fn i128_to_decimal_string_branches() {
+        assert_eq!(i128_to_decimal_string(12345, 0), "12345");
+        assert_eq!(i128_to_decimal_string(12345, 2), "123.45");
+        assert_eq!(i128_to_decimal_string(5, 4), "0.0005");
+        assert_eq!(i128_to_decimal_string(-5, 4), "-0.0005");
+    }
+
+    #[test]
+    fn micros_to_time_string_branches() {
+        assert_eq!(micros_to_time_string(0), "00:00:00");
+        assert!(micros_to_time_string(1).contains('.'));
+    }
+}
