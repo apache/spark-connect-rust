@@ -26,9 +26,8 @@ concurrency:
 
 # Mirrors Apache Spark's build_python_connect.yml approach, adapted for the
 # Rust-backed client: download the Spark 4.2.0 Connect server, start it, pull the
-# official v4.2.0 connect test files, and run them through our client - the gate is
-# "every test passes except the checked-in known-environmental-failures manifest".
-# A separate job enforces Rust test coverage across all crates.
+# official v4.2.0 connect test files, and run them BOTH with the reference pyspark
+# client and with our client - the gate is "no regressions vs the reference".
 
 on:
   push:
@@ -45,15 +44,11 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Parity gate: the official connect suite through our client, against a real
-  # Spark 4.2.0 Connect server (see scripts/run_official_tests.py).
+  # Reference-vs-ours parity gate against a real Spark 4.2.0 Connect server.
   # ---------------------------------------------------------------------------
   connect-parity:
-    name: Connect parity (official suite via our client, Python ${{ matrix.python-version }})
+    name: Connect parity vs reference (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    # The official suite runs serially (--jobs 1) and takes ~45-60 min; bound the job so
-    # a genuinely hung test fails it instead of running to GitHub's 6-hour default.
-    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -158,7 +153,7 @@ jobs:
           SPARK_HOME="${{ steps.spark-download.outputs.SPARK_HOME }}"
           echo "Starting Connect server on ${SPARK_CONNECT_TESTING_REMOTE}"
           # Give the driver extra heap: the parity gate runs all 84 files serially against
-          # this one server, and a 1g default degrades late in the run (GC pressure),
+          # this one server (~2h), and a 1g default degrades late in the run (GC pressure),
           # which is what made the streaming listener/observation files flake.
           "${SPARK_HOME}/sbin/start-connect-server.sh" \
             --packages "org.apache.spark:spark-connect_2.13:${SPARK_VERSION}" \
@@ -173,54 +168,40 @@ jobs:
             sleep 1
           done
 
-      - name: Rust behavioral e2e tests (against the live server)
-        # These assert results against a live server and otherwise self-gate on
-        # SPARK_REMOTE, so they no-op in the server-less rust.yml job. Run them here,
-        # where a Spark 4.2.0 Connect server is already up, so the drop-in behavior
-        # (functions/columns/dataframe/tvf/catalog/session/streaming/merge/ml/artifact)
-        # is actually verified in CI. Serial: they share the one server session.
-        env:
-          SPARK_REMOTE: sc://localhost:15002
-        run: |
-          cargo test -p apache-spark-connect \
-            --test e2e_functions --test e2e_columns --test e2e_dataframe \
-            --test e2e_coverage --test e2e_integration \
-            -- --test-threads=1
-
-      - name: Parity - official connect suite through OUR Rust client
+      - name: Parity - reference client vs OUR Rust client (via transport injection)
         id: parity
         env:
           PYTHONUNBUFFERED: "1"   # stream per-file progress into the live log
           RUST_PYSPARK_SO: ${{ github.workspace }}/python/pyspark/_pyspark.so
         run: |
-          # pipefail so the script's exit code (nonzero on any unexpected failure) gates
-          # the job - otherwise `| tee` would mask it and the gate would be falsely green.
+          # pipefail so the script's exit code (nonzero on regressions) gates the job -
+          # otherwise `| tee` would mask it and the gate would be falsely green.
           set -o pipefail
-          # Run the official connect suite ONLY through the Rust transport plugin (which
-          # genuinely exercises our client), requiring every test to pass except the
-          # checked-in manifest of known *environmental* failures (scripts/
-          # parity_known_failures.txt) - tests the reference client also fails in this
-          # single-node pure-Connect environment. Now that the client is at full parity we
-          # no longer run the reference client on every file just to derive that baseline,
-          # which roughly halves this job. Regenerate the manifest with
-          # scripts/gen_parity_skiplist.py when the pinned Spark version bumps.
+          # "ours" runs each official connect test through the Rust transport plugin
+          # (genuinely exercises our client); "reference" runs stock pyspark. Fails on
+          # any regression (a test the reference passes but ours fails).
+          # Runs the full SQL connect suite, including Python/pandas UDF and arrow
+          # modules (the server now has worker-capable Python via PYSPARK_PYTHON).
           # Run serially (--jobs 1), matching Apache's own connect test runner
-          # (./python/run-tests --parallelism=1): the streaming-query-listener tests wait
-          # on real server-pushed progress events and are timeout-sensitive, so parallel
-          # runs starve them under server contention. Serial removes that artifact.
-          python scripts/run_official_tests.py \
+          # (./python/run-tests --parallelism=1). The streaming-query-listener tests
+          # (e.g. test_parity_listener) wait on real server-pushed progress events and
+          # are timeout-sensitive; running files in parallel starves them under server
+          # contention and makes them exceed the per-file cap even though they pass when
+          # run alone. Serial execution removes that artifact without weakening the gate.
+          python scripts/rust_parity_diff.py \
             --spark "${{ steps.spark-source.outputs.SPARK_SOURCE }}" \
             --remote "${SPARK_CONNECT_TESTING_REMOTE}" \
+            --path-contains "sql/tests/connect" \
             --jobs 1 \
-            2>&1 | tee /tmp/parity_ours.log
+            2>&1 | tee /tmp/parity_diff.log
 
-      - name: Upload parity log + server log
+      - name: Upload parity diff + server log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: parity-ours-py${{ matrix.python-version }}
+          name: parity-diff-py${{ matrix.python-version }}
           path: |
-            /tmp/parity_ours.log
+            /tmp/parity_diff.log
             /tmp/connect-server.log
           if-no-files-found: warn
 
@@ -342,4 +323,3 @@ jobs:
         run: cargo test -p apache-spark-connect -p apache-spark-connect-core --release
       - name: No-stub audit
         run: bash scripts/audit_no_stubs.sh
-

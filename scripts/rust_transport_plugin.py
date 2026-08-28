@@ -169,46 +169,6 @@ class _RustStub:
         self._c.close()
 
 
-def pytest_collection_modifyitems(config, items):
-    """Deselect the known-environmental tests named in ``RUST_PARITY_DESELECT``.
-
-    run_official_tests.py passes the manifest's ``Class::method`` suffixes for the
-    file being run (newline-separated). We match on the node-id *suffix* rather than
-    handing pytest a full ``--deselect <path>::...`` argument: pytest's --deselect
-    compares against a node id computed relative to its rootdir, which varies between
-    a Spark *dist* tree (rootdir = python/) and a *source clone* (rootdir may be the
-    repo root, prefixing ids with ``python/``). Suffix matching is immune to that, so
-    the manifest applies identically everywhere. Only one file runs per invocation,
-    so a ``Class::method`` suffix cannot collide across files.
-    """
-    # Two modes, both by node-id suffix match:
-    #   RUST_PARITY_DESELECT     - drop the listed tests (normal skiplist application)
-    #   RUST_PARITY_SELECT_ONLY  - keep ONLY the listed tests (the drift check re-runs
-    #                              the skiplisted tests to see if any now pass)
-    select_only = os.environ.get("RUST_PARITY_SELECT_ONLY", "")
-    deselect = os.environ.get("RUST_PARITY_DESELECT", "")
-    raw = select_only or deselect
-    suffixes = [s.strip() for s in raw.splitlines() if s.strip()]
-    if not suffixes:
-        return
-
-    def matches(nid):
-        # Match "…::Class::method" (or a parametrized "…::Class::method[param]").
-        return any(nid.endswith(s) or f"::{s}[" in nid for s in suffixes)
-
-    keep, drop = [], []
-    for item in items:
-        hit = matches(item.nodeid)
-        # select-only keeps hits and drops the rest; deselect does the opposite.
-        if hit == bool(select_only):
-            keep.append(item)
-        else:
-            drop.append(item)
-    if drop:
-        config.hook.pytest_deselected(items=drop)
-        items[:] = keep
-
-
 def pytest_configure(config):
     import pyspark.sql.connect.client.core as core
 
