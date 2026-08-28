@@ -16,6 +16,11 @@
 #
 """Small subset of pyspark.sql.utils needed by the drop-in and vendored modules."""
 
+from typing import Any, Union, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pyspark.pandas._typing import IndexOpsLike, SeriesOrIndex
+
 
 def is_remote() -> bool:
     """This client is always a Spark Connect (remote) client."""
@@ -37,3 +42,29 @@ def is_timestamp_ntz_preferred() -> bool:
         return session.conf.get("spark.sql.timestampType", None) == "TIMESTAMP_NTZ"
     except Exception:
         return False
+
+
+def get_lit_sql_str(val: str) -> str:
+    """Get SQL string literal representation.
+
+    Equivalent to `lit(val)._jc.expr().sql()` for string typed val.
+    See `sql` definition in `sql/catalyst/src/main/scala/org/apache/spark/
+    sql/catalyst/expressions/literals.scala`
+    """
+    return "'" + val.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def pyspark_column_op(
+    func_name: str, left: "IndexOpsLike", right: Any, fillna: Any = None
+) -> Union["SeriesOrIndex", None]:
+    """Wrapper function for column_op to get proper Column class."""
+    from pyspark.pandas.base import column_op
+    from pyspark.sql.column import Column
+    from pyspark.pandas.data_type_ops.base import _is_extension_dtypes
+
+    result = column_op(getattr(Column, func_name))(left, right)
+    # It works as expected on extension dtype, so we don't need to call `fillna` for this case.
+    if (fillna is not None) and (_is_extension_dtypes(left) or _is_extension_dtypes(right)):
+        fillna = None
+    # TODO(SPARK-43877): Fix behavior difference for compare binary functions.
+    return result.fillna(fillna) if fillna is not None else result
