@@ -1644,9 +1644,26 @@ impl DataFrame {
         record_batches_to_polars(&self.collect_record_batches()?)
     }
 
-    /// Repartition by ID.
-    pub fn repartition_by_id(&self, num_partitions: i32) -> DataFrame {
-        self.repartition(num_partitions)
+    /// Repartition into `num_partitions` using the given column's value directly as
+    /// the shuffle partition id. Mirrors `DataFrame.repartitionById(numPartitions,
+    /// partitionIdCol)`: the column is wrapped in a `DirectShufflePartitionID`
+    /// expression and used as the sole repartition expression.
+    pub fn repartition_by_id(&self, num_partitions: i32, partition_id_col: Column) -> DataFrame {
+        let direct =
+            Expression::DirectShufflePartitionId(Box::new(partition_id_col.expression().clone()));
+        self.repartition_by_expressions(num_partitions, vec![direct])
+    }
+
+    /// Append a monotonically increasing index column. Mirrors
+    /// `DataFrame.zipWithIndex(indexColName="index")`:
+    /// `self.select(col("*"), distributed_sequence_id().alias(indexColName))`.
+    pub fn zip_with_index(&self, index_col_name: &str) -> DataFrame {
+        let star = Column::new(Expression::UnresolvedStar(None));
+        let seq = Column::new(Expression::UnresolvedFunction(
+            crate::expression::UnresolvedFunction::new("distributed_sequence_id", vec![]),
+        ))
+        .alias(index_col_name);
+        self.select(vec![star, seq])
     }
 
     /// Reconcile this DataFrame to a new schema: reorder/select columns by name

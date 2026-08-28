@@ -150,6 +150,24 @@ def test_column_methods_offline():
     assert type(c.outer()).__name__ == "Column"
     assert type(c.asc()).__name__ == "Column"
     assert type(c.desc()).__name__ == "Column"
+    # Column.transform(f) is just f(self).
+    assert type(c.transform(lambda x: x + 1)).__name__ == "Column"
+
+
+def test_new_v420_methods_exposed():
+    # Presence of the v4.2.0 parity methods on the drop-in classes (behaviour that
+    # needs a live server is covered by the e2e tests).
+    import pyspark._pyspark as p
+
+    for cls, methods in [
+        (p.DataFrame, ["repartitionById", "zipWithIndex"]),
+        (p.Column, ["transform"]),
+        (p.RuntimeConf, ["getAll"]),
+        (p.DataFrameStatFunctions, ["sampleBy"]),
+    ]:
+        have = set(m for m in dir(cls) if not m.startswith("_"))
+        missing = [m for m in methods if m not in have]
+        assert not missing, f"{cls.__name__} missing {missing}"
 
 
 # --------------------------------------------------------------------------- udf / udtf

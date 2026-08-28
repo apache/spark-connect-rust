@@ -36,6 +36,9 @@ pub enum Expression {
     Alias(Box<Alias>),
     /// `pyspark.sql.connect.expressions.CastExpression` - a cast expression.
     Cast(Box<Cast>),
+    /// `spark.connect.Expression.DirectShufflePartitionID` - wraps a child expression
+    /// that evaluates to a partition id (used by `DataFrame.repartitionById`).
+    DirectShufflePartitionId(Box<Expression>),
     /// `pyspark.sql.connect.expressions.UnresolvedRegex` - a regex column reference.
     UnresolvedRegex(String),
     /// `pyspark.sql.connect.expressions.SortOrder` - a sort order expression.
@@ -79,6 +82,15 @@ impl Expression {
             }
             Expression::Alias(alias) => alias.to_proto(),
             Expression::Cast(cast) => cast.to_proto(),
+            Expression::DirectShufflePartitionId(child) => {
+                let mut expr = proto::Expression::default();
+                expr.expr_type = Some(proto::expression::ExprType::DirectShufflePartitionId(
+                    Box::new(proto::expression::DirectShufflePartitionId {
+                        child: Some(Box::new(child.to_proto())),
+                    }),
+                ));
+                expr
+            }
             Expression::UnresolvedRegex(col_name) => {
                 let mut expr = proto::Expression::default();
                 expr.expr_type = Some(proto::expression::ExprType::UnresolvedRegex(

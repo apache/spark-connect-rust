@@ -46,4 +46,15 @@ impl PyRuntimeConf {
     fn is_modifiable(&self, py: Python<'_>, key: &str) -> PyResult<bool> {
         py.detach(|| self.conf.is_modifiable(key)).to_pyerr()
     }
+
+    /// All configuration values as a dict. Mirrors the `RuntimeConf.getAll` property.
+    #[getter(getAll)]
+    fn get_all<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let all = py.detach(|| self.conf.get_all()).to_pyerr()?;
+        let dict = pyo3::types::PyDict::new(py);
+        for (k, v) in all {
+            dict.set_item(k, v)?;
+        }
+        Ok(dict)
+    }
 }

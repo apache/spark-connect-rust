@@ -321,6 +321,34 @@ impl PyDataFrame {
         ))
     }
 
+    /// Repartition into `numPartitions` using a column's value directly as the shuffle
+    /// partition id. Mirrors `DataFrame.repartitionById(numPartitions, partitionIdCol)`.
+    #[pyo3(signature = (numPartitions, partitionIdCol))]
+    #[allow(non_snake_case)]
+    fn repartitionById(
+        &self,
+        numPartitions: i32,
+        partitionIdCol: &Bound<'_, PyAny>,
+    ) -> PyResult<PyDataFrame> {
+        if numPartitions <= 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "numPartitions must be positive, got {numPartitions}"
+            )));
+        }
+        let col = to_column(partitionIdCol)?;
+        Ok(PyDataFrame::new(
+            self.dataframe.repartition_by_id(numPartitions, col),
+        ))
+    }
+
+    /// Append a distributed monotonically-increasing index column. Mirrors
+    /// `DataFrame.zipWithIndex(indexColName="index")`.
+    #[pyo3(signature = (indexColName="index"))]
+    #[allow(non_snake_case)]
+    fn zipWithIndex(&self, indexColName: &str) -> PyDataFrame {
+        PyDataFrame::new(self.dataframe.zip_with_index(indexColName))
+    }
+
     /// Union with another DataFrame.
     fn union(&self, other: &PyDataFrame) -> PyDataFrame {
         PyDataFrame::new(self.dataframe.union(&other.dataframe))

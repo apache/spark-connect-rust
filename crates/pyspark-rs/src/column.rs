@@ -46,6 +46,12 @@ impl PyColumn {
         PyColumn::new(self.column.clone().name(name))
     }
 
+    /// Apply a transformation function to this column. Mirrors `Column.transform(f)`,
+    /// which is simply `f(self)`.
+    fn transform<'py>(slf: Bound<'py, Self>, f: Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        f.call1((slf,))
+    }
+
     /// Mark this column as an outer reference (for correlated subqueries / lateral
     /// joins). Mirrors `Column.outer()`, which returns the same expression — outer
     /// resolution is performed server-side via the plan id.

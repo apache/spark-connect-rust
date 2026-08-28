@@ -686,7 +686,11 @@ fn dataframe_extra_surface() {
             .unwrap(),
         4
     );
-    assert_eq!(df.repartition_by_id(2).count().unwrap(), 4);
+    assert_eq!(df.repartition_by_id(2, col("id")).count().unwrap(), 4);
+    // zipWithIndex appends the index column (so one more column than the input).
+    let zwi = df.zip_with_index("idx");
+    assert!(zwi.columns().unwrap().contains(&"idx".to_string()));
+    assert_eq!(zwi.count().unwrap(), 4);
     assert_eq!(df.spark_session().range(2).unwrap().count().unwrap(), 2);
 
     // metadata_column just builds a Column (client-side); temp-view registration.
