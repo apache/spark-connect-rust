@@ -149,10 +149,14 @@ def run_ours(
         "-p",
         "rust_transport_plugin",
     ]
-    args.append(rel_file)
+    # BISECT EXPERIMENT: invoke pytest the way the old harness (rust_parity_diff.py) did
+    # -- absolute file path, repo-root cwd (no cwd=spark_py) -- to test whether the new
+    # runner's cwd/rootdir/conftest context is what makes test_parity_arrow_python_udf.py
+    # hang at setup (p=0 TIMEOUT). Deselection is env-var/suffix based and rootdir-agnostic.
+    args.append(str(test_file))
     try:
         r = subprocess.run(
-            args, env=env, cwd=str(spark_py), capture_output=True, text=True, timeout=timeout
+            args, env=env, capture_output=True, text=True, timeout=timeout
         )
         text = r.stdout + "\n" + r.stderr
     except subprocess.TimeoutExpired:
