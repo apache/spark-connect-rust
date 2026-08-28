@@ -302,6 +302,18 @@ Do not rely on the previous version's suite. When bumping to vX.Y.Z:
 
 # 10. Module and package parity — audit at the package/module level, not just class level
 
+**The completeness contract: every module in the `pyspark-client` `connect_packages`
+list (`python/packaging/client/setup.py`, at the version tag being tracked) must either be
+vendored verbatim (pure-Python modules) OR have equivalent Rust-backed logic exposed under
+the same import path.** There is no third option — a `connect_packages` entry that is
+neither present nor Rust-equivalent is a parity gap. This includes the non-obvious ones:
+`pyspark.testing` (a public API — `assertDataFrameEqual`/`assertSchemaEqual` and the test
+base classes), `pyspark.pandas`, `pyspark.sql.pandas`, `pyspark.sql.plot`, `pyspark.logger`,
+`pyspark.errors`, `pyspark.ml.*`, `pyspark.pipelines`, etc. The only intentional exception is
+the `pyspark.sql.connect.*` gRPC-client internals, which the Rust transport replaces — and
+even those get thin re-export shims where vendored/official code (and official tests) import
+from them. Enumerate `connect_packages` at the tracked tag and reconcile the whole list.
+
 Parity auditing must audit **packages and top-level modules**, not just connect classes
 (DataFrame/Column). The class-diff alone silently misses whole packages the `pyspark-client`
 wheel ships. Every version upgrade:
