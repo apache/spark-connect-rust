@@ -402,11 +402,27 @@ For every method matching a pyspark name:
   `StateOperatorProgress`, etc.) as faithful pure-Python implementations parsed from server
   JSON, not Rust-backed. The listener bus (subscribe/dispatch) is genuinely Rust-backed;
   the progress data structure is not.
-- **pandas-on-Spark runtime parity:** A multi-step effort driven by running the official test
-  suite. Each test surfaces one gap at a time (import closure → properties → expressions →
-  internals). Provide thin `pyspark.sql.connect.*` compat shims and private accessors as
-  needed. Keep this work distinct from drop-in parity. Fixes belong in Rust or in the compat
-  shims — **never** by editing a vendored file (breaks the drift gate) or monkey-patching a
+- **The pandas-parity gate runs OFFICIAL pyspark over our TRANSPORT — not our drop-in classes.**
+  `.github/workflows/pandas-parity.yml` puts the apache/spark v4.2.0 checkout on `PYTHONPATH` and
+  loads `scripts/rust_transport_plugin.py`, which monkeypatches `SparkConnectClient` so official
+  pyspark builds every proto (Column/lit/isin/createDataFrame) and only the gRPC transport is ours.
+  **So Rust Column/lit/`__repr__` changes do NOT move this gate** — a failure here is in the transport
+  seam or the test environment, not the drop-in. To reproduce a failure locally, drive it the same
+  way (do NOT `import pyspark.pandas` from our `./python`): `PYTHONPATH=scripts:<spark-src>/python`,
+  `RUST_PYSPARK_SO=...`, `SPARK_REMOTE=sc://localhost:15002`, `-p rust_transport_plugin`, against a
+  real server. Two environment requirements the tests silently assume (both cost real time):
+  - **Client timezone must equal the server's `spark.sql.session.timeZone`.** The tests compare
+    against pure-pandas (tz-naive) results; a timestamp only round-trips through Spark when the two
+    tzs match (createDataFrame converts with the session tz, `lit(datetime)` with the client's local
+    tz). REAL pyspark fails identically when they differ, so ALIGN them (workflow sets both to UTC),
+    don't "fix" the client. Symptoms of a mismatch: `Series.isin([datetime])` / `get_dummies` on a
+    datetime column silently return all-False/all-zeros.
+  - **Pin pandas to the supported range (`>=2.2,<3.0`).** v4.2.0 pandas-on-Spark warns pandas ≥ 3.0.0
+    is unsupported and has 3.0-only branches that misbehave (e.g. `test_frame_loc_setitem` no-ops a
+    reordered multi-column `.loc` assignment). Also add test-only deps the suite needs (scipy for the
+    corr tests, pyyaml for pipelines) — matching Apache's own pandas test environment.
+- **Improving the drop-in ITSELF (separate from the gate above):** fixes belong in Rust or in the
+  compat shims — **never** by editing a vendored file (breaks the drift gate) or monkey-patching a
   Rust class from Python. Two gotchas that cost real time:
   - **`Column.__repr__` must render the expression** (`Column<'<expr>'>`), not a constant. pandas-
     on-Spark's `spark_column_equals` decides column identity by comparing repr strings (it does
