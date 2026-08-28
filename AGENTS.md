@@ -300,217 +300,90 @@ Do not rely on the previous version's suite. When bumping to vX.Y.Z:
 
 ---
 
-# 10. Full-package parity — module-level, not just class-level (THE hard lesson)
+# 10. Module and package parity — audit at the package/module level, not just class level
 
-The single biggest gap-source discovered in the v4.2.0 push: **the step-2 diff only
-covers connect *classes* (DataFrame/Column/…). It silently misses whole packages and
-top-level modules that the `pyspark-client` wheel ships.** Do this audit *every* upgrade,
-before declaring parity, so gaps stop surfacing piecemeal.
+Parity auditing must audit **packages and top-level modules**, not just connect classes
+(DataFrame/Column). The class-diff alone silently misses whole packages the `pyspark-client`
+wheel ships. Every version upgrade:
 
-**A. Package audit — against the client packaging manifest.**
-```
-# authoritative client package list = connect_packages in:
-#   python/packaging/client/setup.py   (of apache/spark at the version tag)
-# ours = dirs with __init__.py under python/pyspark
-find python/pyspark -name __init__.py | sed 's#/__init__.py##; s#python/##; s#/#.#g' | sort
-# diff the manifest's connect_packages against that; triage every missing package.
-```
-`pyspark.sql.connect.*` packages are the intentional exception (Rust transport replaces
-the Python gRPC client) — everything else in the manifest is either a gap or a
-deliberate, *written-down* N/A.
+- Diff the official `pyspark-client` packaging manifest against your module inventory.
+  Triage every missing item: client-API (implement), classic/deprecated (N/A), or
+  server-side (N/A). **Write the triage down** to avoid rediscovering gaps later.
+- Audit top-level `pyspark/*.py` files and `pyspark/__init__.py` exports against the
+  manifest. Connect-N/A files (`rdd`, `context`, etc.) are distinct from public
+  client APIs (`conf`, `version`, task context).
+- When auditing, check the **module attributes and dunders** by hand — the class
+  introspection diff does NOT catch missing properties, dunder methods, or submodules.
 
-**B. Top-level module audit — `pyspark/*.py` and what `pyspark/__init__.py` exports.**
-The manifest lists the `pyspark` package, which ships *every* `pyspark/*.py`; the
-public API is what `pyspark/__init__.py` imports (`SparkConf`, `Accumulator`,
-`TaskContext`, `Profiler`, …). Diff `ls pyspark/*.py` vs ours and check each against the
-`__init__` export list. Classic SparkContext/RDD-world files (`context`,`rdd`,`broadcast`,
-`daemon`,`worker`,`shuffle`,…) are N/A for a Connect client; but `conf`/`accumulators`/
-`taskcontext`/`profiler`/`version` are public API surface.
+# 11. Pure-Python modules and import closures — vendor faithfully, not as stubs
 
-**C. Triage bucket every missing item into exactly one of:**
-- *Client-API, implement it* (vendor pure-Python verbatim; Rust-back only server-facing bits).
-- *Classic-only, deprecated, N/A under Connect* (`mllib*`, `streaming` DStream).
-- *Server-side, N/A for a client* (`sql.worker`, `sql.streaming.proto`).
-Write the triage down (we keep it in the `client-package-parity-inventory` memo). An
-undocumented "missing" line reads as an open gap forever.
+When vendoring pure-Python modules (e.g. `errors`, `logger`, client-side `pipelines`):
+- Trace the **full import closure** — vendoring one module may pull dependencies you
+  did not anticipate (e.g., `pyspark.logger` was itself a missing module imported by
+  `pyspark.errors`). Import-time dependencies matter; runtime captures do not.
+- Do NOT hand-write stubs. Stub APIs (missing attributes, broken behavior) pass local
+  testing but fail official test suites and mis-render errors/messages. Vendor the
+  real module byte-for-byte, excluding only deep dependencies you cannot satisfy
+  (e.g., `py4j`/`grpc` imports in specific submodules).
+- Run the official tests to confirm import-time parity — official test suites will
+  surface missing attributes the class diff and hand-written shims both miss.
 
-**v4.2.0 findings (starting point for 4.3.0):** missing client-API packages were
-`pyspark.pipelines`, `pyspark.sql.functions` *as a package* (we ship `functions.py`),
-`pyspark.sql.pandas`, `pyspark.sql.plot`, `pyspark.logger`, `pyspark.ml.{linalg,param,
-torch,deepspeed}`, `pyspark.pandas.{data_type_ops,usage_logging}`; missing top-level
-`conf`/`accumulators`/`taskcontext`/`profiler`. `pyspark.errors` shipped but was a STUB
-(see 11). Full picture: `client-package-parity-inventory` memory memo.
+# 12. API signatures and behavioral parity — mirror exact semantics, not just names
 
-# 11. `pyspark.errors` and `pyspark.logger` — vendor them faithfully, don't stub
+For every method matching a pyspark name:
+- **Signature must match**: default arguments, kwarg names, types. A method using
+  default-argument semantics (like `conf.get(key, default=None)` that returns the
+  default instead of raising when a key is absent) must route to the correct server
+  operation.
+- **Members documented as properties must be Python properties** (`#[getter]` in PyO3),
+  not methods. The introspection diff does NOT catch property-vs-method bugs; check
+  by hand against official docs.
+- **Apply ergonomics sweeps consistently across ALL analogous APIs**, not just the first
+  instance. Grep every matching arg type when a pattern emerges (e.g., string-name
+  lists should all take `impl IntoIterator<Item = impl Into<String>>`).
 
-A hand-written `errors` stub (no `getCondition`, no error-class message rendering) passes
-casual use but fails real parity tests (`e.getCondition() == "NOT_EXPECTED_TYPE"`) and
-mis-renders messages. `pyspark.errors` is **pure-Python and vendorable**; the whole public
-API comes from `errors/exceptions/base.py`. Vendor the closure:
-`errors/__init__.py` (byte-identical), `errors/exceptions/base.py`, `errors/utils.py`
-(`ErrorClassesReader`), `errors/error_classes.py` + `errors/error-conditions.json`,
-`errors/exceptions/tblib.py`, and **`pyspark/logger/`** (`base.py` imports
-`pyspark.logger.PySparkLogger`). Do NOT vendor `exceptions/{captured,connect}.py` —
-they import `py4j`/`grpc`; the public classes live in `base.py`, which `__init__` imports
-exclusively. `errors/utils.py`'s only "connect" reference is a runtime JVM-origin capture
-(not import-time), so it vendors clean. **Lesson: vendoring one pure module pulls a
-dependency closure — trace the import graph (`logger` was itself a missing package).**
+# 13. Data types — picklability, recursion, and correct Python materialization
 
-# 12. Running official tests directly against the drop-in + `connect.*` compat shims
+- **Every `DataType` must be picklable:** the `__reduce__` method returns
+  `(pyspark.sql.types._parse_datatype_json_string, (json,))` to round-trip through
+  official UDF workers. The `_parse_datatype_json_string` function must handle the
+  **full recursive case** (nested `struct`/`array`/`map` forms and all atomic forms,
+  including `decimal`, `char`, `varchar`, `time`, `interval`). Non-recursive parsers
+  silently break nested pickling.
+- **Struct-field metadata must preserve raw JSON**, not re-quote it during parse. Keep
+  the JSON and proto paths consistent.
+- **`df.schema` and `df.columns` must be properties returning the correct Python type**
+  (StructType/list, not a bare DataType or method). Use `data_type_to_py` to materialize
+  core `DataType` objects into their concrete Python types with the correct MRO.
+- **`StructType` and `StructField` must expose all documented accessors and dunders**
+  (fields, names, `__getitem__`, `__len__`, etc.). The introspection diff does NOT
+  catch missing attributes; check by hand.
+- **`PyDataType` needs a `#[new]`** to allow pure-Python subclasses (UserDefinedType).
+  UDT is inherently Python and must cloudpickle the concrete class, not be lowered to Rust.
 
-Two ways to run official tests (both valid):
-- **Strangler-fig harness** (`scripts/run_official_tests.py`): real pyspark *source* on
-  PYTHONPATH + our Rust transport `.so`. Tests import real `pyspark.sql.connect.*`.
-- **Directly against our `python/pyspark` drop-in**: pure-Python official tests (those NOT
-  using `ReusedConnectTestCase`) run with no server. But they import from
-  `pyspark.sql.connect.*` (e.g. `from pyspark.sql.connect.functions.builtin import col, expr`).
-  Provide **thin compat shims** that re-export our Rust-backed impls under the connect path:
-  `python/pyspark/sql/connect/functions/{__init__,builtin}.py` → `from pyspark.sql.functions
-  import *`. In this arch "connect functions" *is* `pyspark.sql.functions`. Add more connect
-  shims as more official tests need them — keep each a pure re-export, never a fork.
-- Server-backed official tests (`ReusedConnectTestCase`, `should_test_connect`) need the
-  live local Connect server (step 1) and the relevant Rust command paths.
+# 14. Vendored code and proto — use version tags, verify coverage, not drift
 
-# 13. DataType ↔ Python materialization, `df.schema`, StructType introspection, UDT
+- **Vendored pure-Python dirs:** use `git subtree` pinned to the upstream **version tag**
+  (never master) so they carry provenance, are importable, and update via `git subtree pull`.
+  Classify each dir as Rust-backed shim (keep ours) or pure upstream (vendor verbatim).
+- **Proto can intentionally diverge:** the fork may extend the proto with fork-specific
+  fields. On a version bump, verify new upstream fields are covered with a `>`-only diff
+  (no lines from the tag should be absent from ours). The proto is exempt from vendor
+  drift checks because it is a superset, not a byte-identical copy.
 
-- **`df.schema` is a PROPERTY returning a real `StructType`** (not a method, not a bare
-  `DataType`). The bug: it returned `PyDataType::new(schema)` (a base `DataType` method),
-  so `df.schema.fields`/`["c"]`/`fieldNames()` all broke. Fix: `#[getter] schema` calling
-  `crate::types::data_type_to_py(py, &schema)`.
-- **`data_type_to_py`** (crates/pyspark-rs/src/types.rs) is the inverse of
-  `py_to_data_type`: materialize a core `DataType` into its *concrete* Python type object
-  with the correct MRO (StructType/IntegerType/… via the `init_chain!` macro). Any place
-  handing a schema/type back to Python must use it. UDT/Unparsed delegate to the Python
-  `_parse_datatype_json_string`.
-- **StructType** must expose `.fields` (list of StructField), `.names`, `__getitem__`
-  (index/name/slice), `__iter__`, `__len__`, and chainable `.add()` (returns self).
-  **StructField** must expose `.dataType`/`.metadata`/`.name`/`.nullable` getters + faithful
-  `__repr__`/`__eq__`. The class-name introspection diff does NOT catch missing *attributes*
-  or *dunders* — check these by hand.
-- **`PyDataType` needs a `#[new]`** so pure-Python subclasses (a user's `UserDefinedType`)
-  are instantiable. `UserDefinedType` is a *Python* subclass of the Rust `DataType`: its
-  `jsonValue` cloudpickles the concrete class and `fromJson` re-imports it by module path —
-  inherently Python (like the pickling serializers), not lowerable to Rust. `py_to_data_type`
-  special-cases a UDT instance (reads `jsonValue()`+`sqlType()`) before the base fallback.
+# 15. Architectural constraints and known blockers
 
-# 14. Pipelines / Spark Declarative Pipelines (SDP)
-
-- **Pure-Python surface vendors cleanly**: `pyspark/pipelines/{api,flow,output,
-  graph_element_registry,source_code_location,type_error_utils,logging_utils,__init__}.py`.
-  The ONLY edit needed: `api.py`'s two *lazy* `from pyspark.sql.connect.functions.builtin
-  import expr/col` → `pyspark.sql.functions`. The official pure-Python parity tests
-  (`tests/test_decorators.py`, `tests/test_graph_element_registry.py`, using the vendored
-  in-memory `tests/local_graph_element_registry.py`) then pass unmodified.
-- **Connect-server path needs a Rust `PipelineCommand` seam.** Upstream's
-  `spark_connect_pipeline.py` (`create_dataflow_graph`/`start_run`/`handle_pipeline_events`)
-  and `spark_connect_graph_element_registry.py` call `spark.client.execute_command(pb2.Command)`
-  / `execute_command_as_iterator(...)` + `df._plan.plan(client)` + `col.to_plan(client)` —
-  the low-level internals we replaced with Rust. The proto has everything:
-  `PipelineCommand.{CreateDataflowGraph, DefineOutput{TableDetails/SinkDetails, Schema oneof
-  SchemaDataType/SchemaString}, DefineFlow{RelationFlowDetails/AutoCdcFlowDetails, ScdType},
-  DefineSqlGraphElements, StartRun}`; results via `ExecutePlanResponse.response_type`
-  variants `PipelineCommandResult` (→ `CreateDataflowGraphResult.dataflow_graph_id`) and
-  streamed `PipelineEventResult`. NOTE the message is `DefineOutput` (with `OutputType`
-  enum MATERIALIZED_VIEW/TABLE/TEMPORARY_VIEW/SINK), *not* `DefineDataset`.
-- **Preferred impl (Rust-native, Path B):** add high-level methods to `spark-connect`
-  (`create_dataflow_graph→graph_id`, `define_output`, `define_flow` taking our DataFrame's
-  `LogicalPlan`, `define_auto_cdc_flow`, `define_sql_graph_elements`, `start_run→event
-  iterator`) built on `execute_command_collect` (read `PipelineCommandResult`) and a
-  streaming variant (yield `PipelineEventResult`); expose via pyspark-rs on the session;
-  then vendor + rewire the two `spark_connect_*` files to call those instead of `pb2`.
-  Avoids shipping the full Python proto bindings. Confirm the local server registered a
-  PipelinesHandler before chasing test failures.
-
-# 15. Proto can be a fork *superset* — verify wire coverage, don't trust the label
-
-Our vendored proto was labeled v4.1.0 but actually **covered 100% of v4.2.0's wire surface**
-plus fork additions (`Zip` relation, nanosecond timestamp literals/types, SCD2 pipeline
-history). Verify with a `>`-only diff (lines in the version-tag proto absent from ours):
-```
-for f in $V/*.proto; do diff ours/$(basename $f) $f | grep -E '^>' ; done   # empty ⇒ covered
-```
-The fork intentionally extends the proto, so it is **exempt from the vendor drift check**
-(that guards only byte-verbatim dirs like `cloudpickle`). On a version bump: run the
-`>`-only diff to find genuinely new upstream fields, add them (preserving fork additions,
-whose field numbers must not collide), and bump `PROTO_VERSION.txt` / `SPARK_SHA.txt` /
-the `SPARK_VERSION` user-agent const in `crates/spark-connect-core/src/channel.rs`.
-
-# 16. Misc conventions learned this push
-
-- New Python test code uses `from pyspark.sql import functions as sf` (never `as F`).
-- `CapturedStreamingQueryException` is JVM-only — skip it; ensure `StreamingQueryException` exists.
-- Streaming listener *progress holders* (`StreamingQueryProgress`/`StateOperatorProgress`/
-  `SourceProgress`/`SinkProgress` + the event holders) are, in upstream itself, pure-Python
-  `dict` subclasses parsed from server JSON — keep them as faithful Python (porting to Rust
-  would DIVERGE from upstream structure). The *listener bus* (subscribe/dispatch) is the part
-  that is genuinely Rust-backed.
-- `variant_utils.py` is pure-Python in upstream too; the drop-in vendors it. A Rust-native
-  variant codec would be a `spark-connect`-crate enhancement (Rust API coverage), separate
-  from drop-in parity — don't conflate.
-
-# 17. More hard-won gotchas (v4.2.0 parity, continued)
-
-- **Property-vs-method parity bugs are a recurring class.** Several DataFrame/type members
-  must be Python *properties* (`#[getter]` in PyO3) but were implemented as methods, so
-  `x.member` returned a bound method instead of the value and broke callers. Confirmed/fixed
-  this session: `DataFrame.schema`, `DataFrame.columns`. When adding/auditing any member that
-  pyspark documents as a property (schema, columns, dtypes, isStreaming, storageLevel, na,
-  stat, write, ...), verify it is a `#[getter]`. The class-name introspection diff does NOT
-  catch property-vs-method or missing attributes/dunders — check those by hand.
-
-- **`RuntimeConf.get(key, default)` must use the server `GetWithDefault` op.** A plain `Get`
-  raises `SQL_CONF_NOT_FOUND` for an unknown key; pyspark's `conf.get(key, default)` returns
-  the default. Fixed by routing to `get_config_with_defaults` when a default is supplied
-  (`crates/spark-connect/src/conf.rs::get_with_default`); `get(key)` with no default still
-  raises, matching `RuntimeConfig.get`. pandas-on-Spark hit this immediately (`config.py`
-  does `conf.get(key, default=json.dumps(...))`).
-
-- **`createDataFrame` must accept a pandas DataFrame, not just lists.** pandas-on-Spark's
-  `InternalFrame.from_pandas` calls `spark.createDataFrame(pdf, schema=...)`. The PyO3
-  `createDataFrame` was typed `data: &Bound<PyList>` (rejected pandas outright). Now it
-  detects a `pandas.DataFrame` and converts rows with NaN/NaT→None via
-  `df.astype(object).where(df.notna(), None).values.tolist()`, taking names from `df.columns`.
-  NOTE (future work): this Python row round-trip is a stopgap — the correct/efficient path is
-  Arrow-batch ingestion straight into the `LocalRelation` (the core already emits Arrow IPC
-  for list input; add an entry point that accepts Arrow IPC bytes from pandas→Arrow
-  conversion, honoring exact dtypes/timestamps).
-
-- **`pyspark.pandas` should be the FULL upstream package, vendored verbatim — it ships in
-  the JVM-free `pyspark-client`.** A prior diverged 48-file subset never even imported
-  (referenced `data_type_ops`, which was absent). Replaced with the full v4.2.0 package
-  (67 files); the only bridging needed at import time was two pure helpers added verbatim to
-  `pyspark/sql/utils.py` (`get_lit_sql_str`, `pyspark_column_op`). `import pyspark.pandas`
-  now works.
-
-- **pandas-on-Spark RUNTIME is a long chain of connect-internal dependencies.** After import,
-  exercising it surfaces one real gap at a time (conf.get default → createDataFrame(pandas)
-  → `DataFrame._col` → `DataFrame.columns` property → `spark_column_equals`/`pyspark.sql.
-  connect.column` + Column expression-equality → deeper `InternalFrame` machinery). Expect
-  to add thin `pyspark.sql.connect.*` compat shims (re-exporting the Rust-backed classes)
-  and a few private accessors (`_col`, ...) as each surfaces. Treat pandas-on-Spark runtime
-  parity as its own multi-step effort, driven by running the connect pandas tests (a
-  dedicated long-running `pandas-parity.yml` workflow exists for this).
-
-- **The known Row blocker (still open).** Our `Row` (`pyspark._pyspark.Row`) is NOT a `tuple`
-  subclass and its `__fields__` is read-only; PyO3 cannot subclass `tuple`. Some
-  pandas-on-Spark code paths (and `pyspark.sql.types._create_row`, which upstream builds via
-  `Row(*values); row.__fields__ = fields`) assume a tuple-`Row` with mutable `__fields__`.
-  Our `_create_row` works around it by constructing from name/value pairs, but full fidelity
-  likely needs adopting the upstream Python tuple-`Row` as canonical and returning it from
-  `collect()`/`head()`/`take()`/`first()`/`toLocalIterator` (~13 materialization sites in
-  `crates/pyspark-rs/src/dataframe.rs`).
-
-- **Drop-in module layout: mirror official `pyspark/sql/__init__.py` verbatim + thin
-  re-export submodules.** Hand-writing a minimal `__init__.py` caused endless "cannot import
-  name X" gaps. The fix: vendor the official `__init__` and back it with thin submodules
-  (`session/column/group/readwriter/merge/dataframe/window/catalog/observation/utils/
-  context/internal`) that re-export the Rust-backed classes. `pyspark.sql.types` must also
-  re-export the stdlib names upstream leaks (e.g. `cast`) and helpers (`_drop_metadata`,
-  `_create_row`, `Row`).
-
-- **The Vec<String> ergonomics sweep.** The earlier IntoIterator sweep only covered
-  `Vec<Column>`; string-name lists (`DataFrameWriter[/V2].{cluster_by,partition_by,
-  bucket_by,sort_by}`, `DataFrame.{join_using,hint}`) still took `Vec<String>` and rejected
-  array/`&str` literals. They now take `impl IntoIterator<Item = impl Into<String>>`; empty-list
-  call sites need `Vec::<String>::new()` to satisfy inference. When sweeping, grep BOTH
-  `Vec<Column>` and `Vec<String>` public method args.
+- **Row materialization:** PyO3 cannot subclass `tuple`, so our `Row` is not a tuple subclass.
+  Some pandas-on-Spark code assumes a tuple-`Row` with mutable `__fields__`. Full fidelity
+  likely requires adopting the upstream Python tuple-`Row` at collect boundaries.
+- **Streaming listeners and progress holders:** Keep progress holders (`StreamingQueryProgress`,
+  `StateOperatorProgress`, etc.) as faithful pure-Python implementations parsed from server
+  JSON, not Rust-backed. The listener bus (subscribe/dispatch) is genuinely Rust-backed;
+  the progress data structure is not.
+- **pandas-on-Spark runtime parity:** A multi-step effort driven by running the official test
+  suite. Each test surfaces one gap at a time (import closure → properties → expressions →
+  internals). Provide thin `pyspark.sql.connect.*` compat shims and private accessors as
+  needed. Keep this work distinct from drop-in parity.
+- **Pipelines (SDP):** The pure-Python surface vendors cleanly with one edit to imports. The
+  Connect-server path requires a dedicated Rust `PipelineCommand` seam with high-level methods
+  on the session, separate from drop-in parity work.
