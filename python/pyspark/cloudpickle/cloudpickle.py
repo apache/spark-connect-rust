@@ -783,12 +783,6 @@ def _class_getstate(obj):
 
     clsdict.pop("__dict__", None)  # unpicklable property object
 
-    if sys.version_info >= (3, 14):
-        # PEP-649/749: __annotate_func__ contains a closure that references the class
-        # dict. We need to exclude it from pickling. Python will recreate it when
-        # __annotations__ is accessed at unpickling time.
-        clsdict.pop("__annotate_func__", None)
-
     return (clsdict, {})
 
 
@@ -1196,10 +1190,6 @@ def _class_setstate(obj, state):
         for subclass in registry:
             obj.register(subclass)
 
-    # PEP-649/749: During pickling, we excluded the __annotate_func__ attribute but it
-    # will be created by Python. Subsequently, annotations will be recreated when
-    # __annotations__ is accessed.
-
     return obj
 
 
@@ -1311,9 +1301,12 @@ class Pickler(pickle.Pickler):
     def dump(self, obj):
         try:
             return super().dump(obj)
-        except RecursionError as e:
-            msg = "Could not pickle object as excessively deep recursion required."
-            raise pickle.PicklingError(msg) from e
+        except RuntimeError as e:
+            if len(e.args) > 0 and "recursion" in e.args[0]:
+                msg = "Could not pickle object as excessively deep recursion required."
+                raise pickle.PicklingError(msg) from e
+            else:
+                raise
 
     def __init__(self, file, protocol=None, buffer_callback=None):
         if protocol is None:
