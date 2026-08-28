@@ -18,7 +18,7 @@ use spark_connect_proto::{
 };
 
 use crate::artifact::{build_artifact_request_stream, FileArtifact, NamedArtifact};
-use crate::channel::ChannelBuilder;
+use crate::channel::{ChannelBuilder, GRPC_MAX_MESSAGE_LENGTH_DEFAULT};
 use crate::error::{Result, SparkError};
 use crate::reattach::ExecutePlanResponseReattachableIterator;
 use crate::retries::{RetryPolicy, RetryPolicyState};
@@ -103,7 +103,13 @@ impl SparkConnectClient {
                 .connect_lazy()
         };
 
-        let stub = SparkConnectServiceClient::new(channel.clone());
+        // Raise the message-size cap from tonic's 4 MiB default (too small for real Arrow
+        // `collect()` results) to 128 MiB, applied to both the stub and the raw Grpc calls
+        // below. The reference client sets this unconditionally via GRPC_DEFAULT_OPTIONS
+        // (grpc.max_{send,receive}_message_length); it is not a connection-string option.
+        let stub = SparkConnectServiceClient::new(channel.clone())
+            .max_decoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT)
+            .max_encoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT);
 
         let metadata = builder.metadata().into_iter().collect();
 
@@ -173,7 +179,9 @@ impl SparkConnectClient {
     /// and deep plans don't hit the recursion limit - the server sees exactly the bytes
     /// the reference client built.
     pub async fn execute_plan_raw(&self, request: Vec<u8>) -> Result<Streaming<Vec<u8>>> {
-        let mut grpc = tonic::client::Grpc::new(self.channel.clone());
+        let mut grpc = tonic::client::Grpc::new(self.channel.clone())
+            .max_decoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT)
+            .max_encoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT);
         wait_ready(&mut grpc).await?;
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
@@ -189,7 +197,9 @@ impl SparkConnectClient {
 
     /// ReattachExecute, byte-exact passthrough returning a raw response stream.
     pub async fn reattach_execute_raw(&self, request: Vec<u8>) -> Result<Streaming<Vec<u8>>> {
-        let mut grpc = tonic::client::Grpc::new(self.channel.clone());
+        let mut grpc = tonic::client::Grpc::new(self.channel.clone())
+            .max_decoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT)
+            .max_encoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT);
         wait_ready(&mut grpc).await?;
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
@@ -239,7 +249,9 @@ impl SparkConnectClient {
     /// returns the raw response bytes, avoiding the client-side limit (matching the
     /// reference client, which never re-decodes the request it built).
     pub async fn analyze_plan_raw(&self, request: Vec<u8>) -> Result<Vec<u8>> {
-        let mut grpc = tonic::client::Grpc::new(self.channel.clone());
+        let mut grpc = tonic::client::Grpc::new(self.channel.clone())
+            .max_decoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT)
+            .max_encoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT);
         wait_ready(&mut grpc).await?;
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
