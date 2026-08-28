@@ -281,11 +281,162 @@ Do not rely on the previous version's suite. When bumping to vX.Y.Z:
 ## 9. Condensed checklist
 
 1. Bump version + regen protos; get vX.Y.Z conda pyspark + local Connect server.
-2. Run the introspection diff → per-class gap list (step 2).
+2. Run the introspection diff → per-class gap list (step 2) **AND the module/package
+   audit (step 10) — the class diff alone misses whole modules.**
 3. Implement each gap in core + PyO3 (+ shim), matching signature & behavior (step 3).
 4. New DataTypes → picklability + json/proto round-trip + `types_roundtrip.rs` (step 4).
 5. `git subtree pull` vendored dirs to the vX.Y.Z tag; update drift-check `SPARK_TAG` (step 5).
-6. Re-audit the packaging manifest for newly-shipped client files (step 5).
+6. Re-audit the packaging manifest for newly-shipped client files (step 5 / step 10).
 7. Coverage >90% both sides (step 6).
 8. Pre-push discipline: compile-all-tests, fmt, clippy, parity gate, prove-diff (step 7).
 9. Push (after `gh auth switch`), monitor CI, fix.
+
+---
+
+# 10. Full-package parity — module-level, not just class-level (THE hard lesson)
+
+The single biggest gap-source discovered in the v4.2.0 push: **the step-2 diff only
+covers connect *classes* (DataFrame/Column/…). It silently misses whole packages and
+top-level modules that the `pyspark-client` wheel ships.** Do this audit *every* upgrade,
+before declaring parity, so gaps stop surfacing piecemeal.
+
+**A. Package audit — against the client packaging manifest.**
+```
+# authoritative client package list = connect_packages in:
+#   python/packaging/client/setup.py   (of apache/spark at the version tag)
+# ours = dirs with __init__.py under python/pyspark
+find python/pyspark -name __init__.py | sed 's#/__init__.py##; s#python/##; s#/#.#g' | sort
+# diff the manifest's connect_packages against that; triage every missing package.
+```
+`pyspark.sql.connect.*` packages are the intentional exception (Rust transport replaces
+the Python gRPC client) — everything else in the manifest is either a gap or a
+deliberate, *written-down* N/A.
+
+**B. Top-level module audit — `pyspark/*.py` and what `pyspark/__init__.py` exports.**
+The manifest lists the `pyspark` package, which ships *every* `pyspark/*.py`; the
+public API is what `pyspark/__init__.py` imports (`SparkConf`, `Accumulator`,
+`TaskContext`, `Profiler`, …). Diff `ls pyspark/*.py` vs ours and check each against the
+`__init__` export list. Classic SparkContext/RDD-world files (`context`,`rdd`,`broadcast`,
+`daemon`,`worker`,`shuffle`,…) are N/A for a Connect client; but `conf`/`accumulators`/
+`taskcontext`/`profiler`/`version` are public API surface.
+
+**C. Triage bucket every missing item into exactly one of:**
+- *Client-API, implement it* (vendor pure-Python verbatim; Rust-back only server-facing bits).
+- *Classic-only, deprecated, N/A under Connect* (`mllib*`, `streaming` DStream).
+- *Server-side, N/A for a client* (`sql.worker`, `sql.streaming.proto`).
+Write the triage down (we keep it in the `client-package-parity-inventory` memo). An
+undocumented "missing" line reads as an open gap forever.
+
+**v4.2.0 findings (starting point for 4.3.0):** missing client-API packages were
+`pyspark.pipelines`, `pyspark.sql.functions` *as a package* (we ship `functions.py`),
+`pyspark.sql.pandas`, `pyspark.sql.plot`, `pyspark.logger`, `pyspark.ml.{linalg,param,
+torch,deepspeed}`, `pyspark.pandas.{data_type_ops,usage_logging}`; missing top-level
+`conf`/`accumulators`/`taskcontext`/`profiler`. `pyspark.errors` shipped but was a STUB
+(see 11). Full picture: `client-package-parity-inventory` memory memo.
+
+# 11. `pyspark.errors` and `pyspark.logger` — vendor them faithfully, don't stub
+
+A hand-written `errors` stub (no `getCondition`, no error-class message rendering) passes
+casual use but fails real parity tests (`e.getCondition() == "NOT_EXPECTED_TYPE"`) and
+mis-renders messages. `pyspark.errors` is **pure-Python and vendorable**; the whole public
+API comes from `errors/exceptions/base.py`. Vendor the closure:
+`errors/__init__.py` (byte-identical), `errors/exceptions/base.py`, `errors/utils.py`
+(`ErrorClassesReader`), `errors/error_classes.py` + `errors/error-conditions.json`,
+`errors/exceptions/tblib.py`, and **`pyspark/logger/`** (`base.py` imports
+`pyspark.logger.PySparkLogger`). Do NOT vendor `exceptions/{captured,connect}.py` —
+they import `py4j`/`grpc`; the public classes live in `base.py`, which `__init__` imports
+exclusively. `errors/utils.py`'s only "connect" reference is a runtime JVM-origin capture
+(not import-time), so it vendors clean. **Lesson: vendoring one pure module pulls a
+dependency closure — trace the import graph (`logger` was itself a missing package).**
+
+# 12. Running official tests directly against the drop-in + `connect.*` compat shims
+
+Two ways to run official tests (both valid):
+- **Strangler-fig harness** (`scripts/run_official_tests.py`): real pyspark *source* on
+  PYTHONPATH + our Rust transport `.so`. Tests import real `pyspark.sql.connect.*`.
+- **Directly against our `python/pyspark` drop-in**: pure-Python official tests (those NOT
+  using `ReusedConnectTestCase`) run with no server. But they import from
+  `pyspark.sql.connect.*` (e.g. `from pyspark.sql.connect.functions.builtin import col, expr`).
+  Provide **thin compat shims** that re-export our Rust-backed impls under the connect path:
+  `python/pyspark/sql/connect/functions/{__init__,builtin}.py` → `from pyspark.sql.functions
+  import *`. In this arch "connect functions" *is* `pyspark.sql.functions`. Add more connect
+  shims as more official tests need them — keep each a pure re-export, never a fork.
+- Server-backed official tests (`ReusedConnectTestCase`, `should_test_connect`) need the
+  live local Connect server (step 1) and the relevant Rust command paths.
+
+# 13. DataType ↔ Python materialization, `df.schema`, StructType introspection, UDT
+
+- **`df.schema` is a PROPERTY returning a real `StructType`** (not a method, not a bare
+  `DataType`). The bug: it returned `PyDataType::new(schema)` (a base `DataType` method),
+  so `df.schema.fields`/`["c"]`/`fieldNames()` all broke. Fix: `#[getter] schema` calling
+  `crate::types::data_type_to_py(py, &schema)`.
+- **`data_type_to_py`** (crates/pyspark-rs/src/types.rs) is the inverse of
+  `py_to_data_type`: materialize a core `DataType` into its *concrete* Python type object
+  with the correct MRO (StructType/IntegerType/… via the `init_chain!` macro). Any place
+  handing a schema/type back to Python must use it. UDT/Unparsed delegate to the Python
+  `_parse_datatype_json_string`.
+- **StructType** must expose `.fields` (list of StructField), `.names`, `__getitem__`
+  (index/name/slice), `__iter__`, `__len__`, and chainable `.add()` (returns self).
+  **StructField** must expose `.dataType`/`.metadata`/`.name`/`.nullable` getters + faithful
+  `__repr__`/`__eq__`. The class-name introspection diff does NOT catch missing *attributes*
+  or *dunders* — check these by hand.
+- **`PyDataType` needs a `#[new]`** so pure-Python subclasses (a user's `UserDefinedType`)
+  are instantiable. `UserDefinedType` is a *Python* subclass of the Rust `DataType`: its
+  `jsonValue` cloudpickles the concrete class and `fromJson` re-imports it by module path —
+  inherently Python (like the pickling serializers), not lowerable to Rust. `py_to_data_type`
+  special-cases a UDT instance (reads `jsonValue()`+`sqlType()`) before the base fallback.
+
+# 14. Pipelines / Spark Declarative Pipelines (SDP)
+
+- **Pure-Python surface vendors cleanly**: `pyspark/pipelines/{api,flow,output,
+  graph_element_registry,source_code_location,type_error_utils,logging_utils,__init__}.py`.
+  The ONLY edit needed: `api.py`'s two *lazy* `from pyspark.sql.connect.functions.builtin
+  import expr/col` → `pyspark.sql.functions`. The official pure-Python parity tests
+  (`tests/test_decorators.py`, `tests/test_graph_element_registry.py`, using the vendored
+  in-memory `tests/local_graph_element_registry.py`) then pass unmodified.
+- **Connect-server path needs a Rust `PipelineCommand` seam.** Upstream's
+  `spark_connect_pipeline.py` (`create_dataflow_graph`/`start_run`/`handle_pipeline_events`)
+  and `spark_connect_graph_element_registry.py` call `spark.client.execute_command(pb2.Command)`
+  / `execute_command_as_iterator(...)` + `df._plan.plan(client)` + `col.to_plan(client)` —
+  the low-level internals we replaced with Rust. The proto has everything:
+  `PipelineCommand.{CreateDataflowGraph, DefineOutput{TableDetails/SinkDetails, Schema oneof
+  SchemaDataType/SchemaString}, DefineFlow{RelationFlowDetails/AutoCdcFlowDetails, ScdType},
+  DefineSqlGraphElements, StartRun}`; results via `ExecutePlanResponse.response_type`
+  variants `PipelineCommandResult` (→ `CreateDataflowGraphResult.dataflow_graph_id`) and
+  streamed `PipelineEventResult`. NOTE the message is `DefineOutput` (with `OutputType`
+  enum MATERIALIZED_VIEW/TABLE/TEMPORARY_VIEW/SINK), *not* `DefineDataset`.
+- **Preferred impl (Rust-native, Path B):** add high-level methods to `spark-connect`
+  (`create_dataflow_graph→graph_id`, `define_output`, `define_flow` taking our DataFrame's
+  `LogicalPlan`, `define_auto_cdc_flow`, `define_sql_graph_elements`, `start_run→event
+  iterator`) built on `execute_command_collect` (read `PipelineCommandResult`) and a
+  streaming variant (yield `PipelineEventResult`); expose via pyspark-rs on the session;
+  then vendor + rewire the two `spark_connect_*` files to call those instead of `pb2`.
+  Avoids shipping the full Python proto bindings. Confirm the local server registered a
+  PipelinesHandler before chasing test failures.
+
+# 15. Proto can be a fork *superset* — verify wire coverage, don't trust the label
+
+Our vendored proto was labeled v4.1.0 but actually **covered 100% of v4.2.0's wire surface**
+plus fork additions (`Zip` relation, nanosecond timestamp literals/types, SCD2 pipeline
+history). Verify with a `>`-only diff (lines in the version-tag proto absent from ours):
+```
+for f in $V/*.proto; do diff ours/$(basename $f) $f | grep -E '^>' ; done   # empty ⇒ covered
+```
+The fork intentionally extends the proto, so it is **exempt from the vendor drift check**
+(that guards only byte-verbatim dirs like `cloudpickle`). On a version bump: run the
+`>`-only diff to find genuinely new upstream fields, add them (preserving fork additions,
+whose field numbers must not collide), and bump `PROTO_VERSION.txt` / `SPARK_SHA.txt` /
+the `SPARK_VERSION` user-agent const in `crates/spark-connect-core/src/channel.rs`.
+
+# 16. Misc conventions learned this push
+
+- New Python test code uses `from pyspark.sql import functions as sf` (never `as F`).
+- `CapturedStreamingQueryException` is JVM-only — skip it; ensure `StreamingQueryException` exists.
+- Streaming listener *progress holders* (`StreamingQueryProgress`/`StateOperatorProgress`/
+  `SourceProgress`/`SinkProgress` + the event holders) are, in upstream itself, pure-Python
+  `dict` subclasses parsed from server JSON — keep them as faithful Python (porting to Rust
+  would DIVERGE from upstream structure). The *listener bus* (subscribe/dispatch) is the part
+  that is genuinely Rust-backed.
+- `variant_utils.py` is pure-Python in upstream too; the drop-in vendors it. A Rust-native
+  variant codec would be a `spark-connect`-crate enhancement (Rust API coverage), separate
+  from drop-in parity — don't conflate.
