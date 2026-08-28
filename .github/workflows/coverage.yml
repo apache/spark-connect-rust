@@ -152,8 +152,12 @@ jobs:
             cargo llvm-cov --no-cfg-coverage --no-report -p apache-spark-connect \
               --test e2e_functions --test e2e_columns --test e2e_dataframe \
               --test e2e_coverage --test e2e_integration \
+              --test e2e_streaming --test e2e_new_methods \
               -- --test-threads=1
           cargo llvm-cov report --json --output-path coverage-rust-llvm.json
+          # Per-file table into the job log, so coverage regressions are easy to see
+          # (which file dropped) without downloading the JSON artifact.
+          cargo llvm-cov report --summary-only
 
       - name: Parse Rust coverage and create badge JSON
         # Extract line coverage % from llvm-cov JSON output and convert to shields.io
@@ -299,6 +303,8 @@ jobs:
           path: |
             coverage-rust-badge.json
             coverage-python-badge.json
+            coverage-rust-llvm.json
+            python/coverage-python.json
           retention-days: 5
 
       - name: Upload Connect server log
