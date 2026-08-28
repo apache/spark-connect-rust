@@ -51,7 +51,10 @@ fn format_literal(literal: &proto::expression::Literal) -> String {
 struct ProfileResult {
     /// The accumulated profile data (typically a string representation).
     pub data: String,
-    /// Metadata about the profile (e.g., profile type, timestamp).
+    /// Metadata about the profile (e.g., profile type, timestamp). Collected from the
+    /// profiler responses (see `collect_profiles`) for parity with pyspark; retained for
+    /// a future `show()`/`dump()` that surfaces it, hence not read yet.
+    #[allow(dead_code)]
     pub metadata: HashMap<String, String>,
 }
 
@@ -299,5 +302,135 @@ mod tests {
         let result = collector.show(Some(1));
         assert!(result.contains("udf_time_ms: 150"));
         assert!(result.contains("python_calls: 42"));
+    }
+
+    #[test]
+    fn format_literal_covers_all_variants() {
+        use proto::expression::literal::{self, LiteralType};
+        let lit = |lt: LiteralType| proto::expression::Literal {
+            literal_type: Some(lt),
+            data_type: None,
+        };
+        assert_eq!(
+            format_literal(&lit(LiteralType::Null(proto::DataType::default()))),
+            "null"
+        );
+        assert_eq!(format_literal(&lit(LiteralType::Boolean(true))), "true");
+        assert_eq!(format_literal(&lit(LiteralType::Byte(1))), "1");
+        assert_eq!(format_literal(&lit(LiteralType::Short(2))), "2");
+        assert_eq!(format_literal(&lit(LiteralType::Integer(3))), "3");
+        assert_eq!(format_literal(&lit(LiteralType::Long(4))), "4");
+        assert_eq!(format_literal(&lit(LiteralType::Float(1.5))), "1.5");
+        assert_eq!(format_literal(&lit(LiteralType::Double(2.5))), "2.5");
+        assert_eq!(
+            format_literal(&lit(LiteralType::Decimal(literal::Decimal::default()))),
+            "decimal"
+        );
+        assert_eq!(
+            format_literal(&lit(LiteralType::String("hi".to_string()))),
+            "hi"
+        );
+        assert!(
+            format_literal(&lit(LiteralType::Binary(vec![1u8, 2, 3].into()))).contains("3 bytes")
+        );
+        assert_eq!(
+            format_literal(&lit(LiteralType::CalendarInterval(
+                literal::CalendarInterval::default()
+            ))),
+            "calendar_interval"
+        );
+        assert_eq!(
+            format_literal(&lit(LiteralType::YearMonthInterval(0))),
+            "year_month_interval"
+        );
+        assert_eq!(
+            format_literal(&lit(LiteralType::DayTimeInterval(0))),
+            "day_time_interval"
+        );
+        assert_eq!(format_literal(&lit(LiteralType::Date(0))), "date");
+        assert_eq!(format_literal(&lit(LiteralType::Timestamp(0))), "timestamp");
+        assert_eq!(
+            format_literal(&lit(LiteralType::TimestampNtz(0))),
+            "timestamp_ntz"
+        );
+        assert_eq!(
+            format_literal(&lit(LiteralType::Time(literal::Time::default()))),
+            "time"
+        );
+        assert_eq!(
+            format_literal(&lit(LiteralType::TimestampNtzNanos(
+                literal::TimestampNtzNanos::default()
+            ))),
+            "timestamp_ntz_nanos"
+        );
+        assert_eq!(
+            format_literal(&lit(LiteralType::TimestampLtzNanos(
+                literal::TimestampLtzNanos::default()
+            ))),
+            "timestamp_ltz_nanos"
+        );
+        assert_eq!(
+            format_literal(&lit(LiteralType::Map(literal::Map::default()))),
+            "map"
+        );
+        assert_eq!(
+            format_literal(&lit(LiteralType::Array(literal::Array::default()))),
+            "array"
+        );
+        assert_eq!(
+            format_literal(&lit(LiteralType::Struct(literal::Struct::default()))),
+            "struct"
+        );
+        assert_eq!(
+            format_literal(&lit(LiteralType::SpecializedArray(
+                literal::SpecializedArray::default()
+            ))),
+            "specialized_array"
+        );
+        // literal_type == None falls through to "unknown".
+        assert_eq!(
+            format_literal(&proto::expression::Literal {
+                literal_type: None,
+                data_type: None,
+            }),
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn accumulate_observed_metrics_more_values_than_keys() {
+        // values longer than keys hits the `value_{i}` fallback key branch.
+        let collector = ProfilerCollector::new();
+        let mut metric = proto::execute_plan_response::ObservedMetrics::default();
+        metric.name = "m".to_string();
+        metric.plan_id = 7;
+        metric.keys = vec!["a".to_string()];
+        metric.values.push(proto::expression::Literal {
+            literal_type: Some(proto::expression::literal::LiteralType::Long(1)),
+            data_type: None,
+        });
+        metric.values.push(proto::expression::Literal {
+            literal_type: Some(proto::expression::literal::LiteralType::Long(2)),
+            data_type: None,
+        });
+        collector.accumulate_observed_metrics(&[metric]);
+        let shown = collector.show(Some(7));
+        assert!(shown.contains("a: 1"));
+        assert!(shown.contains("value_1: 2"));
+    }
+
+    #[test]
+    fn dump_to_unwritable_path_errors() {
+        let collector = ProfilerCollector::new();
+        collector.accumulate_profile(1, "data".to_string(), HashMap::new());
+        // A path under a non-existent directory cannot be written -> Err branch.
+        let res = collector.dump(Some(1), "/nonexistent_dir_zzz_12345/profile.txt");
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn default_constructs_empty_collector() {
+        let collector = ProfilerCollector::default();
+        assert_eq!(collector.count(), 0);
     }
 }

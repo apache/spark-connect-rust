@@ -3,6 +3,8 @@
 //! Read and write operations must serialize to the exact same protobuf
 //! the reference PySpark client produces.
 
+#![allow(dead_code)] // golden-test helpers are copy-shared across suites; each binary uses a subset
+
 use std::collections::HashMap;
 
 use spark_connect::plan::LogicalPlan;

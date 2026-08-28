@@ -199,11 +199,71 @@ jobs:
           # (./python/run-tests --parallelism=1): the streaming-query-listener tests wait
           # on real server-pushed progress events and are timeout-sensitive, so parallel
           # runs starve them under server contention. Serial removes that artifact.
+          # The resource/artifact tests need a real multi-executor cluster, so they run
+          # in the separate local-cluster phase below (mirroring Apache's
+          # build_python_connect.yml, which runs exactly these under local-cluster) and
+          # are excluded here where the server is plain local[*].
           python scripts/run_official_tests.py \
             --spark "${{ steps.spark-source.outputs.SPARK_SOURCE }}" \
             --remote "${SPARK_CONNECT_TESTING_REMOTE}" \
             --jobs 1 \
+            --exclude "test_artifact.py,test_artifact_localcluster.py,test_parity_resources.py" \
             2>&1 | tee /tmp/parity_ours.log
+
+      - name: Restart Connect server in local-cluster mode
+        # Resource profiles and artifact distribution across executors can only be
+        # exercised against a real multi-executor cluster, so - mirroring Apache's
+        # build_python_connect.yml - bounce the server into local-cluster mode for those
+        # tests (the parity run above uses the default local[*] and excludes these files).
+        env:
+          PYSPARK_PYTHON: python
+          PYSPARK_DRIVER_PYTHON: python
+        run: |
+          SPARK_HOME="${{ steps.spark-download.outputs.SPARK_HOME }}"
+          echo "Stopping the local[*] Connect server..."
+          "${SPARK_HOME}/sbin/stop-connect-server.sh" || true
+          pkill -f 'org.apache.spark.sql.connect.service' 2>/dev/null || true
+          pkill -f 'spark-connect' 2>/dev/null || true
+          for i in $(seq 1 30); do
+            if ! (echo > /dev/tcp/localhost/15002) 2>/dev/null; then break; fi
+            sleep 1
+          done
+          echo "Starting Connect server in local-cluster mode..."
+          # Keep --packages: local-cluster launches real executor JVMs that each need the
+          # spark-connect jar on their classpath, so it is not redundant here.
+          "${SPARK_HOME}/sbin/start-connect-server.sh" \
+            --master "local-cluster[2, 4, 1024]" \
+            --packages "org.apache.spark:spark-connect_2.13:${SPARK_VERSION}" \
+            --driver-memory 3g \
+            --conf spark.sql.session.localRelationSizeLimit=1073741824 \
+            > /tmp/connect-server-localcluster.log 2>&1 &
+          for i in $(seq 1 120); do
+            if (echo > /dev/tcp/localhost/15002) 2>/dev/null; then
+              echo "Connect server (local-cluster) is up (after ${i}s)."; break
+            fi
+            if [ "$i" -eq 120 ]; then
+              echo "Server failed to start:"; cat /tmp/connect-server-localcluster.log; exit 1
+            fi
+            sleep 1
+          done
+
+      - name: Parity - resource & artifact tests (local-cluster)
+        id: parity-localcluster
+        env:
+          PYTHONUNBUFFERED: "1"
+          RUST_PYSPARK_SO: ${{ github.workspace }}/python/pyspark/_pyspark.so
+        run: |
+          set -o pipefail
+          # Mirror Apache's local-cluster testnames: resource profiles + artifact
+          # distribution across executors, run through our Rust client. --no-drift-check:
+          # none of these are skiplisted.
+          python scripts/run_official_tests.py \
+            --spark "${{ steps.spark-source.outputs.SPARK_SOURCE }}" \
+            --remote "${SPARK_CONNECT_TESTING_REMOTE}" \
+            --jobs 1 \
+            --no-drift-check \
+            --only "pyspark.resource.tests.test_connect_resources,pyspark.sql.tests.connect.client.test_artifact,pyspark.sql.tests.connect.client.test_artifact_localcluster,pyspark.sql.tests.connect.test_parity_resources" \
+            2>&1 | tee /tmp/parity_localcluster.log
 
       - name: Upload parity log + server log
         if: always()
@@ -212,7 +272,9 @@ jobs:
           name: parity-ours-py${{ matrix.python-version }}
           path: |
             /tmp/parity_ours.log
+            /tmp/parity_localcluster.log
             /tmp/connect-server.log
+            /tmp/connect-server-localcluster.log
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
@@ -410,6 +472,11 @@ jobs:
   rust-checks:
     name: Rust checks
     runs-on: ubuntu-latest
+    # Hard-fail on any compiler warning in our workspace crates (cargo caps dependency
+    # lints to `allow`, so third-party deps are unaffected). Job-scoped on purpose: the
+    # parity job above builds the pyspark-rs extension, which this must not gate.
+    env:
+      RUSTFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain

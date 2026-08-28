@@ -4,6 +4,8 @@
 //! Goldens live in `tests/golden/window.jsonl` (captured by
 //! `scripts/capture_window_golden.py`).
 
+#![allow(dead_code)] // golden-test helpers are copy-shared across suites; each binary uses a subset
+
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
