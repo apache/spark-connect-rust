@@ -53,7 +53,9 @@ fn catalog_full_surface() {
         .list_databases_with_pattern(Some("*"))
         .and_then(|d| d.collect());
     let _ = cat.get_database("default").and_then(|d| d.collect());
-    assert!(cat.database_exists("default").unwrap_or(false) || cat.database_exists("default").is_ok());
+    assert!(
+        cat.database_exists("default").unwrap_or(false) || cat.database_exists("default").is_ok()
+    );
     let _ = cat.database_exists("no_such_db_e2e");
 
     // Table-level.

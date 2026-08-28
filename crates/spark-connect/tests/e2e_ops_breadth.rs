@@ -155,11 +155,31 @@ fn aggregates_execute() {
         .collect()
         .unwrap();
     let _ = df.group_by(vec![col("id")]).count().collect().unwrap();
-    let _ = df.group_by(vec![col("id")]).sum(vec!["v"]).collect().unwrap();
-    let _ = df.group_by(vec![col("id")]).avg(vec!["v"]).collect().unwrap();
-    let _ = df.group_by(vec![col("id")]).min(vec!["v"]).collect().unwrap();
-    let _ = df.group_by(vec![col("id")]).max(vec!["v"]).collect().unwrap();
-    let _ = df.group_by(vec![col("id")]).mean(vec!["v"]).collect().unwrap();
+    let _ = df
+        .group_by(vec![col("id")])
+        .sum(vec!["v"])
+        .collect()
+        .unwrap();
+    let _ = df
+        .group_by(vec![col("id")])
+        .avg(vec!["v"])
+        .collect()
+        .unwrap();
+    let _ = df
+        .group_by(vec![col("id")])
+        .min(vec!["v"])
+        .collect()
+        .unwrap();
+    let _ = df
+        .group_by(vec![col("id")])
+        .max(vec!["v"])
+        .collect()
+        .unwrap();
+    let _ = df
+        .group_by(vec![col("id")])
+        .mean(vec!["v"])
+        .collect()
+        .unwrap();
     let _ = df.rollup(vec![col("id")]).count().collect().unwrap();
     let _ = df.cube(vec![col("id")]).count().collect().unwrap();
     let _ = df

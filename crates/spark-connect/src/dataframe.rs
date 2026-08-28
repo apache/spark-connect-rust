@@ -3025,18 +3025,13 @@ mod arrow_value_tests {
     #[test]
     fn fixed_size_binary() {
         let arr = FixedSizeBinaryArray::try_from_iter(vec![vec![1u8, 2u8]].into_iter()).unwrap();
-        assert!(matches!(
-            arrow_value_at(&arr, 0).unwrap(),
-            Value::Binary(_)
-        ));
+        assert!(matches!(arrow_value_at(&arr, 0).unwrap(), Value::Binary(_)));
     }
 
     #[test]
     fn nested_list_struct_map() {
-        let list = ListArray::from_iter_primitive::<Int32Type, _, _>(vec![Some(vec![
-            Some(1),
-            Some(2),
-        ])]);
+        let list =
+            ListArray::from_iter_primitive::<Int32Type, _, _>(vec![Some(vec![Some(1), Some(2)])]);
         assert!(matches!(arrow_value_at(&list, 0).unwrap(), Value::List(_)));
 
         let field = Arc::new(Field::new("a", ArrowDataType::Int32, false));
