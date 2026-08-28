@@ -233,8 +233,9 @@ fn scalar_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<LiteralExpression>>
     if let Ok(dt_mod) = py.import("datetime") {
         let datetime_cls = dt_mod.getattr("datetime")?;
         if obj.is_instance(&datetime_cls)? {
-            let timestamp_f64: f64 = obj.call_method0("timestamp")?.extract()?;
-            let micros = (timestamp_f64 * 1_000_000.0).round() as i64;
+            // Shared with session::py_to_value so lit() and createDataFrame() agree (a pandas
+            // Timestamp's .timestamp() treats a naive value as UTC; normalize it first).
+            let micros = crate::session::datetime_to_micros(obj)?;
             return Ok(Some(LiteralExpression::Timestamp(micros)));
         }
         let date_cls = dt_mod.getattr("date")?;

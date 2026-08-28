@@ -877,9 +877,12 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     if let Some(dt_mod) = &datetime_mod {
         if let Ok(datetime_cls) = dt_mod.getattr("datetime") {
             if obj.is_instance(&datetime_cls)? {
-                // Call .timestamp() to get POSIX seconds, then convert to microseconds
-                let timestamp_f64: f64 = obj.call_method0("timestamp")?.extract()?;
-                let micros = (timestamp_f64 * 1_000_000.0) as i64;
+                // A naive datetime represents session-local wall-clock; encode it via the
+                // POSIX instant (.timestamp() interprets a naive value in the local zone).
+                // A pandas Timestamp is a datetime subclass but its .timestamp() treats a
+                // naive value as UTC, which disagrees with datetime/`lit(..)`; normalize it
+                // to a pure datetime first so createDataFrame() and lit() encode identically.
+                let micros = datetime_to_micros(obj)?;
                 return Ok(Value::Timestamp(micros));
             }
         }
@@ -907,6 +910,25 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
         "unsupported value type for createDataFrame: {type_name}"
     )))
+}
+
+/// Encode a Python `datetime.datetime` as microseconds since the Unix epoch (UTC),
+/// consistently for both plain `datetime` and `pandas.Timestamp`.
+///
+/// `datetime.timestamp()` interprets a naive value in the local zone (the convention Spark
+/// uses for a naive value in a session-local TIMESTAMP, and the one `functions.lit(..)`
+/// follows). `pandas.Timestamp.timestamp()` instead treats a naive value as UTC, which would
+/// make `createDataFrame(pandas_df)` disagree with `lit(..)` by the local offset. To keep the
+/// two paths identical we first downcast a pandas Timestamp to a plain `datetime` via
+/// `to_pydatetime()`. Timezone-aware values are unaffected (both encode the same instant).
+pub(crate) fn datetime_to_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
+    let normalized = if obj.hasattr("to_pydatetime").unwrap_or(false) {
+        obj.call_method0("to_pydatetime")?
+    } else {
+        obj.clone()
+    };
+    let timestamp_f64: f64 = normalized.call_method0("timestamp")?.extract()?;
+    Ok((timestamp_f64 * 1_000_000.0).round() as i64)
 }
 
 /// If `obj` is a `decimal.Decimal`, return it as a `Value::Decimal` (string value + scale
