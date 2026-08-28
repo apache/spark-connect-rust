@@ -82,6 +82,7 @@ VENDORED_FILES=(
   "memory_profiler_ext.py"
   "profiler.py"
   "worker_util.py"
+  "instrumentation_utils.py"
 
   # ML: core utilities
   "ml/common.py"
