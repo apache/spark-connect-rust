@@ -1,0 +1,233 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+
+# IMPORTANT: This workflow runs Spark Declarative Pipelines (SDP) connect parity
+# tests in two groups:
+#
+# 1. BLOCKING: Pure-Python pipeline tests (test_decorators.py, test_graph_element_registry.py)
+#    These run without a server and do not set continue-on-error. They must pass.
+#
+# 2. ADVISORY (continue-on-error: true): Full official upstream pipeline connect suite
+#    These include server-backed tests like test_spark_connect.py that require the
+#    ReusedConnectTestCase harness compat (SparkConf, SparkSession.client) not yet
+#    complete. Once that compat lands, remove continue-on-error: true and make this
+#    group blocking.
+
+name: Pipelines Connect Parity (Spark 4.2.0)
+
+# Cancel an in-progress run when a newer commit supersedes it (per workflow + ref).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+env:
+  SPARK_VERSION: "4.2.0"
+  SPARK_CONNECT_TESTING_REMOTE: sc://localhost:15002
+  SPARK_TESTING: "1"
+  SPARK_SKIP_CONNECT_COMPAT_TESTS: "1"   # force remote-only (pure connect, no local JVM)
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Pipelines Connect parity: run the official pipeline connect tests through our
+  # Rust client against a real Spark 4.2.0 Connect server. Tests in two groups:
+  # BLOCKING (pure-Python) and ADVISORY (server-backed, conditional on harness compat).
+  # ---------------------------------------------------------------------------
+  pipelines-parity:
+    name: Pipelines parity (official suite via our client, Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    # Pipelines tests take ~30-45 min; bound the job so a genuinely hung test fails it
+    # instead of running to GitHub's 6-hour default.
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Rust toolchain
+        # rustup is preinstalled; avoid third-party toolchain actions (ASF Actions
+        # policy allowlists actions/* only).
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache cargo & target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-pipelines-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-pipelines-
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest pandas pyarrow numpy grpcio grpcio-status googleapis-common-protos cloudpickle zstandard py4j
+
+      - name: Build the Rust extension into the skin
+        # The parity diff drives both clients via PYTHONPATH (our ./python for ours,
+        # the spark checkout for reference), so we do NOT install a wheel (which would
+        # collide in site-packages with the reference pyspark). We just build the
+        # extension and drop it into python/pyspark so ./python is a working package.
+        run: |
+          cargo build -p pyspark-rs --release
+          cp target/release/lib_pyspark.so python/pyspark/_pyspark.so
+
+      - name: Cache Spark ${{ env.SPARK_VERSION }} distribution
+        uses: actions/cache@v4
+        with:
+          path: ~/spark-dist
+          key: spark-dist-${{ env.SPARK_VERSION }}-hadoop3
+
+      - name: Download Apache Spark ${{ env.SPARK_VERSION }} (Connect server)
+        id: spark-download
+        run: |
+          PKG="spark-${SPARK_VERSION}-bin-hadoop3"
+          if [ ! -d "${HOME}/spark-dist/${PKG}" ]; then
+            URL="https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/${PKG}.tgz"
+            mkdir -p "${HOME}/spark-dist"
+            echo "Downloading ${URL}"
+            wget -q -O "${HOME}/spark-dist/${PKG}.tgz" "${URL}"
+            tar -xzf "${HOME}/spark-dist/${PKG}.tgz" -C "${HOME}/spark-dist"
+            rm -f "${HOME}/spark-dist/${PKG}.tgz"
+          else
+            echo "Using cached Spark distribution."
+          fi
+          echo "SPARK_HOME=${HOME}/spark-dist/${PKG}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Spark ${{ env.SPARK_VERSION }} source (official test files)
+        uses: actions/cache@v4
+        with:
+          path: ~/spark-source
+          key: spark-source-${{ env.SPARK_VERSION }}
+
+      - name: Clone Apache Spark v${{ env.SPARK_VERSION }} (official test files + reference client)
+        id: spark-source
+        run: |
+          if [ ! -d "${HOME}/spark-source/python" ]; then
+            git clone --depth 1 --branch "v${SPARK_VERSION}" \
+              https://github.com/apache/spark.git "${HOME}/spark-source"
+          else
+            echo "Using cached Spark source."
+          fi
+          echo "SPARK_SOURCE=${HOME}/spark-source" >> "$GITHUB_OUTPUT"
+
+      - name: BLOCKING - Pure-Python pipeline parity tests (no server needed)
+        id: pure-python-tests
+        env:
+          PYTHONUNBUFFERED: "1"   # stream per-file progress into the live log
+        run: |
+          set -o pipefail
+          # Run the pure-Python pipeline tests from our repo that require no server.
+          # These include test_decorators.py and test_graph_element_registry.py.
+          PYTHONPATH="$(pwd)/python" python -m pytest \
+            -q \
+            -rfE \
+            --tb=short \
+            -p no:cacheprovider \
+            python/pyspark/pipelines/tests/test_decorators.py \
+            python/pyspark/pipelines/tests/test_graph_element_registry.py \
+            2>&1 | tee /tmp/pipelines_pure_python.log
+
+      - name: Start Spark Connect server
+        env:
+          # The server spawns Python workers for UDF/arrow/mapInPandas execution; they
+          # need pandas + pyarrow (installed above) plus pyspark (from SPARK_HOME/python).
+          PYSPARK_PYTHON: python
+          PYSPARK_DRIVER_PYTHON: python
+        run: |
+          SPARK_HOME="${{ steps.spark-download.outputs.SPARK_HOME }}"
+          echo "Starting Connect server on ${SPARK_CONNECT_TESTING_REMOTE}"
+          # Give the driver extra heap for the pipeline tests which may be I/O heavy.
+          "${SPARK_HOME}/sbin/start-connect-server.sh" \
+            --packages "org.apache.spark:spark-connect_2.13:${SPARK_VERSION}" \
+            --driver-memory 3g \
+            --conf spark.sql.session.localRelationSizeLimit=1073741824 \
+            > /tmp/connect-server.log 2>&1 &
+          for i in $(seq 1 90); do
+            if (echo > /dev/tcp/localhost/15002) 2>/dev/null; then
+              echo "Connect server is up (after ${i}s)."; break
+            fi
+            if [ "$i" -eq 90 ]; then echo "Server failed to start:"; cat /tmp/connect-server.log; exit 1; fi
+            sleep 1
+          done
+
+      - name: ADVISORY - Full official pipeline connect suite via OUR Rust client
+        id: pipeline-connect-tests
+        # IMPORTANT: continue-on-error: true because the full official pipeline suite
+        # includes server-backed tests (like test_spark_connect.py) that require the
+        # ReusedConnectTestCase harness compat (SparkConf, SparkSession.client) not yet
+        # complete in this Rust drop-in. Remove continue-on-error: true and make the job
+        # blocking once the harness compat lands.
+        continue-on-error: true
+        env:
+          PYTHONUNBUFFERED: "1"   # stream per-file progress into the live log
+          RUST_PYSPARK_SO: ${{ github.workspace }}/python/pyspark/_pyspark.so
+        run: |
+          set -o pipefail
+          # Run the full official pipeline connect test suite through our Rust client.
+          # The pipeline tests are in python/pyspark/pipelines/tests/ in the official
+          # Spark source tree. We inject the Rust transport plugin via PYTHONPATH and
+          # env vars to exercise our client.
+          python -m pytest \
+            -q \
+            -rfE \
+            --tb=short \
+            -p no:cacheprovider \
+            -p rust_transport_plugin \
+            "${{ steps.spark-source.outputs.SPARK_SOURCE }}/python/pyspark/pipelines/tests" \
+            2>&1 | tee /tmp/pipelines_connect.log
+
+      - name: Upload pipelines parity log + server log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipelines-parity-py${{ matrix.python-version }}
+          path: |
+            /tmp/pipelines_pure_python.log
+            /tmp/pipelines_connect.log
+            /tmp/connect-server.log
+          if-no-files-found: warn

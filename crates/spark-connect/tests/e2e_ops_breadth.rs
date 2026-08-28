@@ -86,7 +86,10 @@ fn transforms_execute() {
         .collect()
         .unwrap();
     let _ = df.repartition_by_id(2, col("id")).collect().unwrap();
-    let _ = df.hint("broadcast", Vec::<String>::new()).collect().unwrap();
+    let _ = df
+        .hint("broadcast", Vec::<String>::new())
+        .collect()
+        .unwrap();
     let _ = df.broadcast().collect().unwrap();
     let _ = df.to_df(vec!["a", "b", "c"]).collect().unwrap();
     let _ = df.alias("t2").collect().unwrap();
