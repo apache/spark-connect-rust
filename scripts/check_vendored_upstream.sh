@@ -161,6 +161,7 @@ VENDORED_FILES=(
   "sql/pandas/utils.py"
 
   # SQL: core utilities
+  "sql/variant_utils.py"
   "sql/conversion.py"
   "sql/datasource_internal.py"
   "sql/internal.py"
