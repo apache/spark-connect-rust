@@ -53,3 +53,6 @@ derby.log
 # python coverage data
 .coverage
 python/.coverage
+
+# Isaac / code-sync local tooling state (must not be committed)
+.isaac/
