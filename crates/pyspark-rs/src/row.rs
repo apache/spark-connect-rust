@@ -129,6 +129,17 @@ impl PyRow {
         self.row.len()
     }
 
+    /// `x in row` — membership over the row's values (pyspark `Row` subclasses `tuple`,
+    /// so `value in row` tests the values). Compares with Python equality.
+    fn __contains__(&self, py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<bool> {
+        for v in self.row.values() {
+            if value_to_py(py, v)?.eq(item)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Index (int, supports negative) or field-name (str) access. Raises
     /// IndexError / KeyError like pyspark so the Row is a proper sequence.
     fn __getitem__<'py>(

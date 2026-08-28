@@ -22,6 +22,8 @@ parsing in Rust and raises the canonical ``pyspark.errors`` classes, so the
 Connect exception types are the same classes re-exported under this import path
 (what upstream code and tests import as ``pyspark.errors.exceptions.connect.*``).
 """
+from typing import Any
+
 from pyspark.errors.exceptions.base import (
     AnalysisException,
     ArithmeticException,
@@ -32,6 +34,8 @@ from pyspark.errors.exceptions.base import (
     ParseException,
     PySparkException,
     PythonException,
+    QueryContext as BaseQueryContext,
+    QueryContextType,
     QueryExecutionException,
     SparkNoSuchElementException,
     SparkRuntimeException,
@@ -46,9 +50,91 @@ from pyspark.errors.exceptions.base import (
 SparkConnectException = PySparkException
 SparkConnectGrpcException = PySparkException
 
+
+class SparkException(SparkConnectGrpcException):
+    """ """
+
+
+class InvalidPlanInput(SparkConnectGrpcException):
+    """Error thrown when a connect plan is not valid."""
+
+
+def _unsupported(class_name: str, method_name: str) -> "UnsupportedOperationException":
+    return UnsupportedOperationException(
+        errorClass="UNSUPPORTED_CALL.WITHOUT_SUGGESTION",
+        messageParameters={"className": class_name, "methodName": method_name},
+    )
+
+
+class SQLQueryContext(BaseQueryContext):
+    """A SQL query context parsed from server error details."""
+
+    def __init__(self, q: Any):
+        self._q = q
+
+    def contextType(self) -> QueryContextType:
+        return QueryContextType.SQL
+
+    def objectType(self) -> str:
+        return str(self._q.object_type)
+
+    def objectName(self) -> str:
+        return str(self._q.object_name)
+
+    def startIndex(self) -> int:
+        return int(self._q.start_index)
+
+    def stopIndex(self) -> int:
+        return int(self._q.stop_index)
+
+    def fragment(self) -> str:
+        return str(self._q.fragment)
+
+    def callSite(self) -> str:
+        raise _unsupported("SQLQueryContext", "callSite")
+
+    def summary(self) -> str:
+        return str(self._q.summary)
+
+
+class DataFrameQueryContext(BaseQueryContext):
+    """A DataFrame query context parsed from server error details."""
+
+    def __init__(self, q: Any):
+        self._q = q
+
+    def contextType(self) -> QueryContextType:
+        return QueryContextType.DataFrame
+
+    def objectType(self) -> str:
+        raise _unsupported("DataFrameQueryContext", "objectType")
+
+    def objectName(self) -> str:
+        raise _unsupported("DataFrameQueryContext", "objectName")
+
+    def startIndex(self) -> int:
+        raise _unsupported("DataFrameQueryContext", "startIndex")
+
+    def stopIndex(self) -> int:
+        raise _unsupported("DataFrameQueryContext", "stopIndex")
+
+    def fragment(self) -> str:
+        return str(self._q.fragment)
+
+    def callSite(self) -> str:
+        return str(self._q.call_site)
+
+    def summary(self) -> str:
+        return str(self._q.summary)
+
+
 __all__ = [
     "SparkConnectException",
     "SparkConnectGrpcException",
+    "SparkException",
+    "InvalidPlanInput",
+    "SQLQueryContext",
+    "DataFrameQueryContext",
     "AnalysisException",
     "ArithmeticException",
     "ArrayIndexOutOfBoundsException",
