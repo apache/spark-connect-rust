@@ -421,27 +421,32 @@ impl PySparkSession {
         py.detach(|| self.session.stop()).to_pyerr()
     }
 
-    /// Get the UDF registration API. Returns a Python object that implements spark.udf.register.
-    #[pyo3(name = "udf")]
-    fn get_udf<'a>(&self, py: Python<'a>) -> PyResult<Bound<'a, PyAny>> {
-        // Create a simple UDFRegistration wrapper object with a register method
-        let code = c"
-class _UDFRegistration:
-    def __init__(self):
-        pass
+    /// Get the UDF registration API (`spark.udf`). Returns the
+    /// `pyspark.sql.udf.UDFRegistration` bound to this session, so it can register
+    /// Python UDFs and Java UDFs/UDAFs (registerJavaFunction / registerJavaUDAF).
+    #[getter(udf)]
+    fn get_udf<'a>(slf: &Bound<'a, Self>, py: Python<'a>) -> PyResult<Bound<'a, PyAny>> {
+        let cls = py.import("pyspark.sql.udf")?.getattr("UDFRegistration")?;
+        cls.call1((slf,))
+    }
 
-    def register(self, name, f, returnType=None):
-        # Import locally to avoid circular imports
-        from pyspark.sql.udf import UserDefinedFunction
-        from pyspark.sql.types import StringType
-        if returnType is None:
-            returnType = StringType()
-        return UserDefinedFunction(f, returnType, 100, name)
-
-_UDFRegistration()
-";
-        let udf_reg = py.eval(code, None, None)?;
-        Ok(udf_reg)
+    /// Register a Java UDF/UDAF by class name (used by
+    /// `UDFRegistration.registerJavaFunction` / `registerJavaUDAF`).
+    #[pyo3(name = "_registerJavaFunction", signature = (name, java_class_name, return_type=None, aggregate=false))]
+    #[allow(non_snake_case)]
+    fn register_java_function_py(
+        &self,
+        py: Python<'_>,
+        name: &str,
+        java_class_name: &str,
+        return_type: Option<&str>,
+        aggregate: bool,
+    ) -> PyResult<()> {
+        py.detach(|| {
+            self.session
+                .register_java_function(name, java_class_name, return_type, aggregate)
+        })
+        .to_pyerr()
     }
 
     #[pyo3(name = "sessionId")]

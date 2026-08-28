@@ -303,6 +303,38 @@ impl SparkSession {
         crate::catalog::Catalog::new(self.clone())
     }
 
+    /// Register a Java UDF/UDAF by class name, mirroring the reference
+    /// `client.register_java(name, javaClassName, return_type, aggregate)` used by
+    /// `UDFRegistration.registerJavaFunction` / `registerJavaUDAF`: builds a
+    /// `CommonInlineUserDefinedFunction` carrying a `JavaUDF` and sends it as the
+    /// `RegisterFunction` command. `return_type_ddl` is only used for non-aggregate
+    /// functions (matching the reference, which omits the output type when aggregate).
+    pub fn register_java_function(
+        &self,
+        name: &str,
+        java_class_name: &str,
+        return_type_ddl: Option<&str>,
+        aggregate: bool,
+    ) -> Result<()> {
+        let mut java_udf = proto::JavaUdf::default();
+        java_udf.class_name = java_class_name.to_string();
+        if let Some(ddl) = return_type_ddl {
+            java_udf.output_type = Some(crate::types::DataType::from_ddl(ddl)?.to_proto());
+        } else {
+            java_udf.aggregate = aggregate;
+        }
+        let mut fun = proto::CommonInlineUserDefinedFunction::default();
+        fun.function_name = name.to_string();
+        fun.deterministic = true;
+        fun.function =
+            Some(proto::common_inline_user_defined_function::Function::JavaUdf(java_udf));
+        crate::dataframe::execute_command_collect(
+            self,
+            proto::command::CommandType::RegisterFunction(fun),
+        )?;
+        Ok(())
+    }
+
     /// Get the runtime configuration for this session.
     ///
     /// Mirrors `pyspark.sql.SparkSession.conf`.

@@ -377,6 +377,39 @@ def test_broadcast_type_check():
         F.broadcast("not a dataframe")
 
 
+def test_row_count_and_index():
+    from pyspark.sql import Row
+    r = Row(a=1, b=2, c=1)
+    assert r.count(1) == 2
+    assert r.count(2) == 1
+    assert r.index(2) == 1
+    assert r.index(1) == 0
+    with pytest.raises(ValueError):
+        r.index(99)
+
+
+def test_avro_protobuf_partitioning_submodules():
+    # The official import paths resolve (the implementations live in
+    # pyspark.sql.functions and are re-exported here).
+    import pyspark.sql.avro.functions as af
+    import pyspark.sql.protobuf.functions as pf
+    import pyspark.sql.functions.partitioning as part
+    from pyspark.sql import functions as F
+
+    assert hasattr(af, "from_avro") and hasattr(af, "to_avro")
+    assert hasattr(pf, "from_protobuf") and hasattr(pf, "to_protobuf")
+    for n in ("bucket", "days", "hours", "months", "years"):
+        assert hasattr(part, n), f"partitioning.{n} missing"
+        assert hasattr(F.partitioning, n)
+
+
+def test_udf_registration_has_java_methods():
+    # The UDFRegistration class (what spark.udf returns) exposes the Java methods.
+    from pyspark.sql.udf import UDFRegistration
+    for m in ("register", "registerJavaFunction", "registerJavaUDAF"):
+        assert hasattr(UDFRegistration, m), f"UDFRegistration missing {m}"
+
+
 def test_util_helpers():
     from pyspark import util
     assert util.is_remote_only() is True

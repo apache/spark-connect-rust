@@ -382,6 +382,25 @@ def broadcast(df):
     return df.hint("broadcast")
 
 
+# Expose the `partitioning` submodule (bucket/days/hours/months/years) at
+# ``pyspark.sql.functions.partitioning``. Since this module is a plain module (not a
+# package), register a synthetic submodule holding the flat partition-transform
+# functions so both ``import pyspark.sql.functions.partitioning`` and
+# ``F.partitioning.bucket`` work, mirroring reference pyspark.
+import sys as _sys
+import types as _types
+
+partitioning = _types.ModuleType("pyspark.sql.functions.partitioning")
+partitioning.__doc__ = "Partition transform functions (bucket/days/hours/months/years)."
+for _pname in ("years", "months", "days", "hours", "bucket"):
+    _obj = globals().get(_pname)
+    if _obj is not None:
+        setattr(partitioning, _pname, _obj)
+partitioning.__all__ = [
+    _n for _n in ("years", "months", "days", "hours", "bucket") if hasattr(partitioning, _n)
+]
+_sys.modules["pyspark.sql.functions.partitioning"] = partitioning
+
 # Build __all__ with all function names
 __all__ = [
     "col",

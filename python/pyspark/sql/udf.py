@@ -259,3 +259,32 @@ class UDFRegistration:
         # Create a UDF with the given name
         udf = UserDefinedFunction(f, returnType, 100, name)
         return udf
+
+    def registerJavaFunction(
+        self,
+        name: str,
+        javaClassName: str,
+        returnType: Optional[DataType] = None,
+    ) -> None:
+        """Register a Java UDF by fully-qualified class name so it is callable by
+        ``name`` in SQL. Mirrors ``UDFRegistration.registerJavaFunction``.
+
+        Parameters
+        ----------
+        name : str
+            Name to register the function with.
+        javaClassName : str
+            Fully-qualified name of the Java class implementing the UDF.
+        returnType : DataType or str, optional
+            Return type (a DataType or a DDL string). Defaults to the class's own type.
+        """
+        rt_ddl = None
+        if returnType is not None:
+            rt_ddl = returnType if isinstance(returnType, str) else returnType.simpleString()
+        self.spark_session._registerJavaFunction(name, javaClassName, rt_ddl, False)
+
+    def registerJavaUDAF(self, name: str, javaClassName: str) -> None:
+        """Register a Java user-defined aggregate function (UDAF) by class name.
+        Mirrors ``UDFRegistration.registerJavaUDAF``.
+        """
+        self.spark_session._registerJavaFunction(name, javaClassName, None, True)
