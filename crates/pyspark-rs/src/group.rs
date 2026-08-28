@@ -207,65 +207,118 @@ impl PyGroupedData {
         ))
     }
 
-    /// `GroupedData.transformWithStateInPandas` (stateful streaming).
+    /// `GroupedData.transformWithStateInPandas` — arbitrary stateful processing with a
+    /// user `StatefulProcessor` (pandas output). Mirrors the Connect API: the processor is
+    /// wrapped by `TransformWithStateInPandasUdfUtils` into a UDF (cloudpickled + run on the
+    /// server), and the `GroupMap` proto carries the transform-with-state info.
     #[pyo3(name = "transformWithStateInPandas")]
-    #[pyo3(signature = (func, output_schema, output_mode, time_mode, event_time_column_name=None))]
+    #[pyo3(signature = (statefulProcessor, outputStructType, outputMode, timeMode, initialState=None, eventTimeColumnName=""))]
+    #[allow(non_snake_case)]
     fn transform_with_state_in_pandas(
         &self,
         py: Python<'_>,
-        func: Bound<'_, PyAny>,
-        output_schema: Bound<'_, PyAny>,
-        output_mode: &str,
-        time_mode: &str,
-        event_time_column_name: Option<String>,
+        statefulProcessor: Bound<'_, PyAny>,
+        outputStructType: Bound<'_, PyAny>,
+        outputMode: &str,
+        timeMode: &str,
+        initialState: Option<PyRef<'_, PyGroupedData>>,
+        eventTimeColumnName: &str,
     ) -> PyResult<PyDataFrame> {
+        let (func, et) = twus_func(
+            py,
+            &statefulProcessor,
+            timeMode,
+            initialState.is_some(),
+            true,
+        )?;
         let udf = build_map_udf(
             py,
             "transformWithStateInPandas",
             &func,
-            &output_schema,
-            eval_type::SQL_TRANSFORM_WITH_STATE_PANDAS_UDF,
+            &outputStructType,
+            et,
         )?;
-        let out = crate::dataframe::resolve_datatype(&output_schema)?;
+        let out = crate::types::py_to_data_type(&outputStructType)?;
+        let etc = (!eventTimeColumnName.is_empty()).then_some(eventTimeColumnName);
         Ok(PyDataFrame::new(
             self.grouped_data.transform_with_state_in_pandas(
                 udf,
                 out,
-                output_mode,
-                time_mode,
-                event_time_column_name.as_deref(),
-                None,
+                outputMode,
+                timeMode,
+                etc,
+                initialState.as_ref().map(|g| &g.grouped_data),
             ),
         ))
     }
 
-    /// `GroupedData.transformWithState` (row output, stateful streaming).
+    /// `GroupedData.transformWithState` (row output). Like `transformWithStateInPandas` but
+    /// with the row-oriented eval type and no output schema on the plan node.
     #[pyo3(name = "transformWithState")]
-    #[pyo3(signature = (func, output_schema, output_mode, time_mode, event_time_column_name=None))]
+    #[pyo3(signature = (statefulProcessor, outputStructType, outputMode, timeMode, initialState=None, eventTimeColumnName=""))]
+    #[allow(non_snake_case)]
     fn transform_with_state(
         &self,
         py: Python<'_>,
-        func: Bound<'_, PyAny>,
-        output_schema: Bound<'_, PyAny>,
-        output_mode: &str,
-        time_mode: &str,
-        event_time_column_name: Option<String>,
+        statefulProcessor: Bound<'_, PyAny>,
+        outputStructType: Bound<'_, PyAny>,
+        outputMode: &str,
+        timeMode: &str,
+        initialState: Option<PyRef<'_, PyGroupedData>>,
+        eventTimeColumnName: &str,
     ) -> PyResult<PyDataFrame> {
-        let udf = build_map_udf(
+        let (func, et) = twus_func(
             py,
-            "transformWithState",
-            &func,
-            &output_schema,
-            eval_type::SQL_TRANSFORM_WITH_STATE_PYTHON_ROW_UDF,
+            &statefulProcessor,
+            timeMode,
+            initialState.is_some(),
+            false,
         )?;
+        let udf = build_map_udf(py, "transformWithState", &func, &outputStructType, et)?;
+        let etc = (!eventTimeColumnName.is_empty()).then_some(eventTimeColumnName);
         Ok(PyDataFrame::new(self.grouped_data.transform_with_state(
             udf,
-            output_mode,
-            time_mode,
-            event_time_column_name.as_deref(),
-            None,
+            outputMode,
+            timeMode,
+            etc,
+            initialState.as_ref().map(|g| &g.grouped_data),
         )))
     }
+}
+
+/// Wrap a user `StatefulProcessor` into the transform-with-state UDF callable, returning it
+/// with the matching `PythonEvalType`. Mirrors the Connect client's
+/// `TransformWithStateInPandasUdfUtils` usage (pandas vs row output; with/without init state).
+fn twus_func<'py>(
+    py: Python<'py>,
+    processor: &Bound<'py, PyAny>,
+    time_mode: &str,
+    has_init_state: bool,
+    pandas: bool,
+) -> PyResult<(Bound<'py, PyAny>, i32)> {
+    let util = py
+        .import("pyspark.sql.streaming.stateful_processor_util")?
+        .getattr("TransformWithStateInPandasUdfUtils")?
+        .call1((processor.clone(), time_mode))?;
+    let (attr, et) = match (has_init_state, pandas) {
+        (false, true) => (
+            "transformWithStateUDF",
+            eval_type::SQL_TRANSFORM_WITH_STATE_PANDAS_UDF,
+        ),
+        (true, true) => (
+            "transformWithStateWithInitStateUDF",
+            eval_type::SQL_TRANSFORM_WITH_STATE_PANDAS_INIT_STATE_UDF,
+        ),
+        (false, false) => (
+            "transformWithStateUDF",
+            eval_type::SQL_TRANSFORM_WITH_STATE_PYTHON_ROW_UDF,
+        ),
+        (true, false) => (
+            "transformWithStateWithInitStateUDF",
+            eval_type::SQL_TRANSFORM_WITH_STATE_PYTHON_ROW_INIT_STATE_UDF,
+        ),
+    };
+    Ok((util.getattr(attr)?, et))
 }
 
 /// Python wrapper for cogrouped pandas/arrow ops (`pyspark.sql.group.PandasCogroupedOps`).
