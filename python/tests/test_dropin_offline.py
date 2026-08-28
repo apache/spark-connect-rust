@@ -509,6 +509,23 @@ def test_catalog_result_classes():
     assert Column is p.CatalogColumn
 
 
+def test_udtf_analyze_result_family():
+    from pyspark.sql.udtf import (
+        AnalyzeArgument, PartitioningColumn, OrderingColumn, SelectedColumn,
+        AnalyzeResult, SkipRestOfInputTableException,
+    )
+    assert PartitioningColumn("x").name == "x"
+    oc = OrderingColumn("y", ascending=False)
+    assert oc.name == "y" and oc.ascending is False and oc.overrideNullsFirst is None
+    assert SelectedColumn("z", alias="a").alias == "a"
+    ar = AnalyzeResult(schema=T.StructType([T.StructField("a", T.IntegerType())]),
+                       withSinglePartition=True, partitionBy=[PartitioningColumn("x")])
+    assert ar.withSinglePartition is True and len(ar.partitionBy) == 1
+    ar.withSinglePartition = False  # mutable dataclass
+    assert ar.withSinglePartition is False
+    assert issubclass(SkipRestOfInputTableException, Exception)
+
+
 def test_table_arg_class():
     import pyspark._pyspark as p
     assert hasattr(p, "TableArg")

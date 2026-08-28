@@ -20,6 +20,11 @@ User-defined table function (UDTF) support for the Spark Connect client.
 Mirrors pyspark.sql.connect.udtf and pyspark.sql.functions.udtf.
 """
 
+from pyspark._pyspark import (
+    AnalyzeArgument, PartitioningColumn, OrderingColumn, SelectedColumn,
+    AnalyzeResult, SkipRestOfInputTableException,
+)
+
 import sys
 from typing import Any, Optional, Type
 
