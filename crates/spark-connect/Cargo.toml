@@ -3,6 +3,9 @@ name = "apache-spark-connect"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 description = "Pure-Rust Spark Connect DataFrame client mirroring the PySpark API surface"
 
 [lib]
