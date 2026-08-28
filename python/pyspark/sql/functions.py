@@ -353,6 +353,10 @@ def cume_dist():
     return _invoke_function("cume_dist")
 
 
+# ``random`` is an alias for ``rand`` (matches pyspark.sql.functions).
+random = rand
+
+
 # ``column`` is an alias of ``col`` (matches pyspark.sql.functions).
 column = _pyfunc_col
 

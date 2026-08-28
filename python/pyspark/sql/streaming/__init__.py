@@ -35,8 +35,10 @@ from pyspark.sql.streaming.datasource import (
     ReadMaxBytes,
     SupportsTriggerAvailableNow,
 )
+from pyspark.sql.streaming.listener import StreamingQueryListener
 
 __all__ = [
+    "StreamingQueryListener",
     "DataStreamReader",
     "DataStreamWriter",
     "Trigger",

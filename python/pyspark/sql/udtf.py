@@ -80,6 +80,17 @@ class UserDefinedTableFunction:
             *args,
         )
 
+    def asDeterministic(self) -> "UserDefinedTableFunction":
+        """Return a copy of this UDTF marked as deterministic. Mirrors
+        ``UserDefinedTableFunction.asDeterministic``."""
+        return UserDefinedTableFunction(
+            self.func,
+            returnType=self.returnType,
+            name=self.name,
+            evalType=self.evalType,
+            deterministic=True,
+        )
+
 
 def udtf(
     cls: Optional[Type] = None,

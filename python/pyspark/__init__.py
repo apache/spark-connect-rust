@@ -10,6 +10,7 @@ from pyspark.sql import (
     Column,
     Row,
 )
+from pyspark.storagelevel import StorageLevel
 
 # For compatibility with testing harness, provide a stub SparkConf that works with
 # Spark Connect. This is imported by the testing utils but we don't need a full
@@ -56,4 +57,5 @@ __all__ = [
     "Column",
     "Row",
     "SparkConf",
+    "StorageLevel",
 ]

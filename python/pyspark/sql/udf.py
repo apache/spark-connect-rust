@@ -71,6 +71,15 @@ class UserDefinedFunction:
             self.command,
             self.python_ver,
             *args,
+            deterministic=self.deterministic,
+        )
+
+    def asNondeterministic(self) -> "UserDefinedFunction":
+        """Return a copy of this UDF marked as non-deterministic. Mirrors
+        ``UserDefinedFunction.asNondeterministic`` — the server will not fold/reuse
+        results across rows."""
+        return UserDefinedFunction(
+            self.func, self.returnType, self.evalType, self.name, deterministic=False
         )
 
 

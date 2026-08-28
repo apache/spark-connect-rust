@@ -410,6 +410,38 @@ def test_udf_registration_has_java_methods():
         assert hasattr(UDFRegistration, m), f"UDFRegistration missing {m}"
 
 
+def test_udf_udtf_determinism_and_extras():
+    from pyspark.sql import functions as F
+    from pyspark.sql.udf import udf, UserDefinedFunction
+    from pyspark.sql.udtf import udtf
+
+    u = udf(lambda x: x, T.IntegerType())
+    nd = u.asNondeterministic()
+    assert isinstance(nd, UserDefinedFunction) and nd.deterministic is False
+    assert u.returnType is not None
+
+    @udtf(returnType="a int")
+    class E:
+        def eval(self, n):
+            yield (n,)
+
+    d = E.asDeterministic()
+    assert d.deterministic is True
+
+    # functions.random is an alias for rand.
+    assert F.random is F.rand
+    # StructField.fromDDL.
+    assert T.StructField.fromDDL("a int").simpleString() == "a:int"
+    assert T.StructField.fromDDL("b: string").simpleString() == "b:string"
+
+
+def test_reexport_paths():
+    from pyspark import StorageLevel
+    assert StorageLevel.MEMORY_ONLY is not None
+    from pyspark.sql.streaming import StreamingQueryListener
+    assert StreamingQueryListener.__name__ == "StreamingQueryListener"
+
+
 def test_util_helpers():
     from pyspark import util
     assert util.is_remote_only() is True

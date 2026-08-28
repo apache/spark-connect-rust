@@ -28,7 +28,7 @@ mod dispatch {
 /// - python_ver: str - Python version (e.g., "3.9")
 /// - *args: Column - argument columns
 #[pyfunction]
-#[pyo3(signature = (name, return_type, eval_type, command_bytes, python_ver, *args))]
+#[pyo3(signature = (name, return_type, eval_type, command_bytes, python_ver, *args, deterministic=true))]
 fn pyfunc_make_udf(
     name: String,
     return_type: &Bound<'_, PyAny>,
@@ -36,6 +36,7 @@ fn pyfunc_make_udf(
     command_bytes: Vec<u8>,
     python_ver: String,
     args: Vec<Bound<'_, PyAny>>,
+    deterministic: bool,
 ) -> PyResult<PyColumn> {
     // Accept any DataType object (our type classes / DataType) or a DDL string.
     let return_data_type = crate::types::py_to_data_type(return_type)?;
@@ -56,10 +57,8 @@ fn pyfunc_make_udf(
     let python_udf = PythonUDFPayload::new(return_data_type, eval_type, command_bytes, python_ver);
 
     // Create the UDF expression
-    let udf_expr = CommonInlineUserDefinedFunctionExpression::new(
-        name, true, // deterministic by default
-        arg_exprs, python_udf,
-    );
+    let udf_expr =
+        CommonInlineUserDefinedFunctionExpression::new(name, deterministic, arg_exprs, python_udf);
 
     Ok(PyColumn::new(Column::new(
         Expression::CommonInlineUserDefinedFunction(Box::new(udf_expr)),
