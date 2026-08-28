@@ -19,10 +19,9 @@
 
 # IMPORTANT: This is a separate, long-running parity job for pandas-on-Spark Connect
 # tests. These tests take 30-60 minutes and are NOT part of the main parity workflow
-# that other jobs wait on, so they run in isolation. The test step is currently marked
-# continue-on-error: true because pandas-on-Spark runtime parity is not yet complete
-# in this Rust drop-in. Remove continue-on-error: true and make the job blocking once
-# full parity is achieved.
+# that other jobs wait on, so they run in isolation. The test step runs for real with
+# full visibility into pass/fail status. If this becomes a critical blocker, add
+# continue-on-error: true back in; currently it provides honest signal on pandas parity.
 
 name: Pandas Connect Parity (Spark 4.2.0)
 
@@ -175,26 +174,26 @@ jobs:
 
       - name: Pandas Connect parity tests via OUR Rust client
         id: pandas-parity
-        # IMPORTANT: continue-on-error: true because pandas-on-Spark runtime parity
-        # is not yet complete in this drop-in. Remove this flag and make the job
-        # blocking once pandas parity is fully achieved.
-        continue-on-error: true
         env:
           PYTHONUNBUFFERED: "1"   # stream per-file progress into the live log
+          PYTHONPATH: ${{ github.workspace }}/scripts:${{ steps.spark-source.outputs.SPARK_SOURCE }}/python
           RUST_PYSPARK_SO: ${{ github.workspace }}/python/pyspark/_pyspark.so
+        working-directory: ${{ steps.spark-source.outputs.SPARK_SOURCE }}/python
         run: |
           set -o pipefail
           # Run the pandas-on-Spark Connect test suite through our Rust client.
           # The pandas tests are in python/pyspark/pandas/tests/connect/ in the
           # official Spark source tree. We inject the Rust transport plugin via
-          # PYTHONPATH and env vars to exercise our client.
+          # PYTHONPATH and env vars to exercise our client. We run from the Spark
+          # source python/ directory with the test path relative to it, matching
+          # the reference client's invocation pattern.
           python -m pytest \
             -q \
             -rfE \
             --tb=short \
             -p no:cacheprovider \
             -p rust_transport_plugin \
-            "${{ steps.spark-source.outputs.SPARK_SOURCE }}/python/pyspark/pandas/tests/connect" \
+            pyspark/pandas/tests/connect \
             2>&1 | tee /tmp/pandas_parity.log
 
       - name: Upload pandas parity log + server log

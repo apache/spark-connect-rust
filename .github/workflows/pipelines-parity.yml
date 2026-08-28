@@ -23,11 +23,11 @@
 # 1. BLOCKING: Pure-Python pipeline tests (test_decorators.py, test_graph_element_registry.py)
 #    These run without a server and do not set continue-on-error. They must pass.
 #
-# 2. ADVISORY (continue-on-error: true): Full official upstream pipeline connect suite
-#    These include server-backed tests like test_spark_connect.py that require the
-#    ReusedConnectTestCase harness compat (SparkConf, SparkSession.client) not yet
-#    complete. Once that compat lands, remove continue-on-error: true and make this
-#    group blocking.
+# 2. FULL SUITE: Full official upstream pipeline connect suite
+#    These include server-backed tests like test_spark_connect.py. They run for real
+#    with full visibility into pass/fail status. If this becomes a critical blocker,
+#    add continue-on-error: true back in; currently it provides honest signal on
+#    pipeline parity with the Rust transport plugin.
 
 name: Pipelines Connect Parity (Spark 4.2.0)
 
@@ -195,30 +195,28 @@ jobs:
             sleep 1
           done
 
-      - name: ADVISORY - Full official pipeline connect suite via OUR Rust client
+      - name: Full official pipeline connect suite via OUR Rust client
         id: pipeline-connect-tests
-        # IMPORTANT: continue-on-error: true because the full official pipeline suite
-        # includes server-backed tests (like test_spark_connect.py) that require the
-        # ReusedConnectTestCase harness compat (SparkConf, SparkSession.client) not yet
-        # complete in this Rust drop-in. Remove continue-on-error: true and make the job
-        # blocking once the harness compat lands.
-        continue-on-error: true
         env:
           PYTHONUNBUFFERED: "1"   # stream per-file progress into the live log
+          PYTHONPATH: ${{ github.workspace }}/scripts:${{ steps.spark-source.outputs.SPARK_SOURCE }}/python
           RUST_PYSPARK_SO: ${{ github.workspace }}/python/pyspark/_pyspark.so
+        working-directory: ${{ steps.spark-source.outputs.SPARK_SOURCE }}/python
         run: |
           set -o pipefail
           # Run the full official pipeline connect test suite through our Rust client.
           # The pipeline tests are in python/pyspark/pipelines/tests/ in the official
           # Spark source tree. We inject the Rust transport plugin via PYTHONPATH and
-          # env vars to exercise our client.
+          # env vars to exercise our client. We run from the Spark source python/
+          # directory with the test path relative to it, matching the reference
+          # client's invocation pattern.
           python -m pytest \
             -q \
             -rfE \
             --tb=short \
             -p no:cacheprovider \
             -p rust_transport_plugin \
-            "${{ steps.spark-source.outputs.SPARK_SOURCE }}/python/pyspark/pipelines/tests" \
+            pyspark/pipelines/tests \
             2>&1 | tee /tmp/pipelines_connect.log
 
       - name: Upload pipelines parity log + server log
