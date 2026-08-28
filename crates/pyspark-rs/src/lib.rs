@@ -86,6 +86,7 @@ use window::{PyFrameBound, PyWindow, PyWindowSpec};
 #[pymodule]
 fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySparkSession>()?;
+    m.add_class::<session::PyConnectClientStub>()?;
     m.add_class::<PySparkSessionBuilder>()?;
     m.add_class::<PyDataFrame>()?;
     m.add_class::<PyDataFrameWriter>()?;

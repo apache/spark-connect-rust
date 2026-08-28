@@ -52,14 +52,16 @@ impl PySparkSessionBuilder {
     }
 
     /// Set a config option, or several via `map`. Mirrors
-    /// `SparkSession.Builder.config(key=None, value=None, *, map=None)`. `spark.remote`
-    /// sets the connect endpoint; other keys are applied as runtime confs on connect.
-    #[pyo3(signature = (key=None, value=None, map=None))]
+    /// `SparkSession.Builder.config(key=None, value=None, *, map=None, conf=None)`.
+    /// `spark.remote` sets the connect endpoint; other keys are applied as runtime confs
+    /// on connect. `conf` accepts a `SparkConf` (its `getAll()` pairs are applied).
+    #[pyo3(signature = (key=None, value=None, map=None, conf=None))]
     fn config(
         &self,
         key: Option<&str>,
         value: Option<&Bound<'_, PyAny>>,
         map: Option<&Bound<'_, PyDict>>,
+        conf: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySparkSessionBuilder> {
         let mut b = self.clone();
         if let Some(k) = key {
@@ -74,6 +76,15 @@ impl PySparkSessionBuilder {
                 let ks = k.str()?.to_string();
                 let vs = crate::coerce_option_value(&v)?.unwrap_or_default();
                 b.set_conf(&ks, vs);
+            }
+        }
+        if let Some(c) = conf {
+            // A SparkConf: apply its (key, value) pairs via getAll().
+            for pair in c.call_method0("getAll")?.try_iter()? {
+                let pair = pair?;
+                let k: String = pair.get_item(0)?.str()?.to_string();
+                let v: String = pair.get_item(1)?.str()?.to_string();
+                b.set_conf(&k, v);
             }
         }
         Ok(b)
@@ -485,6 +496,17 @@ impl PySparkSession {
         self.session.session_id().to_string()
     }
 
+    /// The low-level Connect client. In the reference client this is the gRPC
+    /// `SparkConnectClient`; here the transport is Rust, so we expose a minimal stub
+    /// carrying the bits test/util code touches (`_server_session_id`, `_cleanup_ml_cache`),
+    /// mirroring `SparkSession.client` enough for harnesses like `ReusedConnectTestCase`.
+    #[getter]
+    fn client(&self) -> PyConnectClientStub {
+        PyConnectClientStub {
+            session_id: self.session.session_id().to_string(),
+        }
+    }
+
     /// Whether this session has been stopped. Mirrors `SparkSession.is_stopped`.
     #[getter]
     fn is_stopped(&self) -> bool {
@@ -663,6 +685,26 @@ impl PySparkSession {
     fn clone_session(&self) -> PySparkSession {
         PySparkSession::new(self.session.clone_session())
     }
+}
+
+/// Minimal stand-in for the reference `SparkConnectClient`, returned by
+/// `SparkSession.client`. The real client is the Rust transport; this only surfaces the
+/// members that test/utility code (e.g. `ReusedConnectTestCase`) touches.
+#[pyclass(name = "SparkConnectClientStub")]
+pub struct PyConnectClientStub {
+    session_id: String,
+}
+
+#[pymethods]
+impl PyConnectClientStub {
+    /// The server-side session id (property, mirrors `client._server_session_id`).
+    #[getter]
+    fn _server_session_id(&self) -> String {
+        self.session_id.clone()
+    }
+
+    /// No-op: the Rust transport has no client-side ML cache to clear.
+    fn _cleanup_ml_cache(&self) {}
 }
 
 /// Infer the Spark `DataType` for a `createDataFrame` column from its (first) value.
