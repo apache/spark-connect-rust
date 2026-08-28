@@ -339,6 +339,13 @@ def test_datatype_object_model():
     assert T.DataType.fromDDL("a int, b string").simpleString() == "struct<a:int,b:string>"
 
 
+def test_structfield_collation_methods():
+    f = T.StructField("a", T.StringType())
+    assert f.getCollationsMap({}) == {}
+    assert f.getCollationsMap({"__COLLATIONS": {"a": "icu.UNICODE"}}) == {"a": "UNICODE"}
+    assert f.schemaCollationValue(T.StringType()) == "spark.UTF8_BINARY"
+
+
 def test_structfield_object_model():
     f = T.StructField("a", T.IntegerType(), True)
     assert f.simpleString() == "a:int"

@@ -1141,6 +1141,51 @@ impl PyStructField {
     ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
         Ok(pyo3::types::PyDict::new(py))
     }
+
+    /// Map of collated-field path -> collation name, parsed from the field's
+    /// `__COLLATIONS` metadata (empty when absent). Mirrors `StructField.getCollationsMap`.
+    #[pyo3(name = "getCollationsMap")]
+    fn __sf_get_collations_map<'py>(
+        &self,
+        py: Python<'py>,
+        metadata: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let out = pyo3::types::PyDict::new(py);
+        if let Ok(dict) = metadata.downcast::<pyo3::types::PyDict>() {
+            if let Some(coll) = dict.get_item("__COLLATIONS")? {
+                if let Ok(cdict) = coll.downcast::<pyo3::types::PyDict>() {
+                    for (k, v) in cdict.iter() {
+                        let val: String = v.extract()?;
+                        // Value is "provider.name"; the map holds just the name.
+                        let name = val.rsplit('.').next().unwrap_or(&val).to_string();
+                        out.set_item(k, name)?;
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// The "provider.collation" value for a collated string type. Mirrors
+    /// `StructField.schemaCollationValue` (UTF8_BINARY/UTF8_LCASE are the "spark"
+    /// provider, everything else "icu").
+    #[pyo3(name = "schemaCollationValue")]
+    fn __sf_schema_collation_value(&self, dt: &Bound<'_, PyAny>) -> PyResult<String> {
+        let collation = match py_to_data_type(dt)? {
+            DataType::String { collation } => collation,
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "schemaCollationValue expects a StringType",
+                ))
+            }
+        };
+        let provider = if collation == "UTF8_BINARY" || collation == "UTF8_LCASE" {
+            "spark"
+        } else {
+            "icu"
+        };
+        Ok(format!("{provider}.{collation}"))
+    }
     /// Parse a single-field DDL string (e.g. "a INT" or "a: int") into a StructField.
     /// Mirrors `StructField.fromDDL`.
     #[classmethod]
