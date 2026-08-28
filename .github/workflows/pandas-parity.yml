@@ -165,18 +165,21 @@ jobs:
           SPARK_HOME="${{ steps.spark-download.outputs.SPARK_HOME }}"
           echo "Starting Connect server on ${SPARK_CONNECT_TESTING_REMOTE}"
           # Give the driver extra heap for the pandas tests which are I/O heavy.
-          # Pin the server timezone to UTC (and match it on the client via TZ=UTC below).
-          # The pandas tests compare against pure-pandas (tz-naive wall-clock) results, which
-          # only round-trip through Spark when the client's local timezone equals the server's
-          # spark.sql.session.timeZone. Real pyspark fails these too when the two differ, so this
-          # aligns them rather than papering over a client bug.
+          # Set the server JVM timezone to America/Los_Angeles and match it on the client
+          # (TZ below). This replicates Apache Spark's own test environment, which fixes the
+          # timezone for determinism (pom.xml surefire/scalatest `<timeZone>America/Los_Angeles`
+          # and pyspark.testing goldenutils.setup_timezone). It is NOT a UTC hack: a Spark
+          # TIMESTAMP is a tz-less instant, and the pandas tests compare against pure-pandas
+          # wall-clock, so the round-trip only holds when the client's local timezone equals the
+          # server's (createDataFrame localizes with the session tz; lit(datetime) uses the
+          # client's local tz via time.mktime). Real pyspark fails identically when they differ.
+          # spark.sql.session.timeZone is left to derive from the JVM default, as Apache does.
           "${SPARK_HOME}/sbin/start-connect-server.sh" \
             --packages "org.apache.spark:spark-connect_2.13:${SPARK_VERSION}" \
             --driver-memory 3g \
             --conf spark.sql.session.localRelationSizeLimit=1073741824 \
-            --conf spark.sql.session.timeZone=UTC \
-            --conf spark.driver.extraJavaOptions=-Duser.timezone=UTC \
-            --conf spark.executor.extraJavaOptions=-Duser.timezone=UTC \
+            --conf spark.driver.extraJavaOptions=-Duser.timezone=America/Los_Angeles \
+            --conf spark.executor.extraJavaOptions=-Duser.timezone=America/Los_Angeles \
             > /tmp/connect-server.log 2>&1 &
           for i in $(seq 1 90); do
             if (echo > /dev/tcp/localhost/15002) 2>/dev/null; then
@@ -190,7 +193,7 @@ jobs:
         id: pandas-parity
         env:
           PYTHONUNBUFFERED: "1"   # stream per-file progress into the live log
-          TZ: UTC                 # match the server's spark.sql.session.timeZone (see server startup)
+          TZ: America/Los_Angeles # match the server JVM timezone (see server startup); Apache's test convention
           PYTHONPATH: ${{ github.workspace }}/scripts:${{ steps.spark-source.outputs.SPARK_SOURCE }}/python
           RUST_PYSPARK_SO: ${{ github.workspace }}/python/pyspark/_pyspark.so
         working-directory: ${{ steps.spark-source.outputs.SPARK_SOURCE }}/python
