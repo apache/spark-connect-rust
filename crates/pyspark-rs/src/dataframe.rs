@@ -1196,7 +1196,8 @@ impl PyDataFrame {
         Ok(rows.into_iter().map(PyRow::new).collect())
     }
 
-    /// Get column names.
+    /// Column names (a property, mirroring `DataFrame.columns`).
+    #[getter]
     fn columns(&self) -> PyResult<Vec<String>> {
         self.dataframe.columns().to_pyerr()
     }
@@ -1327,6 +1328,12 @@ impl PyDataFrame {
 
     /// Column access by name (`df["col"]`).
     fn __getitem__(&self, item: &str) -> PyColumn {
+        PyColumn::new(spark_connect::functions::col(item))
+    }
+
+    /// Private column accessor used by pandas-on-Spark (`sdf._col(name)`); mirrors the
+    /// connect DataFrame's `_col`. Backtick-quoted names arrive from `scol_for`.
+    fn _col(&self, item: &str) -> PyColumn {
         PyColumn::new(spark_connect::functions::col(item))
     }
 

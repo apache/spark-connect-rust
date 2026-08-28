@@ -246,10 +246,34 @@ impl PySparkSession {
     fn createDataFrame(
         &self,
         py: Python<'_>,
-        data: &Bound<'_, PyList>,
+        data: &Bound<'_, PyAny>,
         schema: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         use crate::row::PyRow;
+
+        // Accept a pandas DataFrame (as pyspark does): convert it to a list of row lists
+        // with NaN/NaT mapped to None, and take its column names as the default schema.
+        // pandas-on-Spark always passes an explicit `schema`, so this mainly needs to
+        // deliver the row values; the list path below handles the rest.
+        let mut pandas_columns: Option<Vec<String>> = None;
+        let is_pandas = py
+            .import("pandas")
+            .and_then(|m| m.getattr("DataFrame"))
+            .and_then(|c| data.is_instance(&c))
+            .unwrap_or(false);
+        let data_owned: Bound<'_, PyList>;
+        let data: &Bound<'_, PyList> = if is_pandas {
+            pandas_columns = Some(data.getattr("columns")?.call_method0("tolist")?.extract()?);
+            // df.astype(object).where(df.notna(), None).values.tolist() -> rows with None for NA.
+            let notna = data.call_method0("notna")?;
+            let obj = data.call_method1("astype", ("object",))?;
+            let replaced = obj.call_method1("where", (notna, py.None()))?;
+            let values = replaced.getattr("values")?.call_method0("tolist")?;
+            data_owned = values.cast_into::<PyList>()?;
+            &data_owned
+        } else {
+            data.cast::<PyList>()?
+        };
 
         // Resolve the schema: a list of column names (types inferred), a DDL string or
         // a StructType (names + types explicit), or None (names from Row / default).
@@ -319,6 +343,7 @@ impl PySparkSession {
             let names = spec_names
                 .clone()
                 .or(row_names)
+                .or_else(|| pandas_columns.clone())
                 .unwrap_or_else(|| (0..values.len()).map(|i| format!("col{}", i)).collect());
             rows.push(Row::new(names, values));
         }
