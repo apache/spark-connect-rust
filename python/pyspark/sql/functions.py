@@ -89,7 +89,13 @@ def _dict_to_options_column(options_dict):
 
 # Import UDF / UDTF functions
 from pyspark.sql.udf import udf, pandas_udf, arrow_udf
-from pyspark.sql.udtf import udtf, arrow_udtf
+from pyspark.sql.udtf import (
+    udtf,
+    arrow_udtf,
+    OrderingColumn,
+    PartitioningColumn,
+    SelectedColumn,
+)
 
 # Hand-written special functions
 col = _pyfunc_col

@@ -40,7 +40,7 @@ Important classes of Spark SQL and DataFrames:
       For working with window functions.
 """
 
-from pyspark.sql.types import Geography, Geometry, Row, VariantVal
+from pyspark.sql.types import Row, VariantVal
 from pyspark.sql.context import SQLContext, HiveContext, UDFRegistration, UDTFRegistration
 from pyspark.sql.session import SparkSession
 from pyspark.sql.column import Column
@@ -53,6 +53,13 @@ from pyspark.sql.merge import MergeIntoWriter
 from pyspark.sql.window import Window, WindowSpec
 from pyspark.sql.pandas.group_ops import PandasCogroupedOps
 from pyspark.sql.utils import is_remote
+
+# Geography and Geometry are optional spatial types that may not be available
+try:
+    from pyspark.sql.types import Geography, Geometry
+except ImportError:
+    Geography = None  # type: ignore
+    Geometry = None  # type: ignore
 
 __all__ = [
     "SparkSession",
@@ -69,8 +76,6 @@ __all__ = [
     "DataFrameNaFunctions",
     "DataFrameStatFunctions",
     "VariantVal",
-    "Geography",
-    "Geometry",
     "Window",
     "WindowSpec",
     "DataFrameReader",
@@ -80,3 +85,9 @@ __all__ = [
     "PandasCogroupedOps",
     "is_remote",
 ]
+
+# Add optional spatial types if available
+if Geography is not None:
+    __all__.append("Geography")
+if Geometry is not None:
+    __all__.append("Geometry")

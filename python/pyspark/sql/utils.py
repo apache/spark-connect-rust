@@ -16,7 +16,7 @@
 #
 """Small subset of pyspark.sql.utils needed by the drop-in and vendored modules."""
 
-from typing import Any, Union, TYPE_CHECKING
+from typing import Any, Union, TYPE_CHECKING, Sequence
 
 if TYPE_CHECKING:
     from pyspark.pandas._typing import IndexOpsLike, SeriesOrIndex
@@ -68,3 +68,45 @@ def pyspark_column_op(
         fillna = None
     # TODO(SPARK-43877): Fix behavior difference for compare binary functions.
     return result.fillna(fillna) if fillna is not None else result
+
+
+def require_minimum_plotly_version() -> None:
+    """Raise ImportError if plotly is not installed"""
+    from pyspark.loose_version import LooseVersion
+    from pyspark.errors import PySparkImportError
+
+    minimum_plotly_version = "4.8"
+
+    try:
+        import plotly
+
+        have_plotly = True
+    except ImportError as error:
+        have_plotly = False
+        raised_error = error
+    if not have_plotly:
+        raise PySparkImportError(
+            errorClass="PACKAGE_NOT_INSTALLED",
+            messageParameters={
+                "package_name": "Plotly",
+                "minimum_version": str(minimum_plotly_version),
+            },
+        ) from raised_error
+    if LooseVersion(plotly.__version__) < LooseVersion(minimum_plotly_version):
+        raise PySparkImportError(
+            errorClass="UNSUPPORTED_PACKAGE_VERSION",
+            messageParameters={
+                "package_name": "Plotly",
+                "minimum_version": str(minimum_plotly_version),
+                "current_version": str(plotly.__version__),
+            },
+        )
+
+
+class NumpyHelper:
+    @staticmethod
+    def linspace(start: float, stop: float, num: int) -> Sequence[float]:
+        if num == 1:
+            return [float(start)]
+        step = (float(stop) - float(start)) / (num - 1)
+        return [start + step * i for i in range(num)]

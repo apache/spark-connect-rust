@@ -4,6 +4,22 @@
 
 __version__ = "0.1.0"
 
+from typing import Callable, TypeVar, Union
+
+_F = TypeVar("_F", bound=Callable)
+
+
+def since(version: Union[str, float]) -> Callable[[_F], _F]:
+    """
+    A decorator that annotates a function to append the version of Spark the function was added.
+    For Connect-only clients, this is a no-op that just passes through the function.
+    """
+    def deco(f: _F) -> _F:
+        # For Connect-only, we don't modify docstrings; this is just a pass-through decorator
+        return f
+    return deco
+
+
 from pyspark.sql import (
     SparkSession,
     DataFrame,

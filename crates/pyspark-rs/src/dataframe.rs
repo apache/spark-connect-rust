@@ -44,7 +44,7 @@ fn flatten_str_cols(cols: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<String>> {
 }
 
 /// Python wrapper for a Spark DataFrame.
-#[pyclass(name = "DataFrame")]
+#[pyclass(name = "DataFrame", subclass)]
 pub struct PyDataFrame {
     pub(crate) dataframe: DataFrame,
 }
