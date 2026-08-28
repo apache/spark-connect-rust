@@ -1154,10 +1154,13 @@ impl PyDataFrame {
         Ok(psdf.bind(py).getattr("plot")?.unbind())
     }
 
-    /// Get the schema of this DataFrame.
-    fn schema(&self) -> PyResult<PyDataType> {
-        let schema = self.dataframe.schema().to_pyerr()?;
-        Ok(PyDataType::new(schema))
+    /// The schema of this DataFrame as a `StructType` (a property, mirroring
+    /// `DataFrame.schema`) — materialized into the proper Python type classes so
+    /// `df.schema.fields`, `df.schema["c"]`, `df.schema.fieldNames()` all work.
+    #[getter]
+    fn schema(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let schema = py.detach(|| self.dataframe.schema()).to_pyerr()?;
+        crate::types::data_type_to_py(py, &schema)
     }
 
     /// Get the first row.

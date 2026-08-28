@@ -674,3 +674,108 @@ def test_util_print_exec_and_skip_env(monkeypatch):
         assert "ValueError" in buf.getvalue()
     monkeypatch.setenv("SPARK_SKIP_CONNECT_COMPAT_TESTS", "1")
     assert util.is_remote_only() is True
+
+
+def test_struct_type_introspection():
+    """StructType.fields / names / __getitem__ / __iter__ / __len__ + chainable add."""
+    st = T.StructType(
+        [T.StructField("a", T.IntegerType(), True), T.StructField("b", T.StringType(), False)]
+    )
+    assert len(st) == 2
+    assert st.names == ["a", "b"] == st.fieldNames()
+    assert [f.name for f in st.fields] == ["a", "b"]
+    assert [type(f.dataType).__name__ for f in st.fields] == ["IntegerType", "StringType"]
+    # index by position and by name
+    assert st[0].name == "a"
+    assert st["b"].name == "b"
+    assert not st["b"].nullable
+    # iteration
+    assert [f.name for f in st] == ["a", "b"]
+    # slice yields a StructType
+    sl = st[0:1]
+    assert isinstance(sl, T.StructType)
+    assert sl.fieldNames() == ["a"]
+    # out-of-range + missing name
+    with pytest.raises(IndexError):
+        _ = st[5]
+    with pytest.raises(KeyError):
+        _ = st["nope"]
+    # chainable add
+    st2 = T.StructType().add("x", "int").add("y", T.StringType(), False).add(
+        T.StructField("z", T.IntegerType())
+    )
+    assert st2.fieldNames() == ["x", "y", "z"]
+    assert isinstance(st2, T.StructType)
+
+
+def test_struct_field_attributes():
+    """StructField exposes name / dataType / nullable / metadata and a faithful repr/eq."""
+    f = T.StructField("m", T.IntegerType(), True, {"k": "v"})
+    assert f.name == "m"
+    assert isinstance(f.dataType, T.IntegerType)
+    assert f.nullable is True
+    assert f.metadata == {"k": "v"}
+    assert repr(f) == "StructField('m', IntegerType(), True)"
+    assert f == T.StructField("m", T.IntegerType(), True, {"k": "v"})
+    assert f != T.StructField("m", T.StringType(), True)
+
+
+def test_user_defined_type():
+    """UserDefinedType subclasses the Rust DataType and round-trips via json/fromJson."""
+    import sys
+    import types as _pytypes
+
+    # Define the UDT in an importable module so cloudpickle serializes it by reference.
+    mod = _pytypes.ModuleType("_udt_test_mod")
+    sys.modules["_udt_test_mod"] = mod
+    src = (
+        "from pyspark.sql.types import UserDefinedType, ArrayType, DoubleType\n"
+        "class PointUDT(UserDefinedType):\n"
+        "    @classmethod\n"
+        "    def sqlType(cls): return ArrayType(DoubleType(), False)\n"
+        "    @classmethod\n"
+        "    def module(cls): return '_udt_test_mod'\n"
+        "    def serialize(self, obj): return [obj[0], obj[1]]\n"
+        "    def deserialize(self, datum): return (datum[0], datum[1])\n"
+    )
+    exec(compile(src, "_udt_test_mod", "exec"), mod.__dict__)
+    PointUDT = mod.PointUDT
+
+    u = PointUDT()
+    assert isinstance(u, T.DataType)
+    assert isinstance(u, T.UserDefinedType)
+    assert u.typeName() == "pointudt"
+    assert u.simpleString() == "udt"
+    assert u.needConversion() is True
+    assert u.scalaUDT() == ""
+    # serialize / deserialize round-trip
+    assert u.serialize((1.0, 2.0)) == [1.0, 2.0]
+    assert u.deserialize([1.0, 2.0]) == (1.0, 2.0)
+    # jsonValue carries the udt envelope
+    jv = u.jsonValue()
+    assert jv["type"] == "udt"
+    assert jv["pyClass"] == "_udt_test_mod.PointUDT"
+    assert "serializedClass" in jv
+    assert jv["sqlType"] == T.ArrayType(T.DoubleType(), False).jsonValue()
+    # embed in a schema and parse it back -> reconstructs the UDT class
+    sch = T.StructType([T.StructField("p", u, True)])
+    rt = T._parse_datatype_json_string(sch.json())
+    assert isinstance(rt.fields[0].dataType, PointUDT)
+    del sys.modules["_udt_test_mod"]
+
+
+def test_user_defined_type_not_implemented():
+    """The abstract UDT hooks raise the pyspark NOT_IMPLEMENTED error."""
+    from pyspark.errors import PySparkNotImplementedError
+
+    class Bare(T.UserDefinedType):
+        pass
+
+    with pytest.raises(PySparkNotImplementedError):
+        Bare.sqlType()
+    with pytest.raises(PySparkNotImplementedError):
+        Bare.module()
+    with pytest.raises(PySparkNotImplementedError):
+        Bare().serialize(object())
+    with pytest.raises(PySparkNotImplementedError):
+        Bare().deserialize(object())

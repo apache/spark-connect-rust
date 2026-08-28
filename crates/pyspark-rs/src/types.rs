@@ -82,6 +82,17 @@ fn py_new_struct(py: Python<'_>, fields: Vec<StructField>) -> PyResult<Py<PyStru
 
 #[pymethods]
 impl PyDataType {
+    /// Allow instantiating the base and, crucially, pure-Python subclasses of it
+    /// (e.g. a user's `UserDefinedType`). The sentinel `inner` is never consulted for
+    /// such subclasses — they override the object-model methods in Python, and
+    /// `py_to_data_type` special-cases `UserDefinedType` before reading `inner`.
+    #[new]
+    fn __new__() -> Self {
+        PyDataType {
+            inner: DataType::Null,
+        }
+    }
+
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
@@ -1322,13 +1333,38 @@ impl PyStructField {
     fn nullable(&self) -> bool {
         self.field.nullable
     }
-    fn __repr__(&self) -> String {
-        format!(
+    /// The field's data type as its concrete Python type object (mirrors `StructField.dataType`).
+    #[getter]
+    #[pyo3(name = "dataType")]
+    fn data_type(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        data_type_to_py(py, &self.field.data_type)
+    }
+    /// The field's metadata dict (mirrors `StructField.metadata`).
+    #[getter]
+    fn metadata<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let out = pyo3::types::PyDict::new(py);
+        for (k, v) in &self.field.metadata {
+            out.set_item(k, v)?;
+        }
+        Ok(out)
+    }
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        // Mirror pyspark: StructField('name', <DataType repr>, nullable).
+        let dt = data_type_to_py(py, &self.field.data_type)?;
+        let dt_repr: String = dt.bind(py).repr()?.extract()?;
+        Ok(format!(
             "StructField('{}', {}, {})",
             self.field.name,
-            self.field.data_type.simple_string(),
-            self.field.nullable
-        )
+            dt_repr,
+            if self.field.nullable { "True" } else { "False" }
+        ))
+    }
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+        if let Ok(o) = other.extract::<PyRef<PyStructField>>() {
+            self.field == o.field
+        } else {
+            false
+        }
     }
 }
 
@@ -1414,16 +1450,18 @@ impl PyStructType {
         ))
     }
 
-    /// Append a field (pyspark `StructType.add`). Chainable is not required here.
-    #[pyo3(signature = (field, data_type=None, nullable=true))]
-    fn add(
-        &mut self,
+    /// Append a field and return `self` (chainable, mirroring `StructType.add`):
+    /// `StructType().add("a", "int").add("b", StringType())`.
+    #[pyo3(signature = (field, data_type=None, nullable=true, metadata=None))]
+    fn add<'py>(
+        slf: Bound<'py, Self>,
         field: &Bound<'_, PyAny>,
         data_type: Option<&Bound<'_, PyAny>>,
         nullable: bool,
-    ) -> PyResult<()> {
-        if let Ok(sf) = field.extract::<PyRef<PyStructField>>() {
-            self.fields.push(sf.field.clone());
+        metadata: Option<std::collections::HashMap<String, String>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        let new_field = if let Ok(sf) = field.extract::<PyRef<PyStructField>>() {
+            sf.field.clone()
         } else {
             let name: String = field.extract()?;
             let dt = match data_type {
@@ -1432,14 +1470,91 @@ impl PyStructType {
                     collation: "UTF8_BINARY".to_string(),
                 },
             };
-            self.fields.push(StructField {
+            StructField {
                 name,
                 data_type: dt,
                 nullable,
-                metadata: BTreeMap::new(),
-            });
+                metadata: metadata.unwrap_or_default().into_iter().collect(),
+            }
+        };
+        {
+            let mut me = slf.borrow_mut();
+            me.fields.push(new_field);
         }
-        Ok(())
+        Ok(slf)
+    }
+
+    /// The fields as `StructField` objects (mirrors `StructType.fields`).
+    #[getter]
+    fn fields(&self, py: Python<'_>) -> PyResult<Vec<Py<PyStructField>>> {
+        self.fields
+            .iter()
+            .map(|f| Py::new(py, PyStructField { field: f.clone() }))
+            .collect()
+    }
+
+    /// The field names in order (mirrors `StructType.names`).
+    #[getter]
+    fn names(&self) -> Vec<String> {
+        self.fields.iter().map(|f| f.name.clone()).collect()
+    }
+
+    fn __len__(&self) -> usize {
+        self.fields.len()
+    }
+
+    /// Index by position (`st[0]`) or by name (`st["a"]`), returning a `StructField`
+    /// (mirrors `StructType.__getitem__`; a slice yields a new `StructType`).
+    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(name) = key.extract::<String>() {
+            for f in &self.fields {
+                if f.name == name {
+                    return Ok(Py::new(py, PyStructField { field: f.clone() })?.into_any());
+                }
+            }
+            return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                "No StructField named {name}"
+            )));
+        }
+        if let Ok(slice) = key.downcast::<pyo3::types::PySlice>() {
+            let idx = slice.indices(self.fields.len() as isize)?;
+            let mut out = Vec::new();
+            let (mut i, stop, step) = (idx.start, idx.stop, idx.step);
+            while (step > 0 && i < stop) || (step < 0 && i > stop) {
+                out.push(self.fields[i as usize].clone());
+                i += step;
+            }
+            return Ok(py_new_struct(py, out)?.into_any());
+        }
+        let i: isize = key.extract().map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "StructType indices must be integers, slices, or field names",
+            )
+        })?;
+        let n = self.fields.len() as isize;
+        let idx = if i < 0 { i + n } else { i };
+        if idx < 0 || idx >= n {
+            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                "StructType index out of range",
+            ));
+        }
+        Ok(Py::new(
+            py,
+            PyStructField {
+                field: self.fields[idx as usize].clone(),
+            },
+        )?
+        .into_any())
+    }
+
+    fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let items: Vec<Py<PyStructField>> = self
+            .fields
+            .iter()
+            .map(|f| Py::new(py, PyStructField { field: f.clone() }))
+            .collect::<PyResult<_>>()?;
+        let list = pyo3::types::PyList::new(py, items)?;
+        Ok(list.as_any().call_method0("__iter__")?.unbind())
     }
 
     #[pyo3(name = "simpleString")]
@@ -2069,6 +2184,224 @@ impl PyGeographyType {
 
 /// Convert a Python DataType object (any of the type classes) or a DDL string into
 /// the core `DataType`. Mirrors pyspark accepting `Union[DataType, str]` everywhere.
+/// Materialize a core [`DataType`] into its concrete Python type object — a real
+/// `StructType`/`IntegerType`/... with the correct MRO — the inverse of
+/// [`py_to_data_type`]. Used by `df.schema`, `StructField.dataType`, and `StructType`
+/// field access so schema introspection yields the proper classes (not a bare `DataType`).
+pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAny>> {
+    macro_rules! obj {
+        ($init:expr) => {
+            Py::new(py, $init)?.into_any()
+        };
+    }
+    let o = match dt {
+        DataType::Null => obj!(init_chain!(DataType::Null, PyNullType, [])),
+        DataType::Boolean => obj!(init_chain!(DataType::Boolean, PyBooleanType, [PyAtomicType])),
+        DataType::Byte => obj!(init_chain!(
+            DataType::Byte,
+            PyByteType,
+            [PyAtomicType, PyNumericType, PyIntegralType]
+        )),
+        DataType::Short => obj!(init_chain!(
+            DataType::Short,
+            PyShortType,
+            [PyAtomicType, PyNumericType, PyIntegralType]
+        )),
+        DataType::Integer => obj!(init_chain!(
+            DataType::Integer,
+            PyIntegerType,
+            [PyAtomicType, PyNumericType, PyIntegralType]
+        )),
+        DataType::Long => obj!(init_chain!(
+            DataType::Long,
+            PyLongType,
+            [PyAtomicType, PyNumericType, PyIntegralType]
+        )),
+        DataType::Float => obj!(init_chain!(
+            DataType::Float,
+            PyFloatType,
+            [PyAtomicType, PyNumericType, PyFractionalType]
+        )),
+        DataType::Double => obj!(init_chain!(
+            DataType::Double,
+            PyDoubleType,
+            [PyAtomicType, PyNumericType, PyFractionalType]
+        )),
+        DataType::Decimal { precision, scale } => {
+            let (precision, scale) = (*precision, *scale);
+            obj!(init_chain!(
+                DataType::Decimal { precision, scale },
+                PyDecimalType { precision, scale },
+                [PyAtomicType, PyNumericType, PyFractionalType],
+                value
+            ))
+        }
+        DataType::String { collation } => obj!(init_chain!(
+            DataType::String {
+                collation: collation.clone()
+            },
+            PyStringType,
+            [PyAtomicType]
+        )),
+        DataType::Binary => obj!(init_chain!(DataType::Binary, PyBinaryType, [PyAtomicType])),
+        DataType::Date => obj!(init_chain!(
+            DataType::Date,
+            PyDateType,
+            [PyAtomicType, PyDatetimeType]
+        )),
+        DataType::Timestamp => obj!(init_chain!(
+            DataType::Timestamp,
+            PyTimestampType,
+            [PyAtomicType, PyDatetimeType]
+        )),
+        DataType::TimestampNtz => obj!(init_chain!(
+            DataType::TimestampNtz,
+            PyTimestampNTZType,
+            [PyAtomicType, PyDatetimeType]
+        )),
+        DataType::Array {
+            element_type,
+            contains_null,
+        } => {
+            let (et, contains_null) = ((**element_type).clone(), *contains_null);
+            obj!(init_chain!(
+                DataType::Array {
+                    element_type: Box::new(et.clone()),
+                    contains_null,
+                },
+                PyArrayType {
+                    element_type: et,
+                    contains_null,
+                },
+                [],
+                value
+            ))
+        }
+        DataType::Map {
+            key_type,
+            value_type,
+            value_contains_null,
+        } => {
+            let (kt, vt, value_contains_null) = (
+                (**key_type).clone(),
+                (**value_type).clone(),
+                *value_contains_null,
+            );
+            obj!(init_chain!(
+                DataType::Map {
+                    key_type: Box::new(kt.clone()),
+                    value_type: Box::new(vt.clone()),
+                    value_contains_null,
+                },
+                PyMapType {
+                    key_type: kt,
+                    value_type: vt,
+                    value_contains_null,
+                },
+                [],
+                value
+            ))
+        }
+        DataType::Struct { fields } => py_new_struct(py, fields.clone())?.into_any(),
+        DataType::Char { length } => {
+            let length = *length;
+            obj!(init_chain!(
+                DataType::Char { length },
+                PyCharType { length },
+                [PyAtomicType],
+                value
+            ))
+        }
+        DataType::Varchar { length } => {
+            let length = *length;
+            obj!(init_chain!(
+                DataType::Varchar { length },
+                PyVarcharType { length },
+                [PyAtomicType],
+                value
+            ))
+        }
+        DataType::Time { precision } => {
+            let precision = *precision;
+            obj!(init_chain!(
+                DataType::Time { precision },
+                PyTimeType { precision },
+                [PyAtomicType, PyDatetimeType, PyAnyTimeType],
+                value
+            ))
+        }
+        DataType::CalendarInterval => obj!(init_chain!(
+            DataType::CalendarInterval,
+            PyCalendarIntervalType,
+            []
+        )),
+        DataType::YearMonthInterval {
+            start_field,
+            end_field,
+        } => {
+            let (start_field, end_field) = (*start_field, *end_field);
+            obj!(init_chain!(
+                DataType::YearMonthInterval {
+                    start_field,
+                    end_field,
+                },
+                PyYearMonthIntervalType {
+                    start_field,
+                    end_field,
+                },
+                [PyAtomicType, PyAnsiIntervalType],
+                value
+            ))
+        }
+        DataType::DayTimeInterval {
+            start_field,
+            end_field,
+        } => {
+            let (start_field, end_field) = (*start_field, *end_field);
+            obj!(init_chain!(
+                DataType::DayTimeInterval {
+                    start_field,
+                    end_field,
+                },
+                PyDayTimeIntervalType {
+                    start_field,
+                    end_field,
+                },
+                [PyAtomicType, PyAnsiIntervalType],
+                value
+            ))
+        }
+        DataType::Variant => obj!(init_chain!(DataType::Variant, PyVariantType, [PyAtomicType])),
+        DataType::Geometry { srid } => {
+            let srid = *srid;
+            obj!(init_chain!(
+                DataType::Geometry { srid },
+                PyGeometryType { srid },
+                [PyAtomicType, PySpatialType],
+                value
+            ))
+        }
+        DataType::Geography { srid } => {
+            let srid = *srid;
+            obj!(init_chain!(
+                DataType::Geography { srid },
+                PyGeographyType { srid },
+                [PyAtomicType, PySpatialType],
+                value
+            ))
+        }
+        DataType::Udt { .. } | DataType::Unparsed { .. } => {
+            // A UDT reconstructs by re-importing its Python class; delegate to the Python
+            // parser (which also handles the unparsed-DDL fallback).
+            py.import("pyspark.sql.types")?
+                .getattr("_parse_datatype_json_string")?
+                .call1((dt.json(),))?
+                .unbind()
+        }
+    };
+    Ok(o)
+}
+
 pub(crate) fn py_to_data_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
     if let Ok(g) = obj.extract::<PyRef<PyGeometryType>>() {
         return Ok(DataType::Geometry { srid: g.srid });
@@ -2169,6 +2502,34 @@ pub(crate) fn py_to_data_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
     }
     if obj.extract::<PyRef<PyVariantType>>().is_ok() {
         return Ok(DataType::Variant);
+    }
+    // `UserDefinedType` is a pure-Python subclass of the base `DataType` (its jsonValue
+    // cloudpickles the concrete class, so it can't be lowered into Rust). Detect it before
+    // the bare-base fallback and build the core `Udt` from its jsonValue + sqlType().
+    if let Ok(udt_cls) = obj
+        .py()
+        .import("pyspark.sql.types")
+        .and_then(|m| m.getattr("UserDefinedType"))
+    {
+        if obj.is_instance(&udt_cls)? {
+            let jv = obj.call_method0("jsonValue")?;
+            let get = |k: &str| -> PyResult<Option<String>> {
+                let v = jv.call_method1("get", (k,))?;
+                if v.is_none() {
+                    Ok(None)
+                } else {
+                    Ok(Some(v.extract()?))
+                }
+            };
+            let sql_type = py_to_data_type(&obj.call_method0("sqlType")?)?;
+            return Ok(DataType::Udt {
+                type_str: "udt".to_string(),
+                jvm_class: get("class")?,
+                python_class: get("pyClass")?,
+                serialized_python_class: get("serializedClass")?,
+                sql_type: Some(Box::new(sql_type)),
+            });
+        }
     }
     // The bare base `DataType` (e.g. from `fromDDL`) is matched LAST: concrete subclasses
     // (which all share the PyDataType base) are handled above via their own fields, so a
