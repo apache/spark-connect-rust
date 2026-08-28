@@ -2,6 +2,7 @@
 Minimal pyspark.sql.types module for the Spark Connect client.
 Provides DataType classes and conversion functions.
 """
+from typing import cast  # noqa: F401  (upstream leaks typing.cast from this module)
 
 # Import from _pyspark for the actual DataType implementations
 try:
@@ -17,6 +18,8 @@ try:
         GeometryType, GeographyType,
         VariantVal, Geometry, Geography,
     )
+    # Row lives in the Rust core; upstream code imports it from pyspark.sql.types too.
+    from pyspark._pyspark import Row
 except ImportError:  # pragma: no cover - defensive fallback when the extension is absent
     # Fallback: define minimal stubs for testing purposes
     class DataType:
@@ -235,6 +238,7 @@ class UserDefinedType(DataType):
 __all__ = [
     "DataType",
     "UserDefinedType",
+    "Row",
     "NullType",
     "BooleanType",
     "ByteType",
@@ -260,6 +264,7 @@ __all__ = [
     "YearMonthIntervalType",
     "DayTimeIntervalType",
     "VariantType",
+    "_drop_metadata",
     "_parse_datatype_json_string",
     "_parse_datatype_json_value",
 ]
@@ -343,3 +348,30 @@ def _parse_datatype_json_value(v):
         elif t == "udt":
             return UserDefinedType.fromJson(v)
     raise ValueError(f"cannot parse datatype json: {v!r}")
+
+
+def _drop_metadata(d):
+    """Recursively strip StructField metadata (mirrors pyspark.sql.types._drop_metadata)."""
+    from typing import cast
+    assert isinstance(d, (DataType, StructField))
+    if isinstance(d, StructField):
+        return StructField(d.name, _drop_metadata(d.dataType), d.nullable, None)
+    elif isinstance(d, StructType):
+        return StructType([cast(StructField, _drop_metadata(f)) for f in d.fields])
+    elif isinstance(d, ArrayType):
+        return ArrayType(_drop_metadata(d.elementType), d.containsNull)
+    elif isinstance(d, MapType):
+        return MapType(_drop_metadata(d.keyType), _drop_metadata(d.valueType), d.valueContainsNull)
+    return d
+
+def _create_row(fields, values):
+    """Build a Row with the given field names (mirrors pyspark.sql.types._create_row).
+
+    Upstream builds ``Row(*values)`` then sets ``__fields__``; our Rust ``Row`` carries its
+    field names from construction instead, so build it from the (name, value) pairs.
+    """
+    try:
+        names = list(fields.__fields__)  # `fields` may itself be a Row
+    except AttributeError:
+        names = list(fields)
+    return Row(**{name: value for name, value in zip(names, values)})

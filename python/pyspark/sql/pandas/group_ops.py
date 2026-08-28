@@ -14,6 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Re-export of the Rust-backed class(es) under the official pyspark.sql import path."""
-from pyspark._pyspark import DataFrame, DataFrameNaFunctions, DataFrameStatFunctions
-__all__ = ["DataFrame", "DataFrameNaFunctions", "DataFrameStatFunctions"]
+"""Rust-backed PandasCogroupedOps under the official import path."""
+from pyspark._pyspark import PandasCogroupedOps
+__all__ = ["PandasCogroupedOps"]

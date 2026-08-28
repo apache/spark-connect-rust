@@ -14,6 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Re-export of the Rust-backed class(es) under the official pyspark.sql import path."""
-from pyspark._pyspark import DataFrame, DataFrameNaFunctions, DataFrameStatFunctions
-__all__ = ["DataFrame", "DataFrameNaFunctions", "DataFrameStatFunctions"]
+"""
+This package includes the internal APIs for PySpark about interoperability
+between pandas, PySpark and PyArrow. This package should not be directly
+imported and used.
+"""

@@ -14,6 +14,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Re-export of the Rust-backed class(es) under the official pyspark.sql import path."""
-from pyspark._pyspark import DataFrame, DataFrameNaFunctions, DataFrameStatFunctions
-__all__ = ["DataFrame", "DataFrameNaFunctions", "DataFrameStatFunctions"]
+"""Rust-backed pandas UDF entry points under the official import path."""
+from pyspark.sql.functions import pandas_udf  # noqa: F401
+try:
+    from pyspark.sql.functions import PandasUDFType  # noqa: F401
+except ImportError:  # pragma: no cover
+    class PandasUDFType:  # minimal stand-in; enum values set below
+        SCALAR = 200
+        GROUPED_MAP = 201
+        GROUPED_AGG = 202
+        SCALAR_ITER = 204
+        MAP_ITER = 205
+        COGROUPED_MAP = 206
+__all__ = ["pandas_udf", "PandasUDFType"]

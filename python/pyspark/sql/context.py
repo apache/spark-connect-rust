@@ -14,6 +14,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Re-export of the Rust-backed class(es) under the official pyspark.sql import path."""
-from pyspark._pyspark import DataFrame, DataFrameNaFunctions, DataFrameStatFunctions
-__all__ = ["DataFrame", "DataFrameNaFunctions", "DataFrameStatFunctions"]
+"""Legacy SQLContext/HiveContext plus the UDF/UDTF registration re-exports that
+pyspark.sql.__init__ imports."""
+from pyspark.sql.udf import UDFRegistration
+from pyspark.sql.udtf import UDTFRegistration
+
+__all__ = ["SQLContext", "HiveContext", "UDFRegistration", "UDTFRegistration"]
+
+
+class SQLContext:
+    """Deprecated. Retained for import compatibility; use SparkSession."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        raise NotImplementedError(
+            "SQLContext is not supported in the Spark Connect client; use SparkSession."
+        )
+
+
+class HiveContext(SQLContext):
+    """Deprecated. Retained for import compatibility; use SparkSession."""

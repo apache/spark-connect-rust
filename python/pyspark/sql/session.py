@@ -15,5 +15,5 @@
 # limitations under the License.
 #
 """Re-export of the Rust-backed class(es) under the official pyspark.sql import path."""
-from pyspark._pyspark import DataFrame, DataFrameNaFunctions, DataFrameStatFunctions
-__all__ = ["DataFrame", "DataFrameNaFunctions", "DataFrameStatFunctions"]
+from pyspark._pyspark import SparkSession
+__all__ = ["SparkSession"]

@@ -14,6 +14,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Re-export of the Rust-backed class(es) under the official pyspark.sql import path."""
-from pyspark._pyspark import DataFrame, DataFrameNaFunctions, DataFrameStatFunctions
-__all__ = ["DataFrame", "DataFrameNaFunctions", "DataFrameStatFunctions"]
+"""Small subset of pyspark.sql.utils needed by the drop-in and vendored modules."""
+
+
+def is_remote() -> bool:
+    """This client is always a Spark Connect (remote) client."""
+    return True
+
+
+def is_timestamp_ntz_preferred() -> bool:
+    """Whether TIMESTAMP_NTZ is the preferred timestamp type.
+
+    Best-effort for the Connect drop-in: honor the active session's
+    spark.sql.timestampType when one is running, else False.
+    """
+    try:
+        from pyspark.sql import SparkSession
+
+        session = SparkSession.getActiveSession()
+        if session is None:
+            return False
+        return session.conf.get("spark.sql.timestampType", None) == "TIMESTAMP_NTZ"
+    except Exception:
+        return False
