@@ -434,3 +434,47 @@ fn test_to_arrow_full_path() {
     let rows: usize = reader.map(|b| b.expect("batch").num_rows()).sum();
     assert_eq!(rows, 5, "to_arrow must round-trip all 5 rows of range(5)");
 }
+
+/// End-to-end guard for SPARK-59037: a single ~5 MiB string cell yields one Arrow
+/// batch, and thus one gRPC response message, larger than tonic's 4 MiB default
+/// decode cap. Before the client raised `max_decoding_message_size` to 128 MiB this
+/// `collect()` failed with a gRPC "message length too large" decode error (the same
+/// batch the reference grpcio client returns fine). It must now succeed and return
+/// the whole value intact.
+#[test]
+fn test_collect_batch_larger_than_grpc_default_cap() {
+    if !should_run() {
+        println!(
+            "Skipping test_collect_batch_larger_than_grpc_default_cap - set SPARK_REMOTE to run"
+        );
+        return;
+    }
+
+    let remote_url =
+        std::env::var("SPARK_REMOTE").unwrap_or_else(|_| "sc://localhost:15002".to_string());
+    let session = SparkSession::builder()
+        .remote(&remote_url)
+        .get_or_create()
+        .expect("Failed to create session");
+
+    // 5 MiB, comfortably above tonic's 4 MiB default receive cap. A single row cannot be
+    // split across Arrow batches, so this forces one oversized gRPC response message.
+    let n: usize = 5 * 1024 * 1024;
+    let df = session
+        .sql(&format!("SELECT repeat('x', {n}) AS s"))
+        .expect("Failed to build repeat() DataFrame");
+    let rows = df
+        .collect()
+        .expect("collect() of a >4 MiB batch must succeed with the raised gRPC cap");
+
+    assert_eq!(rows.len(), 1, "Expected exactly one row");
+    let s = rows[0]
+        .get(0)
+        .and_then(|v| v.as_str())
+        .expect("Expected a string cell");
+    assert_eq!(
+        s.len(),
+        n,
+        "Expected the full {n}-byte string to round-trip through collect()"
+    );
+}
