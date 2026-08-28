@@ -428,3 +428,17 @@ for name, obj in list(globals().items()):
         name not in __all__ and
         name not in ['inspect', 'importlib', '_gen_module', 'spec', 'os']):
         __all__.append(name)
+
+# Expose the `builtin` submodule at ``pyspark.sql.functions.builtin``. Upstream v4.2.0 splits
+# functions into a package whose ``builtin`` submodule holds the actual functions and whose
+# ``__init__`` re-exports them; here this module IS the implementation, so register a synthetic
+# ``builtin`` submodule mirroring it (so ``import pyspark.sql.functions.builtin`` and
+# ``from pyspark.sql.functions.builtin import col`` work like reference pyspark).
+builtin = _types.ModuleType("pyspark.sql.functions.builtin")
+builtin.__doc__ = "Built-in DataFrame functions (re-exported from pyspark.sql.functions)."
+for _bname in list(__all__):
+    _bobj = globals().get(_bname)
+    if _bobj is not None:
+        setattr(builtin, _bname, _bobj)
+builtin.__all__ = list(__all__)
+_sys.modules["pyspark.sql.functions.builtin"] = builtin
