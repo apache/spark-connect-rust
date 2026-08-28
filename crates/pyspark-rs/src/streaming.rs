@@ -6,14 +6,42 @@ use spark_connect::dataframe::DataFrame;
 use spark_connect::session::SparkSession;
 use spark_connect::streaming::{
     DataStreamReader, DataStreamWriter, ListenerEventStream, StreamingQuery,
-    StreamingQueryException, StreamingQueryManager, StreamingQueryStatus, Trigger,
+    StreamingQueryException, StreamingQueryListener, StreamingQueryListenerEvent,
+    StreamingQueryManager, StreamingQueryStatus, Trigger,
 };
 use spark_connect::udf::PythonUDFPayload;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::dataframe::{py_cloudpickle, py_version, PyDataFrame};
 use crate::errors::ResultExt;
 use spark_connect_core::runtime::block_on;
+
+/// Adapts a Python `StreamingQueryListener` to the native Rust listener trait: on each
+/// event it acquires the GIL and calls the Python-side dispatch helper (which builds the
+/// typed event object and invokes the right `onQuery*` callback).
+struct PyListenerAdapter {
+    listener: Py<PyAny>,
+}
+
+impl StreamingQueryListener for PyListenerAdapter {
+    fn on_event(&self, event: &StreamingQueryListenerEvent) {
+        Python::attach(|py| {
+            let dispatch = py
+                .import("pyspark.sql.streaming.query")
+                .and_then(|m| m.getattr("_dispatch_listener_event"));
+            if let Ok(dispatch) = dispatch {
+                // Swallow listener/callback errors so one bad listener cannot kill the
+                // dispatch thread (reference pyspark also isolates callback exceptions).
+                let _ = dispatch.call1((
+                    self.listener.bind(py),
+                    event.event_type,
+                    event.event_json.as_str(),
+                ));
+            }
+        });
+    }
+}
 
 /// Python wrapper for DataStreamReader.
 #[pyclass(name = "DataStreamReader")]
@@ -81,6 +109,43 @@ impl PyDataStreamReader {
     #[pyo3(signature = (path=None))]
     fn load(&mut self, path: Option<&str>) -> PyResult<PyDataFrame> {
         let df = self.take()?.load(path);
+        Ok(PyDataFrame::new(df))
+    }
+
+    /// Set the source name (for checkpoint stability). Mirrors `DataStreamReader.name`,
+    /// which validates the name is a non-empty `[A-Za-z0-9_]+` string.
+    fn name(&mut self, source_name: &str) -> PyResult<PyDataStreamReader> {
+        if source_name.is_empty()
+            || !source_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Invalid streaming source name: {source_name:?}; only ASCII letters, digits, and underscores are allowed"
+            )));
+        }
+        Ok(PyDataStreamReader {
+            inner: Some(self.take()?.name(source_name)),
+        })
+    }
+
+    /// Read the streaming CDC changes of a named table. Mirrors `DataStreamReader.changes`.
+    fn changes(&mut self, tableName: &str) -> PyResult<PyDataFrame> {
+        Ok(PyDataFrame::new(self.take()?.changes(tableName)))
+    }
+
+    /// Load an XML streaming source. Mirrors `DataStreamReader.xml(path, **options)` =
+    /// set the options, then `format("xml").load(path)`.
+    #[pyo3(signature = (path, **options))]
+    #[allow(non_snake_case)]
+    fn xml(&mut self, path: &str, options: Option<&Bound<'_, PyDict>>) -> PyResult<PyDataFrame> {
+        let mut opts = HashMap::new();
+        if let Some(options) = options {
+            for (k, v) in options.iter() {
+                if let Some(val) = crate::coerce_option_value(&v)? {
+                    opts.insert(k.str()?.to_string(), val);
+                }
+            }
+        }
+        let df = self.take()?.format("xml").options(opts).load(Some(path));
         Ok(PyDataFrame::new(df))
     }
 
@@ -506,18 +571,35 @@ impl PyStreamingQueryManager {
         self.inner.reset_terminated().to_pyerr()
     }
 
-    fn addListener(&self, listener_payload: Vec<u8>, python_ver: &str) -> PyResult<String> {
-        let payload = PythonUDFPayload::new(
-            spark_connect::types::DataType::Struct { fields: vec![] },
-            0,
-            listener_payload,
-            python_ver.to_string(),
-        );
-        self.inner.add_listener(payload).to_pyerr()
+    /// Register a client-side listener object (with onQueryStarted/Progress/Idle/
+    /// Terminated callbacks). Mirrors `StreamingQueryManager.addListener`. The native
+    /// Rust bus streams events and dispatches to this listener; the assigned id is
+    /// stashed on the listener so `removeListener` can find it.
+    fn addListener(&self, py: Python<'_>, listener: Py<PyAny>) -> PyResult<()> {
+        let adapter = Arc::new(PyListenerAdapter {
+            listener: listener.clone_ref(py),
+        });
+        let id = self.inner.add_listener(adapter).to_pyerr()?;
+        listener.bind(py).setattr("_rust_listener_id", id)?;
+        Ok(())
     }
 
-    fn removeListener(&self, listener_id: &str) -> PyResult<()> {
-        self.inner.remove_listener(listener_id).to_pyerr()
+    /// Remove a previously-added client-side listener object. Mirrors
+    /// `StreamingQueryManager.removeListener`.
+    fn removeListener(&self, py: Python<'_>, listener: Py<PyAny>) -> PyResult<()> {
+        let bound = listener.bind(py);
+        if let Ok(id_obj) = bound.getattr("_rust_listener_id") {
+            let id: String = id_obj.extract()?;
+            self.inner.remove_listener(&id).to_pyerr()?;
+            let _ = bound.delattr("_rust_listener_id");
+        }
+        Ok(())
+    }
+
+    /// Remove all client-side listeners and stop the dispatch thread. Mirrors
+    /// `StreamingQueryManager.close`.
+    fn close(&self) -> PyResult<()> {
+        self.inner.close().to_pyerr()
     }
 
     fn streamListenerEvents(&self) -> PyResult<PyListenerEventStream> {

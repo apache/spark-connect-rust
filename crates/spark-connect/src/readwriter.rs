@@ -78,6 +78,16 @@ impl DataFrameReader {
         DataFrame::new(self.session, plan)
     }
 
+    /// Read the CDC changes of a named table. Mirrors `DataFrameReader.changes`.
+    pub fn changes(self, table_name: &str) -> DataFrame {
+        let plan = LogicalPlan::RelationChanges {
+            table_name: table_name.to_string(),
+            options: self.options.clone(),
+            is_streaming: None,
+        };
+        DataFrame::new(self.session, plan)
+    }
+
     /// Read from a named table.
     pub fn table(self, table_name: &str) -> DataFrame {
         let plan = LogicalPlan::Read {

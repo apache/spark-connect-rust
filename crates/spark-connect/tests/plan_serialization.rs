@@ -83,3 +83,41 @@ fn local_and_cached_relations_serialize() {
         other => panic!("expected CachedRemoteRelation, got {other:?}"),
     }
 }
+
+#[test]
+fn relation_changes_maps_to_correct_proto() {
+    use std::collections::HashMap;
+    let mut options = HashMap::new();
+    options.insert("startingVersion".to_string(), "0".to_string());
+
+    // Batch changes: is_streaming defaults to false.
+    let batch = LogicalPlan::RelationChanges {
+        table_name: "db.tbl".to_string(),
+        options: options.clone(),
+        is_streaming: None,
+    }
+    .to_proto();
+    match batch.rel_type {
+        Some(proto::relation::RelType::RelationChanges(rc)) => {
+            assert_eq!(rc.unparsed_identifier, "db.tbl");
+            assert!(!rc.is_streaming);
+            assert_eq!(rc.options.get("startingVersion").map(String::as_str), Some("0"));
+        }
+        other => panic!("expected RelationChanges, got {other:?}"),
+    }
+
+    // Streaming changes: is_streaming = true.
+    let streaming = LogicalPlan::RelationChanges {
+        table_name: "db.tbl".to_string(),
+        options: HashMap::new(),
+        is_streaming: Some(true),
+    }
+    .to_proto();
+    match streaming.rel_type {
+        Some(proto::relation::RelType::RelationChanges(rc)) => {
+            assert_eq!(rc.unparsed_identifier, "db.tbl");
+            assert!(rc.is_streaming);
+        }
+        other => panic!("expected RelationChanges, got {other:?}"),
+    }
+}

@@ -32,10 +32,10 @@ dependencies = [
 ]
 # cloudpickle is vendored at pyspark/cloudpickle (matching Apache Spark's own
 # bundling), so it is intentionally NOT an external dependency.
-
-[project.optional-dependencies]
-grpc = ["grpcio>=1.48.0"]
-all = ["grpcio>=1.48.0"]
+#
+# No optional-dependencies: unlike upstream PySpark's `connect` extra, this
+# package has no pure-Python gRPC client — the Rust extension (pyspark._pyspark)
+# speaks gRPC via tonic, so grpcio is never imported at runtime.
 
 [project.urls]
 Homepage = "https://spark.apache.org/"

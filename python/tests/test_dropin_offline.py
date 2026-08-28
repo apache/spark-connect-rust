@@ -164,10 +164,22 @@ def test_new_v420_methods_exposed():
         (p.Column, ["transform"]),
         (p.RuntimeConf, ["getAll"]),
         (p.DataFrameStatFunctions, ["sampleBy"]),
+        (p.DataFrameReader, ["changes"]),
+        (p.DataStreamReader, ["changes", "xml", "name"]),
     ]:
         have = set(m for m in dir(cls) if not m.startswith("_"))
         missing = [m for m in methods if m not in have]
         assert not missing, f"{cls.__name__} missing {missing}"
+
+
+def test_streaming_query_manager_wrapper_has_listener_api():
+    # spark.streams returns the Python StreamingQueryManager wrapper, which exposes the
+    # listener-bus API (addListener/removeListener/close). Verify the class contract
+    # offline (no server needed to check the wrapper class).
+    from pyspark.sql.streaming.query import StreamingQueryManager
+
+    for m in ["addListener", "removeListener", "close"]:
+        assert hasattr(StreamingQueryManager, m), f"StreamingQueryManager missing {m}"
 
 
 # --------------------------------------------------------------------------- udf / udtf

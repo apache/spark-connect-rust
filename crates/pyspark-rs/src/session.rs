@@ -378,11 +378,13 @@ impl PySparkSession {
     }
 
     /// Get the StreamingQueryManager for managing active streaming queries (`spark.streams`).
+    ///
+    /// The native manager owns a Rust-side listener bus, so `addListener`/`removeListener`/
+    /// `close` are implemented in the core (Rust clients get the feature too).
     #[getter]
     #[pyo3(name = "streams")]
     fn streams(&self) -> PyStreamingQueryManager {
-        let manager = self.session.streams();
-        PyStreamingQueryManager::new(manager)
+        PyStreamingQueryManager::new(self.session.streams())
     }
 
     /// Stop this Spark session.
