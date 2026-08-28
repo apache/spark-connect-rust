@@ -187,6 +187,38 @@ jobs:
             --test e2e_coverage --test e2e_integration \
             -- --test-threads=1
 
+      - name: Restart Connect server before parity (fresh, uncontaminated by e2e)
+        # EXPERIMENT (SPARK-59032): the e2e step above shares this one server with the
+        # parity run. Bounce the server here so parity starts against a completely fresh
+        # driver/session - if the arrow-UDF hang disappears, the e2e step was leaving the
+        # shared server in a state that provoked it; if it persists, the fault is intrinsic
+        # to the parity run itself. Either way no test is skipped.
+        env:
+          PYSPARK_PYTHON: python
+          PYSPARK_DRIVER_PYTHON: python
+        run: |
+          SPARK_HOME="${{ steps.spark-download.outputs.SPARK_HOME }}"
+          echo "Stopping the post-e2e Connect server..."
+          "${SPARK_HOME}/sbin/stop-connect-server.sh" || true
+          pkill -f 'org.apache.spark.sql.connect.service' 2>/dev/null || true
+          pkill -f 'spark-connect' 2>/dev/null || true
+          for i in $(seq 1 30); do
+            if ! (echo > /dev/tcp/localhost/15002) 2>/dev/null; then break; fi
+            sleep 1
+          done
+          echo "Starting a fresh Connect server for the parity run..."
+          "${SPARK_HOME}/sbin/start-connect-server.sh" \
+            --driver-memory 3g \
+            --conf spark.sql.session.localRelationSizeLimit=1073741824 \
+            > /tmp/connect-server.log 2>&1 &
+          for i in $(seq 1 90); do
+            if (echo > /dev/tcp/localhost/15002) 2>/dev/null; then
+              echo "Connect server is up (after ${i}s)."; break
+            fi
+            if [ "$i" -eq 90 ]; then echo "Server failed to start:"; cat /tmp/connect-server.log; exit 1; fi
+            sleep 1
+          done
+
       - name: Parity - official connect suite through OUR Rust client
         id: parity
         env:
