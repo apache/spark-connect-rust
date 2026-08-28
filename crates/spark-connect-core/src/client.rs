@@ -18,7 +18,7 @@ use spark_connect_proto::{
 };
 
 use crate::artifact::{build_artifact_request_stream, FileArtifact, NamedArtifact};
-use crate::channel::ChannelBuilder;
+use crate::channel::{ChannelBuilder, GRPC_MAX_MESSAGE_LENGTH_DEFAULT};
 use crate::error::{Result, SparkError};
 use crate::reattach::ExecutePlanResponseReattachableIterator;
 use crate::retries::{RetryPolicy, RetryPolicyState};
@@ -63,8 +63,6 @@ pub struct SparkConnectClient {
     user_agent: String,
     /// Retry policy applied to RPCs (exponential backoff on transient failures).
     retry_policy: RetryPolicy,
-    /// Max gRPC message size (bytes) applied to en/decoding on the stub and raw calls.
-    max_message_size: usize,
 }
 
 impl SparkConnectClient {
@@ -105,14 +103,13 @@ impl SparkConnectClient {
                 .connect_lazy()
         };
 
-        // Raise the message-size cap from tonic's 4 MiB default (which is too small for
-        // real Arrow `collect()` results) to the parsed grpc_max_message_size (128 MiB
-        // default), matching the reference client. Applied to both the stub and the raw
-        // Grpc calls below.
-        let max_message_size = builder.max_message_size();
+        // Raise the message-size cap from tonic's 4 MiB default (too small for real Arrow
+        // `collect()` results) to 128 MiB, applied to both the stub and the raw Grpc calls
+        // below. The reference client sets this unconditionally via GRPC_DEFAULT_OPTIONS
+        // (grpc.max_{send,receive}_message_length); it is not a connection-string option.
         let stub = SparkConnectServiceClient::new(channel.clone())
-            .max_decoding_message_size(max_message_size)
-            .max_encoding_message_size(max_message_size);
+            .max_decoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT)
+            .max_encoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT);
 
         let metadata = builder.metadata().into_iter().collect();
 
@@ -124,7 +121,6 @@ impl SparkConnectClient {
             metadata,
             user_agent,
             retry_policy: RetryPolicy::default(),
-            max_message_size,
         })
     }
 
@@ -146,7 +142,6 @@ impl SparkConnectClient {
             metadata: self.metadata.clone(),
             user_agent: self.user_agent.clone(),
             retry_policy: self.retry_policy.clone(),
-            max_message_size: self.max_message_size,
         }
     }
 
@@ -185,8 +180,8 @@ impl SparkConnectClient {
     /// the reference client built.
     pub async fn execute_plan_raw(&self, request: Vec<u8>) -> Result<Streaming<Vec<u8>>> {
         let mut grpc = tonic::client::Grpc::new(self.channel.clone())
-            .max_decoding_message_size(self.max_message_size)
-            .max_encoding_message_size(self.max_message_size);
+            .max_decoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT)
+            .max_encoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT);
         wait_ready(&mut grpc).await?;
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
@@ -203,8 +198,8 @@ impl SparkConnectClient {
     /// ReattachExecute, byte-exact passthrough returning a raw response stream.
     pub async fn reattach_execute_raw(&self, request: Vec<u8>) -> Result<Streaming<Vec<u8>>> {
         let mut grpc = tonic::client::Grpc::new(self.channel.clone())
-            .max_decoding_message_size(self.max_message_size)
-            .max_encoding_message_size(self.max_message_size);
+            .max_decoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT)
+            .max_encoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT);
         wait_ready(&mut grpc).await?;
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
@@ -255,8 +250,8 @@ impl SparkConnectClient {
     /// reference client, which never re-decodes the request it built).
     pub async fn analyze_plan_raw(&self, request: Vec<u8>) -> Result<Vec<u8>> {
         let mut grpc = tonic::client::Grpc::new(self.channel.clone())
-            .max_decoding_message_size(self.max_message_size)
-            .max_encoding_message_size(self.max_message_size);
+            .max_decoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT)
+            .max_encoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT);
         wait_ready(&mut grpc).await?;
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
