@@ -241,7 +241,11 @@ fn catalog_ddl_v420_surface() {
     // listViews: with a pattern (no db -> current database is used) and db-qualified.
     let _ = c.list_views(None, None).unwrap().collect().unwrap();
     let _ = c.list_views(None, Some("*")).unwrap().collect().unwrap();
-    let _ = c.list_views(Some(db), Some("*")).unwrap().collect().unwrap();
+    let _ = c
+        .list_views(Some(db), Some("*"))
+        .unwrap()
+        .collect()
+        .unwrap();
 
     // A managed, partitioned table in that database for the table-scoped ops.
     let tbl = format!("{db}.cov_ddl_tbl");
@@ -304,7 +308,10 @@ fn catalog_typed_results_surface() {
     let tables = c.list_tables_typed(None, None).unwrap();
     let v = tables.iter().find(|t| t.name == "cov_typed_view").unwrap();
     assert!(v.is_temporary);
-    assert_eq!(c.get_table_typed("cov_typed_view").unwrap().name, "cov_typed_view");
+    assert_eq!(
+        c.get_table_typed("cov_typed_view").unwrap().name,
+        "cov_typed_view"
+    );
 
     let funcs = c.list_functions_typed(None, None).unwrap();
     assert!(!funcs.is_empty());

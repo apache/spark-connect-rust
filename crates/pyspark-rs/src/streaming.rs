@@ -116,7 +116,9 @@ impl PyDataStreamReader {
     /// which validates the name is a non-empty `[A-Za-z0-9_]+` string.
     fn name(&mut self, source_name: &str) -> PyResult<PyDataStreamReader> {
         if source_name.is_empty()
-            || !source_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            || !source_name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
         {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "Invalid streaming source name: {source_name:?}; only ASCII letters, digits, and underscores are allowed"

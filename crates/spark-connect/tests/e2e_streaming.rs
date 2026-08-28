@@ -116,9 +116,9 @@ fn streaming_native_listener_bus() {
     if !should_run() {
         return;
     }
+    use spark_connect::streaming::{StreamingQueryListener, StreamingQueryListenerEvent};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
-    use spark_connect::streaming::{StreamingQueryListener, StreamingQueryListenerEvent};
 
     struct CountingListener {
         events: Arc<AtomicUsize>,
@@ -163,5 +163,8 @@ fn streaming_native_listener_bus() {
     mgr.remove_listener(&id).expect("remove_listener");
     mgr.close().expect("close");
 
-    assert!(got > 0, "expected at least one native listener event, got {got}");
+    assert!(
+        got > 0,
+        "expected at least one native listener event, got {got}"
+    );
 }

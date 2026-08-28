@@ -82,14 +82,16 @@ fn py_new_struct(py: Python<'_>, fields: Vec<StructField>) -> PyResult<Py<PyStru
 
 #[pymethods]
 impl PyDataType {
-
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
         Ok(py_to_data_type(slf.as_any())?.json())
     }
     #[pyo3(name = "jsonValue")]
-    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn __obj_json_value<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
         py.import("json")?.getattr("loads")?.call1((v.to_string(),))
     }
@@ -136,14 +138,16 @@ pub struct PyNullType;
 
 #[pymethods]
 impl PyNullType {
-
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
         Ok(py_to_data_type(slf.as_any())?.json())
     }
     #[pyo3(name = "jsonValue")]
-    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn __obj_json_value<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
         py.import("json")?.getattr("loads")?.call1((v.to_string(),))
     }
@@ -191,14 +195,16 @@ pub struct PyBooleanType;
 
 #[pymethods]
 impl PyBooleanType {
-
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
         Ok(py_to_data_type(slf.as_any())?.json())
     }
     #[pyo3(name = "jsonValue")]
-    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn __obj_json_value<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
         py.import("json")?.getattr("loads")?.call1((v.to_string(),))
     }
@@ -246,14 +252,16 @@ pub struct PyByteType;
 
 #[pymethods]
 impl PyByteType {
-
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
         Ok(py_to_data_type(slf.as_any())?.json())
     }
     #[pyo3(name = "jsonValue")]
-    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn __obj_json_value<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
         py.import("json")?.getattr("loads")?.call1((v.to_string(),))
     }
@@ -281,7 +289,11 @@ impl PyByteType {
     }
     #[new]
     fn new() -> pyo3::PyClassInitializer<Self> {
-        init_chain!(DataType::Byte, PyByteType, [PyAtomicType, PyNumericType, PyIntegralType])
+        init_chain!(
+            DataType::Byte,
+            PyByteType,
+            [PyAtomicType, PyNumericType, PyIntegralType]
+        )
     }
     fn __repr__(&self) -> String {
         "ByteType()".to_string()
@@ -301,14 +313,16 @@ pub struct PyShortType;
 
 #[pymethods]
 impl PyShortType {
-
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
         Ok(py_to_data_type(slf.as_any())?.json())
     }
     #[pyo3(name = "jsonValue")]
-    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn __obj_json_value<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
         py.import("json")?.getattr("loads")?.call1((v.to_string(),))
     }
@@ -336,7 +350,11 @@ impl PyShortType {
     }
     #[new]
     fn new() -> pyo3::PyClassInitializer<Self> {
-        init_chain!(DataType::Short, PyShortType, [PyAtomicType, PyNumericType, PyIntegralType])
+        init_chain!(
+            DataType::Short,
+            PyShortType,
+            [PyAtomicType, PyNumericType, PyIntegralType]
+        )
     }
     fn __repr__(&self) -> String {
         "ShortType()".to_string()
@@ -356,14 +374,16 @@ pub struct PyIntegerType;
 
 #[pymethods]
 impl PyIntegerType {
-
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
         Ok(py_to_data_type(slf.as_any())?.json())
     }
     #[pyo3(name = "jsonValue")]
-    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn __obj_json_value<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
         py.import("json")?.getattr("loads")?.call1((v.to_string(),))
     }
@@ -415,14 +435,16 @@ pub struct PyLongType;
 
 #[pymethods]
 impl PyLongType {
-
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
         Ok(py_to_data_type(slf.as_any())?.json())
     }
     #[pyo3(name = "jsonValue")]
-    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn __obj_json_value<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
         py.import("json")?.getattr("loads")?.call1((v.to_string(),))
     }
@@ -450,7 +472,11 @@ impl PyLongType {
     }
     #[new]
     fn new() -> pyo3::PyClassInitializer<Self> {
-        init_chain!(DataType::Long, PyLongType, [PyAtomicType, PyNumericType, PyIntegralType])
+        init_chain!(
+            DataType::Long,
+            PyLongType,
+            [PyAtomicType, PyNumericType, PyIntegralType]
+        )
     }
     fn __repr__(&self) -> String {
         "LongType()".to_string()
@@ -470,14 +496,16 @@ pub struct PyFloatType;
 
 #[pymethods]
 impl PyFloatType {
-
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
         Ok(py_to_data_type(slf.as_any())?.json())
     }
     #[pyo3(name = "jsonValue")]
-    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn __obj_json_value<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
         py.import("json")?.getattr("loads")?.call1((v.to_string(),))
     }
@@ -505,7 +533,11 @@ impl PyFloatType {
     }
     #[new]
     fn new() -> pyo3::PyClassInitializer<Self> {
-        init_chain!(DataType::Float, PyFloatType, [PyAtomicType, PyNumericType, PyFractionalType])
+        init_chain!(
+            DataType::Float,
+            PyFloatType,
+            [PyAtomicType, PyNumericType, PyFractionalType]
+        )
     }
     fn __repr__(&self) -> String {
         "FloatType()".to_string()
@@ -525,14 +557,16 @@ pub struct PyDoubleType;
 
 #[pymethods]
 impl PyDoubleType {
-
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
         Ok(py_to_data_type(slf.as_any())?.json())
     }
     #[pyo3(name = "jsonValue")]
-    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn __obj_json_value<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
         py.import("json")?.getattr("loads")?.call1((v.to_string(),))
     }
@@ -560,7 +594,11 @@ impl PyDoubleType {
     }
     #[new]
     fn new() -> pyo3::PyClassInitializer<Self> {
-        init_chain!(DataType::Double, PyDoubleType, [PyAtomicType, PyNumericType, PyFractionalType])
+        init_chain!(
+            DataType::Double,
+            PyDoubleType,
+            [PyAtomicType, PyNumericType, PyFractionalType]
+        )
     }
     fn __repr__(&self) -> String {
         "DoubleType()".to_string()
@@ -583,14 +621,16 @@ pub struct PyDecimalType {
 
 #[pymethods]
 impl PyDecimalType {
-
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
         Ok(py_to_data_type(slf.as_any())?.json())
     }
     #[pyo3(name = "jsonValue")]
-    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn __obj_json_value<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
         py.import("json")?.getattr("loads")?.call1((v.to_string(),))
     }
@@ -657,14 +697,16 @@ pub struct PyStringType;
 
 #[pymethods]
 impl PyStringType {
-
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
         Ok(py_to_data_type(slf.as_any())?.json())
     }
     #[pyo3(name = "jsonValue")]
-    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn __obj_json_value<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
         py.import("json")?.getattr("loads")?.call1((v.to_string(),))
     }
@@ -692,7 +734,13 @@ impl PyStringType {
     }
     #[new]
     fn new() -> pyo3::PyClassInitializer<Self> {
-        init_chain!(DataType::String { collation: "UTF8_BINARY".to_string() }, PyStringType, [PyAtomicType])
+        init_chain!(
+            DataType::String {
+                collation: "UTF8_BINARY".to_string()
+            },
+            PyStringType,
+            [PyAtomicType]
+        )
     }
     fn __repr__(&self) -> String {
         "StringType()".to_string()
@@ -712,14 +760,16 @@ pub struct PyBinaryType;
 
 #[pymethods]
 impl PyBinaryType {
-
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
         Ok(py_to_data_type(slf.as_any())?.json())
     }
     #[pyo3(name = "jsonValue")]
-    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn __obj_json_value<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
         py.import("json")?.getattr("loads")?.call1((v.to_string(),))
     }
@@ -767,14 +817,16 @@ pub struct PyDateType;
 
 #[pymethods]
 impl PyDateType {
-
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
         Ok(py_to_data_type(slf.as_any())?.json())
     }
     #[pyo3(name = "jsonValue")]
-    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn __obj_json_value<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
         py.import("json")?.getattr("loads")?.call1((v.to_string(),))
     }
@@ -822,14 +874,16 @@ pub struct PyTimestampType;
 
 #[pymethods]
 impl PyTimestampType {
-
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
         Ok(py_to_data_type(slf.as_any())?.json())
     }
     #[pyo3(name = "jsonValue")]
-    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn __obj_json_value<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
         py.import("json")?.getattr("loads")?.call1((v.to_string(),))
     }
@@ -857,7 +911,11 @@ impl PyTimestampType {
     }
     #[new]
     fn new() -> pyo3::PyClassInitializer<Self> {
-        init_chain!(DataType::Timestamp, PyTimestampType, [PyAtomicType, PyDatetimeType])
+        init_chain!(
+            DataType::Timestamp,
+            PyTimestampType,
+            [PyAtomicType, PyDatetimeType]
+        )
     }
     fn __repr__(&self) -> String {
         "TimestampType()".to_string()
@@ -877,14 +935,16 @@ pub struct PyTimestampNTZType;
 
 #[pymethods]
 impl PyTimestampNTZType {
-
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
         Ok(py_to_data_type(slf.as_any())?.json())
     }
     #[pyo3(name = "jsonValue")]
-    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn __obj_json_value<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
         py.import("json")?.getattr("loads")?.call1((v.to_string(),))
     }
@@ -912,7 +972,11 @@ impl PyTimestampNTZType {
     }
     #[new]
     fn new() -> pyo3::PyClassInitializer<Self> {
-        init_chain!(DataType::TimestampNtz, PyTimestampNTZType, [PyAtomicType, PyDatetimeType])
+        init_chain!(
+            DataType::TimestampNtz,
+            PyTimestampNTZType,
+            [PyAtomicType, PyDatetimeType]
+        )
     }
     fn __repr__(&self) -> String {
         "TimestampNTZType()".to_string()
@@ -935,14 +999,16 @@ pub struct PyArrayType {
 
 #[pymethods]
 impl PyArrayType {
-
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
         Ok(py_to_data_type(slf.as_any())?.json())
     }
     #[pyo3(name = "jsonValue")]
-    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn __obj_json_value<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
         py.import("json")?.getattr("loads")?.call1((v.to_string(),))
     }
@@ -1014,14 +1080,16 @@ pub struct PyMapType {
 
 #[pymethods]
 impl PyMapType {
-
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
         Ok(py_to_data_type(slf.as_any())?.json())
     }
     #[pyo3(name = "jsonValue")]
-    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn __obj_json_value<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
         py.import("json")?.getattr("loads")?.call1((v.to_string(),))
     }
@@ -1097,7 +1165,6 @@ pub struct PyStructField {
 
 #[pymethods]
 impl PyStructField {
-
     // --- StructField object-model methods (v4.2.0 parity), operating on the field
     // itself (a StructField is not a DataType, so these do not go through
     // py_to_data_type). ---
@@ -1193,13 +1260,11 @@ impl PyStructField {
     fn __sf_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyStructField> {
         let trimmed = ddl.trim();
         // Split "name type" at the first run of whitespace; tolerate a "name:" colon.
-        let split = trimmed
-            .find(char::is_whitespace)
-            .ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "fromDDL expects 'name type', e.g. 'a INT'",
-                )
-            })?;
+        let split = trimmed.find(char::is_whitespace).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "fromDDL expects 'name type', e.g. 'a INT'",
+            )
+        })?;
         let name = trimmed[..split].trim_end_matches(':').to_string();
         let type_str = trimmed[split..].trim();
         let data_type = DataType::from_ddl(type_str)
@@ -1274,14 +1339,16 @@ pub struct PyStructType {
 
 #[pymethods]
 impl PyStructType {
-
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
         Ok(py_to_data_type(slf.as_any())?.json())
     }
     #[pyo3(name = "jsonValue")]
-    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn __obj_json_value<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
         py.import("json")?.getattr("loads")?.call1((v.to_string(),))
     }
@@ -1464,14 +1531,16 @@ pub struct PyCharType {
 
 #[pymethods]
 impl PyCharType {
-
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
         Ok(py_to_data_type(slf.as_any())?.json())
     }
     #[pyo3(name = "jsonValue")]
-    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn __obj_json_value<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
         py.import("json")?.getattr("loads")?.call1((v.to_string(),))
     }
@@ -1529,14 +1598,16 @@ pub struct PyVarcharType {
 
 #[pymethods]
 impl PyVarcharType {
-
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
         Ok(py_to_data_type(slf.as_any())?.json())
     }
     #[pyo3(name = "jsonValue")]
-    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn __obj_json_value<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
         py.import("json")?.getattr("loads")?.call1((v.to_string(),))
     }
@@ -1594,14 +1665,16 @@ pub struct PyTimeType {
 
 #[pymethods]
 impl PyTimeType {
-
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
         Ok(py_to_data_type(slf.as_any())?.json())
     }
     #[pyo3(name = "jsonValue")]
-    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn __obj_json_value<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
         py.import("json")?.getattr("loads")?.call1((v.to_string(),))
     }
@@ -1659,14 +1732,16 @@ pub struct PyCalendarIntervalType;
 
 #[pymethods]
 impl PyCalendarIntervalType {
-
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
         Ok(py_to_data_type(slf.as_any())?.json())
     }
     #[pyo3(name = "jsonValue")]
-    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn __obj_json_value<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
         py.import("json")?.getattr("loads")?.call1((v.to_string(),))
     }
@@ -1717,14 +1792,16 @@ pub struct PyYearMonthIntervalType {
 
 #[pymethods]
 impl PyYearMonthIntervalType {
-
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
         Ok(py_to_data_type(slf.as_any())?.json())
     }
     #[pyo3(name = "jsonValue")]
-    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn __obj_json_value<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
         py.import("json")?.getattr("loads")?.call1((v.to_string(),))
     }
@@ -1794,14 +1871,16 @@ pub struct PyDayTimeIntervalType {
 
 #[pymethods]
 impl PyDayTimeIntervalType {
-
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
         Ok(py_to_data_type(slf.as_any())?.json())
     }
     #[pyo3(name = "jsonValue")]
-    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn __obj_json_value<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
         py.import("json")?.getattr("loads")?.call1((v.to_string(),))
     }
@@ -1868,14 +1947,16 @@ pub struct PyVariantType;
 
 #[pymethods]
 impl PyVariantType {
-
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
         Ok(py_to_data_type(slf.as_any())?.json())
     }
     #[pyo3(name = "jsonValue")]
-    fn __obj_json_value<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn __obj_json_value<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
         py.import("json")?.getattr("loads")?.call1((v.to_string(),))
     }

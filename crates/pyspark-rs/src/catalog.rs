@@ -99,7 +99,10 @@ impl PyTable {
         }
     }
     fn __repr__(&self) -> String {
-        format!("Table(name='{}', tableType='{}')", self.inner.name, self.inner.table_type)
+        format!(
+            "Table(name='{}', tableType='{}')",
+            self.inner.name, self.inner.table_type
+        )
     }
 }
 
@@ -140,7 +143,10 @@ impl PyCatalogColumn {
         self.inner.is_cluster
     }
     fn __repr__(&self) -> String {
-        format!("Column(name='{}', dataType='{}')", self.inner.name, self.inner.data_type)
+        format!(
+            "Column(name='{}', dataType='{}')",
+            self.inner.name, self.inner.data_type
+        )
     }
 }
 
@@ -176,7 +182,10 @@ impl PyFunction {
         self.inner.is_temporary
     }
     fn __repr__(&self) -> String {
-        format!("Function(name='{}', className='{}')", self.inner.name, self.inner.class_name)
+        format!(
+            "Function(name='{}', className='{}')",
+            self.inner.name, self.inner.class_name
+        )
     }
 }
 
@@ -471,7 +480,9 @@ impl PyCatalog {
     #[pyo3(signature = (tableName, ifExists=false, purge=false))]
     #[allow(non_snake_case)]
     fn dropTable(&self, tableName: &str, ifExists: bool, purge: bool) -> PyResult<()> {
-        self.catalog.drop_table(tableName, ifExists, purge).to_pyerr()
+        self.catalog
+            .drop_table(tableName, ifExists, purge)
+            .to_pyerr()
     }
 
     /// Drop a view.

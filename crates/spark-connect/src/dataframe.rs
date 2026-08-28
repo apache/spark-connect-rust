@@ -1564,8 +1564,7 @@ impl DataFrame {
         value_column_name: &str,
     ) -> DataFrame {
         let ids: Vec<Column> = ids.into_iter().map(Into::into).collect();
-        let values: Option<Vec<Column>> =
-            values.map(|v| v.into_iter().map(Into::into).collect());
+        let values: Option<Vec<Column>> = values.map(|v| v.into_iter().map(Into::into).collect());
         let plan = LogicalPlan::Unpivot {
             input: Box::new(self.plan.clone()),
             ids,

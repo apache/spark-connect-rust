@@ -24,8 +24,18 @@ pub struct PyAnalyzeArgument {
 impl PyAnalyzeArgument {
     #[new]
     #[allow(non_snake_case)]
-    fn new(dataType: Py<PyAny>, value: Py<PyAny>, isTable: bool, isConstantExpression: bool) -> Self {
-        PyAnalyzeArgument { dataType, value, isTable, isConstantExpression }
+    fn new(
+        dataType: Py<PyAny>,
+        value: Py<PyAny>,
+        isTable: bool,
+        isConstantExpression: bool,
+    ) -> Self {
+        PyAnalyzeArgument {
+            dataType,
+            value,
+            isTable,
+            isConstantExpression,
+        }
     }
 }
 
@@ -55,7 +65,11 @@ impl PyOrderingColumn {
     #[pyo3(signature = (name, ascending=true, overrideNullsFirst=None))]
     #[allow(non_snake_case)]
     fn new(name: String, ascending: bool, overrideNullsFirst: Option<bool>) -> Self {
-        PyOrderingColumn { name, ascending, overrideNullsFirst }
+        PyOrderingColumn {
+            name,
+            ascending,
+            overrideNullsFirst,
+        }
     }
 }
 

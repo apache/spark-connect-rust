@@ -102,9 +102,9 @@ pub fn cast(_col: Column, to_col: Column) -> Column {
 pub fn call_function<C: Into<Column>>(name: &str, args: impl IntoIterator<Item = C>) -> Column {
     let args: Vec<Column> = args.into_iter().map(Into::into).collect();
     let arg_exprs = args.iter().map(|c| c.expression().clone()).collect();
-    Column::new(Expression::CallFunction(Box::new(CallFunctionWrapper::new(
-        name, arg_exprs,
-    ))))
+    Column::new(Expression::CallFunction(Box::new(
+        CallFunctionWrapper::new(name, arg_exprs),
+    )))
 }
 
 /// Mirrors `pyspark.sql.functions.call_udf` = `_invoke_function(udfName, *cols)`

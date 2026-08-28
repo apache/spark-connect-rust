@@ -299,9 +299,9 @@ fn pyfunc_call_named_function(name: String, args: Vec<Bound<'_, PyAny>>) -> PyRe
     for arg in args {
         arg_exprs.push(to_column(&arg)?.expression().clone());
     }
-    let result = Column::new(Expression::CallFunction(Box::new(CallFunctionWrapper::new(
-        name, arg_exprs,
-    ))));
+    let result = Column::new(Expression::CallFunction(Box::new(
+        CallFunctionWrapper::new(name, arg_exprs),
+    )));
     Ok(PyColumn::new(result))
 }
 

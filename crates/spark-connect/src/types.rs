@@ -787,8 +787,7 @@ impl StructField {
             .ok_or_else(|| SparkError::value("INVALID_JSON", &[("detail", "missing field name")]))?
             .to_string();
         let nullable = v.get("nullable").and_then(|x| x.as_bool()).unwrap_or(true);
-        let data_type =
-            DataType::from_json(v.get("type").unwrap_or(&serde_json::Value::Null))?;
+        let data_type = DataType::from_json(v.get("type").unwrap_or(&serde_json::Value::Null))?;
         let mut metadata = BTreeMap::new();
         if let Some(md) = v.get("metadata").and_then(|x| x.as_object()) {
             for (k, val) in md {

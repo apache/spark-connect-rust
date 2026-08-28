@@ -64,7 +64,10 @@ pub struct TablePartition {
 
 // Row-parsing helpers for the typed catalog results.
 fn row_str(row: &Row, i: usize) -> String {
-    row.get(i).and_then(|v| v.as_str()).unwrap_or("").to_string()
+    row.get(i)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 fn row_opt_str(row: &Row, i: usize) -> Option<String> {
     match row.get(i) {
@@ -932,7 +935,11 @@ impl Catalog {
     }
 
     /// Typed `listTables` -> `Vec<Table>`.
-    pub fn list_tables_typed(&self, db_name: Option<&str>, pattern: Option<&str>) -> Result<Vec<Table>> {
+    pub fn list_tables_typed(
+        &self,
+        db_name: Option<&str>,
+        pattern: Option<&str>,
+    ) -> Result<Vec<Table>> {
         let rows = self.list_tables_with_pattern(db_name, pattern)?.collect()?;
         Ok(rows.iter().map(parse_table).collect())
     }
@@ -946,8 +953,14 @@ impl Catalog {
     }
 
     /// Typed `listFunctions` -> `Vec<Function>`.
-    pub fn list_functions_typed(&self, db_name: Option<&str>, pattern: Option<&str>) -> Result<Vec<Function>> {
-        let rows = self.list_functions_with_pattern(db_name, pattern)?.collect()?;
+    pub fn list_functions_typed(
+        &self,
+        db_name: Option<&str>,
+        pattern: Option<&str>,
+    ) -> Result<Vec<Function>> {
+        let rows = self
+            .list_functions_with_pattern(db_name, pattern)?
+            .collect()?;
         Ok(rows.iter().map(parse_function).collect())
     }
 
@@ -960,8 +973,14 @@ impl Catalog {
     }
 
     /// Typed `listColumns` -> `Vec<Column>`.
-    pub fn list_columns_typed(&self, table_name: &str, db_name: Option<&str>) -> Result<Vec<Column>> {
-        let rows = self.list_columns_with_database(table_name, db_name)?.collect()?;
+    pub fn list_columns_typed(
+        &self,
+        table_name: &str,
+        db_name: Option<&str>,
+    ) -> Result<Vec<Column>> {
+        let rows = self
+            .list_columns_with_database(table_name, db_name)?
+            .collect()?;
         Ok(rows
             .iter()
             .map(|r| Column {
@@ -988,7 +1007,11 @@ impl Catalog {
     }
 
     /// Typed `listViews` -> `Vec<Table>` (views share the Table result shape).
-    pub fn list_views_typed(&self, db_name: Option<&str>, pattern: Option<&str>) -> Result<Vec<Table>> {
+    pub fn list_views_typed(
+        &self,
+        db_name: Option<&str>,
+        pattern: Option<&str>,
+    ) -> Result<Vec<Table>> {
         let rows = self.list_views(db_name, pattern)?.collect()?;
         Ok(rows.iter().map(parse_table).collect())
     }

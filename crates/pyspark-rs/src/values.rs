@@ -44,7 +44,11 @@ impl PyVariantVal {
             .extract()
     }
     #[classmethod]
-    fn parseJson(_cls: &Bound<'_, pyo3::types::PyType>, py: Python<'_>, json_str: &str) -> PyResult<PyVariantVal> {
+    fn parseJson(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        py: Python<'_>,
+        json_str: &str,
+    ) -> PyResult<PyVariantVal> {
         let t = py
             .import("pyspark.sql.variant_utils")?
             .getattr("VariantUtils")?
@@ -84,7 +88,11 @@ impl PyGeography {
         self.wkb == other.wkb && self.srid == other.srid
     }
     fn __repr__(&self, py: Python<'_>) -> String {
-        format!("Geography({:?}, {})", PyBytes::new(py, &self.wkb), self.srid)
+        format!(
+            "Geography({:?}, {})",
+            PyBytes::new(py, &self.wkb),
+            self.srid
+        )
     }
 }
 

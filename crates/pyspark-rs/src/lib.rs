@@ -36,12 +36,12 @@ mod row;
 mod session;
 mod stat;
 mod streaming;
-mod transport;
 mod tablearg;
+mod transport;
 mod tvf;
+mod types;
 mod udtf_analyze;
 mod values;
-mod types;
 mod window;
 
 use catalog::{
@@ -74,9 +74,10 @@ use types::{
     PyAnsiIntervalType, PyAnyTimeType, PyArrayType, PyAtomicType, PyBinaryType, PyBooleanType,
     PyByteType, PyCalendarIntervalType, PyCharType, PyDataType, PyDateType, PyDatetimeType,
     PyDayTimeIntervalType, PyDecimalType, PyDoubleType, PyFloatType, PyFractionalType,
-    PyIntegerType, PyIntegralType, PyLongType, PyMapType, PyNullType, PyNumericType, PyShortType,
-    PyGeographyType, PyGeometryType, PySpatialType, PyStringType, PyStructField, PyStructType, PyTimeType, PyTimestampNTZType,
-    PyTimestampType, PyVarcharType, PyVariantType, PyYearMonthIntervalType,
+    PyGeographyType, PyGeometryType, PyIntegerType, PyIntegralType, PyLongType, PyMapType,
+    PyNullType, PyNumericType, PyShortType, PySpatialType, PyStringType, PyStructField,
+    PyStructType, PyTimeType, PyTimestampNTZType, PyTimestampType, PyVarcharType, PyVariantType,
+    PyYearMonthIntervalType,
 };
 use window::{PyFrameBound, PyWindow, PyWindowSpec};
 
@@ -187,7 +188,11 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<udtf_analyze::PyOrderingColumn>()?;
     m.add_class::<udtf_analyze::PySelectedColumn>()?;
     m.add_class::<udtf_analyze::PyAnalyzeResult>()?;
-    m.add("SkipRestOfInputTableException", m.py().get_type::<udtf_analyze::SkipRestOfInputTableException>())?;
+    m.add(
+        "SkipRestOfInputTableException",
+        m.py()
+            .get_type::<udtf_analyze::SkipRestOfInputTableException>(),
+    )?;
 
     m.add_class::<observation::PyObservation>()?;
 

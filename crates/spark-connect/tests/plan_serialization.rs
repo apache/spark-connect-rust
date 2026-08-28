@@ -101,7 +101,10 @@ fn relation_changes_maps_to_correct_proto() {
         Some(proto::relation::RelType::RelationChanges(rc)) => {
             assert_eq!(rc.unparsed_identifier, "db.tbl");
             assert!(!rc.is_streaming);
-            assert_eq!(rc.options.get("startingVersion").map(String::as_str), Some("0"));
+            assert_eq!(
+                rc.options.get("startingVersion").map(String::as_str),
+                Some("0")
+            );
         }
         other => panic!("expected RelationChanges, got {other:?}"),
     }
