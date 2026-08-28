@@ -42,15 +42,17 @@ pub fn pipeline_create_dataflow_graph(
     sql_conf: Option<HashMap<String, String>>,
 ) -> PyResult<String> {
     let sess = session.session.clone();
-    session.py().detach(|| {
-        pipelines::create_dataflow_graph(
-            &sess,
-            default_catalog,
-            default_database,
-            sql_conf.unwrap_or_default(),
-        )
-    })
-    .to_pyerr()
+    session
+        .py()
+        .detach(|| {
+            pipelines::create_dataflow_graph(
+                &sess,
+                default_catalog,
+                default_database,
+                sql_conf.unwrap_or_default(),
+            )
+        })
+        .to_pyerr()
 }
 
 /// `PipelineCommand.DefineOutput`. `output_type` is the `spark.connect.OutputType` enum

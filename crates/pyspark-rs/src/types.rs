@@ -2196,7 +2196,11 @@ pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAn
     }
     let o = match dt {
         DataType::Null => obj!(init_chain!(DataType::Null, PyNullType, [])),
-        DataType::Boolean => obj!(init_chain!(DataType::Boolean, PyBooleanType, [PyAtomicType])),
+        DataType::Boolean => obj!(init_chain!(
+            DataType::Boolean,
+            PyBooleanType,
+            [PyAtomicType]
+        )),
         DataType::Byte => obj!(init_chain!(
             DataType::Byte,
             PyByteType,
@@ -2371,7 +2375,11 @@ pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAn
                 value
             ))
         }
-        DataType::Variant => obj!(init_chain!(DataType::Variant, PyVariantType, [PyAtomicType])),
+        DataType::Variant => obj!(init_chain!(
+            DataType::Variant,
+            PyVariantType,
+            [PyAtomicType]
+        )),
         DataType::Geometry { srid } => {
             let srid = *srid;
             obj!(init_chain!(

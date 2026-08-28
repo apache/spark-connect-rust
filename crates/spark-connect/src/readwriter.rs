@@ -360,8 +360,8 @@ impl DataFrameWriter {
     }
 
     /// Cluster the output by the given columns (liquid clustering).
-    pub fn cluster_by(mut self, cols: Vec<String>) -> Self {
-        self.cluster_cols = cols;
+    pub fn cluster_by<S: Into<String>>(mut self, cols: impl IntoIterator<Item = S>) -> Self {
+        self.cluster_cols = cols.into_iter().map(Into::into).collect();
         self
     }
 
@@ -392,21 +392,25 @@ impl DataFrameWriter {
     }
 
     /// Set the partition columns.
-    pub fn partition_by(mut self, cols: Vec<String>) -> Self {
-        self.partition_cols = cols;
+    pub fn partition_by<S: Into<String>>(mut self, cols: impl IntoIterator<Item = S>) -> Self {
+        self.partition_cols = cols.into_iter().map(Into::into).collect();
         self
     }
 
     /// Set the bucketing specification.
-    pub fn bucket_by(mut self, num_buckets: i32, cols: Vec<String>) -> Self {
+    pub fn bucket_by<S: Into<String>>(
+        mut self,
+        num_buckets: i32,
+        cols: impl IntoIterator<Item = S>,
+    ) -> Self {
         self.num_buckets = Some(num_buckets);
-        self.bucket_cols = cols;
+        self.bucket_cols = cols.into_iter().map(Into::into).collect();
         self
     }
 
     /// Set the sort columns.
-    pub fn sort_by(mut self, cols: Vec<String>) -> Self {
-        self.sort_cols = cols;
+    pub fn sort_by<S: Into<String>>(mut self, cols: impl IntoIterator<Item = S>) -> Self {
+        self.sort_cols = cols.into_iter().map(Into::into).collect();
         self
     }
 
@@ -532,8 +536,8 @@ impl DataFrameWriterV2 {
     }
 
     /// Cluster the output table by the given columns (liquid clustering).
-    pub fn cluster_by(mut self, cols: Vec<String>) -> Self {
-        self.cluster_cols = cols;
+    pub fn cluster_by<S: Into<String>>(mut self, cols: impl IntoIterator<Item = S>) -> Self {
+        self.cluster_cols = cols.into_iter().map(Into::into).collect();
         self
     }
 

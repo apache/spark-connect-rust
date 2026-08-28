@@ -675,7 +675,10 @@ fn dataframe_more_surface() {
     let _ = df.intersect(&other).count().unwrap();
     let _ = df.intersect_all(&other).count().unwrap();
     let _ = df.subtract(&other).count().unwrap();
-    let _ = df.hint("broadcast", vec![]).collect().unwrap();
+    let _ = df
+        .hint("broadcast", Vec::<String>::new())
+        .collect()
+        .unwrap();
     let _ = df.to_df(vec!["a", "b", "c"]).collect().unwrap();
     let _ = df.sample(0.5, Some(1)).count().unwrap();
     let _ = df.col_regex("`.*`").collect().unwrap();

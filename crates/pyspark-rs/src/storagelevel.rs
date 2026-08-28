@@ -15,8 +15,20 @@ pub struct PyStorageLevel {
 }
 
 impl PyStorageLevel {
-    fn mk(use_disk: bool, use_memory: bool, use_off_heap: bool, deserialized: bool, replication: i32) -> Self {
-        PyStorageLevel { useDisk: use_disk, useMemory: use_memory, useOffHeap: use_off_heap, deserialized, replication }
+    fn mk(
+        use_disk: bool,
+        use_memory: bool,
+        use_off_heap: bool,
+        deserialized: bool,
+        replication: i32,
+    ) -> Self {
+        PyStorageLevel {
+            useDisk: use_disk,
+            useMemory: use_memory,
+            useOffHeap: use_off_heap,
+            deserialized,
+            replication,
+        }
     }
 }
 
@@ -25,7 +37,13 @@ impl PyStorageLevel {
     #[new]
     #[pyo3(signature = (useDisk, useMemory, useOffHeap, deserialized, replication=1))]
     #[allow(non_snake_case)]
-    fn new(useDisk: bool, useMemory: bool, useOffHeap: bool, deserialized: bool, replication: i32) -> Self {
+    fn new(
+        useDisk: bool,
+        useMemory: bool,
+        useOffHeap: bool,
+        deserialized: bool,
+        replication: i32,
+    ) -> Self {
         PyStorageLevel::mk(useDisk, useMemory, useOffHeap, deserialized, replication)
     }
 
@@ -76,31 +94,49 @@ impl PyStorageLevel {
     }
     #[classattr]
     #[allow(non_snake_case)]
-    fn DISK_ONLY() -> PyStorageLevel { PyStorageLevel::mk(true, false, false, false, 1) }
+    fn DISK_ONLY() -> PyStorageLevel {
+        PyStorageLevel::mk(true, false, false, false, 1)
+    }
     #[classattr]
     #[allow(non_snake_case)]
-    fn DISK_ONLY_2() -> PyStorageLevel { PyStorageLevel::mk(true, false, false, false, 2) }
+    fn DISK_ONLY_2() -> PyStorageLevel {
+        PyStorageLevel::mk(true, false, false, false, 2)
+    }
     #[classattr]
     #[allow(non_snake_case)]
-    fn DISK_ONLY_3() -> PyStorageLevel { PyStorageLevel::mk(true, false, false, false, 3) }
+    fn DISK_ONLY_3() -> PyStorageLevel {
+        PyStorageLevel::mk(true, false, false, false, 3)
+    }
     #[classattr]
     #[allow(non_snake_case)]
-    fn MEMORY_ONLY() -> PyStorageLevel { PyStorageLevel::mk(false, true, false, false, 1) }
+    fn MEMORY_ONLY() -> PyStorageLevel {
+        PyStorageLevel::mk(false, true, false, false, 1)
+    }
     #[classattr]
     #[allow(non_snake_case)]
-    fn MEMORY_ONLY_2() -> PyStorageLevel { PyStorageLevel::mk(false, true, false, false, 2) }
+    fn MEMORY_ONLY_2() -> PyStorageLevel {
+        PyStorageLevel::mk(false, true, false, false, 2)
+    }
     #[classattr]
     #[allow(non_snake_case)]
-    fn MEMORY_AND_DISK() -> PyStorageLevel { PyStorageLevel::mk(true, true, false, false, 1) }
+    fn MEMORY_AND_DISK() -> PyStorageLevel {
+        PyStorageLevel::mk(true, true, false, false, 1)
+    }
     #[classattr]
     #[allow(non_snake_case)]
-    fn MEMORY_AND_DISK_2() -> PyStorageLevel { PyStorageLevel::mk(true, true, false, false, 2) }
+    fn MEMORY_AND_DISK_2() -> PyStorageLevel {
+        PyStorageLevel::mk(true, true, false, false, 2)
+    }
     #[classattr]
     #[allow(non_snake_case)]
-    fn OFF_HEAP() -> PyStorageLevel { PyStorageLevel::mk(true, true, true, false, 1) }
+    fn OFF_HEAP() -> PyStorageLevel {
+        PyStorageLevel::mk(true, true, true, false, 1)
+    }
     #[classattr]
     #[allow(non_snake_case)]
-    fn MEMORY_AND_DISK_DESER() -> PyStorageLevel { PyStorageLevel::mk(true, true, false, true, 1) }
+    fn MEMORY_AND_DISK_DESER() -> PyStorageLevel {
+        PyStorageLevel::mk(true, true, false, true, 1)
+    }
 }
 
 fn py_bool(b: bool) -> &'static str {

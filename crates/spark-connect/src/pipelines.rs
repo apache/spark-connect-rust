@@ -132,7 +132,10 @@ pub fn define_output(
         source_code_location: spec.source_code_location,
         details,
     };
-    execute_command_collect(session, wrap(pipeline_command::CommandType::DefineOutput(inner)))?;
+    execute_command_collect(
+        session,
+        wrap(pipeline_command::CommandType::DefineOutput(inner)),
+    )?;
     Ok(())
 }
 
@@ -148,9 +151,10 @@ pub fn define_flow(
 ) -> Result<()> {
     let mut relation = relation_df.plan.to_proto();
     assign_plan_ids(&mut relation, &relation_df.session)?;
-    let details = define_flow::Details::RelationFlowDetails(define_flow::WriteRelationFlowDetails {
-        relation: Some(relation),
-    });
+    let details =
+        define_flow::Details::RelationFlowDetails(define_flow::WriteRelationFlowDetails {
+            relation: Some(relation),
+        });
     let inner = DefineFlow {
         dataflow_graph_id: Some(dataflow_graph_id.to_string()),
         flow_name: Some(flow_name.to_string()),
@@ -161,7 +165,10 @@ pub fn define_flow(
         once: None,
         details: Some(details),
     };
-    execute_command_collect(session, wrap(pipeline_command::CommandType::DefineFlow(inner)))?;
+    execute_command_collect(
+        session,
+        wrap(pipeline_command::CommandType::DefineFlow(inner)),
+    )?;
     Ok(())
 }
 
@@ -185,7 +192,10 @@ pub fn define_auto_cdc_flow(
         once: None,
         details: Some(define_flow::Details::AutoCdcFlowDetails(details)),
     };
-    execute_command_collect(session, wrap(pipeline_command::CommandType::DefineFlow(inner)))?;
+    execute_command_collect(
+        session,
+        wrap(pipeline_command::CommandType::DefineFlow(inner)),
+    )?;
     Ok(())
 }
 

@@ -370,10 +370,10 @@ impl DataFrame {
     }
 
     /// Join with another DataFrame using column names (a name-based/"using" join).
-    pub fn join_using(
+    pub fn join_using<S: Into<String>>(
         &self,
         right: &DataFrame,
-        using_columns: Vec<String>,
+        using_columns: impl IntoIterator<Item = S>,
         join_type: JoinType,
     ) -> DataFrame {
         let plan = LogicalPlan::Join {
@@ -381,7 +381,7 @@ impl DataFrame {
             right: Box::new(right.plan.clone()),
             join_type,
             on: None,
-            using_columns,
+            using_columns: using_columns.into_iter().map(Into::into).collect(),
         };
         DataFrame::new(self.session.clone(), plan)
     }
@@ -515,11 +515,15 @@ impl DataFrame {
     }
 
     /// Add a hint.
-    pub fn hint(&self, name: &str, parameters: Vec<String>) -> DataFrame {
+    pub fn hint<S: Into<String>>(
+        &self,
+        name: &str,
+        parameters: impl IntoIterator<Item = S>,
+    ) -> DataFrame {
         let plan = LogicalPlan::Hint {
             input: Box::new(self.plan.clone()),
             name: name.to_string(),
-            parameters,
+            parameters: parameters.into_iter().map(Into::into).collect(),
         };
         DataFrame::new(self.session.clone(), plan)
     }
@@ -527,7 +531,7 @@ impl DataFrame {
     /// Marks a DataFrame as eligible for broadcast join (smaller table).
     /// Mirrors `pyspark.sql.functions.broadcast`.
     pub fn broadcast(&self) -> DataFrame {
-        self.hint("broadcast", vec![])
+        self.hint("broadcast", Vec::<String>::new())
     }
 
     /// Convert to DataFrame with new column names.
@@ -2699,7 +2703,7 @@ mod plan_construction_tests {
         ser(&df.repartition(4));
         ser(&df.coalesce(2));
         ser(&df.repartition_by_range(3, vec![e()]));
-        ser(&df.hint("broadcast", vec![]));
+        ser(&df.hint("broadcast", Vec::<String>::new()));
         ser(&df.to_df(vec!["a"]));
         ser(&df.alias("t"));
         ser(&df.sample(0.5, Some(1)));
