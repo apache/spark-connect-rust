@@ -1,64 +1,22 @@
-"""StorageLevel for the Spark Connect client (mirrors pyspark.storagelevel)."""
+#
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+"""StorageLevel for the Spark Connect client, implemented natively in the Rust core
+and re-exported here (mirrors ``pyspark.storagelevel``)."""
+
+from pyspark._pyspark import StorageLevel
 
 __all__ = ["StorageLevel"]
-
-
-class StorageLevel:
-    """Flags for controlling the storage of an RDD/DataFrame.
-
-    Mirrors ``pyspark.storagelevel.StorageLevel``: which storage tiers are used
-    (disk, memory, off-heap), whether values are stored deserialized, and how
-    many replicas to keep.
-    """
-
-    def __init__(self, useDisk, useMemory, useOffHeap, deserialized, replication=1):
-        self.useDisk = useDisk
-        self.useMemory = useMemory
-        self.useOffHeap = useOffHeap
-        self.deserialized = deserialized
-        self.replication = replication
-
-    def __repr__(self):
-        return "StorageLevel(%s, %s, %s, %s, %s)" % (
-            self.useDisk,
-            self.useMemory,
-            self.useOffHeap,
-            self.deserialized,
-            self.replication,
-        )
-
-    def __str__(self):
-        result = ""
-        result += "Disk " if self.useDisk else ""
-        result += "Memory " if self.useMemory else ""
-        result += "OffHeap " if self.useOffHeap else ""
-        result += "Deserialized " if self.deserialized else "Serialized "
-        result += "%sx Replicated" % self.replication
-        return result
-
-    def __eq__(self, other):
-        return isinstance(other, StorageLevel) and (
-            self.useDisk,
-            self.useMemory,
-            self.useOffHeap,
-            self.deserialized,
-            self.replication,
-        ) == (
-            other.useDisk,
-            other.useMemory,
-            other.useOffHeap,
-            other.deserialized,
-            other.replication,
-        )
-
-
-StorageLevel.NONE = StorageLevel(False, False, False, False, 1)
-StorageLevel.DISK_ONLY = StorageLevel(True, False, False, False, 1)
-StorageLevel.DISK_ONLY_2 = StorageLevel(True, False, False, False, 2)
-StorageLevel.DISK_ONLY_3 = StorageLevel(True, False, False, False, 3)
-StorageLevel.MEMORY_ONLY = StorageLevel(False, True, False, False, 1)
-StorageLevel.MEMORY_ONLY_2 = StorageLevel(False, True, False, False, 2)
-StorageLevel.MEMORY_AND_DISK = StorageLevel(True, True, False, False, 1)
-StorageLevel.MEMORY_AND_DISK_2 = StorageLevel(True, True, False, False, 2)
-StorageLevel.MEMORY_AND_DISK_DESER = StorageLevel(True, True, False, True, 1)
-StorageLevel.OFF_HEAP = StorageLevel(True, True, True, False, 1)

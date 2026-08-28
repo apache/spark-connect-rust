@@ -35,6 +35,7 @@ mod resource;
 mod row;
 mod session;
 mod stat;
+mod storagelevel;
 mod streaming;
 mod tablearg;
 mod transport;
@@ -112,6 +113,7 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRuntimeConf>()?;
     m.add_class::<PyDataFrameReader>()?;
     m.add_class::<PyStatFunctions>()?;
+    m.add_class::<storagelevel::PyStorageLevel>()?;
 
     // Streaming classes
     m.add_class::<PyDataStreamReader>()?;
