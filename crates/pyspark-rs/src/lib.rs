@@ -40,6 +40,7 @@ mod transport;
 mod tablearg;
 mod tvf;
 mod udtf_analyze;
+mod values;
 mod types;
 mod window;
 
@@ -169,6 +170,9 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyYearMonthIntervalType>()?;
     m.add_class::<PyDayTimeIntervalType>()?;
     m.add_class::<PyVariantType>()?;
+    m.add_class::<values::PyVariantVal>()?;
+    m.add_class::<values::PyGeography>()?;
+    m.add_class::<values::PyGeometry>()?;
 
     // Register Window classes
     m.add_class::<PyWindow>()?;

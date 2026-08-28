@@ -15,6 +15,7 @@ try:
         AtomicType, NumericType, IntegralType, FractionalType, DatetimeType,
         AnyTimeType, AnsiIntervalType, SpatialType,
         GeometryType, GeographyType,
+        VariantVal, Geometry, Geography,
     )
 except ImportError:  # pragma: no cover - defensive fallback when the extension is absent
     # Fallback: define minimal stubs for testing purposes

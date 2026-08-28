@@ -526,6 +526,18 @@ def test_udtf_analyze_result_family():
     assert issubclass(SkipRestOfInputTableException, Exception)
 
 
+def test_variant_and_geo_values():
+    from pyspark.sql.types import VariantVal, Geometry, Geography
+    v = VariantVal.parseJson('{"a": 1, "b": [2, 3]}')
+    assert v.toJson() == '{"a":1,"b":[2,3]}'
+    assert v.toPython() == {"a": 1, "b": [2, 3]}
+    g = Geometry(b"\x01\x02", 4326)
+    assert g.getSrid() == 4326 and g.getBytes() == b"\x01\x02"
+    assert g == Geometry.fromWKB(b"\x01\x02", 4326)
+    gg = Geography.fromWKB(b"\x03", 4326)
+    assert gg.getSrid() == 4326 and gg.getBytes() == b"\x03"
+
+
 def test_table_arg_class():
     import pyspark._pyspark as p
     assert hasattr(p, "TableArg")
