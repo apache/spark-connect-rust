@@ -10,10 +10,10 @@ use std::io::{BufRead, BufReader};
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use prost::Message;
-use spark_connect::column::{col, lit};
+use spark_connect::column::col;
 use spark_connect::expression::{Expression, LiteralExpression};
 use spark_connect::functions;
-use spark_connect::window::{FrameBound, FrameType, Window, WindowSpec};
+use spark_connect::window::{FrameBound, WindowSpec};
 use spark_connect_proto as proto;
 
 /// An integer literal Column (pyspark infers 32-bit `integer` for small ints).
@@ -261,7 +261,7 @@ fn test_window_golden() {
     let mut matched = 0;
 
     for (name, expected) in &goldens {
-        let built = build(name).expect(&format!("missing build case for {}", name));
+        let built = build(name).unwrap_or_else(|| panic!("missing build case for {}", name));
         let mut actual = built.to_proto();
         normalize(&mut actual);
 

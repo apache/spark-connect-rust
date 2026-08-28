@@ -7,7 +7,6 @@
 //! Or simply skip with: `cargo test --test e2e_integration` (will skip all tests)
 
 use spark_connect::column::{col, lit};
-use spark_connect::functions;
 use spark_connect::row::Value;
 use spark_connect::session::SparkSession;
 use spark_connect::types::DataType;

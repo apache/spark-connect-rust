@@ -173,19 +173,10 @@ jobs:
             sleep 1
           done
 
-      - name: Rust behavioral e2e tests (against the live server)
-        # These assert results against a live server and otherwise self-gate on
-        # SPARK_REMOTE, so they no-op in the server-less rust.yml job. Run them here,
-        # where a Spark 4.2.0 Connect server is already up, so the drop-in behavior
-        # (functions/columns/dataframe/tvf/catalog/session/streaming/merge/ml/artifact)
-        # is actually verified in CI. Serial: they share the one server session.
-        env:
-          SPARK_REMOTE: sc://localhost:15002
-        run: |
-          cargo test -p apache-spark-connect \
-            --test e2e_functions --test e2e_columns --test e2e_dataframe \
-            --test e2e_coverage --test e2e_integration \
-            -- --test-threads=1
+      # NOTE (SPARK-59032): the behavioral e2e tests used to run here, sharing this
+      # server with the parity gate. They now run in their own job (connect-e2e,
+      # below) so the parity run starts against a server nothing else has touched.
+      # No test is skipped.
 
       - name: Parity - official connect suite through OUR Rust client
         id: parity
@@ -223,6 +214,107 @@ jobs:
             /tmp/parity_ours.log
             /tmp/connect-server.log
           if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Behavioral e2e tests (Rust drop-in against a live server), in their OWN job
+  # with a separate Connect server so they never share server state with the
+  # parity gate. The parity gate then starts against a server nothing else has
+  # touched, which avoids the SPARK-59032 arrow-UDF hang (a UDF that crashes a
+  # Python worker on the shared server wedged worker reuse for later tests).
+  # ---------------------------------------------------------------------------
+  connect-e2e:
+    name: Rust behavioral e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache cargo & target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-e2e-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-e2e-
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Install Python dependencies (server-side UDF workers)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pandas pyarrow numpy
+
+      - name: Cache Spark ${{ env.SPARK_VERSION }} distribution
+        uses: actions/cache@v4
+        with:
+          path: ~/spark-dist
+          key: spark-dist-${{ env.SPARK_VERSION }}-hadoop3
+
+      - name: Download Apache Spark ${{ env.SPARK_VERSION }} (Connect server)
+        id: spark-download
+        run: |
+          PKG="spark-${SPARK_VERSION}-bin-hadoop3"
+          if [ ! -d "${HOME}/spark-dist/${PKG}" ]; then
+            URL="https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/${PKG}.tgz"
+            mkdir -p "${HOME}/spark-dist"
+            echo "Downloading ${URL}"
+            wget -q -O "${HOME}/spark-dist/${PKG}.tgz" "${URL}"
+            tar -xzf "${HOME}/spark-dist/${PKG}.tgz" -C "${HOME}/spark-dist"
+            rm -f "${HOME}/spark-dist/${PKG}.tgz"
+          else
+            echo "Using cached Spark distribution."
+          fi
+          echo "SPARK_HOME=${HOME}/spark-dist/${PKG}" >> "$GITHUB_OUTPUT"
+
+      - name: Start Spark Connect server
+        env:
+          PYSPARK_PYTHON: python
+          PYSPARK_DRIVER_PYTHON: python
+        run: |
+          SPARK_HOME="${{ steps.spark-download.outputs.SPARK_HOME }}"
+          "${SPARK_HOME}/sbin/start-connect-server.sh" \
+            --packages "org.apache.spark:spark-connect_2.13:${SPARK_VERSION}" \
+            --driver-memory 3g \
+            --conf spark.sql.session.localRelationSizeLimit=1073741824 \
+            > /tmp/connect-server.log 2>&1 &
+          for i in $(seq 1 90); do
+            if (echo > /dev/tcp/localhost/15002) 2>/dev/null; then
+              echo "Connect server is up (after ${i}s)."; break
+            fi
+            if [ "$i" -eq 90 ]; then echo "Server failed to start:"; cat /tmp/connect-server.log; exit 1; fi
+            sleep 1
+          done
+
+      - name: Rust behavioral e2e tests (against the live server)
+        env:
+          SPARK_REMOTE: sc://localhost:15002
+        run: |
+          cargo test -p apache-spark-connect \
+            --test e2e_functions --test e2e_columns --test e2e_dataframe \
+            --test e2e_coverage --test e2e_integration \
+            -- --test-threads=1
 
   # ---------------------------------------------------------------------------
   # E2E performance benchmark: our client vs reference, same 4.2.0 server.

@@ -13,7 +13,6 @@ use std::io::{BufRead, BufReader};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use prost::Message;
 
-use spark_connect::catalog::Catalog;
 use spark_connect_proto as proto;
 
 /// Recursively clear fields that vary run-to-run and are not client-authored:
@@ -36,13 +35,10 @@ fn normalize_expression(e: &mut proto::Expression) {
     if let Some(expr_type) = &mut e.expr_type {
         // Recursively normalize nested expressions as needed
         use proto::expression::ExprType;
-        match expr_type {
-            ExprType::Alias(alias) => {
-                if let Some(expr) = &mut alias.expr {
-                    normalize_expression(expr);
-                }
+        if let ExprType::Alias(alias) = expr_type {
+            if let Some(expr) = &mut alias.expr {
+                normalize_expression(expr);
             }
-            _ => {}
         }
     }
 }

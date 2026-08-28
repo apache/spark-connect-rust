@@ -5,8 +5,6 @@
 #[cfg(test)]
 mod tests {
     use spark_connect::plan::LogicalPlan;
-    use spark_connect::table_arg::TableArg;
-    use spark_connect::tvf::TableValuedFunction;
 
     #[test]
     fn test_unresolved_table_valued_function_plan() {

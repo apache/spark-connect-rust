@@ -2431,7 +2431,7 @@ mod cache_tests {
         // The LocalRowIterator and collect() use the same underlying ExecutePlan.
         // The difference is purely in client-side consumption: streaming vs buffering.
         // We verify that to_local_iterator() creates the same iterator type.
-        let iter: LocalRowIterator;
+        let _iter: LocalRowIterator;
         // This test just verifies the type exists and is constructible.
         // A true integration test would create an actual stream.
     }
