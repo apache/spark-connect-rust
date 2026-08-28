@@ -14,6 +14,7 @@ try:
         # Abstract base classes of the type hierarchy.
         AtomicType, NumericType, IntegralType, FractionalType, DatetimeType,
         AnyTimeType, AnsiIntervalType, SpatialType,
+        GeometryType, GeographyType,
     )
 except ImportError:  # pragma: no cover - defensive fallback when the extension is absent
     # Fallback: define minimal stubs for testing purposes

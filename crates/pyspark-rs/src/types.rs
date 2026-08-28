@@ -1873,11 +1873,82 @@ impl PyVariantType {
     }
 }
 
+#[pyclass(name = "GeometryType", extends = PySpatialType)]
+pub struct PyGeometryType {
+    pub srid: i32,
+}
+
+#[pymethods]
+impl PyGeometryType {
+    #[new]
+    #[pyo3(signature = (srid=0))]
+    fn new(srid: i32) -> pyo3::PyClassInitializer<Self> {
+        init_chain!(
+            DataType::Geometry { srid },
+            PyGeometryType { srid },
+            [PyAtomicType, PySpatialType],
+            value
+        )
+    }
+    #[getter]
+    fn srid(&self) -> i32 {
+        self.srid
+    }
+    fn __repr__(&self) -> String {
+        format!("GeometryType({})", self.srid)
+    }
+    #[pyo3(name = "simpleString")]
+    fn simple_string(&self) -> String {
+        DataType::Geometry { srid: self.srid }.simple_string()
+    }
+    #[pyo3(name = "typeName")]
+    fn type_name(&self) -> &'static str {
+        "geometry"
+    }
+}
+
+#[pyclass(name = "GeographyType", extends = PySpatialType)]
+pub struct PyGeographyType {
+    pub srid: i32,
+}
+
+#[pymethods]
+impl PyGeographyType {
+    #[new]
+    #[pyo3(signature = (srid=0))]
+    fn new(srid: i32) -> pyo3::PyClassInitializer<Self> {
+        init_chain!(
+            DataType::Geography { srid },
+            PyGeographyType { srid },
+            [PyAtomicType, PySpatialType],
+            value
+        )
+    }
+    #[getter]
+    fn srid(&self) -> i32 {
+        self.srid
+    }
+    fn __repr__(&self) -> String {
+        format!("GeographyType({})", self.srid)
+    }
+    #[pyo3(name = "simpleString")]
+    fn simple_string(&self) -> String {
+        DataType::Geography { srid: self.srid }.simple_string()
+    }
+    #[pyo3(name = "typeName")]
+    fn type_name(&self) -> &'static str {
+        "geography"
+    }
+}
+
 /// Convert a Python DataType object (any of the type classes) or a DDL string into
 /// the core `DataType`. Mirrors pyspark accepting `Union[DataType, str]` everywhere.
 pub(crate) fn py_to_data_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
-    if let Ok(d) = obj.extract::<PyRef<PyDataType>>() {
-        return Ok(d.inner.clone());
+    if let Ok(g) = obj.extract::<PyRef<PyGeometryType>>() {
+        return Ok(DataType::Geometry { srid: g.srid });
+    }
+    if let Ok(g) = obj.extract::<PyRef<PyGeographyType>>() {
+        return Ok(DataType::Geography { srid: g.srid });
     }
     if obj.extract::<PyRef<PyNullType>>().is_ok() {
         return Ok(DataType::Null);
@@ -1972,6 +2043,12 @@ pub(crate) fn py_to_data_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
     }
     if obj.extract::<PyRef<PyVariantType>>().is_ok() {
         return Ok(DataType::Variant);
+    }
+    // The bare base `DataType` (e.g. from `fromDDL`) is matched LAST: concrete subclasses
+    // (which all share the PyDataType base) are handled above via their own fields, so a
+    // mutated StructType reflects its live fields rather than the base's snapshot.
+    if let Ok(d) = obj.extract::<PyRef<PyDataType>>() {
+        return Ok(d.inner.clone());
     }
     if let Ok(s) = obj.extract::<String>() {
         return DataType::from_ddl(&s).map_err(|e| {

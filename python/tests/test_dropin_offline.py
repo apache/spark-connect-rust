@@ -299,6 +299,30 @@ def test_type_class_hierarchy():
     assert issubclass(T.AtomicType, T.DataType)
 
 
+def test_spatial_types():
+    g = T.GeometryType(4326)
+    assert [c.__name__ for c in type(g).__mro__ if c.__name__ != "object"] == [
+        "GeometryType", "SpatialType", "AtomicType", "DataType",
+    ]
+    assert g.srid == 4326
+    assert g.simpleString() == "geometry(4326)"
+    assert g.typeName() == "geometry"
+    assert isinstance(g, T.SpatialType) and isinstance(g, T.DataType)
+    gg = T.GeographyType(4326)
+    assert gg.simpleString() == "geography(4326)" and gg.srid == 4326
+    assert isinstance(gg, T.SpatialType)
+
+
+def test_structtype_add_reflected_in_json():
+    # Regression: after mutating with add(), json()/jsonValue() must reflect the new
+    # field (py_to_data_type reads the live concrete fields, not a base snapshot).
+    st = T.StructType([T.StructField("a", T.IntegerType())])
+    assert '"b"' not in st.json()
+    st.add("b", T.StringType())
+    assert '"b"' in st.json()
+    assert st.fieldNames() == ["a", "b"]
+
+
 def test_datatype_object_model():
     # json / jsonValue / typeName / simpleString / needConversion match official pyspark.
     assert T.IntegerType().typeName() == "integer"
