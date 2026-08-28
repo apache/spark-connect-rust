@@ -17,17 +17,12 @@
 # under the License.
 #
 
-# IMPORTANT: This workflow runs Spark Declarative Pipelines (SDP) connect parity
-# tests in two groups:
+# This workflow runs the Spark Declarative Pipelines (SDP) connect parity tests. Both
+# steps are blocking (no continue-on-error) and must pass:
 #
-# 1. BLOCKING: Pure-Python pipeline tests (test_decorators.py, test_graph_element_registry.py)
-#    These run without a server and do not set continue-on-error. They must pass.
-#
-# 2. FULL SUITE: Full official upstream pipeline connect suite
-#    These include server-backed tests like test_spark_connect.py. They run for real
-#    with full visibility into pass/fail status. If this becomes a critical blocker,
-#    add continue-on-error: true back in; currently it provides honest signal on
-#    pipeline parity with the Rust transport plugin.
+# 1. Pure-Python pipeline tests (test_decorators.py, test_graph_element_registry.py) — no server.
+# 2. The full official upstream pipeline connect suite (incl. server-backed tests like
+#    test_spark_connect.py) run through OUR Rust client via the transport plugin.
 
 name: Pipelines Connect Parity (Spark 4.2.0)
 
@@ -52,8 +47,8 @@ env:
 jobs:
   # ---------------------------------------------------------------------------
   # Pipelines Connect parity: run the official pipeline connect tests through our
-  # Rust client against a real Spark 4.2.0 Connect server. Tests in two groups:
-  # BLOCKING (pure-Python) and ADVISORY (server-backed, conditional on harness compat).
+  # Rust client against a real Spark 4.2.0 Connect server. Two blocking groups: pure-Python
+  # pipeline tests and the full server-backed official suite.
   # ---------------------------------------------------------------------------
   pipelines-parity:
     name: Pipelines parity (official suite via our client, Python ${{ matrix.python-version }})
@@ -105,7 +100,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest pandas pyarrow numpy grpcio grpcio-status googleapis-common-protos cloudpickle zstandard py4j
+          python -m pip install pytest pandas pyarrow numpy grpcio grpcio-status googleapis-common-protos cloudpickle zstandard py4j pyyaml
 
       - name: Build the Rust extension into the skin
         # The parity diff drives both clients via PYTHONPATH (our ./python for ours,
@@ -155,7 +150,7 @@ jobs:
           fi
           echo "SPARK_SOURCE=${HOME}/spark-source" >> "$GITHUB_OUTPUT"
 
-      - name: BLOCKING - Pure-Python pipeline parity tests (no server needed)
+      - name: Pure-Python pipeline parity tests (no server needed)
         id: pure-python-tests
         env:
           PYTHONUNBUFFERED: "1"   # stream per-file progress into the live log
