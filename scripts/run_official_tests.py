@@ -82,6 +82,28 @@ def discover(spark_py: Path):
     return out
 
 
+def resolve_only(spec: str, spark_py: Path):
+    """Resolve a comma-separated `--only` list to explicit test-file Paths under spark_py.
+
+    Accepts either a dotted module name the way Apache's `./python/run-tests --testnames`
+    does (`pyspark.resource.tests.test_connect_resources`) or a file path relative to
+    spark_py (`pyspark/sql/tests/connect/client/test_artifact.py`). This is how the
+    local-cluster phase runs a fixed set of resource/artifact tests, including
+    `pyspark.resource.tests.test_connect_resources`, which lives outside the
+    `sql/tests/connect/` scope `discover()` walks.
+    """
+    out = []
+    for name in spec.split(","):
+        name = name.strip()
+        if not name:
+            continue
+        if name.endswith(".py"):
+            out.append(spark_py / name)
+        else:
+            out.append(spark_py.joinpath(*name.split(".")).with_suffix(".py"))
+    return out
+
+
 def load_manifest(path: Path):
     """Return (per_file_deselect, whole_file_skip).
 
@@ -197,13 +219,40 @@ def main():
         help="Skip the post-run check that re-runs skiplisted tests to report any that "
         "now pass (candidates to remove from the manifest).",
     )
+    ap.add_argument(
+        "--only",
+        default="",
+        help="Run ONLY this comma-separated list of tests instead of discovering the "
+        "whole sql/tests/connect suite. Each entry is a dotted module name (like "
+        "Apache's run-tests --testnames, e.g. "
+        "pyspark.resource.tests.test_connect_resources) or a spark_py-relative .py path. "
+        "Used by the local-cluster phase to run the resource/artifact tests, which need "
+        "a real multi-executor cluster.",
+    )
+    ap.add_argument(
+        "--exclude",
+        default="",
+        help="Comma-separated test-file basenames to drop from discovery (e.g. the "
+        "resource/artifact files that only run in the local-cluster phase). Ignored "
+        "when --only is set.",
+    )
     args = ap.parse_args()
 
     if not os.environ.get("RUST_PYSPARK_SO"):
         print("!! set RUST_PYSPARK_SO to the built extension")
         return 2
     spark_py = Path(os.path.expanduser(args.spark)) / "python"
-    files = discover(spark_py)
+    if args.only:
+        files = resolve_only(args.only, spark_py)
+        missing = [f for f in files if not f.exists()]
+        if missing:
+            print("!! --only test file(s) not found:", *(str(m) for m in missing))
+            return 2
+    else:
+        files = discover(spark_py)
+        if args.exclude:
+            drop = {x.strip() for x in args.exclude.split(",") if x.strip()}
+            files = [f for f in files if f.name not in drop]
     if not files:
         print("!! no connect test files found under", spark_py)
         return 2
