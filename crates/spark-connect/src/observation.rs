@@ -2,7 +2,6 @@
 //!
 //! Mirroring `pyspark.sql.observation.Observation`.
 
-use crate::dataframe::DataFrame;
 use std::collections::HashMap;
 
 /// An Observation for collecting metrics from a DataFrame.
@@ -10,7 +9,6 @@ use std::collections::HashMap;
 /// Mirrors `pyspark.sql.observation.Observation`.
 pub struct Observation {
     name: String,
-    dataframe: Option<DataFrame>,
     metrics: HashMap<String, String>,
 }
 
@@ -19,7 +17,6 @@ impl Observation {
     pub fn new(name: &str) -> Self {
         Observation {
             name: name.to_string(),
-            dataframe: None,
             metrics: HashMap::new(),
         }
     }
@@ -32,16 +29,6 @@ impl Observation {
     /// Get metrics from this Observation.
     pub fn get(&self) -> HashMap<String, String> {
         self.metrics.clone()
-    }
-
-    /// Internal method to set the DataFrame.
-    pub(crate) fn set_dataframe(&mut self, df: DataFrame) {
-        self.dataframe = Some(df);
-    }
-
-    /// Internal method to set metrics.
-    pub(crate) fn set_metrics(&mut self, metrics: HashMap<String, String>) {
-        self.metrics = metrics;
     }
 }
 

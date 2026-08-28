@@ -3,6 +3,8 @@
 //! Tests that Rust ML operator builders produce the exact same protobuf
 //! structures as the reference PySpark ML Connect client for newer operators.
 
+#![allow(dead_code)] // golden-test helpers are copy-shared across suites; each binary uses a subset
+
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
