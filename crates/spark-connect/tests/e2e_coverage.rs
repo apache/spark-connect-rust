@@ -220,6 +220,67 @@ fn catalog_extras_surface() {
     let _ = c.create_external_table("cov_ext_tbl", None, Some("parquet"));
 }
 
+/// DDL catalog operations added for v4.2.0 parity: create/drop database, drop/analyze/
+/// truncate table, drop view, get create-table string, get table properties, list
+/// partitions, list views. Exercises the real client->server round-trip and cleans up.
+#[test]
+fn catalog_ddl_v420_surface() {
+    if !should_run() {
+        return;
+    }
+    let s = session();
+    let c = s.catalog();
+
+    let db = "cov_ddl_db";
+    // createDatabase (idempotent) + verify it exists.
+    let mut props = HashMap::new();
+    props.insert("purpose".to_string(), "coverage".to_string());
+    c.create_database(db, true, props).unwrap();
+    assert!(c.database_exists(db).unwrap());
+
+    // listViews: with a pattern (no db -> current database is used) and db-qualified.
+    let _ = c.list_views(None, None).unwrap().collect().unwrap();
+    let _ = c.list_views(None, Some("*")).unwrap().collect().unwrap();
+    let _ = c.list_views(Some(db), Some("*")).unwrap().collect().unwrap();
+
+    // A managed, partitioned table in that database for the table-scoped ops.
+    let tbl = format!("{db}.cov_ddl_tbl");
+    s.sql(&format!(
+        "CREATE TABLE IF NOT EXISTS {tbl} (a INT) USING parquet PARTITIONED BY (p INT)"
+    ))
+    .unwrap()
+    .collect()
+    .unwrap();
+    s.sql(&format!("INSERT INTO {tbl} PARTITION (p=1) VALUES (10)"))
+        .unwrap()
+        .collect()
+        .unwrap();
+
+    // listPartitions, getTableProperties, getCreateTableString, analyzeTable.
+    let _ = c.list_partitions(&tbl).unwrap().collect().unwrap();
+    let _ = c.get_table_properties(&tbl).unwrap();
+    let create_str = c.get_create_table_string(&tbl, false).unwrap();
+    assert!(create_str.to_uppercase().contains("CREATE"));
+    c.analyze_table(&tbl, true).unwrap();
+
+    // truncateTable then dropTable.
+    c.truncate_table(&tbl).unwrap();
+    c.drop_table(&tbl, true, false).unwrap();
+    assert!(!c.table_exists(&tbl).unwrap());
+
+    // A persistent view for dropView.
+    let view = format!("{db}.cov_ddl_view");
+    s.sql(&format!("CREATE OR REPLACE VIEW {view} AS SELECT 1 AS a"))
+        .unwrap()
+        .collect()
+        .unwrap();
+    c.drop_view(&view, true).unwrap();
+
+    // dropDatabase(cascade) cleans up.
+    c.drop_database(db, true, true).unwrap();
+    assert!(!c.database_exists(db).unwrap());
+}
+
 #[test]
 fn session_surface() {
     if !should_run() {

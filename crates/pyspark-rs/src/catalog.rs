@@ -214,6 +214,101 @@ impl PyCatalog {
         udf_cls.call1((f, rt, 100, name))
     }
 
+    /// Create a database.
+    #[pyo3(signature = (dbName, ifNotExists=false, properties=None))]
+    #[allow(non_snake_case)]
+    fn createDatabase(
+        &self,
+        dbName: &str,
+        ifNotExists: bool,
+        properties: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<()> {
+        let mut props = std::collections::HashMap::new();
+        if let Some(dict) = properties {
+            for (k, v) in dict.iter() {
+                props.insert(k.extract::<String>()?, v.extract::<String>()?);
+            }
+        }
+        self.catalog
+            .create_database(dbName, ifNotExists, props)
+            .to_pyerr()
+    }
+
+    /// Drop a database.
+    #[pyo3(signature = (dbName, ifExists=false, cascade=false))]
+    #[allow(non_snake_case)]
+    fn dropDatabase(&self, dbName: &str, ifExists: bool, cascade: bool) -> PyResult<()> {
+        self.catalog
+            .drop_database(dbName, ifExists, cascade)
+            .to_pyerr()
+    }
+
+    /// Drop a table.
+    #[pyo3(signature = (tableName, ifExists=false, purge=false))]
+    #[allow(non_snake_case)]
+    fn dropTable(&self, tableName: &str, ifExists: bool, purge: bool) -> PyResult<()> {
+        self.catalog.drop_table(tableName, ifExists, purge).to_pyerr()
+    }
+
+    /// Drop a view.
+    #[pyo3(signature = (viewName, ifExists=false))]
+    #[allow(non_snake_case)]
+    fn dropView(&self, viewName: &str, ifExists: bool) -> PyResult<()> {
+        self.catalog.drop_view(viewName, ifExists).to_pyerr()
+    }
+
+    /// Truncate a table.
+    #[allow(non_snake_case)]
+    fn truncateTable(&self, tableName: &str) -> PyResult<()> {
+        self.catalog.truncate_table(tableName).to_pyerr()
+    }
+
+    /// Recover the statistics of a table.
+    #[pyo3(signature = (tableName, noScan=false))]
+    #[allow(non_snake_case)]
+    fn analyzeTable(&self, tableName: &str, noScan: bool) -> PyResult<()> {
+        self.catalog.analyze_table(tableName, noScan).to_pyerr()
+    }
+
+    /// Get the `CREATE TABLE` string of a table.
+    #[pyo3(signature = (tableName, asSerde=false))]
+    #[allow(non_snake_case)]
+    fn getCreateTableString(&self, tableName: &str, asSerde: bool) -> PyResult<String> {
+        self.catalog
+            .get_create_table_string(tableName, asSerde)
+            .to_pyerr()
+    }
+
+    /// Get the properties of a table as a dict.
+    #[allow(non_snake_case)]
+    fn getTableProperties<'py>(
+        &self,
+        py: Python<'py>,
+        tableName: &str,
+    ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let props = self.catalog.get_table_properties(tableName).to_pyerr()?;
+        let dict = pyo3::types::PyDict::new(py);
+        for (k, v) in props {
+            dict.set_item(k, v)?;
+        }
+        Ok(dict)
+    }
+
+    /// List the partitions of a table.
+    #[allow(non_snake_case)]
+    fn listPartitions(&self, tableName: &str) -> PyResult<PyDataFrame> {
+        let df = self.catalog.list_partitions(tableName).to_pyerr()?;
+        Ok(PyDataFrame::new(df))
+    }
+
+    /// List the views in a database.
+    #[pyo3(signature = (dbName=None, pattern=None))]
+    #[allow(non_snake_case)]
+    fn listViews(&self, dbName: Option<&str>, pattern: Option<&str>) -> PyResult<PyDataFrame> {
+        let df = self.catalog.list_views(dbName, pattern).to_pyerr()?;
+        Ok(PyDataFrame::new(df))
+    }
+
     fn __repr__(&self) -> String {
         "Catalog()".to_string()
     }

@@ -623,6 +623,178 @@ impl Catalog {
         Ok(())
     }
 
+    /// Create a database.
+    ///
+    /// Mirrors `pyspark.sql.connect.catalog.Catalog.createDatabase`.
+    pub fn create_database(
+        &self,
+        db_name: &str,
+        if_not_exists: bool,
+        properties: std::collections::HashMap<String, String>,
+    ) -> Result<()> {
+        let create_db = proto::CreateDatabase {
+            db_name: db_name.to_string(),
+            if_not_exists,
+            properties,
+        };
+        let mut catalog_msg = proto::Catalog::default();
+        catalog_msg.cat_type = Some(proto::catalog::CatType::CreateDatabase(create_db));
+        self.execute_catalog(&catalog_msg)?;
+        Ok(())
+    }
+
+    /// Drop a database.
+    ///
+    /// Mirrors `pyspark.sql.connect.catalog.Catalog.dropDatabase`.
+    pub fn drop_database(&self, db_name: &str, if_exists: bool, cascade: bool) -> Result<()> {
+        let drop_db = proto::DropDatabase {
+            db_name: db_name.to_string(),
+            if_exists,
+            cascade,
+        };
+        let mut catalog_msg = proto::Catalog::default();
+        catalog_msg.cat_type = Some(proto::catalog::CatType::DropDatabase(drop_db));
+        self.execute_catalog(&catalog_msg)?;
+        Ok(())
+    }
+
+    /// Drop a table.
+    ///
+    /// Mirrors `pyspark.sql.connect.catalog.Catalog.dropTable`.
+    pub fn drop_table(&self, table_name: &str, if_exists: bool, purge: bool) -> Result<()> {
+        let drop_tbl = proto::DropTable {
+            table_name: table_name.to_string(),
+            if_exists,
+            purge,
+        };
+        let mut catalog_msg = proto::Catalog::default();
+        catalog_msg.cat_type = Some(proto::catalog::CatType::DropTable(drop_tbl));
+        self.execute_catalog(&catalog_msg)?;
+        Ok(())
+    }
+
+    /// Drop a view.
+    ///
+    /// Mirrors `pyspark.sql.connect.catalog.Catalog.dropView`.
+    pub fn drop_view(&self, view_name: &str, if_exists: bool) -> Result<()> {
+        let drop_view = proto::DropView {
+            view_name: view_name.to_string(),
+            if_exists,
+        };
+        let mut catalog_msg = proto::Catalog::default();
+        catalog_msg.cat_type = Some(proto::catalog::CatType::DropView(drop_view));
+        self.execute_catalog(&catalog_msg)?;
+        Ok(())
+    }
+
+    /// Truncate a table.
+    ///
+    /// Mirrors `pyspark.sql.connect.catalog.Catalog.truncateTable`.
+    pub fn truncate_table(&self, table_name: &str) -> Result<()> {
+        let truncate = proto::TruncateTable {
+            table_name: table_name.to_string(),
+        };
+        let mut catalog_msg = proto::Catalog::default();
+        catalog_msg.cat_type = Some(proto::catalog::CatType::TruncateTable(truncate));
+        self.execute_catalog(&catalog_msg)?;
+        Ok(())
+    }
+
+    /// Recover the statistics of a table.
+    ///
+    /// Mirrors `pyspark.sql.connect.catalog.Catalog.analyzeTable`.
+    pub fn analyze_table(&self, table_name: &str, no_scan: bool) -> Result<()> {
+        let analyze = proto::AnalyzeTable {
+            table_name: table_name.to_string(),
+            no_scan,
+        };
+        let mut catalog_msg = proto::Catalog::default();
+        catalog_msg.cat_type = Some(proto::catalog::CatType::AnalyzeTable(analyze));
+        self.execute_catalog(&catalog_msg)?;
+        Ok(())
+    }
+
+    /// Get the `CREATE TABLE` string of a table.
+    ///
+    /// Mirrors `pyspark.sql.connect.catalog.Catalog.getCreateTableString`. Returns the
+    /// first row's first column, or an empty string when there are no rows.
+    pub fn get_create_table_string(&self, table_name: &str, as_serde: bool) -> Result<String> {
+        let get = proto::GetCreateTableString {
+            table_name: table_name.to_string(),
+            as_serde,
+        };
+        let mut catalog_msg = proto::Catalog::default();
+        catalog_msg.cat_type = Some(proto::catalog::CatType::GetCreateTableString(get));
+        let result = self.execute_catalog(&catalog_msg)?;
+        match result.first().and_then(|row| row.get(0)) {
+            Some(value) => match value.as_str() {
+                Some(s) => Ok(s.to_string()),
+                None => Err(SparkError::connect_msg(
+                    "getCreateTableString returned non-string",
+                )),
+            },
+            None => Ok(String::new()),
+        }
+    }
+
+    /// Get the properties of a table as (key, value) pairs.
+    ///
+    /// Mirrors `pyspark.sql.connect.catalog.Catalog.getTableProperties`: the result has
+    /// two columns (key, value), one row per property.
+    pub fn get_table_properties(&self, table_name: &str) -> Result<Vec<(String, String)>> {
+        let get = proto::GetTableProperties {
+            table_name: table_name.to_string(),
+        };
+        let mut catalog_msg = proto::Catalog::default();
+        catalog_msg.cat_type = Some(proto::catalog::CatType::GetTableProperties(get));
+        let result = self.execute_catalog(&catalog_msg)?;
+        let mut props = Vec::with_capacity(result.len());
+        for row in &result {
+            let key = row
+                .get(0)
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| SparkError::connect_msg("getTableProperties key not a string"))?;
+            let value = row
+                .get(1)
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| SparkError::connect_msg("getTableProperties value not a string"))?;
+            props.push((key.to_string(), value.to_string()));
+        }
+        Ok(props)
+    }
+
+    /// List the partitions of a table (returns a DataFrame, matching the other
+    /// `list_*` catalog methods).
+    ///
+    /// Mirrors `pyspark.sql.connect.catalog.Catalog.listPartitions`.
+    pub fn list_partitions(&self, table_name: &str) -> Result<DataFrame> {
+        let list = proto::ListPartitions {
+            table_name: table_name.to_string(),
+        };
+        let mut catalog_msg = proto::Catalog::default();
+        catalog_msg.cat_type = Some(proto::catalog::CatType::ListPartitions(list));
+        self.execute_catalog_as_dataframe(&catalog_msg)
+    }
+
+    /// List the views (returns a DataFrame, matching the other `list_*` methods).
+    ///
+    /// Mirrors `pyspark.sql.connect.catalog.Catalog.listViews`: when a pattern is given
+    /// without a database, the current database is used.
+    pub fn list_views(&self, db_name: Option<&str>, pattern: Option<&str>) -> Result<DataFrame> {
+        let resolved_db = if pattern.is_some() && db_name.is_none() {
+            Some(self.current_database()?)
+        } else {
+            db_name.map(|s| s.to_string())
+        };
+        let list = proto::ListViews {
+            db_name: resolved_db,
+            pattern: pattern.map(|s| s.to_string()),
+        };
+        let mut catalog_msg = proto::Catalog::default();
+        catalog_msg.cat_type = Some(proto::catalog::CatType::ListViews(list));
+        self.execute_catalog_as_dataframe(&catalog_msg)
+    }
+
     /// Helper: execute a catalog operation and return results as Rows.
     fn execute_catalog(&self, catalog: &proto::Catalog) -> Result<Vec<Row>> {
         let request = self.build_execute_catalog_request(catalog)?;
