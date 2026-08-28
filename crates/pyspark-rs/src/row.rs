@@ -77,6 +77,16 @@ pub fn value_to_py<'py>(py: Python<'py>, v: &Value) -> PyResult<Bound<'py, PyAny
             }
             dict.into_any()
         }
+        Value::Variant { value, metadata } => {
+            // A VARIANT materializes as a VariantVal (toJson/toPython decode lazily),
+            // matching pyspark, rather than a raw {value, metadata} dict.
+            Py::new(
+                py,
+                crate::values::PyVariantVal::from_parts(value.clone(), metadata.clone()),
+            )?
+            .into_bound(py)
+            .into_any()
+        }
     })
 }
 

@@ -2328,6 +2328,32 @@ pub(crate) fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> R
         return Ok(Value::List(items));
     }
     if let Some(arr) = array.as_any().downcast_ref::<StructArray>() {
+        // A VARIANT column arrives as struct<value: binary, metadata: binary> where the
+        // `metadata` field carries arrow metadata {"variant": "true"}. Recognize it and
+        // return a Value::Variant (raw bytes) so it materializes as a VariantVal (matching
+        // pyspark) rather than a plain {value, metadata} struct/dict.
+        let is_variant = arr.fields().iter().any(|f| {
+            f.metadata()
+                .get("variant")
+                .map(|v| v == "true")
+                .unwrap_or(false)
+        });
+        if is_variant {
+            let bin_field = |name: &str| -> Result<Vec<u8>> {
+                match arr.column_by_name(name) {
+                    Some(col) => match arrow_value_at(col.as_ref(), index)? {
+                        Value::Binary(b) => Ok(b),
+                        Value::Null => Ok(vec![]),
+                        _ => Err(SparkError::connect_msg("variant field is not binary")),
+                    },
+                    None => Ok(vec![]),
+                }
+            };
+            return Ok(Value::Variant {
+                value: bin_field("value")?,
+                metadata: bin_field("metadata")?,
+            });
+        }
         let mut fields = Vec::new();
         for (f, col) in arr.fields().iter().zip(arr.columns()) {
             fields.push((f.name().clone(), arrow_value_at(col.as_ref(), index)?));

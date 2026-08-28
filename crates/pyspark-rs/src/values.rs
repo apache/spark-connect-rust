@@ -12,6 +12,13 @@ pub struct PyVariantVal {
     metadata: Vec<u8>,
 }
 
+impl PyVariantVal {
+    /// Build from raw (value, metadata) bytes (used when materializing a VARIANT column).
+    pub(crate) fn from_parts(value: Vec<u8>, metadata: Vec<u8>) -> Self {
+        PyVariantVal { value, metadata }
+    }
+}
+
 #[pymethods]
 impl PyVariantVal {
     #[new]

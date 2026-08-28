@@ -45,6 +45,10 @@ pub enum Value {
     Map(BTreeMap<String, Value>),
     /// Struct (nested Row)
     Struct(Vec<(String, Value)>),
+    /// A VARIANT value carried as its raw (value, metadata) binary components, matching
+    /// `pyspark.sql.types.VariantVal(value, metadata)`. Decoding to JSON/Python is done
+    /// lazily on the Python side (VariantVal.toJson/toPython via variant_utils).
+    Variant { value: Vec<u8>, metadata: Vec<u8> },
 }
 
 impl Value {
@@ -158,6 +162,14 @@ impl fmt::Display for Value {
                     write!(f, "{}={}", k, v)?;
                 }
                 write!(f, ")")
+            }
+            Value::Variant { value, metadata } => {
+                write!(
+                    f,
+                    "Variant(value={} bytes, metadata={} bytes)",
+                    value.len(),
+                    metadata.len()
+                )
             }
         }
     }
