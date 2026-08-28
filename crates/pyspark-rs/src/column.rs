@@ -376,8 +376,24 @@ impl PyColumn {
     }
     #[pyo3(signature = (*cols))]
     fn isin(&self, py: Python<'_>, cols: Vec<Py<PyAny>>) -> PyResult<PyColumn> {
-        let mut vals = Vec::with_capacity(cols.len());
-        for c in &cols {
+        // pyspark's Column.isin unpacks a single list/tuple/set argument:
+        // col.isin([1, 2]) == col.isin(1, 2). pandas-on-Spark's Series.isin relies on
+        // this (it passes a single list of lit(..) columns).
+        let mut items: Vec<Py<PyAny>> = cols;
+        if items.len() == 1 {
+            let only = items[0].bind(py);
+            if only.is_instance_of::<pyo3::types::PyList>()
+                || only.is_instance_of::<pyo3::types::PyTuple>()
+                || only.is_instance_of::<pyo3::types::PySet>()
+            {
+                items = only
+                    .try_iter()?
+                    .map(|r| r.map(|b| b.unbind()))
+                    .collect::<PyResult<Vec<_>>>()?;
+            }
+        }
+        let mut vals = Vec::with_capacity(items.len());
+        for c in &items {
             vals.push(to_column(&c.bind(py))?);
         }
         Ok(PyColumn::new(self.column.clone().isin(vals)))

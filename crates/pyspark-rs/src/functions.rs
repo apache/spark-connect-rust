@@ -156,6 +156,14 @@ pub fn to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
         ))));
     }
 
+    // Non-primitive scalars must be checked BEFORE int/float: Decimal defines
+    // __float__/__int__, and a pandas Timestamp (a datetime subclass) defines __int__
+    // (nanoseconds), so an early int/float extract would silently mis-encode them.
+    // Mirrors `py_to_value` in session.rs so `lit(..)` and `createDataFrame(..)` agree.
+    if let Some(lit) = scalar_literal(obj)? {
+        return Ok(Column::new(Expression::Literal(lit)));
+    }
+
     // Try to convert scalars to literals
     if let Ok(b) = obj.extract::<bool>() {
         return Ok(Column::new(Expression::Literal(
@@ -185,9 +193,68 @@ pub fn to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
         ))));
     }
 
-    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-        "Expected Column or scalar (int, float, str, bool, None)",
-    ))
+    let type_name = obj
+        .get_type()
+        .name()
+        .map(|n| n.to_string())
+        .unwrap_or_else(|_| "<unknown>".to_string());
+    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+        "Expected Column or scalar (int, float, str, bool, bytes, datetime, date, Decimal, None); got {type_name}"
+    )))
+}
+
+/// Build a literal for the non-primitive scalar Python types (`datetime`, `date`,
+/// `decimal.Decimal`, `bytes`/`bytearray`). Returns `None` if `obj` is not one of them,
+/// so the caller falls through to the primitive int/float/str/bool checks. Kept in sync
+/// with `session::py_to_value` so `lit(..)` and `createDataFrame(..)` encode identically.
+fn scalar_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<LiteralExpression>> {
+    let py = obj.py();
+
+    // decimal.Decimal -> Decimal literal (before int/float: Decimal has __float__/__int__).
+    if let Ok(dec_mod) = py.import("decimal") {
+        let decimal_cls = dec_mod.getattr("Decimal")?;
+        if obj.is_instance(&decimal_cls)? {
+            let value: String = obj.str()?.extract()?;
+            let as_tuple = obj.call_method0("as_tuple")?;
+            let num_digits = as_tuple.get_item(1)?.len()? as i32;
+            let exp: i64 = as_tuple.get_item(2)?.extract().unwrap_or(0);
+            let scale = if exp < 0 { (-exp) as i32 } else { 0 };
+            let precision = num_digits.max(scale).max(1);
+            return Ok(Some(LiteralExpression::Decimal {
+                value,
+                precision,
+                scale,
+            }));
+        }
+    }
+
+    // datetime.datetime -> Timestamp (checked before datetime.date, which it subclasses,
+    // and before int, since a pandas Timestamp's __int__ returns nanoseconds).
+    if let Ok(dt_mod) = py.import("datetime") {
+        let datetime_cls = dt_mod.getattr("datetime")?;
+        if obj.is_instance(&datetime_cls)? {
+            let timestamp_f64: f64 = obj.call_method0("timestamp")?.extract()?;
+            let micros = (timestamp_f64 * 1_000_000.0).round() as i64;
+            return Ok(Some(LiteralExpression::Timestamp(micros)));
+        }
+        let date_cls = dt_mod.getattr("date")?;
+        if obj.is_instance(&date_cls)? {
+            let ordinal: i64 = obj.call_method0("toordinal")?.extract()?;
+            // 719163 is the ordinal of 1970-01-01.
+            let days = (ordinal - 719163i64) as i32;
+            return Ok(Some(LiteralExpression::Date(days)));
+        }
+    }
+
+    // bytes / bytearray -> Binary. Checked explicitly so it is not mistaken for anything else.
+    if obj.is_instance_of::<pyo3::types::PyBytes>()
+        || obj.is_instance_of::<pyo3::types::PyByteArray>()
+    {
+        let bytes: Vec<u8> = obj.extract()?;
+        return Ok(Some(LiteralExpression::Binary(bytes)));
+    }
+
+    Ok(None)
 }
 
 #[pyfunction]
