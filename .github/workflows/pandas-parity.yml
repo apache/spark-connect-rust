@@ -165,21 +165,24 @@ jobs:
           SPARK_HOME="${{ steps.spark-download.outputs.SPARK_HOME }}"
           echo "Starting Connect server on ${SPARK_CONNECT_TESTING_REMOTE}"
           # Give the driver extra heap for the pandas tests which are I/O heavy.
-          # Set the server JVM timezone to America/Los_Angeles and match it on the client
-          # (TZ below). This replicates Apache Spark's own test environment, which fixes the
-          # timezone for determinism (pom.xml surefire/scalatest `<timeZone>America/Los_Angeles`
-          # and pyspark.testing goldenutils.setup_timezone). It is NOT a UTC hack: a Spark
-          # TIMESTAMP is a tz-less instant, and the pandas tests compare against pure-pandas
-          # wall-clock, so the round-trip only holds when the client's local timezone equals the
-          # server's (createDataFrame localizes with the session tz; lit(datetime) uses the
-          # client's local tz via time.mktime). Real pyspark fails identically when they differ.
-          # spark.sql.session.timeZone is left to derive from the JVM default, as Apache does.
+          # Align the server timezone with the client (TZ=UTC below) so timestamps round-trip:
+          # a Spark TIMESTAMP is a tz-less instant, and these tests compare against pure-pandas
+          # wall-clock, which only holds when the client's local tz equals the server's session tz
+          # (createDataFrame localizes with the session tz; lit(datetime) uses the client's local tz
+          # via time.mktime). Real pyspark fails identically when they differ.
+          #
+          # We use UTC specifically (not the JVM default, not America/Los_Angeles): UTC has no DST,
+          # so it avoids client-side pandas NonExistentTimeError / DST-averaging on the resample and
+          # describe tests whose data includes the 2021-03-14 02:00 spring-forward gap. This matches
+          # how Apache's PYTHON connect tests run (the runner's UTC); the pom.xml America/Los_Angeles
+          # is for the JVM/Scala maven-surefire tests, not the separately-launched python connect server.
           "${SPARK_HOME}/sbin/start-connect-server.sh" \
             --packages "org.apache.spark:spark-connect_2.13:${SPARK_VERSION}" \
             --driver-memory 3g \
             --conf spark.sql.session.localRelationSizeLimit=1073741824 \
-            --conf spark.driver.extraJavaOptions=-Duser.timezone=America/Los_Angeles \
-            --conf spark.executor.extraJavaOptions=-Duser.timezone=America/Los_Angeles \
+            --conf spark.sql.session.timeZone=UTC \
+            --conf spark.driver.extraJavaOptions=-Duser.timezone=UTC \
+            --conf spark.executor.extraJavaOptions=-Duser.timezone=UTC \
             > /tmp/connect-server.log 2>&1 &
           for i in $(seq 1 90); do
             if (echo > /dev/tcp/localhost/15002) 2>/dev/null; then
@@ -193,7 +196,7 @@ jobs:
         id: pandas-parity
         env:
           PYTHONUNBUFFERED: "1"   # stream per-file progress into the live log
-          TZ: America/Los_Angeles # match the server JVM timezone (see server startup); Apache's test convention
+          TZ: UTC                 # match the server timezone (see server startup); UTC avoids DST landmines
           PYTHONPATH: ${{ github.workspace }}/scripts:${{ steps.spark-source.outputs.SPARK_SOURCE }}/python
           RUST_PYSPARK_SO: ${{ github.workspace }}/python/pyspark/_pyspark.so
         working-directory: ${{ steps.spark-source.outputs.SPARK_SOURCE }}/python

@@ -414,9 +414,14 @@ For every method matching a pyspark name:
   - **Client timezone must equal the server's `spark.sql.session.timeZone`.** The tests compare
     against pure-pandas (tz-naive) results; a timestamp only round-trips through Spark when the two
     tzs match (createDataFrame converts with the session tz, `lit(datetime)` with the client's local
-    tz). REAL pyspark fails identically when they differ, so ALIGN them (workflow sets both to UTC),
-    don't "fix" the client. Symptoms of a mismatch: `Series.isin([datetime])` / `get_dummies` on a
-    datetime column silently return all-False/all-zeros.
+    tz). REAL pyspark fails identically when they differ, so ALIGN them, don't "fix" the client.
+    Symptoms of a mismatch: `Series.isin([datetime])` / `get_dummies` on a datetime column silently
+    return all-False/all-zeros. Use **UTC** on both (server `-Duser.timezone=UTC` +
+    `spark.sql.session.timeZone=UTC`, client `TZ=UTC`), NOT a DST-having zone: America/Los_Angeles
+    aligns too but makes client-side pandas raise `NonExistentTimeError` (and skew a timestamp `mean`)
+    on the resample/describe tests, whose data includes the 2021-03-14 02:00 spring-forward gap. UTC
+    also matches how Apache runs its PYTHON connect tests (the runner's UTC); the pom.xml
+    `America/Los_Angeles` is only for the JVM/Scala maven-surefire tests, not the python connect server.
   - **Pin pandas to the supported range (`>=2.2,<3.0`).** v4.2.0 pandas-on-Spark warns pandas ≥ 3.0.0
     is unsupported and has 3.0-only branches that misbehave (e.g. `test_frame_loc_setitem` no-ops a
     reordered multi-column `.loc` assignment). Also add test-only deps the suite needs (scipy for the
