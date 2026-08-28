@@ -440,3 +440,70 @@ the `SPARK_VERSION` user-agent const in `crates/spark-connect-core/src/channel.r
 - `variant_utils.py` is pure-Python in upstream too; the drop-in vendors it. A Rust-native
   variant codec would be a `spark-connect`-crate enhancement (Rust API coverage), separate
   from drop-in parity — don't conflate.
+
+# 17. More hard-won gotchas (v4.2.0 parity, continued)
+
+- **Property-vs-method parity bugs are a recurring class.** Several DataFrame/type members
+  must be Python *properties* (`#[getter]` in PyO3) but were implemented as methods, so
+  `x.member` returned a bound method instead of the value and broke callers. Confirmed/fixed
+  this session: `DataFrame.schema`, `DataFrame.columns`. When adding/auditing any member that
+  pyspark documents as a property (schema, columns, dtypes, isStreaming, storageLevel, na,
+  stat, write, ...), verify it is a `#[getter]`. The class-name introspection diff does NOT
+  catch property-vs-method or missing attributes/dunders — check those by hand.
+
+- **`RuntimeConf.get(key, default)` must use the server `GetWithDefault` op.** A plain `Get`
+  raises `SQL_CONF_NOT_FOUND` for an unknown key; pyspark's `conf.get(key, default)` returns
+  the default. Fixed by routing to `get_config_with_defaults` when a default is supplied
+  (`crates/spark-connect/src/conf.rs::get_with_default`); `get(key)` with no default still
+  raises, matching `RuntimeConfig.get`. pandas-on-Spark hit this immediately (`config.py`
+  does `conf.get(key, default=json.dumps(...))`).
+
+- **`createDataFrame` must accept a pandas DataFrame, not just lists.** pandas-on-Spark's
+  `InternalFrame.from_pandas` calls `spark.createDataFrame(pdf, schema=...)`. The PyO3
+  `createDataFrame` was typed `data: &Bound<PyList>` (rejected pandas outright). Now it
+  detects a `pandas.DataFrame` and converts rows with NaN/NaT→None via
+  `df.astype(object).where(df.notna(), None).values.tolist()`, taking names from `df.columns`.
+  NOTE (future work): this Python row round-trip is a stopgap — the correct/efficient path is
+  Arrow-batch ingestion straight into the `LocalRelation` (the core already emits Arrow IPC
+  for list input; add an entry point that accepts Arrow IPC bytes from pandas→Arrow
+  conversion, honoring exact dtypes/timestamps).
+
+- **`pyspark.pandas` should be the FULL upstream package, vendored verbatim — it ships in
+  the JVM-free `pyspark-client`.** A prior diverged 48-file subset never even imported
+  (referenced `data_type_ops`, which was absent). Replaced with the full v4.2.0 package
+  (67 files); the only bridging needed at import time was two pure helpers added verbatim to
+  `pyspark/sql/utils.py` (`get_lit_sql_str`, `pyspark_column_op`). `import pyspark.pandas`
+  now works.
+
+- **pandas-on-Spark RUNTIME is a long chain of connect-internal dependencies.** After import,
+  exercising it surfaces one real gap at a time (conf.get default → createDataFrame(pandas)
+  → `DataFrame._col` → `DataFrame.columns` property → `spark_column_equals`/`pyspark.sql.
+  connect.column` + Column expression-equality → deeper `InternalFrame` machinery). Expect
+  to add thin `pyspark.sql.connect.*` compat shims (re-exporting the Rust-backed classes)
+  and a few private accessors (`_col`, ...) as each surfaces. Treat pandas-on-Spark runtime
+  parity as its own multi-step effort, driven by running the connect pandas tests (a
+  dedicated long-running `pandas-parity.yml` workflow exists for this).
+
+- **The known Row blocker (still open).** Our `Row` (`pyspark._pyspark.Row`) is NOT a `tuple`
+  subclass and its `__fields__` is read-only; PyO3 cannot subclass `tuple`. Some
+  pandas-on-Spark code paths (and `pyspark.sql.types._create_row`, which upstream builds via
+  `Row(*values); row.__fields__ = fields`) assume a tuple-`Row` with mutable `__fields__`.
+  Our `_create_row` works around it by constructing from name/value pairs, but full fidelity
+  likely needs adopting the upstream Python tuple-`Row` as canonical and returning it from
+  `collect()`/`head()`/`take()`/`first()`/`toLocalIterator` (~13 materialization sites in
+  `crates/pyspark-rs/src/dataframe.rs`).
+
+- **Drop-in module layout: mirror official `pyspark/sql/__init__.py` verbatim + thin
+  re-export submodules.** Hand-writing a minimal `__init__.py` caused endless "cannot import
+  name X" gaps. The fix: vendor the official `__init__` and back it with thin submodules
+  (`session/column/group/readwriter/merge/dataframe/window/catalog/observation/utils/
+  context/internal`) that re-export the Rust-backed classes. `pyspark.sql.types` must also
+  re-export the stdlib names upstream leaks (e.g. `cast`) and helpers (`_drop_metadata`,
+  `_create_row`, `Row`).
+
+- **The Vec<String> ergonomics sweep.** The earlier IntoIterator sweep only covered
+  `Vec<Column>`; string-name lists (`DataFrameWriter[/V2].{cluster_by,partition_by,
+  bucket_by,sort_by}`, `DataFrame.{join_using,hint}`) still took `Vec<String>` and rejected
+  array/`&str` literals. They now take `impl IntoIterator<Item = impl Into<String>>`; empty-list
+  call sites need `Vec::<String>::new()` to satisfy inference. When sweeping, grep BOTH
+  `Vec<Column>` and `Vec<String>` public method args.
