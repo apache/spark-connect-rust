@@ -346,10 +346,25 @@ impl PySparkSession {
                             .collect::<PyResult<_>>()?,
                         None,
                     )
+                } else if let Ok(dict) = item.cast::<PyDict>() {
+                    // A dict row: field names are its keys (sorted, mirroring pyspark's
+                    // `_infer_schema` for dicts), values in that key order.
+                    let mut pairs: Vec<(String, Bound<'_, PyAny>)> = Vec::with_capacity(dict.len());
+                    for (k, v) in dict.iter() {
+                        pairs.push((k.str()?.to_string(), v));
+                    }
+                    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+                    let names: Vec<String> = pairs.iter().map(|(k, _)| k.clone()).collect();
+                    let values: Vec<Value> = pairs
+                        .iter()
+                        .map(|(_, v)| py_to_value(v))
+                        .collect::<PyResult<_>>()?;
+                    (values, Some(names))
                 } else {
-                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                        "Each row must be a list, tuple, or Row",
-                    ));
+                    // A scalar row (int/str/float/...): a single-field row, matching
+                    // `createDataFrame([1, 2, 3], IntegerType())`. The field name comes from
+                    // the schema when given, else defaults below.
+                    (vec![py_to_value(&item)?], None)
                 };
             let names = spec_names
                 .clone()
