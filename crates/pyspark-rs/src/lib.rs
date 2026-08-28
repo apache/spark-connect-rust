@@ -24,6 +24,7 @@ mod conf;
 mod dataframe;
 mod datasource;
 mod errors;
+mod eval_type;
 mod functions;
 mod group;
 mod ml;
@@ -103,6 +104,7 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCatalogColumn>()?;
     m.add_class::<PyFunction>()?;
     m.add_class::<PyTablePartition>()?;
+    m.add_class::<eval_type::PyPythonEvalType>()?;
     m.add_class::<PyRuntimeConf>()?;
     m.add_class::<PyDataFrameReader>()?;
     m.add_class::<PyStatFunctions>()?;

@@ -502,6 +502,17 @@ def test_catalog_result_classes():
     assert Column is p.CatalogColumn
 
 
+def test_python_eval_type_constants():
+    from pyspark.util import PythonEvalType
+    assert PythonEvalType.SQL_BATCHED_UDF == 100
+    assert PythonEvalType.SQL_ARROW_BATCHED_UDF == 101
+    assert PythonEvalType.SQL_SCALAR_PANDAS_UDF == 200
+    assert PythonEvalType.SQL_SCALAR_ARROW_UDF == 250
+    assert PythonEvalType.SQL_TABLE_UDF == 300
+    assert PythonEvalType.SQL_ARROW_TABLE_UDF == 301
+    assert PythonEvalType.__module__ == "builtins"  # Rust-backed
+
+
 def test_reexport_paths():
     from pyspark import StorageLevel
     assert StorageLevel.MEMORY_ONLY is not None

@@ -45,3 +45,6 @@ def _parse_memory(s: str) -> int:
     if s[-1].lower() not in units:
         raise ValueError("invalid format: " + s)
     return int(float(s[:-1]) * units[s[-1].lower()])
+
+# Evaluation-type constants (Rust-backed), mirroring pyspark.util.PythonEvalType.
+from pyspark._pyspark import PythonEvalType  # noqa: E402,F401
