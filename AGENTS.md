@@ -405,7 +405,25 @@ For every method matching a pyspark name:
 - **pandas-on-Spark runtime parity:** A multi-step effort driven by running the official test
   suite. Each test surfaces one gap at a time (import closure → properties → expressions →
   internals). Provide thin `pyspark.sql.connect.*` compat shims and private accessors as
-  needed. Keep this work distinct from drop-in parity.
+  needed. Keep this work distinct from drop-in parity. Fixes belong in Rust or in the compat
+  shims — **never** by editing a vendored file (breaks the drift gate) or monkey-patching a
+  Rust class from Python. Two gotchas that cost real time:
+  - **`Column.__repr__` must render the expression** (`Column<'<expr>'>`), not a constant. pandas-
+    on-Spark's `spark_column_equals` decides column identity by comparing repr strings (it does
+    `repr(left).replace(backtick, "") == repr(right)...`); a generic `"Column()"` makes every column
+    look equal and collapses frames to `(n, 0)`. `Expression::render()` mirrors the pyspark-connect
+    expression `__repr__` (infix binary ops, `AS`, `CAST`, star, ...). `pyspark.sql.connect.column`
+    re-exports the Rust `Column`, so its `isinstance(x, ConnectColumn)` checks already pass.
+  - **Internal pandas functions dispatch by NAME, not by client reimplementation.**
+    `pyspark.sql.internal.InternalFunction` (`distributed_sequence_id`, `pandas_product`,
+    `pandas_stddev`, ...) routes through `connect.functions.builtin._invoke_function_over_columns`,
+    which must build a plain `UnresolvedFunction(name, cols)` (via `functions._invoke_function` →
+    Rust `pyfunc_invoke_function`). The Connect *server* resolves these internal names. Do NOT
+    special-case them client-side (e.g. faking `distributed_sequence_id` with a `row_number`
+    window — it is wrong and non-distributed).
+- **`*cols` methods unpack a single list.** `df.select(["a","b"])` must behave like
+  `df.select("a","b")` (pyspark unpacks a lone list/tuple arg). Handled centrally in
+  `to_column_list`, so it covers `select`/`sort`/`groupBy`/... at once — don't re-solve per method.
 - **Pipelines (SDP):** The pure-Python surface vendors cleanly with one edit to imports. The
   Connect-server path requires a dedicated Rust `PipelineCommand` seam with high-level methods
   on the session, separate from drop-in parity work.
