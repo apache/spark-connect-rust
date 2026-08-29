@@ -757,4 +757,272 @@ mod tests {
         });
         assert!(matches!(casted.expr, Expression::Cast(_)));
     }
+
+    #[test]
+    fn test_comparison_operators() {
+        let c1 = col("a");
+        let c2 = col("b");
+
+        // Test eq
+        let result = c1.clone().eq(c2.clone());
+        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+
+        // Test ne
+        let result = col("a").ne(col("b"));
+        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+
+        // Test gt
+        let result = col("a").gt(col("b"));
+        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+
+        // Test lt
+        let result = col("a").lt(col("b"));
+        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+
+        // Test ge
+        let result = col("a").ge(col("b"));
+        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+
+        // Test le
+        let result = col("a").le(col("b"));
+        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+    }
+
+    #[test]
+    fn test_arithmetic_operators() {
+        // Test sub
+        let result = col("a").sub(col("b"));
+        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+
+        // Test mul
+        let result = col("a").mul(col("b"));
+        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+
+        // Test div
+        let result = col("a").div(col("b"));
+        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+
+        // Test modulo
+        let result = col("a").modulo(col("b"));
+        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+    }
+
+    #[test]
+    fn test_logical_operators() {
+        // Test and
+        let result = col("a").and(col("b"));
+        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+
+        // Test or
+        let result = col("a").or(col("b"));
+        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+
+        // Test not
+        let result = col("a").not();
+        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+
+        // Test neg
+        let result = col("a").neg();
+        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+    }
+
+    #[test]
+    fn test_operator_traits() {
+        let c1 = col("a");
+        let c2 = col("b");
+
+        // Test Add trait
+        let result = c1.clone() + c2.clone();
+        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+
+        // Test Sub trait
+        let result = col("a") - col("b");
+        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+
+        // Test Mul trait
+        let result = col("a") * col("b");
+        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+
+        // Test Div trait
+        let result = col("a") / col("b");
+        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+
+        // Test Rem trait
+        let result = col("a") % col("b");
+        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+
+        // Test BitAnd trait
+        let result = col("a") & col("b");
+        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+
+        // Test BitOr trait
+        let result = col("a") | col("b");
+        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+
+        // Test Not trait
+        let result = !col("a");
+        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+    }
+
+    #[test]
+    fn test_from_implementations() {
+        // Test From<&str>
+        let c1: Column = "x".into();
+        assert!(matches!(c1.expr, Expression::ColumnReference(_)));
+
+        // Test From<String>
+        let c2: Column = "y".to_string().into();
+        assert!(matches!(c2.expr, Expression::ColumnReference(_)));
+
+        // Test From<&String>
+        let s = "z".to_string();
+        let c3: Column = (&s).into();
+        assert!(matches!(c3.expr, Expression::ColumnReference(_)));
+    }
+
+    #[test]
+    fn test_lit_functions() {
+        // Test lit with small number (fits in i32)
+        let c = lit(42);
+        assert!(matches!(
+            c.expr,
+            Expression::Literal(LiteralExpression::Integer(_))
+        ));
+
+        // Test lit with large number (needs i64)
+        let c = lit(5_000_000_000i64);
+        assert!(matches!(
+            c.expr,
+            Expression::Literal(LiteralExpression::Long(_))
+        ));
+
+        // Test lit_string
+        let c = lit_string("hello");
+        assert!(matches!(
+            c.expr,
+            Expression::Literal(LiteralExpression::String(_))
+        ));
+
+        // Test lit_double
+        let c = lit_double(3.14);
+        assert!(matches!(
+            c.expr,
+            Expression::Literal(LiteralExpression::Double(_))
+        ));
+
+        // Test lit_boolean
+        let c = lit_boolean(true);
+        assert!(matches!(
+            c.expr,
+            Expression::Literal(LiteralExpression::Boolean(_))
+        ));
+    }
+
+    #[test]
+    fn test_when_otherwise() {
+        // Test when
+        let cond = col("x").gt(lit(5));
+        let result = when(cond, lit(1));
+        assert!(matches!(result.expr, Expression::CaseWhen(_)));
+
+        // Test when with otherwise
+        let cond2 = col("y").lt(lit(10));
+        let result2 = result.when(cond2, lit(2));
+        assert!(matches!(result2.expr, Expression::CaseWhen(_)));
+
+        // Test otherwise
+        let final_result = result2.otherwise(lit(99));
+        assert!(matches!(final_result.expr, Expression::CaseWhen(_)));
+    }
+
+    #[test]
+    fn test_is_null_and_is_not_null() {
+        // Test is_null
+        let result = col("a").is_null();
+        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+
+        // Test is_not_null
+        let result = col("a").is_not_null();
+        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+    }
+
+    #[test]
+    fn test_getitem() {
+        // Test get_item
+        let result = col("array").get_item(lit(0));
+        assert!(matches!(result.expr, Expression::UnresolvedExtractValue(_)));
+    }
+
+    #[test]
+    fn test_between() {
+        let result = col("a").between(lit(1), lit(10));
+        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+    }
+
+    #[test]
+    fn test_substring() {
+        let result = col("a").substr(lit(1), lit(3));
+        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+    }
+
+    #[test]
+    fn test_various_methods() {
+        // Test cast_str
+        let result = col("a").cast_str("int");
+        assert!(matches!(result.expr, Expression::Cast(_)));
+
+        // Test desc
+        let result = col("a").desc();
+        assert!(matches!(result.expr, Expression::SortOrder(_)));
+
+        // Test desc_nulls_first
+        let result = col("a").desc_nulls_first();
+        assert!(matches!(result.expr, Expression::SortOrder(_)));
+
+        // Test desc_nulls_last
+        let result = col("a").desc_nulls_last();
+        assert!(matches!(result.expr, Expression::SortOrder(_)));
+
+        // Test asc
+        let result = col("a").asc();
+        assert!(matches!(result.expr, Expression::SortOrder(_)));
+
+        // Test asc_nulls_first
+        let result = col("a").asc_nulls_first();
+        assert!(matches!(result.expr, Expression::SortOrder(_)));
+
+        // Test asc_nulls_last
+        let result = col("a").asc_nulls_last();
+        assert!(matches!(result.expr, Expression::SortOrder(_)));
+    }
+
+    #[test]
+    fn test_get_field() {
+        // Test get_field
+        let result = col("struct").get_field("field_name");
+        assert!(matches!(result.expr, Expression::UnresolvedExtractValue(_)));
+    }
+
+    #[test]
+    fn test_string_functions() {
+        // Test contains
+        let result = col("a").contains(col("b"));
+        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+
+        // Test startswith
+        let result = col("a").startswith(col("b"));
+        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+
+        // Test endswith
+        let result = col("a").endswith(col("b"));
+        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+
+        // Test like
+        let result = col("a").like("%pattern%");
+        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+
+        // Test rlike
+        let result = col("a").rlike("[0-9]+");
+        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+    }
 }
