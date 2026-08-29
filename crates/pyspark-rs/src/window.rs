@@ -4,7 +4,34 @@ use pyo3::prelude::*;
 use spark_connect::expression::{Expression, NullOrdering, SortOrder};
 use spark_connect::window::{FrameBound, WindowSpec};
 
-use crate::functions::to_column;
+use crate::dataframe::to_column_list;
+
+/// Build partition expressions from ColumnOrName args (a bare string is a COLUMN
+/// NAME, not a literal — mirrors pyspark Window.partitionBy).
+fn to_partition_exprs(cols: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<Expression>> {
+    Ok(to_column_list(cols)?
+        .iter()
+        .map(|c| c.expression().clone())
+        .collect())
+}
+
+/// Build sort orders from ColumnOrName args; a bare string becomes an ascending
+/// SortOrder over that column (not a string literal).
+fn to_sort_orders(cols: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<SortOrder>> {
+    let mut sort_orders = Vec::new();
+    for column in to_column_list(cols)? {
+        if let Expression::SortOrder(sort) = column.expression() {
+            sort_orders.push((**sort).clone());
+        } else {
+            sort_orders.push(SortOrder {
+                child: column.expression().clone(),
+                ascending: true,
+                null_ordering: NullOrdering::Last,
+            });
+        }
+    }
+    Ok(sort_orders)
+}
 
 /// Python wrapper for a window frame bound.
 #[pyclass(name = "FrameBound", from_py_object)]
@@ -72,33 +99,14 @@ impl PyWindowSpec {
     /// Partition the window by the given columns.
     #[pyo3(signature = (*cols))]
     fn partitionBy(&self, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyWindowSpec> {
-        let mut expressions = Vec::new();
-        for col in cols {
-            expressions.push(to_column(&col)?.expression().clone());
-        }
-        let new_spec = self.spec.clone().partition_by(expressions);
+        let new_spec = self.spec.clone().partition_by(to_partition_exprs(cols)?);
         Ok(PyWindowSpec::new(new_spec))
     }
 
     /// Order the window by the given columns.
     #[pyo3(signature = (*cols))]
     fn orderBy(&self, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyWindowSpec> {
-        let mut sort_orders = Vec::new();
-        for col in cols {
-            let column = to_column(&col)?;
-            // Extract sort order from the column
-            if let Expression::SortOrder(sort) = column.expression() {
-                sort_orders.push((**sort).clone());
-            } else {
-                // Default to ascending
-                sort_orders.push(SortOrder {
-                    child: column.expression().clone(),
-                    ascending: true,
-                    null_ordering: NullOrdering::Last,
-                });
-            }
-        }
-        let new_spec = self.spec.clone().order_by(sort_orders);
+        let new_spec = self.spec.clone().order_by(to_sort_orders(cols)?);
         Ok(PyWindowSpec::new(new_spec))
     }
 
@@ -161,11 +169,7 @@ impl PyWindow {
     #[pyo3(signature = (*cols))]
     #[staticmethod]
     fn partitionBy(cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyWindowSpec> {
-        let mut expressions = Vec::new();
-        for col in cols {
-            expressions.push(to_column(&col)?.expression().clone());
-        }
-        let spec = WindowSpec::new().partition_by(expressions);
+        let spec = WindowSpec::new().partition_by(to_partition_exprs(cols)?);
         Ok(PyWindowSpec::new(spec))
     }
 
@@ -173,22 +177,7 @@ impl PyWindow {
     #[pyo3(signature = (*cols))]
     #[staticmethod]
     fn orderBy(cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyWindowSpec> {
-        let mut sort_orders = Vec::new();
-        for col in cols {
-            let column = to_column(&col)?;
-            // Extract sort order from the column
-            if let Expression::SortOrder(sort) = column.expression() {
-                sort_orders.push((**sort).clone());
-            } else {
-                // Default to ascending
-                sort_orders.push(SortOrder {
-                    child: column.expression().clone(),
-                    ascending: true,
-                    null_ordering: NullOrdering::Last,
-                });
-            }
-        }
-        let spec = WindowSpec::new().order_by(sort_orders);
+        let spec = WindowSpec::new().order_by(to_sort_orders(cols)?);
         Ok(PyWindowSpec::new(spec))
     }
 

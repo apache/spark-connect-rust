@@ -244,9 +244,40 @@ impl PySparkSession {
         Ok(PyDataFrame::new(df))
     }
 
-    /// Execute a SQL query and return a DataFrame.
-    fn sql(&self, sqlQuery: &str) -> PyResult<PyDataFrame> {
-        let df = self.session.sql(sqlQuery).to_pyerr()?;
+    /// Execute a SQL query and return a DataFrame. `args` binds parameters: a list fills
+    /// positional `?` parameters, a dict fills named (`:name`) parameters. Values are always
+    /// literals (a string arg is a string literal, never a column reference).
+    #[pyo3(signature = (sqlQuery, args=None))]
+    fn sql(&self, sqlQuery: &str, args: Option<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        fn to_lit(v: &Bound<'_, PyAny>) -> PyResult<spark_connect::expression::Expression> {
+            use spark_connect::expression::{Expression, LiteralExpression};
+            if let Ok(sv) = v.extract::<String>() {
+                return Ok(Expression::Literal(LiteralExpression::string(sv)));
+            }
+            Ok(crate::functions::to_column(v)?.expression().clone())
+        }
+        let mut pos: Vec<spark_connect::expression::Expression> = Vec::new();
+        let mut named: std::collections::HashMap<String, spark_connect::expression::Expression> =
+            std::collections::HashMap::new();
+        if let Some(a) = args {
+            if let Ok(d) = a.cast::<PyDict>() {
+                for (k, v) in d.iter() {
+                    named.insert(k.extract::<String>()?, to_lit(&v)?);
+                }
+            } else if let Ok(lst) = a.cast::<PyList>() {
+                for v in lst.iter() {
+                    pos.push(to_lit(&v)?);
+                }
+            } else {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "args must be a list (positional) or dict (named)",
+                ));
+            }
+        }
+        let df = self
+            .session
+            .sql_with_args(sqlQuery, pos, named)
+            .to_pyerr()?;
         Ok(PyDataFrame::new(df))
     }
 
@@ -375,16 +406,17 @@ impl PySparkSession {
             rows.push(Row::new(names, values));
         }
 
-        if rows.is_empty() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Data is empty",
-            ));
-        }
-
-        // An explicit struct schema wins; otherwise infer field types from the first row.
+        // An explicit struct schema wins; otherwise infer field types from the first row
+        // (which requires at least one row -- an empty dataset needs an explicit schema,
+        // matching pyspark which creates an empty DataFrame from schema + [] data).
         let schema_dtype = match spec {
             Spec::Struct(fields) => DataType::Struct { fields },
             _ => {
+                if rows.is_empty() {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "can not infer schema from empty dataset",
+                    ));
+                }
                 let fields: Vec<StructField> = rows[0]
                     .fields()
                     .iter()

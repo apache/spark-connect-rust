@@ -1362,14 +1362,36 @@ fn parse_geography(s: &str) -> Result<DataType> {
 fn parse_datatype_string(input: &str) -> Result<DataType> {
     let trimmed = input.trim();
 
-    // Check if it's a top-level schema (multiple fields like "a INT, b STRING")
-    // Heuristic: contains comma at top level (not inside angle brackets/parens)
-    // and doesn't start with "struct<"
-    if !trimmed.to_lowercase().starts_with("struct<") && contains_top_level_comma(trimmed) {
-        return parse_top_level_schema(trimmed);
+    // A top-level schema is "a INT, b STRING" (multiple fields) OR a single "a INT"
+    // (one field, no comma) -- both parse to a StructType, matching PySpark's
+    // _parse_datatype_string. Detect either a top-level comma or a top-level space
+    // separating a field name from its type; fall back to single-type parsing if the
+    // schema interpretation fails (e.g. a bare type that itself contains spaces such as
+    // "interval day to second").
+    if !trimmed.to_lowercase().starts_with("struct<")
+        && (contains_top_level_comma(trimmed) || contains_top_level_whitespace(trimmed))
+    {
+        if let Ok(dt) = parse_top_level_schema(trimmed) {
+            return Ok(dt);
+        }
     }
 
     parse_single_type(trimmed)
+}
+
+/// Whether `s` has a top-level whitespace char (outside `<>`/`()`), i.e. it looks like a
+/// "name type" field rather than a bare type such as `int` or `array<int>`.
+fn contains_top_level_whitespace(s: &str) -> bool {
+    let mut depth = 0;
+    for c in s.chars() {
+        match c {
+            '<' | '(' => depth += 1,
+            '>' | ')' => depth -= 1,
+            _ if depth == 0 && c.is_whitespace() => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Check if a string contains a comma at the top level (not inside brackets/parens)
