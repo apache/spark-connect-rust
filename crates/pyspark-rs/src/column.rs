@@ -429,7 +429,12 @@ impl PyColumn {
     }
 
     // --- named Column methods (PySpark camelCase) ---
-    fn between(&self, py: Python<'_>, lowerBound: Py<PyAny>, upperBound: Py<PyAny>) -> PyResult<PyColumn> {
+    fn between(
+        &self,
+        py: Python<'_>,
+        lowerBound: Py<PyAny>,
+        upperBound: Py<PyAny>,
+    ) -> PyResult<PyColumn> {
         let l = to_column(&lowerBound.bind(py))?;
         let u = to_column(&upperBound.bind(py))?;
         Ok(PyColumn::new(self.column.clone().between(l, u)))

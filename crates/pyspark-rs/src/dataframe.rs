@@ -475,7 +475,8 @@ impl PyDataFrame {
     /// Grouping sets aggregation: `groupingSets([[a, b], [a], []])`.
     #[pyo3(name = "groupingSets")]
     fn grouping_sets(&self, groupingSets: Vec<Vec<Bound<'_, PyAny>>>) -> PyResult<PyGroupedData> {
-        let mut out: Vec<Vec<spark_connect::column::Column>> = Vec::with_capacity(groupingSets.len());
+        let mut out: Vec<Vec<spark_connect::column::Column>> =
+            Vec::with_capacity(groupingSets.len());
         for s in groupingSets {
             out.push(to_column_list(s)?);
         }
