@@ -2394,3 +2394,58 @@ def test_drop_metadata_and_create_row():
     r2 = _create_row(r, [3, 4])
     assert r2["a"] == 3 and r2["b"] == 4
     assert list(r.__fields__) == ["a", "b"]
+
+
+# ------------------------------------------- API parity: version, properties, signatures
+#
+# These guard the PySpark-surface parity that the transport-level official-suite gate does
+# not exercise: the reported version, property-vs-method access, show()'s default, and the
+# public keyword-argument names (camelCase, not the Rust snake_case).
+
+import inspect  # noqa: E402
+
+import pyspark  # noqa: E402
+from pyspark.sql import SparkSession as _SS, DataFrame as _DF, Column as _Col  # noqa: E402
+
+
+def test_dropin_version_is_spark_version():
+    assert pyspark.__version__ == "4.2.0"
+
+
+@pytest.mark.parametrize("cls,name", [(_SS, "version"), (_DF, "dtypes"), (_DF, "executionInfo")])
+def test_property_not_method(cls, name):
+    # PySpark accesses these without parentheses; the Rust getter is a getset_descriptor.
+    assert type(inspect.getattr_static(cls, name)).__name__ == "getset_descriptor"
+
+
+def test_show_has_no_required_args_and_defaults_n_to_20():
+    sig = inspect.signature(_DF.show)
+    required = [
+        p.name
+        for p in sig.parameters.values()
+        if p.name not in ("self", "cls")
+        and p.kind in (p.POSITIONAL_OR_KEYWORD, p.POSITIONAL_ONLY, p.KEYWORD_ONLY)
+        and p.default is inspect._empty
+    ]
+    assert required == [], required  # df.show() must work
+    assert sig.parameters["n"].default == 20
+
+
+@pytest.mark.parametrize(
+    "cls,method,param",
+    [
+        (_SS, "sql", "sqlQuery"),
+        (_SS, "table", "tableName"),
+        (_DF, "limit", "num"),
+        (_DF, "take", "num"),
+        (_DF, "withColumn", "colName"),
+        (_DF, "repartition", "numPartitions"),
+        (_Col, "cast", "dataType"),
+        (_Col, "astype", "dataType"),
+        (_Col, "substr", "startPos"),
+        (_Col, "between", "lowerBound"),
+        (_Col, "over", "window"),
+    ],
+)
+def test_keyword_param_names_match_pyspark(cls, method, param):
+    assert param in inspect.signature(getattr(cls, method)).parameters

@@ -50,24 +50,35 @@ fn py_obj_to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
 impl PyColumn {
     /// Alias the column, optionally attaching column metadata (a dict), mirroring
     /// `Column.alias(name, metadata=...)`.
-    #[pyo3(signature = (name, metadata=None))]
+    #[pyo3(signature = (*alias, metadata=None))]
     fn alias(
         &self,
-        name: &str,
+        alias: Vec<String>,
         metadata: Option<std::collections::HashMap<String, String>>,
     ) -> PyColumn {
+        // Mirrors Column.alias(*alias, **kwargs): the common single-name form aliases the
+        // column; extra names beyond the first (multi-output aliasing) are not applied here.
+        let name = match alias.first() {
+            Some(n) => n.clone(),
+            None => return PyColumn::new(self.column.clone()),
+        };
         match metadata {
-            None => PyColumn::new(self.column.clone().alias(name)),
+            None => PyColumn::new(self.column.clone().alias(&name)),
             Some(m) => {
                 let md: std::collections::BTreeMap<String, String> = m.into_iter().collect();
-                PyColumn::new(self.column.clone().alias_with_metadata(name, md))
+                PyColumn::new(self.column.clone().alias_with_metadata(&name, md))
             }
         }
     }
 
     /// Alias for `alias` (pyspark `Column.name`).
-    fn name(&self, name: &str) -> PyColumn {
-        PyColumn::new(self.column.clone().name(name))
+    #[pyo3(signature = (*alias, metadata=None))]
+    fn name(
+        &self,
+        alias: Vec<String>,
+        metadata: Option<std::collections::HashMap<String, String>>,
+    ) -> PyColumn {
+        self.alias(alias, metadata)
     }
 
     /// Apply a transformation function to this column. Mirrors `Column.transform(f)`,
@@ -85,30 +96,30 @@ impl PyColumn {
 
     /// Cast to a different type. Accepts a `DataType` or a DDL type string,
     /// matching `pyspark.sql.Column.cast`.
-    fn cast(&self, data_type: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
+    fn cast(&self, dataType: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
         // A DDL string keeps the unparsed type_str form (reference cast("int"));
         // any DataType object is converted to a typed cast.
-        if let Ok(s) = data_type.extract::<String>() {
+        if let Ok(s) = dataType.extract::<String>() {
             Ok(PyColumn::new(self.column.clone().cast_str(&s)))
         } else {
-            let dt = crate::types::py_to_data_type(data_type)?;
+            let dt = crate::types::py_to_data_type(dataType)?;
             Ok(PyColumn::new(self.column.clone().cast(dt)))
         }
     }
 
     /// Alias for `cast` (pyspark `Column.astype`).
-    fn astype(&self, data_type: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
-        self.cast(data_type)
+    fn astype(&self, dataType: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
+        self.cast(dataType)
     }
 
     /// Try to cast, yielding NULL on failure. Accepts a `DataType` or DDL string.
     /// Mirrors `pyspark.sql.Column.try_cast`.
     #[pyo3(name = "try_cast")]
-    fn try_cast(&self, data_type: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
-        if let Ok(s) = data_type.extract::<String>() {
+    fn try_cast(&self, dataType: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
+        if let Ok(s) = dataType.extract::<String>() {
             Ok(PyColumn::new(self.column.clone().try_cast_str(&s)))
         } else {
-            let dt = crate::types::py_to_data_type(data_type)?;
+            let dt = crate::types::py_to_data_type(dataType)?;
             Ok(PyColumn::new(self.column.clone().try_cast(dt)))
         }
     }
@@ -133,8 +144,8 @@ impl PyColumn {
     }
 
     /// Substring extraction (start and length as columns).
-    fn substr(&self, start: &Bound<'_, PyAny>, length: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
-        let start_col = py_obj_to_column(start)?;
+    fn substr(&self, startPos: &Bound<'_, PyAny>, length: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
+        let start_col = py_obj_to_column(startPos)?;
         let length_col = py_obj_to_column(length)?;
         Ok(PyColumn::new(
             self.column.clone().substr(start_col, length_col),
@@ -142,13 +153,13 @@ impl PyColumn {
     }
 
     /// Pattern matching with LIKE.
-    fn like(&self, pattern: &str) -> PyColumn {
-        PyColumn::new(self.column.clone().like(pattern))
+    fn like(&self, other: &str) -> PyColumn {
+        PyColumn::new(self.column.clone().like(other))
     }
 
     /// Pattern matching with RLIKE (regex).
-    fn rlike(&self, pattern: &str) -> PyColumn {
-        PyColumn::new(self.column.clone().rlike(pattern))
+    fn rlike(&self, other: &str) -> PyColumn {
+        PyColumn::new(self.column.clone().rlike(other))
     }
 
     /// Check if contains another column value.
@@ -333,8 +344,8 @@ impl PyColumn {
     }
 
     /// Apply a window function over a window specification.
-    fn over(&self, window_spec: &crate::window::PyWindowSpec) -> PyColumn {
-        PyColumn::new(self.column.clone().over(window_spec.spec.clone()))
+    fn over(&self, window: &crate::window::PyWindowSpec) -> PyColumn {
+        PyColumn::new(self.column.clone().over(window.spec.clone()))
     }
 
     /// String representation, mirroring `pyspark.sql.connect.column.Column.__repr__`
@@ -418,9 +429,9 @@ impl PyColumn {
     }
 
     // --- named Column methods (PySpark camelCase) ---
-    fn between(&self, py: Python<'_>, lower: Py<PyAny>, upper: Py<PyAny>) -> PyResult<PyColumn> {
-        let l = to_column(&lower.bind(py))?;
-        let u = to_column(&upper.bind(py))?;
+    fn between(&self, py: Python<'_>, lowerBound: Py<PyAny>, upperBound: Py<PyAny>) -> PyResult<PyColumn> {
+        let l = to_column(&lowerBound.bind(py))?;
+        let u = to_column(&upperBound.bind(py))?;
         Ok(PyColumn::new(self.column.clone().between(l, u)))
     }
     #[pyo3(name = "bitwiseAND")]
@@ -438,8 +449,8 @@ impl PyColumn {
         let o = to_column(&other.bind(py))?;
         Ok(PyColumn::new(self.column.clone().bitwise_xor(o)))
     }
-    fn ilike(&self, pattern: &str) -> PyColumn {
-        PyColumn::new(self.column.clone().ilike(pattern))
+    fn ilike(&self, other: &str) -> PyColumn {
+        PyColumn::new(self.column.clone().ilike(other))
     }
     #[pyo3(name = "isNaN")]
     fn is_nan(&self) -> PyColumn {
@@ -475,9 +486,9 @@ impl PyColumn {
         Ok(PyColumn::new(self.column.clone().isin(vals)))
     }
     #[pyo3(name = "withField")]
-    fn with_field(&self, py: Python<'_>, field_name: &str, value: Py<PyAny>) -> PyResult<PyColumn> {
-        let v = to_column(&value.bind(py))?;
-        Ok(PyColumn::new(self.column.clone().with_field(field_name, v)))
+    fn with_field(&self, py: Python<'_>, fieldName: &str, col: Py<PyAny>) -> PyResult<PyColumn> {
+        let v = to_column(&col.bind(py))?;
+        Ok(PyColumn::new(self.column.clone().with_field(fieldName, v)))
     }
     #[pyo3(name = "dropFields", signature = (*field_names))]
     fn drop_fields(&self, field_names: Vec<String>) -> PyColumn {

@@ -2,7 +2,7 @@
 #
 # Exposes the Rust-backed Spark Connect client as a pure-Python package.
 
-__version__ = "0.1.0"
+from pyspark.version import __version__  # noqa: F401  (tracks the Spark version we target)
 
 from typing import Callable, TypeVar, Union
 

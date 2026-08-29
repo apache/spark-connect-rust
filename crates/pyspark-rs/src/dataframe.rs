@@ -151,8 +151,8 @@ impl PyDataFrame {
     }
 
     /// Add or replace a column.
-    fn withColumn(&self, name: &str, col: &PyColumn) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.with_column(name, col.column.clone()))
+    fn withColumn(&self, colName: &str, col: &PyColumn) -> PyDataFrame {
+        PyDataFrame::new(self.dataframe.with_column(colName, col.column.clone()))
     }
 
     /// Rename a column.
@@ -161,13 +161,15 @@ impl PyDataFrame {
     }
 
     /// Add or replace multiple columns from a {name: Column} mapping.
-    #[pyo3(name = "withColumns")]
-    fn with_columns(&self, cols: &Bound<'_, PyDict>) -> PyResult<PyDataFrame> {
-        let mut pairs = Vec::with_capacity(cols.len());
-        for (k, v) in cols.iter() {
-            let name: String = k.extract()?;
-            let pycol = v.extract::<PyRef<PyColumn>>()?;
-            pairs.push((name, pycol.column.clone()));
+    #[pyo3(name = "withColumns", signature = (*colsMap))]
+    fn with_columns(&self, colsMap: Vec<Bound<'_, PyDict>>) -> PyResult<PyDataFrame> {
+        let mut pairs = Vec::new();
+        for d in &colsMap {
+            for (k, v) in d.iter() {
+                let name: String = k.extract()?;
+                let pycol = v.extract::<PyRef<PyColumn>>()?;
+                pairs.push((name, pycol.column.clone()));
+            }
         }
         Ok(PyDataFrame::new(self.dataframe.with_columns(pairs)))
     }
@@ -193,13 +195,13 @@ impl PyDataFrame {
     }
 
     /// Limit the number of rows.
-    fn limit(&self, n: i32) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.limit(n))
+    fn limit(&self, num: i32) -> PyDataFrame {
+        PyDataFrame::new(self.dataframe.limit(num))
     }
 
     /// Skip the first n rows.
-    fn offset(&self, n: i32) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.offset(n))
+    fn offset(&self, num: i32) -> PyDataFrame {
+        PyDataFrame::new(self.dataframe.offset(num))
     }
 
     /// Remove duplicate rows.
@@ -395,16 +397,16 @@ impl PyDataFrame {
     /// first argument may instead be a Column/str - `df.repartition("country")` /
     /// `df.repartition(col("country"))` repartition by that column at the default
     /// partition count (no explicit number).
-    #[pyo3(signature = (num_partitions, *cols))]
+    #[pyo3(signature = (numPartitions, *cols))]
     fn repartition(
         &self,
         py: Python<'_>,
-        num_partitions: Bound<'_, PyAny>,
+        numPartitions: Bound<'_, PyAny>,
         cols: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         // First arg is an int -> a partition count; otherwise it's a partition column
         // (str/Column) and the count defaults to the server's (passed as 0 = unset).
-        if let Ok(n) = num_partitions.extract::<i32>() {
+        if let Ok(n) = numPartitions.extract::<i32>() {
             if cols.is_empty() {
                 return Ok(PyDataFrame::new(self.dataframe.repartition(n)));
             }
@@ -417,7 +419,7 @@ impl PyDataFrame {
             ))
         } else {
             // Column-first form: the first arg is itself a partition column.
-            let mut all = vec![num_partitions];
+            let mut all = vec![numPartitions];
             all.extend(cols);
             let _ = py;
             let exprs: Vec<_> = to_column_list(all)?
@@ -431,8 +433,8 @@ impl PyDataFrame {
     }
 
     /// Coalesce.
-    fn coalesce(&self, num_partitions: i32) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.coalesce(num_partitions))
+    fn coalesce(&self, numPartitions: i32) -> PyDataFrame {
+        PyDataFrame::new(self.dataframe.coalesce(numPartitions))
     }
 
     /// Convert to DataFrame with new column names.
@@ -443,8 +445,8 @@ impl PyDataFrame {
     }
 
     /// Alias this DataFrame.
-    fn alias(&self, name: &str) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.alias(name))
+    fn alias(&self, alias: &str) -> PyDataFrame {
+        PyDataFrame::new(self.dataframe.alias(alias))
     }
 
     /// Group by columns for aggregation.
@@ -472,9 +474,9 @@ impl PyDataFrame {
 
     /// Grouping sets aggregation: `groupingSets([[a, b], [a], []])`.
     #[pyo3(name = "groupingSets")]
-    fn grouping_sets(&self, sets: Vec<Vec<Bound<'_, PyAny>>>) -> PyResult<PyGroupedData> {
-        let mut out: Vec<Vec<spark_connect::column::Column>> = Vec::with_capacity(sets.len());
-        for s in sets {
+    fn grouping_sets(&self, groupingSets: Vec<Vec<Bound<'_, PyAny>>>) -> PyResult<PyGroupedData> {
+        let mut out: Vec<Vec<spark_connect::column::Column>> = Vec::with_capacity(groupingSets.len());
+        for s in groupingSets {
             out.push(to_column_list(s)?);
         }
         Ok(PyGroupedData::new(self.dataframe.grouping_sets(out)))
@@ -539,18 +541,18 @@ impl PyDataFrame {
     #[pyo3(name = "withColumnsRenamed")]
     fn with_columns_renamed(
         &self,
-        renames: std::collections::HashMap<String, String>,
+        colsMap: std::collections::HashMap<String, String>,
     ) -> PyDataFrame {
         PyDataFrame::new(
             self.dataframe
-                .with_columns_renamed(renames.into_iter().collect()),
+                .with_columns_renamed(colsMap.into_iter().collect()),
         )
     }
 
     /// Select columns whose names match a regex.
     #[pyo3(name = "colRegex")]
-    fn col_regex(&self, col_name: &str) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.col_regex(col_name))
+    fn col_regex(&self, colName: &str) -> PyDataFrame {
+        PyDataFrame::new(self.dataframe.col_regex(colName))
     }
 
     /// Basic statistics for the given columns (count/mean/stddev/min/max).
@@ -685,13 +687,13 @@ impl PyDataFrame {
         py: Python<'_>,
         col: &str,
         probabilities: Vec<f64>,
-        relative_error: f64,
+        relativeError: f64,
     ) -> PyResult<Vec<f64>> {
         use spark_connect::row::Value;
         let df = self
             .dataframe
             .stat()
-            .approx_quantile(vec![col], probabilities, relative_error);
+            .approx_quantile(vec![col], probabilities, relativeError);
         let rows = py.detach(|| df.collect()).to_pyerr()?;
         let quantiles = match rows.first().and_then(|r| r.get(0)) {
             Some(Value::List(outer)) => match outer.first() {
@@ -1132,11 +1134,16 @@ impl PyDataFrame {
     }
 
     /// Show the first n rows.
-    fn show(&self, py: Python<'_>, n: usize) -> PyResult<()> {
+    #[pyo3(signature = (n=20, truncate=true, vertical=false))]
+    fn show(&self, py: Python<'_>, n: usize, truncate: bool, vertical: bool) -> PyResult<()> {
+        // truncate/vertical are accepted for PySpark signature parity; the Rust core
+        // currently renders with its default formatting.
+        let _ = (truncate, vertical);
         py.detach(|| self.dataframe.show(n)).to_pyerr()
     }
 
     /// Execution metrics from the most recent action. Mirrors `DataFrame.executionInfo`.
+    #[getter]
     #[pyo3(name = "executionInfo")]
     fn execution_info(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let info = self.dataframe.execution_info().to_pyerr()?;
@@ -1213,8 +1220,8 @@ impl PyDataFrame {
     }
 
     /// Get the first n rows.
-    fn take(&self, py: Python<'_>, n: usize) -> PyResult<Vec<PyRow>> {
-        let rows = py.detach(|| self.dataframe.take(n)).to_pyerr()?;
+    fn take(&self, py: Python<'_>, num: usize) -> PyResult<Vec<PyRow>> {
+        let rows = py.detach(|| self.dataframe.take(num)).to_pyerr()?;
         Ok(rows.into_iter().map(PyRow::new).collect())
     }
 
@@ -1287,6 +1294,7 @@ impl PyDataFrame {
     }
 
     /// Get the schema as a list of (name, type) tuples.
+    #[getter]
     fn dtypes(&self) -> PyResult<Vec<(String, String)>> {
         let schema = self.dataframe.schema().to_pyerr()?;
         match schema {
@@ -1318,9 +1326,9 @@ impl PyDataFrame {
 
     /// The V2 writer interface (`df.writeTo("table")`).
     #[pyo3(name = "writeTo")]
-    fn write_to(&self, table_name: &str) -> PyDataFrameWriterV2 {
+    fn write_to(&self, table: &str) -> PyDataFrameWriterV2 {
         PyDataFrameWriterV2 {
-            inner: Some(self.dataframe.write_to(table_name)),
+            inner: Some(self.dataframe.write_to(table)),
         }
     }
 
@@ -1407,43 +1415,43 @@ impl PyDataFrame {
 
     /// `DataFrame.foreach` — run a function per row for side effects.
     #[pyo3(name = "foreach")]
-    fn foreach(&self, py: Python<'_>, func: Bound<'_, PyAny>) -> PyResult<()> {
-        let udf = build_side_effect_udf(py, "foreach", &func)?;
+    fn foreach(&self, py: Python<'_>, f: Bound<'_, PyAny>) -> PyResult<()> {
+        let udf = build_side_effect_udf(py, "foreach", &f)?;
         self.dataframe.foreach(udf).to_pyerr()
     }
 
     /// `DataFrame.foreachPartition` — run a function per partition for side effects.
     #[pyo3(name = "foreachPartition")]
-    fn foreach_partition(&self, py: Python<'_>, func: Bound<'_, PyAny>) -> PyResult<()> {
-        let udf = build_side_effect_udf(py, "foreachPartition", &func)?;
+    fn foreach_partition(&self, py: Python<'_>, f: Bound<'_, PyAny>) -> PyResult<()> {
+        let udf = build_side_effect_udf(py, "foreachPartition", &f)?;
         self.dataframe.foreach_partition(udf).to_pyerr()
     }
 
     /// `DataFrame.nearestByJoin`.
-    #[pyo3(name = "nearestByJoin", signature = (other, ranking_expression, num_results = 1, mode = "brute", direction = "asc", join_type = "inner"))]
+    #[pyo3(name = "nearestByJoin", signature = (other, rankingExpression, numResults = 1, mode = "brute", direction = "asc", joinType = "inner"))]
     fn nearest_by_join(
         &self,
         other: &PyDataFrame,
-        ranking_expression: &PyColumn,
-        num_results: i32,
+        rankingExpression: &PyColumn,
+        numResults: i32,
         mode: &str,
         direction: &str,
-        join_type: &str,
+        joinType: &str,
     ) -> PyDataFrame {
         PyDataFrame::new(self.dataframe.nearest_by_join(
             &other.dataframe,
-            ranking_expression.column.clone(),
-            num_results,
+            rankingExpression.column.clone(),
+            numResults,
             mode,
             direction,
-            join_type,
+            joinType,
         ))
     }
 
     /// `DataFrame.metadataColumn`.
     #[pyo3(name = "metadataColumn")]
-    fn metadata_column(&self, name: &str) -> PyColumn {
-        PyColumn::new(self.dataframe.metadata_column(name))
+    fn metadata_column(&self, colName: &str) -> PyColumn {
+        PyColumn::new(self.dataframe.metadata_column(colName))
     }
 }
 
