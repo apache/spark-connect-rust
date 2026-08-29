@@ -2449,3 +2449,42 @@ def test_show_has_no_required_args_and_defaults_n_to_20():
 )
 def test_keyword_param_names_match_pyspark(cls, method, param):
     assert param in inspect.signature(getattr(cls, method)).parameters
+
+
+# --- SPARK-XXXXX: string function args are column names (ColumnOrName parity) ---
+def test_fn_col_args_spec_classification():
+    from pyspark.sql import functions as F
+    spec = F._FN_COL_ARGS
+    # literal-param functions: only the listed positions are columns
+    assert spec["date_format"] == ((0,), None)
+    assert spec["regexp_replace"] == ((0,), None)
+    assert spec["split"] == ((0, 2), None)
+    assert spec["substring_index"] == ((0,), None)
+    assert spec["concat_ws"] == ((), 1)          # sep literal, *cols variadic columns
+    assert spec["current_date"] == ((), None)     # no column args
+    # pure-column functions are absent -> default: every arg is a column
+    for name in ("sqrt", "upper", "abs", "mean", "struct", "array", "coalesce"):
+        assert name not in spec, name
+
+
+def test_to_col_coerces_str_to_column():
+    from pyspark.sql import functions as F
+    col_cls = type(F.col("x"))
+    # a bare str resolves to a Column via col()
+    assert isinstance(F._to_col("x"), col_cls)
+    # an existing Column passes through unchanged
+    c = F.col("y")
+    assert F._to_col(c) is c
+
+
+def test_generated_fn_accepts_str_column_name():
+    from pyspark.sql import functions as F
+    col_cls = type(F.col("x"))
+    # string-name and Column forms build identical column expressions (lazy, no server)
+    for build in (lambda a: F.sqrt(a), lambda a: F.upper(a), lambda a: F.abs(a)):
+        assert isinstance(build("v"), col_cls)
+        assert repr(build("v")) == repr(build(F.col("v")))
+    # multi-col string args reference columns
+    assert repr(F.struct("id", "g")) == repr(F.struct(F.col("id"), F.col("g")))
+    # literal-position args stay literal (date_format format, regexp pattern)
+    assert "yyyy" in repr(F.date_format(F.col("d"), "yyyy"))

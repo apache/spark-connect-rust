@@ -781,9 +781,15 @@ pub fn collect_set(col1: Column) -> Column {
     func("collect_set", vec![col1.expression().clone()])
 }
 
-/// Mirrors `pyspark.sql.functions.concat_ws`.
-pub fn concat_ws(col1: Column) -> Column {
-    func("concat_ws", vec![col1.expression().clone()])
+/// Mirrors `pyspark.sql.functions.concat_ws(sep, *cols)`: the separator literal
+/// followed by a variadic number of columns. Variadic like `concat` so extra
+/// columns are not dropped.
+pub fn concat_ws<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
+    func(
+        "concat_ws",
+        cols.iter().map(|c| c.expression().clone()).collect(),
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.cos`.
@@ -929,9 +935,15 @@ pub fn floor_scale(col1: Column, scale: Column) -> Column {
     )
 }
 
-/// Mirrors `pyspark.sql.functions.format_string`.
-pub fn format_string(col1: Column) -> Column {
-    func("format_string", vec![col1.expression().clone()])
+/// Mirrors `pyspark.sql.functions.format_string(format, *cols)`: the format
+/// literal followed by a variadic number of columns. Variadic like `concat` so
+/// extra columns are not dropped.
+pub fn format_string<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
+    func(
+        "format_string",
+        cols.iter().map(|c| c.expression().clone()).collect(),
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.from_unixtime`.

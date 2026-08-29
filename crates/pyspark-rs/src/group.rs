@@ -21,9 +21,33 @@ impl PyGroupedData {
 
 #[pymethods]
 impl PyGroupedData {
-    /// Aggregate with expressions (accepts Column objects).
+    /// Aggregate with expressions (accepts Column objects), or the dict form
+    /// `agg({"col": "aggfunc"})` (PySpark parity), e.g. `agg({"age": "max"})`.
     #[pyo3(signature = (*cols))]
     fn agg(&self, _py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        // Dict form: {column_name: aggregate_function_name} -> func(col(name)) per entry.
+        if cols.len() == 1 {
+            if let Ok(dict) = cols[0].cast::<pyo3::types::PyDict>() {
+                let mut exprs = vec![];
+                for (k, v) in dict.iter() {
+                    let col_name: String = k.extract()?;
+                    let func_name: String = v.extract()?;
+                    let c = spark_connect::functions::col(&col_name);
+                    // Build func(col) as an unresolved function resolved server-side, so
+                    // aggregate names (max/min/sum/avg/count/...) all work regardless of
+                    // whether they are in the generated dispatch.
+                    let agg_expr = spark_connect::expression::Expression::UnresolvedFunction(
+                        spark_connect::expression::UnresolvedFunction::new(
+                            func_name,
+                            vec![c.expression().clone()],
+                        ),
+                    );
+                    exprs.push(agg_expr);
+                }
+                let df = self.grouped_data.agg(exprs);
+                return Ok(PyDataFrame::new(df));
+            }
+        }
         let mut exprs = vec![];
         for col in cols {
             let rust_col = to_column(&col)?;
