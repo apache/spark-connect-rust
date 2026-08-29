@@ -76,6 +76,14 @@ the Rust and Python sides, no stubs, green CI.
   This keeps connect-rust work in its own release notes instead of leaking into
   core Spark's. `dev/create_spark_jira.py` and `dev/merge_connect_rust_pr.py`
   already follow this; keep it consistent when editing tickets by hand.
+- **Release umbrella JIRA: one Epic per `connect-rust-x.y.z` release.** Each
+  release is tracked by an umbrella Epic titled `spark-connect-rust
+  connect-rust-x.y.z release` (e.g. `SPARK-59035` for `connect-rust-4.2.0`,
+  `SPARK-59102` for `connect-rust-4.3.0`), with *Affects Version/s* = the prior
+  release and *Fix Version/s* = this release. Attach every JIRA that ships in the
+  release to it with an **`is part of` (Incorporates) issue link** — the umbrella
+  `incorporates` the child, the child `is part of` the umbrella — **not** the
+  Epic Link field. Use only that one mechanism so the two never drift apart.
 
 ## 1. Environment setup
 
