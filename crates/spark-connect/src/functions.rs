@@ -1047,7 +1047,13 @@ pub fn kurtosis(col1: Column) -> Column {
 /// Mirrors `pyspark.sql.functions.lag`.
 pub fn lag<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
     let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
-    func("lag", cols.iter().map(|c| c.expression().clone()).collect())
+    let mut args: Vec<Expression> = cols.iter().map(|c| c.expression().clone()).collect();
+    // PySpark's lag(col) defaults the offset to 1 (lag(col, 1)); append it only for the
+    // bare single-column form -- callers passing offset/default already include them.
+    if args.len() == 1 {
+        args.push(lit_int(1));
+    }
+    func("lag", args)
 }
 
 /// Mirrors `pyspark.sql.functions.last`.
@@ -1073,10 +1079,13 @@ pub fn lcase(col1: Column) -> Column {
 /// Mirrors `pyspark.sql.functions.lead`.
 pub fn lead<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
     let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
-    func(
-        "lead",
-        cols.iter().map(|c| c.expression().clone()).collect(),
-    )
+    let mut args: Vec<Expression> = cols.iter().map(|c| c.expression().clone()).collect();
+    // PySpark's lead(col) defaults the offset to 1; append it only for the bare
+    // single-column form -- callers passing offset/default already include them.
+    if args.len() == 1 {
+        args.push(lit_int(1));
+    }
+    func("lead", args)
 }
 
 /// Mirrors `pyspark.sql.functions.length`.
