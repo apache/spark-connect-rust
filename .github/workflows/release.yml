@@ -42,24 +42,31 @@
 #   * Cut an RC (release-version + rc-count, finalize=false): build the wheels +
 #     sdist -- versioned as the FINAL release-version, since the RC number lives
 #     only in the tag/release name, never in the artifact version -- then
-#     auto-create and push the tag `v<version>-rc<rc>` to this fork and attach the
-#     artifacts to a GitHub *pre-release* of that tag. crates.io/PyPI are NOT
-#     touched, so an RC stays fully deletable.
+#     auto-create and push the tag `v<version>-rc<rc>` to the canonical apache repo
+#     and attach the artifacts to a GitHub *pre-release* of that tag. crates.io/PyPI
+#     are NOT touched, so an RC stays fully deletable.
 #
 #   * Finalize (finalize=true, naming an existing RC): check out the RC tag,
 #     `twine upload` the EXACT wheels+sdist from that RC's GitHub pre-release to
 #     PyPI, `cargo publish` the identical source to crates.io, push a permanent
 #     `v<version>` git tag marking the released commit, then delete every
-#     `v<version>-rc*` GitHub pre-release (and its tag) from this fork. GitHub
+#     `v<version>-rc*` GitHub pre-release (and its tag) from the apache repo. GitHub
 #     Releases are only RC staging; the official release lives on PyPI + crates.io,
-#     marked in git by the immutable `v<version>` tag.
+#     marked in git by the immutable `v<version>` tag on the apache repo.
 #
-# Required fork secrets for a real run: CARGO_REGISTRY_TOKEN (crates.io) and
-# PYPI_API_TOKEN (PyPI). Without them, only dry runs work. The default GITHUB_TOKEN
-# creates/deletes the RC tags and GitHub Releases on the fork.
+# The workflow RUNS in a committer's fork, but all tags and GitHub Releases land on
+# the canonical apache repo (never the fork). Required fork secrets for a real run:
+#   - CARGO_REGISTRY_TOKEN  crates.io publish
+#   - PYPI_API_TOKEN        PyPI publish
+#   - RELEASE_GITHUB_TOKEN  a Personal Access Token with write (contents) access to
+#                           apache/spark-connect-rust, used to push the tags and
+#                           create/delete the GitHub Releases there. The built-in
+#                           GITHUB_TOKEN can only write to the fork, so it is NOT used
+#                           for these; it is read-only here.
+# Without these secrets, only dry runs work.
 #
 # To drop an RC without finalizing: delete its GitHub pre-release and the
-# `v<version>-rc<n>` tag from the fork (nothing was published to PyPI/crates.io).
+# `v<version>-rc<n>` tag from the apache repo (nothing was published to PyPI/crates.io).
 
 name: Release
 
@@ -350,7 +357,9 @@ jobs:
     if: needs.resolve.outputs.mode == 'rc'
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # push the RC tag + create the GitHub Release on the fork
+      # The tag push + GitHub Release go to the canonical apache repo via
+      # RELEASE_GITHUB_TOKEN; the built-in token only needs read (checkout/artifacts).
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -362,9 +371,9 @@ jobs:
           pattern: wheels-*
           path: dist
           merge-multiple: true
-      - name: Create and push the RC tag to this fork
+      - name: Create and push the RC tag to the canonical apache repo
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_GITHUB_TOKEN }}
           TAG: ${{ needs.resolve.outputs.rc_tag }}
           VERSION: ${{ needs.resolve.outputs.version }}
         run: |
@@ -376,12 +385,13 @@ jobs:
           else
             git tag -a "${TAG}" -m "Release candidate ${TAG} of pyspark-client-rust ${VERSION}"
           fi
-          # Push the RC tag (and the objects it reaches) to THIS fork, so the GitHub
-          # pre-release below can hang off it. Force so re-cutting the same RC is idempotent.
-          git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "refs/tags/${TAG}"
+          # Push the RC tag (and the objects it reaches) to the canonical apache repo,
+          # so the GitHub pre-release below can hang off it. Force so re-cutting the same
+          # RC is idempotent.
+          git push --force "https://x-access-token:${GH_TOKEN}@github.com/${UPSTREAM_REPO}.git" "refs/tags/${TAG}"
       - name: Create the GitHub pre-release with the artifacts
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_GITHUB_TOKEN }}
           TAG: ${{ needs.resolve.outputs.rc_tag }}
           VERSION: ${{ needs.resolve.outputs.version }}
         run: |
@@ -389,10 +399,10 @@ jobs:
           ls -l dist
           NOTES="Release candidate ${TAG} of pyspark-client-rust ${VERSION}."$'\n\n'"> Not published to PyPI or crates.io. Install directly from a wheel/sdist asset below, e.g. \`pip install <asset-url>\`. This pre-release is deleted when the RC is finalized (or dropped)."
           # Idempotent: a re-run updates the existing release and clobbers its assets.
-          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release upload "${TAG}" dist/* --repo "${GITHUB_REPOSITORY}" --clobber
+          if gh release view "${TAG}" --repo "${UPSTREAM_REPO}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" dist/* --repo "${UPSTREAM_REPO}" --clobber
           else
-            gh release create "${TAG}" dist/* --repo "${GITHUB_REPOSITORY}" \
+            gh release create "${TAG}" dist/* --repo "${UPSTREAM_REPO}" \
               --prerelease --title "${TAG}" --notes "${NOTES}"
           fi
 
@@ -403,7 +413,9 @@ jobs:
     if: needs.resolve.outputs.mode == 'finalize'
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # delete the RC pre-releases + tags on the fork
+      # All writes (permanent tag push, RC pre-release/tag deletion) go to the
+      # canonical apache repo via RELEASE_GITHUB_TOKEN; the built-in token only reads.
+      contents: read
     steps:
       - name: Abort window
         run: |
@@ -416,19 +428,19 @@ jobs:
           sleep 60
       - name: Verify the RC pre-release exists
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_GITHUB_TOKEN }}
           TAG: ${{ needs.resolve.outputs.rc_tag }}
         run: |
           set -euo pipefail
-          if ! gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            echo "::error::RC GitHub pre-release ${TAG} not found on ${GITHUB_REPOSITORY}. Cut the RC first."
+          if ! gh release view "${TAG}" --repo "${UPSTREAM_REPO}" >/dev/null 2>&1; then
+            echo "::error::RC GitHub pre-release ${TAG} not found on ${UPSTREAM_REPO}. Cut the RC first."
             exit 1
           fi
       - name: Check out the RC tag (the exact released source)
         uses: actions/checkout@v4
         with:
-          # The RC tag lives on the fork where the RC was cut (this repository).
-          repository: ${{ github.repository }}
+          # The RC tag lives on the canonical apache repo, where the RC was cut.
+          repository: ${{ env.UPSTREAM_REPO }}
           ref: ${{ needs.resolve.outputs.rc_tag }}
           fetch-depth: 0
       - name: Validate the RC source versions
@@ -457,12 +469,12 @@ jobs:
           python-version: "3.11"
       - name: Download the RC artifacts (the exact tested wheels + sdist)
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_GITHUB_TOKEN }}
           TAG: ${{ needs.resolve.outputs.rc_tag }}
         run: |
           set -euo pipefail
           mkdir -p dist
-          gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" --dir dist --pattern '*'
+          gh release download "${TAG}" --repo "${UPSTREAM_REPO}" --dir dist --pattern '*'
           ls -l dist
       - name: Publish wheels + sdist to PyPI
         env:
@@ -504,14 +516,14 @@ jobs:
           fi
       - name: Tag the released commit with the permanent v<version> tag
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_GITHUB_TOKEN }}
           TAG: v${{ needs.resolve.outputs.version }}
           VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           set -euo pipefail
           git config user.name "${{ github.actor }}"
           git config user.email "${{ github.actor }}@users.noreply.github.com"
-          URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          URL="https://x-access-token:${GH_TOKEN}@github.com/${UPSTREAM_REPO}.git"
           # HEAD is the RC tag's commit (the exact released source), checked out above.
           LOCAL_SHA=$(git rev-parse HEAD)
           if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
@@ -533,31 +545,31 @@ jobs:
             if [ "${REMOTE_SHA}" = "${LOCAL_SHA}" ]; then
               echo "Release tag ${TAG} already points at ${LOCAL_SHA}; nothing to do."
             else
-              echo "::error::Release tag ${TAG} already exists on ${GITHUB_REPOSITORY} at ${REMOTE_SHA}, but the release commit is ${LOCAL_SHA}. Refusing to move an immutable release tag."
+              echo "::error::Release tag ${TAG} already exists on ${UPSTREAM_REPO} at ${REMOTE_SHA}, but the release commit is ${LOCAL_SHA}. Refusing to move an immutable release tag."
               exit 1
             fi
           fi
 
       - name: Remove all RC GitHub pre-releases + tags for this version
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_GITHUB_TOKEN }}
           VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           set -euo pipefail
           # Every v<version>-rcN pre-release is RC staging; the official release now lives
-          # on PyPI + crates.io, so delete them all (and their tags) from this fork.
+          # on PyPI + crates.io, so delete them all (and their tags) from the apache repo.
           # Escape dots: grep -E treats '.' as any char, so an unescaped 4.2.0 would also
           # match tags like v4x2x0-rcN.
           ESC_V="${VERSION//./\\.}"
           # Fetch the tag list in its own command so a `gh` failure (rate limit/network)
           # aborts loudly under `set -e`, instead of being swallowed by the `|| true` that
           # is only meant to absorb grep's "no match" exit code.
-          ALL_TAGS=$(gh release list --repo "${GITHUB_REPOSITORY}" --limit 200 --json tagName --jq '.[].tagName')
+          ALL_TAGS=$(gh release list --repo "${UPSTREAM_REPO}" --limit 200 --json tagName --jq '.[].tagName')
           mapfile -t RCS < <(printf '%s\n' "${ALL_TAGS}" | grep -E "^v${ESC_V}-rc[0-9]+$" || true)
           if [ "${#RCS[@]}" -eq 0 ]; then
             echo "No v${VERSION}-rc* GitHub releases to remove."
           fi
           for t in "${RCS[@]}"; do
             echo "Deleting RC release + tag ${t}"
-            gh release delete "${t}" --repo "${GITHUB_REPOSITORY}" --cleanup-tag --yes
+            gh release delete "${t}" --repo "${UPSTREAM_REPO}" --cleanup-tag --yes
           done
