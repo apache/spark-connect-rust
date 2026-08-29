@@ -15,51 +15,216 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Verify that directories vendored verbatim from Apache Spark match the pinned
-# upstream tag. These are pure upstream copies (brought in via `git subtree` from
-# the SPARK_TAG below) with no fork-specific edits, so any difference means either
-# an accidental local edit or an upstream bump that needs re-vendoring. Fails CI on
-# drift.
+# Verify that files/directories vendored verbatim from Apache Spark match the pinned
+# upstream tag. These are pure upstream copies with no fork-specific edits, so any
+# difference means either an accidental local edit or an upstream bump that needs
+# re-vendoring. Fails CI on drift.
 #
-# Extend VENDORED_PATHS (paths under python/pyspark) as more dirs are vendored.
-# Do NOT list Rust-backed shims here (anything importing `pyspark._pyspark`) — those
-# intentionally differ from upstream.
+# Extend VENDORED_DIRS (whole byte-identical trees) or VENDORED_FILES (individual
+# byte-identical files whose sibling files are fork-adapted) as more is vendored.
+# Do NOT list Rust-backed shims here (anything importing `pyspark._pyspark`), nor
+# fork-adapted files (e.g. pipelines/api.py) — those intentionally differ from upstream.
 set -euo pipefail
 
 SPARK_TAG="v4.2.0"
 SPARK_REPO="https://github.com/apache/spark.git"
 
-# Paths under python/pyspark that are vendored verbatim from upstream v4.2.0.
-VENDORED_PATHS=(
+# Directories under python/pyspark vendored verbatim from upstream (whole tree byte-identical).
+VENDORED_DIRS=(
   "cloudpickle"
+  "pandas/data_type_ops"
+  "pandas/indexes"
+  "pandas/missing"
+  "pandas/plot"
+  "pandas/spark"
+  "pandas/typedef"
+  "pandas/usage_logging"
+  "mllib/linalg"
+  "sql/worker"
+  "sql/plot"
+  "testing/tests"
+)
+
+# Individual files under python/pyspark vendored verbatim from upstream. Listed per-file
+# (not per-dir) because their parent dirs also hold fork-adapted files that intentionally
+# differ (e.g. pipelines/api.py's connect->functions import repointing, and the Rust-backed
+# errors/exceptions/__init__.py; upstream's errors/exceptions/{captured,connect}.py are
+# omitted here as they need py4j/grpc). Keep these byte-identical to the tag.
+VENDORED_FILES=(
+  # Logging
+  "logger/__init__.py"
+  "logger/logger.py"
+  "logger/worker_io.py"
+
+  # Errors
+  "errors/__init__.py"
+  "errors/error_classes.py"
+  "errors/error-conditions.json"
+  "errors/utils.py"
+  "errors/exceptions/base.py"
+  "errors/exceptions/tblib.py"
+
+  # Pipelines
+  "pipelines/__init__.py"
+  "pipelines/flow.py"
+  "pipelines/output.py"
+  "pipelines/source_code_location.py"
+  "pipelines/graph_element_registry.py"
+  "pipelines/type_error_utils.py"
+  "pipelines/logging_utils.py"
+  "pipelines/tests/__init__.py"
+  "pipelines/tests/local_graph_element_registry.py"
+  "pipelines/tests/test_decorators.py"
+  "pipelines/tests/test_graph_element_registry.py"
+
+  # Top-level modules
+  "accumulators.py"
+  "memory_profiler_ext.py"
+  "profiler.py"
+  "worker_util.py"
+  "instrumentation_utils.py"
+
+  # ML: core utilities
+  "ml/common.py"
+  "ml/dl_util.py"
+  "ml/util.py"
+
+  # ML: param (param API is unmodified)
+  "ml/param/__init__.py"
+  "ml/param/_shared_params_code_gen.py"
+  "ml/param/shared.py"
+
+  # ML: torch (excluding fork-adapted spark_connect_* shims)
+  "ml/torch/__init__.py"
+  "ml/torch/data.py"
+  "ml/torch/distributor.py"
+  "ml/torch/log_communication.py"
+  "ml/torch/torch_run_process_wrapper.py"
+
+  # ML: deepspeed (excluding fork-adapted spark_connect_* shims)
+  "ml/deepspeed/__init__.py"
+  "ml/deepspeed/deepspeed_distributor.py"
+
+  # MLlib (stat dir handled separately due to adapted __init__.py)
+  "mllib/__init__.py"
+  "mllib/classification.py"
+  "mllib/clustering.py"
+  "mllib/common.py"
+  "mllib/evaluation.py"
+  "mllib/feature.py"
+  "mllib/fpm.py"
+  "mllib/random.py"
+  "mllib/recommendation.py"
+  "mllib/regression.py"
+  "mllib/stat/_statistics.py"
+  "mllib/stat/distribution.py"
+  "mllib/stat/KernelDensity.py"
+  "mllib/stat/test.py"
+  "mllib/tree.py"
+  "mllib/util.py"
+
+  # Pandas: core (excluding adapted group_ops, functions, and Connect-specific modules)
+  "pandas/__init__.py"
+  "pandas/_typing.py"
+  "pandas/accessors.py"
+  "pandas/base.py"
+  "pandas/categorical.py"
+  "pandas/config.py"
+  "pandas/correlation.py"
+  "pandas/datetimes.py"
+  "pandas/exceptions.py"
+  "pandas/extensions.py"
+  "pandas/frame.py"
+  "pandas/generic.py"
+  "pandas/groupby.py"
+  "pandas/indexing.py"
+  "pandas/internal.py"
+  "pandas/mlflow.py"
+  "pandas/namespace.py"
+  "pandas/numpy_compat.py"
+  "pandas/resample.py"
+  "pandas/series.py"
+  "pandas/sql_formatter.py"
+  "pandas/sql_processor.py"
+  "pandas/strings.py"
+  "pandas/supported_api_gen.py"
+  "pandas/testing.py"
+  "pandas/utils.py"
+  "pandas/window.py"
+
+  # SQL: pandas (excluding adapted group_ops, functions)
+  "sql/pandas/__init__.py"
+  "sql/pandas/conversion.py"
+  "sql/pandas/map_ops.py"
+  "sql/pandas/serializers.py"
+  "sql/pandas/typehints.py"
+  "sql/pandas/types.py"
+  "sql/pandas/utils.py"
+
+  # SQL: core utilities
+  "sql/variant_utils.py"
+  "sql/conversion.py"
+  "sql/datasource_internal.py"
+  "sql/internal.py"
+  "sql/profiler.py"
+
+  # Streaming (excluding adapted context, dstream, util)
+  "streaming/__init__.py"
+  "streaming/kinesis.py"
+  "streaming/listener.py"
+
+  # Testing utilities (excluding adapted connectutils, sqlutils, __init__)
+  "testing/goldenutils.py"
+  "testing/mllibutils.py"
+  "testing/mlutils.py"
+  "testing/objects.py"
+  "testing/pandasutils.py"
+  "testing/streamingutils.py"
+  "testing/unittestutils.py"
+  "testing/utils.py"
 )
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# Sparse-checkout the dirs + the parent dirs of the individual files (cone mode operates on
+# directories, so a file path alone would not materialize).
+sparse_paths=("${VENDORED_DIRS[@]}")
+for f in "${VENDORED_FILES[@]}"; do
+  sparse_paths+=("$(dirname "${f}")")
+done
+
 echo "Fetching Apache Spark ${SPARK_TAG} (sparse, blobless) ..."
 git clone --quiet --depth 1 --branch "${SPARK_TAG}" --filter=blob:none --sparse \
   "${SPARK_REPO}" "${WORK}/spark"
 ( cd "${WORK}/spark" && git sparse-checkout set \
-    "${VENDORED_PATHS[@]/#/python/pyspark/}" >/dev/null )
+    "${sparse_paths[@]/#/python/pyspark/}" >/dev/null )
 
 status=0
-for p in "${VENDORED_PATHS[@]}"; do
-  ours="${REPO_ROOT}/python/pyspark/${p}"
-  theirs="${WORK}/spark/python/pyspark/${p}"
+check_one() {
+  local p="$1" flag="$2"
+  local ours="${REPO_ROOT}/python/pyspark/${p}"
+  local theirs="${WORK}/spark/python/pyspark/${p}"
   if [[ ! -e "${theirs}" ]]; then
     echo "ERROR: upstream path python/pyspark/${p} not found at ${SPARK_TAG}"
     status=1
-    continue
+    return
   fi
-  if diff -r --exclude=__pycache__ "${ours}" "${theirs}" >/dev/null; then
+  if diff ${flag} --exclude=__pycache__ "${ours}" "${theirs}" >/dev/null; then
     echo "OK    python/pyspark/${p} matches Apache Spark ${SPARK_TAG}"
   else
     echo "DRIFT python/pyspark/${p} differs from Apache Spark ${SPARK_TAG}:"
-    diff -r --exclude=__pycache__ "${ours}" "${theirs}" || true
+    diff ${flag} --exclude=__pycache__ "${ours}" "${theirs}" || true
     status=1
   fi
+}
+
+for p in "${VENDORED_DIRS[@]}"; do
+  check_one "${p}" "-r"
+done
+for p in "${VENDORED_FILES[@]}"; do
+  check_one "${p}" ""
 done
 
 if [[ "${status}" -ne 0 ]]; then

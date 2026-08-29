@@ -30,7 +30,7 @@ use spark_connect::{col, lit};
 
 let result = df
     .filter(col("value").gt(lit(10)))
-    .select(vec![col("timestamp"), col("value")])
+    .select([col("timestamp"), col("value")])
     .write_stream()
     .format("console")
     .start("")?;

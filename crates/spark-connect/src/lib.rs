@@ -16,6 +16,7 @@ pub mod group;
 pub mod merge;
 pub mod ml;
 pub mod observation;
+pub mod pipelines;
 pub mod plan;
 pub mod profiler;
 pub mod readwriter;

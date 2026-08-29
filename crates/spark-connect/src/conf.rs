@@ -62,6 +62,14 @@ impl RuntimeConf {
         Ok(results.into_iter().next().flatten())
     }
 
+    /// Get a configuration value, returning `default` when the key is unset — instead of
+    /// erroring as `get` does for an unknown key. Uses the server's `GetWithDefault`
+    /// operation, mirroring `RuntimeConfig.get(key, default)`.
+    pub fn get_with_default(&self, key: &str, default: Option<&str>) -> Result<Option<String>> {
+        let results = block_on(self.client.get_config_with_defaults(&[(key, default)]))?;
+        Ok(results.into_iter().next().flatten())
+    }
+
     /// Get all configuration values as a HashMap.
     ///
     /// # Example

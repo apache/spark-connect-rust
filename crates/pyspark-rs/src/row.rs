@@ -77,6 +77,16 @@ pub fn value_to_py<'py>(py: Python<'py>, v: &Value) -> PyResult<Bound<'py, PyAny
             }
             dict.into_any()
         }
+        Value::Variant { value, metadata } => {
+            // A VARIANT materializes as a VariantVal (toJson/toPython decode lazily),
+            // matching pyspark, rather than a raw {value, metadata} dict.
+            Py::new(
+                py,
+                crate::values::PyVariantVal::from_parts(value.clone(), metadata.clone()),
+            )?
+            .into_bound(py)
+            .into_any()
+        }
     })
 }
 
@@ -119,6 +129,17 @@ impl PyRow {
         self.row.len()
     }
 
+    /// `x in row` — membership over the row's values (pyspark `Row` subclasses `tuple`,
+    /// so `value in row` tests the values). Compares with Python equality.
+    fn __contains__(&self, py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<bool> {
+        for v in self.row.values() {
+            if value_to_py(py, v)?.eq(item)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Index (int, supports negative) or field-name (str) access. Raises
     /// IndexError / KeyError like pyspark so the Row is a proper sequence.
     fn __getitem__<'py>(
@@ -153,7 +174,9 @@ impl PyRow {
         }
     }
 
-    /// Field names, in order.
+    /// Field names, in order. A list ATTRIBUTE (pyspark's `Row.__fields__` is a list, not a
+    /// method), so `list(row.__fields__)` and `row.__fields__` work as in the reference.
+    #[getter]
     fn __fields__(&self) -> Vec<String> {
         self.row.fields().to_vec()
     }
@@ -176,5 +199,48 @@ impl PyRow {
 
     fn __eq__(&self, other: &PyRow) -> bool {
         self.row == other.row
+    }
+
+    /// Number of occurrences of `value` among the row's values (tuple.count).
+    fn count(&self, py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<usize> {
+        let mut n = 0;
+        for v in self.row.values() {
+            if value_to_py(py, v)?.eq(value)? {
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
+    /// Index of the first occurrence of `value` (tuple.index); raises ValueError if
+    /// not found. `start`/`stop` bound the search, with Python's negative-index rules.
+    #[pyo3(signature = (value, start=0, stop=None))]
+    fn index(
+        &self,
+        py: Python<'_>,
+        value: &Bound<'_, PyAny>,
+        start: isize,
+        stop: Option<isize>,
+    ) -> PyResult<usize> {
+        let len = self.row.len() as isize;
+        let norm = |i: isize| -> isize {
+            if i < 0 {
+                (len + i).max(0)
+            } else {
+                i.min(len)
+            }
+        };
+        let lo = norm(start);
+        let hi = stop.map(norm).unwrap_or(len);
+        let mut i = lo;
+        while i < hi {
+            if value_to_py(py, self.row.get(i as usize).unwrap())?.eq(value)? {
+                return Ok(i as usize);
+            }
+            i += 1;
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "tuple.index(x): x not in tuple",
+        ))
     }
 }

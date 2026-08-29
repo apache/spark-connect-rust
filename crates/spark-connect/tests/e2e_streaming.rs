@@ -107,3 +107,64 @@ fn streaming_available_now_to_table() {
         .sql("DROP TABLE IF EXISTS e2e_stream_tbl")
         .and_then(|d| d.collect());
 }
+
+/// The native (Rust) client-side listener bus: implement StreamingQueryListener, add
+/// it to the manager, run a rate query, and assert events are dispatched to the Rust
+/// listener; then remove it and close the bus.
+#[test]
+fn streaming_native_listener_bus() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::streaming::{StreamingQueryListener, StreamingQueryListenerEvent};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    struct CountingListener {
+        events: Arc<AtomicUsize>,
+    }
+    impl StreamingQueryListener for CountingListener {
+        fn on_event(&self, _event: &StreamingQueryListenerEvent) {
+            self.events.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let spark = session();
+    let mgr = spark.streams();
+    let counter = Arc::new(AtomicUsize::new(0));
+    let listener = Arc::new(CountingListener {
+        events: counter.clone(),
+    });
+    let id = mgr.add_listener(listener).expect("add_listener");
+    assert!(!id.is_empty());
+
+    let query = spark
+        .read_stream()
+        .format("rate")
+        .option("rowsPerSecond", "5")
+        .load(None)
+        .write_stream()
+        .format("memory")
+        .query_name("e2e_native_listener")
+        .trigger(Trigger::ProcessingTime("1 seconds".to_string()))
+        .start("")
+        .expect("start streaming query");
+
+    // Wait up to ~30s for at least one listener event.
+    let mut got = 0;
+    for _ in 0..30 {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        got = counter.load(Ordering::SeqCst);
+        if got > 0 {
+            break;
+        }
+    }
+    query.stop().expect("stop");
+    mgr.remove_listener(&id).expect("remove_listener");
+    mgr.close().expect("close");
+
+    assert!(
+        got > 0,
+        "expected at least one native listener event, got {got}"
+    );
+}

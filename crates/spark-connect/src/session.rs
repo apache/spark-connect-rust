@@ -303,6 +303,38 @@ impl SparkSession {
         crate::catalog::Catalog::new(self.clone())
     }
 
+    /// Register a Java UDF/UDAF by class name, mirroring the reference
+    /// `client.register_java(name, javaClassName, return_type, aggregate)` used by
+    /// `UDFRegistration.registerJavaFunction` / `registerJavaUDAF`: builds a
+    /// `CommonInlineUserDefinedFunction` carrying a `JavaUDF` and sends it as the
+    /// `RegisterFunction` command. `return_type_ddl` is only used for non-aggregate
+    /// functions (matching the reference, which omits the output type when aggregate).
+    pub fn register_java_function(
+        &self,
+        name: &str,
+        java_class_name: &str,
+        return_type_ddl: Option<&str>,
+        aggregate: bool,
+    ) -> Result<()> {
+        let mut java_udf = proto::JavaUdf::default();
+        java_udf.class_name = java_class_name.to_string();
+        if let Some(ddl) = return_type_ddl {
+            java_udf.output_type = Some(crate::types::DataType::from_ddl(ddl)?.to_proto());
+        } else {
+            java_udf.aggregate = aggregate;
+        }
+        let mut fun = proto::CommonInlineUserDefinedFunction::default();
+        fun.function_name = name.to_string();
+        fun.deterministic = true;
+        fun.function =
+            Some(proto::common_inline_user_defined_function::Function::JavaUdf(java_udf));
+        crate::dataframe::execute_command_collect(
+            self,
+            proto::command::CommandType::RegisterFunction(fun),
+        )?;
+        Ok(())
+    }
+
     /// Get the runtime configuration for this session.
     ///
     /// Mirrors `pyspark.sql.SparkSession.conf`.
@@ -612,48 +644,92 @@ fn rows_to_arrow_ipc(rows: &[Row], schema: &DataType) -> Result<Vec<u8>> {
 
 /// Convert DataType fields to Arrow fields.
 fn schema_to_arrow_fields(schema: &DataType) -> Result<Vec<arrow::datatypes::Field>> {
-    use arrow::datatypes::{DataType as ArrowDataType, Field, TimeUnit};
+    use arrow::datatypes::Field;
 
     match schema {
         DataType::Struct { fields } => {
             let mut arrow_fields = vec![];
             for field in fields {
-                let arrow_type = match &field.data_type {
-                    DataType::Null => ArrowDataType::Null,
-                    DataType::Boolean => ArrowDataType::Boolean,
-                    DataType::Byte => ArrowDataType::Int8,
-                    DataType::Short => ArrowDataType::Int16,
-                    DataType::Integer => ArrowDataType::Int32,
-                    DataType::Long => ArrowDataType::Int64,
-                    DataType::Float => ArrowDataType::Float32,
-                    DataType::Double => ArrowDataType::Float64,
-                    // CHAR/VARCHAR are string-backed on the wire.
-                    DataType::String { .. } | DataType::Char { .. } | DataType::Varchar { .. } => {
-                        ArrowDataType::Utf8
-                    }
-                    DataType::Binary => ArrowDataType::Binary,
-                    DataType::Date => ArrowDataType::Date32,
-                    // TIMESTAMP (LTZ) and TIMESTAMP_NTZ are both micros; NTZ carries no zone.
-                    DataType::Timestamp => {
-                        ArrowDataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
-                    }
-                    DataType::TimestampNtz => ArrowDataType::Timestamp(TimeUnit::Microsecond, None),
-                    DataType::Time { .. } => ArrowDataType::Time64(TimeUnit::Microsecond),
-                    DataType::Decimal { precision, scale } => {
-                        ArrowDataType::Decimal128(*precision as u8, *scale as i8)
-                    }
-                    other => {
-                        return Err(SparkError::connect_msg(format!(
-                            "Unsupported type for Arrow createDataFrame conversion: {other:?}"
-                        )))
-                    }
-                };
-                arrow_fields.push(Field::new(&field.name, arrow_type, field.nullable));
+                arrow_fields.push(Field::new(
+                    &field.name,
+                    datatype_to_arrow(&field.data_type)?,
+                    field.nullable,
+                ));
             }
             Ok(arrow_fields)
         }
         _ => Err(SparkError::connect_msg("Schema is not a struct")),
     }
+}
+
+/// Map a Spark `DataType` to its Arrow `DataType`, recursively (array/map/struct included).
+fn datatype_to_arrow(dt: &DataType) -> Result<arrow::datatypes::DataType> {
+    use arrow::datatypes::{DataType as A, Field, Fields, TimeUnit};
+    Ok(match dt {
+        DataType::Null => A::Null,
+        DataType::Boolean => A::Boolean,
+        DataType::Byte => A::Int8,
+        DataType::Short => A::Int16,
+        DataType::Integer => A::Int32,
+        DataType::Long => A::Int64,
+        DataType::Float => A::Float32,
+        DataType::Double => A::Float64,
+        // CHAR/VARCHAR are string-backed on the wire.
+        DataType::String { .. } | DataType::Char { .. } | DataType::Varchar { .. } => A::Utf8,
+        DataType::Binary => A::Binary,
+        DataType::Date => A::Date32,
+        // TIMESTAMP (LTZ) and TIMESTAMP_NTZ are both micros; NTZ carries no zone.
+        DataType::Timestamp => A::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+        DataType::TimestampNtz => A::Timestamp(TimeUnit::Microsecond, None),
+        DataType::Time { .. } => A::Time64(TimeUnit::Microsecond),
+        DataType::Decimal { precision, scale } => A::Decimal128(*precision as u8, *scale as i8),
+        DataType::Array {
+            element_type,
+            contains_null,
+        } => A::List(Arc::new(Field::new(
+            "element",
+            datatype_to_arrow(element_type)?,
+            *contains_null,
+        ))),
+        DataType::Map {
+            key_type,
+            value_type,
+            value_contains_null,
+        } => {
+            let entry_fields: Fields = vec![
+                Field::new("key", datatype_to_arrow(key_type)?, false),
+                Field::new(
+                    "value",
+                    datatype_to_arrow(value_type)?,
+                    *value_contains_null,
+                ),
+            ]
+            .into();
+            A::Map(
+                Arc::new(Field::new("entries", A::Struct(entry_fields), false)),
+                false,
+            )
+        }
+        DataType::Struct { fields } => {
+            let f: Fields = fields
+                .iter()
+                .map(|field| {
+                    Ok(Field::new(
+                        &field.name,
+                        datatype_to_arrow(&field.data_type)?,
+                        field.nullable,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?
+                .into();
+            A::Struct(f)
+        }
+        other => {
+            return Err(SparkError::connect_msg(format!(
+                "Unsupported type for Arrow createDataFrame conversion: {other:?}"
+            )))
+        }
+    })
 }
 
 /// Coerce a value to a declared field type (numeric widening/narrowing from the
@@ -681,15 +757,294 @@ fn coerce_value(v: Option<&Value>, target: &DataType) -> Value {
         (DataType::Double, Value::Long(n)) => Value::Double(*n as f64),
         (DataType::Double, Value::Integer(n)) => Value::Double(*n as f64),
         (DataType::Double, Value::Float(f)) => Value::Double(*f as f64),
+        // Nested types: coerce children to their declared element/field/value types so a
+        // nested `Integer` field built from a Python int (Long) matches the Arrow schema.
+        (DataType::Array { element_type, .. }, Value::List(items)) => Value::List(
+            items
+                .iter()
+                .map(|it| coerce_value(Some(it), element_type))
+                .collect(),
+        ),
+        (DataType::Struct { fields }, Value::Struct(sf)) => Value::Struct(
+            fields
+                .iter()
+                .enumerate()
+                .map(|(i, f)| {
+                    let val = sf
+                        .iter()
+                        .find(|(n, _)| n == &f.name)
+                        .map(|(_, v)| v)
+                        .or_else(|| sf.get(i).map(|(_, v)| v));
+                    (f.name.clone(), coerce_value(val, &f.data_type))
+                })
+                .collect(),
+        ),
+        (DataType::Map { value_type, .. }, Value::Map(m)) => Value::Map(
+            m.iter()
+                .map(|(k, v)| (k.clone(), coerce_value(Some(v), value_type)))
+                .collect(),
+        ),
         _ => v.clone(),
     }
 }
 
 /// Build an Arrow array for a specific field across all rows.
+/// Build the Arrow array for one column: gather the column's values and build them
+/// against the declared type (schema-driven, so nested array/map/struct recurse).
 fn build_arrow_array(
     rows: &[Row],
     field_idx: usize,
     target: Option<&DataType>,
+) -> Result<Arc<dyn arrow::array::Array>> {
+    use arrow::array::NullArray;
+    if rows.is_empty() {
+        return Ok(Arc::new(NullArray::new(0)));
+    }
+    let column: Vec<Value> = rows
+        .iter()
+        .map(|r| r.get(field_idx).cloned().unwrap_or(Value::Null))
+        .collect();
+    match target {
+        Some(dt) => values_to_arrow(&column, dt),
+        // No declared type (shouldn't happen for createDataFrame): fall back to the
+        // value-driven scalar builder for backward compatibility.
+        None => build_arrow_array_scalar(rows, field_idx),
+    }
+}
+
+/// Recursively build an Arrow array from a column of `Value`s against a declared
+/// `DataType`, covering scalars and the nested array/map/struct types.
+fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::array::Array>> {
+    use arrow::array::*;
+    use arrow::buffer::{NullBuffer, OffsetBuffer};
+    use arrow::datatypes::{Field, Fields};
+
+    macro_rules! prim {
+        ($arr:ty, $pat:path) => {{
+            let vals: Result<Vec<_>> = values
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    $pat(x) => Ok(Some(*x)),
+                    _ => Err(SparkError::connect_msg("Type mismatch in row data")),
+                })
+                .collect();
+            Ok(Arc::new(<$arr>::from(vals?)) as Arc<dyn Array>)
+        }};
+    }
+
+    match dt {
+        DataType::Null => Ok(Arc::new(NullArray::new(values.len()))),
+        DataType::Boolean => prim!(BooleanArray, Value::Bool),
+        DataType::Byte => prim!(Int8Array, Value::Byte),
+        DataType::Short => prim!(Int16Array, Value::Short),
+        DataType::Integer => prim!(Int32Array, Value::Integer),
+        DataType::Long => prim!(Int64Array, Value::Long),
+        DataType::Float => prim!(Float32Array, Value::Float),
+        DataType::Double => prim!(Float64Array, Value::Double),
+        DataType::String { .. } | DataType::Char { .. } | DataType::Varchar { .. } => {
+            let vals: Result<Vec<Option<&str>>> = values
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::String(s) => Ok(Some(s.as_str())),
+                    _ => Err(SparkError::connect_msg("Type mismatch in row data")),
+                })
+                .collect();
+            Ok(Arc::new(StringArray::from(vals?)))
+        }
+        DataType::Binary => {
+            let vals: Result<Vec<Option<&[u8]>>> = values
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Binary(b) => Ok(Some(b.as_slice())),
+                    _ => Err(SparkError::connect_msg("Type mismatch in row data")),
+                })
+                .collect();
+            Ok(Arc::new(BinaryArray::from(vals?)))
+        }
+        DataType::Date => prim!(Date32Array, Value::Date),
+        DataType::Timestamp | DataType::TimestampNtz => {
+            let vals: Result<Vec<Option<i64>>> = values
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Timestamp(t) => Ok(Some(*t)),
+                    _ => Err(SparkError::connect_msg("Type mismatch in row data")),
+                })
+                .collect();
+            let arr = TimestampMicrosecondArray::from(vals?);
+            let arr = if matches!(dt, DataType::TimestampNtz) {
+                arr
+            } else {
+                arr.with_timezone("UTC")
+            };
+            Ok(Arc::new(arr))
+        }
+        DataType::Decimal { precision, scale } => {
+            let col_scale = *scale;
+            let vals: Result<Vec<Option<i128>>> = values
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Decimal { value, .. } => {
+                        decimal_str_to_unscaled(value, col_scale).map(Some)
+                    }
+                    _ => Err(SparkError::connect_msg("Type mismatch in row data")),
+                })
+                .collect();
+            // Use the DECLARED precision/scale so the array matches the Arrow schema field
+            // (Decimal128(precision, scale)); hardcoding 38 mismatched a DecimalType(10, 2).
+            let arr = Decimal128Array::from(vals?)
+                .with_precision_and_scale(*precision as u8, col_scale as i8)
+                .map_err(|e| SparkError::connect_msg(format!("decimal build: {e}")))?;
+            Ok(Arc::new(arr))
+        }
+        DataType::Array {
+            element_type,
+            contains_null,
+        } => {
+            let mut child: Vec<Value> = Vec::new();
+            let mut offsets: Vec<i32> = vec![0];
+            let mut valid = arrow::array::builder::BooleanBufferBuilder::new(values.len());
+            for v in values {
+                match v {
+                    Value::Null => {
+                        valid.append(false);
+                        offsets.push(*offsets.last().unwrap());
+                    }
+                    Value::List(items) => {
+                        valid.append(true);
+                        child.extend(items.iter().cloned());
+                        offsets.push(child.len() as i32);
+                    }
+                    _ => return Err(SparkError::connect_msg("Type mismatch: expected array")),
+                }
+            }
+            let child_arr = values_to_arrow(&child, element_type)?;
+            let field = Arc::new(Field::new(
+                "element",
+                datatype_to_arrow(element_type)?,
+                *contains_null,
+            ));
+            Ok(Arc::new(ListArray::new(
+                field,
+                OffsetBuffer::new(offsets.into()),
+                child_arr,
+                Some(NullBuffer::new(valid.finish())),
+            )))
+        }
+        DataType::Struct { fields } => {
+            let mut cols: Vec<Vec<Value>> = vec![Vec::with_capacity(values.len()); fields.len()];
+            let mut valid = arrow::array::builder::BooleanBufferBuilder::new(values.len());
+            for v in values {
+                match v {
+                    Value::Null => {
+                        valid.append(false);
+                        for c in cols.iter_mut() {
+                            c.push(Value::Null);
+                        }
+                    }
+                    Value::Struct(sf) => {
+                        valid.append(true);
+                        for (i, f) in fields.iter().enumerate() {
+                            // Prefer match by field name, else positional.
+                            let val = sf
+                                .iter()
+                                .find(|(n, _)| n == &f.name)
+                                .map(|(_, val)| val.clone())
+                                .or_else(|| sf.get(i).map(|(_, val)| val.clone()))
+                                .unwrap_or(Value::Null);
+                            cols[i].push(val);
+                        }
+                    }
+                    _ => return Err(SparkError::connect_msg("Type mismatch: expected struct")),
+                }
+            }
+            let arrays: Vec<Arc<dyn Array>> = fields
+                .iter()
+                .enumerate()
+                .map(|(i, f)| values_to_arrow(&cols[i], &f.data_type))
+                .collect::<Result<_>>()?;
+            let afields: Fields = fields
+                .iter()
+                .map(|f| {
+                    Ok(Field::new(
+                        &f.name,
+                        datatype_to_arrow(&f.data_type)?,
+                        f.nullable,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?
+                .into();
+            Ok(Arc::new(StructArray::new(
+                afields,
+                arrays,
+                Some(NullBuffer::new(valid.finish())),
+            )))
+        }
+        DataType::Map {
+            key_type,
+            value_type,
+            value_contains_null,
+        } => {
+            let mut keys: Vec<Value> = Vec::new();
+            let mut vals: Vec<Value> = Vec::new();
+            let mut offsets: Vec<i32> = vec![0];
+            let mut valid = arrow::array::builder::BooleanBufferBuilder::new(values.len());
+            for v in values {
+                match v {
+                    Value::Null => {
+                        valid.append(false);
+                        offsets.push(*offsets.last().unwrap());
+                    }
+                    Value::Map(m) => {
+                        valid.append(true);
+                        for (k, val) in m {
+                            keys.push(Value::String(k.clone()));
+                            vals.push(val.clone());
+                        }
+                        offsets.push(keys.len() as i32);
+                    }
+                    _ => return Err(SparkError::connect_msg("Type mismatch: expected map")),
+                }
+            }
+            let key_arr = values_to_arrow(&keys, key_type)?;
+            let val_arr = values_to_arrow(&vals, value_type)?;
+            let entry_fields: Fields = vec![
+                Field::new("key", datatype_to_arrow(key_type)?, false),
+                Field::new(
+                    "value",
+                    datatype_to_arrow(value_type)?,
+                    *value_contains_null,
+                ),
+            ]
+            .into();
+            let entries = StructArray::new(entry_fields.clone(), vec![key_arr, val_arr], None);
+            let entries_field = Arc::new(Field::new(
+                "entries",
+                arrow::datatypes::DataType::Struct(entry_fields),
+                false,
+            ));
+            Ok(Arc::new(MapArray::new(
+                entries_field,
+                OffsetBuffer::new(offsets.into()),
+                entries,
+                Some(NullBuffer::new(valid.finish())),
+                false,
+            )))
+        }
+        other => Err(SparkError::connect_msg(format!(
+            "Unsupported type for Arrow createDataFrame conversion: {other:?}"
+        ))),
+    }
+}
+
+/// Legacy value-driven scalar array builder (used only when no declared type is available).
+fn build_arrow_array_scalar(
+    rows: &[Row],
+    field_idx: usize,
 ) -> Result<Arc<dyn arrow::array::Array>> {
     use arrow::array::*;
 
@@ -823,16 +1178,8 @@ fn build_arrow_array(
                     Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
-            // `Value::Timestamp` covers both TIMESTAMP (LTZ) and TIMESTAMP_NTZ; the
-            // Arrow array must carry the timezone the schema declares, or
-            // `RecordBatch::try_new` rejects it (LTZ schema field = Timestamp(_, UTC),
-            // NTZ = Timestamp(_, None)). Default to UTC unless the target is NTZ.
-            let arr = TimestampMicrosecondArray::from(values?);
-            let arr = if matches!(target, Some(DataType::TimestampNtz)) {
-                arr
-            } else {
-                arr.with_timezone("UTC")
-            };
+            // Scalar fallback (no declared type): default to UTC (LTZ).
+            let arr = TimestampMicrosecondArray::from(values?).with_timezone("UTC");
             Ok(Arc::new(arr))
         }
         Value::Decimal { scale, .. } => {

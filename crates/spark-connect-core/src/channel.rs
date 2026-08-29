@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use crate::error::{Result, SparkError};
 
 /// Client version reported in the user-agent (mirrors `pyspark.__version__`).
-pub const SPARK_VERSION: &str = "4.1.0.dev0";
+pub const SPARK_VERSION: &str = "4.2.0";
 
 /// Default Spark Connect server port.
 pub const DEFAULT_PORT: u16 = 15002;

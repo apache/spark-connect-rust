@@ -20,6 +20,11 @@ User-defined table function (UDTF) support for the Spark Connect client.
 Mirrors pyspark.sql.connect.udtf and pyspark.sql.functions.udtf.
 """
 
+from pyspark._pyspark import (
+    AnalyzeArgument, PartitioningColumn, OrderingColumn, SelectedColumn,
+    AnalyzeResult, SkipRestOfInputTableException,
+)
+
 import sys
 from typing import Any, Optional, Type
 
@@ -80,6 +85,17 @@ class UserDefinedTableFunction:
             *args,
         )
 
+    def asDeterministic(self) -> "UserDefinedTableFunction":
+        """Return a copy of this UDTF marked as deterministic. Mirrors
+        ``UserDefinedTableFunction.asDeterministic``."""
+        return UserDefinedTableFunction(
+            self.func,
+            returnType=self.returnType,
+            name=self.name,
+            evalType=self.evalType,
+            deterministic=True,
+        )
+
 
 def udtf(
     cls: Optional[Type] = None,
@@ -100,6 +116,26 @@ def udtf(
     if cls is not None:
         return _udtf_decorator(cls)
     return _udtf_decorator
+
+
+def arrow_udtf(
+    cls: Optional[Type] = None,
+    *,
+    returnType: Optional[Any] = None,
+) -> Any:
+    """Create an Arrow-based user-defined table function (UDTF).
+
+    Mirrors ``pyspark.sql.functions.arrow_udtf``: like :func:`udtf` but the handler
+    operates on Arrow data (``SQL_ARROW_TABLE_UDF``).
+    """
+    def _arrow_udtf_decorator(handler: Type) -> UserDefinedTableFunction:
+        return UserDefinedTableFunction(
+            handler, returnType=returnType, evalType=SQL_ARROW_TABLE_UDF
+        )
+
+    if cls is not None:
+        return _arrow_udtf_decorator(cls)
+    return _arrow_udtf_decorator
 
 
 class UDTFRegistration:

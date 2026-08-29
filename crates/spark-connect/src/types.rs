@@ -13,7 +13,8 @@ use spark_connect_core::error::{Result, SparkError};
 ///
 /// All concrete types are variants of this enum. Each variant carries the data
 /// needed to fully specify that type (e.g., DecimalType carries precision and scale).
-#[derive(Debug, Clone, PartialEq, Eq)]
+// Not `Eq` (only `PartialEq`): a Struct field's metadata holds arbitrary JSON values.
+#[derive(Debug, Clone, PartialEq)]
 pub enum DataType {
     /// `pyspark.sql.types.NullType`
     Null,
@@ -88,12 +89,14 @@ pub enum DataType {
 }
 
 /// A field in a StructType, mirroring `pyspark.sql.types.StructField`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// Not `Eq`: metadata values are arbitrary JSON (`serde_json::Value`, which is only `PartialEq`
+// because of floats), matching pyspark's `Dict[str, Any]` field metadata.
+#[derive(Debug, Clone, PartialEq)]
 pub struct StructField {
     pub name: String,
     pub data_type: DataType,
     pub nullable: bool,
-    pub metadata: BTreeMap<String, String>,
+    pub metadata: BTreeMap<String, serde_json::Value>,
 }
 
 impl DataType {
@@ -410,6 +413,13 @@ impl DataType {
     /// Parses a JSON value into a DataType, mirroring the reverse of `json()` / `jsonValue()`.
     pub fn from_json(value: &serde_json::Value) -> Result<DataType> {
         parse_json_value(value, None)
+    }
+
+    /// Parses a JSON string into a DataType (convenience over [`from_json`]).
+    pub fn from_json_str(s: &str) -> Result<DataType> {
+        let value: serde_json::Value = serde_json::from_str(s)
+            .map_err(|e| SparkError::value("INVALID_JSON", &[("detail", &e.to_string())]))?;
+        DataType::from_json(&value)
     }
 
     /// Converts to a protobuf DataType, mirroring
@@ -769,6 +779,31 @@ impl StructField {
             "metadata": self.metadata,
         })
     }
+
+    /// Parses a StructField from its JSON string, mirroring `StructField.fromJson`.
+    pub fn from_json_str(s: &str) -> Result<StructField> {
+        let v: serde_json::Value = serde_json::from_str(s)
+            .map_err(|e| SparkError::value("INVALID_JSON", &[("detail", &e.to_string())]))?;
+        let name = v
+            .get("name")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| SparkError::value("INVALID_JSON", &[("detail", "missing field name")]))?
+            .to_string();
+        let nullable = v.get("nullable").and_then(|x| x.as_bool()).unwrap_or(true);
+        let data_type = DataType::from_json(v.get("type").unwrap_or(&serde_json::Value::Null))?;
+        let mut metadata = BTreeMap::new();
+        if let Some(md) = v.get("metadata").and_then(|x| x.as_object()) {
+            for (k, val) in md {
+                metadata.insert(k.clone(), val.clone());
+            }
+        }
+        Ok(StructField {
+            name,
+            data_type,
+            nullable,
+            metadata,
+        })
+    }
 }
 
 /// Helper methods for StructType operations, mirroring `pyspark.sql.types.StructType`.
@@ -793,6 +828,96 @@ impl DataType {
         self.field_names()
     }
 
+    /// DDL string for a StructType, mirroring `StructType.toDDL()`:
+    /// comma-separated `name type[ NOT NULL][ COMMENT '...']` per field.
+    pub fn to_ddl(&self) -> Result<String> {
+        match self {
+            DataType::Struct { fields } => Ok(fields
+                .iter()
+                .map(|f| {
+                    let mut s = format!("{} {}", f.name, f.data_type.simple_string());
+                    if !f.nullable {
+                        s.push_str(" NOT NULL");
+                    }
+                    if let Some(comment) = f.metadata.get("comment").and_then(|c| c.as_str()) {
+                        s.push_str(&format!(" COMMENT '{}'", comment.replace('\'', "\\'")));
+                    }
+                    s
+                })
+                .collect::<Vec<_>>()
+                .join(",")),
+            _ => Err(SparkError::value(
+                "INVALID_TYPE",
+                &[("detail", "toDDL() can only be called on StructType")],
+            )),
+        }
+    }
+
+    /// Tree-string for a StructType, mirroring `StructType.treeString()`.
+    pub fn tree_string(&self) -> Result<String> {
+        match self {
+            DataType::Struct { .. } => {
+                let mut out = String::from("root\n");
+                self.append_tree(&mut out, " |");
+                Ok(out)
+            }
+            _ => Err(SparkError::value(
+                "INVALID_TYPE",
+                &[("detail", "treeString() can only be called on StructType")],
+            )),
+        }
+    }
+
+    fn append_tree(&self, out: &mut String, prefix: &str) {
+        if let DataType::Struct { fields } = self {
+            for f in fields {
+                out.push_str(&format!(
+                    "{}-- {}: {} (nullable = {})\n",
+                    prefix,
+                    f.name,
+                    f.data_type.simple_string(),
+                    f.nullable
+                ));
+                if matches!(f.data_type, DataType::Struct { .. }) {
+                    f.data_type
+                        .append_tree(out, &format!("{}    |", prefix.trim_end_matches('|')));
+                }
+            }
+        }
+    }
+
+    /// Return a copy with every field made nullable (recursively), mirroring
+    /// `StructType.toNullable()`.
+    pub fn to_nullable(&self) -> DataType {
+        match self {
+            DataType::Struct { fields } => DataType::Struct {
+                fields: fields
+                    .iter()
+                    .map(|f| StructField {
+                        name: f.name.clone(),
+                        data_type: f.data_type.to_nullable(),
+                        nullable: true,
+                        metadata: f.metadata.clone(),
+                    })
+                    .collect(),
+            },
+            DataType::Array { element_type, .. } => DataType::Array {
+                element_type: Box::new(element_type.to_nullable()),
+                contains_null: true,
+            },
+            DataType::Map {
+                key_type,
+                value_type,
+                ..
+            } => DataType::Map {
+                key_type: Box::new(key_type.to_nullable()),
+                value_type: Box::new(value_type.to_nullable()),
+                value_contains_null: true,
+            },
+            other => other.clone(),
+        }
+    }
+
     /// Adds a field to a StructType, mirroring `StructType.add()`.
     ///
     /// This is a builder method that returns a new StructType with the field added.
@@ -813,7 +938,7 @@ impl DataType {
         field_name: &str,
         field_type: DataType,
         nullable: bool,
-        metadata: Option<BTreeMap<String, String>>,
+        metadata: Option<BTreeMap<String, serde_json::Value>>,
     ) -> Result<DataType> {
         match self {
             DataType::Struct { fields } => {
@@ -1002,20 +1127,7 @@ fn parse_json_object(obj: &serde_json::Map<String, serde_json::Value>) -> Result
                     let metadata = field_map
                         .get("metadata")
                         .and_then(|v| v.as_object())
-                        .map(|m| {
-                            m.iter()
-                                .map(|(k, v)| {
-                                    // Store the raw string for string-valued metadata (a bare
-                                    // "v", not the re-serialized "\"v\""), matching the proto
-                                    // path; fall back to the JSON text for non-string values.
-                                    let val = v
-                                        .as_str()
-                                        .map(str::to_string)
-                                        .unwrap_or_else(|| v.to_string());
-                                    (k.clone(), val)
-                                })
-                                .collect()
-                        })
+                        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
                         .unwrap_or_default();
 
                     fields.push(StructField {
@@ -2388,7 +2500,10 @@ mod tests {
 
         // Test add with metadata
         let mut metadata = BTreeMap::new();
-        metadata.insert("key".to_string(), "value".to_string());
+        metadata.insert(
+            "key".to_string(),
+            serde_json::Value::String("value".to_string()),
+        );
         let with_metadata = with_both
             .add("score", DataType::Double, false, Some(metadata))
             .unwrap();
@@ -2464,5 +2579,520 @@ mod tests {
             DataType::from_ddl("ARRAY<INT>").unwrap(),
             DataType::from_ddl("array<int>").unwrap()
         );
+    }
+
+    #[test]
+    fn test_to_nullable_primitive_types() {
+        // Primitive types should remain unchanged
+        let int_type = DataType::Integer;
+        assert_eq!(int_type.to_nullable(), DataType::Integer);
+
+        let string_type = DataType::String {
+            collation: "UTF8_BINARY".to_string(),
+        };
+        assert_eq!(string_type.to_nullable(), string_type);
+
+        let bool_type = DataType::Boolean;
+        assert_eq!(bool_type.to_nullable(), bool_type);
+
+        let double_type = DataType::Double;
+        assert_eq!(double_type.to_nullable(), double_type);
+
+        let date_type = DataType::Date;
+        assert_eq!(date_type.to_nullable(), date_type);
+
+        let timestamp_type = DataType::Timestamp;
+        assert_eq!(timestamp_type.to_nullable(), timestamp_type);
+    }
+
+    #[test]
+    fn test_to_nullable_array_type() {
+        let array_type = DataType::Array {
+            element_type: Box::new(DataType::Integer),
+            contains_null: false,
+        };
+        let nullable = array_type.to_nullable();
+
+        if let DataType::Array {
+            element_type: _,
+            contains_null,
+        } = nullable
+        {
+            assert!(contains_null);
+        } else {
+            panic!("Expected Array type");
+        }
+    }
+
+    #[test]
+    fn test_to_nullable_array_nested() {
+        let nested_array = DataType::Array {
+            element_type: Box::new(DataType::Array {
+                element_type: Box::new(DataType::Integer),
+                contains_null: false,
+            }),
+            contains_null: false,
+        };
+        let nullable = nested_array.to_nullable();
+
+        if let DataType::Array {
+            element_type,
+            contains_null,
+        } = nullable
+        {
+            assert!(contains_null);
+            if let DataType::Array {
+                contains_null: inner_null,
+                ..
+            } = element_type.as_ref()
+            {
+                assert!(inner_null);
+            } else {
+                panic!("Expected nested Array type");
+            }
+        } else {
+            panic!("Expected Array type");
+        }
+    }
+
+    #[test]
+    fn test_to_nullable_map_type() {
+        let map_type = DataType::Map {
+            key_type: Box::new(DataType::String {
+                collation: "UTF8_BINARY".to_string(),
+            }),
+            value_type: Box::new(DataType::Integer),
+            value_contains_null: false,
+        };
+        let nullable = map_type.to_nullable();
+
+        if let DataType::Map {
+            key_type: _,
+            value_type: _,
+            value_contains_null,
+        } = nullable
+        {
+            assert!(value_contains_null);
+        } else {
+            panic!("Expected Map type");
+        }
+    }
+
+    #[test]
+    fn test_to_nullable_struct_type() {
+        let struct_type = DataType::Struct {
+            fields: vec![
+                StructField {
+                    name: "a".to_string(),
+                    data_type: DataType::Integer,
+                    nullable: false,
+                    metadata: BTreeMap::new(),
+                },
+                StructField {
+                    name: "b".to_string(),
+                    data_type: DataType::String {
+                        collation: "UTF8_BINARY".to_string(),
+                    },
+                    nullable: false,
+                    metadata: BTreeMap::new(),
+                },
+            ],
+        };
+        let nullable = struct_type.to_nullable();
+
+        if let DataType::Struct { fields } = nullable {
+            assert_eq!(fields.len(), 2);
+            assert!(fields[0].nullable);
+            assert!(fields[1].nullable);
+        } else {
+            panic!("Expected Struct type");
+        }
+    }
+
+    #[test]
+    fn test_simple_string_all_types() {
+        // Test simple_string for all basic types
+        assert_eq!(DataType::Null.simple_string(), "void");
+        assert_eq!(DataType::Boolean.simple_string(), "boolean");
+        assert_eq!(DataType::Byte.simple_string(), "tinyint");
+        assert_eq!(DataType::Short.simple_string(), "smallint");
+        assert_eq!(DataType::Integer.simple_string(), "int");
+        assert_eq!(DataType::Long.simple_string(), "bigint");
+        assert_eq!(DataType::Float.simple_string(), "float");
+        assert_eq!(DataType::Double.simple_string(), "double");
+        assert_eq!(DataType::Binary.simple_string(), "binary");
+        assert_eq!(DataType::Date.simple_string(), "date");
+        assert_eq!(DataType::Timestamp.simple_string(), "timestamp");
+        assert_eq!(DataType::TimestampNtz.simple_string(), "timestamp_ntz");
+        assert_eq!(DataType::CalendarInterval.simple_string(), "interval");
+        assert_eq!(DataType::Variant.simple_string(), "variant");
+    }
+
+    #[test]
+    fn test_simple_string_with_collation() {
+        let string_default = DataType::String {
+            collation: "".to_string(),
+        };
+        assert_eq!(string_default.simple_string(), "string");
+
+        let string_utf8 = DataType::String {
+            collation: "UTF8_BINARY".to_string(),
+        };
+        assert_eq!(string_utf8.simple_string(), "string");
+
+        let string_custom = DataType::String {
+            collation: "UNICODE".to_string(),
+        };
+        assert_eq!(string_custom.simple_string(), "string collate UNICODE");
+    }
+
+    #[test]
+    fn test_type_name_all_types() {
+        assert_eq!(DataType::Null.type_name(), "void");
+        assert_eq!(DataType::Boolean.type_name(), "boolean");
+        assert_eq!(DataType::Byte.type_name(), "byte");
+        assert_eq!(DataType::Integer.type_name(), "integer");
+        assert_eq!(
+            DataType::String {
+                collation: "UTF8_BINARY".to_string()
+            }
+            .type_name(),
+            "string"
+        );
+    }
+
+    #[test]
+    fn test_from_json_string_types() {
+        let json_int = serde_json::json!("integer");
+        let dt = DataType::from_json(&json_int).unwrap();
+        assert_eq!(dt, DataType::Integer);
+
+        let json_string = serde_json::json!("string");
+        let dt = DataType::from_json(&json_string).unwrap();
+        assert_eq!(
+            dt,
+            DataType::String {
+                collation: "UTF8_BINARY".to_string()
+            }
+        );
+
+        let json_timestamp = serde_json::json!("timestamp");
+        let dt = DataType::from_json(&json_timestamp).unwrap();
+        assert_eq!(dt, DataType::Timestamp);
+    }
+
+    #[test]
+    fn test_from_json_str_simple() {
+        let dt = DataType::from_json_str("\"integer\"").unwrap();
+        assert_eq!(dt, DataType::Integer);
+
+        let dt = DataType::from_json_str("\"double\"").unwrap();
+        assert_eq!(dt, DataType::Double);
+
+        let dt = DataType::from_json_str("\"boolean\"").unwrap();
+        assert_eq!(dt, DataType::Boolean);
+    }
+
+    #[test]
+    fn test_from_json_complex_types() {
+        // Array type
+        let json_array = serde_json::json!({
+            "type": "array",
+            "elementType": "integer",
+            "containsNull": true
+        });
+        let dt = DataType::from_json(&json_array).unwrap();
+        match dt {
+            DataType::Array {
+                element_type,
+                contains_null,
+            } => {
+                assert_eq!(*element_type, DataType::Integer);
+                assert!(contains_null);
+            }
+            _ => panic!("Expected Array type"),
+        }
+
+        // Map type
+        let json_map = serde_json::json!({
+            "type": "map",
+            "keyType": "string",
+            "valueType": "integer",
+            "valueContainsNull": false
+        });
+        let dt = DataType::from_json(&json_map).unwrap();
+        match dt {
+            DataType::Map {
+                key_type,
+                value_type,
+                value_contains_null,
+            } => {
+                assert_eq!(
+                    *key_type,
+                    DataType::String {
+                        collation: "UTF8_BINARY".to_string()
+                    }
+                );
+                assert_eq!(*value_type, DataType::Integer);
+                assert!(!value_contains_null);
+            }
+            _ => panic!("Expected Map type"),
+        }
+
+        // Struct type
+        let json_struct = serde_json::json!({
+            "type": "struct",
+            "fields": [
+                {
+                    "name": "a",
+                    "type": "integer",
+                    "nullable": true,
+                    "metadata": {}
+                },
+                {
+                    "name": "b",
+                    "type": "string",
+                    "nullable": false,
+                    "metadata": {}
+                }
+            ]
+        });
+        let dt = DataType::from_json(&json_struct).unwrap();
+        match dt {
+            DataType::Struct { fields } => {
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].name, "a");
+                assert_eq!(fields[1].name, "b");
+            }
+            _ => panic!("Expected Struct type"),
+        }
+    }
+
+    #[test]
+    fn test_from_json_decimal() {
+        let json_decimal = serde_json::json!("decimal(10,2)");
+        let dt = DataType::from_json(&json_decimal).unwrap();
+        match dt {
+            DataType::Decimal { precision, scale } => {
+                assert_eq!(precision, 10);
+                assert_eq!(scale, 2);
+            }
+            _ => panic!("Expected Decimal type"),
+        }
+    }
+
+    #[test]
+    fn test_from_json_geometry() {
+        let json_geom = serde_json::json!("geometry(any)");
+        let dt = DataType::from_json(&json_geom).unwrap();
+        match dt {
+            DataType::Geometry { srid } => {
+                assert_eq!(srid, -1);
+            }
+            _ => panic!("Expected Geometry type"),
+        }
+    }
+
+    #[test]
+    fn test_json_value_simple_types() {
+        let int_val = DataType::Integer.json_value();
+        assert_eq!(int_val, serde_json::json!("integer"));
+
+        let string_val = DataType::String {
+            collation: "UTF8_BINARY".to_string(),
+        }
+        .json_value();
+        assert_eq!(string_val, serde_json::json!("string"));
+
+        let bool_val = DataType::Boolean.json_value();
+        assert_eq!(bool_val, serde_json::json!("boolean"));
+    }
+
+    #[test]
+    fn test_json_value_complex_types() {
+        let array_val = DataType::Array {
+            element_type: Box::new(DataType::Integer),
+            contains_null: true,
+        }
+        .json_value();
+        assert!(array_val.is_object());
+        assert_eq!(
+            array_val.get("type").and_then(|v| v.as_str()),
+            Some("array")
+        );
+    }
+
+    #[test]
+    fn test_to_ddl() {
+        let struct_type = DataType::Struct {
+            fields: vec![
+                StructField {
+                    name: "id".to_string(),
+                    data_type: DataType::Integer,
+                    nullable: false,
+                    metadata: BTreeMap::new(),
+                },
+                StructField {
+                    name: "name".to_string(),
+                    data_type: DataType::String {
+                        collation: "UTF8_BINARY".to_string(),
+                    },
+                    nullable: true,
+                    metadata: BTreeMap::new(),
+                },
+            ],
+        };
+        let ddl = struct_type.to_ddl().unwrap();
+        assert!(ddl.contains("id"));
+        assert!(ddl.contains("name"));
+        assert!(ddl.to_uppercase().contains("INT") || ddl.contains("int"));
+        assert!(ddl.to_uppercase().contains("STRING") || ddl.contains("string"));
+    }
+
+    #[test]
+    fn test_tree_string() {
+        let struct_type = DataType::Struct {
+            fields: vec![
+                StructField {
+                    name: "id".to_string(),
+                    data_type: DataType::Integer,
+                    nullable: false,
+                    metadata: BTreeMap::new(),
+                },
+                StructField {
+                    name: "nested".to_string(),
+                    data_type: DataType::Struct {
+                        fields: vec![StructField {
+                            name: "x".to_string(),
+                            data_type: DataType::Double,
+                            nullable: true,
+                            metadata: BTreeMap::new(),
+                        }],
+                    },
+                    nullable: true,
+                    metadata: BTreeMap::new(),
+                },
+            ],
+        };
+        let tree = struct_type.tree_string().unwrap();
+        assert!(tree.contains("id"));
+        assert!(tree.contains("nested"));
+        assert!(tree.contains("x"));
+    }
+
+    #[test]
+    fn test_to_proto_simple_types() {
+        let int_proto = DataType::Integer.to_proto();
+        assert!(int_proto.kind.is_some());
+
+        let string_proto = DataType::String {
+            collation: "UTF8_BINARY".to_string(),
+        }
+        .to_proto();
+        assert!(string_proto.kind.is_some());
+
+        let bool_proto = DataType::Boolean.to_proto();
+        assert!(bool_proto.kind.is_some());
+    }
+
+    #[test]
+    fn test_to_proto_array_type() {
+        let array_type = DataType::Array {
+            element_type: Box::new(DataType::Integer),
+            contains_null: false,
+        };
+        let proto = array_type.to_proto();
+        assert!(proto.kind.is_some());
+    }
+
+    #[test]
+    fn test_to_proto_map_type() {
+        let map_type = DataType::Map {
+            key_type: Box::new(DataType::String {
+                collation: "UTF8_BINARY".to_string(),
+            }),
+            value_type: Box::new(DataType::Integer),
+            value_contains_null: true,
+        };
+        let proto = map_type.to_proto();
+        assert!(proto.kind.is_some());
+    }
+
+    #[test]
+    fn test_to_proto_struct_type() {
+        let struct_type = DataType::Struct {
+            fields: vec![
+                StructField {
+                    name: "a".to_string(),
+                    data_type: DataType::Integer,
+                    nullable: true,
+                    metadata: BTreeMap::new(),
+                },
+                StructField {
+                    name: "b".to_string(),
+                    data_type: DataType::String {
+                        collation: "UTF8_BINARY".to_string(),
+                    },
+                    nullable: false,
+                    metadata: BTreeMap::new(),
+                },
+            ],
+        };
+        let proto = struct_type.to_proto();
+        assert!(proto.kind.is_some());
+    }
+
+    #[test]
+    fn test_display_trait() {
+        let int_type = DataType::Integer;
+        let display_str = format!("{}", int_type);
+        assert_eq!(display_str, "int");
+
+        let array_type = DataType::Array {
+            element_type: Box::new(DataType::Integer),
+            contains_null: true,
+        };
+        let display_str = format!("{}", array_type);
+        assert_eq!(display_str, "array<int>");
+    }
+
+    #[test]
+    fn test_interval_year_month() {
+        let ym = DataType::YearMonthInterval {
+            start_field: 0,
+            end_field: 1,
+        };
+        assert_eq!(ym.simple_string(), "interval year to month");
+    }
+
+    #[test]
+    fn test_interval_day_time() {
+        let dt = DataType::DayTimeInterval {
+            start_field: 0,
+            end_field: 3,
+        };
+        assert_eq!(dt.simple_string(), "interval day to second");
+    }
+
+    #[test]
+    fn test_udt_type() {
+        let udt = DataType::Udt {
+            type_str: "com.example.MyUDT".to_string(),
+            jvm_class: Some("com.example.MyUDT".to_string()),
+            python_class: None,
+            serialized_python_class: None,
+            sql_type: None,
+        };
+        assert_eq!(udt.simple_string(), "udt");
+        assert_eq!(udt.type_name(), "udt");
+    }
+
+    #[test]
+    fn test_char_varchar() {
+        let char_type = DataType::Char { length: 50 };
+        assert_eq!(char_type.simple_string(), "char(50)");
+
+        let varchar_type = DataType::Varchar { length: 100 };
+        assert_eq!(varchar_type.simple_string(), "varchar(100)");
     }
 }

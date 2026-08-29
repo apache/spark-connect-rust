@@ -210,7 +210,8 @@ impl DataFrame {
     }
 
     /// Select specific columns.
-    pub fn select(&self, columns: Vec<Column>) -> DataFrame {
+    pub fn select<C: Into<Column>>(&self, columns: impl IntoIterator<Item = C>) -> DataFrame {
+        let columns: Vec<Column> = columns.into_iter().map(Into::into).collect();
         let plan = LogicalPlan::Project {
             input: Box::new(self.plan.clone()),
             columns,
@@ -369,10 +370,10 @@ impl DataFrame {
     }
 
     /// Join with another DataFrame using column names (a name-based/"using" join).
-    pub fn join_using(
+    pub fn join_using<S: Into<String>>(
         &self,
         right: &DataFrame,
-        using_columns: Vec<String>,
+        using_columns: impl IntoIterator<Item = S>,
         join_type: JoinType,
     ) -> DataFrame {
         let plan = LogicalPlan::Join {
@@ -380,7 +381,7 @@ impl DataFrame {
             right: Box::new(right.plan.clone()),
             join_type,
             on: None,
-            using_columns,
+            using_columns: using_columns.into_iter().map(Into::into).collect(),
         };
         DataFrame::new(self.session.clone(), plan)
     }
@@ -514,11 +515,15 @@ impl DataFrame {
     }
 
     /// Add a hint.
-    pub fn hint(&self, name: &str, parameters: Vec<String>) -> DataFrame {
+    pub fn hint<S: Into<String>>(
+        &self,
+        name: &str,
+        parameters: impl IntoIterator<Item = S>,
+    ) -> DataFrame {
         let plan = LogicalPlan::Hint {
             input: Box::new(self.plan.clone()),
             name: name.to_string(),
-            parameters,
+            parameters: parameters.into_iter().map(Into::into).collect(),
         };
         DataFrame::new(self.session.clone(), plan)
     }
@@ -526,7 +531,7 @@ impl DataFrame {
     /// Marks a DataFrame as eligible for broadcast join (smaller table).
     /// Mirrors `pyspark.sql.functions.broadcast`.
     pub fn broadcast(&self) -> DataFrame {
-        self.hint("broadcast", vec![])
+        self.hint("broadcast", Vec::<String>::new())
     }
 
     /// Convert to DataFrame with new column names.
@@ -622,7 +627,11 @@ impl DataFrame {
     }
 
     /// Group by columns for aggregation.
-    pub fn group_by(&self, group_cols: Vec<Column>) -> crate::group::GroupedData {
+    pub fn group_by<C: Into<Column>>(
+        &self,
+        group_cols: impl IntoIterator<Item = C>,
+    ) -> crate::group::GroupedData {
+        let group_cols: Vec<Column> = group_cols.into_iter().map(Into::into).collect();
         crate::group::GroupedData::new(self.clone(), group_cols, AggregateGroupType::GroupBy)
     }
 
@@ -1307,12 +1316,20 @@ impl DataFrame {
     }
 
     /// Group by with rollup.
-    pub fn rollup(&self, group_cols: Vec<Column>) -> crate::group::GroupedData {
+    pub fn rollup<C: Into<Column>>(
+        &self,
+        group_cols: impl IntoIterator<Item = C>,
+    ) -> crate::group::GroupedData {
+        let group_cols: Vec<Column> = group_cols.into_iter().map(Into::into).collect();
         crate::group::GroupedData::new(self.clone(), group_cols, AggregateGroupType::Rollup)
     }
 
     /// Group by with cube.
-    pub fn cube(&self, group_cols: Vec<Column>) -> crate::group::GroupedData {
+    pub fn cube<C: Into<Column>>(
+        &self,
+        group_cols: impl IntoIterator<Item = C>,
+    ) -> crate::group::GroupedData {
+        let group_cols: Vec<Column> = group_cols.into_iter().map(Into::into).collect();
         crate::group::GroupedData::new(self.clone(), group_cols, AggregateGroupType::Cube)
     }
 
@@ -1543,13 +1560,15 @@ impl DataFrame {
     }
 
     /// Unpivot columns (like melt).
-    pub fn unpivot(
+    pub fn unpivot<C: Into<Column>, D: Into<Column>>(
         &self,
-        ids: Vec<Column>,
-        values: Option<Vec<Column>>,
+        ids: impl IntoIterator<Item = C>,
+        values: Option<impl IntoIterator<Item = D>>,
         variable_column_name: &str,
         value_column_name: &str,
     ) -> DataFrame {
+        let ids: Vec<Column> = ids.into_iter().map(Into::into).collect();
+        let values: Option<Vec<Column>> = values.map(|v| v.into_iter().map(Into::into).collect());
         let plan = LogicalPlan::Unpivot {
             input: Box::new(self.plan.clone()),
             ids,
@@ -1644,9 +1663,26 @@ impl DataFrame {
         record_batches_to_polars(&self.collect_record_batches()?)
     }
 
-    /// Repartition by ID.
-    pub fn repartition_by_id(&self, num_partitions: i32) -> DataFrame {
-        self.repartition(num_partitions)
+    /// Repartition into `num_partitions` using the given column's value directly as
+    /// the shuffle partition id. Mirrors `DataFrame.repartitionById(numPartitions,
+    /// partitionIdCol)`: the column is wrapped in a `DirectShufflePartitionID`
+    /// expression and used as the sole repartition expression.
+    pub fn repartition_by_id(&self, num_partitions: i32, partition_id_col: Column) -> DataFrame {
+        let direct =
+            Expression::DirectShufflePartitionId(Box::new(partition_id_col.expression().clone()));
+        self.repartition_by_expressions(num_partitions, vec![direct])
+    }
+
+    /// Append a monotonically increasing index column. Mirrors
+    /// `DataFrame.zipWithIndex(indexColName="index")`:
+    /// `self.select(col("*"), distributed_sequence_id().alias(indexColName))`.
+    pub fn zip_with_index(&self, index_col_name: &str) -> DataFrame {
+        let star = Column::new(Expression::UnresolvedStar(None));
+        let seq = Column::new(Expression::UnresolvedFunction(
+            crate::expression::UnresolvedFunction::new("distributed_sequence_id", vec![]),
+        ))
+        .alias(index_col_name);
+        self.select(vec![star, seq])
     }
 
     /// Reconcile this DataFrame to a new schema: reorder/select columns by name
@@ -2196,6 +2232,11 @@ pub(crate) fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> R
         return Ok(Value::Null);
     }
 
+    // A NullType column arrives as an all-null NullArray; every element is Null.
+    if array.as_any().downcast_ref::<NullArray>().is_some() {
+        return Ok(Value::Null);
+    }
+
     // Try each array type
     if let Some(arr) = array.as_any().downcast_ref::<BooleanArray>() {
         return Ok(Value::Bool(arr.value(index)));
@@ -2292,6 +2333,32 @@ pub(crate) fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> R
         return Ok(Value::List(items));
     }
     if let Some(arr) = array.as_any().downcast_ref::<StructArray>() {
+        // A VARIANT column arrives as struct<value: binary, metadata: binary> where the
+        // `metadata` field carries arrow metadata {"variant": "true"}. Recognize it and
+        // return a Value::Variant (raw bytes) so it materializes as a VariantVal (matching
+        // pyspark) rather than a plain {value, metadata} struct/dict.
+        let is_variant = arr.fields().iter().any(|f| {
+            f.metadata()
+                .get("variant")
+                .map(|v| v == "true")
+                .unwrap_or(false)
+        });
+        if is_variant {
+            let bin_field = |name: &str| -> Result<Vec<u8>> {
+                match arr.column_by_name(name) {
+                    Some(col) => match arrow_value_at(col.as_ref(), index)? {
+                        Value::Binary(b) => Ok(b),
+                        Value::Null => Ok(vec![]),
+                        _ => Err(SparkError::connect_msg("variant field is not binary")),
+                    },
+                    None => Ok(vec![]),
+                }
+            };
+            return Ok(Value::Variant {
+                value: bin_field("value")?,
+                metadata: bin_field("metadata")?,
+            });
+        }
         let mut fields = Vec::new();
         for (f, col) in arr.fields().iter().zip(arr.columns()) {
             fields.push((f.name().clone(), arrow_value_at(col.as_ref(), index)?));
@@ -2667,7 +2734,7 @@ mod plan_construction_tests {
         ser(&df.repartition(4));
         ser(&df.coalesce(2));
         ser(&df.repartition_by_range(3, vec![e()]));
-        ser(&df.hint("broadcast", vec![]));
+        ser(&df.hint("broadcast", Vec::<String>::new()));
         ser(&df.to_df(vec!["a"]));
         ser(&df.alias("t"));
         ser(&df.sample(0.5, Some(1)));
@@ -2684,7 +2751,7 @@ mod plan_construction_tests {
                 metadata: std::collections::BTreeMap::new(),
             }],
         }));
-        ser(&df.unpivot(vec![col("id")], None, "var", "val"));
+        ser(&df.unpivot(vec![col("id")], None::<Vec<Column>>, "var", "val"));
         ser(&df.melt(vec!["id"], None, "var", "val"));
         ser(&df.group_by(vec![col("id")]).agg(vec![e()]));
         ser(&df.rollup(vec![col("id")]).agg(vec![e()]));

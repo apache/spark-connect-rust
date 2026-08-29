@@ -150,7 +150,12 @@ impl TableValuedFunction {
     /// ```ignore
     /// let df = spark.tvf().json_tuple(col("json_str"), vec![col("field1"), col("field2")])?;
     /// ```
-    pub fn json_tuple(&self, input: &Column, fields: Vec<Column>) -> Result<DataFrame> {
+    pub fn json_tuple<C: Into<Column>>(
+        &self,
+        input: &Column,
+        fields: impl IntoIterator<Item = C>,
+    ) -> Result<DataFrame> {
+        let fields: Vec<Column> = fields.into_iter().map(Into::into).collect();
         if fields.is_empty() {
             return Err(spark_connect_core::error::SparkError::value(
                 "CANNOT_BE_EMPTY",
@@ -184,7 +189,12 @@ impl TableValuedFunction {
     ///
     /// * `n` - The number of columns to stack
     /// * `fields` - The columns to stack
-    pub fn stack(&self, n: &Column, fields: Vec<Column>) -> Result<DataFrame> {
+    pub fn stack<C: Into<Column>>(
+        &self,
+        n: &Column,
+        fields: impl IntoIterator<Item = C>,
+    ) -> Result<DataFrame> {
+        let fields: Vec<Column> = fields.into_iter().map(Into::into).collect();
         let mut args = vec![n.clone()];
         args.extend(fields);
         self._fn("stack", args)
@@ -337,7 +347,7 @@ mod tests {
         let spark = session();
         let tvf = spark.tvf();
         let input = crate::column::col("json_col");
-        let result = tvf.json_tuple(&input, vec![]);
+        let result = tvf.json_tuple(&input, Vec::<Column>::new());
         assert!(result.is_err());
     }
 

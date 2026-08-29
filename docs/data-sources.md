@@ -85,7 +85,7 @@ Organize output by one or more columns:
 ```rust
 df.write()
     .format("parquet")
-    .partition_by(vec!["year".to_string(), "month".to_string()])
+    .partition_by(["year", "month"])
     .mode("overwrite")
     .save(Some("/path/to/output"))?;
 ```

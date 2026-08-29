@@ -30,10 +30,17 @@ impl PyRuntimeConf {
         py.detach(|| self.conf.set(key, &v)).to_pyerr()
     }
 
-    /// Get a configuration value, returning `default` when unset.
+    /// Get a configuration value. With a `default`, an unknown key returns the default
+    /// (server `GetWithDefault`) rather than raising; without one, an unknown key raises,
+    /// mirroring `RuntimeConfig.get`.
     #[pyo3(signature = (key, default=None))]
     fn get(&self, py: Python<'_>, key: &str, default: Option<String>) -> PyResult<Option<String>> {
-        Ok(py.detach(|| self.conf.get(key)).to_pyerr()?.or(default))
+        match default {
+            Some(d) => py
+                .detach(|| self.conf.get_with_default(key, Some(&d)))
+                .to_pyerr(),
+            None => py.detach(|| self.conf.get(key)).to_pyerr(),
+        }
     }
 
     /// Reset a configuration value to its default.
@@ -45,5 +52,16 @@ impl PyRuntimeConf {
     #[pyo3(name = "isModifiable")]
     fn is_modifiable(&self, py: Python<'_>, key: &str) -> PyResult<bool> {
         py.detach(|| self.conf.is_modifiable(key)).to_pyerr()
+    }
+
+    /// All configuration values as a dict. Mirrors the `RuntimeConf.getAll` property.
+    #[getter(getAll)]
+    fn get_all<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let all = py.detach(|| self.conf.get_all()).to_pyerr()?;
+        let dict = pyo3::types::PyDict::new(py);
+        for (k, v) in all {
+            dict.set_item(k, v)?;
+        }
+        Ok(dict)
     }
 }

@@ -97,16 +97,21 @@ pub fn cast(_col: Column, to_col: Column) -> Column {
     to_col
 }
 
-/// Mirrors `pyspark.sql.functions.call_function`.
-pub fn call_function(name: &str) -> Column {
+/// Mirrors `pyspark.sql.functions.call_function`: builds a `CallFunction`
+/// expression carrying the argument columns.
+pub fn call_function<C: Into<Column>>(name: &str, args: impl IntoIterator<Item = C>) -> Column {
+    let args: Vec<Column> = args.into_iter().map(Into::into).collect();
+    let arg_exprs = args.iter().map(|c| c.expression().clone()).collect();
     Column::new(Expression::CallFunction(Box::new(
-        CallFunctionWrapper::new(name),
+        CallFunctionWrapper::new(name, arg_exprs),
     )))
 }
 
-/// Mirrors `pyspark.sql.functions.call_udf`.
-pub fn call_udf(name: &str) -> Column {
-    func(name, vec![])
+/// Mirrors `pyspark.sql.functions.call_udf` = `_invoke_function(udfName, *cols)`
+/// (an `UnresolvedFunction` call).
+pub fn call_udf<C: Into<Column>>(name: &str, args: impl IntoIterator<Item = C>) -> Column {
+    let args: Vec<Column> = args.into_iter().map(Into::into).collect();
+    func(name, args.iter().map(|c| c.expression().clone()).collect())
 }
 
 /// Mirrors `pyspark.sql.functions.asc`.
@@ -135,35 +140,40 @@ pub fn desc_nulls_last(col: Column) -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.array` (variadic over the given columns).
-pub fn array(cols: Vec<Column>) -> Column {
+pub fn array<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func(
         "array",
         cols.iter().map(|c| c.expression().clone()).collect(),
     )
 }
 /// Mirrors `pyspark.sql.functions.concat` (variadic over the given columns).
-pub fn concat(cols: Vec<Column>) -> Column {
+pub fn concat<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func(
         "concat",
         cols.iter().map(|c| c.expression().clone()).collect(),
     )
 }
 /// Mirrors `pyspark.sql.functions.coalesce` (variadic over the given columns).
-pub fn coalesce(cols: Vec<Column>) -> Column {
+pub fn coalesce<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func(
         "coalesce",
         cols.iter().map(|c| c.expression().clone()).collect(),
     )
 }
 /// Mirrors `pyspark.sql.functions.arrays_zip`.
-pub fn arrays_zip(cols: Vec<Column>) -> Column {
+pub fn arrays_zip<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func(
         "arrays_zip",
         cols.iter().map(|c| c.expression().clone()).collect(),
     )
 }
 /// Mirrors `pyspark.sql.functions.create_map`.
-pub fn create_map(cols: Vec<Column>) -> Column {
+pub fn create_map<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func("map", cols.iter().map(|c| c.expression().clone()).collect())
 }
 
@@ -261,12 +271,14 @@ pub fn e() -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.elt`.
-pub fn elt(cols: Vec<Column>) -> Column {
+pub fn elt<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func("elt", cols.iter().map(|c| c.expression().clone()).collect())
 }
 
 /// Mirrors `pyspark.sql.functions.grouping_id`.
-pub fn grouping_id(cols: Vec<Column>) -> Column {
+pub fn grouping_id<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func(
         "grouping_id",
         cols.iter().map(|c| c.expression().clone()).collect(),
@@ -274,7 +286,8 @@ pub fn grouping_id(cols: Vec<Column>) -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.hash`.
-pub fn hash(cols: Vec<Column>) -> Column {
+pub fn hash<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func(
         "hash",
         cols.iter().map(|c| c.expression().clone()).collect(),
@@ -297,7 +310,8 @@ pub fn input_file_name() -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.java_method`.
-pub fn java_method(cols: Vec<Column>) -> Column {
+pub fn java_method<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func(
         "java_method",
         cols.iter().map(|c| c.expression().clone()).collect(),
@@ -352,7 +366,8 @@ pub fn make_ym_interval() -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.map_concat`.
-pub fn map_concat(cols: Vec<Column>) -> Column {
+pub fn map_concat<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func(
         "map_concat",
         cols.iter().map(|c| c.expression().clone()).collect(),
@@ -365,7 +380,8 @@ pub fn monotonically_increasing_id() -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.named_struct`.
-pub fn named_struct(cols: Vec<Column>) -> Column {
+pub fn named_struct<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func(
         "named_struct",
         cols.iter().map(|c| c.expression().clone()).collect(),
@@ -403,7 +419,8 @@ pub fn rank() -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.reflect`.
-pub fn reflect(cols: Vec<Column>) -> Column {
+pub fn reflect<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func(
         "reflect",
         cols.iter().map(|c| c.expression().clone()).collect(),
@@ -426,7 +443,8 @@ pub fn spark_partition_id() -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.stack`.
-pub fn stack(cols: Vec<Column>) -> Column {
+pub fn stack<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func(
         "stack",
         cols.iter().map(|c| c.expression().clone()).collect(),
@@ -434,7 +452,8 @@ pub fn stack(cols: Vec<Column>) -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.struct`.
-pub fn r#struct(cols: Vec<Column>) -> Column {
+pub fn r#struct<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func(
         "struct",
         cols.iter().map(|c| c.expression().clone()).collect(),
@@ -462,7 +481,8 @@ pub fn try_make_interval() -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.try_reflect`.
-pub fn try_reflect(cols: Vec<Column>) -> Column {
+pub fn try_reflect<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func(
         "try_reflect",
         cols.iter().map(|c| c.expression().clone()).collect(),
@@ -485,7 +505,8 @@ pub fn version() -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.xxhash64`.
-pub fn xxhash64(cols: Vec<Column>) -> Column {
+pub fn xxhash64<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func(
         "xxhash64",
         cols.iter().map(|c| c.expression().clone()).collect(),
@@ -4038,9 +4059,9 @@ pub fn variant_array_append(v: Column, path: Column, value: Column) -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.variant_delete`.
-pub fn variant_delete(v: Column, paths: Vec<Column>) -> Column {
+pub fn variant_delete<C: Into<Column>>(v: Column, paths: impl IntoIterator<Item = C>) -> Column {
     let mut args = vec![v.expression().clone()];
-    args.extend(paths.into_iter().map(|c| c.expression().clone()));
+    args.extend(paths.into_iter().map(|c| c.into().expression().clone()));
     func("variant_delete", args)
 }
 
@@ -4306,4 +4327,728 @@ pub fn tuple_union_theta_integer(col1: Column, col2: Column) -> Column {
         "tuple_union_theta_integer",
         vec![col1.expression().clone(), col2.expression().clone()],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_zero_arg_functions() {
+        let _cume = cume_dist();
+        let _curdate = curdate();
+        let _catalog = current_catalog();
+        let _db = current_database();
+        let _now = current_date();
+        let _schema = current_schema();
+        let _ts = current_timestamp();
+        let _tz = current_timezone();
+        let _user = current_user();
+        let _dense = dense_rank();
+        let _e_val = e();
+        let _input_block = input_file_block_length();
+        let _input_start = input_file_block_start();
+        let _input_name = input_file_name();
+        let _local_ts = localtimestamp();
+        let _mono_id = monotonically_increasing_id();
+        let _now_fn = now();
+        let _pr = percent_rank();
+        let _pi_val = pi();
+        let _rand_val = rand();
+        let _uuid_val = uuid();
+    }
+
+    #[test]
+    fn test_zero_arg_functions_serialize() {
+        let funcs = vec![
+            cume_dist(),
+            curdate(),
+            current_catalog(),
+            current_date(),
+            dense_rank(),
+            e(),
+            pi(),
+            rand(),
+            uuid(),
+        ];
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+    }
+
+    #[test]
+    fn test_interval_builders_serialize() {
+        let make_dt = make_dt_interval();
+        let _ = make_dt.to_proto();
+
+        let make_i = make_interval();
+        let _ = make_i.to_proto();
+
+        let make_ym = make_ym_interval();
+        let _ = make_ym.to_proto();
+    }
+
+    #[test]
+    fn test_math_functions_serialize() {
+        let test_col = col("test");
+        let funcs = vec![
+            abs(test_col.clone()),
+            acos(test_col.clone()),
+            acosh(test_col.clone()),
+            asin(test_col.clone()),
+            asinh(test_col.clone()),
+            atan(test_col.clone()),
+            atanh(test_col.clone()),
+            cbrt(test_col.clone()),
+            ceil(test_col.clone()),
+            cos(test_col.clone()),
+            cosh(test_col.clone()),
+            exp(test_col.clone()),
+            expm1(test_col.clone()),
+            floor(test_col.clone()),
+            log(test_col.clone()),
+            log10(test_col.clone()),
+            log1p(test_col.clone()),
+            log2(test_col.clone()),
+            rint(test_col.clone()),
+            round(test_col.clone()),
+            signum(test_col.clone()),
+            sin(test_col.clone()),
+            sinh(test_col.clone()),
+            sqrt(test_col.clone()),
+            tan(test_col.clone()),
+            tanh(test_col.clone()),
+        ];
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+    }
+
+    #[test]
+    fn test_string_functions_serialize() {
+        let test_col = col("test");
+        let funcs = vec![
+            ascii(test_col.clone()),
+            bit_count(test_col.clone()),
+            char_length(test_col.clone()),
+            character_length(test_col.clone()),
+            initcap(test_col.clone()),
+            lower(test_col.clone()),
+            ltrim(test_col.clone()),
+            octet_length(test_col.clone()),
+            reverse(test_col.clone()),
+            rtrim(test_col.clone()),
+            size(test_col.clone()),
+            soundex(test_col.clone()),
+            upper(test_col.clone()),
+        ];
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+    }
+
+    #[test]
+    fn test_col_patterns() {
+        let c_col = col("my_column");
+        match c_col.expression() {
+            Expression::ColumnReference(_) => {}
+            _ => panic!("Expected ColumnReference"),
+        }
+
+        let star = col("*");
+        match star.expression() {
+            Expression::UnresolvedStar(None) => {}
+            _ => panic!("Expected UnresolvedStar(None)"),
+        }
+
+        let table_star = col("t.*");
+        match table_star.expression() {
+            Expression::UnresolvedStar(Some(_)) => {}
+            _ => panic!("Expected UnresolvedStar with prefix"),
+        }
+    }
+
+    #[test]
+    fn test_expr_function_serialize() {
+        let e = expr("SELECT 1");
+        match e.expression() {
+            Expression::SQLExpression(s) => {
+                assert_eq!(s, "SELECT 1");
+            }
+            _ => panic!("Expected SQLExpression"),
+        }
+        let _ = e.to_proto();
+    }
+
+    #[test]
+    fn test_variadic_functions_serialize() {
+        let c1 = col("a");
+        let c2 = col("b");
+        let c3 = col("c");
+
+        let arr = array(vec![c1.clone(), c2.clone(), c3.clone()]);
+        let _ = arr.to_proto();
+
+        let concat_res = concat(vec![c1.clone(), c2.clone()]);
+        let _ = concat_res.to_proto();
+
+        let zip = arrays_zip(vec![c1.clone(), c2.clone()]);
+        let _ = zip.to_proto();
+
+        let map_res = create_map(vec![c1, c2, c3]);
+        let _ = map_res.to_proto();
+    }
+
+    #[test]
+    fn test_sort_functions_serialize() {
+        let test_col = col("test");
+        let funcs = vec![
+            asc(test_col.clone()),
+            asc_nulls_first(test_col.clone()),
+            asc_nulls_last(test_col.clone()),
+            desc(test_col.clone()),
+            desc_nulls_first(test_col.clone()),
+            desc_nulls_last(test_col.clone()),
+        ];
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+    }
+
+    #[test]
+    fn test_window_functions_serialize() {
+        let test_col = col("test");
+        let w1 = window(test_col.clone(), "1 minute");
+        let _ = w1.to_proto();
+
+        let w2 =
+            window_with_slide_and_start(test_col.clone(), "10 minutes", "5 minutes", "0 minutes");
+        let _ = w2.to_proto();
+    }
+
+    #[test]
+    fn test_udf_call_serialize() {
+        let c1 = col("a");
+        let c2 = col("b");
+
+        let udf_res = call_udf("my_udf", vec![c1.clone(), c2.clone()]);
+        let _ = udf_res.to_proto();
+
+        let cf = call_function("func_name", vec![c1, c2]);
+        let _ = cf.to_proto();
+    }
+
+    #[test]
+    fn test_two_arg_functions_serialize() {
+        let c1 = col("a");
+        let c2 = col("b");
+
+        let funcs = vec![
+            pow(c1.clone(), c2.clone()),
+            hypot(c1.clone(), c2.clone()),
+            atan2(c1.clone(), c2.clone()),
+            datediff(c1.clone(), c2.clone()),
+            from_utc_timestamp(c1.clone(), c2.clone()),
+            to_utc_timestamp(c1.clone(), c2.clone()),
+            try_add(c1.clone(), c2.clone()),
+            try_divide(c1.clone(), c2.clone()),
+            try_multiply(c1.clone(), c2.clone()),
+            try_subtract(c1.clone(), c2.clone()),
+        ];
+
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+    }
+
+    #[test]
+    fn test_type_cast_serialize() {
+        let test_col = col("test");
+        let fmt_col = col("fmt");
+        let funcs = vec![
+            bitwiseNOT(test_col.clone()),
+            bool_and(test_col.clone()),
+            bool_or(test_col.clone()),
+            to_date(test_col.clone()),
+            to_timestamp(test_col.clone()),
+            to_char(test_col.clone(), fmt_col.clone()),
+            to_varchar(test_col.clone(), fmt_col.clone()),
+            to_binary(test_col.clone()),
+            unix_date(test_col.clone()),
+            unix_seconds(test_col.clone()),
+            unix_millis(test_col.clone()),
+            unix_micros(test_col.clone()),
+        ];
+
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+    }
+
+    #[test]
+    fn test_hash_functions_serialize() {
+        let test_col = col("test");
+        let c1 = col("a");
+        let c2 = col("b");
+
+        let funcs = vec![
+            md5(test_col.clone()),
+            sha1(test_col.clone()),
+            sha2(test_col.clone(), 256),
+            crc32(test_col.clone()),
+        ];
+
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+
+        let hash_res = hash(vec![c1, c2]);
+        let _ = hash_res.to_proto();
+    }
+
+    #[test]
+    fn test_encoding_serialize() {
+        let test_col = col("test");
+        let funcs = vec![
+            bin(test_col.clone()),
+            hex(test_col.clone()),
+            unhex(test_col.clone()),
+            base64(test_col.clone()),
+            unbase64(test_col.clone()),
+        ];
+
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+    }
+
+    #[test]
+    fn test_datetime_serialize() {
+        let test_col = col("test");
+        let funcs = vec![
+            dayofmonth(test_col.clone()),
+            dayofweek(test_col.clone()),
+            dayofyear(test_col.clone()),
+            month(test_col.clone()),
+            quarter(test_col.clone()),
+            dayofmonth(test_col.clone()),
+            hour(test_col.clone()),
+            minute(test_col.clone()),
+            second(test_col.clone()),
+            year(test_col.clone()),
+        ];
+
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+    }
+
+    #[test]
+    fn test_array_functions_serialize() {
+        let test_col = col("test");
+        let other_col = col("other");
+
+        let funcs = vec![
+            array_contains(test_col.clone(), other_col.clone()),
+            array_intersect(test_col.clone(), other_col.clone()),
+            array_max(test_col.clone()),
+            array_min(test_col.clone()),
+            array_position(test_col.clone(), other_col.clone()),
+            array_remove(test_col.clone(), other_col.clone()),
+            array_sort(test_col.clone()),
+            array_distinct(test_col.clone()),
+            array_compact(test_col.clone()),
+        ];
+
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+    }
+
+    #[test]
+    fn test_map_functions_serialize() {
+        let test_col = col("test");
+        let other_col = col("other");
+
+        let funcs = vec![
+            map_contains_key(test_col.clone(), other_col.clone()),
+            map_keys(test_col.clone()),
+            map_values(test_col.clone()),
+            map_from_arrays(test_col.clone(), other_col.clone()),
+            element_at(test_col.clone(), other_col.clone()),
+            try_element_at(test_col.clone(), other_col.clone()),
+        ];
+
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+    }
+
+    #[test]
+    fn test_string_ops_serialize() {
+        let test_col = col("test");
+        let col1 = col("a");
+        let col2 = col("b");
+        let col3 = col("c");
+
+        let funcs = vec![
+            substring(test_col.clone(), col1.clone(), col2.clone()),
+            instr(test_col.clone(), col1.clone()),
+            rpad(test_col.clone(), col1.clone(), col2.clone()),
+            lpad(test_col.clone(), col1.clone(), col2.clone()),
+            split(test_col.clone(), col1.clone()),
+            regexp_extract(test_col.clone(), col1.clone(), col3.clone()),
+            regexp_like(test_col.clone(), col1.clone()),
+        ];
+
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+    }
+
+    #[test]
+    fn test_explode_serialize() {
+        let test_col = col("test");
+        let funcs = vec![
+            explode(test_col.clone()),
+            explode_outer(test_col.clone()),
+            posexplode(test_col.clone()),
+            posexplode_outer(test_col.clone()),
+        ];
+
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+    }
+
+    #[test]
+    fn test_json_serialize() {
+        let test_col = col("test");
+        let other_col = col("other");
+        let funcs = vec![
+            get_json_object(test_col.clone(), other_col.clone()),
+            json_array_length(test_col.clone()),
+            json_object_keys(test_col.clone()),
+            parse_json(test_col.clone()),
+            from_json(test_col.clone(), other_col.clone()),
+            to_json(test_col.clone()),
+            schema_of_json(test_col.clone()),
+        ];
+
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+    }
+
+    #[test]
+    fn test_aggregation_serialize() {
+        let test_col = col("test");
+        let funcs = vec![
+            count_distinct(test_col.clone()),
+            approx_count_distinct(test_col.clone()),
+            skewness(test_col.clone()),
+            kurtosis(test_col.clone()),
+            var_pop(test_col.clone()),
+            var_samp(test_col.clone()),
+            stddev(test_col.clone()),
+            stddev_pop(test_col.clone()),
+            stddev_samp(test_col.clone()),
+        ];
+
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+    }
+
+    #[test]
+    fn test_shift_functions_serialize() {
+        let test_col = col("test");
+        let col_n = col("n");
+        let funcs = vec![
+            shiftLeft(test_col.clone(), col_n.clone()),
+            shiftRight(test_col.clone(), col_n.clone()),
+            shiftRightUnsigned(test_col.clone(), col_n.clone()),
+        ];
+
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+    }
+
+    #[test]
+    fn test_misc_functions_serialize() {
+        let test_col = col("test");
+        let funcs = vec![
+            degrees(test_col.clone()),
+            radians(test_col.clone()),
+            bround(test_col.clone()),
+            url_encode(test_col.clone()),
+            url_decode(test_col.clone()),
+            try_to_binary(test_col.clone()),
+            try_url_decode(test_col.clone()),
+        ];
+
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+    }
+
+    #[test]
+    fn test_nested_calls() {
+        let inner = col("x");
+        let outer = sqrt(inner);
+        let _ = outer.to_proto();
+
+        let nested = ceil(sqrt(col("y")));
+        let _ = nested.to_proto();
+
+        let complex = floor(abs(log(col("z"))));
+        let _ = complex.to_proto();
+    }
+
+    #[test]
+    fn test_comprehensive_coverage() {
+        let c1 = col("c1");
+        let c2 = col("c2");
+        let c3 = col("c3");
+
+        // Test one-argument functions
+        let one_arg_funcs = vec![
+            abs(c1.clone()),
+            acos(c1.clone()),
+            acosh(c1.clone()),
+            any_value(c1.clone()),
+            approxCountDistinct(c1.clone()),
+            approx_count_distinct(c1.clone()),
+            array_agg(c1.clone()),
+            array_compact(c1.clone()),
+            array_distinct(c1.clone()),
+            array_max(c1.clone()),
+            array_min(c1.clone()),
+            array_size(c1.clone()),
+            array_sort(c1.clone()),
+            asc(c1.clone()),
+            asc_nulls_first(c1.clone()),
+            asc_nulls_last(c1.clone()),
+            ascii(c1.clone()),
+            asin(c1.clone()),
+            asinh(c1.clone()),
+            assert_true(c1.clone()),
+            atan(c1.clone()),
+            atanh(c1.clone()),
+            avg(c1.clone()),
+            base64(c1.clone()),
+            bin(c1.clone()),
+            bit_and(c1.clone()),
+            bit_count(c1.clone()),
+            bit_length(c1.clone()),
+            bit_or(c1.clone()),
+            bit_xor(c1.clone()),
+            bitmap_and_agg(c1.clone()),
+            bitmap_bit_position(c1.clone()),
+            bitmap_bucket_number(c1.clone()),
+            bitmap_construct_agg(c1.clone()),
+            bitmap_count(c1.clone()),
+            bitmap_or_agg(c1.clone()),
+            bitwiseNOT(c1.clone()),
+            bitwise_not(c1.clone()),
+            bool_and(c1.clone()),
+            bool_or(c1.clone()),
+            bround(c1.clone()),
+            btrim(c1.clone()),
+            cardinality(c1.clone()),
+            cbrt(c1.clone()),
+            ceil(c1.clone()),
+            ceiling(c1.clone()),
+            char(c1.clone()),
+            char_length(c1.clone()),
+            character_length(c1.clone()),
+            chr(c1.clone()),
+            collation(c1.clone()),
+            collect_list(c1.clone()),
+            collect_set(c1.clone()),
+            concat_ws(c1.clone()),
+            cos(c1.clone()),
+            cosh(c1.clone()),
+            cot(c1.clone()),
+            count(c1.clone()),
+            countDistinct(c1.clone()),
+            count_distinct(c1.clone()),
+            count_if(c1.clone()),
+            counter_diff(c1.clone()),
+            crc32(c1.clone()),
+            csc(c1.clone()),
+            date_from_unix_date(c1.clone()),
+            day(c1.clone()),
+            dayname(c1.clone()),
+            dayofmonth(c1.clone()),
+            dayofweek(c1.clone()),
+            dayofyear(c1.clone()),
+            days(c1.clone()),
+            degrees(c1.clone()),
+            desc(c1.clone()),
+            desc_nulls_first(c1.clone()),
+            desc_nulls_last(c1.clone()),
+            every(c1.clone()),
+            exp(c1.clone()),
+            explode(c1.clone()),
+            explode_outer(c1.clone()),
+            expm1(c1.clone()),
+            factorial(c1.clone()),
+            first(c1.clone()),
+            first_value(c1.clone()),
+            flatten(c1.clone()),
+            floor(c1.clone()),
+            format_string(c1.clone()),
+            grouping(c1.clone()),
+            hex(c1.clone()),
+            hll_sketch_agg(c1.clone()),
+            hll_sketch_estimate(c1.clone()),
+            hll_union_agg(c1.clone()),
+            hour(c1.clone()),
+            hours(c1.clone()),
+            initcap(c1.clone()),
+            inline(c1.clone()),
+        ];
+        for f in one_arg_funcs {
+            let _ = f.to_proto();
+        }
+
+        // Test two-argument functions
+        let two_arg_funcs = vec![
+            add_months(c1.clone(), c2.clone()),
+            aes_decrypt(c1.clone(), c2.clone()),
+            aes_encrypt(c1.clone(), c2.clone()),
+            approx_count_distinct_rsd(c1.clone(), c2.clone()),
+            approx_percentile(c1.clone(), c2.clone()),
+            array_append(c1.clone(), c2.clone()),
+            array_contains(c1.clone(), c2.clone()),
+            array_except(c1.clone(), c2.clone()),
+            array_intersect(c1.clone(), c2.clone()),
+            array_join(c1.clone(), c2.clone()),
+            array_position(c1.clone(), c2.clone()),
+            array_prepend(c1.clone(), c2.clone()),
+            array_remove(c1.clone(), c2.clone()),
+            array_repeat(c1.clone(), c2.clone()),
+            array_union(c1.clone(), c2.clone()),
+            arrays_overlap(c1.clone(), c2.clone()),
+            atan2(c1.clone(), c2.clone()),
+            bit_get(c1.clone(), c2.clone()),
+            bround_scale(c1.clone(), c2.clone()),
+            bucket(c1.clone(), c2.clone()),
+            cast(c1.clone(), c2.clone()),
+            ceil_scale(c1.clone(), c2.clone()),
+            collate(c1.clone(), c2.clone()),
+            contains(c1.clone(), c2.clone()),
+            corr(c1.clone(), c2.clone()),
+            covar_pop(c1.clone(), c2.clone()),
+            covar_samp(c1.clone(), c2.clone()),
+            date_add(c1.clone(), c2.clone()),
+            date_diff(c1.clone(), c2.clone()),
+            date_format(c1.clone(), c2.clone()),
+            date_part(c1.clone(), c2.clone()),
+            date_sub(c1.clone(), c2.clone()),
+            date_trunc(c1.clone(), c2.clone()),
+            dateadd(c1.clone(), c2.clone()),
+            datediff(c1.clone(), c2.clone()),
+            datepart(c1.clone(), c2.clone()),
+            decode(c1.clone(), c2.clone()),
+            element_at(c1.clone(), c2.clone()),
+            encode(c1.clone(), c2.clone()),
+            endswith(c1.clone(), c2.clone()),
+            equal_null(c1.clone(), c2.clone()),
+            extract(c1.clone(), c2.clone()),
+            find_in_set(c1.clone(), c2.clone()),
+            floor_scale(c1.clone(), c2.clone()),
+            format_number(c1.clone(), c2.clone()),
+            from_csv(c1.clone(), c2.clone()),
+            from_json(c1.clone(), c2.clone()),
+            from_utc_timestamp(c1.clone(), c2.clone()),
+            from_xml(c1.clone(), c2.clone()),
+            get(c1.clone(), c2.clone()),
+            get_json_object(c1.clone(), c2.clone()),
+            getbit(c1.clone(), c2.clone()),
+            greatest(c1.clone(), c2.clone()),
+            histogram_numeric(c1.clone(), c2.clone()),
+            hll_union(c1.clone(), c2.clone()),
+            hmac(c1.clone(), c2.clone()),
+            hypot(c1.clone(), c2.clone()),
+            ifnull(c1.clone(), c2.clone()),
+            ilike(c1.clone(), c2.clone()),
+            instr(c1.clone(), c2.clone()),
+            jaro_winkler_similarity(c1.clone(), c2.clone()),
+            json_tuple(c1.clone(), c2.clone()),
+            kll_sketch_get_quantile_bigint(c1.clone(), c2.clone()),
+            kll_sketch_get_quantile_double(c1.clone(), c2.clone()),
+            kll_sketch_get_quantile_float(c1.clone(), c2.clone()),
+            kll_sketch_get_rank_bigint(c1.clone(), c2.clone()),
+            kll_sketch_get_rank_double(c1.clone(), c2.clone()),
+            kll_sketch_get_rank_float(c1.clone(), c2.clone()),
+            kll_sketch_merge_bigint(c1.clone(), c2.clone()),
+            kll_sketch_merge_double(c1.clone(), c2.clone()),
+            kll_sketch_merge_float(c1.clone(), c2.clone()),
+            least(c1.clone(), c2.clone()),
+            left(c1.clone(), c2.clone()),
+            levenshtein(c1.clone(), c2.clone()),
+            like(c1.clone(), c2.clone()),
+            locate(c1.clone(), c2.clone()),
+            ltrim_with(c1.clone(), c2.clone()),
+            map_contains_key(c1.clone(), c2.clone()),
+            map_from_arrays(c1.clone(), c2.clone()),
+            max_by(c1.clone(), c2.clone()),
+            min_by(c1.clone(), c2.clone()),
+            months_between(c1.clone(), c2.clone()),
+            nanvl(c1.clone(), c2.clone()),
+            next_day(c1.clone(), c2.clone()),
+            nth_value(c1.clone(), c2.clone()),
+            nullif(c1.clone(), c2.clone()),
+            nvl(c1.clone(), c2.clone()),
+            parse_url(c1.clone(), c2.clone()),
+            percentile(c1.clone(), c2.clone()),
+            percentile_approx(c1.clone(), c2.clone()),
+            pmod(c1.clone(), c2.clone()),
+            position(c1.clone(), c2.clone()),
+            pow(c1.clone(), c2.clone()),
+            power(c1.clone(), c2.clone()),
+            regexp(c1.clone(), c2.clone()),
+            regexp_count(c1.clone(), c2.clone()),
+            regexp_extract_all(c1.clone(), c2.clone()),
+            regexp_instr(c1.clone(), c2.clone()),
+        ];
+        for f in two_arg_funcs {
+            let _ = f.to_proto();
+        }
+
+        // Test three-argument functions
+        let three_arg_funcs = vec![
+            array_insert(c1.clone(), c2.clone(), c3.clone()),
+            conv(c1.clone(), c2.clone(), c3.clone()),
+            convert_timezone(c1.clone(), c2.clone(), c3.clone()),
+            count_min_sketch(c1.clone(), c2.clone(), c3.clone()),
+            lpad(c1.clone(), c2.clone(), c3.clone()),
+            make_date(c1.clone(), c2.clone(), c3.clone()),
+            make_time(c1.clone(), c2.clone(), c3.clone()),
+            nvl2(c1.clone(), c2.clone(), c3.clone()),
+            overlay(c1.clone(), c2.clone(), c3.clone()),
+            regexp_extract(c1.clone(), c2.clone(), c3.clone()),
+            regexp_replace(c1.clone(), c2.clone(), c3.clone()),
+            rpad(c1.clone(), c2.clone(), c3.clone()),
+            slice(c1.clone(), c2.clone(), c3.clone()),
+            split_part(c1.clone(), c2.clone(), c3.clone()),
+            substring(c1.clone(), c2.clone(), c3.clone()),
+            substring_index(c1.clone(), c2.clone(), c3.clone()),
+            time_diff(c1.clone(), c2.clone(), c3.clone()),
+            timestamp_add(c1.clone(), c2.clone(), c3.clone()),
+            timestamp_diff(c1.clone(), c2.clone(), c3.clone()),
+            translate(c1.clone(), c2.clone(), c3.clone()),
+            try_variant_array_append(c1.clone(), c2.clone(), c3.clone()),
+            try_variant_get(c1.clone(), c2.clone(), c3.clone()),
+            try_variant_insert(c1.clone(), c2.clone(), c3.clone()),
+            try_variant_set(c1.clone(), c2.clone(), c3.clone()),
+            variant_array_append(c1.clone(), c2.clone(), c3.clone()),
+        ];
+        for f in three_arg_funcs {
+            let _ = f.to_proto();
+        }
+    }
 }

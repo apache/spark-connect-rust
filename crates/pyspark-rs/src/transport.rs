@@ -50,17 +50,6 @@ fn spark_err_to_py(py: Python<'_>, e: spark_connect_core::error::SparkError) -> 
 // side can rebuild the exact typed pyspark exception via convert_exception().
 pyo3::create_exception!(_pyspark, RustRpcError, pyo3::exceptions::PyException);
 
-// Error kinds surfaced from a streaming execute: either a transport-level SparkError
-// (e.g. failed to open the stream) or a per-message gRPC status from the server.
-enum ExecErr {
-    Spark(spark_connect_core::error::SparkError),
-    Rpc {
-        code: i32,
-        details: Vec<u8>,
-        message: String,
-    },
-}
-
 /// A lazy iterator over a server-streaming response (ExecutePlan / ReattachExecute).
 ///
 /// Yields one serialized response at a time (pulling from the gRPC stream on demand),

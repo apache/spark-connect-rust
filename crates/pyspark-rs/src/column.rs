@@ -5,6 +5,30 @@ use spark_connect::column::Column;
 
 use crate::functions::to_column;
 
+/// Raise a `pyspark.errors` exception (`class_name`) carrying the given `error_class`
+/// condition and message parameters, mirroring the reference Column guard-rails.
+fn raise_pyspark(
+    py: Python<'_>,
+    class_name: &str,
+    error_class: &str,
+    params: &[(&str, &str)],
+) -> PyErr {
+    use pyo3::types::PyDict;
+    let build = || -> PyResult<PyErr> {
+        let cls = py.import("pyspark.errors")?.getattr(class_name)?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("errorClass", error_class)?;
+        let mp = PyDict::new(py);
+        for (k, v) in params {
+            mp.set_item(*k, *v)?;
+        }
+        kwargs.set_item("messageParameters", mp)?;
+        let exc = cls.call((), Some(&kwargs))?;
+        Ok(PyErr::from_value(exc))
+    };
+    build().unwrap_or_else(|e| e)
+}
+
 /// Python wrapper for a Spark Column.
 #[pyclass(name = "Column")]
 pub struct PyColumn {
@@ -44,6 +68,12 @@ impl PyColumn {
     /// Alias for `alias` (pyspark `Column.name`).
     fn name(&self, name: &str) -> PyColumn {
         PyColumn::new(self.column.clone().name(name))
+    }
+
+    /// Apply a transformation function to this column. Mirrors `Column.transform(f)`,
+    /// which is simply `f(self)`.
+    fn transform<'py>(slf: Bound<'py, Self>, f: Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        f.call1((slf,))
     }
 
     /// Mark this column as an outer reference (for correlated subqueries / lateral
@@ -307,13 +337,14 @@ impl PyColumn {
         PyColumn::new(self.column.clone().over(window_spec.spec.clone()))
     }
 
-    /// String representation.
+    /// String representation, mirroring `pyspark.sql.connect.column.Column.__repr__`
+    /// (`Column<'<expr>'>`). pandas-on-Spark's `spark_column_equals` relies on this.
     fn __repr__(&self) -> String {
-        "Column()".to_string()
+        format!("Column<'{}'>", self.column.expression().render())
     }
 
     fn __str__(&self) -> String {
-        "Column()".to_string()
+        self.__repr__()
     }
 
     // --- reverse arithmetic/logical dunders (operand order swapped) ---
@@ -332,6 +363,58 @@ impl PyColumn {
     fn __ror__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
         let o = to_column(&other.bind(py))?;
         Ok(PyColumn::new(o.or(self.column.clone())))
+    }
+
+    /// `col ** other`. Mirrors `Column.__pow__` = `power(self, other)`.
+    /// (`modulo` is part of Python's ternary pow protocol; Spark has no 3-arg pow.)
+    fn __pow__(&self, py: Python<'_>, other: Py<PyAny>, _modulo: Py<PyAny>) -> PyResult<PyColumn> {
+        let o = to_column(&other.bind(py))?;
+        Ok(PyColumn::new(spark_connect::functions::pow(
+            self.column.clone(),
+            o,
+        )))
+    }
+
+    /// `other ** col`. Mirrors `Column.__rpow__` = `power(other, self)`.
+    fn __rpow__(&self, py: Python<'_>, other: Py<PyAny>, _modulo: Py<PyAny>) -> PyResult<PyColumn> {
+        let o = to_column(&other.bind(py))?;
+        Ok(PyColumn::new(spark_connect::functions::pow(
+            o,
+            self.column.clone(),
+        )))
+    }
+
+    // --- guard-rails: mirror the reference Column, which raises helpful errors rather
+    // than silently doing the wrong thing for these Python protocol hooks. ---
+
+    /// `x in col` is not supported. Mirrors `Column.__contains__`.
+    fn __contains__(&self, py: Python<'_>, _item: Py<PyAny>) -> PyResult<()> {
+        Err(raise_pyspark(
+            py,
+            "PySparkValueError",
+            "CANNOT_APPLY_IN_FOR_COLUMN",
+            &[],
+        ))
+    }
+
+    /// A Column is not iterable. Mirrors `Column.__iter__`.
+    fn __iter__(&self, py: Python<'_>) -> PyResult<()> {
+        Err(raise_pyspark(
+            py,
+            "PySparkTypeError",
+            "NOT_ITERABLE",
+            &[("objectName", "Column")],
+        ))
+    }
+
+    /// `bool(col)` / `if col:` is not supported. Mirrors `Column.__bool__`/`__nonzero__`.
+    fn __bool__(&self, py: Python<'_>) -> PyResult<bool> {
+        Err(raise_pyspark(
+            py,
+            "PySparkValueError",
+            "CANNOT_CONVERT_COLUMN_INTO_BOOL",
+            &[],
+        ))
     }
 
     // --- named Column methods (PySpark camelCase) ---
@@ -369,8 +452,24 @@ impl PyColumn {
     }
     #[pyo3(signature = (*cols))]
     fn isin(&self, py: Python<'_>, cols: Vec<Py<PyAny>>) -> PyResult<PyColumn> {
-        let mut vals = Vec::with_capacity(cols.len());
-        for c in &cols {
+        // pyspark's Column.isin unpacks a single list/tuple/set argument:
+        // col.isin([1, 2]) == col.isin(1, 2). pandas-on-Spark's Series.isin relies on
+        // this (it passes a single list of lit(..) columns).
+        let mut items: Vec<Py<PyAny>> = cols;
+        if items.len() == 1 {
+            let only = items[0].bind(py);
+            if only.is_instance_of::<pyo3::types::PyList>()
+                || only.is_instance_of::<pyo3::types::PyTuple>()
+                || only.is_instance_of::<pyo3::types::PySet>()
+            {
+                items = only
+                    .try_iter()?
+                    .map(|r| r.map(|b| b.unbind()))
+                    .collect::<PyResult<Vec<_>>>()?;
+            }
+        }
+        let mut vals = Vec::with_capacity(items.len());
+        for c in &items {
             vals.push(to_column(&c.bind(py))?);
         }
         Ok(PyColumn::new(self.column.clone().isin(vals)))

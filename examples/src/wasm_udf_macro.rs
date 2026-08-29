@@ -45,7 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // (one per argument), nothing to wire up here.
     spark
         .range(5)?
-        .select(vec![
+        .select([
             col("id"),
             wasm_udfs::udf::add_one(col("id"))?.alias("id_plus_one"),
             wasm_udfs::udf::celsius_to_fahrenheit(col("id").cast(DataType::Double))?

@@ -393,7 +393,8 @@ impl UserDefinedFunction {
 
     /// Apply the UDF to `args`, producing a [`Column`] — mirroring calling a
     /// PySpark `UserDefinedFunction` on columns (`my_udf(col("x"))`).
-    pub fn call(&self, args: Vec<Column>) -> Result<Column> {
+    pub fn call<C: Into<Column>>(&self, args: impl IntoIterator<Item = C>) -> Result<Column> {
+        let args: Vec<Column> = args.into_iter().map(Into::into).collect();
         let expr = self.to_expression(args)?;
         Ok(Column::new(Expression::CommonInlineUserDefinedFunction(
             Box::new(expr),

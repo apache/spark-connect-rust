@@ -71,6 +71,15 @@ class UserDefinedFunction:
             self.command,
             self.python_ver,
             *args,
+            deterministic=self.deterministic,
+        )
+
+    def asNondeterministic(self) -> "UserDefinedFunction":
+        """Return a copy of this UDF marked as non-deterministic. Mirrors
+        ``UserDefinedFunction.asNondeterministic`` — the server will not fold/reuse
+        results across rows."""
+        return UserDefinedFunction(
+            self.func, self.returnType, self.evalType, self.name, deterministic=False
         )
 
 
@@ -181,6 +190,41 @@ def pandas_udf(
         return _pandas_udf_decorator
 
 
+def arrow_udf(
+    f: Optional[Callable[..., Any]] = None,
+    returnType: Optional[DataType] = None,
+    functionType: str = "scalar",
+) -> Any:
+    """
+    Create an Arrow user-defined function, mirroring ``pyspark.sql.functions.arrow_udf``.
+
+    Arrow UDFs transfer data via Arrow and operate on ``pyarrow.Array`` values. This is
+    the Arrow analogue of :func:`pandas_udf`.
+
+    Parameters
+    ----------
+    f : callable, optional
+        The Python function to wrap.
+    returnType : DataType, optional
+        Return type; defaults to StringType().
+    functionType : str, optional
+        "scalar" (default) or "scalar_iter".
+    """
+    if returnType is None:
+        returnType = StringType()
+
+    # SQL_SCALAR_ARROW_UDF = 250, SQL_SCALAR_ARROW_ITER_UDF = 251.
+    eval_type_map = {"scalar": 250, "scalar_iter": 251}
+    evalType = eval_type_map.get(functionType, 250)
+
+    def _arrow_udf_decorator(func):
+        return UserDefinedFunction(func, returnType, evalType)
+
+    if f is not None:
+        return _arrow_udf_decorator(f)
+    return _arrow_udf_decorator
+
+
 class UDFRegistration:
     """
     Wrapper for user-defined function registration (spark.udf.register).
@@ -224,3 +268,32 @@ class UDFRegistration:
         # Create a UDF with the given name
         udf = UserDefinedFunction(f, returnType, 100, name)
         return udf
+
+    def registerJavaFunction(
+        self,
+        name: str,
+        javaClassName: str,
+        returnType: Optional[DataType] = None,
+    ) -> None:
+        """Register a Java UDF by fully-qualified class name so it is callable by
+        ``name`` in SQL. Mirrors ``UDFRegistration.registerJavaFunction``.
+
+        Parameters
+        ----------
+        name : str
+            Name to register the function with.
+        javaClassName : str
+            Fully-qualified name of the Java class implementing the UDF.
+        returnType : DataType or str, optional
+            Return type (a DataType or a DDL string). Defaults to the class's own type.
+        """
+        rt_ddl = None
+        if returnType is not None:
+            rt_ddl = returnType if isinstance(returnType, str) else returnType.simpleString()
+        self.spark_session._registerJavaFunction(name, javaClassName, rt_ddl, False)
+
+    def registerJavaUDAF(self, name: str, javaClassName: str) -> None:
+        """Register a Java user-defined aggregate function (UDAF) by class name.
+        Mirrors ``UDFRegistration.registerJavaUDAF``.
+        """
+        self.spark_session._registerJavaFunction(name, javaClassName, None, True)

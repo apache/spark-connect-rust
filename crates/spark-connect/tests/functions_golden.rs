@@ -130,7 +130,7 @@ fn all_golden_function_cases_pass() {
         ("approxCountDistinct", approxCountDistinct(a())),
         ("approx_count_distinct", approx_count_distinct(a())),
         ("approx_percentile", approx_percentile(a(), b())),
-        ("array", array(vec![])),
+        ("array", array(Vec::<Column>::new())),
         ("array_agg", array_agg(a())),
         ("array_append", array_append(a(), b())),
         ("array_compact", array_compact(a())),
@@ -150,7 +150,7 @@ fn all_golden_function_cases_pass() {
         ("array_sort", array_sort(a())),
         ("array_union", array_union(a(), b())),
         ("arrays_overlap", arrays_overlap(a(), b())),
-        ("arrays_zip", arrays_zip(vec![])),
+        ("arrays_zip", arrays_zip(Vec::<Column>::new())),
         ("asc", asc(a())),
         ("asc_nulls_first", asc_nulls_first(a())),
         ("asc_nulls_last", asc_nulls_last(a())),
@@ -182,8 +182,8 @@ fn all_golden_function_cases_pass() {
         ("bround", bround(a())),
         ("btrim", btrim(a())),
         ("bucket", bucket(a(), b())),
-        ("call_function", call_function("x")),
-        ("call_udf", call_udf("x")),
+        ("call_function", call_function("x", Vec::<Column>::new())),
+        ("call_udf", call_udf("x", Vec::<Column>::new())),
         ("cardinality", cardinality(a())),
         ("cast", cast(a(), b())),
         ("cbrt", cbrt(a())),
@@ -192,14 +192,14 @@ fn all_golden_function_cases_pass() {
         ("char", char(a())),
         ("char_length", char_length(a())),
         ("character_length", character_length(a())),
-        ("coalesce", coalesce(vec![])),
+        ("coalesce", coalesce(Vec::<Column>::new())),
         ("col", col("x")),
         ("collate", collate(a(), b())),
         ("collation", collation(a())),
         ("collect_list", collect_list(a())),
         ("collect_set", collect_set(a())),
         ("column", column("x")),
-        ("concat", concat(vec![])),
+        ("concat", concat(Vec::<Column>::new())),
         ("concat_ws", concat_ws(a())),
         ("contains", contains(a(), b())),
         ("conv", conv(a(), b(), c())),
@@ -216,7 +216,7 @@ fn all_golden_function_cases_pass() {
         ("covar_pop", covar_pop(a(), b())),
         ("covar_samp", covar_samp(a(), b())),
         ("crc32", crc32(a())),
-        ("create_map", create_map(vec![])),
+        ("create_map", create_map(Vec::<Column>::new())),
         ("csc", csc(a())),
         ("cume_dist", cume_dist()),
         ("curdate", curdate()),
@@ -251,7 +251,7 @@ fn all_golden_function_cases_pass() {
         ("desc_nulls_last", desc_nulls_last(a())),
         ("e", e()),
         ("element_at", element_at(a(), b())),
-        ("elt", elt(vec![])),
+        ("elt", elt(Vec::<Column>::new())),
         ("encode", encode(a(), b())),
         ("endswith", endswith(a(), b())),
         ("equal_null", equal_null(a(), b())),
@@ -280,8 +280,8 @@ fn all_golden_function_cases_pass() {
         ("getbit", getbit(a(), b())),
         ("greatest", greatest(a(), b())),
         ("grouping", grouping(a())),
-        ("grouping_id", grouping_id(vec![])),
-        ("hash", hash(vec![])),
+        ("grouping_id", grouping_id(Vec::<Column>::new())),
+        ("hash", hash(Vec::<Column>::new())),
         ("hex", hex(a())),
         ("histogram_numeric", histogram_numeric(a(), b())),
         ("hll_sketch_agg", hll_sketch_agg(a())),
@@ -305,7 +305,7 @@ fn all_golden_function_cases_pass() {
         ("isnan", isnan(a())),
         ("isnotnull", isnotnull(a())),
         ("isnull", isnull(a())),
-        ("java_method", java_method(vec![])),
+        ("java_method", java_method(Vec::<Column>::new())),
         ("json_array_length", json_array_length(a())),
         ("json_object_keys", json_object_keys(a())),
         ("json_tuple", json_tuple(a(), b())),
@@ -339,7 +339,7 @@ fn all_golden_function_cases_pass() {
         ("make_interval", make_interval()),
         ("make_valid_utf8", make_valid_utf8(a())),
         ("make_ym_interval", make_ym_interval()),
-        ("map_concat", map_concat(vec![])),
+        ("map_concat", map_concat(Vec::<Column>::new())),
         ("map_contains_key", map_contains_key(a(), b())),
         ("map_entries", map_entries(a())),
         ("map_from_arrays", map_from_arrays(a(), b())),
@@ -361,7 +361,7 @@ fn all_golden_function_cases_pass() {
         ("monthname", monthname(a())),
         ("months", months(a())),
         ("months_between", months_between(a(), b())),
-        ("named_struct", named_struct(vec![])),
+        ("named_struct", named_struct(Vec::<Column>::new())),
         ("nanvl", nanvl(a(), b())),
         ("negate", negate(a())),
         ("negative", negative(a())),
@@ -397,7 +397,7 @@ fn all_golden_function_cases_pass() {
         ("randn", randn()),
         ("randstr", randstr(a())),
         ("rank", rank()),
-        ("reflect", reflect(vec![])),
+        ("reflect", reflect(Vec::<Column>::new())),
         ("regexp", regexp(a(), b())),
         ("regexp_count", regexp_count(a(), b())),
         ("regexp_extract", regexp_extract(a(), b(), c())),
@@ -459,7 +459,7 @@ fn all_golden_function_cases_pass() {
         ("split", split(a(), b())),
         ("split_part", split_part(a(), b(), c())),
         ("sqrt", sqrt(a())),
-        ("stack", stack(vec![])),
+        ("stack", stack(Vec::<Column>::new())),
         ("startswith", startswith(a(), b())),
         ("std", std(a())),
         ("stddev", stddev(a())),
@@ -468,7 +468,7 @@ fn all_golden_function_cases_pass() {
         ("str_to_map", str_to_map(a())),
         ("string_agg", string_agg(a())),
         ("string_agg_distinct", string_agg_distinct(a())),
-        ("struct", r#struct(vec![])),
+        ("struct", r#struct(Vec::<Column>::new())),
         ("substr", substr(a(), b())),
         ("substring", substring(a(), b(), c())),
         ("substring_index", substring_index(a(), b(), c())),
@@ -511,7 +511,7 @@ fn all_golden_function_cases_pass() {
         ("try_multiply", try_multiply(a(), b())),
         ("try_parse_json", try_parse_json(a())),
         ("try_parse_url", try_parse_url(a(), b())),
-        ("try_reflect", try_reflect(vec![])),
+        ("try_reflect", try_reflect(Vec::<Column>::new())),
         ("try_subtract", try_subtract(a(), b())),
         ("try_sum", try_sum(a())),
         ("try_to_binary", try_to_binary(a())),
@@ -556,7 +556,7 @@ fn all_golden_function_cases_pass() {
         ("xpath_number", xpath_number(a(), b())),
         ("xpath_short", xpath_short(a(), b())),
         ("xpath_string", xpath_string(a(), b())),
-        ("xxhash64", xxhash64(vec![])),
+        ("xxhash64", xxhash64(Vec::<Column>::new())),
         ("year", year(a())),
         ("years", years(a())),
         ("zeroifnull", zeroifnull(a())),
@@ -733,4 +733,36 @@ fn all_golden_function_cases_pass() {
     );
     assert_eq!(total, 511, "expected exactly 511 cases, got {total}");
     println!("all {total} golden function cases passed");
+}
+
+/// `call_function` (CallFunction proto) and `call_udf` (UnresolvedFunction proto)
+/// must carry their column arguments. Regression test for the previous
+/// implementations that dropped all arguments.
+#[test]
+fn call_function_and_call_udf_carry_arguments() {
+    use proto::expression::ExprType;
+    use spark_connect::column::Column;
+    use spark_connect::expression::{ColumnReference, Expression};
+    use spark_connect::functions::{call_function, call_udf};
+
+    let a = || Column::new(Expression::ColumnReference(ColumnReference::new("a")));
+    let b = || Column::new(Expression::ColumnReference(ColumnReference::new("b")));
+
+    let cf = call_function("my_fn", vec![a(), b()]).to_proto();
+    match cf.expr_type.expect("expr_type") {
+        ExprType::CallFunction(c) => {
+            assert_eq!(c.function_name, "my_fn");
+            assert_eq!(c.arguments.len(), 2, "call_function must carry its 2 args");
+        }
+        other => panic!("expected CallFunction, got {other:?}"),
+    }
+
+    let cu = call_udf("my_udf", vec![a()]).to_proto();
+    match cu.expr_type.expect("expr_type") {
+        ExprType::UnresolvedFunction(f) => {
+            assert_eq!(f.function_name, "my_udf");
+            assert_eq!(f.arguments.len(), 1, "call_udf must carry its arg");
+        }
+        other => panic!("expected UnresolvedFunction, got {other:?}"),
+    }
 }

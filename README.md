@@ -73,7 +73,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let df = spark
         .range(1_000_000)?
-        .select(vec![(f::col("id") * lit(2)).alias("x")])
+        .select([(f::col("id") * lit(2)).alias("x")])
         .filter((f::col("x") % lit(3)).eq(lit(0)));
 
     println!("count = {}", df.count()?);
@@ -96,7 +96,7 @@ mod udfs {
     pub fn add_one(x: i64) -> i64 { x + 1 }
 }
 
-spark.range(5)?.select(vec![udf::add_one(col("id"))?]).show(20)?;
+spark.range(5)?.select([udf::add_one(col("id"))?]).show(20)?;
 ```
 
 See the [WASM UDF guide](https://apache.github.io/spark-connect-rust/udfs/) for

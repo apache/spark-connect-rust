@@ -255,3 +255,54 @@ fn remaining_variant_strings() {
         DataType::Varchar { length: 16 }
     ));
 }
+
+#[test]
+fn struct_to_ddl_tree_and_nullable() {
+    use spark_connect::types::StructField;
+    let st = DataType::Struct {
+        fields: vec![
+            StructField {
+                name: "a".to_string(),
+                data_type: DataType::Integer,
+                nullable: true,
+                metadata: Default::default(),
+            },
+            StructField {
+                name: "b".to_string(),
+                data_type: DataType::String {
+                    collation: "UTF8_BINARY".to_string(),
+                },
+                nullable: false,
+                metadata: Default::default(),
+            },
+        ],
+    };
+    assert_eq!(st.to_ddl().unwrap(), "a int,b string NOT NULL");
+    let tree = st.tree_string().unwrap();
+    assert!(tree.starts_with("root\n"));
+    assert!(tree.contains("a: int (nullable = true)"));
+    assert!(tree.contains("b: string (nullable = false)"));
+    // toNullable makes every field nullable.
+    if let DataType::Struct { fields } = st.to_nullable() {
+        assert!(fields.iter().all(|f| f.nullable));
+    } else {
+        panic!("expected struct");
+    }
+    // to_ddl / tree_string reject non-structs.
+    assert!(DataType::Integer.to_ddl().is_err());
+    assert!(DataType::Integer.tree_string().is_err());
+}
+
+#[test]
+fn from_json_str_roundtrips() {
+    use spark_connect::types::StructField;
+    let dt = DataType::from_json_str("\"integer\"").unwrap();
+    assert!(matches!(dt, DataType::Integer));
+    let f = StructField::from_json_str(
+        "{\"name\":\"a\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}}",
+    )
+    .unwrap();
+    assert_eq!(f.name, "a");
+    assert!(f.nullable);
+    assert!(matches!(f.data_type, DataType::Integer));
+}

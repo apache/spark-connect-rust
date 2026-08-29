@@ -115,6 +115,12 @@ impl PyDataFrameReader {
         Ok(PyDataFrame::new(self.take()?.table(table_name)))
     }
 
+    /// Read the CDC changes of a named table. Mirrors `DataFrameReader.changes`.
+    #[allow(non_snake_case)]
+    fn changes(&mut self, tableName: &str) -> PyResult<PyDataFrame> {
+        Ok(PyDataFrame::new(self.take()?.changes(tableName)))
+    }
+
     /// Read JSON file(s) - full pyspark signature; each named option is
     /// applied as a read option when provided.
     #[pyo3(signature = (path, schema=None, primitivesAsString=None, prefersDecimal=None, allowComments=None, allowUnquotedFieldNames=None, allowSingleQuotes=None, allowNumericLeadingZero=None, allowBackslashEscapingAnyCharacter=None, mode=None, columnNameOfCorruptRecord=None, dateFormat=None, timestampFormat=None, multiLine=None, allowUnquotedControlChars=None, lineSep=None, samplingRatio=None, dropFieldIfAllNull=None, encoding=None, locale=None, pathGlobFilter=None, recursiveFileLookup=None, modifiedBefore=None, modifiedAfter=None, allowNonNumericNumbers=None, useUnsafeRow=None))]

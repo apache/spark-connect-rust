@@ -56,7 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // bytes or signature to write by hand.
     spark
         .range(5)?
-        .select(vec![
+        .select([
             col("id"),
             udf::add_one(col("id"))?.alias("id_plus_one"),
             udf::shout(col("id").cast(spark_connect::types::DataType::String {

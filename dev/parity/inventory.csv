@@ -421,7 +421,7 @@ sql/connect/dataframe.py,method,DataFrame,persist,"(self, storageLevel)",2195,do
 sql/connect/dataframe.py,method,DataFrame,storageLevel,(self),2206,done,
 sql/connect/dataframe.py,method,DataFrame,unpersist,"(self, blocking)",2214,done,dataframe.rs
 sql/connect/dataframe.py,method,DataFrame,is_cached,(self),2220,done,
-sql/connect/dataframe.py,method,DataFrame,toLocalIterator,"(self, prefetchPartitions)",2223,n/a,n/a: no partition-streaming iterator on the client; use collect()
+sql/connect/dataframe.py,method,DataFrame,toLocalIterator,"(self, prefetchPartitions)",2223,done,"Rust: lazy row iterator (pyspark-rs dataframe.rs toLocalIterator, prefetchPartitions arg)"
 sql/connect/dataframe.py,method,DataFrame,pandas_api,"(self, index_col)",2243,done,
 sql/connect/dataframe.py,method,DataFrame,registerTempTable,"(self, name)",2258,done,
 sql/connect/dataframe.py,method,DataFrame,mapInPandas,"(self, func, schema, barrier, profile)",2295,done,
@@ -1171,7 +1171,7 @@ sql/connect/group.py,method,GroupedData,sum,"(self, *cols)",199,done,group.rs
 sql/connect/group.py,method,GroupedData,avg,"(self, *cols)",204,done,group.rs
 sql/connect/group.py,method,GroupedData,count,(self),211,done,group.rs
 sql/connect/group.py,method,GroupedData,pivot,"(self, pivot_col, values)",216,done,
-sql/connect/group.py,method,GroupedData,apply,"(self, udf)",270,n/a,"n/a: deprecated, superseded by applyInPandas"
+sql/connect/group.py,method,GroupedData,apply,"(self, udf)",270,done,"Rust: deprecated grouped-map apply; delegates to applyInPandas with the udf's func/returnType (group.rs)"
 sql/connect/group.py,method,GroupedData,applyInPandas,"(self, func, schema)",296,done,
 sql/connect/group.py,method,GroupedData,applyInPandasWithState,"(self, func, outputStructType, stateStructType, outputMode, timeoutConf)",337,done,
 sql/connect/group.py,method,GroupedData,transformWithStateInPandas,"(self, statefulProcessor, outputStructType, outputMode, timeMode, initialState, eventTimeColumnName)",381,done,
@@ -1632,9 +1632,9 @@ sql/connect/readwriter.py,method,DataFrameWriterV2,createOrReplace,(self),1034,d
 sql/connect/readwriter.py,method,DataFrameWriterV2,append,(self),1043,done,readwriter.rs
 sql/connect/readwriter.py,method,DataFrameWriterV2,overwrite,"(self, condition)",1052,done,readwriter.rs
 sql/connect/readwriter.py,method,DataFrameWriterV2,overwritePartitions,(self),1062,done,readwriter.rs
-sql/connect/resource/profile.py,class,,ResourceProfile,,25,n/a,n/a: Spark resource-profile (cluster resource) API; not applicable to the Connect client
+sql/connect/resource/profile.py,class,,ResourceProfile,,25,done,"Rust: PyResourceProfile via ResourceProfileBuilder.build() (resource.rs); vendored python/pyspark/resource/*"
 sql/connect/resource/profile.py,method,ResourceProfile,__init__,"(self, exec_req, task_req)",29,n/a,n/a: Python object-protocol/class-internal; not a client API method
-sql/connect/resource/profile.py,method,ResourceProfile,id,(self),68,n/a,n/a: Python object-protocol/class-internal; not a client API method
+sql/connect/resource/profile.py,method,ResourceProfile,id,(self),68,done,"Rust: PyResourceProfile.id() returns the server-assigned profile id (resource.rs)"
 sql/connect/session.py,class,,SparkSession,,115,done,
 sql/connect/session.py,method,SparkSession,__init__,"(self, connection, userId, hook_factories)",280,n/a,n/a: Python object-protocol/class-internal; not a client API method
 sql/connect/session.py,method,SparkSession,getActiveSession,(cls),334,verified,session.rs (e2e-tested)
@@ -1660,7 +1660,7 @@ sql/connect/session.py,method,SparkSession,removeTag,"(self, tag)",913,done,
 sql/connect/session.py,method,SparkSession,getTags,(self),918,done,
 sql/connect/session.py,method,SparkSession,clearTags,(self),923,done,
 sql/connect/session.py,method,SparkSession,stop,(self),928,verified,session.rs (e2e-tested)
-sql/connect/session.py,method,SparkSession,is_stopped,(self),993,n/a,n/a: host-side lifecycle flag; not a stateless-client concept
+sql/connect/session.py,method,SparkSession,is_stopped,(self),993,done,"Rust: SparkSession.is_stopped -> session.is_stopped() (session.rs)"
 sql/connect/session.py,method,SparkSession,conf,(self),1000,verified,session.rs (e2e-tested)
 sql/connect/session.py,method,SparkSession,streams,(self),1006,done,
 sql/connect/session.py,method,SparkSession,__getattr__,"(self, name)",1014,n/a,n/a: Python object-protocol/class-internal; not a client API method
@@ -2148,7 +2148,7 @@ sql/column.py,method,Column,when,"(self, condition, value)",1356,done,
 sql/column.py,method,Column,otherwise,"(self, value)",1432,done,
 sql/column.py,method,Column,over,"(self, window)",1472,done,
 sql/column.py,method,Column,transform,"(self, f)",1515,done,
-sql/column.py,method,Column,outer,(self),1567,n/a,n/a: Python object-protocol/class-internal; not a client API method
+sql/column.py,method,Column,outer,(self),1567,done,"Rust: Column.outer() returns the same expression (outer resolution is server-side via plan id); matches connect Column.outer"
 sql/column.py,method,Column,__nonzero__,(self),1607,done,
 sql/column.py,method,Column,__bool__,(self),1610,done,
 sql/column.py,method,Column,__repr__,(self),1613,done,

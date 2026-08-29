@@ -4,6 +4,7 @@
 //! for building and executing streaming workloads.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use uuid;
 
 use spark_connect_core::client::ReattachableResponseStream;
@@ -99,6 +100,17 @@ impl DataStreamReader {
                 options: self.options.clone(),
             },
             is_streaming: true,
+        };
+        DataFrame::new(self.session, plan)
+    }
+
+    /// Read the streaming CDC changes of a named table. Mirrors
+    /// `DataStreamReader.changes` (`is_streaming = true`).
+    pub fn changes(self, table_name: &str) -> DataFrame {
+        let plan = LogicalPlan::RelationChanges {
+            table_name: table_name.to_string(),
+            options: self.options.clone(),
+            is_streaming: Some(true),
         };
         DataFrame::new(self.session, plan)
     }
@@ -767,17 +779,146 @@ impl Iterator for ListenerEventStream {
     }
 }
 
+/// Event-type constants for listener events (mirror pyspark's values).
+pub const QUERY_PROGRESS_EVENT: i32 = 1;
+pub const QUERY_TERMINATED_EVENT: i32 = 2;
+pub const QUERY_IDLE_EVENT: i32 = 3;
+
+/// A streaming-query listener event delivered by the client-side listener bus.
+///
+/// `event_json` is the server-provided JSON for the event; `event_type` is one of
+/// [`QUERY_PROGRESS_EVENT`], [`QUERY_TERMINATED_EVENT`], [`QUERY_IDLE_EVENT`].
+#[derive(Debug, Clone)]
+pub struct StreamingQueryListenerEvent {
+    pub event_type: i32,
+    pub event_json: String,
+}
+
+/// A client-side listener for streaming-query events. Implement this trait (Rust
+/// clients) and register it with [`StreamingQueryManager::add_listener`]; the manager
+/// runs a background bus that streams events from the server and dispatches them here.
+pub trait StreamingQueryListener: Send + Sync {
+    fn on_event(&self, event: &StreamingQueryListenerEvent);
+}
+
+/// Shared state of the client-side listener bus: the registered listeners and the
+/// background dispatch thread (started with the first listener, stopped with the last).
+#[derive(Default)]
+struct ListenerBusState {
+    listeners: Vec<(String, Arc<dyn StreamingQueryListener>)>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+/// The background dispatch loop: opens the server event stream and forwards each event
+/// to every currently-registered listener. Ends when the stream closes (the server was
+/// asked to stop via `RemoveListenerBusListener`) or all listeners are removed.
+fn run_listener_event_loop(session: SparkSession, bus: Arc<Mutex<ListenerBusState>>) {
+    let stream = match StreamingQueryManager::new(session).listener_event_stream() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    for item in stream {
+        let listeners: Vec<Arc<dyn StreamingQueryListener>> = {
+            let st = bus.lock().unwrap();
+            if st.listeners.is_empty() {
+                break;
+            }
+            st.listeners.iter().map(|(_, l)| l.clone()).collect()
+        };
+        match item {
+            Ok((event_type, event_json)) => {
+                let ev = StreamingQueryListenerEvent {
+                    event_type,
+                    event_json,
+                };
+                for l in &listeners {
+                    l.on_event(&ev);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+}
+
 /// Manager for active streaming queries.
 ///
-/// Mirrors `pyspark.sql.connect.streaming.StreamingQueryManager`.
+/// Mirrors `pyspark.sql.connect.streaming.StreamingQueryManager`, including a native
+/// client-side listener bus (so Rust clients get the listener feature too).
 pub struct StreamingQueryManager {
     session: SparkSession,
+    bus: Arc<Mutex<ListenerBusState>>,
 }
 
 impl StreamingQueryManager {
     /// Create a new StreamingQueryManager.
     pub(crate) fn new(session: SparkSession) -> Self {
-        StreamingQueryManager { session }
+        StreamingQueryManager {
+            session,
+            bus: Arc::new(Mutex::new(ListenerBusState::default())),
+        }
+    }
+
+    /// Register a client-side listener. Returns an id that can be passed to
+    /// [`StreamingQueryManager::remove_listener`]. Starts the background dispatch
+    /// thread when it is the first listener. Mirrors `StreamingQueryManager.addListener`.
+    pub fn add_listener(&self, listener: Arc<dyn StreamingQueryListener>) -> Result<String> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut st = self.bus.lock().unwrap();
+        st.listeners.push((id.clone(), listener));
+        if st.listeners.len() == 1 {
+            let session = self.session.clone();
+            let bus = self.bus.clone();
+            st.thread = Some(std::thread::spawn(move || {
+                run_listener_event_loop(session, bus);
+            }));
+        }
+        Ok(id)
+    }
+
+    /// Remove a client-side listener by id. Stops the background dispatch thread when
+    /// the last listener is removed. Mirrors `StreamingQueryManager.removeListener`.
+    pub fn remove_listener(&self, id: &str) -> Result<()> {
+        let now_empty = {
+            let mut st = self.bus.lock().unwrap();
+            st.listeners.retain(|(lid, _)| lid != id);
+            st.listeners.is_empty()
+        };
+        if now_empty {
+            self.stop_listener_bus();
+        }
+        Ok(())
+    }
+
+    /// Remove all client-side listeners and stop the dispatch thread. Mirrors
+    /// `StreamingQueryManager.close`.
+    pub fn close(&self) -> Result<()> {
+        let had_listeners = {
+            let mut st = self.bus.lock().unwrap();
+            let had = !st.listeners.is_empty();
+            st.listeners.clear();
+            had
+        };
+        if had_listeners {
+            self.stop_listener_bus();
+        }
+        Ok(())
+    }
+
+    /// Ask the server to stop streaming listener events (which ends the background
+    /// thread's stream), then join the thread.
+    fn stop_listener_bus(&self) {
+        let mut lb = proto::StreamingQueryListenerBusCommand::default();
+        lb.command = Some(
+            proto::streaming_query_listener_bus_command::Command::RemoveListenerBusListener(true),
+        );
+        let _ = crate::dataframe::execute_command_collect(
+            &self.session,
+            proto::command::CommandType::StreamingQueryListenerBusCommand(lb),
+        );
+        let handle = self.bus.lock().unwrap().thread.take();
+        if let Some(h) = handle {
+            let _ = h.join();
+        }
     }
 
     /// Get all active streaming queries.
@@ -898,8 +1039,11 @@ impl StreamingQueryManager {
         Ok(())
     }
 
-    /// Add a listener with a PythonUDF payload.
-    pub fn add_listener(&self, payload: PythonUDFPayload) -> Result<String> {
+    /// Register a server-side listener from a cloudpickled PythonUDF payload (the
+    /// server runs it in a Python worker). This is distinct from the client-side
+    /// listener bus ([`add_listener`](Self::add_listener)); it sends the
+    /// `AddListener` manager command and returns the server listener id.
+    pub fn register_python_listener(&self, payload: PythonUDFPayload) -> Result<String> {
         let listener_id = uuid::Uuid::new_v4().to_string();
         let mut cmd = proto::StreamingQueryManagerCommand::default();
         let mut listener_cmd =
@@ -920,8 +1064,9 @@ impl StreamingQueryManager {
         }
     }
 
-    /// Remove a listener by ID.
-    pub fn remove_listener(&self, listener_id: &str) -> Result<()> {
+    /// Remove a server-side listener registered via
+    /// [`register_python_listener`](Self::register_python_listener), by id.
+    pub fn unregister_python_listener(&self, listener_id: &str) -> Result<()> {
         let mut cmd = proto::StreamingQueryManagerCommand::default();
         let mut listener_cmd =
             proto::streaming_query_manager_command::StreamingQueryListenerCommand::default();

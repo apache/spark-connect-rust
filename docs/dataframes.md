@@ -35,7 +35,7 @@ Transform DataFrames with chainable operations like `select`, `filter`, and `wit
 use spark_connect::{functions as f, lit};
 
 // Select columns
-let df = df.select(vec![f::col("id"), f::col("name")]);
+let df = df.select([f::col("id"), f::col("name")]);
 
 // Filter rows
 let df = df.filter(f::col("id").gt(lit(10)));
@@ -67,11 +67,11 @@ Group rows and compute aggregates like count, sum, and average.
 use spark_connect::{functions as f, lit};
 
 // Group by one column
-let agg_df = df.group_by(vec![f::col("category")])
+let agg_df = df.group_by([f::col("category")])
     .agg(vec![f::count(lit(1)).expression().clone()]);
 
 // Group by multiple columns with multiple aggregates
-let agg_df = df.group_by(vec![f::col("category"), f::col("year")])
+let agg_df = df.group_by([f::col("category"), f::col("year")])
     .agg(vec![
         f::sum(f::col("amount")).expression().clone(),
         f::avg(f::col("value")).expression().clone(),
@@ -144,7 +144,7 @@ use spark_connect::{functions as f, lit};
 let result = spark.range(101)?
     .with_column("squared", f::col("id") * f::col("id"))
     .filter(f::col("squared").gt(lit(100)))
-    .select(vec![f::col("id"), f::col("squared")])
+    .select([f::col("id"), f::col("squared")])
     .order_by(vec![f::col("id").expression().clone()])
     .limit(10);
 result.show(10)?;

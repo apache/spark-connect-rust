@@ -75,7 +75,6 @@ __all__ = [  # noqa: F405
     "options",
     "option_context",
     "NamedAgg",
-    "show_versions",
 ]
 
 

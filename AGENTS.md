@@ -288,11 +288,163 @@ Do not rely on the previous version's suite. When bumping to vX.Y.Z:
 ## 9. Condensed checklist
 
 1. Bump version + regen protos; get vX.Y.Z conda pyspark + local Connect server.
-2. Run the introspection diff → per-class gap list (step 2).
+2. Run the introspection diff → per-class gap list (step 2) **AND the module/package
+   audit (step 10) — the class diff alone misses whole modules.**
 3. Implement each gap in core + PyO3 (+ shim), matching signature & behavior (step 3).
 4. New DataTypes → picklability + json/proto round-trip + `types_roundtrip.rs` (step 4).
 5. `git subtree pull` vendored dirs to the vX.Y.Z tag; update drift-check `SPARK_TAG` (step 5).
-6. Re-audit the packaging manifest for newly-shipped client files (step 5).
+6. Re-audit the packaging manifest for newly-shipped client files (step 5 / step 10).
 7. Coverage >90% both sides (step 6).
 8. Pre-push discipline: compile-all-tests, fmt, clippy, parity gate, prove-diff (step 7).
 9. Push (after `gh auth switch`), monitor CI, fix.
+
+---
+
+# 10. Module and package parity — audit at the package/module level, not just class level
+
+**The completeness contract: every module in the `pyspark-client` `connect_packages`
+list (`python/packaging/client/setup.py`, at the version tag being tracked) must either be
+vendored verbatim (pure-Python modules) OR have equivalent Rust-backed logic exposed under
+the same import path.** There is no third option — a `connect_packages` entry that is
+neither present nor Rust-equivalent is a parity gap. This includes the non-obvious ones:
+`pyspark.testing` (a public API — `assertDataFrameEqual`/`assertSchemaEqual` and the test
+base classes), `pyspark.pandas`, `pyspark.sql.pandas`, `pyspark.sql.plot`, `pyspark.logger`,
+`pyspark.errors`, `pyspark.ml.*`, `pyspark.pipelines`, etc. The only intentional exception is
+the `pyspark.sql.connect.*` gRPC-client internals, which the Rust transport replaces — and
+even those get thin re-export shims where vendored/official code (and official tests) import
+from them. Enumerate `connect_packages` at the tracked tag and reconcile the whole list.
+
+Parity auditing must audit **packages and top-level modules**, not just connect classes
+(DataFrame/Column). The class-diff alone silently misses whole packages the `pyspark-client`
+wheel ships. Every version upgrade:
+
+- Diff the official `pyspark-client` packaging manifest against your module inventory.
+  Triage every missing item: client-API (implement), classic/deprecated (N/A), or
+  server-side (N/A). **Write the triage down** to avoid rediscovering gaps later.
+- Audit top-level `pyspark/*.py` files and `pyspark/__init__.py` exports against the
+  manifest. Connect-N/A files (`rdd`, `context`, etc.) are distinct from public
+  client APIs (`conf`, `version`, task context).
+- When auditing, check the **module attributes and dunders** by hand — the class
+  introspection diff does NOT catch missing properties, dunder methods, or submodules.
+
+# 11. Pure-Python modules and import closures — vendor faithfully, not as stubs
+
+When vendoring pure-Python modules (e.g. `errors`, `logger`, client-side `pipelines`):
+- Trace the **full import closure** — vendoring one module may pull dependencies you
+  did not anticipate (e.g., `pyspark.logger` was itself a missing module imported by
+  `pyspark.errors`). Import-time dependencies matter; runtime captures do not.
+- Do NOT hand-write stubs. Stub APIs (missing attributes, broken behavior) pass local
+  testing but fail official test suites and mis-render errors/messages. Vendor the
+  real module byte-for-byte, excluding only deep dependencies you cannot satisfy
+  (e.g., `py4j`/`grpc` imports in specific submodules).
+- Run the official tests to confirm import-time parity — official test suites will
+  surface missing attributes the class diff and hand-written shims both miss.
+
+# 12. API signatures and behavioral parity — mirror exact semantics, not just names
+
+For every method matching a pyspark name:
+- **Signature must match**: default arguments, kwarg names, types. A method using
+  default-argument semantics (like `conf.get(key, default=None)` that returns the
+  default instead of raising when a key is absent) must route to the correct server
+  operation.
+- **Members documented as properties must be Python properties** (`#[getter]` in PyO3),
+  not methods. The introspection diff does NOT catch property-vs-method bugs; check
+  by hand against official docs.
+- **Apply ergonomics sweeps consistently across ALL analogous APIs**, not just the first
+  instance. Grep every matching arg type when a pattern emerges (e.g., string-name
+  lists should all take `impl IntoIterator<Item = impl Into<String>>`).
+
+# 13. Data types — picklability, recursion, and correct Python materialization
+
+- **Every `DataType` must be picklable:** the `__reduce__` method returns
+  `(pyspark.sql.types._parse_datatype_json_string, (json,))` to round-trip through
+  official UDF workers. The `_parse_datatype_json_string` function must handle the
+  **full recursive case** (nested `struct`/`array`/`map` forms and all atomic forms,
+  including `decimal`, `char`, `varchar`, `time`, `interval`). Non-recursive parsers
+  silently break nested pickling.
+- **Struct-field metadata must preserve raw JSON**, not re-quote it during parse. Keep
+  the JSON and proto paths consistent.
+- **`df.schema` and `df.columns` must be properties returning the correct Python type**
+  (StructType/list, not a bare DataType or method). Use `data_type_to_py` to materialize
+  core `DataType` objects into their concrete Python types with the correct MRO.
+- **`StructType` and `StructField` must expose all documented accessors and dunders**
+  (fields, names, `__getitem__`, `__len__`, etc.). The introspection diff does NOT
+  catch missing attributes; check by hand.
+- **`PyDataType` needs a `#[new]`** to allow pure-Python subclasses (UserDefinedType).
+  UDT is inherently Python and must cloudpickle the concrete class, not be lowered to Rust.
+
+# 14. Vendored code and proto — use version tags, verify coverage, not drift
+
+- **Vendored pure-Python dirs:** use `git subtree` pinned to the upstream **version tag**
+  (never master) so they carry provenance, are importable, and update via `git subtree pull`.
+  Classify each dir as Rust-backed shim (keep ours) or pure upstream (vendor verbatim).
+- **Proto can intentionally diverge:** the fork may extend the proto with fork-specific
+  fields. On a version bump, verify new upstream fields are covered with a `>`-only diff
+  (no lines from the tag should be absent from ours). The proto is exempt from vendor
+  drift checks because it is a superset, not a byte-identical copy.
+
+# 15. Architectural constraints and known blockers
+
+- **Cloudpickled-and-server-executed APIs stay Python — do NOT rewrite them in Rust.** UDFs,
+  `pandas_udf`, `UserDefinedType`, `DataSource`, and `StatefulProcessor` (+ ValueState/ListState/
+  MapState/StatefulProcessorHandle and the state clients) are all serialized with cloudpickle and
+  *executed on the server's Python worker* (real pyspark). The user subclasses them in Python; the
+  client only imports/cloudpickles them. A Rust class would (a) break the cloudpickle round-trip
+  (the server reconstructs by module path and expects the Python class) and (b) never run on the
+  client anyway, so it buys nothing. What IS Rust-backed is the client-side METHOD that builds the
+  proto carrying the pickled object: `registerDataSource`, `GroupedData.transformWithState[InPandas]`,
+  `createDataFrame(..., udf)`, etc. General rule: proto-building → Rust; cloudpickled Python code that
+  runs server-side → vendored Python.
+- **Row materialization:** PyO3 cannot subclass `tuple`, so our `Row` is not a tuple subclass.
+  Some pandas-on-Spark code assumes a tuple-`Row` with mutable `__fields__`. Full fidelity
+  likely requires adopting the upstream Python tuple-`Row` at collect boundaries.
+- **Streaming listeners and progress holders:** Keep progress holders (`StreamingQueryProgress`,
+  `StateOperatorProgress`, etc.) as faithful pure-Python implementations parsed from server
+  JSON, not Rust-backed. The listener bus (subscribe/dispatch) is genuinely Rust-backed;
+  the progress data structure is not.
+- **The pandas-parity gate runs OFFICIAL pyspark over our TRANSPORT — not our drop-in classes.**
+  `.github/workflows/pandas-parity.yml` puts the apache/spark v4.2.0 checkout on `PYTHONPATH` and
+  loads `scripts/rust_transport_plugin.py`, which monkeypatches `SparkConnectClient` so official
+  pyspark builds every proto (Column/lit/isin/createDataFrame) and only the gRPC transport is ours.
+  **So Rust Column/lit/`__repr__` changes do NOT move this gate** — a failure here is in the transport
+  seam or the test environment, not the drop-in. To reproduce a failure locally, drive it the same
+  way (do NOT `import pyspark.pandas` from our `./python`): `PYTHONPATH=scripts:<spark-src>/python`,
+  `RUST_PYSPARK_SO=...`, `SPARK_REMOTE=sc://localhost:15002`, `-p rust_transport_plugin`, against a
+  real server. Two environment requirements the tests silently assume (both cost real time):
+  - **Client timezone must equal the server's `spark.sql.session.timeZone`.** The tests compare
+    against pure-pandas (tz-naive) results; a timestamp only round-trips through Spark when the two
+    tzs match (createDataFrame converts with the session tz, `lit(datetime)` with the client's local
+    tz). REAL pyspark fails identically when they differ, so ALIGN them, don't "fix" the client.
+    Symptoms of a mismatch: `Series.isin([datetime])` / `get_dummies` on a datetime column silently
+    return all-False/all-zeros. Use **UTC** on both (server `-Duser.timezone=UTC` +
+    `spark.sql.session.timeZone=UTC`, client `TZ=UTC`), NOT a DST-having zone: America/Los_Angeles
+    aligns too but makes client-side pandas raise `NonExistentTimeError` (and skew a timestamp `mean`)
+    on the resample/describe tests, whose data includes the 2021-03-14 02:00 spring-forward gap. UTC
+    also matches how Apache runs its PYTHON connect tests (the runner's UTC); the pom.xml
+    `America/Los_Angeles` is only for the JVM/Scala maven-surefire tests, not the python connect server.
+  - **Pin pandas to the supported range (`>=2.2,<3.0`).** v4.2.0 pandas-on-Spark warns pandas ≥ 3.0.0
+    is unsupported and has 3.0-only branches that misbehave (e.g. `test_frame_loc_setitem` no-ops a
+    reordered multi-column `.loc` assignment). Also add test-only deps the suite needs (scipy for the
+    corr tests, pyyaml for pipelines) — matching Apache's own pandas test environment.
+- **Improving the drop-in ITSELF (separate from the gate above):** fixes belong in Rust or in the
+  compat shims — **never** by editing a vendored file (breaks the drift gate) or monkey-patching a
+  Rust class from Python. Two gotchas that cost real time:
+  - **`Column.__repr__` must render the expression** (`Column<'<expr>'>`), not a constant. pandas-
+    on-Spark's `spark_column_equals` decides column identity by comparing repr strings (it does
+    `repr(left).replace(backtick, "") == repr(right)...`); a generic `"Column()"` makes every column
+    look equal and collapses frames to `(n, 0)`. `Expression::render()` mirrors the pyspark-connect
+    expression `__repr__` (infix binary ops, `AS`, `CAST`, star, ...). `pyspark.sql.connect.column`
+    re-exports the Rust `Column`, so its `isinstance(x, ConnectColumn)` checks already pass.
+  - **Internal pandas functions dispatch by NAME, not by client reimplementation.**
+    `pyspark.sql.internal.InternalFunction` (`distributed_sequence_id`, `pandas_product`,
+    `pandas_stddev`, ...) routes through `connect.functions.builtin._invoke_function_over_columns`,
+    which must build a plain `UnresolvedFunction(name, cols)` (via `functions._invoke_function` →
+    Rust `pyfunc_invoke_function`). The Connect *server* resolves these internal names. Do NOT
+    special-case them client-side (e.g. faking `distributed_sequence_id` with a `row_number`
+    window — it is wrong and non-distributed).
+- **`*cols` methods unpack a single list.** `df.select(["a","b"])` must behave like
+  `df.select("a","b")` (pyspark unpacks a lone list/tuple arg). Handled centrally in
+  `to_column_list`, so it covers `select`/`sort`/`groupBy`/... at once — don't re-solve per method.
+- **Pipelines (SDP):** The pure-Python surface vendors cleanly with one edit to imports. The
+  Connect-server path requires a dedicated Rust `PipelineCommand` seam with high-level methods
+  on the session, separate from drop-in parity work.

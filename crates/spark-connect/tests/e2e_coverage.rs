@@ -220,6 +220,108 @@ fn catalog_extras_surface() {
     let _ = c.create_external_table("cov_ext_tbl", None, Some("parquet"));
 }
 
+/// DDL catalog operations added for v4.2.0 parity: create/drop database, drop/analyze/
+/// truncate table, drop view, get create-table string, get table properties, list
+/// partitions, list views. Exercises the real client->server round-trip and cleans up.
+#[test]
+fn catalog_ddl_v420_surface() {
+    if !should_run() {
+        return;
+    }
+    let s = session();
+    let c = s.catalog();
+
+    let db = "cov_ddl_db";
+    // createDatabase (idempotent) + verify it exists.
+    let mut props = HashMap::new();
+    props.insert("purpose".to_string(), "coverage".to_string());
+    c.create_database(db, true, props).unwrap();
+    assert!(c.database_exists(db).unwrap());
+
+    // listViews: with a pattern (no db -> current database is used) and db-qualified.
+    let _ = c.list_views(None, None).unwrap().collect().unwrap();
+    let _ = c.list_views(None, Some("*")).unwrap().collect().unwrap();
+    let _ = c
+        .list_views(Some(db), Some("*"))
+        .unwrap()
+        .collect()
+        .unwrap();
+
+    // A managed, partitioned table in that database for the table-scoped ops.
+    let tbl = format!("{db}.cov_ddl_tbl");
+    s.sql(&format!(
+        "CREATE TABLE IF NOT EXISTS {tbl} (a INT) USING parquet PARTITIONED BY (p INT)"
+    ))
+    .unwrap()
+    .collect()
+    .unwrap();
+    s.sql(&format!("INSERT INTO {tbl} PARTITION (p=1) VALUES (10)"))
+        .unwrap()
+        .collect()
+        .unwrap();
+
+    // listPartitions, getTableProperties, getCreateTableString, analyzeTable.
+    let _ = c.list_partitions(&tbl).unwrap().collect().unwrap();
+    let _ = c.get_table_properties(&tbl).unwrap();
+    let create_str = c.get_create_table_string(&tbl, false).unwrap();
+    assert!(create_str.to_uppercase().contains("CREATE"));
+    c.analyze_table(&tbl, true).unwrap();
+
+    // truncateTable then dropTable.
+    c.truncate_table(&tbl).unwrap();
+    c.drop_table(&tbl, true, false).unwrap();
+    assert!(!c.table_exists(&tbl).unwrap());
+
+    // A persistent view for dropView.
+    let view = format!("{db}.cov_ddl_view");
+    s.sql(&format!("CREATE OR REPLACE VIEW {view} AS SELECT 1 AS a"))
+        .unwrap()
+        .collect()
+        .unwrap();
+    c.drop_view(&view, true).unwrap();
+
+    // dropDatabase(cascade) cleans up.
+    c.drop_database(db, true, true).unwrap();
+    assert!(!c.database_exists(db).unwrap());
+}
+
+/// Typed catalog result structs (Table/Database/Function/Column/CatalogMetadata) parsed
+/// from the catalog queries. Mirrors pyspark's List[Table] etc.
+#[test]
+fn catalog_typed_results_surface() {
+    if !should_run() {
+        return;
+    }
+    let s = session();
+    let c = s.catalog();
+    s.range(3)
+        .unwrap()
+        .create_or_replace_temp_view("cov_typed_view")
+        .unwrap();
+
+    let cats = c.list_catalogs_typed(None).unwrap();
+    assert!(!cats.is_empty() && !cats[0].name.is_empty());
+    let dbs = c.list_databases_typed(None).unwrap();
+    assert!(dbs.iter().any(|d| d.name == "default"));
+    assert_eq!(c.get_database_typed("default").unwrap().name, "default");
+
+    let tables = c.list_tables_typed(None, None).unwrap();
+    let v = tables.iter().find(|t| t.name == "cov_typed_view").unwrap();
+    assert!(v.is_temporary);
+    assert_eq!(
+        c.get_table_typed("cov_typed_view").unwrap().name,
+        "cov_typed_view"
+    );
+
+    let funcs = c.list_functions_typed(None, None).unwrap();
+    assert!(!funcs.is_empty());
+    assert_eq!(c.get_function_typed("abs").unwrap().name, "abs");
+
+    let cols = c.list_columns_typed("cov_typed_view", None).unwrap();
+    assert_eq!(cols.len(), 1);
+    assert_eq!(cols[0].name, "id");
+}
+
 #[test]
 fn session_surface() {
     if !should_run() {
@@ -573,7 +675,10 @@ fn dataframe_more_surface() {
     let _ = df.intersect(&other).count().unwrap();
     let _ = df.intersect_all(&other).count().unwrap();
     let _ = df.subtract(&other).count().unwrap();
-    let _ = df.hint("broadcast", vec![]).collect().unwrap();
+    let _ = df
+        .hint("broadcast", Vec::<String>::new())
+        .collect()
+        .unwrap();
     let _ = df.to_df(vec!["a", "b", "c"]).collect().unwrap();
     let _ = df.sample(0.5, Some(1)).count().unwrap();
     let _ = df.col_regex("`.*`").collect().unwrap();
@@ -625,7 +730,11 @@ fn dataframe_extra_surface() {
             .unwrap(),
         4
     );
-    assert_eq!(df.repartition_by_id(2).count().unwrap(), 4);
+    assert_eq!(df.repartition_by_id(2, col("id")).count().unwrap(), 4);
+    // zipWithIndex appends the index column (so one more column than the input).
+    let zwi = df.zip_with_index("idx");
+    assert!(zwi.columns().unwrap().contains(&"idx".to_string()));
+    assert_eq!(zwi.count().unwrap(), 4);
     assert_eq!(df.spark_session().range(2).unwrap().count().unwrap(), 2);
 
     // metadata_column just builds a Column (client-side); temp-view registration.

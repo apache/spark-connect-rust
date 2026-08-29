@@ -18,7 +18,7 @@ use crate::streaming::{PyDataStreamReader, PyStreamingQueryManager};
 ///
 /// Mirrors `pyspark.sql.SparkSession.Builder`: chainable and reached via the
 /// `SparkSession.builder` class attribute.
-#[pyclass(name = "SparkSessionBuilder")]
+#[pyclass(name = "SparkSessionBuilder", from_py_object)]
 #[derive(Clone)]
 pub struct PySparkSessionBuilder {
     remote_url: Option<String>,
@@ -52,14 +52,16 @@ impl PySparkSessionBuilder {
     }
 
     /// Set a config option, or several via `map`. Mirrors
-    /// `SparkSession.Builder.config(key=None, value=None, *, map=None)`. `spark.remote`
-    /// sets the connect endpoint; other keys are applied as runtime confs on connect.
-    #[pyo3(signature = (key=None, value=None, map=None))]
+    /// `SparkSession.Builder.config(key=None, value=None, *, map=None, conf=None)`.
+    /// `spark.remote` sets the connect endpoint; other keys are applied as runtime confs
+    /// on connect. `conf` accepts a `SparkConf` (its `getAll()` pairs are applied).
+    #[pyo3(signature = (key=None, value=None, map=None, conf=None))]
     fn config(
         &self,
         key: Option<&str>,
         value: Option<&Bound<'_, PyAny>>,
         map: Option<&Bound<'_, PyDict>>,
+        conf: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySparkSessionBuilder> {
         let mut b = self.clone();
         if let Some(k) = key {
@@ -74,6 +76,15 @@ impl PySparkSessionBuilder {
                 let ks = k.str()?.to_string();
                 let vs = crate::coerce_option_value(&v)?.unwrap_or_default();
                 b.set_conf(&ks, vs);
+            }
+        }
+        if let Some(c) = conf {
+            // A SparkConf: apply its (key, value) pairs via getAll().
+            for pair in c.call_method0("getAll")?.try_iter()? {
+                let pair = pair?;
+                let k: String = pair.get_item(0)?.str()?.to_string();
+                let v: String = pair.get_item(1)?.str()?.to_string();
+                b.set_conf(&k, v);
             }
         }
         Ok(b)
@@ -93,19 +104,48 @@ impl PySparkSessionBuilder {
         self.clone()
     }
 
-    /// `channelBuilder` - customizing the underlying gRPC channel is a Python-transport
-    /// concept; this client uses a native Rust transport configured via `remote(url)`,
-    /// so a custom Python channel builder is not supported. Mirrors the API surface.
+    /// `channelBuilder` - accept a Spark Connect ChannelBuilder and reconstruct an
+    /// `sc://` connection URL from its endpoint (host/port) and connection params, then
+    /// use it as the native-transport remote. Mirrors `SparkSession.Builder.channelBuilder`
+    /// (custom gRPC channels/interceptors themselves are a Python-transport concept and
+    /// do not apply to the native Rust transport, but the endpoint + params are honored).
     #[pyo3(name = "channelBuilder")]
-    #[allow(unused_variables)]
+    #[allow(non_snake_case)]
     fn channel_builder(
         &self,
         channelBuilder: &Bound<'_, PyAny>,
     ) -> PyResult<PySparkSessionBuilder> {
-        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-            "channelBuilder is not supported: this client uses a native Rust transport; \
-             configure the endpoint via .remote(url) instead",
-        ))
+        // Endpoint: prefer the builder's host/port (DefaultChannelBuilder exposes both).
+        let host: String = channelBuilder
+            .getattr("host")
+            .and_then(|h| h.extract::<String>())
+            .map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "channelBuilder must expose a `host` (e.g. DefaultChannelBuilder); \
+                     otherwise configure the endpoint via .remote(url)",
+                )
+            })?;
+        let port: i64 = channelBuilder
+            .getattr("port")
+            .and_then(|p| p.extract::<i64>())
+            .unwrap_or(15002);
+        let mut url = format!("sc://{host}:{port}");
+        // Preserve connection params (token/use_ssl/user_id/...) if present as `_params`.
+        if let Ok(params) = channelBuilder.getattr("_params") {
+            if let Ok(dict) = params.cast::<pyo3::types::PyDict>() {
+                if !dict.is_empty() {
+                    let mut parts: Vec<String> = Vec::new();
+                    for (k, v) in dict.iter() {
+                        parts.push(format!("{}={}", k.str()?, v.str()?));
+                    }
+                    url.push_str("/;");
+                    url.push_str(&parts.join(";"));
+                }
+            }
+        }
+        let mut b = self.clone();
+        b.remote_url = Some(url);
+        Ok(b)
     }
 
     /// `enableHiveSupport` - a no-op for a Connect client (the remote server's
@@ -217,10 +257,34 @@ impl PySparkSession {
     fn createDataFrame(
         &self,
         py: Python<'_>,
-        data: &Bound<'_, PyList>,
+        data: &Bound<'_, PyAny>,
         schema: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         use crate::row::PyRow;
+
+        // Accept a pandas DataFrame (as pyspark does): convert it to a list of row lists
+        // with NaN/NaT mapped to None, and take its column names as the default schema.
+        // pandas-on-Spark always passes an explicit `schema`, so this mainly needs to
+        // deliver the row values; the list path below handles the rest.
+        let mut pandas_columns: Option<Vec<String>> = None;
+        let is_pandas = py
+            .import("pandas")
+            .and_then(|m| m.getattr("DataFrame"))
+            .and_then(|c| data.is_instance(&c))
+            .unwrap_or(false);
+        let data_owned: Bound<'_, PyList>;
+        let data: &Bound<'_, PyList> = if is_pandas {
+            pandas_columns = Some(data.getattr("columns")?.call_method0("tolist")?.extract()?);
+            // df.astype(object).where(df.notna(), None).values.tolist() -> rows with None for NA.
+            let notna = data.call_method0("notna")?;
+            let obj = data.call_method1("astype", ("object",))?;
+            let replaced = obj.call_method1("where", (notna, py.None()))?;
+            let values = replaced.getattr("values")?.call_method0("tolist")?;
+            data_owned = values.cast_into::<PyList>()?;
+            &data_owned
+        } else {
+            data.cast::<PyList>()?
+        };
 
         // Resolve the schema: a list of column names (types inferred), a DDL string or
         // a StructType (names + types explicit), or None (names from Row / default).
@@ -282,14 +346,30 @@ impl PySparkSession {
                             .collect::<PyResult<_>>()?,
                         None,
                     )
+                } else if let Ok(dict) = item.cast::<PyDict>() {
+                    // A dict row: field names are its keys (sorted, mirroring pyspark's
+                    // `_infer_schema` for dicts), values in that key order.
+                    let mut pairs: Vec<(String, Bound<'_, PyAny>)> = Vec::with_capacity(dict.len());
+                    for (k, v) in dict.iter() {
+                        pairs.push((k.str()?.to_string(), v));
+                    }
+                    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+                    let names: Vec<String> = pairs.iter().map(|(k, _)| k.clone()).collect();
+                    let values: Vec<Value> = pairs
+                        .iter()
+                        .map(|(_, v)| py_to_value(v))
+                        .collect::<PyResult<_>>()?;
+                    (values, Some(names))
                 } else {
-                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                        "Each row must be a list, tuple, or Row",
-                    ));
+                    // A scalar row (int/str/float/...): a single-field row, matching
+                    // `createDataFrame([1, 2, 3], IntegerType())`. The field name comes from
+                    // the schema when given, else defaults below.
+                    (vec![py_to_value(&item)?], None)
                 };
             let names = spec_names
                 .clone()
                 .or(row_names)
+                .or_else(|| pandas_columns.clone())
                 .unwrap_or_else(|| (0..values.len()).map(|i| format!("col{}", i)).collect());
             rows.push(Row::new(names, values));
         }
@@ -378,11 +458,13 @@ impl PySparkSession {
     }
 
     /// Get the StreamingQueryManager for managing active streaming queries (`spark.streams`).
+    ///
+    /// The native manager owns a Rust-side listener bus, so `addListener`/`removeListener`/
+    /// `close` are implemented in the core (Rust clients get the feature too).
     #[getter]
     #[pyo3(name = "streams")]
     fn streams(&self) -> PyStreamingQueryManager {
-        let manager = self.session.streams();
-        PyStreamingQueryManager::new(manager)
+        PyStreamingQueryManager::new(self.session.streams())
     }
 
     /// Stop this Spark session.
@@ -390,27 +472,32 @@ impl PySparkSession {
         py.detach(|| self.session.stop()).to_pyerr()
     }
 
-    /// Get the UDF registration API. Returns a Python object that implements spark.udf.register.
-    #[pyo3(name = "udf")]
-    fn get_udf<'a>(&self, py: Python<'a>) -> PyResult<Bound<'a, PyAny>> {
-        // Create a simple UDFRegistration wrapper object with a register method
-        let code = c"
-class _UDFRegistration:
-    def __init__(self):
-        pass
+    /// Get the UDF registration API (`spark.udf`). Returns the
+    /// `pyspark.sql.udf.UDFRegistration` bound to this session, so it can register
+    /// Python UDFs and Java UDFs/UDAFs (registerJavaFunction / registerJavaUDAF).
+    #[getter(udf)]
+    fn get_udf<'a>(slf: &Bound<'a, Self>, py: Python<'a>) -> PyResult<Bound<'a, PyAny>> {
+        let cls = py.import("pyspark.sql.udf")?.getattr("UDFRegistration")?;
+        cls.call1((slf,))
+    }
 
-    def register(self, name, f, returnType=None):
-        # Import locally to avoid circular imports
-        from pyspark.sql.udf import UserDefinedFunction
-        from pyspark.sql.types import StringType
-        if returnType is None:
-            returnType = StringType()
-        return UserDefinedFunction(f, returnType, 100, name)
-
-_UDFRegistration()
-";
-        let udf_reg = py.eval(code, None, None)?;
-        Ok(udf_reg)
+    /// Register a Java UDF/UDAF by class name (used by
+    /// `UDFRegistration.registerJavaFunction` / `registerJavaUDAF`).
+    #[pyo3(name = "_registerJavaFunction", signature = (name, java_class_name, return_type=None, aggregate=false))]
+    #[allow(non_snake_case)]
+    fn register_java_function_py(
+        &self,
+        py: Python<'_>,
+        name: &str,
+        java_class_name: &str,
+        return_type: Option<&str>,
+        aggregate: bool,
+    ) -> PyResult<()> {
+        py.detach(|| {
+            self.session
+                .register_java_function(name, java_class_name, return_type, aggregate)
+        })
+        .to_pyerr()
     }
 
     #[pyo3(name = "sessionId")]
@@ -422,6 +509,17 @@ _UDFRegistration()
     #[getter]
     fn session_id(&self) -> String {
         self.session.session_id().to_string()
+    }
+
+    /// The low-level Connect client. In the reference client this is the gRPC
+    /// `SparkConnectClient`; here the transport is Rust, so we expose a minimal stub
+    /// carrying the bits test/util code touches (`_server_session_id`, `_cleanup_ml_cache`),
+    /// mirroring `SparkSession.client` enough for harnesses like `ReusedConnectTestCase`.
+    #[getter]
+    fn client(&self) -> PyConnectClientStub {
+        PyConnectClientStub {
+            session_id: self.session.session_id().to_string(),
+        }
     }
 
     /// Whether this session has been stopped. Mirrors `SparkSession.is_stopped`.
@@ -604,6 +702,26 @@ _UDFRegistration()
     }
 }
 
+/// Minimal stand-in for the reference `SparkConnectClient`, returned by
+/// `SparkSession.client`. The real client is the Rust transport; this only surfaces the
+/// members that test/utility code (e.g. `ReusedConnectTestCase`) touches.
+#[pyclass(name = "SparkConnectClientStub")]
+pub struct PyConnectClientStub {
+    session_id: String,
+}
+
+#[pymethods]
+impl PyConnectClientStub {
+    /// The server-side session id (property, mirrors `client._server_session_id`).
+    #[getter]
+    fn _server_session_id(&self) -> String {
+        self.session_id.clone()
+    }
+
+    /// No-op: the Rust transport has no client-side ML cache to clear.
+    fn _cleanup_ml_cache(&self) {}
+}
+
 /// Infer the Spark `DataType` for a `createDataFrame` column from its (first) value.
 /// Scalars, Date/Timestamp, and Decimal map precisely; Null and nested collections
 /// fall back to String (createDataFrame here does not deep-infer nested schemas).
@@ -629,7 +747,44 @@ fn value_to_datatype(v: &Value) -> DataType {
             precision: precision.unwrap_or(38),
             scale: scale.unwrap_or(0),
         },
-        _ => utf8(),
+        // Nested inference (schema=None): infer element/field/value types recursively so a
+        // list/dict/Row value produces the right Array/Struct/Map type.
+        Value::List(items) => {
+            let element_type = items
+                .iter()
+                .find(|x| !matches!(x, Value::Null))
+                .map(value_to_datatype)
+                .unwrap_or_else(utf8);
+            DataType::Array {
+                element_type: Box::new(element_type),
+                contains_null: true,
+            }
+        }
+        Value::Struct(fields) => DataType::Struct {
+            fields: fields
+                .iter()
+                .map(|(n, val)| spark_connect::types::StructField {
+                    name: n.clone(),
+                    data_type: value_to_datatype(val),
+                    nullable: true,
+                    metadata: Default::default(),
+                })
+                .collect(),
+        },
+        Value::Map(m) => {
+            let value_type = m
+                .values()
+                .find(|x| !matches!(x, Value::Null))
+                .map(value_to_datatype)
+                .unwrap_or_else(utf8);
+            DataType::Map {
+                key_type: Box::new(utf8()),
+                value_type: Box::new(value_type),
+                value_contains_null: true,
+            }
+        }
+        Value::Variant { .. } => DataType::Variant,
+        Value::Null => utf8(),
     }
 }
 
@@ -643,6 +798,12 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     // Check for bool (before int because bool is a subclass of int in Python)
     if let Ok(b) = obj.extract::<bool>() {
         return Ok(Value::Bool(b));
+    }
+
+    // Check for decimal.Decimal BEFORE int/float: Decimal defines __float__/__int__, so
+    // extract::<f64>()/<i64>() would succeed and mis-tag a Decimal as Double/Long.
+    if let Some(v) = decimal_to_value(obj)? {
+        return Ok(v);
     }
 
     // Check for int
@@ -660,20 +821,24 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
         return Ok(Value::String(s));
     }
 
-    // Check for bytes
-    if let Ok(b) = obj.extract::<Vec<u8>>() {
-        return Ok(Value::Binary(b));
+    // Check for bytes/bytearray SPECIFICALLY (not `extract::<Vec<u8>>()`, which also
+    // matches a Python list of small ints like [1,2,3] and would mis-tag arrays as binary).
+    if let Ok(b) = obj.cast::<pyo3::types::PyBytes>() {
+        return Ok(Value::Binary(b.as_bytes().to_vec()));
+    }
+    if let Ok(ba) = obj.cast::<pyo3::types::PyByteArray>() {
+        return Ok(Value::Binary(ba.to_vec()));
     }
 
     // list / tuple -> array (recursively converted)
-    if let Ok(list) = obj.downcast::<pyo3::types::PyList>() {
+    if let Ok(list) = obj.cast::<pyo3::types::PyList>() {
         let mut items = Vec::with_capacity(list.len());
         for item in list.iter() {
             items.push(py_to_value(&item)?);
         }
         return Ok(Value::List(items));
     }
-    if let Ok(tuple) = obj.downcast::<pyo3::types::PyTuple>() {
+    if let Ok(tuple) = obj.cast::<pyo3::types::PyTuple>() {
         let mut items = Vec::with_capacity(tuple.len());
         for item in tuple.iter() {
             items.push(py_to_value(&item)?);
@@ -681,8 +846,24 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
         return Ok(Value::List(items));
     }
 
+    // pyspark Row -> struct: its named fields (values already core Values), so a nested
+    // Row inside createDataFrame data (e.g. Row(s=Row(x=1))) converts recursively.
+    if let Ok(pyrow) = obj.extract::<PyRef<crate::row::PyRow>>() {
+        let fields = pyrow.row.fields();
+        let values = pyrow.row.values();
+        let mut out = Vec::with_capacity(values.len());
+        for (i, v) in values.iter().enumerate() {
+            let name = fields
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| format!("_{}", i + 1));
+            out.push((name, v.clone()));
+        }
+        return Ok(Value::Struct(out));
+    }
+
     // dict -> map (keys coerced to their string form, values recursively converted)
-    if let Ok(dict) = obj.downcast::<pyo3::types::PyDict>() {
+    if let Ok(dict) = obj.cast::<pyo3::types::PyDict>() {
         let mut map = std::collections::BTreeMap::new();
         for (k, v) in dict.iter() {
             map.insert(k.str()?.to_string(), py_to_value(&v)?);
@@ -696,9 +877,12 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     if let Some(dt_mod) = &datetime_mod {
         if let Ok(datetime_cls) = dt_mod.getattr("datetime") {
             if obj.is_instance(&datetime_cls)? {
-                // Call .timestamp() to get POSIX seconds, then convert to microseconds
-                let timestamp_f64: f64 = obj.call_method0("timestamp")?.extract()?;
-                let micros = (timestamp_f64 * 1_000_000.0) as i64;
+                // A naive datetime represents session-local wall-clock; encode it via the
+                // POSIX instant (.timestamp() interprets a naive value in the local zone).
+                // A pandas Timestamp is a datetime subclass but its .timestamp() treats a
+                // naive value as UTC, which disagrees with datetime/`lit(..)`; normalize it
+                // to a pure datetime first so createDataFrame() and lit() encode identically.
+                let micros = datetime_to_micros(obj)?;
                 return Ok(Value::Timestamp(micros));
             }
         }
@@ -717,34 +901,6 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
         }
     }
 
-    // Check for decimal.Decimal
-    let decimal_mod = py.import("decimal").ok();
-    if let Some(dec_mod) = &decimal_mod {
-        if let Ok(decimal_cls) = dec_mod.getattr("Decimal") {
-            if obj.is_instance(&decimal_cls)? {
-                // Get the string representation
-                let dec_str: String = obj.str()?.extract()?;
-                // Try to get precision and scale from as_tuple()
-                let as_tuple = obj.call_method0("as_tuple")?;
-                let mut scale: Option<i32> = None;
-                if let Ok(exp_obj) = as_tuple.get_item(2) {
-                    if !exp_obj.is_none() {
-                        if let Ok(exp) = exp_obj.extract::<i64>() {
-                            if exp <= 0 {
-                                scale = Some((-exp) as i32);
-                            }
-                        }
-                    }
-                }
-                return Ok(Value::Decimal {
-                    value: dec_str,
-                    precision: None,
-                    scale,
-                });
-            }
-        }
-    }
-
     // Anything else is not a supported literal; error rather than silently coercing to a wrong value.
     let type_name = obj
         .get_type()
@@ -754,4 +910,55 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
         "unsupported value type for createDataFrame: {type_name}"
     )))
+}
+
+/// Encode a Python `datetime.datetime` as microseconds since the Unix epoch (UTC),
+/// consistently for both plain `datetime` and `pandas.Timestamp`.
+///
+/// `datetime.timestamp()` interprets a naive value in the local zone (the convention Spark
+/// uses for a naive value in a session-local TIMESTAMP, and the one `functions.lit(..)`
+/// follows). `pandas.Timestamp.timestamp()` instead treats a naive value as UTC, which would
+/// make `createDataFrame(pandas_df)` disagree with `lit(..)` by the local offset. To keep the
+/// two paths identical we first downcast a pandas Timestamp to a plain `datetime` via
+/// `to_pydatetime()`. Timezone-aware values are unaffected (both encode the same instant).
+pub(crate) fn datetime_to_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
+    let normalized = if obj.hasattr("to_pydatetime").unwrap_or(false) {
+        obj.call_method0("to_pydatetime")?
+    } else {
+        obj.clone()
+    };
+    let timestamp_f64: f64 = normalized.call_method0("timestamp")?.extract()?;
+    Ok((timestamp_f64 * 1_000_000.0).round() as i64)
+}
+
+/// If `obj` is a `decimal.Decimal`, return it as a `Value::Decimal` (string value + scale
+/// from `as_tuple()`); otherwise `None`. Checked before int/float in `py_to_value` because
+/// Decimal defines `__float__`/`__int__`.
+fn decimal_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Option<Value>> {
+    let py = obj.py();
+    let dec_mod = match py.import("decimal") {
+        Ok(m) => m,
+        Err(_) => return Ok(None),
+    };
+    let decimal_cls = dec_mod.getattr("Decimal")?;
+    if !obj.is_instance(&decimal_cls)? {
+        return Ok(None);
+    }
+    let dec_str: String = obj.str()?.extract()?;
+    let as_tuple = obj.call_method0("as_tuple")?;
+    let mut scale: Option<i32> = None;
+    if let Ok(exp_obj) = as_tuple.get_item(2) {
+        if !exp_obj.is_none() {
+            if let Ok(exp) = exp_obj.extract::<i64>() {
+                if exp <= 0 {
+                    scale = Some((-exp) as i32);
+                }
+            }
+        }
+    }
+    Ok(Some(Value::Decimal {
+        value: dec_str,
+        precision: None,
+        scale,
+    }))
 }

@@ -16,3 +16,8 @@
 #
 
 """Spark Connect testing utilities - re-exported from Apache Spark with Connect adaptations."""
+
+from pyspark.testing.unittestutils import main
+from pyspark.testing.utils import assertDataFrameEqual, assertSchemaEqual
+
+__all__ = ["assertDataFrameEqual", "assertSchemaEqual", "main"]

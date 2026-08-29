@@ -228,6 +228,13 @@ pub enum LogicalPlan {
         read_type: crate::readwriter::ReadType,
         is_streaming: bool,
     },
+    /// RelationChanges: `spark.read.changes(table)` / `spark.readStream.changes(table)`
+    /// (CDC read for a named table).
+    RelationChanges {
+        table_name: String,
+        options: std::collections::HashMap<String, String>,
+        is_streaming: Option<bool>,
+    },
     /// WithWatermark: `df.withWatermark(timeColumn, delayThreshold)`.
     WithWatermark {
         input: Box<LogicalPlan>,
@@ -984,6 +991,20 @@ impl LogicalPlan {
                 relation.rel_type = Some(proto::relation::RelType::Read(read));
             }
 
+            LogicalPlan::RelationChanges {
+                table_name,
+                options,
+                is_streaming,
+            } => {
+                let mut changes = proto::RelationChanges::default();
+                changes.unparsed_identifier = table_name.clone();
+                changes.options.extend(options.clone());
+                if let Some(s) = is_streaming {
+                    changes.is_streaming = *s;
+                }
+                relation.rel_type = Some(proto::relation::RelType::RelationChanges(changes));
+            }
+
             LogicalPlan::WithWatermark {
                 input,
                 time_column,
@@ -1296,10 +1317,13 @@ pub fn sql(query: impl Into<String>) -> LogicalPlan {
 }
 
 /// Create a Project plan.
-pub fn project(input: LogicalPlan, columns: Vec<Column>) -> LogicalPlan {
+pub fn project<C: Into<Column>>(
+    input: LogicalPlan,
+    columns: impl IntoIterator<Item = C>,
+) -> LogicalPlan {
     LogicalPlan::Project {
         input: Box::new(input),
-        columns,
+        columns: columns.into_iter().map(Into::into).collect(),
     }
 }
 

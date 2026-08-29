@@ -112,7 +112,7 @@ results survive transient disconnects.
     let spark = SparkSession::builder()
         .remote("sc://localhost:15002")
         .get_or_create()?;
-    spark.range(100)?.select(vec![f::col("id")]).show(20)?;
+    spark.range(100)?.select([f::col("id")]).show(20)?;
     ```
 
 === "Python (drop-in)"

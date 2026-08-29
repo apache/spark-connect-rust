@@ -44,7 +44,7 @@ fn flatten_str_cols(cols: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<String>> {
 }
 
 /// Python wrapper for a Spark DataFrame.
-#[pyclass(name = "DataFrame")]
+#[pyclass(name = "DataFrame", subclass)]
 pub struct PyDataFrame {
     pub(crate) dataframe: DataFrame,
 }
@@ -56,7 +56,19 @@ impl PyDataFrame {
 }
 
 /// Helper to convert arguments to a vector of Columns.
-fn to_column_list(_args: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<spark_connect::column::Column>> {
+pub(crate) fn to_column_list(
+    mut _args: Vec<Bound<'_, PyAny>>,
+) -> PyResult<Vec<spark_connect::column::Column>> {
+    // pyspark unpacks a single list/tuple argument: df.select(["a", "b"]) == df.select("a","b").
+    // (A single Column/str stays as-is.)
+    if _args.len() == 1 {
+        let only = &_args[0];
+        if only.is_instance_of::<pyo3::types::PyList>()
+            || only.is_instance_of::<pyo3::types::PyTuple>()
+        {
+            _args = only.try_iter()?.collect::<PyResult<Vec<_>>>()?;
+        }
+    }
     let mut cols = vec![];
     for arg in _args {
         // Try as PyColumn first
@@ -319,6 +331,34 @@ impl PyDataFrame {
         Ok(PyDataFrame::new(
             self.dataframe.repartition_by_range(numPartitions, exprs),
         ))
+    }
+
+    /// Repartition into `numPartitions` using a column's value directly as the shuffle
+    /// partition id. Mirrors `DataFrame.repartitionById(numPartitions, partitionIdCol)`.
+    #[pyo3(signature = (numPartitions, partitionIdCol))]
+    #[allow(non_snake_case)]
+    fn repartitionById(
+        &self,
+        numPartitions: i32,
+        partitionIdCol: &Bound<'_, PyAny>,
+    ) -> PyResult<PyDataFrame> {
+        if numPartitions <= 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "numPartitions must be positive, got {numPartitions}"
+            )));
+        }
+        let col = to_column(partitionIdCol)?;
+        Ok(PyDataFrame::new(
+            self.dataframe.repartition_by_id(numPartitions, col),
+        ))
+    }
+
+    /// Append a distributed monotonically-increasing index column. Mirrors
+    /// `DataFrame.zipWithIndex(indexColName="index")`.
+    #[pyo3(signature = (indexColName="index"))]
+    #[allow(non_snake_case)]
+    fn zipWithIndex(&self, indexColName: &str) -> PyDataFrame {
+        PyDataFrame::new(self.dataframe.zip_with_index(indexColName))
     }
 
     /// Union with another DataFrame.
@@ -601,7 +641,7 @@ impl PyDataFrame {
         value: &Bound<'_, PyAny>,
         subset: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        if let Ok(d) = value.downcast::<PyDict>() {
+        if let Ok(d) = value.cast::<PyDict>() {
             let mut pairs = Vec::with_capacity(d.len());
             for (k, v) in d.iter() {
                 pairs.push((k.extract::<String>()?, crate::session::py_to_value(&v)?));
@@ -770,7 +810,7 @@ impl PyDataFrame {
         subset: Option<Vec<String>>,
     ) -> PyResult<PyDataFrame> {
         let mut pairs: Vec<(String, String)> = Vec::new();
-        if let Ok(d) = to_replace.downcast::<PyDict>() {
+        if let Ok(d) = to_replace.cast::<PyDict>() {
             for (k, v) in d.iter() {
                 pairs.push((k.str()?.to_string(), v.str()?.to_string()));
             }
@@ -897,10 +937,13 @@ impl PyDataFrame {
         }
     }
 
-    /// Convert to a table alias for use as a table argument.
+    /// Return a `TableArg` wrapping this DataFrame, for use as a table-valued function
+    /// argument. Mirrors `DataFrame.asTable()`.
     #[pyo3(name = "asTable")]
-    fn as_table(&self, alias: &str) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.as_table(alias))
+    fn as_table(&self) -> crate::tablearg::PyTableArg {
+        crate::tablearg::PyTableArg::new(spark_connect::table_arg::TableArg::new(
+            self.dataframe.clone(),
+        ))
     }
 
     /// Deprecated alias for dropDuplicates.
@@ -1071,6 +1114,18 @@ impl PyDataFrame {
         Ok(df.unbind())
     }
 
+    /// Internal Arrow-based pandas conversion used by pandas-on-Spark
+    /// (`pyspark.sql.connect.dataframe.DataFrame._to_pandas`). Accepts and ignores
+    /// keyword options such as `pandasStructHandlingMode`; delegates to `toPandas`.
+    #[pyo3(signature = (**_kwargs))]
+    fn _to_pandas(
+        &self,
+        py: Python<'_>,
+        _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.toPandas(py)
+    }
+
     /// Get the count of rows.
     fn count(&self, py: Python<'_>) -> PyResult<i64> {
         py.detach(|| self.dataframe.count()).to_pyerr()
@@ -1121,10 +1176,13 @@ impl PyDataFrame {
         Ok(psdf.bind(py).getattr("plot")?.unbind())
     }
 
-    /// Get the schema of this DataFrame.
-    fn schema(&self) -> PyResult<PyDataType> {
-        let schema = self.dataframe.schema().to_pyerr()?;
-        Ok(PyDataType::new(schema))
+    /// The schema of this DataFrame as a `StructType` (a property, mirroring
+    /// `DataFrame.schema`) — materialized into the proper Python type classes so
+    /// `df.schema.fields`, `df.schema["c"]`, `df.schema.fieldNames()` all work.
+    #[getter]
+    fn schema(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let schema = py.detach(|| self.dataframe.schema()).to_pyerr()?;
+        crate::types::data_type_to_py(py, &schema)
     }
 
     /// Get the first row.
@@ -1160,7 +1218,8 @@ impl PyDataFrame {
         Ok(rows.into_iter().map(PyRow::new).collect())
     }
 
-    /// Get column names.
+    /// Column names (a property, mirroring `DataFrame.columns`).
+    #[getter]
     fn columns(&self) -> PyResult<Vec<String>> {
         self.dataframe.columns().to_pyerr()
     }
@@ -1291,6 +1350,12 @@ impl PyDataFrame {
 
     /// Column access by name (`df["col"]`).
     fn __getitem__(&self, item: &str) -> PyColumn {
+        PyColumn::new(spark_connect::functions::col(item))
+    }
+
+    /// Private column accessor used by pandas-on-Spark (`sdf._col(name)`); mirrors the
+    /// connect DataFrame's `_col`. Backtick-quoted names arrive from `scol_for`.
+    fn _col(&self, item: &str) -> PyColumn {
         PyColumn::new(spark_connect::functions::col(item))
     }
 
@@ -1452,19 +1517,19 @@ fn build_replacement_pairs(
 ) -> PyResult<Vec<(String, String)>> {
     use pyo3::exceptions::PyValueError;
     use pyo3::types::{PyDict, PyList};
-    if let Ok(d) = to_replace.downcast::<PyDict>() {
+    if let Ok(d) = to_replace.cast::<PyDict>() {
         let mut pairs = Vec::with_capacity(d.len());
         for (k, v) in d.iter() {
             pairs.push((k.str()?.to_string(), v.str()?.to_string()));
         }
         return Ok(pairs);
     }
-    if let Ok(olds) = to_replace.downcast::<PyList>() {
+    if let Ok(olds) = to_replace.cast::<PyList>() {
         let val = value.ok_or_else(|| {
             PyValueError::new_err("replace with a list to_replace requires a value list")
         })?;
         let news = val
-            .downcast::<PyList>()
+            .cast::<PyList>()
             .map_err(|_| PyValueError::new_err("value must be a list when to_replace is a list"))?;
         if olds.len() != news.len() {
             return Err(PyValueError::new_err(

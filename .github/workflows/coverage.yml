@@ -147,7 +147,11 @@ jobs:
         # `--no-report` accumulates raw coverage; `report` merges both passes into one JSON.
         run: |
           cargo llvm-cov clean --workspace
-          cargo llvm-cov --no-cfg-coverage --no-report -p apache-spark-connect
+          # Include apache-spark-connect-core: it is core client code (transport, retries, error
+          # handling, reattach) with its own substantial unit-test suite. Running -p apache-spark-connect
+          # alone never executed those tests, so its files reflected only incidental e2e coverage
+          # (e.g. error.rs at ~35%), dragging the total below 90%.
+          cargo llvm-cov --no-cfg-coverage --no-report -p apache-spark-connect -p apache-spark-connect-core
           SPARK_REMOTE=sc://localhost:15002 \
             cargo llvm-cov --no-cfg-coverage --no-report -p apache-spark-connect \
               --test e2e_functions --test e2e_columns --test e2e_dataframe \

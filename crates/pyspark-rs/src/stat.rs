@@ -47,6 +47,23 @@ impl PyStatFunctions {
         PyDataFrame::new(self.stat.freq_items(refs, support))
     }
 
+    /// Stratified sample without replacement. Mirrors `DataFrameStatFunctions.sampleBy(
+    /// col, fractions, seed)`; `fractions` maps stratum values to sampling fractions.
+    #[pyo3(name = "sampleBy", signature = (col, fractions, seed=None))]
+    fn sample_by(
+        &self,
+        col: &str,
+        fractions: &Bound<'_, pyo3::types::PyDict>,
+        seed: Option<i64>,
+    ) -> PyResult<PyDataFrame> {
+        let mut fr = Vec::with_capacity(fractions.len());
+        for (k, v) in fractions.iter() {
+            let key = crate::functions::to_column(&k)?.expression().clone();
+            fr.push((key, v.extract::<f64>()?));
+        }
+        Ok(PyDataFrame::new(self.stat.sample_by(col, fr, seed)))
+    }
+
     /// Approximate quantiles of a column at the given probabilities.
     ///
     /// Mirrors reference `DataFrameStatFunctions.approxQuantile(col, probabilities,

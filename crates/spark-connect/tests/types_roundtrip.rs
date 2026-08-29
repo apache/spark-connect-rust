@@ -85,7 +85,7 @@ fn nested_variants() -> Vec<DataType> {
                     // ("v" stays "v", not "\"v\"").
                     metadata: {
                         let mut m = BTreeMap::new();
-                        m.insert("k".to_string(), "v".to_string());
+                        m.insert("k".to_string(), serde_json::Value::String("v".to_string()));
                         m
                     },
                 },
