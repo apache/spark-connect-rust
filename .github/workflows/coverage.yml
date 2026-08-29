@@ -26,9 +26,9 @@ concurrency:
 
 on:
   push:
-    branches: [master]
+    branches: [master, "branch-*"]
   pull_request:
-    branches: [master]
+    branches: [master, "branch-*"]
 
 env:
   CARGO_TERM_COLOR: always

@@ -21,7 +21,7 @@ name: Docs
 
 on:
   push:
-    branches: [master]
+    branches: [master, "branch-*"]
     paths:
       - "docs/**"
       - "mkdocs.yml"

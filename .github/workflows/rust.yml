@@ -26,9 +26,9 @@ concurrency:
 
 on:
   push:
-    branches: [master]
+    branches: [master, "branch-*"]
   pull_request:
-    branches: [master]
+    branches: [master, "branch-*"]
 
 # Treat any compiler warning as a hard error across the whole Rust CI. Cargo caps
 # lints for dependencies to `allow`, so this only fails on warnings in our own
