@@ -4328,3 +4328,481 @@ pub fn tuple_union_theta_integer(col1: Column, col2: Column) -> Column {
         vec![col1.expression().clone(), col2.expression().clone()],
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_zero_arg_functions() {
+        let _cume = cume_dist();
+        let _curdate = curdate();
+        let _catalog = current_catalog();
+        let _db = current_database();
+        let _now = current_date();
+        let _schema = current_schema();
+        let _ts = current_timestamp();
+        let _tz = current_timezone();
+        let _user = current_user();
+        let _dense = dense_rank();
+        let _e_val = e();
+        let _input_block = input_file_block_length();
+        let _input_start = input_file_block_start();
+        let _input_name = input_file_name();
+        let _local_ts = localtimestamp();
+        let _mono_id = monotonically_increasing_id();
+        let _now_fn = now();
+        let _pr = percent_rank();
+        let _pi_val = pi();
+        let _rand_val = rand();
+        let _uuid_val = uuid();
+    }
+
+    #[test]
+    fn test_zero_arg_functions_serialize() {
+        let funcs = vec![
+            cume_dist(),
+            curdate(),
+            current_catalog(),
+            current_date(),
+            dense_rank(),
+            e(),
+            pi(),
+            rand(),
+            uuid(),
+        ];
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+    }
+
+    #[test]
+    fn test_interval_builders_serialize() {
+        let make_dt = make_dt_interval();
+        let _ = make_dt.to_proto();
+
+        let make_i = make_interval();
+        let _ = make_i.to_proto();
+
+        let make_ym = make_ym_interval();
+        let _ = make_ym.to_proto();
+    }
+
+    #[test]
+    fn test_math_functions_serialize() {
+        let test_col = col("test");
+        let funcs = vec![
+            abs(test_col.clone()),
+            acos(test_col.clone()),
+            acosh(test_col.clone()),
+            asin(test_col.clone()),
+            asinh(test_col.clone()),
+            atan(test_col.clone()),
+            atanh(test_col.clone()),
+            cbrt(test_col.clone()),
+            ceil(test_col.clone()),
+            cos(test_col.clone()),
+            cosh(test_col.clone()),
+            exp(test_col.clone()),
+            expm1(test_col.clone()),
+            floor(test_col.clone()),
+            log(test_col.clone()),
+            log10(test_col.clone()),
+            log1p(test_col.clone()),
+            log2(test_col.clone()),
+            rint(test_col.clone()),
+            round(test_col.clone()),
+            signum(test_col.clone()),
+            sin(test_col.clone()),
+            sinh(test_col.clone()),
+            sqrt(test_col.clone()),
+            tan(test_col.clone()),
+            tanh(test_col.clone()),
+        ];
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+    }
+
+    #[test]
+    fn test_string_functions_serialize() {
+        let test_col = col("test");
+        let funcs = vec![
+            ascii(test_col.clone()),
+            bit_count(test_col.clone()),
+            char_length(test_col.clone()),
+            character_length(test_col.clone()),
+            initcap(test_col.clone()),
+            lower(test_col.clone()),
+            ltrim(test_col.clone()),
+            octet_length(test_col.clone()),
+            reverse(test_col.clone()),
+            rtrim(test_col.clone()),
+            size(test_col.clone()),
+            soundex(test_col.clone()),
+            upper(test_col.clone()),
+        ];
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+    }
+
+    #[test]
+    fn test_col_patterns() {
+        let c_col = col("my_column");
+        match c_col.expression() {
+            Expression::ColumnReference(_) => {}
+            _ => panic!("Expected ColumnReference"),
+        }
+
+        let star = col("*");
+        match star.expression() {
+            Expression::UnresolvedStar(None) => {}
+            _ => panic!("Expected UnresolvedStar(None)"),
+        }
+
+        let table_star = col("t.*");
+        match table_star.expression() {
+            Expression::UnresolvedStar(Some(_)) => {}
+            _ => panic!("Expected UnresolvedStar with prefix"),
+        }
+    }
+
+    #[test]
+    fn test_expr_function_serialize() {
+        let e = expr("SELECT 1");
+        match e.expression() {
+            Expression::SQLExpression(s) => {
+                assert_eq!(s, "SELECT 1");
+            }
+            _ => panic!("Expected SQLExpression"),
+        }
+        let _ = e.to_proto();
+    }
+
+    #[test]
+    fn test_variadic_functions_serialize() {
+        let c1 = col("a");
+        let c2 = col("b");
+        let c3 = col("c");
+
+        let arr = array(vec![c1.clone(), c2.clone(), c3.clone()]);
+        let _ = arr.to_proto();
+
+        let concat_res = concat(vec![c1.clone(), c2.clone()]);
+        let _ = concat_res.to_proto();
+
+        let zip = arrays_zip(vec![c1.clone(), c2.clone()]);
+        let _ = zip.to_proto();
+
+        let map_res = create_map(vec![c1, c2, c3]);
+        let _ = map_res.to_proto();
+    }
+
+    #[test]
+    fn test_sort_functions_serialize() {
+        let test_col = col("test");
+        let funcs = vec![
+            asc(test_col.clone()),
+            asc_nulls_first(test_col.clone()),
+            asc_nulls_last(test_col.clone()),
+            desc(test_col.clone()),
+            desc_nulls_first(test_col.clone()),
+            desc_nulls_last(test_col.clone()),
+        ];
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+    }
+
+    #[test]
+    fn test_window_functions_serialize() {
+        let test_col = col("test");
+        let w1 = window(test_col.clone(), "1 minute");
+        let _ = w1.to_proto();
+
+        let w2 =
+            window_with_slide_and_start(test_col.clone(), "10 minutes", "5 minutes", "0 minutes");
+        let _ = w2.to_proto();
+    }
+
+    #[test]
+    fn test_udf_call_serialize() {
+        let c1 = col("a");
+        let c2 = col("b");
+
+        let udf_res = call_udf("my_udf", vec![c1.clone(), c2.clone()]);
+        let _ = udf_res.to_proto();
+
+        let cf = call_function("func_name", vec![c1, c2]);
+        let _ = cf.to_proto();
+    }
+
+    #[test]
+    fn test_two_arg_functions_serialize() {
+        let c1 = col("a");
+        let c2 = col("b");
+
+        let funcs = vec![
+            pow(c1.clone(), c2.clone()),
+            hypot(c1.clone(), c2.clone()),
+            atan2(c1.clone(), c2.clone()),
+            datediff(c1.clone(), c2.clone()),
+            from_utc_timestamp(c1.clone(), c2.clone()),
+            to_utc_timestamp(c1.clone(), c2.clone()),
+            try_add(c1.clone(), c2.clone()),
+            try_divide(c1.clone(), c2.clone()),
+            try_multiply(c1.clone(), c2.clone()),
+            try_subtract(c1.clone(), c2.clone()),
+        ];
+
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+    }
+
+    #[test]
+    fn test_type_cast_serialize() {
+        let test_col = col("test");
+        let fmt_col = col("fmt");
+        let funcs = vec![
+            bitwiseNOT(test_col.clone()),
+            bool_and(test_col.clone()),
+            bool_or(test_col.clone()),
+            to_date(test_col.clone()),
+            to_timestamp(test_col.clone()),
+            to_char(test_col.clone(), fmt_col.clone()),
+            to_varchar(test_col.clone(), fmt_col.clone()),
+            to_binary(test_col.clone()),
+            unix_date(test_col.clone()),
+            unix_seconds(test_col.clone()),
+            unix_millis(test_col.clone()),
+            unix_micros(test_col.clone()),
+        ];
+
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+    }
+
+    #[test]
+    fn test_hash_functions_serialize() {
+        let test_col = col("test");
+        let c1 = col("a");
+        let c2 = col("b");
+
+        let funcs = vec![
+            md5(test_col.clone()),
+            sha1(test_col.clone()),
+            sha2(test_col.clone(), 256),
+            crc32(test_col.clone()),
+        ];
+
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+
+        let hash_res = hash(vec![c1, c2]);
+        let _ = hash_res.to_proto();
+    }
+
+    #[test]
+    fn test_encoding_serialize() {
+        let test_col = col("test");
+        let funcs = vec![
+            bin(test_col.clone()),
+            hex(test_col.clone()),
+            unhex(test_col.clone()),
+            base64(test_col.clone()),
+            unbase64(test_col.clone()),
+        ];
+
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+    }
+
+    #[test]
+    fn test_datetime_serialize() {
+        let test_col = col("test");
+        let funcs = vec![
+            dayofmonth(test_col.clone()),
+            dayofweek(test_col.clone()),
+            dayofyear(test_col.clone()),
+            month(test_col.clone()),
+            quarter(test_col.clone()),
+            dayofmonth(test_col.clone()),
+            hour(test_col.clone()),
+            minute(test_col.clone()),
+            second(test_col.clone()),
+            year(test_col.clone()),
+        ];
+
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+    }
+
+    #[test]
+    fn test_array_functions_serialize() {
+        let test_col = col("test");
+        let other_col = col("other");
+
+        let funcs = vec![
+            array_contains(test_col.clone(), other_col.clone()),
+            array_intersect(test_col.clone(), other_col.clone()),
+            array_max(test_col.clone()),
+            array_min(test_col.clone()),
+            array_position(test_col.clone(), other_col.clone()),
+            array_remove(test_col.clone(), other_col.clone()),
+            array_sort(test_col.clone()),
+            array_distinct(test_col.clone()),
+            array_compact(test_col.clone()),
+        ];
+
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+    }
+
+    #[test]
+    fn test_map_functions_serialize() {
+        let test_col = col("test");
+        let other_col = col("other");
+
+        let funcs = vec![
+            map_contains_key(test_col.clone(), other_col.clone()),
+            map_keys(test_col.clone()),
+            map_values(test_col.clone()),
+            map_from_arrays(test_col.clone(), other_col.clone()),
+            element_at(test_col.clone(), other_col.clone()),
+            try_element_at(test_col.clone(), other_col.clone()),
+        ];
+
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+    }
+
+    #[test]
+    fn test_string_ops_serialize() {
+        let test_col = col("test");
+        let col1 = col("a");
+        let col2 = col("b");
+        let col3 = col("c");
+
+        let funcs = vec![
+            substring(test_col.clone(), col1.clone(), col2.clone()),
+            instr(test_col.clone(), col1.clone()),
+            rpad(test_col.clone(), col1.clone(), col2.clone()),
+            lpad(test_col.clone(), col1.clone(), col2.clone()),
+            split(test_col.clone(), col1.clone()),
+            regexp_extract(test_col.clone(), col1.clone(), col3.clone()),
+            regexp_like(test_col.clone(), col1.clone()),
+        ];
+
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+    }
+
+    #[test]
+    fn test_explode_serialize() {
+        let test_col = col("test");
+        let funcs = vec![
+            explode(test_col.clone()),
+            explode_outer(test_col.clone()),
+            posexplode(test_col.clone()),
+            posexplode_outer(test_col.clone()),
+        ];
+
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+    }
+
+    #[test]
+    fn test_json_serialize() {
+        let test_col = col("test");
+        let other_col = col("other");
+        let funcs = vec![
+            get_json_object(test_col.clone(), other_col.clone()),
+            json_array_length(test_col.clone()),
+            json_object_keys(test_col.clone()),
+            parse_json(test_col.clone()),
+            from_json(test_col.clone(), other_col.clone()),
+            to_json(test_col.clone()),
+            schema_of_json(test_col.clone()),
+        ];
+
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+    }
+
+    #[test]
+    fn test_aggregation_serialize() {
+        let test_col = col("test");
+        let funcs = vec![
+            count_distinct(test_col.clone()),
+            approx_count_distinct(test_col.clone()),
+            skewness(test_col.clone()),
+            kurtosis(test_col.clone()),
+            var_pop(test_col.clone()),
+            var_samp(test_col.clone()),
+            stddev(test_col.clone()),
+            stddev_pop(test_col.clone()),
+            stddev_samp(test_col.clone()),
+        ];
+
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+    }
+
+    #[test]
+    fn test_shift_functions_serialize() {
+        let test_col = col("test");
+        let col_n = col("n");
+        let funcs = vec![
+            shiftLeft(test_col.clone(), col_n.clone()),
+            shiftRight(test_col.clone(), col_n.clone()),
+            shiftRightUnsigned(test_col.clone(), col_n.clone()),
+        ];
+
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+    }
+
+    #[test]
+    fn test_misc_functions_serialize() {
+        let test_col = col("test");
+        let funcs = vec![
+            degrees(test_col.clone()),
+            radians(test_col.clone()),
+            bround(test_col.clone()),
+            url_encode(test_col.clone()),
+            url_decode(test_col.clone()),
+            try_to_binary(test_col.clone()),
+            try_url_decode(test_col.clone()),
+        ];
+
+        for col in funcs {
+            let _ = col.to_proto();
+        }
+    }
+
+    #[test]
+    fn test_nested_calls() {
+        let inner = col("x");
+        let outer = sqrt(inner);
+        let _ = outer.to_proto();
+
+        let nested = ceil(sqrt(col("y")));
+        let _ = nested.to_proto();
+
+        let complex = floor(abs(log(col("z"))));
+        let _ = complex.to_proto();
+    }
+}
