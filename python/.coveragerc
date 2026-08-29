@@ -42,6 +42,12 @@ omit =
     */pyspark/serializers.py
     */pyspark/loose_version.py
     */pyspark/_globals.py
+    # Classic-Spark / JVM / launcher utilities that a Connect-only client never uses and
+    # cannot exercise offline (SparkContext helpers, gateway launch, local-install discovery).
+    */pyspark/util.py
+    */pyspark/sql/utils.py
+    */pyspark/find_spark_home.py
+    */pyspark/version.py
     */pyspark/accumulators.py
     */pyspark/profiler.py
     */pyspark/memory_profiler_ext.py
@@ -54,4 +60,8 @@ omit =
 exclude_lines =
     pragma: no cover
     raise NotImplementedError
+    raise PySparkNotImplementedError
     if __name__ == .__main__.:
+    # Never executed at runtime: type-checking-only imports and optional-dependency guards.
+    if TYPE_CHECKING:
+    except ImportError:

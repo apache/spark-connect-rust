@@ -2256,3 +2256,128 @@ def test_row_asdict_ordering():
     d = r.asDict()
     keys = list(d.keys())
     assert keys == ["a", "b", "c"]
+
+
+# --- Connect import-path shims + offline utility helpers ---------------------
+# The pyspark.sql.connect.* modules are thin re-exports that pandas-on-Spark and the
+# official connect tests import from; verify they import and re-export the Rust-backed
+# classes so the drop-in's connect import path is exercised offline.
+def test_connect_shim_imports():
+    import importlib
+
+    for mod in [
+        "pyspark.sql.connect.column",
+        "pyspark.sql.connect.dataframe",
+        "pyspark.sql.connect.session",
+        "pyspark.sql.connect.plan",
+        "pyspark.sql.connect.proto",
+        "pyspark.sql.connect.functions",
+        "pyspark.sql.connect.functions.builtin",
+        "pyspark.sql.connect.avro",
+        "pyspark.sql.connect.protobuf",
+        "pyspark.sql.connect.resource",
+        "pyspark.sql.connect.streaming",
+        "pyspark.sql.connect.client",
+        "pyspark.sql.connect.shell",
+    ]:
+        m = importlib.import_module(mod)
+        assert m is not None
+
+    # Column/DataFrame re-exported under the connect path are the Rust-backed classes.
+    from pyspark.sql.connect.column import Column as ConnectColumn
+    from pyspark.sql.connect.dataframe import DataFrame as ConnectDataFrame
+    from pyspark._pyspark import Column as RustColumn, DataFrame as RustDataFrame
+
+    assert ConnectColumn is RustColumn
+    assert ConnectDataFrame is RustDataFrame
+
+    # The internal-function dispatcher builds an UnresolvedFunction by name.
+    from pyspark.sql.connect.functions.builtin import _invoke_function_over_columns
+    from pyspark.sql import functions as F
+
+    assert repr(_invoke_function_over_columns("pandas_product", F.col("x"))) == "Column<'pandas_product(x)'>"
+
+
+def test_is_remote_flags():
+    # The Rust-backed drop-in is always Connect-only.
+    from pyspark.util import is_remote_only
+
+    assert is_remote_only() is True
+
+
+# --- UserDefinedType protocol + types.py helpers (offline) -------------------
+from pyspark.sql.types import (
+    UserDefinedType,
+    ArrayType as _AT,
+    DoubleType as _DT,
+    IntegerType as _IT,
+    StringType as _ST,
+    StructField as _SF,
+    StructType as _StT,
+    MapType as _MT,
+    _drop_metadata,
+    _create_row,
+)
+
+
+class _PointUDT(UserDefinedType):
+    @classmethod
+    def sqlType(cls):
+        return _AT(_DT(), False)
+
+    @classmethod
+    def module(cls):
+        return "tests.test_dropin_offline"
+
+    def serialize(self, obj):
+        return [float(obj[0]), float(obj[1])]
+
+    def deserialize(self, datum):
+        return (datum[0], datum[1])
+
+
+class _BareUDT(UserDefinedType):
+    @classmethod
+    def sqlType(cls):
+        return _IT()
+
+
+def test_udt_protocol_roundtrip():
+    udt = _PointUDT()
+    assert udt.simpleString() == "udt"
+    internal = udt.toInternal((1.0, 2.0))
+    assert udt.fromInternal(internal) == (1.0, 2.0)
+    # _cachedSqlType caches the sqlType instance.
+    assert udt._cachedSqlType() is udt._cachedSqlType()
+    # jsonValue (python UDT -> pyClass form) + json round-trips via fromJson.
+    jv = udt.jsonValue()
+    assert jv["type"] == "udt"
+    assert "pyClass" in jv
+    import json as _json
+
+    assert _json.loads(udt.json())["type"] == "udt"
+    # fromJson reconstructs the UDT from its serialized pyClass (covers the udt branch).
+    UserDefinedType.fromJson(jv)
+    # None passes through toInternal/fromInternal.
+    assert udt.toInternal(None) is None
+
+
+def test_udt_not_implemented_defaults():
+    import pytest
+
+    udt = _BareUDT()
+    with pytest.raises(Exception):
+        udt.serialize((1,))
+    with pytest.raises(Exception):
+        udt.deserialize(1)
+
+
+def test_drop_metadata_and_create_row():
+    st = _StT([_SF("a", _IT(), True, {"m": "v"}), _SF("b", _AT(_IT()), True)])
+    dm = _drop_metadata(st)
+    assert not dm.fields[0].metadata
+    _drop_metadata(_AT(_IT()))
+    _drop_metadata(_MT(_ST(), _IT()))
+    _drop_metadata(_IT())
+    r = _create_row(["a", "b"], [1, 2])
+    assert r["a"] == 1 and r["b"] == 2
