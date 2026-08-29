@@ -17,60 +17,74 @@
 # under the License.
 #
 
-# Release workflow for the Rust crates (crates.io) and the Python wheel (PyPI).
+# Release workflow for pyspark-client-rust (the Rust crates on crates.io + the
+# Python wheel on PyPI). Modeled on Apache Spark's release workflow: it is
+# DISPATCHED FROM A COMMITTER'S FORK (which holds the publish tokens), takes the
+# same inputs, and follows the same release-candidate-then-finalize flow.
 #
-# Following the Apache Spark model, releases are cut by a committer from THEIR
-# OWN FORK (which holds the publish tokens), but on a manual dispatch the code
-# being released is fetched fresh from the canonical apache/spark-connect-rust
-# repository, never from the fork's own (possibly stale) copy:
+# Inputs (identical to apache/spark's release workflow):
+#   branch          apache/spark-connect-rust branch the release source is fetched
+#                   from (always from apache, never the fork's own copy). Default
+#                   master. Unused by finalize, which uses the RC tag as its source.
+#   release-version Final version, e.g. 4.2.0. Leave empty (with rc-count) for a dry
+#                   run. Must equal the Cargo.toml/pyproject.toml version on `branch`
+#                   (asserted) -- the RC number never appears in the artifact version.
+#   rc-count        RC number, e.g. 1. Leave empty (with release-version) for a dry run.
+#   finalize        true => convert the named RC into the OFFICIAL release
+#                   (IRREVERSIBLE). Default false.
 #
-#   1. Enable GitHub Actions on your fork.
-#   2. Add the release secrets to the fork:
-#        - CARGO_REGISTRY_TOKEN  (crates.io API token)
-#        - PYPI_API_TOKEN        (PyPI API token)
-#   3. Land the version bump on the apache branch you will release from
-#      (e.g. master or branch-4.2): Cargo.toml and pyproject.toml must match, as
-#      must the internal path-dependency version pins.
-#   4. Dispatch this workflow from your fork, type the upstream `branch`, and
-#      leave dry_run=true to rehearse (default); re-dispatch with dry_run=false to
-#      publish. The `branch` you type is fetched from apache/spark-connect-rust.
+# The three modes are derived from the inputs (see the `resolve` job):
 #
-# A pushed `v<version>` tag also triggers a publish, from the tagged commit on the
-# fork it was pushed to (use this to release an exact commit rather than a branch
-# tip; the tag must match the version in that commit's Cargo.toml/pyproject.toml).
+#   * Dry run  (release-version AND rc-count empty): build every wheel + sdist and
+#     `cargo publish --dry-run`. Creates no tag, publishes nothing. This is the
+#     testable path and also runs on a schedule to keep the release path healthy.
 #
-# A dry run fully rehearses BOTH sides without publishing: it packages and
-# verify-builds every crate in dependency order (`cargo publish --dry-run`) and
-# builds every wheel and the sdist. A tag push (or an explicit dry_run=false
-# dispatch) additionally publishes to crates.io and PyPI. Both publish steps are
-# idempotent, so a re-run after a partial failure skips what already landed.
+#   * Cut an RC (release-version + rc-count, finalize=false): build the wheels +
+#     sdist -- versioned as the FINAL release-version, since the RC number lives
+#     only in the tag/release name, never in the artifact version -- then
+#     auto-create and push the tag `v<version>-rc<rc>` to this fork and attach the
+#     artifacts to a GitHub *pre-release* of that tag. crates.io/PyPI are NOT
+#     touched, so an RC stays fully deletable.
 #
-# Release candidates (pre-releases)
-# ---------------------------------
-# Push a semver pre-release tag, e.g. `v4.2.0-rc1`, with the versions set to
-# Cargo `4.2.0-rc1` / pyproject `4.2.0rc1` (Cargo uses the hyphen; PEP 440 does
-# not -- validate-version normalizes the two). A pre-release is shipped ONLY as a
-# GitHub pre-release with the wheels + sdist attached; the crates.io and PyPI
-# publish jobs are skipped. This keeps an RC droppable: delete the GitHub Release
-# and the tag to withdraw it (PyPI/crates are immutable and cannot be replaced).
-# Users try it with `pip install <asset-url>` from the release page. A final tag
-# (no `-rcN`) publishes to crates.io + PyPI AND creates a regular GitHub Release.
+#   * Finalize (finalize=true, naming an existing RC): check out the RC tag,
+#     `twine upload` the EXACT wheels+sdist from that RC's GitHub pre-release to
+#     PyPI, `cargo publish` the identical source to crates.io, push a permanent
+#     `v<version>` git tag marking the released commit, then delete every
+#     `v<version>-rc*` GitHub pre-release (and its tag) from this fork. GitHub
+#     Releases are only RC staging; the official release lives on PyPI + crates.io,
+#     marked in git by the immutable `v<version>` tag.
+#
+# Required fork secrets for a real run: CARGO_REGISTRY_TOKEN (crates.io) and
+# PYPI_API_TOKEN (PyPI). Without them, only dry runs work. The default GITHUB_TOKEN
+# creates/deletes the RC tags and GitHub Releases on the fork.
+#
+# To drop an RC without finalizing: delete its GitHub pre-release and the
+# `v<version>-rc<n>` tag from the fork (nothing was published to PyPI/crates.io).
 
 name: Release
 
 on:
+  schedule:
+    # Periodic dry run (runs only in the repo hosting the workflow; GitHub does not
+    # run scheduled workflows in forks), to catch release-path breakage early.
+    - cron: '0 7 */2 * *'
   workflow_dispatch:
     inputs:
       branch:
-        description: "apache/spark-connect-rust branch to release from (e.g. master, branch-4.2)"
-        type: string
+        description: 'Branch to release. Leave release-version/rc-count empty to launch a dryrun. Dispatch this workflow only in the forked repository.'
+        required: true
         default: master
-      dry_run:
-        description: "Build and validate artifacts but do not publish"
+      release-version:
+        description: 'Release version (e.g. 4.2.0). Leave it empty to launch a dryrun.'
+        required: false
+      rc-count:
+        description: 'RC number (e.g. 1). Leave it empty to launch a dryrun.'
+        required: false
+      finalize:
+        description: 'Whether to convert RC to the official release (IRREVERSIBLE)'
+        required: true
         type: boolean
-        default: true
-  push:
-    tags: ["v*"]
+        default: false
 
 permissions:
   contents: read
@@ -81,175 +95,165 @@ concurrency:
   group: release
   cancel-in-progress: false
 
+env:
+  # The release source is always fetched from this canonical apache repository.
+  UPSTREAM_REPO: apache/spark-connect-rust
+
 jobs:
-  # Decides which repository and ref every source-checkout job below uses, so the
-  # choice is made in exactly one place. A manual dispatch releases apache's code
-  # (the fork's own copy may be stale) at the branch the committer typed; a tag
-  # push releases the tagged commit on the fork the tag was pushed to.
-  resolve-source:
-    name: Resolve release source
+  # A real (RC/finalize) run must come from a committer's fork, which holds the publish
+  # tokens; the canonical apache repo only does dry runs. `resolve`'s `if:` already skips
+  # real runs there, but a bare skip is a green, all-skipped no-op that explains nothing.
+  # This job runs ONLY in that mistaken case and fails loudly with instructions.
+  reject-real-release-from-apache:
+    name: Reject real releases dispatched from the apache repo
     runs-on: ubuntu-latest
-    outputs:
-      repository: ${{ steps.src.outputs.repository }}
-      ref: ${{ steps.src.outputs.ref }}
+    if: >-
+      github.repository == 'apache/spark-connect-rust' &&
+      (inputs.release-version != '' || inputs.rc-count != '')
     steps:
-      - id: src
+      - run: |
+          echo "::error::Real releases (RC or finalize) must be dispatched from a committer's FORK of spark-connect-rust (which holds CARGO_REGISTRY_TOKEN / PYPI_API_TOKEN) — not from apache/spark-connect-rust. This canonical repository only runs dry runs: leave release-version and rc-count empty. See the workflow header for the fork-based release process."
+          exit 1
+
+  resolve:
+    name: Resolve release mode
+    runs-on: ubuntu-latest
+    # In the canonical apache repo, only dry runs are allowed (release-version and
+    # rc-count empty). A fork may perform real runs. This mirrors apache/spark.
+    # NOTE: the `env` context is not available in a job-level `if:`, so the canonical
+    # repo is spelled out literally here; it must match `env.UPSTREAM_REPO` below.
+    if: >-
+      github.repository != 'apache/spark-connect-rust' ||
+      (inputs.release-version == '' && inputs.rc-count == '')
+    outputs:
+      mode: ${{ steps.r.outputs.mode }}
+      version: ${{ steps.r.outputs.version }}
+      rc_tag: ${{ steps.r.outputs.rc_tag }}
+      branch: ${{ steps.r.outputs.branch }}
+      # The branch resolved to a single immutable commit SHA, checked out everywhere
+      # downstream so the wheels, sdist, and RC tag can never come from different commits.
+      sha: ${{ steps.r.outputs.sha }}
+    steps:
+      - name: Determine mode and validate inputs
+        id: r
         env:
-          EVENT: ${{ github.event_name }}
-          BRANCH: ${{ inputs.branch }}
-          FORK: ${{ github.repository }}
-          REF: ${{ github.ref }}
+          IN_BRANCH: ${{ inputs.branch }}
+          IN_VERSION: ${{ inputs.release-version }}
+          IN_RC: ${{ inputs.rc-count }}
+          IN_FINALIZE: ${{ inputs.finalize }}
         run: |
           set -euo pipefail
-          if [[ "${EVENT}" == "workflow_dispatch" ]]; then
-            echo "repository=apache/spark-connect-rust" >> "$GITHUB_OUTPUT"
-            echo "ref=${BRANCH}" >> "$GITHUB_OUTPUT"
-            echo "Releasing apache/spark-connect-rust @ ${BRANCH}"
-          else
-            echo "repository=${FORK}" >> "$GITHUB_OUTPUT"
-            echo "ref=${REF}" >> "$GITHUB_OUTPUT"
-            echo "Releasing ${FORK} @ ${REF}"
+          BRANCH="${IN_BRANCH:-master}"
+          RV="${IN_VERSION:-}"
+          RC="${IN_RC:-}"
+          FIN="${IN_FINALIZE:-false}"
+
+          # release-version and rc-count must be provided together (or neither).
+          if { [ -n "$RV" ] && [ -z "$RC" ]; } || { [ -z "$RV" ] && [ -n "$RC" ]; }; then
+            echo "::error::Provide BOTH 'release-version' and 'rc-count', or leave BOTH empty for a dry run."
+            exit 1
           fi
 
-  validate-version:
-    name: Validate version
-    needs: resolve-source
-    runs-on: ubuntu-latest
-    outputs:
-      # Consumed by the publish jobs: a pre-release (X.Y.Z-rcN) is shipped ONLY as a
-      # GitHub pre-release, never to crates.io/PyPI.
-      is_prerelease: ${{ steps.v.outputs.is_prerelease }}
-      version: ${{ steps.v.outputs.version }}
-    steps:
-      - uses: actions/checkout@v4
+          if [ "$FIN" = "true" ]; then
+            if [ -z "$RV" ] || [ -z "$RC" ]; then
+              echo "::error::finalize=true requires 'release-version' and 'rc-count' naming the RC to promote."
+              exit 1
+            fi
+            MODE=finalize
+          elif [ -n "$RV" ]; then
+            MODE=rc
+          else
+            MODE=dryrun
+          fi
+
+          RC_TAG=""
+          [ -n "$RV" ] && RC_TAG="v${RV}-rc${RC}"
+
+          # Pin the branch to one immutable commit SHA so every downstream checkout
+          # (wheels, sdist, RC tag) uses the SAME source even if the branch moves
+          # mid-run. finalize does not need it (it checks out the RC tag instead).
+          SHA=""
+          if [ "$MODE" = "rc" ] || [ "$MODE" = "dryrun" ]; then
+            SHA=$(git ls-remote "https://github.com/${UPSTREAM_REPO}.git" "refs/heads/${BRANCH}" | awk 'NR==1{print $1}')
+            if [ -z "$SHA" ]; then
+              echo "::error::Branch '${BRANCH}' not found on ${UPSTREAM_REPO}."
+              exit 1
+            fi
+          fi
+
+          {
+            echo "mode=$MODE"
+            echo "version=$RV"
+            echo "rc_tag=$RC_TAG"
+            echo "branch=$BRANCH"
+            echo "sha=$SHA"
+          } >> "$GITHUB_OUTPUT"
+          echo "Resolved: mode=$MODE version='${RV}' rc='${RC}' tag='${RC_TAG}' branch='${BRANCH}' sha='${SHA}'"
+
+      - name: Check out release source (for version validation)
+        if: steps.r.outputs.mode == 'dryrun' || steps.r.outputs.mode == 'rc'
+        uses: actions/checkout@v4
         with:
-          repository: ${{ needs.resolve-source.outputs.repository }}
-          ref: ${{ needs.resolve-source.outputs.ref }}
-      - name: Cargo and pyproject versions agree (and match the tag, if any)
-        id: v
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ steps.r.outputs.sha }}
+
+      - name: Validate versions
+        # Runs for dry run AND rc. The Cargo<->pyproject agreement and the path-dep pin
+        # checks always run (so the scheduled dry run actually exercises them); the
+        # release-version equality check is additional and rc-only.
+        if: steps.r.outputs.mode == 'dryrun' || steps.r.outputs.mode == 'rc'
+        env:
+          MODE: ${{ steps.r.outputs.mode }}
+          V: ${{ steps.r.outputs.version }}
         run: |
           set -euo pipefail
           CARGO_VER=$(grep -m1 '^version' Cargo.toml | awk -F'"' '{print $2}')
           PYPROJECT_VER=$(grep -m1 '^version' pyproject.toml | awk -F'"' '{print $2}')
-          echo "Cargo.toml=${CARGO_VER}  pyproject.toml=${PYPROJECT_VER}"
-          # Rust/Cargo semver spells a pre-release with a hyphen (X.Y.Z-rcN); Python
-          # PEP 440 spells the same release X.Y.ZrcN (no hyphen). They are the same
-          # release, so normalize the Cargo form to PEP 440 before the equality check.
-          NORM_CARGO="${CARGO_VER/-rc/rc}"
-          if [[ "${NORM_CARGO}" != "${PYPROJECT_VER}" ]]; then
-            echo "::error::Cargo.toml (${CARGO_VER} ~ ${NORM_CARGO}) and pyproject.toml (${PYPROJECT_VER}) versions differ"
+          echo "mode=${MODE} Cargo=${CARGO_VER} pyproject=${PYPROJECT_VER} release-version=${V:-<none>}"
+
+          # 1. Cargo.toml and pyproject.toml must declare the same version.
+          if [ "$CARGO_VER" != "$PYPROJECT_VER" ]; then
+            echo "::error::Cargo.toml (${CARGO_VER}) and pyproject.toml (${PYPROJECT_VER}) versions disagree."
             exit 1
           fi
-          # Internal path-dependency version pins (e.g. spark-connect-core -> proto)
-          # must track the workspace version (Cargo semver form, verbatim), or
-          # `cargo publish` embeds a stale requirement into the published crate.
+
+          # 2. Internal path-dep pins (e.g. spark-connect-core -> proto) must track the
+          #    workspace version, or `cargo publish` embeds a stale hard dep into the
+          #    published crate and breaks downstream consumers.
           BAD=$(grep -rEn 'path = "\.\./spark-connect[^"]*"' crates/*/Cargo.toml \
                 | grep -E 'version = "' \
                 | grep -v "version = \"${CARGO_VER}\"" || true)
-          if [[ -n "${BAD}" ]]; then
-            echo "::error::internal path-dep version pin(s) do not match ${CARGO_VER}:"
-            echo "${BAD}"
+          if [ -n "$BAD" ]; then
+            echo "::error::internal path-dep version pin(s) do not match the workspace version ${CARGO_VER}:"
+            echo "$BAD"
             exit 1
           fi
-          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            TAG="${GITHUB_REF##*/}"
-            # The tag uses the Cargo/semver spelling: v4.2.0 or v4.2.0-rc1.
-            if [[ "${TAG}" != "v${CARGO_VER}" ]]; then
-              echo "::error::Pushed tag ${TAG} does not match version v${CARGO_VER}"
-              exit 1
-            fi
-          fi
-          # Any semver pre-release suffix (the hyphen, e.g. -rc1) marks a pre-release.
-          if [[ "${CARGO_VER}" == *-* ]]; then IS_PRE=true; else IS_PRE=false; fi
-          echo "Pre-release: ${IS_PRE}"
-          echo "is_prerelease=${IS_PRE}" >> "$GITHUB_OUTPUT"
-          echo "version=${CARGO_VER}" >> "$GITHUB_OUTPUT"
 
-  publish-crates:
-    name: Publish Rust crates to crates.io
-    needs: [resolve-source, validate-version]
-    # Pre-releases (RCs) are GitHub-Release-only and never go to crates.io.
-    if: needs.validate-version.outputs.is_prerelease != 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: ${{ needs.resolve-source.outputs.repository }}
-          ref: ${{ needs.resolve-source.outputs.ref }}
-      - name: Install Rust toolchain
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - name: cargo publish (dependency-ordered; dry-run unless releasing)
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-          # true only for an explicit dry-run dispatch; tag pushes and an explicit
-          # dry_run=false dispatch both evaluate to "false" and publish for real.
-          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
-        run: |
-          set -euo pipefail
-          # Leaf-first; cargo (>=1.90) orders and verify-builds these together,
-          # resolving siblings from the local workspace.
-          CRATES=(apache-spark-connect-proto apache-spark-connect-core apache-spark-connect)
-          VER=$(grep -m1 '^version' Cargo.toml | awk -F'"' '{print $2}')
-
-          if [[ "${DRY_RUN}" == "true" ]]; then
-            # Rehearse the real publish. Because siblings resolve from the local
-            # workspace, this works even before anything exists on crates.io.
-            pkgs=(); for c in "${CRATES[@]}"; do pkgs+=(-p "$c"); done
-            echo "::group::cargo publish --dry-run ${pkgs[*]}"
-            cargo publish --dry-run "${pkgs[@]}"
-            echo "::endgroup::"
-            echo "Dry run only — nothing published."
-            exit 0
+          # 3. For an RC, the declared version must equal the requested release-version.
+          if [ "$MODE" = "rc" ] && [ "$CARGO_VER" != "$V" ]; then
+            echo "::error::Branch '${{ steps.r.outputs.branch }}' declares ${CARGO_VER}, but release-version=${V}. Bump the branch to ${V} (Cargo.toml, pyproject.toml, and the internal path-dep pins) before cutting the RC."
+            exit 1
           fi
 
-          # Real publish. Skip any crate whose current version is already on
-          # crates.io so a re-run after a partial failure is idempotent.
-          pkgs=()
-          for c in "${CRATES[@]}"; do
-            if curl -sf -H "User-Agent: spark-connect-rust-release (dev@spark.apache.org)" \
-                 "https://crates.io/api/v1/crates/${c}/${VER}" >/dev/null; then
-              echo "${c} ${VER} is already on crates.io — skipping"
-            else
-              pkgs+=(-p "$c")
-            fi
-          done
-          if [[ ${#pkgs[@]} -eq 0 ]]; then
-            echo "All crates already published at ${VER}; nothing to do."
-            exit 0
-          fi
-          echo "::group::cargo publish ${pkgs[*]}"
-          # cargo publishes in dependency order and waits for the index between
-          # crates, so no manual sleep is needed.
-          cargo publish "${pkgs[@]}"
-          echo "::endgroup::"
-
+  # ---- Build (dry run + RC only; finalize reuses the RC's already-built artifacts) ----
   build-wheels:
     name: Build wheel (${{ matrix.target }})
-    needs: [resolve-source, validate-version]
+    needs: resolve
+    if: needs.resolve.outputs.mode == 'dryrun' || needs.resolve.outputs.mode == 'rc'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            zig: true
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            zig: true
-          - os: macos-latest
-            target: universal2-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,  zig: true }
+          - { os: ubuntu-latest,  target: aarch64-unknown-linux-gnu, zig: true }
+          - { os: macos-latest,   target: universal2-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
     steps:
       - uses: actions/checkout@v4
         with:
-          repository: ${{ needs.resolve-source.outputs.repository }}
-          ref: ${{ needs.resolve-source.outputs.ref }}
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ needs.resolve.outputs.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -276,10 +280,8 @@ jobs:
             Windows) choco install protoc -y ;;
           esac
       - name: Build abi3 wheel with maturin
-        # abi3-py39 produces a single wheel per (platform, arch) valid for
-        # CPython 3.9+. `--zig` cross-links the Linux wheels against an old glibc
-        # (manylinux2014), so they install on essentially any modern Linux rather
-        # than only on the runner's glibc.
+        # abi3-py39 produces one wheel per (platform, arch) valid for CPython 3.9+.
+        # `--zig` cross-links the Linux wheels against an old glibc (manylinux2014).
         shell: bash
         run: |
           python -m pip install --upgrade maturin
@@ -296,19 +298,18 @@ jobs:
 
   build-sdist:
     name: Build source distribution
-    needs: [resolve-source, validate-version]
+    needs: resolve
+    if: needs.resolve.outputs.mode == 'dryrun' || needs.resolve.outputs.mode == 'rc'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          repository: ${{ needs.resolve-source.outputs.repository }}
-          ref: ${{ needs.resolve-source.outputs.ref }}
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ needs.resolve.outputs.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - name: Build sdist with maturin
-        # sdist packages source only (no compile), so protoc is not needed here.
-        # It is the install fallback for platforms without a prebuilt wheel.
         run: |
           python -m pip install --upgrade maturin
           maturin sdist --out dist
@@ -317,76 +318,246 @@ jobs:
           name: wheels-sdist
           path: dist/*.tar.gz
 
-  publish-wheels:
-    name: Publish wheel + sdist to PyPI
-    needs: [validate-version, build-wheels, build-sdist]
-    # Skipped for pre-releases (RCs): those ship only as a GitHub pre-release, since
-    # PyPI is immutable and a "try it / drop it" RC must stay deletable.
-    if: >-
-      needs.validate-version.outputs.is_prerelease != 'true' &&
-      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false))
+  # ---- Dry run: rehearse the crates.io packaging without publishing ----
+  dryrun-crates:
+    name: Dry-run crates.io packaging
+    needs: resolve
+    if: needs.resolve.outputs.mode == 'dryrun'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
         with:
-          python-version: "3.11"
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ needs.resolve.outputs.sha }}
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: cargo publish --dry-run (dependency-ordered)
+        run: |
+          set -euo pipefail
+          cargo publish --dry-run \
+            -p apache-spark-connect-proto \
+            -p apache-spark-connect-core \
+            -p apache-spark-connect
+
+  # ---- Cut an RC: tag + GitHub pre-release with the artifacts (no crates.io/PyPI) ----
+  publish-rc:
+    name: Cut RC GitHub pre-release
+    needs: [resolve, build-wheels, build-sdist]
+    if: needs.resolve.outputs.mode == 'rc'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # push the RC tag + create the GitHub Release on the fork
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ needs.resolve.outputs.sha }}
+          fetch-depth: 0  # full history so the tag push carries all reachable objects
       - uses: actions/download-artifact@v4
         with:
-          # Matches every wheels-<target> artifact plus wheels-sdist.
           pattern: wheels-*
           path: dist
           merge-multiple: true
-      - name: Publish to PyPI
-        # Fork-based release: authenticate with the committer's PyPI token via twine
-        # (avoids third-party publish actions; ASF Actions policy allowlists actions/*).
+      - name: Create and push the RC tag to this fork
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.rc_tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor }}@users.noreply.github.com"
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "Local tag ${TAG} already exists; reusing."
+          else
+            git tag -a "${TAG}" -m "Release candidate ${TAG} of pyspark-client-rust ${VERSION}"
+          fi
+          # Push the RC tag (and the objects it reaches) to THIS fork, so the GitHub
+          # pre-release below can hang off it. Force so re-cutting the same RC is idempotent.
+          git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "refs/tags/${TAG}"
+      - name: Create the GitHub pre-release with the artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.rc_tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          ls -l dist
+          NOTES="Release candidate ${TAG} of pyspark-client-rust ${VERSION}."$'\n\n'"> Not published to PyPI or crates.io. Install directly from a wheel/sdist asset below, e.g. \`pip install <asset-url>\`. This pre-release is deleted when the RC is finalized (or dropped)."
+          # Idempotent: a re-run updates the existing release and clobbers its assets.
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" dist/* --repo "${GITHUB_REPOSITORY}" --clobber
+          else
+            gh release create "${TAG}" dist/* --repo "${GITHUB_REPOSITORY}" \
+              --prerelease --title "${TAG}" --notes "${NOTES}"
+          fi
+
+  # ---- Finalize: promote the named RC into the official release (IRREVERSIBLE) ----
+  finalize:
+    name: Finalize release to PyPI + crates.io (IRREVERSIBLE)
+    needs: resolve
+    if: needs.resolve.outputs.mode == 'finalize'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # delete the RC pre-releases + tags on the fork
+    steps:
+      - name: Abort window
+        run: |
+          echo "=============================================================================="
+          echo " CONVERTING RC ${{ needs.resolve.outputs.rc_tag }} INTO THE OFFICIAL RELEASE"
+          echo " ${{ needs.resolve.outputs.version }} -> PyPI + crates.io. THIS IS IRREVERSIBLE."
+          echo " Cancel this workflow now if you did not intend to finalize."
+          echo " Continuing in 60 seconds..."
+          echo "=============================================================================="
+          sleep 60
+      - name: Verify the RC pre-release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.rc_tag }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "::error::RC GitHub pre-release ${TAG} not found on ${GITHUB_REPOSITORY}. Cut the RC first."
+            exit 1
+          fi
+      - name: Check out the RC tag (the exact released source)
+        uses: actions/checkout@v4
+        with:
+          # The RC tag lives on the fork where the RC was cut (this repository).
+          repository: ${{ github.repository }}
+          ref: ${{ needs.resolve.outputs.rc_tag }}
+          fetch-depth: 0
+      - name: Validate the RC source versions
+        run: |
+          set -euo pipefail
+          V="${{ needs.resolve.outputs.version }}"
+          CARGO_VER=$(grep -m1 '^version' Cargo.toml | awk -F'"' '{print $2}')
+          PYPROJECT_VER=$(grep -m1 '^version' pyproject.toml | awk -F'"' '{print $2}')
+          echo "RC tag source: Cargo=${CARGO_VER} pyproject=${PYPROJECT_VER}; release-version=${V}"
+          # Cargo and pyproject must both equal the release-version (agreement + expected value).
+          if [ "$CARGO_VER" != "$V" ] || [ "$PYPROJECT_VER" != "$V" ]; then
+            echo "::error::RC tag ${{ needs.resolve.outputs.rc_tag }} declares Cargo=${CARGO_VER} / pyproject=${PYPROJECT_VER}, not ${V}."
+            exit 1
+          fi
+          # Path-dep pins must match, or `cargo publish` ships a stale hard dep (same check as resolve).
+          BAD=$(grep -rEn 'path = "\.\./spark-connect[^"]*"' crates/*/Cargo.toml \
+                | grep -E 'version = "' \
+                | grep -v "version = \"${CARGO_VER}\"" || true)
+          if [ -n "$BAD" ]; then
+            echo "::error::internal path-dep version pin(s) in the RC source do not match ${CARGO_VER}:"
+            echo "$BAD"
+            exit 1
+          fi
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Download the RC artifacts (the exact tested wheels + sdist)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.rc_tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" --dir dist --pattern '*'
+          ls -l dist
+      - name: Publish wheels + sdist to PyPI
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
         run: |
+          set -euo pipefail
           python -m pip install --upgrade twine
           # --skip-existing makes a re-run after a partial upload safe.
           twine upload --skip-existing dist/*
-
-  publish-github-release:
-    name: Publish GitHub Release
-    needs: [validate-version, build-wheels, build-sdist]
-    # Runs on any tag push. For a pre-release tag (v4.2.0-rc1) this is the ONLY
-    # distribution channel (crates.io/PyPI are skipped above): the wheels + sdist
-    # are attached to a GitHub pre-release users can download and try, and the
-    # whole release + tag can be deleted later. For a final tag it publishes a
-    # regular GitHub Release alongside the crates.io/PyPI uploads.
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write  # gh release create needs write; the workflow default is read.
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          # Matches every wheels-<target> artifact plus wheels-sdist.
-          pattern: wheels-*
-          path: dist
-          merge-multiple: true
-      - name: Create or update the GitHub Release
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Publish crates to crates.io (from the identical RC source)
         env:
-          GH_TOKEN: ${{ github.token }}
-          IS_PRERELEASE: ${{ needs.validate-version.outputs.is_prerelease }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF##*/}"
-          pre_flag=()
-          notes_pre=""
-          if [[ "${IS_PRERELEASE}" == "true" ]]; then
-            pre_flag=(--prerelease)
-            notes_pre=$'\n\n> **Release candidate** — not published to PyPI or crates.io. '
-            notes_pre+=$'Install directly from a wheel/sdist asset below, e.g. `pip install <asset-url>`.'
-          fi
-          NOTES="Automated release for ${TAG}. Attached: wheels (Linux x86_64/aarch64, macOS universal2, Windows x86_64) and the source distribution.${notes_pre}"
-          # Idempotent: a re-run (e.g. after a transient failure) updates the existing
-          # release and clobbers its assets rather than failing.
-          if gh release view "${TAG}" >/dev/null 2>&1; then
-            gh release upload "${TAG}" dist/* --clobber
+          CRATES=(apache-spark-connect-proto apache-spark-connect-core apache-spark-connect)
+          VER="${{ needs.resolve.outputs.version }}"
+          # Skip any crate already on crates.io at this version so a re-run is idempotent.
+          pkgs=()
+          for c in "${CRATES[@]}"; do
+            if curl -sf -H "User-Agent: spark-connect-rust-release (dev@spark.apache.org)" \
+                 "https://crates.io/api/v1/crates/${c}/${VER}" >/dev/null; then
+              echo "${c} ${VER} is already on crates.io — skipping"
+            else
+              pkgs+=(-p "$c")
+            fi
+          done
+          if [ ${#pkgs[@]} -eq 0 ]; then
+            echo "All crates already published at ${VER}; nothing to do."
           else
-            gh release create "${TAG}" dist/* "${pre_flag[@]}" \
-              --title "${TAG}" --notes "${NOTES}"
+            # cargo publishes in dependency order and waits for the index between crates.
+            cargo publish "${pkgs[@]}"
           fi
+      - name: Tag the released commit with the permanent v<version> tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ needs.resolve.outputs.version }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor }}@users.noreply.github.com"
+          URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          # HEAD is the RC tag's commit (the exact released source), checked out above.
+          LOCAL_SHA=$(git rev-parse HEAD)
+          if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            git tag -a "${TAG}" -m "pyspark-client-rust ${VERSION}"
+          fi
+          # A release tag is immutable. Look the remote tag up EXPLICITLY: a network/auth
+          # failure then aborts under set -e (instead of being mistaken for "already
+          # exists"). Only an exact same-commit tag is a no-op; a tag already pointing at
+          # a DIFFERENT commit is a hard error (we must never silently move a release tag,
+          # nor report success while it marks the wrong source).
+          REMOTE_LS=$(git ls-remote --tags "${URL}" "refs/tags/${TAG}")
+          if [ -z "${REMOTE_LS}" ]; then
+            git push "${URL}" "refs/tags/${TAG}"   # a push failure is fatal under set -e
+            echo "Pushed release tag ${TAG} -> ${LOCAL_SHA}."
+          else
+            # Annotated tags list a peeled '^{}' line with the commit; prefer it, else the ref line.
+            REMOTE_SHA=$(printf '%s\n' "${REMOTE_LS}" | awk '/\^\{\}$/{c=$1} END{if(c!="")print c}')
+            [ -z "${REMOTE_SHA}" ] && REMOTE_SHA=$(printf '%s\n' "${REMOTE_LS}" | awk 'NR==1{print $1}')
+            if [ "${REMOTE_SHA}" = "${LOCAL_SHA}" ]; then
+              echo "Release tag ${TAG} already points at ${LOCAL_SHA}; nothing to do."
+            else
+              echo "::error::Release tag ${TAG} already exists on ${GITHUB_REPOSITORY} at ${REMOTE_SHA}, but the release commit is ${LOCAL_SHA}. Refusing to move an immutable release tag."
+              exit 1
+            fi
+          fi
+
+      - name: Remove all RC GitHub pre-releases + tags for this version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Every v<version>-rcN pre-release is RC staging; the official release now lives
+          # on PyPI + crates.io, so delete them all (and their tags) from this fork.
+          # Escape dots: grep -E treats '.' as any char, so an unescaped 4.2.0 would also
+          # match tags like v4x2x0-rcN.
+          ESC_V="${VERSION//./\\.}"
+          # Fetch the tag list in its own command so a `gh` failure (rate limit/network)
+          # aborts loudly under `set -e`, instead of being swallowed by the `|| true` that
+          # is only meant to absorb grep's "no match" exit code.
+          ALL_TAGS=$(gh release list --repo "${GITHUB_REPOSITORY}" --limit 200 --json tagName --jq '.[].tagName')
+          mapfile -t RCS < <(printf '%s\n' "${ALL_TAGS}" | grep -E "^v${ESC_V}-rc[0-9]+$" || true)
+          if [ "${#RCS[@]}" -eq 0 ]; then
+            echo "No v${VERSION}-rc* GitHub releases to remove."
+          fi
+          for t in "${RCS[@]}"; do
+            echo "Deleting RC release + tag ${t}"
+            gh release delete "${t}" --repo "${GITHUB_REPOSITORY}" --cleanup-tag --yes
+          done
