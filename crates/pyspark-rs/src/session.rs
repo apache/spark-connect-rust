@@ -244,8 +244,8 @@ impl PySparkSession {
     }
 
     /// Execute a SQL query and return a DataFrame.
-    fn sql(&self, query: &str) -> PyResult<PyDataFrame> {
-        let df = self.session.sql(query).to_pyerr()?;
+    fn sql(&self, sqlQuery: &str) -> PyResult<PyDataFrame> {
+        let df = self.session.sql(sqlQuery).to_pyerr()?;
         Ok(PyDataFrame::new(df))
     }
 
@@ -592,8 +592,8 @@ impl PySparkSession {
 
     /// Remove a progress handler by id. Mirrors `removeProgressHandler`.
     #[pyo3(name = "removeProgressHandler")]
-    fn remove_progress_handler(&self, id: u64) {
-        self.session.remove_progress_handler(id);
+    fn remove_progress_handler(&self, handler: u64) {
+        self.session.remove_progress_handler(handler);
     }
 
     /// Remove all progress handlers. Mirrors `clearProgressHandlers`.
@@ -628,12 +628,13 @@ impl PySparkSession {
             .to_pyerr()
     }
 
+    #[getter]
     fn version(&self, py: Python<'_>) -> PyResult<String> {
         py.detach(|| self.session.version()).to_pyerr()
     }
 
-    fn table(&self, table_name: &str) -> PyResult<PyDataFrame> {
-        Ok(PyDataFrame::new(self.session.table(table_name).to_pyerr()?))
+    fn table(&self, tableName: &str) -> PyResult<PyDataFrame> {
+        Ok(PyDataFrame::new(self.session.table(tableName).to_pyerr()?))
     }
 
     #[pyo3(name = "emptyDataFrame")]
@@ -654,8 +655,8 @@ impl PySparkSession {
     }
 
     #[pyo3(name = "interruptOperation")]
-    fn interrupt_operation(&self, py: Python<'_>, operation_id: &str) -> PyResult<Vec<String>> {
-        py.detach(|| self.session.interrupt_operation(operation_id))
+    fn interrupt_operation(&self, py: Python<'_>, op_id: &str) -> PyResult<Vec<String>> {
+        py.detach(|| self.session.interrupt_operation(op_id))
             .to_pyerr()
     }
 
@@ -686,9 +687,20 @@ impl PySparkSession {
         py.detach(|| self.session.add_artifacts(&refs)).to_pyerr()
     }
 
-    #[pyo3(name = "addArtifact")]
-    fn add_artifact(&self, py: Python<'_>, path: &str) -> PyResult<()> {
-        py.detach(|| self.session.add_artifact(path)).to_pyerr()
+    #[pyo3(name = "addArtifact", signature = (*path, pyfile=false, archive=false, file=false))]
+    fn add_artifact(
+        &self,
+        py: Python<'_>,
+        path: Vec<String>,
+        pyfile: bool,
+        archive: bool,
+        file: bool,
+    ) -> PyResult<()> {
+        // pyfile/archive/file are accepted for PySpark signature parity; artifact
+        // classification is handled by the Rust transport / server.
+        let _ = (pyfile, archive, file);
+        let refs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
+        py.detach(|| self.session.add_artifacts(&refs)).to_pyerr()
     }
 
     #[pyo3(name = "newSession")]
