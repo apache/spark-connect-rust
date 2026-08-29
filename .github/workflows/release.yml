@@ -20,21 +20,41 @@
 # Release workflow for the Rust crates (crates.io) and the Python wheel (PyPI).
 #
 # Following the Apache Spark model, releases are cut by a committer from THEIR
-# OWN FORK, not from the canonical apache/ repository:
+# OWN FORK (which holds the publish tokens), but on a manual dispatch the code
+# being released is fetched fresh from the canonical apache/spark-connect-rust
+# repository, never from the fork's own (possibly stale) copy:
 #
 #   1. Enable GitHub Actions on your fork.
 #   2. Add the release secrets to the fork:
 #        - CARGO_REGISTRY_TOKEN  (crates.io API token)
 #        - PYPI_API_TOKEN        (PyPI API token)
-#   3. Bump the version in Cargo.toml and pyproject.toml (they must match).
-#   4. Dispatch this workflow with dry_run=true to rehearse (default), then push
-#      a matching `v<version>` tag (or dispatch with dry_run=false) to publish.
+#   3. Land the version bump on the apache branch you will release from
+#      (e.g. master or branch-4.2): Cargo.toml and pyproject.toml must match, as
+#      must the internal path-dependency version pins.
+#   4. Dispatch this workflow from your fork, type the upstream `branch`, and
+#      leave dry_run=true to rehearse (default); re-dispatch with dry_run=false to
+#      publish. The `branch` you type is fetched from apache/spark-connect-rust.
+#
+# A pushed `v<version>` tag also triggers a publish, from the tagged commit on the
+# fork it was pushed to (use this to release an exact commit rather than a branch
+# tip; the tag must match the version in that commit's Cargo.toml/pyproject.toml).
 #
 # A dry run fully rehearses BOTH sides without publishing: it packages and
 # verify-builds every crate in dependency order (`cargo publish --dry-run`) and
 # builds every wheel and the sdist. A tag push (or an explicit dry_run=false
 # dispatch) additionally publishes to crates.io and PyPI. Both publish steps are
 # idempotent, so a re-run after a partial failure skips what already landed.
+#
+# Release candidates (pre-releases)
+# ---------------------------------
+# Push a semver pre-release tag, e.g. `v4.2.0-rc1`, with the versions set to
+# Cargo `4.2.0-rc1` / pyproject `4.2.0rc1` (Cargo uses the hyphen; PEP 440 does
+# not -- validate-version normalizes the two). A pre-release is shipped ONLY as a
+# GitHub pre-release with the wheels + sdist attached; the crates.io and PyPI
+# publish jobs are skipped. This keeps an RC droppable: delete the GitHub Release
+# and the tag to withdraw it (PyPI/crates are immutable and cannot be replaced).
+# Users try it with `pip install <asset-url>` from the release page. A final tag
+# (no `-rcN`) publishes to crates.io + PyPI AND creates a regular GitHub Release.
 
 name: Release
 
@@ -61,21 +81,31 @@ jobs:
   validate-version:
     name: Validate version
     runs-on: ubuntu-latest
+    outputs:
+      # Consumed by the publish jobs: a pre-release (X.Y.Z-rcN) is shipped ONLY as a
+      # GitHub pre-release, never to crates.io/PyPI.
+      is_prerelease: ${{ steps.v.outputs.is_prerelease }}
+      version: ${{ steps.v.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - name: Cargo and pyproject versions agree (and match the tag, if any)
+        id: v
         run: |
           set -euo pipefail
           CARGO_VER=$(grep -m1 '^version' Cargo.toml | awk -F'"' '{print $2}')
           PYPROJECT_VER=$(grep -m1 '^version' pyproject.toml | awk -F'"' '{print $2}')
           echo "Cargo.toml=${CARGO_VER}  pyproject.toml=${PYPROJECT_VER}"
-          if [[ "${CARGO_VER}" != "${PYPROJECT_VER}" ]]; then
-            echo "::error::Cargo.toml (${CARGO_VER}) and pyproject.toml (${PYPROJECT_VER}) versions differ"
+          # Rust/Cargo semver spells a pre-release with a hyphen (X.Y.Z-rcN); Python
+          # PEP 440 spells the same release X.Y.ZrcN (no hyphen). They are the same
+          # release, so normalize the Cargo form to PEP 440 before the equality check.
+          NORM_CARGO="${CARGO_VER/-rc/rc}"
+          if [[ "${NORM_CARGO}" != "${PYPROJECT_VER}" ]]; then
+            echo "::error::Cargo.toml (${CARGO_VER} ~ ${NORM_CARGO}) and pyproject.toml (${PYPROJECT_VER}) versions differ"
             exit 1
           fi
           # Internal path-dependency version pins (e.g. spark-connect-core -> proto)
-          # must track the workspace version, or `cargo publish` embeds a stale
-          # requirement into the published crate.
+          # must track the workspace version (Cargo semver form, verbatim), or
+          # `cargo publish` embeds a stale requirement into the published crate.
           BAD=$(grep -rEn 'path = "\.\./spark-connect[^"]*"' crates/*/Cargo.toml \
                 | grep -E 'version = "' \
                 | grep -v "version = \"${CARGO_VER}\"" || true)
@@ -86,15 +116,23 @@ jobs:
           fi
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             TAG="${GITHUB_REF##*/}"
+            # The tag uses the Cargo/semver spelling: v4.2.0 or v4.2.0-rc1.
             if [[ "${TAG}" != "v${CARGO_VER}" ]]; then
               echo "::error::Pushed tag ${TAG} does not match version v${CARGO_VER}"
               exit 1
             fi
           fi
+          # Any semver pre-release suffix (the hyphen, e.g. -rc1) marks a pre-release.
+          if [[ "${CARGO_VER}" == *-* ]]; then IS_PRE=true; else IS_PRE=false; fi
+          echo "Pre-release: ${IS_PRE}"
+          echo "is_prerelease=${IS_PRE}" >> "$GITHUB_OUTPUT"
+          echo "version=${CARGO_VER}" >> "$GITHUB_OUTPUT"
 
   publish-crates:
     name: Publish Rust crates to crates.io
     needs: validate-version
+    # Pre-releases (RCs) are GitHub-Release-only and never go to crates.io.
+    if: needs.validate-version.outputs.is_prerelease != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -235,8 +273,12 @@ jobs:
 
   publish-wheels:
     name: Publish wheel + sdist to PyPI
-    needs: [build-wheels, build-sdist]
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
+    needs: [validate-version, build-wheels, build-sdist]
+    # Skipped for pre-releases (RCs): those ship only as a GitHub pre-release, since
+    # PyPI is immutable and a "try it / drop it" RC must stay deletable.
+    if: >-
+      needs.validate-version.outputs.is_prerelease != 'true' &&
+      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/setup-python@v5
@@ -258,3 +300,47 @@ jobs:
           python -m pip install --upgrade twine
           # --skip-existing makes a re-run after a partial upload safe.
           twine upload --skip-existing dist/*
+
+  publish-github-release:
+    name: Publish GitHub Release
+    needs: [validate-version, build-wheels, build-sdist]
+    # Runs on any tag push. For a pre-release tag (v4.2.0-rc1) this is the ONLY
+    # distribution channel (crates.io/PyPI are skipped above): the wheels + sdist
+    # are attached to a GitHub pre-release users can download and try, and the
+    # whole release + tag can be deleted later. For a final tag it publishes a
+    # regular GitHub Release alongside the crates.io/PyPI uploads.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # gh release create needs write; the workflow default is read.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          # Matches every wheels-<target> artifact plus wheels-sdist.
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      - name: Create or update the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IS_PRERELEASE: ${{ needs.validate-version.outputs.is_prerelease }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF##*/}"
+          pre_flag=()
+          notes_pre=""
+          if [[ "${IS_PRERELEASE}" == "true" ]]; then
+            pre_flag=(--prerelease)
+            notes_pre=$'\n\n> **Release candidate** — not published to PyPI or crates.io. '
+            notes_pre+=$'Install directly from a wheel/sdist asset below, e.g. `pip install <asset-url>`.'
+          fi
+          NOTES="Automated release for ${TAG}. Attached: wheels (Linux x86_64/aarch64, macOS universal2, Windows x86_64) and the source distribution.${notes_pre}"
+          # Idempotent: a re-run (e.g. after a transient failure) updates the existing
+          # release and clobbers its assets rather than failing.
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" dist/* --clobber
+          else
+            gh release create "${TAG}" dist/* "${pre_flag[@]}" \
+              --title "${TAG}" --notes "${NOTES}"
+          fi
