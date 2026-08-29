@@ -33,8 +33,12 @@ pub enum LogicalPlan {
         step: i64,
         num_partitions: Option<i32>,
     },
-    /// A SQL query: `sql("SELECT ...")`.
-    Sql { query: String },
+    /// A SQL query: `sql("SELECT ...")`, with optional positional/named parameter bindings.
+    Sql {
+        query: String,
+        pos_args: Vec<Expression>,
+        named_args: HashMap<String, Expression>,
+    },
     /// A projection (select): `df.select(cols...)`.
     Project {
         input: Box<LogicalPlan>,
@@ -418,9 +422,19 @@ impl LogicalPlan {
                 relation.rel_type = Some(proto::relation::RelType::Range(range));
             }
 
-            LogicalPlan::Sql { query } => {
+            LogicalPlan::Sql {
+                query,
+                pos_args,
+                named_args,
+            } => {
                 let mut sql = proto::Sql::default();
                 sql.query = query.clone();
+                for e in pos_args {
+                    sql.pos_arguments.push(e.to_proto());
+                }
+                for (k, v) in named_args {
+                    sql.named_arguments.insert(k.clone(), v.to_proto());
+                }
                 relation.rel_type = Some(proto::relation::RelType::Sql(sql));
             }
 
@@ -1313,6 +1327,8 @@ pub fn range_with_partitions(start: i64, end: i64, step: i64, num_partitions: i3
 pub fn sql(query: impl Into<String>) -> LogicalPlan {
     LogicalPlan::Sql {
         query: query.into(),
+        pos_args: Vec::new(),
+        named_args: HashMap::new(),
     }
 }
 

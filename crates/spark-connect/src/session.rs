@@ -255,8 +255,21 @@ impl SparkSession {
     ///
     /// Mirrors `pyspark.sql.SparkSession.sql(sqlQuery)`.
     pub fn sql(&self, query: &str) -> Result<DataFrame> {
+        self.sql_with_args(query, Vec::new(), std::collections::HashMap::new())
+    }
+
+    /// SQL with parameters: positional (`pos_args`) and/or named (`named_args`) expression
+    /// bindings, mirroring `SparkSession.sql(query, args=...)`.
+    pub fn sql_with_args(
+        &self,
+        query: &str,
+        pos_args: Vec<crate::expression::Expression>,
+        named_args: std::collections::HashMap<String, crate::expression::Expression>,
+    ) -> Result<DataFrame> {
         let plan = LogicalPlan::Sql {
             query: query.to_string(),
+            pos_args,
+            named_args,
         };
         Ok(DataFrame::new(self.clone(), plan))
     }
@@ -265,13 +278,15 @@ impl SparkSession {
     ///
     /// Mirrors `pyspark.sql.SparkSession.createDataFrame(rows, schema)`.
     pub fn create_dataframe(&self, rows: Vec<Row>, schema: DataType) -> Result<DataFrame> {
-        // Build Arrow RecordBatch from rows and schema
-        let arrow_data = rows_to_arrow_ipc(&rows, &schema)?;
-
-        let plan = LogicalPlan::LocalRelation {
-            schema,
-            data: Some(arrow_data),
+        // Empty data -> send the schema only (no Arrow `data`); the server builds an empty
+        // relation from the schema. A zero-row Arrow payload would be empty bytes, which the
+        // server cannot parse ("Unexpected end of input. Missing schema.").
+        let data = if rows.is_empty() {
+            None
+        } else {
+            Some(rows_to_arrow_ipc(&rows, &schema)?)
         };
+        let plan = LogicalPlan::LocalRelation { schema, data };
         Ok(DataFrame::new(self.clone(), plan))
     }
 
@@ -833,15 +848,51 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
         }};
     }
 
+    // Numeric encoders coerce across integer/float widths, so a value the schema-unaware
+    // Python->Value conversion produced as a wider/narrower numeric (e.g. a nested-struct
+    // int arriving as Long) still matches its declared field type.
+    macro_rules! int_prim {
+        ($arr:ty, $t:ty) => {{
+            let vals: Result<Vec<_>> = values
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Byte(x) => Ok(Some(*x as $t)),
+                    Value::Short(x) => Ok(Some(*x as $t)),
+                    Value::Integer(x) => Ok(Some(*x as $t)),
+                    Value::Long(x) => Ok(Some(*x as $t)),
+                    _ => Err(SparkError::connect_msg("Type mismatch in row data")),
+                })
+                .collect();
+            Ok(Arc::new(<$arr>::from(vals?)) as Arc<dyn Array>)
+        }};
+    }
+    macro_rules! float_prim {
+        ($arr:ty, $t:ty) => {{
+            let vals: Result<Vec<_>> = values
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Float(x) => Ok(Some(*x as $t)),
+                    Value::Double(x) => Ok(Some(*x as $t)),
+                    Value::Integer(x) => Ok(Some(*x as $t)),
+                    Value::Long(x) => Ok(Some(*x as $t)),
+                    _ => Err(SparkError::connect_msg("Type mismatch in row data")),
+                })
+                .collect();
+            Ok(Arc::new(<$arr>::from(vals?)) as Arc<dyn Array>)
+        }};
+    }
+
     match dt {
         DataType::Null => Ok(Arc::new(NullArray::new(values.len()))),
         DataType::Boolean => prim!(BooleanArray, Value::Bool),
-        DataType::Byte => prim!(Int8Array, Value::Byte),
-        DataType::Short => prim!(Int16Array, Value::Short),
-        DataType::Integer => prim!(Int32Array, Value::Integer),
-        DataType::Long => prim!(Int64Array, Value::Long),
-        DataType::Float => prim!(Float32Array, Value::Float),
-        DataType::Double => prim!(Float64Array, Value::Double),
+        DataType::Byte => int_prim!(Int8Array, i8),
+        DataType::Short => int_prim!(Int16Array, i16),
+        DataType::Integer => int_prim!(Int32Array, i32),
+        DataType::Long => int_prim!(Int64Array, i64),
+        DataType::Float => float_prim!(Float32Array, f32),
+        DataType::Double => float_prim!(Float64Array, f64),
         DataType::String { .. } | DataType::Char { .. } | DataType::Varchar { .. } => {
             let vals: Result<Vec<Option<&str>>> = values
                 .iter()
@@ -957,6 +1008,14 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
                                 .or_else(|| sf.get(i).map(|(_, val)| val.clone()))
                                 .unwrap_or(Value::Null);
                             cols[i].push(val);
+                        }
+                    }
+                    // A Python dict supplied for a struct field (e.g. array<struct> data)
+                    // arrives as a Map; match its entries to the struct fields by name.
+                    Value::Map(m) => {
+                        valid.append(true);
+                        for (i, f) in fields.iter().enumerate() {
+                            cols[i].push(m.get(&f.name).cloned().unwrap_or(Value::Null));
                         }
                     }
                     _ => return Err(SparkError::connect_msg("Type mismatch: expected struct")),

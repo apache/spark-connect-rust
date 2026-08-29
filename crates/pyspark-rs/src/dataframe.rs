@@ -1346,6 +1346,7 @@ impl PyDataFrame {
     fn na(&self) -> PyDataFrameNaFunctions {
         PyDataFrameNaFunctions {
             inner: self.dataframe.na(),
+            df: self.dataframe.clone(),
         }
     }
 
@@ -1464,6 +1465,7 @@ impl PyDataFrame {
 #[pyclass(name = "DataFrameNaFunctions")]
 pub struct PyDataFrameNaFunctions {
     inner: spark_connect::group::NaFunctions,
+    df: spark_connect::dataframe::DataFrame,
 }
 
 #[pymethods]
@@ -1481,12 +1483,28 @@ impl PyDataFrameNaFunctions {
         PyDataFrame::new(self.inner.drop(how.as_deref(), thresh, subset_refs))
     }
 
+    /// Fill nulls; `value` may be a scalar (float / int / str / bool, optionally over
+    /// `subset`) or a {column: value} mapping. Alias of `DataFrame.fillna`. PySpark fills
+    /// only columns whose type matches the value's type (server-side).
     #[pyo3(signature = (value, subset=None))]
-    fn fill(&self, value: i64, subset: Option<Vec<String>>) -> PyDataFrame {
-        let subset_refs: Option<Vec<&str>> = subset
+    fn fill(
+        &self,
+        value: &Bound<'_, PyAny>,
+        subset: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        if let Ok(d) = value.cast::<PyDict>() {
+            let mut pairs = Vec::with_capacity(d.len());
+            for (k, v) in d.iter() {
+                pairs.push((k.extract::<String>()?, crate::session::py_to_value(&v)?));
+            }
+            return Ok(PyDataFrame::new(self.df.fillna_map(pairs)));
+        }
+        let val = crate::session::py_to_value(value)?;
+        let owned = to_subset(subset)?;
+        let refs: Option<Vec<&str>> = owned
             .as_ref()
-            .map(|v| v.iter().map(String::as_str).collect());
-        PyDataFrame::new(self.inner.fill(value, subset_refs))
+            .map(|v| v.iter().map(|s| s.as_str()).collect());
+        Ok(PyDataFrame::new(self.df.fillna_value(val, refs)))
     }
 
     /// Replace values, mirroring `DataFrameNaFunctions.replace`:

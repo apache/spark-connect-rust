@@ -71,11 +71,16 @@ pub fn value_to_py<'py>(py: Python<'py>, v: &Value) -> PyResult<Bound<'py, PyAny
             dict.into_any()
         }
         Value::Struct(fields) => {
-            let dict = PyDict::new(py);
-            for (k, val) in fields {
-                dict.set_item(k, value_to_py(py, val)?)?;
+            // A struct value materializes as a Row (named fields), matching PySpark,
+            // rather than a plain dict.
+            let names: Vec<String> = fields.iter().map(|(k, _)| k.clone()).collect();
+            let mut vals: Vec<Value> = Vec::with_capacity(fields.len());
+            for (_, val) in fields {
+                vals.push(val.clone());
             }
-            dict.into_any()
+            Py::new(py, PyRow::new(spark_connect::row::Row::new(names, vals)))?
+                .into_bound(py)
+                .into_any()
         }
         Value::Variant { value, metadata } => {
             // A VARIANT materializes as a VariantVal (toJson/toPython decode lazily),

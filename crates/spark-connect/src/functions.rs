@@ -1045,8 +1045,9 @@ pub fn kurtosis(col1: Column) -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.lag`.
-pub fn lag(col1: Column) -> Column {
-    func("lag", vec![col1.expression().clone(), lit_int(1)])
+pub fn lag<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
+    func("lag", cols.iter().map(|c| c.expression().clone()).collect())
 }
 
 /// Mirrors `pyspark.sql.functions.last`.
@@ -1070,8 +1071,12 @@ pub fn lcase(col1: Column) -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.lead`.
-pub fn lead(col1: Column) -> Column {
-    func("lead", vec![col1.expression().clone(), lit_int(1)])
+pub fn lead<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
+    func(
+        "lead",
+        cols.iter().map(|c| c.expression().clone()).collect(),
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.length`.
@@ -2208,10 +2213,11 @@ pub fn instr(col1: Column, col2: Column) -> Column {
 }
 
 /// Mirrors `pyspark.sql.functions.json_tuple`.
-pub fn json_tuple(col1: Column, col2: Column) -> Column {
+pub fn json_tuple<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
+    let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
     func(
         "json_tuple",
-        vec![col1.expression().clone(), col2.expression().clone()],
+        cols.iter().map(|c| c.expression().clone()).collect(),
     )
 }
 
@@ -2785,12 +2791,11 @@ pub fn uniform(col1: Column, col2: Column) -> Column {
     )
 }
 
-/// Mirrors `pyspark.sql.functions.when`.
+/// Mirrors `pyspark.sql.functions.when`: starts a CASE WHEN (so chaining
+/// `.when(...).otherwise(...)` appends branches) rather than an opaque
+/// `when(...)` UnresolvedFunction (which would drop earlier branches on chaining).
 pub fn when(col1: Column, col2: Column) -> Column {
-    func(
-        "when",
-        vec![col1.expression().clone(), col2.expression().clone()],
-    )
+    crate::column::when(col1, col2)
 }
 
 /// Mirrors `pyspark.sql.functions.xpath`.
@@ -4989,7 +4994,7 @@ mod tests {
             ilike(c1.clone(), c2.clone()),
             instr(c1.clone(), c2.clone()),
             jaro_winkler_similarity(c1.clone(), c2.clone()),
-            json_tuple(c1.clone(), c2.clone()),
+            json_tuple([c1.clone(), c2.clone()]),
             kll_sketch_get_quantile_bigint(c1.clone(), c2.clone()),
             kll_sketch_get_quantile_double(c1.clone(), c2.clone()),
             kll_sketch_get_quantile_float(c1.clone(), c2.clone()),

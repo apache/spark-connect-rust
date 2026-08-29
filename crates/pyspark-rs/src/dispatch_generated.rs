@@ -431,10 +431,7 @@ pub fn call_builtin(name: &str, args: Vec<spark_connect::column::Column>) -> PyR
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
                 Ok(spark_funcs::kurtosis(args[0].clone()))
             },
-            "lag" => {
-                if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
-                Ok(spark_funcs::lag(args[0].clone()))
-            },
+            "lag" => Ok(spark_funcs::lag(args.clone())),
             "last" => {
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
                 Ok(spark_funcs::last(args[0].clone()))
@@ -451,10 +448,7 @@ pub fn call_builtin(name: &str, args: Vec<spark_connect::column::Column>) -> PyR
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
                 Ok(spark_funcs::lcase(args[0].clone()))
             },
-            "lead" => {
-                if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
-                Ok(spark_funcs::lead(args[0].clone()))
-            },
+            "lead" => Ok(spark_funcs::lead(args.clone())),
             "length" => {
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
                 Ok(spark_funcs::length(args[0].clone()))
@@ -1371,10 +1365,7 @@ pub fn call_builtin(name: &str, args: Vec<spark_connect::column::Column>) -> PyR
                 if args.len() < 2 { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!("Missing required arguments for instr: expected at least 2, got {}", args.len()))); }
                 Ok(spark_funcs::instr(args[0].clone(), args[1].clone()))
             },
-            "json_tuple" => {
-                if args.len() < 2 { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!("Missing required arguments for json_tuple: expected at least 2, got {}", args.len()))); }
-                Ok(spark_funcs::json_tuple(args[0].clone(), args[1].clone()))
-            },
+            "json_tuple" => Ok(spark_funcs::json_tuple(args.clone())),
             "least" => {
                 if args.len() < 2 { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!("Missing required arguments for least: expected at least 2, got {}", args.len()))); }
                 Ok(spark_funcs::least(args[0].clone(), args[1].clone()))

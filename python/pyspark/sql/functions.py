@@ -420,6 +420,27 @@ for name in dir(_gen_module):
     if not name.startswith('_'):
         globals()[name] = getattr(_gen_module, name)
 
+
+# Overrides for functions whose Python signature carries extra literal args that the
+# generated single-arg wrapper cannot express (offset/default, variadic field names).
+# Defined AFTER the generated import so they take precedence. Field/offset/default are
+# literals; only the first arg is a column (PySpark ColumnOrName).
+def lag(col, offset=1, default=None):
+    """lag(col, offset=1, default=None): value offset rows before the current row."""
+    return _wrap(_call_function("lag", _to_col(col), _pyfunc_lit(offset), _pyfunc_lit(default)))
+
+
+def lead(col, offset=1, default=None):
+    """lead(col, offset=1, default=None): value offset rows after the current row."""
+    return _wrap(_call_function("lead", _to_col(col), _pyfunc_lit(offset), _pyfunc_lit(default)))
+
+
+def json_tuple(col, *fields):
+    """json_tuple(col, *fields): extract the given JSON fields (literal names) as columns."""
+    if not fields:
+        raise ValueError("json_tuple() takes at least one field name")
+    return _wrap(_call_function("json_tuple", _to_col(col), *[_pyfunc_lit(f) for f in fields]))
+
 # ---------------------------------------------------------------------------
 # Higher-order functions.
 #

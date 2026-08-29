@@ -337,6 +337,10 @@ def test_datatype_object_model():
     assert T.IntegerType().toInternal(5) == 5
     # fromDDL parses a DDL string client-side.
     assert T.DataType.fromDDL("a int, b string").simpleString() == "struct<a:int,b:string>"
+    # A single-field DDL schema (no comma) must also parse to a one-field struct, not be
+    # misread as a bare type (SPARK-59113 follow-up).
+    assert T.DataType.fromDDL("i int").simpleString() == "struct<i:int>"
+    assert T.StructType.fromDDL("id long").simpleString() == "struct<id:bigint>"
 
 
 def test_structfield_collation_methods():

@@ -866,14 +866,16 @@ fn to_proto_frame_boundary(
         FrameBoundary::CurrentRow => Some(
             proto::expression::window::window_frame::frame_boundary::Boundary::CurrentRow(true),
         ),
+        // A ROWS-frame offset must be an IntegerType literal (Spark rejects bigint with
+        // SPECIFIED_WINDOW_FRAME_UNACCEPTED_TYPE), and preceding is a negative offset.
         FrameBoundary::Preceding(n) => Some(
             proto::expression::window::window_frame::frame_boundary::Boundary::Value(Box::new(
-                Expression::Literal(LiteralExpression::long(*n)).to_proto(),
+                Expression::Literal(LiteralExpression::int(-(*n as i32))).to_proto(),
             )),
         ),
         FrameBoundary::Following(n) => Some(
             proto::expression::window::window_frame::frame_boundary::Boundary::Value(Box::new(
-                Expression::Literal(LiteralExpression::long(*n)).to_proto(),
+                Expression::Literal(LiteralExpression::int(*n as i32)).to_proto(),
             )),
         ),
     };

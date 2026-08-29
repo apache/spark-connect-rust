@@ -230,7 +230,7 @@ fn build(name: &str) -> Option<Expression> {
             .expression()
             .clone(),
 
-        "window_lag" => functions::lag(col("x"))
+        "window_lag" => functions::lag([col("x")])
             .over(
                 WindowSpec::new()
                     .partition_by(vec![col("a").expression().clone()])
@@ -241,7 +241,7 @@ fn build(name: &str) -> Option<Expression> {
             .expression()
             .clone(),
 
-        "window_lead" => functions::lead(col("x"))
+        "window_lead" => functions::lead([col("x")])
             .over(
                 WindowSpec::new()
                     .partition_by(vec![col("a").expression().clone()])
