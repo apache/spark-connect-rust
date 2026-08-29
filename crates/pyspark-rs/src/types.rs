@@ -1083,6 +1083,17 @@ pub struct PyArrayType {
 
 #[pymethods]
 impl PyArrayType {
+    /// `ArrayType.elementType` attribute (the element DataType).
+    #[getter]
+    fn elementType(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        data_type_to_py(py, &self.element_type)
+    }
+    /// `ArrayType.containsNull` attribute.
+    #[getter]
+    fn containsNull(&self) -> bool {
+        self.contains_null
+    }
+
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
@@ -1200,6 +1211,22 @@ pub struct PyMapType {
 
 #[pymethods]
 impl PyMapType {
+    /// `MapType.keyType` attribute.
+    #[getter]
+    fn keyType(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        data_type_to_py(py, &self.key_type)
+    }
+    /// `MapType.valueType` attribute.
+    #[getter]
+    fn valueType(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        data_type_to_py(py, &self.value_type)
+    }
+    /// `MapType.valueContainsNull` attribute.
+    #[getter]
+    fn valueContainsNull(&self) -> bool {
+        self.value_contains_null
+    }
+
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
