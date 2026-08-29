@@ -12,7 +12,7 @@ description = "Spark Connect client transport: gRPC channel, retries, reattach, 
 name = "spark_connect_core"
 
 [dependencies]
-spark-connect-proto = { package = "apache-spark-connect-proto", path = "../spark-connect-proto", version = "4.2.0" }
+spark-connect-proto = { package = "apache-spark-connect-proto", path = "../spark-connect-proto", version = "4.3.0" }
 tonic = { workspace = true, features = ["tls-ring", "tls-native-roots"] }
 prost.workspace = true
 tokio.workspace = true

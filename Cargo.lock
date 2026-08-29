@@ -54,7 +54,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "apache-spark-connect"
-version = "4.2.0"
+version = "4.3.0"
 dependencies = [
  "apache-spark-connect-core",
  "apache-spark-connect-proto",
@@ -73,11 +73,11 @@ dependencies = [
 
 [[package]]
 name = "apache-spark-connect-build"
-version = "4.2.0"
+version = "4.3.0"
 
 [[package]]
 name = "apache-spark-connect-core"
-version = "4.2.0"
+version = "4.3.0"
 dependencies = [
  "apache-spark-connect-proto",
  "bytes",
@@ -98,7 +98,7 @@ dependencies = [
 
 [[package]]
 name = "apache-spark-connect-macros"
-version = "4.2.0"
+version = "4.3.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -107,7 +107,7 @@ dependencies = [
 
 [[package]]
 name = "apache-spark-connect-proto"
-version = "4.2.0"
+version = "4.3.0"
 dependencies = [
  "prost",
  "prost-types",
@@ -3386,7 +3386,7 @@ dependencies = [
 
 [[package]]
 name = "pyspark-rs"
-version = "4.2.0"
+version = "4.3.0"
 dependencies = [
  "apache-spark-connect",
  "apache-spark-connect-core",
