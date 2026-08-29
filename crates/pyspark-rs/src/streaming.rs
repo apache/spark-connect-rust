@@ -2,8 +2,6 @@
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use spark_connect::dataframe::DataFrame;
-use spark_connect::session::SparkSession;
 use spark_connect::streaming::{
     DataStreamReader, DataStreamWriter, ListenerEventStream, StreamingQuery,
     StreamingQueryException, StreamingQueryListener, StreamingQueryListenerEvent,
@@ -13,9 +11,8 @@ use spark_connect::udf::PythonUDFPayload;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::dataframe::{py_cloudpickle, py_version, PyDataFrame};
+use crate::dataframe::PyDataFrame;
 use crate::errors::ResultExt;
-use spark_connect_core::runtime::block_on;
 
 /// Adapts a Python `StreamingQueryListener` to the native Rust listener trait: on each
 /// event it acquires the GIL and calls the Python-side dispatch helper (which builds the
@@ -183,7 +180,7 @@ impl PyDataStreamReader {
 }
 
 /// Python wrapper for Trigger.
-#[pyclass(name = "Trigger")]
+#[pyclass(name = "Trigger", from_py_object)]
 #[derive(Clone)]
 pub struct PyTrigger {
     inner: Trigger,
@@ -405,7 +402,7 @@ impl PyDataStreamWriter {
 }
 
 /// Python wrapper for StreamingQueryStatus.
-#[pyclass(name = "StreamingQueryStatus")]
+#[pyclass(name = "StreamingQueryStatus", from_py_object)]
 #[derive(Clone)]
 pub struct PyStreamingQueryStatus {
     inner: StreamingQueryStatus,
@@ -441,7 +438,7 @@ impl PyStreamingQueryStatus {
 }
 
 /// Python wrapper for StreamingQueryException.
-#[pyclass(name = "StreamingQueryException")]
+#[pyclass(name = "StreamingQueryException", from_py_object)]
 #[derive(Clone)]
 pub struct PyStreamingQueryException {
     inner: StreamingQueryException,
@@ -627,7 +624,7 @@ impl PyListenerEventStream {
 
 #[pymethods]
 impl PyListenerEventStream {
-    fn __iter__(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
+    fn __iter__(slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
         slf
     }
 

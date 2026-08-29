@@ -4,11 +4,10 @@ use pyo3::prelude::*;
 use spark_connect::expression::{Expression, NullOrdering, SortOrder};
 use spark_connect::window::{FrameBound, WindowSpec};
 
-use crate::column::PyColumn;
 use crate::functions::to_column;
 
 /// Python wrapper for a window frame bound.
-#[pyclass(name = "FrameBound")]
+#[pyclass(name = "FrameBound", from_py_object)]
 #[derive(Clone)]
 pub struct PyFrameBound {
     pub(crate) bound: FrameBound,
@@ -56,7 +55,7 @@ impl PyFrameBound {
 }
 
 /// Python wrapper for a WindowSpec.
-#[pyclass(name = "WindowSpec")]
+#[pyclass(name = "WindowSpec", from_py_object)]
 #[derive(Clone)]
 pub struct PyWindowSpec {
     pub(crate) spec: WindowSpec,

@@ -11,6 +11,13 @@ publish = false
 name = "_pyspark"
 crate-type = ["cdylib"]
 
+# Warnings are errors for this crate in every build (CI builds it via several workflows
+# that don't all set RUSTFLAGS=-D warnings). `non_snake_case` stays allowed: these classes
+# expose PySpark's camelCase public API verbatim (see the crate-level note in lib.rs).
+[lints.rust]
+warnings = "deny"
+non_snake_case = "allow"
+
 [dependencies]
 spark-connect = { package = "apache-spark-connect", path = "../spark-connect" }
 spark-connect-core = { package = "apache-spark-connect-core", path = "../spark-connect-core" }

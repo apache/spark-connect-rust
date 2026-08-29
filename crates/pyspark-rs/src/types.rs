@@ -90,7 +90,7 @@ fn from_json_dict(
     default_type: &str,
 ) -> PyResult<DataType> {
     use pyo3::types::PyDict;
-    let value: Bound<'_, PyAny> = if let Ok(d) = json.downcast::<PyDict>() {
+    let value: Bound<'_, PyAny> = if let Ok(d) = json.cast::<PyDict>() {
         let d = d.copy()?;
         if !d.contains("type")? {
             d.set_item("type", default_type)?;
@@ -1389,9 +1389,9 @@ impl PyStructField {
         metadata: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
         let out = pyo3::types::PyDict::new(py);
-        if let Ok(dict) = metadata.downcast::<pyo3::types::PyDict>() {
+        if let Ok(dict) = metadata.cast::<pyo3::types::PyDict>() {
             if let Some(coll) = dict.get_item("__COLLATIONS")? {
-                if let Ok(cdict) = coll.downcast::<pyo3::types::PyDict>() {
+                if let Ok(cdict) = coll.cast::<pyo3::types::PyDict>() {
                     for (k, v) in cdict.iter() {
                         let val: String = v.extract()?;
                         // Value is "provider.name"; the map holds just the name.
@@ -1676,7 +1676,7 @@ impl PyStructType {
                 "No StructField named {name}"
             )));
         }
-        if let Ok(slice) = key.downcast::<pyo3::types::PySlice>() {
+        if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
             let idx = slice.indices(self.fields.len() as isize)?;
             let mut out = Vec::new();
             let (mut i, stop, step) = (idx.start, idx.stop, idx.step);

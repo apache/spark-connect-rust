@@ -77,7 +77,7 @@ pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
                     Ok(exc_instance) => {
                         // Convert the exception instance to a PyErr.
                         // We use unsafe code to construct the PyErr from the exception value.
-                        unsafe { PyErr::from_value(exc_instance) }
+                        PyErr::from_value(exc_instance)
                     }
                     Err(_) => {
                         // If instantiation fails, fall back to PyRuntimeError

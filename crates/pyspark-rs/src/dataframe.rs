@@ -641,7 +641,7 @@ impl PyDataFrame {
         value: &Bound<'_, PyAny>,
         subset: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        if let Ok(d) = value.downcast::<PyDict>() {
+        if let Ok(d) = value.cast::<PyDict>() {
             let mut pairs = Vec::with_capacity(d.len());
             for (k, v) in d.iter() {
                 pairs.push((k.extract::<String>()?, crate::session::py_to_value(&v)?));
@@ -810,7 +810,7 @@ impl PyDataFrame {
         subset: Option<Vec<String>>,
     ) -> PyResult<PyDataFrame> {
         let mut pairs: Vec<(String, String)> = Vec::new();
-        if let Ok(d) = to_replace.downcast::<PyDict>() {
+        if let Ok(d) = to_replace.cast::<PyDict>() {
             for (k, v) in d.iter() {
                 pairs.push((k.str()?.to_string(), v.str()?.to_string()));
             }
@@ -1517,19 +1517,19 @@ fn build_replacement_pairs(
 ) -> PyResult<Vec<(String, String)>> {
     use pyo3::exceptions::PyValueError;
     use pyo3::types::{PyDict, PyList};
-    if let Ok(d) = to_replace.downcast::<PyDict>() {
+    if let Ok(d) = to_replace.cast::<PyDict>() {
         let mut pairs = Vec::with_capacity(d.len());
         for (k, v) in d.iter() {
             pairs.push((k.str()?.to_string(), v.str()?.to_string()));
         }
         return Ok(pairs);
     }
-    if let Ok(olds) = to_replace.downcast::<PyList>() {
+    if let Ok(olds) = to_replace.cast::<PyList>() {
         let val = value.ok_or_else(|| {
             PyValueError::new_err("replace with a list to_replace requires a value list")
         })?;
         let news = val
-            .downcast::<PyList>()
+            .cast::<PyList>()
             .map_err(|_| PyValueError::new_err("value must be a list when to_replace is a list"))?;
         if olds.len() != news.len() {
             return Err(PyValueError::new_err(

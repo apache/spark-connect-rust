@@ -18,7 +18,7 @@ use crate::streaming::{PyDataStreamReader, PyStreamingQueryManager};
 ///
 /// Mirrors `pyspark.sql.SparkSession.Builder`: chainable and reached via the
 /// `SparkSession.builder` class attribute.
-#[pyclass(name = "SparkSessionBuilder")]
+#[pyclass(name = "SparkSessionBuilder", from_py_object)]
 #[derive(Clone)]
 pub struct PySparkSessionBuilder {
     remote_url: Option<String>,
@@ -132,7 +132,7 @@ impl PySparkSessionBuilder {
         let mut url = format!("sc://{host}:{port}");
         // Preserve connection params (token/use_ssl/user_id/...) if present as `_params`.
         if let Ok(params) = channelBuilder.getattr("_params") {
-            if let Ok(dict) = params.downcast::<pyo3::types::PyDict>() {
+            if let Ok(dict) = params.cast::<pyo3::types::PyDict>() {
                 if !dict.is_empty() {
                     let mut parts: Vec<String> = Vec::new();
                     for (k, v) in dict.iter() {
@@ -823,22 +823,22 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
 
     // Check for bytes/bytearray SPECIFICALLY (not `extract::<Vec<u8>>()`, which also
     // matches a Python list of small ints like [1,2,3] and would mis-tag arrays as binary).
-    if let Ok(b) = obj.downcast::<pyo3::types::PyBytes>() {
+    if let Ok(b) = obj.cast::<pyo3::types::PyBytes>() {
         return Ok(Value::Binary(b.as_bytes().to_vec()));
     }
-    if let Ok(ba) = obj.downcast::<pyo3::types::PyByteArray>() {
+    if let Ok(ba) = obj.cast::<pyo3::types::PyByteArray>() {
         return Ok(Value::Binary(ba.to_vec()));
     }
 
     // list / tuple -> array (recursively converted)
-    if let Ok(list) = obj.downcast::<pyo3::types::PyList>() {
+    if let Ok(list) = obj.cast::<pyo3::types::PyList>() {
         let mut items = Vec::with_capacity(list.len());
         for item in list.iter() {
             items.push(py_to_value(&item)?);
         }
         return Ok(Value::List(items));
     }
-    if let Ok(tuple) = obj.downcast::<pyo3::types::PyTuple>() {
+    if let Ok(tuple) = obj.cast::<pyo3::types::PyTuple>() {
         let mut items = Vec::with_capacity(tuple.len());
         for item in tuple.iter() {
             items.push(py_to_value(&item)?);
@@ -863,7 +863,7 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     }
 
     // dict -> map (keys coerced to their string form, values recursively converted)
-    if let Ok(dict) = obj.downcast::<pyo3::types::PyDict>() {
+    if let Ok(dict) = obj.cast::<pyo3::types::PyDict>() {
         let mut map = std::collections::BTreeMap::new();
         for (k, v) in dict.iter() {
             map.insert(k.str()?.to_string(), py_to_value(&v)?);

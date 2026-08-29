@@ -4,7 +4,7 @@ use pyo3::prelude::*;
 
 /// Flags controlling storage of a persisted DataFrame (disk/memory/off-heap,
 /// (de)serialized, replication). Mirrors `pyspark.storagelevel.StorageLevel`.
-#[pyclass(name = "StorageLevel", get_all)]
+#[pyclass(name = "StorageLevel", get_all, from_py_object)]
 #[derive(Clone)]
 pub struct PyStorageLevel {
     pub useDisk: bool,

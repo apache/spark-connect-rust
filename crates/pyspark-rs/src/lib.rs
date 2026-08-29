@@ -1,4 +1,10 @@
 //! PyO3 bindings for the Rust Spark Connect client.
+//!
+//! `non_snake_case` is allowed crate-wide: these classes deliberately expose PySpark's
+//! camelCase public API (e.g. `toPandas`, `withColumn`, `containsNull`), so the Rust method,
+//! field, and argument names must match the Python names verbatim — renaming them would change
+//! the user-facing API.
+#![allow(non_snake_case)]
 
 use pyo3::prelude::*;
 use pyo3::types::PyBool;
@@ -12,7 +18,7 @@ pub(crate) fn coerce_option_value(v: &Bound<'_, PyAny>) -> PyResult<Option<Strin
     if v.is_none() {
         return Ok(None);
     }
-    if let Ok(b) = v.downcast::<PyBool>() {
+    if let Ok(b) = v.cast::<PyBool>() {
         return Ok(Some(if b.is_true() { "true" } else { "false" }.to_string()));
     }
     Ok(Some(v.str()?.to_string()))
@@ -60,7 +66,6 @@ use dataframe::{
 use datasource::PyDataSourceRegistration;
 use group::{PyCoGroupedData, PyGroupedData};
 use profiler::PyProfilerCollector;
-use pyo3::prelude::*;
 use readwriter::PyDataFrameReader;
 use resource::{
     PyExecutorResourceRequests, PyResourceProfile, PyResourceProfileBuilder, PyTaskResourceRequests,
