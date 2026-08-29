@@ -328,7 +328,11 @@ def resolve_jira_issue(merge_branches, comment, default_jira_id=""):
             found = False
             found_versions = []
             for v in versions:
-                if v.name.startswith(b.replace("branch-", "")):
+                # spark-connect-rust versions are named connect-rust-X.Y.Z, so branch-X.Y
+                # maps to the connect-rust-X.Y.* line. Comparing the bare "X.Y" from the
+                # branch name against v.name never matches, because v.name carries the
+                # "connect-rust-" prefix; match the full prefixed name instead.
+                if v.name.startswith("connect-rust-%s." % b.replace("branch-", "")):
                     found_versions.append(v.name)
                     found = True
             if found:
