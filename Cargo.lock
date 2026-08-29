@@ -3394,6 +3394,7 @@ dependencies = [
  "arrow",
  "prost",
  "pyo3",
+ "serde_json",
  "tokio",
  "tonic",
 ]
