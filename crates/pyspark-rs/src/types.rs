@@ -1144,8 +1144,15 @@ impl PyArrayType {
             value
         ))
     }
-    fn __repr__(&self) -> String {
-        format!("ArrayType({})", self.element_type.simple_string())
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        // Mirror pyspark: ArrayType(<elementType repr>, <containsNull>).
+        let el = data_type_to_py(py, &self.element_type)?;
+        let el_repr: String = el.bind(py).repr()?.extract()?;
+        Ok(format!(
+            "ArrayType({}, {})",
+            el_repr,
+            if self.contains_null { "True" } else { "False" }
+        ))
     }
     #[pyo3(name = "simpleString")]
     fn simple_string(&self) -> String {
@@ -1257,6 +1264,27 @@ impl PyMapType {
             },
             [],
             value
+        ))
+    }
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        // Mirror pyspark: MapType(<keyType repr>, <valueType repr>, <valueContainsNull>).
+        let k: String = data_type_to_py(py, &self.key_type)?
+            .bind(py)
+            .repr()?
+            .extract()?;
+        let v: String = data_type_to_py(py, &self.value_type)?
+            .bind(py)
+            .repr()?
+            .extract()?;
+        Ok(format!(
+            "MapType({}, {}, {})",
+            k,
+            v,
+            if self.value_contains_null {
+                "True"
+            } else {
+                "False"
+            }
         ))
     }
     #[pyo3(name = "simpleString")]
@@ -1766,8 +1794,22 @@ impl PyStructType {
         }
     }
 
-    fn __repr__(&self) -> String {
-        self.simple_string()
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        // Mirror pyspark: StructType([StructField('n', <dt repr>, nullable), ...]).
+        let mut parts = Vec::with_capacity(self.fields.len());
+        for f in &self.fields {
+            let dt_repr: String = data_type_to_py(py, &f.data_type)?
+                .bind(py)
+                .repr()?
+                .extract()?;
+            parts.push(format!(
+                "StructField('{}', {}, {})",
+                f.name,
+                dt_repr,
+                if f.nullable { "True" } else { "False" }
+            ));
+        }
+        Ok(format!("StructType([{}])", parts.join(", ")))
     }
 }
 
