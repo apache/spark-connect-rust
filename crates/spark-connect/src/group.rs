@@ -111,6 +111,12 @@ impl GroupedData {
         }
     }
 
+    /// Column names of the underlying (pre-grouping) DataFrame. These are passed as the
+    /// map/apply UDF's argument columns so the worker's pandas/Arrow input is named.
+    pub fn input_columns(&self) -> Result<Vec<String>> {
+        self.dataframe.columns()
+    }
+
     /// Grouping-key expressions for this grouped data.
     fn grouping_expressions(&self) -> Vec<Expression> {
         self.group_cols
@@ -495,6 +501,14 @@ pub struct CoGroupedData {
 }
 
 impl CoGroupedData {
+    /// Column names of both sides (left then right), passed as the cogroup UDF's
+    /// argument columns so the worker's two pandas/Arrow inputs are named.
+    pub fn input_columns(&self) -> Result<Vec<String>> {
+        let mut cols = self.left.input_columns()?;
+        cols.extend(self.right.input_columns()?);
+        Ok(cols)
+    }
+
     /// Apply a pandas UDF to each cogroup (`cogroup(...).applyInPandas`).
     ///
     /// `func` is built on the Python side (cloudpickled, eval type

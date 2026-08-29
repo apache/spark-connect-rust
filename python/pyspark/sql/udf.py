@@ -23,8 +23,24 @@ Mirrors pyspark.sql.connect.udf and pyspark.sql.functions.udf/pandas_udf.
 import sys
 from typing import Callable, Optional, Any
 
-from pyspark.sql.types import DataType, StringType
+from pyspark.sql.types import DataType, StringType, _parse_datatype_json_string
 from pyspark.serializers import CloudPickleSerializer
+
+
+def _as_concrete_datatype(returnType: Any) -> DataType:
+    """Return a concrete, picklable pyspark ``DataType``.
+
+    A DDL string (e.g. ``"double"``, ``"a int, b string"``) is parsed via the
+    Rust DDL parser and rebuilt into a concrete type through
+    ``_parse_datatype_json_string``. This matters because the cloudpickled UDF
+    command must carry a real ``DataType`` (not a DDL string): the pandas/Arrow
+    worker pairs each result column with its spark type to build the Arrow batch,
+    so a bare string breaks it ("not enough values to unpack"). Mirrors how the
+    reference Connect client pickles the *parsed* output type.
+    """
+    if isinstance(returnType, str):
+        return _parse_datatype_json_string(DataType.fromDDL(returnType).json())
+    return returnType
 
 
 class UserDefinedFunction:
@@ -42,7 +58,9 @@ class UserDefinedFunction:
         deterministic: bool = True,
     ):
         self.func = func
-        self.returnType = returnType
+        # Normalize to a concrete, picklable DataType so the cloudpickled command
+        # carries a real type (required by the pandas/Arrow worker, not just str).
+        self.returnType = _as_concrete_datatype(returnType)
         self.evalType = evalType
         self.name = name or (
             func.__name__ if hasattr(func, "__name__") else "udf"
@@ -50,9 +68,11 @@ class UserDefinedFunction:
         self.deterministic = deterministic
         self.python_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
 
-        # Cloudpickle the function (the command is the pickled (func, returnType) tuple)
+        # Cloudpickle the function (the command is the pickled (func, returnType) tuple).
+        # Use the normalized concrete DataType, not the raw arg, so the worker gets a
+        # real type it can turn into an Arrow schema.
         serializer = CloudPickleSerializer()
-        self.command = serializer.dumps((func, returnType))
+        self.command = serializer.dumps((func, self.returnType))
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """
@@ -60,6 +80,12 @@ class UserDefinedFunction:
         Returns a Column representing the UDF call.
         """
         from pyspark import _pyspark
+        from pyspark.sql.functions import col
+
+        # A UDF argument is ColumnOrName: a bare string is a COLUMN NAME (like PySpark),
+        # not a string literal. Coerce str -> col(str) before handing to the Rust layer
+        # (whose to_column would otherwise treat a str as a literal).
+        cols = [col(a) if isinstance(a, str) else a for a in args]
 
         # pyfunc_make_udf accepts any DataType object or DDL string as the return type
         # and builds the proto output type; the pickled command carries (func, returnType)
@@ -70,7 +96,7 @@ class UserDefinedFunction:
             self.evalType,
             self.command,
             self.python_ver,
-            *args,
+            *cols,
             deterministic=self.deterministic,
         )
 
@@ -113,6 +139,11 @@ def udf(
     >>> u = F.udf(lambda x: x + 1, IntegerType())
     >>> result = spark.range(3).select(u(F.col('id')).alias('inc_id'))
     """
+    # Decorator form @udf(returnType) / @udf("ddl"): the first positional is the
+    # return type (a DataType or DDL string), not the function.
+    if f is not None and not callable(f):
+        returnType, f = f, None
+
     if returnType is None:
         returnType = StringType()
 
@@ -134,7 +165,7 @@ def udf(
 def pandas_udf(
     f: Optional[Callable[..., Any]] = None,
     returnType: Optional[DataType] = None,
-    functionType: str = "scalar",
+    functionType: Optional[str] = None,
 ) -> Any:
     """
     Create a pandas UDF.
@@ -163,6 +194,11 @@ def pandas_udf(
     ...     return s + 1
     >>> result = spark.range(3).select(inc_id(F.col('id')).alias('inc_id'))
     """
+    # Decorator form @pandas_udf(returnType) / @pandas_udf("ddl"): the first
+    # positional is the return type, not the function.
+    if f is not None and not callable(f):
+        returnType, f = f, None
+
     if returnType is None:
         returnType = StringType()
 
@@ -177,10 +213,24 @@ def pandas_udf(
         "cogrouped_map": 206,  # SQL_COGROUPED_MAP_PANDAS_UDF
     }
 
-    evalType = eval_type_map.get(functionType, 200)  # Default to scalar
-
     def _pandas_udf_decorator(func):
-        return UserDefinedFunction(func, returnType, evalType)
+        et = eval_type_map.get(functionType) if functionType is not None else None
+        if et is None:
+            # Modern form @pandas_udf("type"): infer the eval type from the function's
+            # pandas type hints (Series->Series = scalar, Iterator[Series]->Iterator =
+            # scalar_iter, Series->scalar = grouped_agg), mirroring
+            # pyspark.sql.pandas.functions.pandas_udf.
+            try:
+                from inspect import signature
+                from typing import get_type_hints
+                from pyspark.sql.pandas.typehints import infer_eval_type
+
+                et = infer_eval_type(signature(func), get_type_hints(func))
+            except Exception:
+                et = None
+        if et is None:
+            et = 200  # SQL_SCALAR_PANDAS_UDF
+        return UserDefinedFunction(func, returnType, et)
 
     if f is not None:
         # Direct call
@@ -210,6 +260,10 @@ def arrow_udf(
     functionType : str, optional
         "scalar" (default) or "scalar_iter".
     """
+    # Decorator form @arrow_udf(returnType) / @arrow_udf("ddl").
+    if f is not None and not callable(f):
+        returnType, f = f, None
+
     if returnType is None:
         returnType = StringType()
 
@@ -262,11 +316,28 @@ class UDFRegistration:
         >>> spark.udf.register("inc_id", lambda x: x + 1, IntegerType())
         >>> result = spark.sql("SELECT inc_id(id) AS incremented FROM range(3)")
         """
-        if returnType is None:
-            returnType = StringType()
+        # If f is already a UDF (from udf()/pandas_udf()), reuse its packed command;
+        # otherwise wrap the plain Python function as a SQL_BATCHED_UDF.
+        if hasattr(f, "command") and hasattr(f, "evalType"):
+            if returnType is not None:
+                from pyspark.errors import PySparkTypeError
 
-        # Create a UDF with the given name
-        udf = UserDefinedFunction(f, returnType, 100, name)
+                raise PySparkTypeError(
+                    errorClass="CANNOT_SPECIFY_RETURN_TYPE_FOR_UDF",
+                    messageParameters={"arg_name": "f", "return_type": str(returnType)},
+                )
+            udf = f
+        else:
+            if returnType is None:
+                returnType = StringType()
+            udf = UserDefinedFunction(f, returnType, 100, name)
+
+        # Send the registration to the Connect server so `name` resolves in SQL
+        # (mirrors the reference client.register_udf: a RegisterFunction command
+        # carrying the cloudpickled PythonUDF with no bound arguments).
+        self.spark_session._registerPythonUdf(
+            name, udf.returnType, udf.evalType, udf.command, udf.python_ver, udf.deterministic
+        )
         return udf
 
     def registerJavaFunction(

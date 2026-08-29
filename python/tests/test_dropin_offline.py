@@ -654,13 +654,26 @@ def test_udf_defaults_and_registration():
     # pandas_udf grouped_map/other functionType branches
     for ft in ["scalar", "grouped_map", "grouped_agg"]:
         assert pandas_udf(lambda s: s, T.IntegerType(), functionType=ft) is not None
-    # UDFRegistration.register returns a UDF
+    # UDFRegistration.register wires to the session's _registerPythonUdf (so the name
+    # resolves in SQL) and returns the UDF.
     from pyspark.sql.udf import UDFRegistration
-    reg = UDFRegistration(object())
+
+    class _StubSession:
+        def __init__(self):
+            self.calls = []
+
+        def _registerPythonUdf(self, name, returnType, evalType, command, python_ver, deterministic):
+            self.calls.append((name, evalType, isinstance(command, (bytes, bytearray))))
+
+    stub = _StubSession()
+    reg = UDFRegistration(stub)
     r = reg.register("f", lambda x: x + 1, T.IntegerType())
     assert r.name == "f"
     r2 = reg.register("g", lambda x: x)  # returnType default
     assert r2.name == "g"
+    # both were sent to the server with cloudpickled command bytes
+    assert [c[0] for c in stub.calls] == ["f", "g"]
+    assert all(c[2] for c in stub.calls)
 
 
 def test_util_print_exec_and_skip_env(monkeypatch):
@@ -2488,3 +2501,70 @@ def test_generated_fn_accepts_str_column_name():
     assert repr(F.struct("id", "g")) == repr(F.struct(F.col("id"), F.col("g")))
     # literal-position args stay literal (date_format format, regexp pattern)
     assert "yyyy" in repr(F.date_format(F.col("d"), "yyyy"))
+
+
+def test_udf_string_arg_is_column_name_not_literal():
+    # udf(f)("colname") must reference a column (ColumnOrName), not a string literal.
+    from pyspark.sql.functions import udf, col
+    from pyspark.sql.types import IntegerType
+    u = udf(lambda x: x + 1, IntegerType())
+    c = u("id")
+    # Same rendered expression whether the arg is a str or an explicit col().
+    assert repr(c) == repr(u(col("id")))
+
+
+def test_udf_and_pandas_udf_decorator_forms():
+    # @udf(returnType) / @pandas_udf(returnType) return a decorator that wraps a function.
+    from pyspark.sql.functions import udf, pandas_udf
+    from pyspark.sql.types import IntegerType
+    from pyspark.sql.udf import UserDefinedFunction
+
+    @udf(IntegerType())
+    def inc(x):
+        return x + 1
+    assert isinstance(inc, UserDefinedFunction)
+
+    @pandas_udf("long")
+    def p(s):
+        return s + 1
+    assert isinstance(p, UserDefinedFunction)
+
+
+def test_udf_return_type_normalized_to_concrete_datatype():
+    # A DDL-string returnType must become a concrete, picklable DataType so the
+    # cloudpickled command carries a real type (the pandas/Arrow worker needs it).
+    import pickle
+    from pyspark.sql.functions import pandas_udf
+    from pyspark.sql.types import DoubleType
+
+    @pandas_udf("double")
+    def f(s):
+        return s
+    assert isinstance(f.returnType, DoubleType), type(f.returnType)
+    # command is cloudpickle of (func, returnType) -> must not carry a bare str.
+    assert isinstance(f.command, (bytes, bytearray))
+    pickle.dumps(f.returnType)  # concrete types pickle
+
+
+def test_pandas_udf_eval_type_inferred_from_type_hints():
+    # @pandas_udf("type") infers eval type from the function's pandas type hints:
+    # Series->Series = scalar(200), Iterator->Iterator = scalar_iter(204),
+    # Series->scalar = grouped_agg(202).
+    from typing import Iterator
+    import pandas as pd
+    from pyspark.sql.functions import pandas_udf
+
+    @pandas_udf("double")
+    def scal(s: pd.Series) -> pd.Series:
+        return s
+    assert scal.evalType == 200, scal.evalType
+
+    @pandas_udf("double")
+    def itr(it: Iterator[pd.Series]) -> Iterator[pd.Series]:
+        yield from it
+    assert itr.evalType == 204, itr.evalType
+
+    @pandas_udf("double")
+    def agg(s: pd.Series) -> float:
+        return float(s.mean())
+    assert agg.evalType == 202, agg.evalType

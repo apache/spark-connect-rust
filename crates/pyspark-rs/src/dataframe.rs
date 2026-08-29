@@ -1381,12 +1381,14 @@ impl PyDataFrame {
         schema: Bound<'_, PyAny>,
         is_barrier: bool,
     ) -> PyResult<PyDataFrame> {
+        let cols = py.detach(|| self.dataframe.columns()).to_pyerr()?;
         let udf = build_map_udf(
             py,
             "mapInPandas",
             &func,
             &schema,
             eval_type::SQL_MAP_PANDAS_ITER_UDF,
+            &cols,
         )?;
         Ok(PyDataFrame::new(
             self.dataframe.map_in_pandas(udf, is_barrier),
@@ -1402,12 +1404,14 @@ impl PyDataFrame {
         schema: Bound<'_, PyAny>,
         is_barrier: bool,
     ) -> PyResult<PyDataFrame> {
+        let cols = py.detach(|| self.dataframe.columns()).to_pyerr()?;
         let udf = build_map_udf(
             py,
             "mapInArrow",
             &func,
             &schema,
             eval_type::SQL_MAP_ARROW_ITER_UDF,
+            &cols,
         )?;
         Ok(PyDataFrame::new(
             self.dataframe.map_in_arrow(udf, is_barrier),
@@ -2202,15 +2206,24 @@ pub(crate) fn build_map_udf(
     func: &Bound<'_, PyAny>,
     schema: &Bound<'_, PyAny>,
     eval_type_id: i32,
+    input_cols: &[String],
 ) -> PyResult<CommonInlineUserDefinedFunctionExpression> {
     let return_type = resolve_datatype(schema)?;
     let tup = PyTuple::new(py, [func.clone(), schema.clone()])?;
     let command = py_cloudpickle(py, tup.as_any())?;
     let payload = PythonUDFPayload::new(return_type, eval_type_id, command, py_version(py));
+    // The worker reconstructs the input pandas/Arrow DataFrame from the UDF's argument
+    // columns; without them the input columns are unnamed (KeyError in the user fn).
+    // Mirror the reference Connect client, which passes the child's columns as the
+    // function arguments.
+    let arguments = input_cols
+        .iter()
+        .map(|c| spark_connect::functions::col(c).expression().clone())
+        .collect();
     Ok(CommonInlineUserDefinedFunctionExpression::new(
         name.to_string(),
         true,
-        vec![],
+        arguments,
         payload,
     ))
 }
