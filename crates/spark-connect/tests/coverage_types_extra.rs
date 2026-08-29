@@ -99,7 +99,7 @@ fn extra_variants() -> Vec<DataType> {
                     nullable: false,
                     metadata: {
                         let mut m = BTreeMap::new();
-                        m.insert("k".to_string(), "v".to_string());
+                        m.insert("k".to_string(), serde_json::Value::String("v".to_string()));
                         m
                     },
                 },
