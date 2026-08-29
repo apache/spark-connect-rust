@@ -366,6 +366,10 @@ jobs:
           repository: ${{ env.UPSTREAM_REPO }}
           ref: ${{ needs.resolve.outputs.sha }}
           fetch-depth: 0  # full history so the tag push carries all reachable objects
+          # Do NOT persist the built-in GITHUB_TOKEN as an http.extraheader: it would
+          # override the RELEASE_GITHUB_TOKEN embedded in the push URL below, so the push
+          # to apache would go out as github-actions[bot] (which cannot write to apache).
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           pattern: wheels-*
@@ -443,6 +447,9 @@ jobs:
           repository: ${{ env.UPSTREAM_REPO }}
           ref: ${{ needs.resolve.outputs.rc_tag }}
           fetch-depth: 0
+          # Same reason as publish-rc: don't let the built-in token's persisted
+          # http.extraheader override RELEASE_GITHUB_TOKEN on the release-tag push below.
+          persist-credentials: false
       - name: Validate the RC source versions
         run: |
           set -euo pipefail
