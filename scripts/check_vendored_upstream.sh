@@ -32,13 +32,10 @@ SPARK_REPO="https://github.com/apache/spark.git"
 # Directories under python/pyspark vendored verbatim from upstream (whole tree byte-identical).
 VENDORED_DIRS=(
   "cloudpickle"
-  "pandas/data_type_ops"
-  "pandas/indexes"
-  "pandas/missing"
-  "pandas/plot"
-  "pandas/spark"
-  "pandas/typedef"
-  "pandas/usage_logging"
+  # The entire pandas-on-Spark package is vendored byte-for-byte from upstream (only its
+  # tests/ subdir is intentionally not shipped; excluded in check_one). Do NOT hand-edit any
+  # file under pyspark/pandas -- re-vendor from Apache instead.
+  "pandas"
   "mllib/linalg"
   "sql/worker"
   "sql/plot"
@@ -123,34 +120,8 @@ VENDORED_FILES=(
   "mllib/tree.py"
   "mllib/util.py"
 
-  # Pandas: core (excluding adapted group_ops, functions, and Connect-specific modules)
-  "pandas/__init__.py"
-  "pandas/_typing.py"
-  "pandas/accessors.py"
-  "pandas/base.py"
-  "pandas/categorical.py"
-  "pandas/config.py"
-  "pandas/correlation.py"
-  "pandas/datetimes.py"
-  "pandas/exceptions.py"
-  "pandas/extensions.py"
-  "pandas/frame.py"
-  "pandas/generic.py"
-  "pandas/groupby.py"
-  "pandas/indexing.py"
-  "pandas/internal.py"
-  "pandas/mlflow.py"
-  "pandas/namespace.py"
-  "pandas/numpy_compat.py"
-  "pandas/resample.py"
-  "pandas/series.py"
-  "pandas/sql_formatter.py"
-  "pandas/sql_processor.py"
-  "pandas/strings.py"
-  "pandas/supported_api_gen.py"
-  "pandas/testing.py"
-  "pandas/utils.py"
-  "pandas/window.py"
+  # Pandas: the whole pyspark/pandas tree is vendored as a VENDORED_DIRS entry above (every
+  # file, tests/ excluded), so no individual pandas/*.py entries are listed here.
 
   # SQL: pandas (excluding adapted group_ops, functions)
   "sql/pandas/__init__.py"
@@ -203,25 +174,34 @@ git clone --quiet --depth 1 --branch "${SPARK_TAG}" --filter=blob:none --sparse 
 
 status=0
 check_one() {
-  local p="$1" flag="$2"
+  local p="$1" flag="$2" extra_exclude="${3:-}"
   local ours="${REPO_ROOT}/python/pyspark/${p}"
   local theirs="${WORK}/spark/python/pyspark/${p}"
+  # Always ignore __pycache__; a caller may add one more --exclude (e.g. `tests` for the
+  # whole pandas tree, which upstream ships but we intentionally do not vendor).
+  local excludes=(--exclude=__pycache__)
+  [[ -n "${extra_exclude}" ]] && excludes+=(--exclude="${extra_exclude}")
   if [[ ! -e "${theirs}" ]]; then
     echo "ERROR: upstream path python/pyspark/${p} not found at ${SPARK_TAG}"
     status=1
     return
   fi
-  if diff ${flag} --exclude=__pycache__ "${ours}" "${theirs}" >/dev/null; then
+  if diff ${flag} "${excludes[@]}" "${ours}" "${theirs}" >/dev/null; then
     echo "OK    python/pyspark/${p} matches Apache Spark ${SPARK_TAG}"
   else
     echo "DRIFT python/pyspark/${p} differs from Apache Spark ${SPARK_TAG}:"
-    diff ${flag} --exclude=__pycache__ "${ours}" "${theirs}" || true
+    diff ${flag} "${excludes[@]}" "${ours}" "${theirs}" || true
     status=1
   fi
 }
 
 for p in "${VENDORED_DIRS[@]}"; do
-  check_one "${p}" "-r"
+  # The pandas-on-Spark tree is vendored in full EXCEPT its tests/ (which we do not ship).
+  if [[ "${p}" == "pandas" ]]; then
+    check_one "${p}" "-r" "tests"
+  else
+    check_one "${p}" "-r"
+  fi
 done
 for p in "${VENDORED_FILES[@]}"; do
   check_one "${p}" ""
