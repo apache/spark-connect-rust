@@ -108,6 +108,35 @@ fn from_json_dict(
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
 }
 
+/// Convert a Python `StructField` metadata dict to the core JSON-value map. Values may be any
+/// JSON-serializable Python object (mirrors pyspark's `Dict[str, Any]` field metadata), so we
+/// route through `json.dumps` -> serde_json.
+fn py_metadata_to_map(
+    py: Python<'_>,
+    d: &Bound<'_, pyo3::types::PyDict>,
+) -> PyResult<BTreeMap<String, serde_json::Value>> {
+    let s: String = py
+        .import("json")?
+        .getattr("dumps")?
+        .call1((d,))?
+        .extract()?;
+    serde_json::from_str(&s)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+}
+
+/// Convert the core JSON-value metadata map back to a Python dict.
+fn metadata_map_to_py<'py>(
+    py: Python<'py>,
+    m: &BTreeMap<String, serde_json::Value>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    let s = serde_json::to_string(m).unwrap_or_else(|_| "{}".to_string());
+    py.import("json")?
+        .getattr("loads")?
+        .call1((s,))?
+        .cast_into::<pyo3::types::PyDict>()
+        .map_err(|_| PyErr::new::<pyo3::exceptions::PyTypeError, _>("metadata is not a dict"))
+}
+
 #[pymethods]
 impl PyDataType {
     /// Allow instantiating the base and, crucially, pure-Python subclasses of it
@@ -1500,9 +1529,12 @@ impl PyStructField {
         name: String,
         dataType: &Bound<'_, PyAny>,
         nullable: bool,
-        metadata: Option<std::collections::HashMap<String, String>>,
+        metadata: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<Self> {
-        let md: BTreeMap<String, String> = metadata.unwrap_or_default().into_iter().collect();
+        let md = match metadata {
+            Some(d) => py_metadata_to_map(d.py(), d)?,
+            None => BTreeMap::new(),
+        };
         Ok(PyStructField {
             field: StructField {
                 name,
@@ -1526,14 +1558,10 @@ impl PyStructField {
     fn data_type(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         data_type_to_py(py, &self.field.data_type)
     }
-    /// The field's metadata dict (mirrors `StructField.metadata`).
+    /// The field's metadata dict (mirrors `StructField.metadata`; values may be any type).
     #[getter]
     fn metadata<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-        let out = pyo3::types::PyDict::new(py);
-        for (k, v) in &self.field.metadata {
-            out.set_item(k, v)?;
-        }
-        Ok(out)
+        metadata_map_to_py(py, &self.field.metadata)
     }
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         // Mirror pyspark: StructField('name', <DataType repr>, nullable).
@@ -1645,7 +1673,7 @@ impl PyStructType {
         field: &Bound<'_, PyAny>,
         data_type: Option<&Bound<'_, PyAny>>,
         nullable: bool,
-        metadata: Option<std::collections::HashMap<String, String>>,
+        metadata: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<Bound<'py, Self>> {
         let new_field = if let Ok(sf) = field.extract::<PyRef<PyStructField>>() {
             sf.field.clone()
@@ -1657,11 +1685,15 @@ impl PyStructType {
                     collation: "UTF8_BINARY".to_string(),
                 },
             };
+            let md = match metadata {
+                Some(d) => py_metadata_to_map(d.py(), d)?,
+                None => BTreeMap::new(),
+            };
             StructField {
                 name,
                 data_type: dt,
                 nullable,
-                metadata: metadata.unwrap_or_default().into_iter().collect(),
+                metadata: md,
             }
         };
         {

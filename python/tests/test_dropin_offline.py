@@ -2372,8 +2372,17 @@ def test_udt_not_implemented_defaults():
         udt.deserialize(1)
 
 
+def test_struct_field_metadata_any_values():
+    # StructField metadata accepts arbitrary JSON values (Dict[str, Any]), not just str,
+    # and round-trips through json.
+    f = _SF("a", _IT(), True, {"m": 1, "s": "x", "b": True, "l": [1, 2]})
+    assert f.metadata == {"m": 1, "s": "x", "b": True, "l": [1, 2]}
+    f2 = _SF.fromJson(f.jsonValue())
+    assert f2.metadata["m"] == 1 and f2.metadata["b"] is True and f2.metadata["l"] == [1, 2]
+
+
 def test_drop_metadata_and_create_row():
-    st = _StT([_SF("a", _IT(), True, {"m": "v"}), _SF("b", _AT(_IT()), True)])
+    st = _StT([_SF("a", _IT(), True, {"m": 1}), _SF("b", _AT(_IT()), True)])
     dm = _drop_metadata(st)
     assert not dm.fields[0].metadata
     _drop_metadata(_AT(_IT()))
@@ -2381,3 +2390,7 @@ def test_drop_metadata_and_create_row():
     _drop_metadata(_IT())
     r = _create_row(["a", "b"], [1, 2])
     assert r["a"] == 1 and r["b"] == 2
+    # _create_row accepts an existing Row as the field source (Row.__fields__ is a list attr).
+    r2 = _create_row(r, [3, 4])
+    assert r2["a"] == 3 and r2["b"] == 4
+    assert list(r.__fields__) == ["a", "b"]

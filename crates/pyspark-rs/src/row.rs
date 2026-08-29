@@ -174,7 +174,9 @@ impl PyRow {
         }
     }
 
-    /// Field names, in order.
+    /// Field names, in order. A list ATTRIBUTE (pyspark's `Row.__fields__` is a list, not a
+    /// method), so `list(row.__fields__)` and `row.__fields__` work as in the reference.
+    #[getter]
     fn __fields__(&self) -> Vec<String> {
         self.row.fields().to_vec()
     }

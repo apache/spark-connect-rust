@@ -13,7 +13,8 @@ use spark_connect_core::error::{Result, SparkError};
 ///
 /// All concrete types are variants of this enum. Each variant carries the data
 /// needed to fully specify that type (e.g., DecimalType carries precision and scale).
-#[derive(Debug, Clone, PartialEq, Eq)]
+// Not `Eq` (only `PartialEq`): a Struct field's metadata holds arbitrary JSON values.
+#[derive(Debug, Clone, PartialEq)]
 pub enum DataType {
     /// `pyspark.sql.types.NullType`
     Null,
@@ -88,12 +89,14 @@ pub enum DataType {
 }
 
 /// A field in a StructType, mirroring `pyspark.sql.types.StructField`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// Not `Eq`: metadata values are arbitrary JSON (`serde_json::Value`, which is only `PartialEq`
+// because of floats), matching pyspark's `Dict[str, Any]` field metadata.
+#[derive(Debug, Clone, PartialEq)]
 pub struct StructField {
     pub name: String,
     pub data_type: DataType,
     pub nullable: bool,
-    pub metadata: BTreeMap<String, String>,
+    pub metadata: BTreeMap<String, serde_json::Value>,
 }
 
 impl DataType {
@@ -791,9 +794,7 @@ impl StructField {
         let mut metadata = BTreeMap::new();
         if let Some(md) = v.get("metadata").and_then(|x| x.as_object()) {
             for (k, val) in md {
-                if let Some(sv) = val.as_str() {
-                    metadata.insert(k.clone(), sv.to_string());
-                }
+                metadata.insert(k.clone(), val.clone());
             }
         }
         Ok(StructField {
@@ -838,7 +839,7 @@ impl DataType {
                     if !f.nullable {
                         s.push_str(" NOT NULL");
                     }
-                    if let Some(comment) = f.metadata.get("comment") {
+                    if let Some(comment) = f.metadata.get("comment").and_then(|c| c.as_str()) {
                         s.push_str(&format!(" COMMENT '{}'", comment.replace('\'', "\\'")));
                     }
                     s
@@ -937,7 +938,7 @@ impl DataType {
         field_name: &str,
         field_type: DataType,
         nullable: bool,
-        metadata: Option<BTreeMap<String, String>>,
+        metadata: Option<BTreeMap<String, serde_json::Value>>,
     ) -> Result<DataType> {
         match self {
             DataType::Struct { fields } => {
@@ -1126,20 +1127,7 @@ fn parse_json_object(obj: &serde_json::Map<String, serde_json::Value>) -> Result
                     let metadata = field_map
                         .get("metadata")
                         .and_then(|v| v.as_object())
-                        .map(|m| {
-                            m.iter()
-                                .map(|(k, v)| {
-                                    // Store the raw string for string-valued metadata (a bare
-                                    // "v", not the re-serialized "\"v\""), matching the proto
-                                    // path; fall back to the JSON text for non-string values.
-                                    let val = v
-                                        .as_str()
-                                        .map(str::to_string)
-                                        .unwrap_or_else(|| v.to_string());
-                                    (k.clone(), val)
-                                })
-                                .collect()
-                        })
+                        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
                         .unwrap_or_default();
 
                     fields.push(StructField {
@@ -2512,7 +2500,10 @@ mod tests {
 
         // Test add with metadata
         let mut metadata = BTreeMap::new();
-        metadata.insert("key".to_string(), "value".to_string());
+        metadata.insert(
+            "key".to_string(),
+            serde_json::Value::String("value".to_string()),
+        );
         let with_metadata = with_both
             .add("score", DataType::Double, false, Some(metadata))
             .unwrap();
