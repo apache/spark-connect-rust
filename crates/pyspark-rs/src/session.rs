@@ -5,6 +5,7 @@ use pyo3::types::{PyDict, PyList};
 use spark_connect::row::{Row, Value};
 use spark_connect::session::SparkSession;
 use spark_connect::types::{DataType, StructField};
+use spark_connect::udf::{CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
 
 use crate::catalog::PyCatalog;
 use crate::dataframe::PyDataFrame;
@@ -498,6 +499,35 @@ impl PySparkSession {
                 .register_java_function(name, java_class_name, return_type, aggregate)
         })
         .to_pyerr()
+    }
+
+    /// Register a Python UDF by name so it resolves in SQL (used by
+    /// `UDFRegistration.register`). Mirrors the reference `client.register_udf`: build a
+    /// `CommonInlineUserDefinedFunction` carrying a `PythonUDF` (cloudpickled command +
+    /// output type + eval type) with NO arguments, and send it as the `RegisterFunction`
+    /// command so the server's session function registry resolves `name` in SQL.
+    #[pyo3(name = "_registerPythonUdf", signature = (name, return_type, eval_type, command, python_ver, deterministic=true))]
+    #[allow(non_snake_case)]
+    fn register_python_udf_py(
+        &self,
+        py: Python<'_>,
+        name: &str,
+        return_type: &Bound<'_, PyAny>,
+        eval_type: i32,
+        command: Vec<u8>,
+        python_ver: String,
+        deterministic: bool,
+    ) -> PyResult<()> {
+        let return_data_type = crate::types::py_to_data_type(return_type)?;
+        let payload = PythonUDFPayload::new(return_data_type, eval_type, command, python_ver);
+        let udf_expr = CommonInlineUserDefinedFunctionExpression::new(
+            name.to_string(),
+            deterministic,
+            Vec::new(),
+            payload,
+        );
+        py.detach(|| self.session.register_function(udf_expr))
+            .to_pyerr()
     }
 
     #[pyo3(name = "sessionId")]
