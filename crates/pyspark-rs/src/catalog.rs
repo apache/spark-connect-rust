@@ -9,7 +9,7 @@ use crate::dataframe::PyDataFrame;
 use crate::errors::ResultExt;
 
 /// `pyspark.sql.catalog.CatalogMetadata`.
-#[pyclass(name = "CatalogMetadata")]
+#[pyclass(name = "CatalogMetadata", module = "pyspark.sql.catalog")]
 pub struct PyCatalogMetadata {
     inner: CatalogMetadata,
 }
@@ -32,7 +32,7 @@ impl PyCatalogMetadata {
 }
 
 /// `pyspark.sql.catalog.Database`.
-#[pyclass(name = "Database")]
+#[pyclass(name = "Database", module = "pyspark.sql.catalog")]
 pub struct PyDatabase {
     inner: Database,
 }
@@ -60,7 +60,7 @@ impl PyDatabase {
 }
 
 /// `pyspark.sql.catalog.Table`.
-#[pyclass(name = "Table")]
+#[pyclass(name = "Table", module = "pyspark.sql.catalog")]
 pub struct PyTable {
     inner: Table,
 }
@@ -108,7 +108,7 @@ impl PyTable {
 
 /// `pyspark.sql.catalog.Column` (exposed as `CatalogColumn` in the extension to avoid
 /// colliding with the expression `Column`; re-exported as `Column` by pyspark.sql.catalog).
-#[pyclass(name = "CatalogColumn")]
+#[pyclass(name = "CatalogColumn", module = "pyspark.sql.catalog")]
 pub struct PyCatalogColumn {
     inner: Column,
 }
@@ -151,7 +151,7 @@ impl PyCatalogColumn {
 }
 
 /// `pyspark.sql.catalog.Function`.
-#[pyclass(name = "Function")]
+#[pyclass(name = "Function", module = "pyspark.sql.catalog")]
 pub struct PyFunction {
     inner: Function,
 }
@@ -190,7 +190,7 @@ impl PyFunction {
 }
 
 /// `pyspark.sql.catalog.TablePartition`.
-#[pyclass(name = "TablePartition")]
+#[pyclass(name = "TablePartition", module = "pyspark.sql.catalog")]
 pub struct PyTablePartition {
     inner: TablePartition,
 }
@@ -206,7 +206,7 @@ impl PyTablePartition {
 }
 
 /// Python wrapper for Spark Catalog.
-#[pyclass(name = "Catalog")]
+#[pyclass(name = "Catalog", module = "pyspark.sql.catalog")]
 pub struct PyCatalog {
     pub(crate) catalog: Catalog,
 }

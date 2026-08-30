@@ -11,7 +11,7 @@ use crate::dataframe::PyDataFrame;
 /// Python wrapper for the batch DataFrameReader. The core reader is a consuming
 /// builder, so each step takes the inner value and returns a fresh wrapper (mirrors
 /// the existing PyDataStreamReader).
-#[pyclass(name = "DataFrameReader")]
+#[pyclass(name = "DataFrameReader", module = "pyspark.sql.readwriter")]
 pub struct PyDataFrameReader {
     inner: Option<DataFrameReader>,
 }

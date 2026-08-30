@@ -2572,3 +2572,54 @@ def test_pandas_udf_eval_type_inferred_from_type_hints():
     def agg(s: pd.Series) -> float:
         return float(s.mean())
     assert agg.evalType == 202, agg.evalType
+
+
+# --------------------------------------------------------- __module__ / class pickling
+# PyO3 defaults a #[pyclass]'s __module__ to "builtins", which diverges from the
+# reference client (where each class reports the module that defines it) and makes the
+# class itself unpicklable: pickle serializes a class BY REFERENCE, writing
+# __module__ + __qualname__ and re-importing on load, so "builtins.IntegerType" fails
+# the lookup. Every #[pyclass] therefore carries an explicit `module = "..."`.
+# NB: DataFrame/Column report the *connect* module: upstream pyspark.sql.{dataframe,
+# column} hold the abstract parent, while the concrete class a Connect session hands
+# out is pyspark.sql.connect.*.
+
+
+@pytest.mark.parametrize(
+    "cls,expected",
+    [
+        (_DF, "pyspark.sql.connect.dataframe"),
+        (_Col, "pyspark.sql.connect.column"),
+        (_SS, "pyspark.sql.session"),
+        (T.DataType, "pyspark.sql.types"),
+        (T.IntegerType, "pyspark.sql.types"),
+        (T.StructType, "pyspark.sql.types"),
+        (T.NumericType, "pyspark.sql.types"),  # macro-generated abstract base
+        (T.Row, "pyspark.sql.types"),
+    ],
+)
+def test_class_module_matches_reference_path(cls, expected):
+    assert cls.__module__ == expected, f"{cls.__name__}.__module__ = {cls.__module__}"
+
+
+@pytest.mark.parametrize(
+    "cls",
+    [T.DataType, T.IntegerType, T.StringType, T.ArrayType, T.MapType, T.StructType,
+     T.DecimalType, T.NumericType, T.AtomicType],
+)
+def test_datatype_class_itself_is_picklable(cls):
+    # Pickling the CLASS (not an instance) round-trips to the identical object. A
+    # __module__ of "builtins" raises PicklingError here.
+    assert pickle.loads(pickle.dumps(cls)) is cls
+
+
+def test_no_pyclass_reports_builtins_module():
+    # Guard against a new #[pyclass] landing without `module = "..."`.
+    import pyspark._pyspark as _rust
+
+    offenders = sorted(
+        name
+        for name, obj in vars(_rust).items()
+        if isinstance(obj, type) and obj.__module__ == "builtins"
+    )
+    assert offenders == [], f"missing module=: {offenders}"

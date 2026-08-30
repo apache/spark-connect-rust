@@ -9,7 +9,7 @@ use crate::errors::ResultExt;
 /// A table argument for a table-valued function, mirroring
 /// `pyspark.sql.connect.table_arg.TableArg`. Built via `df.asTable()`, then optionally
 /// `partitionBy`/`orderBy`/`withSinglePartition` (each returns a new TableArg).
-#[pyclass(name = "TableArg")]
+#[pyclass(name = "TableArg", module = "pyspark.sql.table_arg")]
 pub struct PyTableArg {
     pub(crate) inner: TableArg,
 }

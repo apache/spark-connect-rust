@@ -30,7 +30,7 @@ fn raise_pyspark(
 }
 
 /// Python wrapper for a Spark Column.
-#[pyclass(name = "Column")]
+#[pyclass(name = "Column", module = "pyspark.sql.connect.column")]
 pub struct PyColumn {
     pub(crate) column: Column,
 }

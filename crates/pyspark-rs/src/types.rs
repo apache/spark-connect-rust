@@ -18,7 +18,7 @@ fn type_reduce(py: Python<'_>, json: &str) -> PyResult<(Py<PyAny>, (String,))> {
 /// (mirroring pyspark's `DataType`); concrete type classes extend it (directly or via
 /// the intermediate abstract bases below), so `isinstance(dt, DataType)` and the object
 /// model (simpleString/typeName/json/...) are inherited from here via `self.inner`.
-#[pyclass(subclass, name = "DataType")]
+#[pyclass(subclass, name = "DataType", module = "pyspark.sql.types")]
 pub struct PyDataType {
     pub(crate) inner: DataType,
 }
@@ -29,7 +29,9 @@ pub struct PyDataType {
 /// existing so `isinstance(dt, NumericType)` etc. work with the reference MRO.
 macro_rules! abstract_type {
     ($ty:ident, $name:literal, $parent:ty) => {
-        #[pyclass(subclass, name = $name, extends = $parent)]
+        // `module` matches where the drop-in re-exports these (pyspark.sql.types), so
+        // `__module__` reports the reference path instead of PyO3's default `builtins`.
+        #[pyclass(subclass, name = $name, module = "pyspark.sql.types", extends = $parent)]
         pub struct $ty;
     };
 }
@@ -201,7 +203,7 @@ impl PyDataType {
 }
 
 // Define concrete type classes
-#[pyclass(name = "NullType", extends = PyDataType)]
+#[pyclass(name = "NullType", module = "pyspark.sql.types", extends = PyDataType)]
 pub struct PyNullType;
 
 #[pymethods]
@@ -258,7 +260,7 @@ impl PyNullType {
     }
 }
 
-#[pyclass(name = "BooleanType", extends = PyAtomicType)]
+#[pyclass(name = "BooleanType", module = "pyspark.sql.types", extends = PyAtomicType)]
 pub struct PyBooleanType;
 
 #[pymethods]
@@ -315,7 +317,7 @@ impl PyBooleanType {
     }
 }
 
-#[pyclass(name = "ByteType", extends = PyIntegralType)]
+#[pyclass(name = "ByteType", module = "pyspark.sql.types", extends = PyIntegralType)]
 pub struct PyByteType;
 
 #[pymethods]
@@ -376,7 +378,7 @@ impl PyByteType {
     }
 }
 
-#[pyclass(name = "ShortType", extends = PyIntegralType)]
+#[pyclass(name = "ShortType", module = "pyspark.sql.types", extends = PyIntegralType)]
 pub struct PyShortType;
 
 #[pymethods]
@@ -437,7 +439,7 @@ impl PyShortType {
     }
 }
 
-#[pyclass(name = "IntegerType", extends = PyIntegralType)]
+#[pyclass(name = "IntegerType", module = "pyspark.sql.types", extends = PyIntegralType)]
 pub struct PyIntegerType;
 
 #[pymethods]
@@ -498,7 +500,7 @@ impl PyIntegerType {
     }
 }
 
-#[pyclass(name = "LongType", extends = PyIntegralType)]
+#[pyclass(name = "LongType", module = "pyspark.sql.types", extends = PyIntegralType)]
 pub struct PyLongType;
 
 #[pymethods]
@@ -559,7 +561,7 @@ impl PyLongType {
     }
 }
 
-#[pyclass(name = "FloatType", extends = PyFractionalType)]
+#[pyclass(name = "FloatType", module = "pyspark.sql.types", extends = PyFractionalType)]
 pub struct PyFloatType;
 
 #[pymethods]
@@ -620,7 +622,7 @@ impl PyFloatType {
     }
 }
 
-#[pyclass(name = "DoubleType", extends = PyFractionalType)]
+#[pyclass(name = "DoubleType", module = "pyspark.sql.types", extends = PyFractionalType)]
 pub struct PyDoubleType;
 
 #[pymethods]
@@ -681,7 +683,7 @@ impl PyDoubleType {
     }
 }
 
-#[pyclass(name = "DecimalType", extends = PyFractionalType)]
+#[pyclass(name = "DecimalType", module = "pyspark.sql.types", extends = PyFractionalType)]
 pub struct PyDecimalType {
     pub precision: i32,
     pub scale: i32,
@@ -760,7 +762,7 @@ impl PyDecimalType {
     }
 }
 
-#[pyclass(name = "StringType", extends = PyAtomicType)]
+#[pyclass(name = "StringType", module = "pyspark.sql.types", extends = PyAtomicType)]
 pub struct PyStringType {
     pub collation: String,
 }
@@ -868,7 +870,7 @@ impl PyStringType {
     }
 }
 
-#[pyclass(name = "BinaryType", extends = PyAtomicType)]
+#[pyclass(name = "BinaryType", module = "pyspark.sql.types", extends = PyAtomicType)]
 pub struct PyBinaryType;
 
 #[pymethods]
@@ -925,7 +927,7 @@ impl PyBinaryType {
     }
 }
 
-#[pyclass(name = "DateType", extends = PyDatetimeType)]
+#[pyclass(name = "DateType", module = "pyspark.sql.types", extends = PyDatetimeType)]
 pub struct PyDateType;
 
 #[pymethods]
@@ -982,7 +984,7 @@ impl PyDateType {
     }
 }
 
-#[pyclass(name = "TimestampType", extends = PyDatetimeType)]
+#[pyclass(name = "TimestampType", module = "pyspark.sql.types", extends = PyDatetimeType)]
 pub struct PyTimestampType;
 
 #[pymethods]
@@ -1043,7 +1045,7 @@ impl PyTimestampType {
     }
 }
 
-#[pyclass(name = "TimestampNTZType", extends = PyDatetimeType)]
+#[pyclass(name = "TimestampNTZType", module = "pyspark.sql.types", extends = PyDatetimeType)]
 pub struct PyTimestampNTZType;
 
 #[pymethods]
@@ -1104,7 +1106,7 @@ impl PyTimestampNTZType {
     }
 }
 
-#[pyclass(name = "ArrayType", extends = PyDataType)]
+#[pyclass(name = "ArrayType", module = "pyspark.sql.types", extends = PyDataType)]
 pub struct PyArrayType {
     pub element_type: DataType,
     pub contains_null: bool,
@@ -1231,7 +1233,7 @@ impl PyArrayType {
     }
 }
 
-#[pyclass(name = "MapType", extends = PyDataType)]
+#[pyclass(name = "MapType", module = "pyspark.sql.types", extends = PyDataType)]
 pub struct PyMapType {
     pub key_type: DataType,
     pub value_type: DataType,
@@ -1385,7 +1387,7 @@ impl PyMapType {
     }
 }
 
-#[pyclass(name = "StructField")]
+#[pyclass(name = "StructField", module = "pyspark.sql.types")]
 pub struct PyStructField {
     pub(crate) field: StructField,
 }
@@ -1583,7 +1585,7 @@ impl PyStructField {
     }
 }
 
-#[pyclass(name = "StructType", extends = PyDataType)]
+#[pyclass(name = "StructType", module = "pyspark.sql.types", extends = PyDataType)]
 pub struct PyStructType {
     pub(crate) fields: Vec<StructField>,
 }
@@ -1872,7 +1874,7 @@ impl PyStructType {
     }
 }
 
-#[pyclass(name = "CharType", extends = PyAtomicType)]
+#[pyclass(name = "CharType", module = "pyspark.sql.types", extends = PyAtomicType)]
 pub struct PyCharType {
     pub length: i32,
 }
@@ -1939,7 +1941,7 @@ impl PyCharType {
     }
 }
 
-#[pyclass(name = "VarcharType", extends = PyAtomicType)]
+#[pyclass(name = "VarcharType", module = "pyspark.sql.types", extends = PyAtomicType)]
 pub struct PyVarcharType {
     pub length: i32,
 }
@@ -2006,7 +2008,7 @@ impl PyVarcharType {
     }
 }
 
-#[pyclass(name = "TimeType", extends = PyAnyTimeType)]
+#[pyclass(name = "TimeType", module = "pyspark.sql.types", extends = PyAnyTimeType)]
 pub struct PyTimeType {
     pub precision: i32,
 }
@@ -2075,7 +2077,7 @@ impl PyTimeType {
     }
 }
 
-#[pyclass(name = "CalendarIntervalType", extends = PyDataType)]
+#[pyclass(name = "CalendarIntervalType", module = "pyspark.sql.types", extends = PyDataType)]
 pub struct PyCalendarIntervalType;
 
 #[pymethods]
@@ -2132,7 +2134,7 @@ impl PyCalendarIntervalType {
     }
 }
 
-#[pyclass(name = "YearMonthIntervalType", extends = PyAnsiIntervalType)]
+#[pyclass(name = "YearMonthIntervalType", module = "pyspark.sql.types", extends = PyAnsiIntervalType)]
 pub struct PyYearMonthIntervalType {
     pub start_field: i32,
     pub end_field: i32,
@@ -2211,7 +2213,7 @@ impl PyYearMonthIntervalType {
     }
 }
 
-#[pyclass(name = "DayTimeIntervalType", extends = PyAnsiIntervalType)]
+#[pyclass(name = "DayTimeIntervalType", module = "pyspark.sql.types", extends = PyAnsiIntervalType)]
 pub struct PyDayTimeIntervalType {
     pub start_field: i32,
     pub end_field: i32,
@@ -2290,7 +2292,7 @@ impl PyDayTimeIntervalType {
     }
 }
 
-#[pyclass(name = "VariantType", extends = PyAtomicType)]
+#[pyclass(name = "VariantType", module = "pyspark.sql.types", extends = PyAtomicType)]
 pub struct PyVariantType;
 
 #[pymethods]
@@ -2347,7 +2349,7 @@ impl PyVariantType {
     }
 }
 
-#[pyclass(name = "GeometryType", extends = PySpatialType)]
+#[pyclass(name = "GeometryType", module = "pyspark.sql.types", extends = PySpatialType)]
 pub struct PyGeometryType {
     pub srid: i32,
 }
@@ -2381,7 +2383,7 @@ impl PyGeometryType {
     }
 }
 
-#[pyclass(name = "GeographyType", extends = PySpatialType)]
+#[pyclass(name = "GeographyType", module = "pyspark.sql.types", extends = PySpatialType)]
 pub struct PyGeographyType {
     pub srid: i32,
 }
