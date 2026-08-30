@@ -12,7 +12,7 @@ use crate::session::PySparkSession;
 /// Python accessor for data source registration.
 ///
 /// Exposed as `SparkSession.dataSource` to register custom data sources.
-#[pyclass(name = "DataSourceRegistration")]
+#[pyclass(name = "DataSourceRegistration", module = "pyspark.sql.datasource")]
 pub struct PyDataSourceRegistration {
     pub(crate) session: PySparkSession,
 }

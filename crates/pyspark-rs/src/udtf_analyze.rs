@@ -6,14 +6,16 @@
 
 use pyo3::prelude::*;
 
+// The module argument sets `__module__`; use the reference path (upstream defines this
+// in pyspark/sql/udtf.py) rather than the extension's own name.
 pyo3::create_exception!(
-    _pyspark,
+    pyspark.sql.udtf,
     SkipRestOfInputTableException,
     pyo3::exceptions::PyException
 );
 
 /// `pyspark.sql.udtf.AnalyzeArgument`.
-#[pyclass(name = "AnalyzeArgument", get_all)]
+#[pyclass(name = "AnalyzeArgument", module = "pyspark.sql.udtf", get_all)]
 pub struct PyAnalyzeArgument {
     pub dataType: Py<PyAny>,
     pub value: Py<PyAny>,
@@ -40,7 +42,12 @@ impl PyAnalyzeArgument {
 }
 
 /// `pyspark.sql.udtf.PartitioningColumn` (frozen).
-#[pyclass(name = "PartitioningColumn", get_all, frozen)]
+#[pyclass(
+    name = "PartitioningColumn",
+    module = "pyspark.sql.udtf",
+    get_all,
+    frozen
+)]
 pub struct PyPartitioningColumn {
     pub name: String,
 }
@@ -53,7 +60,7 @@ impl PyPartitioningColumn {
 }
 
 /// `pyspark.sql.udtf.OrderingColumn` (frozen).
-#[pyclass(name = "OrderingColumn", get_all, frozen)]
+#[pyclass(name = "OrderingColumn", module = "pyspark.sql.udtf", get_all, frozen)]
 pub struct PyOrderingColumn {
     pub name: String,
     pub ascending: bool,
@@ -74,7 +81,7 @@ impl PyOrderingColumn {
 }
 
 /// `pyspark.sql.udtf.SelectedColumn` (frozen).
-#[pyclass(name = "SelectedColumn", get_all, frozen)]
+#[pyclass(name = "SelectedColumn", module = "pyspark.sql.udtf", get_all, frozen)]
 pub struct PySelectedColumn {
     pub name: String,
     pub alias: String,
@@ -89,7 +96,7 @@ impl PySelectedColumn {
 }
 
 /// `pyspark.sql.udtf.AnalyzeResult` (mutable dataclass).
-#[pyclass(name = "AnalyzeResult", get_all, set_all)]
+#[pyclass(name = "AnalyzeResult", module = "pyspark.sql.udtf", get_all, set_all)]
 pub struct PyAnalyzeResult {
     pub schema: Py<PyAny>,
     pub withSinglePartition: bool,

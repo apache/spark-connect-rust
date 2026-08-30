@@ -16,7 +16,7 @@ use crate::dataframe::PyDataFrame;
 use crate::errors::ResultExt;
 
 /// A fitted ML model (result of `Estimator.fit`), wrapping a boxed core `Model`.
-#[pyclass(name = "MLModel")]
+#[pyclass(name = "MLModel", module = "pyspark.ml.connect")]
 pub struct PyMLModel {
     model: Box<dyn Model>,
 }
@@ -32,7 +32,7 @@ impl PyMLModel {
 }
 
 /// StandardScaler estimator.
-#[pyclass(name = "StandardScaler")]
+#[pyclass(name = "StandardScaler", module = "pyspark.ml.connect.feature")]
 pub struct PyStandardScaler {
     inner: StandardScaler,
 }
@@ -72,7 +72,7 @@ impl PyStandardScaler {
 }
 
 /// MaxAbsScaler estimator.
-#[pyclass(name = "MaxAbsScaler")]
+#[pyclass(name = "MaxAbsScaler", module = "pyspark.ml.connect.feature")]
 pub struct PyMaxAbsScaler {
     inner: MaxAbsScaler,
 }
@@ -112,7 +112,7 @@ impl PyMaxAbsScaler {
 }
 
 /// StringIndexer estimator.
-#[pyclass(name = "StringIndexer")]
+#[pyclass(name = "StringIndexer", module = "pyspark.ml.connect.feature")]
 pub struct PyStringIndexer {
     inner: StringIndexer,
 }
@@ -152,7 +152,7 @@ impl PyStringIndexer {
 }
 
 /// VectorAssembler transformer.
-#[pyclass(name = "VectorAssembler")]
+#[pyclass(name = "VectorAssembler", module = "pyspark.ml.connect.feature")]
 pub struct PyVectorAssembler {
     inner: VectorAssembler,
 }
@@ -194,7 +194,10 @@ impl PyVectorAssembler {
 }
 
 /// LogisticRegression estimator.
-#[pyclass(name = "LogisticRegression")]
+#[pyclass(
+    name = "LogisticRegression",
+    module = "pyspark.ml.connect.classification"
+)]
 pub struct PyLogisticRegression {
     inner: LogisticRegression,
 }
@@ -257,7 +260,7 @@ impl PyLogisticRegression {
 }
 
 /// RegressionEvaluator.
-#[pyclass(name = "RegressionEvaluator")]
+#[pyclass(name = "RegressionEvaluator", module = "pyspark.ml.connect.evaluation")]
 pub struct PyRegressionEvaluator {
     inner: RegressionEvaluator,
 }
@@ -308,7 +311,10 @@ impl PyRegressionEvaluator {
 }
 
 /// BinaryClassificationEvaluator.
-#[pyclass(name = "BinaryClassificationEvaluator")]
+#[pyclass(
+    name = "BinaryClassificationEvaluator",
+    module = "pyspark.ml.connect.evaluation"
+)]
 pub struct PyBinaryClassificationEvaluator {
     inner: BinaryClassificationEvaluator,
 }
@@ -355,7 +361,7 @@ impl PyBinaryClassificationEvaluator {
 }
 
 /// Pipeline estimator (chains stages by name).
-#[pyclass(name = "Pipeline")]
+#[pyclass(name = "Pipeline", module = "pyspark.ml.connect.pipeline")]
 pub struct PyPipeline {
     inner: Pipeline,
 }
@@ -387,7 +393,10 @@ impl PyPipeline {
 }
 
 /// MulticlassClassificationEvaluator.
-#[pyclass(name = "MulticlassClassificationEvaluator")]
+#[pyclass(
+    name = "MulticlassClassificationEvaluator",
+    module = "pyspark.ml.connect.evaluation"
+)]
 pub struct PyMulticlassClassificationEvaluator {
     inner: MulticlassClassificationEvaluator,
 }
@@ -438,7 +447,7 @@ impl PyMulticlassClassificationEvaluator {
 }
 
 /// CrossValidator (k-fold tuning).
-#[pyclass(name = "CrossValidator")]
+#[pyclass(name = "CrossValidator", module = "pyspark.ml.connect.tuning")]
 pub struct PyCrossValidator {
     inner: CrossValidator,
 }

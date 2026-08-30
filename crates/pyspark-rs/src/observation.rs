@@ -8,7 +8,7 @@ use spark_connect::observation::Observation;
 static OBS_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Python wrapper for a named metric Observation.
-#[pyclass(name = "Observation")]
+#[pyclass(name = "Observation", module = "pyspark.sql.observation")]
 pub struct PyObservation {
     pub(crate) inner: Observation,
 }

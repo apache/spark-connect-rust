@@ -6,7 +6,7 @@ use spark_connect::resource::{
 };
 
 /// Python wrapper for ExecutorResourceRequests.
-#[pyclass(name = "ExecutorResourceRequests")]
+#[pyclass(name = "ExecutorResourceRequests", module = "pyspark.resource.profile")]
 pub struct PyExecutorResourceRequests {
     pub(crate) inner: ExecutorResourceRequests,
 }
@@ -61,7 +61,7 @@ impl PyExecutorResourceRequests {
 }
 
 /// Python wrapper for TaskResourceRequests.
-#[pyclass(name = "TaskResourceRequests")]
+#[pyclass(name = "TaskResourceRequests", module = "pyspark.resource.profile")]
 pub struct PyTaskResourceRequests {
     pub(crate) inner: TaskResourceRequests,
 }
@@ -92,7 +92,7 @@ impl PyTaskResourceRequests {
 }
 
 /// Python wrapper for ResourceProfileBuilder.
-#[pyclass(name = "ResourceProfileBuilder")]
+#[pyclass(name = "ResourceProfileBuilder", module = "pyspark.resource.profile")]
 pub struct PyResourceProfileBuilder {
     pub(crate) inner: ResourceProfileBuilder,
 }
@@ -133,7 +133,7 @@ impl PyResourceProfileBuilder {
 }
 
 /// Python wrapper for ResourceProfile.
-#[pyclass(name = "ResourceProfile")]
+#[pyclass(name = "ResourceProfile", module = "pyspark.resource.profile")]
 pub struct PyResourceProfile {
     pub(crate) inner: ResourceProfile,
 }

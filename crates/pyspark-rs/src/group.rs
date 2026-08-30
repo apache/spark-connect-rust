@@ -9,7 +9,7 @@ use crate::errors::ResultExt;
 use crate::functions::to_column;
 
 /// Python wrapper for Spark GroupedData.
-#[pyclass(name = "GroupedData")]
+#[pyclass(name = "GroupedData", module = "pyspark.sql.group")]
 pub struct PyGroupedData {
     pub(crate) grouped_data: RustGroupedData,
 }
@@ -363,7 +363,7 @@ fn twus_func<'py>(
 }
 
 /// Python wrapper for cogrouped pandas/arrow ops (`pyspark.sql.group.PandasCogroupedOps`).
-#[pyclass(name = "PandasCogroupedOps")]
+#[pyclass(name = "PandasCogroupedOps", module = "pyspark.sql.pandas.group_ops")]
 pub struct PyCoGroupedData {
     pub(crate) inner: RustCoGroupedData,
 }

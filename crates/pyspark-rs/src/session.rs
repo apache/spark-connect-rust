@@ -19,7 +19,11 @@ use crate::streaming::{PyDataStreamReader, PyStreamingQueryManager};
 ///
 /// Mirrors `pyspark.sql.SparkSession.Builder`: chainable and reached via the
 /// `SparkSession.builder` class attribute.
-#[pyclass(name = "SparkSessionBuilder", from_py_object)]
+#[pyclass(
+    name = "SparkSessionBuilder",
+    module = "pyspark.sql.session",
+    from_py_object
+)]
 #[derive(Clone)]
 pub struct PySparkSessionBuilder {
     remote_url: Option<String>,
@@ -200,7 +204,7 @@ fn active_slot() -> &'static std::sync::Mutex<Option<SparkSession>> {
 }
 
 /// Python wrapper for a Spark session.
-#[pyclass(name = "SparkSession")]
+#[pyclass(name = "SparkSession", module = "pyspark.sql.session")]
 pub struct PySparkSession {
     pub(crate) session: SparkSession,
 }
@@ -779,7 +783,7 @@ impl PySparkSession {
 /// Minimal stand-in for the reference `SparkConnectClient`, returned by
 /// `SparkSession.client`. The real client is the Rust transport; this only surfaces the
 /// members that test/utility code (e.g. `ReusedConnectTestCase`) touches.
-#[pyclass(name = "SparkConnectClientStub")]
+#[pyclass(name = "SparkConnectClientStub", module = "pyspark.sql.connect.client")]
 pub struct PyConnectClientStub {
     session_id: String,
 }

@@ -8,7 +8,7 @@ use crate::errors::ResultExt;
 use crate::functions::to_column;
 
 /// Python wrapper for the table-valued-function namespace (`spark.tvf`).
-#[pyclass(name = "TableValuedFunction")]
+#[pyclass(name = "TableValuedFunction", module = "pyspark.sql.tvf")]
 pub struct PyTableValuedFunction {
     inner: TableValuedFunction,
 }

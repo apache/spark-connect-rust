@@ -245,7 +245,10 @@ pub fn pipeline_define_sql_graph_elements(
 /// `(message: str, timestamp_micros: int)` per pipeline event; command-result responses
 /// are skipped; a server-side failure is raised (mapped to the pyspark exception type,
 /// e.g. `AnalysisException`) during iteration.
-#[pyclass(name = "PipelineRunStream")]
+#[pyclass(
+    name = "PipelineRunStream",
+    module = "pyspark.pipelines.spark_connect_pipeline"
+)]
 pub struct PyPipelineRunStream {
     inner: PipelineRunStream,
 }

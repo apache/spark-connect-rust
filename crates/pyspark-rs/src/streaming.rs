@@ -41,7 +41,7 @@ impl StreamingQueryListener for PyListenerAdapter {
 }
 
 /// Python wrapper for DataStreamReader.
-#[pyclass(name = "DataStreamReader")]
+#[pyclass(name = "DataStreamReader", module = "pyspark.sql.streaming.readwriter")]
 pub struct PyDataStreamReader {
     inner: Option<DataStreamReader>,
 }
@@ -180,7 +180,11 @@ impl PyDataStreamReader {
 }
 
 /// Python wrapper for Trigger.
-#[pyclass(name = "Trigger", from_py_object)]
+#[pyclass(
+    name = "Trigger",
+    module = "pyspark.sql.streaming.readwriter",
+    from_py_object
+)]
 #[derive(Clone)]
 pub struct PyTrigger {
     inner: Trigger,
@@ -220,7 +224,7 @@ impl PyTrigger {
 }
 
 /// Python wrapper for DataStreamWriter.
-#[pyclass(name = "DataStreamWriter")]
+#[pyclass(name = "DataStreamWriter", module = "pyspark.sql.streaming.readwriter")]
 pub struct PyDataStreamWriter {
     inner: Option<DataStreamWriter>,
 }
@@ -402,7 +406,11 @@ impl PyDataStreamWriter {
 }
 
 /// Python wrapper for StreamingQueryStatus.
-#[pyclass(name = "StreamingQueryStatus", from_py_object)]
+#[pyclass(
+    name = "StreamingQueryStatus",
+    module = "pyspark.sql.streaming.query",
+    from_py_object
+)]
 #[derive(Clone)]
 pub struct PyStreamingQueryStatus {
     inner: StreamingQueryStatus,
@@ -438,7 +446,11 @@ impl PyStreamingQueryStatus {
 }
 
 /// Python wrapper for StreamingQueryException.
-#[pyclass(name = "StreamingQueryException", from_py_object)]
+#[pyclass(
+    name = "StreamingQueryException",
+    module = "pyspark.sql.streaming.query",
+    from_py_object
+)]
 #[derive(Clone)]
 pub struct PyStreamingQueryException {
     inner: StreamingQueryException,
@@ -464,7 +476,7 @@ impl PyStreamingQueryException {
 }
 
 /// Python wrapper for StreamingQuery.
-#[pyclass(name = "StreamingQuery")]
+#[pyclass(name = "StreamingQuery", module = "pyspark.sql.streaming.query")]
 pub struct PyStreamingQuery {
     inner: StreamingQuery,
 }
@@ -538,7 +550,7 @@ impl PyStreamingQuery {
 }
 
 /// Python wrapper for StreamingQueryManager.
-#[pyclass(name = "StreamingQueryManager")]
+#[pyclass(name = "StreamingQueryManager", module = "pyspark.sql.streaming.query")]
 pub struct PyStreamingQueryManager {
     inner: StreamingQueryManager,
 }
@@ -609,7 +621,7 @@ impl PyStreamingQueryManager {
 
 /// Python wrapper for ListenerEventStream.
 /// Implements `__iter__` and `__next__` to yield (event_type: i32, event_json: String) tuples.
-#[pyclass(name = "ListenerEventStream")]
+#[pyclass(name = "ListenerEventStream", module = "pyspark.sql.streaming.query")]
 pub struct PyListenerEventStream {
     inner: Option<ListenerEventStream>,
 }
