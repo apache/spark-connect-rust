@@ -7,7 +7,7 @@ use crate::dataframe::PyDataFrame;
 use crate::errors::ResultExt;
 
 /// Python wrapper for DataFrame statistical functions.
-#[pyclass(name = "DataFrameStatFunctions")]
+#[pyclass(name = "DataFrameStatFunctions", module = "pyspark.sql.dataframe")]
 pub struct PyStatFunctions {
     stat: StatFunctions,
 }

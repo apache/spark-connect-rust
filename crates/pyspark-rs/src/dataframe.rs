@@ -44,7 +44,7 @@ fn flatten_str_cols(cols: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<String>> {
 }
 
 /// Python wrapper for a Spark DataFrame.
-#[pyclass(name = "DataFrame", subclass)]
+#[pyclass(name = "DataFrame", module = "pyspark.sql.connect.dataframe", subclass)]
 pub struct PyDataFrame {
     pub(crate) dataframe: DataFrame,
 }
@@ -1462,7 +1462,7 @@ impl PyDataFrame {
 }
 
 /// Python wrapper for `DataFrameNaFunctions` (`df.na`).
-#[pyclass(name = "DataFrameNaFunctions")]
+#[pyclass(name = "DataFrameNaFunctions", module = "pyspark.sql.dataframe")]
 pub struct PyDataFrameNaFunctions {
     inner: spark_connect::group::NaFunctions,
     df: spark_connect::dataframe::DataFrame,
@@ -1582,7 +1582,7 @@ fn build_replacement_pairs(
 }
 
 /// Python wrapper for `MergeIntoWriter` (`df.mergeInto(...)`).
-#[pyclass(name = "MergeIntoWriter")]
+#[pyclass(name = "MergeIntoWriter", module = "pyspark.sql.merge")]
 pub struct PyMergeIntoWriter {
     inner: Option<spark_connect::MergeIntoWriter>,
 }
@@ -1647,7 +1647,7 @@ fn assignments_to_map(
 }
 
 /// `whenMatched(...)` clause builder.
-#[pyclass(name = "WhenMatched")]
+#[pyclass(name = "WhenMatched", module = "pyspark.sql.merge")]
 pub struct PyWhenMatched {
     inner: Option<spark_connect::merge::WhenMatched>,
 }
@@ -1691,7 +1691,7 @@ impl PyWhenMatched {
 }
 
 /// `whenNotMatched(...)` clause builder.
-#[pyclass(name = "WhenNotMatched")]
+#[pyclass(name = "WhenNotMatched", module = "pyspark.sql.merge")]
 pub struct PyWhenNotMatched {
     inner: Option<spark_connect::merge::WhenNotMatched>,
 }
@@ -1725,7 +1725,7 @@ impl PyWhenNotMatched {
 }
 
 /// `whenNotMatchedBySource(...)` clause builder.
-#[pyclass(name = "WhenNotMatchedBySource")]
+#[pyclass(name = "WhenNotMatchedBySource", module = "pyspark.sql.merge")]
 pub struct PyWhenNotMatchedBySource {
     inner: Option<spark_connect::merge::WhenNotMatchedBySource>,
 }
@@ -1769,7 +1769,7 @@ impl PyWhenNotMatchedBySource {
 }
 
 /// Python wrapper for the V1 `DataFrameWriter` (`df.write`).
-#[pyclass(name = "DataFrameWriter")]
+#[pyclass(name = "DataFrameWriter", module = "pyspark.sql.readwriter")]
 pub struct PyDataFrameWriter {
     inner: Option<spark_connect::readwriter::DataFrameWriter>,
 }
@@ -2079,7 +2079,7 @@ impl PyDataFrameWriter {
 }
 
 /// Python wrapper for the V2 `DataFrameWriter` (`df.writeTo`).
-#[pyclass(name = "DataFrameWriterV2")]
+#[pyclass(name = "DataFrameWriterV2", module = "pyspark.sql.readwriter")]
 pub struct PyDataFrameWriterV2 {
     inner: Option<spark_connect::readwriter::DataFrameWriterV2>,
 }
@@ -2270,7 +2270,7 @@ fn build_side_effect_udf(
 /// Python wrapper for LocalRowIterator yielding Row objects lazily.
 ///
 /// Implements `__iter__` and `__next__` to make it a proper Python iterator.
-#[pyclass(name = "LocalRowIterator")]
+#[pyclass(name = "LocalRowIterator", module = "pyspark.sql.dataframe")]
 pub struct PyLocalRowIterator {
     iterator: LocalRowIterator,
 }

@@ -9,7 +9,7 @@ use crate::errors::ResultExt;
 /// Python wrapper for the ProfilerCollector.
 ///
 /// Exposed as `SparkSession.profile` to access profiler results.
-#[pyclass(name = "ProfilerCollector")]
+#[pyclass(name = "ProfilerCollector", module = "pyspark.sql.profiler")]
 pub struct PyProfilerCollector {
     pub(crate) inner: Arc<ProfilerCollector>,
 }

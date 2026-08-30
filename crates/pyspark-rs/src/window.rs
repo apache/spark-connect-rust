@@ -34,7 +34,7 @@ fn to_sort_orders(cols: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<SortOrder>> {
 }
 
 /// Python wrapper for a window frame bound.
-#[pyclass(name = "FrameBound", from_py_object)]
+#[pyclass(name = "FrameBound", module = "pyspark.sql.window", from_py_object)]
 #[derive(Clone)]
 pub struct PyFrameBound {
     pub(crate) bound: FrameBound,
@@ -82,7 +82,7 @@ impl PyFrameBound {
 }
 
 /// Python wrapper for a WindowSpec.
-#[pyclass(name = "WindowSpec", from_py_object)]
+#[pyclass(name = "WindowSpec", module = "pyspark.sql.window", from_py_object)]
 #[derive(Clone)]
 pub struct PyWindowSpec {
     pub(crate) spec: WindowSpec,
@@ -142,7 +142,7 @@ impl PyWindowSpec {
 }
 
 /// Python wrapper for the Window static builder.
-#[pyclass(name = "Window")]
+#[pyclass(name = "Window", module = "pyspark.sql.window")]
 pub struct PyWindow;
 
 #[pymethods]

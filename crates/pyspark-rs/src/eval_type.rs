@@ -5,7 +5,7 @@
 use pyo3::prelude::*;
 
 /// Evaluation-type constants for Python UDFs/UDTFs. Mirrors `pyspark.util.PythonEvalType`.
-#[pyclass(name = "PythonEvalType")]
+#[pyclass(name = "PythonEvalType", module = "pyspark.util")]
 pub struct PyPythonEvalType;
 
 #[allow(non_upper_case_globals)]

@@ -6,7 +6,7 @@ use pyo3::types::{PyBytes, PyDict, PyList};
 use spark_connect::row::{Row, Value};
 
 /// Python wrapper for a Spark Row.
-#[pyclass(name = "Row")]
+#[pyclass(name = "Row", module = "pyspark.sql.types")]
 pub struct PyRow {
     pub(crate) row: Row,
 }
