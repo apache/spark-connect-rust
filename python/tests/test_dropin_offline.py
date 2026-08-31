@@ -507,9 +507,10 @@ def test_catalog_result_classes():
         Catalog, CatalogMetadata, Database, Table, Column, Function, TablePartition,
     )
     import pyspark._pyspark as p
-    # Rust-backed (defined in the extension module).
+    # Rust-backed, but reporting the reference `pyspark.sql.catalog` module path
+    # (SPARK-59117), not "builtins".
     for cls in (CatalogMetadata, Database, Table, Function, TablePartition):
-        assert cls.__module__ == "builtins", f"{cls.__name__} should be Rust-backed"
+        assert cls.__module__ == "pyspark.sql.catalog", f"{cls.__name__} module = {cls.__module__}"
     assert Column is p.CatalogColumn
 
 
@@ -557,7 +558,7 @@ def test_python_eval_type_constants():
     assert PythonEvalType.SQL_SCALAR_ARROW_UDF == 250
     assert PythonEvalType.SQL_TABLE_UDF == 300
     assert PythonEvalType.SQL_ARROW_TABLE_UDF == 301
-    assert PythonEvalType.__module__ == "builtins"  # Rust-backed
+    assert PythonEvalType.__module__ == "pyspark.util"  # reference path (SPARK-59117)
 
 
 def test_reexport_paths():
