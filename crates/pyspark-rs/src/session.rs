@@ -175,6 +175,7 @@ impl PySparkSessionBuilder {
             py.detach(|| conf.set(k, v)).to_pyerr()?;
         }
         *active_slot().lock().unwrap() = Some(session.clone());
+        log_client_banner(py);
         Ok(PySparkSession::new(session))
     }
 
@@ -201,6 +202,34 @@ fn active_slot() -> &'static std::sync::Mutex<Option<SparkSession>> {
     static SLOT: std::sync::OnceLock<std::sync::Mutex<Option<SparkSession>>> =
         std::sync::OnceLock::new();
     SLOT.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Emit a one-time INFO log identifying this as the Rust-backed Spark Connect
+/// client, so it is discoverable at runtime which client is in use -- and issues
+/// get filed against this project, not the reference `pyspark-client`. Logged the
+/// first time a session connects, via Python's `logging` (so it honors the
+/// application's logging configuration); best-effort and never fails the connect.
+fn log_client_banner(py: Python<'_>) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = (|| -> PyResult<()> {
+            let version: String = py
+                .import("pyspark")
+                .and_then(|m| m.getattr("__version__"))
+                .and_then(|v| v.extract())
+                .unwrap_or_default();
+            let logger = py
+                .import("logging")?
+                .call_method1("getLogger", ("pyspark",))?;
+            let msg = format!(
+                "pyspark-client-rust {version} active: Spark Connect client backed by the native \
+                 Rust engine (tonic), a drop-in for pyspark-client -- not the reference Python \
+                 client. https://apache.github.io/spark-connect-rust/which-client/"
+            );
+            logger.call_method1("info", (msg,))?;
+            Ok(())
+        })();
+    });
 }
 
 /// Python wrapper for a Spark session.

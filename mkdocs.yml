@@ -86,6 +86,7 @@ nav:
   - Home: index.md
   - Get started:
       - Installation: installation.md
+      - Which client am I using?: which-client.md
       - Quickstart: quickstart.md
       - Configuration and Connection: configuration.md
   - Guides:
