@@ -29,6 +29,10 @@ use crate::retries::{RetryPolicy, RetryPolicyState};
 /// to a down server would hang forever instead of raising `UNAVAILABLE`.
 const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// gRPC/HTTP header carrying the connection-string `token` as `Bearer <token>`.
+/// Named here (rather than as a string literal) so the key is written once.
+const AUTHORIZATION_HEADER: &str = "authorization";
+
 /// Wait for `grpc` to become ready, bounded by [`READY_TIMEOUT`], mapping any failure
 /// (or the timeout) to a gRPC `UNAVAILABLE` error. This matches how grpcio reports an
 /// unreachable server, so the reference client raises `SparkConnectGrpcException` with
@@ -122,7 +126,25 @@ impl SparkConnectClient {
         // excluded from `metadata()`, so attach it explicitly here; this then propagates
         // to every request via `_attach_metadata` and the reattach stream.
         if let Some(tok) = builder.token() {
-            metadata.push(("authorization".to_string(), format!("Bearer {}", tok)));
+            // Never send the bearer token in cleartext. The scheme above is chosen from
+            // `use_ssl()` alone, so without this guard `sc://host/;token=SECRET` (no
+            // `use_ssl`) would ship `Authorization: Bearer SECRET` over plain HTTP. The
+            // reference client cannot reach that state: `toChannel` sends a token only
+            // over `ssl_channel_credentials()` or, for `localhost`, the loopback
+            // `local_channel_credentials()`, and grpcio refuses call credentials on an
+            // insecure channel outright. Mirror that by requiring TLS for a token unless
+            // the endpoint is loopback; fail loudly rather than downgrade silently.
+            if !builder.use_ssl() && !builder.is_loopback() {
+                // A misconfigured connection string is a value error (surfaces as
+                // `PySparkValueError`), not a generic runtime failure.
+                return Err(SparkError::value_msg(format!(
+                    "Refusing to send the authentication token to '{}' over an insecure \
+                     connection. Set 'use_ssl=true' in the connection string to enable TLS \
+                     (a token is only allowed without TLS when connecting to localhost).",
+                    builder.host()
+                )));
+            }
+            metadata.push((AUTHORIZATION_HEADER.to_string(), format!("Bearer {}", tok)));
         }
 
         Ok(Self {
@@ -970,20 +992,64 @@ mod tests {
 
     #[tokio::test]
     async fn test_token_bearer_in_metadata() {
-        // A connection-string token must actually be SENT as an `Authorization: Bearer`
-        // header, not merely parsed. Assert it is attached to the client's request metadata.
-        let builder = ChannelBuilder::parse("sc://localhost/;token=my_token_123").unwrap();
+        // A connection-string token must actually reach the wire as an
+        // `Authorization: Bearer` header, not merely be parsed. Build a real request,
+        // run it through `_attach_metadata`, and assert on the resulting gRPC metadata
+        // so this survives a future change to how the header is stored or inserted.
+        let builder =
+            ChannelBuilder::parse("sc://localhost/;use_ssl=true;token=my_token_123").unwrap();
         assert!(builder.secure());
         assert_eq!(builder.token(), Some("my_token_123".to_string()));
         let client = SparkConnectClient::connect(&builder).await.unwrap();
-        assert!(
-            client
-                .metadata
-                .iter()
-                .any(|(k, v)| k.eq_ignore_ascii_case("authorization") && v == "Bearer my_token_123"),
-            "expected an `Authorization: Bearer` header in client metadata, got {:?}",
-            client.metadata
+
+        let mut req = Request::new(());
+        client._attach_metadata(&mut req);
+        assert_eq!(
+            req.metadata()
+                .get("authorization")
+                .map(|v| v.to_str().unwrap()),
+            Some("Bearer my_token_123"),
+            "expected an `Authorization: Bearer` header on the request, got {:?}",
+            req.metadata()
         );
+    }
+
+    #[tokio::test]
+    async fn test_token_without_ssl_to_remote_host_is_rejected() {
+        // A token over a non-loopback host without `use_ssl=true` would ship the bearer
+        // credential in cleartext; the client must refuse rather than downgrade silently.
+        let builder = ChannelBuilder::parse("sc://example.com/;token=SECRET").unwrap();
+        match SparkConnectClient::connect(&builder).await {
+            Ok(_) => panic!("expected a token over cleartext to a remote host to be rejected"),
+            Err(e) => assert!(
+                e.to_string().contains("use_ssl=true"),
+                "expected the error to point at use_ssl=true, got: {e}"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_token_without_ssl_to_localhost_is_allowed() {
+        // Local development mirrors upstream's `local_channel_credentials()` exception:
+        // a token over plaintext loopback is permitted and the header is attached.
+        for url in [
+            "sc://localhost/;token=SECRET",
+            "sc://127.0.0.1/;token=SECRET",
+            "sc://[::1]/;token=SECRET",
+        ] {
+            let builder = ChannelBuilder::parse(url).unwrap();
+            let client = SparkConnectClient::connect(&builder)
+                .await
+                .unwrap_or_else(|e| panic!("{url} should be allowed, got: {e}"));
+            assert!(
+                client
+                    .metadata
+                    .iter()
+                    .any(|(k, v)| k == "authorization" && v == "Bearer SECRET"),
+                "{url}: expected the bearer header to be attached, got {:?}",
+                client.metadata
+            );
+        }
     }
 
     #[tokio::test]
