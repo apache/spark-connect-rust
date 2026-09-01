@@ -294,6 +294,34 @@ fn struct_to_ddl_tree_and_nullable() {
 }
 
 #[test]
+fn tree_string_with_depth_truncates_nested_structs() {
+    use spark_connect::types::StructField;
+    let nested = DataType::Struct {
+        fields: vec![StructField {
+            name: "outer".to_string(),
+            data_type: DataType::Struct {
+                fields: vec![StructField {
+                    name: "inner".to_string(),
+                    data_type: DataType::Integer,
+                    nullable: true,
+                    metadata: Default::default(),
+                }],
+            },
+            nullable: true,
+            metadata: Default::default(),
+        }],
+    };
+    // Full depth shows the nested field, rendering the struct as the bare type name.
+    let full = nested.tree_string().unwrap();
+    assert!(full.contains("outer: struct (nullable = true)"));
+    assert!(full.contains("inner: int (nullable = true)"));
+    // max_depth = 1 prints only the top level; the nested field is omitted.
+    let shallow = nested.tree_string_with_depth(1).unwrap();
+    assert!(shallow.contains("outer: struct (nullable = true)"));
+    assert!(!shallow.contains("inner"));
+}
+
+#[test]
 fn from_json_str_roundtrips() {
     use spark_connect::types::StructField;
     let dt = DataType::from_json_str("\"integer\"").unwrap();

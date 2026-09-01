@@ -878,14 +878,22 @@ impl DataType {
     fn append_tree(&self, out: &mut String, prefix: &str, depth: i32, max_depth: i32) {
         if let DataType::Struct { fields } = self {
             for f in fields {
+                // A nested struct is rendered as the bare type name ("struct") and its
+                // fields are shown by recursing below, so `max_depth` can truncate them.
+                // Using `simple_string()` here would inline the children (e.g.
+                // "struct<inner:int>"), leaking them past `max_depth`. Non-struct types
+                // have no depth-controlled children, so their simple string is used.
+                let is_struct = matches!(f.data_type, DataType::Struct { .. });
+                let type_repr = if is_struct {
+                    f.data_type.type_name()
+                } else {
+                    f.data_type.simple_string()
+                };
                 out.push_str(&format!(
                     "{}-- {}: {} (nullable = {})\n",
-                    prefix,
-                    f.name,
-                    f.data_type.simple_string(),
-                    f.nullable
+                    prefix, f.name, type_repr, f.nullable
                 ));
-                if matches!(f.data_type, DataType::Struct { .. }) && depth < max_depth {
+                if is_struct && depth < max_depth {
                     f.data_type.append_tree(
                         out,
                         &format!("{}    |", prefix.trim_end_matches('|')),
