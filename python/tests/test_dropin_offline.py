@@ -193,6 +193,46 @@ def test_column_methods_offline():
     assert type(c.transform(lambda x: x + 1)).__name__ == "Column"
 
 
+def test_functions_keyword_and_dispatch_paths():
+    # PySpark 4.2.0 keyword-argument parity: generated wrappers carry the reference
+    # parameter names, and the hand-written wrappers dispatch to the core. All lazy
+    # (column-expression building; no server needed).
+    from pyspark.sql import functions as F
+
+    def is_col(x):
+        return type(x).__name__ == "Column"
+
+    c = F.col("id")
+    # hand-written wrappers with reference parameter names
+    assert is_col(F.col("id")) and is_col(F.lit(3))
+    assert is_col(F.expr("id + 1")) and is_col(F.column("id"))
+    assert is_col(F.sha2(c, 256))
+    assert is_col(F.window(c, "10 minutes"))
+    assert is_col(F.window(c, "10 minutes", "5 minutes", "1 minute"))
+    # generated wrappers accept the reference keyword arguments (GAP 1)
+    assert is_col(F.first(c, ignorenulls=True))
+    assert is_col(F.round(c, scale=2))
+    assert is_col(F.split(c, pattern=",", limit=2))
+    assert is_col(F.array_contains(c, value=1))
+    assert is_col(F.concat_ws("-", c, c))
+    # lag/lead literal-arg overrides
+    assert is_col(F.lag(c, offset=2, default=0))
+    assert is_col(F.lead(c, offset=2, default=0))
+    # the *args fallback wrapper (used for Rust-only extras) still dispatches positionally
+    assert is_col(F._create_wrapper("upper")(c))
+    # the _UNSET sentinel (default for optional generated args) has a stable repr
+    assert repr(F._UNSET) == "<unset>"
+
+
+def test_column_alias_metadata_offline():
+    from pyspark.sql import functions as F
+
+    c = F.col("id")
+    assert type(c.alias("x")).__name__ == "Column"
+    assert type(c.alias("x", metadata={"k": "v"})).__name__ == "Column"
+    assert type(c.name("y")).__name__ == "Column"
+
+
 def test_new_v420_methods_exposed():
     # Presence of the v4.2.0 parity methods on the drop-in classes (behaviour that
     # needs a live server is covered by the e2e tests).

@@ -88,6 +88,48 @@ pub(crate) fn to_column_list(
     Ok(cols)
 }
 
+/// Build sort-order expressions for sort/orderBy/sortWithinPartitions, honoring an
+/// optional `ascending` kwarg (a bool applied to all columns, or a per-column list of
+/// bools/ints). Mirrors reference pyspark, which wraps each column with asc()/desc()
+/// when `ascending` is given; without it, columns are used as-is.
+fn sort_order_exprs(
+    columns: Vec<spark_connect::column::Column>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Vec<spark_connect::expression::Expression>> {
+    let ascending = match kwargs {
+        Some(kw) => kw.get_item("ascending")?,
+        None => None,
+    };
+    let Some(ascending) = ascending else {
+        return Ok(columns.iter().map(|c| c.expression().clone()).collect());
+    };
+    let flags: Vec<bool> = if let Ok(b) = ascending.extract::<bool>() {
+        vec![b; columns.len()]
+    } else if let Ok(i) = ascending.extract::<i64>() {
+        vec![i != 0; columns.len()]
+    } else if let Ok(list) = ascending.extract::<Vec<bool>>() {
+        list
+    } else if let Ok(list) = ascending.extract::<Vec<i64>>() {
+        list.into_iter().map(|i| i != 0).collect()
+    } else {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "ascending must be a bool, an int, or a list of bools/ints",
+        ));
+    };
+    if flags.len() != columns.len() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "the list length of ascending ({}) must equal the number of sort columns ({})",
+            flags.len(),
+            columns.len()
+        )));
+    }
+    Ok(columns
+        .into_iter()
+        .zip(flags)
+        .map(|(c, asc)| (if asc { c.asc() } else { c.desc() }).expression().clone())
+        .collect())
+}
+
 /// Map a pyspark `how` string to a JoinType (shared by join / lateralJoin).
 fn parse_join_type(how: &str) -> PyResult<JoinType> {
     Ok(match how.to_lowercase().as_str() {
@@ -126,9 +168,9 @@ impl PyDataFrame {
     }
 
     /// Select using SQL expressions.
-    #[pyo3(signature = (*exprs))]
-    fn selectExpr(&self, _py: Python<'_>, exprs: Vec<String>) -> PyDataFrame {
-        let columns: Vec<_> = exprs
+    #[pyo3(signature = (*expr))]
+    fn selectExpr(&self, _py: Python<'_>, expr: Vec<String>) -> PyDataFrame {
+        let columns: Vec<_> = expr
             .iter()
             .map(|e| spark_connect::functions::expr(e))
             .collect();
@@ -188,9 +230,9 @@ impl PyDataFrame {
     }
 
     /// Drop columns.
-    #[pyo3(signature = (*names))]
-    fn drop(&self, _py: Python<'_>, names: Vec<String>) -> PyDataFrame {
-        let col_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+    #[pyo3(signature = (*cols))]
+    fn drop(&self, _py: Python<'_>, cols: Vec<String>) -> PyDataFrame {
+        let col_refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
         PyDataFrame::new(self.dataframe.drop(col_refs))
     }
 
@@ -218,19 +260,28 @@ impl PyDataFrame {
         PyDataFrame::new(self.dataframe.drop_duplicates(col_refs))
     }
 
-    /// Sort rows.
-    #[pyo3(signature = (*cols))]
-    fn sort(&self, _py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
-        let columns = to_column_list(cols)?;
-        let exprs: Vec<_> = columns.iter().map(|c| c.expression().clone()).collect();
+    /// Sort rows. `ascending` (a bool or list of bools, via kwargs) mirrors reference
+    /// pyspark: it wraps each sort column with asc()/desc().
+    #[pyo3(signature = (*cols, **kwargs))]
+    fn sort(
+        &self,
+        _py: Python<'_>,
+        cols: Vec<Bound<'_, PyAny>>,
+        kwargs: Option<Bound<'_, PyDict>>,
+    ) -> PyResult<PyDataFrame> {
+        let exprs = sort_order_exprs(to_column_list(cols)?, kwargs.as_ref())?;
         Ok(PyDataFrame::new(self.dataframe.sort(exprs)))
     }
 
     /// Alias for sort.
-    #[pyo3(signature = (*cols))]
-    fn orderBy(&self, _py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
-        let columns = to_column_list(cols)?;
-        let exprs: Vec<_> = columns.iter().map(|c| c.expression().clone()).collect();
+    #[pyo3(signature = (*cols, **kwargs))]
+    fn orderBy(
+        &self,
+        _py: Python<'_>,
+        cols: Vec<Bound<'_, PyAny>>,
+        kwargs: Option<Bound<'_, PyDict>>,
+    ) -> PyResult<PyDataFrame> {
+        let exprs = sort_order_exprs(to_column_list(cols)?, kwargs.as_ref())?;
         Ok(PyDataFrame::new(self.dataframe.order_by(exprs)))
     }
 
@@ -438,9 +489,9 @@ impl PyDataFrame {
     }
 
     /// Convert to DataFrame with new column names.
-    #[pyo3(signature = (*names))]
-    fn toDF(&self, _py: Python<'_>, names: Vec<String>) -> PyDataFrame {
-        let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+    #[pyo3(signature = (*cols))]
+    fn toDF(&self, _py: Python<'_>, cols: Vec<String>) -> PyDataFrame {
+        let name_refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
         PyDataFrame::new(self.dataframe.to_df(name_refs))
     }
 
@@ -472,9 +523,18 @@ impl PyDataFrame {
         ))
     }
 
-    /// Grouping sets aggregation: `groupingSets([[a, b], [a], []])`.
-    #[pyo3(name = "groupingSets")]
-    fn grouping_sets(&self, groupingSets: Vec<Vec<Bound<'_, PyAny>>>) -> PyResult<PyGroupedData> {
+    /// Grouping sets aggregation: `groupingSets([[a, b], [a], []], "a", "b")`.
+    ///
+    /// `*cols` (the overall grouping columns) is accepted for signature parity with
+    /// reference pyspark; the connect core derives the grouping from the sets, so the
+    /// trailing columns are currently informational.
+    #[pyo3(name = "groupingSets", signature = (groupingSets, *cols))]
+    #[allow(unused_variables)]
+    fn grouping_sets(
+        &self,
+        groupingSets: Vec<Vec<Bound<'_, PyAny>>>,
+        cols: Vec<Bound<'_, PyAny>>,
+    ) -> PyResult<PyGroupedData> {
         let mut out: Vec<Vec<spark_connect::column::Column>> =
             Vec::with_capacity(groupingSets.len());
         for s in groupingSets {
@@ -495,9 +555,8 @@ impl PyDataFrame {
     /// `toJSON()` returns an RDD in classic PySpark; Spark Connect has no RDD, so
     /// the official Connect client raises NotImplementedError - we match that exactly.
     /// (Use `df.select(to_json(struct("*")))` for a JSON-string DataFrame.)
-    #[pyo3(name = "toJSON", signature = (use_unicode=true))]
-    #[allow(unused_variables)]
-    fn to_json(&self, use_unicode: bool) -> PyResult<()> {
+    #[pyo3(name = "toJSON")]
+    fn to_json(&self) -> PyResult<()> {
         Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
             "toJSON() is not supported for Spark Connect (it returns an RDD)",
         ))
@@ -517,16 +576,14 @@ impl PyDataFrame {
     }
 
     /// Sort within each partition.
-    #[pyo3(name = "sortWithinPartitions", signature = (*cols))]
+    #[pyo3(name = "sortWithinPartitions", signature = (*cols, **kwargs))]
     fn sort_within_partitions(
         &self,
         _py: Python<'_>,
         cols: Vec<Bound<'_, PyAny>>,
+        kwargs: Option<Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
-        let exprs: Vec<_> = to_column_list(cols)?
-            .iter()
-            .map(|c| c.expression().clone())
-            .collect();
+        let exprs = sort_order_exprs(to_column_list(cols)?, kwargs.as_ref())?;
         Ok(PyDataFrame::new(
             self.dataframe.sort_within_partitions(exprs),
         ))
@@ -763,10 +820,17 @@ impl PyDataFrame {
         ))
     }
 
-    /// Local checkpoint.
-    #[pyo3(name = "localCheckpoint", signature = (eager=true))]
+    /// Local checkpoint. `storageLevel` is accepted for signature parity with reference
+    /// pyspark; the connect core's local checkpoint does not yet take a storage level,
+    /// so a supplied value is currently a no-op.
+    #[pyo3(name = "localCheckpoint", signature = (eager=true, storageLevel=None))]
     #[allow(unused_variables)]
-    fn local_checkpoint(&self, py: Python<'_>, eager: bool) -> PyResult<PyDataFrame> {
+    fn local_checkpoint(
+        &self,
+        py: Python<'_>,
+        eager: bool,
+        storageLevel: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
         Ok(PyDataFrame::new(
             py.detach(|| self.dataframe.local_checkpoint()).to_pyerr()?,
         ))
@@ -984,53 +1048,63 @@ impl PyDataFrame {
     }
 
     /// Unpivot (wide-to-long). `values=None` unpivots all non-id columns.
-    #[pyo3(signature = (ids, values=None, var_name="variable", value_name="value"))]
+    #[pyo3(signature = (ids, values=None, variableColumnName="variable", valueColumnName="value"))]
     fn unpivot(
         &self,
         ids: Vec<String>,
         values: Option<Vec<String>>,
-        var_name: &str,
-        value_name: &str,
+        variableColumnName: &str,
+        valueColumnName: &str,
     ) -> PyDataFrame {
         let id_refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
         let owned = values;
         let val_refs = owned
             .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect());
-        PyDataFrame::new(self.dataframe.melt(id_refs, val_refs, var_name, value_name))
+        PyDataFrame::new(self.dataframe.melt(
+            id_refs,
+            val_refs,
+            variableColumnName,
+            valueColumnName,
+        ))
     }
 
     /// Alias for unpivot.
-    #[pyo3(signature = (ids, values=None, var_name="variable", value_name="value"))]
+    #[pyo3(signature = (ids, values=None, variableColumnName="variable", valueColumnName="value"))]
     fn melt(
         &self,
         ids: Vec<String>,
         values: Option<Vec<String>>,
-        var_name: &str,
-        value_name: &str,
+        variableColumnName: &str,
+        valueColumnName: &str,
     ) -> PyDataFrame {
         let id_refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
         let owned = values;
         let val_refs = owned
             .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect());
-        PyDataFrame::new(self.dataframe.melt(id_refs, val_refs, var_name, value_name))
+        PyDataFrame::new(self.dataframe.melt(
+            id_refs,
+            val_refs,
+            variableColumnName,
+            valueColumnName,
+        ))
     }
 
     /// Persist the DataFrame. A storage-level argument is accepted for API parity;
     /// the default (MEMORY_AND_DISK) is used.
-    #[pyo3(signature = (storage_level=None))]
+    #[pyo3(signature = (storageLevel=None))]
     fn persist(
         &self,
         py: Python<'_>,
-        storage_level: Option<Bound<'_, PyAny>>,
+        storageLevel: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         use spark_connect::storage::StorageLevelExt;
         // Honor the requested StorageLevel instead of always using MEMORY_AND_DISK.
         // A pyspark StorageLevel exposes useDisk/useMemory/useOffHeap/deserialized/
         // replication; map them onto the proto. Default (None) is MEMORY_AND_DISK_DESER,
         // matching reference DataFrame.persist().
-        let level = match storage_level {
+        let level = match storageLevel {
             Some(obj) => spark_connect_proto::StorageLevel {
                 use_disk: obj.getattr("useDisk")?.extract()?,
                 use_memory: obj.getattr("useMemory")?.extract()?,
@@ -1243,17 +1317,17 @@ impl PyDataFrame {
     /// Sample a fraction of rows. Mirrors `DataFrame.sample(withReplacement=None,
     /// fraction=None, seed=None)` including the legacy positional form
     /// `sample(fraction)` (where the first positional arg is the fraction).
-    #[pyo3(signature = (with_replacement=None, fraction=None, seed=None))]
+    #[pyo3(signature = (withReplacement=None, fraction=None, seed=None))]
     fn sample(
         &self,
-        with_replacement: Option<&Bound<'_, PyAny>>,
+        withReplacement: Option<&Bound<'_, PyAny>>,
         fraction: Option<f64>,
         seed: Option<i64>,
     ) -> PyResult<PyDataFrame> {
         // Resolve the (withReplacement, fraction) overloads exactly like pyspark:
         // if the first positional is a float and no fraction was given, it IS the
         // fraction (legacy `sample(0.5)`); otherwise it's the bool withReplacement.
-        let (replace, frac) = match (with_replacement, fraction) {
+        let (replace, frac) = match (withReplacement, fraction) {
             (Some(w), None) => {
                 if let Ok(f) = w.extract::<f64>() {
                     (false, f) // legacy sample(fraction)
@@ -1289,8 +1363,12 @@ impl PyDataFrame {
         self.dataframe.is_empty().to_pyerr()
     }
 
-    /// Print the schema of the DataFrame.
-    fn printSchema(&self) -> PyResult<()> {
+    /// Print the schema of the DataFrame. `level` (max nesting depth to print) is
+    /// accepted for signature parity with reference pyspark; the connect core does not
+    /// yet thread a depth into the schema tree-string, so it is currently ignored.
+    #[pyo3(signature = (level=None))]
+    #[allow(unused_variables)]
+    fn printSchema(&self, level: Option<i32>) -> PyResult<()> {
         self.dataframe.show(0).to_pyerr()
     }
 
@@ -1374,13 +1452,19 @@ impl PyDataFrame {
     }
 
     /// `DataFrame.mapInPandas` — map an iterator of pandas DataFrames.
-    #[pyo3(name = "mapInPandas", signature = (func, schema, is_barrier = false))]
+    ///
+    /// `profile` (a ResourceProfile) is accepted for signature parity with reference
+    /// pyspark; the connect core does not yet attach a resource profile id to the
+    /// map-partitions plan, so a supplied profile is currently a no-op.
+    #[pyo3(name = "mapInPandas", signature = (func, schema, barrier = false, profile = None))]
+    #[allow(unused_variables)]
     fn map_in_pandas(
         &self,
         py: Python<'_>,
         func: Bound<'_, PyAny>,
         schema: Bound<'_, PyAny>,
-        is_barrier: bool,
+        barrier: bool,
+        profile: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         let cols = py.detach(|| self.dataframe.columns()).to_pyerr()?;
         let udf = build_map_udf(
@@ -1391,19 +1475,20 @@ impl PyDataFrame {
             eval_type::SQL_MAP_PANDAS_ITER_UDF,
             &cols,
         )?;
-        Ok(PyDataFrame::new(
-            self.dataframe.map_in_pandas(udf, is_barrier),
-        ))
+        Ok(PyDataFrame::new(self.dataframe.map_in_pandas(udf, barrier)))
     }
 
-    /// `DataFrame.mapInArrow` — map an iterator of Arrow batches.
-    #[pyo3(name = "mapInArrow", signature = (func, schema, is_barrier = false))]
+    /// `DataFrame.mapInArrow` — map an iterator of Arrow batches. `profile` is accepted
+    /// for signature parity (see `mapInPandas`); it is currently a no-op.
+    #[pyo3(name = "mapInArrow", signature = (func, schema, barrier = false, profile = None))]
+    #[allow(unused_variables)]
     fn map_in_arrow(
         &self,
         py: Python<'_>,
         func: Bound<'_, PyAny>,
         schema: Bound<'_, PyAny>,
-        is_barrier: bool,
+        barrier: bool,
+        profile: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         let cols = py.detach(|| self.dataframe.columns()).to_pyerr()?;
         let udf = build_map_udf(
@@ -1414,9 +1499,7 @@ impl PyDataFrame {
             eval_type::SQL_MAP_ARROW_ITER_UDF,
             &cols,
         )?;
-        Ok(PyDataFrame::new(
-            self.dataframe.map_in_arrow(udf, is_barrier),
-        ))
+        Ok(PyDataFrame::new(self.dataframe.map_in_arrow(udf, barrier)))
     }
 
     /// `DataFrame.foreach` — run a function per row for side effects.
@@ -1782,11 +1865,47 @@ impl PyDataFrameWriter {
     }
 }
 
+/// Apply the shared `format` / `mode` / `partitionBy` / `**options` arguments that
+/// reference `DataFrameWriter.save` and `.saveAsTable` accept inline, mirroring
+/// `.format().mode().partitionBy().options()` chaining.
+fn apply_write_common(
+    mut w: spark_connect::readwriter::DataFrameWriter,
+    format: Option<&str>,
+    mode: Option<&str>,
+    partitionBy: Option<&Bound<'_, PyAny>>,
+    options: Option<&Bound<'_, PyDict>>,
+) -> PyResult<spark_connect::readwriter::DataFrameWriter> {
+    if let Some(f) = format {
+        w = w.format(f);
+    }
+    if let Some(m) = mode {
+        w = w.mode(m);
+    }
+    if let Some(pb) = partitionBy {
+        let cols: Vec<String> = if let Ok(one) = pb.extract::<String>() {
+            vec![one]
+        } else {
+            pb.extract::<Vec<String>>()?
+        };
+        w = w.partition_by(cols);
+    }
+    if let Some(opts) = options {
+        let mut map = std::collections::HashMap::new();
+        for (k, v) in opts.iter() {
+            if let Some(val) = crate::coerce_option_value(&v)? {
+                map.insert(k.str()?.to_string(), val);
+            }
+        }
+        w = w.options(map);
+    }
+    Ok(w)
+}
+
 #[pymethods]
 impl PyDataFrameWriter {
-    fn mode(&mut self, mode: &str) -> PyResult<PyDataFrameWriter> {
+    fn mode(&mut self, saveMode: &str) -> PyResult<PyDataFrameWriter> {
         Ok(PyDataFrameWriter {
-            inner: Some(self.take()?.mode(mode)),
+            inner: Some(self.take()?.mode(saveMode)),
         })
     }
 
@@ -1832,17 +1951,26 @@ impl PyDataFrameWriter {
         })
     }
 
-    #[pyo3(name = "bucketBy", signature = (num_buckets, *cols))]
-    fn bucket_by(&mut self, num_buckets: i32, cols: Vec<String>) -> PyResult<PyDataFrameWriter> {
+    #[pyo3(name = "bucketBy", signature = (numBuckets, col, *cols))]
+    fn bucket_by(
+        &mut self,
+        numBuckets: i32,
+        col: String,
+        cols: Vec<String>,
+    ) -> PyResult<PyDataFrameWriter> {
+        let mut all = vec![col];
+        all.extend(cols);
         Ok(PyDataFrameWriter {
-            inner: Some(self.take()?.bucket_by(num_buckets, cols)),
+            inner: Some(self.take()?.bucket_by(numBuckets, all)),
         })
     }
 
-    #[pyo3(name = "sortBy", signature = (*cols))]
-    fn sort_by(&mut self, cols: Vec<String>) -> PyResult<PyDataFrameWriter> {
+    #[pyo3(name = "sortBy", signature = (col, *cols))]
+    fn sort_by(&mut self, col: String, cols: Vec<String>) -> PyResult<PyDataFrameWriter> {
+        let mut all = vec![col];
+        all.extend(cols);
         Ok(PyDataFrameWriter {
-            inner: Some(self.take()?.sort_by(cols)),
+            inner: Some(self.take()?.sort_by(all)),
         })
     }
 
@@ -1876,19 +2004,43 @@ impl PyDataFrameWriter {
         w.save(None).to_pyerr()
     }
 
-    #[pyo3(signature = (path=None))]
-    fn save(&mut self, path: Option<String>) -> PyResult<()> {
-        self.take()?.save(path.as_deref()).to_pyerr()
+    #[pyo3(signature = (path=None, format=None, mode=None, partitionBy=None, **options))]
+    #[allow(non_snake_case)]
+    fn save(
+        &mut self,
+        path: Option<String>,
+        format: Option<&str>,
+        mode: Option<&str>,
+        partitionBy: Option<&Bound<'_, PyAny>>,
+        options: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let w = apply_write_common(self.take()?, format, mode, partitionBy, options)?;
+        w.save(path.as_deref()).to_pyerr()
     }
 
-    #[pyo3(name = "saveAsTable")]
-    fn save_as_table(&mut self, table_name: &str) -> PyResult<()> {
-        self.take()?.save_as_table(table_name).to_pyerr()
+    #[pyo3(name = "saveAsTable", signature = (name, format=None, mode=None, partitionBy=None, **options))]
+    #[allow(non_snake_case)]
+    fn save_as_table(
+        &mut self,
+        name: &str,
+        format: Option<&str>,
+        mode: Option<&str>,
+        partitionBy: Option<&Bound<'_, PyAny>>,
+        options: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let w = apply_write_common(self.take()?, format, mode, partitionBy, options)?;
+        w.save_as_table(name).to_pyerr()
     }
 
-    #[pyo3(name = "insertInto")]
-    fn insert_into(&mut self, table_name: &str) -> PyResult<()> {
-        self.take()?.insert_into(table_name).to_pyerr()
+    /// Insert into an existing table. `overwrite` maps to overwrite/append mode,
+    /// mirroring reference `DataFrameWriter.insertInto(tableName, overwrite=None)`.
+    #[pyo3(name = "insertInto", signature = (tableName, overwrite=None))]
+    fn insert_into(&mut self, tableName: &str, overwrite: Option<bool>) -> PyResult<()> {
+        let mut w = self.take()?;
+        if let Some(ow) = overwrite {
+            w = w.mode(if ow { "overwrite" } else { "append" });
+        }
+        w.insert_into(tableName).to_pyerr()
     }
 
     /// Write as PARQUET - full pyspark signature; each named option is
@@ -2136,18 +2288,26 @@ impl PyDataFrameWriterV2 {
         })
     }
 
-    #[pyo3(name = "partitionedBy", signature = (*cols))]
-    fn partitioned_by(&mut self, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrameWriterV2> {
-        let columns = to_column_list(cols)?;
+    #[pyo3(name = "partitionedBy", signature = (col, *cols))]
+    fn partitioned_by(
+        &mut self,
+        col: Bound<'_, PyAny>,
+        cols: Vec<Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrameWriterV2> {
+        let mut all = vec![col];
+        all.extend(cols);
+        let columns = to_column_list(all)?;
         Ok(PyDataFrameWriterV2 {
             inner: Some(self.take()?.partition_by(columns)),
         })
     }
 
-    #[pyo3(name = "clusterBy", signature = (*cols))]
-    fn cluster_by(&mut self, cols: Vec<String>) -> PyResult<PyDataFrameWriterV2> {
+    #[pyo3(name = "clusterBy", signature = (col, *cols))]
+    fn cluster_by(&mut self, col: String, cols: Vec<String>) -> PyResult<PyDataFrameWriterV2> {
+        let mut all = vec![col];
+        all.extend(cols);
         Ok(PyDataFrameWriterV2 {
-            inner: Some(self.take()?.cluster_by(cols)),
+            inner: Some(self.take()?.cluster_by(all)),
         })
     }
 

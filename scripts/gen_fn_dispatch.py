@@ -4,8 +4,35 @@ Generator for dispatch and Python wrappers for all 440 Spark SQL functions.
 Parses crates/spark-connect/src/functions.rs and generates optimized code.
 """
 
+import argparse
+import inspect
 import re
+import sys
 from pathlib import Path
+
+_ap = argparse.ArgumentParser(description=__doc__)
+_ap.add_argument(
+    "--pyspark-src",
+    default=None,
+    help="Path to the reference PySpark package root (…/python). When given, generated "
+    "Python wrappers carry the reference's real parameter names/order so keyword calls "
+    "work; without it, wrappers fall back to the historical *args form.",
+)
+_ap.add_argument(
+    "--write-dispatch",
+    action="store_true",
+    help="Also (re)write crates/pyspark-rs/src/dispatch_generated.rs. OFF by default: "
+    "that file carries hand-tuned multi-arg arms (e.g. round_scale, "
+    "approx_count_distinct_rsd) this generator does not reproduce, so overwriting it "
+    "would regress. Only pass this when intentionally regenerating the Rust dispatch.",
+)
+_args = _ap.parse_args()
+
+# Optionally load the reference pyspark to mirror real function signatures.
+_ref_functions = None
+if _args.pyspark_src:
+    sys.path.insert(0, _args.pyspark_src)
+    import pyspark.sql.functions as _ref_functions  # noqa: E402
 
 # Read the spark-connect functions file
 functions_rs = Path("crates/spark-connect/src/functions.rs").read_text()
@@ -238,17 +265,95 @@ pub fn call_builtin(name: &str, args: Vec<spark_connect::column::Column>) -> PyR
 """
 )
 
-# Write dispatch file
+# Write dispatch file (guarded: the committed file is hand-tuned; see --write-dispatch).
 dispatch_file = Path("crates/pyspark-rs/src/dispatch_generated.rs")
-dispatch_file.write_text(dispatch_code)
-print(f"\nGenerated dispatch function in {dispatch_file}")
+if _args.write_dispatch:
+    dispatch_file.write_text(dispatch_code)
+    print(f"\nGenerated dispatch function in {dispatch_file}")
+else:
+    print(f"\nSkipped {dispatch_file} (pass --write-dispatch to regenerate the Rust dispatch)")
 
 # Generate Python wrapper functions
 # (skip_functions is defined above, before categorization.)
+#
+# When a reference PySpark is available, emit an explicit ``def`` per function carrying
+# the reference's real parameter names/order, so keyword calls (``F.first(col,
+# ignorenulls=True)``) work. Optional params default to the ``_UNSET`` sentinel and are
+# forwarded only when supplied, reproducing the historical ``*args`` dispatch exactly
+# (same columns, same order) — see functions.py ``_dispatch`` / ``_UNSET``.
+
+
+def _emit_def(name, sig):
+    """Return source for ``def name(<ref params>): return _dispatch(name, [...])``."""
+    sig_parts = []
+    build = []
+    posonly = []
+    star_emitted = False
+    for p in sig.parameters.values():
+        k = p.kind
+        if k is inspect.Parameter.VAR_KEYWORD:
+            continue  # **kwargs are not part of the positional dispatch
+        if k is inspect.Parameter.POSITIONAL_ONLY:
+            posonly.append(p.name)
+            sig_parts.append(p.name)
+            build.append(f"    _a.append({p.name})")
+        elif k is inspect.Parameter.POSITIONAL_OR_KEYWORD:
+            if p.default is inspect.Parameter.empty:
+                sig_parts.append(p.name)
+                build.append(f"    _a.append({p.name})")
+            else:
+                sig_parts.append(f"{p.name}=_UNSET")
+                build.append(f"    if {p.name} is not _UNSET: _a.append({p.name})")
+        elif k is inspect.Parameter.VAR_POSITIONAL:
+            sig_parts.append(f"*{p.name}")
+            build.append(f"    _a.extend({p.name})")
+            star_emitted = True
+        elif k is inspect.Parameter.KEYWORD_ONLY:
+            if not star_emitted:
+                sig_parts.append("*")
+                star_emitted = True
+            sig_parts.append(f"{p.name}=_UNSET")
+            build.append(f"    if {p.name} is not _UNSET: _a.append({p.name})")
+    if posonly:
+        # insert the positional-only marker after the last positional-only param
+        idx = len(posonly)
+        sig_parts.insert(idx, "/")
+    header = f"def {name}({', '.join(sig_parts)}):"
+    body = ["    _a = []", *build, f'    return _dispatch("{name}", _a)']
+    return header + "\n" + "\n".join(body)
+
+
+# The authoritative wrapper set is the names already in functions_generated.py (the
+# shipped, golden-verified set). Deriving it from the Rust functions.rs regex is fragile:
+# generic signatures (e.g. `pub fn concat_ws<C: Into<Column>>(...)`) are silently missed.
+# We only *upgrade* each existing wrapper's signature; we never add or drop functions.
+wrappers_file = Path("python/pyspark/sql/functions_generated.py")
+_existing = wrappers_file.read_text() if wrappers_file.exists() else ""
+_wrapper_names = re.findall(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*_create_wrapper\(", _existing, re.M)
+_wrapper_names += re.findall(r"^def ([A-Za-z_][A-Za-z0-9_]*)\(", _existing, re.M)
+_wrapper_names = sorted(set(_wrapper_names))
+if not _wrapper_names:
+    # First-time generation: fall back to the Rust-parsed function set.
+    _wrapper_names = sorted(n for n in functions if n not in skip_functions)
+
 python_wrappers = []
-for name in sorted(functions.keys()):
-    if name not in skip_functions:
-        python_wrappers.append(f'''{name} = _create_wrapper("{name}")''')
+n_typed = 0
+for name in _wrapper_names:
+    if name in skip_functions:
+        continue
+    ref_fn = getattr(_ref_functions, name, None) if _ref_functions is not None else None
+    sig = None
+    if ref_fn is not None and callable(ref_fn):
+        try:
+            sig = inspect.signature(ref_fn)
+        except (TypeError, ValueError):
+            sig = None
+    if sig is not None:
+        python_wrappers.append(_emit_def(name, sig))
+        n_typed += 1
+    else:
+        # Rust-only extra (not in the reference) — keep the historical *args form.
+        python_wrappers.append(f'{name} = _create_wrapper("{name}")')
 
 python_code = (
     '''"""Auto-generated wrapper functions for Spark SQL functions.
