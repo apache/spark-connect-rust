@@ -855,10 +855,17 @@ impl DataType {
 
     /// Tree-string for a StructType, mirroring `StructType.treeString()`.
     pub fn tree_string(&self) -> Result<String> {
+        self.tree_string_with_depth(i32::MAX)
+    }
+
+    /// Like [`DataType::tree_string`], but stops recursing into nested structs
+    /// once `max_depth` nesting levels have been printed (top-level fields are
+    /// depth 1). Mirrors `StructType.treeString(maxDepth)`.
+    pub fn tree_string_with_depth(&self, max_depth: i32) -> Result<String> {
         match self {
             DataType::Struct { .. } => {
                 let mut out = String::from("root\n");
-                self.append_tree(&mut out, " |");
+                self.append_tree(&mut out, " |", 1, max_depth);
                 Ok(out)
             }
             _ => Err(SparkError::value(
@@ -868,7 +875,7 @@ impl DataType {
         }
     }
 
-    fn append_tree(&self, out: &mut String, prefix: &str) {
+    fn append_tree(&self, out: &mut String, prefix: &str, depth: i32, max_depth: i32) {
         if let DataType::Struct { fields } = self {
             for f in fields {
                 out.push_str(&format!(
@@ -878,9 +885,13 @@ impl DataType {
                     f.data_type.simple_string(),
                     f.nullable
                 ));
-                if matches!(f.data_type, DataType::Struct { .. }) {
-                    f.data_type
-                        .append_tree(out, &format!("{}    |", prefix.trim_end_matches('|')));
+                if matches!(f.data_type, DataType::Struct { .. }) && depth < max_depth {
+                    f.data_type.append_tree(
+                        out,
+                        &format!("{}    |", prefix.trim_end_matches('|')),
+                        depth + 1,
+                        max_depth,
+                    );
                 }
             }
         }
