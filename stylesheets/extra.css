@@ -1,0 +1,161 @@
+/* Slate & Rust-ember theme for the Spark Connect Rust Client docs.
+   A near-black slate chrome with a warm rust-ember accent - a nod to Rust's
+   identity, kept understated. Tuned for both the light (default) and the slate
+   (dark) schemes. Colors live here as CSS custom properties; mkdocs.yml sets
+   `primary: custom` / `accent: custom` so Material picks these up. */
+
+:root {
+  /* Slate chrome + rust-ember accent (light scheme). */
+  --md-primary-fg-color:        #1f2733;
+  --md-primary-fg-color--light: #33404f;
+  --md-primary-fg-color--dark:  #141a23;
+  --md-primary-bg-color:        #ffffff;
+  --md-primary-bg-color--light: #ffffffcc;
+
+  --md-accent-fg-color:             #c2410c;
+  --md-accent-fg-color--transparent: rgba(194, 65, 12, 0.10);
+
+  /* Rust brand ember for the logo/wordmark flourishes. */
+  --sc-ember:        #c2410c;
+  --sc-ember-bright: #ea580c;
+}
+
+/* Light scheme: links track the ember accent for a cohesive feel. */
+[data-md-color-scheme="default"] {
+  --md-typeset-a-color: #b23a0b;
+}
+
+/* Dark (slate) scheme: deepen the chrome and lift the ember to a warm amber
+   so it reads on the dark background. */
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color:        #161c26;
+  --md-primary-fg-color--light: #2a3543;
+  --md-primary-fg-color--dark:  #0c1017;
+
+  --md-accent-fg-color:             #fb923c;
+  --md-accent-fg-color--transparent: rgba(251, 146, 60, 0.14);
+  --md-typeset-a-color:         #fb923c;
+
+  --md-default-bg-color:        #0d1117;
+  --md-code-bg-color:           #131a24;
+
+  --sc-ember:        #fb923c;
+  --sc-ember-bright: #fdba74;
+}
+
+/* Header: a subtle slate gradient gives the navbar some depth, with a thin
+   ember hairline beneath it. */
+.md-header {
+  background: linear-gradient(
+    100deg,
+    var(--md-primary-fg-color--dark),
+    var(--md-primary-fg-color--light)
+  );
+  box-shadow:
+    0 0 0.2rem rgba(0, 0, 0, 0.25),
+    inset 0 -2px 0 0 var(--sc-ember);
+}
+.md-tabs {
+  background: transparent;
+}
+
+/* Typography: tighter, more confident headings. */
+.md-typeset h1 {
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.md-typeset h2 {
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  margin-top: 2.2rem;
+}
+.md-typeset h3 {
+  font-weight: 600;
+}
+
+/* Softer corners on admonitions/details, tables, and code. */
+.md-typeset .admonition,
+.md-typeset details {
+  border-radius: 0.4rem;
+  border-left-width: 0.2rem;
+}
+.md-typeset code {
+  border-radius: 0.25rem;
+}
+.md-typeset pre > code,
+.md-typeset .highlight {
+  border-radius: 0.5rem;
+}
+
+/* Reference tables: tidy, with an ember-tinted header row. */
+.md-typeset table:not([class]) {
+  border-radius: 0.4rem;
+  overflow: hidden;
+}
+.md-typeset table:not([class]) th {
+  font-weight: 600;
+  background: var(--md-accent-fg-color--transparent);
+}
+
+/* Primary buttons (used on the home page hero). */
+.md-typeset .md-button--primary {
+  background-color: var(--sc-ember);
+  border-color: var(--sc-ember);
+  color: #fff;
+}
+.md-typeset .md-button--primary:hover {
+  background-color: var(--sc-ember-bright);
+  border-color: var(--sc-ember-bright);
+}
+
+/* ---- Home page hero -------------------------------------------------- */
+
+.sc-hero {
+  text-align: center;
+  padding: 2.6rem 1rem 1.6rem;
+}
+.sc-hero h1 {
+  font-size: 2.5rem;
+  line-height: 1.1;
+  margin: 0 0 0.4rem;
+}
+.sc-hero .sc-tagline {
+  font-size: 1.15rem;
+  color: var(--md-default-fg-color--light);
+  max-width: 40rem;
+  margin: 0 auto 1.4rem;
+}
+.sc-badges {
+  display: flex;
+  gap: 0.4rem;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin-bottom: 1.4rem;
+}
+
+/* Feature cards grid on the home page. */
+.sc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 1rem;
+  margin: 1.6rem 0;
+}
+.sc-card {
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 0.6rem;
+  padding: 1rem 1.1rem;
+  transition: border-color 0.2s ease, transform 0.2s ease;
+}
+.sc-card:hover {
+  border-color: var(--sc-ember);
+  transform: translateY(-2px);
+}
+.sc-card h3 {
+  margin: 0 0 0.35rem;
+  font-size: 1rem;
+}
+.sc-card p {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--md-default-fg-color--light);
+}
