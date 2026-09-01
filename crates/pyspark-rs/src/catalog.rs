@@ -225,8 +225,8 @@ impl PyCatalog {
     }
 
     /// Set the current catalog.
-    fn setCurrentCatalog(&self, catalog_name: &str) -> PyResult<()> {
-        self.catalog.set_current_catalog(catalog_name).to_pyerr()
+    fn setCurrentCatalog(&self, catalogName: &str) -> PyResult<()> {
+        self.catalog.set_current_catalog(catalogName).to_pyerr()
     }
 
     /// List catalogs. Mirrors `Catalog.listCatalogs(pattern=None) -> List[CatalogMetadata]`.
@@ -247,8 +247,8 @@ impl PyCatalog {
     }
 
     /// Set current database.
-    fn setCurrentDatabase(&self, db_name: &str) -> PyResult<()> {
-        self.catalog.set_current_database(db_name).to_pyerr()
+    fn setCurrentDatabase(&self, dbName: &str) -> PyResult<()> {
+        self.catalog.set_current_database(dbName).to_pyerr()
     }
 
     /// List databases. Mirrors `Catalog.listDatabases(pattern=None) -> List[Database]`.
@@ -264,14 +264,14 @@ impl PyCatalog {
     }
 
     /// Check if database exists.
-    fn databaseExists(&self, db_name: &str) -> PyResult<bool> {
-        self.catalog.database_exists(db_name).to_pyerr()
+    fn databaseExists(&self, dbName: &str) -> PyResult<bool> {
+        self.catalog.database_exists(dbName).to_pyerr()
     }
 
     /// Get database info. Mirrors `Catalog.getDatabase(dbName) -> Database`.
-    fn getDatabase(&self, db_name: &str) -> PyResult<PyDatabase> {
+    fn getDatabase(&self, dbName: &str) -> PyResult<PyDatabase> {
         Ok(PyDatabase {
-            inner: self.catalog.get_database_typed(db_name).to_pyerr()?,
+            inner: self.catalog.get_database_typed(dbName).to_pyerr()?,
         })
     }
 
@@ -288,15 +288,18 @@ impl PyCatalog {
             .collect())
     }
 
-    /// Check if table exists.
-    fn tableExists(&self, table_name: &str) -> PyResult<bool> {
-        self.catalog.table_exists(table_name).to_pyerr()
+    /// Check if table exists. Mirrors `Catalog.tableExists(tableName, dbName=None) -> bool`.
+    #[pyo3(signature = (tableName, dbName=None))]
+    fn tableExists(&self, tableName: &str, dbName: Option<&str>) -> PyResult<bool> {
+        self.catalog
+            .table_exists_with_database(tableName, dbName)
+            .to_pyerr()
     }
 
     /// Get table info. Mirrors `Catalog.getTable(tableName) -> Table`.
-    fn getTable(&self, table_name: &str) -> PyResult<PyTable> {
+    fn getTable(&self, tableName: &str) -> PyResult<PyTable> {
         Ok(PyTable {
-            inner: self.catalog.get_table_typed(table_name).to_pyerr()?,
+            inner: self.catalog.get_table_typed(tableName).to_pyerr()?,
         })
     }
 
@@ -317,15 +320,18 @@ impl PyCatalog {
             .collect())
     }
 
-    /// Check if function exists.
-    fn functionExists(&self, function_name: &str) -> PyResult<bool> {
-        self.catalog.function_exists(function_name).to_pyerr()
+    /// Check if function exists. Mirrors `Catalog.functionExists(functionName, dbName=None) -> bool`.
+    #[pyo3(signature = (functionName, dbName=None))]
+    fn functionExists(&self, functionName: &str, dbName: Option<&str>) -> PyResult<bool> {
+        self.catalog
+            .function_exists_with_database(functionName, dbName)
+            .to_pyerr()
     }
 
     /// Get function info. Mirrors `Catalog.getFunction(functionName) -> Function`.
-    fn getFunction(&self, function_name: &str) -> PyResult<PyFunction> {
+    fn getFunction(&self, functionName: &str) -> PyResult<PyFunction> {
         Ok(PyFunction {
-            inner: self.catalog.get_function_typed(function_name).to_pyerr()?,
+            inner: self.catalog.get_function_typed(functionName).to_pyerr()?,
         })
     }
 
@@ -342,29 +348,46 @@ impl PyCatalog {
             .collect())
     }
 
-    /// Cache a table.
-    fn cacheTable(&self, table_name: &str) -> PyResult<()> {
-        self.catalog.cache_table(table_name).to_pyerr()
+    /// Cache a table. Mirrors `Catalog.cacheTable(tableName, storageLevel=None) -> None`.
+    ///
+    /// A supplied pyspark `StorageLevel` is mapped onto the `spark.connect`
+    /// `CacheTable.storage_level` field (the same field layout `DataFrame.persist` uses);
+    /// `None` leaves it unset so the server default applies.
+    #[pyo3(signature = (tableName, storageLevel=None))]
+    fn cacheTable(&self, tableName: &str, storageLevel: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+        let level = match storageLevel {
+            Some(obj) => Some(spark_connect_proto::StorageLevel {
+                use_disk: obj.getattr("useDisk")?.extract()?,
+                use_memory: obj.getattr("useMemory")?.extract()?,
+                use_off_heap: obj.getattr("useOffHeap")?.extract()?,
+                deserialized: obj.getattr("deserialized")?.extract()?,
+                replication: obj.getattr("replication")?.extract()?,
+            }),
+            None => None,
+        };
+        self.catalog
+            .cache_table_with_storage_level(tableName, level)
+            .to_pyerr()
     }
 
     /// Uncache a table.
-    fn uncacheTable(&self, table_name: &str) -> PyResult<()> {
-        self.catalog.uncache_table(table_name).to_pyerr()
+    fn uncacheTable(&self, tableName: &str) -> PyResult<()> {
+        self.catalog.uncache_table(tableName).to_pyerr()
     }
 
     /// Drop temporary view.
-    fn dropTempView(&self, view_name: &str) -> PyResult<bool> {
-        self.catalog.drop_temp_view(view_name).to_pyerr()
+    fn dropTempView(&self, viewName: &str) -> PyResult<bool> {
+        self.catalog.drop_temp_view(viewName).to_pyerr()
     }
 
     /// Drop a global temporary view.
-    fn dropGlobalTempView(&self, view_name: &str) -> PyResult<bool> {
-        self.catalog.drop_global_temp_view(view_name).to_pyerr()
+    fn dropGlobalTempView(&self, viewName: &str) -> PyResult<bool> {
+        self.catalog.drop_global_temp_view(viewName).to_pyerr()
     }
 
     /// Whether a table/view is cached.
-    fn isCached(&self, table_name: &str) -> PyResult<bool> {
-        self.catalog.is_cached(table_name).to_pyerr()
+    fn isCached(&self, tableName: &str) -> PyResult<bool> {
+        self.catalog.is_cached(tableName).to_pyerr()
     }
 
     /// Remove all cached tables from the in-memory cache.
@@ -373,8 +396,8 @@ impl PyCatalog {
     }
 
     /// Invalidate and refresh cached metadata for a table.
-    fn refreshTable(&self, table_name: &str) -> PyResult<()> {
-        self.catalog.refresh_table(table_name).to_pyerr()
+    fn refreshTable(&self, tableName: &str) -> PyResult<()> {
+        self.catalog.refresh_table(tableName).to_pyerr()
     }
 
     /// Invalidate and refresh cached data for any table at a path.
@@ -383,8 +406,8 @@ impl PyCatalog {
     }
 
     /// Recover all the partitions of a table.
-    fn recoverPartitions(&self, table_name: &str) -> PyResult<()> {
-        self.catalog.recover_partitions(table_name).to_pyerr()
+    fn recoverPartitions(&self, tableName: &str) -> PyResult<()> {
+        self.catalog.recover_partitions(tableName).to_pyerr()
     }
 
     /// Create a table from a data source.

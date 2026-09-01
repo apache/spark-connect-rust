@@ -104,15 +104,31 @@ impl PyDataFrameReader {
         Ok(PyDataFrameReader::new(self.take()?.options(map)))
     }
 
-    /// Load data from the (optional) path using the configured format/options.
-    #[pyo3(signature = (path=None))]
-    fn load(&mut self, path: Option<&str>) -> PyResult<PyDataFrame> {
-        Ok(PyDataFrame::new(self.take()?.load(path)))
+    /// Load data from the (optional) path. Mirrors the reference
+    /// `DataFrameReader.load(path=None, format=None, schema=None, **options)`: the
+    /// one-shot form applies format/schema/options here before reading, equivalent to
+    /// chaining `.format(...).schema(...).options(...).load(path)`.
+    #[pyo3(signature = (path=None, format=None, schema=None, **options))]
+    fn load(
+        &mut self,
+        path: Option<&str>,
+        format: Option<&str>,
+        schema: Option<&Bound<'_, PyAny>>,
+        options: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyDataFrame> {
+        let mut r = self.take_with_opts(options)?;
+        if let Some(f) = format {
+            r = r.format(f);
+        }
+        if let Some(s) = schema {
+            r = apply_reader_schema(r, s)?;
+        }
+        Ok(PyDataFrame::new(r.load(path)))
     }
 
     /// Read a table by name.
-    fn table(&mut self, table_name: &str) -> PyResult<PyDataFrame> {
-        Ok(PyDataFrame::new(self.take()?.table(table_name)))
+    fn table(&mut self, tableName: &str) -> PyResult<PyDataFrame> {
+        Ok(PyDataFrame::new(self.take()?.table(tableName)))
     }
 
     /// Read the CDC changes of a named table. Mirrors `DataFrameReader.changes`.
@@ -190,14 +206,21 @@ impl PyDataFrameReader {
     }
 
     /// Read Parquet file(s).
-    #[pyo3(signature = (path, **options))]
+    #[pyo3(signature = (*paths, **options))]
     fn parquet(
         &mut self,
-        path: &str,
+        paths: Vec<String>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
+        // Reference `parquet(*paths)` accepts multiple paths; the connect core reader
+        // currently loads a single path, so we support exactly one here.
+        if paths.len() != 1 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "parquet() currently supports exactly one path",
+            ));
+        }
         Ok(PyDataFrame::new(
-            self.take_with_opts(options)?.parquet(path),
+            self.take_with_opts(options)?.parquet(&paths[0]),
         ))
     }
 
@@ -309,11 +332,11 @@ impl PyDataFrameReader {
 
     /// Read TEXT file(s) - full pyspark signature; each named option is
     /// applied as a read option when provided.
-    #[pyo3(signature = (path, wholetext=None, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None, modifiedBefore=None, modifiedAfter=None))]
+    #[pyo3(signature = (paths, wholetext=None, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None, modifiedBefore=None, modifiedAfter=None))]
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn text(
         &mut self,
-        path: &str,
+        paths: &str,
         wholetext: Option<&Bound<'_, PyAny>>,
         lineSep: Option<&Bound<'_, PyAny>>,
         pathGlobFilter: Option<&Bound<'_, PyAny>>,
@@ -328,7 +351,7 @@ impl PyDataFrameReader {
         r = set_opt(r, "recursiveFileLookup", recursiveFileLookup)?;
         r = set_opt(r, "modifiedBefore", modifiedBefore)?;
         r = set_opt(r, "modifiedAfter", modifiedAfter)?;
-        Ok(PyDataFrame::new(r.text(path)))
+        Ok(PyDataFrame::new(r.text(paths)))
     }
 
     /// Read XML file(s) - full pyspark signature; each named option is

@@ -41,6 +41,39 @@ impl StreamingQueryListener for PyListenerAdapter {
 }
 
 /// Python wrapper for DataStreamReader.
+/// Apply a named read option to a streaming reader when supplied (mirrors the batch
+/// `set_opt` in readwriter.rs): `None` leaves the option unset (not the string "None");
+/// booleans lowercase to "true"/"false" via `coerce_option_value`.
+fn set_ropt(
+    r: DataStreamReader,
+    name: &str,
+    v: Option<&Bound<'_, PyAny>>,
+) -> PyResult<DataStreamReader> {
+    match v {
+        Some(x) => match crate::coerce_option_value(x)? {
+            Some(sv) => Ok(r.option(name, &sv)),
+            None => Ok(r),
+        },
+        None => Ok(r),
+    }
+}
+
+/// Apply a `schema` argument (a DDL string or a StructType) to a streaming reader,
+/// mirroring the batch `apply_reader_schema`.
+fn apply_stream_schema(r: DataStreamReader, v: &Bound<'_, PyAny>) -> PyResult<DataStreamReader> {
+    let dt = crate::types::py_to_data_type(v)?;
+    Ok(r.schema(dt.simple_string()))
+}
+
+/// Coerce a `partitionBy` argument (a single column name or a list of names) to a
+/// column-name vector, mirroring PySpark's `str | list[str]` acceptance.
+fn extract_partition_cols(v: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
+    if let Ok(s) = v.extract::<String>() {
+        return Ok(vec![s]);
+    }
+    v.extract::<Vec<String>>()
+}
+
 #[pyclass(name = "DataStreamReader", module = "pyspark.sql.streaming.readwriter")]
 pub struct PyDataStreamReader {
     inner: Option<DataStreamReader>,
@@ -103,10 +136,31 @@ impl PyDataStreamReader {
         })
     }
 
-    #[pyo3(signature = (path=None))]
-    fn load(&mut self, path: Option<&str>) -> PyResult<PyDataFrame> {
-        let df = self.take()?.load(path);
-        Ok(PyDataFrame::new(df))
+    #[pyo3(signature = (path=None, format=None, schema=None, **options))]
+    fn load(
+        &mut self,
+        path: Option<&str>,
+        format: Option<&str>,
+        schema: Option<&Bound<'_, PyAny>>,
+        options: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyDataFrame> {
+        let mut r = self.take()?;
+        if let Some(fmt) = format {
+            r = r.format(fmt);
+        }
+        if let Some(v) = schema {
+            r = apply_stream_schema(r, v)?;
+        }
+        if let Some(options) = options {
+            let mut opts = HashMap::new();
+            for (k, v) in options.iter() {
+                if let Some(val) = crate::coerce_option_value(&v)? {
+                    opts.insert(k.str()?.to_string(), val);
+                }
+            }
+            r = r.options(opts);
+        }
+        Ok(PyDataFrame::new(r.load(path)))
     }
 
     /// Set the source name (for checkpoint stability). Mirrors `DataStreamReader.name`,
@@ -131,51 +185,251 @@ impl PyDataStreamReader {
         Ok(PyDataFrame::new(self.take()?.changes(tableName)))
     }
 
-    /// Load an XML streaming source. Mirrors `DataStreamReader.xml(path, **options)` =
-    /// set the options, then `format("xml").load(path)`.
-    #[pyo3(signature = (path, **options))]
-    #[allow(non_snake_case)]
-    fn xml(&mut self, path: &str, options: Option<&Bound<'_, PyDict>>) -> PyResult<PyDataFrame> {
-        let mut opts = HashMap::new();
-        if let Some(options) = options {
-            for (k, v) in options.iter() {
-                if let Some(val) = crate::coerce_option_value(&v)? {
-                    opts.insert(k.str()?.to_string(), val);
-                }
-            }
+    /// Load an XML streaming source. Mirrors `DataStreamReader.xml(...)`: set each named
+    /// option, then `format("xml").load(path)`.
+    #[pyo3(signature = (path, rowTag=None, schema=None, excludeAttribute=None, attributePrefix=None, valueTag=None, ignoreSurroundingSpaces=None, rowValidationXSDPath=None, ignoreNamespace=None, wildcardColName=None, encoding=None, inferSchema=None, nullValue=None, dateFormat=None, timestampFormat=None, mode=None, columnNameOfCorruptRecord=None, multiLine=None, samplingRatio=None, locale=None))]
+    #[allow(non_snake_case, clippy::too_many_arguments)]
+    fn xml(
+        &mut self,
+        path: &str,
+        rowTag: Option<&Bound<'_, PyAny>>,
+        schema: Option<&Bound<'_, PyAny>>,
+        excludeAttribute: Option<&Bound<'_, PyAny>>,
+        attributePrefix: Option<&Bound<'_, PyAny>>,
+        valueTag: Option<&Bound<'_, PyAny>>,
+        ignoreSurroundingSpaces: Option<&Bound<'_, PyAny>>,
+        rowValidationXSDPath: Option<&Bound<'_, PyAny>>,
+        ignoreNamespace: Option<&Bound<'_, PyAny>>,
+        wildcardColName: Option<&Bound<'_, PyAny>>,
+        encoding: Option<&Bound<'_, PyAny>>,
+        inferSchema: Option<&Bound<'_, PyAny>>,
+        nullValue: Option<&Bound<'_, PyAny>>,
+        dateFormat: Option<&Bound<'_, PyAny>>,
+        timestampFormat: Option<&Bound<'_, PyAny>>,
+        mode: Option<&Bound<'_, PyAny>>,
+        columnNameOfCorruptRecord: Option<&Bound<'_, PyAny>>,
+        multiLine: Option<&Bound<'_, PyAny>>,
+        samplingRatio: Option<&Bound<'_, PyAny>>,
+        locale: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let mut r = self.take()?.format("xml");
+        r = set_ropt(r, "rowTag", rowTag)?;
+        if let Some(v) = schema {
+            r = apply_stream_schema(r, v)?;
         }
-        let df = self.take()?.format("xml").options(opts).load(Some(path));
+        r = set_ropt(r, "excludeAttribute", excludeAttribute)?;
+        r = set_ropt(r, "attributePrefix", attributePrefix)?;
+        r = set_ropt(r, "valueTag", valueTag)?;
+        r = set_ropt(r, "ignoreSurroundingSpaces", ignoreSurroundingSpaces)?;
+        r = set_ropt(r, "rowValidationXSDPath", rowValidationXSDPath)?;
+        r = set_ropt(r, "ignoreNamespace", ignoreNamespace)?;
+        r = set_ropt(r, "wildcardColName", wildcardColName)?;
+        r = set_ropt(r, "encoding", encoding)?;
+        r = set_ropt(r, "inferSchema", inferSchema)?;
+        r = set_ropt(r, "nullValue", nullValue)?;
+        r = set_ropt(r, "dateFormat", dateFormat)?;
+        r = set_ropt(r, "timestampFormat", timestampFormat)?;
+        r = set_ropt(r, "mode", mode)?;
+        r = set_ropt(r, "columnNameOfCorruptRecord", columnNameOfCorruptRecord)?;
+        r = set_ropt(r, "multiLine", multiLine)?;
+        r = set_ropt(r, "samplingRatio", samplingRatio)?;
+        r = set_ropt(r, "locale", locale)?;
+        Ok(PyDataFrame::new(r.load(Some(path))))
+    }
+
+    fn table(&mut self, tableName: &str) -> PyResult<PyDataFrame> {
+        let df = self.take()?.table(tableName);
         Ok(PyDataFrame::new(df))
     }
 
-    fn table(&mut self, table_name: &str) -> PyResult<PyDataFrame> {
-        let df = self.take()?.table(table_name);
-        Ok(PyDataFrame::new(df))
+    #[pyo3(signature = (path, schema=None, primitivesAsString=None, prefersDecimal=None, allowComments=None, allowUnquotedFieldNames=None, allowSingleQuotes=None, allowNumericLeadingZero=None, allowBackslashEscapingAnyCharacter=None, mode=None, columnNameOfCorruptRecord=None, dateFormat=None, timestampFormat=None, multiLine=None, allowUnquotedControlChars=None, lineSep=None, locale=None, dropFieldIfAllNull=None, encoding=None, pathGlobFilter=None, recursiveFileLookup=None, allowNonNumericNumbers=None, useUnsafeRow=None))]
+    #[allow(non_snake_case, clippy::too_many_arguments)]
+    fn json(
+        &mut self,
+        path: &str,
+        schema: Option<&Bound<'_, PyAny>>,
+        primitivesAsString: Option<&Bound<'_, PyAny>>,
+        prefersDecimal: Option<&Bound<'_, PyAny>>,
+        allowComments: Option<&Bound<'_, PyAny>>,
+        allowUnquotedFieldNames: Option<&Bound<'_, PyAny>>,
+        allowSingleQuotes: Option<&Bound<'_, PyAny>>,
+        allowNumericLeadingZero: Option<&Bound<'_, PyAny>>,
+        allowBackslashEscapingAnyCharacter: Option<&Bound<'_, PyAny>>,
+        mode: Option<&Bound<'_, PyAny>>,
+        columnNameOfCorruptRecord: Option<&Bound<'_, PyAny>>,
+        dateFormat: Option<&Bound<'_, PyAny>>,
+        timestampFormat: Option<&Bound<'_, PyAny>>,
+        multiLine: Option<&Bound<'_, PyAny>>,
+        allowUnquotedControlChars: Option<&Bound<'_, PyAny>>,
+        lineSep: Option<&Bound<'_, PyAny>>,
+        locale: Option<&Bound<'_, PyAny>>,
+        dropFieldIfAllNull: Option<&Bound<'_, PyAny>>,
+        encoding: Option<&Bound<'_, PyAny>>,
+        pathGlobFilter: Option<&Bound<'_, PyAny>>,
+        recursiveFileLookup: Option<&Bound<'_, PyAny>>,
+        allowNonNumericNumbers: Option<&Bound<'_, PyAny>>,
+        useUnsafeRow: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let mut r = self.take()?;
+        if let Some(v) = schema {
+            r = apply_stream_schema(r, v)?;
+        }
+        r = set_ropt(r, "primitivesAsString", primitivesAsString)?;
+        r = set_ropt(r, "prefersDecimal", prefersDecimal)?;
+        r = set_ropt(r, "allowComments", allowComments)?;
+        r = set_ropt(r, "allowUnquotedFieldNames", allowUnquotedFieldNames)?;
+        r = set_ropt(r, "allowSingleQuotes", allowSingleQuotes)?;
+        r = set_ropt(r, "allowNumericLeadingZero", allowNumericLeadingZero)?;
+        r = set_ropt(
+            r,
+            "allowBackslashEscapingAnyCharacter",
+            allowBackslashEscapingAnyCharacter,
+        )?;
+        r = set_ropt(r, "mode", mode)?;
+        r = set_ropt(r, "columnNameOfCorruptRecord", columnNameOfCorruptRecord)?;
+        r = set_ropt(r, "dateFormat", dateFormat)?;
+        r = set_ropt(r, "timestampFormat", timestampFormat)?;
+        r = set_ropt(r, "multiLine", multiLine)?;
+        r = set_ropt(r, "allowUnquotedControlChars", allowUnquotedControlChars)?;
+        r = set_ropt(r, "lineSep", lineSep)?;
+        r = set_ropt(r, "locale", locale)?;
+        r = set_ropt(r, "dropFieldIfAllNull", dropFieldIfAllNull)?;
+        r = set_ropt(r, "encoding", encoding)?;
+        r = set_ropt(r, "pathGlobFilter", pathGlobFilter)?;
+        r = set_ropt(r, "recursiveFileLookup", recursiveFileLookup)?;
+        r = set_ropt(r, "allowNonNumericNumbers", allowNonNumericNumbers)?;
+        r = set_ropt(r, "useUnsafeRow", useUnsafeRow)?;
+        Ok(PyDataFrame::new(r.json(path)))
     }
 
-    fn json(&mut self, path: &str) -> PyResult<PyDataFrame> {
-        let df = self.take()?.json(path);
-        Ok(PyDataFrame::new(df))
+    #[pyo3(signature = (path, mergeSchema=None, pathGlobFilter=None, recursiveFileLookup=None, datetimeRebaseMode=None, int96RebaseMode=None))]
+    #[allow(non_snake_case, clippy::too_many_arguments)]
+    fn parquet(
+        &mut self,
+        path: &str,
+        mergeSchema: Option<&Bound<'_, PyAny>>,
+        pathGlobFilter: Option<&Bound<'_, PyAny>>,
+        recursiveFileLookup: Option<&Bound<'_, PyAny>>,
+        datetimeRebaseMode: Option<&Bound<'_, PyAny>>,
+        int96RebaseMode: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let mut r = self.take()?;
+        r = set_ropt(r, "mergeSchema", mergeSchema)?;
+        r = set_ropt(r, "pathGlobFilter", pathGlobFilter)?;
+        r = set_ropt(r, "recursiveFileLookup", recursiveFileLookup)?;
+        r = set_ropt(r, "datetimeRebaseMode", datetimeRebaseMode)?;
+        r = set_ropt(r, "int96RebaseMode", int96RebaseMode)?;
+        Ok(PyDataFrame::new(r.parquet(path)))
     }
 
-    fn parquet(&mut self, path: &str) -> PyResult<PyDataFrame> {
-        let df = self.take()?.parquet(path);
-        Ok(PyDataFrame::new(df))
+    #[pyo3(signature = (path, schema=None, sep=None, encoding=None, quote=None, escape=None, comment=None, header=None, inferSchema=None, ignoreLeadingWhiteSpace=None, ignoreTrailingWhiteSpace=None, nullValue=None, nanValue=None, positiveInf=None, negativeInf=None, dateFormat=None, timestampFormat=None, maxColumns=None, maxCharsPerColumn=None, maxMalformedLogPerPartition=None, mode=None, columnNameOfCorruptRecord=None, multiLine=None, charToEscapeQuoteEscaping=None, enforceSchema=None, emptyValue=None, locale=None, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None, unescapedQuoteHandling=None))]
+    #[allow(non_snake_case, clippy::too_many_arguments)]
+    fn csv(
+        &mut self,
+        path: &str,
+        schema: Option<&Bound<'_, PyAny>>,
+        sep: Option<&Bound<'_, PyAny>>,
+        encoding: Option<&Bound<'_, PyAny>>,
+        quote: Option<&Bound<'_, PyAny>>,
+        escape: Option<&Bound<'_, PyAny>>,
+        comment: Option<&Bound<'_, PyAny>>,
+        header: Option<&Bound<'_, PyAny>>,
+        inferSchema: Option<&Bound<'_, PyAny>>,
+        ignoreLeadingWhiteSpace: Option<&Bound<'_, PyAny>>,
+        ignoreTrailingWhiteSpace: Option<&Bound<'_, PyAny>>,
+        nullValue: Option<&Bound<'_, PyAny>>,
+        nanValue: Option<&Bound<'_, PyAny>>,
+        positiveInf: Option<&Bound<'_, PyAny>>,
+        negativeInf: Option<&Bound<'_, PyAny>>,
+        dateFormat: Option<&Bound<'_, PyAny>>,
+        timestampFormat: Option<&Bound<'_, PyAny>>,
+        maxColumns: Option<&Bound<'_, PyAny>>,
+        maxCharsPerColumn: Option<&Bound<'_, PyAny>>,
+        maxMalformedLogPerPartition: Option<&Bound<'_, PyAny>>,
+        mode: Option<&Bound<'_, PyAny>>,
+        columnNameOfCorruptRecord: Option<&Bound<'_, PyAny>>,
+        multiLine: Option<&Bound<'_, PyAny>>,
+        charToEscapeQuoteEscaping: Option<&Bound<'_, PyAny>>,
+        enforceSchema: Option<&Bound<'_, PyAny>>,
+        emptyValue: Option<&Bound<'_, PyAny>>,
+        locale: Option<&Bound<'_, PyAny>>,
+        lineSep: Option<&Bound<'_, PyAny>>,
+        pathGlobFilter: Option<&Bound<'_, PyAny>>,
+        recursiveFileLookup: Option<&Bound<'_, PyAny>>,
+        unescapedQuoteHandling: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let mut r = self.take()?;
+        if let Some(v) = schema {
+            r = apply_stream_schema(r, v)?;
+        }
+        r = set_ropt(r, "sep", sep)?;
+        r = set_ropt(r, "encoding", encoding)?;
+        r = set_ropt(r, "quote", quote)?;
+        r = set_ropt(r, "escape", escape)?;
+        r = set_ropt(r, "comment", comment)?;
+        r = set_ropt(r, "header", header)?;
+        r = set_ropt(r, "inferSchema", inferSchema)?;
+        r = set_ropt(r, "ignoreLeadingWhiteSpace", ignoreLeadingWhiteSpace)?;
+        r = set_ropt(r, "ignoreTrailingWhiteSpace", ignoreTrailingWhiteSpace)?;
+        r = set_ropt(r, "nullValue", nullValue)?;
+        r = set_ropt(r, "nanValue", nanValue)?;
+        r = set_ropt(r, "positiveInf", positiveInf)?;
+        r = set_ropt(r, "negativeInf", negativeInf)?;
+        r = set_ropt(r, "dateFormat", dateFormat)?;
+        r = set_ropt(r, "timestampFormat", timestampFormat)?;
+        r = set_ropt(r, "maxColumns", maxColumns)?;
+        r = set_ropt(r, "maxCharsPerColumn", maxCharsPerColumn)?;
+        r = set_ropt(
+            r,
+            "maxMalformedLogPerPartition",
+            maxMalformedLogPerPartition,
+        )?;
+        r = set_ropt(r, "mode", mode)?;
+        r = set_ropt(r, "columnNameOfCorruptRecord", columnNameOfCorruptRecord)?;
+        r = set_ropt(r, "multiLine", multiLine)?;
+        r = set_ropt(r, "charToEscapeQuoteEscaping", charToEscapeQuoteEscaping)?;
+        r = set_ropt(r, "enforceSchema", enforceSchema)?;
+        r = set_ropt(r, "emptyValue", emptyValue)?;
+        r = set_ropt(r, "locale", locale)?;
+        r = set_ropt(r, "lineSep", lineSep)?;
+        r = set_ropt(r, "pathGlobFilter", pathGlobFilter)?;
+        r = set_ropt(r, "recursiveFileLookup", recursiveFileLookup)?;
+        r = set_ropt(r, "unescapedQuoteHandling", unescapedQuoteHandling)?;
+        Ok(PyDataFrame::new(r.csv(path)))
     }
 
-    fn csv(&mut self, path: &str) -> PyResult<PyDataFrame> {
-        let df = self.take()?.csv(path);
-        Ok(PyDataFrame::new(df))
+    #[pyo3(signature = (path, mergeSchema=None, pathGlobFilter=None, recursiveFileLookup=None))]
+    #[allow(non_snake_case)]
+    fn orc(
+        &mut self,
+        path: &str,
+        mergeSchema: Option<&Bound<'_, PyAny>>,
+        pathGlobFilter: Option<&Bound<'_, PyAny>>,
+        recursiveFileLookup: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let mut r = self.take()?;
+        r = set_ropt(r, "mergeSchema", mergeSchema)?;
+        r = set_ropt(r, "pathGlobFilter", pathGlobFilter)?;
+        r = set_ropt(r, "recursiveFileLookup", recursiveFileLookup)?;
+        Ok(PyDataFrame::new(r.orc(path)))
     }
 
-    fn orc(&mut self, path: &str) -> PyResult<PyDataFrame> {
-        let df = self.take()?.orc(path);
-        Ok(PyDataFrame::new(df))
-    }
-
-    fn text(&mut self, path: &str) -> PyResult<PyDataFrame> {
-        let df = self.take()?.text(path);
-        Ok(PyDataFrame::new(df))
+    #[pyo3(signature = (path, wholetext=None, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None))]
+    #[allow(non_snake_case)]
+    fn text(
+        &mut self,
+        path: &str,
+        wholetext: Option<&Bound<'_, PyAny>>,
+        lineSep: Option<&Bound<'_, PyAny>>,
+        pathGlobFilter: Option<&Bound<'_, PyAny>>,
+        recursiveFileLookup: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let mut r = self.take()?;
+        r = set_ropt(r, "wholetext", wholetext)?;
+        r = set_ropt(r, "lineSep", lineSep)?;
+        r = set_ropt(r, "pathGlobFilter", pathGlobFilter)?;
+        r = set_ropt(r, "recursiveFileLookup", recursiveFileLookup)?;
+        Ok(PyDataFrame::new(r.text(path)))
     }
 }
 
@@ -241,13 +495,51 @@ impl PyDataStreamWriter {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("DataStreamWriter already consumed")
         })
     }
+
+    /// Apply the one-shot writer options accepted by `start`/`toTable`
+    /// (`format`, `outputMode`, `partitionBy`, `queryName`, `**options`) before
+    /// terminating the stream. Mirrors the reference, where these are keyword args.
+    fn apply_write_opts(
+        &mut self,
+        format: Option<&str>,
+        output_mode: Option<&str>,
+        partition_by: Option<&Bound<'_, PyAny>>,
+        query_name: Option<&str>,
+        options: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<DataStreamWriter> {
+        let mut w = self.take()?;
+        if let Some(fmt) = format {
+            w = w.format(fmt);
+        }
+        if let Some(m) = output_mode {
+            w = w.output_mode(m);
+        }
+        if let Some(pb) = partition_by {
+            let cols = extract_partition_cols(pb)?;
+            let refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
+            w = w.partition_by(refs);
+        }
+        if let Some(qn) = query_name {
+            w = w.query_name(qn);
+        }
+        if let Some(options) = options {
+            let mut opts = HashMap::new();
+            for (k, v) in options.iter() {
+                if let Some(val) = crate::coerce_option_value(&v)? {
+                    opts.insert(k.str()?.to_string(), val);
+                }
+            }
+            w = w.options(opts);
+        }
+        Ok(w)
+    }
 }
 
 #[pymethods]
 impl PyDataStreamWriter {
-    fn outputMode(&mut self, mode: &str) -> PyResult<PyDataStreamWriter> {
+    fn outputMode(&mut self, outputMode: &str) -> PyResult<PyDataStreamWriter> {
         Ok(PyDataStreamWriter {
-            inner: Some(self.take()?.output_mode(mode)),
+            inner: Some(self.take()?.output_mode(outputMode)),
         })
     }
 
@@ -302,33 +594,40 @@ impl PyDataStreamWriter {
         })
     }
 
-    fn queryName(&mut self, name: &str) -> PyResult<PyDataStreamWriter> {
+    fn queryName(&mut self, queryName: &str) -> PyResult<PyDataStreamWriter> {
         Ok(PyDataStreamWriter {
-            inner: Some(self.take()?.query_name(name)),
+            inner: Some(self.take()?.query_name(queryName)),
         })
     }
 
     /// `DataStreamWriter.trigger(...)`: mirrors the reference keyword API — exactly one
     /// of `processingTime` / `once` / `availableNow` / `continuous` is given.
-    #[pyo3(signature = (processingTime=None, once=None, availableNow=None, continuous=None))]
+    #[pyo3(signature = (*, processingTime=None, once=None, continuous=None, availableNow=None, realTime=None))]
     fn trigger(
         &mut self,
         processingTime: Option<&str>,
         once: Option<bool>,
-        availableNow: Option<bool>,
         continuous: Option<&str>,
+        availableNow: Option<bool>,
+        realTime: Option<&str>,
     ) -> PyResult<PyDataStreamWriter> {
         let trigger = if let Some(interval) = processingTime {
             Trigger::ProcessingTime(interval.to_string())
         } else if once == Some(true) {
             Trigger::Once
-        } else if availableNow == Some(true) {
-            Trigger::AvailableNow
         } else if let Some(interval) = continuous {
             Trigger::Continuous(interval.to_string())
+        } else if availableNow == Some(true) {
+            Trigger::AvailableNow
+        } else if realTime.is_some() {
+            // `realTime` is accepted for signature parity with reference pyspark; the
+            // connect core's Trigger enum does not yet model a real-time trigger.
+            return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+                "the realTime trigger is not yet supported by this client",
+            ));
         } else {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "trigger() requires exactly one of processingTime, once, availableNow, continuous",
+                "trigger() requires exactly one of processingTime, once, continuous, availableNow, realTime",
             ));
         };
         Ok(PyDataStreamWriter {
@@ -336,17 +635,36 @@ impl PyDataStreamWriter {
         })
     }
 
-    #[pyo3(signature = (path=None))]
-    fn start(&mut self, path: Option<&str>) -> PyResult<PyStreamingQuery> {
-        let writer = self.take()?;
+    #[pyo3(signature = (path=None, format=None, outputMode=None, partitionBy=None, queryName=None, **options))]
+    #[allow(non_snake_case)]
+    fn start(
+        &mut self,
+        path: Option<&str>,
+        format: Option<&str>,
+        outputMode: Option<&str>,
+        partitionBy: Option<&Bound<'_, PyAny>>,
+        queryName: Option<&str>,
+        options: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyStreamingQuery> {
+        let writer = self.apply_write_opts(format, outputMode, partitionBy, queryName, options)?;
         // Memory/console/foreach sinks take no path; the core treats "" as unset.
         let query = writer.start(path.unwrap_or("")).to_pyerr()?;
         Ok(PyStreamingQuery::new(query))
     }
 
-    fn toTable(&mut self, table_name: &str) -> PyResult<PyStreamingQuery> {
-        let writer = self.take()?;
-        let query = writer.to_table(table_name).to_pyerr()?;
+    #[pyo3(signature = (tableName, format=None, outputMode=None, partitionBy=None, queryName=None, **options))]
+    #[allow(non_snake_case)]
+    fn toTable(
+        &mut self,
+        tableName: &str,
+        format: Option<&str>,
+        outputMode: Option<&str>,
+        partitionBy: Option<&Bound<'_, PyAny>>,
+        queryName: Option<&str>,
+        options: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyStreamingQuery> {
+        let writer = self.apply_write_opts(format, outputMode, partitionBy, queryName, options)?;
+        let query = writer.to_table(tableName).to_pyerr()?;
         Ok(PyStreamingQuery::new(query))
     }
 
@@ -519,8 +837,9 @@ impl PyStreamingQuery {
         self.inner.stop().to_pyerr()
     }
 
-    fn awaitTermination(&self, timeout_sec: Option<f64>) -> PyResult<Option<bool>> {
-        self.inner.await_termination(timeout_sec).to_pyerr()
+    #[pyo3(signature = (timeout=None))]
+    fn awaitTermination(&self, timeout: Option<f64>) -> PyResult<Option<bool>> {
+        self.inner.await_termination(timeout).to_pyerr()
     }
 
     #[getter]
@@ -574,8 +893,9 @@ impl PyStreamingQueryManager {
         Ok(query.map(PyStreamingQuery::new))
     }
 
-    fn awaitAnyTermination(&self, timeout_sec: Option<f64>) -> PyResult<Option<bool>> {
-        self.inner.await_any_termination(timeout_sec).to_pyerr()
+    #[pyo3(signature = (timeout=None))]
+    fn awaitAnyTermination(&self, timeout: Option<f64>) -> PyResult<Option<bool>> {
+        self.inner.await_any_termination(timeout).to_pyerr()
     }
 
     fn resetTerminated(&self) -> PyResult<()> {

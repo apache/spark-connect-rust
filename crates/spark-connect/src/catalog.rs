@@ -626,8 +626,19 @@ impl Catalog {
     ///
     /// Mirrors `pyspark.sql.connect.catalog.Catalog.cacheTable`.
     pub fn cache_table(&self, table_name: &str) -> Result<()> {
+        self.cache_table_with_storage_level(table_name, None)
+    }
+
+    /// Cache a table at an optional storage level (`CacheTable.storage_level`, tag 2).
+    /// Mirrors `Catalog.cacheTable(tableName, storageLevel)`.
+    pub fn cache_table_with_storage_level(
+        &self,
+        table_name: &str,
+        storage_level: Option<proto::StorageLevel>,
+    ) -> Result<()> {
         let mut cache = proto::CacheTable::default();
         cache.table_name = table_name.to_string();
+        cache.storage_level = storage_level;
 
         let mut catalog_msg = proto::Catalog::default();
         catalog_msg.cat_type = Some(proto::catalog::CatType::CacheTable(cache));

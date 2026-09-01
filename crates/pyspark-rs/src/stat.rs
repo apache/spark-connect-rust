@@ -26,7 +26,17 @@ impl PyStatFunctions {
     /// the GIL across the call - otherwise a Python thread is blocked for the whole
     /// RPC. (`crosstab`/`freq_items`/`approx_quantile` return lazy DataFrames and do
     /// no I/O here, so they need no detach.)
-    fn corr(&self, py: Python<'_>, col1: &str, col2: &str) -> PyResult<f64> {
+    /// Pearson correlation. `method` is accepted for signature parity with reference
+    /// pyspark, which currently supports only "pearson".
+    #[pyo3(signature = (col1, col2, method=None))]
+    fn corr(&self, py: Python<'_>, col1: &str, col2: &str, method: Option<&str>) -> PyResult<f64> {
+        if let Some(m) = method {
+            if m != "pearson" {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Currently only the calculation of the Pearson Correlation coefficient is supported, got {m}"
+                )));
+            }
+        }
         py.detach(|| self.stat.corr(col1, col2)).to_pyerr()
     }
 
@@ -77,12 +87,12 @@ impl PyStatFunctions {
         py: Python<'_>,
         col: &str,
         probabilities: Vec<f64>,
-        relative_error: f64,
+        relativeError: f64,
     ) -> PyResult<Vec<f64>> {
         use spark_connect::row::Value;
         let df = self
             .stat
-            .approx_quantile(vec![col], probabilities, relative_error);
+            .approx_quantile(vec![col], probabilities, relativeError);
         let rows = py.detach(|| df.collect()).to_pyerr()?;
         // The server returns a single row, col 0 = array-of-arrays (one inner array of
         // quantiles per input column); for a single column we return that inner array.
