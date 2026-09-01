@@ -3,7 +3,9 @@
 This client aims for **full API parity** with the reference PySpark Spark Connect
 client (`pyspark.sql.connect.*`) and the shared modules it depends on. The goal is
 that existing Spark Connect code runs unchanged and gets byte-for-byte identical
-results.
+results. For how this client relates to the `pyspark` and `pyspark-client` packages
+on PyPI - and how to tell which one you have installed - see
+[Which client am I using?](which-client.md).
 
 ## Supported Spark
 

@@ -5,12 +5,12 @@ build-backend = "maturin"
 [project]
 name = "pyspark-client-rust"
 version = "4.2.0"
-description = "Rust-backed drop-in replacement for pyspark.sql.connect — full API parity with native performance"
+description = "Rust-backed drop-in for the PySpark Spark Connect client (pyspark-client): the same `pyspark` API and results, powered by a native Rust engine (tonic) instead of grpcio/py4j."
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "Apache-2.0"}
 authors = [{name = "Apache Spark", email = "dev@spark.apache.org"}]
-keywords = ["pyspark", "spark", "connect", "rust"]
+keywords = ["pyspark", "spark", "spark-connect", "connect", "pyspark-client", "rust", "tonic", "grpc", "arrow", "dataframe"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -39,6 +39,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://spark.apache.org/"
+Documentation = "https://apache.github.io/spark-connect-rust/"
 Repository = "https://github.com/apache/spark-connect-rust"
 "Bug Tracker" = "https://issues.apache.org/jira/browse/SPARK"
 
