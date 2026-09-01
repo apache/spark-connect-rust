@@ -268,6 +268,26 @@ impl SparkError {
         }
     }
 
+    /// Create a ValueError-kind error with a plain message (no error class).
+    ///
+    /// For invalid client-side configuration (e.g. a malformed connection string)
+    /// that has no registered error class. Surfaces as `PySparkValueError` on the
+    /// Python side, matching how the reference client reports connection-string
+    /// problems, rather than the generic runtime kind.
+    pub fn value_msg(message: impl Into<String>) -> Self {
+        Self {
+            kind: SparkErrorKind::ValueError,
+            error_class: String::new(),
+            params: BTreeMap::new(),
+            message: message.into(),
+            sql_state: None,
+            contexts: Vec::new(),
+            server_stacktrace: None,
+            grpc_code: None,
+            grpc_details: None,
+        }
+    }
+
     /// Create an error of a specific kind with an error class and parameters.
     pub fn classed(kind: SparkErrorKind, error_class: &str, params: &[(&str, &str)]) -> Self {
         Self {

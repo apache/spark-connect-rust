@@ -154,9 +154,25 @@ impl ChannelBuilder {
             .or_else(|| std::env::var("SPARK_CONNECT_AUTHENTICATE_TOKEN").ok())
     }
 
-    /// A channel is secure when SSL is requested or a token is present.
+    /// Mirrors the reference client's `secure` property (`use_ssl` OR a token is
+    /// present). NOTE: this does NOT gate the transport. It reads like a security
+    /// check but grants none: the token half was the source of the cleartext-token
+    /// bug, since a token alone reports "secure" while the scheme stays plaintext.
+    /// The real gate on sending the token is `use_ssl() && !is_loopback()` in
+    /// `SparkConnectClient::connect`; this method is kept only for parity/inspection.
     pub fn secure(&self) -> bool {
         self.use_ssl() || self.token().is_some()
+    }
+
+    /// Whether the endpoint is a loopback address.
+    ///
+    /// The reference client (`core.py` `toChannel`) permits a token over an
+    /// unencrypted channel only for `host == "localhost"` (via
+    /// `grpc.local_channel_credentials()`); every other host is forced onto TLS.
+    /// We treat the IPv4/IPv6 loopback literals as equivalent to `localhost` so
+    /// local development keeps working without `use_ssl=true`.
+    pub fn is_loopback(&self) -> bool {
+        matches!(self.host.as_str(), "localhost" | "127.0.0.1" | "[::1]")
     }
 
     pub fn user_id(&self) -> Option<&str> {

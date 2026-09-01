@@ -25,6 +25,8 @@ use spark_connect_core::retries::RetryPolicy;
 use spark_connect_core::runtime::block_on;
 use spark_connect_proto as proto;
 
+use crate::errors::ResultExt;
+
 fn err<E: std::fmt::Display>(e: E) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
 }
@@ -153,12 +155,15 @@ pub struct RustConnectStub {
 impl RustConnectStub {
     #[new]
     fn new(py: Python<'_>, url: &str) -> PyResult<Self> {
-        let builder = ChannelBuilder::parse(url).map_err(err)?;
+        // Map connection-setup failures (bad URL, cleartext-token refusal, …) through
+        // the typed error layer so they surface as the right `pyspark.errors` exception
+        // (e.g. `PySparkValueError`) rather than a bare `RuntimeError`.
+        let builder = ChannelBuilder::parse(url).to_pyerr()?;
         // Release the GIL during the connect handshake so a slow/unresponsive server
         // can't wedge the whole interpreter (incl. signal handling / Ctrl-C).
         let mut client = py
             .detach(|| block_on(SparkConnectClient::connect(&builder)))
-            .map_err(err)?;
+            .to_pyerr()?;
         // This stub is a drop-in for the grpcio stub: a single RPC per call. The reference
         // client wraps calls in its own GrpcRetryHandler (per the client-side retry
         // policy), so retrying inside our client too would double-retry and ignore that
