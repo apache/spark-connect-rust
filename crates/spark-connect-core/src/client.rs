@@ -87,7 +87,12 @@ impl SparkConnectClient {
         let endpoint = builder.endpoint();
         let channel = if builder.use_ssl() {
             // TLS connection with native root certificates
-            let tls_config = ClientTlsConfig::new().domain_name(builder.host());
+            // `with_native_roots()` is required: tonic >=0.11 does NOT load a trust store
+            // from the `tls-native-roots` feature alone, so without this the TLS handshake
+            // has no CA anchors, fails, and the retry policy masks it as a hang.
+            let tls_config = ClientTlsConfig::new()
+                .domain_name(builder.host())
+                .with_native_roots();
 
             tonic::transport::Channel::from_shared(format!("https://{endpoint}"))
                 .map_err(|e| SparkError::connect_msg(format!("Invalid endpoint: {}", e)))?
@@ -111,7 +116,14 @@ impl SparkConnectClient {
             .max_decoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT)
             .max_encoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT);
 
-        let metadata = builder.metadata().into_iter().collect();
+        let mut metadata: Vec<(String, String)> = builder.metadata();
+        // Spark Connect servers that require token auth expect the connection-string
+        // `token` as an `Authorization: Bearer <token>` header. It is a reserved key
+        // excluded from `metadata()`, so attach it explicitly here; this then propagates
+        // to every request via `_attach_metadata` and the reattach stream.
+        if let Some(tok) = builder.token() {
+            metadata.push(("authorization".to_string(), format!("Bearer {}", tok)));
+        }
 
         Ok(Self {
             channel,
@@ -956,12 +968,22 @@ mod tests {
         assert!(builder.secure());
     }
 
-    #[test]
-    fn test_token_bearer_in_metadata() {
-        // Verify that a token parameter is recognized and would be passed as metadata
+    #[tokio::test]
+    async fn test_token_bearer_in_metadata() {
+        // A connection-string token must actually be SENT as an `Authorization: Bearer`
+        // header, not merely parsed. Assert it is attached to the client's request metadata.
         let builder = ChannelBuilder::parse("sc://localhost/;token=my_token_123").unwrap();
         assert!(builder.secure());
         assert_eq!(builder.token(), Some("my_token_123".to_string()));
+        let client = SparkConnectClient::connect(&builder).await.unwrap();
+        assert!(
+            client
+                .metadata
+                .iter()
+                .any(|(k, v)| k.eq_ignore_ascii_case("authorization") && v == "Bearer my_token_123"),
+            "expected an `Authorization: Bearer` header in client metadata, got {:?}",
+            client.metadata
+        );
     }
 
     #[tokio::test]
