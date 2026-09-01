@@ -2664,3 +2664,68 @@ def test_no_pyclass_reports_builtins_module():
         if isinstance(obj, type) and obj.__module__ == "builtins"
     )
     assert offenders == [], f"missing module=: {offenders}"
+
+
+# ------------------------------------------------- connect.* import-path parity
+
+# The reference Spark Connect client exposes these classes under the
+# pyspark.sql.connect.* package (and pyspark.sql.conf / pyspark.sql.tvf);
+# existing code and the official test suite import from these paths.
+@pytest.mark.parametrize(
+    "module, names",
+    [
+        ("pyspark.sql.connect.catalog",
+         ["Catalog", "Database", "Table", "Function", "CatalogMetadata", "TablePartition"]),
+        ("pyspark.sql.connect.conf", ["RuntimeConf"]),
+        ("pyspark.sql.connect.group", ["GroupedData", "PandasCogroupedOps"]),
+        ("pyspark.sql.connect.window", ["Window", "WindowSpec"]),
+        ("pyspark.sql.connect.readwriter",
+         ["DataFrameReader", "DataFrameWriter", "DataFrameWriterV2"]),
+        ("pyspark.sql.connect.tvf", ["TableValuedFunction"]),
+        ("pyspark.sql.connect.udf", ["UserDefinedFunction", "UDFRegistration"]),
+        ("pyspark.sql.connect.udtf",
+         ["UserDefinedTableFunction", "UDTFRegistration", "AnalyzeArgument", "AnalyzeResult"]),
+        ("pyspark.sql.connect.observation", ["Observation"]),
+        ("pyspark.sql.connect.merge", ["MergeIntoWriter"]),
+        ("pyspark.sql.connect.streaming.readwriter", ["DataStreamReader", "DataStreamWriter"]),
+        ("pyspark.sql.connect.streaming.query", ["StreamingQuery", "StreamingQueryManager"]),
+        ("pyspark.sql.conf", ["RuntimeConfig", "RuntimeConf"]),
+        ("pyspark.sql.tvf", ["TableValuedFunction"]),
+    ],
+)
+def test_connect_submodule_import_paths(module, names):
+    import importlib
+
+    mod = importlib.import_module(module)
+    missing = [n for n in names if not hasattr(mod, n)]
+    assert missing == [], f"{module} is missing {missing}"
+
+
+# --------------------------------------------- v4.2.0 signature-parity fixes
+
+def test_structtype_from_json_accepts_json_kwarg():
+    # Reference names the fromJson parameter `json`, not `data`.
+    import json as _json
+
+    st = T.StructType([T.StructField("a", T.IntegerType()), T.StructField("b", T.StringType())])
+    payload = _json.loads(st.json())
+    assert T.StructType.fromJson(json=payload).simpleString() == st.simpleString()
+
+    sf = T.StructField("a", T.IntegerType())
+    assert T.StructField.fromJson(json=_json.loads(sf.json())).name == "a"
+
+
+def test_structtype_tree_string_max_depth():
+    nested = T.StructType([
+        T.StructField("outer", T.StructType([T.StructField("inner", T.IntegerType())])),
+    ])
+    full = nested.treeString()
+    assert "inner" in full
+    # maxDepth=1 prints only the top level; the nested field is omitted.
+    assert "inner" not in nested.treeString(1)
+    assert "outer" in nested.treeString(1)
+
+
+def test_variant_type_to_internal_accepts_variant_kwarg():
+    # Reference names the VariantType.toInternal parameter `variant`, not `obj`.
+    assert T.VariantType().toInternal(variant=None) is None

@@ -1513,12 +1513,12 @@ impl PyStructField {
     fn __sf_from_json(
         _cls: &Bound<'_, pyo3::types::PyType>,
         py: Python<'_>,
-        data: &Bound<'_, PyAny>,
+        json: &Bound<'_, PyAny>,
     ) -> PyResult<PyStructField> {
         let s: String = py
             .import("json")?
             .getattr("dumps")?
-            .call1((data,))?
+            .call1((json,))?
             .extract()?;
         let field = StructField::from_json_str(&s)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
@@ -1808,13 +1808,14 @@ impl PyStructType {
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
     }
 
-    /// Tree string. Mirrors `StructType.treeString()`.
-    #[pyo3(name = "treeString")]
-    fn __st_tree_string(&self) -> PyResult<String> {
+    /// Tree string. Mirrors `StructType.treeString(maxDepth)`.
+    #[allow(non_snake_case)]
+    #[pyo3(name = "treeString", signature = (maxDepth = 2147483647))]
+    fn __st_tree_string(&self, maxDepth: i32) -> PyResult<String> {
         DataType::Struct {
             fields: self.fields.clone(),
         }
-        .tree_string()
+        .tree_string_with_depth(maxDepth)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
     }
 
@@ -1838,12 +1839,12 @@ impl PyStructType {
     fn __st_from_json(
         _cls: &Bound<'_, pyo3::types::PyType>,
         py: Python<'_>,
-        data: &Bound<'_, PyAny>,
+        json: &Bound<'_, PyAny>,
     ) -> PyResult<Py<PyStructType>> {
         let s: String = py
             .import("json")?
             .getattr("dumps")?
-            .call1((data,))?
+            .call1((json,))?
             .extract()?;
         match DataType::from_json_str(&s)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
@@ -2319,8 +2320,8 @@ impl PyVariantType {
         obj
     }
     #[pyo3(name = "toInternal")]
-    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_to_internal<'py>(&self, variant: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        variant
     }
     #[classmethod]
     #[pyo3(name = "fromDDL")]
