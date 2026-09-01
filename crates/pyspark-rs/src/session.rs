@@ -251,8 +251,13 @@ impl PySparkSession {
     /// Execute a SQL query and return a DataFrame. `args` binds parameters: a list fills
     /// positional `?` parameters, a dict fills named (`:name`) parameters. Values are always
     /// literals (a string arg is a string literal, never a column reference).
-    #[pyo3(signature = (sqlQuery, args=None))]
-    fn sql(&self, sqlQuery: &str, args: Option<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+    #[pyo3(signature = (sqlQuery, args=None, **kwargs))]
+    fn sql(
+        &self,
+        sqlQuery: &str,
+        args: Option<Bound<'_, PyAny>>,
+        kwargs: Option<Bound<'_, PyDict>>,
+    ) -> PyResult<PyDataFrame> {
         fn to_lit(v: &Bound<'_, PyAny>) -> PyResult<spark_connect::expression::Expression> {
             use spark_connect::expression::{Expression, LiteralExpression};
             if let Ok(sv) = v.extract::<String>() {
@@ -278,6 +283,13 @@ impl PySparkSession {
                 ));
             }
         }
+        // Named parameters may also be supplied as **kwargs (reference parity); merge them
+        // into the named-args map alongside any dict passed via `args`.
+        if let Some(kw) = kwargs {
+            for (k, v) in kw.iter() {
+                named.insert(k.extract::<String>()?, to_lit(&v)?);
+            }
+        }
         let df = self
             .session
             .sql_with_args(sqlQuery, pos, named)
@@ -289,14 +301,23 @@ impl PySparkSession {
     ///
     /// If schema is a list of strings, those are used as column names (all types inferred as string).
     /// If schema is None, columns are named col0, col1, etc. and all types are string.
-    #[pyo3(signature = (data, schema=None))]
+    #[pyo3(signature = (data, schema=None, samplingRatio=None, verifySchema=None))]
     fn createDataFrame(
         &self,
         py: Python<'_>,
         data: &Bound<'_, PyAny>,
         schema: Option<&Bound<'_, PyAny>>,
+        samplingRatio: Option<f64>,
+        verifySchema: Option<bool>,
     ) -> PyResult<PyDataFrame> {
         use crate::row::PyRow;
+
+        // `samplingRatio` only affects RDD-based schema inference in reference PySpark and is
+        // unused for local data over Spark Connect (reference ignores it here too).
+        // `verifySchema` toggles client-side row/type verification; this path builds the plan
+        // directly and does not perform that extra verification, so both are accepted for
+        // signature parity. See PARITY_GAP_ANALYSIS.md.
+        let _ = (samplingRatio, verifySchema);
 
         // Accept a pandas DataFrame (as pyspark does): convert it to a list of row lists
         // with NaN/NaT mapped to None, and take its column names as the default schema.
@@ -703,11 +724,24 @@ impl PySparkSession {
         Ok(PyDataFrame::new(self.session.table(tableName).to_pyerr()?))
     }
 
-    #[pyo3(name = "emptyDataFrame")]
-    fn empty_data_frame(&self) -> PyResult<PyDataFrame> {
-        Ok(PyDataFrame::new(
-            self.session.empty_data_frame().to_pyerr()?,
-        ))
+    // Reference: emptyDataFrame(schema) -> createDataFrame([], schema). We accept an
+    // optional schema (a permissive superset): with a schema we build a typed empty frame
+    // via createDataFrame; without one we return the core's schema-less empty frame.
+    #[pyo3(name = "emptyDataFrame", signature = (schema=None))]
+    fn empty_data_frame(
+        &self,
+        py: Python<'_>,
+        schema: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        match schema {
+            Some(s) => {
+                let empty = PyList::empty(py);
+                self.createDataFrame(py, empty.as_any(), Some(s), None, None)
+            }
+            None => Ok(PyDataFrame::new(
+                self.session.empty_data_frame().to_pyerr()?,
+            )),
+        }
     }
 
     #[pyo3(name = "interruptAll")]
@@ -746,10 +780,20 @@ impl PySparkSession {
         self.session.clear_tags()
     }
 
-    // Mirrors reference `SparkSession.addArtifacts(*path)` - variadic positional paths.
-    #[pyo3(name = "addArtifacts", signature = (*paths))]
-    fn add_artifacts(&self, py: Python<'_>, paths: Vec<String>) -> PyResult<()> {
-        let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+    // Mirrors reference `SparkSession.addArtifacts(*path, pyfile=False, archive=False,
+    // file=False)`. The pyfile/archive/file flags are accepted for signature parity;
+    // artifact classification is handled by the Rust transport / server.
+    #[pyo3(name = "addArtifacts", signature = (*path, pyfile=false, archive=false, file=false))]
+    fn add_artifacts(
+        &self,
+        py: Python<'_>,
+        path: Vec<String>,
+        pyfile: bool,
+        archive: bool,
+        file: bool,
+    ) -> PyResult<()> {
+        let _ = (pyfile, archive, file);
+        let refs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
         py.detach(|| self.session.add_artifacts(&refs)).to_pyerr()
     }
 
@@ -774,8 +818,12 @@ impl PySparkSession {
         PySparkSession::new(self.session.new_session())
     }
 
-    #[pyo3(name = "cloneSession")]
-    fn clone_session(&self) -> PySparkSession {
+    // Reference: cloneSession(new_session_id=None). The optional id is accepted for
+    // signature parity; the Rust core assigns the cloned session's id itself and does not
+    // support overriding it. See PARITY_GAP_ANALYSIS.md.
+    #[pyo3(name = "cloneSession", signature = (new_session_id=None))]
+    fn clone_session(&self, new_session_id: Option<String>) -> PySparkSession {
+        let _ = new_session_id;
         PySparkSession::new(self.session.clone_session())
     }
 }

@@ -228,25 +228,58 @@ _FN_COL_ARGS = {
     'when': ((), None),
 }
 
-def _create_wrapper(fname):
-    """Create a wrapper for a generated Spark SQL function.
+class _UnsetType:
+    """Sentinel for optional generated-function args that were not supplied.
 
-    PySpark's ColumnOrName contract: a bare ``str`` argument is a COLUMN NAME, so
-    column-position ``str`` args are resolved via col() (``_to_col``); literal-position
-    args (a format/pattern string, an int count, ...) are passed through unchanged.
-    Functions absent from ``_FN_COL_ARGS`` have every positional arg as a column.
+    Generated wrappers carry PySpark's real parameter names (so keyword calls work),
+    but default every optional parameter to ``_UNSET`` and forward only the args the
+    caller actually passed. This reproduces the historical ``*args`` dispatch exactly
+    (same columns forwarded, in the same order) while accepting keyword arguments.
+    """
+
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self):
+        return "<unset>"
+
+
+_UNSET = _UnsetType()
+
+
+def _dispatch(fname, args):
+    """Convert positional args per the ColumnOrName contract and dispatch to the core.
+
+    A bare ``str`` at a column position is a COLUMN NAME (resolved via ``_to_col``);
+    literal-position args (a format/pattern string, an int count, ...) pass through
+    unchanged. Functions absent from ``_FN_COL_ARGS`` have every positional arg as a
+    column. See ``_FN_COL_ARGS``.
     """
     override = _FN_COL_ARGS.get(fname)
+    if override is None:
+        conv = [_to_col(a) for a in args]
+    else:
+        cols, vstart = override
+        conv = [
+            _to_col(a) if (i in cols or (vstart is not None and i >= vstart)) else a
+            for i, a in enumerate(args)
+        ]
+    return _wrap(_call_function(fname, *conv))
+
+
+def _create_wrapper(fname):
+    """Fallback wrapper for a generated function with no reference PySpark signature.
+
+    Used only for functions absent from the reference (e.g. Rust-only extras); these
+    keep the historical ``*args`` form. Functions present in the reference get an
+    explicit signature emitted into ``functions_generated.py`` instead.
+    """
     def wrapper(*args):
-        if override is None:
-            conv = [_to_col(a) for a in args]
-        else:
-            cols, vstart = override
-            conv = [
-                _to_col(a) if (i in cols or (vstart is not None and i >= vstart)) else a
-                for i, a in enumerate(args)
-            ]
-        return _wrap(_call_function(fname, *conv))
+        return _dispatch(fname, list(args))
     wrapper.__doc__ = f"Auto-generated wrapper for {fname}"
     wrapper.__name__ = fname
     return wrapper
@@ -281,10 +314,22 @@ from pyspark.sql.udtf import (
     SelectedColumn,
 )
 
-# Hand-written special functions
-col = _pyfunc_col
-lit = _pyfunc_lit
-expr = _pyfunc_expr
+# Hand-written special functions. Thin wrappers so the public parameter names match
+# the reference PySpark 4.2.0 signatures (keyword-call parity), forwarding to the native
+# bindings whose Rust arg names differ.
+def col(col):
+    """Returns a Column based on the given column name."""
+    return _pyfunc_col(col)
+
+
+def lit(col):
+    """Creates a Column of literal value."""
+    return _pyfunc_lit(col)
+
+
+def expr(str):
+    """Parses the expression string into the column that it represents."""
+    return _pyfunc_expr(str)
 sum = _col_wrapper(_pyfunc_sum)
 count = _col_wrapper(_pyfunc_count)
 avg = _col_wrapper(_pyfunc_avg)
@@ -293,32 +338,32 @@ min = _col_wrapper(_pyfunc_min)
 when = _pyfunc_when
 
 # Mixed/special functions - explicit wrappers for non-generic dispatch
-def sha2(col, num_bits):
+def sha2(col, numBits):
     """Returns the hex string result of SHA2 digest of the given data.
 
     Args:
         col: column to hash
-        num_bits: either 256 or 512
+        numBits: either 256 or 512
     """
-    return _pyfunc_sha2(_to_col(col), num_bits)
+    return _pyfunc_sha2(_to_col(col), numBits)
 
-def window(time_column, window_duration, slide_duration=None, start_time=None):
+def window(timeColumn, windowDuration, slideDuration=None, startTime=None):
     """Buckets rows into one or more time windows specified by the given parameters.
 
     Args:
-        time_column: the column containing timestamps
-        window_duration: a string specifying the width of the window, e.g. '10 minutes'
-        slide_duration: optional, the slide interval. Defaults to ``window_duration``
-            (a tumbling window) when only ``start_time`` is given.
-        start_time: optional, the offset of the first window, e.g. '15 minutes'.
+        timeColumn: the column containing timestamps
+        windowDuration: a string specifying the width of the window, e.g. '10 minutes'
+        slideDuration: optional, the slide interval. Defaults to ``windowDuration``
+            (a tumbling window) when only ``startTime`` is given.
+        startTime: optional, the offset of the first window, e.g. '15 minutes'.
             Defaults to '0 second'.
     """
-    if slide_duration is None and start_time is None:
-        return _pyfunc_window(_to_col(time_column), window_duration)
-    slide = slide_duration if slide_duration is not None else window_duration
-    start = start_time if start_time is not None else "0 second"
+    if slideDuration is None and startTime is None:
+        return _pyfunc_window(_to_col(timeColumn), windowDuration)
+    slide = slideDuration if slideDuration is not None else windowDuration
+    start = startTime if startTime is not None else "0 second"
     return _pyfunc_window_with_slide_and_start(
-        _to_col(time_column), window_duration, slide, start
+        _to_col(timeColumn), windowDuration, slide, start
     )
 
 def from_avro(data, json_format_schema):
@@ -410,8 +455,11 @@ spec = importlib.util.spec_from_file_location("functions_generated",
 _gen_module = importlib.util.module_from_spec(spec)
 # Inject our helper functions into the generated module's namespace before loading
 _gen_module._create_wrapper = _create_wrapper
+_gen_module._dispatch = _dispatch
+_gen_module._UNSET = _UNSET
 _gen_module._wrap = _wrap
 _gen_module._unwrap = _unwrap
+_gen_module._to_col = _to_col
 _gen_module._call_function = _call_function
 spec.loader.exec_module(_gen_module)
 
@@ -569,7 +617,9 @@ random = rand
 
 
 # ``column`` is an alias of ``col`` (matches pyspark.sql.functions).
-column = _pyfunc_col
+def column(col):
+    """Returns a Column based on the given column name (alias of ``col``)."""
+    return _pyfunc_col(col)
 
 
 def call_udf(udfName, *cols):

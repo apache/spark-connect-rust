@@ -1,6 +1,7 @@
 //! PyO3 wrapper for spark_connect::column::Column.
 
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use spark_connect::column::Column;
 
 use crate::functions::to_column;
@@ -50,35 +51,35 @@ fn py_obj_to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
 impl PyColumn {
     /// Alias the column, optionally attaching column metadata (a dict), mirroring
     /// `Column.alias(name, metadata=...)`.
-    #[pyo3(signature = (*alias, metadata=None))]
-    fn alias(
-        &self,
-        alias: Vec<String>,
-        metadata: Option<std::collections::HashMap<String, String>>,
-    ) -> PyColumn {
+    #[pyo3(signature = (*alias, **kwargs))]
+    fn alias(&self, alias: Vec<String>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyColumn> {
         // Mirrors Column.alias(*alias, **kwargs): the common single-name form aliases the
-        // column; extra names beyond the first (multi-output aliasing) are not applied here.
+        // column; `metadata` (a dict) may be passed via kwargs. Extra names beyond the first
+        // (multi-output aliasing) are not applied here.
+        let metadata: Option<std::collections::HashMap<String, String>> = match kwargs {
+            Some(kw) => match kw.get_item("metadata")? {
+                Some(v) if !v.is_none() => Some(v.extract()?),
+                _ => None,
+            },
+            None => None,
+        };
         let name = match alias.first() {
             Some(n) => n.clone(),
-            None => return PyColumn::new(self.column.clone()),
+            None => return Ok(PyColumn::new(self.column.clone())),
         };
-        match metadata {
+        Ok(match metadata {
             None => PyColumn::new(self.column.clone().alias(&name)),
             Some(m) => {
                 let md: std::collections::BTreeMap<String, String> = m.into_iter().collect();
                 PyColumn::new(self.column.clone().alias_with_metadata(&name, md))
             }
-        }
+        })
     }
 
     /// Alias for `alias` (pyspark `Column.name`).
-    #[pyo3(signature = (*alias, metadata=None))]
-    fn name(
-        &self,
-        alias: Vec<String>,
-        metadata: Option<std::collections::HashMap<String, String>>,
-    ) -> PyColumn {
-        self.alias(alias, metadata)
+    #[pyo3(signature = (*alias, **kwargs))]
+    fn name(&self, alias: Vec<String>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyColumn> {
+        self.alias(alias, kwargs)
     }
 
     /// Apply a transformation function to this column. Mirrors `Column.transform(f)`,
@@ -495,9 +496,9 @@ impl PyColumn {
         let v = to_column(&col.bind(py))?;
         Ok(PyColumn::new(self.column.clone().with_field(fieldName, v)))
     }
-    #[pyo3(name = "dropFields", signature = (*field_names))]
-    fn drop_fields(&self, field_names: Vec<String>) -> PyColumn {
-        let refs: Vec<&str> = field_names.iter().map(|s| s.as_str()).collect();
+    #[pyo3(name = "dropFields", signature = (*fieldNames))]
+    fn drop_fields(&self, fieldNames: Vec<String>) -> PyColumn {
+        let refs: Vec<&str> = fieldNames.iter().map(|s| s.as_str()).collect();
         PyColumn::new(self.column.clone().drop_fields(refs))
     }
 }

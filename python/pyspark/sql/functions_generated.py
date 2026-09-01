@@ -6,506 +6,2342 @@ are defined in functions.py
 """
 
 # Generated wrappers (requires _create_wrapper to be defined)
-abs = _create_wrapper("abs")
-acos = _create_wrapper("acos")
-acosh = _create_wrapper("acosh")
-add_months = _create_wrapper("add_months")
-aes_decrypt = _create_wrapper("aes_decrypt")
-aes_encrypt = _create_wrapper("aes_encrypt")
-any_value = _create_wrapper("any_value")
-approxCountDistinct = _create_wrapper("approxCountDistinct")
-approx_count_distinct = _create_wrapper("approx_count_distinct")
-approx_percentile = _create_wrapper("approx_percentile")
-array = _create_wrapper("array")
-array_agg = _create_wrapper("array_agg")
-array_append = _create_wrapper("array_append")
-array_compact = _create_wrapper("array_compact")
-array_contains = _create_wrapper("array_contains")
-array_distinct = _create_wrapper("array_distinct")
-array_except = _create_wrapper("array_except")
-array_insert = _create_wrapper("array_insert")
-array_intersect = _create_wrapper("array_intersect")
-array_join = _create_wrapper("array_join")
-array_max = _create_wrapper("array_max")
-array_min = _create_wrapper("array_min")
-array_position = _create_wrapper("array_position")
-array_prepend = _create_wrapper("array_prepend")
-array_remove = _create_wrapper("array_remove")
-array_repeat = _create_wrapper("array_repeat")
-array_size = _create_wrapper("array_size")
-array_sort = _create_wrapper("array_sort")
-array_union = _create_wrapper("array_union")
-arrays_overlap = _create_wrapper("arrays_overlap")
-arrays_zip = _create_wrapper("arrays_zip")
-asc = _create_wrapper("asc")
-asc_nulls_first = _create_wrapper("asc_nulls_first")
-asc_nulls_last = _create_wrapper("asc_nulls_last")
-ascii = _create_wrapper("ascii")
-asin = _create_wrapper("asin")
-asinh = _create_wrapper("asinh")
-assert_true = _create_wrapper("assert_true")
-atan = _create_wrapper("atan")
-atan2 = _create_wrapper("atan2")
-atanh = _create_wrapper("atanh")
-base64 = _create_wrapper("base64")
-bin = _create_wrapper("bin")
-bit_and = _create_wrapper("bit_and")
-bit_count = _create_wrapper("bit_count")
-bit_get = _create_wrapper("bit_get")
-bit_length = _create_wrapper("bit_length")
-bit_or = _create_wrapper("bit_or")
-bit_xor = _create_wrapper("bit_xor")
-bitmap_and_agg = _create_wrapper("bitmap_and_agg")
-bitmap_bit_position = _create_wrapper("bitmap_bit_position")
-bitmap_bucket_number = _create_wrapper("bitmap_bucket_number")
-bitmap_construct_agg = _create_wrapper("bitmap_construct_agg")
-bitmap_count = _create_wrapper("bitmap_count")
-bitmap_or_agg = _create_wrapper("bitmap_or_agg")
-bitwiseNOT = _create_wrapper("bitwiseNOT")
-bitwise_not = _create_wrapper("bitwise_not")
-bool_and = _create_wrapper("bool_and")
-bool_or = _create_wrapper("bool_or")
-bround = _create_wrapper("bround")
-btrim = _create_wrapper("btrim")
-bucket = _create_wrapper("bucket")
-cardinality = _create_wrapper("cardinality")
-cbrt = _create_wrapper("cbrt")
-ceil = _create_wrapper("ceil")
-ceiling = _create_wrapper("ceiling")
-char = _create_wrapper("char")
-char_length = _create_wrapper("char_length")
-character_length = _create_wrapper("character_length")
-chr = _create_wrapper("chr")
-coalesce = _create_wrapper("coalesce")
-collate = _create_wrapper("collate")
-collation = _create_wrapper("collation")
-collect_list = _create_wrapper("collect_list")
-collect_set = _create_wrapper("collect_set")
-concat = _create_wrapper("concat")
-concat_ws = _create_wrapper("concat_ws")
-contains = _create_wrapper("contains")
-conv = _create_wrapper("conv")
-convert_timezone = _create_wrapper("convert_timezone")
-corr = _create_wrapper("corr")
-cos = _create_wrapper("cos")
-cosh = _create_wrapper("cosh")
-cot = _create_wrapper("cot")
-countDistinct = _create_wrapper("countDistinct")
-count_distinct = _create_wrapper("count_distinct")
-count_if = _create_wrapper("count_if")
-count_min_sketch = _create_wrapper("count_min_sketch")
+def abs(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("abs", _a)
+def acos(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("acos", _a)
+def acosh(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("acosh", _a)
+def add_months(start, months):
+    _a = []
+    _a.append(start)
+    _a.append(months)
+    return _dispatch("add_months", _a)
+def aes_decrypt(input, key, mode=_UNSET, padding=_UNSET, aad=_UNSET):
+    _a = []
+    _a.append(input)
+    _a.append(key)
+    if mode is not _UNSET: _a.append(mode)
+    if padding is not _UNSET: _a.append(padding)
+    if aad is not _UNSET: _a.append(aad)
+    return _dispatch("aes_decrypt", _a)
+def aes_encrypt(input, key, mode=_UNSET, padding=_UNSET, iv=_UNSET, aad=_UNSET):
+    _a = []
+    _a.append(input)
+    _a.append(key)
+    if mode is not _UNSET: _a.append(mode)
+    if padding is not _UNSET: _a.append(padding)
+    if iv is not _UNSET: _a.append(iv)
+    if aad is not _UNSET: _a.append(aad)
+    return _dispatch("aes_encrypt", _a)
+def any_value(col, ignoreNulls=_UNSET):
+    _a = []
+    _a.append(col)
+    if ignoreNulls is not _UNSET: _a.append(ignoreNulls)
+    return _dispatch("any_value", _a)
+def approxCountDistinct(col, rsd=_UNSET):
+    _a = []
+    _a.append(col)
+    if rsd is not _UNSET: _a.append(rsd)
+    return _dispatch("approxCountDistinct", _a)
+def approx_count_distinct(col, rsd=_UNSET):
+    _a = []
+    _a.append(col)
+    if rsd is not _UNSET: _a.append(rsd)
+    return _dispatch("approx_count_distinct", _a)
+def approx_percentile(col, percentage, accuracy=_UNSET):
+    _a = []
+    _a.append(col)
+    _a.append(percentage)
+    if accuracy is not _UNSET: _a.append(accuracy)
+    return _dispatch("approx_percentile", _a)
+def array(*cols):
+    _a = []
+    _a.extend(cols)
+    return _dispatch("array", _a)
+def array_agg(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("array_agg", _a)
+def array_append(col, value):
+    _a = []
+    _a.append(col)
+    _a.append(value)
+    return _dispatch("array_append", _a)
+def array_compact(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("array_compact", _a)
+def array_contains(col, value):
+    _a = []
+    _a.append(col)
+    _a.append(value)
+    return _dispatch("array_contains", _a)
+def array_distinct(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("array_distinct", _a)
+def array_except(col1, col2):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    return _dispatch("array_except", _a)
+def array_insert(arr, pos, value):
+    _a = []
+    _a.append(arr)
+    _a.append(pos)
+    _a.append(value)
+    return _dispatch("array_insert", _a)
+def array_intersect(col1, col2):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    return _dispatch("array_intersect", _a)
+def array_join(col, delimiter, null_replacement=_UNSET):
+    _a = []
+    _a.append(col)
+    _a.append(delimiter)
+    if null_replacement is not _UNSET: _a.append(null_replacement)
+    return _dispatch("array_join", _a)
+def array_max(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("array_max", _a)
+def array_min(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("array_min", _a)
+def array_position(col, value):
+    _a = []
+    _a.append(col)
+    _a.append(value)
+    return _dispatch("array_position", _a)
+def array_prepend(col, value):
+    _a = []
+    _a.append(col)
+    _a.append(value)
+    return _dispatch("array_prepend", _a)
+def array_remove(col, element):
+    _a = []
+    _a.append(col)
+    _a.append(element)
+    return _dispatch("array_remove", _a)
+def array_repeat(col, count):
+    _a = []
+    _a.append(col)
+    _a.append(count)
+    return _dispatch("array_repeat", _a)
+def array_size(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("array_size", _a)
+def array_sort(col, comparator=_UNSET):
+    _a = []
+    _a.append(col)
+    if comparator is not _UNSET: _a.append(comparator)
+    return _dispatch("array_sort", _a)
+def array_union(col1, col2):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    return _dispatch("array_union", _a)
+def arrays_overlap(a1, a2):
+    _a = []
+    _a.append(a1)
+    _a.append(a2)
+    return _dispatch("arrays_overlap", _a)
+def arrays_zip(*cols):
+    _a = []
+    _a.extend(cols)
+    return _dispatch("arrays_zip", _a)
+def asc(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("asc", _a)
+def asc_nulls_first(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("asc_nulls_first", _a)
+def asc_nulls_last(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("asc_nulls_last", _a)
+def ascii(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("ascii", _a)
+def asin(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("asin", _a)
+def asinh(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("asinh", _a)
+def assert_true(col, errMsg=_UNSET):
+    _a = []
+    _a.append(col)
+    if errMsg is not _UNSET: _a.append(errMsg)
+    return _dispatch("assert_true", _a)
+def atan(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("atan", _a)
+def atan2(col1, col2):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    return _dispatch("atan2", _a)
+def atanh(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("atanh", _a)
+def base64(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("base64", _a)
+def bin(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("bin", _a)
+def bit_and(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("bit_and", _a)
+def bit_count(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("bit_count", _a)
+def bit_get(col, pos):
+    _a = []
+    _a.append(col)
+    _a.append(pos)
+    return _dispatch("bit_get", _a)
+def bit_length(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("bit_length", _a)
+def bit_or(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("bit_or", _a)
+def bit_xor(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("bit_xor", _a)
+def bitmap_and_agg(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("bitmap_and_agg", _a)
+def bitmap_bit_position(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("bitmap_bit_position", _a)
+def bitmap_bucket_number(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("bitmap_bucket_number", _a)
+def bitmap_construct_agg(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("bitmap_construct_agg", _a)
+def bitmap_count(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("bitmap_count", _a)
+def bitmap_or_agg(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("bitmap_or_agg", _a)
+def bitwiseNOT(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("bitwiseNOT", _a)
+def bitwise_not(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("bitwise_not", _a)
+def bool_and(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("bool_and", _a)
+def bool_or(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("bool_or", _a)
+def bround(col, scale=_UNSET):
+    _a = []
+    _a.append(col)
+    if scale is not _UNSET: _a.append(scale)
+    return _dispatch("bround", _a)
+def btrim(str, trim=_UNSET):
+    _a = []
+    _a.append(str)
+    if trim is not _UNSET: _a.append(trim)
+    return _dispatch("btrim", _a)
+def bucket(numBuckets, col):
+    _a = []
+    _a.append(numBuckets)
+    _a.append(col)
+    return _dispatch("bucket", _a)
+def cardinality(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("cardinality", _a)
+def cbrt(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("cbrt", _a)
+def ceil(col, scale=_UNSET):
+    _a = []
+    _a.append(col)
+    if scale is not _UNSET: _a.append(scale)
+    return _dispatch("ceil", _a)
+def ceiling(col, scale=_UNSET):
+    _a = []
+    _a.append(col)
+    if scale is not _UNSET: _a.append(scale)
+    return _dispatch("ceiling", _a)
+def char(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("char", _a)
+def char_length(str):
+    _a = []
+    _a.append(str)
+    return _dispatch("char_length", _a)
+def character_length(str):
+    _a = []
+    _a.append(str)
+    return _dispatch("character_length", _a)
+def chr(n):
+    _a = []
+    _a.append(n)
+    return _dispatch("chr", _a)
+def coalesce(*cols):
+    _a = []
+    _a.extend(cols)
+    return _dispatch("coalesce", _a)
+def collate(col, collation):
+    _a = []
+    _a.append(col)
+    _a.append(collation)
+    return _dispatch("collate", _a)
+def collation(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("collation", _a)
+def collect_list(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("collect_list", _a)
+def collect_set(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("collect_set", _a)
+def concat(*cols):
+    _a = []
+    _a.extend(cols)
+    return _dispatch("concat", _a)
+def concat_ws(sep, *cols):
+    _a = []
+    _a.append(sep)
+    _a.extend(cols)
+    return _dispatch("concat_ws", _a)
+def contains(left, right):
+    _a = []
+    _a.append(left)
+    _a.append(right)
+    return _dispatch("contains", _a)
+def conv(col, fromBase, toBase):
+    _a = []
+    _a.append(col)
+    _a.append(fromBase)
+    _a.append(toBase)
+    return _dispatch("conv", _a)
+def convert_timezone(sourceTz, targetTz, sourceTs):
+    _a = []
+    _a.append(sourceTz)
+    _a.append(targetTz)
+    _a.append(sourceTs)
+    return _dispatch("convert_timezone", _a)
+def corr(col1, col2):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    return _dispatch("corr", _a)
+def cos(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("cos", _a)
+def cosh(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("cosh", _a)
+def cot(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("cot", _a)
+def countDistinct(col, *cols):
+    _a = []
+    _a.append(col)
+    _a.extend(cols)
+    return _dispatch("countDistinct", _a)
+def count_distinct(col, *cols):
+    _a = []
+    _a.append(col)
+    _a.extend(cols)
+    return _dispatch("count_distinct", _a)
+def count_if(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("count_if", _a)
+def count_min_sketch(col, eps, confidence, seed=_UNSET):
+    _a = []
+    _a.append(col)
+    _a.append(eps)
+    _a.append(confidence)
+    if seed is not _UNSET: _a.append(seed)
+    return _dispatch("count_min_sketch", _a)
 counter_diff = _create_wrapper("counter_diff")
-covar_pop = _create_wrapper("covar_pop")
-covar_samp = _create_wrapper("covar_samp")
-crc32 = _create_wrapper("crc32")
-create_map = _create_wrapper("create_map")
-csc = _create_wrapper("csc")
-curdate = _create_wrapper("curdate")
-current_catalog = _create_wrapper("current_catalog")
-current_database = _create_wrapper("current_database")
-current_date = _create_wrapper("current_date")
-current_path = _create_wrapper("current_path")
-current_schema = _create_wrapper("current_schema")
-current_time = _create_wrapper("current_time")
-current_timestamp = _create_wrapper("current_timestamp")
-current_timezone = _create_wrapper("current_timezone")
-current_user = _create_wrapper("current_user")
-date_add = _create_wrapper("date_add")
-date_diff = _create_wrapper("date_diff")
-date_format = _create_wrapper("date_format")
-date_from_unix_date = _create_wrapper("date_from_unix_date")
-date_part = _create_wrapper("date_part")
-date_sub = _create_wrapper("date_sub")
-date_trunc = _create_wrapper("date_trunc")
-dateadd = _create_wrapper("dateadd")
-datediff = _create_wrapper("datediff")
-datepart = _create_wrapper("datepart")
-day = _create_wrapper("day")
-dayname = _create_wrapper("dayname")
-dayofmonth = _create_wrapper("dayofmonth")
-dayofweek = _create_wrapper("dayofweek")
-dayofyear = _create_wrapper("dayofyear")
-days = _create_wrapper("days")
-decode = _create_wrapper("decode")
-degrees = _create_wrapper("degrees")
-dense_rank = _create_wrapper("dense_rank")
-desc = _create_wrapper("desc")
-desc_nulls_first = _create_wrapper("desc_nulls_first")
-desc_nulls_last = _create_wrapper("desc_nulls_last")
-e = _create_wrapper("e")
-element_at = _create_wrapper("element_at")
-elt = _create_wrapper("elt")
-encode = _create_wrapper("encode")
-endswith = _create_wrapper("endswith")
-equal_null = _create_wrapper("equal_null")
-every = _create_wrapper("every")
-exp = _create_wrapper("exp")
-explode = _create_wrapper("explode")
-explode_outer = _create_wrapper("explode_outer")
-expm1 = _create_wrapper("expm1")
-extract = _create_wrapper("extract")
-factorial = _create_wrapper("factorial")
-find_in_set = _create_wrapper("find_in_set")
-first = _create_wrapper("first")
-first_value = _create_wrapper("first_value")
-flatten = _create_wrapper("flatten")
-floor = _create_wrapper("floor")
-format_number = _create_wrapper("format_number")
-format_string = _create_wrapper("format_string")
-from_csv = _create_wrapper("from_csv")
-from_json = _create_wrapper("from_json")
-from_unixtime = _create_wrapper("from_unixtime")
-from_utc_timestamp = _create_wrapper("from_utc_timestamp")
-from_xml = _create_wrapper("from_xml")
-get = _create_wrapper("get")
-get_json_object = _create_wrapper("get_json_object")
-getbit = _create_wrapper("getbit")
-greatest = _create_wrapper("greatest")
-grouping = _create_wrapper("grouping")
-grouping_id = _create_wrapper("grouping_id")
-hash = _create_wrapper("hash")
-hex = _create_wrapper("hex")
-histogram_numeric = _create_wrapper("histogram_numeric")
-hll_sketch_agg = _create_wrapper("hll_sketch_agg")
-hll_sketch_estimate = _create_wrapper("hll_sketch_estimate")
-hll_union = _create_wrapper("hll_union")
-hll_union_agg = _create_wrapper("hll_union_agg")
+def covar_pop(col1, col2):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    return _dispatch("covar_pop", _a)
+def covar_samp(col1, col2):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    return _dispatch("covar_samp", _a)
+def crc32(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("crc32", _a)
+def create_map(*cols):
+    _a = []
+    _a.extend(cols)
+    return _dispatch("create_map", _a)
+def csc(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("csc", _a)
+def curdate():
+    _a = []
+    return _dispatch("curdate", _a)
+def current_catalog():
+    _a = []
+    return _dispatch("current_catalog", _a)
+def current_database():
+    _a = []
+    return _dispatch("current_database", _a)
+def current_date():
+    _a = []
+    return _dispatch("current_date", _a)
+def current_path():
+    _a = []
+    return _dispatch("current_path", _a)
+def current_schema():
+    _a = []
+    return _dispatch("current_schema", _a)
+def current_time(precision=_UNSET):
+    _a = []
+    if precision is not _UNSET: _a.append(precision)
+    return _dispatch("current_time", _a)
+def current_timestamp():
+    _a = []
+    return _dispatch("current_timestamp", _a)
+def current_timezone():
+    _a = []
+    return _dispatch("current_timezone", _a)
+def current_user():
+    _a = []
+    return _dispatch("current_user", _a)
+def date_add(start, days):
+    _a = []
+    _a.append(start)
+    _a.append(days)
+    return _dispatch("date_add", _a)
+def date_diff(end, start):
+    _a = []
+    _a.append(end)
+    _a.append(start)
+    return _dispatch("date_diff", _a)
+def date_format(date, format):
+    _a = []
+    _a.append(date)
+    _a.append(format)
+    return _dispatch("date_format", _a)
+def date_from_unix_date(days):
+    _a = []
+    _a.append(days)
+    return _dispatch("date_from_unix_date", _a)
+def date_part(field, source):
+    _a = []
+    _a.append(field)
+    _a.append(source)
+    return _dispatch("date_part", _a)
+def date_sub(start, days):
+    _a = []
+    _a.append(start)
+    _a.append(days)
+    return _dispatch("date_sub", _a)
+def date_trunc(format, timestamp):
+    _a = []
+    _a.append(format)
+    _a.append(timestamp)
+    return _dispatch("date_trunc", _a)
+def dateadd(start, days):
+    _a = []
+    _a.append(start)
+    _a.append(days)
+    return _dispatch("dateadd", _a)
+def datediff(end, start):
+    _a = []
+    _a.append(end)
+    _a.append(start)
+    return _dispatch("datediff", _a)
+def datepart(field, source):
+    _a = []
+    _a.append(field)
+    _a.append(source)
+    return _dispatch("datepart", _a)
+def day(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("day", _a)
+def dayname(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("dayname", _a)
+def dayofmonth(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("dayofmonth", _a)
+def dayofweek(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("dayofweek", _a)
+def dayofyear(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("dayofyear", _a)
+def days(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("days", _a)
+def decode(col, charset):
+    _a = []
+    _a.append(col)
+    _a.append(charset)
+    return _dispatch("decode", _a)
+def degrees(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("degrees", _a)
+def dense_rank():
+    _a = []
+    return _dispatch("dense_rank", _a)
+def desc(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("desc", _a)
+def desc_nulls_first(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("desc_nulls_first", _a)
+def desc_nulls_last(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("desc_nulls_last", _a)
+def e():
+    _a = []
+    return _dispatch("e", _a)
+def element_at(col, extraction):
+    _a = []
+    _a.append(col)
+    _a.append(extraction)
+    return _dispatch("element_at", _a)
+def elt(*inputs):
+    _a = []
+    _a.extend(inputs)
+    return _dispatch("elt", _a)
+def encode(col, charset):
+    _a = []
+    _a.append(col)
+    _a.append(charset)
+    return _dispatch("encode", _a)
+def endswith(str, suffix):
+    _a = []
+    _a.append(str)
+    _a.append(suffix)
+    return _dispatch("endswith", _a)
+def equal_null(col1, col2):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    return _dispatch("equal_null", _a)
+def every(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("every", _a)
+def exp(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("exp", _a)
+def explode(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("explode", _a)
+def explode_outer(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("explode_outer", _a)
+def expm1(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("expm1", _a)
+def extract(field, source):
+    _a = []
+    _a.append(field)
+    _a.append(source)
+    return _dispatch("extract", _a)
+def factorial(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("factorial", _a)
+def find_in_set(str, str_array):
+    _a = []
+    _a.append(str)
+    _a.append(str_array)
+    return _dispatch("find_in_set", _a)
+def first(col, ignorenulls=_UNSET):
+    _a = []
+    _a.append(col)
+    if ignorenulls is not _UNSET: _a.append(ignorenulls)
+    return _dispatch("first", _a)
+def first_value(col, ignoreNulls=_UNSET):
+    _a = []
+    _a.append(col)
+    if ignoreNulls is not _UNSET: _a.append(ignoreNulls)
+    return _dispatch("first_value", _a)
+def flatten(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("flatten", _a)
+def floor(col, scale=_UNSET):
+    _a = []
+    _a.append(col)
+    if scale is not _UNSET: _a.append(scale)
+    return _dispatch("floor", _a)
+def format_number(col, d):
+    _a = []
+    _a.append(col)
+    _a.append(d)
+    return _dispatch("format_number", _a)
+def format_string(format, *cols):
+    _a = []
+    _a.append(format)
+    _a.extend(cols)
+    return _dispatch("format_string", _a)
+def from_csv(col, schema, options=_UNSET):
+    _a = []
+    _a.append(col)
+    _a.append(schema)
+    if options is not _UNSET: _a.append(options)
+    return _dispatch("from_csv", _a)
+def from_json(col, schema, options=_UNSET):
+    _a = []
+    _a.append(col)
+    _a.append(schema)
+    if options is not _UNSET: _a.append(options)
+    return _dispatch("from_json", _a)
+def from_unixtime(timestamp, format=_UNSET):
+    _a = []
+    _a.append(timestamp)
+    if format is not _UNSET: _a.append(format)
+    return _dispatch("from_unixtime", _a)
+def from_utc_timestamp(timestamp, tz):
+    _a = []
+    _a.append(timestamp)
+    _a.append(tz)
+    return _dispatch("from_utc_timestamp", _a)
+def from_xml(col, schema, options=_UNSET):
+    _a = []
+    _a.append(col)
+    _a.append(schema)
+    if options is not _UNSET: _a.append(options)
+    return _dispatch("from_xml", _a)
+def get(col, index):
+    _a = []
+    _a.append(col)
+    _a.append(index)
+    return _dispatch("get", _a)
+def get_json_object(col, path):
+    _a = []
+    _a.append(col)
+    _a.append(path)
+    return _dispatch("get_json_object", _a)
+def getbit(col, pos):
+    _a = []
+    _a.append(col)
+    _a.append(pos)
+    return _dispatch("getbit", _a)
+def greatest(*cols):
+    _a = []
+    _a.extend(cols)
+    return _dispatch("greatest", _a)
+def grouping(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("grouping", _a)
+def grouping_id(*cols):
+    _a = []
+    _a.extend(cols)
+    return _dispatch("grouping_id", _a)
+def hash(*cols):
+    _a = []
+    _a.extend(cols)
+    return _dispatch("hash", _a)
+def hex(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("hex", _a)
+def histogram_numeric(col, nBins):
+    _a = []
+    _a.append(col)
+    _a.append(nBins)
+    return _dispatch("histogram_numeric", _a)
+def hll_sketch_agg(col, lgConfigK=_UNSET):
+    _a = []
+    _a.append(col)
+    if lgConfigK is not _UNSET: _a.append(lgConfigK)
+    return _dispatch("hll_sketch_agg", _a)
+def hll_sketch_estimate(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("hll_sketch_estimate", _a)
+def hll_union(col1, col2, allowDifferentLgConfigK=_UNSET):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    if allowDifferentLgConfigK is not _UNSET: _a.append(allowDifferentLgConfigK)
+    return _dispatch("hll_union", _a)
+def hll_union_agg(col, allowDifferentLgConfigK=_UNSET):
+    _a = []
+    _a.append(col)
+    if allowDifferentLgConfigK is not _UNSET: _a.append(allowDifferentLgConfigK)
+    return _dispatch("hll_union_agg", _a)
 hmac = _create_wrapper("hmac")
-hour = _create_wrapper("hour")
-hours = _create_wrapper("hours")
-hypot = _create_wrapper("hypot")
-ifnull = _create_wrapper("ifnull")
-ilike = _create_wrapper("ilike")
-initcap = _create_wrapper("initcap")
-inline = _create_wrapper("inline")
-inline_outer = _create_wrapper("inline_outer")
-input_file_block_length = _create_wrapper("input_file_block_length")
-input_file_block_start = _create_wrapper("input_file_block_start")
-input_file_name = _create_wrapper("input_file_name")
-instr = _create_wrapper("instr")
-is_valid_utf8 = _create_wrapper("is_valid_utf8")
-is_valid_variant = _create_wrapper("is_valid_variant")
-is_variant_null = _create_wrapper("is_variant_null")
-isnan = _create_wrapper("isnan")
-isnotnull = _create_wrapper("isnotnull")
-isnull = _create_wrapper("isnull")
+def hour(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("hour", _a)
+def hours(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("hours", _a)
+def hypot(col1, col2):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    return _dispatch("hypot", _a)
+def ifnull(col1, col2):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    return _dispatch("ifnull", _a)
+def ilike(str, pattern, escapeChar=_UNSET):
+    _a = []
+    _a.append(str)
+    _a.append(pattern)
+    if escapeChar is not _UNSET: _a.append(escapeChar)
+    return _dispatch("ilike", _a)
+def initcap(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("initcap", _a)
+def inline(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("inline", _a)
+def inline_outer(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("inline_outer", _a)
+def input_file_block_length():
+    _a = []
+    return _dispatch("input_file_block_length", _a)
+def input_file_block_start():
+    _a = []
+    return _dispatch("input_file_block_start", _a)
+def input_file_name():
+    _a = []
+    return _dispatch("input_file_name", _a)
+def instr(str, substr):
+    _a = []
+    _a.append(str)
+    _a.append(substr)
+    return _dispatch("instr", _a)
+def is_valid_utf8(str):
+    _a = []
+    _a.append(str)
+    return _dispatch("is_valid_utf8", _a)
+def is_valid_variant(v):
+    _a = []
+    _a.append(v)
+    return _dispatch("is_valid_variant", _a)
+def is_variant_null(v):
+    _a = []
+    _a.append(v)
+    return _dispatch("is_variant_null", _a)
+def isnan(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("isnan", _a)
+def isnotnull(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("isnotnull", _a)
+def isnull(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("isnull", _a)
 jaro_winkler_similarity = _create_wrapper("jaro_winkler_similarity")
-java_method = _create_wrapper("java_method")
-json_array_length = _create_wrapper("json_array_length")
-json_object_keys = _create_wrapper("json_object_keys")
-json_tuple = _create_wrapper("json_tuple")
-kll_merge_agg_bigint = _create_wrapper("kll_merge_agg_bigint")
-kll_merge_agg_double = _create_wrapper("kll_merge_agg_double")
-kll_merge_agg_float = _create_wrapper("kll_merge_agg_float")
-kll_sketch_agg_bigint = _create_wrapper("kll_sketch_agg_bigint")
-kll_sketch_agg_double = _create_wrapper("kll_sketch_agg_double")
-kll_sketch_agg_float = _create_wrapper("kll_sketch_agg_float")
-kll_sketch_get_n_bigint = _create_wrapper("kll_sketch_get_n_bigint")
-kll_sketch_get_n_double = _create_wrapper("kll_sketch_get_n_double")
-kll_sketch_get_n_float = _create_wrapper("kll_sketch_get_n_float")
-kll_sketch_get_quantile_bigint = _create_wrapper("kll_sketch_get_quantile_bigint")
-kll_sketch_get_quantile_double = _create_wrapper("kll_sketch_get_quantile_double")
-kll_sketch_get_quantile_float = _create_wrapper("kll_sketch_get_quantile_float")
-kll_sketch_get_rank_bigint = _create_wrapper("kll_sketch_get_rank_bigint")
-kll_sketch_get_rank_double = _create_wrapper("kll_sketch_get_rank_double")
-kll_sketch_get_rank_float = _create_wrapper("kll_sketch_get_rank_float")
-kll_sketch_merge_bigint = _create_wrapper("kll_sketch_merge_bigint")
-kll_sketch_merge_double = _create_wrapper("kll_sketch_merge_double")
-kll_sketch_merge_float = _create_wrapper("kll_sketch_merge_float")
-kll_sketch_to_string_bigint = _create_wrapper("kll_sketch_to_string_bigint")
-kll_sketch_to_string_double = _create_wrapper("kll_sketch_to_string_double")
-kll_sketch_to_string_float = _create_wrapper("kll_sketch_to_string_float")
-kurtosis = _create_wrapper("kurtosis")
-lag = _create_wrapper("lag")
-last = _create_wrapper("last")
-last_day = _create_wrapper("last_day")
-last_value = _create_wrapper("last_value")
-lcase = _create_wrapper("lcase")
-lead = _create_wrapper("lead")
-least = _create_wrapper("least")
-left = _create_wrapper("left")
-length = _create_wrapper("length")
-levenshtein = _create_wrapper("levenshtein")
-like = _create_wrapper("like")
-listagg = _create_wrapper("listagg")
-listagg_distinct = _create_wrapper("listagg_distinct")
-ln = _create_wrapper("ln")
-localtimestamp = _create_wrapper("localtimestamp")
-locate = _create_wrapper("locate")
-log = _create_wrapper("log")
-log10 = _create_wrapper("log10")
-log1p = _create_wrapper("log1p")
-log2 = _create_wrapper("log2")
-lower = _create_wrapper("lower")
-lpad = _create_wrapper("lpad")
-ltrim = _create_wrapper("ltrim")
-make_date = _create_wrapper("make_date")
-make_dt_interval = _create_wrapper("make_dt_interval")
-make_interval = _create_wrapper("make_interval")
-make_time = _create_wrapper("make_time")
-make_timestamp = _create_wrapper("make_timestamp")
-make_timestamp_ltz = _create_wrapper("make_timestamp_ltz")
-make_timestamp_ntz = _create_wrapper("make_timestamp_ntz")
-make_valid_utf8 = _create_wrapper("make_valid_utf8")
-make_ym_interval = _create_wrapper("make_ym_interval")
-map_concat = _create_wrapper("map_concat")
-map_contains_key = _create_wrapper("map_contains_key")
-map_entries = _create_wrapper("map_entries")
-map_from_arrays = _create_wrapper("map_from_arrays")
-map_from_entries = _create_wrapper("map_from_entries")
-map_keys = _create_wrapper("map_keys")
-map_values = _create_wrapper("map_values")
-mask = _create_wrapper("mask")
-max_by = _create_wrapper("max_by")
-md5 = _create_wrapper("md5")
-mean = _create_wrapper("mean")
-median = _create_wrapper("median")
-min_by = _create_wrapper("min_by")
-minute = _create_wrapper("minute")
-mode = _create_wrapper("mode")
-monotonically_increasing_id = _create_wrapper("monotonically_increasing_id")
-month = _create_wrapper("month")
-monthname = _create_wrapper("monthname")
-months = _create_wrapper("months")
-months_between = _create_wrapper("months_between")
-named_struct = _create_wrapper("named_struct")
-nanvl = _create_wrapper("nanvl")
-negate = _create_wrapper("negate")
-negative = _create_wrapper("negative")
-next_day = _create_wrapper("next_day")
-now = _create_wrapper("now")
-nth_value = _create_wrapper("nth_value")
-ntile = _create_wrapper("ntile")
-nullif = _create_wrapper("nullif")
-nullifzero = _create_wrapper("nullifzero")
-nvl = _create_wrapper("nvl")
-nvl2 = _create_wrapper("nvl2")
-octet_length = _create_wrapper("octet_length")
-overlay = _create_wrapper("overlay")
-parse_json = _create_wrapper("parse_json")
-parse_url = _create_wrapper("parse_url")
-percent_rank = _create_wrapper("percent_rank")
-percentile = _create_wrapper("percentile")
-percentile_approx = _create_wrapper("percentile_approx")
-pi = _create_wrapper("pi")
-pmod = _create_wrapper("pmod")
-posexplode = _create_wrapper("posexplode")
-posexplode_outer = _create_wrapper("posexplode_outer")
-position = _create_wrapper("position")
-positive = _create_wrapper("positive")
-pow = _create_wrapper("pow")
-power = _create_wrapper("power")
-printf = _create_wrapper("printf")
-product = _create_wrapper("product")
-quarter = _create_wrapper("quarter")
-quote = _create_wrapper("quote")
-radians = _create_wrapper("radians")
-raise_error = _create_wrapper("raise_error")
-rand = _create_wrapper("rand")
-randn = _create_wrapper("randn")
-randstr = _create_wrapper("randstr")
-rank = _create_wrapper("rank")
-reflect = _create_wrapper("reflect")
-regexp = _create_wrapper("regexp")
-regexp_count = _create_wrapper("regexp_count")
-regexp_extract = _create_wrapper("regexp_extract")
-regexp_extract_all = _create_wrapper("regexp_extract_all")
-regexp_instr = _create_wrapper("regexp_instr")
-regexp_like = _create_wrapper("regexp_like")
-regexp_replace = _create_wrapper("regexp_replace")
-regexp_substr = _create_wrapper("regexp_substr")
-regr_avgx = _create_wrapper("regr_avgx")
-regr_avgy = _create_wrapper("regr_avgy")
-regr_count = _create_wrapper("regr_count")
-regr_intercept = _create_wrapper("regr_intercept")
-regr_r2 = _create_wrapper("regr_r2")
-regr_slope = _create_wrapper("regr_slope")
-regr_sxx = _create_wrapper("regr_sxx")
-regr_sxy = _create_wrapper("regr_sxy")
-regr_syy = _create_wrapper("regr_syy")
-repeat = _create_wrapper("repeat")
-replace = _create_wrapper("replace")
-reverse = _create_wrapper("reverse")
-right = _create_wrapper("right")
-rint = _create_wrapper("rint")
-rlike = _create_wrapper("rlike")
-round = _create_wrapper("round")
-row_number = _create_wrapper("row_number")
-rpad = _create_wrapper("rpad")
-rtrim = _create_wrapper("rtrim")
-schema_of_csv = _create_wrapper("schema_of_csv")
-schema_of_json = _create_wrapper("schema_of_json")
-schema_of_variant = _create_wrapper("schema_of_variant")
-schema_of_variant_agg = _create_wrapper("schema_of_variant_agg")
-schema_of_xml = _create_wrapper("schema_of_xml")
-sec = _create_wrapper("sec")
-second = _create_wrapper("second")
-sentences = _create_wrapper("sentences")
-sequence = _create_wrapper("sequence")
-session_user = _create_wrapper("session_user")
-session_window = _create_wrapper("session_window")
-sha = _create_wrapper("sha")
-sha1 = _create_wrapper("sha1")
-shiftLeft = _create_wrapper("shiftLeft")
-shiftRight = _create_wrapper("shiftRight")
-shiftRightUnsigned = _create_wrapper("shiftRightUnsigned")
-shiftleft = _create_wrapper("shiftleft")
-shiftright = _create_wrapper("shiftright")
-shiftrightunsigned = _create_wrapper("shiftrightunsigned")
-shuffle = _create_wrapper("shuffle")
-sign = _create_wrapper("sign")
-signum = _create_wrapper("signum")
-sin = _create_wrapper("sin")
-sinh = _create_wrapper("sinh")
-size = _create_wrapper("size")
-skewness = _create_wrapper("skewness")
-slice = _create_wrapper("slice")
-some = _create_wrapper("some")
-sort_array = _create_wrapper("sort_array")
-soundex = _create_wrapper("soundex")
-spark_partition_id = _create_wrapper("spark_partition_id")
-split = _create_wrapper("split")
-split_part = _create_wrapper("split_part")
-sqrt = _create_wrapper("sqrt")
-st_asbinary = _create_wrapper("st_asbinary")
-st_geogfromwkb = _create_wrapper("st_geogfromwkb")
-st_geomfromwkb = _create_wrapper("st_geomfromwkb")
-st_setsrid = _create_wrapper("st_setsrid")
-st_srid = _create_wrapper("st_srid")
-stack = _create_wrapper("stack")
-startswith = _create_wrapper("startswith")
-std = _create_wrapper("std")
-stddev = _create_wrapper("stddev")
-stddev_pop = _create_wrapper("stddev_pop")
-stddev_samp = _create_wrapper("stddev_samp")
-str_to_map = _create_wrapper("str_to_map")
-string_agg = _create_wrapper("string_agg")
-string_agg_distinct = _create_wrapper("string_agg_distinct")
-struct = _create_wrapper("struct")
-substr = _create_wrapper("substr")
-substring = _create_wrapper("substring")
-substring_index = _create_wrapper("substring_index")
-sumDistinct = _create_wrapper("sumDistinct")
-sum_distinct = _create_wrapper("sum_distinct")
-tan = _create_wrapper("tan")
-tanh = _create_wrapper("tanh")
-theta_difference = _create_wrapper("theta_difference")
-theta_intersection = _create_wrapper("theta_intersection")
-theta_intersection_agg = _create_wrapper("theta_intersection_agg")
-theta_sketch_agg = _create_wrapper("theta_sketch_agg")
-theta_sketch_estimate = _create_wrapper("theta_sketch_estimate")
-theta_union = _create_wrapper("theta_union")
-theta_union_agg = _create_wrapper("theta_union_agg")
-time_bucket = _create_wrapper("time_bucket")
-time_diff = _create_wrapper("time_diff")
-time_from_micros = _create_wrapper("time_from_micros")
-time_from_millis = _create_wrapper("time_from_millis")
-time_from_seconds = _create_wrapper("time_from_seconds")
-time_to_micros = _create_wrapper("time_to_micros")
-time_to_millis = _create_wrapper("time_to_millis")
-time_to_seconds = _create_wrapper("time_to_seconds")
-time_trunc = _create_wrapper("time_trunc")
-timestamp_add = _create_wrapper("timestamp_add")
-timestamp_diff = _create_wrapper("timestamp_diff")
-timestamp_micros = _create_wrapper("timestamp_micros")
-timestamp_millis = _create_wrapper("timestamp_millis")
+def java_method(*cols):
+    _a = []
+    _a.extend(cols)
+    return _dispatch("java_method", _a)
+def json_array_length(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("json_array_length", _a)
+def json_object_keys(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("json_object_keys", _a)
+def json_tuple(col, *fields):
+    _a = []
+    _a.append(col)
+    _a.extend(fields)
+    return _dispatch("json_tuple", _a)
+def kll_merge_agg_bigint(col, k=_UNSET):
+    _a = []
+    _a.append(col)
+    if k is not _UNSET: _a.append(k)
+    return _dispatch("kll_merge_agg_bigint", _a)
+def kll_merge_agg_double(col, k=_UNSET):
+    _a = []
+    _a.append(col)
+    if k is not _UNSET: _a.append(k)
+    return _dispatch("kll_merge_agg_double", _a)
+def kll_merge_agg_float(col, k=_UNSET):
+    _a = []
+    _a.append(col)
+    if k is not _UNSET: _a.append(k)
+    return _dispatch("kll_merge_agg_float", _a)
+def kll_sketch_agg_bigint(col, k=_UNSET):
+    _a = []
+    _a.append(col)
+    if k is not _UNSET: _a.append(k)
+    return _dispatch("kll_sketch_agg_bigint", _a)
+def kll_sketch_agg_double(col, k=_UNSET):
+    _a = []
+    _a.append(col)
+    if k is not _UNSET: _a.append(k)
+    return _dispatch("kll_sketch_agg_double", _a)
+def kll_sketch_agg_float(col, k=_UNSET):
+    _a = []
+    _a.append(col)
+    if k is not _UNSET: _a.append(k)
+    return _dispatch("kll_sketch_agg_float", _a)
+def kll_sketch_get_n_bigint(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("kll_sketch_get_n_bigint", _a)
+def kll_sketch_get_n_double(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("kll_sketch_get_n_double", _a)
+def kll_sketch_get_n_float(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("kll_sketch_get_n_float", _a)
+def kll_sketch_get_quantile_bigint(sketch, rank):
+    _a = []
+    _a.append(sketch)
+    _a.append(rank)
+    return _dispatch("kll_sketch_get_quantile_bigint", _a)
+def kll_sketch_get_quantile_double(sketch, rank):
+    _a = []
+    _a.append(sketch)
+    _a.append(rank)
+    return _dispatch("kll_sketch_get_quantile_double", _a)
+def kll_sketch_get_quantile_float(sketch, rank):
+    _a = []
+    _a.append(sketch)
+    _a.append(rank)
+    return _dispatch("kll_sketch_get_quantile_float", _a)
+def kll_sketch_get_rank_bigint(sketch, quantile):
+    _a = []
+    _a.append(sketch)
+    _a.append(quantile)
+    return _dispatch("kll_sketch_get_rank_bigint", _a)
+def kll_sketch_get_rank_double(sketch, quantile):
+    _a = []
+    _a.append(sketch)
+    _a.append(quantile)
+    return _dispatch("kll_sketch_get_rank_double", _a)
+def kll_sketch_get_rank_float(sketch, quantile):
+    _a = []
+    _a.append(sketch)
+    _a.append(quantile)
+    return _dispatch("kll_sketch_get_rank_float", _a)
+def kll_sketch_merge_bigint(left, right):
+    _a = []
+    _a.append(left)
+    _a.append(right)
+    return _dispatch("kll_sketch_merge_bigint", _a)
+def kll_sketch_merge_double(left, right):
+    _a = []
+    _a.append(left)
+    _a.append(right)
+    return _dispatch("kll_sketch_merge_double", _a)
+def kll_sketch_merge_float(left, right):
+    _a = []
+    _a.append(left)
+    _a.append(right)
+    return _dispatch("kll_sketch_merge_float", _a)
+def kll_sketch_to_string_bigint(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("kll_sketch_to_string_bigint", _a)
+def kll_sketch_to_string_double(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("kll_sketch_to_string_double", _a)
+def kll_sketch_to_string_float(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("kll_sketch_to_string_float", _a)
+def kurtosis(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("kurtosis", _a)
+def lag(col, offset=_UNSET, default=_UNSET):
+    _a = []
+    _a.append(col)
+    if offset is not _UNSET: _a.append(offset)
+    if default is not _UNSET: _a.append(default)
+    return _dispatch("lag", _a)
+def last(col, ignorenulls=_UNSET):
+    _a = []
+    _a.append(col)
+    if ignorenulls is not _UNSET: _a.append(ignorenulls)
+    return _dispatch("last", _a)
+def last_day(date):
+    _a = []
+    _a.append(date)
+    return _dispatch("last_day", _a)
+def last_value(col, ignoreNulls=_UNSET):
+    _a = []
+    _a.append(col)
+    if ignoreNulls is not _UNSET: _a.append(ignoreNulls)
+    return _dispatch("last_value", _a)
+def lcase(str):
+    _a = []
+    _a.append(str)
+    return _dispatch("lcase", _a)
+def lead(col, offset=_UNSET, default=_UNSET):
+    _a = []
+    _a.append(col)
+    if offset is not _UNSET: _a.append(offset)
+    if default is not _UNSET: _a.append(default)
+    return _dispatch("lead", _a)
+def least(*cols):
+    _a = []
+    _a.extend(cols)
+    return _dispatch("least", _a)
+def left(str, len):
+    _a = []
+    _a.append(str)
+    _a.append(len)
+    return _dispatch("left", _a)
+def length(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("length", _a)
+def levenshtein(left, right, threshold=_UNSET):
+    _a = []
+    _a.append(left)
+    _a.append(right)
+    if threshold is not _UNSET: _a.append(threshold)
+    return _dispatch("levenshtein", _a)
+def like(str, pattern, escapeChar=_UNSET):
+    _a = []
+    _a.append(str)
+    _a.append(pattern)
+    if escapeChar is not _UNSET: _a.append(escapeChar)
+    return _dispatch("like", _a)
+def listagg(col, delimiter=_UNSET):
+    _a = []
+    _a.append(col)
+    if delimiter is not _UNSET: _a.append(delimiter)
+    return _dispatch("listagg", _a)
+def listagg_distinct(col, delimiter=_UNSET):
+    _a = []
+    _a.append(col)
+    if delimiter is not _UNSET: _a.append(delimiter)
+    return _dispatch("listagg_distinct", _a)
+def ln(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("ln", _a)
+def localtimestamp():
+    _a = []
+    return _dispatch("localtimestamp", _a)
+def locate(substr, str, pos=_UNSET):
+    _a = []
+    _a.append(substr)
+    _a.append(str)
+    if pos is not _UNSET: _a.append(pos)
+    return _dispatch("locate", _a)
+def log(arg1, arg2=_UNSET):
+    _a = []
+    _a.append(arg1)
+    if arg2 is not _UNSET: _a.append(arg2)
+    return _dispatch("log", _a)
+def log10(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("log10", _a)
+def log1p(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("log1p", _a)
+def log2(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("log2", _a)
+def lower(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("lower", _a)
+def lpad(col, len, pad):
+    _a = []
+    _a.append(col)
+    _a.append(len)
+    _a.append(pad)
+    return _dispatch("lpad", _a)
+def ltrim(col, trim=_UNSET):
+    _a = []
+    _a.append(col)
+    if trim is not _UNSET: _a.append(trim)
+    return _dispatch("ltrim", _a)
+def make_date(year, month, day):
+    _a = []
+    _a.append(year)
+    _a.append(month)
+    _a.append(day)
+    return _dispatch("make_date", _a)
+def make_dt_interval(days=_UNSET, hours=_UNSET, mins=_UNSET, secs=_UNSET):
+    _a = []
+    if days is not _UNSET: _a.append(days)
+    if hours is not _UNSET: _a.append(hours)
+    if mins is not _UNSET: _a.append(mins)
+    if secs is not _UNSET: _a.append(secs)
+    return _dispatch("make_dt_interval", _a)
+def make_interval(years=_UNSET, months=_UNSET, weeks=_UNSET, days=_UNSET, hours=_UNSET, mins=_UNSET, secs=_UNSET):
+    _a = []
+    if years is not _UNSET: _a.append(years)
+    if months is not _UNSET: _a.append(months)
+    if weeks is not _UNSET: _a.append(weeks)
+    if days is not _UNSET: _a.append(days)
+    if hours is not _UNSET: _a.append(hours)
+    if mins is not _UNSET: _a.append(mins)
+    if secs is not _UNSET: _a.append(secs)
+    return _dispatch("make_interval", _a)
+def make_time(hour, minute, second):
+    _a = []
+    _a.append(hour)
+    _a.append(minute)
+    _a.append(second)
+    return _dispatch("make_time", _a)
+def make_timestamp(years=_UNSET, months=_UNSET, days=_UNSET, hours=_UNSET, mins=_UNSET, secs=_UNSET, timezone=_UNSET, date=_UNSET, time=_UNSET):
+    _a = []
+    if years is not _UNSET: _a.append(years)
+    if months is not _UNSET: _a.append(months)
+    if days is not _UNSET: _a.append(days)
+    if hours is not _UNSET: _a.append(hours)
+    if mins is not _UNSET: _a.append(mins)
+    if secs is not _UNSET: _a.append(secs)
+    if timezone is not _UNSET: _a.append(timezone)
+    if date is not _UNSET: _a.append(date)
+    if time is not _UNSET: _a.append(time)
+    return _dispatch("make_timestamp", _a)
+def make_timestamp_ltz(years, months, days, hours, mins, secs, timezone=_UNSET):
+    _a = []
+    _a.append(years)
+    _a.append(months)
+    _a.append(days)
+    _a.append(hours)
+    _a.append(mins)
+    _a.append(secs)
+    if timezone is not _UNSET: _a.append(timezone)
+    return _dispatch("make_timestamp_ltz", _a)
+def make_timestamp_ntz(years=_UNSET, months=_UNSET, days=_UNSET, hours=_UNSET, mins=_UNSET, secs=_UNSET, date=_UNSET, time=_UNSET):
+    _a = []
+    if years is not _UNSET: _a.append(years)
+    if months is not _UNSET: _a.append(months)
+    if days is not _UNSET: _a.append(days)
+    if hours is not _UNSET: _a.append(hours)
+    if mins is not _UNSET: _a.append(mins)
+    if secs is not _UNSET: _a.append(secs)
+    if date is not _UNSET: _a.append(date)
+    if time is not _UNSET: _a.append(time)
+    return _dispatch("make_timestamp_ntz", _a)
+def make_valid_utf8(str):
+    _a = []
+    _a.append(str)
+    return _dispatch("make_valid_utf8", _a)
+def make_ym_interval(years=_UNSET, months=_UNSET):
+    _a = []
+    if years is not _UNSET: _a.append(years)
+    if months is not _UNSET: _a.append(months)
+    return _dispatch("make_ym_interval", _a)
+def map_concat(*cols):
+    _a = []
+    _a.extend(cols)
+    return _dispatch("map_concat", _a)
+def map_contains_key(col, value):
+    _a = []
+    _a.append(col)
+    _a.append(value)
+    return _dispatch("map_contains_key", _a)
+def map_entries(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("map_entries", _a)
+def map_from_arrays(col1, col2):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    return _dispatch("map_from_arrays", _a)
+def map_from_entries(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("map_from_entries", _a)
+def map_keys(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("map_keys", _a)
+def map_values(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("map_values", _a)
+def mask(col, upperChar=_UNSET, lowerChar=_UNSET, digitChar=_UNSET, otherChar=_UNSET):
+    _a = []
+    _a.append(col)
+    if upperChar is not _UNSET: _a.append(upperChar)
+    if lowerChar is not _UNSET: _a.append(lowerChar)
+    if digitChar is not _UNSET: _a.append(digitChar)
+    if otherChar is not _UNSET: _a.append(otherChar)
+    return _dispatch("mask", _a)
+def max_by(col, ord, k=_UNSET):
+    _a = []
+    _a.append(col)
+    _a.append(ord)
+    if k is not _UNSET: _a.append(k)
+    return _dispatch("max_by", _a)
+def md5(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("md5", _a)
+def mean(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("mean", _a)
+def median(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("median", _a)
+def min_by(col, ord, k=_UNSET):
+    _a = []
+    _a.append(col)
+    _a.append(ord)
+    if k is not _UNSET: _a.append(k)
+    return _dispatch("min_by", _a)
+def minute(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("minute", _a)
+def mode(col, deterministic=_UNSET):
+    _a = []
+    _a.append(col)
+    if deterministic is not _UNSET: _a.append(deterministic)
+    return _dispatch("mode", _a)
+def monotonically_increasing_id():
+    _a = []
+    return _dispatch("monotonically_increasing_id", _a)
+def month(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("month", _a)
+def monthname(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("monthname", _a)
+def months(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("months", _a)
+def months_between(date1, date2, roundOff=_UNSET):
+    _a = []
+    _a.append(date1)
+    _a.append(date2)
+    if roundOff is not _UNSET: _a.append(roundOff)
+    return _dispatch("months_between", _a)
+def named_struct(*cols):
+    _a = []
+    _a.extend(cols)
+    return _dispatch("named_struct", _a)
+def nanvl(col1, col2):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    return _dispatch("nanvl", _a)
+def negate(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("negate", _a)
+def negative(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("negative", _a)
+def next_day(date, dayOfWeek):
+    _a = []
+    _a.append(date)
+    _a.append(dayOfWeek)
+    return _dispatch("next_day", _a)
+def now():
+    _a = []
+    return _dispatch("now", _a)
+def nth_value(col, offset, ignoreNulls=_UNSET):
+    _a = []
+    _a.append(col)
+    _a.append(offset)
+    if ignoreNulls is not _UNSET: _a.append(ignoreNulls)
+    return _dispatch("nth_value", _a)
+def ntile(n):
+    _a = []
+    _a.append(n)
+    return _dispatch("ntile", _a)
+def nullif(col1, col2):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    return _dispatch("nullif", _a)
+def nullifzero(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("nullifzero", _a)
+def nvl(col1, col2):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    return _dispatch("nvl", _a)
+def nvl2(col1, col2, col3):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    _a.append(col3)
+    return _dispatch("nvl2", _a)
+def octet_length(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("octet_length", _a)
+def overlay(src, replace, pos, len=_UNSET):
+    _a = []
+    _a.append(src)
+    _a.append(replace)
+    _a.append(pos)
+    if len is not _UNSET: _a.append(len)
+    return _dispatch("overlay", _a)
+def parse_json(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("parse_json", _a)
+def parse_url(url, partToExtract, key=_UNSET):
+    _a = []
+    _a.append(url)
+    _a.append(partToExtract)
+    if key is not _UNSET: _a.append(key)
+    return _dispatch("parse_url", _a)
+def percent_rank():
+    _a = []
+    return _dispatch("percent_rank", _a)
+def percentile(col, percentage, frequency=_UNSET):
+    _a = []
+    _a.append(col)
+    _a.append(percentage)
+    if frequency is not _UNSET: _a.append(frequency)
+    return _dispatch("percentile", _a)
+def percentile_approx(col, percentage, accuracy=_UNSET):
+    _a = []
+    _a.append(col)
+    _a.append(percentage)
+    if accuracy is not _UNSET: _a.append(accuracy)
+    return _dispatch("percentile_approx", _a)
+def pi():
+    _a = []
+    return _dispatch("pi", _a)
+def pmod(dividend, divisor):
+    _a = []
+    _a.append(dividend)
+    _a.append(divisor)
+    return _dispatch("pmod", _a)
+def posexplode(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("posexplode", _a)
+def posexplode_outer(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("posexplode_outer", _a)
+def position(substr, str, start=_UNSET):
+    _a = []
+    _a.append(substr)
+    _a.append(str)
+    if start is not _UNSET: _a.append(start)
+    return _dispatch("position", _a)
+def positive(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("positive", _a)
+def pow(col1, col2):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    return _dispatch("pow", _a)
+def power(col1, col2):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    return _dispatch("power", _a)
+def printf(format, *cols):
+    _a = []
+    _a.append(format)
+    _a.extend(cols)
+    return _dispatch("printf", _a)
+def product(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("product", _a)
+def quarter(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("quarter", _a)
+def quote(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("quote", _a)
+def radians(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("radians", _a)
+def raise_error(errMsg):
+    _a = []
+    _a.append(errMsg)
+    return _dispatch("raise_error", _a)
+def rand(seed=_UNSET):
+    _a = []
+    if seed is not _UNSET: _a.append(seed)
+    return _dispatch("rand", _a)
+def randn(seed=_UNSET):
+    _a = []
+    if seed is not _UNSET: _a.append(seed)
+    return _dispatch("randn", _a)
+def randstr(length, seed=_UNSET):
+    _a = []
+    _a.append(length)
+    if seed is not _UNSET: _a.append(seed)
+    return _dispatch("randstr", _a)
+def rank():
+    _a = []
+    return _dispatch("rank", _a)
+def reflect(*cols):
+    _a = []
+    _a.extend(cols)
+    return _dispatch("reflect", _a)
+def regexp(str, regexp):
+    _a = []
+    _a.append(str)
+    _a.append(regexp)
+    return _dispatch("regexp", _a)
+def regexp_count(str, regexp):
+    _a = []
+    _a.append(str)
+    _a.append(regexp)
+    return _dispatch("regexp_count", _a)
+def regexp_extract(str, pattern, idx):
+    _a = []
+    _a.append(str)
+    _a.append(pattern)
+    _a.append(idx)
+    return _dispatch("regexp_extract", _a)
+def regexp_extract_all(str, regexp, idx=_UNSET):
+    _a = []
+    _a.append(str)
+    _a.append(regexp)
+    if idx is not _UNSET: _a.append(idx)
+    return _dispatch("regexp_extract_all", _a)
+def regexp_instr(str, regexp, idx=_UNSET):
+    _a = []
+    _a.append(str)
+    _a.append(regexp)
+    if idx is not _UNSET: _a.append(idx)
+    return _dispatch("regexp_instr", _a)
+def regexp_like(str, regexp):
+    _a = []
+    _a.append(str)
+    _a.append(regexp)
+    return _dispatch("regexp_like", _a)
+def regexp_replace(string, pattern, replacement):
+    _a = []
+    _a.append(string)
+    _a.append(pattern)
+    _a.append(replacement)
+    return _dispatch("regexp_replace", _a)
+def regexp_substr(str, regexp):
+    _a = []
+    _a.append(str)
+    _a.append(regexp)
+    return _dispatch("regexp_substr", _a)
+def regr_avgx(y, x):
+    _a = []
+    _a.append(y)
+    _a.append(x)
+    return _dispatch("regr_avgx", _a)
+def regr_avgy(y, x):
+    _a = []
+    _a.append(y)
+    _a.append(x)
+    return _dispatch("regr_avgy", _a)
+def regr_count(y, x):
+    _a = []
+    _a.append(y)
+    _a.append(x)
+    return _dispatch("regr_count", _a)
+def regr_intercept(y, x):
+    _a = []
+    _a.append(y)
+    _a.append(x)
+    return _dispatch("regr_intercept", _a)
+def regr_r2(y, x):
+    _a = []
+    _a.append(y)
+    _a.append(x)
+    return _dispatch("regr_r2", _a)
+def regr_slope(y, x):
+    _a = []
+    _a.append(y)
+    _a.append(x)
+    return _dispatch("regr_slope", _a)
+def regr_sxx(y, x):
+    _a = []
+    _a.append(y)
+    _a.append(x)
+    return _dispatch("regr_sxx", _a)
+def regr_sxy(y, x):
+    _a = []
+    _a.append(y)
+    _a.append(x)
+    return _dispatch("regr_sxy", _a)
+def regr_syy(y, x):
+    _a = []
+    _a.append(y)
+    _a.append(x)
+    return _dispatch("regr_syy", _a)
+def repeat(col, n):
+    _a = []
+    _a.append(col)
+    _a.append(n)
+    return _dispatch("repeat", _a)
+def replace(src, search, replace=_UNSET):
+    _a = []
+    _a.append(src)
+    _a.append(search)
+    if replace is not _UNSET: _a.append(replace)
+    return _dispatch("replace", _a)
+def reverse(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("reverse", _a)
+def right(str, len):
+    _a = []
+    _a.append(str)
+    _a.append(len)
+    return _dispatch("right", _a)
+def rint(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("rint", _a)
+def rlike(str, regexp):
+    _a = []
+    _a.append(str)
+    _a.append(regexp)
+    return _dispatch("rlike", _a)
+def round(col, scale=_UNSET):
+    _a = []
+    _a.append(col)
+    if scale is not _UNSET: _a.append(scale)
+    return _dispatch("round", _a)
+def row_number():
+    _a = []
+    return _dispatch("row_number", _a)
+def rpad(col, len, pad):
+    _a = []
+    _a.append(col)
+    _a.append(len)
+    _a.append(pad)
+    return _dispatch("rpad", _a)
+def rtrim(col, trim=_UNSET):
+    _a = []
+    _a.append(col)
+    if trim is not _UNSET: _a.append(trim)
+    return _dispatch("rtrim", _a)
+def schema_of_csv(csv, options=_UNSET):
+    _a = []
+    _a.append(csv)
+    if options is not _UNSET: _a.append(options)
+    return _dispatch("schema_of_csv", _a)
+def schema_of_json(json, options=_UNSET):
+    _a = []
+    _a.append(json)
+    if options is not _UNSET: _a.append(options)
+    return _dispatch("schema_of_json", _a)
+def schema_of_variant(v):
+    _a = []
+    _a.append(v)
+    return _dispatch("schema_of_variant", _a)
+def schema_of_variant_agg(v):
+    _a = []
+    _a.append(v)
+    return _dispatch("schema_of_variant_agg", _a)
+def schema_of_xml(xml, options=_UNSET):
+    _a = []
+    _a.append(xml)
+    if options is not _UNSET: _a.append(options)
+    return _dispatch("schema_of_xml", _a)
+def sec(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("sec", _a)
+def second(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("second", _a)
+def sentences(string, language=_UNSET, country=_UNSET):
+    _a = []
+    _a.append(string)
+    if language is not _UNSET: _a.append(language)
+    if country is not _UNSET: _a.append(country)
+    return _dispatch("sentences", _a)
+def sequence(start, stop, step=_UNSET):
+    _a = []
+    _a.append(start)
+    _a.append(stop)
+    if step is not _UNSET: _a.append(step)
+    return _dispatch("sequence", _a)
+def session_user():
+    _a = []
+    return _dispatch("session_user", _a)
+def session_window(timeColumn, gapDuration):
+    _a = []
+    _a.append(timeColumn)
+    _a.append(gapDuration)
+    return _dispatch("session_window", _a)
+def sha(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("sha", _a)
+def sha1(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("sha1", _a)
+def shiftLeft(col, numBits):
+    _a = []
+    _a.append(col)
+    _a.append(numBits)
+    return _dispatch("shiftLeft", _a)
+def shiftRight(col, numBits):
+    _a = []
+    _a.append(col)
+    _a.append(numBits)
+    return _dispatch("shiftRight", _a)
+def shiftRightUnsigned(col, numBits):
+    _a = []
+    _a.append(col)
+    _a.append(numBits)
+    return _dispatch("shiftRightUnsigned", _a)
+def shiftleft(col, numBits):
+    _a = []
+    _a.append(col)
+    _a.append(numBits)
+    return _dispatch("shiftleft", _a)
+def shiftright(col, numBits):
+    _a = []
+    _a.append(col)
+    _a.append(numBits)
+    return _dispatch("shiftright", _a)
+def shiftrightunsigned(col, numBits):
+    _a = []
+    _a.append(col)
+    _a.append(numBits)
+    return _dispatch("shiftrightunsigned", _a)
+def shuffle(col, seed=_UNSET):
+    _a = []
+    _a.append(col)
+    if seed is not _UNSET: _a.append(seed)
+    return _dispatch("shuffle", _a)
+def sign(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("sign", _a)
+def signum(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("signum", _a)
+def sin(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("sin", _a)
+def sinh(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("sinh", _a)
+def size(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("size", _a)
+def skewness(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("skewness", _a)
+def slice(x, start, length):
+    _a = []
+    _a.append(x)
+    _a.append(start)
+    _a.append(length)
+    return _dispatch("slice", _a)
+def some(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("some", _a)
+def sort_array(col, asc=_UNSET):
+    _a = []
+    _a.append(col)
+    if asc is not _UNSET: _a.append(asc)
+    return _dispatch("sort_array", _a)
+def soundex(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("soundex", _a)
+def spark_partition_id():
+    _a = []
+    return _dispatch("spark_partition_id", _a)
+def split(str, pattern, limit=_UNSET):
+    _a = []
+    _a.append(str)
+    _a.append(pattern)
+    if limit is not _UNSET: _a.append(limit)
+    return _dispatch("split", _a)
+def split_part(src, delimiter, partNum):
+    _a = []
+    _a.append(src)
+    _a.append(delimiter)
+    _a.append(partNum)
+    return _dispatch("split_part", _a)
+def sqrt(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("sqrt", _a)
+def st_asbinary(geo, endianness=_UNSET):
+    _a = []
+    _a.append(geo)
+    if endianness is not _UNSET: _a.append(endianness)
+    return _dispatch("st_asbinary", _a)
+def st_geogfromwkb(wkb):
+    _a = []
+    _a.append(wkb)
+    return _dispatch("st_geogfromwkb", _a)
+def st_geomfromwkb(wkb, srid=_UNSET):
+    _a = []
+    _a.append(wkb)
+    if srid is not _UNSET: _a.append(srid)
+    return _dispatch("st_geomfromwkb", _a)
+def st_setsrid(geo, srid):
+    _a = []
+    _a.append(geo)
+    _a.append(srid)
+    return _dispatch("st_setsrid", _a)
+def st_srid(geo):
+    _a = []
+    _a.append(geo)
+    return _dispatch("st_srid", _a)
+def stack(*cols):
+    _a = []
+    _a.extend(cols)
+    return _dispatch("stack", _a)
+def startswith(str, prefix):
+    _a = []
+    _a.append(str)
+    _a.append(prefix)
+    return _dispatch("startswith", _a)
+def std(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("std", _a)
+def stddev(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("stddev", _a)
+def stddev_pop(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("stddev_pop", _a)
+def stddev_samp(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("stddev_samp", _a)
+def str_to_map(text, pairDelim=_UNSET, keyValueDelim=_UNSET):
+    _a = []
+    _a.append(text)
+    if pairDelim is not _UNSET: _a.append(pairDelim)
+    if keyValueDelim is not _UNSET: _a.append(keyValueDelim)
+    return _dispatch("str_to_map", _a)
+def string_agg(col, delimiter=_UNSET):
+    _a = []
+    _a.append(col)
+    if delimiter is not _UNSET: _a.append(delimiter)
+    return _dispatch("string_agg", _a)
+def string_agg_distinct(col, delimiter=_UNSET):
+    _a = []
+    _a.append(col)
+    if delimiter is not _UNSET: _a.append(delimiter)
+    return _dispatch("string_agg_distinct", _a)
+def struct(*cols):
+    _a = []
+    _a.extend(cols)
+    return _dispatch("struct", _a)
+def substr(str, pos, len=_UNSET):
+    _a = []
+    _a.append(str)
+    _a.append(pos)
+    if len is not _UNSET: _a.append(len)
+    return _dispatch("substr", _a)
+def substring(str, pos, len):
+    _a = []
+    _a.append(str)
+    _a.append(pos)
+    _a.append(len)
+    return _dispatch("substring", _a)
+def substring_index(str, delim, count):
+    _a = []
+    _a.append(str)
+    _a.append(delim)
+    _a.append(count)
+    return _dispatch("substring_index", _a)
+def sumDistinct(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("sumDistinct", _a)
+def sum_distinct(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("sum_distinct", _a)
+def tan(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("tan", _a)
+def tanh(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("tanh", _a)
+def theta_difference(col1, col2):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    return _dispatch("theta_difference", _a)
+def theta_intersection(col1, col2):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    return _dispatch("theta_intersection", _a)
+def theta_intersection_agg(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("theta_intersection_agg", _a)
+def theta_sketch_agg(col, lgNomEntries=_UNSET):
+    _a = []
+    _a.append(col)
+    if lgNomEntries is not _UNSET: _a.append(lgNomEntries)
+    return _dispatch("theta_sketch_agg", _a)
+def theta_sketch_estimate(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("theta_sketch_estimate", _a)
+def theta_union(col1, col2, lgNomEntries=_UNSET):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    if lgNomEntries is not _UNSET: _a.append(lgNomEntries)
+    return _dispatch("theta_union", _a)
+def theta_union_agg(col, lgNomEntries=_UNSET):
+    _a = []
+    _a.append(col)
+    if lgNomEntries is not _UNSET: _a.append(lgNomEntries)
+    return _dispatch("theta_union_agg", _a)
+def time_bucket(bucket_size, ts, origin=_UNSET):
+    _a = []
+    _a.append(bucket_size)
+    _a.append(ts)
+    if origin is not _UNSET: _a.append(origin)
+    return _dispatch("time_bucket", _a)
+def time_diff(unit, start, end):
+    _a = []
+    _a.append(unit)
+    _a.append(start)
+    _a.append(end)
+    return _dispatch("time_diff", _a)
+def time_from_micros(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("time_from_micros", _a)
+def time_from_millis(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("time_from_millis", _a)
+def time_from_seconds(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("time_from_seconds", _a)
+def time_to_micros(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("time_to_micros", _a)
+def time_to_millis(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("time_to_millis", _a)
+def time_to_seconds(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("time_to_seconds", _a)
+def time_trunc(unit, time):
+    _a = []
+    _a.append(unit)
+    _a.append(time)
+    return _dispatch("time_trunc", _a)
+def timestamp_add(unit, quantity, ts):
+    _a = []
+    _a.append(unit)
+    _a.append(quantity)
+    _a.append(ts)
+    return _dispatch("timestamp_add", _a)
+def timestamp_diff(unit, start, end):
+    _a = []
+    _a.append(unit)
+    _a.append(start)
+    _a.append(end)
+    return _dispatch("timestamp_diff", _a)
+def timestamp_micros(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("timestamp_micros", _a)
+def timestamp_millis(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("timestamp_millis", _a)
 timestamp_nanos = _create_wrapper("timestamp_nanos")
-timestamp_seconds = _create_wrapper("timestamp_seconds")
-toDegrees = _create_wrapper("toDegrees")
-toRadians = _create_wrapper("toRadians")
+def timestamp_seconds(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("timestamp_seconds", _a)
+def toDegrees(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("toDegrees", _a)
+def toRadians(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("toRadians", _a)
 to_avro = _create_wrapper("to_avro")
-to_binary = _create_wrapper("to_binary")
-to_char = _create_wrapper("to_char")
-to_csv = _create_wrapper("to_csv")
-to_date = _create_wrapper("to_date")
-to_json = _create_wrapper("to_json")
-to_number = _create_wrapper("to_number")
-to_time = _create_wrapper("to_time")
-to_timestamp = _create_wrapper("to_timestamp")
-to_timestamp_ltz = _create_wrapper("to_timestamp_ltz")
-to_timestamp_ntz = _create_wrapper("to_timestamp_ntz")
-to_unix_timestamp = _create_wrapper("to_unix_timestamp")
-to_utc_timestamp = _create_wrapper("to_utc_timestamp")
-to_varchar = _create_wrapper("to_varchar")
-to_variant_object = _create_wrapper("to_variant_object")
-to_xml = _create_wrapper("to_xml")
-translate = _create_wrapper("translate")
-trim = _create_wrapper("trim")
-trunc = _create_wrapper("trunc")
-try_add = _create_wrapper("try_add")
-try_aes_decrypt = _create_wrapper("try_aes_decrypt")
-try_avg = _create_wrapper("try_avg")
-try_divide = _create_wrapper("try_divide")
-try_element_at = _create_wrapper("try_element_at")
-try_make_interval = _create_wrapper("try_make_interval")
-try_make_timestamp = _create_wrapper("try_make_timestamp")
-try_make_timestamp_ltz = _create_wrapper("try_make_timestamp_ltz")
-try_make_timestamp_ntz = _create_wrapper("try_make_timestamp_ntz")
-try_mod = _create_wrapper("try_mod")
-try_multiply = _create_wrapper("try_multiply")
-try_parse_json = _create_wrapper("try_parse_json")
-try_parse_url = _create_wrapper("try_parse_url")
-try_reflect = _create_wrapper("try_reflect")
-try_subtract = _create_wrapper("try_subtract")
-try_sum = _create_wrapper("try_sum")
-try_to_binary = _create_wrapper("try_to_binary")
-try_to_date = _create_wrapper("try_to_date")
-try_to_number = _create_wrapper("try_to_number")
-try_to_time = _create_wrapper("try_to_time")
-try_to_timestamp = _create_wrapper("try_to_timestamp")
-try_url_decode = _create_wrapper("try_url_decode")
-try_validate_utf8 = _create_wrapper("try_validate_utf8")
+def to_binary(col, format=_UNSET):
+    _a = []
+    _a.append(col)
+    if format is not _UNSET: _a.append(format)
+    return _dispatch("to_binary", _a)
+def to_char(col, format):
+    _a = []
+    _a.append(col)
+    _a.append(format)
+    return _dispatch("to_char", _a)
+def to_csv(col, options=_UNSET):
+    _a = []
+    _a.append(col)
+    if options is not _UNSET: _a.append(options)
+    return _dispatch("to_csv", _a)
+def to_date(col, format=_UNSET):
+    _a = []
+    _a.append(col)
+    if format is not _UNSET: _a.append(format)
+    return _dispatch("to_date", _a)
+def to_json(col, options=_UNSET):
+    _a = []
+    _a.append(col)
+    if options is not _UNSET: _a.append(options)
+    return _dispatch("to_json", _a)
+def to_number(col, format):
+    _a = []
+    _a.append(col)
+    _a.append(format)
+    return _dispatch("to_number", _a)
+def to_time(str, format=_UNSET):
+    _a = []
+    _a.append(str)
+    if format is not _UNSET: _a.append(format)
+    return _dispatch("to_time", _a)
+def to_timestamp(col, format=_UNSET):
+    _a = []
+    _a.append(col)
+    if format is not _UNSET: _a.append(format)
+    return _dispatch("to_timestamp", _a)
+def to_timestamp_ltz(timestamp, format=_UNSET):
+    _a = []
+    _a.append(timestamp)
+    if format is not _UNSET: _a.append(format)
+    return _dispatch("to_timestamp_ltz", _a)
+def to_timestamp_ntz(timestamp, format=_UNSET):
+    _a = []
+    _a.append(timestamp)
+    if format is not _UNSET: _a.append(format)
+    return _dispatch("to_timestamp_ntz", _a)
+def to_unix_timestamp(timestamp, format=_UNSET):
+    _a = []
+    _a.append(timestamp)
+    if format is not _UNSET: _a.append(format)
+    return _dispatch("to_unix_timestamp", _a)
+def to_utc_timestamp(timestamp, tz):
+    _a = []
+    _a.append(timestamp)
+    _a.append(tz)
+    return _dispatch("to_utc_timestamp", _a)
+def to_varchar(col, format):
+    _a = []
+    _a.append(col)
+    _a.append(format)
+    return _dispatch("to_varchar", _a)
+def to_variant_object(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("to_variant_object", _a)
+def to_xml(col, options=_UNSET):
+    _a = []
+    _a.append(col)
+    if options is not _UNSET: _a.append(options)
+    return _dispatch("to_xml", _a)
+def translate(srcCol, matching, replace):
+    _a = []
+    _a.append(srcCol)
+    _a.append(matching)
+    _a.append(replace)
+    return _dispatch("translate", _a)
+def trim(col, trim=_UNSET):
+    _a = []
+    _a.append(col)
+    if trim is not _UNSET: _a.append(trim)
+    return _dispatch("trim", _a)
+def trunc(date, format):
+    _a = []
+    _a.append(date)
+    _a.append(format)
+    return _dispatch("trunc", _a)
+def try_add(left, right):
+    _a = []
+    _a.append(left)
+    _a.append(right)
+    return _dispatch("try_add", _a)
+def try_aes_decrypt(input, key, mode=_UNSET, padding=_UNSET, aad=_UNSET):
+    _a = []
+    _a.append(input)
+    _a.append(key)
+    if mode is not _UNSET: _a.append(mode)
+    if padding is not _UNSET: _a.append(padding)
+    if aad is not _UNSET: _a.append(aad)
+    return _dispatch("try_aes_decrypt", _a)
+def try_avg(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("try_avg", _a)
+def try_divide(left, right):
+    _a = []
+    _a.append(left)
+    _a.append(right)
+    return _dispatch("try_divide", _a)
+def try_element_at(col, extraction):
+    _a = []
+    _a.append(col)
+    _a.append(extraction)
+    return _dispatch("try_element_at", _a)
+def try_make_interval(years=_UNSET, months=_UNSET, weeks=_UNSET, days=_UNSET, hours=_UNSET, mins=_UNSET, secs=_UNSET):
+    _a = []
+    if years is not _UNSET: _a.append(years)
+    if months is not _UNSET: _a.append(months)
+    if weeks is not _UNSET: _a.append(weeks)
+    if days is not _UNSET: _a.append(days)
+    if hours is not _UNSET: _a.append(hours)
+    if mins is not _UNSET: _a.append(mins)
+    if secs is not _UNSET: _a.append(secs)
+    return _dispatch("try_make_interval", _a)
+def try_make_timestamp(years=_UNSET, months=_UNSET, days=_UNSET, hours=_UNSET, mins=_UNSET, secs=_UNSET, timezone=_UNSET, date=_UNSET, time=_UNSET):
+    _a = []
+    if years is not _UNSET: _a.append(years)
+    if months is not _UNSET: _a.append(months)
+    if days is not _UNSET: _a.append(days)
+    if hours is not _UNSET: _a.append(hours)
+    if mins is not _UNSET: _a.append(mins)
+    if secs is not _UNSET: _a.append(secs)
+    if timezone is not _UNSET: _a.append(timezone)
+    if date is not _UNSET: _a.append(date)
+    if time is not _UNSET: _a.append(time)
+    return _dispatch("try_make_timestamp", _a)
+def try_make_timestamp_ltz(years, months, days, hours, mins, secs, timezone=_UNSET):
+    _a = []
+    _a.append(years)
+    _a.append(months)
+    _a.append(days)
+    _a.append(hours)
+    _a.append(mins)
+    _a.append(secs)
+    if timezone is not _UNSET: _a.append(timezone)
+    return _dispatch("try_make_timestamp_ltz", _a)
+def try_make_timestamp_ntz(years=_UNSET, months=_UNSET, days=_UNSET, hours=_UNSET, mins=_UNSET, secs=_UNSET, date=_UNSET, time=_UNSET):
+    _a = []
+    if years is not _UNSET: _a.append(years)
+    if months is not _UNSET: _a.append(months)
+    if days is not _UNSET: _a.append(days)
+    if hours is not _UNSET: _a.append(hours)
+    if mins is not _UNSET: _a.append(mins)
+    if secs is not _UNSET: _a.append(secs)
+    if date is not _UNSET: _a.append(date)
+    if time is not _UNSET: _a.append(time)
+    return _dispatch("try_make_timestamp_ntz", _a)
+def try_mod(left, right):
+    _a = []
+    _a.append(left)
+    _a.append(right)
+    return _dispatch("try_mod", _a)
+def try_multiply(left, right):
+    _a = []
+    _a.append(left)
+    _a.append(right)
+    return _dispatch("try_multiply", _a)
+def try_parse_json(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("try_parse_json", _a)
+def try_parse_url(url, partToExtract, key=_UNSET):
+    _a = []
+    _a.append(url)
+    _a.append(partToExtract)
+    if key is not _UNSET: _a.append(key)
+    return _dispatch("try_parse_url", _a)
+def try_reflect(*cols):
+    _a = []
+    _a.extend(cols)
+    return _dispatch("try_reflect", _a)
+def try_subtract(left, right):
+    _a = []
+    _a.append(left)
+    _a.append(right)
+    return _dispatch("try_subtract", _a)
+def try_sum(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("try_sum", _a)
+def try_to_binary(col, format=_UNSET):
+    _a = []
+    _a.append(col)
+    if format is not _UNSET: _a.append(format)
+    return _dispatch("try_to_binary", _a)
+def try_to_date(col, format=_UNSET):
+    _a = []
+    _a.append(col)
+    if format is not _UNSET: _a.append(format)
+    return _dispatch("try_to_date", _a)
+def try_to_number(col, format):
+    _a = []
+    _a.append(col)
+    _a.append(format)
+    return _dispatch("try_to_number", _a)
+def try_to_time(str, format=_UNSET):
+    _a = []
+    _a.append(str)
+    if format is not _UNSET: _a.append(format)
+    return _dispatch("try_to_time", _a)
+def try_to_timestamp(col, format=_UNSET):
+    _a = []
+    _a.append(col)
+    if format is not _UNSET: _a.append(format)
+    return _dispatch("try_to_timestamp", _a)
+def try_url_decode(str):
+    _a = []
+    _a.append(str)
+    return _dispatch("try_url_decode", _a)
+def try_validate_utf8(str):
+    _a = []
+    _a.append(str)
+    return _dispatch("try_validate_utf8", _a)
 try_variant_array_append = _create_wrapper("try_variant_array_append")
-try_variant_get = _create_wrapper("try_variant_get")
+def try_variant_get(v, path, targetType):
+    _a = []
+    _a.append(v)
+    _a.append(path)
+    _a.append(targetType)
+    return _dispatch("try_variant_get", _a)
 try_variant_insert = _create_wrapper("try_variant_insert")
 try_variant_set = _create_wrapper("try_variant_set")
-tuple_difference_double = _create_wrapper("tuple_difference_double")
-tuple_difference_integer = _create_wrapper("tuple_difference_integer")
-tuple_difference_theta_double = _create_wrapper("tuple_difference_theta_double")
-tuple_difference_theta_integer = _create_wrapper("tuple_difference_theta_integer")
-tuple_intersection_agg_double = _create_wrapper("tuple_intersection_agg_double")
-tuple_intersection_agg_integer = _create_wrapper("tuple_intersection_agg_integer")
-tuple_intersection_double = _create_wrapper("tuple_intersection_double")
-tuple_intersection_integer = _create_wrapper("tuple_intersection_integer")
-tuple_intersection_theta_double = _create_wrapper("tuple_intersection_theta_double")
-tuple_intersection_theta_integer = _create_wrapper("tuple_intersection_theta_integer")
-tuple_sketch_agg_double = _create_wrapper("tuple_sketch_agg_double")
-tuple_sketch_agg_integer = _create_wrapper("tuple_sketch_agg_integer")
-tuple_sketch_estimate_double = _create_wrapper("tuple_sketch_estimate_double")
-tuple_sketch_estimate_integer = _create_wrapper("tuple_sketch_estimate_integer")
-tuple_sketch_summary_double = _create_wrapper("tuple_sketch_summary_double")
-tuple_sketch_summary_integer = _create_wrapper("tuple_sketch_summary_integer")
-tuple_sketch_theta_double = _create_wrapper("tuple_sketch_theta_double")
-tuple_sketch_theta_integer = _create_wrapper("tuple_sketch_theta_integer")
-tuple_union_agg_double = _create_wrapper("tuple_union_agg_double")
-tuple_union_agg_integer = _create_wrapper("tuple_union_agg_integer")
-tuple_union_double = _create_wrapper("tuple_union_double")
-tuple_union_integer = _create_wrapper("tuple_union_integer")
-tuple_union_theta_double = _create_wrapper("tuple_union_theta_double")
-tuple_union_theta_integer = _create_wrapper("tuple_union_theta_integer")
-typeof = _create_wrapper("typeof")
-ucase = _create_wrapper("ucase")
-unbase64 = _create_wrapper("unbase64")
-unhex = _create_wrapper("unhex")
-uniform = _create_wrapper("uniform")
-unix_date = _create_wrapper("unix_date")
-unix_micros = _create_wrapper("unix_micros")
-unix_millis = _create_wrapper("unix_millis")
+def tuple_difference_double(col1, col2):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    return _dispatch("tuple_difference_double", _a)
+def tuple_difference_integer(col1, col2):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    return _dispatch("tuple_difference_integer", _a)
+def tuple_difference_theta_double(col1, col2):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    return _dispatch("tuple_difference_theta_double", _a)
+def tuple_difference_theta_integer(col1, col2):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    return _dispatch("tuple_difference_theta_integer", _a)
+def tuple_intersection_agg_double(col, mode=_UNSET):
+    _a = []
+    _a.append(col)
+    if mode is not _UNSET: _a.append(mode)
+    return _dispatch("tuple_intersection_agg_double", _a)
+def tuple_intersection_agg_integer(col, mode=_UNSET):
+    _a = []
+    _a.append(col)
+    if mode is not _UNSET: _a.append(mode)
+    return _dispatch("tuple_intersection_agg_integer", _a)
+def tuple_intersection_double(col1, col2, mode=_UNSET):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    if mode is not _UNSET: _a.append(mode)
+    return _dispatch("tuple_intersection_double", _a)
+def tuple_intersection_integer(col1, col2, mode=_UNSET):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    if mode is not _UNSET: _a.append(mode)
+    return _dispatch("tuple_intersection_integer", _a)
+def tuple_intersection_theta_double(col1, col2, mode=_UNSET):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    if mode is not _UNSET: _a.append(mode)
+    return _dispatch("tuple_intersection_theta_double", _a)
+def tuple_intersection_theta_integer(col1, col2, mode=_UNSET):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    if mode is not _UNSET: _a.append(mode)
+    return _dispatch("tuple_intersection_theta_integer", _a)
+def tuple_sketch_agg_double(key, summary, lgNomEntries=_UNSET, mode=_UNSET):
+    _a = []
+    _a.append(key)
+    _a.append(summary)
+    if lgNomEntries is not _UNSET: _a.append(lgNomEntries)
+    if mode is not _UNSET: _a.append(mode)
+    return _dispatch("tuple_sketch_agg_double", _a)
+def tuple_sketch_agg_integer(key, summary, lgNomEntries=_UNSET, mode=_UNSET):
+    _a = []
+    _a.append(key)
+    _a.append(summary)
+    if lgNomEntries is not _UNSET: _a.append(lgNomEntries)
+    if mode is not _UNSET: _a.append(mode)
+    return _dispatch("tuple_sketch_agg_integer", _a)
+def tuple_sketch_estimate_double(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("tuple_sketch_estimate_double", _a)
+def tuple_sketch_estimate_integer(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("tuple_sketch_estimate_integer", _a)
+def tuple_sketch_summary_double(col, mode=_UNSET):
+    _a = []
+    _a.append(col)
+    if mode is not _UNSET: _a.append(mode)
+    return _dispatch("tuple_sketch_summary_double", _a)
+def tuple_sketch_summary_integer(col, mode=_UNSET):
+    _a = []
+    _a.append(col)
+    if mode is not _UNSET: _a.append(mode)
+    return _dispatch("tuple_sketch_summary_integer", _a)
+def tuple_sketch_theta_double(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("tuple_sketch_theta_double", _a)
+def tuple_sketch_theta_integer(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("tuple_sketch_theta_integer", _a)
+def tuple_union_agg_double(col, lgNomEntries=_UNSET, mode=_UNSET):
+    _a = []
+    _a.append(col)
+    if lgNomEntries is not _UNSET: _a.append(lgNomEntries)
+    if mode is not _UNSET: _a.append(mode)
+    return _dispatch("tuple_union_agg_double", _a)
+def tuple_union_agg_integer(col, lgNomEntries=_UNSET, mode=_UNSET):
+    _a = []
+    _a.append(col)
+    if lgNomEntries is not _UNSET: _a.append(lgNomEntries)
+    if mode is not _UNSET: _a.append(mode)
+    return _dispatch("tuple_union_agg_integer", _a)
+def tuple_union_double(col1, col2, lgNomEntries=_UNSET, mode=_UNSET):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    if lgNomEntries is not _UNSET: _a.append(lgNomEntries)
+    if mode is not _UNSET: _a.append(mode)
+    return _dispatch("tuple_union_double", _a)
+def tuple_union_integer(col1, col2, lgNomEntries=_UNSET, mode=_UNSET):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    if lgNomEntries is not _UNSET: _a.append(lgNomEntries)
+    if mode is not _UNSET: _a.append(mode)
+    return _dispatch("tuple_union_integer", _a)
+def tuple_union_theta_double(col1, col2, lgNomEntries=_UNSET, mode=_UNSET):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    if lgNomEntries is not _UNSET: _a.append(lgNomEntries)
+    if mode is not _UNSET: _a.append(mode)
+    return _dispatch("tuple_union_theta_double", _a)
+def tuple_union_theta_integer(col1, col2, lgNomEntries=_UNSET, mode=_UNSET):
+    _a = []
+    _a.append(col1)
+    _a.append(col2)
+    if lgNomEntries is not _UNSET: _a.append(lgNomEntries)
+    if mode is not _UNSET: _a.append(mode)
+    return _dispatch("tuple_union_theta_integer", _a)
+def typeof(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("typeof", _a)
+def ucase(str):
+    _a = []
+    _a.append(str)
+    return _dispatch("ucase", _a)
+def unbase64(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("unbase64", _a)
+def unhex(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("unhex", _a)
+def uniform(min, max, seed=_UNSET):
+    _a = []
+    _a.append(min)
+    _a.append(max)
+    if seed is not _UNSET: _a.append(seed)
+    return _dispatch("uniform", _a)
+def unix_date(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("unix_date", _a)
+def unix_micros(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("unix_micros", _a)
+def unix_millis(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("unix_millis", _a)
 unix_nanos = _create_wrapper("unix_nanos")
-unix_seconds = _create_wrapper("unix_seconds")
-unix_timestamp = _create_wrapper("unix_timestamp")
-unwrap_udt = _create_wrapper("unwrap_udt")
-upper = _create_wrapper("upper")
-url_decode = _create_wrapper("url_decode")
-url_encode = _create_wrapper("url_encode")
-user = _create_wrapper("user")
-uuid = _create_wrapper("uuid")
-validate_utf8 = _create_wrapper("validate_utf8")
-var_pop = _create_wrapper("var_pop")
-var_samp = _create_wrapper("var_samp")
-variance = _create_wrapper("variance")
+def unix_seconds(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("unix_seconds", _a)
+def unix_timestamp(timestamp=_UNSET, format=_UNSET):
+    _a = []
+    if timestamp is not _UNSET: _a.append(timestamp)
+    if format is not _UNSET: _a.append(format)
+    return _dispatch("unix_timestamp", _a)
+def unwrap_udt(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("unwrap_udt", _a)
+def upper(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("upper", _a)
+def url_decode(str):
+    _a = []
+    _a.append(str)
+    return _dispatch("url_decode", _a)
+def url_encode(str):
+    _a = []
+    _a.append(str)
+    return _dispatch("url_encode", _a)
+def user():
+    _a = []
+    return _dispatch("user", _a)
+def uuid(seed=_UNSET):
+    _a = []
+    if seed is not _UNSET: _a.append(seed)
+    return _dispatch("uuid", _a)
+def validate_utf8(str):
+    _a = []
+    _a.append(str)
+    return _dispatch("validate_utf8", _a)
+def var_pop(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("var_pop", _a)
+def var_samp(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("var_samp", _a)
+def variance(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("variance", _a)
 variant_array_append = _create_wrapper("variant_array_append")
-variant_get = _create_wrapper("variant_get")
+def variant_get(v, path, targetType):
+    _a = []
+    _a.append(v)
+    _a.append(path)
+    _a.append(targetType)
+    return _dispatch("variant_get", _a)
 variant_insert = _create_wrapper("variant_insert")
 variant_set = _create_wrapper("variant_set")
 vector_avg = _create_wrapper("vector_avg")
@@ -515,22 +2351,91 @@ vector_l2_distance = _create_wrapper("vector_l2_distance")
 vector_norm = _create_wrapper("vector_norm")
 vector_normalize = _create_wrapper("vector_normalize")
 vector_sum = _create_wrapper("vector_sum")
-version = _create_wrapper("version")
-weekday = _create_wrapper("weekday")
-weekofyear = _create_wrapper("weekofyear")
-when = _create_wrapper("when")
-width_bucket = _create_wrapper("width_bucket")
-window_time = _create_wrapper("window_time")
-xpath = _create_wrapper("xpath")
-xpath_boolean = _create_wrapper("xpath_boolean")
-xpath_double = _create_wrapper("xpath_double")
-xpath_float = _create_wrapper("xpath_float")
-xpath_int = _create_wrapper("xpath_int")
-xpath_long = _create_wrapper("xpath_long")
-xpath_number = _create_wrapper("xpath_number")
-xpath_short = _create_wrapper("xpath_short")
-xpath_string = _create_wrapper("xpath_string")
-xxhash64 = _create_wrapper("xxhash64")
-year = _create_wrapper("year")
-years = _create_wrapper("years")
-zeroifnull = _create_wrapper("zeroifnull")
+def version():
+    _a = []
+    return _dispatch("version", _a)
+def weekday(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("weekday", _a)
+def weekofyear(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("weekofyear", _a)
+def when(condition, value):
+    _a = []
+    _a.append(condition)
+    _a.append(value)
+    return _dispatch("when", _a)
+def width_bucket(v, min, max, numBucket):
+    _a = []
+    _a.append(v)
+    _a.append(min)
+    _a.append(max)
+    _a.append(numBucket)
+    return _dispatch("width_bucket", _a)
+def window_time(windowColumn):
+    _a = []
+    _a.append(windowColumn)
+    return _dispatch("window_time", _a)
+def xpath(xml, path):
+    _a = []
+    _a.append(xml)
+    _a.append(path)
+    return _dispatch("xpath", _a)
+def xpath_boolean(xml, path):
+    _a = []
+    _a.append(xml)
+    _a.append(path)
+    return _dispatch("xpath_boolean", _a)
+def xpath_double(xml, path):
+    _a = []
+    _a.append(xml)
+    _a.append(path)
+    return _dispatch("xpath_double", _a)
+def xpath_float(xml, path):
+    _a = []
+    _a.append(xml)
+    _a.append(path)
+    return _dispatch("xpath_float", _a)
+def xpath_int(xml, path):
+    _a = []
+    _a.append(xml)
+    _a.append(path)
+    return _dispatch("xpath_int", _a)
+def xpath_long(xml, path):
+    _a = []
+    _a.append(xml)
+    _a.append(path)
+    return _dispatch("xpath_long", _a)
+def xpath_number(xml, path):
+    _a = []
+    _a.append(xml)
+    _a.append(path)
+    return _dispatch("xpath_number", _a)
+def xpath_short(xml, path):
+    _a = []
+    _a.append(xml)
+    _a.append(path)
+    return _dispatch("xpath_short", _a)
+def xpath_string(xml, path):
+    _a = []
+    _a.append(xml)
+    _a.append(path)
+    return _dispatch("xpath_string", _a)
+def xxhash64(*cols):
+    _a = []
+    _a.extend(cols)
+    return _dispatch("xxhash64", _a)
+def year(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("year", _a)
+def years(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("years", _a)
+def zeroifnull(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("zeroifnull", _a)

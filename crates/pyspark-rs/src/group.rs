@@ -24,12 +24,12 @@ impl PyGroupedData {
 impl PyGroupedData {
     /// Aggregate with expressions (accepts Column objects), or the dict form
     /// `agg({"col": "aggfunc"})` (PySpark parity), e.g. `agg({"age": "max"})`.
-    #[pyo3(signature = (*cols))]
-    fn agg(&self, _py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+    #[pyo3(signature = (*exprs))]
+    fn agg(&self, _py: Python<'_>, exprs: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
         // Dict form: {column_name: aggregate_function_name} -> func(col(name)) per entry.
-        if cols.len() == 1 {
-            if let Ok(dict) = cols[0].cast::<pyo3::types::PyDict>() {
-                let mut exprs = vec![];
+        if exprs.len() == 1 {
+            if let Ok(dict) = exprs[0].cast::<pyo3::types::PyDict>() {
+                let mut agg_exprs = vec![];
                 for (k, v) in dict.iter() {
                     let col_name: String = k.extract()?;
                     let func_name: String = v.extract()?;
@@ -43,18 +43,18 @@ impl PyGroupedData {
                             vec![c.expression().clone()],
                         ),
                     );
-                    exprs.push(agg_expr);
+                    agg_exprs.push(agg_expr);
                 }
-                let df = self.grouped_data.agg(exprs);
+                let df = self.grouped_data.agg(agg_exprs);
                 return Ok(PyDataFrame::new(df));
             }
         }
-        let mut exprs = vec![];
-        for col in cols {
+        let mut agg_exprs = vec![];
+        for col in exprs {
             let rust_col = to_column(&col)?;
-            exprs.push(rust_col.expression().clone());
+            agg_exprs.push(rust_col.expression().clone());
         }
-        let df = self.grouped_data.agg(exprs);
+        let df = self.grouped_data.agg(agg_exprs);
         Ok(PyDataFrame::new(df))
     }
 
@@ -208,32 +208,32 @@ impl PyGroupedData {
 
     /// `GroupedData.applyInPandasWithState` (stateful streaming).
     #[pyo3(name = "applyInPandasWithState")]
-    #[pyo3(signature = (func, output_struct_type, state_struct_type, output_mode, timeout_conf))]
+    #[pyo3(signature = (func, outputStructType, stateStructType, outputMode, timeoutConf))]
     fn apply_in_pandas_with_state(
         &self,
         py: Python<'_>,
         func: Bound<'_, PyAny>,
-        output_struct_type: Bound<'_, PyAny>,
-        state_struct_type: Bound<'_, PyAny>,
-        output_mode: &str,
-        timeout_conf: &str,
+        outputStructType: Bound<'_, PyAny>,
+        stateStructType: Bound<'_, PyAny>,
+        outputMode: &str,
+        timeoutConf: &str,
     ) -> PyResult<PyDataFrame> {
         let cols = py.detach(|| self.grouped_data.input_columns()).to_pyerr()?;
         let udf = build_map_udf(
             py,
             "applyInPandasWithState",
             &func,
-            &output_struct_type,
+            &outputStructType,
             eval_type::SQL_GROUPED_MAP_PANDAS_UDF_WITH_STATE,
             &cols,
         )?;
-        let state_schema = crate::dataframe::resolve_datatype(&state_struct_type)?;
+        let state_schema = crate::dataframe::resolve_datatype(&stateStructType)?;
         Ok(PyDataFrame::new(
             self.grouped_data.apply_in_pandas_with_state(
                 udf,
                 state_schema,
-                output_mode,
-                timeout_conf,
+                outputMode,
+                timeoutConf,
             ),
         ))
     }
