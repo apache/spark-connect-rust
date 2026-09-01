@@ -75,7 +75,7 @@ impl PyTableValuedFunction {
         ))
     }
 
-    #[pyo3(name = "json_tuple")]
+    #[pyo3(name = "json_tuple", signature = (input, *fields))]
     fn json_tuple(
         &self,
         py: Python<'_>,
@@ -108,6 +108,7 @@ impl PyTableValuedFunction {
         ))
     }
 
+    #[pyo3(signature = (n, *fields))]
     fn stack(
         &self,
         py: Python<'_>,

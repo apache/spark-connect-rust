@@ -855,10 +855,17 @@ impl DataType {
 
     /// Tree-string for a StructType, mirroring `StructType.treeString()`.
     pub fn tree_string(&self) -> Result<String> {
+        self.tree_string_with_depth(i32::MAX)
+    }
+
+    /// Like [`DataType::tree_string`], but stops recursing into nested structs
+    /// once `max_depth` nesting levels have been printed (top-level fields are
+    /// depth 1). Mirrors `StructType.treeString(maxDepth)`.
+    pub fn tree_string_with_depth(&self, max_depth: i32) -> Result<String> {
         match self {
             DataType::Struct { .. } => {
                 let mut out = String::from("root\n");
-                self.append_tree(&mut out, " |");
+                self.append_tree(&mut out, " |", 1, max_depth);
                 Ok(out)
             }
             _ => Err(SparkError::value(
@@ -868,19 +875,31 @@ impl DataType {
         }
     }
 
-    fn append_tree(&self, out: &mut String, prefix: &str) {
+    fn append_tree(&self, out: &mut String, prefix: &str, depth: i32, max_depth: i32) {
         if let DataType::Struct { fields } = self {
             for f in fields {
+                // A nested struct is rendered as the bare type name ("struct") and its
+                // fields are shown by recursing below, so `max_depth` can truncate them.
+                // Using `simple_string()` here would inline the children (e.g.
+                // "struct<inner:int>"), leaking them past `max_depth`. Non-struct types
+                // have no depth-controlled children, so their simple string is used.
+                let is_struct = matches!(f.data_type, DataType::Struct { .. });
+                let type_repr = if is_struct {
+                    f.data_type.type_name()
+                } else {
+                    f.data_type.simple_string()
+                };
                 out.push_str(&format!(
                     "{}-- {}: {} (nullable = {})\n",
-                    prefix,
-                    f.name,
-                    f.data_type.simple_string(),
-                    f.nullable
+                    prefix, f.name, type_repr, f.nullable
                 ));
-                if matches!(f.data_type, DataType::Struct { .. }) {
-                    f.data_type
-                        .append_tree(out, &format!("{}    |", prefix.trim_end_matches('|')));
+                if is_struct && depth < max_depth {
+                    f.data_type.append_tree(
+                        out,
+                        &format!("{}    |", prefix.trim_end_matches('|')),
+                        depth + 1,
+                        max_depth,
+                    );
                 }
             }
         }
