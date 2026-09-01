@@ -4,6 +4,15 @@
 
 from pyspark.version import __version__  # noqa: F401  (tracks the Spark version we target)
 
+# --- Client identity ---------------------------------------------------------
+# This distribution is ``pyspark-client-rust``: the Spark Connect client backed by
+# the native Rust engine (tonic), installed under the ``pyspark`` import name as a
+# drop-in for the reference ``pyspark-client``. These markers let user code and bug
+# reports tell, at runtime, which client is in use -- this one, not the reference
+# Python client. See https://apache.github.io/spark-connect-rust/which-client/
+__rust_client__: bool = True
+__engine__: str = "rust"  # native Rust core via tonic -- not grpcio/py4j
+
 from typing import Callable, TypeVar, Union
 
 _F = TypeVar("_F", bound=Callable)

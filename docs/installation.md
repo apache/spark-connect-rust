@@ -45,12 +45,20 @@ cargo build --release
 
 ### Installation
 
-If you have an existing `pyspark` or `pyspark-client` installation, uninstall it first to avoid import clashes:
+All three PyPI packages that ship a Spark Connect client - [`pyspark`](https://pypi.org/project/pyspark/), [`pyspark-client`](https://pypi.org/project/pyspark-client/), and `pyspark-client-rust` - install into the **same `pyspark` import directory**, so only one can be active in an environment at a time. Do **not** install `pyspark-client-rust` on top of another one: `pip` does not remove the previous distribution's files first, so you would be left with a mix of both and a broken `pyspark`. Always uninstall the existing client first:
 
 ```bash
-pip uninstall pyspark pyspark-client -y
+pip uninstall -y pyspark pyspark-client
 pip install pyspark-client-rust
 ```
+
+!!! warning "Switching back to the reference client"
+    For the same reason, **uninstalling `pyspark-client-rust` is not enough** to restore the reference client - it removes the shared `pyspark` files and leaves the environment with no working `pyspark`. Reinstall PySpark explicitly afterward:
+
+    ```bash
+    pip uninstall -y pyspark-client-rust
+    pip install pyspark-client   # or `pyspark` for full Apache Spark
+    ```
 
 **Requirements:**
 - Python 3.9 or later

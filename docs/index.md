@@ -30,7 +30,8 @@ results as the reference client.
     pyspark-client-rust`, and your Spark Connect code runs **unchanged** - same
     imports, same API, same server (see [Installation](installation.md)). Use it
     exactly like [PySpark](https://spark.apache.org/docs/latest/api/python/); the
-    rest of these docs cover the **native Rust API**.
+    rest of these docs cover the **native Rust API**. New to the different `pyspark`
+    packages on PyPI? See [Which client am I using?](which-client.md).
 
 ## Why
 
