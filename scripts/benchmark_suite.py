@@ -52,7 +52,6 @@ import statistics
 import subprocess
 import sys
 import time
-from typing import Callable
 
 REMOTE_DEFAULT = os.environ.get("SPARK_CONNECT_TESTING_REMOTE", "sc://localhost:15002")
 
@@ -255,7 +254,7 @@ def run_rowcount(spark, iters: int, warmup: int, remote: str) -> dict:
 # --------------------------------------------------------------------------- #
 def run_udf(spark, iters: int, warmup: int, remote: str) -> dict:
     from pyspark.sql import functions as F
-    from pyspark.sql.types import IntegerType, DoubleType, StringType
+    from pyspark.sql.types import DoubleType, IntegerType, StringType
 
     rows = 100_000
     base = spark.range(0, rows)

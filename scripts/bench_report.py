@@ -68,7 +68,7 @@ def render(ref_path: str, ours_path: str) -> int:
         # CPU/GB & memory (from the largest payload)
         big = list(rt.keys())[-1]
         rb, ob = rt[big], ot[big]
-        p("### CPU & memory (at %s payload)\n" % big)
+        p(f"### CPU & memory (at {big} payload)\n")
         p("| metric | reference (Python client) | Rust client |")
         p("|---|--:|--:|")
         def _f(x, u=""):
