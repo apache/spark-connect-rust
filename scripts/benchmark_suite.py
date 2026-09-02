@@ -202,8 +202,12 @@ def bench_collect(spark, rows: int, iters: int, warmup: int, remote: str) -> dic
     gb_per_s = gb / s["p50_s"] if s["p50_s"] > 0 else float("nan")
     # CPU per GB across the whole timed region (iters * gb transferred).
     total_gb = gb * iters
-    client_cpu_per_gb = (agg["client_cpu_s"] / total_gb) if agg["client_cpu_s"] and total_gb else None
-    server_cpu_per_gb = (agg["server_cpu_s"] / total_gb) if agg["server_cpu_s"] and total_gb else None
+    client_cpu_per_gb = (
+        (agg["client_cpu_s"] / total_gb) if agg["client_cpu_s"] and total_gb else None
+    )
+    server_cpu_per_gb = (
+        (agg["server_cpu_s"] / total_gb) if agg["server_cpu_s"] and total_gb else None
+    )
     return {
         "rows": rows,
         "cols": NCOLS,
@@ -226,9 +230,9 @@ def run_transport(spark, iters: int, warmup: int, remote: str) -> dict:
         out[name] = bench_collect(spark, rows, iters, warmup, remote)
         r = out[name]
         print(
-            f"  transport {name:>6}: rows={rows:>9} p50={r['latency']['p50_s']*1000:8.2f}ms "
-            f"p99={r['latency']['p99_s']*1000:8.2f}ms "
-            f"{r['gb_per_s_p50']:6.3f} GB/s {r['rows_per_s_p50']/1e6:7.2f} Mrows/s",
+            f"  transport {name:>6}: rows={rows:>9} p50={r['latency']['p50_s'] * 1000:8.2f}ms "
+            f"p99={r['latency']['p99_s'] * 1000:8.2f}ms "
+            f"{r['gb_per_s_p50']:6.3f} GB/s {r['rows_per_s_p50'] / 1e6:7.2f} Mrows/s",
             flush=True,
         )
     return out
@@ -242,8 +246,8 @@ def run_rowcount(spark, iters: int, warmup: int, remote: str) -> dict:
         out[str(rows)] = bench_collect(spark, rows, it, warmup, remote)
         r = out[str(rows)]
         print(
-            f"  rowcount {rows:>10}: p50={r['latency']['p50_s']*1000:9.2f}ms "
-            f"{r['gb_per_s_p50']:6.3f} GB/s {r['rows_per_s_p50']/1e6:7.2f} Mrows/s",
+            f"  rowcount {rows:>10}: p50={r['latency']['p50_s'] * 1000:9.2f}ms "
+            f"{r['gb_per_s_p50']:6.3f} GB/s {r['rows_per_s_p50'] / 1e6:7.2f} Mrows/s",
             flush=True,
         )
     return out
@@ -301,7 +305,10 @@ def run_udf(spark, iters: int, warmup: int, remote: str) -> dict:
                 samples.append(time.perf_counter() - t0)
             s = summarize(samples)
             out[name] = {"rows": rows, "latency": s, "rows_per_s_p50": rows / s["p50_s"]}
-            print(f"  udf {name:>14}: p50={s['p50_s']*1000:9.2f}ms  {rows/s['p50_s']/1e6:6.3f} Mrows/s", flush=True)
+            print(
+                f"  udf {name:>14}: p50={s['p50_s'] * 1000:9.2f}ms  {rows / s['p50_s'] / 1e6:6.3f} Mrows/s",
+                flush=True,
+            )
         except Exception as e:  # noqa: BLE001
             out[name] = {"error": f"{type(e).__name__}: {str(e)[:120]}"}
             print(f"  udf {name:>14}: ERROR {out[name]['error']}", flush=True)
@@ -324,7 +331,10 @@ def run_udf(spark, iters: int, warmup: int, remote: str) -> dict:
             samples.append(time.perf_counter() - t0)
         s = summarize(samples)
         out["pandas_udf"] = {"rows": rows, "latency": s, "rows_per_s_p50": rows / s["p50_s"]}
-        print(f"  udf {'pandas_udf':>14}: p50={s['p50_s']*1000:9.2f}ms  {rows/s['p50_s']/1e6:6.3f} Mrows/s", flush=True)
+        print(
+            f"  udf {'pandas_udf':>14}: p50={s['p50_s'] * 1000:9.2f}ms  {rows / s['p50_s'] / 1e6:6.3f} Mrows/s",
+            flush=True,
+        )
     except Exception as e:  # noqa: BLE001
         out["pandas_udf"] = {"error": f"{type(e).__name__}: {str(e)[:120]}"}
         print(f"  udf {'pandas_udf':>14}: ERROR {out['pandas_udf']['error']}", flush=True)
@@ -374,8 +384,8 @@ def run_coldstart(remote: str, runs: int) -> dict:
         fq.append(d["firstq_s"])
         tot.append(wall)  # full process wall incl. interpreter spawn
         print(
-            f"  coldstart run: import={d['import_s']*1000:7.1f}ms session={d['session_s']*1000:7.1f}ms "
-            f"firstq={d['firstq_s']*1000:7.1f}ms proc_total={wall*1000:7.1f}ms",
+            f"  coldstart run: import={d['import_s'] * 1000:7.1f}ms session={d['session_s'] * 1000:7.1f}ms "
+            f"firstq={d['firstq_s'] * 1000:7.1f}ms proc_total={wall * 1000:7.1f}ms",
             flush=True,
         )
     if not tot:
@@ -462,8 +472,8 @@ def run_concurrency(remote: str, duration: float) -> dict:
         lp = out[str(p)]["latency"]
         print(
             f"  concurrency P={p}: ops={total_ops:>6} {agg_gb_per_s:6.3f} GB/s "
-            f"{agg_rows_per_s/1e6:6.2f} Mrows/s  p50={lp.get('p50_s',float('nan'))*1000:8.2f}ms "
-            f"p99={lp.get('p99_s',float('nan'))*1000:8.2f}ms (failed={failed})",
+            f"{agg_rows_per_s / 1e6:6.2f} Mrows/s  p50={lp.get('p50_s', float('nan')) * 1000:8.2f}ms "
+            f"p99={lp.get('p99_s', float('nan')) * 1000:8.2f}ms (failed={failed})",
             flush=True,
         )
     return out
@@ -476,8 +486,13 @@ def run_all(args) -> int:
 
     spark = SparkSession.builder.remote(args.remote).getOrCreate()
     client_path = os.path.dirname(pyspark.__file__)
-    print(f"# label={args.label} client={client_path} arch={platform.machine()} remote={args.remote}")
-    print(f"# pyspark_version={pyspark.__version__} iters={args.iters} warmup={args.warmup}\n", flush=True)
+    print(
+        f"# label={args.label} client={client_path} arch={platform.machine()} remote={args.remote}"
+    )
+    print(
+        f"# pyspark_version={pyspark.__version__} iters={args.iters} warmup={args.warmup}\n",
+        flush=True,
+    )
 
     payload = {
         "label": args.label,
