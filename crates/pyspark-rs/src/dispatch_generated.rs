@@ -1379,7 +1379,8 @@ pub fn call_builtin(name: &str, args: Vec<spark_connect::column::Column>) -> PyR
             },
             "instr" => {
                 if args.len() < 2 { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!("Missing required arguments for instr: expected at least 2, got {}", args.len()))); }
-                Ok(spark_funcs::instr(args[0].clone(), args[1].clone()))
+                // Forward the optional 4.3.0 start/occurrence args too (not just the first 2).
+                Ok(spark_funcs::call_function("instr", args.clone()))
             },
             "json_tuple" => Ok(spark_funcs::json_tuple(args.clone())),
             "least" => {
@@ -1728,7 +1729,8 @@ pub fn call_builtin(name: &str, args: Vec<spark_connect::column::Column>) -> PyR
             },
             "regexp_replace" => {
                 if args.len() < 3 { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!("Missing required arguments for regexp_replace: expected at least 3, got {}", args.len()))); }
-                Ok(spark_funcs::regexp_replace(args[0].clone(), args[1].clone(), args[2].clone()))
+                // Forward the optional 4.3.0 position arg too (not just the first 3).
+                Ok(spark_funcs::call_function("regexp_replace", args.clone()))
             },
             "rpad" => {
                 if args.len() < 3 { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!("Missing required arguments for rpad: expected at least 3, got {}", args.len()))); }

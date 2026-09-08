@@ -206,14 +206,6 @@ def base64(col):
     _a = []
     _a.append(col)
     return _dispatch("base64", _a)
-def to_base32(col):
-    _a = []
-    _a.append(col)
-    return _dispatch("to_base32", _a)
-def from_base32(col):
-    _a = []
-    _a.append(col)
-    return _dispatch("from_base32", _a)
 def bin(col):
     _a = []
     _a.append(col)
@@ -353,6 +345,10 @@ def collect_set(col):
     _a = []
     _a.append(col)
     return _dispatch("collect_set", _a)
+def collect_union(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("collect_union", _a)
 def concat(*cols):
     _a = []
     _a.extend(cols)
@@ -417,7 +413,11 @@ def count_min_sketch(col, eps, confidence, seed=_UNSET):
     _a.append(confidence)
     if seed is not _UNSET: _a.append(seed)
     return _dispatch("count_min_sketch", _a)
-counter_diff = _create_wrapper("counter_diff")
+def counter_diff(value, startTime=_UNSET):
+    _a = []
+    _a.append(value)
+    if startTime is not _UNSET: _a.append(startTime)
+    return _dispatch("counter_diff", _a)
 def covar_pop(col1, col2):
     _a = []
     _a.append(col1)
@@ -658,6 +658,10 @@ def format_string(format, *cols):
     _a.append(format)
     _a.extend(cols)
     return _dispatch("format_string", _a)
+def from_base32(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("from_base32", _a)
 def from_csv(col, schema, options=_UNSET):
     _a = []
     _a.append(col)
@@ -746,7 +750,12 @@ def hll_union_agg(col, allowDifferentLgConfigK=_UNSET):
     _a.append(col)
     if allowDifferentLgConfigK is not _UNSET: _a.append(allowDifferentLgConfigK)
     return _dispatch("hll_union_agg", _a)
-hmac = _create_wrapper("hmac")
+def hmac(key, message, algorithm=_UNSET):
+    _a = []
+    _a.append(key)
+    _a.append(message)
+    if algorithm is not _UNSET: _a.append(algorithm)
+    return _dispatch("hmac", _a)
 def hour(col):
     _a = []
     _a.append(col)
@@ -792,10 +801,12 @@ def input_file_block_start():
 def input_file_name():
     _a = []
     return _dispatch("input_file_name", _a)
-def instr(str, substr):
+def instr(str, substr, start=_UNSET, occurrence=_UNSET):
     _a = []
     _a.append(str)
     _a.append(substr)
+    if start is not _UNSET: _a.append(start)
+    if occurrence is not _UNSET: _a.append(occurrence)
     return _dispatch("instr", _a)
 def is_valid_utf8(str):
     _a = []
@@ -809,10 +820,6 @@ def is_variant_null(v):
     _a = []
     _a.append(v)
     return _dispatch("is_variant_null", _a)
-def collect_union(col):
-    _a = []
-    _a.append(col)
-    return _dispatch("collect_union", _a)
 def isnan(col):
     _a = []
     _a.append(col)
@@ -825,7 +832,11 @@ def isnull(col):
     _a = []
     _a.append(col)
     return _dispatch("isnull", _a)
-jaro_winkler_similarity = _create_wrapper("jaro_winkler_similarity")
+def jaro_winkler_similarity(left, right):
+    _a = []
+    _a.append(left)
+    _a.append(right)
+    return _dispatch("jaro_winkler_similarity", _a)
 def java_method(*cols):
     _a = []
     _a.extend(cols)
@@ -1424,11 +1435,12 @@ def regexp_like(str, regexp):
     _a.append(str)
     _a.append(regexp)
     return _dispatch("regexp_like", _a)
-def regexp_replace(string, pattern, replacement):
+def regexp_replace(string, pattern, replacement, position=_UNSET):
     _a = []
     _a.append(string)
     _a.append(pattern)
     _a.append(replacement)
+    if position is not _UNSET: _a.append(position)
     return _dispatch("regexp_replace", _a)
 def regexp_substr(str, regexp):
     _a = []
@@ -1881,7 +1893,10 @@ def timestamp_millis(col):
     _a = []
     _a.append(col)
     return _dispatch("timestamp_millis", _a)
-timestamp_nanos = _create_wrapper("timestamp_nanos")
+def timestamp_nanos(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("timestamp_nanos", _a)
 def timestamp_seconds(col):
     _a = []
     _a.append(col)
@@ -1895,6 +1910,10 @@ def toRadians(col):
     _a.append(col)
     return _dispatch("toRadians", _a)
 to_avro = _create_wrapper("to_avro")
+def to_base32(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("to_base32", _a)
 def to_binary(col, format=_UNSET):
     _a = []
     _a.append(col)
@@ -2121,15 +2140,31 @@ def try_validate_utf8(str):
     _a = []
     _a.append(str)
     return _dispatch("try_validate_utf8", _a)
-try_variant_array_append = _create_wrapper("try_variant_array_append")
+def try_variant_array_append(v, path, value):
+    _a = []
+    _a.append(v)
+    _a.append(path)
+    _a.append(value)
+    return _dispatch("try_variant_array_append", _a)
 def try_variant_get(v, path, targetType):
     _a = []
     _a.append(v)
     _a.append(path)
     _a.append(targetType)
     return _dispatch("try_variant_get", _a)
-try_variant_insert = _create_wrapper("try_variant_insert")
-try_variant_set = _create_wrapper("try_variant_set")
+def try_variant_insert(v, path, value):
+    _a = []
+    _a.append(v)
+    _a.append(path)
+    _a.append(value)
+    return _dispatch("try_variant_insert", _a)
+def try_variant_set(v, path, value, create_if_missing=_UNSET):
+    _a = []
+    _a.append(v)
+    _a.append(path)
+    _a.append(value)
+    if create_if_missing is not _UNSET: _a.append(create_if_missing)
+    return _dispatch("try_variant_set", _a)
 def tuple_difference_double(col1, col2):
     _a = []
     _a.append(col1)
@@ -2298,7 +2333,10 @@ def unix_millis(col):
     _a = []
     _a.append(col)
     return _dispatch("unix_millis", _a)
-unix_nanos = _create_wrapper("unix_nanos")
+def unix_nanos(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("unix_nanos", _a)
 def unix_seconds(col):
     _a = []
     _a.append(col)
@@ -2347,22 +2385,64 @@ def variance(col):
     _a = []
     _a.append(col)
     return _dispatch("variance", _a)
-variant_array_append = _create_wrapper("variant_array_append")
+def variant_array_append(v, path, value):
+    _a = []
+    _a.append(v)
+    _a.append(path)
+    _a.append(value)
+    return _dispatch("variant_array_append", _a)
 def variant_get(v, path, targetType):
     _a = []
     _a.append(v)
     _a.append(path)
     _a.append(targetType)
     return _dispatch("variant_get", _a)
-variant_insert = _create_wrapper("variant_insert")
-variant_set = _create_wrapper("variant_set")
-vector_avg = _create_wrapper("vector_avg")
-vector_cosine_similarity = _create_wrapper("vector_cosine_similarity")
-vector_inner_product = _create_wrapper("vector_inner_product")
-vector_l2_distance = _create_wrapper("vector_l2_distance")
-vector_norm = _create_wrapper("vector_norm")
-vector_normalize = _create_wrapper("vector_normalize")
-vector_sum = _create_wrapper("vector_sum")
+def variant_insert(v, path, value):
+    _a = []
+    _a.append(v)
+    _a.append(path)
+    _a.append(value)
+    return _dispatch("variant_insert", _a)
+def variant_set(v, path, value, create_if_missing=_UNSET):
+    _a = []
+    _a.append(v)
+    _a.append(path)
+    _a.append(value)
+    if create_if_missing is not _UNSET: _a.append(create_if_missing)
+    return _dispatch("variant_set", _a)
+def vector_avg(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("vector_avg", _a)
+def vector_cosine_similarity(left, right):
+    _a = []
+    _a.append(left)
+    _a.append(right)
+    return _dispatch("vector_cosine_similarity", _a)
+def vector_inner_product(left, right):
+    _a = []
+    _a.append(left)
+    _a.append(right)
+    return _dispatch("vector_inner_product", _a)
+def vector_l2_distance(left, right):
+    _a = []
+    _a.append(left)
+    _a.append(right)
+    return _dispatch("vector_l2_distance", _a)
+def vector_norm(vector, degree=_UNSET):
+    _a = []
+    _a.append(vector)
+    if degree is not _UNSET: _a.append(degree)
+    return _dispatch("vector_norm", _a)
+def vector_normalize(vector, degree=_UNSET):
+    _a = []
+    _a.append(vector)
+    if degree is not _UNSET: _a.append(degree)
+    return _dispatch("vector_normalize", _a)
+def vector_sum(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("vector_sum", _a)
 def version():
     _a = []
     return _dispatch("version", _a)
