@@ -320,6 +320,28 @@ jobs:
         run: |
           python -m pip install --upgrade maturin
           maturin sdist --out dist
+      - name: Verify declared License-File(s) exist in the sdist
+        # PyPI (PEP 639) rejects an sdist whose PKG-INFO declares a `License-File`
+        # that is not actually inside the tarball. maturin bundles the license into
+        # the wheel automatically but not the sdist, so this is easy to miss until
+        # the upload fails at finalize. Catch it here (dry run + RC), before publish.
+        run: |
+          python - <<'PY'
+          import glob, re, sys, tarfile
+          sdist = glob.glob('dist/*.tar.gz')[0]
+          t = tarfile.open(sdist)
+          names = set(t.getnames())
+          top = t.getnames()[0].split('/')[0]
+          pkg = t.extractfile(f'{top}/PKG-INFO').read().decode()
+          declared = re.findall(r'^License-File:\s*(.+)$', pkg, re.M)
+          missing = [lf for lf in declared if f'{top}/{lf}' not in names]
+          if missing:
+              print(f"::error::sdist {sdist} declares License-File {missing} but the "
+                    f"file(s) are absent from the tarball; PyPI will reject it (PEP 639). "
+                    f"Add them to [tool.maturin] include with format = \"sdist\".")
+              sys.exit(1)
+          print(f"sdist License-File check passed ({sdist}): {declared or 'none declared'}")
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-sdist
