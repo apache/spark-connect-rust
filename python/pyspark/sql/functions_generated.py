@@ -206,6 +206,14 @@ def base64(col):
     _a = []
     _a.append(col)
     return _dispatch("base64", _a)
+def to_base32(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("to_base32", _a)
+def from_base32(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("from_base32", _a)
 def bin(col):
     _a = []
     _a.append(col)
@@ -801,6 +809,10 @@ def is_variant_null(v):
     _a = []
     _a.append(v)
     return _dispatch("is_variant_null", _a)
+def collect_union(col):
+    _a = []
+    _a.append(col)
+    return _dispatch("collect_union", _a)
 def isnan(col):
     _a = []
     _a.append(col)

@@ -2467,7 +2467,7 @@ from pyspark.sql import SparkSession as _SS, DataFrame as _DF, Column as _Col  #
 
 
 def test_dropin_version_is_spark_version():
-    assert pyspark.__version__ == "4.2.0"
+    assert pyspark.__version__ == "4.3.0"
 
 
 @pytest.mark.parametrize("cls,name", [(_SS, "version"), (_DF, "dtypes"), (_DF, "executionInfo")])
@@ -2729,3 +2729,91 @@ def test_structtype_tree_string_max_depth():
 def test_variant_type_to_internal_accepts_variant_kwarg():
     # Reference names the VariantType.toInternal parameter `variant`, not `obj`.
     assert T.VariantType().toInternal(variant=None) is None
+
+
+# --------------------------------------------- 4.3.0 API-surface additions
+
+
+def test_new_4_3_0_sql_functions_build_columns():
+    from pyspark.sql import functions as F
+
+    c = F.col("v")
+    for fn in (F.collect_union, F.to_base32, F.from_base32):
+        assert isinstance(fn(c), _Col)
+    assert isinstance(F.variant_strip_nulls(c), _Col)
+    assert isinstance(F.variant_strip_nulls(c, include_arrays=False), _Col)
+    assert isinstance(F.variant_delete(c, F.lit("$.a"), "$.b"), _Col)
+
+
+def test_new_4_3_0_functions_are_exported():
+    from pyspark.sql import functions as F
+
+    for name in (
+        "variant_delete",
+        "collect_union",
+        "to_base32",
+        "from_base32",
+        "variant_strip_nulls",
+        "PandasUDFType",
+        "ArrowUDFType",
+        "UserDefinedFunction",
+        "UserDefinedTableFunction",
+        "AnalyzeArgument",
+        "AnalyzeResult",
+        "SkipRestOfInputTableException",
+    ):
+        assert name in F.__all__, name
+        assert hasattr(F, name), name
+
+
+def test_arrow_udf_type_enum_values():
+    from pyspark.sql.pandas.functions import ArrowUDFType, PandasUDFType
+
+    assert (ArrowUDFType.SCALAR, ArrowUDFType.SCALAR_ITER) == (250, 251)
+    assert (ArrowUDFType.GROUPED_AGG, ArrowUDFType.GROUPED_AGG_ITER) == (252, 254)
+    assert PandasUDFType.GROUPED_AGG_ITER == 217
+
+
+def test_datatype_class_constants():
+    assert (T.DayTimeIntervalType.DAY, T.DayTimeIntervalType.HOUR) == (0, 1)
+    assert (T.DayTimeIntervalType.MINUTE, T.DayTimeIntervalType.SECOND) == (2, 3)
+    assert (T.YearMonthIntervalType.YEAR, T.YearMonthIntervalType.MONTH) == (0, 1)
+    assert T.DateType.EPOCH_ORDINAL == 719163
+    assert T.GeometryType.DEFAULT_CRS == "OGC:CRS84"
+    assert T.GeometryType.DEFAULT_SRID == 4326
+    assert T.GeographyType.DEFAULT_ALG == "SPHERICAL"
+    assert (T.SpatialType.MIXED_CRS, T.SpatialType.MIXED_SRID) == ("SRID:ANY", -1)
+
+
+def test_types_all_exports_spatial_and_variant():
+    for name in ("Geometry", "GeometryType", "Geography", "GeographyType", "VariantVal"):
+        assert name in T.__all__, name
+
+
+def test_merge_into_writer_nested_class_refs():
+    from pyspark.sql.merge import MergeIntoWriter
+
+    assert isinstance(MergeIntoWriter.WhenMatched, type)
+    assert isinstance(MergeIntoWriter.WhenNotMatched, type)
+    assert isinstance(MergeIntoWriter.WhenNotMatchedBySource, type)
+
+
+def test_session_hook_is_present_and_passthrough():
+    hook = _SS.Hook()
+    sentinel = object()
+    assert hook.on_execute_plan(sentinel) is sentinel
+
+
+def test_ml_connect_base_classes_and_functions():
+    from pyspark.ml.connect import Estimator, Transformer, Evaluator, Model, PipelineModel
+
+    for cls in (Estimator, Transformer, Evaluator, Model, PipelineModel):
+        assert isinstance(cls, type)
+    import pyspark.ml.functions as mf
+
+    assert hasattr(mf, "vector_to_array") and hasattr(mf, "array_to_vector")
+
+
+def test_pyspark_version_exported():
+    assert pyspark.__version__ == "4.3.0"
+    assert "__version__" in pyspark.__all__

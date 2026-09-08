@@ -22,6 +22,7 @@ _pyfunc_when = _functions.pyfunc_when
 _call_function = _functions.pyfunc_call_function
 # Mixed function bindings
 _pyfunc_sha2 = _functions.pyfunc_sha2
+_pyfunc_variant_strip_nulls = _functions.pyfunc_variant_strip_nulls
 _pyfunc_window = _functions.pyfunc_window
 _pyfunc_window_with_slide_and_start = _functions.pyfunc_window_with_slide_and_start
 _pyfunc_from_avro = _functions.pyfunc_from_avro
@@ -347,6 +348,28 @@ def sha2(col, numBits):
     """
     return _pyfunc_sha2(_to_col(col), numBits)
 
+
+def variant_strip_nulls(v, include_arrays=True):
+    """Recursively removes variant-null object fields and array elements.
+
+    Args:
+        v: a variant column
+        include_arrays: also strip nulls inside arrays (default True)
+    """
+    return _pyfunc_variant_strip_nulls(_to_col(v), include_arrays)
+
+
+def variant_delete(v, *paths):
+    """Deletes the value(s) at the given path(s) from a variant column.
+
+    Args:
+        v: a variant column
+        *paths: one or more path expressions (Column or str)
+    """
+    _a = [v]
+    _a.extend(paths)
+    return _dispatch("variant_delete", _a)
+
 def window(timeColumn, windowDuration, slideDuration=None, startTime=None):
     """Buckets rows into one or more time windows specified by the given parameters.
 
@@ -665,6 +688,27 @@ partitioning.__all__ = [
     _n for _n in ("years", "months", "days", "hours", "bucket") if hasattr(partitioning, _n)
 ]
 _sys.modules["pyspark.sql.functions.partitioning"] = partitioning
+
+# Public classes/enums that pyspark.sql.functions re-exports (so `from
+# pyspark.sql.functions import PandasUDFType` etc. work, matching reference pyspark).
+# Guarded so a partial import never breaks the functions module.
+try:
+    from pyspark.sql.udf import UserDefinedFunction  # noqa: F401
+except Exception:  # pragma: no cover
+    pass
+try:
+    from pyspark.sql.udtf import (  # noqa: F401
+        UserDefinedTableFunction,
+        AnalyzeArgument,
+        AnalyzeResult,
+        SkipRestOfInputTableException,
+    )
+except Exception:  # pragma: no cover
+    pass
+try:
+    from pyspark.sql.pandas.functions import PandasUDFType, ArrowUDFType  # noqa: F401
+except Exception:  # pragma: no cover
+    pass
 
 # Build __all__ with all function names
 __all__ = [

@@ -141,6 +141,14 @@ pub fn call_builtin(name: &str, args: Vec<spark_connect::column::Column>) -> PyR
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
                 Ok(spark_funcs::base64(args[0].clone()))
             },
+            "to_base32" => {
+                if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
+                Ok(spark_funcs::to_base32(args[0].clone()))
+            },
+            "from_base32" => {
+                if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
+                Ok(spark_funcs::from_base32(args[0].clone()))
+            },
             "bin" => {
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
                 Ok(spark_funcs::bin(args[0].clone()))
@@ -406,6 +414,14 @@ pub fn call_builtin(name: &str, args: Vec<spark_connect::column::Column>) -> PyR
             "is_variant_null" => {
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
                 Ok(spark_funcs::is_variant_null(args[0].clone()))
+            },
+            "collect_union" => {
+                if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
+                Ok(spark_funcs::collect_union(args[0].clone()))
+            },
+            "variant_delete" => {
+                if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
+                Ok(spark_funcs::variant_delete(args[0].clone(), args[1..].to_vec()))
             },
             "isnan" => {
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }

@@ -50,9 +50,11 @@ impl PySparkSessionBuilder {
     }
 
     /// Set the remote Spark Connect server URL. Returns the builder (chainable).
-    fn remote(&self, url: &str) -> PySparkSessionBuilder {
+    /// Mirrors `SparkSession.Builder.remote(location="sc://localhost")`.
+    #[pyo3(signature = (location="sc://localhost"))]
+    fn remote(&self, location: &str) -> PySparkSessionBuilder {
         let mut b = self.clone();
-        b.remote_url = Some(url.to_string());
+        b.remote_url = Some(location.to_string());
         b
     }
 
@@ -99,13 +101,25 @@ impl PySparkSessionBuilder {
     /// already-running remote server, so this is a no-op (chainable), matching
     /// pyspark's Connect behavior.
     #[pyo3(name = "appName")]
-    fn app_name(&self, _name: &str) -> PySparkSessionBuilder {
+    fn app_name(&self, name: &str) -> PySparkSessionBuilder {
+        let _ = name;
         self.clone()
     }
 
     /// `master` - not applicable to a remote Connect session (no local cluster to
     /// point at); accepted and ignored for API parity, like pyspark Connect.
-    fn master(&self, _url: &str) -> PySparkSessionBuilder {
+    fn master(&self, master: &str) -> PySparkSessionBuilder {
+        let _ = master;
+        self.clone()
+    }
+
+    /// `_registerHook` - register an execution-hook factory (mirrors pyspark's Builder).
+    /// Accepted for API parity; this native-transport client sends ExecutePlanRequests
+    /// from Rust, so registered `Hook.on_execute_plan` callbacks are not invoked (see
+    /// `PyHook`). Chainable, matching the builder pattern.
+    #[pyo3(name = "_registerHook")]
+    fn register_hook(&self, hook_factory: &Bound<'_, PyAny>) -> PySparkSessionBuilder {
+        let _ = hook_factory;
         self.clone()
     }
 
@@ -230,6 +244,28 @@ fn log_client_banner(py: Python<'_>) {
             Ok(())
         })();
     });
+}
+
+/// `SparkSession.Hook` - injects behavior around plan execution (mirrors pyspark's
+/// `SparkSession.Hook`). In pyspark, `on_execute_plan` rewrites the Python
+/// `ExecutePlanRequest` before the gRPC client sends it. This client uses a native Rust
+/// transport that builds and sends the request in Rust (there is no Python request to
+/// rewrite), so the hook is a passthrough - the same architectural reason
+/// `SparkSession.client` is absent. Exposed for API parity and subclassing.
+#[pyclass(name = "Hook", module = "pyspark.sql.connect.session", subclass)]
+pub struct PyHook;
+
+#[pymethods]
+impl PyHook {
+    #[new]
+    fn new() -> Self {
+        PyHook
+    }
+
+    /// Called before sending an ExecutePlanRequest; returns the (unchanged) request.
+    fn on_execute_plan<'py>(&self, request: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        request
+    }
 }
 
 /// Python wrapper for a Spark session.
@@ -650,6 +686,13 @@ impl PySparkSession {
     #[allow(non_snake_case)]
     fn Builder(py: Python<'_>) -> Py<pyo3::types::PyType> {
         py.get_type::<PySparkSessionBuilder>().unbind()
+    }
+
+    /// The execution hook base class, reached as `SparkSession.Hook` (mirrors pyspark).
+    #[classattr]
+    #[allow(non_snake_case)]
+    fn Hook(py: Python<'_>) -> Py<pyo3::types::PyType> {
+        py.get_type::<PyHook>().unbind()
     }
 
     /// UDTF registration accessor, mirroring `SparkSession.udtf.register(name, cls)`.

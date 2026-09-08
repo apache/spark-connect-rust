@@ -62,15 +62,15 @@ fn main() {
 ```toml
 # Cargo.toml
 [dependencies]
-spark-connect-macros = { package = "apache-spark-connect-macros", version = "4.2" }
+spark-connect-macros = { package = "apache-spark-connect-macros", version = "4.3" }
 
 # host-only: the client is not pulled into the wasm build
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-spark-connect = { package = "apache-spark-connect", version = "4.2", features = ["wasm-udf"] }
+spark-connect = { package = "apache-spark-connect", version = "4.3", features = ["wasm-udf"] }
 
 [build-dependencies]
-spark-connect-build  = { package = "apache-spark-connect-build",  version = "4.2" }
-spark-connect-macros = { package = "apache-spark-connect-macros", version = "4.2" }
+spark-connect-build  = { package = "apache-spark-connect-build",  version = "4.3" }
+spark-connect-macros = { package = "apache-spark-connect-macros", version = "4.3" }
 ```
 
 Run it:
@@ -134,7 +134,7 @@ Nothing here is needed unless the `wasm-udf` feature is enabled:
   there is nothing extra to install or put on a path; point `SPARK_CONNECT_PYTHON`
   at the interpreter if it isn't your default `python3`.
 - **Executors** - the `wasmtime` Python package.
-- **Spark** - 4.2.0+.
+- **Spark** - 4.3.0+.
 
 ## Advanced
 

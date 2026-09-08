@@ -26,7 +26,7 @@
 # fork-adapted files (e.g. pipelines/api.py) — those intentionally differ from upstream.
 set -euo pipefail
 
-SPARK_TAG="v4.2.0"
+SPARK_TAG="v4.3.0-rc1"
 SPARK_REPO="https://github.com/apache/spark.git"
 
 # Directories under python/pyspark vendored verbatim from upstream (whole tree byte-identical).
@@ -40,6 +40,8 @@ VENDORED_DIRS=(
   "sql/worker"
   "sql/plot"
   "testing/tests"
+  # New in 4.3.0: the client-side message-receiver package (pyspark.messages).
+  "messages"
 )
 
 # Individual files under python/pyspark vendored verbatim from upstream. Listed per-file
@@ -85,6 +87,9 @@ VENDORED_FILES=(
   "ml/common.py"
   "ml/dl_util.py"
   "ml/util.py"
+  "ml/functions.py"
+  # ML connect base ABCs (Estimator/Transformer/Evaluator/Model) - pure upstream.
+  "ml/connect/base.py"
 
   # ML: param (param API is unmodified)
   "ml/param/__init__.py"
