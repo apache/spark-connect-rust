@@ -224,6 +224,48 @@ def test_functions_keyword_and_dispatch_paths():
     assert repr(F._UNSET) == "<unset>"
 
 
+def test_dispatch_keeps_literal_string_args_literal():
+    # Guards _FN_COL_ARGS: a bare-str arg at a LITERAL position (e.g. a variant path)
+    # must reach the core UNCHANGED, not be resolved to a column via _to_col. If it were
+    # coerced, `variant_delete(v, "$.b")` would send an unresolved attribute col("$.b")
+    # and fail analysis on the server. Asserting only that a Column is built (as elsewhere)
+    # can't catch this, so we capture the exact positional args handed to the core: a
+    # value column is coerced away from str, while a literal path stays a str.
+    from pyspark.sql import functions as F
+
+    captured = []
+
+    orig = F._call_function
+    F._call_function = lambda fname, *args: captured.append((fname, args)) or orig(fname, *args)
+    def is_col(x):
+        return type(x).__name__ == "Column"
+
+    try:
+        # (function call, positions that MUST stay raw literals — a str path or a bool
+        # flag — and positions that MUST be coerced to a column)
+        cases = [
+            (lambda: F.variant_get("v", "$.a", "int"), {1, 2}, {0}),
+            (lambda: F.try_variant_get("v", "$.a", "int"), {1, 2}, {0}),
+            (lambda: F.variant_delete("v", "$.a", "$.b"), {1, 2}, {0}),
+            (lambda: F.variant_insert("v", "$.b", "x"), {1}, {0, 2}),
+            (lambda: F.try_variant_insert("v", "$.b", "x"), {1}, {0, 2}),
+            (lambda: F.variant_set("v", "$.b", "x", True), {1, 3}, {0, 2}),
+            (lambda: F.try_variant_set("v", "$.b", "x", True), {1, 3}, {0, 2}),
+            (lambda: F.variant_array_append("v", "$", "x"), {1}, {0, 2}),
+            (lambda: F.try_variant_array_append("v", "$", "x"), {1}, {0, 2}),
+        ]
+        for call, literal_pos, col_pos in cases:
+            captured.clear()
+            call()
+            fname, args = captured[-1]
+            for i in literal_pos:
+                assert not is_col(args[i]), f"{fname} arg[{i}] should stay a raw literal, got a Column"
+            for i in col_pos:
+                assert is_col(args[i]), f"{fname} arg[{i}] should be coerced to a Column, got {type(args[i]).__name__}"
+    finally:
+        F._call_function = orig
+
+
 def test_column_alias_metadata_offline():
     from pyspark.sql import functions as F
 
