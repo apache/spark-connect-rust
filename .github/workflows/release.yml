@@ -301,7 +301,7 @@ jobs:
           fi
           maturin build "${args[@]}"
       - name: Set up free-threaded interpreters
-        if: runner.os == 'Linux'
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
         uses: actions/setup-python@v5
         with:
           python-version: |
@@ -309,11 +309,12 @@ jobs:
             3.14t
       - name: Build free-threaded wheels with maturin
         # The free-threaded (PEP 703) ABI is incompatible with abi3, so these are
-        # separate, version-specific cp313t/cp314t wheels; pyo3 ignores the abi3-py39
-        # feature when it detects a free-threaded interpreter. They land in the same
-        # dist/ and are uploaded alongside the abi3 wheel. Linux only for now --
-        # macOS/Windows free-threaded legs can follow.
-        if: runner.os == 'Linux'
+        # separate, version-specific cp313t/cp314t wheels built without the abi3
+        # feature (dropped from pyproject; the abi3 leg passes it explicitly). They
+        # land in the same dist/ and are uploaded alongside the abi3 wheel. x86_64
+        # Linux for now -- the aarch64 free-threaded cross-compile needs pyo3 to
+        # detect the target's free-threaded ABI and is a follow-up.
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
         shell: bash
         run: |
           # The preceding setup-python made a free-threaded interpreter the default
