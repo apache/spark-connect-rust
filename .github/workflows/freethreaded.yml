@@ -1,0 +1,54 @@
+name: Free-threaded build
+
+# Builds the pyspark-rs extension against a free-threaded (no-GIL, PEP 703)
+# CPython. The extension is excluded from the workspace default-members, so the
+# regular Rust CI never compiles it against a free-threaded interpreter -- and
+# compiling against Py_GIL_DISABLED is exactly what enforces that every #[pyclass]
+# is Sync. This workflow is that missing check.
+
+on:
+  push:
+    branches: [master, "branch-*"]
+  pull_request:
+    branches: [master, "branch-*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  freethreaded:
+    name: Build the extension against the free-threaded ABI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13t"
+      - name: Install Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Install protoc
+        shell: bash
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Build pyspark-rs against the free-threaded interpreter
+        # If any #[pyclass] were not Sync, this build would fail: pyo3 requires
+        # Sync pyclasses on the free-threaded ABI. So a green build proves the
+        # extension is free-threading-safe.
+        env:
+          PYO3_PYTHON: python
+        shell: bash
+        run: cargo build -p pyspark-rs --release
+      - name: Import the extension on the free-threaded interpreter
+        # Load the built extension standalone (avoiding the Python skin's heavier
+        # imports) to confirm it initializes on a free-threaded interpreter, and
+        # report whether the GIL is disabled. The GIL only actually stays off once
+        # the module declares gil_used = false (SPARK-59432); until then CPython
+        # re-enables it on import, which is expected and not a failure here.
+        shell: bash
+        run: |
+          cp target/release/lib_pyspark.so /tmp/_pyspark.so
+          cd /tmp
+          python -c "import sys, _pyspark; print('loaded:', _pyspark.__name__); print('gil_enabled:', sys._is_gil_enabled())"

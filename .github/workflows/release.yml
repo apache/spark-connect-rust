@@ -298,6 +298,27 @@ jobs:
             args+=(--zig)
           fi
           maturin build "${args[@]}"
+      - name: Set up free-threaded interpreters
+        if: runner.os == 'Linux'
+        uses: actions/setup-python@v5
+        with:
+          python-version: |
+            3.13t
+            3.14t
+      - name: Build free-threaded wheels with maturin
+        # The free-threaded (PEP 703) ABI is incompatible with abi3, so these are
+        # separate, version-specific cp313t/cp314t wheels; pyo3 ignores the abi3-py39
+        # feature when it detects a free-threaded interpreter. They land in the same
+        # dist/ and are uploaded alongside the abi3 wheel. Linux only for now --
+        # macOS/Windows free-threaded legs can follow.
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          args=(--release --out dist --target "${{ matrix.target }}" --interpreter python3.13t python3.14t)
+          if [[ "${{ matrix.zig }}" == "true" ]]; then
+            args+=(--zig)
+          fi
+          maturin build "${args[@]}"
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.target }}
