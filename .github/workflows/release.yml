@@ -292,7 +292,9 @@ jobs:
         shell: bash
         run: |
           python -m pip install --upgrade maturin
-          args=(--release --out dist --target "${{ matrix.target }}")
+          # abi3 is passed here (not in pyproject) so the free-threaded leg can build
+          # without it — abi3 and the free-threaded ABI are mutually exclusive.
+          args=(--release --out dist --target "${{ matrix.target }}" --features pyo3/abi3-py39)
           if [[ "${{ matrix.zig }}" == "true" ]]; then
             python -m pip install ziglang
             args+=(--zig)
