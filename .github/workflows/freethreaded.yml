@@ -44,9 +44,9 @@ jobs:
       - name: Import the extension on the free-threaded interpreter
         # Load the built extension standalone (avoiding the Python skin's heavier
         # imports) to confirm it initializes on a free-threaded interpreter, and
-        # report whether the GIL is disabled. The GIL only actually stays off once
-        # the module declares gil_used = false (SPARK-59432); until then CPython
-        # re-enables it on import, which is expected and not a failure here.
+        # report whether the GIL is disabled. Under the pinned pyo3 0.28 a plain
+        # #[pymodule] is free-threading by default (it emits Py_MOD_GIL_NOT_USED),
+        # so the GIL is expected to stay off here (gil_enabled: False).
         shell: bash
         run: |
           cp target/release/lib_pyspark.so /tmp/_pyspark.so

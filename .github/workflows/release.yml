@@ -314,8 +314,14 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
+          # The preceding setup-python made a free-threaded interpreter the default
+          # `python`, but maturin and ziglang were pip-installed into 3.11 by the abi3
+          # step. Reinstall them here so maturin runs and can locate zig via
+          # `python -m ziglang` under the now-default free-threaded interpreter.
+          python -m pip install --upgrade maturin
           args=(--release --out dist --target "${{ matrix.target }}" --interpreter python3.13t python3.14t)
           if [[ "${{ matrix.zig }}" == "true" ]]; then
+            python -m pip install ziglang
             args+=(--zig)
           fi
           maturin build "${args[@]}"
