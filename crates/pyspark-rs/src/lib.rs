@@ -88,7 +88,7 @@ use types::{
 };
 use window::{PyFrameBound, PyWindow, PyWindowSpec};
 
-#[pymodule]
+#[pymodule(gil_used = false)]
 fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySparkSession>()?;
     m.add_class::<session::PyConnectClientStub>()?;
