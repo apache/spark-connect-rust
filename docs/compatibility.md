@@ -9,8 +9,8 @@ on PyPI - and how to tell which one you have installed - see
 
 ## Supported Spark
 
-Apache Spark **4.2.0 and later**. The crate and wheel version tracks the Spark
-release it targets (starting at `4.2.0`), so the version number tells you which
+Apache Spark **4.3.0 and later**. The crate and wheel version tracks the Spark
+release it targets (starting at `4.3.0`), so the version number tells you which
 Spark it speaks.
 
 ## How parity is verified

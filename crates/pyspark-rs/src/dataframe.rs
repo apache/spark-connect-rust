@@ -414,6 +414,14 @@ impl PyDataFrame {
         PyDataFrame::new(self.dataframe.zip_with_index(indexColName))
     }
 
+    /// Zip this DataFrame with another column-wise (side-by-side). Mirrors
+    /// `DataFrame.zip(other)`.
+    fn zip(&self, other: &PyDataFrame) -> PyResult<PyDataFrame> {
+        Ok(PyDataFrame::new(
+            self.dataframe.zip(&other.dataframe).to_pyerr()?,
+        ))
+    }
+
     /// Union with another DataFrame.
     fn union(&self, other: &PyDataFrame) -> PyDataFrame {
         PyDataFrame::new(self.dataframe.union(&other.dataframe))
@@ -1680,6 +1688,25 @@ impl PyMergeIntoWriter {
 
 #[pymethods]
 impl PyMergeIntoWriter {
+    /// Nested builder-class references, mirroring pyspark's `MergeIntoWriter.WhenMatched`
+    /// etc. (the objects returned by `whenMatched()` / `whenNotMatched()` /
+    /// `whenNotMatchedBySource()`).
+    #[classattr]
+    #[allow(non_snake_case)]
+    fn WhenMatched(py: Python<'_>) -> Py<pyo3::types::PyType> {
+        py.get_type::<PyWhenMatched>().unbind()
+    }
+    #[classattr]
+    #[allow(non_snake_case)]
+    fn WhenNotMatched(py: Python<'_>) -> Py<pyo3::types::PyType> {
+        py.get_type::<PyWhenNotMatched>().unbind()
+    }
+    #[classattr]
+    #[allow(non_snake_case)]
+    fn WhenNotMatchedBySource(py: Python<'_>) -> Py<pyo3::types::PyType> {
+        py.get_type::<PyWhenNotMatchedBySource>().unbind()
+    }
+
     #[pyo3(name = "whenMatched", signature = (condition=None))]
     fn when_matched(&mut self, condition: Option<&PyColumn>) -> PyResult<PyWhenMatched> {
         let cond = condition.map(|c| c.column.clone());

@@ -18,7 +18,7 @@
 name: Vendored upstream drift
 
 # Guards that directories vendored verbatim from Apache Spark (e.g. cloudpickle,
-# brought in via git subtree) stay byte-identical to the pinned v4.2.0 tag. Catches
+# brought in via git subtree) stay byte-identical to the pinned v4.3.0-rc1 tag. Catches
 # accidental local edits to upstream-tracked code.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -32,7 +32,7 @@ on:
 
 jobs:
   vendored-drift:
-    name: Vendored files match Apache Spark v4.2.0
+    name: Vendored files match Apache Spark v4.3.0-rc1
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

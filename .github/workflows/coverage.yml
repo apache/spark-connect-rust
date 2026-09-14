@@ -32,7 +32,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  SPARK_VERSION: "4.2.0"
+  SPARK_VERSION: "4.3.0"
 
 jobs:
   coverage:
@@ -98,12 +98,12 @@ jobs:
           path: ~/spark-dist
           key: spark-dist-${{ env.SPARK_VERSION }}-hadoop3
 
-      - name: Download Apache Spark ${{ env.SPARK_VERSION }} (Connect server)
+      - name: Download Apache Spark ${{ env.SPARK_VERSION }} (Connect server, RC)
         id: spark-download
         run: |
-          PKG="spark-${SPARK_VERSION}-bin-hadoop3"
-          if [ ! -d "${HOME}/spark-dist/${PKG}" ]; then
-            URL="https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/${PKG}.tgz"
+          PKG="spark-${SPARK_VERSION}-bin-hadoop3-connect"
+          if [ ! -d "${HOME}/spark-dist/spark-4.3.0-bin-hadoop3"* ]; then
+            URL="https://dist.apache.org/repos/dist/dev/spark/v4.3.0-rc1-bin/${PKG}.tgz"
             mkdir -p "${HOME}/spark-dist"
             echo "Downloading ${URL}"
             wget -q -O "${HOME}/spark-dist/${PKG}.tgz" "${URL}"
@@ -112,7 +112,8 @@ jobs:
           else
             echo "Using cached Spark distribution."
           fi
-          echo "SPARK_HOME=${HOME}/spark-dist/${PKG}" >> "$GITHUB_OUTPUT"
+          SPARK_HOME=$(find "${HOME}/spark-dist" -maxdepth 1 -type d -name 'spark-4.3.0-bin-hadoop3*' | head -1)
+          echo "SPARK_HOME=${SPARK_HOME}" >> "$GITHUB_OUTPUT"
 
       - name: Start Spark Connect server
         env:
@@ -124,7 +125,6 @@ jobs:
           SPARK_HOME="${{ steps.spark-download.outputs.SPARK_HOME }}"
           echo "Starting Connect server on sc://localhost:15002"
           "${SPARK_HOME}/sbin/start-connect-server.sh" \
-            --packages "org.apache.spark:spark-connect_2.13:${SPARK_VERSION}" \
             --driver-memory 3g \
             --conf spark.sql.session.localRelationSizeLimit=1073741824 \
             > /tmp/connect-server.log 2>&1 &

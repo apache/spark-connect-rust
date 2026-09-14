@@ -13,7 +13,7 @@ results as the reference client.
 
 <div class="sc-badges" markdown>
 ![PyPI](https://img.shields.io/pypi/v/pyspark-client-rust?color=c2410c&label=pyspark-client-rust)
-![Spark](https://img.shields.io/badge/Apache%20Spark-4.2.0%2B-c2410c)
+![Spark](https://img.shields.io/badge/Apache%20Spark-4.3.0%2B-c2410c)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 </div>
 
@@ -74,7 +74,7 @@ runs unchanged.
 </div>
 
 <div class="sc-card" markdown>
-### Spark 4.2.0+
+### Spark 4.3.0+
 The crate and wheel version tracks the Spark release it targets, so the version
 number tells you which Spark it speaks.
 </div>

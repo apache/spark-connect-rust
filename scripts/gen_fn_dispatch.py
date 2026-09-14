@@ -104,6 +104,9 @@ skip_functions = {
     #   variant_delete(Column, Vec<Column>) -> Column  (variadic paths)
     "broadcast",
     "variant_delete",
+    # variant_strip_nulls(Column, bool) -> Column: bool arg, dedicated pyfunc binding
+    # (the generic Vec<Column> dispatch would drop the trailing scalar).
+    "variant_strip_nulls",
     # Mixed functions with dedicated pyfunc_* bindings:
     #   sha2(Column, i32) -> Column
     #   window(Column, &str) -> Column

@@ -8,7 +8,7 @@ Add the crate to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-apache-spark-connect = "4.2"
+apache-spark-connect = "4.3"
 ```
 
 ### Optional Features
@@ -17,7 +17,7 @@ Enable optional features for additional functionality:
 
 ```toml
 [dependencies]
-apache-spark-connect = { version = "4.2", features = ["datafusion", "polars"] }
+apache-spark-connect = { version = "4.3", features = ["datafusion", "polars"] }
 ```
 
 **Requirements:**
@@ -91,7 +91,7 @@ pip install dist/pyspark_client_rust-*.whl
 
 ## Version and Compatibility
 
-The crate and package versions track Apache Spark: version `4.2.x` supports Spark 4.2.0 and later. The wire protocol is identical to the reference client, so existing Spark Connect code works unchanged.
+The crate and package versions track Apache Spark: version `4.3.x` supports Spark 4.3.0 and later. The wire protocol is identical to the reference client, so existing Spark Connect code works unchanged.
 
 ## Next Steps
 

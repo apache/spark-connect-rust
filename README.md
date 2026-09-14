@@ -20,7 +20,7 @@
 # Spark Connect Rust Client
 
 A fast, native **Rust** client for **Apache Spark Connect** - and a drop-in
-`pyspark` replacement with **100% public-API parity with PySpark 4.2.0**. It
+`pyspark` replacement with **100% public-API parity with PySpark 4.3.0**. It
 builds `spark.connect` protobuf plans, manages the gRPC channel, and decodes
 Arrow results in Rust, speaking the same protocol and returning the same results
 as the reference client.
@@ -28,7 +28,7 @@ as the reference client.
 [![PyPI](https://img.shields.io/pypi/v/pyspark-client-rust?color=c2410c&label=pyspark-client-rust)](https://pypi.org/project/pyspark-client-rust/)
 [![Crates.io](https://img.shields.io/crates/v/apache-spark-connect?color=c2410c&label=apache-spark-connect)](https://crates.io/crates/apache-spark-connect)
 [![docs.rs](https://img.shields.io/docsrs/apache-spark-connect?color=c2410c&label=docs.rs)](https://docs.rs/apache-spark-connect)
-![Spark](https://img.shields.io/badge/Apache%20Spark-4.2.0%2B-c2410c)
+![Spark](https://img.shields.io/badge/Apache%20Spark-4.3.0%2B-c2410c)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 <!-- Coverage badges are published by .github/workflows/coverage.yml to the `badges` branch. -->
 [![Rust coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/apache/spark-connect-rust/badges/coverage-rust.json)](https://github.com/apache/spark-connect-rust/actions/workflows/coverage.yml)
@@ -63,7 +63,7 @@ Your Spark Connect code then runs unchanged; use it exactly like
 
 ```toml
 [dependencies]
-apache-spark-connect = "4.2"
+apache-spark-connect = "4.3"
 ```
 
 ## Quickstart (Rust)

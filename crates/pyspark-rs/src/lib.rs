@@ -71,7 +71,7 @@ use resource::{
     PyExecutorResourceRequests, PyResourceProfile, PyResourceProfileBuilder, PyTaskResourceRequests,
 };
 use row::PyRow;
-use session::{PySparkSession, PySparkSessionBuilder};
+use session::{PyHook, PySparkSession, PySparkSessionBuilder};
 use stat::PyStatFunctions;
 use streaming::{
     PyDataStreamReader, PyDataStreamWriter, PyListenerEventStream, PyStreamingQuery,
@@ -91,6 +91,7 @@ use window::{PyFrameBound, PyWindow, PyWindowSpec};
 #[pymodule(gil_used = false)]
 fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySparkSession>()?;
+    m.add_class::<PyHook>()?;
     m.add_class::<session::PyConnectClientStub>()?;
     m.add_class::<PySparkSessionBuilder>()?;
     m.add_class::<PyDataFrame>()?;

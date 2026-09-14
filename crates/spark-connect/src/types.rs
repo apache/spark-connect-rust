@@ -88,6 +88,58 @@ pub enum DataType {
     Unparsed { data_type_string: String },
 }
 
+/// Field-index constants for [`DataType::YearMonthInterval`], mirroring
+/// `pyspark.sql.types.YearMonthIntervalType`.
+pub struct YearMonthIntervalType;
+impl YearMonthIntervalType {
+    pub const YEAR: i32 = 0;
+    pub const MONTH: i32 = 1;
+}
+
+/// Field-index constants for [`DataType::DayTimeInterval`], mirroring
+/// `pyspark.sql.types.DayTimeIntervalType`.
+pub struct DayTimeIntervalType;
+impl DayTimeIntervalType {
+    pub const DAY: i32 = 0;
+    pub const HOUR: i32 = 1;
+    pub const MINUTE: i32 = 2;
+    pub const SECOND: i32 = 3;
+}
+
+/// Constants for [`DataType::Date`], mirroring `pyspark.sql.types.DateType`.
+pub struct DateType;
+impl DateType {
+    /// Number of days from 0001-01-01 to 1970-01-01.
+    pub const EPOCH_ORDINAL: i32 = 719163;
+}
+
+/// CRS/SRID constants shared by the spatial types, mirroring
+/// `pyspark.sql.types.SpatialType`.
+pub struct SpatialType;
+impl SpatialType {
+    pub const MIXED_CRS: &'static str = "SRID:ANY";
+    pub const MIXED_SRID: i32 = -1;
+}
+
+/// Constants for [`DataType::Geometry`], mirroring `pyspark.sql.types.GeometryType`.
+pub struct GeometryType;
+impl GeometryType {
+    pub const DEFAULT_CRS: &'static str = "OGC:CRS84";
+    pub const DEFAULT_SRID: i32 = 4326;
+    pub const MIXED_CRS: &'static str = "SRID:ANY";
+    pub const MIXED_SRID: i32 = -1;
+}
+
+/// Constants for [`DataType::Geography`], mirroring `pyspark.sql.types.GeographyType`.
+pub struct GeographyType;
+impl GeographyType {
+    pub const DEFAULT_ALG: &'static str = "SPHERICAL";
+    pub const DEFAULT_CRS: &'static str = "OGC:CRS84";
+    pub const DEFAULT_SRID: i32 = 4326;
+    pub const MIXED_CRS: &'static str = "SRID:ANY";
+    pub const MIXED_SRID: i32 = -1;
+}
+
 /// A field in a StructType, mirroring `pyspark.sql.types.StructField`.
 // Not `Eq`: metadata values are arbitrary JSON (`serde_json::Value`, which is only `PartialEq`
 // because of floats), matching pyspark's `Dict[str, Any]` field metadata.

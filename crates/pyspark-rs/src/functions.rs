@@ -120,6 +120,7 @@ pub fn register_functions(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<
     m.add_function(wrap_pyfunction!(pyfunc_call_named_function, m)?)?;
     m.add_function(wrap_pyfunction!(pyfunc_invoke_function, m)?)?;
     m.add_function(wrap_pyfunction!(pyfunc_sha2, m)?)?;
+    m.add_function(wrap_pyfunction!(pyfunc_variant_strip_nulls, m)?)?;
     m.add_function(wrap_pyfunction!(pyfunc_window, m)?)?;
     m.add_function(wrap_pyfunction!(pyfunc_window_with_slide_and_start, m)?)?;
     m.add_function(wrap_pyfunction!(pyfunc_from_avro, m)?)?;
@@ -399,6 +400,15 @@ fn pyfunc_invoke_function(name: String, args: Vec<Bound<'_, PyAny>>) -> PyResult
 #[pyfunction]
 fn pyfunc_sha2(col: &PyColumn, numbits: i32) -> PyColumn {
     PyColumn::new(spark_funcs::sha2(col.column.clone(), numbits))
+}
+
+/// Wrapper for variant_strip_nulls(v, include_arrays) - bool second arg.
+#[pyfunction]
+fn pyfunc_variant_strip_nulls(v: &PyColumn, include_arrays: bool) -> PyColumn {
+    PyColumn::new(spark_funcs::variant_strip_nulls(
+        v.column.clone(),
+        include_arrays,
+    ))
 }
 
 /// Wrapper for window(col, window_duration).

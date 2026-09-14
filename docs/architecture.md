@@ -36,7 +36,7 @@ flowchart TD
         ARROW["Arrow result decode"]
     end
 
-    SERVER["Spark Connect server (Spark 4.2+, :15002)"]
+    SERVER["Spark Connect server (Spark 4.3+, :15002)"]
     OUT["Rows / Arrow - optionally DataFusion or Polars (Rust); pandas (Python)"]
 
     PY --> SKIN --> EXT --> API

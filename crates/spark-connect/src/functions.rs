@@ -630,6 +630,14 @@ pub fn base64(col1: Column) -> Column {
     func("base64", vec![col1.expression().clone()])
 }
 
+pub fn to_base32(col1: Column) -> Column {
+    func("to_base32", vec![col1.expression().clone()])
+}
+
+pub fn from_base32(col1: Column) -> Column {
+    func("from_base32", vec![col1.expression().clone()])
+}
+
 /// Mirrors `pyspark.sql.functions.bin`.
 pub fn bin(col1: Column) -> Column {
     func("bin", vec![col1.expression().clone()])
@@ -1012,6 +1020,17 @@ pub fn is_valid_utf8(col1: Column) -> Column {
 /// Mirrors `pyspark.sql.functions.is_variant_null`.
 pub fn is_variant_null(col1: Column) -> Column {
     func("is_variant_null", vec![col1.expression().clone()])
+}
+
+pub fn collect_union(col1: Column) -> Column {
+    func("collect_union", vec![col1.expression().clone()])
+}
+
+pub fn variant_strip_nulls(v: Column, include_arrays: bool) -> Column {
+    func(
+        "variant_strip_nulls",
+        vec![v.expression().clone(), lit_bool(include_arrays)],
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.isnan`.

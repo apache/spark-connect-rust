@@ -28,6 +28,7 @@ omit =
     */pyspark/pipelines/*
     */pyspark/logger/*
     */pyspark/errors/*
+    */pyspark/messages/*
     */pyspark/sql/streaming/*
     */pyspark/sql/worker/*
     */pyspark/sql/plot/*

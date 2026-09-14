@@ -24,7 +24,7 @@
 # 2. The full official upstream pipeline connect suite (incl. server-backed tests like
 #    test_spark_connect.py) run through OUR Rust client via the transport plugin.
 
-name: Pipelines Connect Parity (Spark 4.2.0)
+name: Pipelines Connect Parity (Spark 4.3.0-rc1)
 
 # Cancel an in-progress run when a newer commit supersedes it (per workflow + ref).
 concurrency:
@@ -39,7 +39,7 @@ on:
   workflow_dispatch:
 
 env:
-  SPARK_VERSION: "4.2.0"
+  SPARK_VERSION: "4.3.0"
   SPARK_CONNECT_TESTING_REMOTE: sc://localhost:15002
   SPARK_TESTING: "1"
   SPARK_SKIP_CONNECT_COMPAT_TESTS: "1"   # force remote-only (pure connect, no local JVM)
@@ -47,7 +47,7 @@ env:
 jobs:
   # ---------------------------------------------------------------------------
   # Pipelines Connect parity: run the official pipeline connect tests through our
-  # Rust client against a real Spark 4.2.0 Connect server. Two blocking groups: pure-Python
+  # Rust client against a real Spark 4.3.0-rc1 Connect server. Two blocking groups: pure-Python
   # pipeline tests and the full server-backed official suite.
   # ---------------------------------------------------------------------------
   pipelines-parity:
@@ -117,12 +117,12 @@ jobs:
           path: ~/spark-dist
           key: spark-dist-${{ env.SPARK_VERSION }}-hadoop3
 
-      - name: Download Apache Spark ${{ env.SPARK_VERSION }} (Connect server)
+      - name: Download Apache Spark ${{ env.SPARK_VERSION }} (Connect server, RC)
         id: spark-download
         run: |
-          PKG="spark-${SPARK_VERSION}-bin-hadoop3"
-          if [ ! -d "${HOME}/spark-dist/${PKG}" ]; then
-            URL="https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/${PKG}.tgz"
+          PKG="spark-${SPARK_VERSION}-bin-hadoop3-connect"
+          if [ ! -d "${HOME}/spark-dist/spark-4.3.0-bin-hadoop3"* ]; then
+            URL="https://dist.apache.org/repos/dist/dev/spark/v4.3.0-rc1-bin/${PKG}.tgz"
             mkdir -p "${HOME}/spark-dist"
             echo "Downloading ${URL}"
             wget -q -O "${HOME}/spark-dist/${PKG}.tgz" "${URL}"
@@ -131,7 +131,8 @@ jobs:
           else
             echo "Using cached Spark distribution."
           fi
-          echo "SPARK_HOME=${HOME}/spark-dist/${PKG}" >> "$GITHUB_OUTPUT"
+          SPARK_HOME=$(find "${HOME}/spark-dist" -maxdepth 1 -type d -name 'spark-4.3.0-bin-hadoop3*' | head -1)
+          echo "SPARK_HOME=${SPARK_HOME}" >> "$GITHUB_OUTPUT"
 
       - name: Cache Spark ${{ env.SPARK_VERSION }} source (official test files)
         uses: actions/cache@v4
@@ -139,11 +140,11 @@ jobs:
           path: ~/spark-source
           key: spark-source-${{ env.SPARK_VERSION }}
 
-      - name: Clone Apache Spark v${{ env.SPARK_VERSION }} (official test files + reference client)
+      - name: Clone Apache Spark v4.3.0-rc1 (official test files + reference client)
         id: spark-source
         run: |
           if [ ! -d "${HOME}/spark-source/python" ]; then
-            git clone --depth 1 --branch "v${SPARK_VERSION}" \
+            git clone --depth 1 --branch "v4.3.0-rc1" \
               https://github.com/apache/spark.git "${HOME}/spark-source"
           else
             echo "Using cached Spark source."
@@ -178,7 +179,6 @@ jobs:
           echo "Starting Connect server on ${SPARK_CONNECT_TESTING_REMOTE}"
           # Give the driver extra heap for the pipeline tests which may be I/O heavy.
           "${SPARK_HOME}/sbin/start-connect-server.sh" \
-            --packages "org.apache.spark:spark-connect_2.13:${SPARK_VERSION}" \
             --driver-memory 3g \
             --conf spark.sql.session.localRelationSizeLimit=1073741824 \
             > /tmp/connect-server.log 2>&1 &

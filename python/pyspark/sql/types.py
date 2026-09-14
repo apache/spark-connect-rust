@@ -73,7 +73,8 @@ except ImportError:  # pragma: no cover - defensive fallback when the extension 
 
     class DateType(DataType):
         """Date data type."""
-        pass
+
+        EPOCH_ORDINAL = 719163
 
     class TimestampType(DataType):
         """Timestamp data type."""
@@ -264,6 +265,11 @@ __all__ = [
     "YearMonthIntervalType",
     "DayTimeIntervalType",
     "VariantType",
+    "VariantVal",
+    "GeometryType",
+    "GeographyType",
+    "Geometry",
+    "Geography",
     "_drop_metadata",
     "_parse_datatype_json_string",
     "_parse_datatype_json_value",
