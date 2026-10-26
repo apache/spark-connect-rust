@@ -25,6 +25,7 @@ import json
 import tempfile
 import types
 import unittest
+import weakref
 from pathlib import Path
 from unittest.mock import patch
 
@@ -95,26 +96,48 @@ class Session:
 class BenchmarkPlanSharingTests(unittest.TestCase):
     def setUp(self):
         self.config = {
-            "rows": 5, "depth": 3, "branches": 4, "partitions": 1,
-            "warmups": 0, "repetitions": 1, "order_seed": 0,
+            "rows": 5,
+            "depth": 3,
+            "branches": 4,
+            "partitions": 1,
+            "warmups": 0,
+            "repetitions": 1,
+            "order_seed": 0,
         }
 
     def report(self):
         expected = benchmark.expected_result("linear", 5, 3, 4)
         return {
-            "format_version": 1, "status": "ok", "label": "baseline", "build_id": "before",
-            "config": self.config, "endpoint_sha256": "endpoint", "server_version": "test",
+            "format_version": 1,
+            "status": "ok",
+            "label": "baseline",
+            "build_id": "before",
+            "config": self.config,
+            "endpoint_sha256": "endpoint",
+            "server_version": "test",
             "server_configs": {},
             "provenance": {
-                "python_version": "test", "platform": "test", "hostname": "test",
-                "dependencies": {}, "script_sha256": "script", "extension": {"sha256": "a"},
+                "python_version": "test",
+                "platform": "test",
+                "hostname": "test",
+                "dependencies": {},
+                "script_sha256": "script",
+                "extension": {"sha256": "a"},
             },
-            "results": {"linear": {
-                "expected": expected, "warmups": [],
-                "samples": [{
-                    "construction_s": 1.0, "action_s": 2.0, "total_s": 3.0, "result": expected,
-                }],
-            }},
+            "results": {
+                "linear": {
+                    "expected": expected,
+                    "warmups": [],
+                    "samples": [
+                        {
+                            "construction_s": 1.0,
+                            "action_s": 2.0,
+                            "total_s": 3.0,
+                            "result": expected,
+                        }
+                    ],
+                }
+            },
         }
 
     def test_workload_values_and_retained_handles(self):
@@ -152,7 +175,7 @@ class BenchmarkPlanSharingTests(unittest.TestCase):
         columns = [handle for handle in retained if isinstance(handle, Expression)]
         frames = [handle for handle in retained if isinstance(handle, Frame)]
         shared_column = columns[self.config["depth"]]
-        for branch in frames[1:self.config["branches"] + 1]:
+        for branch in frames[1 : self.config["branches"] + 1]:
             self.assertIs(branch.inputs[0], frames[0])
             aliased = branch.expressions[0]
             self.assertIs(aliased.child.child, shared_column)
@@ -190,6 +213,36 @@ class BenchmarkPlanSharingTests(unittest.TestCase):
                 benchmark.measure(Session(), Functions, "linear", self.config)
         self.assertEqual(gc.isenabled(), before)
 
+    def test_measure_retains_handles_until_action_completes(self):
+        class Handle:
+            pass
+
+        for fails in (False, True):
+            with self.subTest(fails=fails):
+                references = []
+
+                def build_query(*args, references=references):
+                    handle = Handle()
+                    references.append(weakref.ref(handle))
+                    return Frame([]), [handle]
+
+                def collect(references=references, fails=fails):
+                    self.assertIsNotNone(references[0]())
+                    if fails:
+                        raise RuntimeError("server failed")
+                    return [(25, 5)]
+
+                with (
+                    patch.object(benchmark, "build_query", side_effect=build_query),
+                    patch.object(Frame, "collect", side_effect=collect),
+                ):
+                    if fails:
+                        with self.assertRaisesRegex(RuntimeError, "server failed"):
+                            benchmark.measure(Session(), Functions, "linear", self.config)
+                    else:
+                        benchmark.measure(Session(), Functions, "linear", self.config)
+                self.assertIsNone(references[0]())
+
     def test_incorrect_checksum_or_type_fails(self):
         for rows in ([], [(25,)], [(24, 5)], [(25.0, 5)]):
             with self.subTest(rows=rows), self.assertRaises(ValueError):
@@ -218,10 +271,13 @@ class BenchmarkPlanSharingTests(unittest.TestCase):
                     benchmark.client_provenance(Session(), Functions, "rust", "incorrect")
 
     def test_transport_plugin_is_rejected(self):
-        with patch.dict(benchmark.sys.modules, {
-            "pyspark": types.ModuleType("pyspark"),
-            "rust_transport_plugin": types.ModuleType("rust_transport_plugin"),
-        }):
+        with patch.dict(
+            benchmark.sys.modules,
+            {
+                "pyspark": types.ModuleType("pyspark"),
+                "rust_transport_plugin": types.ModuleType("rust_transport_plugin"),
+            },
+        ):
             with self.assertRaisesRegex(RuntimeError, "Transport-injected"):
                 benchmark.client_provenance(Session(), Functions, "rust", None)
 
@@ -261,21 +317,41 @@ class BenchmarkPlanSharingTests(unittest.TestCase):
                 patch.object(benchmark, "run", side_effect=RuntimeError("wrong client")),
                 contextlib.redirect_stderr(io.StringIO()),
             ):
-                status = benchmark.main([
-                    "--label", "test", "--build-id", "test", "--out", str(output),
-                ])
+                status = benchmark.main(
+                    [
+                        "--label",
+                        "test",
+                        "--build-id",
+                        "test",
+                        "--out",
+                        str(output),
+                    ]
+                )
             self.assertEqual(status, 1)
             self.assertFalse(output.exists())
 
     def test_expression_workload_cli_choices(self):
         for name in benchmark.EXPRESSION_WORKLOADS:
-            with self.subTest(name=name), patch.object(
-                benchmark, "run", side_effect=RuntimeError("offline CLI test")
-            ) as run, contextlib.redirect_stderr(io.StringIO()):
-                self.assertEqual(benchmark.main([
-                    "--label", "test", "--build-id", "test", "--out", "unused.json",
-                    "--workload", name,
-                ]), 1)
+            with (
+                self.subTest(name=name),
+                patch.object(benchmark, "run", side_effect=RuntimeError("offline CLI test")) as run,
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(
+                    benchmark.main(
+                        [
+                            "--label",
+                            "test",
+                            "--build-id",
+                            "test",
+                            "--out",
+                            "unused.json",
+                            "--workload",
+                            name,
+                        ]
+                    ),
+                    1,
+                )
                 self.assertEqual(run.call_args.args[0].workload, name)
 
 

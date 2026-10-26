@@ -146,10 +146,10 @@ def measure(spark, functions, name: str, config: dict) -> dict:
     gc.collect()
     gc_was_enabled = gc.isenabled()
     gc.disable()
-    query = retained = result = None
+    query = _retained = result = None
     try:
         start = time.perf_counter()
-        query, retained = build_query(spark, functions, name, config)
+        query, _retained = build_query(spark, functions, name, config)
         constructed = time.perf_counter()
         result = query.collect()
         finished = time.perf_counter()
@@ -162,7 +162,7 @@ def measure(spark, functions, name: str, config: dict) -> dict:
             "result": actual,
         }
     finally:
-        result = query = retained = None
+        result = query = _retained = None
         if gc_was_enabled:
             gc.enable()
 
@@ -231,7 +231,13 @@ def run(args) -> dict:
     config = {
         key: getattr(args, key)
         for key in (
-            "rows", "depth", "branches", "partitions", "warmups", "repetitions", "order_seed"
+            "rows",
+            "depth",
+            "branches",
+            "partitions",
+            "warmups",
+            "repetitions",
+            "order_seed",
         )
     }
     names = list(WORKLOADS) if args.workload == "all" else [args.workload]
