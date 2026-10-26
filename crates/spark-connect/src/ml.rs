@@ -1709,7 +1709,7 @@ mod tests {
             .set_input_cols(vec!["id"])
             .set_output_col("v");
         let out = va.transform(&df).unwrap();
-        assert!(matches!(out.plan, LogicalPlan::MlTransform { .. }));
+        assert!(matches!(out.plan.as_ref(), LogicalPlan::MlTransform { .. }));
 
         // StandardScaler fits locally into a model; the model transform also builds
         // an MlTransform plan, and Model::clone_box works.
@@ -1718,7 +1718,10 @@ mod tests {
             .set_output_col("scaled");
         let mut model = ss.fit(&df).unwrap();
         let scaled = model.transform(&df).unwrap();
-        assert!(matches!(scaled.plan, LogicalPlan::MlTransform { .. }));
+        assert!(matches!(
+            scaled.plan.as_ref(),
+            LogicalPlan::MlTransform { .. }
+        ));
         let _cloned = model.clone_box();
     }
 
@@ -1765,7 +1768,7 @@ mod tests {
         let mut cv2 = CrossValidator::new().set_num_folds(2);
         let mut model = cv2.fit(&df).unwrap();
         let out = model.transform(&df).unwrap();
-        assert!(matches!(out.plan, LogicalPlan::MlTransform { .. }));
+        assert!(matches!(out.plan.as_ref(), LogicalPlan::MlTransform { .. }));
         let _ = model.clone_box();
     }
 
@@ -1779,7 +1782,7 @@ mod tests {
         assert_eq!(mas.input_col(), "f");
         let mut m = mas.fit(&df).unwrap();
         assert!(matches!(
-            m.transform(&df).unwrap().plan,
+            m.transform(&df).unwrap().plan.as_ref(),
             LogicalPlan::MlTransform { .. }
         ));
         let _ = m.clone_box();

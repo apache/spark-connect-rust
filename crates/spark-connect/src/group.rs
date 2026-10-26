@@ -2,11 +2,13 @@
 //!
 //! Mirroring `pyspark.sql.GroupedData`.
 
+use std::sync::Arc;
+
 use spark_connect_core::error::Result;
 
 use crate::column::Column;
 use crate::dataframe::DataFrame;
-use crate::expression::Expression;
+use crate::expression::{Expression, ExpressionNode};
 use crate::plan::{AggregateGroupType, LogicalPlan};
 use crate::types::DataType;
 use crate::udf::CommonInlineUserDefinedFunctionExpression;
@@ -26,7 +28,7 @@ fn value_to_lit_expr(v: crate::row::Value) -> Expression {
         Value::String(s) => L::string(s),
         other => L::string(format!("{:?}", other)),
     };
-    Expression::Literal(lit)
+    Expression::new(ExpressionNode::Literal(lit))
 }
 
 /// Grouped data for performing aggregations.
@@ -140,7 +142,7 @@ impl GroupedData {
 
     fn group_map(&self, func: CommonInlineUserDefinedFunctionExpression) -> DataFrame {
         let plan = LogicalPlan::GroupMap {
-            input: Box::new(self.dataframe.plan.clone()),
+            input: Arc::clone(&self.dataframe.plan),
             grouping_expressions: self.grouping_expressions(),
             func,
             sorting_expressions: vec![],
@@ -168,7 +170,7 @@ impl GroupedData {
         timeout_conf: &str,
     ) -> DataFrame {
         let plan = LogicalPlan::GroupMap {
-            input: Box::new(self.dataframe.plan.clone()),
+            input: Arc::clone(&self.dataframe.plan),
             grouping_expressions: self.grouping_expressions(),
             func,
             sorting_expressions: vec![],
@@ -236,13 +238,13 @@ impl GroupedData {
     ) -> DataFrame {
         let (initial_input, initial_grouping_expressions) = match initial_state {
             Some(gd) => (
-                Some(Box::new(gd.dataframe.plan.clone())),
+                Some(Arc::clone(&gd.dataframe.plan)),
                 gd.grouping_expressions(),
             ),
             None => (None, vec![]),
         };
         let plan = LogicalPlan::GroupMap {
-            input: Box::new(self.dataframe.plan.clone()),
+            input: Arc::clone(&self.dataframe.plan),
             grouping_expressions: self.grouping_expressions(),
             func,
             sorting_expressions: vec![],
@@ -286,7 +288,7 @@ impl GroupedData {
             .collect();
 
         let plan = LogicalPlan::Aggregate {
-            input: Box::new(self.dataframe.plan.clone()),
+            input: Arc::clone(&self.dataframe.plan),
             group_type: self.group_type,
             grouping_expressions,
             aggregate_expressions: expressions,
@@ -301,9 +303,9 @@ impl GroupedData {
     /// Count rows in each group.
     pub fn count(&self) -> DataFrame {
         use crate::functions;
-        let count_expr = functions::count(Column::new(Expression::Literal(
+        let count_expr = functions::count(Column::new(Expression::new(ExpressionNode::Literal(
             crate::expression::LiteralExpression::int(1),
-        )))
+        ))))
         .expression()
         .clone();
 
@@ -376,7 +378,7 @@ impl StatFunctions {
     /// Compute a cross-tabulation of two columns.
     pub fn crosstab(&self, col1: &str, col2: &str) -> DataFrame {
         let plan = LogicalPlan::StatCrosstab {
-            input: Box::new(self.dataframe.plan.clone()),
+            input: Arc::clone(&self.dataframe.plan),
             col1: col1.to_string(),
             col2: col2.to_string(),
         };
@@ -386,7 +388,7 @@ impl StatFunctions {
     /// Find frequent items.
     pub fn freq_items(&self, columns: Vec<&str>, support: f64) -> DataFrame {
         let plan = LogicalPlan::StatFreqItems {
-            input: Box::new(self.dataframe.plan.clone()),
+            input: Arc::clone(&self.dataframe.plan),
             columns: columns.iter().map(|s| s.to_string()).collect(),
             support,
         };
@@ -401,7 +403,7 @@ impl StatFunctions {
         relative_error: f64,
     ) -> DataFrame {
         let plan = LogicalPlan::StatApproxQuantile {
-            input: Box::new(self.dataframe.plan.clone()),
+            input: Arc::clone(&self.dataframe.plan),
             columns: columns.iter().map(|s| s.to_string()).collect(),
             probabilities,
             relative_error,
@@ -415,7 +417,7 @@ impl StatFunctions {
     /// (NaN when the correlation is undefined, e.g. an empty relation).
     pub fn corr(&self, col1: &str, col2: &str) -> Result<f64> {
         let plan = LogicalPlan::StatCorr {
-            input: Box::new(self.dataframe.plan.clone()),
+            input: Arc::clone(&self.dataframe.plan),
             col1: col1.to_string(),
             col2: col2.to_string(),
         };
@@ -428,7 +430,7 @@ impl StatFunctions {
     /// Executes the stat aggregation and returns the resulting `f64`.
     pub fn cov(&self, col1: &str, col2: &str) -> Result<f64> {
         let plan = LogicalPlan::StatCov {
-            input: Box::new(self.dataframe.plan.clone()),
+            input: Arc::clone(&self.dataframe.plan),
             col1: col1.to_string(),
             col2: col2.to_string(),
         };
@@ -444,7 +446,7 @@ impl StatFunctions {
         seed: Option<i64>,
     ) -> DataFrame {
         let plan = LogicalPlan::StatSampleBy {
-            input: Box::new(self.dataframe.plan.clone()),
+            input: Arc::clone(&self.dataframe.plan),
             col: col.to_string(),
             fractions,
             seed,
@@ -524,9 +526,9 @@ impl CoGroupedData {
 
     fn cogroup_map(&self, func: CommonInlineUserDefinedFunctionExpression) -> DataFrame {
         let plan = LogicalPlan::CoGroupMap {
-            input: Box::new(self.left.dataframe.plan.clone()),
+            input: Arc::clone(&self.left.dataframe.plan),
             input_grouping_expressions: self.left.grouping_expressions(),
-            other: Box::new(self.right.dataframe.plan.clone()),
+            other: Arc::clone(&self.right.dataframe.plan),
             other_grouping_expressions: self.right.grouping_expressions(),
             func,
         };
@@ -547,12 +549,35 @@ mod tests {
     }
 
     #[test]
+    fn grouped_and_stat_builders_share_the_source_plan() {
+        let spark = session();
+        let df = spark.range(10).unwrap();
+        let grouped = df.group_by(vec![crate::column::col("id")]);
+        assert!(Arc::ptr_eq(&grouped.dataframe.plan, &df.plan));
+        let cloned = grouped.clone();
+        assert!(Arc::ptr_eq(&cloned.dataframe.plan, &df.plan));
+        let count = grouped.count();
+        let LogicalPlan::Aggregate { input, .. } = count.plan.as_ref() else {
+            panic!("expected aggregate");
+        };
+        assert!(Arc::ptr_eq(input, &df.plan));
+
+        let stat = df.stat();
+        assert!(Arc::ptr_eq(&stat.dataframe.plan, &df.plan));
+        let result = stat.crosstab("id", "id");
+        let LogicalPlan::StatCrosstab { input, .. } = result.plan.as_ref() else {
+            panic!("expected crosstab");
+        };
+        assert!(Arc::ptr_eq(input, &df.plan));
+    }
+
+    #[test]
     fn group_count_plan() {
         let spark = session();
         let df = spark.range(10).unwrap();
         let grouped = df.group_by(vec![crate::column::col("id")]);
         let result = grouped.count();
-        match &result.plan {
+        match result.plan.as_ref() {
             LogicalPlan::Aggregate {
                 group_type: AggregateGroupType::GroupBy,
                 ..
@@ -569,7 +594,7 @@ mod tests {
         let df = spark.range(10).unwrap();
         let grouped = df.group_by(vec![crate::column::col("id")]);
         let result = grouped.sum(vec!["id"]);
-        match &result.plan {
+        match result.plan.as_ref() {
             LogicalPlan::Aggregate {
                 group_type: AggregateGroupType::GroupBy,
                 aggregate_expressions,
@@ -590,7 +615,7 @@ mod tests {
             .expression()
             .clone()];
         let result = grouped.agg(exprs);
-        match &result.plan {
+        match result.plan.as_ref() {
             LogicalPlan::Aggregate {
                 group_type: AggregateGroupType::GroupBy,
                 ..
@@ -617,7 +642,7 @@ mod tests {
         let df = spark.range(10).unwrap();
         let stats = df.stat();
         let result = stats.crosstab("col1", "col2");
-        match &result.plan {
+        match result.plan.as_ref() {
             LogicalPlan::StatCrosstab { .. } => {
                 // Plan is correct
             }
@@ -631,7 +656,7 @@ mod tests {
         let df = spark.range(10).unwrap();
         let stats = df.stat();
         let result = stats.freq_items(vec!["col1", "col2"], 0.25);
-        match &result.plan {
+        match result.plan.as_ref() {
             LogicalPlan::StatFreqItems {
                 columns, support, ..
             } => {
@@ -648,7 +673,7 @@ mod tests {
         let df = spark.range(10).unwrap();
         let stats = df.stat();
         let result = stats.approx_quantile(vec!["col1"], vec![0.25, 0.75], 0.05);
-        match &result.plan {
+        match result.plan.as_ref() {
             LogicalPlan::StatApproxQuantile {
                 columns,
                 probabilities,
@@ -670,16 +695,20 @@ mod tests {
         let stats = df.stat();
         let fractions = vec![
             (
-                Expression::Literal(crate::expression::LiteralExpression::string("A")),
+                Expression::new(ExpressionNode::Literal(
+                    crate::expression::LiteralExpression::string("A"),
+                )),
                 0.5,
             ),
             (
-                Expression::Literal(crate::expression::LiteralExpression::string("B")),
+                Expression::new(ExpressionNode::Literal(
+                    crate::expression::LiteralExpression::string("B"),
+                )),
                 0.3,
             ),
         ];
         let result = stats.sample_by("category", fractions, Some(42));
-        match &result.plan {
+        match result.plan.as_ref() {
             LogicalPlan::StatSampleBy {
                 col,
                 seed,

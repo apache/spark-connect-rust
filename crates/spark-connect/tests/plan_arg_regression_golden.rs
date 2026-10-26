@@ -11,7 +11,7 @@
 //! exact proto field that must be present to prevent argument loss.
 
 use spark_connect::column::col;
-use spark_connect::expression::{Expression, LiteralExpression};
+use spark_connect::expression::{Expression, ExpressionNode, LiteralExpression};
 use spark_connect::plan::{self, AggregateGroupType};
 use spark_connect_proto as proto;
 
@@ -270,8 +270,8 @@ fn test_pivot_with_explicit_values_assertion() {
 
     // Create an aggregation with pivot and explicit values.
     let pivot_values = vec![
-        Expression::Literal(LiteralExpression::string("a")),
-        Expression::Literal(LiteralExpression::string("b")),
+        Expression::new(ExpressionNode::Literal(LiteralExpression::string("a"))),
+        Expression::new(ExpressionNode::Literal(LiteralExpression::string("b"))),
     ];
     let df_plan = plan::aggregate_with_pivot(
         base,

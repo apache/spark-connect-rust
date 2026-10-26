@@ -257,7 +257,7 @@ mod tests {
         let spark = session();
         let tvf = spark.tvf();
         let df = tvf.range(0, Some(10), 1, None).unwrap();
-        match &df.plan {
+        match df.plan.as_ref() {
             LogicalPlan::Range { .. } => {
                 // Plan is correct
             }
@@ -271,7 +271,7 @@ mod tests {
         let tvf = spark.tvf();
         // range(end) should be range(0, end)
         let df = tvf.range(5, None, 1, None).unwrap();
-        match &df.plan {
+        match df.plan.as_ref() {
             LogicalPlan::Range {
                 start, end, step, ..
             } => {
@@ -289,7 +289,7 @@ mod tests {
         let tvf = spark.tvf();
         let col = crate::column::col("array_col");
         let df = tvf.explode(&col).unwrap();
-        match &df.plan {
+        match df.plan.as_ref() {
             LogicalPlan::UnresolvedTableValuedFunction { name, arguments } => {
                 assert_eq!(name, "explode");
                 assert_eq!(arguments.len(), 1);
@@ -304,7 +304,7 @@ mod tests {
         let tvf = spark.tvf();
         let col = crate::column::col("array_col");
         let df = tvf.explode_outer(&col).unwrap();
-        match &df.plan {
+        match df.plan.as_ref() {
             LogicalPlan::UnresolvedTableValuedFunction { name, .. } => {
                 assert_eq!(name, "explode_outer");
             }
@@ -318,7 +318,7 @@ mod tests {
         let tvf = spark.tvf();
         let col = crate::column::col("struct_array");
         let df = tvf.inline(&col).unwrap();
-        match &df.plan {
+        match df.plan.as_ref() {
             LogicalPlan::UnresolvedTableValuedFunction { name, .. } => {
                 assert_eq!(name, "inline");
             }
@@ -333,7 +333,7 @@ mod tests {
         let input = crate::column::col("json_col");
         let fields = vec![crate::column::col("field1"), crate::column::col("field2")];
         let df = tvf.json_tuple(&input, fields).unwrap();
-        match &df.plan {
+        match df.plan.as_ref() {
             LogicalPlan::UnresolvedTableValuedFunction { name, arguments } => {
                 assert_eq!(name, "json_tuple");
                 assert_eq!(arguments.len(), 3); // input + 2 fields
@@ -357,7 +357,7 @@ mod tests {
         let tvf = spark.tvf();
         let col = crate::column::col("array_col");
         let df = tvf.posexplode(&col).unwrap();
-        match &df.plan {
+        match df.plan.as_ref() {
             LogicalPlan::UnresolvedTableValuedFunction { name, .. } => {
                 assert_eq!(name, "posexplode");
             }
@@ -376,7 +376,7 @@ mod tests {
             crate::column::col("col3"),
         ];
         let df = tvf.stack(&n, fields).unwrap();
-        match &df.plan {
+        match df.plan.as_ref() {
             LogicalPlan::UnresolvedTableValuedFunction { name, arguments } => {
                 assert_eq!(name, "stack");
                 assert_eq!(arguments.len(), 4); // n + 3 fields
@@ -390,7 +390,7 @@ mod tests {
         let spark = session();
         let tvf = spark.tvf();
         let df = tvf.collations().unwrap();
-        match &df.plan {
+        match df.plan.as_ref() {
             LogicalPlan::UnresolvedTableValuedFunction { name, arguments } => {
                 assert_eq!(name, "collations");
                 assert!(arguments.is_empty());
@@ -404,7 +404,7 @@ mod tests {
         let spark = session();
         let tvf = spark.tvf();
         let df = tvf.sql_keywords().unwrap();
-        match &df.plan {
+        match df.plan.as_ref() {
             LogicalPlan::UnresolvedTableValuedFunction { name, arguments } => {
                 assert_eq!(name, "sql_keywords");
                 assert!(arguments.is_empty());

@@ -3,6 +3,8 @@
 //! enum, and local/cached relations serialize to the right rel_type. These assert the
 //! actual proto mapping (not a recorded snapshot) and run in CI without a server.
 
+use std::sync::Arc;
+
 use spark_connect::column::col;
 use spark_connect::plan::{self, JoinType, LogicalPlan};
 use spark_connect::types::DataType;
@@ -10,6 +12,37 @@ use spark_connect_proto as proto;
 
 fn base() -> LogicalPlan {
     plan::range(0, 5, 1)
+}
+
+#[test]
+fn plan_helpers_accept_shared_nodes_without_cloning_them() {
+    let source = Arc::new(base());
+    let projected = Arc::new(plan::project(Arc::clone(&source), vec![col("id")]));
+    let limited = plan::limit(Arc::clone(&projected), 3);
+    let joined = plan::join(
+        Arc::clone(&projected),
+        Arc::clone(&projected),
+        JoinType::Cross,
+        None,
+        vec![],
+    );
+    let LogicalPlan::Project { input, .. } = projected.as_ref() else {
+        panic!("expected projection");
+    };
+    assert!(Arc::ptr_eq(input, &source));
+    let LogicalPlan::Limit { input, .. } = &limited else {
+        panic!("expected limit");
+    };
+    assert!(Arc::ptr_eq(input, &projected));
+    let LogicalPlan::Join { left, right, .. } = &joined else {
+        panic!("expected join");
+    };
+    assert!(Arc::ptr_eq(left, &projected));
+    assert!(Arc::ptr_eq(right, &projected));
+    assert_eq!(
+        limited.to_proto(),
+        plan::limit(plan::project(base(), vec![col("id")]), 3).to_proto()
+    );
 }
 
 #[test]

@@ -110,14 +110,30 @@ fn load_goldens() -> HashMap<String, proto::Expression> {
 #[test]
 fn all_golden_function_cases_pass() {
     use spark_connect::column::Column;
-    use spark_connect::expression::{ColumnReference, Expression};
+    use spark_connect::expression::{ColumnReference, Expression, ExpressionNode};
     use spark_connect::functions::*;
 
     let goldens = load_goldens();
-    let a = || Column::new(Expression::ColumnReference(ColumnReference::new("a")));
-    let b = || Column::new(Expression::ColumnReference(ColumnReference::new("b")));
-    let c = || Column::new(Expression::ColumnReference(ColumnReference::new("c")));
-    let d = || Column::new(Expression::ColumnReference(ColumnReference::new("d")));
+    let a = || {
+        Column::new(Expression::new(ExpressionNode::ColumnReference(
+            ColumnReference::new("a"),
+        )))
+    };
+    let b = || {
+        Column::new(Expression::new(ExpressionNode::ColumnReference(
+            ColumnReference::new("b"),
+        )))
+    };
+    let c = || {
+        Column::new(Expression::new(ExpressionNode::ColumnReference(
+            ColumnReference::new("c"),
+        )))
+    };
+    let d = || {
+        Column::new(Expression::new(ExpressionNode::ColumnReference(
+            ColumnReference::new("d"),
+        )))
+    };
 
     let cases: Vec<(&str, Column)> = vec![
         ("abs", abs(a())),
@@ -742,11 +758,19 @@ fn all_golden_function_cases_pass() {
 fn call_function_and_call_udf_carry_arguments() {
     use proto::expression::ExprType;
     use spark_connect::column::Column;
-    use spark_connect::expression::{ColumnReference, Expression};
+    use spark_connect::expression::{ColumnReference, Expression, ExpressionNode};
     use spark_connect::functions::{call_function, call_udf};
 
-    let a = || Column::new(Expression::ColumnReference(ColumnReference::new("a")));
-    let b = || Column::new(Expression::ColumnReference(ColumnReference::new("b")));
+    let a = || {
+        Column::new(Expression::new(ExpressionNode::ColumnReference(
+            ColumnReference::new("a"),
+        )))
+    };
+    let b = || {
+        Column::new(Expression::new(ExpressionNode::ColumnReference(
+            ColumnReference::new("b"),
+        )))
+    };
 
     let cf = call_function("my_fn", vec![a(), b()]).to_proto();
     match cf.expr_type.expect("expr_type") {

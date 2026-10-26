@@ -3,6 +3,7 @@
 //! Provides the API for reading data from various sources and writing DataFrames to files/tables.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use spark_connect_core::error::Result;
 use spark_connect_proto as proto;
@@ -331,7 +332,7 @@ impl TableSaveMethod {
 /// Mirrors `pyspark.sql.connect.readwriter.DataFrameWriter`.
 pub struct DataFrameWriter {
     session: SparkSession,
-    input_plan: LogicalPlan,
+    input_plan: Arc<LogicalPlan>,
     format: Option<String>,
     mode: SaveMode,
     options: HashMap<String, String>,
@@ -344,7 +345,7 @@ pub struct DataFrameWriter {
 
 impl DataFrameWriter {
     /// Create a new DataFrameWriter.
-    pub(crate) fn new(session: SparkSession, input_plan: LogicalPlan) -> Self {
+    pub(crate) fn new(session: SparkSession, input_plan: Arc<LogicalPlan>) -> Self {
         DataFrameWriter {
             session,
             input_plan,
@@ -511,7 +512,7 @@ impl DataFrameWriter {
 /// Mirrors `pyspark.sql.connect.readwriter.DataFrameWriterV2`.
 pub struct DataFrameWriterV2 {
     session: SparkSession,
-    input_plan: LogicalPlan,
+    input_plan: Arc<LogicalPlan>,
     table_name: String,
     provider: Option<String>,
     options: HashMap<String, String>,
@@ -522,7 +523,11 @@ pub struct DataFrameWriterV2 {
 
 impl DataFrameWriterV2 {
     /// Create a new DataFrameWriterV2 targeting `table_name`.
-    pub(crate) fn new(session: SparkSession, input_plan: LogicalPlan, table_name: &str) -> Self {
+    pub(crate) fn new(
+        session: SparkSession,
+        input_plan: Arc<LogicalPlan>,
+        table_name: &str,
+    ) -> Self {
         DataFrameWriterV2 {
             session,
             input_plan,
@@ -649,6 +654,16 @@ mod tests {
             .remote("sc://localhost:15002")
             .get_or_create()
             .expect("failed to build session")
+    }
+
+    #[test]
+    fn writers_share_the_source_plan() {
+        let spark = session();
+        let df = spark.range(10).unwrap().limit(5);
+        let writer = df.write();
+        let writer_v2 = df.write_to("target");
+        assert!(Arc::ptr_eq(&writer.input_plan, &df.plan));
+        assert!(Arc::ptr_eq(&writer_v2.input_plan, &df.plan));
     }
 
     #[test]
@@ -795,7 +810,7 @@ mod tests {
             .option("password", "secret")
             .jdbc("jdbc:mysql://localhost:3306/db", "table_name", None);
 
-        match &df.plan {
+        match df.plan.as_ref() {
             LogicalPlan::Read {
                 read_type:
                     ReadType::DataSource {
@@ -826,7 +841,7 @@ mod tests {
             Some(predicates.clone()),
         );
 
-        match &df.plan {
+        match df.plan.as_ref() {
             LogicalPlan::Read {
                 read_type:
                     ReadType::DataSource {
@@ -906,7 +921,7 @@ mod tests {
             .options(opts)
             .load(Some("/data.csv"));
 
-        match &df.plan {
+        match df.plan.as_ref() {
             LogicalPlan::Read {
                 read_type:
                     ReadType::DataSource {

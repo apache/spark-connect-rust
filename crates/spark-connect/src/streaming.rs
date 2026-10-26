@@ -244,7 +244,7 @@ pub enum Trigger {
 /// Mirrors `pyspark.sql.connect.streaming.DataStreamWriter`.
 pub struct DataStreamWriter {
     session: SparkSession,
-    plan: LogicalPlan,
+    plan: Arc<LogicalPlan>,
     format: Option<String>,
     output_mode: Option<String>,
     options: HashMap<String, String>,
@@ -260,7 +260,7 @@ pub struct DataStreamWriter {
 
 impl DataStreamWriter {
     /// Create a new DataStreamWriter.
-    pub(crate) fn new(session: SparkSession, plan: LogicalPlan) -> Self {
+    pub(crate) fn new(session: SparkSession, plan: Arc<LogicalPlan>) -> Self {
         DataStreamWriter {
             session,
             plan,
@@ -1152,6 +1152,14 @@ mod tests {
     }
 
     #[test]
+    fn stream_writer_shares_the_source_plan() {
+        let spark = session();
+        let df = spark.read_stream().format("rate").load(None).limit(5);
+        let writer = df.write_stream();
+        assert!(Arc::ptr_eq(&writer.plan, &df.plan));
+    }
+
+    #[test]
     fn stream_reader_format_option() {
         let spark = session();
         let reader = spark.read_stream();
@@ -1185,7 +1193,7 @@ mod tests {
         let reader = spark.read_stream().format("kafka");
         let df = reader.load(Some("/path/to/data"));
         assert!(matches!(
-            &df.plan,
+            df.plan.as_ref(),
             crate::plan::LogicalPlan::Read {
                 is_streaming: true,
                 ..
@@ -1199,7 +1207,7 @@ mod tests {
         let reader = spark.read_stream();
         let df = reader.json("/path/to/json");
         // Verify that the plan has the streaming flag set
-        match &df.plan {
+        match df.plan.as_ref() {
             crate::plan::LogicalPlan::Read { is_streaming, .. } => {
                 assert!(*is_streaming);
             }

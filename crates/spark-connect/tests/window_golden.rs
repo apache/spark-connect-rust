@@ -13,14 +13,16 @@ use std::io::{BufRead, BufReader};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use prost::Message;
 use spark_connect::column::col;
-use spark_connect::expression::{Expression, LiteralExpression};
+use spark_connect::expression::{Expression, ExpressionNode, LiteralExpression};
 use spark_connect::functions;
 use spark_connect::window::{FrameBound, WindowSpec};
 use spark_connect_proto as proto;
 
 /// An integer literal Column (pyspark infers 32-bit `integer` for small ints).
 fn cint(v: i32) -> spark_connect::column::Column {
-    spark_connect::column::Column::new(Expression::Literal(LiteralExpression::int(v)))
+    spark_connect::column::Column::new(Expression::new(ExpressionNode::Literal(
+        LiteralExpression::int(v),
+    )))
 }
 
 /// Recursively clear fields that vary run-to-run and are not client-authored:

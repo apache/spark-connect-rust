@@ -13,7 +13,7 @@ use std::io::{BufRead, BufReader};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use prost::Message;
 use spark_connect::column::col;
-use spark_connect::expression::Expression;
+use spark_connect::expression::{Expression, ExpressionNode};
 use spark_connect::functions::{
     aggregate, aggregate_with_finish, exists, filter, forall, map_filter, map_zip_with, transform,
     transform_idx, transform_keys, transform_values, zip_with,
@@ -22,9 +22,9 @@ use spark_connect_proto as proto;
 
 /// An integer literal Column.
 fn cint(v: i32) -> spark_connect::column::Column {
-    spark_connect::column::Column::new(Expression::Literal(
+    spark_connect::column::Column::new(Expression::new(ExpressionNode::Literal(
         spark_connect::expression::LiteralExpression::int(v),
-    ))
+    )))
 }
 
 /// Recursively canonicalize lambda variable names in an expression.

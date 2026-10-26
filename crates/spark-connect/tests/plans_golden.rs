@@ -14,7 +14,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use prost::Message;
 
 use spark_connect::column::col;
-use spark_connect::expression::{ColumnReference, Expression};
+use spark_connect::expression::{ColumnReference, Expression, ExpressionNode};
 use spark_connect::plan::{self, AggregateGroupType, JoinType, LogicalPlan, SetOpType};
 use spark_connect_proto as proto;
 
@@ -297,7 +297,9 @@ fn build(name: &str) -> Option<LogicalPlan> {
         }
         "select_star" => {
             let range = plan::range(0, 10, 1);
-            let star_col = spark_connect::column::Column::new(Expression::UnresolvedStar(None));
+            let star_col = spark_connect::column::Column::new(Expression::new(
+                ExpressionNode::UnresolvedStar(None),
+            ));
             plan::project(range, vec![star_col])
         }
         "select_alias" => {
@@ -307,11 +309,11 @@ fn build(name: &str) -> Option<LogicalPlan> {
         }
         "select_expr" => {
             let range = plan::range(0, 10, 1);
-            let expr1 = spark_connect::column::Column::new(Expression::SQLExpression(
-                "id * 2 as x".to_string(),
+            let expr1 = spark_connect::column::Column::new(Expression::new(
+                ExpressionNode::SQLExpression("id * 2 as x".to_string()),
             ));
-            let expr2 = spark_connect::column::Column::new(Expression::SQLExpression(
-                "id + 1 as y".to_string(),
+            let expr2 = spark_connect::column::Column::new(Expression::new(
+                ExpressionNode::SQLExpression("id + 1 as y".to_string()),
             ));
             plan::project(range, vec![expr1, expr2])
         }
@@ -370,20 +372,20 @@ fn build(name: &str) -> Option<LogicalPlan> {
         }
         "sort" => {
             let range = plan::range(0, 10, 1);
-            let order_expr = Expression::SortOrder(Box::new(
-                spark_connect::expression::SortOrder::desc_nulls_last(Expression::ColumnReference(
-                    ColumnReference::new("id"),
+            let order_expr = Expression::new(ExpressionNode::SortOrder(Box::new(
+                spark_connect::expression::SortOrder::desc_nulls_last(Expression::new(
+                    ExpressionNode::ColumnReference(ColumnReference::new("id")),
                 )),
-            ));
+            )));
             plan::sort(range, vec![order_expr], true)
         }
         "order_by_multi" => {
             let range = plan::range(0, 10, 1);
-            let order_expr = Expression::SortOrder(Box::new(
-                spark_connect::expression::SortOrder::asc_nulls_last(Expression::ColumnReference(
-                    ColumnReference::new("id"),
+            let order_expr = Expression::new(ExpressionNode::SortOrder(Box::new(
+                spark_connect::expression::SortOrder::asc_nulls_last(Expression::new(
+                    ExpressionNode::ColumnReference(ColumnReference::new("id")),
                 )),
-            ));
+            )));
             plan::sort(range, vec![order_expr], true)
         }
         "group_agg" => {
@@ -392,19 +394,25 @@ fn build(name: &str) -> Option<LogicalPlan> {
                 .alias("k")
                 .expression()
                 .clone();
-            let agg_count = spark_connect::column::Column::new(Expression::UnresolvedFunction(
-                spark_connect::expression::UnresolvedFunction::new(
-                    "count",
-                    vec![Expression::UnresolvedStar(None)],
+            let agg_count = spark_connect::column::Column::new(Expression::new(
+                ExpressionNode::UnresolvedFunction(
+                    spark_connect::expression::UnresolvedFunction::new(
+                        "count",
+                        vec![Expression::new(ExpressionNode::UnresolvedStar(None))],
+                    ),
                 ),
             ))
             .alias("c")
             .expression()
             .clone();
-            let agg_sum = spark_connect::column::Column::new(Expression::UnresolvedFunction(
-                spark_connect::expression::UnresolvedFunction::new(
-                    "sum",
-                    vec![Expression::ColumnReference(ColumnReference::new("id"))],
+            let agg_sum = spark_connect::column::Column::new(Expression::new(
+                ExpressionNode::UnresolvedFunction(
+                    spark_connect::expression::UnresolvedFunction::new(
+                        "sum",
+                        vec![Expression::new(ExpressionNode::ColumnReference(
+                            ColumnReference::new("id"),
+                        ))],
+                    ),
                 ),
             ))
             .alias("s")
@@ -419,13 +427,16 @@ fn build(name: &str) -> Option<LogicalPlan> {
         }
         "group_count" => {
             let range = plan::range(0, 10, 1);
-            let group_expr = Expression::ColumnReference(ColumnReference::new("id"));
-            let agg_count = spark_connect::column::Column::new(Expression::UnresolvedFunction(
-                spark_connect::expression::UnresolvedFunction::new(
-                    "count",
-                    vec![Expression::Literal(
-                        spark_connect::expression::LiteralExpression::int(1),
-                    )],
+            let group_expr =
+                Expression::new(ExpressionNode::ColumnReference(ColumnReference::new("id")));
+            let agg_count = spark_connect::column::Column::new(Expression::new(
+                ExpressionNode::UnresolvedFunction(
+                    spark_connect::expression::UnresolvedFunction::new(
+                        "count",
+                        vec![Expression::new(ExpressionNode::Literal(
+                            spark_connect::expression::LiteralExpression::int(1),
+                        ))],
+                    ),
                 ),
             ))
             .alias("count")
@@ -440,13 +451,16 @@ fn build(name: &str) -> Option<LogicalPlan> {
         }
         "cube" => {
             let range = plan::range(0, 10, 1);
-            let group_expr = Expression::ColumnReference(ColumnReference::new("id"));
-            let agg_count = spark_connect::column::Column::new(Expression::UnresolvedFunction(
-                spark_connect::expression::UnresolvedFunction::new(
-                    "count",
-                    vec![Expression::Literal(
-                        spark_connect::expression::LiteralExpression::int(1),
-                    )],
+            let group_expr =
+                Expression::new(ExpressionNode::ColumnReference(ColumnReference::new("id")));
+            let agg_count = spark_connect::column::Column::new(Expression::new(
+                ExpressionNode::UnresolvedFunction(
+                    spark_connect::expression::UnresolvedFunction::new(
+                        "count",
+                        vec![Expression::new(ExpressionNode::Literal(
+                            spark_connect::expression::LiteralExpression::int(1),
+                        ))],
+                    ),
                 ),
             ))
             .alias("count")
@@ -461,13 +475,16 @@ fn build(name: &str) -> Option<LogicalPlan> {
         }
         "rollup" => {
             let range = plan::range(0, 10, 1);
-            let group_expr = Expression::ColumnReference(ColumnReference::new("id"));
-            let agg_count = spark_connect::column::Column::new(Expression::UnresolvedFunction(
-                spark_connect::expression::UnresolvedFunction::new(
-                    "count",
-                    vec![Expression::Literal(
-                        spark_connect::expression::LiteralExpression::int(1),
-                    )],
+            let group_expr =
+                Expression::new(ExpressionNode::ColumnReference(ColumnReference::new("id")));
+            let agg_count = spark_connect::column::Column::new(Expression::new(
+                ExpressionNode::UnresolvedFunction(
+                    spark_connect::expression::UnresolvedFunction::new(
+                        "count",
+                        vec![Expression::new(ExpressionNode::Literal(
+                            spark_connect::expression::LiteralExpression::int(1),
+                        ))],
+                    ),
                 ),
             ))
             .alias("count")
@@ -482,19 +499,23 @@ fn build(name: &str) -> Option<LogicalPlan> {
         }
         "pivot" => {
             let range = plan::range(0, 10, 1);
-            let group_expr = Expression::ColumnReference(ColumnReference::new("id"));
-            let agg_count = spark_connect::column::Column::new(Expression::UnresolvedFunction(
-                spark_connect::expression::UnresolvedFunction::new(
-                    "count",
-                    vec![Expression::Literal(
-                        spark_connect::expression::LiteralExpression::int(1),
-                    )],
+            let group_expr =
+                Expression::new(ExpressionNode::ColumnReference(ColumnReference::new("id")));
+            let agg_count = spark_connect::column::Column::new(Expression::new(
+                ExpressionNode::UnresolvedFunction(
+                    spark_connect::expression::UnresolvedFunction::new(
+                        "count",
+                        vec![Expression::new(ExpressionNode::Literal(
+                            spark_connect::expression::LiteralExpression::int(1),
+                        ))],
+                    ),
                 ),
             ))
             .alias("count")
             .expression()
             .clone();
-            let pivot_col = Expression::ColumnReference(ColumnReference::new("id"));
+            let pivot_col =
+                Expression::new(ExpressionNode::ColumnReference(ColumnReference::new("id")));
             plan::aggregate_with_pivot(
                 range,
                 AggregateGroupType::Pivot,
@@ -537,13 +558,19 @@ fn build(name: &str) -> Option<LogicalPlan> {
         "join_inner" => {
             let left = plan::subquery_alias(plan::range(0, 5, 1), "a");
             let right = plan::subquery_alias(plan::range(0, 5, 1), "b");
-            let on = spark_connect::column::Column::new(Expression::UnresolvedFunction(
-                spark_connect::expression::UnresolvedFunction::new(
-                    "==",
-                    vec![
-                        Expression::ColumnReference(ColumnReference::new("a.id")),
-                        Expression::ColumnReference(ColumnReference::new("b.id")),
-                    ],
+            let on = spark_connect::column::Column::new(Expression::new(
+                ExpressionNode::UnresolvedFunction(
+                    spark_connect::expression::UnresolvedFunction::new(
+                        "==",
+                        vec![
+                            Expression::new(ExpressionNode::ColumnReference(ColumnReference::new(
+                                "a.id",
+                            ))),
+                            Expression::new(ExpressionNode::ColumnReference(ColumnReference::new(
+                                "b.id",
+                            ))),
+                        ],
+                    ),
                 ),
             ));
             plan::join(left, right, JoinType::Inner, Some(on), vec![])
@@ -551,13 +578,19 @@ fn build(name: &str) -> Option<LogicalPlan> {
         "join_left" => {
             let left = plan::subquery_alias(plan::range(0, 5, 1), "a");
             let right = plan::subquery_alias(plan::range(0, 5, 1), "b");
-            let on = spark_connect::column::Column::new(Expression::UnresolvedFunction(
-                spark_connect::expression::UnresolvedFunction::new(
-                    "==",
-                    vec![
-                        Expression::ColumnReference(ColumnReference::new("a.id")),
-                        Expression::ColumnReference(ColumnReference::new("b.id")),
-                    ],
+            let on = spark_connect::column::Column::new(Expression::new(
+                ExpressionNode::UnresolvedFunction(
+                    spark_connect::expression::UnresolvedFunction::new(
+                        "==",
+                        vec![
+                            Expression::new(ExpressionNode::ColumnReference(ColumnReference::new(
+                                "a.id",
+                            ))),
+                            Expression::new(ExpressionNode::ColumnReference(ColumnReference::new(
+                                "b.id",
+                            ))),
+                        ],
+                    ),
                 ),
             ));
             plan::join(left, right, JoinType::LeftOuter, Some(on), vec![])
@@ -580,7 +613,9 @@ fn build(name: &str) -> Option<LogicalPlan> {
             plan::repartition_by_expression(
                 range,
                 4,
-                vec![Expression::ColumnReference(ColumnReference::new("id"))],
+                vec![Expression::new(ExpressionNode::ColumnReference(
+                    ColumnReference::new("id"),
+                ))],
             )
         }
         "coalesce" => {
@@ -630,8 +665,9 @@ fn build(name: &str) -> Option<LogicalPlan> {
         }
         "col_regex" => {
             let range = plan::range(0, 10, 1);
-            let regex_col =
-                spark_connect::column::Column::new(Expression::UnresolvedRegex("`id`".to_string()));
+            let regex_col = spark_connect::column::Column::new(Expression::new(
+                ExpressionNode::UnresolvedRegex("`id`".to_string()),
+            ));
             plan::project(range, vec![regex_col])
         }
         "unpivot" => {

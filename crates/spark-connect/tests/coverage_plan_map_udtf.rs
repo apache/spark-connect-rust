@@ -5,13 +5,15 @@
 //! No server: each test constructs the `LogicalPlan` variant and calls `to_proto()`
 //! so the proto-building lines run. Assertions are intentionally light.
 
-use spark_connect::expression::{ColumnReference, Expression};
+use std::sync::Arc;
+
+use spark_connect::expression::{ColumnReference, Expression, ExpressionNode};
 use spark_connect::plan::{self, LogicalPlan, TransformWithStateInfo};
 use spark_connect::types::DataType;
 use spark_connect::udf::{eval_type, CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
 
 fn col_expr(name: &str) -> Expression {
-    Expression::ColumnReference(ColumnReference::new(name))
+    Expression::new(ExpressionNode::ColumnReference(ColumnReference::new(name)))
 }
 
 fn base() -> LogicalPlan {
@@ -36,7 +38,7 @@ fn udf() -> CommonInlineUserDefinedFunctionExpression {
 #[test]
 fn map_partitions_to_proto() {
     let p = LogicalPlan::MapPartitions {
-        input: Box::new(base()),
+        input: Arc::new(base()),
         func: udf(),
         is_barrier: true,
     };
@@ -47,7 +49,7 @@ fn map_partitions_to_proto() {
 fn group_map_to_proto_plain_and_stateful() {
     // Plain applyInPandas shape: every optional/stateful field empty (the `None` branches).
     let plain = LogicalPlan::GroupMap {
-        input: Box::new(base()),
+        input: Arc::new(base()),
         grouping_expressions: vec![col_expr("g")],
         func: udf(),
         sorting_expressions: vec![],
@@ -64,11 +66,11 @@ fn group_map_to_proto_plain_and_stateful() {
     // Fully-stateful shape: exercise the `Some(...)` branches for initial_input,
     // state_schema, and transform_with_state_info.
     let stateful = LogicalPlan::GroupMap {
-        input: Box::new(base()),
+        input: Arc::new(base()),
         grouping_expressions: vec![col_expr("g")],
         func: udf(),
         sorting_expressions: vec![col_expr("s")],
-        initial_input: Some(Box::new(base())),
+        initial_input: Some(Arc::new(base())),
         initial_grouping_expressions: vec![col_expr("ig")],
         is_map_groups_with_state: Some(true),
         output_mode: Some("append".to_string()),
@@ -86,9 +88,9 @@ fn group_map_to_proto_plain_and_stateful() {
 #[test]
 fn co_group_map_to_proto() {
     let p = LogicalPlan::CoGroupMap {
-        input: Box::new(base()),
+        input: Arc::new(base()),
         input_grouping_expressions: vec![col_expr("a")],
-        other: Box::new(base()),
+        other: Arc::new(base()),
         other_grouping_expressions: vec![col_expr("b")],
         func: udf(),
     };
@@ -98,8 +100,8 @@ fn co_group_map_to_proto() {
 #[test]
 fn nearest_by_join_to_proto() {
     let p = LogicalPlan::NearestByJoin {
-        left: Box::new(base()),
-        right: Box::new(base()),
+        left: Arc::new(base()),
+        right: Arc::new(base()),
         ranking_expression: col_expr("dist"),
         num_results: 5,
         join_type: "inner".to_string(),

@@ -5,9 +5,10 @@
 
 use spark_connect_proto as proto;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::column::Column;
-use crate::expression::Expression;
+use crate::expression::{Expression, ExpressionNode};
 use crate::types::DataType;
 use crate::udf::CommonInlineUserDefinedFunctionExpression;
 
@@ -23,7 +24,9 @@ pub struct TransformWithStateInfo {
 /// A logical plan node, mirroring `pyspark.sql.connect.plan.LogicalPlan`.
 ///
 /// Each variant represents a different relation type that can be executed.
-/// Call `to_proto()` to convert to a `spark.connect.Relation` protobuf.
+/// Child plans are immutable shared nodes, so adding a transformation does not clone
+/// its ancestors. Call `to_proto()` to materialize a fresh protobuf tree; sharing
+/// does not deduplicate relation occurrences or their execution-time plan IDs.
 #[derive(Debug, Clone)]
 pub enum LogicalPlan {
     /// A range of integers: `range(start, end, step)`.
@@ -41,17 +44,17 @@ pub enum LogicalPlan {
     },
     /// A projection (select): `df.select(cols...)`.
     Project {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         columns: Vec<Column>,
     },
     /// A filter: `df.filter(condition)`.
     Filter {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         condition: Column,
     },
     /// An aggregation: `df.groupBy(...).agg(...)`.
     Aggregate {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         group_type: AggregateGroupType,
         grouping_expressions: Vec<Expression>,
         aggregate_expressions: Vec<Expression>,
@@ -63,53 +66,53 @@ pub enum LogicalPlan {
     },
     /// A join: `df.join(other, on)`.
     Join {
-        left: Box<LogicalPlan>,
-        right: Box<LogicalPlan>,
+        left: Arc<LogicalPlan>,
+        right: Arc<LogicalPlan>,
         join_type: JoinType,
         on: Option<Column>,
         using_columns: Vec<String>,
     },
     /// A lateral join (`LATERAL` correlated subquery join).
     LateralJoin {
-        left: Box<LogicalPlan>,
-        right: Box<LogicalPlan>,
+        left: Arc<LogicalPlan>,
+        right: Arc<LogicalPlan>,
         join_type: JoinType,
         on: Option<Column>,
     },
     /// A set operation (union, intersect, except).
     SetOperation {
-        left: Box<LogicalPlan>,
-        right: Box<LogicalPlan>,
+        left: Arc<LogicalPlan>,
+        right: Arc<LogicalPlan>,
         set_op_type: SetOpType,
         is_all: bool,
         by_name: bool,
         allow_missing_columns: bool,
     },
     /// Limit: `df.limit(n)`.
-    Limit { input: Box<LogicalPlan>, limit: i32 },
+    Limit { input: Arc<LogicalPlan>, limit: i32 },
     /// Offset: `df.offset(n)`.
     Offset {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         offset: i32,
     },
     /// Tail: `df.tail(n)` - returns last n rows.
-    Tail { input: Box<LogicalPlan>, limit: i32 },
+    Tail { input: Arc<LogicalPlan>, limit: i32 },
     /// Deduplicate: `df.distinct()` or `df.dropDuplicates()`.
     Deduplicate {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         all_columns_as_keys: bool,
         column_names: Vec<String>,
         within_watermark: bool,
     },
     /// Sort: `df.sort(cols...)`.
     Sort {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         order: Vec<Expression>,
         is_global: bool,
     },
     /// Sample: `df.sample(fraction)` or `df.sample(num_rows)`.
     Sample {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         lower_bound: f64,
         upper_bound: f64,
         with_replacement: bool,
@@ -117,19 +120,19 @@ pub enum LogicalPlan {
     },
     /// Repartition: `df.repartition(num_partitions)`.
     Repartition {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         num_partitions: i32,
         shuffle: bool,
     },
     /// RepartitionByExpression: `df.repartitionByRange()` or similar.
     RepartitionByExpression {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         num_partitions: i32,
         expressions: Vec<Expression>,
     },
     /// WithColumns: `df.withColumn(name, col)` or `df.withColumns(...)`.
     WithColumns {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         column_names: Vec<String>,
         columns: Vec<Column>,
     },
@@ -137,39 +140,39 @@ pub enum LogicalPlan {
     /// Mirrors `DataFrame.withMetadata` - a `WithColumns` whose one alias re-aliases
     /// the column to itself, carrying the metadata JSON.
     WithColumnMetadata {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         column_name: String,
         metadata_json: String,
     },
     /// WithColumnsRenamed: `df.withColumnRenamed(old, new)` or `df.withColumnsRenamed(...)`.
     WithColumnsRenamed {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         renames: HashMap<String, String>,
     },
     /// Drop: `df.drop(column_names...)`.
     Drop {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         columns: Vec<String>,
     },
     /// ToDF: `df.toDF(*column_names)`.
     ToDF {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         column_names: Vec<String>,
     },
     /// ToSchema: set schema to match the provided type.
     ToSchema {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         schema: DataType,
     },
     /// Hint: `df.hint(name, parameters...)`.
     Hint {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         name: String,
         parameters: Vec<String>,
     },
     /// Unpivot: `df.unpivot(...)`.
     Unpivot {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         ids: Vec<Column>,
         values: Option<Vec<Column>>,
         variable_column_name: String,
@@ -177,47 +180,47 @@ pub enum LogicalPlan {
     },
     /// NAFill: `df.fillna(value, subset)`.
     NAFill {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         fill_value: crate::row::Value,
         columns: Vec<String>,
     },
     /// NAFill with a per-column value: `df.fillna({col: value, ...})`.
     NAFillColumns {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         cols: Vec<String>,
         values: Vec<crate::row::Value>,
     },
     /// NADrop: `df.dropna(how, thresh, subset)`.
     NADrop {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         how: String,
         min_non_null: Option<i32>,
         columns: Vec<String>,
     },
     /// NAReplace: `df.replace(to_replace, value, subset)`.
     NAReplace {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         replacements: Vec<(String, String)>,
         columns: Vec<String>,
     },
     /// Describe: `df.describe(cols...)`.
     Describe {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         columns: Vec<String>,
     },
     /// Summary: `df.summary(percentiles...)`.
     Summary {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         percentiles: Vec<String>,
     },
     /// ColRegex: column selection by regex.
     ColRegex {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         col_name: String,
     },
     /// SubqueryAlias: `df.as(alias)`.
     SubqueryAlias {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         alias: String,
     },
     /// LocalRelation: data supplied locally.
@@ -241,57 +244,57 @@ pub enum LogicalPlan {
     },
     /// WithWatermark: `df.withWatermark(timeColumn, delayThreshold)`.
     WithWatermark {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         time_column: String,
         delay_threshold: String,
     },
     /// RepartitionByRange: `df.repartitionByRange(numPartitions, *cols)`.
     RepartitionByRange {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         num_partitions: Option<i32>,
         partition_exprs: Vec<Expression>,
     },
     /// StatCrosstab: `df.stat.crosstab(col1, col2)`.
     StatCrosstab {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         col1: String,
         col2: String,
     },
     /// StatFreqItems: `df.stat.freqItems(columns, support)`.
     StatFreqItems {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         columns: Vec<String>,
         support: f64,
     },
     /// StatApproxQuantile: `df.stat.approxQuantile(columns, probabilities, relativeError)`.
     StatApproxQuantile {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         columns: Vec<String>,
         probabilities: Vec<f64>,
         relative_error: f64,
     },
     /// StatCorr: `df.stat.corr(col1, col2)`.
     StatCorr {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         col1: String,
         col2: String,
     },
     /// StatCov: `df.stat.cov(col1, col2)`.
     StatCov {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         col1: String,
         col2: String,
     },
     /// StatSampleBy: `df.stat.sampleBy(col, fractions, seed)`.
     StatSampleBy {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         col: String,
         fractions: Vec<(Expression, f64)>,
         seed: Option<i64>,
     },
     /// Observe: `df.observe(name, exprs)` - collect metrics.
     Observe {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         name: String,
         exprs: Vec<Expression>,
     },
@@ -302,8 +305,8 @@ pub enum LogicalPlan {
     },
     /// Zip: `df.zip(other)` - combine two DataFrames column-wise.
     Zip {
-        left: Box<LogicalPlan>,
-        right: Box<LogicalPlan>,
+        left: Arc<LogicalPlan>,
+        right: Arc<LogicalPlan>,
     },
     /// ML Transformation: wraps an MlRelation proto directly.
     MlTransform { ml_relation: proto::Relation },
@@ -314,24 +317,24 @@ pub enum LogicalPlan {
     /// Transpose: swap rows and columns. `index_columns` optionally names the
     /// column(s) used as the transposed header (empty = server default).
     Transpose {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         index_columns: Vec<Expression>,
     },
     /// MapPartitions: `DataFrame.mapInPandas` / `mapInArrow` (also backs foreach).
     MapPartitions {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         func: CommonInlineUserDefinedFunctionExpression,
         is_barrier: bool,
     },
     /// GroupMap: `GroupedData.applyInPandas` / `applyInArrow`, and the stateful
     /// variants `applyInPandasWithState` / `transformWithState[InPandas]`.
     GroupMap {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         grouping_expressions: Vec<Expression>,
         func: CommonInlineUserDefinedFunctionExpression,
         sorting_expressions: Vec<Expression>,
         // Stateful fields (all default to None/empty for plain applyInPandas/applyInArrow).
-        initial_input: Option<Box<LogicalPlan>>,
+        initial_input: Option<Arc<LogicalPlan>>,
         initial_grouping_expressions: Vec<Expression>,
         is_map_groups_with_state: Option<bool>,
         output_mode: Option<String>,
@@ -341,16 +344,16 @@ pub enum LogicalPlan {
     },
     /// CoGroupMap: `GroupedData.cogroup(...).applyInPandas` / `applyInArrow`.
     CoGroupMap {
-        input: Box<LogicalPlan>,
+        input: Arc<LogicalPlan>,
         input_grouping_expressions: Vec<Expression>,
-        other: Box<LogicalPlan>,
+        other: Arc<LogicalPlan>,
         other_grouping_expressions: Vec<Expression>,
         func: CommonInlineUserDefinedFunctionExpression,
     },
     /// NearestByJoin: `DataFrame.nearestByJoin`.
     NearestByJoin {
-        left: Box<LogicalPlan>,
-        right: Box<LogicalPlan>,
+        left: Arc<LogicalPlan>,
+        right: Arc<LogicalPlan>,
         ranking_expression: Expression,
         num_results: i32,
         join_type: String,
@@ -626,7 +629,7 @@ impl LogicalPlan {
                 sort.input = Some(Box::new(input.to_proto()));
                 for expr in order {
                     // Extract SortOrder from Expression if it's SortOrder type
-                    if let Expression::SortOrder(so) = expr {
+                    if let ExpressionNode::SortOrder(so) = expr.node() {
                         let mut sort_order = proto::expression::SortOrder::default();
                         sort_order.child = Some(Box::new(so.child.to_proto()));
                         sort_order.direction = if so.ascending {
@@ -741,8 +744,10 @@ impl LogicalPlan {
             } => {
                 let mut wc = proto::WithColumns::default();
                 wc.input = Some(Box::new(input.to_proto()));
-                let col_expr = crate::expression::Expression::ColumnReference(
-                    crate::expression::ColumnReference::new(column_name.clone()),
+                let col_expr = crate::expression::Expression::new(
+                    crate::expression::ExpressionNode::ColumnReference(
+                        crate::expression::ColumnReference::new(column_name.clone()),
+                    ),
                 );
                 let mut alias = proto::expression::Alias::default();
                 alias.expr = Some(Box::new(col_expr.to_proto()));
@@ -1334,32 +1339,32 @@ pub fn sql(query: impl Into<String>) -> LogicalPlan {
 
 /// Create a Project plan.
 pub fn project<C: Into<Column>>(
-    input: LogicalPlan,
+    input: impl Into<Arc<LogicalPlan>>,
     columns: impl IntoIterator<Item = C>,
 ) -> LogicalPlan {
     LogicalPlan::Project {
-        input: Box::new(input),
+        input: input.into(),
         columns: columns.into_iter().map(Into::into).collect(),
     }
 }
 
 /// Create a Filter plan.
-pub fn filter(input: LogicalPlan, condition: Column) -> LogicalPlan {
+pub fn filter(input: impl Into<Arc<LogicalPlan>>, condition: Column) -> LogicalPlan {
     LogicalPlan::Filter {
-        input: Box::new(input),
+        input: input.into(),
         condition,
     }
 }
 
 /// Create an Aggregate plan.
 pub fn aggregate(
-    input: LogicalPlan,
+    input: impl Into<Arc<LogicalPlan>>,
     group_type: AggregateGroupType,
     grouping_expressions: Vec<Expression>,
     aggregate_expressions: Vec<Expression>,
 ) -> LogicalPlan {
     LogicalPlan::Aggregate {
-        input: Box::new(input),
+        input: input.into(),
         group_type,
         grouping_expressions,
         aggregate_expressions,
@@ -1371,7 +1376,7 @@ pub fn aggregate(
 
 /// Create an Aggregate plan with pivot.
 pub fn aggregate_with_pivot(
-    input: LogicalPlan,
+    input: impl Into<Arc<LogicalPlan>>,
     group_type: AggregateGroupType,
     grouping_expressions: Vec<Expression>,
     aggregate_expressions: Vec<Expression>,
@@ -1379,7 +1384,7 @@ pub fn aggregate_with_pivot(
     pivot_values: Vec<Expression>,
 ) -> LogicalPlan {
     LogicalPlan::Aggregate {
-        input: Box::new(input),
+        input: input.into(),
         group_type,
         grouping_expressions,
         aggregate_expressions,
@@ -1391,13 +1396,13 @@ pub fn aggregate_with_pivot(
 
 /// Create an Aggregate plan with explicit grouping sets.
 pub fn aggregate_with_grouping_sets(
-    input: LogicalPlan,
+    input: impl Into<Arc<LogicalPlan>>,
     grouping_expressions: Vec<Expression>,
     aggregate_expressions: Vec<Expression>,
     grouping_sets: Vec<Vec<Expression>>,
 ) -> LogicalPlan {
     LogicalPlan::Aggregate {
-        input: Box::new(input),
+        input: input.into(),
         group_type: AggregateGroupType::GroupingSets,
         grouping_expressions,
         aggregate_expressions,
@@ -1409,15 +1414,15 @@ pub fn aggregate_with_grouping_sets(
 
 /// Create a Join plan.
 pub fn join(
-    left: LogicalPlan,
-    right: LogicalPlan,
+    left: impl Into<Arc<LogicalPlan>>,
+    right: impl Into<Arc<LogicalPlan>>,
     join_type: JoinType,
     on: Option<Column>,
     using_columns: Vec<String>,
 ) -> LogicalPlan {
     LogicalPlan::Join {
-        left: Box::new(left),
-        right: Box::new(right),
+        left: left.into(),
+        right: right.into(),
         join_type,
         on,
         using_columns,
@@ -1426,16 +1431,16 @@ pub fn join(
 
 /// Create a SetOperation plan.
 pub fn set_operation(
-    left: LogicalPlan,
-    right: LogicalPlan,
+    left: impl Into<Arc<LogicalPlan>>,
+    right: impl Into<Arc<LogicalPlan>>,
     set_op_type: SetOpType,
     is_all: bool,
     by_name: bool,
     allow_missing_columns: bool,
 ) -> LogicalPlan {
     LogicalPlan::SetOperation {
-        left: Box::new(left),
-        right: Box::new(right),
+        left: left.into(),
+        right: right.into(),
         set_op_type,
         is_all,
         by_name,
@@ -1444,38 +1449,38 @@ pub fn set_operation(
 }
 
 /// Create a Limit plan.
-pub fn limit(input: LogicalPlan, limit: i32) -> LogicalPlan {
+pub fn limit(input: impl Into<Arc<LogicalPlan>>, limit: i32) -> LogicalPlan {
     LogicalPlan::Limit {
-        input: Box::new(input),
+        input: input.into(),
         limit,
     }
 }
 
 /// Create an Offset plan.
-pub fn offset(input: LogicalPlan, offset: i32) -> LogicalPlan {
+pub fn offset(input: impl Into<Arc<LogicalPlan>>, offset: i32) -> LogicalPlan {
     LogicalPlan::Offset {
-        input: Box::new(input),
+        input: input.into(),
         offset,
     }
 }
 
 /// Create a Tail plan.
-pub fn tail(input: LogicalPlan, limit: i32) -> LogicalPlan {
+pub fn tail(input: impl Into<Arc<LogicalPlan>>, limit: i32) -> LogicalPlan {
     LogicalPlan::Tail {
-        input: Box::new(input),
+        input: input.into(),
         limit,
     }
 }
 
 /// Create a Deduplicate plan.
 pub fn deduplicate(
-    input: LogicalPlan,
+    input: impl Into<Arc<LogicalPlan>>,
     all_columns_as_keys: bool,
     column_names: Vec<String>,
     within_watermark: bool,
 ) -> LogicalPlan {
     LogicalPlan::Deduplicate {
-        input: Box::new(input),
+        input: input.into(),
         all_columns_as_keys,
         column_names,
         within_watermark,
@@ -1483,9 +1488,13 @@ pub fn deduplicate(
 }
 
 /// Create a Sort plan.
-pub fn sort(input: LogicalPlan, order: Vec<Expression>, is_global: bool) -> LogicalPlan {
+pub fn sort(
+    input: impl Into<Arc<LogicalPlan>>,
+    order: Vec<Expression>,
+    is_global: bool,
+) -> LogicalPlan {
     LogicalPlan::Sort {
-        input: Box::new(input),
+        input: input.into(),
         order,
         is_global,
     }
@@ -1493,14 +1502,14 @@ pub fn sort(input: LogicalPlan, order: Vec<Expression>, is_global: bool) -> Logi
 
 /// Create a Sample plan.
 pub fn sample(
-    input: LogicalPlan,
+    input: impl Into<Arc<LogicalPlan>>,
     lower_bound: f64,
     upper_bound: f64,
     with_replacement: bool,
     seed: Option<i64>,
 ) -> LogicalPlan {
     LogicalPlan::Sample {
-        input: Box::new(input),
+        input: input.into(),
         lower_bound,
         upper_bound,
         with_replacement,
@@ -1509,9 +1518,13 @@ pub fn sample(
 }
 
 /// Create a Repartition plan.
-pub fn repartition(input: LogicalPlan, num_partitions: i32, shuffle: bool) -> LogicalPlan {
+pub fn repartition(
+    input: impl Into<Arc<LogicalPlan>>,
+    num_partitions: i32,
+    shuffle: bool,
+) -> LogicalPlan {
     LogicalPlan::Repartition {
-        input: Box::new(input),
+        input: input.into(),
         num_partitions,
         shuffle,
     }
@@ -1519,12 +1532,12 @@ pub fn repartition(input: LogicalPlan, num_partitions: i32, shuffle: bool) -> Lo
 
 /// Create a RepartitionByExpression plan.
 pub fn repartition_by_expression(
-    input: LogicalPlan,
+    input: impl Into<Arc<LogicalPlan>>,
     num_partitions: i32,
     expressions: Vec<Expression>,
 ) -> LogicalPlan {
     LogicalPlan::RepartitionByExpression {
-        input: Box::new(input),
+        input: input.into(),
         num_partitions,
         expressions,
     }
@@ -1532,53 +1545,60 @@ pub fn repartition_by_expression(
 
 /// Create a WithColumns plan.
 pub fn with_columns(
-    input: LogicalPlan,
+    input: impl Into<Arc<LogicalPlan>>,
     column_names: Vec<String>,
     columns: Vec<Column>,
 ) -> LogicalPlan {
     LogicalPlan::WithColumns {
-        input: Box::new(input),
+        input: input.into(),
         column_names,
         columns,
     }
 }
 
 /// Create a WithColumnsRenamed plan.
-pub fn with_columns_renamed(input: LogicalPlan, renames: HashMap<String, String>) -> LogicalPlan {
+pub fn with_columns_renamed(
+    input: impl Into<Arc<LogicalPlan>>,
+    renames: HashMap<String, String>,
+) -> LogicalPlan {
     LogicalPlan::WithColumnsRenamed {
-        input: Box::new(input),
+        input: input.into(),
         renames,
     }
 }
 
 /// Create a Drop plan.
-pub fn drop(input: LogicalPlan, columns: Vec<String>) -> LogicalPlan {
+pub fn drop(input: impl Into<Arc<LogicalPlan>>, columns: Vec<String>) -> LogicalPlan {
     LogicalPlan::Drop {
-        input: Box::new(input),
+        input: input.into(),
         columns,
     }
 }
 
 /// Create a ToDF plan.
-pub fn to_df(input: LogicalPlan, column_names: Vec<String>) -> LogicalPlan {
+pub fn to_df(input: impl Into<Arc<LogicalPlan>>, column_names: Vec<String>) -> LogicalPlan {
     LogicalPlan::ToDF {
-        input: Box::new(input),
+        input: input.into(),
         column_names,
     }
 }
 
 /// Create a ToSchema plan.
-pub fn to_schema(input: LogicalPlan, schema: DataType) -> LogicalPlan {
+pub fn to_schema(input: impl Into<Arc<LogicalPlan>>, schema: DataType) -> LogicalPlan {
     LogicalPlan::ToSchema {
-        input: Box::new(input),
+        input: input.into(),
         schema,
     }
 }
 
 /// Create a Hint plan.
-pub fn hint(input: LogicalPlan, name: impl Into<String>, parameters: Vec<String>) -> LogicalPlan {
+pub fn hint(
+    input: impl Into<Arc<LogicalPlan>>,
+    name: impl Into<String>,
+    parameters: Vec<String>,
+) -> LogicalPlan {
     LogicalPlan::Hint {
-        input: Box::new(input),
+        input: input.into(),
         name: name.into(),
         parameters,
     }
@@ -1586,14 +1606,14 @@ pub fn hint(input: LogicalPlan, name: impl Into<String>, parameters: Vec<String>
 
 /// Create an Unpivot plan.
 pub fn unpivot(
-    input: LogicalPlan,
+    input: impl Into<Arc<LogicalPlan>>,
     ids: Vec<Column>,
     values: Option<Vec<Column>>,
     variable_column_name: impl Into<String>,
     value_column_name: impl Into<String>,
 ) -> LogicalPlan {
     LogicalPlan::Unpivot {
-        input: Box::new(input),
+        input: input.into(),
         ids,
         values,
         variable_column_name: variable_column_name.into(),
@@ -1603,12 +1623,12 @@ pub fn unpivot(
 
 /// Create a NAFill plan.
 pub fn na_fill(
-    input: LogicalPlan,
+    input: impl Into<Arc<LogicalPlan>>,
     fill_value: crate::row::Value,
     columns: Vec<String>,
 ) -> LogicalPlan {
     LogicalPlan::NAFill {
-        input: Box::new(input),
+        input: input.into(),
         fill_value,
         columns,
     }
@@ -1665,13 +1685,13 @@ fn str_to_proto_literal(s: &str) -> proto::expression::Literal {
 
 /// Create a NADrop plan.
 pub fn na_drop(
-    input: LogicalPlan,
+    input: impl Into<Arc<LogicalPlan>>,
     how: impl Into<String>,
     min_non_null: Option<i32>,
     columns: Vec<String>,
 ) -> LogicalPlan {
     LogicalPlan::NADrop {
-        input: Box::new(input),
+        input: input.into(),
         how: how.into(),
         min_non_null,
         columns,
@@ -1680,45 +1700,45 @@ pub fn na_drop(
 
 /// Create a NAReplace plan.
 pub fn na_replace(
-    input: LogicalPlan,
+    input: impl Into<Arc<LogicalPlan>>,
     replacements: Vec<(String, String)>,
     columns: Vec<String>,
 ) -> LogicalPlan {
     LogicalPlan::NAReplace {
-        input: Box::new(input),
+        input: input.into(),
         replacements,
         columns,
     }
 }
 
 /// Create a Describe plan.
-pub fn describe(input: LogicalPlan, columns: Vec<String>) -> LogicalPlan {
+pub fn describe(input: impl Into<Arc<LogicalPlan>>, columns: Vec<String>) -> LogicalPlan {
     LogicalPlan::Describe {
-        input: Box::new(input),
+        input: input.into(),
         columns,
     }
 }
 
 /// Create a Summary plan.
-pub fn summary(input: LogicalPlan, percentiles: Vec<String>) -> LogicalPlan {
+pub fn summary(input: impl Into<Arc<LogicalPlan>>, percentiles: Vec<String>) -> LogicalPlan {
     LogicalPlan::Summary {
-        input: Box::new(input),
+        input: input.into(),
         percentiles,
     }
 }
 
 /// Create a ColRegex plan.
-pub fn col_regex(input: LogicalPlan, col_name: impl Into<String>) -> LogicalPlan {
+pub fn col_regex(input: impl Into<Arc<LogicalPlan>>, col_name: impl Into<String>) -> LogicalPlan {
     LogicalPlan::ColRegex {
-        input: Box::new(input),
+        input: input.into(),
         col_name: col_name.into(),
     }
 }
 
 /// Create a SubqueryAlias plan.
-pub fn subquery_alias(input: LogicalPlan, alias: impl Into<String>) -> LogicalPlan {
+pub fn subquery_alias(input: impl Into<Arc<LogicalPlan>>, alias: impl Into<String>) -> LogicalPlan {
     LogicalPlan::SubqueryAlias {
-        input: Box::new(input),
+        input: input.into(),
         alias: alias.into(),
     }
 }
@@ -1768,7 +1788,7 @@ mod argfix_tests {
     #[test]
     fn dropna_how_all_any_thresh_are_distinct() {
         let mk = |how: &str, thresh: Option<i32>| LogicalPlan::NADrop {
-            input: Box::new(base()),
+            input: Arc::new(base()),
             how: how.to_string(),
             min_non_null: thresh,
             columns: vec![],
@@ -1788,7 +1808,7 @@ mod argfix_tests {
     #[test]
     fn hint_carries_parameters() {
         let p = LogicalPlan::Hint {
-            input: Box::new(base()),
+            input: Arc::new(base()),
             name: "REPARTITION".to_string(),
             parameters: vec!["10".to_string(), "name".to_string()],
         };
@@ -1810,7 +1830,7 @@ mod argfix_tests {
     #[test]
     fn replace_sets_string_literals() {
         let p = LogicalPlan::NAReplace {
-            input: Box::new(base()),
+            input: Arc::new(base()),
             replacements: vec![("foo".to_string(), "bar".to_string())],
             columns: vec![],
         };
@@ -1848,8 +1868,8 @@ mod argfix_tests {
             vec![],
             col("k").expression().clone(),
             vec![
-                Expression::Literal(LiteralExpression::string("a")),
-                Expression::Literal(LiteralExpression::string("b")),
+                Expression::new(ExpressionNode::Literal(LiteralExpression::string("a"))),
+                Expression::new(ExpressionNode::Literal(LiteralExpression::string("b"))),
             ],
         );
         match rel_type(p) {
@@ -1868,7 +1888,7 @@ mod argfix_tests {
     #[test]
     fn fillna_double_literal() {
         let p = LogicalPlan::NAFill {
-            input: Box::new(base()),
+            input: Arc::new(base()),
             fill_value: crate::row::Value::Double(1.5),
             columns: vec![],
         };
