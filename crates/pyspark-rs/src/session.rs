@@ -288,11 +288,9 @@ impl PySparkSession {
         kwargs: Option<Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
         fn to_lit(v: &Bound<'_, PyAny>) -> PyResult<spark_connect::expression::Expression> {
-            use spark_connect::expression::{Expression, ExpressionNode, LiteralExpression};
+            use spark_connect::expression::{Expression, LiteralExpression};
             if let Ok(sv) = v.extract::<String>() {
-                return Ok(Expression::new(ExpressionNode::Literal(
-                    LiteralExpression::string(sv),
-                )));
+                return Ok(Expression::literal(LiteralExpression::string(sv)));
             }
             Ok(crate::functions::to_column(v)?.expression().clone())
         }

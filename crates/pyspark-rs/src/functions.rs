@@ -60,9 +60,9 @@ fn pyfunc_make_udf(
     let udf_expr =
         CommonInlineUserDefinedFunctionExpression::new(name, deterministic, arg_exprs, python_udf);
 
-    Ok(PyColumn::new(Column::new(Expression::new(
-        ExpressionNode::CommonInlineUserDefinedFunction(Box::new(udf_expr)),
-    ))))
+    Ok(PyColumn::new(Column::new(
+        ExpressionNode::CommonInlineUserDefinedFunction(Box::new(udf_expr)).into(),
+    )))
 }
 
 /// PyO3 wrapper for building a Python UDTF (table function) call.
@@ -151,8 +151,8 @@ pub fn to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
 
     // Check for None
     if obj.is_none() {
-        return Ok(Column::new(Expression::new(ExpressionNode::Literal(
-            LiteralExpression::null(spark_connect::types::DataType::Null),
+        return Ok(Column::new(Expression::literal(LiteralExpression::null(
+            spark_connect::types::DataType::Null,
         ))));
     }
 
@@ -161,35 +161,35 @@ pub fn to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
     // (nanoseconds), so an early int/float extract would silently mis-encode them.
     // Mirrors `py_to_value` in session.rs so `lit(..)` and `createDataFrame(..)` agree.
     if let Some(lit) = scalar_literal(obj)? {
-        return Ok(Column::new(Expression::new(ExpressionNode::Literal(lit))));
+        return Ok(Column::new(Expression::literal(lit)));
     }
 
     // Try to convert scalars to literals
     if let Ok(b) = obj.extract::<bool>() {
-        return Ok(Column::new(Expression::new(ExpressionNode::Literal(
+        return Ok(Column::new(Expression::literal(
             LiteralExpression::boolean(b),
-        ))));
+        )));
     }
 
     if let Ok(i) = obj.extract::<i64>() {
-        return Ok(Column::new(Expression::new(ExpressionNode::Literal(
+        return Ok(Column::new(Expression::literal(
             if i32::try_from(i).is_ok() {
                 LiteralExpression::int(i as i32)
             } else {
                 LiteralExpression::long(i)
             },
-        ))));
+        )));
     }
 
     if let Ok(f) = obj.extract::<f64>() {
-        return Ok(Column::new(Expression::new(ExpressionNode::Literal(
-            LiteralExpression::double(f),
+        return Ok(Column::new(Expression::literal(LiteralExpression::double(
+            f,
         ))));
     }
 
     if let Ok(s) = obj.extract::<String>() {
-        return Ok(Column::new(Expression::new(ExpressionNode::Literal(
-            LiteralExpression::string(s),
+        return Ok(Column::new(Expression::literal(LiteralExpression::string(
+            s,
         ))));
     }
 
@@ -341,9 +341,10 @@ use spark_connect::expression::{
 /// Mirrors `UnresolvedNamedLambdaVariable([name])` on the Python side.
 #[pyfunction]
 fn pyfunc_named_lambda_variable(name: String) -> PyColumn {
-    PyColumn::new(Column::new(Expression::new(
-        ExpressionNode::UnresolvedNamedLambdaVariable(UnresolvedNamedLambdaVariable::new(name)),
-    )))
+    PyColumn::new(Column::new(
+        ExpressionNode::UnresolvedNamedLambdaVariable(UnresolvedNamedLambdaVariable::new(name))
+            .into(),
+    ))
 }
 
 /// Build a Column wrapping a `LambdaFunction` from a body Column and its argument
@@ -355,9 +356,9 @@ fn pyfunc_lambda_function(body: &PyColumn, arg_names: Vec<String>) -> PyColumn {
         .map(UnresolvedNamedLambdaVariable::new)
         .collect();
     let lambda = LambdaFunction::new(body.column.expression().clone(), args);
-    PyColumn::new(Column::new(Expression::new(
-        ExpressionNode::LambdaFunction(Box::new(lambda)),
-    )))
+    PyColumn::new(Column::new(
+        ExpressionNode::LambdaFunction(Box::new(lambda)).into(),
+    ))
 }
 
 /// Build a Column wrapping a `CallFunction` expression (a named function call
@@ -369,9 +370,9 @@ fn pyfunc_call_named_function(name: String, args: Vec<Bound<'_, PyAny>>) -> PyRe
     for arg in args {
         arg_exprs.push(to_column(&arg)?.expression().clone());
     }
-    let result = Column::new(Expression::new(ExpressionNode::CallFunction(Box::new(
-        CallFunctionWrapper::new(name, arg_exprs),
-    ))));
+    let result = Column::new(
+        ExpressionNode::CallFunction(Box::new(CallFunctionWrapper::new(name, arg_exprs))).into(),
+    );
     Ok(PyColumn::new(result))
 }
 
@@ -387,9 +388,7 @@ fn pyfunc_invoke_function(name: String, args: Vec<Bound<'_, PyAny>>) -> PyResult
     for arg in args {
         arg_exprs.push(to_column(&arg)?.expression().clone());
     }
-    let result = Column::new(Expression::new(ExpressionNode::UnresolvedFunction(
-        spark_connect::expression::UnresolvedFunction::new(name, arg_exprs),
-    )));
+    let result = Column::new(Expression::function(name, arg_exprs));
     Ok(PyColumn::new(result))
 }
 

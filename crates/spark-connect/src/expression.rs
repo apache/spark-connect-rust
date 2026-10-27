@@ -21,7 +21,9 @@ pub fn next_lambda_var_index() -> u32 {
 /// An immutable, shared expression, mirroring PySpark's base Expression type.
 ///
 /// Cloning a handle shares its node rather than copying the expression subtree.
-/// Construct nodes with [`Expression::new`] and inspect them with [`Expression::node`].
+/// Build common expressions with [`Expression::literal`], [`Expression::column`],
+/// and [`Expression::function`], or use [`Expression::new`] for other node types.
+/// Inspect expressions with [`Expression::node`].
 #[derive(Clone)]
 pub struct Expression(Arc<ExpressionNode>);
 
@@ -65,7 +67,7 @@ pub enum ExpressionNode {
     Cast(Box<Cast>),
     /// `spark.connect.Expression.DirectShufflePartitionID` - wraps a child expression
     /// that evaluates to a partition id (used by `DataFrame.repartitionById`).
-    DirectShufflePartitionId(Box<Expression>),
+    DirectShufflePartitionId(Expression),
     /// `pyspark.sql.connect.expressions.UnresolvedRegex` - a regex column reference.
     UnresolvedRegex(String),
     /// `pyspark.sql.connect.expressions.SortOrder` - a sort order expression.
@@ -94,6 +96,23 @@ impl Expression {
     /// Allocate an immutable expression node.
     pub fn new(node: ExpressionNode) -> Self {
         Self(Arc::new(node))
+    }
+
+    /// Create a literal expression.
+    pub fn literal(value: LiteralExpression) -> Self {
+        Self::new(ExpressionNode::Literal(value))
+    }
+
+    /// Create an unbound column reference.
+    pub fn column(name: impl Into<String>) -> Self {
+        Self::new(ExpressionNode::ColumnReference(ColumnReference::new(name)))
+    }
+
+    /// Create a non-distinct unresolved function call.
+    pub fn function(name: impl Into<String>, args: Vec<Expression>) -> Self {
+        Self::new(ExpressionNode::UnresolvedFunction(UnresolvedFunction::new(
+            name, args,
+        )))
     }
 
     /// Borrow this expression's node without exposing mutable shared state.
@@ -746,7 +765,7 @@ impl SortOrder {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CaseWhen {
     pub branches: Vec<(Expression, Expression)>,
-    pub else_expr: Option<Box<Expression>>,
+    pub else_expr: Option<Expression>,
 }
 
 impl CaseWhen {
@@ -758,7 +777,7 @@ impl CaseWhen {
     }
 
     pub fn with_else(mut self, else_expr: Expression) -> Self {
-        self.else_expr = Some(Box::new(else_expr));
+        self.else_expr = Some(else_expr);
         self
     }
 
@@ -782,7 +801,7 @@ impl CaseWhen {
             args.push(value.clone());
         }
         if let Some(else_expr) = &self.else_expr {
-            args.push((**else_expr).clone());
+            args.push(else_expr.clone());
         }
         let func = UnresolvedFunction::new("when", args);
         func.to_proto()
@@ -907,16 +926,12 @@ fn to_proto_frame_boundary(
         // SPECIFIED_WINDOW_FRAME_UNACCEPTED_TYPE), and preceding is a negative offset.
         FrameBoundary::Preceding(n) => Some(
             proto::expression::window::window_frame::frame_boundary::Boundary::Value(Box::new(
-                Expression::new(ExpressionNode::Literal(LiteralExpression::int(
-                    -(*n as i32),
-                )))
-                .to_proto(),
+                Expression::literal(LiteralExpression::int(-(*n as i32))).to_proto(),
             )),
         ),
         FrameBoundary::Following(n) => Some(
             proto::expression::window::window_frame::frame_boundary::Boundary::Value(Box::new(
-                Expression::new(ExpressionNode::Literal(LiteralExpression::int(*n as i32)))
-                    .to_proto(),
+                Expression::literal(LiteralExpression::int(*n as i32)).to_proto(),
             )),
         ),
     };
@@ -999,7 +1014,7 @@ mod tests {
     use super::*;
 
     fn col(name: &str) -> Expression {
-        Expression::new(ExpressionNode::ColumnReference(ColumnReference::new(name)))
+        Expression::column(name)
     }
 
     #[test]
@@ -1007,54 +1022,39 @@ mod tests {
         // Column reference and literal.
         assert_eq!(col("x").render(), "x");
         assert_eq!(
-            Expression::new(ExpressionNode::Literal(LiteralExpression::Integer(0))).render(),
+            Expression::literal(LiteralExpression::Integer(0)).render(),
             "0"
         );
         assert_eq!(
-            Expression::new(ExpressionNode::Literal(LiteralExpression::null(
-                DataType::Integer
-            )))
-            .render(),
+            Expression::literal(LiteralExpression::null(DataType::Integer)).render(),
             "NULL"
         );
 
         // Binary operators render infix, mirroring UnresolvedFunction.__repr__.
-        let add = Expression::new(ExpressionNode::UnresolvedFunction(UnresolvedFunction::new(
+        let add = Expression::function(
             "+",
-            vec![
-                col("x"),
-                Expression::new(ExpressionNode::Literal(LiteralExpression::Integer(1))),
-            ],
-        )));
+            vec![col("x"), Expression::literal(LiteralExpression::Integer(1))],
+        );
         assert_eq!(add.render(), "(x + 1)");
 
-        let eq = Expression::new(ExpressionNode::UnresolvedFunction(UnresolvedFunction::new(
-            "==",
-            vec![col("a"), col("b")],
-        )));
+        let eq = Expression::function("==", vec![col("a"), col("b")]);
         assert_eq!(eq.render(), "(a == b)");
 
         // Unary not.
-        let neq = Expression::new(ExpressionNode::UnresolvedFunction(UnresolvedFunction::new(
-            "not",
-            vec![eq.clone()],
-        )));
+        let neq = Expression::function("not", vec![eq.clone()]);
         assert_eq!(neq.render(), "(NOT (a == b))");
 
         // Non-operator function renders as name(args).
-        let f = Expression::new(ExpressionNode::UnresolvedFunction(UnresolvedFunction::new(
-            "coalesce",
-            vec![col("a"), col("b")],
-        )));
+        let f = Expression::function("coalesce", vec![col("a"), col("b")]);
         assert_eq!(f.render(), "coalesce(a, b)");
 
         // Alias, cast, star.
         assert_eq!(
-            Expression::new(ExpressionNode::Alias(Box::new(Alias::new(col("x"), "y")))).render(),
+            Expression::from(ExpressionNode::Alias(Box::new(Alias::new(col("x"), "y")))).render(),
             "x AS y"
         );
         assert_eq!(
-            Expression::new(ExpressionNode::Cast(Box::new(Cast {
+            Expression::from(ExpressionNode::Cast(Box::new(Cast {
                 child: col("x"),
                 target: CastTarget::TypeStr("int".to_string()),
                 eval_mode: None,
@@ -1063,7 +1063,7 @@ mod tests {
             "CAST(x AS int)"
         );
         assert_eq!(
-            Expression::new(ExpressionNode::UnresolvedStar(None)).render(),
+            Expression::from(ExpressionNode::UnresolvedStar(None)).render(),
             "*"
         );
 
@@ -1245,39 +1245,38 @@ mod tests {
 
     #[test]
     fn test_expression_render_unresolved_star_with_target() {
-        let expr = Expression::new(ExpressionNode::UnresolvedStar(Some("table.*".to_string())));
+        let expr: Expression = ExpressionNode::UnresolvedStar(Some("table.*".to_string())).into();
         assert_eq!(expr.render(), "table.*");
     }
 
     #[test]
     fn test_expression_render_unresolved_regex() {
-        let expr = Expression::new(ExpressionNode::UnresolvedRegex("`col_.*`".to_string()));
+        let expr: Expression = ExpressionNode::UnresolvedRegex("`col_.*`".to_string()).into();
         assert_eq!(expr.render(), "`col_.*`");
     }
 
     #[test]
     fn test_expression_render_direct_shuffle_partition_id() {
         let child = col("x");
-        let expr = Expression::new(ExpressionNode::DirectShufflePartitionId(Box::new(child)));
+        let expr: Expression = ExpressionNode::DirectShufflePartitionId(child).into();
         assert_eq!(expr.render(), "DIRECT_SHUFFLE_PARTITION_ID(x)");
     }
 
     #[test]
     fn test_expression_render_unresolved_extract_value() {
         let child = col("struct_col");
-        let extraction =
-            Expression::new(ExpressionNode::Literal(LiteralExpression::string("field")));
+        let extraction = Expression::literal(LiteralExpression::string("field"));
         let ev = ExtractValue::new(child, extraction);
-        let expr = Expression::new(ExpressionNode::UnresolvedExtractValue(Box::new(ev)));
+        let expr: Expression = ExpressionNode::UnresolvedExtractValue(Box::new(ev)).into();
         assert_eq!(expr.render(), "struct_col[field]");
     }
 
     #[test]
     fn test_expression_render_update_fields_with_value() {
         let struct_expr = col("s");
-        let value_expr = Expression::new(ExpressionNode::Literal(LiteralExpression::int(42)));
+        let value_expr = Expression::literal(LiteralExpression::int(42));
         let uf = UpdateFieldsExpr::new(struct_expr, "f1", Some(value_expr));
-        let expr = Expression::new(ExpressionNode::UpdateFields(Box::new(uf)));
+        let expr: Expression = ExpressionNode::UpdateFields(Box::new(uf)).into();
         assert_eq!(expr.render(), "update_field(s, f1, 42)");
     }
 
@@ -1285,7 +1284,7 @@ mod tests {
     fn test_expression_render_update_fields_drop() {
         let struct_expr = col("s");
         let uf = UpdateFieldsExpr::new(struct_expr, "f1", None);
-        let expr = Expression::new(ExpressionNode::UpdateFields(Box::new(uf)));
+        let expr: Expression = ExpressionNode::UpdateFields(Box::new(uf)).into();
         assert_eq!(expr.render(), "drop_field(s, f1)");
     }
 
@@ -1316,15 +1315,15 @@ mod tests {
     #[test]
     fn test_expression_render_sort_order() {
         let sort = SortOrder::asc_nulls_first(col("a"));
-        let expr = Expression::new(ExpressionNode::SortOrder(Box::new(sort)));
+        let expr: Expression = ExpressionNode::SortOrder(Box::new(sort)).into();
         assert_eq!(expr.render(), "a ASC NULLS FIRST");
     }
 
     #[test]
     fn test_case_when_render_single_branch() {
         let cw = CaseWhen::new(vec![(
-            Expression::new(ExpressionNode::Literal(LiteralExpression::boolean(true))),
-            Expression::new(ExpressionNode::Literal(LiteralExpression::int(1))),
+            Expression::literal(LiteralExpression::boolean(true)),
+            Expression::literal(LiteralExpression::int(1)),
         )]);
         assert_eq!(cw.render(), "CASE WHEN true THEN 1 END");
     }
@@ -1333,12 +1332,12 @@ mod tests {
     fn test_case_when_render_multiple_branches() {
         let cw = CaseWhen::new(vec![
             (
-                Expression::new(ExpressionNode::Literal(LiteralExpression::boolean(true))),
-                Expression::new(ExpressionNode::Literal(LiteralExpression::int(1))),
+                Expression::literal(LiteralExpression::boolean(true)),
+                Expression::literal(LiteralExpression::int(1)),
             ),
             (
-                Expression::new(ExpressionNode::Literal(LiteralExpression::boolean(false))),
-                Expression::new(ExpressionNode::Literal(LiteralExpression::int(2))),
+                Expression::literal(LiteralExpression::boolean(false)),
+                Expression::literal(LiteralExpression::int(2)),
             ),
         ]);
         assert_eq!(cw.render(), "CASE WHEN true THEN 1 WHEN false THEN 2 END");
@@ -1347,12 +1346,10 @@ mod tests {
     #[test]
     fn test_case_when_render_with_else() {
         let cw = CaseWhen::new(vec![(
-            Expression::new(ExpressionNode::Literal(LiteralExpression::boolean(true))),
-            Expression::new(ExpressionNode::Literal(LiteralExpression::int(1))),
+            Expression::literal(LiteralExpression::boolean(true)),
+            Expression::literal(LiteralExpression::int(1)),
         )])
-        .with_else(Expression::new(ExpressionNode::Literal(
-            LiteralExpression::int(99),
-        )));
+        .with_else(Expression::literal(LiteralExpression::int(99)));
         assert_eq!(cw.render(), "CASE WHEN true THEN 1 ELSE 99 END");
     }
 
@@ -1360,9 +1357,9 @@ mod tests {
     fn test_expression_render_case_when() {
         let cw = CaseWhen::new(vec![(
             col("cond"),
-            Expression::new(ExpressionNode::Literal(LiteralExpression::int(1))),
+            Expression::literal(LiteralExpression::int(1)),
         )]);
-        let expr = Expression::new(ExpressionNode::CaseWhen(Box::new(cw)));
+        let expr: Expression = ExpressionNode::CaseWhen(Box::new(cw)).into();
         assert_eq!(expr.render(), "CASE WHEN cond THEN 1 END");
     }
 
@@ -1383,9 +1380,9 @@ mod tests {
         let func = UnresolvedFunction::new(
             "concat",
             vec![
-                Expression::new(ExpressionNode::Literal(LiteralExpression::string("a"))),
-                Expression::new(ExpressionNode::Literal(LiteralExpression::string("b"))),
-                Expression::new(ExpressionNode::Literal(LiteralExpression::string("c"))),
+                Expression::literal(LiteralExpression::string("a")),
+                Expression::literal(LiteralExpression::string("b")),
+                Expression::literal(LiteralExpression::string("c")),
             ],
         );
         assert_eq!(func.render(), "concat(a, b, c)");
@@ -1398,7 +1395,7 @@ mod tests {
             names: vec!["a".to_string(), "b".to_string()],
             metadata: None,
         };
-        let expr = Expression::new(ExpressionNode::Alias(Box::new(alias)));
+        let expr: Expression = ExpressionNode::Alias(Box::new(alias)).into();
         assert_eq!(expr.render(), "x AS (a, b)");
     }
 
@@ -1410,15 +1407,14 @@ mod tests {
                 collation: "".to_string(),
             },
         );
-        let expr = Expression::new(ExpressionNode::Cast(Box::new(cast)));
+        let expr: Expression = ExpressionNode::Cast(Box::new(cast)).into();
         assert_eq!(expr.render(), "CAST(x AS string)");
     }
 
     #[test]
     fn test_sql_expression_render() {
-        let expr = Expression::new(ExpressionNode::SQLExpression(
-            "SELECT * FROM table".to_string(),
-        ));
+        let expr: Expression =
+            ExpressionNode::SQLExpression("SELECT * FROM table".to_string()).into();
         assert_eq!(expr.render(), "SELECT * FROM table");
     }
 
@@ -1438,9 +1434,7 @@ mod tests {
     fn test_unresolved_function_render_not() {
         let func = UnresolvedFunction::new(
             "not",
-            vec![Expression::new(ExpressionNode::Literal(
-                LiteralExpression::boolean(true),
-            ))],
+            vec![Expression::literal(LiteralExpression::boolean(true))],
         );
         assert_eq!(func.render(), "(NOT true)");
     }
@@ -1469,8 +1463,8 @@ mod tests {
             let func = UnresolvedFunction::new(
                 *op_name,
                 vec![
-                    Expression::new(ExpressionNode::Literal(LiteralExpression::int(1))),
-                    Expression::new(ExpressionNode::Literal(LiteralExpression::int(2))),
+                    Expression::literal(LiteralExpression::int(1)),
+                    Expression::literal(LiteralExpression::int(2)),
                 ],
             );
             assert_eq!(
@@ -1485,8 +1479,8 @@ mod tests {
         let and_func = UnresolvedFunction::new(
             "and",
             vec![
-                Expression::new(ExpressionNode::Literal(LiteralExpression::boolean(true))),
-                Expression::new(ExpressionNode::Literal(LiteralExpression::boolean(false))),
+                Expression::literal(LiteralExpression::boolean(true)),
+                Expression::literal(LiteralExpression::boolean(false)),
             ],
         );
         assert_eq!(and_func.render(), "(true and false)");
@@ -1494,8 +1488,8 @@ mod tests {
         let or_func = UnresolvedFunction::new(
             "or",
             vec![
-                Expression::new(ExpressionNode::Literal(LiteralExpression::boolean(true))),
-                Expression::new(ExpressionNode::Literal(LiteralExpression::boolean(false))),
+                Expression::literal(LiteralExpression::boolean(true)),
+                Expression::literal(LiteralExpression::boolean(false)),
             ],
         );
         assert_eq!(or_func.render(), "(true or false)");
@@ -1518,7 +1512,7 @@ mod tests {
     #[test]
     fn test_call_function_wrapper_render() {
         let cf = CallFunctionWrapper::new("my_func", vec![col("a"), col("b")]);
-        let expr = Expression::new(ExpressionNode::CallFunction(Box::new(cf)));
+        let expr: Expression = ExpressionNode::CallFunction(Box::new(cf)).into();
         // CallFunction renders as debug format
         let rendered = expr.render();
         assert!(rendered.contains("CallFunctionWrapper"));
@@ -1527,15 +1521,12 @@ mod tests {
     #[test]
     fn test_window_expression_render() {
         let we = WindowExpressionWrapper::new(
-            Expression::new(ExpressionNode::UnresolvedFunction(UnresolvedFunction::new(
-                "sum",
-                vec![col("x")],
-            ))),
+            Expression::function("sum", vec![col("x")]),
             vec![col("group_col")],
             vec![],
             None,
         );
-        let expr = Expression::new(ExpressionNode::WindowExpression(Box::new(we)));
+        let expr: Expression = ExpressionNode::WindowExpression(Box::new(we)).into();
         let rendered = expr.render();
         assert!(rendered.contains("WindowExpressionWrapper"));
     }
@@ -1543,7 +1534,7 @@ mod tests {
     #[test]
     fn test_lambda_function_render() {
         let lf = LambdaFunction::new(col("x"), vec![UnresolvedNamedLambdaVariable::new("x")]);
-        let expr = Expression::new(ExpressionNode::LambdaFunction(Box::new(lf)));
+        let expr: Expression = ExpressionNode::LambdaFunction(Box::new(lf)).into();
         let rendered = expr.render();
         assert!(rendered.contains("LambdaFunction"));
     }
@@ -1551,7 +1542,7 @@ mod tests {
     #[test]
     fn test_unresolved_named_lambda_variable_render() {
         let var = UnresolvedNamedLambdaVariable::new("x");
-        let expr = Expression::new(ExpressionNode::UnresolvedNamedLambdaVariable(var));
+        let expr: Expression = ExpressionNode::UnresolvedNamedLambdaVariable(var).into();
         let rendered = expr.render();
         assert!(rendered.contains("UnresolvedNamedLambdaVariable"));
     }
@@ -1643,7 +1634,7 @@ mod tests {
 
     #[test]
     fn test_to_proto_unresolved_star_none() {
-        let expr = Expression::new(ExpressionNode::UnresolvedStar(None));
+        let expr: Expression = ExpressionNode::UnresolvedStar(None).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::UnresolvedStar(star)) = proto.expr_type {
@@ -1655,7 +1646,7 @@ mod tests {
 
     #[test]
     fn test_to_proto_unresolved_star_with_target() {
-        let expr = Expression::new(ExpressionNode::UnresolvedStar(Some("table.*".to_string())));
+        let expr: Expression = ExpressionNode::UnresolvedStar(Some("table.*".to_string())).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::UnresolvedStar(star)) = proto.expr_type {
@@ -1667,7 +1658,7 @@ mod tests {
 
     #[test]
     fn test_to_proto_unresolved_regex() {
-        let expr = Expression::new(ExpressionNode::UnresolvedRegex("`col_.*`".to_string()));
+        let expr: Expression = ExpressionNode::UnresolvedRegex("`col_.*`".to_string()).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::UnresolvedRegex(regex)) = proto.expr_type {
@@ -1680,7 +1671,7 @@ mod tests {
     #[test]
     fn test_to_proto_direct_shuffle_partition_id() {
         let child = col("x");
-        let expr = Expression::new(ExpressionNode::DirectShufflePartitionId(Box::new(child)));
+        let expr: Expression = ExpressionNode::DirectShufflePartitionId(child).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::DirectShufflePartitionId(dspi)) = proto.expr_type {
@@ -1693,10 +1684,9 @@ mod tests {
     #[test]
     fn test_to_proto_unresolved_extract_value() {
         let child = col("struct_col");
-        let extraction =
-            Expression::new(ExpressionNode::Literal(LiteralExpression::string("field")));
+        let extraction = Expression::literal(LiteralExpression::string("field"));
         let ev = ExtractValue::new(child, extraction);
-        let expr = Expression::new(ExpressionNode::UnresolvedExtractValue(Box::new(ev)));
+        let expr: Expression = ExpressionNode::UnresolvedExtractValue(Box::new(ev)).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::UnresolvedExtractValue(uev)) = proto.expr_type {
@@ -1710,9 +1700,9 @@ mod tests {
     #[test]
     fn test_to_proto_update_fields() {
         let struct_expr = col("s");
-        let value_expr = Expression::new(ExpressionNode::Literal(LiteralExpression::int(42)));
+        let value_expr = Expression::literal(LiteralExpression::int(42));
         let uf = UpdateFieldsExpr::new(struct_expr, "f1", Some(value_expr));
-        let expr = Expression::new(ExpressionNode::UpdateFields(Box::new(uf)));
+        let expr: Expression = ExpressionNode::UpdateFields(Box::new(uf)).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::UpdateFields(uf_proto)) = proto.expr_type {
@@ -1726,7 +1716,7 @@ mod tests {
     #[test]
     fn test_to_proto_alias_with_metadata() {
         let alias = Alias::new(col("x"), "y").with_metadata("metadata_str".to_string());
-        let expr = Expression::new(ExpressionNode::Alias(Box::new(alias)));
+        let expr: Expression = ExpressionNode::Alias(Box::new(alias)).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::Alias(alias_proto)) = proto.expr_type {
@@ -1740,7 +1730,7 @@ mod tests {
     #[test]
     fn test_to_proto_cast_with_datatype() {
         let cast = Cast::new(col("x"), DataType::Integer);
-        let expr = Expression::new(ExpressionNode::Cast(Box::new(cast)));
+        let expr: Expression = ExpressionNode::Cast(Box::new(cast)).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::Cast(cast_proto)) = proto.expr_type {
@@ -1754,7 +1744,7 @@ mod tests {
     #[test]
     fn test_to_proto_cast_with_eval_mode_legacy() {
         let cast = Cast::new(col("x"), DataType::Integer).with_eval_mode(CastEvalMode::Legacy);
-        let expr = Expression::new(ExpressionNode::Cast(Box::new(cast)));
+        let expr: Expression = ExpressionNode::Cast(Box::new(cast)).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::Cast(cast_proto)) = proto.expr_type {
@@ -1767,7 +1757,7 @@ mod tests {
     #[test]
     fn test_to_proto_cast_with_eval_mode_ansi() {
         let cast = Cast::new(col("x"), DataType::Integer).with_eval_mode(CastEvalMode::Ansi);
-        let expr = Expression::new(ExpressionNode::Cast(Box::new(cast)));
+        let expr: Expression = ExpressionNode::Cast(Box::new(cast)).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::Cast(cast_proto)) = proto.expr_type {
@@ -1780,7 +1770,7 @@ mod tests {
     #[test]
     fn test_to_proto_cast_with_eval_mode_try() {
         let cast = Cast::new(col("x"), DataType::Integer).with_eval_mode(CastEvalMode::Try);
-        let expr = Expression::new(ExpressionNode::Cast(Box::new(cast)));
+        let expr: Expression = ExpressionNode::Cast(Box::new(cast)).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::Cast(cast_proto)) = proto.expr_type {
@@ -1793,7 +1783,7 @@ mod tests {
     #[test]
     fn test_to_proto_cast_str() {
         let cast = Cast::new_str(col("x"), "integer");
-        let expr = Expression::new(ExpressionNode::Cast(Box::new(cast)));
+        let expr: Expression = ExpressionNode::Cast(Box::new(cast)).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::Cast(cast_proto)) = proto.expr_type {
@@ -1806,7 +1796,7 @@ mod tests {
     #[test]
     fn test_to_proto_sort_order() {
         let sort = SortOrder::asc_nulls_first(col("x"));
-        let expr = Expression::new(ExpressionNode::SortOrder(Box::new(sort)));
+        let expr: Expression = ExpressionNode::SortOrder(Box::new(sort)).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::SortOrder(sort_proto)) = proto.expr_type {
@@ -1820,13 +1810,11 @@ mod tests {
     #[test]
     fn test_to_proto_case_when() {
         let cw = CaseWhen::new(vec![(
-            Expression::new(ExpressionNode::Literal(LiteralExpression::boolean(true))),
-            Expression::new(ExpressionNode::Literal(LiteralExpression::int(1))),
+            Expression::literal(LiteralExpression::boolean(true)),
+            Expression::literal(LiteralExpression::int(1)),
         )])
-        .with_else(Expression::new(ExpressionNode::Literal(
-            LiteralExpression::int(99),
-        )));
-        let expr = Expression::new(ExpressionNode::CaseWhen(Box::new(cw)));
+        .with_else(Expression::literal(LiteralExpression::int(99)));
+        let expr: Expression = ExpressionNode::CaseWhen(Box::new(cw)).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::UnresolvedFunction(func_proto)) = proto.expr_type {
@@ -1839,9 +1827,8 @@ mod tests {
 
     #[test]
     fn test_to_proto_sql_expression() {
-        let expr = Expression::new(ExpressionNode::SQLExpression(
-            "SELECT * FROM table".to_string(),
-        ));
+        let expr: Expression =
+            ExpressionNode::SQLExpression("SELECT * FROM table".to_string()).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::ExpressionString(es)) = proto.expr_type {
@@ -1854,7 +1841,7 @@ mod tests {
     #[test]
     fn test_to_proto_call_function() {
         let cf = CallFunctionWrapper::new("my_func", vec![col("a"), col("b")]);
-        let expr = Expression::new(ExpressionNode::CallFunction(Box::new(cf)));
+        let expr: Expression = ExpressionNode::CallFunction(Box::new(cf)).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::CallFunction(cf_proto)) = proto.expr_type {
@@ -1868,7 +1855,7 @@ mod tests {
     #[test]
     fn test_to_proto_lambda_function() {
         let lf = LambdaFunction::new(col("x"), vec![UnresolvedNamedLambdaVariable::new("x")]);
-        let expr = Expression::new(ExpressionNode::LambdaFunction(Box::new(lf)));
+        let expr: Expression = ExpressionNode::LambdaFunction(Box::new(lf)).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::LambdaFunction(lf_proto)) = proto.expr_type {
@@ -1882,7 +1869,7 @@ mod tests {
     #[test]
     fn test_to_proto_unresolved_named_lambda_variable() {
         let var = UnresolvedNamedLambdaVariable::new("x");
-        let expr = Expression::new(ExpressionNode::UnresolvedNamedLambdaVariable(var));
+        let expr: Expression = ExpressionNode::UnresolvedNamedLambdaVariable(var).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::UnresolvedNamedLambdaVariable(var_proto)) =
@@ -1897,10 +1884,7 @@ mod tests {
     #[test]
     fn test_window_expression_to_proto() {
         let we = WindowExpressionWrapper::new(
-            Expression::new(ExpressionNode::UnresolvedFunction(UnresolvedFunction::new(
-                "sum",
-                vec![col("x")],
-            ))),
+            Expression::function("sum", vec![col("x")]),
             vec![col("group_col")],
             vec![SortOrder::asc_nulls_last(col("sort_col"))],
             Some((
@@ -1909,7 +1893,7 @@ mod tests {
                 FrameBoundary::CurrentRow,
             )),
         );
-        let expr = Expression::new(ExpressionNode::WindowExpression(Box::new(we)));
+        let expr: Expression = ExpressionNode::WindowExpression(Box::new(we)).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::Window(window_proto)) = proto.expr_type {

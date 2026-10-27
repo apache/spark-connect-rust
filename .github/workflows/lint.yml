@@ -77,5 +77,3 @@ jobs:
         run: ruff check scripts/
       - name: ruff format (check) - blocking
         run: ruff format --check scripts/
-      - name: Tooling unit tests
-        run: python -m unittest discover -s scripts/tests

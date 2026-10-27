@@ -7,13 +7,13 @@
 
 use std::sync::Arc;
 
-use spark_connect::expression::{ColumnReference, Expression, ExpressionNode};
+use spark_connect::expression::Expression;
 use spark_connect::plan::{self, LogicalPlan, TransformWithStateInfo};
 use spark_connect::types::DataType;
 use spark_connect::udf::{eval_type, CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
 
 fn col_expr(name: &str) -> Expression {
-    Expression::new(ExpressionNode::ColumnReference(ColumnReference::new(name)))
+    Expression::column(name)
 }
 
 fn base() -> LogicalPlan {

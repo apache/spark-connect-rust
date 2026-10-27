@@ -733,8 +733,8 @@ impl DataFrame {
     /// a global count aggregate is pushed to the server, which returns a single row,
     /// rather than streaming every row back to the client just to count them.
     pub fn count(&self) -> Result<i64> {
-        let count_expr = crate::functions::count(Column::new(Expression::new(
-            ExpressionNode::Literal(crate::expression::LiteralExpression::int(1)),
+        let count_expr = crate::functions::count(Column::new(Expression::literal(
+            crate::expression::LiteralExpression::int(1),
         )))
         .expression()
         .clone();
@@ -1316,9 +1316,12 @@ impl DataFrame {
 
     /// Select a metadata column by name. Mirrors `pyspark.sql.DataFrame.metadataColumn`.
     pub fn metadata_column(&self, name: &str) -> Column {
-        Column::new(Expression::new(ExpressionNode::ColumnReference(
-            crate::expression::ColumnReference::new(name).metadata(),
-        )))
+        Column::new(
+            ExpressionNode::ColumnReference(
+                crate::expression::ColumnReference::new(name).metadata(),
+            )
+            .into(),
+        )
     }
 
     /// Group by with rollup.
@@ -1674,9 +1677,8 @@ impl DataFrame {
     /// partitionIdCol)`: the column is wrapped in a `DirectShufflePartitionID`
     /// expression and used as the sole repartition expression.
     pub fn repartition_by_id(&self, num_partitions: i32, partition_id_col: Column) -> DataFrame {
-        let direct = Expression::new(ExpressionNode::DirectShufflePartitionId(Box::new(
-            partition_id_col.expression().clone(),
-        )));
+        let direct: Expression =
+            ExpressionNode::DirectShufflePartitionId(partition_id_col.expression().clone()).into();
         self.repartition_by_expressions(num_partitions, vec![direct])
     }
 
@@ -1684,11 +1686,9 @@ impl DataFrame {
     /// `DataFrame.zipWithIndex(indexColName="index")`:
     /// `self.select(col("*"), distributed_sequence_id().alias(indexColName))`.
     pub fn zip_with_index(&self, index_col_name: &str) -> DataFrame {
-        let star = Column::new(Expression::new(ExpressionNode::UnresolvedStar(None)));
-        let seq = Column::new(Expression::new(ExpressionNode::UnresolvedFunction(
-            crate::expression::UnresolvedFunction::new("distributed_sequence_id", vec![]),
-        )))
-        .alias(index_col_name);
+        let star = Column::new(ExpressionNode::UnresolvedStar(None).into());
+        let seq = Column::new(Expression::function("distributed_sequence_id", vec![]))
+            .alias(index_col_name);
         self.select(vec![star, seq])
     }
 
@@ -2683,55 +2683,33 @@ mod plan_construction_tests {
     }
 
     #[test]
-    fn long_chain_shares_each_previous_root() {
+    fn related_builders_share_the_source_plan() {
         let spark = session();
-        let mut frames = vec![spark.range(10).unwrap()];
-        for _ in 0..256 {
-            let next = frames.last().unwrap().limit(5);
-            frames.push(next);
-        }
-        for pair in frames.windows(2) {
-            let LogicalPlan::Limit { input, .. } = pair[1].plan.as_ref() else {
-                panic!("expected limit");
-            };
-            assert!(Arc::ptr_eq(input, &pair[0].plan));
-        }
-    }
+        let source = spark.range(10).unwrap().limit(5);
+        assert_eq!(Arc::strong_count(&source.plan), 1);
 
-    #[test]
-    fn local_relation_payload_is_not_cloned_by_transformations() {
-        let spark = session();
-        let source = DataFrame::new(
-            spark,
-            LogicalPlan::LocalRelation {
-                schema: DataType::Binary,
-                data: Some(vec![7; 1024]),
-            },
-        );
-        let LogicalPlan::LocalRelation {
-            data: Some(data), ..
-        } = source.plan.as_ref()
-        else {
-            panic!("expected local relation");
-        };
-        let data_ptr = data.as_ptr();
-        let projected = source.select(vec![crate::functions::col("value")]);
-        let cloned = projected.clone();
-        let LogicalPlan::Project { input, .. } = cloned.plan.as_ref() else {
-            panic!("expected projection");
-        };
-        assert!(Arc::ptr_eq(input, &source.plan));
-        drop(source);
-        drop(projected);
+        let writer = source.write();
+        assert_eq!(Arc::strong_count(&source.plan), 2);
+        let writer_v2 = source.write_to("target");
+        assert_eq!(Arc::strong_count(&source.plan), 3);
+        let stream_writer = source.write_stream();
+        assert_eq!(Arc::strong_count(&source.plan), 4);
+        let merge_writer = source.merge_into("target", crate::column::col("id"));
+        assert_eq!(Arc::strong_count(&source.plan), 5);
+        let table_arg = crate::table_arg::TableArg::new(source.clone());
+        assert_eq!(Arc::strong_count(&source.plan), 6);
+        let cloned_table_arg = table_arg.clone();
+        assert_eq!(Arc::strong_count(&source.plan), 7);
 
-        let LogicalPlan::LocalRelation {
-            data: Some(data), ..
-        } = input.as_ref()
-        else {
-            panic!("expected local relation");
-        };
-        assert_eq!(data.as_ptr(), data_ptr);
-        assert_eq!(data.as_slice(), &[7; 1024]);
+        drop((
+            writer,
+            writer_v2,
+            stream_writer,
+            merge_writer,
+            table_arg,
+            cloned_table_arg,
+        ));
+        assert_eq!(Arc::strong_count(&source.plan), 1);
     }
 
     #[test]

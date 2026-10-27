@@ -744,11 +744,7 @@ impl LogicalPlan {
             } => {
                 let mut wc = proto::WithColumns::default();
                 wc.input = Some(Box::new(input.to_proto()));
-                let col_expr = crate::expression::Expression::new(
-                    crate::expression::ExpressionNode::ColumnReference(
-                        crate::expression::ColumnReference::new(column_name.clone()),
-                    ),
-                );
+                let col_expr = crate::expression::Expression::column(column_name.clone());
                 let mut alias = proto::expression::Alias::default();
                 alias.expr = Some(Box::new(col_expr.to_proto()));
                 alias.name = vec![column_name.clone()];
@@ -1868,8 +1864,8 @@ mod argfix_tests {
             vec![],
             col("k").expression().clone(),
             vec![
-                Expression::new(ExpressionNode::Literal(LiteralExpression::string("a"))),
-                Expression::new(ExpressionNode::Literal(LiteralExpression::string("b"))),
+                Expression::literal(LiteralExpression::string("a")),
+                Expression::literal(LiteralExpression::string("b")),
             ],
         );
         match rel_type(p) {

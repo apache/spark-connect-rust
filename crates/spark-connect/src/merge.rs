@@ -231,14 +231,6 @@ mod tests {
     }
 
     #[test]
-    fn merge_writer_shares_the_source_plan() {
-        let spark = session();
-        let df = spark.range(10).unwrap().limit(5);
-        let writer = df.merge_into("target", crate::column::col("id"));
-        assert!(std::sync::Arc::ptr_eq(&writer.source_plan, &df.plan));
-    }
-
-    #[test]
     fn merge_into_when_matched_update() {
         let spark = session();
         let df = spark.range(3).unwrap();

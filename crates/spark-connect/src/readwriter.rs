@@ -657,16 +657,6 @@ mod tests {
     }
 
     #[test]
-    fn writers_share_the_source_plan() {
-        let spark = session();
-        let df = spark.range(10).unwrap().limit(5);
-        let writer = df.write();
-        let writer_v2 = df.write_to("target");
-        assert!(Arc::ptr_eq(&writer.input_plan, &df.plan));
-        assert!(Arc::ptr_eq(&writer_v2.input_plan, &df.plan));
-    }
-
-    #[test]
     fn v1_write_operation_to_path() {
         let spark = session();
         let df = spark.range(3).unwrap();

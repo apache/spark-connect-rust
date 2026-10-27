@@ -231,19 +231,6 @@ mod tests {
     }
 
     #[test]
-    fn table_argument_and_clone_share_the_source_plan() {
-        let spark = crate::session::SparkSession::builder()
-            .remote("sc://localhost:15002")
-            .get_or_create()
-            .unwrap();
-        let df = spark.range(10).unwrap().limit(5);
-        let argument = TableArg::new(df.clone());
-        let cloned = argument.clone();
-        assert!(Arc::ptr_eq(&argument.plan, &df.plan));
-        assert!(Arc::ptr_eq(&cloned.plan, &df.plan));
-    }
-
-    #[test]
     fn fresh_table_arg_is_unpartitioned() {
         let t = arg();
         assert!(!t.is_partitioned());

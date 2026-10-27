@@ -8,7 +8,7 @@ use spark_connect_core::error::Result;
 
 use crate::column::Column;
 use crate::dataframe::DataFrame;
-use crate::expression::{Expression, ExpressionNode};
+use crate::expression::Expression;
 use crate::plan::{AggregateGroupType, LogicalPlan};
 use crate::types::DataType;
 use crate::udf::CommonInlineUserDefinedFunctionExpression;
@@ -28,7 +28,7 @@ fn value_to_lit_expr(v: crate::row::Value) -> Expression {
         Value::String(s) => L::string(s),
         other => L::string(format!("{:?}", other)),
     };
-    Expression::new(ExpressionNode::Literal(lit))
+    Expression::literal(lit)
 }
 
 /// Grouped data for performing aggregations.
@@ -303,9 +303,9 @@ impl GroupedData {
     /// Count rows in each group.
     pub fn count(&self) -> DataFrame {
         use crate::functions;
-        let count_expr = functions::count(Column::new(Expression::new(ExpressionNode::Literal(
+        let count_expr = functions::count(Column::new(Expression::literal(
             crate::expression::LiteralExpression::int(1),
-        ))))
+        )))
         .expression()
         .clone();
 
@@ -695,15 +695,11 @@ mod tests {
         let stats = df.stat();
         let fractions = vec![
             (
-                Expression::new(ExpressionNode::Literal(
-                    crate::expression::LiteralExpression::string("A"),
-                )),
+                Expression::literal(crate::expression::LiteralExpression::string("A")),
                 0.5,
             ),
             (
-                Expression::new(ExpressionNode::Literal(
-                    crate::expression::LiteralExpression::string("B"),
-                )),
+                Expression::literal(crate::expression::LiteralExpression::string("B")),
                 0.3,
             ),
         ];
