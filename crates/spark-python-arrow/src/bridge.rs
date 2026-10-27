@@ -163,6 +163,7 @@ pub fn export_data_type(py: Python<'_>, data_type: &DataType) -> PyResult<Py<PyA
 /// Batch boundaries, schema metadata, and zero-column row counts are preserved.
 /// An empty batch vector produces an empty table with an empty schema.
 /// Value and offset buffers are shared; sliced validity bitmaps may be realigned.
+/// Inconsistent batch schemas, including metadata and ordering flags, raise `ValueError`.
 pub fn record_batches_to_pyarrow(py: Python<'_>, batches: Vec<RecordBatch>) -> PyResult<Py<PyAny>> {
     let schema = batches
         .first()

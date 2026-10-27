@@ -63,6 +63,7 @@ A Cargo workspace of library crates, plus a Python skin:
 | `apache-spark-connect-core` | `crates/spark-connect-core` | Transport: channel, retries, reattach, artifacts, errors |
 | `apache-spark-connect` | `crates/spark-connect` | The DataFrame API: session, dataframe, column, functions, plan, group, catalog, window, readwriter, streaming, types |
 | `pyspark-rs` | `crates/pyspark-rs` | PyO3 bindings - builds the `_pyspark` extension module |
+| `spark-python-arrow` (unpublished) | `crates/spark-python-arrow` | Arrow/PyArrow C Data bridge and client scalar conversion |
 | Python skin | `python/pyspark` | The drop-in `pyspark` package (+ vendored `pyspark.pandas`, `cloudpickle`, `pyspark.testing`) |
 
 ```mermaid
@@ -70,6 +71,7 @@ flowchart LR
     PROTO["spark-connect-proto"] --> CORE["spark-connect-core"]
     CORE --> SC["spark-connect (DataFrame API)"]
     SC --> PYO3["pyspark-rs (PyO3)"]
+    PYARROW["spark-python-arrow (unpublished)"] --> PYO3
     PYO3 --> SKIN["python/pyspark skin"]
     SC --> RUSTAPP["your Rust app"]
 ```
@@ -152,7 +154,7 @@ See [Rust UDFs via WebAssembly](udfs.md) for the full story.
 3. **Correctness is gated in CI** - golden-proto tests guard plan building; the
    official Apache Spark Connect test suite guards transport and Arrow paths (see
    the CI notes under `dev/design/`).
-4. **Version = Spark version** - the crate/wheel version tracks the Spark release
+4. **Version = Spark version** - the published crate/wheel version tracks the Spark release
    it targets, so the number tells you which Spark it speaks.
 
 For the deeper design write-ups (design notes, CI, the official test suite, and

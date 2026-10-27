@@ -50,8 +50,8 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal --component clippy
           rustup default stable
-      - name: Install reference Python converters
-        run: python -m pip install "pyspark-client==4.2.0" "pyarrow==26.0.0"
+      - name: Install PyArrow
+        run: python -m pip install "pyarrow==26.0.0"
       - name: Isolate the standalone crate and select PyO3
         # The workspace lockfile pins 0.30.1. Build outside it so each matrix leg
         # actually compiles the converter against the requested minor version.
@@ -61,10 +61,10 @@ jobs:
           cargo update --manifest-path "$RUNNER_TEMP/spark-python-arrow/Cargo.toml" \
             -p pyo3 --precise "${{ matrix.pyo3 }}"
           cargo tree --manifest-path "$RUNNER_TEMP/spark-python-arrow/Cargo.toml" --locked -i pyo3
-      - name: Test native and official PySpark conversion semantics
+      - name: Test Arrow handoff and scalar conversion
         run: |
           cargo test --manifest-path "$RUNNER_TEMP/spark-python-arrow/Cargo.toml" \
-            --locked --features pyo3/abi3-py39 -- --include-ignored
+            --locked --features pyo3/abi3-py39
       - name: Check converter Clippy
         run: |
           cargo clippy --manifest-path "$RUNNER_TEMP/spark-python-arrow/Cargo.toml" \

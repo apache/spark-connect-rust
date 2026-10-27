@@ -15,12 +15,10 @@
 // specific language governing permissions and limitations
 // under the License.
 
-//! Python/Arrow conversion without a dependency on Spark transport or worker execution.
+//! Python/Arrow conversion without a dependency on Spark transport.
 //!
 //! The bridge shares compatible Arrow value buffers; scalar and row materialization still
-//! allocates Python objects. The caller owns its interpreter, Python classes, and error policy.
-//! UDF-specific coercion and end-of-batch result conversion are explicit in the [`udf`] API.
+//! allocates Python objects. The caller owns its interpreter and row representation.
 
 pub mod bridge;
 pub mod scalar;
-pub mod udf;

@@ -19,7 +19,8 @@ name = "spark-python-arrow"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "Arrow and Python conversion shared by Spark clients and Python workers"
+publish = false
+description = "Arrow and Python conversion for Spark clients"
 repository = "https://github.com/apache/spark-connect-rust"
 
 [dependencies]
