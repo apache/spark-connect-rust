@@ -41,8 +41,6 @@ jobs:
       fail-fast: false
       matrix:
         pyo3: ["0.28.3", "0.29.0", "0.30.1"]
-    env:
-      SPARK_PYTHON_ARROW_TEST_PYSPARK: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -66,7 +64,7 @@ jobs:
       - name: Test native and official PySpark conversion semantics
         run: |
           cargo test --manifest-path "$RUNNER_TEMP/spark-python-arrow/Cargo.toml" \
-            --locked --features pyo3/abi3-py39
+            --locked --features pyo3/abi3-py39 -- --include-ignored
       - name: Check converter Clippy
         run: |
           cargo clippy --manifest-path "$RUNNER_TEMP/spark-python-arrow/Cargo.toml" \

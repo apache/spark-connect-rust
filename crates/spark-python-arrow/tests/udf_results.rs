@@ -18,7 +18,7 @@
 //! UDF result-policy checks, without a Spark server. The fixtures model PySpark's nullable
 //! top-level String/Binary/Variant converters. Logging and injected failures make scheduling
 //! observable; they are test instrumentation, not support for arbitrary stateful converters.
-//! Set SPARK_PYTHON_ARROW_TEST_PYSPARK=1 to additionally compare against installed PySpark.
+//! Use --include-ignored with official PySpark installed to run the optional comparison.
 
 use std::ffi::CString;
 
@@ -650,11 +650,8 @@ types = [
 }
 
 #[test]
+#[ignore = "requires official pyspark-client==4.2.0 and PyArrow"]
 fn official_pyspark_result_converters_match_native_and_fallback_paths() {
-    if std::env::var("SPARK_PYTHON_ARROW_TEST_PYSPARK").as_deref() != Ok("1") {
-        eprintln!("set SPARK_PYTHON_ARROW_TEST_PYSPARK=1 with official pyspark installed");
-        return;
-    }
     Python::initialize();
     Python::attach(|py| -> PyResult<()> {
         let locals = context(py)?;

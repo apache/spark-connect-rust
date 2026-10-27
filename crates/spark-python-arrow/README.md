@@ -139,10 +139,19 @@ linking required by the embedded test executable. For a virtual environment,
 set `PYO3_PYTHON` to its interpreter and expose its site-packages to the embedded
 interpreter with `PYTHONPATH` when necessary.
 
-With official `pyspark-client==4.2.0` also installed, set
-`SPARK_PYTHON_ARROW_TEST_PYSPARK=1` to enable comparisons against its nullable
-String, Binary, and Variant result converters. The compatibility CI matrix sets
-this flag; the default local command skips that optional comparison.
+The comparison against official PySpark's nullable String, Binary, and Variant
+result converters is marked `#[ignore]`: the default command reports it as
+ignored, not passed. With official `pyspark-client==4.2.0` also installed, run all
+tests including that comparison:
+
+```sh
+CARGO_NET_OFFLINE=true CARGO_REGISTRIES_CRATES_IO_PROTOCOL=git \
+  cargo test -p spark-python-arrow --locked --features pyo3/abi3-py39 -- --include-ignored
+```
+
+The compatibility CI matrix uses `--include-ignored` for every PyO3 version.
+Explicitly running the comparison without its Python dependencies fails instead
+of silently skipping it.
 
 The standalone tests cover buffer identity and lifetime, schema/type round trips,
 empty shapes, native scalar behavior, and UDF fallback/error ordering. The
