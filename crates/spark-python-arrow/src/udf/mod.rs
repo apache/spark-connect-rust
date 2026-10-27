@@ -1,19 +1,19 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with
- * this work for additional information regarding copyright ownership.
- * The ASF licenses this file to You under the Apache License, Version 2.0
- * (the "License"); you may not use this file except in compliance with
- * the License.  You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//    http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 //! Arrow <-> Python conversion one value at a time, for a per-row UDF loop that has to match the
 //! `SQL_ARROW_BATCHED_UDF` loop in `pyspark.worker.read_udfs`.
@@ -81,8 +81,9 @@ fn import_batch(batch: &Bound<'_, PyAny>) -> PyResult<StructArray> {
     Ok(StructArray::from(crate::bridge::import_batch(batch)?))
 }
 
-/// Hands `array` to pyarrow, whose `pa.Array` is `array_type`, without copying it. pyarrow moves
-/// both structs' contents out, so dropping them afterwards releases nothing.
+/// Hands `array` to PyArrow, whose `pa.Array` is `array_type`, sharing compatible value buffers.
+/// Validity-bitmap alignment may copy. PyArrow moves both descriptors' contents out, so dropping
+/// them afterwards releases nothing.
 fn export_array<'py>(
     array_type: &Bound<'py, PyAny>,
     array: ArrayRef,

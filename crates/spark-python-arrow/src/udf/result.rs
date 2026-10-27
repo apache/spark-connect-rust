@@ -1,19 +1,19 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with
- * this work for additional information regarding copyright ownership.
- * The ASF licenses this file to You under the Apache License, Version 2.0
- * (the "License"); you may not use this file except in compliance with
- * the License.  You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 use std::sync::Arc;
 
@@ -47,6 +47,15 @@ const MAX_EXACT_F32_INT: u64 = 1 << 24;
 /// comes from. For supported Variant results, `variant_class` resolves the class UDF code
 /// constructs, which need not be the backend module's class. The resolver runs only after the
 /// Arrow type and converter are accepted; its errors propagate. No package or class is inferred.
+///
+/// # Converter contract
+///
+/// `converter` must be PySpark's pure, top-level nullable result converter (as returned by
+/// `LocalDataToArrowConversion._create_converter(..., nullable=True)`), or `None` for identity.
+/// Non-nullable field converters and arbitrary stateful callbacks are not supported: this policy
+/// keeps `None` unchanged and may bypass the converter for exact strings, bytes, and Variant
+/// parts, or convert immutable built-ins before the remaining UDF calls. No callback is probed to
+/// validate this contract, since probing would change its invocation and error timing.
 pub fn result_spec<'py>(
     py: Python<'py>,
     arrow_type: &Bound<'_, PyAny>,
@@ -62,6 +71,42 @@ pub fn result_spec<'py>(
         return Ok(Err(
             "Arrow extension types require the caller's Python converter".to_owned(),
         ));
+    }
+    let arrow_lib = py.import("pyarrow.lib")?;
+    if arrow_type.is_instance(&arrow_lib.getattr("DictionaryType")?)? {
+        return Ok(Err(
+            "Arrow dictionary types require the caller's Python converter".to_owned(),
+        ));
+    }
+    if arrow_type.is_instance(&arrow_lib.getattr("DataType")?)? {
+        let fields = arrow_type.getattr("num_fields")?.extract::<usize>()?;
+        if fields > 0 {
+            // Only the tagged Variant struct can use a nested native builder. Select the
+            // caller's fallback before importing other nested types, whose child metadata
+            // may not be representable by a bare Rust DataType (dictionary extensions, etc.).
+            let mut variant_candidate =
+                fields == 2 && arrow_type.is_instance(&arrow_lib.getattr("StructType")?)?;
+            if variant_candidate {
+                let binary = arrow_lib.call_method0("binary")?;
+                for index in 0..fields {
+                    let child = arrow_type
+                        .call_method1("field", (index,))?
+                        .getattr("type")?;
+                    if !child
+                        .call_method1("equals", (&binary,))?
+                        .extract::<bool>()?
+                    {
+                        variant_candidate = false;
+                        break;
+                    }
+                }
+            }
+            if !variant_candidate {
+                return Ok(Err(format!(
+                    "{arrow_type} is not supported by the native UDF result converter"
+                )));
+            }
+        }
     }
     let data_type = import_data_type(arrow_type)?;
     let Some(kind) = OutputKind::of(&data_type) else {
@@ -559,7 +604,8 @@ pub struct ResultColumn<'s> {
 
 enum State {
     Building,
-    /// The results from the first one the builder could not take, unconverted, in row order:
+    /// The results from the first one the builder could not take, in row order. The first may be
+    /// an already-converted string that exceeded capacity; the remainder is unconverted:
     /// those in `listed`, then those in `pushed`. `listed` has the held part of each list given
     /// to `extend` and the results pushed before the last such call; `pushed` has the results
     /// pushed after it.
@@ -596,14 +642,14 @@ impl<'s> ResultColumn<'s> {
     /// Adds the next row's result. A built-in the builder takes is converted and appended now, as
     /// it cannot change; from the first result that is not, every result is held for
     /// [`ResultColumn::finish`]. Never raises: a converter error is raised by `finish`.
-    pub fn push<'py>(&mut self, py: Python<'py>, value: Bound<'py, PyAny>) {
+    pub fn push<'py>(&mut self, py: Python<'py>, mut value: Bound<'py, PyAny>) {
         match &mut self.state {
             State::Building => {}
             State::Holding { pushed, .. } => return pushed.push(value.unbind()),
             State::Failed(_) => return,
         }
         if self.builder.append_exact(&value, self.spec.value_capacity)
-            || self.append_converted(py, &value)
+            || self.append_converted(py, &mut value)
         {
             return;
         }
@@ -633,34 +679,35 @@ impl<'s> ResultColumn<'s> {
         py: Python<'py>,
         values: &Bound<'py, PyList>,
     ) -> PyResult<()> {
-        let mut appended = 0;
         // The iterator protocol reads a list with one call per item, and the abi3 list API with
         // three.
-        for value in values.try_iter()? {
-            let value = value?;
+        for (index, value) in values.try_iter()?.enumerate() {
+            let mut value = value?;
             if !(self.builder.append_exact(&value, self.spec.value_capacity)
-                || self.append_converted(py, &value))
+                || self.append_converted(py, &mut value))
             {
-                break;
+                let held = values.get_slice(index, values.len());
+                // The capacity fallback can follow a successful conversion. Retain that
+                // result rather than invoking its converter a second time at finish.
+                held.set_item(0, value)?;
+                self.state = State::Holding {
+                    listed: Some(held.unbind()),
+                    pushed: Vec::new(),
+                };
+                return Ok(());
             }
             if let State::Failed(_) = self.state {
                 return Ok(());
             }
-            appended += 1;
-        }
-        if appended < values.len() {
-            self.state = State::Holding {
-                listed: Some(values.get_slice(appended, values.len()).unbind()),
-                pushed: Vec::new(),
-            };
         }
         Ok(())
     }
 
     /// Appends `value`, which the builder did not take, if it is a float, a bool or an int that
-    /// fits in 64 bits, which the `StringType` converter turns into a str it takes. Returns false
-    /// if `value` has to be held instead. A converter error fails the column.
-    fn append_converted<'py>(&mut self, py: Python<'py>, value: &Bound<'py, PyAny>) -> bool {
+    /// fits in 64 bits, which the `StringType` converter turns into a str it takes. Replaces
+    /// `value` with a successful conversion even when capacity requires holding it for `finish`.
+    /// Returns false if `value` has to be held instead. A converter error fails the column.
+    fn append_converted<'py>(&mut self, py: Python<'py>, value: &mut Bound<'py, PyAny>) -> bool {
         // A built-in cannot change after the UDF returns it, so converting it now matches PySpark,
         // which converts once the UDF has run on every row. For a string column the builder takes
         // only None and exact strs, which the StringType converter returns unchanged.
@@ -674,9 +721,10 @@ impl<'s> ResultColumn<'s> {
             return false;
         }
         match self.spec.convert(py, value.clone()) {
-            Ok(converted) => self
-                .builder
-                .append_exact(&converted, self.spec.value_capacity),
+            Ok(converted) => {
+                *value = converted;
+                self.builder.append_exact(value, self.spec.value_capacity)
+            }
             Err(error) => {
                 self.state = State::Failed(error);
                 true
@@ -856,6 +904,7 @@ fn appended_values<'py>(py: Python<'py>, appended: &Appended) -> PyResult<Bound<
 #[cfg(test)]
 mod tests {
     use arrow::datatypes::{Field, Fields, TimeUnit};
+    use pyo3::exceptions::PyValueError;
 
     use super::*;
 
@@ -877,5 +926,67 @@ mod tests {
         ] {
             assert_eq!(OutputKind::of(&data_type), None, "{data_type}");
         }
+    }
+
+    #[test]
+    fn failed_state_raises_before_calling_pyarrow_and_retains_the_first_error() {
+        Python::initialize();
+        Python::attach(|py| -> PyResult<()> {
+            for extend in [false, true] {
+                let locals = PyDict::new(py);
+                py.run(
+                    c"from types import SimpleNamespace
+class StringType: pass
+sql_types = SimpleNamespace(StringType=StringType)
+spark_type = StringType()
+events = []
+def converter(value):
+    events.append(('converter', value))
+    raise ValueError('first conversion failed')
+def array_spy(*args, **kwargs):
+    events.append(('array',))
+    raise AssertionError('PyArrow must not run after a converter error')
+",
+                    Some(&locals),
+                    Some(&locals),
+                )?;
+                let arrow_type = py.import("pyarrow")?.call_method0("string")?;
+                let mut spec = result_spec(
+                    py,
+                    &arrow_type,
+                    &locals.get_item("spark_type")?.unwrap(),
+                    &locals.get_item("converter")?.unwrap(),
+                    true,
+                    &locals.get_item("sql_types")?.unwrap(),
+                    || Ok(None),
+                )?
+                .expect("nullable string policy is supported");
+                // Replace only this spec's cached callback, not a process-wide PyArrow alias.
+                spec.pyarrow_array = locals.get_item("array_spy")?.unwrap().unbind();
+                let mut column = ResultColumn::new(&spec, 4);
+                let values = PyList::new(py, [1, 2])?;
+                if extend {
+                    column.extend(py, &values);
+                } else {
+                    for value in values.iter() {
+                        column.push(py, value);
+                    }
+                }
+                column.extend(py, &values);
+                column.push(py, py.None().into_bound(py));
+                let error = column.finish(py).err().expect("converter must fail");
+                assert!(error.is_instance_of::<PyValueError>(py));
+                assert_eq!(error.to_string(), "ValueError: first conversion failed");
+                assert!(py
+                    .eval(
+                        c"events == [('converter', 1)]",
+                        Some(&locals),
+                        Some(&locals)
+                    )?
+                    .extract::<bool>()?);
+            }
+            Ok(())
+        })
+        .unwrap();
     }
 }

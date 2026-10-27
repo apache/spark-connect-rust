@@ -1,19 +1,19 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with
- * this work for additional information regarding copyright ownership.
- * The ASF licenses this file to You under the Apache License, Version 2.0
- * (the "License"); you may not use this file except in compliance with
- * the License.  You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 use arrow::array::{
     Array, ArrayRef, AsArray, BinaryArray, BooleanArray, Date32Array, Float32Array, Float64Array,
@@ -363,8 +363,9 @@ impl Column {
                 value().into_python(py)
             }
         }
-        /// Decodes the slot's bytes rather than reading a `&str`: arrow-rs imports strings
-        /// through the C Data Interface without checking them, so CPython's decode is the check.
+        /// Decodes the slot's bytes rather than forming a `&str` from unvalidated UTF-8.
+        /// CPython validates only the UTF-8 payload. Offsets and buffer ranges remain the
+        /// Arrow producer's responsibility; this is not validation of arbitrary C data.
         fn string<'py, O: OffsetSizeTrait>(
             py: Python<'py>,
             array: &GenericStringArray<O>,

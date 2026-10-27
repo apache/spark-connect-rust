@@ -269,7 +269,7 @@ def _mixed_batch():
     nested_type = pa.struct(
         [
             pa.field("items", pa.list_(pa.int64()), metadata={b"nested": b"metadata"}),
-            pa.field("labels", pa.map_(pa.string(), pa.int64())),
+            pa.field("labels", pa.map_(pa.string(), pa.int64(), keys_sorted=True)),
         ]
     )
     arrays = [
@@ -299,7 +299,9 @@ def _mixed_batch():
             type=nested_type,
         ),
         pa.DictionaryArray.from_arrays(
-            pa.array([0, None, 1, 0], type=pa.int8()), pa.array(["red", "blue"])
+            pa.array([0, None, 1, 0], type=pa.int8()),
+            pa.array(["red", "blue"]),
+            ordered=True,
         ),
         pa.nulls(4),
     ]
@@ -491,6 +493,19 @@ def test_mismatched_batch_schemas_are_rejected_before_import(monkeypatch):
         pa.record_batch([pa.array([1])], names=["value"]),
         pa.record_batch([pa.array(["text"])], names=["value"]),
     ]
+    spy = _ArraySpy(monkeypatch)
+    with _dataframe(batches) as (frame, _):
+        with pytest.raises(ValueError, match="inconsistent schemas"):
+            frame.toArrow()
+    assert not spy.callbacks
+
+
+def test_mismatched_dictionary_order_is_rejected_before_import(monkeypatch):
+    ordered = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1], type=pa.int8()), pa.array(["a", "b"]), ordered=True
+    )
+    unordered = pa.DictionaryArray.from_arrays(ordered.indices, ordered.dictionary)
+    batches = [pa.record_batch([array], names=["value"]) for array in (ordered, unordered)]
     spy = _ArraySpy(monkeypatch)
     with _dataframe(batches) as (frame, _):
         with pytest.raises(ValueError, match="inconsistent schemas"):

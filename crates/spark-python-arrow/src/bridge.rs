@@ -19,15 +19,16 @@
 //!
 //! Imports accept real PyArrow objects, not arbitrary objects implementing an
 //! export method. PyArrow remains responsible for the validity of its C data.
-//! These functions check structural invariants but do not scan values or change
-//! when a caller observes conversion errors such as invalid string contents.
+//! These functions perform limited structural checks, not full validation of all
+//! offsets, dictionary indices, or payloads. Valid offsets and buffer bounds are
+//! producer preconditions. String decoding errors remain observable at conversion.
 
 use std::sync::Arc;
 
 use arrow::array::{make_array, Array, ArrayData, ArrayRef, StructArray};
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Field, Schema, UnionFields};
 use arrow::error::ArrowError;
-use arrow::ffi::{from_ffi, FFI_ArrowArray, FFI_ArrowSchema};
+use arrow::ffi::{from_ffi_and_data_type, FFI_ArrowArray, FFI_ArrowSchema};
 use arrow::ipc::writer::FileWriter;
 use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
@@ -41,36 +42,39 @@ pub fn import_schema(value: &Bound<'_, PyAny>) -> PyResult<Schema> {
     let mut schema = FFI_ArrowSchema::empty();
     let address = &mut schema as *mut FFI_ArrowSchema as usize;
     class.call_method1("_export_to_c", (value, address))?;
-    Schema::try_from(&schema).map_err(arrow_error)
+    import_c_schema(&schema).map_err(arrow_error)
 }
 
 /// Import a PyArrow data type.
 ///
-/// Root extension types require a schema or record batch: a bare Rust `DataType`
-/// has nowhere to retain their extension metadata, so this function rejects them.
+/// Root extension types and ordered dictionaries require a schema or record batch:
+/// a bare Rust `DataType` has nowhere to retain these field properties.
 pub fn import_data_type(value: &Bound<'_, PyAny>) -> PyResult<DataType> {
     let class = require_pyarrow_class(value, "DataType")?;
     reject_root_extension_type(value)?;
+    reject_root_dictionary_order(value)?;
     check_python_data_type(value)?;
     let mut schema = FFI_ArrowSchema::empty();
     let address = &mut schema as *mut FFI_ArrowSchema as usize;
     class.call_method1("_export_to_c", (value, address))?;
-    DataType::try_from(&schema).map_err(arrow_error)
+    import_c_data_type(&schema).map_err(arrow_error)
 }
 
 /// Import a PyArrow array without copying its data buffers.
 ///
-/// Root extension arrays are rejected because an `ArrayRef` cannot retain their
-/// extension metadata. Import a record batch to preserve that field metadata.
+/// Root extensions and ordered dictionaries are rejected because an `ArrayRef`
+/// cannot retain their field properties. Import a record batch to preserve them.
 pub fn import_array(value: &Bound<'_, PyAny>) -> PyResult<ArrayRef> {
     let class = require_pyarrow_class(value, "Array")?;
     let data_type = value.getattr("type")?;
     reject_root_extension_type(&data_type)?;
+    reject_root_dictionary_order(&data_type)?;
     check_python_data_type(&data_type)?;
     let (array, schema) = export_python_array(value, &class)?;
+    let data_type = import_c_data_type(&schema).map_err(arrow_error)?;
     // SAFETY: the base PyArrow exporter, not an arbitrary Python method, has
     // initialized both descriptors and transferred ownership of valid C data.
-    let data = unsafe { from_ffi(array, &schema) }.map_err(arrow_error)?;
+    let data = unsafe { from_ffi_and_data_type(array, data_type) }.map_err(arrow_error)?;
     validate_structure(&data)?;
     Ok(make_array(data))
 }
@@ -80,9 +84,10 @@ pub fn import_batch(value: &Bound<'_, PyAny>) -> PyResult<RecordBatch> {
     let class = require_pyarrow_class(value, "RecordBatch")?;
     check_python_schema(&value.getattr("schema")?)?;
     let (array, ffi_schema) = export_python_array(value, &class)?;
-    let schema = Schema::try_from(&ffi_schema).map_err(arrow_error)?;
+    let schema = import_c_schema(&ffi_schema).map_err(arrow_error)?;
+    let data_type = DataType::Struct(schema.fields().clone());
     // SAFETY: only the real PyArrow RecordBatch exporter writes the descriptors.
-    let data = unsafe { from_ffi(array, &ffi_schema) }.map_err(arrow_error)?;
+    let data = unsafe { from_ffi_and_data_type(array, data_type) }.map_err(arrow_error)?;
     validate_structure(&data)?;
     if !matches!(data.data_type(), DataType::Struct(_)) || data.null_count() != 0 {
         return Err(PyValueError::new_err(
@@ -101,7 +106,9 @@ pub fn import_batch(value: &Bound<'_, PyAny>) -> PyResult<RecordBatch> {
         .map_err(arrow_error)
 }
 
-/// Export an Arrow array without copying its data buffers.
+/// Export an Arrow array sharing its value and offset buffers.
+///
+/// Arrow may copy a sliced validity bitmap to align its offset with the data.
 pub fn export_array(py: Python<'_>, array: ArrayRef) -> PyResult<Py<PyAny>> {
     let array_type = py.import("pyarrow")?.getattr("Array")?;
     Ok(export_array_with_type(&array_type, array)?.unbind())
@@ -112,7 +119,7 @@ pub(crate) fn export_array_with_type<'py>(
     array: ArrayRef,
 ) -> PyResult<Bound<'py, PyAny>> {
     check_c_data_type(array.data_type())?;
-    let mut schema = FFI_ArrowSchema::try_from(array.data_type()).map_err(arrow_error)?;
+    let mut schema = export_c_data_type(array.data_type()).map_err(arrow_error)?;
     let schema_address = &mut schema as *mut FFI_ArrowSchema as usize;
     let mut array = FFI_ArrowArray::new(&array.to_data());
     let array_address = &mut array as *mut FFI_ArrowArray as usize;
@@ -127,7 +134,10 @@ pub(crate) fn export_array_with_type<'py>(
 /// returns an error for such schemas; table export provides an IPC fallback.
 pub fn export_schema(py: Python<'_>, schema: &Schema) -> PyResult<Py<PyAny>> {
     check_c_schema(schema)?;
-    let mut schema = FFI_ArrowSchema::try_from(schema).map_err(arrow_error)?;
+    let data_type = DataType::Struct(schema.fields().clone());
+    let mut schema = export_c_data_type(&data_type)
+        .and_then(|exported| exported.with_metadata(schema.metadata()))
+        .map_err(arrow_error)?;
     let address = &mut schema as *mut FFI_ArrowSchema as usize;
     Ok(py
         .import("pyarrow")?
@@ -139,7 +149,7 @@ pub fn export_schema(py: Python<'_>, schema: &Schema) -> PyResult<Py<PyAny>> {
 /// Export an Arrow data type, rejecting strings not representable in C schemas.
 pub fn export_data_type(py: Python<'_>, data_type: &DataType) -> PyResult<Py<PyAny>> {
     check_c_data_type(data_type)?;
-    let mut schema = FFI_ArrowSchema::try_from(data_type).map_err(arrow_error)?;
+    let mut schema = export_c_data_type(data_type).map_err(arrow_error)?;
     let address = &mut schema as *mut FFI_ArrowSchema as usize;
     Ok(py
         .import("pyarrow")?
@@ -152,12 +162,15 @@ pub fn export_data_type(py: Python<'_>, data_type: &DataType) -> PyResult<Py<PyA
 ///
 /// Batch boundaries, schema metadata, and zero-column row counts are preserved.
 /// An empty batch vector produces an empty table with an empty schema.
+/// Value and offset buffers are shared; sliced validity bitmaps may be realigned.
 pub fn record_batches_to_pyarrow(py: Python<'_>, batches: Vec<RecordBatch>) -> PyResult<Py<PyAny>> {
     let schema = batches
         .first()
         .map(|batch| batch.schema())
         .unwrap_or_else(|| Arc::new(Schema::empty()));
-    if batches.iter().any(|batch| batch.schema_ref() != &schema) {
+    if batches.iter().any(|batch| {
+        !Arc::ptr_eq(batch.schema_ref(), &schema) && !schemas_equal(batch.schema_ref(), &schema)
+    }) {
         return Err(PyValueError::new_err(
             "Arrow record batches have inconsistent schemas",
         ));
@@ -225,6 +238,186 @@ fn reject_root_extension_type(data_type: &Bound<'_, PyAny>) -> PyResult<()> {
     Ok(())
 }
 
+fn reject_root_dictionary_order(data_type: &Bound<'_, PyAny>) -> PyResult<()> {
+    if let Ok(ordered) = data_type.getattr("ordered") {
+        if ordered.is_truthy()? {
+            return Err(PyTypeError::new_err(
+                "Ordered Arrow dictionaries require a schema or record batch to preserve ordering",
+            ));
+        }
+    }
+    Ok(())
+}
+
+// Arrow 58's Field conversion overwrites a map's type flags with its field flags.
+// Rebuild the descriptor tree using public constructors, retaining both. Only
+// descriptors are rebuilt: array buffers are not involved in schema conversion.
+fn export_c_data_type(data_type: &DataType) -> Result<FFI_ArrowSchema, ArrowError> {
+    fn has_sorted_map(data_type: &DataType) -> bool {
+        matches!(data_type, DataType::Map(_, true))
+            || child_fields(data_type)
+                .iter()
+                .any(|field| has_sorted_map(field.data_type()))
+            || matches!(data_type, DataType::Dictionary(_, values) if has_sorted_map(values))
+    }
+
+    fn rebuild(
+        source: &FFI_ArrowSchema,
+        data_type: &DataType,
+    ) -> Result<FFI_ArrowSchema, ArrowError> {
+        let children = child_fields(data_type)
+            .into_iter()
+            .enumerate()
+            .map(|(index, field)| rebuild(source.child(index), field.data_type()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let dictionary = match (source.dictionary(), data_type) {
+            (Some(schema), DataType::Dictionary(_, values)) => Some(rebuild(schema, values)?),
+            _ => None,
+        };
+        let mut schema = FFI_ArrowSchema::try_new(source.format(), children, dictionary)?
+            .with_metadata(source.metadata()?)?;
+        if let Some(name) = source.name() {
+            schema = schema.with_name(name)?;
+        }
+        schema.flags = source.flags;
+        if matches!(data_type, DataType::Map(_, true)) {
+            // ARROW_FLAG_MAP_KEYS_SORTED in the public Arrow C Data Interface.
+            schema.flags |= 0b100;
+        }
+        Ok(schema)
+    }
+
+    let schema = FFI_ArrowSchema::try_from(data_type)?;
+    if has_sorted_map(data_type) {
+        rebuild(&schema, data_type)
+    } else {
+        Ok(schema)
+    }
+}
+
+fn child_fields(data_type: &DataType) -> Vec<&Field> {
+    match data_type {
+        DataType::List(field)
+        | DataType::LargeList(field)
+        | DataType::ListView(field)
+        | DataType::LargeListView(field)
+        | DataType::FixedSizeList(field, _)
+        | DataType::Map(field, _) => vec![field],
+        DataType::Struct(fields) => fields.iter().map(AsRef::as_ref).collect(),
+        DataType::Union(fields, _) => fields.iter().map(|(_, field)| field.as_ref()).collect(),
+        DataType::RunEndEncoded(run_ends, values) => vec![run_ends, values],
+        _ => vec![],
+    }
+}
+
+fn schemas_equal(left: &Schema, right: &Schema) -> bool {
+    fn same_order(left: &DataType, right: &DataType) -> bool {
+        let fields_match =
+            child_fields(left)
+                .into_iter()
+                .zip(child_fields(right))
+                .all(|(left, right)| {
+                    left.dict_is_ordered() == right.dict_is_ordered()
+                        && same_order(left.data_type(), right.data_type())
+                });
+        fields_match
+            && match (left, right) {
+                (DataType::Dictionary(_, left), DataType::Dictionary(_, right)) => {
+                    same_order(left, right)
+                }
+                _ => true,
+            }
+    }
+
+    // Arrow's structural equality intentionally excludes dictionary-order flags.
+    // PyArrow includes them, so a table must not relabel later batches' ordering.
+    left == right
+        && same_order(
+            &DataType::Struct(left.fields().clone()),
+            &DataType::Struct(right.fields().clone()),
+        )
+}
+
+fn import_c_schema(schema: &FFI_ArrowSchema) -> Result<Schema, ArrowError> {
+    let DataType::Struct(fields) = import_c_data_type(schema)? else {
+        return Err(ArrowError::CDataInterface(
+            "A schema must be a struct type".into(),
+        ));
+    };
+    Ok(Schema::new(fields).with_metadata(schema.metadata()?))
+}
+
+fn import_c_data_type(schema: &FFI_ArrowSchema) -> Result<DataType, ArrowError> {
+    fn has_ordered_dictionary(schema: &FFI_ArrowSchema) -> bool {
+        schema.dictionary_ordered()
+            || schema.children().any(has_ordered_dictionary)
+            || schema.dictionary().is_some_and(has_ordered_dictionary)
+    }
+
+    // Arrow 58 drops DICTIONARY_ORDERED when importing Fields. Restore it at
+    // every field, including those nested in array types and dictionary values.
+    fn restore(data_type: DataType, schema: &FFI_ArrowSchema) -> Result<DataType, ArrowError> {
+        let field = |field: &Field, index: usize| -> Result<Arc<Field>, ArrowError> {
+            let child = schema.child(index);
+            Ok(Arc::new(
+                field
+                    .clone()
+                    .with_data_type(restore(field.data_type().clone(), child)?)
+                    .with_dict_is_ordered(child.dictionary_ordered()),
+            ))
+        };
+        Ok(match data_type {
+            DataType::List(child) => DataType::List(field(&child, 0)?),
+            DataType::LargeList(child) => DataType::LargeList(field(&child, 0)?),
+            DataType::ListView(child) => DataType::ListView(field(&child, 0)?),
+            DataType::LargeListView(child) => DataType::LargeListView(field(&child, 0)?),
+            DataType::FixedSizeList(child, size) => {
+                DataType::FixedSizeList(field(&child, 0)?, size)
+            }
+            DataType::Map(child, sorted) => DataType::Map(field(&child, 0)?, sorted),
+            DataType::Struct(fields) => DataType::Struct(
+                fields
+                    .iter()
+                    .enumerate()
+                    .map(|(index, child)| field(child, index))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into(),
+            ),
+            DataType::Union(fields, mode) => DataType::Union(
+                UnionFields::try_new(
+                    fields.iter().map(|(id, _)| id),
+                    fields
+                        .iter()
+                        .enumerate()
+                        .map(|(index, (_, child))| field(child, index))
+                        .collect::<Result<Vec<_>, _>>()?,
+                )?,
+                mode,
+            ),
+            DataType::RunEndEncoded(run_ends, values) => {
+                DataType::RunEndEncoded(field(&run_ends, 0)?, field(&values, 1)?)
+            }
+            DataType::Dictionary(keys, values) => DataType::Dictionary(
+                keys,
+                Box::new(restore(
+                    *values,
+                    schema.dictionary().ok_or_else(|| {
+                        ArrowError::CDataInterface("A dictionary must have a value type".into())
+                    })?,
+                )?),
+            ),
+            other => other,
+        })
+    }
+
+    let data_type = DataType::try_from(schema)?;
+    if has_ordered_dictionary(schema) {
+        restore(data_type, schema)
+    } else {
+        Ok(data_type)
+    }
+}
+
 fn require_pyarrow_class<'py>(
     value: &Bound<'py, PyAny>,
     name: &str,
@@ -252,8 +445,8 @@ fn export_python_array(
 
 fn validate_structure(data: &ArrayData) -> PyResult<()> {
     // Arrow's inexpensive validation recurses through child descriptors. It
-    // checks sizes and offset endpoints, not all offsets, UTF-8 contents, or
-    // dictionary indices whose conversion errors callers may defer.
+    // checks sizes and offset endpoints, not every offset or dictionary index;
+    // those remain producer preconditions. UTF-8 is decoded when a value is read.
     data.validate().map_err(arrow_error)
 }
 
@@ -331,6 +524,14 @@ fn check_python_data_type(data_type: &Bound<'_, PyAny>) -> PyResult<()> {
     if num_fields == 0 {
         for name in ["value_type", "storage_type"] {
             if let Ok(child) = data_type.getattr(name) {
+                if name == "value_type" && is_extension_type(&child)? {
+                    return Err(PyTypeError::new_err(
+                        "Arrow dictionary value extension types cannot preserve their metadata",
+                    ));
+                }
+                if name == "value_type" {
+                    reject_root_dictionary_order(&child)?;
+                }
                 check_python_data_type(&child)?;
             }
         }

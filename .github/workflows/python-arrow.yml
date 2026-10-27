@@ -1,0 +1,73 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+
+name: Python Arrow compatibility
+
+on:
+  push:
+    branches: [master, "branch-*"]
+  pull_request:
+    branches: [master, "branch-*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  converter:
+    name: Python Arrow (PyO3 ${{ matrix.pyo3 }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        pyo3: ["0.28.3", "0.29.0"]
+    env:
+      SPARK_PYTHON_ARROW_TEST_PYSPARK: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+      - name: Install reference Python converters
+        run: python -m pip install "pyspark-client==4.2.0" "pyarrow==26.0.0"
+      - name: Isolate the standalone crate and select PyO3
+        # The workspace lockfile pins 0.28.3. Build outside it so each matrix leg
+        # actually compiles the converter against the requested minor version.
+        run: |
+          cp -R crates/spark-python-arrow "$RUNNER_TEMP/spark-python-arrow"
+          cargo generate-lockfile --manifest-path "$RUNNER_TEMP/spark-python-arrow/Cargo.toml"
+          cargo update --manifest-path "$RUNNER_TEMP/spark-python-arrow/Cargo.toml" \
+            -p pyo3 --precise "${{ matrix.pyo3 }}"
+          cargo tree --manifest-path "$RUNNER_TEMP/spark-python-arrow/Cargo.toml" --locked -i pyo3
+      - name: Test native and official PySpark conversion semantics
+        run: |
+          cargo test --manifest-path "$RUNNER_TEMP/spark-python-arrow/Cargo.toml" \
+            --locked --features pyo3/abi3-py39
+      - name: Check converter Clippy
+        run: |
+          cargo clippy --manifest-path "$RUNNER_TEMP/spark-python-arrow/Cargo.toml" \
+            --locked --all-targets --features pyo3/abi3-py39 -- -D warnings
