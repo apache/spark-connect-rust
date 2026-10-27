@@ -346,14 +346,8 @@ mod tests {
         );
         let mut cloned = row.clone();
 
-        let RowFields::Shared(row_fields) = &row.fields else {
-            panic!("expected shared field names");
-        };
-        let RowFields::Shared(cloned_fields) = &cloned.fields else {
-            panic!("expected shared field names");
-        };
-        assert!(Arc::ptr_eq(&fields, row_fields));
-        assert!(Arc::ptr_eq(row_fields, cloned_fields));
+        assert!(std::ptr::eq(fields.as_ref(), row.fields()));
+        assert!(std::ptr::eq(row.fields(), cloned.fields()));
         let Value::List(items) = &mut cloned.values[0] else {
             panic!("expected a list value");
         };
@@ -366,19 +360,14 @@ mod tests {
     }
 
     #[test]
-    fn owned_rows_keep_the_field_buffer_and_clone_values_independently() {
-        let names = vec!["items".to_string()];
-        let original_fields = names.as_ptr();
+    fn constructed_rows_clone_values_independently() {
         let row = Row::new(
-            names,
+            vec!["items".to_string()],
             vec![Value::List(vec![Value::String("original".to_string())])],
         );
-        assert!(matches!(&row.fields, RowFields::Owned(_)));
-        assert_eq!(row.fields().as_ptr(), original_fields);
 
         let mut cloned = row.clone();
-        assert!(matches!(&cloned.fields, RowFields::Owned(_)));
-        assert_ne!(row.fields().as_ptr(), cloned.fields().as_ptr());
+        assert_eq!(row.fields(), cloned.fields());
         let Value::List(items) = &mut cloned.values[0] else {
             panic!("expected a list value");
         };

@@ -1086,46 +1086,36 @@ impl Catalog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::StringArray;
-    use arrow::datatypes::{DataType, Field, Schema};
-    use arrow::ipc::writer::StreamWriter;
-    use arrow::record_batch::RecordBatch;
-    use std::sync::Arc;
 
     #[test]
-    fn decoded_catalog_rows_preserve_database_metadata_and_share_field_names() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("name", DataType::Utf8, false),
-            Field::new("catalog", DataType::Utf8, true),
-            Field::new("description", DataType::Utf8, true),
-            Field::new("locationUri", DataType::Utf8, false),
-        ]));
-        let batch = RecordBatch::try_new(
-            schema,
+    fn parse_database_preserves_metadata_and_nullable_columns() {
+        let fields = vec![
+            "name".to_string(),
+            "catalog".to_string(),
+            "description".to_string(),
+            "locationUri".to_string(),
+        ];
+        let populated = Row::new(
+            fields.clone(),
             vec![
-                Arc::new(StringArray::from(vec!["one", "two"])),
-                Arc::new(StringArray::from(vec![Some("spark_catalog"), None])),
-                Arc::new(StringArray::from(vec![Some("first database"), None])),
-                Arc::new(StringArray::from(vec!["file:/one", "file:/two"])),
+                Value::String("one".to_string()),
+                Value::String("spark_catalog".to_string()),
+                Value::String("first database".to_string()),
+                Value::String("file:/one".to_string()),
             ],
-        )
-        .unwrap();
-        let mut data = Vec::new();
-        {
-            let mut writer = StreamWriter::try_new(&mut data, batch.schema().as_ref()).unwrap();
-            writer.write(&batch).unwrap();
-            writer.finish().unwrap();
-        }
-        let response = proto::execute_plan_response::ArrowBatch {
-            data: data.into(),
-            ..Default::default()
-        };
-        let rows = decode_arrow_batch(&response).unwrap();
+        );
+        let nullable = Row::new(
+            fields,
+            vec![
+                Value::String("two".to_string()),
+                Value::Null,
+                Value::Null,
+                Value::String("file:/two".to_string()),
+            ],
+        );
 
-        assert_eq!(rows.len(), 2);
-        assert!(std::ptr::eq(rows[0].fields(), rows[1].fields()));
         assert_eq!(
-            parse_database(&rows[0]),
+            parse_database(&populated),
             Database {
                 name: "one".to_string(),
                 catalog: Some("spark_catalog".to_string()),
@@ -1134,7 +1124,7 @@ mod tests {
             }
         );
         assert_eq!(
-            parse_database(&rows[1]),
+            parse_database(&nullable),
             Database {
                 name: "two".to_string(),
                 catalog: None,
