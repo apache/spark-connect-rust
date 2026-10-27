@@ -259,6 +259,11 @@ pub struct DataStreamWriter {
 }
 
 impl DataStreamWriter {
+    #[cfg(test)]
+    pub(crate) fn plan(&self) -> &LogicalPlan {
+        self.plan.as_ref()
+    }
+
     /// Create a new DataStreamWriter.
     pub(crate) fn new(session: SparkSession, plan: Arc<LogicalPlan>) -> Self {
         DataStreamWriter {
