@@ -2076,21 +2076,27 @@ fn decode_arrow_batch(batch: &proto::execute_plan_response::ArrowBatch) -> Resul
         let schema = record_batch.schema();
         let num_rows = record_batch.num_rows();
         let num_cols = record_batch.num_columns();
+        if num_rows == 0 {
+            continue;
+        }
+        let field_names: Arc<[String]> = schema
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect::<Vec<_>>()
+            .into();
 
         for row_idx in 0..num_rows {
-            let mut field_names = vec![];
             let mut values = vec![];
 
             for col_idx in 0..num_cols {
-                let field_name = schema.field(col_idx).name().clone();
                 let column = record_batch.column(col_idx);
 
                 let value = arrow_value_at(column.as_ref(), row_idx)?;
-                field_names.push(field_name);
                 values.push(value);
             }
 
-            rows.push(Row::new(field_names, values));
+            rows.push(Row::with_shared_fields(Arc::clone(&field_names), values));
         }
     }
 
@@ -2537,6 +2543,42 @@ mod conversion_tests {
             ],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn decoded_rows_share_batch_field_names_and_preserve_values() {
+        use arrow::ipc::writer::StreamWriter;
+
+        let batch = sample_batch();
+        let mut data = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut data, batch.schema().as_ref()).unwrap();
+            writer.write(&batch.slice(0, 0)).unwrap();
+            writer.write(&batch).unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+        }
+        let response = proto::execute_plan_response::ArrowBatch {
+            data: data.into(),
+            ..Default::default()
+        };
+        let rows = decode_arrow_batch(&response).unwrap();
+
+        assert_eq!(rows.len(), 6);
+        for (index, row) in rows.iter().enumerate() {
+            let source_index = index % 3;
+            assert_eq!(row.fields(), &["id".to_string(), "name".to_string()]);
+            assert_eq!(row.get(0), Some(&Value::Long(source_index as i64 + 1)));
+            assert_eq!(
+                row.get_by_name("name"),
+                Some(&Value::String(["a", "b", "c"][source_index].to_string()))
+            );
+        }
+        assert!(std::ptr::eq(rows[0].fields(), rows[1].fields()));
+        assert!(std::ptr::eq(rows[1].fields(), rows[2].fields()));
+        assert!(std::ptr::eq(rows[3].fields(), rows[4].fields()));
+        assert!(std::ptr::eq(rows[4].fields(), rows[5].fields()));
+        assert!(decode_arrow_batch(&Default::default()).unwrap().is_empty());
     }
 
     #[test]

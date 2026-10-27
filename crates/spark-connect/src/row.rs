@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 
 /// A Value in a Row, supporting all Spark SQL types.
 #[derive(Debug, Clone, PartialEq)]
@@ -175,12 +176,39 @@ impl fmt::Display for Value {
     }
 }
 
+#[derive(Clone)]
+enum RowFields {
+    Owned(Vec<String>),
+    Shared(Arc<[String]>),
+}
+
+impl RowFields {
+    fn as_slice(&self) -> &[String] {
+        match self {
+            Self::Owned(fields) => fields,
+            Self::Shared(fields) => fields,
+        }
+    }
+}
+
+impl fmt::Debug for RowFields {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.as_slice(), f)
+    }
+}
+
+impl PartialEq for RowFields {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
 /// A Row is an ordered collection of (field_name, value) pairs.
 /// Supports access by index or by field name.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Row {
     /// Field names (in order)
-    fields: Vec<String>,
+    fields: RowFields,
     /// Values corresponding to fields (in order)
     values: Vec<Value>,
 }
@@ -194,25 +222,41 @@ impl Row {
             values.len(),
             "field names and values must have the same length"
         );
-        Row { fields, values }
+        Row {
+            fields: RowFields::Owned(fields),
+            values,
+        }
+    }
+
+    /// Create a Row with immutable field names shared by rows from the same batch.
+    pub(crate) fn with_shared_fields(fields: Arc<[String]>, values: Vec<Value>) -> Self {
+        assert_eq!(
+            fields.len(),
+            values.len(),
+            "field names and values must have the same length"
+        );
+        Row {
+            fields: RowFields::Shared(fields),
+            values,
+        }
     }
 
     /// Create an empty Row.
     pub fn empty() -> Self {
         Row {
-            fields: vec![],
+            fields: RowFields::Owned(vec![]),
             values: vec![],
         }
     }
 
     /// Get the number of fields in this Row.
     pub fn len(&self) -> usize {
-        self.fields.len()
+        self.fields().len()
     }
 
     /// Check if this Row is empty.
     pub fn is_empty(&self) -> bool {
-        self.fields.is_empty()
+        self.fields().is_empty()
     }
 
     /// Get a field value by index.
@@ -227,7 +271,7 @@ impl Row {
 
     /// Get a field value by name.
     pub fn get_by_name(&self, name: &str) -> Option<&Value> {
-        self.fields
+        self.fields()
             .iter()
             .position(|f| f == name)
             .and_then(|i| self.values.get(i))
@@ -235,7 +279,7 @@ impl Row {
 
     /// Get field names.
     pub fn fields(&self) -> &[String] {
-        &self.fields
+        self.fields.as_slice()
     }
 
     /// Get values.
@@ -291,6 +335,106 @@ mod tests {
             Some(&Value::String("Alice".to_string()))
         );
         assert_eq!(row.get_by_name("nonexistent"), None);
+    }
+
+    #[test]
+    fn cloned_rows_share_field_names_and_keep_values_independent() {
+        let fields: Arc<[String]> = vec!["items".to_string()].into();
+        let row = Row::with_shared_fields(
+            Arc::clone(&fields),
+            vec![Value::List(vec![Value::String("original".to_string())])],
+        );
+        let mut cloned = row.clone();
+
+        let RowFields::Shared(row_fields) = &row.fields else {
+            panic!("expected shared field names");
+        };
+        let RowFields::Shared(cloned_fields) = &cloned.fields else {
+            panic!("expected shared field names");
+        };
+        assert!(Arc::ptr_eq(&fields, row_fields));
+        assert!(Arc::ptr_eq(row_fields, cloned_fields));
+        let Value::List(items) = &mut cloned.values[0] else {
+            panic!("expected a list value");
+        };
+        items[0] = Value::String("changed".to_string());
+        assert_eq!(
+            row.get(0),
+            Some(&Value::List(vec![Value::String("original".to_string())]))
+        );
+        assert_ne!(row.values(), cloned.values());
+    }
+
+    #[test]
+    fn owned_rows_keep_the_field_buffer_and_clone_values_independently() {
+        let names = vec!["items".to_string()];
+        let original_fields = names.as_ptr();
+        let row = Row::new(
+            names,
+            vec![Value::List(vec![Value::String("original".to_string())])],
+        );
+        assert!(matches!(&row.fields, RowFields::Owned(_)));
+        assert_eq!(row.fields().as_ptr(), original_fields);
+
+        let mut cloned = row.clone();
+        assert!(matches!(&cloned.fields, RowFields::Owned(_)));
+        assert_ne!(row.fields().as_ptr(), cloned.fields().as_ptr());
+        let Value::List(items) = &mut cloned.values[0] else {
+            panic!("expected a list value");
+        };
+        items[0] = Value::String("changed".to_string());
+        assert_eq!(
+            row.get(0),
+            Some(&Value::List(vec![Value::String("original".to_string())]))
+        );
+        assert_ne!(row.values(), cloned.values());
+    }
+
+    #[test]
+    fn shared_field_names_preserve_order_duplicates_equality_and_debug() {
+        let names = vec![
+            "second".to_string(),
+            "first".to_string(),
+            "second".to_string(),
+        ];
+        let values = vec![Value::Long(2), Value::Long(1), Value::Long(3)];
+        let shared = Row::with_shared_fields(names.clone().into(), values.clone());
+        let owned = Row::new(names.clone(), values);
+
+        assert_eq!(shared.fields(), names.as_slice());
+        assert_eq!(shared.get_by_name("second"), Some(&Value::Long(2)));
+        assert_eq!(shared.get(2), Some(&Value::Long(3)));
+        assert_eq!(shared, owned);
+        assert_eq!(owned, shared);
+        assert_eq!(format!("{shared:?}"), format!("{owned:?}"));
+        assert_eq!(
+            format!("{shared:?}"),
+            "Row { fields: [\"second\", \"first\", \"second\"], values: [Long(2), Long(1), Long(3)] }"
+        );
+        let reordered = Row::new(
+            vec![
+                "first".to_string(),
+                "second".to_string(),
+                "second".to_string(),
+            ],
+            owned.values().to_vec(),
+        );
+        assert_ne!(shared, reordered);
+    }
+
+    #[test]
+    fn shared_empty_field_names_preserve_empty_row_behavior() {
+        let fields: Arc<[String]> = Vec::new().into();
+        let row = Row::with_shared_fields(fields, vec![]);
+        assert_eq!(row, Row::empty());
+        assert!(row.fields().is_empty());
+        assert!(row.into_values().is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "field names and values must have the same length")]
+    fn shared_field_names_reject_mismatched_lengths() {
+        let _ = Row::with_shared_fields(vec!["field".to_string()].into(), vec![]);
     }
 
     #[test]
