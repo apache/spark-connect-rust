@@ -8,7 +8,7 @@ use std::fmt;
 use std::sync::Arc;
 
 /// A Value in a Row, supporting all Spark SQL types.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum Value {
     /// NULL value
     Null,
@@ -44,12 +44,63 @@ pub enum Value {
     List(Vec<Value>),
     /// Map of key-value pairs
     Map(BTreeMap<String, Value>),
-    /// Struct (nested Row)
-    Struct(Vec<(String, Value)>),
+    /// Struct (nested Row), with ordered names and values.
+    /// Construct with `Value::Struct(Row::new(fields, values).into())`.
+    Struct(StructValue),
     /// A VARIANT value carried as its raw (value, metadata) binary components, matching
     /// `pyspark.sql.types.VariantVal(value, metadata)`. Decoding to JSON/Python is done
     /// lazily on the Python side (VariantVal.toJson/toPython via variant_utils).
     Variant { value: Vec<u8>, metadata: Vec<u8> },
+}
+
+impl fmt::Debug for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Null => write!(f, "Null"),
+            Self::Bool(v) => f.debug_tuple("Bool").field(v).finish(),
+            Self::Byte(v) => f.debug_tuple("Byte").field(v).finish(),
+            Self::Short(v) => f.debug_tuple("Short").field(v).finish(),
+            Self::Integer(v) => f.debug_tuple("Integer").field(v).finish(),
+            Self::Long(v) => f.debug_tuple("Long").field(v).finish(),
+            Self::Float(v) => f.debug_tuple("Float").field(v).finish(),
+            Self::Double(v) => f.debug_tuple("Double").field(v).finish(),
+            Self::String(v) => f.debug_tuple("String").field(v).finish(),
+            Self::Binary(v) => f.debug_tuple("Binary").field(v).finish(),
+            Self::Date(v) => f.debug_tuple("Date").field(v).finish(),
+            Self::Timestamp(v) => f.debug_tuple("Timestamp").field(v).finish(),
+            Self::Decimal {
+                value,
+                precision,
+                scale,
+            } => f
+                .debug_struct("Decimal")
+                .field("value", value)
+                .field("precision", precision)
+                .field("scale", scale)
+                .finish(),
+            Self::List(v) => f.debug_tuple("List").field(v).finish(),
+            Self::Map(v) => f.debug_tuple("Map").field(v).finish(),
+            Self::Struct(row) => {
+                // Keep the previous ordered-pair representation while names are shared.
+                struct Fields<'a>(&'a StructValue);
+
+                impl fmt::Debug for Fields<'_> {
+                    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                        f.debug_list()
+                            .entries(self.0.fields().iter().zip(self.0.values()))
+                            .finish()
+                    }
+                }
+
+                f.debug_tuple("Struct").field(&Fields(row)).finish()
+            }
+            Self::Variant { value, metadata } => f
+                .debug_struct("Variant")
+                .field("value", value)
+                .field("metadata", metadata)
+                .finish(),
+        }
+    }
 }
 
 impl Value {
@@ -156,7 +207,7 @@ impl fmt::Display for Value {
             }
             Value::Struct(s) => {
                 write!(f, "(")?;
-                for (i, (k, v)) in s.iter().enumerate() {
+                for (i, (k, v)) in s.fields().iter().zip(s.values()).enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
@@ -173,6 +224,60 @@ impl fmt::Display for Value {
                 )
             }
         }
+    }
+}
+
+/// An ordered struct value with shared immutable field names and owned values.
+/// Cloning shares the names while cloning each value independently.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StructValue {
+    fields: Arc<[String]>,
+    values: Vec<Value>,
+}
+
+impl StructValue {
+    /// Create a struct with immutable names that can be shared with other structs.
+    /// Panics if the numbers of names and values differ.
+    pub fn new(fields: Arc<[String]>, values: Vec<Value>) -> Self {
+        assert_eq!(
+            fields.len(),
+            values.len(),
+            "field names and values must have the same length"
+        );
+        Self { fields, values }
+    }
+
+    /// Get the number of fields.
+    pub fn len(&self) -> usize {
+        self.fields.len()
+    }
+
+    /// Check whether this struct has no fields.
+    pub fn is_empty(&self) -> bool {
+        self.fields.is_empty()
+    }
+
+    /// Get the ordered field names.
+    pub fn fields(&self) -> &[String] {
+        &self.fields
+    }
+
+    /// Get the ordered values.
+    pub fn values(&self) -> &[Value] {
+        &self.values
+    }
+
+    /// Get a field value by index.
+    pub fn get(&self, index: usize) -> Option<&Value> {
+        self.values.get(index)
+    }
+
+    /// Get the first field value with the given name.
+    pub fn get_by_name(&self, name: &str) -> Option<&Value> {
+        self.fields
+            .iter()
+            .position(|field| field == name)
+            .and_then(|index| self.values.get(index))
     }
 }
 
@@ -211,6 +316,28 @@ pub struct Row {
     fields: RowFields,
     /// Values corresponding to fields (in order)
     values: Vec<Value>,
+}
+
+impl From<Row> for StructValue {
+    fn from(row: Row) -> Self {
+        let fields = match row.fields {
+            RowFields::Owned(fields) => fields.into(),
+            RowFields::Shared(fields) => fields,
+        };
+        Self {
+            fields,
+            values: row.values,
+        }
+    }
+}
+
+impl From<StructValue> for Row {
+    fn from(value: StructValue) -> Self {
+        Self {
+            fields: RowFields::Shared(value.fields),
+            values: value.values,
+        }
+    }
 }
 
 impl Row {
@@ -412,6 +539,145 @@ mod tests {
     }
 
     #[test]
+    fn nested_struct_names_preserve_pair_order_equality_and_formatting() {
+        let names = vec![
+            "".to_string(),
+            "a".to_string(),
+            "a".to_string(),
+            "é".to_string(),
+        ];
+        let values = vec![
+            Value::Null,
+            Value::Long(1),
+            Value::Long(2),
+            Value::List(vec![Value::String("original".to_string())]),
+        ];
+        let shared =
+            Value::Struct(Row::with_shared_fields(names.clone().into(), values.clone()).into());
+        let owned = Value::Struct(Row::new(names, values).into());
+        assert_eq!(shared, owned);
+        assert_eq!(owned, shared);
+        let Value::Struct(row) = &shared else {
+            panic!("expected a struct value");
+        };
+        assert_eq!(row.get_by_name("a"), Some(&Value::Long(1)));
+        assert_eq!(row.get(2), Some(&Value::Long(2)));
+        assert_eq!(shared.to_string(), "(=NULL, a=1, a=2, é=[original])");
+        assert_eq!(
+            format!("{shared:?}"),
+            "Struct([(\"\", Null), (\"a\", Long(1)), (\"a\", Long(2)), (\"é\", List([String(\"original\")]))])"
+        );
+        assert_eq!(format!("{shared:#?}"), format!("{owned:#?}"));
+        let empty = Value::Struct(Row::empty().into());
+        assert_eq!(format!("{empty:?}"), "Struct([])");
+        assert_eq!(empty.to_string(), "()");
+        let one = Value::Struct(Row::new(vec!["a".to_string()], vec![Value::Integer(1)]).into());
+        assert_eq!(
+            format!("{one:#?}"),
+            concat!(
+                "Struct(\n",
+                "    [\n",
+                "        (\n",
+                "            \"a\",\n",
+                "            Integer(\n",
+                "                1,\n",
+                "            ),\n",
+                "        ),\n",
+                "    ],\n",
+                ")"
+            )
+        );
+    }
+
+    #[test]
+    fn nested_struct_clones_share_names_and_keep_child_values_independent() {
+        let fields: Arc<[String]> = vec!["items".to_string()].into();
+        let value = Value::Struct(
+            Row::with_shared_fields(
+                Arc::clone(&fields),
+                vec![Value::List(vec![Value::String("original".to_string())])],
+            )
+            .into(),
+        );
+        let mut cloned = value.clone();
+        let Value::Struct(original_row) = &value else {
+            panic!("expected a struct value");
+        };
+        let Value::Struct(cloned_row) = &mut cloned else {
+            panic!("expected a cloned struct value");
+        };
+        assert!(std::ptr::eq(fields.as_ref(), cloned_row.fields()));
+        assert!(std::ptr::eq(original_row.fields(), cloned_row.fields()));
+        let Value::List(items) = &mut cloned_row.values[0] else {
+            panic!("expected a list value");
+        };
+        items[0] = Value::String("changed".to_string());
+        assert_eq!(
+            original_row.get(0),
+            Some(&Value::List(vec![Value::String("original".to_string())]))
+        );
+        assert_ne!(value, cloned);
+    }
+
+    #[test]
+    fn nested_struct_equality_does_not_shortcut_nan() {
+        let value = Value::Struct(
+            Row::with_shared_fields(
+                vec!["nan".to_string()].into(),
+                vec![Value::Double(f64::NAN)],
+            )
+            .into(),
+        );
+        assert_ne!(value, value.clone());
+    }
+
+    #[test]
+    fn struct_row_conversions_move_values_and_preserve_name_storage() {
+        let row = Row::new(
+            vec!["field".to_string()],
+            vec![Value::String("value".to_string())],
+        );
+        let names_text = row.fields()[0].as_ptr();
+        let values = row.values().as_ptr();
+        let value = StructValue::from(row);
+        assert_eq!(value.fields()[0].as_ptr(), names_text);
+        assert_eq!(value.values().as_ptr(), values);
+        assert_eq!(value.len(), 1);
+        assert!(!value.is_empty());
+        assert_eq!(value.get(0), Some(&Value::String("value".to_string())));
+        assert_eq!(value.get(1), None);
+        assert_eq!(value.get_by_name("missing"), None);
+
+        let names = value.fields().as_ptr();
+        let row = Row::from(value);
+        assert_eq!(row.fields().as_ptr(), names);
+        assert_eq!(row.values().as_ptr(), values);
+        let value = StructValue::from(row);
+        assert_eq!(value.fields().as_ptr(), names);
+        assert_eq!(value.values().as_ptr(), values);
+    }
+
+    #[test]
+    fn struct_value_constructor_shares_names_and_preserves_empty_values() {
+        let names: Arc<[String]> = vec!["name".to_string()].into();
+        let value = StructValue::new(Arc::clone(&names), vec![Value::Null]);
+        assert!(std::ptr::eq(names.as_ref(), value.fields()));
+        assert_eq!(value.get_by_name("name"), Some(&Value::Null));
+        let empty = StructValue::new(Vec::new().into(), vec![]);
+        assert_eq!(empty.len(), 0);
+        assert!(empty.is_empty());
+        assert!(empty.fields().is_empty());
+        assert!(empty.values().is_empty());
+        assert_eq!(Row::from(empty), Row::empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "field names and values must have the same length")]
+    fn struct_value_constructor_rejects_mismatched_lengths() {
+        let _ = StructValue::new(vec!["name".to_string()].into(), vec![]);
+    }
+
+    #[test]
     fn shared_empty_field_names_preserve_empty_row_behavior() {
         let fields: Arc<[String]> = Vec::new().into();
         let row = Row::with_shared_fields(fields, vec![]);
@@ -526,7 +792,8 @@ mod tests {
         m.insert("k".to_string(), Value::Integer(9));
         assert_eq!(Value::Map(m).to_string(), "{k: 9}");
         assert_eq!(
-            Value::Struct(vec![("a".to_string(), Value::Integer(1))]).to_string(),
+            Value::Struct(Row::new(vec!["a".to_string()], vec![Value::Integer(1)]).into())
+                .to_string(),
             "(a=1)"
         );
     }

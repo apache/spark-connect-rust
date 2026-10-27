@@ -13,7 +13,7 @@ use spark_connect_proto as proto;
 use crate::column::Column;
 use crate::expression::{Expression, ExpressionNode};
 use crate::plan::{AggregateGroupType, JoinType, LogicalPlan, SetOpType};
-use crate::row::{Row, Value};
+use crate::row::{Row, StructValue, Value};
 use crate::session::{ExecutionInfo, SparkSession};
 use crate::types::DataType;
 use crate::udf::CommonInlineUserDefinedFunctionExpression;
@@ -2077,7 +2077,6 @@ pub(crate) fn decode_arrow_batch(
     {
         let schema = record_batch.schema();
         let num_rows = record_batch.num_rows();
-        let num_cols = record_batch.num_columns();
         if num_rows == 0 {
             continue;
         }
@@ -2086,14 +2085,17 @@ pub(crate) fn decode_arrow_batch(
             .iter()
             .map(|field| field.name().clone())
             .collect::<Arc<[String]>>();
+        let layouts = record_batch
+            .columns()
+            .iter()
+            .map(|column| ArrowValueLayout::new(column.data_type()))
+            .collect::<Vec<_>>();
 
         for row_idx in 0..num_rows {
             let mut values = vec![];
 
-            for col_idx in 0..num_cols {
-                let column = record_batch.column(col_idx);
-
-                let value = arrow_value_at(column.as_ref(), row_idx)?;
+            for (column, layout) in record_batch.columns().iter().zip(&layouts) {
+                let value = arrow_value_at_with_layout(column.as_ref(), row_idx, layout)?;
                 values.push(value);
             }
 
@@ -2239,7 +2241,60 @@ fn map_key_to_string(v: Value) -> String {
     }
 }
 
+/// Immutable decoding metadata prepared once for each column in a record batch.
+/// Container layouts follow their children so struct names are also shared inside
+/// lists and maps, without retaining the Arrow arrays after decoding.
+enum ArrowValueLayout {
+    Scalar,
+    List(Box<Self>),
+    Struct {
+        names: Arc<[String]>,
+        children: Vec<Self>,
+        is_variant: bool,
+    },
+    Map(Box<(Self, Self)>),
+}
+
+impl ArrowValueLayout {
+    fn new(data_type: &arrow::datatypes::DataType) -> Self {
+        use arrow::datatypes::DataType;
+        match data_type {
+            DataType::List(field) => Self::List(Box::new(Self::new(field.data_type()))),
+            DataType::Struct(fields) => Self::Struct {
+                names: fields.iter().map(|field| field.name().clone()).collect(),
+                children: fields
+                    .iter()
+                    .map(|field| Self::new(field.data_type()))
+                    .collect(),
+                is_variant: fields.iter().any(|field| {
+                    field
+                        .metadata()
+                        .get("variant")
+                        .is_some_and(|value| value == "true")
+                }),
+            },
+            DataType::Map(entries, _) => match entries.data_type() {
+                DataType::Struct(fields) => Self::Map(Box::new((
+                    Self::new(fields[0].data_type()),
+                    Self::new(fields[1].data_type()),
+                ))),
+                _ => unreachable!("Arrow map entries must be a struct"),
+            },
+            _ => Self::Scalar,
+        }
+    }
+}
+
+#[cfg(test)]
 fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> Result<Value> {
+    arrow_value_at_with_layout(array, index, &ArrowValueLayout::new(array.data_type()))
+}
+
+fn arrow_value_at_with_layout(
+    array: &dyn arrow::array::Array,
+    index: usize,
+    value_layout: &ArrowValueLayout,
+) -> Result<Value> {
     use arrow::array::*;
 
     if array.is_null(index) {
@@ -2339,28 +2394,37 @@ fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> Result<Value
     }
     // Nested: list, struct, map (recurse).
     if let Some(arr) = array.as_any().downcast_ref::<ListArray>() {
+        let ArrowValueLayout::List(child_layout) = value_layout else {
+            unreachable!("layout is prepared from the array's data type");
+        };
         let child = arr.value(index);
         let mut items = Vec::with_capacity(child.len());
         for i in 0..child.len() {
-            items.push(arrow_value_at(child.as_ref(), i)?);
+            items.push(arrow_value_at_with_layout(child.as_ref(), i, child_layout)?);
         }
         return Ok(Value::List(items));
     }
     if let Some(arr) = array.as_any().downcast_ref::<StructArray>() {
+        let ArrowValueLayout::Struct {
+            names,
+            children,
+            is_variant,
+        } = value_layout
+        else {
+            unreachable!("layout is prepared from the array's data type");
+        };
         // A VARIANT column arrives as struct<value: binary, metadata: binary> where the
         // `metadata` field carries arrow metadata {"variant": "true"}. Recognize it and
         // return a Value::Variant (raw bytes) so it materializes as a VariantVal (matching
         // pyspark) rather than a plain {value, metadata} struct/dict.
-        let is_variant = arr.fields().iter().any(|f| {
-            f.metadata()
-                .get("variant")
-                .map(|v| v == "true")
-                .unwrap_or(false)
-        });
-        if is_variant {
+        if *is_variant {
             let bin_field = |name: &str| -> Result<Vec<u8>> {
-                match arr.column_by_name(name) {
-                    Some(col) => match arrow_value_at(col.as_ref(), index)? {
+                match arr.fields().iter().position(|field| field.name() == name) {
+                    Some(col_idx) => match arrow_value_at_with_layout(
+                        arr.column(col_idx).as_ref(),
+                        index,
+                        &children[col_idx],
+                    )? {
                         Value::Binary(b) => Ok(b),
                         Value::Null => Ok(vec![]),
                         _ => Err(SparkError::connect_msg("variant field is not binary")),
@@ -2373,13 +2437,20 @@ fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> Result<Value
                 metadata: bin_field("metadata")?,
             });
         }
-        let mut fields = Vec::new();
-        for (f, col) in arr.fields().iter().zip(arr.columns()) {
-            fields.push((f.name().clone(), arrow_value_at(col.as_ref(), index)?));
+        let mut values = Vec::with_capacity(children.len());
+        for (col, child_layout) in arr.columns().iter().zip(children) {
+            values.push(arrow_value_at_with_layout(
+                col.as_ref(),
+                index,
+                child_layout,
+            )?);
         }
-        return Ok(Value::Struct(fields));
+        return Ok(Value::Struct(StructValue::new(Arc::clone(names), values)));
     }
     if let Some(arr) = array.as_any().downcast_ref::<MapArray>() {
+        let ArrowValueLayout::Map(children) = value_layout else {
+            unreachable!("layout is prepared from the array's data type");
+        };
         let entries = arr.value(index);
         let keys = entries.column(0);
         let vals = entries.column(1);
@@ -2388,8 +2459,11 @@ fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> Result<Value
             // A map key stringifies to its natural scalar form (e.g. `1`, `true`,
             // `1.5`), not the Rust enum's Debug output - a `map<int,string>` key must
             // be "1", never "Integer(1)".
-            let k = map_key_to_string(arrow_value_at(keys.as_ref(), i)?);
-            map.insert(k, arrow_value_at(vals.as_ref(), i)?);
+            let k = map_key_to_string(arrow_value_at_with_layout(keys.as_ref(), i, &children.0)?);
+            map.insert(
+                k,
+                arrow_value_at_with_layout(vals.as_ref(), i, &children.1)?,
+            );
         }
         return Ok(Value::Map(map));
     }
@@ -2451,6 +2525,312 @@ fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> Result<Value
         "Unsupported Arrow type {:?} - cannot convert to Value",
         array.data_type()
     )))
+}
+
+#[cfg(test)]
+mod nested_decode_tests {
+    use super::*;
+    use arrow::array::*;
+    use arrow::buffer::{NullBuffer, OffsetBuffer};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::ipc::writer::StreamWriter;
+    use arrow::record_batch::RecordBatch;
+
+    fn decode_batches(columns: Vec<(&str, ArrayRef)>, repeats: usize) -> Vec<Row> {
+        let schema = Arc::new(Schema::new(
+            columns
+                .iter()
+                .map(|(name, array)| Field::new(*name, array.data_type().clone(), true))
+                .collect::<Vec<_>>(),
+        ));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            columns.into_iter().map(|(_, array)| array).collect(),
+        )
+        .unwrap();
+        let mut data = vec![];
+        {
+            let mut writer = StreamWriter::try_new(&mut data, &schema).unwrap();
+            for _ in 0..repeats {
+                writer.write(&batch).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        decode_arrow_batch(&proto::execute_plan_response::ArrowBatch {
+            data: data.into(),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    fn as_struct(value: &Value) -> &StructValue {
+        let Value::Struct(row) = value else {
+            panic!("expected struct, got {value:?}");
+        };
+        row
+    }
+
+    #[test]
+    fn nested_names_preserve_duplicates_unicode_nulls_and_sibling_layouts() {
+        let names = ["dup", "dup", "", "名前"];
+        let fields = names
+            .iter()
+            .map(|name| Arc::new(Field::new(*name, DataType::Int32, true)))
+            .collect::<Vec<_>>();
+        let columns = (1..=4)
+            .map(|n| Arc::new(Int32Array::from(vec![Some(n), None, None])) as ArrayRef)
+            .collect();
+        let nested = StructArray::new(
+            fields.into(),
+            columns,
+            Some(NullBuffer::from(vec![true, true, false])),
+        );
+        let sibling = StructArray::from(vec![(
+            Arc::new(Field::new("other", DataType::Int32, false)),
+            Arc::new(Int32Array::from(vec![7, 8, 9])) as ArrayRef,
+        )]);
+        let rows = decode_batches(
+            vec![("nested", Arc::new(nested)), ("sibling", Arc::new(sibling))],
+            2,
+        );
+        assert_eq!(rows.len(), 6);
+        for batch in rows.chunks(3) {
+            let populated = as_struct(batch[0].get(0).unwrap());
+            let all_null = as_struct(batch[1].get(0).unwrap());
+            assert_eq!(populated.fields(), &names);
+            assert_eq!(
+                populated.values(),
+                &[
+                    Value::Integer(1),
+                    Value::Integer(2),
+                    Value::Integer(3),
+                    Value::Integer(4)
+                ]
+            );
+            assert_eq!(populated.get_by_name("dup"), Some(&Value::Integer(1)));
+            assert_eq!(all_null.values(), &vec![Value::Null; 4]);
+            assert_eq!(batch[2].get(0), Some(&Value::Null));
+            assert!(std::ptr::eq(populated.fields(), all_null.fields()));
+            let other = as_struct(batch[0].get(1).unwrap());
+            assert_eq!(other.fields(), &["other"]);
+            assert_eq!(other.values(), &[Value::Integer(7)]);
+        }
+    }
+
+    #[test]
+    fn names_are_shared_through_lists_maps_and_nested_structs() {
+        let leaf = StructArray::from(vec![(
+            Arc::new(Field::new("leaf", DataType::Int32, false)),
+            Arc::new(Int32Array::from(vec![1, 2, 3, 4])) as ArrayRef,
+        )]);
+        let entries = StructArray::from(vec![
+            (
+                Arc::new(Field::new("key", DataType::Utf8, false)),
+                Arc::new(StringArray::from(vec!["a", "b", "c", "d"])) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("value", leaf.data_type().clone(), true)),
+                Arc::new(leaf) as ArrayRef,
+            ),
+        ]);
+        let map = MapArray::new(
+            Arc::new(Field::new("entries", entries.data_type().clone(), false)),
+            OffsetBuffer::new(vec![0, 1, 2, 3, 4].into()),
+            entries,
+            None,
+            false,
+        );
+        let list = ListArray::new(
+            Arc::new(Field::new("item", map.data_type().clone(), true)),
+            OffsetBuffer::new(vec![0, 2, 4].into()),
+            Arc::new(map),
+            None,
+        );
+        let outer = StructArray::from(vec![(
+            Arc::new(Field::new("items", list.data_type().clone(), true)),
+            Arc::new(list) as ArrayRef,
+        )]);
+        let rows = decode_batches(vec![("outer", Arc::new(outer))], 1);
+        let mut leaves = vec![];
+        for row in &rows {
+            let outer = as_struct(row.get(0).unwrap());
+            let Value::List(maps) = outer.get(0).unwrap() else {
+                panic!("expected list");
+            };
+            for value in maps {
+                let Value::Map(map) = value else {
+                    panic!("expected map");
+                };
+                leaves.push(as_struct(map.values().next().unwrap()));
+            }
+        }
+        assert_eq!(leaves.len(), 4);
+        for (index, leaf) in leaves.iter().enumerate() {
+            assert_eq!(leaf.fields(), &["leaf"]);
+            assert_eq!(leaf.get(0), Some(&Value::Integer(index as i32 + 1)));
+            assert!(std::ptr::eq(leaves[0].fields(), leaf.fields()));
+        }
+    }
+
+    #[test]
+    fn sliced_containers_preserve_offsets_empty_null_and_struct_values() {
+        let leaf = StructArray::new(
+            vec![Arc::new(Field::new("n", DataType::Int32, true))].into(),
+            vec![Arc::new(Int32Array::from(vec![
+                Some(0),
+                Some(1),
+                None,
+                Some(3),
+                Some(4),
+                Some(5),
+            ]))],
+            Some(NullBuffer::from(vec![true, true, false, true, true, true])),
+        );
+        let offsets = OffsetBuffer::new(vec![0, 1, 3, 3, 4, 6].into());
+        let valid = Some(NullBuffer::from(vec![true, true, true, false, true]));
+        let list = ListArray::new(
+            Arc::new(Field::new("item", leaf.data_type().clone(), true)),
+            offsets.clone(),
+            Arc::new(leaf.clone()),
+            valid.clone(),
+        );
+        let entries = StructArray::from(vec![
+            (
+                Arc::new(Field::new("key", DataType::Utf8, false)),
+                Arc::new(StringArray::from(vec!["k0", "k1", "k2", "k3", "k4", "k5"])) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("value", leaf.data_type().clone(), true)),
+                Arc::new(leaf) as ArrayRef,
+            ),
+        ]);
+        let map = MapArray::new(
+            Arc::new(Field::new("entries", entries.data_type().clone(), false)),
+            offsets,
+            entries,
+            valid,
+            false,
+        );
+        let rows = decode_batches(
+            vec![
+                ("list", Arc::new(list.slice(1, 4))),
+                ("map", Arc::new(map.slice(1, 4))),
+            ],
+            1,
+        );
+        let value =
+            |n| Value::Struct(Row::new(vec!["n".to_string()], vec![Value::Integer(n)]).into());
+        assert_eq!(
+            rows[0].get(0),
+            Some(&Value::List(vec![value(1), Value::Null]))
+        );
+        assert_eq!(
+            rows[0].get(1),
+            Some(&Value::Map(
+                [
+                    ("k1".to_string(), value(1)),
+                    ("k2".to_string(), Value::Null)
+                ]
+                .into()
+            ))
+        );
+        assert_eq!(rows[1].get(0), Some(&Value::List(vec![])));
+        assert_eq!(rows[1].get(1), Some(&Value::Map(Default::default())));
+        assert_eq!(rows[2].get(0), Some(&Value::Null));
+        assert_eq!(rows[2].get(1), Some(&Value::Null));
+        assert_eq!(rows[3].get(0), Some(&Value::List(vec![value(4), value(5)])));
+        assert_eq!(
+            rows[3].get(1),
+            Some(&Value::Map(
+                [("k4".to_string(), value(4)), ("k5".to_string(), value(5))].into()
+            ))
+        );
+        let (Value::List(first), Value::List(last)) =
+            (rows[0].get(0).unwrap(), rows[3].get(0).unwrap())
+        else {
+            panic!("expected lists");
+        };
+        assert!(std::ptr::eq(
+            as_struct(&first[0]).fields(),
+            as_struct(&last[0]).fields()
+        ));
+        let (Value::Map(first), Value::Map(last)) =
+            (rows[0].get(1).unwrap(), rows[3].get(1).unwrap())
+        else {
+            panic!("expected maps");
+        };
+        assert!(std::ptr::eq(
+            as_struct(&first["k1"]).fields(),
+            as_struct(&last["k4"]).fields()
+        ));
+    }
+
+    #[test]
+    fn variant_marker_precedes_struct_decoding_and_preserves_errors() {
+        let marked = |name: &str, array: ArrayRef| {
+            let field = Field::new(name, array.data_type().clone(), true).with_metadata(
+                std::collections::HashMap::from([("variant".into(), "true".into())]),
+            );
+            StructArray::from(vec![(Arc::new(field), array)])
+        };
+        let binary = marked(
+            "value",
+            Arc::new(BinaryArray::from(vec![Some(b"x".as_ref()), None])),
+        );
+        assert_eq!(
+            arrow_value_at(&binary, 0).unwrap(),
+            Value::Variant {
+                value: b"x".to_vec(),
+                metadata: vec![]
+            }
+        );
+        assert_eq!(
+            arrow_value_at(&binary, 1).unwrap(),
+            Value::Variant {
+                value: vec![],
+                metadata: vec![]
+            }
+        );
+        let missing = marked("unrelated", Arc::new(Int32Array::from(vec![1])));
+        assert_eq!(
+            arrow_value_at(&missing, 0).unwrap(),
+            Value::Variant {
+                value: vec![],
+                metadata: vec![]
+            }
+        );
+        let invalid = marked("metadata", Arc::new(Int32Array::from(vec![1])));
+        assert!(arrow_value_at(&invalid, 0)
+            .unwrap_err()
+            .to_string()
+            .contains("variant field is not binary"));
+        let null_parent = StructArray::new(
+            invalid.fields().clone(),
+            invalid.columns().to_vec(),
+            Some(NullBuffer::from(vec![false])),
+        );
+        assert_eq!(arrow_value_at(&null_parent, 0).unwrap(), Value::Null);
+        let ordinary = StructArray::from(vec![
+            (
+                Arc::new(Field::new("value", DataType::Int32, false)),
+                Arc::new(Int32Array::from(vec![1])) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("metadata", DataType::Int32, false)),
+                Arc::new(Int32Array::from(vec![2])) as ArrayRef,
+            ),
+        ]);
+        assert_eq!(
+            arrow_value_at(&ordinary, 0).unwrap(),
+            Value::Struct(
+                Row::new(
+                    vec!["value".to_string(), "metadata".to_string()],
+                    vec![Value::Integer(1), Value::Integer(2)]
+                )
+                .into()
+            )
+        );
+    }
 }
 
 /// Render microseconds-since-midnight as an ISO time string `HH:MM:SS[.ffffff]`.
