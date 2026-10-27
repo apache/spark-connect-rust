@@ -92,6 +92,9 @@ jobs:
           python -m pip install maturin pytest coverage
           python -m pip install pandas pyarrow numpy grpcio grpcio-status googleapis-common-protos cloudpickle zstandard py4j
 
+      - name: Test standalone Python and Arrow converter
+        run: cargo test -p spark-python-arrow --locked --features pyo3/abi3-py39
+
       - name: Cache Spark ${{ env.SPARK_VERSION }} distribution
         uses: actions/cache@v4
         with:
@@ -226,7 +229,7 @@ jobs:
 
       - name: Measure Python coverage with offline test suite
         run: |
-          cd python && PYTHONPATH=$(pwd) python -m coverage run --rcfile=.coveragerc -m pytest tests/test_dropin_offline.py
+          cd python && PYTHONPATH=$(pwd) python -m coverage run --rcfile=.coveragerc -m pytest tests/test_dropin_offline.py tests/test_arrow_handoff.py
           PYTHONPATH=$(pwd) python -m coverage json --rcfile=.coveragerc -o coverage-python.json
 
       - name: Parse Python coverage and create badge JSON
