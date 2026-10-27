@@ -781,18 +781,18 @@ fn coerce_value(v: Option<&Value>, target: &DataType) -> Value {
                 .collect(),
         ),
         (DataType::Struct { fields }, Value::Struct(sf)) => Value::Struct(
-            fields
-                .iter()
-                .enumerate()
-                .map(|(i, f)| {
-                    let val = sf
-                        .iter()
-                        .find(|(n, _)| n == &f.name)
-                        .map(|(_, v)| v)
-                        .or_else(|| sf.get(i).map(|(_, v)| v));
-                    (f.name.clone(), coerce_value(val, &f.data_type))
-                })
-                .collect(),
+            Row::new(
+                fields.iter().map(|f| f.name.clone()).collect(),
+                fields
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| {
+                        let val = sf.get_by_name(&f.name).or_else(|| sf.get(i));
+                        coerce_value(val, &f.data_type)
+                    })
+                    .collect(),
+            )
+            .into(),
         ),
         (DataType::Map { value_type, .. }, Value::Map(m)) => Value::Map(
             m.iter()
@@ -1002,10 +1002,9 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
                         for (i, f) in fields.iter().enumerate() {
                             // Prefer match by field name, else positional.
                             let val = sf
-                                .iter()
-                                .find(|(n, _)| n == &f.name)
-                                .map(|(_, val)| val.clone())
-                                .or_else(|| sf.get(i).map(|(_, val)| val.clone()))
+                                .get_by_name(&f.name)
+                                .or_else(|| sf.get(i))
+                                .cloned()
                                 .unwrap_or(Value::Null);
                             cols[i].push(val);
                         }
@@ -1301,6 +1300,238 @@ fn decimal_str_to_unscaled(s: &str, scale: i32) -> Result<i128> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn struct_field(name: &str, data_type: DataType) -> crate::types::StructField {
+        crate::types::StructField {
+            name: name.to_string(),
+            data_type,
+            nullable: true,
+            metadata: Default::default(),
+        }
+    }
+
+    #[test]
+    fn nested_struct_coercion_preserves_first_name_position_and_numeric_types() {
+        let source = Value::Struct(
+            Row::with_shared_fields(
+                vec!["dup", "dup", "other", "nested", "items", "map"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect::<Arc<[String]>>(),
+                vec![
+                    Value::Long(257),
+                    Value::Long(999),
+                    Value::Long(-2),
+                    Value::Struct(Row::new(vec!["n".to_string()], vec![Value::Long(300)]).into()),
+                    Value::List(vec![Value::Long(65_537), Value::Null]),
+                    Value::Map([("k".to_string(), Value::Long(65_538))].into()),
+                ],
+            )
+            .into(),
+        );
+        let target = DataType::Struct {
+            fields: vec![
+                struct_field("dup", DataType::Byte),
+                struct_field("positional", DataType::Short),
+                struct_field("dup", DataType::Long),
+                struct_field(
+                    "nested",
+                    DataType::Struct {
+                        fields: vec![struct_field("n", DataType::Byte)],
+                    },
+                ),
+                struct_field(
+                    "items",
+                    DataType::Array {
+                        element_type: Box::new(DataType::Short),
+                        contains_null: true,
+                    },
+                ),
+                struct_field(
+                    "map",
+                    DataType::Map {
+                        key_type: Box::new(DataType::String {
+                            collation: "UTF8_BINARY".to_string(),
+                        }),
+                        value_type: Box::new(DataType::Short),
+                        value_contains_null: true,
+                    },
+                ),
+                struct_field("missing", DataType::Integer),
+            ],
+        };
+        let actual = coerce_value(Some(&source), &target);
+        let expected = Value::Struct(
+            Row::new(
+                vec![
+                    "dup",
+                    "positional",
+                    "dup",
+                    "nested",
+                    "items",
+                    "map",
+                    "missing",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+                vec![
+                    Value::Byte(1),
+                    Value::Short(999),
+                    Value::Long(257),
+                    Value::Struct(Row::new(vec!["n".to_string()], vec![Value::Byte(44)]).into()),
+                    Value::List(vec![Value::Short(1), Value::Null]),
+                    Value::Map([("k".to_string(), Value::Short(2))].into()),
+                    Value::Null,
+                ],
+            )
+            .into(),
+        );
+        assert_eq!(actual, expected);
+        assert_eq!(coerce_value(Some(&Value::Null), &target), Value::Null);
+        assert_eq!(coerce_value(None, &target), Value::Null);
+    }
+
+    #[test]
+    fn struct_arrow_encoding_preserves_lookup_map_and_null_semantics() {
+        use arrow::array::{Array, Int16Array, Int32Array, Int64Array, StructArray};
+
+        let target = DataType::Struct {
+            fields: vec![
+                struct_field("dup", DataType::Integer),
+                struct_field("positional", DataType::Short),
+                struct_field("dup", DataType::Long),
+                struct_field("missing", DataType::Integer),
+            ],
+        };
+        let values = vec![
+            Value::Struct(
+                Row::new(
+                    vec!["dup".to_string(), "dup".to_string(), "other".to_string()],
+                    vec![Value::Long(257), Value::Long(999), Value::Long(-2)],
+                )
+                .into(),
+            ),
+            Value::Map(
+                [
+                    ("dup".to_string(), Value::Long(5)),
+                    ("other".to_string(), Value::Long(9)),
+                ]
+                .into(),
+            ),
+            Value::Null,
+            Value::Struct(Row::new(vec!["dup".to_string()], vec![Value::Null]).into()),
+        ];
+        let array = values_to_arrow(&values, &target).unwrap();
+        let array = array.as_any().downcast_ref::<StructArray>().unwrap();
+        assert_eq!(array.len(), 4);
+        assert!(!array.is_null(0));
+        assert!(!array.is_null(1));
+        assert!(array.is_null(2));
+        assert!(!array.is_null(3));
+        let first = array
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        assert_eq!(
+            first,
+            &Int32Array::from(vec![Some(257), Some(5), None, None])
+        );
+        let positional = array
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int16Array>()
+            .unwrap();
+        assert_eq!(
+            positional,
+            &Int16Array::from(vec![Some(999), None, None, None])
+        );
+        let duplicate = array
+            .column(2)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(
+            duplicate,
+            &Int64Array::from(vec![Some(257), Some(5), None, None])
+        );
+        assert_eq!(array.column(3).null_count(), 4);
+    }
+
+    #[test]
+    fn struct_arrow_encoding_recurses_through_arrays_and_maps() {
+        use arrow::array::{Int16Array, ListArray, MapArray, StructArray};
+
+        let leaf_type = DataType::Struct {
+            fields: vec![struct_field("n", DataType::Short)],
+        };
+        let leaf_value =
+            || Value::Struct(Row::new(vec!["n".to_string()], vec![Value::Long(300)]).into());
+        let target = DataType::Struct {
+            fields: vec![
+                struct_field(
+                    "items",
+                    DataType::Array {
+                        element_type: Box::new(leaf_type.clone()),
+                        contains_null: true,
+                    },
+                ),
+                struct_field(
+                    "lookup",
+                    DataType::Map {
+                        key_type: Box::new(DataType::String {
+                            collation: "UTF8_BINARY".to_string(),
+                        }),
+                        value_type: Box::new(leaf_type),
+                        value_contains_null: true,
+                    },
+                ),
+            ],
+        };
+        let source = Value::Struct(
+            Row::new(
+                vec!["items".to_string(), "lookup".to_string()],
+                vec![
+                    Value::List(vec![leaf_value(), Value::Null]),
+                    Value::Map([("k".to_string(), leaf_value())].into()),
+                ],
+            )
+            .into(),
+        );
+        let array = values_to_arrow(&[source], &target).unwrap();
+        let array = array.as_any().downcast_ref::<StructArray>().unwrap();
+        let items = array
+            .column(0)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let items = items.value(0);
+        let items = items.as_any().downcast_ref::<StructArray>().unwrap();
+        assert_eq!(
+            items
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int16Array>()
+                .unwrap(),
+            &Int16Array::from(vec![Some(300), None])
+        );
+        let lookup = array.column(1).as_any().downcast_ref::<MapArray>().unwrap();
+        let entries = lookup.value(0);
+        let value = entries
+            .column(1)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        assert_eq!(
+            value
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int16Array>()
+                .unwrap(),
+            &Int16Array::from(vec![Some(300)])
+        );
+    }
 
     fn session() -> SparkSession {
         SparkSession::builder()

@@ -915,9 +915,11 @@ fn value_to_datatype(v: &Value) -> DataType {
                 contains_null: true,
             }
         }
-        Value::Struct(fields) => DataType::Struct {
-            fields: fields
+        Value::Struct(row) => DataType::Struct {
+            fields: row
+                .fields()
                 .iter()
+                .zip(row.values())
                 .map(|(n, val)| spark_connect::types::StructField {
                     name: n.clone(),
                     data_type: value_to_datatype(val),
@@ -1004,17 +1006,7 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     // pyspark Row -> struct: its named fields (values already core Values), so a nested
     // Row inside createDataFrame data (e.g. Row(s=Row(x=1))) converts recursively.
     if let Ok(pyrow) = obj.extract::<PyRef<crate::row::PyRow>>() {
-        let fields = pyrow.row.fields();
-        let values = pyrow.row.values();
-        let mut out = Vec::with_capacity(values.len());
-        for (i, v) in values.iter().enumerate() {
-            let name = fields
-                .get(i)
-                .cloned()
-                .unwrap_or_else(|| format!("_{}", i + 1));
-            out.push((name, v.clone()));
-        }
-        return Ok(Value::Struct(out));
+        return Ok(Value::Struct(pyrow.row.clone().into()));
     }
 
     // dict -> map (keys coerced to their string form, values recursively converted)
