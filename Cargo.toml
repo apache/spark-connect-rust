@@ -84,7 +84,7 @@ datafusion = { version = "53", default-features = false }
 polars = { version = "0.54", default-features = false, features = ["ipc"] }
 
 # PyO3 for the pyspark-rs CPython extension.
-pyo3 = { version = "0.28", features = ["extension-module", "abi3-py39"] }
+pyo3 = { version = "0.30.1", features = ["extension-module", "abi3-py39"] }
 
 # misc
 bytes = "1"
