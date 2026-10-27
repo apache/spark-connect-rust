@@ -66,21 +66,19 @@ publication would require Apache package naming and release-flow integration.
 Source-based consumers can pin a repository revision and validate it in their
 own dependency graph. The repository's root `LICENSE` covers this crate.
 
-The manifest keeps its package metadata self-contained so the compatibility
-tests can build it outside the workspace lockfile. The library does not
-enable PyO3's `extension-module` feature or select a minimum Python ABI;
+The library does not enable PyO3's `extension-module` feature or select a minimum Python ABI;
 `pyspark-rs` selects these features for the Python extension.
 
 PyO3 must resolve to one compatible version in each consuming dependency graph.
-The manifest permits PyO3 0.28, 0.29, and 0.30; the Python extension selects
-0.30.1. Both this crate and `pyspark-rs` declare Rust 1.85, matching the declared
-minimum of Arrow 58.3.0 and PyO3 0.30.1. The existing workspace default of 1.82
-is unchanged; it is not a claim that these Python/Arrow packages build on 1.82.
-The minimum compiler has not been independently tested locally.
+The manifest uses the same PyO3 0.28 line as the Python extension, with 0.28.3
+pinned in the workspace lockfile. This change does not upgrade PyO3.
+This crate declares Rust 1.85, matching Arrow 58.3.0's declared minimum.
+The existing workspace default of 1.82 is unchanged; it is not a claim that
+these Python/Arrow packages build on 1.82. The minimum compiler has not been
+independently tested locally.
 
-The isolated compatibility CI job tests each PyO3 minor independently of the
-workspace lockfile. A version is not considered verified until its corresponding
-job passes. These tests run in the compatibility workflow, not again in coverage.
+The Python Arrow export CI job tests this crate with the workspace lockfile.
+These tests run separately from the extension build and are not repeated in coverage.
 
 ## Tests
 

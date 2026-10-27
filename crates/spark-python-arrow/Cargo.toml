@@ -27,8 +27,7 @@ repository = "https://github.com/apache/spark-connect-rust"
 [dependencies]
 arrow = { version = "58", default-features = false, features = ["ffi", "ipc"] }
 # The consumer chooses the Python ABI floor and embedding/extension-module linking.
-# Compatibility CI resolves each supported minor independently of the workspace lockfile.
-pyo3 = { version = ">=0.28, <0.31" }
+pyo3 = { version = "0.28" }
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

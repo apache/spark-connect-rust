@@ -2,8 +2,7 @@
 
 use pyo3::exceptions::{PyAttributeError, PyIndexError, PyKeyError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList, PyString};
-use pyo3::IntoPyObjectExt;
+use pyo3::types::{PyBytes, PyDict, PyList};
 use spark_connect::row::{Row, Value};
 
 /// Python wrapper for a Spark Row.
@@ -18,28 +17,29 @@ impl PyRow {
     }
 }
 
-/// Convert a Spark `Value` into a Python object using PyO3's `IntoPyObject`.
+/// Convert a Spark `Value` into a Python object (PyO3 0.28 `IntoPyObject`).
 pub fn value_to_py<'py>(py: Python<'py>, v: &Value) -> PyResult<Bound<'py, PyAny>> {
     // Propagate conversion failures as Python exceptions with `?` rather than
     // panicking across the FFI boundary (the conversions are near-infallible,
     // but a panic here would unwind into CPython).
     Ok(match v {
         Value::Null => py.None().into_bound(py),
-        Value::Bool(b) => b.into_bound_py_any(py)?,
-        Value::Byte(n) => n.into_bound_py_any(py)?,
-        Value::Short(n) => n.into_bound_py_any(py)?,
-        Value::Integer(n) => n.into_bound_py_any(py)?,
-        Value::Long(n) => n.into_bound_py_any(py)?,
-        Value::Float(f) => f.into_bound_py_any(py)?,
-        Value::Double(f) => f.into_bound_py_any(py)?,
-        Value::String(s) => PyString::new(py, s).into_any(),
+        Value::Bool(b) => b.into_pyobject(py)?.to_owned().into_any(),
+        Value::Byte(n) => (*n as i64).into_pyobject(py)?.into_any(),
+        Value::Short(n) => (*n as i64).into_pyobject(py)?.into_any(),
+        Value::Integer(n) => (*n as i64).into_pyobject(py)?.into_any(),
+        Value::Long(n) => (*n).into_pyobject(py)?.into_any(),
+        Value::Float(f) => (*f as f64).into_pyobject(py)?.into_any(),
+        Value::Double(f) => (*f).into_pyobject(py)?.into_any(),
+        Value::String(s) => s.as_str().into_pyobject(py)?.into_any(),
         Value::Binary(b) => PyBytes::new(py, b).into_any(),
         Value::Date(d) => {
-            // 719163 is the ordinal of 1970-01-01. Use i64 to avoid overflow
-            // before Python reports dates outside its supported range.
-            py.import("datetime")?
-                .getattr("date")?
-                .call_method1("fromordinal", (i64::from(*d) + 719_163,))?
+            // Convert days-since-epoch (i32) to datetime.date
+            let date_mod = py.import("datetime")?;
+            let date_cls = date_mod.getattr("date")?;
+            // 719163 is the ordinal of 1970-01-01
+            let ordinal = (*d as i64) + 719163i64;
+            date_cls.call_method1("fromordinal", (ordinal,))?.into_any()
         }
         Value::Timestamp(t) => {
             // Convert microseconds-since-epoch (i64) to datetime.datetime

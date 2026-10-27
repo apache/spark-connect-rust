@@ -1,7 +1,7 @@
 //! PyO3 wrapper for Spark Connect sessions.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyByteArray, PyBytes, PyDict, PyList};
+use pyo3::types::{PyDict, PyList};
 use spark_connect::row::{Row, Value};
 use spark_connect::session::SparkSession;
 use spark_connect::types::{DataType, StructField};
@@ -980,11 +980,11 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
 
     // Check for bytes/bytearray SPECIFICALLY (not `extract::<Vec<u8>>()`, which also
     // matches a Python list of small ints like [1,2,3] and would mis-tag arrays as binary).
-    if let Ok(bytes) = obj.cast::<PyBytes>() {
-        return Ok(Value::Binary(bytes.as_bytes().to_vec()));
+    if let Ok(b) = obj.cast::<pyo3::types::PyBytes>() {
+        return Ok(Value::Binary(b.as_bytes().to_vec()));
     }
-    if let Ok(bytes) = obj.cast::<PyByteArray>() {
-        return Ok(Value::Binary(bytes.to_vec()));
+    if let Ok(ba) = obj.cast::<pyo3::types::PyByteArray>() {
+        return Ok(Value::Binary(ba.to_vec()));
     }
 
     // list / tuple -> array (recursively converted)
