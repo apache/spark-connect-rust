@@ -15,10 +15,9 @@
 // specific language governing permissions and limitations
 // under the License.
 
-//! Python/Arrow conversion without a dependency on Spark transport.
+//! Arrow record batch export to PyArrow without a dependency on Spark transport.
 //!
-//! The bridge shares compatible Arrow value buffers; scalar and row materialization still
-//! allocates Python objects. The caller owns its interpreter and row representation.
+//! The bridge shares compatible Arrow value buffers. Scalar conversion and row materialization
+//! remain in the client binding. The caller owns its Python interpreter.
 
 pub mod bridge;
-pub mod scalar;

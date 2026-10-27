@@ -63,7 +63,7 @@ A Cargo workspace of library crates, plus a Python skin:
 | `apache-spark-connect-core` | `crates/spark-connect-core` | Transport: channel, retries, reattach, artifacts, errors |
 | `apache-spark-connect` | `crates/spark-connect` | The DataFrame API: session, dataframe, column, functions, plan, group, catalog, window, readwriter, streaming, types |
 | `pyspark-rs` | `crates/pyspark-rs` | PyO3 bindings - builds the `_pyspark` extension module |
-| `spark-python-arrow` (unpublished) | `crates/spark-python-arrow` | Arrow/PyArrow C Data bridge and client scalar conversion |
+| `spark-python-arrow` (unpublished) | `crates/spark-python-arrow` | Arrow record batch export to PyArrow |
 | Python skin | `python/pyspark` | The drop-in `pyspark` package (+ vendored `pyspark.pandas`, `cloudpickle`, `pyspark.testing`) |
 
 ```mermaid

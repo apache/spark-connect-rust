@@ -18,9 +18,10 @@
 name = "spark-python-arrow"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.85"
 license = "Apache-2.0"
 publish = false
-description = "Arrow and Python conversion for Spark clients"
+description = "Arrow record batch export to PyArrow for Spark clients"
 repository = "https://github.com/apache/spark-connect-rust"
 
 [dependencies]

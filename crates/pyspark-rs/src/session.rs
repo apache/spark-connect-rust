@@ -1,7 +1,7 @@
 //! PyO3 wrapper for Spark Connect sessions.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyByteArray, PyBytes, PyDict, PyList};
 use spark_connect::row::{Row, Value};
 use spark_connect::session::SparkSession;
 use spark_connect::types::{DataType, StructField};
@@ -945,15 +945,13 @@ fn value_to_datatype(v: &Value) -> DataType {
 
 /// Convert a Python value to a Rust Value.
 pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
-    use spark_python_arrow::scalar;
-
     // Check for None
     if obj.is_none() {
         return Ok(Value::Null);
     }
 
     // Check for bool (before int because bool is a subclass of int in Python)
-    if let Ok(b) = scalar::extract_bool(obj) {
+    if let Ok(b) = obj.extract::<bool>() {
         return Ok(Value::Bool(b));
     }
 
@@ -964,24 +962,27 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     }
 
     // Check for int
-    if let Ok(i) = scalar::extract_i64(obj) {
+    if let Ok(i) = obj.extract::<i64>() {
         return Ok(Value::Long(i));
     }
 
     // Check for float
-    if let Ok(f) = scalar::extract_f64(obj) {
+    if let Ok(f) = obj.extract::<f64>() {
         return Ok(Value::Double(f));
     }
 
     // Check for str
-    if let Ok(s) = scalar::extract_string(obj) {
+    if let Ok(s) = obj.extract::<String>() {
         return Ok(Value::String(s));
     }
 
     // Check for bytes/bytearray SPECIFICALLY (not `extract::<Vec<u8>>()`, which also
     // matches a Python list of small ints like [1,2,3] and would mis-tag arrays as binary).
-    if let Some(bytes) = scalar::extract_binary(obj) {
-        return Ok(Value::Binary(bytes));
+    if let Ok(bytes) = obj.cast::<PyBytes>() {
+        return Ok(Value::Binary(bytes.as_bytes().to_vec()));
+    }
+    if let Ok(bytes) = obj.cast::<PyByteArray>() {
+        return Ok(Value::Binary(bytes.to_vec()));
     }
 
     // list / tuple -> array (recursively converted)

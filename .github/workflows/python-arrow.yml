@@ -61,7 +61,7 @@ jobs:
           cargo update --manifest-path "$RUNNER_TEMP/spark-python-arrow/Cargo.toml" \
             -p pyo3 --precise "${{ matrix.pyo3 }}"
           cargo tree --manifest-path "$RUNNER_TEMP/spark-python-arrow/Cargo.toml" --locked -i pyo3
-      - name: Test Arrow handoff and scalar conversion
+      - name: Test Arrow table export
         run: |
           cargo test --manifest-path "$RUNNER_TEMP/spark-python-arrow/Cargo.toml" \
             --locked --features pyo3/abi3-py39

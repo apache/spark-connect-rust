@@ -47,7 +47,7 @@ crates/
                         column, plan, dataframe, functions, session, readwriter,
                         catalog, group, window, udf/udtf, streaming, observation
   pyspark-rs            PyO3 bindings -> native module `_pyspark`
-  spark-python-arrow    Python/Arrow bridge and scalar conversion; no transport
+  spark-python-arrow    Arrow record batch export to PyArrow; no transport
 python/
   pyspark/…             thin drop-in package; public modules re-export from
                         `_pyspark` so `from pyspark.sql import SparkSession` works
@@ -74,12 +74,11 @@ Compatible Arrow data buffers are shared with PyArrow. Schemas with embedded
 NUL field names or timezones use an IPC compatibility fallback, without another
 RPC. `toPandas()` then calls PyArrow's pandas conversion, which may copy.
 
-The shared crate also owns the scalar routines used by the Python binding's
-input conversion and row materialization. It does not own the client `Row`
-representation, schema inference, transport, or worker execution. `collect()`
-still uses the native client's owned rows; `createDataFrame(pandas)` still materializes
-Python rows. Neither path is claimed to be zero-copy. See the
-[shared converter contract](../../crates/spark-python-arrow/README.md).
+Scalar input conversion and row materialization stay in `pyspark-rs`. The export
+crate does not own schema inference, transport, or worker execution. `collect()`
+still uses the native client's owned rows; `createDataFrame(pandas)` still
+materializes Python rows. Neither path is claimed to be zero-copy. See the
+[table export contract](../../crates/spark-python-arrow/README.md).
 
 ## UDF strategy (full compatibility)
 
