@@ -6,7 +6,7 @@ use spark_connect_core::error::{Result, SparkError};
 use spark_connect_core::runtime::block_on;
 use spark_connect_proto as proto;
 
-use crate::dataframe::DataFrame;
+use crate::dataframe::{decode_arrow_batch, DataFrame};
 use crate::row::{Row, Value};
 use crate::session::SparkSession;
 
@@ -1083,55 +1083,64 @@ impl Catalog {
     }
 }
 
-/// Decode an Arrow batch into rows.
-pub(crate) fn decode_arrow_batch(
-    batch: &proto::execute_plan_response::ArrowBatch,
-) -> Result<Vec<Row>> {
-    use arrow::ipc::reader::StreamReader;
-    use std::io::Cursor;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::StringArray;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::ipc::writer::StreamWriter;
+    use arrow::record_batch::RecordBatch;
+    use std::sync::Arc;
 
-    if batch.data.is_empty() {
-        return Ok(vec![]);
-    }
-
-    let cursor = Cursor::new(&batch.data);
-    let mut reader = StreamReader::try_new(cursor, None).map_err(|e| {
-        SparkError::connect_msg(format!("Failed to create Arrow stream reader: {}", e))
-    })?;
-
-    let mut rows = vec![];
-
-    while let Some(record_batch) = reader
-        .next()
-        .transpose()
-        .map_err(|e| SparkError::connect_msg(format!("Failed to decode Arrow batch: {}", e)))?
-    {
-        let schema = record_batch.schema();
-        let num_rows = record_batch.num_rows();
-        let num_cols = record_batch.num_columns();
-
-        for row_idx in 0..num_rows {
-            let mut field_names = vec![];
-            let mut values = vec![];
-
-            for col_idx in 0..num_cols {
-                let field_name = schema.field(col_idx).name().clone();
-                let column = record_batch.column(col_idx);
-
-                let value = arrow_value_at(column.as_ref(), row_idx)?;
-                field_names.push(field_name);
-                values.push(value);
-            }
-
-            rows.push(Row::new(field_names, values));
+    #[test]
+    fn decoded_catalog_rows_preserve_database_metadata_and_share_field_names() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("name", DataType::Utf8, false),
+            Field::new("catalog", DataType::Utf8, true),
+            Field::new("description", DataType::Utf8, true),
+            Field::new("locationUri", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["one", "two"])),
+                Arc::new(StringArray::from(vec![Some("spark_catalog"), None])),
+                Arc::new(StringArray::from(vec![Some("first database"), None])),
+                Arc::new(StringArray::from(vec!["file:/one", "file:/two"])),
+            ],
+        )
+        .unwrap();
+        let mut data = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut data, batch.schema().as_ref()).unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
         }
+        let response = proto::execute_plan_response::ArrowBatch {
+            data: data.into(),
+            ..Default::default()
+        };
+        let rows = decode_arrow_batch(&response).unwrap();
+
+        assert_eq!(rows.len(), 2);
+        assert!(std::ptr::eq(rows[0].fields(), rows[1].fields()));
+        assert_eq!(
+            parse_database(&rows[0]),
+            Database {
+                name: "one".to_string(),
+                catalog: Some("spark_catalog".to_string()),
+                description: Some("first database".to_string()),
+                location_uri: "file:/one".to_string(),
+            }
+        );
+        assert_eq!(
+            parse_database(&rows[1]),
+            Database {
+                name: "two".to_string(),
+                catalog: None,
+                description: None,
+                location_uri: "file:/two".to_string(),
+            }
+        );
     }
-
-    Ok(rows)
-}
-
-/// Extract a value at a row index from an Arrow array. Delegates to the single,
-/// comprehensive decoder in `dataframe` so catalog results support every type too.
-fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> Result<Value> {
-    crate::dataframe::arrow_value_at(array, index)
 }

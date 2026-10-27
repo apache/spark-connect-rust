@@ -2053,7 +2053,9 @@ pub(crate) fn assign_plan_ids(
 }
 
 /// Decode an Arrow batch into rows.
-fn decode_arrow_batch(batch: &proto::execute_plan_response::ArrowBatch) -> Result<Vec<Row>> {
+pub(crate) fn decode_arrow_batch(
+    batch: &proto::execute_plan_response::ArrowBatch,
+) -> Result<Vec<Row>> {
     use arrow::ipc::reader::StreamReader;
     use std::io::Cursor;
 
@@ -2079,12 +2081,11 @@ fn decode_arrow_batch(batch: &proto::execute_plan_response::ArrowBatch) -> Resul
         if num_rows == 0 {
             continue;
         }
-        let field_names: Arc<[String]> = schema
+        let field_names = schema
             .fields()
             .iter()
             .map(|field| field.name().clone())
-            .collect::<Vec<_>>()
-            .into();
+            .collect::<Arc<[String]>>();
 
         for row_idx in 0..num_rows {
             let mut values = vec![];
@@ -2238,7 +2239,7 @@ fn map_key_to_string(v: Value) -> String {
     }
 }
 
-pub(crate) fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> Result<Value> {
+fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> Result<Value> {
     use arrow::array::*;
 
     if array.is_null(index) {
