@@ -5,14 +5,14 @@
 //! else, and window frame boundaries. No server required.
 
 use spark_connect::expression::{
-    Alias, CaseWhen, Cast, CastEvalMode, ColumnReference, Expression, FrameBoundary,
-    LiteralExpression, SortOrder, UnresolvedFunction, WindowExpressionWrapper,
+    Alias, CaseWhen, Cast, CastEvalMode, ColumnReference, Expression, ExpressionNode,
+    FrameBoundary, LiteralExpression, SortOrder, WindowExpressionWrapper,
 };
 use spark_connect::types::DataType;
 use spark_connect::udf::{eval_type, CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
 
 fn col_expr(name: &str) -> Expression {
-    Expression::ColumnReference(ColumnReference::new(name))
+    Expression::column(name)
 }
 
 #[test]
@@ -64,7 +64,7 @@ fn inline_udf_expression_to_proto() {
         vec![col_expr("x")],
         payload,
     );
-    let expr = Expression::CommonInlineUserDefinedFunction(Box::new(udf));
+    let expr: Expression = ExpressionNode::CommonInlineUserDefinedFunction(Box::new(udf)).into();
     assert!(expr.to_proto().expr_type.is_some());
 }
 
@@ -100,16 +100,16 @@ fn cast_eval_modes_and_type_str() {
 fn case_when_with_else_to_proto() {
     let cw = CaseWhen::new(vec![(
         col_expr("cond"),
-        Expression::Literal(LiteralExpression::int(1)),
+        Expression::literal(LiteralExpression::int(1)),
     )])
-    .with_else(Expression::Literal(LiteralExpression::int(0)));
+    .with_else(Expression::literal(LiteralExpression::int(0)));
     assert!(cw.else_expr.is_some());
     assert!(cw.to_proto().expr_type.is_some());
 }
 
 #[test]
 fn window_frame_boundaries_to_proto() {
-    let func = Expression::UnresolvedFunction(UnresolvedFunction::new("row_number", vec![]));
+    let func = Expression::function("row_number", vec![]);
     let order = vec![SortOrder::asc_nulls_first(col_expr("x"))];
 
     // Preceding / Following value boundaries.

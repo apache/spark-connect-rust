@@ -6,6 +6,7 @@
 //! `to_proto()`, so the proto-building lines run. Assertions are light on purpose.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use spark_connect::column::lit;
 use spark_connect::plan::{self, JoinType, LogicalPlan};
@@ -93,8 +94,8 @@ fn lateral_join_to_proto_all_join_types() {
         JoinType::Cross,
     ] {
         let p = LogicalPlan::LateralJoin {
-            left: Box::new(base()),
-            right: Box::new(base()),
+            left: Arc::new(base()),
+            right: Arc::new(base()),
             join_type: jt,
             on: None,
         };
@@ -106,7 +107,7 @@ fn lateral_join_to_proto_all_join_types() {
 #[test]
 fn repartition_by_range_to_proto() {
     let p = LogicalPlan::RepartitionByRange {
-        input: Box::new(base()),
+        input: Arc::new(base()),
         num_partitions: Some(4),
         partition_exprs: vec![],
     };
@@ -134,7 +135,7 @@ fn read_datasource_to_proto() {
 #[test]
 fn stat_sample_by_to_proto() {
     let p = LogicalPlan::StatSampleBy {
-        input: Box::new(base()),
+        input: Arc::new(base()),
         col: "k".to_string(),
         fractions: vec![
             (lit(0).expression().clone(), 0.1),

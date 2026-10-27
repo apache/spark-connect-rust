@@ -22,7 +22,7 @@ use spark_connect_proto as proto;
 
 /// An integer literal Column.
 fn cint(v: i32) -> spark_connect::column::Column {
-    spark_connect::column::Column::new(Expression::Literal(
+    spark_connect::column::Column::new(Expression::literal(
         spark_connect::expression::LiteralExpression::int(v),
     ))
 }

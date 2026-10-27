@@ -270,8 +270,8 @@ fn test_pivot_with_explicit_values_assertion() {
 
     // Create an aggregation with pivot and explicit values.
     let pivot_values = vec![
-        Expression::Literal(LiteralExpression::string("a")),
-        Expression::Literal(LiteralExpression::string("b")),
+        Expression::literal(LiteralExpression::string("a")),
+        Expression::literal(LiteralExpression::string("b")),
     ];
     let df_plan = plan::aggregate_with_pivot(
         base,

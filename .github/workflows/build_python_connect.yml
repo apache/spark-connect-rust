@@ -39,6 +39,7 @@ on:
 
 env:
   SPARK_VERSION: "4.2.0"
+  RUST_PARITY_LOG_DIR: /tmp/parity-test-logs
   SPARK_CONNECT_TESTING_REMOTE: sc://localhost:15002
   SPARK_TESTING: "1"
   SPARK_SKIP_CONNECT_COMPAT_TESTS: "1"   # force remote-only (pure connect, no local JVM)
@@ -98,7 +99,9 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest pandas pyarrow numpy grpcio grpcio-status googleapis-common-protos cloudpickle zstandard py4j
+          # Match the supported pandas 2.x environment used by pandas-parity.yml.
+          # Spark 4.2's tests and Python workers are not compatible with pandas 3.x.
+          python -m pip install pytest 'pandas>=2.2,<3.0' pyarrow numpy grpcio grpcio-status googleapis-common-protos cloudpickle zstandard py4j
 
       - name: Build the Rust extension into the skin
         # The parity diff drives both clients via PYTHONPATH (our ./python for ours,
@@ -271,6 +274,7 @@ jobs:
         with:
           name: parity-ours-py${{ matrix.python-version }}
           path: |
+            /tmp/parity-test-logs/
             /tmp/parity_ours.log
             /tmp/parity_localcluster.log
             /tmp/connect-server.log
@@ -326,7 +330,7 @@ jobs:
       - name: Install Python dependencies (server-side UDF workers)
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pandas pyarrow numpy
+          python -m pip install 'pandas>=2.2,<3.0' pyarrow numpy
 
       - name: Cache Spark ${{ env.SPARK_VERSION }} distribution
         uses: actions/cache@v4
@@ -411,7 +415,7 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y protobuf-compiler
           python -m pip install --upgrade pip
-          python -m pip install pandas pyarrow numpy grpcio grpcio-status googleapis-common-protos cloudpickle zstandard py4j "pyspark==${SPARK_VERSION}"
+          python -m pip install 'pandas>=2.2,<3.0' pyarrow numpy grpcio grpcio-status googleapis-common-protos cloudpickle zstandard py4j "pyspark==${SPARK_VERSION}"
       - name: Build the Rust extension into the skin
         # Build the extension into ./python/pyspark so our client is usable via
         # PYTHONPATH. We do NOT install a wheel: our package and the reference

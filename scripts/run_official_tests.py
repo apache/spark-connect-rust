@@ -13,6 +13,9 @@ regression, or a new environmental failure. Regenerate the manifest with
 scripts/gen_parity_skiplist.py (which runs the reference client) to reclassify, and
 commit the update if it is environmental.
 
+Set ``RUST_PARITY_LOG_DIR`` to retain each pytest attempt (including tracebacks,
+retries, drift checks, and partial output on timeout). CI uploads these logs.
+
 Usage:
     RUST_PYSPARK_SO=/repo/python/pyspark/_pyspark.so \
     SPARK_CONNECT_TESTING_REMOTE=sc://localhost:15002 \
@@ -27,6 +30,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -139,6 +143,18 @@ def parse_counts(text: str):
     return c
 
 
+def write_test_log(test_file: Path, spark_py: Path, text: str, select_only: bool):
+    """Keep pytest diagnostics, including each retry and manifest drift attempt."""
+    root = os.environ.get("RUST_PARITY_LOG_DIR")
+    if not root:
+        return
+    relative = test_file.relative_to(spark_py)
+    mode = "drift" if select_only else "tests"
+    path = Path(root) / relative.parent / f"{relative.stem}.{mode}.{time.time_ns()}.log"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
 def run_ours(
     test_file: Path, spark_py: Path, remote: str, deselect, timeout: int, select_only=False
 ):
@@ -177,8 +193,17 @@ def run_ours(
             args, env=env, cwd=str(spark_py), capture_output=True, text=True, timeout=timeout
         )
         text = r.stdout + "\n" + r.stderr
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
+
+        def decoded(value):
+            return (
+                value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value or ""
+            )
+
+        text = decoded(exc.stdout) + "\n" + decoded(exc.stderr) + f"\nTIMEOUT after {timeout}s\n"
+        write_test_log(test_file, spark_py, text, select_only)
         return {"passed": 0, "failed": 0, "error": 0, "skipped": 0, "timeout": True, "rc": -1}, []
+    write_test_log(test_file, spark_py, text, select_only)
     counts = parse_counts(text)
     # Gate on pytest's exit code, NOT just the scraped summary: a plugin/extension load
     # failure, collection/import error, or mid-file crash exits nonzero with NO summary
