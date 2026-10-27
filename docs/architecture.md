@@ -63,6 +63,7 @@ A Cargo workspace of library crates, plus a Python skin:
 | `apache-spark-connect-core` | `crates/spark-connect-core` | Transport: channel, retries, reattach, artifacts, errors |
 | `apache-spark-connect` | `crates/spark-connect` | The DataFrame API: session, dataframe, column, functions, plan, group, catalog, window, readwriter, streaming, types |
 | `pyspark-rs` | `crates/pyspark-rs` | PyO3 bindings - builds the `_pyspark` extension module |
+| `spark-python-arrow` (unpublished) | `crates/spark-python-arrow` | Arrow C Stream table export to PyArrow |
 | Python skin | `python/pyspark` | The drop-in `pyspark` package (+ vendored `pyspark.pandas`, `cloudpickle`, `pyspark.testing`) |
 
 ```mermaid
@@ -70,6 +71,7 @@ flowchart LR
     PROTO["spark-connect-proto"] --> CORE["spark-connect-core"]
     CORE --> SC["spark-connect (DataFrame API)"]
     SC --> PYO3["pyspark-rs (PyO3)"]
+    PYARROW["spark-python-arrow (unpublished)"] --> PYO3
     PYO3 --> SKIN["python/pyspark skin"]
     SC --> RUSTAPP["your Rust app"]
 ```
@@ -101,6 +103,27 @@ Transformations are **lazy** - they only build up the plan. Only an *action*
 triggers `ExecutePlan`. If the response stream breaks mid-flight, the core's
 reattachable-execute iterator resumes from the last response it saw, so long
 results survive transient disconnects.
+
+### Python Arrow table handoff
+
+`DataFrame.toArrow()` collects the decoded Arrow batches in Rust, then exports
+one reader through the Arrow C Stream Interface. PyArrow imports that reader
+once and calls `read_all()` to build the table. Native callbacks transfer batch
+descriptors and ownership without calling Python for each batch. C Stream is
+not an IPC byte stream, and this path still holds all result batches in memory
+before the handoff; it does not stream results from the network into Python.
+
+Compatible Arrow value and offset buffers are shared rather than serialized
+again. Schema descriptors still need allocation, sliced validity bitmaps may
+need realignment, and `toPandas()` may copy during pandas conversion. The server's
+IPC responses must still be decoded. Row materialization in `collect()` is
+unchanged and is not zero-copy.
+
+The bridge preserves batch boundaries, schema metadata, and ordering flags. It
+rejects batches with inconsistent schemas. Field names or timezones containing
+NUL use an IPC compatibility fallback over the collected batches, without
+another RPC; length-prefixed schema metadata can contain NUL without fallback.
+An empty batch vector still produces an empty table with an empty schema.
 
 ## Two front-ends, one core
 
@@ -152,7 +175,7 @@ See [Rust UDFs via WebAssembly](udfs.md) for the full story.
 3. **Correctness is gated in CI** - golden-proto tests guard plan building; the
    official Apache Spark Connect test suite guards transport and Arrow paths (see
    the CI notes under `dev/design/`).
-4. **Version = Spark version** - the crate/wheel version tracks the Spark release
+4. **Version = Spark version** - the published crate/wheel version tracks the Spark release
    it targets, so the number tells you which Spark it speaks.
 
 For the deeper design write-ups (design notes, CI, the official test suite, and
