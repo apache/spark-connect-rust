@@ -7,8 +7,8 @@ use std::ops::{Add, BitAnd, BitOr, Div, Mul, Not, Rem, Sub};
 use spark_connect_proto as proto;
 
 use crate::expression::{
-    Alias, CaseWhen, Cast, CastEvalMode, ColumnReference, Expression, ExtractValue, FrameBoundary,
-    LiteralExpression, SortOrder, UnresolvedFunction, UpdateFieldsExpr, WindowExpressionWrapper,
+    Alias, CaseWhen, Cast, CastEvalMode, Expression, ExpressionNode, ExtractValue, FrameBoundary,
+    LiteralExpression, SortOrder, UpdateFieldsExpr, WindowExpressionWrapper,
 };
 use crate::types::DataType;
 use crate::window::WindowSpec;
@@ -36,7 +36,7 @@ impl Column {
     /// Mirrors `pyspark.sql.column.Column.alias`.
     pub fn alias(self, name: &str) -> Column {
         Column {
-            expr: Expression::Alias(Box::new(Alias::new(self.expr, name))),
+            expr: ExpressionNode::Alias(Box::new(Alias::new(self.expr, name))).into(),
         }
     }
 
@@ -49,7 +49,8 @@ impl Column {
     ) -> Column {
         let json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
         Column {
-            expr: Expression::Alias(Box::new(Alias::new(self.expr, name).with_metadata(json))),
+            expr: ExpressionNode::Alias(Box::new(Alias::new(self.expr, name).with_metadata(json)))
+                .into(),
         }
     }
 
@@ -61,7 +62,7 @@ impl Column {
     /// Mirrors `pyspark.sql.column.Column.cast`.
     pub fn cast(self, to_type: DataType) -> Column {
         Column {
-            expr: Expression::Cast(Box::new(Cast::new(self.expr, to_type))),
+            expr: ExpressionNode::Cast(Box::new(Cast::new(self.expr, to_type))).into(),
         }
     }
 
@@ -74,167 +75,139 @@ impl Column {
     /// `col("x").cast("string")` → `cast { type_str: "string" }`.
     pub fn cast_str(self, type_name: &str) -> Column {
         Column {
-            expr: Expression::Cast(Box::new(Cast::new_str(self.expr, type_name))),
+            expr: ExpressionNode::Cast(Box::new(Cast::new_str(self.expr, type_name))).into(),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.try_cast`.
     pub fn try_cast(self, to_type: DataType) -> Column {
         Column {
-            expr: Expression::Cast(Box::new(
+            expr: ExpressionNode::Cast(Box::new(
                 Cast::new(self.expr, to_type).with_eval_mode(CastEvalMode::Try),
-            )),
+            ))
+            .into(),
         }
     }
 
     /// `Column.try_cast` with a DDL type string.
     pub fn try_cast_str(self, type_name: &str) -> Column {
         Column {
-            expr: Expression::Cast(Box::new(
+            expr: ExpressionNode::Cast(Box::new(
                 Cast::new_str(self.expr, type_name).with_eval_mode(CastEvalMode::Try),
-            )),
+            ))
+            .into(),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.isNull`.
     pub fn is_null(self) -> Column {
         Column {
-            expr: Expression::UnresolvedFunction(UnresolvedFunction::new(
-                "isNull",
-                vec![self.expr],
-            )),
+            expr: Expression::function("isNull", vec![self.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.isNotNull`.
     pub fn is_not_null(self) -> Column {
         Column {
-            expr: Expression::UnresolvedFunction(UnresolvedFunction::new(
-                "isNotNull",
-                vec![self.expr],
-            )),
+            expr: Expression::function("isNotNull", vec![self.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.substr`.
     pub fn substr(self, start: Column, length: Column) -> Column {
         Column {
-            expr: Expression::UnresolvedFunction(UnresolvedFunction::new(
-                "substr",
-                vec![self.expr, start.expr, length.expr],
-            )),
+            expr: Expression::function("substr", vec![self.expr, start.expr, length.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.like`.
     pub fn like(self, pattern: &str) -> Column {
         Column {
-            expr: Expression::UnresolvedFunction(UnresolvedFunction::new(
+            expr: Expression::function(
                 "like",
                 vec![
                     self.expr,
-                    Expression::Literal(LiteralExpression::string(pattern)),
+                    Expression::literal(LiteralExpression::string(pattern)),
                 ],
-            )),
+            ),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.rlike`.
     pub fn rlike(self, pattern: &str) -> Column {
         Column {
-            expr: Expression::UnresolvedFunction(UnresolvedFunction::new(
+            expr: Expression::function(
                 "rlike",
                 vec![
                     self.expr,
-                    Expression::Literal(LiteralExpression::string(pattern)),
+                    Expression::literal(LiteralExpression::string(pattern)),
                 ],
-            )),
+            ),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.contains`.
     pub fn contains(self, other: Column) -> Column {
         Column {
-            expr: Expression::UnresolvedFunction(UnresolvedFunction::new(
-                "contains",
-                vec![self.expr, other.expr],
-            )),
+            expr: Expression::function("contains", vec![self.expr, other.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.ilike` (case-insensitive `like`).
     pub fn ilike(self, pattern: &str) -> Column {
         Column {
-            expr: Expression::UnresolvedFunction(UnresolvedFunction::new(
+            expr: Expression::function(
                 "ilike",
                 vec![
                     self.expr,
-                    Expression::Literal(LiteralExpression::string(pattern)),
+                    Expression::literal(LiteralExpression::string(pattern)),
                 ],
-            )),
+            ),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.isNaN`.
     pub fn is_nan(self) -> Column {
         Column {
-            expr: Expression::UnresolvedFunction(UnresolvedFunction::new("isNaN", vec![self.expr])),
+            expr: Expression::function("isNaN", vec![self.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.eqNullSafe` (null-safe equality `<=>`).
     pub fn eq_null_safe(self, other: Column) -> Column {
         Column {
-            expr: Expression::UnresolvedFunction(UnresolvedFunction::new(
-                "<=>",
-                vec![self.expr, other.expr],
-            )),
+            expr: Expression::function("<=>", vec![self.expr, other.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.bitwiseAND`.
     pub fn bitwise_and(self, other: Column) -> Column {
         Column {
-            expr: Expression::UnresolvedFunction(UnresolvedFunction::new(
-                "&",
-                vec![self.expr, other.expr],
-            )),
+            expr: Expression::function("&", vec![self.expr, other.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.bitwiseOR`.
     pub fn bitwise_or(self, other: Column) -> Column {
         Column {
-            expr: Expression::UnresolvedFunction(UnresolvedFunction::new(
-                "|",
-                vec![self.expr, other.expr],
-            )),
+            expr: Expression::function("|", vec![self.expr, other.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.bitwiseXOR`.
     pub fn bitwise_xor(self, other: Column) -> Column {
         Column {
-            expr: Expression::UnresolvedFunction(UnresolvedFunction::new(
-                "^",
-                vec![self.expr, other.expr],
-            )),
+            expr: Expression::function("^", vec![self.expr, other.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.between`:
     /// `(self >= lower) & (self <= upper)`.
     pub fn between(self, lower: Column, upper: Column) -> Column {
-        let lo = Expression::UnresolvedFunction(UnresolvedFunction::new(
-            ">=",
-            vec![self.expr.clone(), lower.expr],
-        ));
-        let hi = Expression::UnresolvedFunction(UnresolvedFunction::new(
-            "<=",
-            vec![self.expr, upper.expr],
-        ));
+        let lo = Expression::function(">=", vec![self.expr.clone(), lower.expr]);
+        let hi = Expression::function("<=", vec![self.expr, upper.expr]);
         Column {
-            expr: Expression::UnresolvedFunction(UnresolvedFunction::new("and", vec![lo, hi])),
+            expr: Expression::function("and", vec![lo, hi]),
         }
     }
 
@@ -246,7 +219,7 @@ impl Column {
         args.push(self.expr);
         args.extend(values.into_iter().map(|c| c.expr));
         Column {
-            expr: Expression::UnresolvedFunction(UnresolvedFunction::new("in", args)),
+            expr: Expression::function("in", args),
         }
     }
 
@@ -254,11 +227,12 @@ impl Column {
     /// a struct-typed column.
     pub fn with_field(self, field_name: &str, value: Column) -> Column {
         Column {
-            expr: Expression::UpdateFields(Box::new(UpdateFieldsExpr::new(
+            expr: ExpressionNode::UpdateFields(Box::new(UpdateFieldsExpr::new(
                 self.expr,
                 field_name,
                 Some(value.expr),
-            ))),
+            )))
+            .into(),
         }
     }
 
@@ -267,7 +241,8 @@ impl Column {
     pub fn drop_fields(self, field_names: Vec<&str>) -> Column {
         let mut expr = self.expr;
         for name in field_names {
-            expr = Expression::UpdateFields(Box::new(UpdateFieldsExpr::new(expr, name, None)));
+            expr = ExpressionNode::UpdateFields(Box::new(UpdateFieldsExpr::new(expr, name, None)))
+                .into();
         }
         Column { expr }
     }
@@ -275,20 +250,14 @@ impl Column {
     /// Mirrors `pyspark.sql.column.Column.startswith`.
     pub fn startswith(self, other: Column) -> Column {
         Column {
-            expr: Expression::UnresolvedFunction(UnresolvedFunction::new(
-                "startsWith",
-                vec![self.expr, other.expr],
-            )),
+            expr: Expression::function("startsWith", vec![self.expr, other.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.endswith`.
     pub fn endswith(self, other: Column) -> Column {
         Column {
-            expr: Expression::UnresolvedFunction(UnresolvedFunction::new(
-                "endsWith",
-                vec![self.expr, other.expr],
-            )),
+            expr: Expression::function("endsWith", vec![self.expr, other.expr]),
         }
     }
 
@@ -300,14 +269,14 @@ impl Column {
     /// Mirrors `pyspark.sql.column.Column.asc_nulls_first`.
     pub fn asc_nulls_first(self) -> Column {
         Column {
-            expr: Expression::SortOrder(Box::new(SortOrder::asc_nulls_first(self.expr))),
+            expr: ExpressionNode::SortOrder(Box::new(SortOrder::asc_nulls_first(self.expr))).into(),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.asc_nulls_last`.
     pub fn asc_nulls_last(self) -> Column {
         Column {
-            expr: Expression::SortOrder(Box::new(SortOrder::asc_nulls_last(self.expr))),
+            expr: ExpressionNode::SortOrder(Box::new(SortOrder::asc_nulls_last(self.expr))).into(),
         }
     }
 
@@ -319,48 +288,52 @@ impl Column {
     /// Mirrors `pyspark.sql.column.Column.desc_nulls_first`.
     pub fn desc_nulls_first(self) -> Column {
         Column {
-            expr: Expression::SortOrder(Box::new(SortOrder::desc_nulls_first(self.expr))),
+            expr: ExpressionNode::SortOrder(Box::new(SortOrder::desc_nulls_first(self.expr)))
+                .into(),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.desc_nulls_last`.
     pub fn desc_nulls_last(self) -> Column {
         Column {
-            expr: Expression::SortOrder(Box::new(SortOrder::desc_nulls_last(self.expr))),
+            expr: ExpressionNode::SortOrder(Box::new(SortOrder::desc_nulls_last(self.expr))).into(),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.when`.
     pub fn when(self, condition: Column, value: Column) -> Column {
         // If we already have a CaseWhen, add a branch
-        if let Expression::CaseWhen(case_when) = self.expr {
+        if let ExpressionNode::CaseWhen(case_when) = self.expr.node() {
             let mut branches = case_when.branches.clone();
             branches.push((condition.expr, value.expr));
             Column {
-                expr: Expression::CaseWhen(Box::new(CaseWhen {
+                expr: ExpressionNode::CaseWhen(Box::new(CaseWhen {
                     branches,
                     else_expr: case_when.else_expr.clone(),
-                })),
+                }))
+                .into(),
             }
         } else {
             // Start a new CaseWhen
             Column {
-                expr: Expression::CaseWhen(Box::new(CaseWhen {
+                expr: ExpressionNode::CaseWhen(Box::new(CaseWhen {
                     branches: vec![(condition.expr, value.expr)],
                     else_expr: None,
-                })),
+                }))
+                .into(),
             }
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.otherwise`.
     pub fn otherwise(self, value: Column) -> Column {
-        if let Expression::CaseWhen(case_when) = self.expr {
+        if let ExpressionNode::CaseWhen(case_when) = self.expr.node() {
             Column {
-                expr: Expression::CaseWhen(Box::new(CaseWhen {
+                expr: ExpressionNode::CaseWhen(Box::new(CaseWhen {
                     branches: case_when.branches.clone(),
-                    else_expr: Some(Box::new(value.expr)),
-                })),
+                    else_expr: Some(value.expr),
+                }))
+                .into(),
             }
         } else {
             Column { expr: self.expr }
@@ -370,11 +343,12 @@ impl Column {
     /// Mirrors `pyspark.sql.column.Column.getField` - struct field access.
     /// Builds an `UnresolvedExtractValue` with the field name as a string literal.
     pub fn get_field(self, name: &str) -> Column {
-        let extraction = Expression::Literal(LiteralExpression::string(name));
+        let extraction = Expression::literal(LiteralExpression::string(name));
         Column {
-            expr: Expression::UnresolvedExtractValue(Box::new(ExtractValue::new(
+            expr: ExpressionNode::UnresolvedExtractValue(Box::new(ExtractValue::new(
                 self.expr, extraction,
-            ))),
+            )))
+            .into(),
         }
     }
 
@@ -382,9 +356,10 @@ impl Column {
     /// extraction. Builds an `UnresolvedExtractValue`.
     pub fn get_item(self, key: Column) -> Column {
         Column {
-            expr: Expression::UnresolvedExtractValue(Box::new(ExtractValue::new(
+            expr: ExpressionNode::UnresolvedExtractValue(Box::new(ExtractValue::new(
                 self.expr, key.expr,
-            ))),
+            )))
+            .into(),
         }
     }
 
@@ -426,7 +401,7 @@ impl Column {
         );
 
         Column {
-            expr: Expression::WindowExpression(Box::new(window_expr)),
+            expr: ExpressionNode::WindowExpression(Box::new(window_expr)).into(),
         }
     }
 
@@ -435,63 +410,45 @@ impl Column {
     /// Mirrors `pyspark.sql.column.Column.__eq__`.
     pub fn eq(self, other: Column) -> Column {
         Column {
-            expr: Expression::UnresolvedFunction(UnresolvedFunction::new(
-                "==",
-                vec![self.expr, other.expr],
-            )),
+            expr: Expression::function("==", vec![self.expr, other.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.__ne__`.
     pub fn ne(self, other: Column) -> Column {
         Column {
-            expr: Expression::UnresolvedFunction(UnresolvedFunction::new(
+            expr: Expression::function(
                 "not",
-                vec![Expression::UnresolvedFunction(UnresolvedFunction::new(
-                    "==",
-                    vec![self.expr, other.expr],
-                ))],
-            )),
+                vec![Expression::function("==", vec![self.expr, other.expr])],
+            ),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.__gt__`.
     pub fn gt(self, other: Column) -> Column {
         Column {
-            expr: Expression::UnresolvedFunction(UnresolvedFunction::new(
-                ">",
-                vec![self.expr, other.expr],
-            )),
+            expr: Expression::function(">", vec![self.expr, other.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.__lt__`.
     pub fn lt(self, other: Column) -> Column {
         Column {
-            expr: Expression::UnresolvedFunction(UnresolvedFunction::new(
-                "<",
-                vec![self.expr, other.expr],
-            )),
+            expr: Expression::function("<", vec![self.expr, other.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.__ge__`.
     pub fn ge(self, other: Column) -> Column {
         Column {
-            expr: Expression::UnresolvedFunction(UnresolvedFunction::new(
-                ">=",
-                vec![self.expr, other.expr],
-            )),
+            expr: Expression::function(">=", vec![self.expr, other.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.__le__`.
     pub fn le(self, other: Column) -> Column {
         Column {
-            expr: Expression::UnresolvedFunction(UnresolvedFunction::new(
-                "<=",
-                vec![self.expr, other.expr],
-            )),
+            expr: Expression::function("<=", vec![self.expr, other.expr]),
         }
     }
 
@@ -500,50 +457,35 @@ impl Column {
     /// Mirrors `pyspark.sql.column.Column.__add__`.
     pub fn add(self, other: Column) -> Column {
         Column {
-            expr: Expression::UnresolvedFunction(UnresolvedFunction::new(
-                "+",
-                vec![self.expr, other.expr],
-            )),
+            expr: Expression::function("+", vec![self.expr, other.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.__sub__`.
     pub fn sub(self, other: Column) -> Column {
         Column {
-            expr: Expression::UnresolvedFunction(UnresolvedFunction::new(
-                "-",
-                vec![self.expr, other.expr],
-            )),
+            expr: Expression::function("-", vec![self.expr, other.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.__mul__`.
     pub fn mul(self, other: Column) -> Column {
         Column {
-            expr: Expression::UnresolvedFunction(UnresolvedFunction::new(
-                "*",
-                vec![self.expr, other.expr],
-            )),
+            expr: Expression::function("*", vec![self.expr, other.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.__truediv__`.
     pub fn div(self, other: Column) -> Column {
         Column {
-            expr: Expression::UnresolvedFunction(UnresolvedFunction::new(
-                "/",
-                vec![self.expr, other.expr],
-            )),
+            expr: Expression::function("/", vec![self.expr, other.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.__mod__`.
     pub fn modulo(self, other: Column) -> Column {
         Column {
-            expr: Expression::UnresolvedFunction(UnresolvedFunction::new(
-                "%",
-                vec![self.expr, other.expr],
-            )),
+            expr: Expression::function("%", vec![self.expr, other.expr]),
         }
     }
 
@@ -552,37 +494,28 @@ impl Column {
     /// Mirrors `pyspark.sql.column.Column.__and__`.
     pub fn and(self, other: Column) -> Column {
         Column {
-            expr: Expression::UnresolvedFunction(UnresolvedFunction::new(
-                "and",
-                vec![self.expr, other.expr],
-            )),
+            expr: Expression::function("and", vec![self.expr, other.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.__or__`.
     pub fn or(self, other: Column) -> Column {
         Column {
-            expr: Expression::UnresolvedFunction(UnresolvedFunction::new(
-                "or",
-                vec![self.expr, other.expr],
-            )),
+            expr: Expression::function("or", vec![self.expr, other.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.__invert__`.
     pub fn not(self) -> Column {
         Column {
-            expr: Expression::UnresolvedFunction(UnresolvedFunction::new("not", vec![self.expr])),
+            expr: Expression::function("not", vec![self.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.__neg__`.
     pub fn neg(self) -> Column {
         Column {
-            expr: Expression::UnresolvedFunction(UnresolvedFunction::new(
-                "negative",
-                vec![self.expr],
-            )),
+            expr: Expression::function("negative", vec![self.expr]),
         }
     }
 }
@@ -641,7 +574,7 @@ impl Not for Column {
     type Output = Column;
     fn not(self) -> Column {
         Column {
-            expr: Expression::UnresolvedFunction(UnresolvedFunction::new("not", vec![self.expr])),
+            expr: Expression::function("not", vec![self.expr]),
         }
     }
 }
@@ -651,7 +584,7 @@ impl Not for Column {
 /// Mirrors `pyspark.sql.functions.col`.
 pub fn col(name: &str) -> Column {
     Column {
-        expr: Expression::ColumnReference(ColumnReference::new(name)),
+        expr: Expression::column(name),
     }
 }
 
@@ -685,28 +618,28 @@ pub fn lit(value: i64) -> Column {
         LiteralExpression::long(value)
     };
     Column {
-        expr: Expression::Literal(lit),
+        expr: Expression::literal(lit),
     }
 }
 
 /// Create a literal from a string.
 pub fn lit_string(value: &str) -> Column {
     Column {
-        expr: Expression::Literal(LiteralExpression::string(value)),
+        expr: Expression::literal(LiteralExpression::string(value)),
     }
 }
 
 /// Create a literal from a double.
 pub fn lit_double(value: f64) -> Column {
     Column {
-        expr: Expression::Literal(LiteralExpression::double(value)),
+        expr: Expression::literal(LiteralExpression::double(value)),
     }
 }
 
 /// Create a literal from a boolean.
 pub fn lit_boolean(value: bool) -> Column {
     Column {
-        expr: Expression::Literal(LiteralExpression::boolean(value)),
+        expr: Expression::literal(LiteralExpression::boolean(value)),
     }
 }
 
@@ -714,7 +647,8 @@ pub fn lit_boolean(value: bool) -> Column {
 /// branches with `Column::when` and finish with `Column::otherwise`.
 pub fn when(condition: Column, value: Column) -> Column {
     Column {
-        expr: Expression::CaseWhen(Box::new(CaseWhen::new(vec![(condition.expr, value.expr)]))),
+        expr: ExpressionNode::CaseWhen(Box::new(CaseWhen::new(vec![(condition.expr, value.expr)])))
+            .into(),
     }
 }
 
@@ -725,13 +659,13 @@ mod tests {
     #[test]
     fn test_col_creation() {
         let c = col("x");
-        assert!(matches!(c.expr, Expression::ColumnReference(_)));
+        assert!(matches!(c.expr.node(), ExpressionNode::ColumnReference(_)));
     }
 
     #[test]
     fn test_lit_creation() {
         let c = lit(42);
-        assert!(matches!(c.expr, Expression::Literal(_)));
+        assert!(matches!(c.expr.node(), ExpressionNode::Literal(_)));
     }
 
     #[test]
@@ -739,14 +673,17 @@ mod tests {
         let c1 = col("a");
         let c2 = lit(1);
         let result = c1.add(c2);
-        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedFunction(_)
+        ));
     }
 
     #[test]
     fn test_alias() {
         let c = col("x");
         let aliased = c.alias("y");
-        assert!(matches!(aliased.expr, Expression::Alias(_)));
+        assert!(matches!(aliased.expr.node(), ExpressionNode::Alias(_)));
     }
 
     #[test]
@@ -755,7 +692,7 @@ mod tests {
         let casted = c.cast(DataType::String {
             collation: "UTF8_BINARY".to_string(),
         });
-        assert!(matches!(casted.expr, Expression::Cast(_)));
+        assert!(matches!(casted.expr.node(), ExpressionNode::Cast(_)));
     }
 
     #[test]
@@ -765,65 +702,107 @@ mod tests {
 
         // Test eq
         let result = c1.clone().eq(c2.clone());
-        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedFunction(_)
+        ));
 
         // Test ne
         let result = col("a").ne(col("b"));
-        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedFunction(_)
+        ));
 
         // Test gt
         let result = col("a").gt(col("b"));
-        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedFunction(_)
+        ));
 
         // Test lt
         let result = col("a").lt(col("b"));
-        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedFunction(_)
+        ));
 
         // Test ge
         let result = col("a").ge(col("b"));
-        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedFunction(_)
+        ));
 
         // Test le
         let result = col("a").le(col("b"));
-        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedFunction(_)
+        ));
     }
 
     #[test]
     fn test_arithmetic_operators() {
         // Test sub
         let result = col("a").sub(col("b"));
-        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedFunction(_)
+        ));
 
         // Test mul
         let result = col("a").mul(col("b"));
-        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedFunction(_)
+        ));
 
         // Test div
         let result = col("a").div(col("b"));
-        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedFunction(_)
+        ));
 
         // Test modulo
         let result = col("a").modulo(col("b"));
-        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedFunction(_)
+        ));
     }
 
     #[test]
     fn test_logical_operators() {
         // Test and
         let result = col("a").and(col("b"));
-        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedFunction(_)
+        ));
 
         // Test or
         let result = col("a").or(col("b"));
-        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedFunction(_)
+        ));
 
         // Test not
         let result = col("a").not();
-        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedFunction(_)
+        ));
 
         // Test neg
         let result = col("a").neg();
-        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedFunction(_)
+        ));
     }
 
     #[test]
@@ -833,51 +812,75 @@ mod tests {
 
         // Test Add trait
         let result = c1.clone() + c2.clone();
-        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedFunction(_)
+        ));
 
         // Test Sub trait
         let result = col("a") - col("b");
-        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedFunction(_)
+        ));
 
         // Test Mul trait
         let result = col("a") * col("b");
-        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedFunction(_)
+        ));
 
         // Test Div trait
         let result = col("a") / col("b");
-        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedFunction(_)
+        ));
 
         // Test Rem trait
         let result = col("a") % col("b");
-        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedFunction(_)
+        ));
 
         // Test BitAnd trait
         let result = col("a") & col("b");
-        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedFunction(_)
+        ));
 
         // Test BitOr trait
         let result = col("a") | col("b");
-        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedFunction(_)
+        ));
 
         // Test Not trait
         let result = !col("a");
-        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedFunction(_)
+        ));
     }
 
     #[test]
     fn test_from_implementations() {
         // Test From<&str>
         let c1: Column = "x".into();
-        assert!(matches!(c1.expr, Expression::ColumnReference(_)));
+        assert!(matches!(c1.expr.node(), ExpressionNode::ColumnReference(_)));
 
         // Test From<String>
         let c2: Column = "y".to_string().into();
-        assert!(matches!(c2.expr, Expression::ColumnReference(_)));
+        assert!(matches!(c2.expr.node(), ExpressionNode::ColumnReference(_)));
 
         // Test From<&String>
         let s = "z".to_string();
         let c3: Column = (&s).into();
-        assert!(matches!(c3.expr, Expression::ColumnReference(_)));
+        assert!(matches!(c3.expr.node(), ExpressionNode::ColumnReference(_)));
     }
 
     #[test]
@@ -885,36 +888,36 @@ mod tests {
         // Test lit with small number (fits in i32)
         let c = lit(42);
         assert!(matches!(
-            c.expr,
-            Expression::Literal(LiteralExpression::Integer(_))
+            c.expr.node(),
+            ExpressionNode::Literal(LiteralExpression::Integer(_))
         ));
 
         // Test lit with large number (needs i64)
         let c = lit(5_000_000_000i64);
         assert!(matches!(
-            c.expr,
-            Expression::Literal(LiteralExpression::Long(_))
+            c.expr.node(),
+            ExpressionNode::Literal(LiteralExpression::Long(_))
         ));
 
         // Test lit_string
         let c = lit_string("hello");
         assert!(matches!(
-            c.expr,
-            Expression::Literal(LiteralExpression::String(_))
+            c.expr.node(),
+            ExpressionNode::Literal(LiteralExpression::String(_))
         ));
 
         // Test lit_double
         let c = lit_double(3.14);
         assert!(matches!(
-            c.expr,
-            Expression::Literal(LiteralExpression::Double(_))
+            c.expr.node(),
+            ExpressionNode::Literal(LiteralExpression::Double(_))
         ));
 
         // Test lit_boolean
         let c = lit_boolean(true);
         assert!(matches!(
-            c.expr,
-            Expression::Literal(LiteralExpression::Boolean(_))
+            c.expr.node(),
+            ExpressionNode::Literal(LiteralExpression::Boolean(_))
         ));
     }
 
@@ -923,106 +926,142 @@ mod tests {
         // Test when
         let cond = col("x").gt(lit(5));
         let result = when(cond, lit(1));
-        assert!(matches!(result.expr, Expression::CaseWhen(_)));
+        assert!(matches!(result.expr.node(), ExpressionNode::CaseWhen(_)));
 
         // Test when with otherwise
         let cond2 = col("y").lt(lit(10));
         let result2 = result.when(cond2, lit(2));
-        assert!(matches!(result2.expr, Expression::CaseWhen(_)));
+        assert!(matches!(result2.expr.node(), ExpressionNode::CaseWhen(_)));
 
         // Test otherwise
         let final_result = result2.otherwise(lit(99));
-        assert!(matches!(final_result.expr, Expression::CaseWhen(_)));
+        assert!(matches!(
+            final_result.expr.node(),
+            ExpressionNode::CaseWhen(_)
+        ));
     }
 
     #[test]
     fn test_is_null_and_is_not_null() {
         // Test is_null
         let result = col("a").is_null();
-        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedFunction(_)
+        ));
 
         // Test is_not_null
         let result = col("a").is_not_null();
-        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedFunction(_)
+        ));
     }
 
     #[test]
     fn test_getitem() {
         // Test get_item
         let result = col("array").get_item(lit(0));
-        assert!(matches!(result.expr, Expression::UnresolvedExtractValue(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedExtractValue(_)
+        ));
     }
 
     #[test]
     fn test_between() {
         let result = col("a").between(lit(1), lit(10));
-        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedFunction(_)
+        ));
     }
 
     #[test]
     fn test_substring() {
         let result = col("a").substr(lit(1), lit(3));
-        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedFunction(_)
+        ));
     }
 
     #[test]
     fn test_various_methods() {
         // Test cast_str
         let result = col("a").cast_str("int");
-        assert!(matches!(result.expr, Expression::Cast(_)));
+        assert!(matches!(result.expr.node(), ExpressionNode::Cast(_)));
 
         // Test desc
         let result = col("a").desc();
-        assert!(matches!(result.expr, Expression::SortOrder(_)));
+        assert!(matches!(result.expr.node(), ExpressionNode::SortOrder(_)));
 
         // Test desc_nulls_first
         let result = col("a").desc_nulls_first();
-        assert!(matches!(result.expr, Expression::SortOrder(_)));
+        assert!(matches!(result.expr.node(), ExpressionNode::SortOrder(_)));
 
         // Test desc_nulls_last
         let result = col("a").desc_nulls_last();
-        assert!(matches!(result.expr, Expression::SortOrder(_)));
+        assert!(matches!(result.expr.node(), ExpressionNode::SortOrder(_)));
 
         // Test asc
         let result = col("a").asc();
-        assert!(matches!(result.expr, Expression::SortOrder(_)));
+        assert!(matches!(result.expr.node(), ExpressionNode::SortOrder(_)));
 
         // Test asc_nulls_first
         let result = col("a").asc_nulls_first();
-        assert!(matches!(result.expr, Expression::SortOrder(_)));
+        assert!(matches!(result.expr.node(), ExpressionNode::SortOrder(_)));
 
         // Test asc_nulls_last
         let result = col("a").asc_nulls_last();
-        assert!(matches!(result.expr, Expression::SortOrder(_)));
+        assert!(matches!(result.expr.node(), ExpressionNode::SortOrder(_)));
     }
 
     #[test]
     fn test_get_field() {
         // Test get_field
         let result = col("struct").get_field("field_name");
-        assert!(matches!(result.expr, Expression::UnresolvedExtractValue(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedExtractValue(_)
+        ));
     }
 
     #[test]
     fn test_string_functions() {
         // Test contains
         let result = col("a").contains(col("b"));
-        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedFunction(_)
+        ));
 
         // Test startswith
         let result = col("a").startswith(col("b"));
-        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedFunction(_)
+        ));
 
         // Test endswith
         let result = col("a").endswith(col("b"));
-        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedFunction(_)
+        ));
 
         // Test like
         let result = col("a").like("%pattern%");
-        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedFunction(_)
+        ));
 
         // Test rlike
         let result = col("a").rlike("[0-9]+");
-        assert!(matches!(result.expr, Expression::UnresolvedFunction(_)));
+        assert!(matches!(
+            result.expr.node(),
+            ExpressionNode::UnresolvedFunction(_)
+        ));
     }
 }

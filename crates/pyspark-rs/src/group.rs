@@ -37,11 +37,9 @@ impl PyGroupedData {
                     // Build func(col) as an unresolved function resolved server-side, so
                     // aggregate names (max/min/sum/avg/count/...) all work regardless of
                     // whether they are in the generated dispatch.
-                    let agg_expr = spark_connect::expression::Expression::UnresolvedFunction(
-                        spark_connect::expression::UnresolvedFunction::new(
-                            func_name,
-                            vec![c.expression().clone()],
-                        ),
+                    let agg_expr = spark_connect::expression::Expression::function(
+                        func_name,
+                        vec![c.expression().clone()],
                     );
                     agg_exprs.push(agg_expr);
                 }

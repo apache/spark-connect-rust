@@ -4,6 +4,7 @@
 //! `whenNotMatched` / `whenNotMatchedBySource` clauses and executes it.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use spark_connect_core::error::Result;
 use spark_connect_proto as proto;
@@ -39,7 +40,7 @@ fn merge_action(
 /// Fluent builder for a MERGE INTO command. Create it via [`crate::dataframe::DataFrame::merge_into`].
 pub struct MergeIntoWriter {
     session: SparkSession,
-    source_plan: LogicalPlan,
+    source_plan: Arc<LogicalPlan>,
     target_table: String,
     condition: Column,
     schema_evolution: bool,
@@ -49,9 +50,14 @@ pub struct MergeIntoWriter {
 }
 
 impl MergeIntoWriter {
+    #[cfg(test)]
+    pub(crate) fn plan(&self) -> &LogicalPlan {
+        self.source_plan.as_ref()
+    }
+
     pub(crate) fn new(
         session: SparkSession,
-        source_plan: LogicalPlan,
+        source_plan: Arc<LogicalPlan>,
         target_table: String,
         condition: Column,
     ) -> Self {

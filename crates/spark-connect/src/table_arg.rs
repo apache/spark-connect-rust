@@ -2,9 +2,11 @@
 //!
 //! Provides table argument support for table-valued functions with partitioning and ordering.
 
+use std::sync::Arc;
+
 use crate::column::Column;
 use crate::dataframe::DataFrame;
-use crate::expression::{Expression, SortOrder};
+use crate::expression::{Expression, ExpressionNode, SortOrder};
 use crate::plan::LogicalPlan;
 use spark_connect_core::error::{Result, SparkError};
 use spark_connect_proto as proto;
@@ -17,7 +19,7 @@ use spark_connect_proto as proto;
 #[derive(Clone)]
 pub struct TableArg {
     /// The underlying DataFrame/plan
-    plan: LogicalPlan,
+    plan: Arc<LogicalPlan>,
     /// Partition expressions
     partition_spec: Vec<Expression>,
     /// Order expressions
@@ -30,7 +32,7 @@ impl TableArg {
     /// Create a new TableArg from a DataFrame.
     pub fn new(df: DataFrame) -> Self {
         TableArg {
-            plan: df.plan().clone(),
+            plan: df.plan,
             partition_spec: Vec::new(),
             order_spec: Vec::new(),
             with_single_partition: false,
@@ -41,7 +43,7 @@ impl TableArg {
     #[allow(dead_code)]
     pub(crate) fn from_plan(plan: LogicalPlan) -> Self {
         TableArg {
-            plan,
+            plan: Arc::new(plan),
             partition_spec: Vec::new(),
             order_spec: Vec::new(),
             with_single_partition: false,
@@ -183,9 +185,9 @@ impl TableArg {
             .map(|e| {
                 // Preserve an explicit SortOrder; otherwise default to ascending,
                 // nulls-first (matching the reference's `_sort_col`).
-                let wrapped = match e {
-                    Expression::SortOrder(_) => e.to_proto(),
-                    other => SortOrder::asc_nulls_first(other.clone()).to_proto(),
+                let wrapped = match e.node() {
+                    ExpressionNode::SortOrder(_) => e.to_proto(),
+                    _ => SortOrder::asc_nulls_first(e.clone()).to_proto(),
                 };
                 match wrapped.expr_type {
                     Some(proto::expression::ExprType::SortOrder(s)) => *s,

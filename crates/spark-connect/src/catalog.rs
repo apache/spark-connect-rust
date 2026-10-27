@@ -6,7 +6,7 @@ use spark_connect_core::error::{Result, SparkError};
 use spark_connect_core::runtime::block_on;
 use spark_connect_proto as proto;
 
-use crate::dataframe::DataFrame;
+use crate::dataframe::{decode_arrow_batch, DataFrame};
 use crate::row::{Row, Value};
 use crate::session::SparkSession;
 
@@ -1083,55 +1083,54 @@ impl Catalog {
     }
 }
 
-/// Decode an Arrow batch into rows.
-pub(crate) fn decode_arrow_batch(
-    batch: &proto::execute_plan_response::ArrowBatch,
-) -> Result<Vec<Row>> {
-    use arrow::ipc::reader::StreamReader;
-    use std::io::Cursor;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    if batch.data.is_empty() {
-        return Ok(vec![]);
-    }
+    #[test]
+    fn parse_database_preserves_metadata_and_nullable_columns() {
+        let fields = vec![
+            "name".to_string(),
+            "catalog".to_string(),
+            "description".to_string(),
+            "locationUri".to_string(),
+        ];
+        let populated = Row::new(
+            fields.clone(),
+            vec![
+                Value::String("one".to_string()),
+                Value::String("spark_catalog".to_string()),
+                Value::String("first database".to_string()),
+                Value::String("file:/one".to_string()),
+            ],
+        );
+        let nullable = Row::new(
+            fields,
+            vec![
+                Value::String("two".to_string()),
+                Value::Null,
+                Value::Null,
+                Value::String("file:/two".to_string()),
+            ],
+        );
 
-    let cursor = Cursor::new(&batch.data);
-    let mut reader = StreamReader::try_new(cursor, None).map_err(|e| {
-        SparkError::connect_msg(format!("Failed to create Arrow stream reader: {}", e))
-    })?;
-
-    let mut rows = vec![];
-
-    while let Some(record_batch) = reader
-        .next()
-        .transpose()
-        .map_err(|e| SparkError::connect_msg(format!("Failed to decode Arrow batch: {}", e)))?
-    {
-        let schema = record_batch.schema();
-        let num_rows = record_batch.num_rows();
-        let num_cols = record_batch.num_columns();
-
-        for row_idx in 0..num_rows {
-            let mut field_names = vec![];
-            let mut values = vec![];
-
-            for col_idx in 0..num_cols {
-                let field_name = schema.field(col_idx).name().clone();
-                let column = record_batch.column(col_idx);
-
-                let value = arrow_value_at(column.as_ref(), row_idx)?;
-                field_names.push(field_name);
-                values.push(value);
+        assert_eq!(
+            parse_database(&populated),
+            Database {
+                name: "one".to_string(),
+                catalog: Some("spark_catalog".to_string()),
+                description: Some("first database".to_string()),
+                location_uri: "file:/one".to_string(),
             }
-
-            rows.push(Row::new(field_names, values));
-        }
+        );
+        assert_eq!(
+            parse_database(&nullable),
+            Database {
+                name: "two".to_string(),
+                catalog: None,
+                description: None,
+                location_uri: "file:/two".to_string(),
+            }
+        );
     }
-
-    Ok(rows)
-}
-
-/// Extract a value at a row index from an Arrow array. Delegates to the single,
-/// comprehensive decoder in `dataframe` so catalog results support every type too.
-fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> Result<Value> {
-    crate::dataframe::arrow_value_at(array, index)
 }

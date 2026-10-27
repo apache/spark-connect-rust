@@ -13,6 +13,46 @@ Apache Spark **4.2.0 and later**. The crate and wheel version tracks the Spark
 release it targets (starting at `4.2.0`), so the version number tells you which
 Spark it speaks.
 
+## Rust migration for the 4.3 line
+
+The 4.3 line changes the public Rust representation of expressions and logical
+plans to share immutable nodes. This is a breaking change for code that directly
+constructs or matches these representations. The `Column` and `DataFrame` APIs,
+Python APIs, and Spark Connect protocol are unchanged by this representation change.
+
+`Expression` is now a shared handle; its previous enum variants live in
+`ExpressionNode`. Construct an `ExpressionNode` and convert it with `.into()` (or
+pass it to `Expression::new`). Match on `expression.node()`, which borrows an
+`&ExpressionNode`. Cloning an `Expression` shares its immutable node instead of
+recursively copying its children. To change an expression, construct a new node.
+Common nodes also have `Expression::literal`, `Expression::column`, and
+`Expression::function` constructors.
+
+For example, replace direct `Expression::Literal(...)` construction and matching
+with:
+
+```rust
+use spark_connect::expression::{Expression, ExpressionNode, LiteralExpression};
+
+let expression: Expression = ExpressionNode::Literal(LiteralExpression::Long(1)).into();
+let shared = expression.clone();
+match shared.node() {
+    ExpressionNode::Literal(LiteralExpression::Long(value)) => assert_eq!(*value, 1),
+    _ => panic!("expected a long literal"),
+}
+```
+
+Child expressions are handles too: `ExpressionNode::DirectShufflePartitionId`
+takes an `Expression`, and `CaseWhen::else_expr` is `Option<Expression>`, without
+the previous extra `Box`.
+
+Logical-plan child fields now use `Arc<LogicalPlan>` instead of `Box<LogicalPlan>`.
+When constructing variants directly, replace `Box::new(child)` with
+`Arc::new(child)`, or clone an existing `Arc` to share that child. Plan-building
+helpers accept `impl Into<Arc<LogicalPlan>>`, so they accept either an owned
+`LogicalPlan` or an existing `Arc<LogicalPlan>`. Serialization still produces the
+same protobuf tree; sharing does not deduplicate repeated relations on the wire.
+
 ## How parity is verified
 
 Two independent gates in CI cover the two halves of a Spark Connect client - plan

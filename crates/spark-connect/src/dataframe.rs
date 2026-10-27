@@ -3,6 +3,7 @@
 //! Provides transformations and actions for working with distributed data.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use spark_connect_core::client::ReattachableResponseStream;
 use spark_connect_core::error::{Result, SparkError};
@@ -10,9 +11,9 @@ use spark_connect_core::runtime::{block_on, get_runtime};
 use spark_connect_proto as proto;
 
 use crate::column::Column;
-use crate::expression::Expression;
+use crate::expression::{Expression, ExpressionNode};
 use crate::plan::{AggregateGroupType, JoinType, LogicalPlan, SetOpType};
-use crate::row::{Row, Value};
+use crate::row::{Row, StructValue, Value};
 use crate::session::{ExecutionInfo, SparkSession};
 use crate::types::DataType;
 use crate::udf::CommonInlineUserDefinedFunctionExpression;
@@ -20,10 +21,11 @@ use crate::udf::CommonInlineUserDefinedFunctionExpression;
 /// A Spark DataFrame, lazily evaluated.
 ///
 /// Mirrors `pyspark.sql.DataFrame`.
+/// Clones and transformations share immutable plan nodes with their inputs.
 #[derive(Clone)]
 pub struct DataFrame {
     pub(crate) session: SparkSession,
-    pub(crate) plan: LogicalPlan,
+    pub(crate) plan: Arc<LogicalPlan>,
 }
 
 /// Iterator over rows from a DataFrame, yielded lazily as the server streams results.
@@ -201,10 +203,14 @@ fn spawn_prefetch(
 impl DataFrame {
     /// Create a new DataFrame.
     pub(crate) fn new(session: SparkSession, plan: LogicalPlan) -> Self {
-        DataFrame { session, plan }
+        DataFrame {
+            session,
+            plan: Arc::new(plan),
+        }
     }
 
     /// Get the underlying logical plan.
+    #[cfg(test)]
     pub(crate) fn plan(&self) -> &LogicalPlan {
         &self.plan
     }
@@ -213,7 +219,7 @@ impl DataFrame {
     pub fn select<C: Into<Column>>(&self, columns: impl IntoIterator<Item = C>) -> DataFrame {
         let columns: Vec<Column> = columns.into_iter().map(Into::into).collect();
         let plan = LogicalPlan::Project {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             columns,
         };
         DataFrame::new(self.session.clone(), plan)
@@ -222,7 +228,7 @@ impl DataFrame {
     /// Filter rows by a condition.
     pub fn filter(&self, condition: Column) -> DataFrame {
         let plan = LogicalPlan::Filter {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             condition,
         };
         DataFrame::new(self.session.clone(), plan)
@@ -236,7 +242,7 @@ impl DataFrame {
     /// Add or replace a column.
     pub fn with_column(&self, name: &str, col: Column) -> DataFrame {
         let plan = LogicalPlan::WithColumns {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             column_names: vec![name.to_string()],
             columns: vec![col],
         };
@@ -247,7 +253,7 @@ impl DataFrame {
     pub fn with_columns(&self, columns: Vec<(String, Column)>) -> DataFrame {
         let (names, cols) = columns.into_iter().unzip();
         let plan = LogicalPlan::WithColumns {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             column_names: names,
             columns: cols,
         };
@@ -259,7 +265,7 @@ impl DataFrame {
         let mut renames = HashMap::new();
         renames.insert(existing.to_string(), new.to_string());
         let plan = LogicalPlan::WithColumnsRenamed {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             renames,
         };
         DataFrame::new(self.session.clone(), plan)
@@ -272,7 +278,7 @@ impl DataFrame {
             rename_map.insert(old, new);
         }
         let plan = LogicalPlan::WithColumnsRenamed {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             renames: rename_map,
         };
         DataFrame::new(self.session.clone(), plan)
@@ -282,7 +288,7 @@ impl DataFrame {
     pub fn drop(&self, columns: Vec<&str>) -> DataFrame {
         let col_names = columns.iter().map(|s| s.to_string()).collect();
         let plan = LogicalPlan::Drop {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             columns: col_names,
         };
         DataFrame::new(self.session.clone(), plan)
@@ -291,7 +297,7 @@ impl DataFrame {
     /// Limit the number of rows.
     pub fn limit(&self, n: i32) -> DataFrame {
         let plan = LogicalPlan::Limit {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             limit: n,
         };
         DataFrame::new(self.session.clone(), plan)
@@ -300,7 +306,7 @@ impl DataFrame {
     /// Skip the first n rows.
     pub fn offset(&self, n: i32) -> DataFrame {
         let plan = LogicalPlan::Offset {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             offset: n,
         };
         DataFrame::new(self.session.clone(), plan)
@@ -309,7 +315,7 @@ impl DataFrame {
     /// Get the last n rows.
     pub fn tail(&self, n: i32) -> DataFrame {
         let plan = LogicalPlan::Tail {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             limit: n,
         };
         DataFrame::new(self.session.clone(), plan)
@@ -318,7 +324,7 @@ impl DataFrame {
     /// Remove duplicate rows.
     pub fn distinct(&self) -> DataFrame {
         let plan = LogicalPlan::Deduplicate {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             all_columns_as_keys: true,
             column_names: vec![],
             within_watermark: false,
@@ -334,7 +340,7 @@ impl DataFrame {
             .unwrap_or_default();
 
         let plan = LogicalPlan::Deduplicate {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             all_columns_as_keys: all_cols,
             column_names: cols,
             within_watermark: false,
@@ -345,7 +351,7 @@ impl DataFrame {
     /// Sort rows.
     pub fn sort(&self, columns: Vec<Expression>) -> DataFrame {
         let plan = LogicalPlan::Sort {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             order: columns,
             is_global: true,
         };
@@ -360,8 +366,8 @@ impl DataFrame {
     /// Join with another DataFrame.
     pub fn join(&self, right: &DataFrame, on: Option<Column>, join_type: JoinType) -> DataFrame {
         let plan = LogicalPlan::Join {
-            left: Box::new(self.plan.clone()),
-            right: Box::new(right.plan.clone()),
+            left: Arc::clone(&self.plan),
+            right: Arc::clone(&right.plan),
             join_type,
             on,
             using_columns: vec![],
@@ -377,8 +383,8 @@ impl DataFrame {
         join_type: JoinType,
     ) -> DataFrame {
         let plan = LogicalPlan::Join {
-            left: Box::new(self.plan.clone()),
-            right: Box::new(right.plan.clone()),
+            left: Arc::clone(&self.plan),
+            right: Arc::clone(&right.plan),
             join_type,
             on: None,
             using_columns: using_columns.into_iter().map(Into::into).collect(),
@@ -401,8 +407,8 @@ impl DataFrame {
         join_type: &str,
     ) -> DataFrame {
         let plan = LogicalPlan::NearestByJoin {
-            left: Box::new(self.plan.clone()),
-            right: Box::new(other.plan.clone()),
+            left: Arc::clone(&self.plan),
+            right: Arc::clone(&other.plan),
             ranking_expression: ranking_expression.expression().clone(),
             num_results,
             join_type: join_type.to_string(),
@@ -427,8 +433,8 @@ impl DataFrame {
         join_type: JoinType,
     ) -> DataFrame {
         let plan = LogicalPlan::LateralJoin {
-            left: Box::new(self.plan.clone()),
-            right: Box::new(right.plan.clone()),
+            left: Arc::clone(&self.plan),
+            right: Arc::clone(&right.plan),
             join_type,
             on,
         };
@@ -438,8 +444,8 @@ impl DataFrame {
     /// Union with another DataFrame.
     pub fn union(&self, other: &DataFrame) -> DataFrame {
         let plan = LogicalPlan::SetOperation {
-            left: Box::new(self.plan.clone()),
-            right: Box::new(other.plan.clone()),
+            left: Arc::clone(&self.plan),
+            right: Arc::clone(&other.plan),
             set_op_type: SetOpType::Union,
             is_all: true,
             by_name: false,
@@ -458,8 +464,8 @@ impl DataFrame {
     /// `DataFrame.unionByName(other, allowMissingColumns=False)`.
     pub fn union_by_name_opt(&self, other: &DataFrame, allow_missing_columns: bool) -> DataFrame {
         let plan = LogicalPlan::SetOperation {
-            left: Box::new(self.plan.clone()),
-            right: Box::new(other.plan.clone()),
+            left: Arc::clone(&self.plan),
+            right: Arc::clone(&other.plan),
             set_op_type: SetOpType::Union,
             is_all: true,
             by_name: true,
@@ -471,8 +477,8 @@ impl DataFrame {
     /// Intersect with another DataFrame.
     pub fn intersect(&self, other: &DataFrame) -> DataFrame {
         let plan = LogicalPlan::SetOperation {
-            left: Box::new(self.plan.clone()),
-            right: Box::new(other.plan.clone()),
+            left: Arc::clone(&self.plan),
+            right: Arc::clone(&other.plan),
             set_op_type: SetOpType::Intersect,
             is_all: false,
             by_name: false,
@@ -484,8 +490,8 @@ impl DataFrame {
     /// Subtract (except) another DataFrame.
     pub fn subtract(&self, other: &DataFrame) -> DataFrame {
         let plan = LogicalPlan::SetOperation {
-            left: Box::new(self.plan.clone()),
-            right: Box::new(other.plan.clone()),
+            left: Arc::clone(&self.plan),
+            right: Arc::clone(&other.plan),
             set_op_type: SetOpType::Except,
             is_all: false,
             by_name: false,
@@ -497,7 +503,7 @@ impl DataFrame {
     /// Repartition.
     pub fn repartition(&self, num_partitions: i32) -> DataFrame {
         let plan = LogicalPlan::Repartition {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             num_partitions,
             shuffle: true,
         };
@@ -507,7 +513,7 @@ impl DataFrame {
     /// Coalesce.
     pub fn coalesce(&self, num_partitions: i32) -> DataFrame {
         let plan = LogicalPlan::Repartition {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             num_partitions,
             shuffle: false,
         };
@@ -521,7 +527,7 @@ impl DataFrame {
         parameters: impl IntoIterator<Item = S>,
     ) -> DataFrame {
         let plan = LogicalPlan::Hint {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             name: name.to_string(),
             parameters: parameters.into_iter().map(Into::into).collect(),
         };
@@ -538,7 +544,7 @@ impl DataFrame {
     pub fn to_df(&self, column_names: Vec<&str>) -> DataFrame {
         let names = column_names.iter().map(|s| s.to_string()).collect();
         let plan = LogicalPlan::ToDF {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             column_names: names,
         };
         DataFrame::new(self.session.clone(), plan)
@@ -547,7 +553,7 @@ impl DataFrame {
     /// Alias this DataFrame.
     pub fn alias(&self, alias: &str) -> DataFrame {
         let plan = LogicalPlan::SubqueryAlias {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             alias: alias.to_string(),
         };
         DataFrame::new(self.session.clone(), plan)
@@ -581,7 +587,7 @@ impl DataFrame {
         is_barrier: bool,
     ) -> DataFrame {
         let plan = LogicalPlan::MapPartitions {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             func,
             is_barrier,
         };
@@ -617,7 +623,7 @@ impl DataFrame {
         seed: Option<i64>,
     ) -> DataFrame {
         let plan = LogicalPlan::Sample {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             lower_bound: 0.0,
             upper_bound: fraction,
             with_replacement,
@@ -727,14 +733,14 @@ impl DataFrame {
     /// a global count aggregate is pushed to the server, which returns a single row,
     /// rather than streaming every row back to the client just to count them.
     pub fn count(&self) -> Result<i64> {
-        let count_expr = crate::functions::count(Column::new(Expression::Literal(
+        let count_expr = crate::functions::count(Column::new(Expression::literal(
             crate::expression::LiteralExpression::int(1),
         )))
         .expression()
         .clone();
 
         let plan = LogicalPlan::Aggregate {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             group_type: AggregateGroupType::GroupBy,
             grouping_expressions: vec![],
             aggregate_expressions: vec![count_expr],
@@ -848,7 +854,7 @@ impl DataFrame {
     ///
     /// Mirrors `pyspark.sql.DataFrame.write`.
     pub fn write(&self) -> crate::readwriter::DataFrameWriter {
-        crate::readwriter::DataFrameWriter::new(self.session.clone(), self.plan.clone())
+        crate::readwriter::DataFrameWriter::new(self.session.clone(), Arc::clone(&self.plan))
     }
 
     /// Create a [`DataFrameWriterV2`](crate::readwriter::DataFrameWriterV2) for
@@ -858,7 +864,7 @@ impl DataFrame {
     pub fn write_to(&self, table_name: &str) -> crate::readwriter::DataFrameWriterV2 {
         crate::readwriter::DataFrameWriterV2::new(
             self.session.clone(),
-            self.plan.clone(),
+            Arc::clone(&self.plan),
             table_name,
         )
     }
@@ -871,7 +877,7 @@ impl DataFrame {
     pub fn merge_into(&self, table: &str, condition: Column) -> crate::merge::MergeIntoWriter {
         crate::merge::MergeIntoWriter::new(
             self.session.clone(),
-            self.plan.clone(),
+            Arc::clone(&self.plan),
             table.to_string(),
             condition,
         )
@@ -881,7 +887,7 @@ impl DataFrame {
     ///
     /// Mirrors `pyspark.sql.DataFrame.writeStream`.
     pub fn write_stream(&self) -> crate::streaming::DataStreamWriter {
-        crate::streaming::DataStreamWriter::new(self.session.clone(), self.plan.clone())
+        crate::streaming::DataStreamWriter::new(self.session.clone(), Arc::clone(&self.plan))
     }
 
     /// The default `MEMORY_AND_DISK_DESER` storage level used by `cache()`.
@@ -1069,7 +1075,7 @@ impl DataFrame {
     /// Add a watermark to this DataFrame for event-time based windows.
     pub fn with_watermark(&self, time_column: &str, delay_threshold: &str) -> DataFrame {
         let plan = LogicalPlan::WithWatermark {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             time_column: time_column.to_string(),
             delay_threshold: delay_threshold.to_string(),
         };
@@ -1079,7 +1085,7 @@ impl DataFrame {
     /// Repartition this DataFrame by range.
     pub fn repartition_by_range(&self, num_partitions: i32, columns: Vec<Expression>) -> DataFrame {
         let plan = LogicalPlan::RepartitionByRange {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             num_partitions: Some(num_partitions),
             partition_exprs: columns,
         };
@@ -1094,7 +1100,7 @@ impl DataFrame {
         columns: Vec<Expression>,
     ) -> DataFrame {
         let plan = LogicalPlan::RepartitionByExpression {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             num_partitions,
             expressions: columns,
         };
@@ -1120,7 +1126,7 @@ impl DataFrame {
             value_vars.map(|v| v.iter().map(|name| col(name)).collect());
 
         let plan = LogicalPlan::Unpivot {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             ids,
             values: vals,
             variable_column_name: var_name.to_string(),
@@ -1151,7 +1157,7 @@ impl DataFrame {
     /// Observe metrics on this DataFrame.
     pub fn observe(&self, name: &str, exprs: Vec<Expression>) -> DataFrame {
         let plan = LogicalPlan::Observe {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             name: name.to_string(),
             exprs,
         };
@@ -1173,7 +1179,7 @@ impl DataFrame {
     /// Perform aggregation without grouping.
     pub fn agg(&self, expressions: Vec<Expression>) -> DataFrame {
         let plan = LogicalPlan::Aggregate {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             group_type: AggregateGroupType::GroupBy,
             grouping_expressions: vec![],
             aggregate_expressions: expressions,
@@ -1221,7 +1227,7 @@ impl DataFrame {
             .map(|v| v.iter().map(|s| s.to_string()).collect())
             .unwrap_or_default();
         let plan = LogicalPlan::NAFill {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             fill_value: value,
             columns,
         };
@@ -1233,7 +1239,7 @@ impl DataFrame {
     pub fn fillna_map(&self, pairs: Vec<(String, crate::row::Value)>) -> DataFrame {
         let (cols, values): (Vec<String>, Vec<crate::row::Value>) = pairs.into_iter().unzip();
         let plan = LogicalPlan::NAFillColumns {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             cols,
             values,
         };
@@ -1254,7 +1260,7 @@ impl DataFrame {
         // `how` is carried into the plan; `min_non_nulls` is derived from `how`
         // and `thresh` in `NADrop::to_proto` (mirrors pyspark's translation).
         let plan = LogicalPlan::NADrop {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             how: how_str,
             min_non_null: thresh,
             columns,
@@ -1272,7 +1278,7 @@ impl DataFrame {
             .map(|v| v.iter().map(|s| s.to_string()).collect())
             .unwrap_or_default();
         let plan = LogicalPlan::NAReplace {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             replacements: to_replace,
             columns,
         };
@@ -1283,7 +1289,7 @@ impl DataFrame {
     pub fn describe(&self, columns: Vec<&str>) -> DataFrame {
         let col_names = columns.iter().map(|s| s.to_string()).collect();
         let plan = LogicalPlan::Describe {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             columns: col_names,
         };
         DataFrame::new(self.session.clone(), plan)
@@ -1293,7 +1299,7 @@ impl DataFrame {
     pub fn summary(&self, percentiles: Vec<&str>) -> DataFrame {
         let percs = percentiles.iter().map(|s| s.to_string()).collect();
         let plan = LogicalPlan::Summary {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             percentiles: percs,
         };
         DataFrame::new(self.session.clone(), plan)
@@ -1302,7 +1308,7 @@ impl DataFrame {
     /// Select columns by regex pattern.
     pub fn col_regex(&self, col_name: &str) -> DataFrame {
         let plan = LogicalPlan::ColRegex {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             col_name: col_name.to_string(),
         };
         DataFrame::new(self.session.clone(), plan)
@@ -1310,9 +1316,12 @@ impl DataFrame {
 
     /// Select a metadata column by name. Mirrors `pyspark.sql.DataFrame.metadataColumn`.
     pub fn metadata_column(&self, name: &str) -> Column {
-        Column::new(Expression::ColumnReference(
-            crate::expression::ColumnReference::new(name).metadata(),
-        ))
+        Column::new(
+            ExpressionNode::ColumnReference(
+                crate::expression::ColumnReference::new(name).metadata(),
+            )
+            .into(),
+        )
     }
 
     /// Group by with rollup.
@@ -1343,7 +1352,7 @@ impl DataFrame {
     /// Sort within partitions (local sort).
     pub fn sort_within_partitions(&self, columns: Vec<Expression>) -> DataFrame {
         let plan = LogicalPlan::Sort {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             order: columns,
             is_global: false,
         };
@@ -1358,7 +1367,7 @@ impl DataFrame {
             .unwrap_or_default();
 
         let plan = LogicalPlan::Deduplicate {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             all_columns_as_keys: all_cols,
             column_names: cols,
             within_watermark: true,
@@ -1385,7 +1394,7 @@ impl DataFrame {
         for weight in normalized {
             let upper = cumulative + weight;
             let plan = LogicalPlan::Sample {
-                input: Box::new(self.plan.clone()),
+                input: Arc::clone(&self.plan),
                 lower_bound: cumulative,
                 upper_bound: upper,
                 with_replacement: false,
@@ -1523,8 +1532,8 @@ impl DataFrame {
     /// Union all rows (alias for union with all=true).
     pub fn union_all(&self, other: &DataFrame) -> DataFrame {
         let plan = LogicalPlan::SetOperation {
-            left: Box::new(self.plan.clone()),
-            right: Box::new(other.plan.clone()),
+            left: Arc::clone(&self.plan),
+            right: Arc::clone(&other.plan),
             set_op_type: SetOpType::Union,
             is_all: true,
             by_name: false,
@@ -1536,8 +1545,8 @@ impl DataFrame {
     /// Except all rows.
     pub fn except_all(&self, other: &DataFrame) -> DataFrame {
         let plan = LogicalPlan::SetOperation {
-            left: Box::new(self.plan.clone()),
-            right: Box::new(other.plan.clone()),
+            left: Arc::clone(&self.plan),
+            right: Arc::clone(&other.plan),
             set_op_type: SetOpType::Except,
             is_all: true,
             by_name: false,
@@ -1549,8 +1558,8 @@ impl DataFrame {
     /// Intersect all rows.
     pub fn intersect_all(&self, other: &DataFrame) -> DataFrame {
         let plan = LogicalPlan::SetOperation {
-            left: Box::new(self.plan.clone()),
-            right: Box::new(other.plan.clone()),
+            left: Arc::clone(&self.plan),
+            right: Arc::clone(&other.plan),
             set_op_type: SetOpType::Intersect,
             is_all: true,
             by_name: false,
@@ -1570,7 +1579,7 @@ impl DataFrame {
         let ids: Vec<Column> = ids.into_iter().map(Into::into).collect();
         let values: Option<Vec<Column>> = values.map(|v| v.into_iter().map(Into::into).collect());
         let plan = LogicalPlan::Unpivot {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             ids,
             values,
             variable_column_name: variable_column_name.to_string(),
@@ -1586,7 +1595,7 @@ impl DataFrame {
     pub fn with_metadata(&self, column_name: &str, metadata: HashMap<String, String>) -> DataFrame {
         let metadata_json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
         let plan = LogicalPlan::WithColumnMetadata {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             column_name: column_name.to_string(),
             metadata_json,
         };
@@ -1600,14 +1609,14 @@ impl DataFrame {
 
     /// Check if this DataFrame is local (collected).
     pub fn is_local(&self) -> bool {
-        matches!(self.plan, LogicalPlan::LocalRelation { .. })
+        matches!(self.plan.as_ref(), LogicalPlan::LocalRelation { .. })
     }
 
     /// Check if this DataFrame is streaming.
     pub fn is_streaming(&self) -> bool {
         // Check if the plan has streaming-related operations
         matches!(
-            self.plan,
+            self.plan.as_ref(),
             LogicalPlan::Read {
                 is_streaming: true,
                 ..
@@ -1668,8 +1677,8 @@ impl DataFrame {
     /// partitionIdCol)`: the column is wrapped in a `DirectShufflePartitionID`
     /// expression and used as the sole repartition expression.
     pub fn repartition_by_id(&self, num_partitions: i32, partition_id_col: Column) -> DataFrame {
-        let direct =
-            Expression::DirectShufflePartitionId(Box::new(partition_id_col.expression().clone()));
+        let direct: Expression =
+            ExpressionNode::DirectShufflePartitionId(partition_id_col.expression().clone()).into();
         self.repartition_by_expressions(num_partitions, vec![direct])
     }
 
@@ -1677,11 +1686,9 @@ impl DataFrame {
     /// `DataFrame.zipWithIndex(indexColName="index")`:
     /// `self.select(col("*"), distributed_sequence_id().alias(indexColName))`.
     pub fn zip_with_index(&self, index_col_name: &str) -> DataFrame {
-        let star = Column::new(Expression::UnresolvedStar(None));
-        let seq = Column::new(Expression::UnresolvedFunction(
-            crate::expression::UnresolvedFunction::new("distributed_sequence_id", vec![]),
-        ))
-        .alias(index_col_name);
+        let star = Column::new(ExpressionNode::UnresolvedStar(None).into());
+        let seq = Column::new(Expression::function("distributed_sequence_id", vec![]))
+            .alias(index_col_name);
         self.select(vec![star, seq])
     }
 
@@ -1691,7 +1698,7 @@ impl DataFrame {
     /// Mirrors `pyspark.sql.connect.dataframe.DataFrame.to` (a `ToSchema` relation).
     pub fn to(&self, schema: DataType) -> DataFrame {
         let plan = LogicalPlan::ToSchema {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             schema,
         };
         DataFrame::new(self.session.clone(), plan)
@@ -1717,7 +1724,7 @@ impl DataFrame {
     /// with no index column (the server uses the first column as the header).
     pub fn transpose(&self) -> Result<DataFrame> {
         let plan = LogicalPlan::Transpose {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             index_columns: vec![],
         };
         Ok(DataFrame::new(self.session.clone(), plan))
@@ -1727,7 +1734,7 @@ impl DataFrame {
     /// Mirrors `DataFrame.transpose(indexColumn)`.
     pub fn transpose_with_index(&self, index_column: Column) -> Result<DataFrame> {
         let plan = LogicalPlan::Transpose {
-            input: Box::new(self.plan.clone()),
+            input: Arc::clone(&self.plan),
             index_columns: vec![index_column.expression().clone()],
         };
         Ok(DataFrame::new(self.session.clone(), plan))
@@ -1736,11 +1743,11 @@ impl DataFrame {
     /// Zip this DataFrame with another DataFrame by row number.
     pub fn zip(&self, other: &DataFrame) -> Result<DataFrame> {
         let plan = LogicalPlan::Zip {
-            left: Box::new(self.plan.clone()),
-            right: Box::new(other.plan.clone()),
+            left: Arc::clone(&self.plan),
+            right: Arc::clone(&other.plan),
         };
         Ok(DataFrame {
-            plan,
+            plan: Arc::new(plan),
             session: self.session.clone(),
         })
     }
@@ -2046,7 +2053,9 @@ pub(crate) fn assign_plan_ids(
 }
 
 /// Decode an Arrow batch into rows.
-fn decode_arrow_batch(batch: &proto::execute_plan_response::ArrowBatch) -> Result<Vec<Row>> {
+pub(crate) fn decode_arrow_batch(
+    batch: &proto::execute_plan_response::ArrowBatch,
+) -> Result<Vec<Row>> {
     use arrow::ipc::reader::StreamReader;
     use std::io::Cursor;
 
@@ -2068,22 +2077,29 @@ fn decode_arrow_batch(batch: &proto::execute_plan_response::ArrowBatch) -> Resul
     {
         let schema = record_batch.schema();
         let num_rows = record_batch.num_rows();
-        let num_cols = record_batch.num_columns();
+        if num_rows == 0 {
+            continue;
+        }
+        let field_names = schema
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect::<Arc<[String]>>();
+        let layouts = record_batch
+            .columns()
+            .iter()
+            .map(|column| ArrowValueLayout::new(column.data_type()))
+            .collect::<Vec<_>>();
 
         for row_idx in 0..num_rows {
-            let mut field_names = vec![];
             let mut values = vec![];
 
-            for col_idx in 0..num_cols {
-                let field_name = schema.field(col_idx).name().clone();
-                let column = record_batch.column(col_idx);
-
-                let value = arrow_value_at(column.as_ref(), row_idx)?;
-                field_names.push(field_name);
+            for (column, layout) in record_batch.columns().iter().zip(&layouts) {
+                let value = arrow_value_at_with_layout(column.as_ref(), row_idx, layout)?;
                 values.push(value);
             }
 
-            rows.push(Row::new(field_names, values));
+            rows.push(Row::with_shared_fields(Arc::clone(&field_names), values));
         }
     }
 
@@ -2225,7 +2241,60 @@ fn map_key_to_string(v: Value) -> String {
     }
 }
 
-pub(crate) fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> Result<Value> {
+/// Immutable decoding metadata prepared once for each column in a record batch.
+/// Container layouts follow their children so struct names are also shared inside
+/// lists and maps, without retaining the Arrow arrays after decoding.
+enum ArrowValueLayout {
+    Scalar,
+    List(Box<Self>),
+    Struct {
+        names: Arc<[String]>,
+        children: Vec<Self>,
+        is_variant: bool,
+    },
+    Map(Box<(Self, Self)>),
+}
+
+impl ArrowValueLayout {
+    fn new(data_type: &arrow::datatypes::DataType) -> Self {
+        use arrow::datatypes::DataType;
+        match data_type {
+            DataType::List(field) => Self::List(Box::new(Self::new(field.data_type()))),
+            DataType::Struct(fields) => Self::Struct {
+                names: fields.iter().map(|field| field.name().clone()).collect(),
+                children: fields
+                    .iter()
+                    .map(|field| Self::new(field.data_type()))
+                    .collect(),
+                is_variant: fields.iter().any(|field| {
+                    field
+                        .metadata()
+                        .get("variant")
+                        .is_some_and(|value| value == "true")
+                }),
+            },
+            DataType::Map(entries, _) => match entries.data_type() {
+                DataType::Struct(fields) => Self::Map(Box::new((
+                    Self::new(fields[0].data_type()),
+                    Self::new(fields[1].data_type()),
+                ))),
+                _ => unreachable!("Arrow map entries must be a struct"),
+            },
+            _ => Self::Scalar,
+        }
+    }
+}
+
+#[cfg(test)]
+fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> Result<Value> {
+    arrow_value_at_with_layout(array, index, &ArrowValueLayout::new(array.data_type()))
+}
+
+fn arrow_value_at_with_layout(
+    array: &dyn arrow::array::Array,
+    index: usize,
+    value_layout: &ArrowValueLayout,
+) -> Result<Value> {
     use arrow::array::*;
 
     if array.is_null(index) {
@@ -2325,28 +2394,37 @@ pub(crate) fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> R
     }
     // Nested: list, struct, map (recurse).
     if let Some(arr) = array.as_any().downcast_ref::<ListArray>() {
+        let ArrowValueLayout::List(child_layout) = value_layout else {
+            unreachable!("layout is prepared from the array's data type");
+        };
         let child = arr.value(index);
         let mut items = Vec::with_capacity(child.len());
         for i in 0..child.len() {
-            items.push(arrow_value_at(child.as_ref(), i)?);
+            items.push(arrow_value_at_with_layout(child.as_ref(), i, child_layout)?);
         }
         return Ok(Value::List(items));
     }
     if let Some(arr) = array.as_any().downcast_ref::<StructArray>() {
+        let ArrowValueLayout::Struct {
+            names,
+            children,
+            is_variant,
+        } = value_layout
+        else {
+            unreachable!("layout is prepared from the array's data type");
+        };
         // A VARIANT column arrives as struct<value: binary, metadata: binary> where the
         // `metadata` field carries arrow metadata {"variant": "true"}. Recognize it and
         // return a Value::Variant (raw bytes) so it materializes as a VariantVal (matching
         // pyspark) rather than a plain {value, metadata} struct/dict.
-        let is_variant = arr.fields().iter().any(|f| {
-            f.metadata()
-                .get("variant")
-                .map(|v| v == "true")
-                .unwrap_or(false)
-        });
-        if is_variant {
+        if *is_variant {
             let bin_field = |name: &str| -> Result<Vec<u8>> {
-                match arr.column_by_name(name) {
-                    Some(col) => match arrow_value_at(col.as_ref(), index)? {
+                match arr.fields().iter().position(|field| field.name() == name) {
+                    Some(col_idx) => match arrow_value_at_with_layout(
+                        arr.column(col_idx).as_ref(),
+                        index,
+                        &children[col_idx],
+                    )? {
                         Value::Binary(b) => Ok(b),
                         Value::Null => Ok(vec![]),
                         _ => Err(SparkError::connect_msg("variant field is not binary")),
@@ -2359,13 +2437,20 @@ pub(crate) fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> R
                 metadata: bin_field("metadata")?,
             });
         }
-        let mut fields = Vec::new();
-        for (f, col) in arr.fields().iter().zip(arr.columns()) {
-            fields.push((f.name().clone(), arrow_value_at(col.as_ref(), index)?));
+        let mut values = Vec::with_capacity(children.len());
+        for (col, child_layout) in arr.columns().iter().zip(children) {
+            values.push(arrow_value_at_with_layout(
+                col.as_ref(),
+                index,
+                child_layout,
+            )?);
         }
-        return Ok(Value::Struct(fields));
+        return Ok(Value::Struct(StructValue::new(Arc::clone(names), values)));
     }
     if let Some(arr) = array.as_any().downcast_ref::<MapArray>() {
+        let ArrowValueLayout::Map(children) = value_layout else {
+            unreachable!("layout is prepared from the array's data type");
+        };
         let entries = arr.value(index);
         let keys = entries.column(0);
         let vals = entries.column(1);
@@ -2374,8 +2459,11 @@ pub(crate) fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> R
             // A map key stringifies to its natural scalar form (e.g. `1`, `true`,
             // `1.5`), not the Rust enum's Debug output - a `map<int,string>` key must
             // be "1", never "Integer(1)".
-            let k = map_key_to_string(arrow_value_at(keys.as_ref(), i)?);
-            map.insert(k, arrow_value_at(vals.as_ref(), i)?);
+            let k = map_key_to_string(arrow_value_at_with_layout(keys.as_ref(), i, &children.0)?);
+            map.insert(
+                k,
+                arrow_value_at_with_layout(vals.as_ref(), i, &children.1)?,
+            );
         }
         return Ok(Value::Map(map));
     }
@@ -2437,6 +2525,312 @@ pub(crate) fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> R
         "Unsupported Arrow type {:?} - cannot convert to Value",
         array.data_type()
     )))
+}
+
+#[cfg(test)]
+mod nested_decode_tests {
+    use super::*;
+    use arrow::array::*;
+    use arrow::buffer::{NullBuffer, OffsetBuffer};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::ipc::writer::StreamWriter;
+    use arrow::record_batch::RecordBatch;
+
+    fn decode_batches(columns: Vec<(&str, ArrayRef)>, repeats: usize) -> Vec<Row> {
+        let schema = Arc::new(Schema::new(
+            columns
+                .iter()
+                .map(|(name, array)| Field::new(*name, array.data_type().clone(), true))
+                .collect::<Vec<_>>(),
+        ));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            columns.into_iter().map(|(_, array)| array).collect(),
+        )
+        .unwrap();
+        let mut data = vec![];
+        {
+            let mut writer = StreamWriter::try_new(&mut data, &schema).unwrap();
+            for _ in 0..repeats {
+                writer.write(&batch).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        decode_arrow_batch(&proto::execute_plan_response::ArrowBatch {
+            data: data.into(),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    fn as_struct(value: &Value) -> &StructValue {
+        let Value::Struct(row) = value else {
+            panic!("expected struct, got {value:?}");
+        };
+        row
+    }
+
+    #[test]
+    fn nested_names_preserve_duplicates_unicode_nulls_and_sibling_layouts() {
+        let names = ["dup", "dup", "", "名前"];
+        let fields = names
+            .iter()
+            .map(|name| Arc::new(Field::new(*name, DataType::Int32, true)))
+            .collect::<Vec<_>>();
+        let columns = (1..=4)
+            .map(|n| Arc::new(Int32Array::from(vec![Some(n), None, None])) as ArrayRef)
+            .collect();
+        let nested = StructArray::new(
+            fields.into(),
+            columns,
+            Some(NullBuffer::from(vec![true, true, false])),
+        );
+        let sibling = StructArray::from(vec![(
+            Arc::new(Field::new("other", DataType::Int32, false)),
+            Arc::new(Int32Array::from(vec![7, 8, 9])) as ArrayRef,
+        )]);
+        let rows = decode_batches(
+            vec![("nested", Arc::new(nested)), ("sibling", Arc::new(sibling))],
+            2,
+        );
+        assert_eq!(rows.len(), 6);
+        for batch in rows.chunks(3) {
+            let populated = as_struct(batch[0].get(0).unwrap());
+            let all_null = as_struct(batch[1].get(0).unwrap());
+            assert_eq!(populated.fields(), &names);
+            assert_eq!(
+                populated.values(),
+                &[
+                    Value::Integer(1),
+                    Value::Integer(2),
+                    Value::Integer(3),
+                    Value::Integer(4)
+                ]
+            );
+            assert_eq!(populated.get_by_name("dup"), Some(&Value::Integer(1)));
+            assert_eq!(all_null.values(), &vec![Value::Null; 4]);
+            assert_eq!(batch[2].get(0), Some(&Value::Null));
+            assert!(std::ptr::eq(populated.fields(), all_null.fields()));
+            let other = as_struct(batch[0].get(1).unwrap());
+            assert_eq!(other.fields(), &["other"]);
+            assert_eq!(other.values(), &[Value::Integer(7)]);
+        }
+    }
+
+    #[test]
+    fn names_are_shared_through_lists_maps_and_nested_structs() {
+        let leaf = StructArray::from(vec![(
+            Arc::new(Field::new("leaf", DataType::Int32, false)),
+            Arc::new(Int32Array::from(vec![1, 2, 3, 4])) as ArrayRef,
+        )]);
+        let entries = StructArray::from(vec![
+            (
+                Arc::new(Field::new("key", DataType::Utf8, false)),
+                Arc::new(StringArray::from(vec!["a", "b", "c", "d"])) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("value", leaf.data_type().clone(), true)),
+                Arc::new(leaf) as ArrayRef,
+            ),
+        ]);
+        let map = MapArray::new(
+            Arc::new(Field::new("entries", entries.data_type().clone(), false)),
+            OffsetBuffer::new(vec![0, 1, 2, 3, 4].into()),
+            entries,
+            None,
+            false,
+        );
+        let list = ListArray::new(
+            Arc::new(Field::new("item", map.data_type().clone(), true)),
+            OffsetBuffer::new(vec![0, 2, 4].into()),
+            Arc::new(map),
+            None,
+        );
+        let outer = StructArray::from(vec![(
+            Arc::new(Field::new("items", list.data_type().clone(), true)),
+            Arc::new(list) as ArrayRef,
+        )]);
+        let rows = decode_batches(vec![("outer", Arc::new(outer))], 1);
+        let mut leaves = vec![];
+        for row in &rows {
+            let outer = as_struct(row.get(0).unwrap());
+            let Value::List(maps) = outer.get(0).unwrap() else {
+                panic!("expected list");
+            };
+            for value in maps {
+                let Value::Map(map) = value else {
+                    panic!("expected map");
+                };
+                leaves.push(as_struct(map.values().next().unwrap()));
+            }
+        }
+        assert_eq!(leaves.len(), 4);
+        for (index, leaf) in leaves.iter().enumerate() {
+            assert_eq!(leaf.fields(), &["leaf"]);
+            assert_eq!(leaf.get(0), Some(&Value::Integer(index as i32 + 1)));
+            assert!(std::ptr::eq(leaves[0].fields(), leaf.fields()));
+        }
+    }
+
+    #[test]
+    fn sliced_containers_preserve_offsets_empty_null_and_struct_values() {
+        let leaf = StructArray::new(
+            vec![Arc::new(Field::new("n", DataType::Int32, true))].into(),
+            vec![Arc::new(Int32Array::from(vec![
+                Some(0),
+                Some(1),
+                None,
+                Some(3),
+                Some(4),
+                Some(5),
+            ]))],
+            Some(NullBuffer::from(vec![true, true, false, true, true, true])),
+        );
+        let offsets = OffsetBuffer::new(vec![0, 1, 3, 3, 4, 6].into());
+        let valid = Some(NullBuffer::from(vec![true, true, true, false, true]));
+        let list = ListArray::new(
+            Arc::new(Field::new("item", leaf.data_type().clone(), true)),
+            offsets.clone(),
+            Arc::new(leaf.clone()),
+            valid.clone(),
+        );
+        let entries = StructArray::from(vec![
+            (
+                Arc::new(Field::new("key", DataType::Utf8, false)),
+                Arc::new(StringArray::from(vec!["k0", "k1", "k2", "k3", "k4", "k5"])) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("value", leaf.data_type().clone(), true)),
+                Arc::new(leaf) as ArrayRef,
+            ),
+        ]);
+        let map = MapArray::new(
+            Arc::new(Field::new("entries", entries.data_type().clone(), false)),
+            offsets,
+            entries,
+            valid,
+            false,
+        );
+        let rows = decode_batches(
+            vec![
+                ("list", Arc::new(list.slice(1, 4))),
+                ("map", Arc::new(map.slice(1, 4))),
+            ],
+            1,
+        );
+        let value =
+            |n| Value::Struct(Row::new(vec!["n".to_string()], vec![Value::Integer(n)]).into());
+        assert_eq!(
+            rows[0].get(0),
+            Some(&Value::List(vec![value(1), Value::Null]))
+        );
+        assert_eq!(
+            rows[0].get(1),
+            Some(&Value::Map(
+                [
+                    ("k1".to_string(), value(1)),
+                    ("k2".to_string(), Value::Null)
+                ]
+                .into()
+            ))
+        );
+        assert_eq!(rows[1].get(0), Some(&Value::List(vec![])));
+        assert_eq!(rows[1].get(1), Some(&Value::Map(Default::default())));
+        assert_eq!(rows[2].get(0), Some(&Value::Null));
+        assert_eq!(rows[2].get(1), Some(&Value::Null));
+        assert_eq!(rows[3].get(0), Some(&Value::List(vec![value(4), value(5)])));
+        assert_eq!(
+            rows[3].get(1),
+            Some(&Value::Map(
+                [("k4".to_string(), value(4)), ("k5".to_string(), value(5))].into()
+            ))
+        );
+        let (Value::List(first), Value::List(last)) =
+            (rows[0].get(0).unwrap(), rows[3].get(0).unwrap())
+        else {
+            panic!("expected lists");
+        };
+        assert!(std::ptr::eq(
+            as_struct(&first[0]).fields(),
+            as_struct(&last[0]).fields()
+        ));
+        let (Value::Map(first), Value::Map(last)) =
+            (rows[0].get(1).unwrap(), rows[3].get(1).unwrap())
+        else {
+            panic!("expected maps");
+        };
+        assert!(std::ptr::eq(
+            as_struct(&first["k1"]).fields(),
+            as_struct(&last["k4"]).fields()
+        ));
+    }
+
+    #[test]
+    fn variant_marker_precedes_struct_decoding_and_preserves_errors() {
+        let marked = |name: &str, array: ArrayRef| {
+            let field = Field::new(name, array.data_type().clone(), true).with_metadata(
+                std::collections::HashMap::from([("variant".into(), "true".into())]),
+            );
+            StructArray::from(vec![(Arc::new(field), array)])
+        };
+        let binary = marked(
+            "value",
+            Arc::new(BinaryArray::from(vec![Some(b"x".as_ref()), None])),
+        );
+        assert_eq!(
+            arrow_value_at(&binary, 0).unwrap(),
+            Value::Variant {
+                value: b"x".to_vec(),
+                metadata: vec![]
+            }
+        );
+        assert_eq!(
+            arrow_value_at(&binary, 1).unwrap(),
+            Value::Variant {
+                value: vec![],
+                metadata: vec![]
+            }
+        );
+        let missing = marked("unrelated", Arc::new(Int32Array::from(vec![1])));
+        assert_eq!(
+            arrow_value_at(&missing, 0).unwrap(),
+            Value::Variant {
+                value: vec![],
+                metadata: vec![]
+            }
+        );
+        let invalid = marked("metadata", Arc::new(Int32Array::from(vec![1])));
+        assert!(arrow_value_at(&invalid, 0)
+            .unwrap_err()
+            .to_string()
+            .contains("variant field is not binary"));
+        let null_parent = StructArray::new(
+            invalid.fields().clone(),
+            invalid.columns().to_vec(),
+            Some(NullBuffer::from(vec![false])),
+        );
+        assert_eq!(arrow_value_at(&null_parent, 0).unwrap(), Value::Null);
+        let ordinary = StructArray::from(vec![
+            (
+                Arc::new(Field::new("value", DataType::Int32, false)),
+                Arc::new(Int32Array::from(vec![1])) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("metadata", DataType::Int32, false)),
+                Arc::new(Int32Array::from(vec![2])) as ArrayRef,
+            ),
+        ]);
+        assert_eq!(
+            arrow_value_at(&ordinary, 0).unwrap(),
+            Value::Struct(
+                Row::new(
+                    vec!["value".to_string(), "metadata".to_string()],
+                    vec![Value::Integer(1), Value::Integer(2)]
+                )
+                .into()
+            )
+        );
+    }
 }
 
 /// Render microseconds-since-midnight as an ISO time string `HH:MM:SS[.ffffff]`.
@@ -2530,6 +2924,42 @@ mod conversion_tests {
             ],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn decoded_rows_share_batch_field_names_and_preserve_values() {
+        use arrow::ipc::writer::StreamWriter;
+
+        let batch = sample_batch();
+        let mut data = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut data, batch.schema().as_ref()).unwrap();
+            writer.write(&batch.slice(0, 0)).unwrap();
+            writer.write(&batch).unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+        }
+        let response = proto::execute_plan_response::ArrowBatch {
+            data: data.into(),
+            ..Default::default()
+        };
+        let rows = decode_arrow_batch(&response).unwrap();
+
+        assert_eq!(rows.len(), 6);
+        for (index, row) in rows.iter().enumerate() {
+            let source_index = index % 3;
+            assert_eq!(row.fields(), &["id".to_string(), "name".to_string()]);
+            assert_eq!(row.get(0), Some(&Value::Long(source_index as i64 + 1)));
+            assert_eq!(
+                row.get_by_name("name"),
+                Some(&Value::String(["a", "b", "c"][source_index].to_string()))
+            );
+        }
+        assert!(std::ptr::eq(rows[0].fields(), rows[1].fields()));
+        assert!(std::ptr::eq(rows[1].fields(), rows[2].fields()));
+        assert!(std::ptr::eq(rows[3].fields(), rows[4].fields()));
+        assert!(std::ptr::eq(rows[4].fields(), rows[5].fields()));
+        assert!(decode_arrow_batch(&Default::default()).unwrap().is_empty());
     }
 
     #[test]
@@ -2627,7 +3057,7 @@ mod plan_construction_tests {
         let spark = session();
         let df = spark.range(3).unwrap();
         let result = df.with_watermark("timestamp", "1 minute");
-        match &result.plan {
+        match result.plan.as_ref() {
             LogicalPlan::WithWatermark {
                 time_column,
                 delay_threshold,
@@ -2641,13 +3071,116 @@ mod plan_construction_tests {
     }
 
     #[test]
+    fn transformations_and_clones_share_ancestors() {
+        use crate::functions::col;
+
+        let spark = session();
+        let source = spark.range(10).unwrap();
+        let original = source.plan.to_proto();
+        let cloned = source.clone();
+        assert!(Arc::ptr_eq(&source.plan, &cloned.plan));
+
+        let projected = source.select(vec![col("id")]);
+        let filtered = source.filter(col("id").gt(crate::column::lit(0)));
+        let limited = projected.limit(5);
+        let LogicalPlan::Project { input, .. } = projected.plan.as_ref() else {
+            panic!("expected projection");
+        };
+        assert!(Arc::ptr_eq(input, &source.plan));
+        let LogicalPlan::Filter { input, .. } = filtered.plan.as_ref() else {
+            panic!("expected filter");
+        };
+        assert!(Arc::ptr_eq(input, &source.plan));
+        let LogicalPlan::Limit { input, .. } = limited.plan.as_ref() else {
+            panic!("expected limit");
+        };
+        assert!(Arc::ptr_eq(input, &projected.plan));
+
+        let joined = projected.cross_join(&filtered);
+        let LogicalPlan::Join { left, right, .. } = joined.plan.as_ref() else {
+            panic!("expected join");
+        };
+        assert!(Arc::ptr_eq(left, &projected.plan));
+        assert!(Arc::ptr_eq(right, &filtered.plan));
+        assert_eq!(source.plan.to_proto(), original);
+    }
+
+    #[test]
+    fn related_builders_share_the_source_plan() {
+        let spark = session();
+        let source = spark.range(10).unwrap().limit(5);
+
+        let writer = source.write();
+        assert!(std::ptr::eq(source.plan(), writer.plan()));
+        let writer_v2 = source.write_to("target");
+        assert!(std::ptr::eq(source.plan(), writer_v2.plan()));
+        let stream_writer = source.write_stream();
+        assert!(std::ptr::eq(source.plan(), stream_writer.plan()));
+        let merge_writer = source.merge_into("target", crate::column::col("id"));
+        assert!(std::ptr::eq(source.plan(), merge_writer.plan()));
+        let table_arg = crate::table_arg::TableArg::new(source.clone());
+        assert!(std::ptr::eq(source.plan(), table_arg.plan()));
+        let cloned_table_arg = table_arg.clone();
+        assert!(std::ptr::eq(source.plan(), cloned_table_arg.plan()));
+    }
+
+    #[test]
+    fn shared_self_join_serializes_each_occurrence_with_distinct_ids() {
+        use crate::functions::col;
+        use crate::plan;
+        use proto::relation::RelType;
+
+        fn ids(relation: &proto::Relation, out: &mut Vec<i64>) {
+            out.push(relation.common.as_ref().unwrap().plan_id.unwrap());
+            match relation.rel_type.as_ref().unwrap() {
+                RelType::Join(join) => {
+                    ids(join.left.as_ref().unwrap(), out);
+                    ids(join.right.as_ref().unwrap(), out);
+                }
+                RelType::Project(project) => ids(project.input.as_ref().unwrap(), out),
+                RelType::Range(_) => {}
+                _ => panic!("unexpected relation"),
+            }
+        }
+
+        let spark = session();
+        let projected = spark.range(10).unwrap().select(vec![col("id")]);
+        let joined = projected.cross_join(&projected);
+        let LogicalPlan::Join { left, right, .. } = joined.plan.as_ref() else {
+            panic!("expected join");
+        };
+        assert!(Arc::ptr_eq(left, right));
+        let expected = plan::join(
+            plan::project(plan::range(0, 10, 1), vec![col("id")]),
+            plan::project(plan::range(0, 10, 1), vec![col("id")]),
+            JoinType::Cross,
+            None,
+            vec![],
+        )
+        .to_proto();
+        assert_eq!(joined.plan.to_proto(), expected);
+
+        let first = build_input_relation(joined.plan(), &spark).unwrap();
+        let second = build_input_relation(joined.plan(), &spark).unwrap();
+        let mut all_ids = Vec::new();
+        ids(&first, &mut all_ids);
+        ids(&second, &mut all_ids);
+        assert_eq!(all_ids.len(), 10);
+        all_ids.sort_unstable();
+        all_ids.dedup();
+        assert_eq!(all_ids.len(), 10);
+        // Assigning IDs mutates only the fresh protobuf, never the shared client plan.
+        assert_eq!(joined.plan.to_proto(), expected);
+    }
+
+    #[test]
     fn with_metadata_plan() {
         let spark = session();
         let df = spark.range(3).unwrap();
         let mut metadata = std::collections::HashMap::new();
         metadata.insert("key".to_string(), "value".to_string());
         let result = df.with_metadata("col", metadata);
-        match &result.plan {
+        match result.plan.as_ref() {
             LogicalPlan::WithColumnMetadata {
                 column_name,
                 metadata_json,
@@ -2668,7 +3201,7 @@ mod plan_construction_tests {
         assert_eq!(dfs.len(), 2);
         // Each split is a different DataFrame with its own plan
         for split_df in &dfs {
-            match &split_df.plan {
+            match split_df.plan.as_ref() {
                 LogicalPlan::Sample {
                     with_replacement: false,
                     ..
@@ -2686,7 +3219,7 @@ mod plan_construction_tests {
         let df = spark.range(3).unwrap();
         let replacements = vec![("old".to_string(), "new".to_string())];
         let result = df.replace(replacements, Some(vec!["col"]));
-        match &result.plan {
+        match result.plan.as_ref() {
             LogicalPlan::NAReplace { replacements, .. } => {
                 assert_eq!(replacements.len(), 1);
             }

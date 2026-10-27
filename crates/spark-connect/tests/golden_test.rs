@@ -20,7 +20,7 @@ use spark_connect_proto as proto;
 
 /// An integer literal Column (pyspark infers 32-bit `integer` for small ints).
 fn cint(v: i32) -> spark_connect::column::Column {
-    spark_connect::column::Column::new(Expression::Literal(LiteralExpression::int(v)))
+    spark_connect::column::Column::new(Expression::literal(LiteralExpression::int(v)))
 }
 
 /// Recursively clear fields that vary run-to-run and are not client-authored:
@@ -95,11 +95,11 @@ fn load_goldens() -> HashMap<String, proto::Expression> {
 fn build(name: &str) -> Option<Expression> {
     let e = match name {
         "col" => col("x").expression().clone(),
-        "lit_int" => Expression::Literal(LiteralExpression::int(5)),
-        "lit_str" => Expression::Literal(LiteralExpression::string("hello")),
-        "lit_double" => Expression::Literal(LiteralExpression::double(3.14)),
-        "lit_bool" => Expression::Literal(LiteralExpression::boolean(true)),
-        "lit_null" => Expression::Literal(LiteralExpression::Null(DataType::Null)),
+        "lit_int" => Expression::literal(LiteralExpression::int(5)),
+        "lit_str" => Expression::literal(LiteralExpression::string("hello")),
+        "lit_double" => Expression::literal(LiteralExpression::double(3.14)),
+        "lit_bool" => Expression::literal(LiteralExpression::boolean(true)),
+        "lit_null" => Expression::literal(LiteralExpression::Null(DataType::Null)),
         "add" => (col("id") + cint(1)).expression().clone(),
         "sub" => (col("id") - cint(1)).expression().clone(),
         "mul" => (col("id") * cint(2)).expression().clone(),

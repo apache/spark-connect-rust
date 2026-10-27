@@ -129,10 +129,10 @@ impl Window {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::expression::{ColumnReference, NullOrdering, SortOrder};
+    use crate::expression::{NullOrdering, SortOrder};
 
     fn col(name: &str) -> Expression {
-        Expression::ColumnReference(ColumnReference::new(name))
+        Expression::column(name)
     }
 
     fn sort(name: &str) -> SortOrder {
