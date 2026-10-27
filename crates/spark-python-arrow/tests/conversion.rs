@@ -25,18 +25,15 @@ use std::sync::Arc;
 use arrow::array::{Array, Int64Array};
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::{RecordBatch, RecordBatchOptions};
-use pyo3::exceptions::{
-    PyOverflowError, PyTypeError, PyUnicodeDecodeError, PyUnicodeEncodeError, PyValueError,
-};
+use pyo3::exceptions::{PyOverflowError, PyTypeError, PyUnicodeEncodeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList, PyString};
 use spark_python_arrow::bridge::{
     export_array, export_data_type, export_schema, import_array, import_batch, import_data_type,
     import_schema, record_batches_to_pyarrow,
 };
 use spark_python_arrow::scalar::{
-    extract_binary, extract_bool, extract_f64, extract_i64, extract_string, utf8_into_python,
-    Scalar,
+    extract_binary, extract_bool, extract_f64, extract_i64, extract_string, Scalar,
 };
 
 fn context(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
@@ -580,18 +577,13 @@ class StringValue:
 }
 
 #[test]
-fn utf8_scalar_decoding_preserves_embedded_nul_and_rejects_invalid_bytes() {
+fn string_scalar_materialization_preserves_unicode_and_embedded_nul() {
     Python::initialize();
     Python::attach(|py| -> PyResult<()> {
-        for value in ["", "a\0b", "\u{03bb}"] {
-            assert_eq!(
-                utf8_into_python(py, value.as_bytes())?.extract::<String>()?,
-                value
-            );
-        }
-        for bytes in [&[0xff][..], &[0xc3][..]] {
-            let error = utf8_into_python(py, bytes).unwrap_err();
-            assert!(error.is_instance_of::<PyUnicodeDecodeError>(py));
+        for value in ["", "ascii", "a\0b", "\u{00e9}", "\u{03bb}", "\u{1f600}"] {
+            let actual = Scalar::String(value).into_python(py)?;
+            assert!(actual.is_exact_instance_of::<PyString>());
+            assert_eq!(actual.extract::<String>()?, value);
         }
         Ok(())
     })

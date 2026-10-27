@@ -59,8 +59,7 @@ position has no metadata-owning Rust field.
 As with the Arrow C Data Interface itself, producers are responsible for valid
 buffer contents and all offsets. Imports perform limited structural checks, not
 full Arrow validation or a scan of every interior offset. A real PyArrow class
-does not by itself prove complete buffer validity. CPython's strict UTF-8 decoder
-checks the selected string bytes, not the Arrow offsets used to select them.
+does not by itself prove complete buffer validity.
 
 Imports call native `pyarrow.lib` class descriptors to avoid dispatching an
 arbitrary object's exporter. Exports and Python fallback operations use the
@@ -91,9 +90,8 @@ own dependency graph. The repository's root `LICENSE` covers this crate.
 
 The manifest keeps its package metadata self-contained so the compatibility
 tests can build it outside the workspace lockfile. The library does not
-enable PyO3's `extension-module` feature or select a minimum Python ABI: a Python
-extension chooses those features in the host package, while an embedded worker
-links its chosen Python runtime.
+enable PyO3's `extension-module` feature or select a minimum Python ABI;
+`pyspark-rs` selects these features for the Python extension.
 PyO3 must resolve to one compatible version in each consuming dependency graph.
 The manifest permits PyO3 0.28, 0.29, and 0.30 so consumers on these lines can use
 the same source. The OSS Python extension selects 0.30.1, which requires Rust

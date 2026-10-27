@@ -20,8 +20,8 @@
 //! Imports accept real PyArrow objects, not arbitrary objects implementing an
 //! export method. PyArrow remains responsible for the validity of its C data.
 //! These functions perform limited structural checks, not full validation of all
-//! offsets, dictionary indices, or payloads. Valid offsets and buffer bounds are
-//! producer preconditions. String decoding errors remain observable at conversion.
+//! offsets, dictionary indices, or payloads. Valid offsets, buffer bounds, and UTF-8
+//! are producer preconditions.
 
 use std::sync::Arc;
 
@@ -446,8 +446,8 @@ fn export_python_array(
 
 fn validate_structure(data: &ArrayData) -> PyResult<()> {
     // Arrow's inexpensive validation recurses through child descriptors. It
-    // checks sizes and offset endpoints, not every offset or dictionary index;
-    // those remain producer preconditions. UTF-8 is decoded when a value is read.
+    // checks sizes and offset endpoints, not every offset or dictionary index.
+    // These and valid UTF-8 remain producer preconditions.
     data.validate().map_err(arrow_error)
 }
 

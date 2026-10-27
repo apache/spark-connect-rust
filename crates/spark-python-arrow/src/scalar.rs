@@ -50,35 +50,17 @@ impl Scalar<'_> {
             Self::Bool(value) => value.into_bound_py_any(py),
             Self::Int(value) => value.into_bound_py_any(py),
             Self::Float(value) => value.into_bound_py_any(py),
-            Self::String(value) => utf8_into_python(py, value.as_bytes()),
+            Self::String(value) => Ok(PyString::new(py, value).into_any()),
             Self::Binary(value) => Ok(PyBytes::new(py, value).into_any()),
             Self::Date(days) => {
                 let fromordinal = py
                     .import("datetime")?
                     .getattr("date")?
                     .getattr("fromordinal")?;
-                date_into_python(days, &fromordinal)
+                fromordinal.call1((i64::from(days) + EPOCH_ORDINAL,))
             }
         }
     }
-}
-
-/// Decodes UTF-8 with Python's strict decoder, preserving its exception on invalid bytes.
-///
-/// This accepts raw bytes because an Arrow C Data import can contain unvalidated string data;
-/// forming a Rust `&str` first would be unsound for such an input.
-pub fn utf8_into_python<'py>(py: Python<'py>, bytes: &[u8]) -> PyResult<Bound<'py, PyAny>> {
-    Ok(PyString::from_bytes(py, bytes)?.into_any())
-}
-
-/// Materializes a date using an explicitly supplied, optionally cached `date.fromordinal`.
-///
-/// The constructor defines out-of-range errors.
-pub fn date_into_python<'py>(
-    days: i32,
-    fromordinal: &Bound<'py, PyAny>,
-) -> PyResult<Bound<'py, PyAny>> {
-    fromordinal.call1((i64::from(days) + EPOCH_ORDINAL,))
 }
 
 /// Extracts with PyO3's boolean rules, not Python truthiness.
