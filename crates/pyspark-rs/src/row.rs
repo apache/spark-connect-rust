@@ -18,7 +18,7 @@ impl PyRow {
     }
 }
 
-/// Convert a Spark `Value` into a Python object (PyO3 0.28 `IntoPyObject`).
+/// Convert a Spark `Value` into a Python object using PyO3's `IntoPyObject`.
 pub fn value_to_py<'py>(py: Python<'py>, v: &Value) -> PyResult<Bound<'py, PyAny>> {
     // Propagate conversion failures as Python exceptions with `?` rather than
     // panicking across the FFI boundary (the conversions are near-infallible,

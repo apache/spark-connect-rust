@@ -112,10 +112,11 @@ enable PyO3's `extension-module` feature or select a minimum Python ABI: a Pytho
 extension chooses those features in the host package, while an embedded worker
 links its chosen Python runtime.
 PyO3 must resolve to one compatible version in each consuming dependency graph.
-The manifest permits PyO3 0.28 and 0.29 so consumers on either line can use the
-same source. The workspace lockfile selects 0.28.3 and does not validate 0.29.
-The isolated converter compatibility CI job tests both versions independently;
-0.29 support must not be considered verified until that job passes.
+The manifest permits PyO3 0.28, 0.29, and 0.30 so consumers on these lines can use
+the same source. The OSS Python extension selects 0.30.1, which requires Rust
+1.85 or newer. The isolated converter compatibility CI job tests each minor
+version independently of the workspace lockfile. A version is not considered
+verified until its corresponding compatibility job passes.
 
 Bazel consumers should pin the OSS revision or release using their existing
 third-party Rust dependency mechanism and depend on this library target. There
