@@ -2092,7 +2092,7 @@ pub(crate) fn decode_arrow_batch(
             .collect::<Vec<_>>();
 
         for row_idx in 0..num_rows {
-            let mut values = vec![];
+            let mut values = Vec::with_capacity(record_batch.num_columns());
 
             for (column, layout) in record_batch.columns().iter().zip(&layouts) {
                 let value = arrow_value_at_with_layout(column.as_ref(), row_idx, layout)?;
