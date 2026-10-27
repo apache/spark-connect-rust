@@ -50,6 +50,11 @@ pub struct MergeIntoWriter {
 }
 
 impl MergeIntoWriter {
+    #[cfg(test)]
+    pub(crate) fn plan(&self) -> &LogicalPlan {
+        self.source_plan.as_ref()
+    }
+
     pub(crate) fn new(
         session: SparkSession,
         source_plan: Arc<LogicalPlan>,

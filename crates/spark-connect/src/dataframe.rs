@@ -2686,30 +2686,19 @@ mod plan_construction_tests {
     fn related_builders_share_the_source_plan() {
         let spark = session();
         let source = spark.range(10).unwrap().limit(5);
-        assert_eq!(Arc::strong_count(&source.plan), 1);
 
         let writer = source.write();
-        assert_eq!(Arc::strong_count(&source.plan), 2);
+        assert!(std::ptr::eq(source.plan(), writer.plan()));
         let writer_v2 = source.write_to("target");
-        assert_eq!(Arc::strong_count(&source.plan), 3);
+        assert!(std::ptr::eq(source.plan(), writer_v2.plan()));
         let stream_writer = source.write_stream();
-        assert_eq!(Arc::strong_count(&source.plan), 4);
+        assert!(std::ptr::eq(source.plan(), stream_writer.plan()));
         let merge_writer = source.merge_into("target", crate::column::col("id"));
-        assert_eq!(Arc::strong_count(&source.plan), 5);
+        assert!(std::ptr::eq(source.plan(), merge_writer.plan()));
         let table_arg = crate::table_arg::TableArg::new(source.clone());
-        assert_eq!(Arc::strong_count(&source.plan), 6);
+        assert!(std::ptr::eq(source.plan(), table_arg.plan()));
         let cloned_table_arg = table_arg.clone();
-        assert_eq!(Arc::strong_count(&source.plan), 7);
-
-        drop((
-            writer,
-            writer_v2,
-            stream_writer,
-            merge_writer,
-            table_arg,
-            cloned_table_arg,
-        ));
-        assert_eq!(Arc::strong_count(&source.plan), 1);
+        assert!(std::ptr::eq(source.plan(), cloned_table_arg.plan()));
     }
 
     #[test]

@@ -344,6 +344,11 @@ pub struct DataFrameWriter {
 }
 
 impl DataFrameWriter {
+    #[cfg(test)]
+    pub(crate) fn plan(&self) -> &LogicalPlan {
+        self.input_plan.as_ref()
+    }
+
     /// Create a new DataFrameWriter.
     pub(crate) fn new(session: SparkSession, input_plan: Arc<LogicalPlan>) -> Self {
         DataFrameWriter {
@@ -522,6 +527,11 @@ pub struct DataFrameWriterV2 {
 }
 
 impl DataFrameWriterV2 {
+    #[cfg(test)]
+    pub(crate) fn plan(&self) -> &LogicalPlan {
+        self.input_plan.as_ref()
+    }
+
     /// Create a new DataFrameWriterV2 targeting `table_name`.
     pub(crate) fn new(
         session: SparkSession,
