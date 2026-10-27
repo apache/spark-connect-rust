@@ -62,6 +62,8 @@ jobs:
         # Advisory for now: the tree still carries pre-existing warnings. This surfaces
         # them in the log without blocking. Tighten to `-- -D warnings` once cleaned.
         run: cargo clippy --workspace --all-targets || true
+      - name: Tooling unit tests
+        run: python3 -m unittest discover -s scripts/tests
 
   python-ruff:
     name: ruff (our scripts)

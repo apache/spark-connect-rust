@@ -26,6 +26,8 @@ Each block is wrapped in a small harness that binds ``spark`` and ``df`` (so the
 common "continue from an earlier block" fragments type-check) and is run through
 ``rustc`` against the already-built ``apache-spark-connect`` rlib. Only compilation
 (type-checking) is performed - snippets are never executed, so no server is needed.
+Emit metadata only so checking each snippet does not link and retain a separate
+native executable containing the crate and its dependencies.
 
 A block that must be skipped (pseudo-code, a deliberate compile-error example, or
 a snippet that needs a feature/macro the snippet harness doesn't build - e.g. the
@@ -81,7 +83,7 @@ def check_block(code: str, tmpdir: Path, idx: int) -> tuple[bool, str]:
     indented = "\n".join("        " + ln if ln.strip() else ln for ln in code.splitlines())
     src = tmpdir / f"snippet_{idx}.rs"
     src.write_text(HARNESS.format(body=indented))
-    out = tmpdir / f"snippet_{idx}.out"
+    out = tmpdir / f"snippet_{idx}.rmeta"
     r = subprocess.run(
         [
             "rustc",
@@ -89,6 +91,7 @@ def check_block(code: str, tmpdir: Path, idx: int) -> tuple[bool, str]:
             "2021",
             "--crate-type",
             "bin",
+            "--emit=metadata",
             "-L",
             f"dependency={DEPS}",
             "--extern",
