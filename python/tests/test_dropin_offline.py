@@ -990,6 +990,85 @@ def test_row_iteration():
     assert values == [1, 2, 3]
 
 
+@pytest.mark.parametrize("value", [
+    None, False, True, 0, -1, -(2**63), 2**63 - 1,
+    0.0, -0.0, 1.25, float("inf"), float("-inf"),
+])
+def test_row_native_number_values_and_types(value):
+    from pyspark.sql import Row
+    import struct
+
+    actual = Row(value=value).value
+    assert type(actual) is type(value)
+    if type(value) is float:
+        assert struct.pack(">d", actual) == struct.pack(">d", value)
+    else:
+        assert actual == value
+
+
+def test_row_number_boundaries_and_nan_payload():
+    from pyspark.sql import Row
+    import struct
+
+    for value in (2**63, -(2**63) - 1):
+        actual = Row(value=value).value
+        assert type(actual) is float
+        assert actual == float(value)
+    with pytest.raises(TypeError, match="unsupported value type.*int"):
+        Row(value=2**20000)
+    bits = bytes.fromhex("7ff8000000000042")
+    value = struct.unpack(">d", bits)[0]
+    assert struct.pack(">d", Row(value=value).value) == bits
+
+
+def test_row_number_subclasses_decimal_and_conversion_protocols():
+    from decimal import Decimal
+    from pyspark.sql import Row
+
+    trace = []
+
+    class IntSubclass(int):
+        def __float__(self):
+            raise AssertionError("int subclass must retain integer conversion")
+
+    class FloatSubclass(float):
+        def __float__(self):
+            raise AssertionError("float subclass must retain float extraction")
+
+    class Indexable:
+        def __index__(self):
+            trace.append("index")
+            return 42
+
+    class Floatable:
+        def __float__(self):
+            trace.append("float")
+            return -1.25
+
+    class DecimalSubclass(Decimal):
+        pass
+
+    for value, expected in [(IntSubclass(13), 13), (FloatSubclass(2.25), 2.25),
+                            (Indexable(), 42), (Floatable(), -1.25)]:
+        actual = Row(value=value).value
+        assert type(actual) is type(expected)
+        assert actual == expected
+    assert trace == ["index", "float"]
+    for value in (Decimal("-12.340"), DecimalSubclass("1.25")):
+        actual = Row(value=value).value
+        assert type(actual) is Decimal
+        assert actual == value
+
+
+def test_row_native_numbers_inside_nested_values():
+    from pyspark.sql import Row
+
+    value = Row(items=[1, -1.25, None, True], mapping={"x": 2**63 - 1})
+    actual = Row(value=value).value
+    assert list(actual.items) == [1, -1.25, None, True]
+    assert actual.mapping == {"x": 2**63 - 1}
+
+
 def test_datatype_from_ddl_parsing():
     """Test DataType.fromDDL parsing of DDL strings."""
     # StructField DDL parsing
