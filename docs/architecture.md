@@ -63,6 +63,7 @@ A Cargo workspace of library crates, plus a Python skin:
 | `apache-spark-connect-core` | `crates/spark-connect-core` | Transport: channel, retries, reattach, artifacts, errors |
 | `apache-spark-connect` | `crates/spark-connect` | The DataFrame API: session, dataframe, column, functions, plan, group, catalog, window, readwriter, streaming, types |
 | `pyspark-rs` | `crates/pyspark-rs` | PyO3 bindings - builds the `_pyspark` extension module |
+| `spark-python-arrow` (unpublished) | `crates/spark-python-arrow` | Spark result export through Arrow's PyArrow table helper |
 | Python skin | `python/pyspark` | The drop-in `pyspark` package (+ vendored `pyspark.pandas`, `cloudpickle`, `pyspark.testing`) |
 
 ```mermaid
@@ -70,6 +71,7 @@ flowchart LR
     PROTO["spark-connect-proto"] --> CORE["spark-connect-core"]
     CORE --> SC["spark-connect (DataFrame API)"]
     SC --> PYO3["pyspark-rs (PyO3)"]
+    PYARROW["spark-python-arrow (unpublished)"] --> PYO3
     PYO3 --> SKIN["python/pyspark skin"]
     SC --> RUSTAPP["your Rust app"]
 ```
@@ -101,6 +103,24 @@ Transformations are **lazy** - they only build up the plan. Only an *action*
 triggers `ExecutePlan`. If the response stream breaks mid-flight, the core's
 reattachable-execute iterator resumes from the last response it saw, so long
 results survive transient disconnects.
+
+### Python Arrow table handoff
+
+`DataFrame.toArrow()` collects decoded Rust batches, then uses
+`arrow::pyarrow::Table` to build a PyArrow table. In Arrow 58.3.0, the helper
+imports each batch through a separate C Stream reader, reads that batch, and
+passes a Python list to `pyarrow.Table.from_batches()`. Compatible value and
+offset buffers are shared, but all batches are collected upfront. This is not
+network streaming or bounded-memory collection. IPC decoding, sliced validity
+bitmap realignment, and pandas conversion can still allocate or copy.
+
+The bridge checks batch schema consistency and preflights C-compatible schemas
+with PyArrow before importing batches. Field names or timezones containing NUL
+use an IPC fallback over the collected batches, without another RPC. Schema
+metadata is preserved. The contract covers standard Spark results, including
+maps with `keys_sorted=false`, not generic sorted maps or dictionary encoding.
+An empty batch vector still produces an empty schema. Row materialization in
+`collect()` is unchanged, and this change does not upgrade PyO3.
 
 ## Two front-ends, one core
 
@@ -152,7 +172,7 @@ See [Rust UDFs via WebAssembly](udfs.md) for the full story.
 3. **Correctness is gated in CI** - golden-proto tests guard plan building; the
    official Apache Spark Connect test suite guards transport and Arrow paths (see
    the CI notes under `dev/design/`).
-4. **Version = Spark version** - the crate/wheel version tracks the Spark release
+4. **Version = Spark version** - the published crate/wheel version tracks the Spark release
    it targets, so the number tells you which Spark it speaks.
 
 For the deeper design write-ups (design notes, CI, the official test suite, and

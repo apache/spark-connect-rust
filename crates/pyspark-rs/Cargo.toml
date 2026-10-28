@@ -22,6 +22,7 @@ non_snake_case = "allow"
 spark-connect = { package = "apache-spark-connect", path = "../spark-connect" }
 spark-connect-core = { package = "apache-spark-connect-core", path = "../spark-connect-core" }
 spark-connect-proto = { package = "apache-spark-connect-proto", path = "../spark-connect-proto" }
+spark-python-arrow = { path = "../spark-python-arrow" }
 pyo3.workspace = true
 arrow.workspace = true
 tokio.workspace = true

@@ -47,6 +47,7 @@ crates/
                         column, plan, dataframe, functions, session, readwriter,
                         catalog, group, window, udf/udtf, streaming, observation
   pyspark-rs            PyO3 bindings -> native module `_pyspark`
+  spark-python-arrow    Spark result export via arrow::pyarrow::Table; no transport
 python/
   pyspark/…             thin drop-in package; public modules re-export from
                         `_pyspark` so `from pyspark.sql import SparkSession` works
@@ -67,9 +68,26 @@ Server-streaming RPCs (`ExecutePlan`) are consumed into Arrow record batches.
 
 ## Data path
 
-Results arrive as Arrow IPC streams. `arrow-rs` decodes them; hand-off to Python
-uses the **Arrow C Data Interface** (zero-copy to `pyarrow`), which is also how
-we build `toPandas()` / `createDataFrame(pandas)` without re-serializing.
+Results arrive as Arrow IPC streams. `arrow-rs` decodes them; `toArrow()` collects
+all batches into a Rust vector and hands them to `spark-python-arrow` through
+`arrow::pyarrow::Table`. In Arrow 58.3.0, that helper imports a separate C Stream
+reader for each batch, calls `read_next_batch()`, and passes a Python list to
+`pyarrow.Table.from_batches()`. This shares compatible value and offset buffers;
+it does not provide network streaming or bounded-memory collection. Sliced
+validity bitmaps may need realignment.
+
+The helper validates batch schema consistency, including metadata, before export.
+A standalone PyArrow schema import rejects unsupported C-compatible schemas
+before any batches are imported. Embedded NUL field names or timezones use an
+IPC compatibility fallback without another RPC. The contract covers standard
+Spark result types, not sorted-map flags or dictionary encoding. `toPandas()`
+then calls PyArrow's pandas conversion, which may copy.
+
+Scalar input conversion and row materialization stay in `pyspark-rs`. The export
+crate does not own schema inference, transport, or worker execution. `collect()`
+still uses the native client's owned rows; `createDataFrame(pandas)` still
+materializes Python rows. Neither path is claimed to be zero-copy. See the
+[table export contract](../../crates/spark-python-arrow/README.md).
 
 ## UDF strategy (full compatibility)
 
