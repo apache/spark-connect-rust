@@ -798,9 +798,8 @@ fn coerce_value(v: Option<&Value>, target: &DataType) -> Value {
     }
 }
 
-/// Build an Arrow array for a specific field across all rows.
-/// Build the Arrow array for one column: gather the column's values and build them
-/// against the declared type (schema-driven, so nested array/map/struct recurse).
+/// Gather and coerce one column to its declared type, then recursively build its
+/// Arrow array; without a declared type, use the value-driven scalar builder.
 fn build_arrow_array(
     rows: &[Row],
     field_idx: usize,
@@ -1615,6 +1614,7 @@ mod tests {
 
 #[cfg(test)]
 mod input_ipc_tests {
+    // Keep IPC encoding fixtures separate from the session API tests above.
     use super::*;
     use arrow::array::{
         BinaryArray, BooleanArray, Float32Array, Int16Array, Int32Array, Int64Array, Int8Array,
@@ -1668,6 +1668,9 @@ mod input_ipc_tests {
 
     #[test]
     fn input_ipc_preserves_scalar_coercion_and_nulls() {
+        // Compatibility check for this optimization: integer overflow currently
+        // wraps instead of rejecting out-of-range input as PySpark does. These
+        // expectations pin existing behavior, not the desired validation policy.
         let schema = schema(vec![
             DataType::Integer,
             DataType::Float,
@@ -1758,7 +1761,9 @@ mod input_ipc_tests {
                 .value(0),
             999
         );
-        // Encoding resolves both duplicate names to the first coerced child.
+        // Compatibility check for an existing bug, not desired semantics:
+        // encoding resolves both duplicate names to the first coerced child,
+        // so the Long field receives the value already narrowed to Byte.
         assert_eq!(
             array
                 .column(2)
