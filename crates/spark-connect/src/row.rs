@@ -36,7 +36,7 @@ pub enum Value {
     Timestamp(i64),
     /// Spark day-time interval, in signed microseconds. The full i64 range is
     /// representable by Python's datetime.timedelta without nanosecond conversion.
-    /// Display (including Rust DataFrame::show) uses `<value> microseconds`.
+    /// Display uses raw microseconds, like Date and Timestamp use their raw units.
     DayTimeInterval(i64),
     /// Decimal (string value with optional precision and scale)
     Decimal {
@@ -174,7 +174,7 @@ impl fmt::Display for Value {
             Value::Binary(b) => write!(f, "{:?}", b),
             Value::Date(d) => write!(f, "{}", d),
             Value::Timestamp(t) => write!(f, "{}", t),
-            Value::DayTimeInterval(t) => write!(f, "{} microseconds", t),
+            Value::DayTimeInterval(t) => write!(f, "{}", t),
             Value::Decimal {
                 value,
                 precision,
@@ -759,7 +759,7 @@ mod tests {
         assert_eq!(Value::Binary(vec![1, 2]).to_string(), "[1, 2]");
         assert_eq!(Value::Date(19_000).to_string(), "19000");
         assert_eq!(Value::Timestamp(123).to_string(), "123");
-        assert_eq!(Value::DayTimeInterval(-1).to_string(), "-1 microseconds");
+        assert_eq!(Value::DayTimeInterval(-1).to_string(), "-1");
         assert_eq!(Value::DayTimeInterval(1).as_i64(), None);
         assert_eq!(
             Value::List(vec![Value::Integer(1), Value::Integer(2)]).to_string(),

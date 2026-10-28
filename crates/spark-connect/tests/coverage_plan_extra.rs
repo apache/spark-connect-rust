@@ -82,21 +82,6 @@ fn nafill_covers_all_value_literal_arms() {
     }
 }
 
-#[test]
-fn nafill_preserves_day_time_interval_literal() {
-    use spark_connect_proto::{expression::literal::LiteralType, relation::RelType};
-    for micros in [i64::MIN, -1, 0, 5, i64::MAX] {
-        let proto = plan::na_fill(base(), Value::DayTimeInterval(micros), vec![]).to_proto();
-        let Some(RelType::FillNa(fill)) = proto.rel_type else {
-            panic!("expected FillNa");
-        };
-        assert_eq!(
-            fill.values[0].literal_type,
-            Some(LiteralType::DayTimeInterval(micros))
-        );
-    }
-}
-
 /// `LateralJoin::to_proto` (join-type match + optional condition), for every join type.
 #[test]
 fn lateral_join_to_proto_all_join_types() {

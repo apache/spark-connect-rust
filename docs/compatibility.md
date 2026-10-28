@@ -15,6 +15,11 @@ Spark it speaks.
 
 ## Rust migration for the 4.3 line
 
+`Value` and `LiteralExpression` add a `DayTimeInterval(i64)` variant for signed
+microseconds. Downstream exhaustive matches on these public enums must handle
+the new variant. Rust interval map keys are stringified as raw microseconds;
+Python `timedelta` map keys are not yet supported.
+
 The 4.3 line changes the public Rust representation of expressions and logical
 plans to share immutable nodes. This is a breaking change for code that directly
 constructs or matches these representations. The `Column` and `DataFrame` APIs,
