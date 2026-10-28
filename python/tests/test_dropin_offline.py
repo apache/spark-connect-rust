@@ -4900,6 +4900,102 @@ def test_exact_string_subclass_uses_generic_conversion():
             "data_type1": "StructType", "data_type2": data_type}
 
 
+# Native numeric conversion happens when createDataFrame consumes Python rows;
+# constructing a Row itself now preserves Python objects as PySpark does.
+def _native_number_input_table(mock_connect, data, schema=None):
+    import pyarrow as pa
+
+    spark, service = mock_connect
+    spark.createDataFrame(data, schema).toArrow()
+    request = parse_message(service.execute_requests[-1])
+    relation = parse_message(parse_message(request[3][0])[1][0])
+    while 18 in relation:  # Relation.to_df -> ToDF.input.
+        relation = parse_message(parse_message(relation[18][0])[1][0])
+    local = parse_message(relation[11][0])
+    return pa.ipc.open_stream(local[1][0]).read_all()
+
+
+@pytest.mark.parametrize("value", [
+    None, False, True, 0, -1, -(2**63), 2**63 - 1,
+    0.0, -0.0, 1.25, float("inf"), float("-inf"),
+])
+def test_local_input_native_number_values_and_types(mock_connect, value):
+    import struct
+
+    dtype = T.BooleanType() if type(value) is bool else (
+        T.LongType() if type(value) is int else T.DoubleType())
+    schema = T.StructType([T.StructField("value", dtype)])
+    actual = _native_number_input_table(mock_connect, [Row(value=value)], schema).column(0)[0].as_py()
+    assert type(actual) is type(value)
+    if type(value) is float:
+        assert struct.pack(">d", actual) == struct.pack(">d", value)
+    else:
+        assert actual == value
+
+
+def test_local_input_overflow_preserves_current_conversion_behavior(mock_connect):
+    for value in (2**63, -(2**63) - 1):
+        actual = _native_number_input_table(mock_connect, [Row(value=value)]).column(0)[0].as_py()
+        assert type(actual) is float
+        assert actual == float(value)
+    with pytest.raises(TypeError, match="unsupported value type.*int"):
+        mock_connect[0].createDataFrame([Row(value=2**20000)])
+
+
+def test_local_input_nan_payload(mock_connect):
+    import struct
+
+    bits = bytes.fromhex("7ff8000000000042")
+    value = struct.unpack(">d", bits)[0]
+    actual = _native_number_input_table(mock_connect, [Row(value=value)]).column(0)[0].as_py()
+    assert struct.pack(">d", actual) == bits
+
+
+def test_local_input_number_subclasses_decimal_and_conversion_protocols(mock_connect):
+    from decimal import Decimal
+
+    trace = []
+
+    class IntSubclass(int):
+        def __float__(self):
+            raise AssertionError("int subclass must retain integer conversion")
+
+    class FloatSubclass(float):
+        def __float__(self):
+            raise AssertionError("float subclass must retain float extraction")
+
+    class Indexable:
+        def __index__(self):
+            trace.append("index")
+            return 42
+
+    class Floatable:
+        def __float__(self):
+            trace.append("float")
+            return -1.25
+
+    class DecimalSubclass(Decimal):
+        pass
+
+    for value, expected in [(IntSubclass(13), 13), (FloatSubclass(2.25), 2.25),
+                            (Indexable(), 42), (Floatable(), -1.25)]:
+        actual = _native_number_input_table(mock_connect, [(value,)]).column(0)[0].as_py()
+        assert type(actual) is type(expected)
+        assert actual == expected
+    assert trace == ["index", "float"]
+    for value in (Decimal("-12.340"), DecimalSubclass("1.25")):
+        actual = _native_number_input_table(mock_connect, [(value,)]).column(0)[0].as_py()
+        assert type(actual) is Decimal
+        assert actual == value
+
+
+def test_local_input_native_numbers_inside_nested_values(mock_connect):
+    value = Row(items=[1, 2, None], mapping={"x": 2**63 - 1})
+    actual = _native_number_input_table(mock_connect, [Row(value=value)]).column(0)[0].as_py()
+    assert actual["items"] == [1, 2, None]
+    assert dict(actual["mapping"]) == {"x": 2**63 - 1}
+
+
 # --------------------------------------------------------------------------- printSchema
 
 
