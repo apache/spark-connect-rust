@@ -29,3 +29,6 @@ crc32fast = "1"
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { workspace = true, features = ["io-util"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = { version = "0.5", features = ["util"] }

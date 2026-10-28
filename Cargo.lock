@@ -83,6 +83,7 @@ dependencies = [
  "bytes",
  "crc32fast",
  "futures",
+ "hyper-util",
  "prost",
  "prost-types",
  "regex",
@@ -92,6 +93,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic",
+ "tower",
  "tracing",
  "uuid",
 ]
