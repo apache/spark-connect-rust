@@ -59,7 +59,7 @@ Int64 confirmation expression-construction CPU was +5.83% and outbound expressio
 
 ## Correctness and interpretation
 
-Each separate candidate passed 416 Rust library/golden/sharing checks and independent Python/API comparisons. The combined draft adds a Long/null/extrema and nested-mixed encode/decode round trip and receives fresh correctness/build/API/Python checks; see the PR for the exact result. Production logic matches the independently measured patches; differences are test comments and the new round trip. There are no combined-head timing results.
+Each separate candidate passed 416 Rust library/golden/sharing checks and independent Python/API comparisons. The combined draft adds a Long/null/extrema and nested-mixed encode/decode round trip and receives fresh correctness/build/API/Python checks; see the PR for the exact result. Production logic matches the independently measured patches; differences are test comments, the new round trip and the nested-struct clone-test cleanup requested in [the review of #106](https://github.com/apache/spark-connect-rust/pull/106#pullrequestreview-5675447129). The local-input name-copy follow-up mentioned in #106 is addressed by removing the intermediate coerced-row matrix. There are no combined-head timing results.
 
 Collect CPU in Int64 confirmation was 35.030 → 14.945 ms. Collect plus a full Python value scan was 305.330 → 283.676 ms: roughly 7%, not 57%, lower CPU on the scanned path. The 100,000 × 50 collect guard observed CPU −51.27% / −50.73%, wall −56.26% / −55.88%.
 
