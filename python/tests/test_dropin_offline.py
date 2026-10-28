@@ -13,6 +13,28 @@ import pytest
 from pyspark.sql import types as T
 
 
+def test_create_dataframe_width_mismatch_is_a_normal_exception():
+    # Isolate the active session from the remaining offline tests. Session
+    # construction and local input validation do not need a running server.
+    import subprocess
+    import sys
+
+    subprocess.run([sys.executable, "-c", """
+from pyspark.sql import SparkSession, types as T
+spark = SparkSession.builder.remote("sc://localhost:15002").getOrCreate()
+schemas = [None, ["a", "b"], T.StructType([
+    T.StructField("a", T.LongType()), T.StructField("b", T.LongType())
+])]
+for schema in schemas:
+    try:
+        spark.createDataFrame([(1, 2), (3,)], schema=schema)
+    except Exception as error:
+        assert "Row 1 has 1 values, but the schema has 2 fields" in str(error), error
+    else:
+        raise AssertionError("expected a width validation error")
+"""], check=True)
+
+
 # --------------------------------------------------------------------------- types
 
 ATOMIC = [

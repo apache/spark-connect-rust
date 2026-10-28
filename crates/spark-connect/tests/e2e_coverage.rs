@@ -1200,7 +1200,7 @@ fn create_dataframe_typed_schemas() {
         1
     );
 
-    // Float target from an int value (coerce_value must widen Long/Integer -> Float).
+    // The Arrow encoder converts integer input to the declared Float type.
     let f_schema = DataType::Struct {
         fields: vec![field("a", DataType::Float)],
     };
