@@ -2236,6 +2236,7 @@ fn map_key_to_string(v: Value) -> String {
         Value::Double(x) => x.to_string(),
         Value::Date(d) => d.to_string(),
         Value::Timestamp(t) => t.to_string(),
+        interval @ Value::DayTimeInterval(_) => interval.to_string(),
         Value::Decimal { value, .. } => value,
         other => format!("{other:?}"),
     }
@@ -3761,6 +3762,10 @@ mod arrow_value_tests {
         assert_eq!(map_key_to_string(Value::Double(2.5)), "2.5");
         assert_eq!(map_key_to_string(Value::Date(5)), "5");
         assert_eq!(map_key_to_string(Value::Timestamp(6)), "6");
+        assert_eq!(
+            map_key_to_string(Value::DayTimeInterval(-1)),
+            "-1 microseconds"
+        );
         assert_eq!(
             map_key_to_string(Value::Decimal {
                 value: "7.5".to_string(),

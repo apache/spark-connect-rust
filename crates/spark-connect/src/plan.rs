@@ -1646,6 +1646,7 @@ fn value_to_proto_literal(v: &crate::row::Value) -> proto::expression::Literal {
         Value::String(s) => LiteralType::String(s.clone()),
         Value::Date(d) => LiteralType::Date(*d),
         Value::Timestamp(t) => LiteralType::Timestamp(*t),
+        Value::DayTimeInterval(t) => LiteralType::DayTimeInterval(*t),
         Value::Decimal {
             value,
             precision,
