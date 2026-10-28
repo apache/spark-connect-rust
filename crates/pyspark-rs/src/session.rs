@@ -478,17 +478,21 @@ impl PySparkSession {
                     .fields()
                     .iter()
                     .enumerate()
-                    .map(|(i, name)| StructField {
-                        name: name.clone(),
-                        data_type: rows[0].get(i).map(value_to_datatype).unwrap_or(
-                            DataType::String {
-                                collation: "UTF8_BINARY".to_string(),
-                            },
-                        ),
-                        nullable: true,
-                        metadata: Default::default(),
+                    .map(|(i, name)| {
+                        Ok(StructField {
+                            name: name.clone(),
+                            data_type: rows[0]
+                                .get(i)
+                                .map(value_to_datatype)
+                                .transpose()?
+                                .unwrap_or(DataType::String {
+                                    collation: "UTF8_BINARY".to_string(),
+                                }),
+                            nullable: true,
+                            metadata: Default::default(),
+                        })
                     })
-                    .collect();
+                    .collect::<PyResult<_>>()?;
                 DataType::Struct { fields }
             }
         };
@@ -881,13 +885,13 @@ impl PyConnectClientStub {
 }
 
 /// Infer the Spark `DataType` for a `createDataFrame` column from its (first) value.
-/// Scalars, Date/Timestamp, and Decimal map precisely; Null and nested collections
-/// fall back to String (createDataFrame here does not deep-infer nested schemas).
-fn value_to_datatype(v: &Value) -> DataType {
+/// Nested collections are inferred recursively. Day-time intervals are result-only
+/// and cannot be used as local input, including inside collected Rows.
+fn value_to_datatype(v: &Value) -> PyResult<DataType> {
     let utf8 = || DataType::String {
         collation: "UTF8_BINARY".to_string(),
     };
-    match v {
+    Ok(match v {
         Value::Bool(_) => DataType::Boolean,
         Value::Byte(_) => DataType::Byte,
         Value::Short(_) => DataType::Short,
@@ -899,10 +903,9 @@ fn value_to_datatype(v: &Value) -> DataType {
         Value::Binary(_) => DataType::Binary,
         Value::Date(_) => DataType::Date,
         Value::Timestamp(_) => DataType::Timestamp,
-        Value::DayTimeInterval(_) => DataType::DayTimeInterval {
-            start_field: 0,
-            end_field: 3,
-        },
+        Value::DayTimeInterval(_) => return Err(pyo3::exceptions::PyTypeError::new_err(
+            "createDataFrame does not support day-time interval input; interval support is decode-only"
+        )),
         Value::Decimal {
             precision, scale, ..
         } => DataType::Decimal {
@@ -916,6 +919,7 @@ fn value_to_datatype(v: &Value) -> DataType {
                 .iter()
                 .find(|x| !matches!(x, Value::Null))
                 .map(value_to_datatype)
+                .transpose()?
                 .unwrap_or_else(utf8);
             DataType::Array {
                 element_type: Box::new(element_type),
@@ -927,19 +931,20 @@ fn value_to_datatype(v: &Value) -> DataType {
                 .fields()
                 .iter()
                 .zip(row.values())
-                .map(|(n, val)| spark_connect::types::StructField {
+                .map(|(n, val)| Ok(spark_connect::types::StructField {
                     name: n.clone(),
-                    data_type: value_to_datatype(val),
+                    data_type: value_to_datatype(val)?,
                     nullable: true,
                     metadata: Default::default(),
-                })
-                .collect(),
+                }))
+                .collect::<PyResult<_>>()?,
         },
         Value::Map(m) => {
             let value_type = m
                 .values()
                 .find(|x| !matches!(x, Value::Null))
                 .map(value_to_datatype)
+                .transpose()?
                 .unwrap_or_else(utf8);
             DataType::Map {
                 key_type: Box::new(utf8()),
@@ -949,7 +954,7 @@ fn value_to_datatype(v: &Value) -> DataType {
         }
         Value::Variant { .. } => DataType::Variant,
         Value::Null => utf8(),
-    }
+    })
 }
 
 /// Convert a Python value to a Rust Value.

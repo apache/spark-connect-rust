@@ -36,6 +36,7 @@ pub enum Value {
     Timestamp(i64),
     /// Spark day-time interval, in signed microseconds. The full i64 range is
     /// representable by Python's datetime.timedelta without nanosecond conversion.
+    /// Display (including Rust DataFrame::show) uses `<value> microseconds`.
     DayTimeInterval(i64),
     /// Decimal (string value with optional precision and scale)
     Decimal {

@@ -88,6 +88,10 @@ other than microseconds are unsupported and produce a conversion error for
 non-null values. Arrow's year-month, day-time and month-day-nano *interval*
 physical types retain their existing string conversions.
 
+Day-time interval support here is decode-only: `createDataFrame` does not accept
+Python `timedelta` inputs or round-trip collected interval rows. Rust row display
+and stringified interval map keys use `<signed microseconds> microseconds`.
+
 ```mermaid
 sequenceDiagram
     participant App as Your code (Rust or pyspark)

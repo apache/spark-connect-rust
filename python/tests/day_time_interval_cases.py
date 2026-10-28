@@ -20,6 +20,10 @@
 The small gRPC fixture sends real Arrow IPC and just the protobuf envelopes
 needed by these tests. It does not depend on the reference PySpark package
 (which occupies the same import namespace as this client).
+
+Envelope fields follow crates/spark-connect-proto/proto/spark/connect/base.proto;
+logical type fields follow types.proto in the same directory. Keep the field
+numbers in these helpers aligned with those vendored definitions.
 """
 
 from concurrent.futures import ThreadPoolExecutor
@@ -101,6 +105,15 @@ def _type(data_type):
 
 @unittest.skipIf(grpc is None or pa is None, "grpcio and pyarrow are required")
 class DayTimeIntervalTests(unittest.TestCase):
+    def _has_interval(self, value):
+        if isinstance(value, timedelta):
+            return True
+        if isinstance(value, dict):
+            return any(self._has_interval(v) for v in value.values())
+        if isinstance(value, list):
+            return any(self._has_interval(v) for v in value)
+        return False
+
     def _normalize(self, value):
         if isinstance(value, Row):
             value = value.asDict()
@@ -178,6 +191,9 @@ class DayTimeIntervalTests(unittest.TestCase):
                         actual = self._normalize(row)
                         self.assertEqual(actual, wanted)
                         self._assert_timedeltas(actual, wanted)
+                        if self._has_interval(wanted):
+                            with self.assertRaisesRegex(TypeError, "decode-only"):
+                                spark.createDataFrame([row])
                 self.assertEqual(frame.schema.json(), before)
                 self.assertIn("interval", before)
             finally:

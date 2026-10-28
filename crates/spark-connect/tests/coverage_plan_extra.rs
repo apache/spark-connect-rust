@@ -66,6 +66,7 @@ fn nafill_covers_all_value_literal_arms() {
         Value::String("s".to_string()),
         Value::Date(5),
         Value::Timestamp(6),
+        Value::DayTimeInterval(5),
         Value::Decimal {
             value: "1.23".to_string(),
             precision: Some(5),
@@ -78,6 +79,21 @@ fn nafill_covers_all_value_literal_arms() {
     for v in values {
         let proto = plan::na_fill(base(), v, vec![]).to_proto();
         assert!(proto.rel_type.is_some());
+    }
+}
+
+#[test]
+fn nafill_preserves_day_time_interval_literal() {
+    use spark_connect_proto::{expression::literal::LiteralType, relation::RelType};
+    for micros in [i64::MIN, -1, 0, 5, i64::MAX] {
+        let proto = plan::na_fill(base(), Value::DayTimeInterval(micros), vec![]).to_proto();
+        let Some(RelType::FillNa(fill)) = proto.rel_type else {
+            panic!("expected FillNa");
+        };
+        assert_eq!(
+            fill.values[0].literal_type,
+            Some(LiteralType::DayTimeInterval(micros))
+        );
     }
 }
 
