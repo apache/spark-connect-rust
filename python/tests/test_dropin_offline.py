@@ -12,6 +12,20 @@ import pytest
 
 from pyspark.sql import types as T
 
+def test_create_dataframe_input_names_offline():
+    # Keep the fixture's active session out of this process's offline tests.
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    for dependency in ("grpc", "pandas", "pyarrow"):
+        pytest.importorskip(dependency)
+    result = subprocess.run(
+        [sys.executable, str(Path(__file__).with_name("input_name_cases.py"))],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
 
 # --------------------------------------------------------------------------- types
 

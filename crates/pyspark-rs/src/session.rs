@@ -2,10 +2,11 @@
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-use spark_connect::row::{Row, Value};
+use spark_connect::row::{Row, StructValue, Value};
 use spark_connect::session::SparkSession;
 use spark_connect::types::{DataType, StructField};
 use spark_connect::udf::{CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
+use std::sync::Arc;
 
 use crate::catalog::PyCatalog;
 use crate::dataframe::PyDataFrame;
@@ -352,7 +353,7 @@ impl PySparkSession {
         // with NaN/NaT mapped to None, and take its column names as the default schema.
         // pandas-on-Spark always passes an explicit `schema`, so this mainly needs to
         // deliver the row values; the list path below handles the rest.
-        let mut pandas_columns: Option<Vec<String>> = None;
+        let mut pandas_columns: Option<Arc<[String]>> = None;
         let is_pandas = py
             .import("pandas")
             .and_then(|m| m.getattr("DataFrame"))
@@ -360,7 +361,12 @@ impl PySparkSession {
             .unwrap_or(false);
         let data_owned: Bound<'_, PyList>;
         let data: &Bound<'_, PyList> = if is_pandas {
-            pandas_columns = Some(data.getattr("columns")?.call_method0("tolist")?.extract()?);
+            pandas_columns = Some(
+                data.getattr("columns")?
+                    .call_method0("tolist")?
+                    .extract::<Vec<String>>()?
+                    .into(),
+            );
             // df.astype(object).where(df.notna(), None).values.tolist() -> rows with None for NA.
             let notna = data.call_method0("notna")?;
             let obj = data.call_method1("astype", ("object",))?;
@@ -402,8 +408,8 @@ impl PySparkSession {
             }
         };
 
-        let spec_names: Option<Vec<String>> = match &spec {
-            Spec::Names(n) => Some(n.clone()),
+        let spec_names: Option<Arc<[String]>> = match &spec {
+            Spec::Names(n) => Some(n.clone().into()),
             Spec::Struct(f) => Some(f.iter().map(|x| x.name.clone()).collect()),
             Spec::None => None,
         };
@@ -452,12 +458,19 @@ impl PySparkSession {
                     // the schema when given, else defaults below.
                     (vec![py_to_value(&item)?], None)
                 };
-            let names = spec_names
-                .clone()
-                .or(row_names)
-                .or_else(|| pandas_columns.clone())
-                .unwrap_or_else(|| (0..values.len()).map(|i| format!("col{}", i)).collect());
-            rows.push(Row::new(names, values));
+            let row = if let Some(names) = &spec_names {
+                StructValue::new(Arc::clone(names), values).into()
+            } else if let Some(names) = row_names {
+                Row::new(names, values)
+            } else if let Some(names) = &pandas_columns {
+                StructValue::new(Arc::clone(names), values).into()
+            } else {
+                Row::new(
+                    (0..values.len()).map(|i| format!("col{}", i)).collect(),
+                    values,
+                )
+            };
+            rows.push(row);
         }
 
         // An explicit struct schema wins; otherwise infer field types from the first row
