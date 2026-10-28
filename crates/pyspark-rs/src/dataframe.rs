@@ -1166,15 +1166,15 @@ impl PyDataFrame {
     /// Collect the DataFrame into a `pyarrow.Table`.
     ///
     /// Mirrors `pyspark.sql.DataFrame.toArrow()`: the result is decoded from the
-    /// server's Arrow IPC stream and handed to `pyarrow` through the shared
-    /// converter, sharing compatible decoded Arrow value buffers. Bitmap alignment
+    /// server's Arrow IPC stream and handed to `pyarrow` through arrow-rs's
+    /// reader conversion, sharing compatible decoded Arrow value buffers. Bitmap alignment
     /// and schemas requiring the IPC compatibility fallback can still copy.
     #[pyo3(name = "toArrow")]
     fn to_arrow(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let batches = py
             .detach(|| self.dataframe.collect_record_batches())
             .to_pyerr()?;
-        spark_python_arrow::bridge::record_batches_to_pyarrow(py, batches)
+        crate::arrow::record_batches_to_pyarrow(py, batches)
     }
 
     /// Collect the DataFrame into a pandas DataFrame.

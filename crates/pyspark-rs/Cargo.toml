@@ -2,6 +2,8 @@
 name = "pyspark-rs"
 version.workspace = true
 edition.workspace = true
+# Arrow 58.3.0, including arrow-pyarrow, requires Rust 1.85.
+rust-version = "1.85"
 license.workspace = true
 description = "PyO3 bindings exposing the Rust Spark Connect client as a drop-in pyspark package"
 # The Python extension (cdylib) is distributed as a PyPI wheel, not on crates.io.
@@ -22,9 +24,8 @@ non_snake_case = "allow"
 spark-connect = { package = "apache-spark-connect", path = "../spark-connect" }
 spark-connect-core = { package = "apache-spark-connect-core", path = "../spark-connect-core" }
 spark-connect-proto = { package = "apache-spark-connect-proto", path = "../spark-connect-proto" }
-spark-python-arrow = { path = "../spark-python-arrow" }
 pyo3.workspace = true
-arrow.workspace = true
+arrow = { workspace = true, features = ["pyarrow"] }
 tokio.workspace = true
 prost.workspace = true
 tonic.workspace = true

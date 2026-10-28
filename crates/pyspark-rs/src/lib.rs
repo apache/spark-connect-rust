@@ -24,6 +24,7 @@ pub(crate) fn coerce_option_value(v: &Bound<'_, PyAny>) -> PyResult<Option<Strin
     Ok(Some(v.str()?.to_string()))
 }
 
+mod arrow;
 mod catalog;
 mod column;
 mod conf;

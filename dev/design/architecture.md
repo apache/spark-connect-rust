@@ -47,7 +47,6 @@ crates/
                         column, plan, dataframe, functions, session, readwriter,
                         catalog, group, window, udf/udtf, streaming, observation
   pyspark-rs            PyO3 bindings -> native module `_pyspark`
-  spark-python-arrow    Arrow C Stream table export to PyArrow; no transport
 python/
   pyspark/…             thin drop-in package; public modules re-export from
                         `_pyspark` so `from pyspark.sql import SparkSession` works
@@ -69,8 +68,8 @@ Server-streaming RPCs (`ExecutePlan`) are consumed into Arrow record batches.
 ## Data path
 
 Results arrive as Arrow IPC streams. `arrow-rs` decodes them; `toArrow()` collects
-all batches into a Rust vector and passes it to `spark-python-arrow`. The bridge
-exports one native Arrow C Stream reader, imports it as a PyArrow
+all batches into a Rust vector. `pyspark-rs` uses arrow-rs's `IntoPyArrow` for
+one boxed `RecordBatchReader`, importing it as a PyArrow
 `RecordBatchReader`, and calls `read_all()`. PyArrow pulls batches through native
 callbacks that do not call Python, avoiding a per-batch Python import loop.
 This is an in-process buffer handoff, not network streaming or bounded-memory
@@ -78,16 +77,15 @@ result collection.
 
 Compatible Arrow value and offset buffers are shared with PyArrow; sliced
 validity bitmaps may need realignment. The bridge validates batch schema
-consistency, including metadata and dictionary ordering. Schemas with embedded
+consistency, including metadata. Schemas with embedded
 NUL field names or timezones use an IPC compatibility fallback, without another
-RPC. Schema metadata and ordering flags are preserved. `toPandas()` then calls
+RPC. Spark results use unsorted maps and are not dictionary-encoded; this path
+does not repair generic Arrow ordering flags. `toPandas()` then calls
 PyArrow's pandas conversion, which may copy.
 
-Scalar input conversion and row materialization stay in `pyspark-rs`. The export
-crate does not own schema inference, transport, or worker execution. `collect()`
+Scalar input conversion and row materialization stay in `pyspark-rs`. `collect()`
 still uses the native client's owned rows; `createDataFrame(pandas)` still
-materializes Python rows. Neither path is claimed to be zero-copy. See the
-[table export contract](../../crates/spark-python-arrow/README.md).
+materializes Python rows. Neither path is claimed to be zero-copy.
 
 ## UDF strategy (full compatibility)
 

@@ -24,7 +24,6 @@ members = [
     "crates/spark-connect-macros",
     "crates/spark-connect-build",
     "crates/pyspark-rs",
-    "crates/spark-python-arrow",
     "examples",
 ]
 exclude = [
@@ -35,8 +34,6 @@ exclude = [
 # Rust-native `examples` crate both link the pure-Rust core directly; both are
 # workspace members but excluded from `default-members` so `cargo test`/`cargo build`
 # stay clean. Build them explicitly (`cargo build -p pyspark-rs` / `-p examples`).
-# `spark-python-arrow` is also explicit: its tests embed Python and require PyArrow.
-# Test it separately to avoid extension-module feature unification disabling libpython linking.
 #
 # The `examples/wasm-udfs` and `examples/wasm-udf-inline` crates are excluded from
 # the workspace entirely because they require the `wasm32-unknown-unknown` target,

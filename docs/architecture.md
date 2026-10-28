@@ -63,7 +63,6 @@ A Cargo workspace of library crates, plus a Python skin:
 | `apache-spark-connect-core` | `crates/spark-connect-core` | Transport: channel, retries, reattach, artifacts, errors |
 | `apache-spark-connect` | `crates/spark-connect` | The DataFrame API: session, dataframe, column, functions, plan, group, catalog, window, readwriter, streaming, types |
 | `pyspark-rs` | `crates/pyspark-rs` | PyO3 bindings - builds the `_pyspark` extension module |
-| `spark-python-arrow` (unpublished) | `crates/spark-python-arrow` | Arrow C Stream table export to PyArrow |
 | Python skin | `python/pyspark` | The drop-in `pyspark` package (+ vendored `pyspark.pandas`, `cloudpickle`, `pyspark.testing`) |
 
 ```mermaid
@@ -71,7 +70,6 @@ flowchart LR
     PROTO["spark-connect-proto"] --> CORE["spark-connect-core"]
     CORE --> SC["spark-connect (DataFrame API)"]
     SC --> PYO3["pyspark-rs (PyO3)"]
-    PYARROW["spark-python-arrow (unpublished)"] --> PYO3
     PYO3 --> SKIN["python/pyspark skin"]
     SC --> RUSTAPP["your Rust app"]
 ```
@@ -106,8 +104,9 @@ results survive transient disconnects.
 
 ### Python Arrow table handoff
 
-`DataFrame.toArrow()` collects the decoded Arrow batches in Rust, then exports
-one reader through the Arrow C Stream Interface. PyArrow imports that reader
+`DataFrame.toArrow()` collects the decoded Arrow batches in Rust. Its `pyspark-rs`
+wrapper uses arrow-rs's `IntoPyArrow` to export one boxed `RecordBatchReader`
+through the Arrow C Stream Interface. PyArrow imports that reader
 once and calls `read_all()` to build the table. Native callbacks transfer batch
 descriptors and ownership without calling Python for each batch. C Stream is
 not an IPC byte stream, and this path still holds all result batches in memory
@@ -119,11 +118,18 @@ need realignment, and `toPandas()` may copy during pandas conversion. The server
 IPC responses must still be decoded. Row materialization in `collect()` is
 unchanged and is not zero-copy.
 
-The bridge preserves batch boundaries, schema metadata, and ordering flags. It
-rejects batches with inconsistent schemas. Field names or timezones containing
+The bridge preserves batch boundaries and schema metadata, and rejects batches
+with inconsistent schemas, including metadata. It targets Spark results: maps
+are unsorted and fields are not dictionary-encoded. It does not repair ordering
+flags for generic Arrow inputs. Field names or timezones containing
 NUL use an IPC compatibility fallback over the collected batches, without
 another RPC; length-prefixed schema metadata can contain NUL without fallback.
 An empty batch vector still produces an empty table with an empty schema.
+
+The schema is imported separately before the reader so older PyArrow versions
+can reject unsupported schemas without entering their stream importer. The
+reader's C callbacks and release handling are provided by arrow-rs, not custom
+client callbacks. PyO3 remains at 0.28.3.
 
 ## Two front-ends, one core
 
