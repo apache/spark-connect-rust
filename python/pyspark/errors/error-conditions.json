@@ -72,7 +72,7 @@
   },
   "CANNOT_CONVERT_COLUMN_INTO_BOOL": {
     "message": [
-      "Cannot convert column into bool: please use '&' for 'and', '|' for 'or', '~' for 'not' when building DataFrame boolean expressions."
+      "Cannot convert column into bool (offending column: <column>): please use '&' for 'and', '|' for 'or', '~' for 'not' when building DataFrame boolean expressions."
     ]
   },
   "CANNOT_CONVERT_TYPE": {
@@ -194,7 +194,7 @@
   },
   "DATA_SOURCE_EXTRANEOUS_FILTERS": {
     "message": [
-      "<type>.pushFilters() returned filters that are not part of the input. Make sure that each returned filter is one of the input filters by reference."
+      "<type>.pushFilters() returned filters that are not part of the input. Make sure that each returned filter is one of the input filters by reference. Input filters: <input>. Extraneous filters: <extraneous>."
     ]
   },
   "DATA_SOURCE_INVALID_RETURN_TYPE": {
@@ -430,6 +430,11 @@
       "Invalid number of dataframes in group <dataframes_in_group>."
     ]
   },
+  "INVALID_OPERATION_UUID_ID": {
+    "message": [
+      "Parameter value <arg_name> must be a valid UUID format: <origin>"
+    ]
+  },
   "INVALID_PANDAS_UDF": {
     "message": [
       "Invalid function: <detail>"
@@ -544,6 +549,16 @@
   "LENGTH_SHOULD_BE_THE_SAME": {
     "message": [
       "<arg1> and <arg2> should be of the same length, got <arg1_length> and <arg2_length>."
+    ]
+  },
+  "LOCAL_CONNECT_RUNTIME_DIR_UNAVAILABLE": {
+    "message": [
+      "Cannot claim the per-user runtime directory <path> (was it created by another user?); remove it or point SPARK_LOCAL_CONNECT_DISCOVERY at a path you own."
+    ]
+  },
+  "LOCAL_CONNECT_SERVER_START_FAILED": {
+    "message": [
+      "Failed to start a persistent local Spark Connect server: <reason>."
     ]
   },
   "LOCAL_RELATION_SIZE_LIMIT_EXCEEDED": {
@@ -851,11 +866,7 @@
       "An Observation can be used with a DataFrame only once."
     ]
   },
-  "SCHEMA_MISMATCH_FOR_PANDAS_UDF": {
-    "message": [
-      "Result vector from <udf_type> was not the required length: expected <expected>, got <actual>."
-    ]
-  },
+
   "SESSION_ALREADY_EXIST": {
     "message": [
       "Cannot start a remote Spark session because there is a regular Spark session already running."
@@ -1083,11 +1094,6 @@
       "Unexpected tuple <tuple> with StructType."
     ]
   },
-  "UNKNOWN_EXPLAIN_MODE": {
-    "message": [
-      "Unknown explain mode: '<explain_mode>'. Accepted explain modes are 'simple', 'extended', 'codegen', 'cost', 'formatted'."
-    ]
-  },
   "UNKNOWN_INTERRUPT_TYPE": {
     "message": [
       "Unknown interrupt type: '<interrupt_type>'. Accepted interrupt types are 'all'."
@@ -1117,6 +1123,12 @@
     "message": [
       "<data_type> is not supported in conversion to Arrow."
     ]
+  },
+  "UNSUPPORTED_FILTER": {
+    "message": [
+      "Unsupported filter <name>."
+    ],
+    "sqlState": "0A000"
   },
   "UNSUPPORTED_JOIN_TYPE": {
     "message": [
@@ -1198,11 +1210,6 @@
       "Value for `<arg_name>` has to be amongst the following values: <allowed_values>."
     ]
   },
-  "VALUE_NOT_ANY_OR_ALL": {
-    "message": [
-      "Value for `<arg_name>` must be 'any' or 'all', got '<arg_value>'."
-    ]
-  },
   "VALUE_NOT_BETWEEN": {
     "message": [
       "Value for `<arg_name>` must be between <min> and <max>."
@@ -1211,11 +1218,6 @@
   "VALUE_NOT_NON_EMPTY_STR": {
     "message": [
       "Value for `<arg_name>` must be a non-empty string, got '<arg_value>'."
-    ]
-  },
-  "VALUE_NOT_PEARSON": {
-    "message": [
-      "Value for `<arg_name>` only supports 'pearson', got '<arg_value>'."
     ]
   },
   "VALUE_NOT_PLAIN_COLUMN_REFERENCE": {
@@ -1228,15 +1230,16 @@
       "Value for `<arg_name>` must be positive, got '<arg_value>'."
     ]
   },
-  "VALUE_NOT_TRUE": {
-    "message": [
-      "Value for `<arg_name>` must be True, got '<arg_value>'."
-    ]
-  },
   "VALUE_OUT_OF_BOUNDS": {
     "message": [
       "Value for `<arg_name>` must be between <lower_bound> and <upper_bound> (inclusive), got <actual>"
     ]
+  },
+  "VARIANT_SIZE_LIMIT": {
+    "message": [
+      "Cannot build variant bigger than <sizeLimit> bytes."
+    ],
+    "sqlState": "22023"
   },
   "WKB_PARSE_ERROR" : {
     "message" : [

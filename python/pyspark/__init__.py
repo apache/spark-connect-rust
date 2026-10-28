@@ -83,4 +83,5 @@ __all__ = [
     "Row",
     "SparkConf",
     "StorageLevel",
+    "__version__",
 ]

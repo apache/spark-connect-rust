@@ -7,7 +7,7 @@ Get up and running with Spark Connect in minutes. This guide walks you through y
 Before you start, ensure you have a running Spark Connect server. See [Configuration and Connection](configuration.md) for how to start one locally:
 
 ```bash
-$SPARK_HOME/sbin/start-connect-server.sh --packages "org.apache.spark:spark-connect_2.13:4.2.0"
+$SPARK_HOME/sbin/start-connect-server.sh --packages "org.apache.spark:spark-connect_2.13:4.3.0"
 ```
 
 The server listens on `sc://localhost:15002` by default.

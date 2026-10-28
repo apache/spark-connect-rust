@@ -431,12 +431,20 @@ class TorchDistributor(Distributor):
         else:
             processes_per_node = 1
         node_rank = os.environ["RANK"]
+        # Set by set_torch_config; no constant fallback, since concurrent runs sharing a
+        # rendezvous endpoint would collide on a fixed id.
+        rdzv_id = os.environ.get("PYSPARK_TORCH_DISTRIBUTOR_RDZV_ID")
+        if not rdzv_id:
+            raise RuntimeError(
+                "Missing PYSPARK_TORCH_DISTRIBUTOR_RDZV_ID environment variable: a unique "
+                "per-run rendezvous id is required for distributed training."
+            )
 
         torchrun_args = [
             f"--nnodes={num_processes // processes_per_node}",
             f"--node_rank={node_rank}",
             f"--rdzv_endpoint={master_addr}:{master_port}",
-            "--rdzv_id=0",  # TODO: setup random ID that is gleaned from env variables
+            f"--rdzv_id={rdzv_id}",
         ]
         return torchrun_args, processes_per_node
 
@@ -482,7 +490,7 @@ class TorchDistributor(Distributor):
         tail: collections.deque = collections.deque(maxlen=_TAIL_LINES_TO_KEEP)
         try:
             for line in task.stdout:  # type: ignore
-                decoded = line.decode()
+                decoded = line.decode("utf-8")
                 tail.append(decoded)
                 if redirect_to_stdout:
                     if (
@@ -660,6 +668,7 @@ class TorchDistributor(Distributor):
         # Spark task program
         def wrapped_train_fn(iterator):  # type: ignore[no-untyped-def]
             import os
+            import secrets
             import pandas as pd
             import pyarrow
             from pyspark import BarrierTaskContext
@@ -687,6 +696,15 @@ class TorchDistributor(Distributor):
 
                 os.environ["MASTER_ADDR"] = str(addrs[0])
                 os.environ["MASTER_PORT"] = str(get_free_port(addrs[0], context))
+                # Unique per run so that concurrent runs sharing a rendezvous endpoint
+                # do not collide.
+                rdzv_id = secrets.token_hex(16) if context.partitionId() == 0 else ""
+                rdzv_id = context.allGather(str(rdzv_id))[0]
+                if not rdzv_id:
+                    raise RuntimeError(
+                        "Failed to generate a shared rendezvous id for distributed training."
+                    )
+                os.environ["PYSPARK_TORCH_DISTRIBUTOR_RDZV_ID"] = rdzv_id
                 os.environ["WORLD_SIZE"] = str(num_processes)
                 os.environ["NODE_RANK"] = str(context.partitionId())
                 os.environ["RANK"] = str(context.partitionId())
@@ -883,7 +901,7 @@ class TorchDistributor(Distributor):
             schema_file_path = os.path.join(save_dir, "schema.json")
             schema_json_string = json.dumps(input_schema_json)
 
-            with open(schema_file_path, "w") as f:
+            with open(schema_file_path, "w", encoding="utf-8") as f:
                 f.write(schema_json_string)
 
             os.environ[SPARK_PARTITION_ARROW_DATA_FILE] = arrow_file_path
@@ -1088,7 +1106,7 @@ def _get_spark_partition_data_loader(
     arrow_file = os.environ[SPARK_PARTITION_ARROW_DATA_FILE]
     schema_file = os.environ[SPARK_DATAFRAME_SCHEMA_FILE]
 
-    with open(schema_file, "r") as fp:
+    with open(schema_file, "r", encoding="utf-8") as fp:
         schema = StructType.fromJson(json.load(fp))
 
     dataset = _SparkPartitionTorchDataset(arrow_file, schema, num_samples)

@@ -4316,7 +4316,7 @@ class Series(Frame, IndexOpsMixin, Generic[T]):
             window = (
                 Window.orderBy(
                     asc_func(self.spark.column),
-                    asc_func(F.col(NATURAL_ORDER_COLUMN_NAME)),
+                    F.col(NATURAL_ORDER_COLUMN_NAME).asc(),
                 )
                 .partitionBy(*part_cols)
                 .rowsBetween(Window.unboundedPreceding, Window.currentRow)
@@ -6000,7 +6000,7 @@ class Series(Frame, IndexOpsMixin, Generic[T]):
         -----
         Indices are assumed to be sorted. Raises if this is not the case and config
         'compute.eager_check' is True. If 'compute.eager_check' is False pandas-on-Spark just
-        proceeds and performs by ignoring the indeces's order
+        proceeds and performs by ignoring the indices' order
 
         Examples
         --------

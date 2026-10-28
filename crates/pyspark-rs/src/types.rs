@@ -932,6 +932,9 @@ pub struct PyDateType;
 
 #[pymethods]
 impl PyDateType {
+    /// Number of days from 0001-01-01 to 1970-01-01 (mirrors pyspark's DateType.EPOCH_ORDINAL).
+    #[classattr]
+    const EPOCH_ORDINAL: i32 = 719163;
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
@@ -2143,6 +2146,10 @@ pub struct PyYearMonthIntervalType {
 
 #[pymethods]
 impl PyYearMonthIntervalType {
+    #[classattr]
+    const YEAR: i32 = 0;
+    #[classattr]
+    const MONTH: i32 = 1;
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
@@ -2222,6 +2229,14 @@ pub struct PyDayTimeIntervalType {
 
 #[pymethods]
 impl PyDayTimeIntervalType {
+    #[classattr]
+    const DAY: i32 = 0;
+    #[classattr]
+    const HOUR: i32 = 1;
+    #[classattr]
+    const MINUTE: i32 = 2;
+    #[classattr]
+    const SECOND: i32 = 3;
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
@@ -2350,6 +2365,16 @@ impl PyVariantType {
     }
 }
 
+// Class constants shared by all spatial types (SpatialType is macro-generated with no
+// #[pymethods], so this companion block adds the reference SpatialType.MIXED_* constants).
+#[pymethods]
+impl PySpatialType {
+    #[classattr]
+    const MIXED_CRS: &'static str = "SRID:ANY";
+    #[classattr]
+    const MIXED_SRID: i32 = -1;
+}
+
 #[pyclass(name = "GeometryType", module = "pyspark.sql.types", extends = PySpatialType)]
 pub struct PyGeometryType {
     pub srid: i32,
@@ -2357,6 +2382,14 @@ pub struct PyGeometryType {
 
 #[pymethods]
 impl PyGeometryType {
+    #[classattr]
+    const DEFAULT_CRS: &'static str = "OGC:CRS84";
+    #[classattr]
+    const DEFAULT_SRID: i32 = 4326;
+    #[classattr]
+    const MIXED_CRS: &'static str = "SRID:ANY";
+    #[classattr]
+    const MIXED_SRID: i32 = -1;
     #[new]
     #[pyo3(signature = (srid=0))]
     fn new(srid: i32) -> pyo3::PyClassInitializer<Self> {
@@ -2391,6 +2424,16 @@ pub struct PyGeographyType {
 
 #[pymethods]
 impl PyGeographyType {
+    #[classattr]
+    const DEFAULT_ALG: &'static str = "SPHERICAL";
+    #[classattr]
+    const DEFAULT_CRS: &'static str = "OGC:CRS84";
+    #[classattr]
+    const DEFAULT_SRID: i32 = 4326;
+    #[classattr]
+    const MIXED_CRS: &'static str = "SRID:ANY";
+    #[classattr]
+    const MIXED_SRID: i32 = -1;
     #[new]
     #[pyo3(signature = (srid=0))]
     fn new(srid: i32) -> pyo3::PyClassInitializer<Self> {
