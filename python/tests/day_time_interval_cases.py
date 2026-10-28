@@ -135,6 +135,10 @@ class DayTimeIntervalTests(unittest.TestCase):
 
         def execute(raw, context):
             request = self.messages["ExecutePlanRequest"].FromString(raw)
+            if request.plan.root.WhichOneof("rel_type") == "local_relation":
+                incoming = pa.ipc.open_stream(request.plan.root.local_relation.data).read_all()
+                wanted = pa.Table.from_batches(batches)
+                self.assertEqual(incoming.to_pylist(), wanted.to_pylist())
             for i, (count, data) in enumerate(payloads):
                 response = self.messages["ExecutePlanResponse"](
                     session_id=request.session_id, server_side_session_id="interval-fixture",
@@ -190,6 +194,11 @@ class DayTimeIntervalTests(unittest.TestCase):
                         actual = self._normalize(row)
                         self.assertEqual(actual, wanted)
                         self._assert_timedeltas(actual, wanted)
+                # Validate actual outbound IPC in the fixture before returning canned data.
+                # This covers Python timedelta conversion as well as collected Rust Rows.
+                for data in (expected, frame.collect()):
+                    restored = spark.createDataFrame(data, frame.schema)
+                    self.assertEqual([self._normalize(r) for r in restored.collect()], expected)
                 self.assertEqual(frame.schema.json(), before)
                 self.assertIn("interval", before)
             finally:

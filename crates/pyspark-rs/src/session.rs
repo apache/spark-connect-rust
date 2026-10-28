@@ -463,7 +463,7 @@ impl PySparkSession {
             rows.push(Row::new(names, values));
         }
 
-        // An explicit struct schema wins; otherwise infer field types from the first row
+        // An explicit struct schema wins; otherwise infer field types across all rows
         // (which requires at least one row -- an empty dataset needs an explicit schema,
         // matching pyspark which creates an empty DataFrame from schema + [] data).
         let schema_dtype = match spec {
@@ -478,17 +478,17 @@ impl PySparkSession {
                     .fields()
                     .iter()
                     .enumerate()
-                    .map(|(i, name)| StructField {
-                        name: name.clone(),
-                        data_type: rows[0].get(i).map(value_to_datatype).unwrap_or(
-                            DataType::String {
-                                collation: "UTF8_BINARY".to_string(),
-                            },
-                        ),
-                        nullable: true,
-                        metadata: Default::default(),
+                    .map(|(i, name)| {
+                        Ok(StructField {
+                            name: name.clone(),
+                            data_type: infer_values(
+                                &rows.iter().filter_map(|row| row.get(i)).collect::<Vec<_>>(),
+                            )?,
+                            nullable: true,
+                            metadata: Default::default(),
+                        })
                     })
-                    .collect();
+                    .collect::<PyResult<_>>()?;
                 DataType::Struct { fields }
             }
         };
@@ -880,14 +880,74 @@ impl PyConnectClientStub {
     fn _cleanup_ml_cache(&self) {}
 }
 
-/// Infer the Spark `DataType` for a `createDataFrame` column from its (first) value.
-/// Nested collections are inferred recursively; nulls and empty collections use
-/// String as a fallback. Interval input conversion is tracked in SPARK-60659.
-fn value_to_datatype(v: &Value) -> DataType {
-    let utf8 = || DataType::String {
-        collation: "UTF8_BINARY".to_string(),
+/// Infer a column across rows, including nested null-first and empty collections.
+fn infer_values(values: &[&Value]) -> PyResult<DataType> {
+    let values: Vec<&Value> = values
+        .iter()
+        .copied()
+        .filter(|v| !matches!(v, Value::Null))
+        .collect();
+    let Some(first) = values.first() else {
+        // Preserve the existing all-null / empty-collection fallback.
+        return Ok(DataType::String {
+            collation: "UTF8_BINARY".to_string(),
+        });
     };
-    match v {
+    if values
+        .iter()
+        .any(|v| std::mem::discriminant(*v) != std::mem::discriminant(*first))
+    {
+        return Err(pyo3::exceptions::PyTypeError::new_err(
+            "cannot merge incompatible createDataFrame value types",
+        ));
+    }
+    Ok(match first {
+        Value::List(_) => DataType::Array {
+            element_type: Box::new(infer_values(
+                &values
+                    .iter()
+                    .flat_map(|v| match v {
+                        Value::List(items) => items.iter(),
+                        _ => unreachable!(),
+                    })
+                    .collect::<Vec<_>>(),
+            )?),
+            contains_null: true,
+        },
+        Value::Map(_) => DataType::Map {
+            key_type: Box::new(DataType::String {
+                collation: "UTF8_BINARY".to_string(),
+            }),
+            value_type: Box::new(infer_values(
+                &values
+                    .iter()
+                    .flat_map(|v| match v {
+                        Value::Map(items) => items.values(),
+                        _ => unreachable!(),
+                    })
+                    .collect::<Vec<_>>(),
+            )?),
+            value_contains_null: true,
+        },
+        Value::Struct(row) => {
+            let mut fields = Vec::new();
+            for name in row.fields() {
+                let children: Vec<&Value> = values
+                    .iter()
+                    .filter_map(|v| match v {
+                        Value::Struct(row) => row.get_by_name(name),
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                fields.push(StructField {
+                    name: name.clone(),
+                    data_type: infer_values(&children)?,
+                    nullable: true,
+                    metadata: Default::default(),
+                });
+            }
+            DataType::Struct { fields }
+        }
         Value::Bool(_) => DataType::Boolean,
         Value::Byte(_) => DataType::Byte,
         Value::Short(_) => DataType::Short,
@@ -895,7 +955,9 @@ fn value_to_datatype(v: &Value) -> DataType {
         Value::Long(_) => DataType::Long,
         Value::Float(_) => DataType::Float,
         Value::Double(_) => DataType::Double,
-        Value::String(_) => utf8(),
+        Value::String(_) => DataType::String {
+            collation: "UTF8_BINARY".to_string(),
+        },
         Value::Binary(_) => DataType::Binary,
         Value::Date(_) => DataType::Date,
         Value::Timestamp(_) => DataType::Timestamp,
@@ -909,47 +971,9 @@ fn value_to_datatype(v: &Value) -> DataType {
             precision: precision.unwrap_or(38),
             scale: scale.unwrap_or(0),
         },
-        // Nested inference (schema=None): infer element/field/value types recursively so a
-        // list/dict/Row value produces the right Array/Struct/Map type.
-        Value::List(items) => {
-            let element_type = items
-                .iter()
-                .find(|x| !matches!(x, Value::Null))
-                .map(value_to_datatype)
-                .unwrap_or_else(utf8);
-            DataType::Array {
-                element_type: Box::new(element_type),
-                contains_null: true,
-            }
-        }
-        Value::Struct(row) => DataType::Struct {
-            fields: row
-                .fields()
-                .iter()
-                .zip(row.values())
-                .map(|(n, val)| spark_connect::types::StructField {
-                    name: n.clone(),
-                    data_type: value_to_datatype(val),
-                    nullable: true,
-                    metadata: Default::default(),
-                })
-                .collect(),
-        },
-        Value::Map(m) => {
-            let value_type = m
-                .values()
-                .find(|x| !matches!(x, Value::Null))
-                .map(value_to_datatype)
-                .unwrap_or_else(utf8);
-            DataType::Map {
-                key_type: Box::new(utf8()),
-                value_type: Box::new(value_type),
-                value_contains_null: true,
-            }
-        }
         Value::Variant { .. } => DataType::Variant,
-        Value::Null => utf8(),
-    }
+        Value::Null => unreachable!("nulls were filtered above"),
+    })
 }
 
 /// Convert a Python value to a Rust Value.
@@ -1023,6 +1047,20 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
             map.insert(k.str()?.to_string(), py_to_value(&v)?);
         }
         return Ok(Value::Map(map));
+    }
+
+    // Avoid floating-point total_seconds(): it loses microseconds for large intervals.
+    if obj.is_instance(&obj.py().import("datetime")?.getattr("timedelta")?)? {
+        let days = i128::from(obj.getattr("days")?.extract::<i64>()?);
+        let seconds = i128::from(obj.getattr("seconds")?.extract::<i64>()?);
+        let micros = i128::from(obj.getattr("microseconds")?.extract::<i64>()?);
+        let total = (days * 86_400 + seconds) * 1_000_000 + micros;
+        let total = i64::try_from(total).map_err(|_| {
+            pyo3::exceptions::PyOverflowError::new_err(
+                "day-time interval exceeds signed 64-bit microseconds",
+            )
+        })?;
+        return Ok(Value::DayTimeInterval(total));
     }
 
     // Check for datetime.datetime (before datetime.date, since datetime is a subclass of date)
