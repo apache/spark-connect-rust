@@ -2419,6 +2419,7 @@ impl<'a> ArrowValueLayout<'a> {
             return Ok(Value::Null);
         }
         match &self.decoder {
+            // NullType may have no null buffer; every element is still Null.
             ArrowValueDecoder::Null => Ok(Value::Null),
             ArrowValueDecoder::Boolean(arr) => Ok(Value::Bool(arr.value(index))),
             ArrowValueDecoder::Int8(arr) => Ok(Value::Byte(arr.value(index))),
@@ -2441,6 +2442,7 @@ impl<'a> ArrowValueLayout<'a> {
                 })?;
                 Ok(Value::Long(i64_val))
             }
+            // Decimal128 stays exact, preserving precision/scale rather than using lossy f64.
             ArrowValueDecoder::Decimal128(arr) => {
                 let scale = arr.scale() as i32;
                 Ok(Value::Decimal {
@@ -2465,12 +2467,14 @@ impl<'a> ArrowValueLayout<'a> {
             ArrowValueDecoder::Date64(arr) => {
                 Ok(Value::Date((arr.value(index) / 86_400_000) as i32))
             }
+            // Decimal256 also preserves exact digits; Arrow formats with the scale.
             ArrowValueDecoder::Decimal256(arr) => Ok(Value::Decimal {
                 value: arr.value_as_string(index),
                 precision: Some(arr.precision() as i32),
                 scale: Some(arr.scale() as i32),
             }),
             ArrowValueDecoder::FixedSizeBinary(arr) => Ok(Value::Binary(arr.value(index).to_vec())),
+            // TimeType has no dedicated Value variant, so render as an ISO time string.
             ArrowValueDecoder::Time64Microsecond(arr) => {
                 Ok(Value::String(micros_to_time_string(arr.value(index))))
             }
@@ -2483,6 +2487,7 @@ impl<'a> ArrowValueLayout<'a> {
             ArrowValueDecoder::Time32Second(arr) => Ok(Value::String(micros_to_time_string(
                 arr.value(index) as i64 * 1_000_000,
             ))),
+            // Intervals likewise have no dedicated Value variant, so render as strings.
             ArrowValueDecoder::IntervalYearMonth(arr) => {
                 let months = arr.value(index);
                 Ok(Value::String(format!(
@@ -2522,6 +2527,10 @@ impl<'a> ArrowValueLayout<'a> {
                 children,
                 variant_fields,
             } => {
+                // VARIANT arrives as struct<value: binary, metadata: binary>, with
+                // {"variant": "true"} on the metadata field. Return raw-byte
+                // Value::Variant so it materializes as pyspark's VariantVal rather
+                // than a plain {value, metadata} struct/dict.
                 if let Some((value, metadata)) = variant_fields {
                     let binary_field = |column: Option<usize>| -> Result<Vec<u8>> {
                         match column {
@@ -2550,6 +2559,8 @@ impl<'a> ArrowValueLayout<'a> {
                 let end = offsets[index + 1] as usize;
                 let mut map = std::collections::BTreeMap::new();
                 for child_index in start..end {
+                    // Scalar keys use their natural form: a map<int, ...> key must
+                    // be "1", never the Value enum's Debug form "Integer(1)".
                     let key = map_key_to_string(children.0.value_at(child_index)?);
                     map.insert(key, children.1.value_at(child_index)?);
                 }
@@ -2580,6 +2591,7 @@ mod nested_decode_tests {
     fn encoded_batches(
         columns: Vec<(&str, ArrayRef)>,
         repeats: usize,
+        empty_boundaries: bool,
     ) -> proto::execute_plan_response::ArrowBatch {
         let schema = Arc::new(Schema::new(
             columns
@@ -2595,15 +2607,19 @@ mod nested_decode_tests {
         let mut data = vec![];
         {
             let mut writer = StreamWriter::try_new(&mut data, &schema).unwrap();
-            writer
-                .write(&RecordBatch::new_empty(schema.clone()))
-                .unwrap();
+            if empty_boundaries {
+                writer
+                    .write(&RecordBatch::new_empty(schema.clone()))
+                    .unwrap();
+            }
             for _ in 0..repeats {
                 writer.write(&batch).unwrap();
             }
-            writer
-                .write(&RecordBatch::new_empty(schema.clone()))
-                .unwrap();
+            if empty_boundaries {
+                writer
+                    .write(&RecordBatch::new_empty(schema.clone()))
+                    .unwrap();
+            }
             writer.finish().unwrap();
         }
         proto::execute_plan_response::ArrowBatch {
@@ -2613,7 +2629,7 @@ mod nested_decode_tests {
     }
 
     fn decode_batches(columns: Vec<(&str, ArrayRef)>, repeats: usize) -> Vec<Row> {
-        decode_arrow_batch(&encoded_batches(columns, repeats)).unwrap()
+        decode_arrow_batch(&encoded_batches(columns, repeats, false)).unwrap()
     }
 
     fn as_struct(value: &Value) -> &StructValue {
@@ -2648,13 +2664,15 @@ mod nested_decode_tests {
             ),
             ("null", Arc::new(NullArray::new(3))),
         ];
-        let rows = decode_batches(
+        let batch = encoded_batches(
             columns
                 .into_iter()
                 .map(|(name, array)| (name, array.slice(1, 2)))
                 .collect(),
             2,
+            true,
         );
+        let rows = decode_arrow_batch(&batch).unwrap();
         assert_eq!(rows.len(), 4);
         for batch in rows.chunks(2) {
             assert_eq!(batch[0].fields(), &["dup", "dup", "bool", "bytes", "null"]);
@@ -2783,6 +2801,9 @@ mod nested_decode_tests {
             Some(NullBuffer::from(vec![false])),
         );
         assert_eq!(arrow_value_at(&parent, 0).unwrap(), Value::Null);
+        // Deliberately noncanonical: detection accepts a marker on any field,
+        // and the first matching "value" wins while an unsupported duplicate
+        // remains unread. The absent "metadata" field must still decode as empty.
         let variant = StructArray::from(vec![
             (
                 Arc::new(
@@ -2816,6 +2837,7 @@ mod nested_decode_tests {
                 ),
             ],
             1,
+            false,
         );
         assert!(decode_arrow_batch(&first_column)
             .unwrap_err()
@@ -2830,6 +2852,7 @@ mod nested_decode_tests {
                 ),
             ],
             1,
+            false,
         );
         assert!(decode_arrow_batch(&first_row)
             .unwrap_err()
@@ -3810,11 +3833,6 @@ mod arrow_value_tests {
             };
             assert_eq!(decoded.to_bits(), value.to_bits());
         }
-        eprintln!(
-            "ArrowValueLayout={} bytes; ArrowValueDecoder={} bytes (per layout node)",
-            std::mem::size_of::<ArrowValueLayout<'_>>(),
-            std::mem::size_of::<ArrowValueDecoder<'_>>()
-        );
     }
 
     #[test]
