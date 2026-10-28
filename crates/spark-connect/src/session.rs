@@ -621,18 +621,18 @@ fn rows_to_arrow_ipc(rows: &[Row], schema: &DataType) -> Result<Vec<u8>> {
     // Conversion is positional, so every row must match the schema width.
     for (index, row) in rows.iter().enumerate() {
         if row.len() != fields.len() {
-            return Err(SparkError::connect_msg(format!(
-                "Row {index} has {} values, but the schema has {} fields",
+            return Err(SparkError::row_width_mismatch(
+                index,
                 row.len(),
-                fields.len()
-            )));
+                fields.len(),
+            ));
         }
     }
 
     for (field_idx, field) in fields.iter().enumerate() {
         let column: Vec<Value> = rows
             .iter()
-            .map(|row| row.get(field_idx).cloned().unwrap_or(Value::Null))
+            .map(|row| row.values()[field_idx].clone())
             .collect();
         columns.push(values_to_arrow(&column, &field.data_type)?);
     }

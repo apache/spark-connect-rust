@@ -458,12 +458,13 @@ impl PySparkSession {
                 .or_else(|| pandas_columns.clone())
                 .unwrap_or_else(|| (0..values.len()).map(|i| format!("col{}", i)).collect());
             if names.len() != values.len() {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "Row {} has {} values, but the schema has {} fields",
-                    rows.len(),
-                    values.len(),
-                    names.len()
-                )));
+                return Err(crate::errors::spark_error_to_py_exception(
+                    spark_connect::SparkError::row_width_mismatch(
+                        rows.len(),
+                        values.len(),
+                        names.len(),
+                    ),
+                ));
             }
             rows.push(Row::new(names, values));
         }
