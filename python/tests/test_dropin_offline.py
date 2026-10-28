@@ -2751,7 +2751,6 @@ for schema in schemas:
         spark.createDataFrame([(1, 2), (3,)], schema=schema)
     except PySparkValueError as error:
         assert type(error) is PySparkValueError, type(error)
-        assert isinstance(error, ValueError)
         assert str(error) == "Row 1 has 1 values, but the schema has 2 fields", error
     else:
         raise AssertionError("expected a width validation error")

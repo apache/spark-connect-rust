@@ -596,6 +596,14 @@ impl Default for SparkSessionBuilder {
     }
 }
 
+/// Construct the shared local-input width error for Rust and Python callers.
+#[doc(hidden)]
+pub fn row_width_mismatch(row_index: usize, actual: usize, expected: usize) -> SparkError {
+    SparkError::value_msg(format!(
+        "Row {row_index} has {actual} values, but the schema has {expected} fields"
+    ))
+}
+
 /// Convert Arrow RecordBatch data to IPC bytes.
 /// Used by createDataFrame to package local data.
 fn rows_to_arrow_ipc(rows: &[Row], schema: &DataType) -> Result<Vec<u8>> {
@@ -621,11 +629,7 @@ fn rows_to_arrow_ipc(rows: &[Row], schema: &DataType) -> Result<Vec<u8>> {
     // Conversion is positional, so every row must match the schema width.
     for (index, row) in rows.iter().enumerate() {
         if row.len() != fields.len() {
-            return Err(SparkError::row_width_mismatch(
-                index,
-                row.len(),
-                fields.len(),
-            ));
+            return Err(row_width_mismatch(index, row.len(), fields.len()));
         }
     }
 

@@ -3,7 +3,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use spark_connect::row::{Row, Value};
-use spark_connect::session::SparkSession;
+use spark_connect::session::{row_width_mismatch, SparkSession};
 use spark_connect::types::{DataType, StructField};
 use spark_connect::udf::{CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
 
@@ -458,13 +458,7 @@ impl PySparkSession {
                 .or_else(|| pandas_columns.clone())
                 .unwrap_or_else(|| (0..values.len()).map(|i| format!("col{}", i)).collect());
             if names.len() != values.len() {
-                return Err(crate::errors::spark_error_to_py_exception(
-                    spark_connect::SparkError::row_width_mismatch(
-                        rows.len(),
-                        values.len(),
-                        names.len(),
-                    ),
-                ));
+                return Err(row_width_mismatch(rows.len(), values.len(), names.len())).to_pyerr();
             }
             rows.push(Row::new(names, values));
         }

@@ -288,13 +288,6 @@ impl SparkError {
         }
     }
 
-    /// Report a local input row whose width does not match its schema.
-    pub fn row_width_mismatch(row_index: usize, actual: usize, expected: usize) -> Self {
-        Self::value_msg(format!(
-            "Row {row_index} has {actual} values, but the schema has {expected} fields"
-        ))
-    }
-
     /// Create an error of a specific kind with an error class and parameters.
     pub fn classed(kind: SparkErrorKind, error_class: &str, params: &[(&str, &str)]) -> Self {
         Self {
