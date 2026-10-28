@@ -900,9 +900,11 @@ fn value_to_datatype(v: &Value) -> PyResult<DataType> {
         Value::Binary(_) => DataType::Binary,
         Value::Date(_) => DataType::Date,
         Value::Timestamp(_) => DataType::Timestamp,
-        Value::DayTimeInterval(_) => return Err(pyo3::exceptions::PyTypeError::new_err(
-            "createDataFrame does not support day-time interval input; interval support is decode-only"
-        )),
+        Value::DayTimeInterval(_) => {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "createDataFrame interval input is unsupported (decode-only)",
+            ))
+        }
         Value::Decimal {
             precision, scale, ..
         } => DataType::Decimal {
@@ -928,12 +930,14 @@ fn value_to_datatype(v: &Value) -> PyResult<DataType> {
                 .fields()
                 .iter()
                 .zip(row.values())
-                .map(|(n, val)| Ok(spark_connect::types::StructField {
-                    name: n.clone(),
-                    data_type: value_to_datatype(val)?,
-                    nullable: true,
-                    metadata: Default::default(),
-                }))
+                .map(|(n, val)| {
+                    Ok(spark_connect::types::StructField {
+                        name: n.clone(),
+                        data_type: value_to_datatype(val)?,
+                        nullable: true,
+                        metadata: Default::default(),
+                    })
+                })
                 .collect::<PyResult<_>>()?,
         },
         Value::Map(m) => {
