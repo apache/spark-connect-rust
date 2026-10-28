@@ -2056,6 +2056,7 @@ pub(crate) fn assign_plan_ids(
 pub(crate) fn decode_arrow_batch(
     batch: &proto::execute_plan_response::ArrowBatch,
 ) -> Result<Vec<Row>> {
+    use arrow::array::{Array, Int64Array};
     use arrow::ipc::reader::StreamReader;
     use std::io::Cursor;
 
@@ -2085,6 +2086,29 @@ pub(crate) fn decode_arrow_batch(
             .iter()
             .map(|field| field.name().clone())
             .collect::<Arc<[String]>>();
+        // Resolve homogeneous Int64 columns once per batch, avoiding repeated
+        // dynamic type checks for each value. Mixed batches use the generic path.
+        if let Some(columns) = record_batch
+            .columns()
+            .iter()
+            .map(|column| column.as_any().downcast_ref::<Int64Array>())
+            .collect::<Option<Vec<_>>>()
+        {
+            for row_idx in 0..num_rows {
+                let values = columns
+                    .iter()
+                    .map(|column| {
+                        if column.is_null(row_idx) {
+                            Value::Null
+                        } else {
+                            Value::Long(column.value(row_idx))
+                        }
+                    })
+                    .collect();
+                rows.push(Row::with_shared_fields(Arc::clone(&field_names), values));
+            }
+            continue;
+        }
         let layouts = record_batch
             .columns()
             .iter()
@@ -3695,5 +3719,291 @@ mod arrow_value_tests {
     fn micros_to_time_string_branches() {
         assert_eq!(micros_to_time_string(0), "00:00:00");
         assert!(micros_to_time_string(1).contains('.'));
+    }
+}
+
+// Differential reference for the homogeneous Int64 fast path. The legacy
+// orchestration retains 74b8e41 behavior and always uses the unchanged
+// generic value decoder.
+#[cfg(test)]
+mod int64_differential_tests {
+    use super::*;
+    use arrow::array::{ArrayRef, DurationMicrosecondArray, Int64Array, StringArray, UInt64Array};
+    use arrow::datatypes::{Field, Schema};
+    use arrow::ipc::reader::StreamReader;
+    use arrow::ipc::writer::StreamWriter;
+    use arrow::record_batch::{RecordBatch, RecordBatchOptions};
+    use std::io::Cursor;
+
+    // Frozen decode_arrow_batch orchestration at 74b8e41; function name only changed.
+    fn legacy_decode_arrow_batch_74b8e41(
+        batch: &proto::execute_plan_response::ArrowBatch,
+    ) -> Result<Vec<Row>> {
+        use arrow::ipc::reader::StreamReader;
+        use std::io::Cursor;
+
+        if batch.data.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let cursor = Cursor::new(&batch.data);
+        let mut reader = StreamReader::try_new(cursor, None).map_err(|e| {
+            SparkError::connect_msg(format!("Failed to create Arrow stream reader: {}", e))
+        })?;
+
+        let mut rows = vec![];
+
+        while let Some(record_batch) = reader
+            .next()
+            .transpose()
+            .map_err(|e| SparkError::connect_msg(format!("Failed to decode Arrow batch: {}", e)))?
+        {
+            let schema = record_batch.schema();
+            let num_rows = record_batch.num_rows();
+            if num_rows == 0 {
+                continue;
+            }
+            let field_names = schema
+                .fields()
+                .iter()
+                .map(|field| field.name().clone())
+                .collect::<Arc<[String]>>();
+            let layouts = record_batch
+                .columns()
+                .iter()
+                .map(|column| ArrowValueLayout::new(column.data_type()))
+                .collect::<Vec<_>>();
+
+            for row_idx in 0..num_rows {
+                let mut values = Vec::with_capacity(record_batch.num_columns());
+
+                for (column, layout) in record_batch.columns().iter().zip(&layouts) {
+                    let value = arrow_value_at_with_layout(column.as_ref(), row_idx, layout)?;
+                    values.push(value);
+                }
+
+                rows.push(Row::with_shared_fields(Arc::clone(&field_names), values));
+            }
+        }
+
+        Ok(rows)
+    }
+
+    fn batch(columns: Vec<(&str, ArrayRef)>) -> RecordBatch {
+        let schema = Schema::new(
+            columns
+                .iter()
+                .map(|(name, array)| {
+                    Field::new(*name, array.data_type().clone(), true).with_metadata(
+                        [("test_metadata".to_string(), "unchanged".to_string())].into(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        );
+        RecordBatch::try_new(
+            Arc::new(schema),
+            columns.into_iter().map(|(_, array)| array).collect(),
+        )
+        .unwrap()
+    }
+
+    fn encode(
+        schema: &Schema,
+        batches: &[RecordBatch],
+    ) -> proto::execute_plan_response::ArrowBatch {
+        let mut data = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut data, schema).unwrap();
+            for batch in batches {
+                writer.write(batch).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        proto::execute_plan_response::ArrowBatch {
+            data: data.into(),
+            ..Default::default()
+        }
+    }
+
+    fn same_success(response: &proto::execute_plan_response::ArrowBatch) -> Vec<Row> {
+        let expected = legacy_decode_arrow_batch_74b8e41(response).unwrap();
+        let actual = decode_arrow_batch(response).unwrap();
+        assert_eq!(
+            actual, expected,
+            "decoded rows differ from the frozen generic path"
+        );
+        actual
+    }
+
+    fn same_error(response: &proto::execute_plan_response::ArrowBatch, fragment: &str) {
+        let expected = legacy_decode_arrow_batch_74b8e41(response)
+            .unwrap_err()
+            .to_string();
+        let actual = decode_arrow_batch(response).unwrap_err().to_string();
+        assert_eq!(actual, expected);
+        assert!(actual.contains(fragment), "unexpected error: {actual}");
+    }
+
+    #[test]
+    fn int64_batch_matches_generic_with_nulls_slices_duplicate_names_and_multiple_batches() {
+        let first: ArrayRef = Arc::new(Int64Array::from(vec![
+            Some(666),
+            Some(-2),
+            None,
+            Some(i64::MAX),
+            Some(i64::MIN),
+            Some(777),
+        ]));
+        let second: ArrayRef = Arc::new(Int64Array::from(vec![
+            Some(777),
+            None,
+            Some(4),
+            Some(5),
+            None,
+            Some(888),
+        ]));
+        let third: ArrayRef = Arc::new(Int64Array::from(vec![
+            Some(888),
+            Some(11),
+            Some(12),
+            None,
+            Some(14),
+            Some(999),
+        ]));
+        let batch = batch(vec![
+            ("dup", first.slice(1, 4)),
+            ("名前", second.slice(1, 4)),
+            ("dup", third.slice(1, 4)),
+        ]);
+        let response = encode(
+            batch.schema().as_ref(),
+            &[
+                batch.slice(0, 0),
+                batch.clone(),
+                batch.slice(0, 0),
+                batch.clone(),
+            ],
+        );
+        let rows = same_success(&response);
+        assert_eq!(rows.len(), 8);
+        let expected_values = [
+            vec![Value::Long(-2), Value::Null, Value::Long(11)],
+            vec![Value::Null, Value::Long(4), Value::Long(12)],
+            vec![Value::Long(i64::MAX), Value::Long(5), Value::Null],
+            vec![Value::Long(i64::MIN), Value::Null, Value::Long(14)],
+        ];
+        for group in rows.chunks(4) {
+            for (row, values) in group.iter().zip(&expected_values) {
+                assert_eq!(
+                    row.fields(),
+                    &["dup".to_string(), "名前".to_string(), "dup".to_string()]
+                );
+                assert_eq!(row.values(), values.as_slice());
+                assert_eq!(row.get_by_name("dup"), row.get(0));
+                assert!(std::ptr::eq(group[0].fields(), row.fields()));
+            }
+        }
+    }
+
+    #[test]
+    fn int64_batch_matches_generic_for_all_null_column_and_empty_names() {
+        let batch = batch(vec![("", Arc::new(Int64Array::from(vec![None::<i64>; 3])))]);
+        let rows = same_success(&encode(batch.schema().as_ref(), &[batch.clone()]));
+        assert_eq!(rows.len(), 3);
+        for row in &rows {
+            assert_eq!(row.fields(), &[String::new()]);
+            assert_eq!(row.values(), &[Value::Null]);
+            assert_eq!(row.get_by_name(""), Some(&Value::Null));
+            assert!(std::ptr::eq(rows[0].fields(), row.fields()));
+        }
+    }
+
+    #[test]
+    fn int64_batch_keeps_empty_payload_stream_and_zero_column_rows() {
+        assert!(same_success(&Default::default()).is_empty());
+        let empty_schema = Schema::empty();
+        assert!(same_success(&encode(&empty_schema, &[])).is_empty());
+        let zero_column_batch = RecordBatch::try_new_with_options(
+            Arc::new(empty_schema.clone()),
+            vec![],
+            &RecordBatchOptions::new().with_row_count(Some(3)),
+        )
+        .unwrap();
+        let response = encode(&empty_schema, &[zero_column_batch]);
+        // Compare against the row count actually represented by this Arrow IPC
+        // version, rather than assuming its zero-column writer preserves it.
+        let serialized_rows: usize = StreamReader::try_new(Cursor::new(&response.data), None)
+            .unwrap()
+            .map(|batch| batch.unwrap().num_rows())
+            .sum();
+        assert!(serialized_rows == 0 || serialized_rows == 3);
+        let rows = same_success(&response);
+        assert_eq!(rows.len(), serialized_rows);
+        for row in rows {
+            assert!(row.fields().is_empty());
+            assert!(row.values().is_empty());
+        }
+    }
+
+    #[test]
+    fn mixed_int64_string_batch_uses_equivalent_fallback() {
+        let batch = batch(vec![
+            (
+                "id",
+                Arc::new(Int64Array::from(vec![Some(1), None, Some(-3)])),
+            ),
+            (
+                "text",
+                Arc::new(StringArray::from(vec![Some("a"), Some("名前"), None])),
+            ),
+        ]);
+        let rows = same_success(&encode(batch.schema().as_ref(), &[batch.clone()]));
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            rows[0].values(),
+            &[Value::Long(1), Value::String("a".to_string())]
+        );
+        assert_eq!(
+            rows[1].values(),
+            &[Value::Null, Value::String("名前".to_string())]
+        );
+        assert_eq!(rows[2].values(), &[Value::Long(-3), Value::Null]);
+        assert!(std::ptr::eq(rows[0].fields(), rows[2].fields()));
+    }
+
+    #[test]
+    fn uint64_overflow_keeps_generic_error_after_initial_int64_column() {
+        let batch = batch(vec![
+            ("signed", Arc::new(Int64Array::from(vec![1, 2]))),
+            ("unsigned", Arc::new(UInt64Array::from(vec![0, u64::MAX]))),
+        ]);
+        same_error(
+            &encode(batch.schema().as_ref(), &[batch.clone()]),
+            "UInt64 value 18446744073709551615 exceeds i64 range",
+        );
+    }
+
+    #[test]
+    fn duration_keeps_unsupported_error_and_all_null_success() {
+        let unsupported = batch(vec![
+            ("signed", Arc::new(Int64Array::from(vec![1, 2]))),
+            (
+                "duration",
+                Arc::new(DurationMicrosecondArray::from(vec![None, Some(5)])),
+            ),
+        ]);
+        same_error(
+            &encode(unsupported.schema().as_ref(), &[unsupported.clone()]),
+            "Unsupported Arrow type Duration(Microsecond) - cannot convert to Value",
+        );
+        // The generic path checks validity before type support. An unsupported
+        // physical type containing only nulls must therefore remain successful.
+        let all_null = batch(vec![(
+            "duration",
+            Arc::new(DurationMicrosecondArray::from(vec![None::<i64>; 2])),
+        )]);
+        let rows = same_success(&encode(all_null.schema().as_ref(), &[all_null.clone()]));
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.values() == [Value::Null]));
     }
 }
