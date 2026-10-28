@@ -1148,6 +1148,61 @@ fn ml_estimators_and_transformers() {
 }
 
 #[test]
+fn collected_small_integer_rows_accept_floating_schemas() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::row::Value;
+    use spark_connect::types::{DataType, StructField};
+
+    let s = session();
+    for (sql_type, min, max) in [("TINYINT", -128, 127), ("SMALLINT", -32768, 32767)] {
+        let rows = s.sql(&format!(
+            "SELECT CAST(n AS {sql_type}) AS n FROM VALUES ({min}), (-1), (0), ({max}), (NULL) AS t(n)"
+        )).unwrap().collect().unwrap();
+        assert!(matches!(
+            rows[0].get(0),
+            Some(Value::Byte(_)) | Some(Value::Short(_))
+        ));
+        for target in [DataType::Float, DataType::Double] {
+            let schema = DataType::Struct {
+                fields: vec![StructField {
+                    name: "n".into(),
+                    data_type: target.clone(),
+                    nullable: true,
+                    metadata: Default::default(),
+                }],
+            };
+            let actual = s
+                .create_dataframe(rows.clone(), schema)
+                .unwrap()
+                .collect()
+                .unwrap();
+            let mut actual: Vec<_> = actual
+                .iter()
+                .map(|row| match (&target, row.get(0).unwrap()) {
+                    (DataType::Float, Value::Float(n)) => Some(*n as f64),
+                    (DataType::Double, Value::Double(n)) => Some(*n),
+                    (_, Value::Null) => None,
+                    other => panic!("unexpected floating result: {other:?}"),
+                })
+                .collect();
+            actual.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            assert_eq!(
+                actual,
+                vec![
+                    None,
+                    Some(min as f64),
+                    Some(-1.0),
+                    Some(0.0),
+                    Some(max as f64)
+                ]
+            );
+        }
+    }
+}
+
+#[test]
 fn create_dataframe_typed_schemas() {
     if !should_run() {
         return;

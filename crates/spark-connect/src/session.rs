@@ -915,6 +915,8 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
                 .iter()
                 .map(|v| match v {
                     Value::Null => Ok(None),
+                    Value::Byte(x) => Ok(Some(*x as $t)),
+                    Value::Short(x) => Ok(Some(*x as $t)),
                     Value::Float(x) => Ok(Some(*x as $t)),
                     Value::Double(x) => Ok(Some(*x as $t)),
                     Value::Integer(x) => Ok(Some(*x as $t)),
@@ -1225,6 +1227,221 @@ mod tests {
             nullable: true,
             metadata: Default::default(),
         }
+    }
+
+    #[test]
+    fn small_integer_rows_encode_as_floating_ipc() {
+        use arrow::array::{Array, Float32Array, Float64Array, ListArray, MapArray, StructArray};
+        use arrow::ipc::reader::StreamReader;
+        use std::io::Cursor;
+
+        let inputs = vec![
+            Value::Byte(i8::MIN),
+            Value::Byte(-1),
+            Value::Byte(0),
+            Value::Byte(i8::MAX),
+            Value::Short(i16::MIN),
+            Value::Short(-1),
+            Value::Short(0),
+            Value::Short(i16::MAX),
+            Value::Null,
+        ];
+        let expected = vec![
+            Some(-128.0),
+            Some(-1.0),
+            Some(0.0),
+            Some(127.0),
+            Some(-32768.0),
+            Some(-1.0),
+            Some(0.0),
+            Some(32767.0),
+            None,
+        ];
+        for target in [DataType::Float, DataType::Double] {
+            let schema = DataType::Struct {
+                fields: vec![
+                    struct_field("scalar", target.clone()),
+                    struct_field(
+                        "array",
+                        DataType::Array {
+                            element_type: Box::new(target.clone()),
+                            contains_null: true,
+                        },
+                    ),
+                    struct_field(
+                        "map",
+                        DataType::Map {
+                            key_type: Box::new(DataType::String {
+                                collation: "UTF8_BINARY".into(),
+                            }),
+                            value_type: Box::new(target.clone()),
+                            value_contains_null: true,
+                        },
+                    ),
+                    struct_field(
+                        "struct",
+                        DataType::Struct {
+                            fields: vec![struct_field("n", target.clone())],
+                        },
+                    ),
+                ],
+            };
+            let rows: Vec<_> = inputs
+                .iter()
+                .map(|value| {
+                    Row::new(
+                        vec![
+                            "scalar".into(),
+                            "array".into(),
+                            "map".into(),
+                            "struct".into(),
+                        ],
+                        vec![
+                            value.clone(),
+                            Value::List(vec![value.clone()]),
+                            Value::Map(vec![(Value::String("k".to_string()), value.clone())]),
+                            Value::Struct(Row::new(vec!["n".into()], vec![value.clone()]).into()),
+                        ],
+                    )
+                })
+                .collect();
+            let bytes = rows_to_arrow_ipc(&rows, &schema).unwrap();
+            let mut reader = StreamReader::try_new(Cursor::new(bytes), None).unwrap();
+            let batch = reader.next().unwrap().unwrap();
+            assert_eq!(batch.num_rows(), inputs.len());
+            let array = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .unwrap();
+            let map = batch.column(2).as_any().downcast_ref::<MapArray>().unwrap();
+            let nested = batch
+                .column(3)
+                .as_any()
+                .downcast_ref::<StructArray>()
+                .unwrap();
+            for column in [
+                batch.column(0),
+                array.values(),
+                map.values(),
+                nested.column(0),
+            ] {
+                match target {
+                    DataType::Float => assert_eq!(
+                        column.as_any().downcast_ref::<Float32Array>().unwrap(),
+                        &Float32Array::from(
+                            expected
+                                .iter()
+                                .map(|v| v.map(|n| n as f32))
+                                .collect::<Vec<_>>()
+                        ),
+                    ),
+                    DataType::Double => assert_eq!(
+                        column.as_any().downcast_ref::<Float64Array>().unwrap(),
+                        &Float64Array::from(expected.clone()),
+                    ),
+                    _ => unreachable!(),
+                }
+                assert_eq!(column.null_count(), 1);
+            }
+            assert!(reader.next().is_none());
+            for invalid in [
+                Value::Bool(true),
+                Value::String("7".into()),
+                Value::Binary(vec![7]),
+            ] {
+                let rows = vec![Row::new(vec!["n".into()], vec![invalid])];
+                let schema = DataType::Struct {
+                    fields: vec![struct_field("n", target.clone())],
+                };
+                assert!(rows_to_arrow_ipc(&rows, &schema)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Type mismatch in row data"));
+            }
+        }
+    }
+
+    #[test]
+    fn nested_struct_coercion_preserves_first_name_position_and_numeric_types() {
+        let source = Value::Struct(
+            Row::with_shared_fields(
+                vec!["dup", "dup", "other", "nested", "items", "map"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect::<Arc<[String]>>(),
+                vec![
+                    Value::Long(257),
+                    Value::Long(999),
+                    Value::Long(-2),
+                    Value::Struct(Row::new(vec!["n".to_string()], vec![Value::Long(300)]).into()),
+                    Value::List(vec![Value::Long(65_537), Value::Null]),
+                    Value::Map(vec![(Value::String("k".to_string()), Value::Long(65_538))]),
+                ],
+            )
+            .into(),
+        );
+        let target = DataType::Struct {
+            fields: vec![
+                struct_field("dup", DataType::Byte),
+                struct_field("positional", DataType::Short),
+                struct_field("dup", DataType::Long),
+                struct_field(
+                    "nested",
+                    DataType::Struct {
+                        fields: vec![struct_field("n", DataType::Byte)],
+                    },
+                ),
+                struct_field(
+                    "items",
+                    DataType::Array {
+                        element_type: Box::new(DataType::Short),
+                        contains_null: true,
+                    },
+                ),
+                struct_field(
+                    "map",
+                    DataType::Map {
+                        key_type: Box::new(DataType::String {
+                            collation: "UTF8_BINARY".to_string(),
+                        }),
+                        value_type: Box::new(DataType::Short),
+                        value_contains_null: true,
+                    },
+                ),
+                struct_field("missing", DataType::Integer),
+            ],
+        };
+        let actual = coerce_value(Some(&source), &target);
+        let expected = Value::Struct(
+            Row::new(
+                vec![
+                    "dup",
+                    "positional",
+                    "dup",
+                    "nested",
+                    "items",
+                    "map",
+                    "missing",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+                vec![
+                    Value::Byte(1),
+                    Value::Short(999),
+                    Value::Long(257),
+                    Value::Struct(Row::new(vec!["n".to_string()], vec![Value::Byte(44)]).into()),
+                    Value::List(vec![Value::Short(1), Value::Null]),
+                    Value::Map(vec![(Value::String("k".to_string()), Value::Short(2))]),
+                    Value::Null,
+                ],
+            )
+            .into(),
+        );
+        assert_eq!(actual, expected);
+        assert_eq!(coerce_value(Some(&Value::Null), &target), Value::Null);
+        assert_eq!(coerce_value(None, &target), Value::Null);
     }
 
     #[test]
