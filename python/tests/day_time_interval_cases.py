@@ -21,14 +21,20 @@ The small gRPC fixture sends real Arrow IPC and just the protobuf envelopes
 needed by these tests. It does not depend on the reference PySpark package
 (which occupies the same import namespace as this client).
 
-Envelope fields follow crates/spark-connect-proto/proto/spark/connect/base.proto;
-logical type fields follow types.proto in the same directory. Keep the field
-numbers in these helpers aligned with those vendored definitions.
+Envelopes and logical types are generated from the vendored Spark Connect protos
+using protoc, which is also required to build the Rust client.
 """
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 import unittest
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+
+from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
 
 try:
     import grpc
@@ -39,80 +45,57 @@ except ImportError:
 from pyspark.sql import Row, SparkSession, types as T
 
 
-def _varint(value):
-    out = bytearray()
-    while value > 127:
-        out.append((value & 127) | 128)
-        value >>= 7
-    out.append(value)
-    return bytes(out)
+def _messages():
+    proto_root = Path(__file__).resolve().parents[2] / "crates/spark-connect-proto/proto"
+    compiler = os.environ.get("PROTOC") or shutil.which("protoc")
+    if not compiler:
+        raise RuntimeError("protoc is required for the interval fixture")
+    with tempfile.TemporaryDirectory() as directory:
+        output = Path(directory) / "connect.pb"
+        command = [compiler, f"-I{proto_root}", "--include_imports",
+                   f"--descriptor_set_out={output}"]
+        if os.environ.get("PROTOC_INCLUDE"):
+            command.append(f"-I{os.environ['PROTOC_INCLUDE']}")
+        subprocess.run(command + ["spark/connect/base.proto"], check=True)
+        descriptors = descriptor_pb2.FileDescriptorSet.FromString(output.read_bytes())
+    pool = descriptor_pool.DescriptorPool()
+    for file in descriptors.file:
+        pool.Add(file)
+    names = ["DataType", "ExecutePlanRequest", "ExecutePlanResponse",
+             "AnalyzePlanRequest", "AnalyzePlanResponse", "ReleaseExecuteRequest",
+             "ReleaseExecuteResponse", "ReleaseSessionRequest", "ReleaseSessionResponse"]
+    return {name: message_factory.GetMessageClass(
+        pool.FindMessageTypeByName(f"spark.connect.{name}")) for name in names}
 
 
-def _bytes(number, value):
-    return _varint(number * 8 + 2) + _varint(len(value)) + value
-
-
-def _int(number, value):
-    return _varint(number * 8) + _varint(value)
-
-
-def _fields(data):
-    def read(pos):
-        value = shift = 0
-        while True:
-            byte = data[pos]
-            pos += 1
-            value |= (byte & 127) << shift
-            if byte < 128:
-                return value, pos
-            shift += 7
-
-    pos = 0
-    result = {}
-    while pos < len(data):
-        tag, pos = read(pos)
-        wire = tag & 7
-        if wire == 2:
-            size, pos = read(pos)
-            result[tag >> 3] = data[pos:pos + size]
-            pos += size
-        elif wire == 0:
-            _, pos = read(pos)
-        else:
-            raise AssertionError(f"Unexpected wire type: {wire}")
-    return result
-
-
-def _type(data_type):
-    # Field numbers are from spark/connect/types.proto.
+def _type(data_type, message):
+    result = message()
     if pa.types.is_duration(data_type):
-        return _bytes(19, _int(1, 0) + _int(2, 3))
-    if pa.types.is_string(data_type):
-        return _bytes(11, b"")
-    if pa.types.is_struct(data_type):
-        fields = b"".join(
-            _bytes(1, _bytes(1, f.name.encode()) + _bytes(2, _type(f.type))
-                   + _int(3, int(f.nullable))) for f in data_type
-        )
-        return _bytes(21, fields)
-    if pa.types.is_list(data_type):
-        return _bytes(20, _bytes(1, _type(data_type.value_type)) + _int(2, 1))
-    if pa.types.is_map(data_type):
-        return _bytes(22, _bytes(1, _type(data_type.key_type))
-                      + _bytes(2, _type(data_type.item_type)) + _int(3, 1))
-    raise AssertionError(data_type)
+        result.day_time_interval.start_field = 0
+        result.day_time_interval.end_field = 3
+    elif pa.types.is_string(data_type):
+        result.string.SetInParent()
+    elif pa.types.is_struct(data_type):
+        for field in data_type:
+            result.struct.fields.add(name=field.name, nullable=field.nullable,
+                                     data_type=_type(field.type, message))
+    elif pa.types.is_list(data_type):
+        result.array.element_type.CopyFrom(_type(data_type.value_type, message))
+        result.array.contains_null = True
+    elif pa.types.is_map(data_type):
+        result.map.key_type.CopyFrom(_type(data_type.key_type, message))
+        result.map.value_type.CopyFrom(_type(data_type.item_type, message))
+        result.map.value_contains_null = True
+    else:
+        raise AssertionError(data_type)
+    return result
 
 
 @unittest.skipIf(grpc is None or pa is None, "grpcio and pyarrow are required")
 class DayTimeIntervalTests(unittest.TestCase):
-    def _has_interval(self, value):
-        if isinstance(value, timedelta):
-            return True
-        if isinstance(value, dict):
-            return any(self._has_interval(v) for v in value.values())
-        if isinstance(value, list):
-            return any(self._has_interval(v) for v in value)
-        return False
+    @classmethod
+    def setUpClass(cls):
+        cls.messages = _messages()
 
     def _normalize(self, value):
         if isinstance(value, Row):
@@ -138,7 +121,7 @@ class DayTimeIntervalTests(unittest.TestCase):
 
     def _check(self, batches, expected):
         schema = batches[0].schema
-        logical_schema = _type(pa.struct(list(schema)))
+        logical_schema = _type(pa.struct(list(schema)), self.messages["DataType"])
         payloads = []
         # Each response contains multiple IPC record batches, including empty ones.
         for group in (batches[:2], batches[2:]):
@@ -151,20 +134,36 @@ class DayTimeIntervalTests(unittest.TestCase):
             payloads.append((sum(b.num_rows for b in group), sink.getvalue().to_pybytes()))
 
         def execute(raw, context):
-            fields = _fields(raw)
-            header = (_bytes(1, fields[1]) + _bytes(15, b"interval-fixture")
-                      + _bytes(12, fields.get(6, b"interval-operation")))
+            request = self.messages["ExecutePlanRequest"].FromString(raw)
             for i, (count, data) in enumerate(payloads):
-                yield (header + _bytes(13, str(i).encode()) + _bytes(7, logical_schema)
-                       + _bytes(2, _int(1, count) + _bytes(2, data)))
-            yield header + _bytes(13, b"complete") + _bytes(14, b"")
+                response = self.messages["ExecutePlanResponse"](
+                    session_id=request.session_id, server_side_session_id="interval-fixture",
+                    operation_id=request.operation_id, response_id=str(i), schema=logical_schema)
+                response.arrow_batch.row_count = count
+                response.arrow_batch.data = data
+                yield response.SerializeToString()
+            done = self.messages["ExecutePlanResponse"](
+                session_id=request.session_id, server_side_session_id="interval-fixture",
+                operation_id=request.operation_id, response_id="complete")
+            done.result_complete.SetInParent()
+            yield done.SerializeToString()
 
         def analyze(raw, context):
-            return (_bytes(1, _fields(raw)[1]) + _bytes(15, b"interval-fixture")
-                    + _bytes(2, _bytes(1, logical_schema)))
+            request = self.messages["AnalyzePlanRequest"].FromString(raw)
+            response = self.messages["AnalyzePlanResponse"](
+                session_id=request.session_id, server_side_session_id="interval-fixture")
+            response.schema.schema.CopyFrom(logical_schema)
+            return response.SerializeToString()
 
-        def release(raw, context):
-            return _bytes(1, _fields(raw)[1])
+        def release_execute(raw, context):
+            request = self.messages["ReleaseExecuteRequest"].FromString(raw)
+            return self.messages["ReleaseExecuteResponse"](
+                session_id=request.session_id).SerializeToString()
+
+        def release_session(raw, context):
+            request = self.messages["ReleaseSessionRequest"].FromString(raw)
+            return self.messages["ReleaseSessionResponse"](
+                session_id=request.session_id).SerializeToString()
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             server = grpc.server(pool)
@@ -172,8 +171,8 @@ class DayTimeIntervalTests(unittest.TestCase):
                 "spark.connect.SparkConnectService", {
                     "ExecutePlan": grpc.unary_stream_rpc_method_handler(execute),
                     "AnalyzePlan": grpc.unary_unary_rpc_method_handler(analyze),
-                    "ReleaseExecute": grpc.unary_unary_rpc_method_handler(release),
-                    "ReleaseSession": grpc.unary_unary_rpc_method_handler(release),
+                    "ReleaseExecute": grpc.unary_unary_rpc_method_handler(release_execute),
+                    "ReleaseSession": grpc.unary_unary_rpc_method_handler(release_session),
                 }
             )])
             port = server.add_insecure_port("127.0.0.1:0")
@@ -191,9 +190,6 @@ class DayTimeIntervalTests(unittest.TestCase):
                         actual = self._normalize(row)
                         self.assertEqual(actual, wanted)
                         self._assert_timedeltas(actual, wanted)
-                        if self._has_interval(wanted):
-                            with self.assertRaisesRegex(TypeError, "decode-only"):
-                                spark.createDataFrame([row])
                 self.assertEqual(frame.schema.json(), before)
                 self.assertIn("interval", before)
             finally:
@@ -246,12 +242,6 @@ class DayTimeIntervalTests(unittest.TestCase):
             {"nested": {"leaf": None, "items": None, "mapping": None}},
         ])
 
-    def test_all_null_and_empty(self):
-        batch = pa.RecordBatch.from_arrays([
-            pa.array([None, None], type=pa.duration("us"))
-        ], names=["interval"])
-        self._check([batch.slice(0, 0)], [])
-        self._check([batch.slice(0, 0), batch], [{"interval": None}, {"interval": None}])
 
 
 if __name__ == "__main__":

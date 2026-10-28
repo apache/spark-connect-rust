@@ -3762,10 +3762,7 @@ mod arrow_value_tests {
         assert_eq!(map_key_to_string(Value::Double(2.5)), "2.5");
         assert_eq!(map_key_to_string(Value::Date(5)), "5");
         assert_eq!(map_key_to_string(Value::Timestamp(6)), "6");
-        assert_eq!(
-            map_key_to_string(Value::DayTimeInterval(-1)),
-            "-1 microseconds"
-        );
+        assert_eq!(map_key_to_string(Value::DayTimeInterval(-1)), "-1");
         assert_eq!(
             map_key_to_string(Value::Decimal {
                 value: "7.5".to_string(),

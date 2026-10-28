@@ -478,3 +478,54 @@ fn test_collect_batch_larger_than_grpc_default_cap() {
         "Expected the full {n}-byte string to round-trip through collect()"
     );
 }
+
+#[test]
+fn test_day_time_interval_real_server() {
+    if !should_run() {
+        return;
+    }
+    let remote = std::env::var("SPARK_REMOTE").unwrap();
+    let spark = SparkSession::builder()
+        .remote(&remote)
+        .get_or_create()
+        .unwrap();
+    let micros = 93_784_000_005;
+    let frame = spark.sql(
+        "WITH t AS (SELECT INTERVAL '1 02:03:04.000005' DAY TO SECOND AS d) \
+         SELECT d, -d AS negative, make_dt_interval(1, 2, 3, 4.000005) AS made, \
+         named_struct('leaf', d) AS nested, array(d, -d, CAST(NULL AS INTERVAL DAY TO SECOND)) AS items, \
+         map('k', d) AS mapping FROM t"
+    ).unwrap();
+    let rows = frame.collect().unwrap();
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(row.get(0), Some(&Value::DayTimeInterval(micros)));
+    assert_eq!(row.get(1), Some(&Value::DayTimeInterval(-micros)));
+    assert_eq!(row.get(2), Some(&Value::DayTimeInterval(micros)));
+    let Some(Value::Struct(nested)) = row.get(3) else {
+        panic!("expected struct")
+    };
+    assert_eq!(nested.values(), &[Value::DayTimeInterval(micros)]);
+    assert_eq!(
+        row.get(4),
+        Some(&Value::List(vec![
+            Value::DayTimeInterval(micros),
+            Value::DayTimeInterval(-micros),
+            Value::Null,
+        ]))
+    );
+    assert_eq!(
+        row.get(5),
+        Some(&Value::Map(
+            [("k".to_string(), Value::DayTimeInterval(micros))].into()
+        ))
+    );
+    for prefetch in [false, true] {
+        let streamed: Vec<_> = frame
+            .to_local_iterator(prefetch)
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(streamed, rows);
+    }
+}

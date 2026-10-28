@@ -79,18 +79,9 @@ flowchart LR
 When you call an action such as `count()` or `show()`, the lazily-built plan is
 serialized and sent to the server; results stream back as Arrow batches.
 
-Spark day-time interval results use Arrow `Duration(Microsecond)`. Row decoding
-preserves them as `Value::DayTimeInterval(i64)` in Rust and `datetime.timedelta`
-in Python, including nested values and nulls. The entire signed 64-bit
-microsecond range fits Python's timedelta range and is converted with integer
-arithmetic, without overflow or rounding through nanoseconds. Duration units
-other than microseconds are unsupported and produce a conversion error for
-non-null values. Arrow's year-month, day-time and month-day-nano *interval*
-physical types retain their existing string conversions.
-
-Day-time interval support here is decode-only: `createDataFrame` does not accept
-Python `timedelta` inputs or round-trip collected interval rows. Rust row display
-and stringified interval map keys use `<signed microseconds> microseconds`.
+Day-time intervals are returned as Python `datetime.timedelta` values, including
+nested values and nulls. Creating DataFrames from `timedelta` inputs or collected
+interval rows is not yet supported; see [SPARK-60659](https://issues.apache.org/jira/browse/SPARK-60659).
 
 ```mermaid
 sequenceDiagram
