@@ -50,6 +50,18 @@ pub fn value_to_py<'py>(py: Python<'py>, v: &Value) -> PyResult<Bound<'py, PyAny
                 .call_method1("fromtimestamp", (seconds,))?
                 .into_any()
         }
+        Value::DayTimeInterval(micros) => {
+            // Normalize using integer arithmetic: neither floats nor an intermediate
+            // nanosecond duration can preserve the full signed i64 microsecond range.
+            // The resulting +/-107 million days fit timedelta's +/-999999999 days.
+            let days = micros.div_euclid(86_400_000_000);
+            let remainder = micros.rem_euclid(86_400_000_000);
+            py.import("datetime")?.getattr("timedelta")?.call1((
+                days,
+                remainder / 1_000_000,
+                remainder % 1_000_000,
+            ))?
+        }
         Value::Decimal { value, .. } => {
             // Convert to Python decimal.Decimal by instantiating the class
             let decimal_mod = py.import("decimal")?;
