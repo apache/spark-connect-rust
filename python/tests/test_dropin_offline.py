@@ -1006,16 +1006,24 @@ def test_row_native_number_values_and_types(value):
         assert actual == value
 
 
-def test_row_number_boundaries_and_nan_payload():
+def test_row_overflow_preserves_current_conversion_behavior():
     from pyspark.sql import Row
-    import struct
 
+    # Known parity gap: classic PySpark Row preserves arbitrary Python ints.
+    # These assertions only guard that the numeric fast path retains the current
+    # generic fallback; they should change when that separate parity gap is fixed.
     for value in (2**63, -(2**63) - 1):
         actual = Row(value=value).value
         assert type(actual) is float
         assert actual == float(value)
     with pytest.raises(TypeError, match="unsupported value type.*int"):
         Row(value=2**20000)
+
+
+def test_row_nan_payload():
+    from pyspark.sql import Row
+    import struct
+
     bits = bytes.fromhex("7ff8000000000042")
     value = struct.unpack(">d", bits)[0]
     assert struct.pack(">d", Row(value=value).value) == bits

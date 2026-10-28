@@ -954,13 +954,13 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
 
     // Exact built-in numbers need neither bool coercion nor Decimal detection.
     // Keep subclasses and overflowing ints on the existing generic path.
-    if obj.is_exact_instance_of::<pyo3::types::PyInt>() {
-        if let Ok(i) = obj.extract::<i64>() {
+    if let Ok(i) = obj.cast_exact::<pyo3::types::PyInt>() {
+        if let Ok(i) = i.extract::<i64>() {
             return Ok(Value::Long(i));
         }
     }
-    if obj.is_exact_instance_of::<pyo3::types::PyFloat>() {
-        return Ok(Value::Double(obj.extract::<f64>()?));
+    if let Ok(f) = obj.cast_exact::<pyo3::types::PyFloat>() {
+        return Ok(Value::Double(f.value()));
     }
 
     // Check for bool (before int because bool is a subclass of int in Python)
