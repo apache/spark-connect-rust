@@ -79,6 +79,15 @@ flowchart LR
 When you call an action such as `count()` or `show()`, the lazily-built plan is
 serialized and sent to the server; results stream back as Arrow batches.
 
+Spark day-time interval results use Arrow `Duration(Microsecond)`. Row decoding
+preserves them as `Value::DayTimeInterval(i64)` in Rust and `datetime.timedelta`
+in Python, including nested values and nulls. The entire signed 64-bit
+microsecond range fits Python's timedelta range and is converted with integer
+arithmetic, without overflow or rounding through nanoseconds. Duration units
+other than microseconds are unsupported and produce a conversion error for
+non-null values. Arrow's year-month, day-time and month-day-nano *interval*
+physical types retain their existing string conversions.
+
 ```mermaid
 sequenceDiagram
     participant App as Your code (Rust or pyspark)

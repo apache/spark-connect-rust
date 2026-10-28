@@ -34,6 +34,9 @@ pub enum Value {
     Date(i32),
     /// Timestamp (microseconds since epoch)
     Timestamp(i64),
+    /// Spark day-time interval, in signed microseconds. The full i64 range is
+    /// representable by Python's datetime.timedelta without nanosecond conversion.
+    DayTimeInterval(i64),
     /// Decimal (string value with optional precision and scale)
     Decimal {
         value: String,
@@ -68,6 +71,7 @@ impl fmt::Debug for Value {
             Self::Binary(v) => f.debug_tuple("Binary").field(v).finish(),
             Self::Date(v) => f.debug_tuple("Date").field(v).finish(),
             Self::Timestamp(v) => f.debug_tuple("Timestamp").field(v).finish(),
+            Self::DayTimeInterval(v) => f.debug_tuple("DayTimeInterval").field(v).finish(),
             Self::Decimal {
                 value,
                 precision,
@@ -169,6 +173,7 @@ impl fmt::Display for Value {
             Value::Binary(b) => write!(f, "{:?}", b),
             Value::Date(d) => write!(f, "{}", d),
             Value::Timestamp(t) => write!(f, "{}", t),
+            Value::DayTimeInterval(t) => write!(f, "{} microseconds", t),
             Value::Decimal {
                 value,
                 precision,
@@ -753,6 +758,8 @@ mod tests {
         assert_eq!(Value::Binary(vec![1, 2]).to_string(), "[1, 2]");
         assert_eq!(Value::Date(19_000).to_string(), "19000");
         assert_eq!(Value::Timestamp(123).to_string(), "123");
+        assert_eq!(Value::DayTimeInterval(-1).to_string(), "-1 microseconds");
+        assert_eq!(Value::DayTimeInterval(1).as_i64(), None);
         assert_eq!(
             Value::List(vec![Value::Integer(1), Value::Integer(2)]).to_string(),
             "[1, 2]"

@@ -896,6 +896,10 @@ fn value_to_datatype(v: &Value) -> DataType {
         Value::Binary(_) => DataType::Binary,
         Value::Date(_) => DataType::Date,
         Value::Timestamp(_) => DataType::Timestamp,
+        Value::DayTimeInterval(_) => DataType::DayTimeInterval {
+            start_field: 0,
+            end_field: 3,
+        },
         Value::Decimal {
             precision, scale, ..
         } => DataType::Decimal {
