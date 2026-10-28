@@ -131,3 +131,108 @@ fn dataframe_metadata_json_semantics() {
     let parts = df.random_split(vec![0.5, 0.5], Some(1));
     assert_eq!(parts.len(), 2);
 }
+
+#[test]
+fn day_time_interval_input_roundtrips() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::row::{Row, Value};
+    use spark_connect::types::{DataType, StructField};
+
+    fn field(name: &str, data_type: DataType) -> StructField {
+        StructField {
+            name: name.into(),
+            data_type,
+            nullable: true,
+            metadata: Default::default(),
+        }
+    }
+    let s = session();
+    let interval = DataType::DayTimeInterval {
+        start_field: 0,
+        end_field: 3,
+    };
+    let schema = DataType::Struct {
+        fields: vec![
+            field("interval", interval.clone()),
+            field(
+                "items",
+                DataType::Array {
+                    element_type: Box::new(interval.clone()),
+                    contains_null: true,
+                },
+            ),
+            field(
+                "nested",
+                DataType::Struct {
+                    fields: vec![field("leaf", interval.clone())],
+                },
+            ),
+            field(
+                "mapping",
+                DataType::Map {
+                    key_type: Box::new(DataType::String {
+                        collation: "UTF8_BINARY".into(),
+                    }),
+                    value_type: Box::new(interval),
+                    value_contains_null: true,
+                },
+            ),
+        ],
+    };
+    let names = vec![
+        "interval".into(),
+        "items".into(),
+        "nested".into(),
+        "mapping".into(),
+    ];
+    let mut rows = vec![Row::new(names.clone(), vec![Value::Null; 4])];
+    for micros in [
+        i64::MIN,
+        i64::MIN + 1,
+        -172_800_000_001,
+        -1,
+        0,
+        1,
+        i64::MAX - 1,
+        i64::MAX,
+    ] {
+        let value = Value::DayTimeInterval(micros);
+        rows.push(Row::new(
+            names.clone(),
+            vec![
+                value.clone(),
+                Value::List(vec![Value::Null, value.clone()]),
+                Value::Struct(Row::new(vec!["leaf".into()], vec![value.clone()]).into()),
+                Value::Map([("k".into(), value), ("null".into(), Value::Null)].into()),
+            ],
+        ));
+    }
+    let df = s.create_dataframe(rows.clone(), schema.clone()).unwrap();
+    let collected = df.collect().unwrap();
+    assert_eq!(collected, rows);
+    assert_eq!(
+        s.create_dataframe(collected, schema)
+            .unwrap()
+            .collect()
+            .unwrap(),
+        rows
+    );
+
+    let sql = s
+        .sql("SELECT INTERVAL '-2 00:00:00.000001' DAY TO SECOND AS interval")
+        .unwrap();
+    let collected = sql.collect().unwrap();
+    assert_eq!(
+        collected[0].get(0),
+        Some(&Value::DayTimeInterval(-172_800_000_001))
+    );
+    assert_eq!(
+        s.create_dataframe(collected.clone(), sql.schema().unwrap())
+            .unwrap()
+            .collect()
+            .unwrap(),
+        collected
+    );
+}

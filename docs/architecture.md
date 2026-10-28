@@ -79,9 +79,11 @@ flowchart LR
 When you call an action such as `count()` or `show()`, the lazily-built plan is
 serialized and sent to the server; results stream back as Arrow batches.
 
-Day-time intervals are returned as Python `datetime.timedelta` values, including
-nested values and nulls. Creating DataFrames from `timedelta` inputs or collected
-interval rows is not yet supported; see [SPARK-60659](https://issues.apache.org/jira/browse/SPARK-60659).
+Day-time intervals use signed 64-bit microseconds in Rust (`Value::DayTimeInterval`)
+and Python `datetime.timedelta` values. `createDataFrame` supports inferred and
+explicit interval schemas, including nested structs, lists, maps, and nulls.
+Collected rows can be passed back with their schema. Python inputs outside the
+signed 64-bit microsecond range raise `OverflowError` without rounding.
 
 ```mermaid
 sequenceDiagram
