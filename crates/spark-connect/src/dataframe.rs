@@ -2088,15 +2088,14 @@ pub(crate) fn decode_arrow_batch(
         let layouts = record_batch
             .columns()
             .iter()
-            .map(|column| ArrowValueLayout::new(column.data_type()))
+            .map(|column| ArrowValueLayout::new(column.as_ref()))
             .collect::<Vec<_>>();
 
         for row_idx in 0..num_rows {
             let mut values = Vec::with_capacity(record_batch.num_columns());
 
-            for (column, layout) in record_batch.columns().iter().zip(&layouts) {
-                let value = arrow_value_at_with_layout(column.as_ref(), row_idx, layout)?;
-                values.push(value);
+            for layout in &layouts {
+                values.push(layout.value_at(row_idx)?);
             }
 
             rows.push(Row::with_shared_fields(Arc::clone(&field_names), values));
@@ -2241,290 +2240,332 @@ fn map_key_to_string(v: Value) -> String {
     }
 }
 
-/// Immutable decoding metadata prepared once for each column in a record batch.
-/// Container layouts follow their children so struct names are also shared inside
-/// lists and maps, without retaining the Arrow arrays after decoding.
-enum ArrowValueLayout {
-    Scalar,
-    List(Box<Self>),
-    Struct {
-        names: Arc<[String]>,
-        children: Vec<Self>,
-        is_variant: bool,
-    },
-    Map(Box<(Self, Self)>),
+/// A borrowed column decoder, resolved once per record batch. Returned Values
+/// own their contents; neither rows nor nested values retain the Arrow arrays.
+struct ArrowValueLayout<'a> {
+    array: &'a dyn arrow::array::Array,
+    decoder: ArrowValueDecoder<'a>,
 }
 
-impl ArrowValueLayout {
-    fn new(data_type: &arrow::datatypes::DataType) -> Self {
-        use arrow::datatypes::DataType;
-        match data_type {
-            DataType::List(field) => Self::List(Box::new(Self::new(field.data_type()))),
-            DataType::Struct(fields) => Self::Struct {
+enum ArrowValueDecoder<'a> {
+    Null,
+    Boolean(&'a arrow::array::BooleanArray),
+    Int8(&'a arrow::array::Int8Array),
+    Int16(&'a arrow::array::Int16Array),
+    Int32(&'a arrow::array::Int32Array),
+    Int64(&'a arrow::array::Int64Array),
+    Float32(&'a arrow::array::Float32Array),
+    Float64(&'a arrow::array::Float64Array),
+    String(&'a arrow::array::StringArray),
+    Binary(&'a arrow::array::BinaryArray),
+    Date32(&'a arrow::array::Date32Array),
+    TimestampMicrosecond(&'a arrow::array::TimestampMicrosecondArray),
+    UInt8(&'a arrow::array::UInt8Array),
+    UInt16(&'a arrow::array::UInt16Array),
+    UInt32(&'a arrow::array::UInt32Array),
+    UInt64(&'a arrow::array::UInt64Array),
+    Decimal128(&'a arrow::array::Decimal128Array),
+    LargeString(&'a arrow::array::LargeStringArray),
+    LargeBinary(&'a arrow::array::LargeBinaryArray),
+    StringView(&'a arrow::array::StringViewArray),
+    BinaryView(&'a arrow::array::BinaryViewArray),
+    TimestampSecond(&'a arrow::array::TimestampSecondArray),
+    TimestampMillisecond(&'a arrow::array::TimestampMillisecondArray),
+    TimestampNanosecond(&'a arrow::array::TimestampNanosecondArray),
+    Date64(&'a arrow::array::Date64Array),
+    Decimal256(&'a arrow::array::Decimal256Array),
+    FixedSizeBinary(&'a arrow::array::FixedSizeBinaryArray),
+    Time64Microsecond(&'a arrow::array::Time64MicrosecondArray),
+    Time64Nanosecond(&'a arrow::array::Time64NanosecondArray),
+    Time32Millisecond(&'a arrow::array::Time32MillisecondArray),
+    Time32Second(&'a arrow::array::Time32SecondArray),
+    IntervalYearMonth(&'a arrow::array::IntervalYearMonthArray),
+    IntervalDayTime(&'a arrow::array::IntervalDayTimeArray),
+    IntervalMonthDayNano(&'a arrow::array::IntervalMonthDayNanoArray),
+    List {
+        array: &'a arrow::array::ListArray,
+        child: Box<ArrowValueLayout<'a>>,
+    },
+    Struct {
+        names: Arc<[String]>,
+        children: Vec<ArrowValueLayout<'a>>,
+        variant_fields: Option<(Option<usize>, Option<usize>)>,
+    },
+    Map {
+        array: &'a arrow::array::MapArray,
+        children: Box<(ArrowValueLayout<'a>, ArrowValueLayout<'a>)>,
+    },
+    Unsupported,
+}
+
+impl<'a> ArrowValueLayout<'a> {
+    fn new(array: &'a dyn arrow::array::Array) -> Self {
+        use arrow::array::*;
+
+        // Resolution never fails: null parents and empty containers must not
+        // reject unsupported children that are never read.
+        let any = array.as_any();
+        let decoder = if any.is::<NullArray>() {
+            ArrowValueDecoder::Null
+        } else if let Some(array) = any.downcast_ref::<BooleanArray>() {
+            ArrowValueDecoder::Boolean(array)
+        } else if let Some(array) = any.downcast_ref::<Int8Array>() {
+            ArrowValueDecoder::Int8(array)
+        } else if let Some(array) = any.downcast_ref::<Int16Array>() {
+            ArrowValueDecoder::Int16(array)
+        } else if let Some(array) = any.downcast_ref::<Int32Array>() {
+            ArrowValueDecoder::Int32(array)
+        } else if let Some(array) = any.downcast_ref::<Int64Array>() {
+            ArrowValueDecoder::Int64(array)
+        } else if let Some(array) = any.downcast_ref::<Float32Array>() {
+            ArrowValueDecoder::Float32(array)
+        } else if let Some(array) = any.downcast_ref::<Float64Array>() {
+            ArrowValueDecoder::Float64(array)
+        } else if let Some(array) = any.downcast_ref::<StringArray>() {
+            ArrowValueDecoder::String(array)
+        } else if let Some(array) = any.downcast_ref::<BinaryArray>() {
+            ArrowValueDecoder::Binary(array)
+        } else if let Some(array) = any.downcast_ref::<Date32Array>() {
+            ArrowValueDecoder::Date32(array)
+        } else if let Some(array) = any.downcast_ref::<TimestampMicrosecondArray>() {
+            ArrowValueDecoder::TimestampMicrosecond(array)
+        } else if let Some(array) = any.downcast_ref::<UInt8Array>() {
+            ArrowValueDecoder::UInt8(array)
+        } else if let Some(array) = any.downcast_ref::<UInt16Array>() {
+            ArrowValueDecoder::UInt16(array)
+        } else if let Some(array) = any.downcast_ref::<UInt32Array>() {
+            ArrowValueDecoder::UInt32(array)
+        } else if let Some(array) = any.downcast_ref::<UInt64Array>() {
+            ArrowValueDecoder::UInt64(array)
+        } else if let Some(array) = any.downcast_ref::<Decimal128Array>() {
+            ArrowValueDecoder::Decimal128(array)
+        } else if let Some(array) = any.downcast_ref::<LargeStringArray>() {
+            ArrowValueDecoder::LargeString(array)
+        } else if let Some(array) = any.downcast_ref::<LargeBinaryArray>() {
+            ArrowValueDecoder::LargeBinary(array)
+        } else if let Some(array) = any.downcast_ref::<StringViewArray>() {
+            ArrowValueDecoder::StringView(array)
+        } else if let Some(array) = any.downcast_ref::<BinaryViewArray>() {
+            ArrowValueDecoder::BinaryView(array)
+        } else if let Some(array) = any.downcast_ref::<TimestampSecondArray>() {
+            ArrowValueDecoder::TimestampSecond(array)
+        } else if let Some(array) = any.downcast_ref::<TimestampMillisecondArray>() {
+            ArrowValueDecoder::TimestampMillisecond(array)
+        } else if let Some(array) = any.downcast_ref::<TimestampNanosecondArray>() {
+            ArrowValueDecoder::TimestampNanosecond(array)
+        } else if let Some(array) = any.downcast_ref::<Date64Array>() {
+            ArrowValueDecoder::Date64(array)
+        } else if let Some(array) = any.downcast_ref::<Decimal256Array>() {
+            ArrowValueDecoder::Decimal256(array)
+        } else if let Some(array) = any.downcast_ref::<FixedSizeBinaryArray>() {
+            ArrowValueDecoder::FixedSizeBinary(array)
+        } else if let Some(array) = any.downcast_ref::<Time64MicrosecondArray>() {
+            ArrowValueDecoder::Time64Microsecond(array)
+        } else if let Some(array) = any.downcast_ref::<Time64NanosecondArray>() {
+            ArrowValueDecoder::Time64Nanosecond(array)
+        } else if let Some(array) = any.downcast_ref::<Time32MillisecondArray>() {
+            ArrowValueDecoder::Time32Millisecond(array)
+        } else if let Some(array) = any.downcast_ref::<Time32SecondArray>() {
+            ArrowValueDecoder::Time32Second(array)
+        } else if let Some(array) = any.downcast_ref::<IntervalYearMonthArray>() {
+            ArrowValueDecoder::IntervalYearMonth(array)
+        } else if let Some(array) = any.downcast_ref::<IntervalDayTimeArray>() {
+            ArrowValueDecoder::IntervalDayTime(array)
+        } else if let Some(array) = any.downcast_ref::<IntervalMonthDayNanoArray>() {
+            ArrowValueDecoder::IntervalMonthDayNano(array)
+        } else if let Some(array) = any.downcast_ref::<ListArray>() {
+            ArrowValueDecoder::List {
+                array,
+                child: Box::new(Self::new(array.values().as_ref())),
+            }
+        } else if let Some(array) = any.downcast_ref::<StructArray>() {
+            let fields = array.fields();
+            let is_variant = fields.iter().any(|field| {
+                field
+                    .metadata()
+                    .get("variant")
+                    .is_some_and(|value| value == "true")
+            });
+            ArrowValueDecoder::Struct {
                 names: fields.iter().map(|field| field.name().clone()).collect(),
-                children: fields
+                children: array
+                    .columns()
                     .iter()
-                    .map(|field| Self::new(field.data_type()))
+                    .map(|child| Self::new(child.as_ref()))
                     .collect(),
-                is_variant: fields.iter().any(|field| {
-                    field
-                        .metadata()
-                        .get("variant")
-                        .is_some_and(|value| value == "true")
+                variant_fields: is_variant.then(|| {
+                    (
+                        fields.iter().position(|field| field.name() == "value"),
+                        fields.iter().position(|field| field.name() == "metadata"),
+                    )
                 }),
-            },
-            DataType::Map(entries, _) => match entries.data_type() {
-                DataType::Struct(fields) => Self::Map(Box::new((
-                    Self::new(fields[0].data_type()),
-                    Self::new(fields[1].data_type()),
-                ))),
-                _ => unreachable!("Arrow map entries must be a struct"),
-            },
-            _ => Self::Scalar,
+            }
+        } else if let Some(array) = any.downcast_ref::<MapArray>() {
+            ArrowValueDecoder::Map {
+                array,
+                children: Box::new((
+                    Self::new(array.keys().as_ref()),
+                    Self::new(array.values().as_ref()),
+                )),
+            }
+        } else {
+            ArrowValueDecoder::Unsupported
+        };
+        Self { array, decoder }
+    }
+
+    fn value_at(&self, index: usize) -> Result<Value> {
+        if self.array.is_null(index) {
+            return Ok(Value::Null);
+        }
+        match &self.decoder {
+            ArrowValueDecoder::Null => Ok(Value::Null),
+            ArrowValueDecoder::Boolean(arr) => Ok(Value::Bool(arr.value(index))),
+            ArrowValueDecoder::Int8(arr) => Ok(Value::Byte(arr.value(index))),
+            ArrowValueDecoder::Int16(arr) => Ok(Value::Short(arr.value(index))),
+            ArrowValueDecoder::Int32(arr) => Ok(Value::Integer(arr.value(index))),
+            ArrowValueDecoder::Int64(arr) => Ok(Value::Long(arr.value(index))),
+            ArrowValueDecoder::Float32(arr) => Ok(Value::Float(arr.value(index))),
+            ArrowValueDecoder::Float64(arr) => Ok(Value::Double(arr.value(index))),
+            ArrowValueDecoder::String(arr) => Ok(Value::String(arr.value(index).to_string())),
+            ArrowValueDecoder::Binary(arr) => Ok(Value::Binary(arr.value(index).to_vec())),
+            ArrowValueDecoder::Date32(arr) => Ok(Value::Date(arr.value(index))),
+            ArrowValueDecoder::TimestampMicrosecond(arr) => Ok(Value::Timestamp(arr.value(index))),
+            ArrowValueDecoder::UInt8(arr) => Ok(Value::Short(arr.value(index) as i16)),
+            ArrowValueDecoder::UInt16(arr) => Ok(Value::Integer(arr.value(index) as i32)),
+            ArrowValueDecoder::UInt32(arr) => Ok(Value::Long(arr.value(index) as i64)),
+            ArrowValueDecoder::UInt64(arr) => {
+                let val = arr.value(index);
+                let i64_val = i64::try_from(val).map_err(|_| {
+                    SparkError::connect_msg(format!("UInt64 value {} exceeds i64 range", val))
+                })?;
+                Ok(Value::Long(i64_val))
+            }
+            ArrowValueDecoder::Decimal128(arr) => {
+                let scale = arr.scale() as i32;
+                Ok(Value::Decimal {
+                    value: i128_to_decimal_string(arr.value(index), scale),
+                    precision: Some(arr.precision() as i32),
+                    scale: Some(scale),
+                })
+            }
+            ArrowValueDecoder::LargeString(arr) => Ok(Value::String(arr.value(index).to_string())),
+            ArrowValueDecoder::LargeBinary(arr) => Ok(Value::Binary(arr.value(index).to_vec())),
+            ArrowValueDecoder::StringView(arr) => Ok(Value::String(arr.value(index).to_string())),
+            ArrowValueDecoder::BinaryView(arr) => Ok(Value::Binary(arr.value(index).to_vec())),
+            ArrowValueDecoder::TimestampSecond(arr) => {
+                Ok(Value::Timestamp(arr.value(index) * 1_000_000))
+            }
+            ArrowValueDecoder::TimestampMillisecond(arr) => {
+                Ok(Value::Timestamp(arr.value(index) * 1_000))
+            }
+            ArrowValueDecoder::TimestampNanosecond(arr) => {
+                Ok(Value::Timestamp(arr.value(index) / 1_000))
+            }
+            ArrowValueDecoder::Date64(arr) => {
+                Ok(Value::Date((arr.value(index) / 86_400_000) as i32))
+            }
+            ArrowValueDecoder::Decimal256(arr) => Ok(Value::Decimal {
+                value: arr.value_as_string(index),
+                precision: Some(arr.precision() as i32),
+                scale: Some(arr.scale() as i32),
+            }),
+            ArrowValueDecoder::FixedSizeBinary(arr) => Ok(Value::Binary(arr.value(index).to_vec())),
+            ArrowValueDecoder::Time64Microsecond(arr) => {
+                Ok(Value::String(micros_to_time_string(arr.value(index))))
+            }
+            ArrowValueDecoder::Time64Nanosecond(arr) => Ok(Value::String(micros_to_time_string(
+                arr.value(index) / 1_000,
+            ))),
+            ArrowValueDecoder::Time32Millisecond(arr) => Ok(Value::String(micros_to_time_string(
+                arr.value(index) as i64 * 1_000,
+            ))),
+            ArrowValueDecoder::Time32Second(arr) => Ok(Value::String(micros_to_time_string(
+                arr.value(index) as i64 * 1_000_000,
+            ))),
+            ArrowValueDecoder::IntervalYearMonth(arr) => {
+                let months = arr.value(index);
+                Ok(Value::String(format!(
+                    "{}-{}",
+                    months / 12,
+                    (months % 12).abs()
+                )))
+            }
+            ArrowValueDecoder::IntervalDayTime(arr) => {
+                let v = arr.value(index);
+                Ok(Value::String(format!(
+                    "{} days {} ms",
+                    v.days, v.milliseconds
+                )))
+            }
+            ArrowValueDecoder::IntervalMonthDayNano(arr) => {
+                let v = arr.value(index);
+                Ok(Value::String(format!(
+                    "{} months {} days {} ns",
+                    v.months, v.days, v.nanoseconds
+                )))
+            }
+            ArrowValueDecoder::List { array, child } => {
+                // Sliced list/map arrays retain their original children. Their
+                // offsets already identify the correct absolute child range.
+                let offsets = array.value_offsets();
+                let start = offsets[index] as usize;
+                let end = offsets[index + 1] as usize;
+                let mut items = Vec::with_capacity(end - start);
+                for child_index in start..end {
+                    items.push(child.value_at(child_index)?);
+                }
+                Ok(Value::List(items))
+            }
+            ArrowValueDecoder::Struct {
+                names,
+                children,
+                variant_fields,
+            } => {
+                if let Some((value, metadata)) = variant_fields {
+                    let binary_field = |column: Option<usize>| -> Result<Vec<u8>> {
+                        match column {
+                            Some(column) => match children[column].value_at(index)? {
+                                Value::Binary(bytes) => Ok(bytes),
+                                Value::Null => Ok(vec![]),
+                                _ => Err(SparkError::connect_msg("variant field is not binary")),
+                            },
+                            None => Ok(vec![]),
+                        }
+                    };
+                    return Ok(Value::Variant {
+                        value: binary_field(*value)?,
+                        metadata: binary_field(*metadata)?,
+                    });
+                }
+                let mut values = Vec::with_capacity(children.len());
+                for child in children {
+                    values.push(child.value_at(index)?);
+                }
+                Ok(Value::Struct(StructValue::new(Arc::clone(names), values)))
+            }
+            ArrowValueDecoder::Map { array, children } => {
+                let offsets = array.value_offsets();
+                let start = offsets[index] as usize;
+                let end = offsets[index + 1] as usize;
+                let mut map = std::collections::BTreeMap::new();
+                for child_index in start..end {
+                    let key = map_key_to_string(children.0.value_at(child_index)?);
+                    map.insert(key, children.1.value_at(child_index)?);
+                }
+                Ok(Value::Map(map))
+            }
+            ArrowValueDecoder::Unsupported => Err(SparkError::connect_msg(format!(
+                "Unsupported Arrow type {:?} - cannot convert to Value",
+                self.array.data_type()
+            ))),
         }
     }
 }
 
 #[cfg(test)]
 fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> Result<Value> {
-    arrow_value_at_with_layout(array, index, &ArrowValueLayout::new(array.data_type()))
-}
-
-fn arrow_value_at_with_layout(
-    array: &dyn arrow::array::Array,
-    index: usize,
-    value_layout: &ArrowValueLayout,
-) -> Result<Value> {
-    use arrow::array::*;
-
-    if array.is_null(index) {
-        return Ok(Value::Null);
-    }
-
-    // A NullType column arrives as an all-null NullArray; every element is Null.
-    if array.as_any().downcast_ref::<NullArray>().is_some() {
-        return Ok(Value::Null);
-    }
-
-    // Try each array type
-    if let Some(arr) = array.as_any().downcast_ref::<BooleanArray>() {
-        return Ok(Value::Bool(arr.value(index)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Int8Array>() {
-        return Ok(Value::Byte(arr.value(index)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Int16Array>() {
-        return Ok(Value::Short(arr.value(index)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Int32Array>() {
-        return Ok(Value::Integer(arr.value(index)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Int64Array>() {
-        return Ok(Value::Long(arr.value(index)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Float32Array>() {
-        return Ok(Value::Float(arr.value(index)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Float64Array>() {
-        return Ok(Value::Double(arr.value(index)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<StringArray>() {
-        return Ok(Value::String(arr.value(index).to_string()));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<BinaryArray>() {
-        return Ok(Value::Binary(arr.value(index).to_vec()));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Date32Array>() {
-        return Ok(Value::Date(arr.value(index)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<TimestampMicrosecondArray>() {
-        return Ok(Value::Timestamp(arr.value(index)));
-    }
-    // Unsigned integers.
-    if let Some(arr) = array.as_any().downcast_ref::<UInt8Array>() {
-        return Ok(Value::Short(arr.value(index) as i16));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<UInt16Array>() {
-        return Ok(Value::Integer(arr.value(index) as i32));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<UInt32Array>() {
-        return Ok(Value::Long(arr.value(index) as i64));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<UInt64Array>() {
-        let val = arr.value(index);
-        let i64_val = i64::try_from(val).map_err(|_| {
-            SparkError::connect_msg(format!("UInt64 value {} exceeds i64 range", val))
-        })?;
-        return Ok(Value::Long(i64_val));
-    }
-    // Decimal128 -> Value::Decimal (exact, not lossy f64), preserving precision/scale.
-    if let Some(arr) = array.as_any().downcast_ref::<Decimal128Array>() {
-        let scale = arr.scale() as i32;
-        return Ok(Value::Decimal {
-            value: i128_to_decimal_string(arr.value(index), scale),
-            precision: Some(arr.precision() as i32),
-            scale: Some(scale),
-        });
-    }
-    // Large / view string & binary variants.
-    if let Some(arr) = array.as_any().downcast_ref::<LargeStringArray>() {
-        return Ok(Value::String(arr.value(index).to_string()));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<LargeBinaryArray>() {
-        return Ok(Value::Binary(arr.value(index).to_vec()));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<StringViewArray>() {
-        return Ok(Value::String(arr.value(index).to_string()));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<BinaryViewArray>() {
-        return Ok(Value::Binary(arr.value(index).to_vec()));
-    }
-    // Other timestamp units, normalized to microseconds.
-    if let Some(arr) = array.as_any().downcast_ref::<TimestampSecondArray>() {
-        return Ok(Value::Timestamp(arr.value(index) * 1_000_000));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<TimestampMillisecondArray>() {
-        return Ok(Value::Timestamp(arr.value(index) * 1_000));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<TimestampNanosecondArray>() {
-        return Ok(Value::Timestamp(arr.value(index) / 1_000));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Date64Array>() {
-        return Ok(Value::Date((arr.value(index) / 86_400_000) as i32));
-    }
-    // Nested: list, struct, map (recurse).
-    if let Some(arr) = array.as_any().downcast_ref::<ListArray>() {
-        let ArrowValueLayout::List(child_layout) = value_layout else {
-            unreachable!("layout is prepared from the array's data type");
-        };
-        let child = arr.value(index);
-        let mut items = Vec::with_capacity(child.len());
-        for i in 0..child.len() {
-            items.push(arrow_value_at_with_layout(child.as_ref(), i, child_layout)?);
-        }
-        return Ok(Value::List(items));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<StructArray>() {
-        let ArrowValueLayout::Struct {
-            names,
-            children,
-            is_variant,
-        } = value_layout
-        else {
-            unreachable!("layout is prepared from the array's data type");
-        };
-        // A VARIANT column arrives as struct<value: binary, metadata: binary> where the
-        // `metadata` field carries arrow metadata {"variant": "true"}. Recognize it and
-        // return a Value::Variant (raw bytes) so it materializes as a VariantVal (matching
-        // pyspark) rather than a plain {value, metadata} struct/dict.
-        if *is_variant {
-            let bin_field = |name: &str| -> Result<Vec<u8>> {
-                match arr.fields().iter().position(|field| field.name() == name) {
-                    Some(col_idx) => match arrow_value_at_with_layout(
-                        arr.column(col_idx).as_ref(),
-                        index,
-                        &children[col_idx],
-                    )? {
-                        Value::Binary(b) => Ok(b),
-                        Value::Null => Ok(vec![]),
-                        _ => Err(SparkError::connect_msg("variant field is not binary")),
-                    },
-                    None => Ok(vec![]),
-                }
-            };
-            return Ok(Value::Variant {
-                value: bin_field("value")?,
-                metadata: bin_field("metadata")?,
-            });
-        }
-        let mut values = Vec::with_capacity(children.len());
-        for (col, child_layout) in arr.columns().iter().zip(children) {
-            values.push(arrow_value_at_with_layout(
-                col.as_ref(),
-                index,
-                child_layout,
-            )?);
-        }
-        return Ok(Value::Struct(StructValue::new(Arc::clone(names), values)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<MapArray>() {
-        let ArrowValueLayout::Map(children) = value_layout else {
-            unreachable!("layout is prepared from the array's data type");
-        };
-        let entries = arr.value(index);
-        let keys = entries.column(0);
-        let vals = entries.column(1);
-        let mut map = std::collections::BTreeMap::new();
-        for i in 0..entries.len() {
-            // A map key stringifies to its natural scalar form (e.g. `1`, `true`,
-            // `1.5`), not the Rust enum's Debug output - a `map<int,string>` key must
-            // be "1", never "Integer(1)".
-            let k = map_key_to_string(arrow_value_at_with_layout(keys.as_ref(), i, &children.0)?);
-            map.insert(
-                k,
-                arrow_value_at_with_layout(vals.as_ref(), i, &children.1)?,
-            );
-        }
-        return Ok(Value::Map(map));
-    }
-    // Decimal256 -> exact string-preserving Decimal (Arrow formats with the scale).
-    if let Some(arr) = array.as_any().downcast_ref::<Decimal256Array>() {
-        return Ok(Value::Decimal {
-            value: arr.value_as_string(index),
-            precision: Some(arr.precision() as i32),
-            scale: Some(arr.scale() as i32),
-        });
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<FixedSizeBinaryArray>() {
-        return Ok(Value::Binary(arr.value(index).to_vec()));
-    }
-    // TimeType (no dedicated Value): render as an ISO time string, normalized to micros.
-    if let Some(arr) = array.as_any().downcast_ref::<Time64MicrosecondArray>() {
-        return Ok(Value::String(micros_to_time_string(arr.value(index))));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Time64NanosecondArray>() {
-        return Ok(Value::String(micros_to_time_string(
-            arr.value(index) / 1_000,
-        )));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Time32MillisecondArray>() {
-        return Ok(Value::String(micros_to_time_string(
-            arr.value(index) as i64 * 1_000,
-        )));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Time32SecondArray>() {
-        return Ok(Value::String(micros_to_time_string(
-            arr.value(index) as i64 * 1_000_000,
-        )));
-    }
-    // Interval types (no dedicated Value): render a compact string.
-    if let Some(arr) = array.as_any().downcast_ref::<IntervalYearMonthArray>() {
-        let months = arr.value(index);
-        return Ok(Value::String(format!(
-            "{}-{}",
-            months / 12,
-            (months % 12).abs()
-        )));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<IntervalDayTimeArray>() {
-        let v = arr.value(index);
-        return Ok(Value::String(format!(
-            "{} days {} ms",
-            v.days, v.milliseconds
-        )));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<IntervalMonthDayNanoArray>() {
-        let v = arr.value(index);
-        return Ok(Value::String(format!(
-            "{} months {} days {} ns",
-            v.months, v.days, v.nanoseconds
-        )));
-    }
-
-    Err(SparkError::connect_msg(format!(
-        "Unsupported Arrow type {:?} - cannot convert to Value",
-        array.data_type()
-    )))
+    ArrowValueLayout::new(array).value_at(index)
 }
 
 #[cfg(test)]
@@ -2536,7 +2577,10 @@ mod nested_decode_tests {
     use arrow::ipc::writer::StreamWriter;
     use arrow::record_batch::RecordBatch;
 
-    fn decode_batches(columns: Vec<(&str, ArrayRef)>, repeats: usize) -> Vec<Row> {
+    fn encoded_batches(
+        columns: Vec<(&str, ArrayRef)>,
+        repeats: usize,
+    ) -> proto::execute_plan_response::ArrowBatch {
         let schema = Arc::new(Schema::new(
             columns
                 .iter()
@@ -2551,16 +2595,25 @@ mod nested_decode_tests {
         let mut data = vec![];
         {
             let mut writer = StreamWriter::try_new(&mut data, &schema).unwrap();
+            writer
+                .write(&RecordBatch::new_empty(schema.clone()))
+                .unwrap();
             for _ in 0..repeats {
                 writer.write(&batch).unwrap();
             }
+            writer
+                .write(&RecordBatch::new_empty(schema.clone()))
+                .unwrap();
             writer.finish().unwrap();
         }
-        decode_arrow_batch(&proto::execute_plan_response::ArrowBatch {
+        proto::execute_plan_response::ArrowBatch {
             data: data.into(),
             ..Default::default()
-        })
-        .unwrap()
+        }
+    }
+
+    fn decode_batches(columns: Vec<(&str, ArrayRef)>, repeats: usize) -> Vec<Row> {
+        decode_arrow_batch(&encoded_batches(columns, repeats)).unwrap()
     }
 
     fn as_struct(value: &Value) -> &StructValue {
@@ -2568,6 +2621,220 @@ mod nested_decode_tests {
             panic!("expected struct, got {value:?}");
         };
         row
+    }
+
+    #[test]
+    fn mixed_nullable_slices_decode_across_empty_and_repeated_batches() {
+        let columns: Vec<(&str, ArrayRef)> = vec![
+            (
+                "dup",
+                Arc::new(Int64Array::from(vec![Some(-1), Some(7), None])),
+            ),
+            (
+                "dup",
+                Arc::new(StringArray::from(vec![Some("skip"), Some("é\0雪"), None])),
+            ),
+            (
+                "bool",
+                Arc::new(BooleanArray::from(vec![Some(true), Some(false), None])),
+            ),
+            (
+                "bytes",
+                Arc::new(BinaryArray::from(vec![
+                    Some(b"skip".as_ref()),
+                    Some(b"\0\xff".as_ref()),
+                    None,
+                ])),
+            ),
+            ("null", Arc::new(NullArray::new(3))),
+        ];
+        let rows = decode_batches(
+            columns
+                .into_iter()
+                .map(|(name, array)| (name, array.slice(1, 2)))
+                .collect(),
+            2,
+        );
+        assert_eq!(rows.len(), 4);
+        for batch in rows.chunks(2) {
+            assert_eq!(batch[0].fields(), &["dup", "dup", "bool", "bytes", "null"]);
+            assert_eq!(
+                batch[0].values(),
+                &[
+                    Value::Long(7),
+                    Value::String("é\0雪".into()),
+                    Value::Bool(false),
+                    Value::Binary(vec![0, 255]),
+                    Value::Null,
+                ]
+            );
+            assert_eq!(batch[1].values(), &vec![Value::Null; 5]);
+            assert_eq!(batch[0].get_by_name("dup"), Some(&Value::Long(7)));
+            assert!(std::ptr::eq(batch[0].fields(), batch[1].fields()));
+        }
+        // The IPC buffers and borrowed column layouts have already been dropped.
+        assert_eq!(rows[2].get(1), Some(&Value::String("é\0雪".into())));
+    }
+
+    #[test]
+    fn sliced_parents_decode_children_that_were_already_sliced() {
+        let leaf = StructArray::from(vec![(
+            Arc::new(Field::new("n", DataType::Int32, false)),
+            Arc::new(Int32Array::from(vec![-9, 10, 20, 30, 40, 50, 60])) as ArrayRef,
+        )]);
+        let entries = StructArray::from(vec![
+            (
+                Arc::new(Field::new("key", DataType::Utf8, false)),
+                Arc::new(StringArray::from(vec![
+                    "skip", "a", "b", "c", "d", "e", "f",
+                ])) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("value", leaf.data_type().clone(), true)),
+                Arc::new(leaf.clone()) as ArrayRef,
+            ),
+        ])
+        .slice(1, 6);
+        let child = leaf.slice(1, 6);
+        let offsets = OffsetBuffer::new(vec![0, 1, 3, 4, 6].into());
+        let list = ListArray::new(
+            Arc::new(Field::new("item", child.data_type().clone(), true)),
+            offsets.clone(),
+            Arc::new(child),
+            None,
+        )
+        .slice(1, 2);
+        let map = MapArray::new(
+            Arc::new(Field::new("entries", entries.data_type().clone(), false)),
+            offsets,
+            entries,
+            None,
+            false,
+        )
+        .slice(1, 2);
+        // Exercise the unserialized sliced arrays as well as the IPC path:
+        // serialization is allowed to normalize their physical child offsets.
+        let value = |n| Value::Struct(Row::new(vec!["n".into()], vec![Value::Integer(n)]).into());
+        let expected_lists = [
+            Value::List(vec![value(20), value(30)]),
+            Value::List(vec![value(40)]),
+        ];
+        let expected_maps = [
+            Value::Map([("b".into(), value(20)), ("c".into(), value(30))].into()),
+            Value::Map([("d".into(), value(40))].into()),
+        ];
+        let list_layout = ArrowValueLayout::new(&list);
+        let map_layout = ArrowValueLayout::new(&map);
+        for i in 0..2 {
+            assert_eq!(list_layout.value_at(i).unwrap(), expected_lists[i]);
+            assert_eq!(map_layout.value_at(i).unwrap(), expected_maps[i]);
+        }
+        drop((list_layout, map_layout));
+        let rows = decode_batches(vec![("list", Arc::new(list)), ("map", Arc::new(map))], 1);
+        for i in 0..2 {
+            assert_eq!(
+                rows[i].values(),
+                &[expected_lists[i].clone(), expected_maps[i].clone()]
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_children_remain_lazy_under_nulls_empty_containers_and_variants() {
+        let null_duration = DurationMicrosecondArray::from(vec![None]);
+        assert_eq!(arrow_value_at(&null_duration, 0).unwrap(), Value::Null);
+        let populated: ArrayRef = Arc::new(DurationMicrosecondArray::from(vec![Some(7)]));
+        let list = ListArray::new(
+            Arc::new(Field::new("item", populated.data_type().clone(), true)),
+            OffsetBuffer::new(vec![0, 0].into()),
+            populated.clone(),
+            None,
+        );
+        assert_eq!(arrow_value_at(&list, 0).unwrap(), Value::List(vec![]));
+        let entries = StructArray::from(vec![
+            (
+                Arc::new(Field::new("key", DataType::Utf8, false)),
+                Arc::new(StringArray::from(vec!["a"])) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("value", populated.data_type().clone(), true)),
+                populated.clone(),
+            ),
+        ]);
+        let map = MapArray::new(
+            Arc::new(Field::new("entries", entries.data_type().clone(), false)),
+            OffsetBuffer::new(vec![0, 0].into()),
+            entries,
+            None,
+            false,
+        );
+        assert_eq!(
+            arrow_value_at(&map, 0).unwrap(),
+            Value::Map(Default::default())
+        );
+        let parent = StructArray::new(
+            vec![Arc::new(Field::new(
+                "unused",
+                populated.data_type().clone(),
+                true,
+            ))]
+            .into(),
+            vec![populated.clone()],
+            Some(NullBuffer::from(vec![false])),
+        );
+        assert_eq!(arrow_value_at(&parent, 0).unwrap(), Value::Null);
+        let variant = StructArray::from(vec![
+            (
+                Arc::new(
+                    Field::new("value", DataType::Binary, false)
+                        .with_metadata([("variant".into(), "true".into())].into()),
+                ),
+                Arc::new(BinaryArray::from_iter_values([b"x".as_ref()])) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("value", populated.data_type().clone(), true)),
+                populated,
+            ),
+        ]);
+        assert_eq!(
+            arrow_value_at(&variant, 0).unwrap(),
+            Value::Variant {
+                value: vec![b'x'],
+                metadata: vec![]
+            }
+        );
+    }
+
+    #[test]
+    fn decoding_errors_keep_row_major_column_order() {
+        let first_column = encoded_batches(
+            vec![
+                ("u", Arc::new(UInt64Array::from(vec![u64::MAX]))),
+                (
+                    "duration",
+                    Arc::new(DurationMicrosecondArray::from(vec![Some(1)])),
+                ),
+            ],
+            1,
+        );
+        assert!(decode_arrow_batch(&first_column)
+            .unwrap_err()
+            .to_string()
+            .contains("UInt64 value 18446744073709551615 exceeds i64 range"));
+        let first_row = encoded_batches(
+            vec![
+                ("u", Arc::new(UInt64Array::from(vec![1, u64::MAX]))),
+                (
+                    "duration",
+                    Arc::new(DurationMicrosecondArray::from(vec![Some(1), None])),
+                ),
+            ],
+            1,
+        );
+        assert!(decode_arrow_batch(&first_row)
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported Arrow type Duration(Microsecond) - cannot convert to Value"));
     }
 
     #[test]
@@ -3463,6 +3730,92 @@ mod arrow_value_tests {
         i256, DataType as ArrowDataType, Field, Int32Type, IntervalDayTime, IntervalMonthDayNano,
     };
     use std::sync::Arc;
+
+    #[test]
+    fn typed_scalar_layouts_preserve_exact_values_and_normalization() {
+        let decimal128 = Decimal128Array::from(vec![-12345i128])
+            .with_precision_and_scale(10, 2)
+            .unwrap();
+        let decimal256 = Decimal256Array::from(vec![i256::from_i128(-12345)])
+            .with_precision_and_scale(10, 2)
+            .unwrap();
+        let decimal = Value::Decimal {
+            value: "-123.45".into(),
+            precision: Some(10),
+            scale: Some(2),
+        };
+        let cases: Vec<(ArrayRef, Value)> = vec![
+            (
+                Arc::new(TimestampSecondArray::from(vec![-1])),
+                Value::Timestamp(-1_000_000),
+            ),
+            (
+                Arc::new(TimestampMillisecondArray::from(vec![-1])),
+                Value::Timestamp(-1_000),
+            ),
+            (
+                Arc::new(TimestampNanosecondArray::from(vec![-1999])),
+                Value::Timestamp(-1),
+            ),
+            (
+                Arc::new(Date64Array::from(vec![-86_400_001])),
+                Value::Date(-1),
+            ),
+            (
+                Arc::new(UInt32Array::from(vec![u32::MAX])),
+                Value::Long(u32::MAX as i64),
+            ),
+            (Arc::new(decimal128), decimal.clone()),
+            (Arc::new(decimal256), decimal),
+            (
+                Arc::new(LargeStringArray::from_iter_values(["é\0雪"])),
+                Value::String("é\0雪".into()),
+            ),
+            (
+                Arc::new(StringViewArray::from_iter_values(["é\0雪"])),
+                Value::String("é\0雪".into()),
+            ),
+            (
+                Arc::new(LargeBinaryArray::from_iter_values([b"\0\xff".as_ref()])),
+                Value::Binary(vec![0, 255]),
+            ),
+            (
+                Arc::new(BinaryViewArray::from_iter_values([b"\0\xff".as_ref()])),
+                Value::Binary(vec![0, 255]),
+            ),
+            (
+                Arc::new(Time64NanosecondArray::from(vec![1_234_567])),
+                Value::String("00:00:00.001234".into()),
+            ),
+            (
+                Arc::new(Time32MillisecondArray::from(vec![1])),
+                Value::String("00:00:00.001000".into()),
+            ),
+        ];
+        for (array, expected) in cases {
+            assert_eq!(
+                ArrowValueLayout::new(array.as_ref()).value_at(0).unwrap(),
+                expected
+            );
+        }
+        for value in [
+            -0.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::from_bits(0x7ff8_0000_0000_0001),
+        ] {
+            let array = Float64Array::from(vec![value]);
+            let Value::Double(decoded) = arrow_value_at(&array, 0).unwrap() else {
+                panic!("expected double")
+            };
+            assert_eq!(decoded.to_bits(), value.to_bits());
+        }
+        eprintln!(
+            "ArrowValueLayout={} bytes; ArrowValueDecoder={} bytes (per layout node)",
+            std::mem::size_of::<ArrowValueLayout<'_>>(),
+            std::mem::size_of::<ArrowValueDecoder<'_>>()
+        );
+    }
 
     #[test]
     fn primitives_and_signed_ints() {
