@@ -17,7 +17,7 @@
 # under the License.
 #
 
-name: Python Connect Parity (Spark 4.3.0-rc1)
+name: Python Connect Parity (Spark 4.3.0-rc3)
 
 # Cancel an in-progress run when a newer commit supersedes it (per workflow + ref).
 concurrency:
@@ -25,8 +25,8 @@ concurrency:
   cancel-in-progress: true
 
 # Mirrors Apache Spark's build_python_connect.yml approach, adapted for the
-# Rust-backed client: download the Spark 4.3.0-rc1 Connect server, start it, pull the
-# official v4.3.0-rc1 connect test files, and run them through our client - the gate is
+# Rust-backed client: download the Spark 4.3.0-rc3 Connect server, start it, pull the
+# official v4.3.0-rc3 connect test files, and run them through our client - the gate is
 # "every test passes except the checked-in known-environmental-failures manifest".
 # A separate job enforces Rust test coverage across all crates.
 
@@ -47,7 +47,7 @@ env:
 jobs:
   # ---------------------------------------------------------------------------
   # Parity gate: the official connect suite through our client, against a real
-  # Spark 4.3.0-rc1 Connect server (see scripts/run_official_tests.py).
+  # Spark 4.3.0-rc3 Connect server (see scripts/run_official_tests.py).
   # ---------------------------------------------------------------------------
   connect-parity:
     name: Connect parity (official suite via our client, Python ${{ matrix.python-version }})
@@ -123,7 +123,7 @@ jobs:
         run: |
           PKG="spark-${SPARK_VERSION}-bin-hadoop3-connect"
           if [ ! -d "${HOME}/spark-dist/spark-4.3.0-bin-hadoop3"* ]; then
-            URL="https://dist.apache.org/repos/dist/dev/spark/v4.3.0-rc1-bin/${PKG}.tgz"
+            URL="https://dist.apache.org/repos/dist/dev/spark/v4.3.0-rc3-bin/${PKG}.tgz"
             mkdir -p "${HOME}/spark-dist"
             echo "Downloading ${URL}"
             wget -q -O "${HOME}/spark-dist/${PKG}.tgz" "${URL}"
@@ -141,11 +141,11 @@ jobs:
           path: ~/spark-source
           key: spark-source-${{ env.SPARK_VERSION }}
 
-      - name: Clone Apache Spark v4.3.0-rc1 (official test files + reference client)
+      - name: Clone Apache Spark v4.3.0-rc3 (official test files + reference client)
         id: spark-source
         run: |
           if [ ! -d "${HOME}/spark-source/python" ]; then
-            git clone --depth 1 --branch "v4.3.0-rc1" \
+            git clone --depth 1 --branch "v4.3.0-rc3" \
               https://github.com/apache/spark.git "${HOME}/spark-source"
           else
             echo "Using cached Spark source."
@@ -280,7 +280,7 @@ jobs:
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
-  # Behavioral e2e tests (Rust drop-in against a live 4.3.0-rc1 server), in their OWN job
+  # Behavioral e2e tests (Rust drop-in against a live 4.3.0-rc3 server), in their OWN job
   # with a separate Connect server so they never share server state with the
   # parity gate. The parity gate then starts against a server nothing else has
   # touched, which avoids the SPARK-59032 arrow-UDF hang (a UDF that crashes a
@@ -341,7 +341,7 @@ jobs:
         run: |
           PKG="spark-${SPARK_VERSION}-bin-hadoop3-connect"
           if [ ! -d "${HOME}/spark-dist/spark-4.3.0-bin-hadoop3"* ]; then
-            URL="https://dist.apache.org/repos/dist/dev/spark/v4.3.0-rc1-bin/${PKG}.tgz"
+            URL="https://dist.apache.org/repos/dist/dev/spark/v4.3.0-rc3-bin/${PKG}.tgz"
             mkdir -p "${HOME}/spark-dist"
             echo "Downloading ${URL}"
             wget -q -O "${HOME}/spark-dist/${PKG}.tgz" "${URL}"
@@ -381,7 +381,7 @@ jobs:
             -- --test-threads=1
 
   # ---------------------------------------------------------------------------
-  # E2E performance benchmark: our client vs reference, same 4.3.0-rc1 server.
+  # E2E performance benchmark: our client vs reference, same 4.3.0-rc3 server.
   # ---------------------------------------------------------------------------
   connect-benchmark:
     name: E2E benchmark vs reference
@@ -413,7 +413,7 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y protobuf-compiler
           python -m pip install --upgrade pip
-          python -m pip install 'pandas>=2.2,<3.0' pyarrow numpy grpcio grpcio-status googleapis-common-protos cloudpickle zstandard py4j "https://dist.apache.org/repos/dist/dev/spark/v4.3.0-rc1-bin/pyspark-4.3.0.tar.gz"
+          python -m pip install 'pandas>=2.2,<3.0' pyarrow numpy grpcio grpcio-status googleapis-common-protos cloudpickle zstandard py4j "https://dist.apache.org/repos/dist/dev/spark/v4.3.0-rc3-bin/pyspark-4.3.0.tar.gz"
       - name: Build the Rust extension into the skin
         # Build the extension into ./python/pyspark so our client is usable via
         # PYTHONPATH. We do NOT install a wheel: our package and the reference
@@ -436,19 +436,19 @@ jobs:
           PKG="spark-${SPARK_VERSION}-bin-hadoop3-connect"
           if [ ! -d "${HOME}/spark-dist/spark-4.3.0-bin-hadoop3"* ]; then
             mkdir -p "${HOME}/spark-dist"
-            wget -q -O "/tmp/${PKG}.tgz" "https://dist.apache.org/repos/dist/dev/spark/v4.3.0-rc1-bin/${PKG}.tgz"
+            wget -q -O "/tmp/${PKG}.tgz" "https://dist.apache.org/repos/dist/dev/spark/v4.3.0-rc3-bin/${PKG}.tgz"
             tar -xzf "/tmp/${PKG}.tgz" -C "${HOME}/spark-dist"
             rm -f "/tmp/${PKG}.tgz"
           fi
           if [ ! -d "${HOME}/spark-source/python" ]; then
-            git clone --depth 1 --branch "v4.3.0-rc1" https://github.com/apache/spark.git "${HOME}/spark-source"
+            git clone --depth 1 --branch "v4.3.0-rc3" https://github.com/apache/spark.git "${HOME}/spark-source"
           fi
           SPARK_HOME=$(find "${HOME}/spark-dist" -maxdepth 1 -type d -name 'spark-4.3.0-bin-hadoop3*' | head -1)
           "${SPARK_HOME}/sbin/start-connect-server.sh" > /tmp/server.log 2>&1 &
           for i in $(seq 1 90); do (echo > /dev/tcp/localhost/15002) 2>/dev/null && break; sleep 1; done
       - name: Benchmark reference client
         run: |
-          # Reference uses the pip-installed pyspark 4.3.0-rc1 (no ./python on the path).
+          # Reference uses the pip-installed pyspark 4.3.0-rc3 (no ./python on the path).
           python scripts/benchmark_e2e.py --isolate --label reference --out /tmp/bench_reference.json
       - name: Benchmark our client
         run: |

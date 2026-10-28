@@ -23,7 +23,7 @@
 # full visibility into pass/fail status. If this becomes a critical blocker, add
 # continue-on-error: true back in; currently it provides honest signal on pandas parity.
 
-name: Pandas Connect Parity (Spark 4.3.0-rc1)
+name: Pandas Connect Parity (Spark 4.3.0-rc3)
 
 # Cancel an in-progress run when a newer commit supersedes it (per workflow + ref).
 concurrency:
@@ -46,7 +46,7 @@ env:
 jobs:
   # ---------------------------------------------------------------------------
   # Pandas-on-Spark Connect parity: run the official pandas tests through our
-  # Rust client against a real Spark 4.3.0-rc1 Connect server. This is a separate,
+  # Rust client against a real Spark 4.3.0-rc3 Connect server. This is a separate,
   # long-running job (30-60 min) to avoid blocking the main parity gate.
   # ---------------------------------------------------------------------------
   pandas-parity:
@@ -127,7 +127,7 @@ jobs:
         run: |
           PKG="spark-${SPARK_VERSION}-bin-hadoop3-connect"
           if [ ! -d "${HOME}/spark-dist/spark-4.3.0-bin-hadoop3"* ]; then
-            URL="https://dist.apache.org/repos/dist/dev/spark/v4.3.0-rc1-bin/${PKG}.tgz"
+            URL="https://dist.apache.org/repos/dist/dev/spark/v4.3.0-rc3-bin/${PKG}.tgz"
             mkdir -p "${HOME}/spark-dist"
             echo "Downloading ${URL}"
             wget -q -O "${HOME}/spark-dist/${PKG}.tgz" "${URL}"
@@ -145,11 +145,11 @@ jobs:
           path: ~/spark-source
           key: spark-source-${{ env.SPARK_VERSION }}
 
-      - name: Clone Apache Spark v4.3.0-rc1 (official test files + reference client)
+      - name: Clone Apache Spark v4.3.0-rc3 (official test files + reference client)
         id: spark-source
         run: |
           if [ ! -d "${HOME}/spark-source/python" ]; then
-            git clone --depth 1 --branch "v4.3.0-rc1" \
+            git clone --depth 1 --branch "v4.3.0-rc3" \
               https://github.com/apache/spark.git "${HOME}/spark-source"
           else
             echo "Using cached Spark source."

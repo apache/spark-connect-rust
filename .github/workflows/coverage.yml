@@ -103,7 +103,7 @@ jobs:
         run: |
           PKG="spark-${SPARK_VERSION}-bin-hadoop3-connect"
           if [ ! -d "${HOME}/spark-dist/spark-4.3.0-bin-hadoop3"* ]; then
-            URL="https://dist.apache.org/repos/dist/dev/spark/v4.3.0-rc1-bin/${PKG}.tgz"
+            URL="https://dist.apache.org/repos/dist/dev/spark/v4.3.0-rc3-bin/${PKG}.tgz"
             mkdir -p "${HOME}/spark-dist"
             echo "Downloading ${URL}"
             wget -q -O "${HOME}/spark-dist/${PKG}.tgz" "${URL}"

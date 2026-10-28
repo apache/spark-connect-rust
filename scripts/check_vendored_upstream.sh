@@ -26,7 +26,7 @@
 # fork-adapted files (e.g. pipelines/api.py) — those intentionally differ from upstream.
 set -euo pipefail
 
-SPARK_TAG="v4.3.0-rc1"
+SPARK_TAG="v4.3.0-rc3"
 SPARK_REPO="https://github.com/apache/spark.git"
 
 # Directories under python/pyspark vendored verbatim from upstream (whole tree byte-identical).
