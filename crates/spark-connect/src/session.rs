@@ -596,6 +596,14 @@ impl Default for SparkSessionBuilder {
     }
 }
 
+/// Construct the shared local-input width error for Rust and Python callers.
+#[doc(hidden)]
+pub fn row_width_mismatch(row_index: usize, actual: usize, expected: usize) -> SparkError {
+    SparkError::value_msg(format!(
+        "Row {row_index} has {actual} values, but the schema has {expected} fields"
+    ))
+}
+
 /// Convert Arrow RecordBatch data to IPC bytes.
 /// Used by createDataFrame to package local data.
 fn rows_to_arrow_ipc(rows: &[Row], schema: &DataType) -> Result<Vec<u8>> {
@@ -618,23 +626,16 @@ fn rows_to_arrow_ipc(rows: &[Row], schema: &DataType) -> Result<Vec<u8>> {
         _ => return Err(SparkError::connect_msg("Schema is not a struct type")),
     };
 
-    // Coerce each value to its declared field type so the built arrays match the
-    // Arrow schema (e.g. a Python int decodes as Long but "a int" wants Int32).
-    let coerced: Vec<Row> = rows
-        .iter()
-        .map(|r| {
-            let vals: Vec<Value> = fields
-                .iter()
-                .enumerate()
-                .map(|(i, f)| coerce_value(r.get(i), &f.data_type))
-                .collect();
-            Row::new(r.fields().to_vec(), vals)
-        })
-        .collect();
+    // Conversion is positional, so every row must match the schema width.
+    for (index, row) in rows.iter().enumerate() {
+        if row.len() != fields.len() {
+            return Err(row_width_mismatch(index, row.len(), fields.len()));
+        }
+    }
 
-    for field_idx in 0..fields.len() {
-        let array = build_arrow_array(&coerced, field_idx, Some(&fields[field_idx].data_type))?;
-        columns.push(array);
+    for (field_idx, field) in fields.iter().enumerate() {
+        let column: Vec<&Value> = rows.iter().map(|row| &row.values()[field_idx]).collect();
+        columns.push(values_to_arrow(&column, &field.data_type)?);
     }
 
     // Create RecordBatch
@@ -747,89 +748,10 @@ fn datatype_to_arrow(dt: &DataType) -> Result<arrow::datatypes::DataType> {
     })
 }
 
-/// Coerce a value to a declared field type (numeric widening/narrowing from the
-/// Python-inferred type). Non-numeric or already-matching values pass through, so an
-/// explicit `createDataFrame` schema produces arrays that match the Arrow schema.
-fn coerce_value(v: Option<&Value>, target: &DataType) -> Value {
-    let v = match v {
-        Some(v) => v,
-        None => return Value::Null,
-    };
-    match (target, v) {
-        (_, Value::Null) => Value::Null,
-        (DataType::Byte, Value::Long(n)) => Value::Byte(*n as i8),
-        (DataType::Byte, Value::Integer(n)) => Value::Byte(*n as i8),
-        (DataType::Short, Value::Long(n)) => Value::Short(*n as i16),
-        (DataType::Short, Value::Integer(n)) => Value::Short(*n as i16),
-        (DataType::Integer, Value::Long(n)) => Value::Integer(*n as i32),
-        (DataType::Long, Value::Integer(n)) => Value::Long(*n as i64),
-        // Float target from any narrower numeric (a Python int decodes as Long/Integer
-        // but "a float" wants Float32); without these, an Int64Array is built against a
-        // Float32 field and RecordBatch::try_new rejects the mismatch.
-        (DataType::Float, Value::Double(f)) => Value::Float(*f as f32),
-        (DataType::Float, Value::Long(n)) => Value::Float(*n as f32),
-        (DataType::Float, Value::Integer(n)) => Value::Float(*n as f32),
-        (DataType::Double, Value::Long(n)) => Value::Double(*n as f64),
-        (DataType::Double, Value::Integer(n)) => Value::Double(*n as f64),
-        (DataType::Double, Value::Float(f)) => Value::Double(*f as f64),
-        // Nested types: coerce children to their declared element/field/value types so a
-        // nested `Integer` field built from a Python int (Long) matches the Arrow schema.
-        (DataType::Array { element_type, .. }, Value::List(items)) => Value::List(
-            items
-                .iter()
-                .map(|it| coerce_value(Some(it), element_type))
-                .collect(),
-        ),
-        (DataType::Struct { fields }, Value::Struct(sf)) => Value::Struct(
-            Row::new(
-                fields.iter().map(|f| f.name.clone()).collect(),
-                fields
-                    .iter()
-                    .enumerate()
-                    .map(|(i, f)| {
-                        let val = sf.get_by_name(&f.name).or_else(|| sf.get(i));
-                        coerce_value(val, &f.data_type)
-                    })
-                    .collect(),
-            )
-            .into(),
-        ),
-        (DataType::Map { value_type, .. }, Value::Map(m)) => Value::Map(
-            m.iter()
-                .map(|(k, v)| (k.clone(), coerce_value(Some(v), value_type)))
-                .collect(),
-        ),
-        _ => v.clone(),
-    }
-}
-
-/// Build an Arrow array for a specific field across all rows.
-/// Build the Arrow array for one column: gather the column's values and build them
-/// against the declared type (schema-driven, so nested array/map/struct recurse).
-fn build_arrow_array(
-    rows: &[Row],
-    field_idx: usize,
-    target: Option<&DataType>,
-) -> Result<Arc<dyn arrow::array::Array>> {
-    use arrow::array::NullArray;
-    if rows.is_empty() {
-        return Ok(Arc::new(NullArray::new(0)));
-    }
-    let column: Vec<Value> = rows
-        .iter()
-        .map(|r| r.get(field_idx).cloned().unwrap_or(Value::Null))
-        .collect();
-    match target {
-        Some(dt) => values_to_arrow(&column, dt),
-        // No declared type (shouldn't happen for createDataFrame): fall back to the
-        // value-driven scalar builder for backward compatibility.
-        None => build_arrow_array_scalar(rows, field_idx),
-    }
-}
-
 /// Recursively build an Arrow array from a column of `Value`s against a declared
-/// `DataType`, covering scalars and the nested array/map/struct types.
-fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::array::Array>> {
+/// `DataType`, covering scalars and the nested array/map/struct types. Temporary
+/// columns borrow their values; building the Arrow output still copies payloads.
+fn values_to_arrow(values: &[&Value], dt: &DataType) -> Result<Arc<dyn arrow::array::Array>> {
     use arrow::array::*;
     use arrow::buffer::{NullBuffer, OffsetBuffer};
     use arrow::datatypes::{Field, Fields};
@@ -838,7 +760,7 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
         ($arr:ty, $pat:path) => {{
             let vals: Result<Vec<_>> = values
                 .iter()
-                .map(|v| match v {
+                .map(|v| match *v {
                     Value::Null => Ok(None),
                     $pat(x) => Ok(Some(*x)),
                     _ => Err(SparkError::connect_msg("Type mismatch in row data")),
@@ -855,7 +777,7 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
         ($arr:ty, $t:ty) => {{
             let vals: Result<Vec<_>> = values
                 .iter()
-                .map(|v| match v {
+                .map(|v| match *v {
                     Value::Null => Ok(None),
                     Value::Byte(x) => Ok(Some(*x as $t)),
                     Value::Short(x) => Ok(Some(*x as $t)),
@@ -871,7 +793,7 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
         ($arr:ty, $t:ty) => {{
             let vals: Result<Vec<_>> = values
                 .iter()
-                .map(|v| match v {
+                .map(|v| match *v {
                     Value::Null => Ok(None),
                     Value::Float(x) => Ok(Some(*x as $t)),
                     Value::Double(x) => Ok(Some(*x as $t)),
@@ -896,7 +818,7 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
         DataType::String { .. } | DataType::Char { .. } | DataType::Varchar { .. } => {
             let vals: Result<Vec<Option<&str>>> = values
                 .iter()
-                .map(|v| match v {
+                .map(|v| match *v {
                     Value::Null => Ok(None),
                     Value::String(s) => Ok(Some(s.as_str())),
                     _ => Err(SparkError::connect_msg("Type mismatch in row data")),
@@ -907,7 +829,7 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
         DataType::Binary => {
             let vals: Result<Vec<Option<&[u8]>>> = values
                 .iter()
-                .map(|v| match v {
+                .map(|v| match *v {
                     Value::Null => Ok(None),
                     Value::Binary(b) => Ok(Some(b.as_slice())),
                     _ => Err(SparkError::connect_msg("Type mismatch in row data")),
@@ -919,7 +841,7 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
         DataType::Timestamp | DataType::TimestampNtz => {
             let vals: Result<Vec<Option<i64>>> = values
                 .iter()
-                .map(|v| match v {
+                .map(|v| match *v {
                     Value::Null => Ok(None),
                     Value::Timestamp(t) => Ok(Some(*t)),
                     _ => Err(SparkError::connect_msg("Type mismatch in row data")),
@@ -937,7 +859,7 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
             let col_scale = *scale;
             let vals: Result<Vec<Option<i128>>> = values
                 .iter()
-                .map(|v| match v {
+                .map(|v| match *v {
                     Value::Null => Ok(None),
                     Value::Decimal { value, .. } => {
                         decimal_str_to_unscaled(value, col_scale).map(Some)
@@ -956,18 +878,18 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
             element_type,
             contains_null,
         } => {
-            let mut child: Vec<Value> = Vec::new();
+            let mut child: Vec<&Value> = Vec::new();
             let mut offsets: Vec<i32> = vec![0];
             let mut valid = arrow::array::builder::BooleanBufferBuilder::new(values.len());
             for v in values {
-                match v {
+                match *v {
                     Value::Null => {
                         valid.append(false);
                         offsets.push(*offsets.last().unwrap());
                     }
                     Value::List(items) => {
                         valid.append(true);
-                        child.extend(items.iter().cloned());
+                        child.extend(items.iter());
                         offsets.push(child.len() as i32);
                     }
                     _ => return Err(SparkError::connect_msg("Type mismatch: expected array")),
@@ -987,14 +909,14 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
             )))
         }
         DataType::Struct { fields } => {
-            let mut cols: Vec<Vec<Value>> = vec![Vec::with_capacity(values.len()); fields.len()];
+            let mut cols: Vec<Vec<&Value>> = vec![Vec::with_capacity(values.len()); fields.len()];
             let mut valid = arrow::array::builder::BooleanBufferBuilder::new(values.len());
             for v in values {
-                match v {
+                match *v {
                     Value::Null => {
                         valid.append(false);
                         for c in cols.iter_mut() {
-                            c.push(Value::Null);
+                            c.push(&Value::Null);
                         }
                     }
                     Value::Struct(sf) => {
@@ -1004,8 +926,7 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
                             let val = sf
                                 .get_by_name(&f.name)
                                 .or_else(|| sf.get(i))
-                                .cloned()
-                                .unwrap_or(Value::Null);
+                                .unwrap_or(&Value::Null);
                             cols[i].push(val);
                         }
                     }
@@ -1014,7 +935,7 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
                     Value::Map(m) => {
                         valid.append(true);
                         for (i, f) in fields.iter().enumerate() {
-                            cols[i].push(m.get(&f.name).cloned().unwrap_or(Value::Null));
+                            cols[i].push(m.get(&f.name).unwrap_or(&Value::Null));
                         }
                     }
                     _ => return Err(SparkError::connect_msg("Type mismatch: expected struct")),
@@ -1047,12 +968,12 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
             value_type,
             value_contains_null,
         } => {
-            let mut keys: Vec<Value> = Vec::new();
-            let mut vals: Vec<Value> = Vec::new();
+            let mut keys: Vec<&str> = Vec::new();
+            let mut vals: Vec<&Value> = Vec::new();
             let mut offsets: Vec<i32> = vec![0];
             let mut valid = arrow::array::builder::BooleanBufferBuilder::new(values.len());
             for v in values {
-                match v {
+                match *v {
                     Value::Null => {
                         valid.append(false);
                         offsets.push(*offsets.last().unwrap());
@@ -1060,15 +981,30 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
                     Value::Map(m) => {
                         valid.append(true);
                         for (k, val) in m {
-                            keys.push(Value::String(k.clone()));
-                            vals.push(val.clone());
+                            keys.push(k.as_str());
+                            vals.push(val);
                         }
                         offsets.push(keys.len() as i32);
                     }
                     _ => return Err(SparkError::connect_msg("Type mismatch: expected map")),
                 }
             }
-            let key_arr = values_to_arrow(&keys, key_type)?;
+            // Map storage has string keys rather than Values. Build their Arrow
+            // buffers directly, borrowing the original key payloads.
+            let key_arr: Arc<dyn Array> = match key_type.as_ref() {
+                DataType::String { .. } | DataType::Char { .. } | DataType::Varchar { .. } => {
+                    Arc::new(StringArray::from_iter_values(keys.iter().copied()))
+                }
+                // Preserve the existing encoder's validation (including empty maps)
+                // for schemas that declare a non-string key type.
+                _ => {
+                    let keys: Vec<Value> = keys
+                        .iter()
+                        .map(|key| Value::String((*key).to_owned()))
+                        .collect();
+                    values_to_arrow(&keys.iter().collect::<Vec<_>>(), key_type)?
+                }
+            };
             let val_arr = values_to_arrow(&vals, value_type)?;
             let entry_fields: Fields = vec![
                 Field::new("key", datatype_to_arrow(key_type)?, false),
@@ -1096,171 +1032,6 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
         other => Err(SparkError::connect_msg(format!(
             "Unsupported type for Arrow createDataFrame conversion: {other:?}"
         ))),
-    }
-}
-
-/// Legacy value-driven scalar array builder (used only when no declared type is available).
-fn build_arrow_array_scalar(
-    rows: &[Row],
-    field_idx: usize,
-) -> Result<Arc<dyn arrow::array::Array>> {
-    use arrow::array::*;
-
-    if rows.is_empty() {
-        return Ok(Arc::new(NullArray::new(0)));
-    }
-
-    // Peek at the first row to determine the type
-    let first_val = rows[0]
-        .get(field_idx)
-        .ok_or_else(|| SparkError::connect_msg("Invalid row index"))?;
-
-    match first_val {
-        Value::Null => Ok(Arc::new(NullArray::new(rows.len()))),
-        Value::Bool(_) => {
-            let values: Result<Vec<Option<bool>>> = rows
-                .iter()
-                .map(|r| match r.get(field_idx) {
-                    None | Some(Value::Null) => Ok(None),
-                    Some(Value::Bool(b)) => Ok(Some(*b)),
-                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
-                })
-                .collect();
-            Ok(Arc::new(BooleanArray::from(values?)))
-        }
-        Value::Byte(_) => {
-            let values: Result<Vec<_>> = rows
-                .iter()
-                .map(|r| match r.get(field_idx) {
-                    None | Some(Value::Null) => Ok(None),
-                    Some(Value::Byte(b)) => Ok(Some(*b)),
-                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
-                })
-                .collect();
-            Ok(Arc::new(Int8Array::from(values?)))
-        }
-        Value::Short(_) => {
-            let values: Result<Vec<_>> = rows
-                .iter()
-                .map(|r| match r.get(field_idx) {
-                    None | Some(Value::Null) => Ok(None),
-                    Some(Value::Short(s)) => Ok(Some(*s)),
-                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
-                })
-                .collect();
-            Ok(Arc::new(Int16Array::from(values?)))
-        }
-        Value::Integer(_) => {
-            let values: Result<Vec<_>> = rows
-                .iter()
-                .map(|r| match r.get(field_idx) {
-                    None | Some(Value::Null) => Ok(None),
-                    Some(Value::Integer(i)) => Ok(Some(*i)),
-                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
-                })
-                .collect();
-            Ok(Arc::new(Int32Array::from(values?)))
-        }
-        Value::Long(_) => {
-            let values: Result<Vec<_>> = rows
-                .iter()
-                .map(|r| match r.get(field_idx) {
-                    None | Some(Value::Null) => Ok(None),
-                    Some(Value::Long(l)) => Ok(Some(*l)),
-                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
-                })
-                .collect();
-            Ok(Arc::new(Int64Array::from(values?)))
-        }
-        Value::Float(_) => {
-            let values: Result<Vec<_>> = rows
-                .iter()
-                .map(|r| match r.get(field_idx) {
-                    None | Some(Value::Null) => Ok(None),
-                    Some(Value::Float(f)) => Ok(Some(*f)),
-                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
-                })
-                .collect();
-            Ok(Arc::new(Float32Array::from(values?)))
-        }
-        Value::Double(_) => {
-            let values: Result<Vec<_>> = rows
-                .iter()
-                .map(|r| match r.get(field_idx) {
-                    None | Some(Value::Null) => Ok(None),
-                    Some(Value::Double(d)) => Ok(Some(*d)),
-                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
-                })
-                .collect();
-            Ok(Arc::new(Float64Array::from(values?)))
-        }
-        Value::String(_) => {
-            let values: Result<Vec<_>> = rows
-                .iter()
-                .map(|r| match r.get(field_idx) {
-                    None | Some(Value::Null) => Ok(None),
-                    Some(Value::String(s)) => Ok(Some(s.as_str())),
-                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
-                })
-                .collect();
-            Ok(Arc::new(StringArray::from(values?)))
-        }
-        Value::Binary(_) => {
-            let values: Result<Vec<_>> = rows
-                .iter()
-                .map(|r| match r.get(field_idx) {
-                    None | Some(Value::Null) => Ok(None),
-                    Some(Value::Binary(b)) => Ok(Some(b.as_slice())),
-                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
-                })
-                .collect();
-            Ok(Arc::new(BinaryArray::from(values?)))
-        }
-        Value::Date(_) => {
-            let values: Result<Vec<Option<i32>>> = rows
-                .iter()
-                .map(|r| match r.get(field_idx) {
-                    None | Some(Value::Null) => Ok(None),
-                    Some(Value::Date(d)) => Ok(Some(*d)),
-                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
-                })
-                .collect();
-            Ok(Arc::new(Date32Array::from(values?)))
-        }
-        Value::Timestamp(_) => {
-            let values: Result<Vec<Option<i64>>> = rows
-                .iter()
-                .map(|r| match r.get(field_idx) {
-                    None | Some(Value::Null) => Ok(None),
-                    Some(Value::Timestamp(t)) => Ok(Some(*t)),
-                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
-                })
-                .collect();
-            // Scalar fallback (no declared type): default to UTC (LTZ).
-            let arr = TimestampMicrosecondArray::from(values?).with_timezone("UTC");
-            Ok(Arc::new(arr))
-        }
-        Value::Decimal { scale, .. } => {
-            // Column-wide precision/scale come from the first value (Spark decimals in a
-            // column share one precision/scale). Each value's string is parsed to an
-            // unscaled i128 at that scale.
-            let col_scale = scale.unwrap_or(0);
-            let values: Result<Vec<Option<i128>>> = rows
-                .iter()
-                .map(|r| match r.get(field_idx) {
-                    None | Some(Value::Null) => Ok(None),
-                    Some(Value::Decimal { value, .. }) => {
-                        decimal_str_to_unscaled(value, col_scale).map(Some)
-                    }
-                    Some(_) => Err(SparkError::connect_msg("Type mismatch in row data")),
-                })
-                .collect();
-            let arr = Decimal128Array::from(values?)
-                .with_precision_and_scale(38, col_scale as i8)
-                .map_err(|e| SparkError::connect_msg(format!("decimal build: {e}")))?;
-            Ok(Arc::new(arr))
-        }
-        _ => Err(SparkError::connect_msg("Unsupported value type")),
     }
 }
 
@@ -1300,6 +1071,12 @@ fn decimal_str_to_unscaled(s: &str, scale: i32) -> Result<i128> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::array::{
+        BinaryArray, BooleanArray, Float32Array, Int16Array, Int32Array, StringArray, StructArray,
+    };
+    use arrow::ipc::reader::StreamReader;
+    use arrow::record_batch::RecordBatch;
+    use std::io::Cursor;
 
     fn struct_field(name: &str, data_type: DataType) -> crate::types::StructField {
         crate::types::StructField {
@@ -1308,88 +1085,6 @@ mod tests {
             nullable: true,
             metadata: Default::default(),
         }
-    }
-
-    #[test]
-    fn nested_struct_coercion_preserves_first_name_position_and_numeric_types() {
-        let source = Value::Struct(
-            Row::with_shared_fields(
-                vec!["dup", "dup", "other", "nested", "items", "map"]
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect::<Arc<[String]>>(),
-                vec![
-                    Value::Long(257),
-                    Value::Long(999),
-                    Value::Long(-2),
-                    Value::Struct(Row::new(vec!["n".to_string()], vec![Value::Long(300)]).into()),
-                    Value::List(vec![Value::Long(65_537), Value::Null]),
-                    Value::Map([("k".to_string(), Value::Long(65_538))].into()),
-                ],
-            )
-            .into(),
-        );
-        let target = DataType::Struct {
-            fields: vec![
-                struct_field("dup", DataType::Byte),
-                struct_field("positional", DataType::Short),
-                struct_field("dup", DataType::Long),
-                struct_field(
-                    "nested",
-                    DataType::Struct {
-                        fields: vec![struct_field("n", DataType::Byte)],
-                    },
-                ),
-                struct_field(
-                    "items",
-                    DataType::Array {
-                        element_type: Box::new(DataType::Short),
-                        contains_null: true,
-                    },
-                ),
-                struct_field(
-                    "map",
-                    DataType::Map {
-                        key_type: Box::new(DataType::String {
-                            collation: "UTF8_BINARY".to_string(),
-                        }),
-                        value_type: Box::new(DataType::Short),
-                        value_contains_null: true,
-                    },
-                ),
-                struct_field("missing", DataType::Integer),
-            ],
-        };
-        let actual = coerce_value(Some(&source), &target);
-        let expected = Value::Struct(
-            Row::new(
-                vec![
-                    "dup",
-                    "positional",
-                    "dup",
-                    "nested",
-                    "items",
-                    "map",
-                    "missing",
-                ]
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-                vec![
-                    Value::Byte(1),
-                    Value::Short(999),
-                    Value::Long(257),
-                    Value::Struct(Row::new(vec!["n".to_string()], vec![Value::Byte(44)]).into()),
-                    Value::List(vec![Value::Short(1), Value::Null]),
-                    Value::Map([("k".to_string(), Value::Short(2))].into()),
-                    Value::Null,
-                ],
-            )
-            .into(),
-        );
-        assert_eq!(actual, expected);
-        assert_eq!(coerce_value(Some(&Value::Null), &target), Value::Null);
-        assert_eq!(coerce_value(None, &target), Value::Null);
     }
 
     #[test]
@@ -1422,7 +1117,7 @@ mod tests {
             Value::Null,
             Value::Struct(Row::new(vec!["dup".to_string()], vec![Value::Null]).into()),
         ];
-        let array = values_to_arrow(&values, &target).unwrap();
+        let array = values_to_arrow(&values.iter().collect::<Vec<_>>(), &target).unwrap();
         let array = array.as_any().downcast_ref::<StructArray>().unwrap();
         assert_eq!(array.len(), 4);
         assert!(!array.is_null(0));
@@ -1499,7 +1194,8 @@ mod tests {
             )
             .into(),
         );
-        let array = values_to_arrow(&[source], &target).unwrap();
+        let batch = read_batch(&[row(vec![source])], &schema(vec![target]));
+        let array = batch.column(0);
         let array = array.as_any().downcast_ref::<StructArray>().unwrap();
         let items = array
             .column(0)
@@ -1611,5 +1307,395 @@ mod tests {
         // Both should have the same tag
         let tags = spark2.get_tags();
         assert!(tags.contains(&"test".to_string()));
+    }
+
+    // createDataFrame input IPC fixtures.
+    fn text_type() -> DataType {
+        DataType::String {
+            collation: "UTF8_BINARY".to_string(),
+        }
+    }
+
+    fn schema(types: Vec<DataType>) -> DataType {
+        DataType::Struct {
+            fields: types
+                .into_iter()
+                .enumerate()
+                .map(|(i, dt)| struct_field(&format!("schema_{i}"), dt))
+                .collect(),
+        }
+    }
+
+    fn row(values: Vec<Value>) -> Row {
+        // Top-level conversion is positional, even when input and schema names differ.
+        Row::new(
+            (0..values.len()).map(|i| format!("input_{i}")).collect(),
+            values,
+        )
+    }
+
+    fn read_batch(rows: &[Row], schema: &DataType) -> RecordBatch {
+        let data = rows_to_arrow_ipc(rows, schema).unwrap();
+        let mut reader = StreamReader::try_new(Cursor::new(data), None).unwrap();
+        let batch = reader.next().unwrap().unwrap();
+        assert!(reader.next().is_none());
+        assert_eq!(batch.num_rows(), rows.len());
+        batch
+    }
+
+    #[test]
+    fn input_ipc_preserves_scalar_coercion_and_nulls() {
+        let schema = schema(vec![
+            DataType::Integer,
+            DataType::Float,
+            DataType::Boolean,
+            text_type(),
+            DataType::Binary,
+        ]);
+        let rows = vec![
+            row(vec![
+                Value::Long(3),
+                Value::Double(1.25),
+                Value::Bool(true),
+                Value::String("é\0名前".to_string()),
+                Value::Binary(vec![0, 255, 1]),
+            ]),
+            row(vec![Value::Null; 5]),
+            row(vec![
+                Value::Long(-2_147_483_648),
+                Value::Long(16_777_217),
+                Value::Bool(false),
+                Value::String(String::new()),
+                Value::Binary(vec![]),
+            ]),
+        ];
+        let batch = read_batch(&rows, &schema);
+        assert_eq!(batch.num_columns(), 5);
+        assert_eq!(batch.schema().field(0).name(), "schema_0");
+        macro_rules! column_eq {
+            ($index:expr, $array:ty, $values:expr) => {
+                assert_eq!(
+                    batch
+                        .column($index)
+                        .as_any()
+                        .downcast_ref::<$array>()
+                        .unwrap(),
+                    &<$array>::from($values)
+                );
+            };
+        }
+        column_eq!(0, Int32Array, vec![Some(3), None, Some(i32::MIN)]);
+        column_eq!(1, Float32Array, vec![Some(1.25), None, Some(16_777_216.0)]);
+        column_eq!(2, BooleanArray, vec![Some(true), None, Some(false)]);
+        column_eq!(3, StringArray, vec![Some("é\0名前"), None, Some("")]);
+        column_eq!(
+            4,
+            BinaryArray,
+            vec![Some(&[0_u8, 255, 1][..]), None, Some(&[][..])]
+        );
+    }
+
+    #[test]
+    fn input_ipc_resolves_duplicate_names_before_numeric_conversion() {
+        let nested_type = DataType::Struct {
+            fields: vec![
+                struct_field("dup", DataType::Float),
+                struct_field("positional", DataType::Short),
+                struct_field("dup", DataType::Double),
+            ],
+        };
+        let nested = Value::Struct(
+            Row::new(
+                vec!["dup".to_string(), "dup".to_string(), "other".to_string()],
+                vec![
+                    Value::Double(16_777_217.0),
+                    Value::Long(999),
+                    Value::Long(-2),
+                ],
+            )
+            .into(),
+        );
+        let batch = read_batch(&[row(vec![nested])], &schema(vec![nested_type]));
+        let array = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        assert_eq!(
+            array
+                .column(0)
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .unwrap()
+                .value(0),
+            16_777_216.0
+        );
+        assert_eq!(
+            array
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int16Array>()
+                .unwrap()
+                .value(0),
+            999
+        );
+        // Both fields select the first source name, but each conversion must
+        // use the original value: Float rounding must not affect Double.
+        assert_eq!(
+            array
+                .column(2)
+                .as_any()
+                .downcast_ref::<arrow::array::Float64Array>()
+                .unwrap()
+                .value(0),
+            16_777_217.0
+        );
+    }
+
+    #[test]
+    fn input_ipc_reports_schema_and_column_errors() {
+        let array = DataType::Array {
+            element_type: Box::new(DataType::Long),
+            contains_null: true,
+        };
+        let map = DataType::Map {
+            key_type: Box::new(text_type()),
+            value_type: Box::new(DataType::Long),
+            value_contains_null: true,
+        };
+        for (rows, schema, message) in [
+            (
+                vec![row(vec![Value::Long(1)])],
+                DataType::Long,
+                "Schema is not a struct",
+            ),
+            (
+                vec![row(vec![Value::String("bad".to_string())])],
+                schema(vec![DataType::Integer]),
+                "Type mismatch in row data",
+            ),
+            (
+                vec![row(vec![Value::Long(1), Value::Long(2)])],
+                schema(vec![array, map]),
+                "Type mismatch: expected array",
+            ),
+            // Schema conversion still precedes the width check.
+            (
+                vec![row(vec![Value::Long(1)])],
+                schema(vec![DataType::CalendarInterval, DataType::Long]),
+                "Unsupported type for Arrow createDataFrame conversion",
+            ),
+        ] {
+            let error = rows_to_arrow_ipc(&rows, &schema).unwrap_err().to_string();
+            assert!(error.contains(message), "{error}");
+        }
+    }
+
+    #[test]
+    fn input_ipc_owns_nested_text_and_binary_after_rows_are_dropped() {
+        let list = |element_type| DataType::Array {
+            element_type: Box::new(element_type),
+            contains_null: true,
+        };
+        let map = |value_type| DataType::Map {
+            key_type: Box::new(text_type()),
+            value_type: Box::new(value_type),
+            value_contains_null: true,
+        };
+        let nested_type = DataType::Struct {
+            fields: vec![
+                struct_field("binary", list(DataType::Binary)),
+                struct_field("text", map(text_type())),
+            ],
+        };
+        let schema = schema(vec![list(text_type()), map(DataType::Binary), nested_type]);
+        let make_rows = || {
+            vec![
+                row(vec![
+                    Value::List(vec![
+                        Value::String("é\0名前".into()),
+                        Value::String(String::new()),
+                        Value::Null,
+                    ]),
+                    Value::Map(
+                        [
+                            ("é\0名前".into(), Value::Binary(vec![0, 255, 1])),
+                            (String::new(), Value::Binary(vec![])),
+                            ("null".into(), Value::Null),
+                        ]
+                        .into(),
+                    ),
+                    Value::Struct(
+                        Row::new(
+                            vec!["binary".into(), "text".into()],
+                            vec![
+                                Value::List(vec![
+                                    Value::Binary(vec![0, 255]),
+                                    Value::Binary(vec![]),
+                                    Value::Null,
+                                ]),
+                                Value::Map(
+                                    [
+                                        ("key\0".into(), Value::String("名前\0é".into())),
+                                        (String::new(), Value::String(String::new())),
+                                        ("null".into(), Value::Null),
+                                    ]
+                                    .into(),
+                                ),
+                            ],
+                        )
+                        .into(),
+                    ),
+                ]),
+                row(vec![
+                    Value::List(vec![]),
+                    Value::Map(Default::default()),
+                    Value::Null,
+                ]),
+                row(vec![Value::Null; 3]),
+            ]
+        };
+        let rows = make_rows();
+        let data = rows_to_arrow_ipc(&rows, &schema).unwrap();
+        drop(rows);
+        // Decode only after all original strings, bytes and nested containers are gone.
+        let response = proto::execute_plan_response::ArrowBatch {
+            data: data.into(),
+            ..Default::default()
+        };
+        let decoded = crate::dataframe::decode_arrow_batch(&response).unwrap();
+        // Reconstruct expectations independently; cloning a StructValue would keep
+        // its shared source Row alive and weaken this ownership check.
+        let expected = make_rows();
+        assert_eq!(decoded.len(), expected.len());
+        for (actual, expected) in decoded.iter().zip(expected) {
+            assert_eq!(actual.values(), expected.values());
+        }
+    }
+
+    #[test]
+    fn input_ipc_preserves_nested_error_order() {
+        let list = |element_type| DataType::Array {
+            element_type: Box::new(element_type),
+            contains_null: true,
+        };
+        // Validate all parent values before recursing into children.
+        let rows = [
+            row(vec![Value::List(vec![Value::String("bad integer".into())])]),
+            row(vec![Value::Long(1)]),
+        ];
+        let error = rows_to_arrow_ipc(&rows, &schema(vec![list(DataType::Long)]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Type mismatch: expected array"), "{error}");
+
+        // Map key validation precedes map value validation, including nested schemas.
+        let map_type = DataType::Map {
+            key_type: Box::new(list(text_type())),
+            value_type: Box::new(DataType::Long),
+            value_contains_null: true,
+        };
+        let rows = [row(vec![Value::Map(
+            [("key".into(), Value::String("bad integer".into()))].into(),
+        )])];
+        let error = rows_to_arrow_ipc(&rows, &schema(vec![map_type]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Type mismatch: expected array"), "{error}");
+    }
+
+    #[test]
+    fn input_ipc_preserves_empty_input_and_zero_column_error() {
+        assert!(rows_to_arrow_ipc(&[], &DataType::Long).unwrap().is_empty());
+        let error = rows_to_arrow_ipc(&[Row::empty()], &schema(vec![]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Failed to create Arrow batch"), "{error}");
+    }
+
+    #[test]
+    fn input_ipc_checks_all_widths_before_encoding() {
+        let rows = [
+            row(vec![
+                Value::String("bad integer".to_string()),
+                Value::Bool(true),
+            ]),
+            row(vec![Value::Long(1)]),
+        ];
+        let error = rows_to_arrow_ipc(&rows, &schema(vec![DataType::Integer, DataType::Boolean]))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("Row 1 has 1 values, but the schema has 2 fields"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn create_dataframe_rejects_short_and_long_rows() {
+        let spark = session();
+        for values in [vec![Value::Long(1)], vec![Value::Long(1); 3]] {
+            let width = values.len();
+            let result = spark.create_dataframe(
+                vec![row(values)],
+                schema(vec![DataType::Long, DataType::Long]),
+            );
+            let error = result.err().expect("expected a width error").to_string();
+            assert!(
+                error.contains(&format!(
+                    "Row 0 has {width} values, but the schema has 2 fields"
+                )),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn input_ipc_roundtrips_through_batch_decoder() {
+        let nested_type = DataType::Struct {
+            fields: vec![
+                struct_field("count", DataType::Long),
+                struct_field("text", text_type()),
+            ],
+        };
+        let nested_value = Value::Struct(
+            Row::new(
+                vec!["count".to_string(), "text".to_string()],
+                vec![Value::Long(3), Value::String("名前".to_string())],
+            )
+            .into(),
+        );
+        for (types, rows) in [
+            (
+                vec![DataType::Long, DataType::Long],
+                vec![
+                    row(vec![Value::Long(i64::MIN), Value::Null]),
+                    row(vec![Value::Long(i64::MAX), Value::Long(0)]),
+                ],
+            ),
+            (
+                vec![DataType::Long, nested_type],
+                vec![
+                    row(vec![Value::Long(-1), nested_value]),
+                    row(vec![Value::Null, Value::Null]),
+                ],
+            ),
+        ] {
+            let schema = schema(types);
+            let data = rows_to_arrow_ipc(&rows, &schema).unwrap();
+            let response = proto::execute_plan_response::ArrowBatch {
+                data: data.into(),
+                ..Default::default()
+            };
+            let decoded = crate::dataframe::decode_arrow_batch(&response).unwrap();
+            assert_eq!(decoded.len(), rows.len());
+            for (actual, expected) in decoded.iter().zip(&rows) {
+                assert_eq!(
+                    actual.fields(),
+                    &["schema_0".to_string(), "schema_1".to_string()]
+                );
+                assert_eq!(actual.values(), expected.values());
+            }
+        }
     }
 }

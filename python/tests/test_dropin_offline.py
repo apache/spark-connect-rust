@@ -2729,3 +2729,29 @@ def test_structtype_tree_string_max_depth():
 def test_variant_type_to_internal_accepts_variant_kwarg():
     # Reference names the VariantType.toInternal parameter `variant`, not `obj`.
     assert T.VariantType().toInternal(variant=None) is None
+
+
+# --------------------------------------------------------------------------- createDataFrame
+
+def test_create_dataframe_width_mismatch_is_a_normal_exception():
+    # Isolate the active session from the remaining offline tests. Session
+    # construction and local input validation do not need a running server.
+    import subprocess
+    import sys
+
+    subprocess.run([sys.executable, "-c", """
+from pyspark.sql import SparkSession, types as T
+from pyspark.errors import PySparkValueError
+spark = SparkSession.builder.remote("sc://localhost:15002").getOrCreate()
+schemas = [None, ["a", "b"], T.StructType([
+    T.StructField("a", T.LongType()), T.StructField("b", T.LongType())
+])]
+for schema in schemas:
+    try:
+        spark.createDataFrame([(1, 2), (3,)], schema=schema)
+    except PySparkValueError as error:
+        assert type(error) is PySparkValueError, type(error)
+        assert str(error) == "Row 1 has 1 values, but the schema has 2 fields", error
+    else:
+        raise AssertionError("expected a width validation error")
+"""], check=True)
