@@ -1022,7 +1022,9 @@ def test_date_public_fallback_keeps_hooks(protocol, monkeypatch, reason):
     ("StructField", "__class__"), ("DateType", "__class__"),
 ])
 @pytest.mark.parametrize("before_import", [False, True])
-def test_date_custom_schema_descriptors_keep_native_row_path(class_name, attribute, before_import):
+def test_date_custom_schema_descriptors_keep_native_row_path(
+    protocol, class_name, attribute, before_import
+):
     import sys
 
     script = r'''
