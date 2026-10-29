@@ -2863,3 +2863,24 @@ def test_arrow_input_types_live_server(kind):
         assert df.toArrow().to_pylist() == table.to_pylist()
     finally:
         spark.stop()
+
+
+def test_arrow_input_large_upload_live_server():
+    """A table larger than one gRPC message must use uploaded cache artifacts."""
+    import os
+    pa = pytest.importorskip("pyarrow")
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("requires SPARK_REMOTE")
+    from pyspark.sql import SparkSession
+
+    rows = 140000
+    table = pa.table({"payload": [b"x" * 1024] * rows})
+    assert table.nbytes > 128 * 1024**2
+    spark = SparkSession.builder.remote(remote).getOrCreate()
+    try:
+        df = spark.createDataFrame(table)
+        assert df.count() == rows
+        assert df.selectExpr("sum(length(payload)) AS total").collect()[0][0] == rows * 1024
+    finally:
+        spark.stop()
