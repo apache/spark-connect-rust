@@ -864,7 +864,7 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
                 .map(|v| match v {
                     Value::Null => Ok(None),
                     Value::Decimal { value, .. } => {
-                        decimal_str_to_unscaled(value, col_scale).map(Some)
+                        decimal_str_to_unscaled(value, *precision, col_scale).map(Some)
                     }
                     _ => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
@@ -1023,37 +1023,99 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
     }
 }
 
-/// Parse a decimal string (e.g. "-1.50") into an unscaled `i128` at the given scale
-/// (e.g. scale 2 → -150). Pads/truncates the fractional part to `scale` digits.
-fn decimal_str_to_unscaled(s: &str, scale: i32) -> Result<i128> {
+/// Convert a fixed-point or scientific decimal string to an unscaled `i128`.
+/// Scientific inputs must fit the declared precision and nonnegative scale exactly.
+/// Fixed-point inputs retain their existing truncation and scale behavior.
+/// Work and storage are bounded by the input length, never by its exponent.
+fn decimal_str_to_unscaled(s: &str, precision: i32, scale: i32) -> Result<i128> {
+    let invalid = || SparkError::connect_msg(format!("invalid or overflowing decimal '{s}'"));
     let s = s.trim();
-    let (neg, s) = match s.strip_prefix('-') {
+    let (negative, s) = match s.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, s.strip_prefix('+').unwrap_or(s)),
     };
-    let (int_part, frac_part) = match s.split_once('.') {
-        Some((i, f)) => (i, f),
-        None => (s, ""),
+    let scientific = s.contains(['e', 'E']);
+    if scientific && (!(1..=38).contains(&precision) || scale < 0) {
+        return Err(invalid());
+    }
+    let (coefficient, exponent) = match s.split_once(['e', 'E']) {
+        Some((coefficient, exponent)) => {
+            (coefficient, exponent.parse::<i64>().map_err(|_| invalid())?)
+        }
+        None => (s, 0),
     };
-    let scale = scale.max(0) as usize;
-    let mut digits = String::with_capacity(int_part.len() + scale);
-    digits.push_str(int_part);
-    // Pad or truncate the fractional digits to exactly `scale`.
-    let frac: String = frac_part
-        .chars()
-        .chain(std::iter::repeat('0'))
-        .take(scale)
-        .collect();
-    digits.push_str(&frac);
-    let digits = digits.trim_start_matches('0');
-    let mag: i128 = if digits.is_empty() {
-        0
-    } else {
-        digits
-            .parse::<i128>()
-            .map_err(|e| SparkError::connect_msg(format!("invalid decimal '{s}': {e}")))?
-    };
-    Ok(if neg { -mag } else { mag })
+    let mut fractional = 0_usize;
+    let mut point = false;
+    let mut digit_count = 0_usize;
+    let mut significant = 0_usize;
+    for byte in coefficient.bytes() {
+        match byte {
+            b'.' if !point => point = true,
+            b'0'..=b'9' => {
+                digit_count += 1;
+                if point {
+                    fractional += 1;
+                }
+                if significant != 0 || byte != b'0' {
+                    significant += 1;
+                }
+            }
+            _ => return Err(invalid()),
+        }
+    }
+    if digit_count == 0 {
+        return Err(invalid());
+    }
+    if significant == 0 {
+        return Ok(0);
+    }
+    // i128 arithmetic also handles i64::MIN/MAX exponents without overflowing.
+    // Preserve the existing treatment of negative declared scales as zero.
+    let shift = i128::from(scale.max(0)) + i128::from(exponent) - fractional as i128;
+    let output_digits = significant as i128 + shift;
+    if output_digits <= 0 {
+        return if scientific { Err(invalid()) } else { Ok(0) };
+    }
+    if output_digits > 39 {
+        return Err(invalid());
+    }
+    let keep = (significant as i128).min(output_digits) as usize;
+    if scientific
+        && coefficient
+            .bytes()
+            .filter(|b| *b != b'.')
+            .skip_while(|b| *b == b'0')
+            .skip(keep)
+            .any(|b| b != b'0')
+    {
+        return Err(invalid());
+    }
+    let mut value = 0_i128;
+    for digit in coefficient
+        .bytes()
+        .filter(|b| *b != b'.')
+        .skip_while(|b| *b == b'0')
+        .take(keep)
+    {
+        let digit = i128::from(digit - b'0');
+        value = value.checked_mul(10).ok_or_else(invalid)?;
+        value = if negative {
+            value.checked_sub(digit)
+        } else {
+            value.checked_add(digit)
+        }
+        .ok_or_else(invalid)?;
+    }
+    for _ in 0..shift.max(0) {
+        value = value.checked_mul(10).ok_or_else(invalid)?;
+    }
+    if scientific {
+        let limit = 10_i128.pow(precision as u32);
+        if value <= -limit || value >= limit {
+            return Err(invalid());
+        }
+    }
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -1065,6 +1127,142 @@ mod tests {
     use arrow::ipc::reader::StreamReader;
     use arrow::record_batch::RecordBatch;
     use std::io::Cursor;
+
+    #[test]
+    fn decimal_scientific_notation_scaling() {
+        for (text, scale, expected) in [
+            ("1E+3", 7, 10_000_000_000),
+            ("1E-7", 7, 1),
+            ("-1E-7", 7, -1),
+            ("+1.25e+2", 2, 12_500),
+            ("-1.25E-2", 4, -125),
+            ("0001.2500e+2", 2, 12_500),
+            ("0E+999999999", 7, 0),
+            ("-0E-999999999", 7, 0),
+            ("123.45", 2, 12_345),
+            ("-123.456", 2, -12_345),
+            (".00100E+3", 2, 100),
+            ("  +1.e2  ", 0, 100),
+        ] {
+            assert_eq!(
+                decimal_str_to_unscaled(text, 38, scale).unwrap(),
+                expected,
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn decimal_scientific_notation_bounds_and_invalid_inputs() {
+        assert_eq!(
+            decimal_str_to_unscaled(&i128::MAX.to_string(), 38, 0).unwrap(),
+            i128::MAX
+        );
+        assert_eq!(
+            decimal_str_to_unscaled(&i128::MIN.to_string(), 38, 0).unwrap(),
+            i128::MIN
+        );
+        // Scaling is applied before parsing, so a long coefficient may still fit.
+        assert_eq!(
+            decimal_str_to_unscaled("100000000000000000000000000000000000000000E-41", 38, 0)
+                .unwrap(),
+            1
+        );
+        for text in [
+            "1E+999999999",
+            "1E+9223372036854775807",
+            "1E+9223372036854775808",
+            "170141183460469231731687303715884105728",
+            "-170141183460469231731687303715884105729",
+            "1.70141183460469231731687303715884105728E38",
+            "",
+            ".",
+            "-",
+            "1E",
+            "E3",
+            "1E1E1",
+            "1.2.3",
+            "1E1.5",
+            "NaN",
+            "Infinity",
+            "1E 3",
+        ] {
+            assert!(decimal_str_to_unscaled(text, 38, 0).is_err(), "{text}");
+        }
+        assert!(decimal_str_to_unscaled("1", 38, i32::MAX).is_err());
+    }
+
+    #[test]
+    fn scientific_decimals_reject_inexact_or_unsupported_schema_values() {
+        for (text, precision, scale) in [
+            ("1.5E-7", 18, 7),
+            ("-1.5E-7", 18, 7),
+            ("1E-8", 18, 7),
+            ("1E-9223372036854775808", 18, 7),
+            ("123456E-3", 10, 2),
+            ("1E+2", 2, 0),
+            ("-1E+2", 2, 0),
+            ("1E+3", 10, -2),
+            ("0E+3", 10, -2),
+        ] {
+            assert!(
+                decimal_str_to_unscaled(text, precision, scale).is_err(),
+                "{text}"
+            );
+        }
+        assert_eq!(decimal_str_to_unscaled("1.2300E+0", 3, 2).unwrap(), 123);
+        assert_eq!(decimal_str_to_unscaled("9.9E+1", 2, 0).unwrap(), 99);
+        // Characterize the existing fixed-point policies, outside this fix's scope.
+        assert_eq!(decimal_str_to_unscaled("1.235", 10, 2).unwrap(), 123);
+        assert_eq!(decimal_str_to_unscaled("100", 2, 0).unwrap(), 100);
+        assert_eq!(decimal_str_to_unscaled("1000", 10, -2).unwrap(), 1000);
+    }
+
+    #[test]
+    fn scientific_decimal_ipc_cells_match_fixed_point() {
+        use arrow::array::Decimal128Array;
+        let values = [
+            "1E+3",
+            "1E-7",
+            "-1E-7",
+            "-0E+3",
+            "99999999999.9999999",
+            "-99999999999.9999999",
+        ];
+        let rows: Vec<_> = values
+            .iter()
+            .map(|value| {
+                row(vec![Value::Decimal {
+                    value: value.to_string(),
+                    precision: None,
+                    scale: None,
+                }])
+            })
+            .collect();
+        let batch = read_batch(
+            &rows,
+            &schema(vec![DataType::Decimal {
+                precision: 18,
+                scale: 7,
+            }]),
+        );
+        let array = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Decimal128Array>()
+            .unwrap();
+        assert_eq!(
+            array.values().as_ref(),
+            &[
+                10_000_000_000,
+                1,
+                -1,
+                0,
+                999_999_999_999_999_999,
+                -999_999_999_999_999_999
+            ]
+        );
+    }
 
     fn struct_field(name: &str, data_type: DataType) -> crate::types::StructField {
         crate::types::StructField {
