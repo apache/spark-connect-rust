@@ -64,3 +64,68 @@ def prepare_int64_table(frame, schema):
         [pa.array(frame.iloc[:, i], type=pa.int64(), from_pandas=True) for i in range(width)],
         names=list(frame.columns),
     )
+
+
+def prepare_date_table(frame, schema):
+    """Accept only explicit date columns whose cells are exact dates or None.
+
+    Inspect every object before Arrow conversion: date subclasses can override
+    conversion hooks, and pandas treats several other objects as missing values.
+    Those cases must keep the existing row conversion and its error ordering.
+    """
+    from datetime import date
+
+    import numpy as np
+    import pandas as pd
+    from types import GetSetDescriptorType, WrapperDescriptorType
+
+    from pyspark._pyspark import DateType, StructField, StructType as NativeStructType
+    from pyspark.sql import types as sql_types
+
+    if type(frame) is not pd.DataFrame or type(schema) is not NativeStructType or len(frame) < 1000:
+        return None
+    # The row path reads native fields directly. Class attributes are mutable,
+    # so customized Python schema access must not select a different Arrow path.
+    for name, cls in (("DateType", DateType), ("StructField", StructField),
+                      ("StructType", NativeStructType)):
+        if (getattr(sql_types, name, None) is not cls
+                or cls.__getattribute__ is not object.__getattribute__
+                or any("__class__" in vars(base) for base in cls.__mro__ if base is not object)):
+            return None
+    for cls, names, descriptor_type in (
+        (NativeStructType, ("fields", "names"), GetSetDescriptorType),
+        (NativeStructType, ("__iter__",), WrapperDescriptorType),
+        (StructField, ("name", "dataType", "nullable", "metadata"), GetSetDescriptorType),
+    ):
+        for name in names:
+            descriptor = vars(cls).get(name)
+            if (type(descriptor) is not descriptor_type
+                    or descriptor.__objclass__ is not cls or descriptor.__name__ != name):
+                return None
+    width = len(frame.columns)
+    if not width or len(schema.fields) != width or not frame.columns.is_unique:
+        return None
+    if not all(type(name) is str and "\x00" not in name for name in frame.columns):
+        return None
+    if not all(
+        type(field) is StructField and type(field.dataType) is DateType
+        and type(field.name) is str and "\x00" not in field.name
+        for field in schema.fields
+    ) or len(set(schema.names)) != width:
+        return None
+    if not all(dtype == np.dtype("object") for dtype in frame.dtypes):
+        return None
+    columns = [frame.iloc[:, i] for i in range(width)]
+    for column, field in zip(columns, schema.fields):
+        # Arrow rejects nulls in non-nullable fields; let the row path retain
+        # its existing behavior for that input instead.
+        if not all(type(value) is date or (value is None and field.nullable)
+                   for value in column.to_numpy(copy=False)):
+            return None
+
+    import pyarrow as pa
+
+    return pa.Table.from_arrays(
+        [pa.array(column, type=pa.date32(), from_pandas=False) for column in columns],
+        names=schema.names,
+    )

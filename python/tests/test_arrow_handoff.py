@@ -848,3 +848,221 @@ def test_arrow_input_empty_skips_all_configs(protocol):
             spark.createDataFrame(table)
         assert state["config_requests"] == []
         assert state["uploads"] == 0
+
+
+# Exact built-in date columns reuse Arrow without materializing pandas rows.
+
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize("verify", [False, True])
+def test_date_columns_preserve_every_ipc_cell(protocol, monkeypatch, cached, verify):
+    from pyspark.sql.pandas.types import from_arrow_metadata
+
+    dates = [date.min, date.max, date(4, 2, 29), date(1600, 2, 29),
+             date(1900, 2, 28), date(1900, 3, 1), date(1969, 12, 31),
+             date(1970, 1, 1), date(2000, 2, 29), date(2100, 3, 1)] * 100
+    nullable = [None if i % 7 == 0 else value for i, value in enumerate(reversed(dates))]
+    expected = [dates, nullable, [None] * len(dates)]
+    frame = pd.DataFrame(dict(zip(["original", "b", "c"], expected)), dtype=object)
+    schema = T.StructType([
+        T.StructField("renamed.`day", T.DateType(), False, {"source": "date", "id": 3}),
+        T.StructField("nullable", T.DateType(), True, {"tag": [1, 2]}),
+        T.StructField("all_null", T.DateType()),
+    ])
+
+    def no_rows(*args, **kwargs):
+        raise AssertionError("date fast path must not materialize Python rows")
+
+    for method in ("astype", "notna", "to_numpy", "iterrows", "itertuples"):
+        monkeypatch.setattr(pd.DataFrame, method, no_rows)
+    monkeypatch.setattr(pd.DataFrame, "values", property(no_rows))
+    monkeypatch.setattr(pd.Series, "tolist", no_rows)
+    overrides = {"spark.sql.session.localRelationCacheThreshold": "1" if cached else "9999999"}
+    with _arrow_input_service(protocol, **overrides) as (spark, state):
+        df = spark.createDataFrame(frame, schema, verifySchema=verify)
+        df.toArrow()
+        table = state["input_tables"][0]
+        assert table.num_rows == len(dates)
+        assert table.schema.names == schema.names
+        epoch = date(1970, 1, 1)
+        for column, values, field in zip(table.columns, expected, schema.fields):
+            assert column.type == pa.date32()
+            # Independent expectations cover every date and validity bit in IPC.
+            assert column.cast(pa.int32()).to_pylist() == [
+                None if value is None else (value - epoch).days for value in values
+            ]
+            assert column.to_pylist() == values
+            actual_field = table.schema.field(field.name)
+            assert actual_field.nullable == field.nullable
+            assert from_arrow_metadata(actual_field.metadata) == (field.metadata or None)
+        assert bool(state["uploads"]) == cached
+
+
+@pytest.mark.parametrize("reason", [
+    "small", "empty", "inferred", "names", "ddl", "cast", "mixed_schema",
+    "width", "duplicate_input", "duplicate_schema", "input_nul", "schema_nul",
+    "input_number", "datetime", "timestamp", "nan", "pd_na", "nat", "mixed",
+    "nonnullable_null", "frame_subclass", "date_subclass", "late_unsupported",
+])
+def test_date_column_guard_preserves_row_fallback(reason):
+    from pyspark.sql._pandas_input import prepare_date_table
+
+    class Frame(pd.DataFrame):
+        pass
+
+    class Day(date):
+        def toordinal(self):
+            raise AssertionError("guard must not call conversion hooks")
+
+    values = [date(2020, 1, 1)] * 1000
+    frame = pd.DataFrame({"day": values}, dtype=object)
+    schema = T.StructType([T.StructField("day", T.DateType())])
+    if reason == "small":
+        frame = frame.iloc[:999]
+    elif reason == "empty":
+        frame = frame.iloc[:0]
+    elif reason in ("inferred", "names", "ddl", "cast"):
+        schema = {"inferred": None, "names": ["day"], "ddl": "day DATE",
+                  "cast": T.StructType([T.StructField("day", T.StringType())])}[reason]
+    elif reason == "mixed_schema":
+        frame["long"] = np.arange(1000)
+        schema.add("long", T.LongType())
+    elif reason == "width":
+        schema.add("extra", T.DateType())
+    elif reason in ("duplicate_input", "duplicate_schema"):
+        frame["other"] = values
+        schema.add("other", T.DateType())
+        if reason == "duplicate_input":
+            frame.columns = ["day", "day"]
+        else:
+            schema = T.StructType([T.StructField("day", T.DateType())] * 2)
+    elif reason in ("input_nul", "input_number"):
+        frame.columns = ["day\x00" if reason == "input_nul" else 1]
+    elif reason == "schema_nul":
+        schema = T.StructType([T.StructField("day\x00", T.DateType())])
+    elif reason == "frame_subclass":
+        frame = Frame(frame)
+    else:
+        value = {
+            "datetime": datetime(2020, 1, 1), "timestamp": pd.Timestamp("2020-01-01"),
+            "nan": float("nan"), "pd_na": pd.NA, "nat": pd.NaT, "mixed": "2020-01-01",
+            "nonnullable_null": None, "date_subclass": Day(2020, 1, 1),
+            "late_unsupported": Day(2020, 1, 1),
+        }[reason]
+        if reason == "nonnullable_null":
+            schema = T.StructType([T.StructField("day", T.DateType(), False)])
+        if reason == "late_unsupported":
+            frame["other"] = values
+            schema.add("other", T.DateType())
+        frame.iat[-1, -1] = value
+    assert prepare_date_table(frame, schema) is None
+
+
+@pytest.mark.parametrize("reason", ["date_subclass", "frame_subclass", "nan", "pd_na", "nat",
+                                    "nonnullable_null", "inferred", "ddl", "small"])
+def test_date_public_fallback_keeps_hooks(protocol, monkeypatch, reason):
+    calls = []
+
+    class Day(date):
+        def toordinal(self):
+            calls.append("toordinal")
+            return super().toordinal() + 7
+
+    class Frame(pd.DataFrame):
+        pass
+
+    values = [date(2020, 1, 1)] * (999 if reason == "small" else 1000)
+    if reason in ("nan", "pd_na", "nat", "nonnullable_null"):
+        values[-1] = {"nan": float("nan"), "pd_na": pd.NA, "nat": pd.NaT,
+                      "nonnullable_null": None}[reason]
+    elif reason == "date_subclass":
+        values[-1] = Day(2020, 1, 1)
+    frame_type = Frame if reason == "frame_subclass" else pd.DataFrame
+    frame = frame_type({"day": values}, dtype=object)
+    schema = T.StructType([T.StructField("day", T.DateType(), reason != "nonnullable_null")])
+    if reason == "inferred":
+        schema = None
+    elif reason == "ddl":
+        schema = "day DATE"
+    astype = pd.DataFrame.astype
+
+    def record_rows(self, *args, **kwargs):
+        calls.append("astype")
+        return astype(self, *args, **kwargs)
+
+    monkeypatch.setattr(pd.DataFrame, "astype", record_rows)
+    with _arrow_input_service(protocol) as (spark, state):
+        if reason == "nonnullable_null":
+            from pyspark.errors import PySparkRuntimeError
+
+            with pytest.raises(PySparkRuntimeError, match=(
+                "Column 'day' is declared as non-nullable but contains null values"
+            )):
+                spark.createDataFrame(frame, schema)
+            assert calls == ["astype"]
+            assert state["config_requests"] == []
+            return
+        spark.createDataFrame(frame, schema).toArrow()
+        assert "astype" in calls
+        actual = state["input_tables"][0].column(0).to_pylist()
+        expected = [date(2020, 1, 1)] * len(values)
+        if reason in ("nan", "pd_na", "nat", "nonnullable_null"):
+            expected[-1] = None
+        elif reason == "date_subclass":
+            assert calls.count("toordinal") == 1
+            expected[-1] = date(2020, 1, 8)
+        assert actual == expected
+
+
+@pytest.mark.parametrize("class_name,attribute", [
+    ("StructType", "names"), ("StructType", "fields"), ("StructType", "__iter__"),
+    ("StructField", "name"), ("StructField", "dataType"), ("StructField", "nullable"),
+    ("StructField", "metadata"),
+    ("StructType", "__getattribute__"), ("StructField", "__getattribute__"),
+    ("DateType", "__getattribute__"), ("StructType", "__class__"),
+    ("StructField", "__class__"), ("DateType", "__class__"),
+])
+@pytest.mark.parametrize("before_import", [False, True])
+def test_date_custom_schema_descriptors_keep_native_row_path(class_name, attribute, before_import):
+    import sys
+
+    script = r'''
+import sys
+import tempfile
+from datetime import date
+from pathlib import Path
+import pandas as pd
+from pyspark.sql import types as T
+
+frame = pd.DataFrame({"day": [date(2020, 1, 1)] * 1000}, dtype=object)
+schema = T.StructType([T.StructField("day", T.DateType(), True, {"source": "native"})])
+class_name, attribute, before_import = sys.argv[1:]
+if before_import == "False":
+    import pyspark.sql._pandas_input
+cls = getattr(T, class_name)
+if attribute == "__getattribute__":
+    replacement = lambda self, name: object.__getattribute__(self, name)
+elif attribute == "__iter__":
+    replacement = lambda self: iter([T.StructField("changed", T.DateType())])
+elif attribute == "__class__":
+    attribute = "__getattribute__"
+    replacement = lambda self, name: object if name == "__class__" else (
+        object.__getattribute__(self, name))
+else:
+    value = {"names": ["changed"], "fields": [], "name": "changed",
+             "dataType": T.DateType(), "nullable": False, "metadata": {"changed": True}}[attribute]
+    replacement = property(lambda self: value)
+setattr(cls, attribute, replacement)
+from tests.test_arrow_handoff import _arrow_input_service, protocol
+class Factory:
+    def mktemp(self, name):
+        return Path(tempfile.mkdtemp(prefix=name))
+with _arrow_input_service(protocol.__wrapped__(Factory())) as (spark, state):
+    spark.createDataFrame(frame, schema).toArrow()
+    assert state["config_requests"] == [], state["config_requests"]
+    table = state["input_tables"][0]
+    assert table.schema.names == ["day"], table.schema
+    assert table.column(0).to_pylist() == [date(2020, 1, 1)] * 1000
+'''
+    result = subprocess.run([sys.executable, "-c", script, class_name, attribute,
+                             str(before_import)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr

@@ -3013,11 +3013,32 @@ def _exact_date_capture_server(connection):
         context.abort(grpc.StatusCode.INVALID_ARGUMENT, "captured date input")
         yield b""  # Make this a streaming handler.
 
+    def _exact_date_config(request, context):
+        from google.protobuf.internal.encoder import _VarintBytes
+
+        def field(tag, value):
+            return bytes([tag]) + _VarintBytes(len(value)) + value
+
+        values = {
+            "spark.sql.timestampType": "TIMESTAMP_LTZ",
+            "spark.sql.session.timeZone": "UTC",
+            "spark.sql.execution.arrow.useLargeVarTypes": "false",
+            "spark.sql.session.localRelationCacheThreshold": "1048576",
+            "spark.sql.session.localRelationSizeLimit": str(3 * 1024**3),
+            "spark.sql.session.localRelationChunkSizeRows": "10000",
+            "spark.sql.session.localRelationChunkSizeBytes": str(16 * 1024**2),
+            "spark.sql.session.localRelationBatchOfChunksSizeBytes": str(1024**3),
+        }
+        # ConfigResponse.pairs=2; KeyValue.key=1, value=2.
+        return b"".join(field(18, field(10, key.encode()) + field(18, value.encode()))
+                        for key, value in values.items())
+
     with ThreadPoolExecutor(max_workers=2) as executor:
         server = grpc.server(executor)
         server.add_generic_rpc_handlers((grpc.method_handlers_generic_handler(
             "spark.connect.SparkConnectService", {
                 "ExecutePlan": grpc.unary_stream_rpc_method_handler(_exact_date_execute),
+                "Config": grpc.unary_unary_rpc_method_handler(_exact_date_config),
             }),))
         port = server.add_insecure_port("127.0.0.1:0")
         server.start()
