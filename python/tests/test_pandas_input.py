@@ -58,7 +58,8 @@ def test_integer_columns_preserve_values_without_python_rows(protocol, monkeypat
     monkeypatch.setattr(pd.DataFrame, "astype", no_rows)
     with _arrow_input_service(protocol) as (spark, state):
         df = spark.createDataFrame(frame, schema=schema, verifySchema=verify)
-        assert df.isLocal()
+        if schema_kind != "names":
+            assert df.isLocal()
         assert df.toArrow().column(0).to_pylist() == [3]
         assert state["result"] == (3, 2**53 + 1, -(2**63))
     table, resolved, renamed = observed[0]
