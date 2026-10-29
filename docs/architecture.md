@@ -111,6 +111,13 @@ Batch schema consistency is validated before export. Field names or timezones
 containing NUL use IPC over the collected batches, without another RPC. Empty
 batch vectors retain the empty-schema behavior.
 
+`createDataFrame(pyarrow_table)` uses the reverse boundary: Spark's schema and
+timestamp conversion helpers normalize the table, then arrow-rs imports its
+`RecordBatchReader` through the C Stream interface. The Rust core serializes
+those batches to IPC for the local relation sent to Spark. No Python rows are
+materialized; casts, buffer alignment, and IPC serialization may still copy.
+Empty tables require an explicit schema, matching PySpark Connect.
+
 ## Two front-ends, one core
 
 === "Rust (native)"

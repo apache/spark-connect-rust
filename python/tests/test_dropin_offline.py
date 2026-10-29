@@ -3085,3 +3085,111 @@ def test_schema_cache_metadata_wait_releases_gil(mock_connect, accessor):
     else:
         assert result == [("id", "bigint")]
     assert service.calls == 1
+
+
+@pytest.mark.parametrize("names,expected", [(None, None), (["a"], ["a", "_2"]), ([], ["_1", "_2"])])
+def test_arrow_input_normalization(names, expected):
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.sql._arrow_input import prepare_table
+
+    table = pa.table({"x": pa.chunked_array([[1], [2]]), "y": ["a", None]})
+    normalized, schema, columns = prepare_table(table, names, "TIMESTAMP_LTZ", "UTC", "false")
+    assert normalized.equals(table)
+    assert schema.names == ["x", "y"]
+    assert columns == expected
+
+
+def test_arrow_input_empty_and_width_errors():
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql._arrow_input import prepare_table
+
+    empty = pa.table({"x": pa.array([], type=pa.int64())})
+    with pytest.raises(PySparkValueError, match="CANNOT_INFER_EMPTY_SCHEMA"):
+        prepare_table(empty, None, None, None, None)
+    schema = T.StructType([T.StructField("x", T.LongType())])
+    assert prepare_table(empty, schema, None, None, None)[1] is schema
+    with pytest.raises(PySparkValueError, match="AXIS_LENGTH_MISMATCH"):
+        prepare_table(pa.table({"x": [1]}), ["a", "b"], "TIMESTAMP_LTZ", "UTC", "false")
+
+
+@pytest.mark.parametrize("timestamp_type,expected", [("TIMESTAMP_NTZ", T.TimestampNTZType), ("TIMESTAMP_LTZ", T.TimestampType)])
+def test_arrow_input_timestamps(timestamp_type, expected):
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.sql._arrow_input import prepare_table
+
+    table = pa.table({"t": pa.array([1001], type=pa.timestamp("ns"))})
+    normalized, schema, _ = prepare_table(table, None, timestamp_type, "UTC", "false")
+    assert isinstance(schema.fields[0].dataType, expected)
+    assert normalized.column(0).type.unit == "us"
+    assert normalized.column(0).cast(pa.int64()).to_pylist() == [1]
+
+
+def test_arrow_input_explicit_cast_and_nested_values():
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.sql._arrow_input import prepare_table
+
+    table = pa.table({"x": [1, 2], "nested": [[1, None], []]})
+    schema = T.StructType([T.StructField("x", T.IntegerType()),
+                           T.StructField("nested", T.ArrayType(T.LongType()))])
+    normalized, result, _ = prepare_table(table, schema, "TIMESTAMP_LTZ", "UTC", "false")
+    assert result is schema
+    assert normalized.column(0).type == pa.int32()
+    assert normalized.to_pylist() == table.to_pylist()
+    with pytest.raises(pa.ArrowInvalid):
+        prepare_table(pa.table({"x": [2**40]}), T.StructType([T.StructField("x", T.IntegerType())]),
+                      "TIMESTAMP_LTZ", "UTC", "false")
+
+
+def test_arrow_input_roundtrip_live_server():
+    """Run explicitly with SPARK_REMOTE; also checks imported buffers own their lifetime."""
+    import gc
+    import os
+    pa = pytest.importorskip("pyarrow")
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("requires SPARK_REMOTE")
+    from pyspark.sql import SparkSession
+
+    spark = SparkSession.builder.remote(remote).getOrCreate()
+    try:
+        table = pa.table({"x": pa.chunked_array([[1, 2], [3]]), "nested": [[1], None, []]})
+        df = spark.createDataFrame(table, ["id", "items"])
+        del table
+        gc.collect()
+        assert df.columns == ["id", "items"]
+        assert [(r[0], r[1]) for r in df.collect()] == [(1, [1]), (2, None), (3, [])]
+        empty = spark.createDataFrame(pa.table({"x": pa.array([], type=pa.int64())}),
+                                     T.StructType([T.StructField("x", T.LongType())]))
+        assert empty.count() == 0
+        assert empty.columns == ["x"]
+    finally:
+        spark.stop()
+
+
+@pytest.mark.parametrize("kind", ["slice", "dictionary", "decimal", "null", "struct", "nul"])
+def test_arrow_input_types_live_server(kind):
+    import os
+    from decimal import Decimal
+    pa = pytest.importorskip("pyarrow")
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("requires SPARK_REMOTE")
+    from pyspark.sql import SparkSession
+
+    tables = {
+        "slice": pa.table({"x": pa.array([0, 1, 2, 3]).slice(1, 2)}),
+        "dictionary": pa.table({"x": pa.array(["a", None, "b", "a"]).dictionary_encode()}),
+        "decimal": pa.table({"x": pa.array([Decimal("1.23"), None], type=pa.decimal128(10, 2))}),
+        "null": pa.table({"x": pa.nulls(2)}),
+        "struct": pa.table({"x": [{"a": [1, None]}, None]}),
+        "nul": pa.table({"a\0b": [1, 2]}),
+    }
+    spark = SparkSession.builder.remote(remote).getOrCreate()
+    try:
+        table = tables[kind]
+        df = spark.createDataFrame(table)
+        assert df.columns == table.column_names
+        assert df.toArrow().to_pylist() == table.to_pylist()
+    finally:
+        spark.stop()
