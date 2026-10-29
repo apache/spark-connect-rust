@@ -967,6 +967,7 @@ fn value_to_datatype(v: &Value) -> DataType {
 /// Build columns only for exact tuples of exact signed integers and None.
 /// Unsupported containers, values, overflow, and widths use the existing row path,
 /// preserving its conversion/error ordering (including integer subclass behavior).
+#[inline(never)]
 fn exact_long_tuple_columns(
     data: &Bound<'_, PyList>,
     fields: &[StructField],
