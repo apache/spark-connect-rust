@@ -500,7 +500,6 @@ def json_tuple(col, *fields):
 # import so they take precedence over any generic wrapper.
 # ---------------------------------------------------------------------------
 import inspect as _inspect
-from pyspark.errors import PySparkValueError as _PySparkValueError
 
 _named_lambda_variable = _functions.pyfunc_named_lambda_variable
 _lambda_function = _functions.pyfunc_lambda_function
@@ -526,12 +525,16 @@ def _get_lambda_parameters(f):
         _inspect.Parameter.POSITIONAL_ONLY,
     }
     if not (1 <= len(parameters) <= 3):
-        raise _PySparkValueError(
+        from pyspark.errors import PySparkValueError
+
+        raise PySparkValueError(
             errorClass="WRONG_NUM_ARGS_FOR_HIGHER_ORDER_FUNCTION",
             messageParameters={"func_name": f.__name__, "num_args": str(len(parameters))},
         )
     if not all(p.kind in supported_parameter_types for p in parameters):
-        raise _PySparkValueError(
+        from pyspark.errors import PySparkValueError
+
+        raise PySparkValueError(
             errorClass="UNSUPPORTED_PARAM_TYPE_FOR_HIGHER_ORDER_FUNCTION",
             messageParameters={"func_name": f.__name__},
         )
@@ -545,7 +548,9 @@ def _create_lambda(f):
     arg_cols = [_named_lambda_variable(v) for v in var_names]
     result = f(*arg_cols)
     if not isinstance(result, _pyspark.Column):
-        raise _PySparkValueError(
+        from pyspark.errors import PySparkValueError
+
+        raise PySparkValueError(
             errorClass="HIGHER_ORDER_FUNCTION_SHOULD_RETURN_COLUMN",
             messageParameters={"func_name": f.__name__, "return_type": type(result).__name__},
         )
