@@ -4900,6 +4900,94 @@ def test_exact_string_subclass_uses_generic_conversion():
             "data_type1": "StructType", "data_type2": data_type}
 
 
+# Higher-order functions: fresh-process lazy error imports.
+
+def lazy_function_run_fresh(source):
+    import subprocess
+    import sys
+    import textwrap
+
+    result = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(source)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_lazy_function_valid_calls_do_not_add_error_imports():
+    lazy_function_run_fresh("""
+        import builtins
+        import sys
+        import pyspark
+
+        # Current package initialization imports error classes for SQLContext.
+        # Audit the extra SQL-functions work instead of requiring the entire
+        # error package to be absent after importing pyspark.
+        errors_before = {name: module for name, module in sys.modules.items()
+                         if name == "pyspark.errors" or name.startswith("pyspark.errors.")}
+        original_import = builtins.__import__
+
+        def reject_error_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "pyspark.errors" or name.startswith("pyspark.errors."):
+                raise AssertionError("valid SQL functions imported error classes")
+            return original_import(name, globals, locals, fromlist, level)
+
+        builtins.__import__ = reject_error_import
+        try:
+            from pyspark.sql import functions as F
+            assert isinstance(F.col("a") + F.lit(1), pyspark.sql.Column)
+            for f in (lambda x: x + 1, lambda x, i: x + i,
+                      lambda x, /: x + 1, lambda x, i=0: x + i):
+                assert isinstance(F.transform("a", f), pyspark.sql.Column)
+            assert isinstance(F.aggregate("a", F.lit(0), lambda a, x: a + x,
+                                          lambda x: x + 1), pyspark.sql.Column)
+            assert isinstance(F.transform("a", lambda x: F.transform(x, lambda y: y + 1)),
+                              pyspark.sql.Column)
+        finally:
+            builtins.__import__ = original_import
+        errors_after = {name: module for name, module in sys.modules.items()
+                        if name == "pyspark.errors" or name.startswith("pyspark.errors.")}
+        assert errors_after == errors_before
+    """)
+
+
+@pytest.mark.parametrize("definition,condition,parameters,message", [
+    ("def invalid(): return 1", "WRONG_NUM_ARGS_FOR_HIGHER_ORDER_FUNCTION",
+     {"func_name": "invalid", "num_args": "0"},
+     "Function `invalid` should take between 1 and 3 arguments, but the provided function takes 0."),
+    ("def invalid(a, b, c, d): return a", "WRONG_NUM_ARGS_FOR_HIGHER_ORDER_FUNCTION",
+     {"func_name": "invalid", "num_args": "4"},
+     "Function `invalid` should take between 1 and 3 arguments, but the provided function takes 4."),
+    ("def invalid(*x): return x", "UNSUPPORTED_PARAM_TYPE_FOR_HIGHER_ORDER_FUNCTION",
+     {"func_name": "invalid"},
+     "Function `invalid` should use only POSITIONAL or POSITIONAL OR KEYWORD arguments."),
+    ("def invalid(*, x): return x", "UNSUPPORTED_PARAM_TYPE_FOR_HIGHER_ORDER_FUNCTION",
+     {"func_name": "invalid"},
+     "Function `invalid` should use only POSITIONAL or POSITIONAL OR KEYWORD arguments."),
+    ("def invalid(**x): return x", "UNSUPPORTED_PARAM_TYPE_FOR_HIGHER_ORDER_FUNCTION",
+     {"func_name": "invalid"},
+     "Function `invalid` should use only POSITIONAL or POSITIONAL OR KEYWORD arguments."),
+    ("def invalid(x): return 123", "HIGHER_ORDER_FUNCTION_SHOULD_RETURN_COLUMN",
+     {"func_name": "invalid", "return_type": "int"},
+     "Function `invalid` should return Column, got int."),
+])
+def test_lazy_function_invalid_lambda_preserves_canonical_error(definition, condition, parameters, message):
+    lazy_function_run_fresh(f"""
+        from pyspark.sql import functions as F
+        {definition}
+        try:
+            F.transform("a", invalid)
+        except Exception as error:
+            from pyspark.errors import PySparkValueError
+            assert type(error) is PySparkValueError
+            assert error.getCondition() == {condition!r}
+            assert error.getMessageParameters() == {parameters!r}
+            assert str(error) == {('[' + condition + '] ' + message)!r}
+        else:
+            raise AssertionError("invalid callable was accepted")
+    """)
+
+
 # --------------------------------------------------------------------------- printSchema
 
 
