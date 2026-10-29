@@ -108,7 +108,8 @@ results survive transient disconnects.
 boxed `RecordBatchReader`. Compatible value and offset buffers are shared;
 network decoding, sliced validity bitmaps, and pandas conversion may still copy.
 Batch schema consistency is validated before export. Field names or timezones
-containing NUL use IPC over the collected batches, without another RPC. Empty batch vectors retain the empty-schema behavior.
+containing NUL use IPC over the collected batches, without another RPC. Empty
+batch vectors retain the empty-schema behavior.
 
 ## Two front-ends, one core
 

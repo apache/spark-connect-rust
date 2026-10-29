@@ -22,6 +22,7 @@ APIs. Server-side Python addresses cannot prove Rust-to-Python buffer sharing.
 
 import gc
 import os
+import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -40,9 +41,12 @@ from pyspark.sql import SparkSession
 @pytest.fixture(scope="module")
 def protocol(tmp_path_factory):
     """Compile the repository protocol instead of hard-coding protobuf field numbers."""
+    protoc = shutil.which(os.environ.get("PROTOC", "protoc"))
+    if protoc is None:
+        pytest.skip("Arrow handoff tests require protoc; install it or set PROTOC")
     proto_root = Path(__file__).resolve().parents[2] / "crates/spark-connect-proto/proto"
     descriptor = tmp_path_factory.mktemp("connect-proto") / "connect.pb"
-    command = [os.environ.get("PROTOC", "protoc"), f"-I{proto_root}"]
+    command = [protoc, f"-I{proto_root}"]
     if include := os.environ.get("PROTOC_INCLUDE"):
         command.append(f"-I{include}")
     subprocess.run(

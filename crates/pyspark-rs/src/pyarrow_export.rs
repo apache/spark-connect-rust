@@ -50,6 +50,9 @@ pub(crate) fn record_batches_to_pyarrow(
     if schema.fields().iter().any(|field| field_needs_ipc(field)) {
         // Arrow 58.3 panics when exporting NUL-containing C strings. Reuse
         // the collected batches for IPC without executing the request again.
+        // CString::new(...).unwrap() in FFI_ArrowSchema::try_new / with_name:
+        // https://github.com/apache/arrow-rs/blob/58.3.0/arrow-schema/src/ffi.rs#L148
+        // https://github.com/apache/arrow-rs/blob/58.3.0/arrow-schema/src/ffi.rs#L174
         let bytes = py
             .detach(|| -> arrow::error::Result<Vec<u8>> {
                 let mut bytes = Vec::new();
