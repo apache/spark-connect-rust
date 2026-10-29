@@ -350,7 +350,7 @@ def test_malformed_ipc_is_reported(protocol):
 
 
 @contextmanager
-def _arrow_input_service(protocol, *, upload_error=None, capture_tables=False, **overrides):
+def _arrow_input_service(protocol, *, upload_error=None, capture_tables=False, config_error=False, **overrides):
     """Resolve cache artifacts at a mock service with a 4 MiB receive limit."""
     import hashlib
     import zlib
@@ -366,11 +366,14 @@ def _arrow_input_service(protocol, *, upload_error=None, capture_tables=False, *
         "spark.sql.session.localRelationBatchOfChunksSizeBytes": str(1024**3),
     }
     config.update(overrides)
-    state = {"cache": {}, "uploads": 0, "relations": [], "message_sizes": [], "tables": []}
+    state = {"cache": {}, "uploads": 0, "relations": [], "message_sizes": [], "tables": [], "config_requests": []}
     server_id = "00000000-0000-0000-0000-000000000001"
 
     def configure(raw, context):
         request = protocol("ConfigRequest").FromString(raw)
+        state["config_requests"].append(list(request.operation.get.keys))
+        if config_error:
+            context.abort(grpc.StatusCode.UNAVAILABLE, "configuration unavailable")
         return protocol("ConfigResponse", session_id=request.session_id,
                         pairs=[dict(key=k, value=config[k]) for k in request.operation.get.keys]
                         ).SerializeToString()
@@ -654,7 +657,7 @@ def test_pandas_timestamp_non_nullable_schema(protocol, has_null):
     schema = T.StructType([T.StructField("a", T.TimestampType(), False)])
     with _arrow_input_service(protocol, capture_tables=True) as (spark, state):
         if has_null:
-            with pytest.raises(ValueError, match="null"):
+            with pytest.raises(RuntimeError, match="null"):
                 spark.createDataFrame(frame, schema)
             assert not state["relations"]
         else:
@@ -672,3 +675,210 @@ def test_pandas_timestamp_mixed_and_arrow_dtypes_fallback():
     frame = pd.DataFrame({"a": pd.to_datetime([0], unit="us"), "b": [1]})
     schema.add("b", T.LongType())
     assert timestamp_columns(frame, schema) is None
+
+
+@pytest.mark.parametrize("config_error", [False, True])
+@pytest.mark.parametrize("verify", [False, True])
+def test_timestamp_nonnullable_nat_keeps_local_error_before_config(protocol, config_error, verify):
+    from pyspark.sql import types as T
+    from pyspark.sql._pandas_input import timestamp_columns
+
+    frame = pd.DataFrame({"a": pd.to_datetime([0, None], utc=True)})
+    schema = T.StructType([T.StructField("renamed", T.TimestampType(), False)])
+    assert timestamp_columns(frame, schema) is None
+    with _arrow_input_service(protocol, capture_tables=True, config_error=config_error) as (spark, state):
+        with pytest.raises(RuntimeError, match="null"):
+            spark.createDataFrame(frame, schema, verifySchema=verify)
+        assert state["config_requests"] == []
+        assert state["relations"] == []
+        assert state["uploads"] == 0
+
+
+@pytest.mark.parametrize("custom", ["dtype", "array"])
+def test_timestamp_custom_datetime_array_keeps_row_values(protocol, custom):
+    from pandas.core.arrays.datetimes import DatetimeArray
+    from pandas.core.dtypes.dtypes import DatetimeTZDtype
+    from pyspark.sql import types as T
+    from pyspark.sql._pandas_input import timestamp_columns
+
+    arrow_calls = []
+
+    class CustomDtype(DatetimeTZDtype):
+        pass
+
+    class CustomArray(DatetimeArray):
+        @property
+        def dtype(self):
+            return CustomDtype(unit="ns", tz="UTC") if custom == "dtype" else super().dtype
+
+        def __arrow_array__(self, type=None):
+            arrow_calls.append("arrow")
+            return pa.array([-7000000] * len(self), type=pa.int64()).cast(type)
+
+    ordinary = pd.to_datetime([0, 1000000, None, -1000000], unit="ns", utc=True).array
+    array = CustomArray._simple_new(ordinary._ndarray, dtype=ordinary.dtype)
+    frame = pd.DataFrame({"a": pd.Series(array, copy=False)})
+    assert type(frame["a"].array) is CustomArray
+    schema = T.StructType([T.StructField("a", T.TimestampType(), True, {"source": "custom"})])
+    assert timestamp_columns(frame, schema) is None
+    with _arrow_input_service(protocol, capture_tables=True) as (spark, state):
+        spark.createDataFrame(frame, schema).toArrow()
+        assert state["config_requests"] == []
+        table = pa.concat_tables(state["tables"])
+        assert table.column(0).cast(pa.int64()).to_pylist() == [0, 1000, None, -1000]
+        logical = __import__("json").loads(state["relations"][0].local_relation.schema)
+        assert logical["fields"][0]["metadata"] == {"source": "custom"}
+    assert arrow_calls == []
+
+
+def test_timestamp_rebound_dataframe_and_duplicate_names_keep_fallback(monkeypatch):
+    from pyspark.sql import types as T
+    from pyspark.sql._pandas_input import timestamp_columns
+
+    class CustomFrame(pd.DataFrame):
+        pass
+
+    frame = CustomFrame({"a": pd.to_datetime([0], utc=True)})
+    schema = T.StructType([T.StructField("a", T.TimestampType())])
+    monkeypatch.setattr(pd, "DataFrame", CustomFrame)
+    assert timestamp_columns(frame, schema) is None
+    from pandas.core.frame import DataFrame
+    frame = DataFrame({"a": pd.to_datetime([0], utc=True), "b": pd.to_datetime([1], utc=True)})
+    monkeypatch.setattr(pd, "DataFrame", DataFrame)
+    schema.add("a", T.TimestampType())
+    assert timestamp_columns(frame, schema) is None
+
+
+def _timestamp_guard_process(mode, argument, before_import=False):
+    import subprocess
+    import sys
+
+    if mode == "captured_alias":
+        import pyspark.sql._arrow_input as importer
+        if not hasattr(importer, "to_arrow_schema"):
+            pytest.skip("this importer resolves converters locally")
+    script = r'''
+import importlib
+import importlib.util
+import json
+import sys
+import tempfile
+from pathlib import Path
+import pandas as pd
+from pyspark.sql import types as T
+from pyspark import _pyspark as native
+spec = importlib.util.spec_from_file_location("timestamp_guard_capture", sys.argv[4])
+capture = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = capture
+spec.loader.exec_module(capture)
+frame = pd.DataFrame({"a": pd.to_datetime([0, 1000000, None, -1000000], unit="ns", utc=True)})
+schema = T.StructType([T.StructField("renamed", T.TimestampType(), True, {"source": "native"})])
+mode, argument, before_import = sys.argv[1:4]
+if before_import == "True":
+    sys.modules.pop("pyspark.sql._pandas_input", None)
+if mode == "descriptor":
+    class_name, attribute = argument.split(":")
+    cls = getattr(native, class_name)
+    if attribute == "alias":
+        setattr(T, class_name, object)
+    elif attribute == "__getattribute__":
+        setattr(cls, attribute, lambda self, name: object.__getattribute__(self, name))
+    elif attribute == "__class__":
+        setattr(cls, "__getattribute__", lambda self, name: (
+            object if name == "__class__" else object.__getattribute__(self, name)))
+    elif attribute == "__iter__":
+        setattr(cls, attribute, lambda self: iter([T.StructField("changed", T.BooleanType())]))
+    else:
+        value = {"names": ["changed"], "fields": [], "name": "changed",
+                 "dataType": T.BooleanType(), "nullable": False,
+                 "metadata": {"changed": True}}[attribute]
+        setattr(cls, attribute, property(lambda self: value))
+elif mode in ("public_alias", "converter_alias", "captured_alias"):
+    replacement = native.BooleanType if argument == "TimestampType" else native.TimestampType
+    if mode == "public_alias":
+        sys.modules.pop("pyspark.sql.pandas.types", None)
+        setattr(T, argument, replacement)
+    else:
+        converter = importlib.import_module("pyspark.sql.pandas.types")
+        if mode == "captured_alias":
+            importer = importlib.import_module("pyspark.sql._arrow_input")
+        setattr(converter, argument, replacement)
+        if mode == "captured_alias":
+            sys.modules.pop("pyspark.sql.pandas.types")
+            assert importlib.import_module("pyspark.sql.pandas.types") is not converter
+elif mode == "importer_alias":
+    import pyspark.sql._arrow_input as importer
+    importer.StructType = None
+else:
+    raise AssertionError(mode)
+class Factory:
+    def mktemp(self, name):
+        return Path(tempfile.mkdtemp(prefix=name))
+with capture._arrow_input_service(capture.protocol.__wrapped__(Factory()), capture_tables=True) as (spark, state):
+    spark.createDataFrame(frame, schema).toArrow()
+    assert state["config_requests"] == [], state["config_requests"]
+    table = capture.pa.concat_tables(state["tables"])
+    assert table.column_names == ["renamed"]
+    assert table.column(0).cast(capture.pa.int64()).to_pylist() == [0, 1000, None, -1000]
+    logical = json.loads(state["relations"][0].local_relation.schema)
+    assert logical["fields"][0]["metadata"] == {"source": "native"}
+'''
+    result = subprocess.run([sys.executable, "-c", script, mode, argument,
+                             str(before_import), __file__],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("class_name,attribute", [
+    ("StructType", "fields"), ("StructType", "names"), ("StructType", "__iter__"),
+    ("StructField", "name"), ("StructField", "dataType"), ("StructField", "nullable"),
+    ("StructField", "metadata"), ("StructType", "__getattribute__"),
+    ("StructField", "__getattribute__"), ("TimestampType", "__getattribute__"),
+    ("StructType", "__class__"), ("StructField", "__class__"), ("TimestampType", "__class__"),
+    ("StructType", "alias"), ("StructField", "alias"), ("TimestampType", "alias"),
+])
+@pytest.mark.parametrize("before_import", [False, True])
+def test_timestamp_custom_schema_descriptors_keep_row_path(class_name, attribute, before_import):
+    _timestamp_guard_process("descriptor", f"{class_name}:{attribute}", before_import)
+
+
+@pytest.mark.parametrize("class_name", ["BooleanType", "ByteType", "ShortType", "IntegerType",
+                                        "LongType", "FloatType", "DoubleType", "DecimalType",
+                                        "StringType", "BinaryType", "DateType", "TimestampType"])
+@pytest.mark.parametrize("mode", ["public_alias", "converter_alias", "captured_alias"])
+def test_timestamp_rebound_converter_aliases_keep_row_path(class_name, mode):
+    _timestamp_guard_process(mode, class_name)
+
+
+def test_timestamp_rebound_importer_schema_alias_keeps_row_path():
+    _timestamp_guard_process("importer_alias", "none")
+
+
+def test_timestamp_warm_local_converter_imports_keep_columnar_route(protocol, monkeypatch):
+    import types
+    import sys
+    import pyspark.sql._arrow_input as importer
+    from pyspark.sql import types as T
+    from pyspark.sql._pandas_input import timestamp_columns
+
+    original = importer.prepare_table
+    substitute = types.ModuleType(importer.__name__)
+    substitute.StructType = T.StructType
+
+    def prepare_table(table, schema, *configs):
+        from pyspark.sql.pandas.types import to_arrow_schema
+        assert to_arrow_schema(schema, timezone="UTC").names == table.column_names
+        return original(table, schema, *configs)
+
+    substitute.prepare_table = prepare_table
+    frame = pd.DataFrame({"a": pd.to_datetime([0, 1000000, None], unit="ns", utc=True)})
+    schema = T.StructType([T.StructField("renamed", T.TimestampType())])
+    with _arrow_input_service(protocol, capture_tables=True) as (spark, state):
+        spark.createDataFrame(pa.table({"warm": [1]})).toArrow()
+        monkeypatch.setitem(sys.modules, importer.__name__, substitute)
+        assert timestamp_columns(frame, schema) is not None
+        monkeypatch.setattr(pd.DataFrame, "astype", lambda *a, **k: pytest.fail("row conversion"))
+        spark.createDataFrame(frame, schema).toArrow()
+        table = state["tables"][-1]
+        assert table.column_names == ["renamed"]
+        assert table.column(0).cast(pa.int64()).to_pylist() == [0, 1000, None]

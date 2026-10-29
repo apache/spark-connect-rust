@@ -73,30 +73,101 @@ def timestamp_columns(frame, schema):
     units and submicrosecond truncation retain the row path. Check the integer
     buffers separately so NaT's sentinel never participates in alignment tests.
     """
+    import sys
+    from types import GetSetDescriptorType, WrapperDescriptorType
+
     import numpy as np
     import pandas as pd
-    from pyspark.sql.types import TimestampType
+    try:
+        from pandas.core.arrays.datetimes import DatetimeArray
+        from pandas.core.dtypes.dtypes import DatetimeTZDtype
+        from pandas.core.frame import DataFrame
+        from pandas.core.series import Series
+    except ImportError:
+        return None
+    from pyspark._pyspark import (
+        BooleanType, ByteType, ShortType, IntegerType, LongType, FloatType,
+        DoubleType, DecimalType, StringType, BinaryType, DateType, TimestampType,
+        StructField, StructType as NativeStructType,
+    )
+    from pyspark.sql import types as sql_types
 
-    if not isinstance(schema, StructType) or not len(frame) or not len(frame.columns):
+    if (pd.DataFrame is not DataFrame or type(frame) is not DataFrame
+            or type(schema) is not NativeStructType or not len(frame)):
         return None
-    if len(schema.fields) != len(frame.columns) or not frame.columns.is_unique:
+    # Native row conversion reads the native schema directly. The Arrow importer
+    # also consults Python descriptors and public or captured converter aliases.
+    if sys.modules.get("pyspark.sql.types") is not sql_types:
         return None
-    if not all(isinstance(name, str) and "\x00" not in name for name in frame.columns):
+    importer = sys.modules.get("pyspark.sql._arrow_input")
+    if importer is not None and getattr(importer, "StructType", None) is not NativeStructType:
         return None
-    if not all(type(field.dataType) is TimestampType and "\x00" not in field.name
-               for field in schema.fields):
+    converter = sys.modules.get("pyspark.sql.pandas.types")
+    namespaces = [vars(sql_types)]
+    if converter is not None:
+        namespaces.append(vars(converter))
+    if importer is not None:
+        for name in ("from_arrow_schema", "to_arrow_schema",
+                     "_check_arrow_table_timestamps_localize"):
+            # Newer importers resolve converters locally within prepare_table.
+            if name not in vars(importer):
+                continue
+            namespace = getattr(getattr(importer, name, None), "__globals__", None)
+            if type(namespace) is not dict:
+                return None
+            namespaces.append(namespace)
+    for name, cls in (
+        ("BooleanType", BooleanType), ("ByteType", ByteType), ("ShortType", ShortType),
+        ("IntegerType", IntegerType), ("LongType", LongType), ("FloatType", FloatType),
+        ("DoubleType", DoubleType), ("DecimalType", DecimalType), ("StringType", StringType),
+        ("BinaryType", BinaryType), ("DateType", DateType), ("TimestampType", TimestampType),
+        ("StructField", StructField), ("StructType", NativeStructType),
+    ):
+        if any(namespace.get(name) is not cls for namespace in namespaces):
+            return None
+    for cls in (TimestampType, StructField, NativeStructType):
+        if (cls.__getattribute__ is not object.__getattribute__
+                or any("__class__" in vars(base) for base in cls.__mro__ if base is not object)):
+            return None
+    for cls, names, descriptor_type in (
+        (NativeStructType, ("fields", "names"), GetSetDescriptorType),
+        (NativeStructType, ("__iter__",), WrapperDescriptorType),
+        (StructField, ("name", "dataType", "nullable", "metadata"), GetSetDescriptorType),
+    ):
+        for name in names:
+            descriptor = vars(cls).get(name)
+            if (type(descriptor) is not descriptor_type
+                    or descriptor.__objclass__ is not cls or descriptor.__name__ != name):
+                return None
+
+    width = len(frame.columns)
+    fields = schema.fields
+    if not width or len(fields) != width or not frame.columns.is_unique:
+        return None
+    if not all(type(name) is str and "\x00" not in name for name in frame.columns):
+        return None
+    if not all(type(field) is StructField and type(field.dataType) is TimestampType
+               and type(field.name) is str and "\x00" not in field.name for field in fields):
+        return None
+    if len(set(schema.names)) != width:
         return None
     columns = []
+    datetime_dtype = type(np.dtype("datetime64[ns]"))
     for i, dtype in enumerate(frame.dtypes):
-        if isinstance(dtype, pd.DatetimeTZDtype):
+        if type(dtype) is DatetimeTZDtype:
             unit = dtype.unit
-        elif isinstance(dtype, np.dtype) and dtype.kind == "M":
+        elif type(dtype) is datetime_dtype and dtype.kind == "M":
             unit = np.datetime_data(dtype)[0]
         else:
             return None
         if unit not in ("ns", "us"):
             return None
         column = frame.iloc[:, i]
+        if type(column) is not Series or type(column.array) is not DatetimeArray:
+            return None
+        # Preserve the row path's local null error before any timezone Config RPC.
+        if not fields[i].nullable and column.hasnans:
+            return None
         if unit == "ns" and np.any(column.array.asi8[column.notna()] % 1000):
             return None
         columns.append(column)
@@ -112,10 +183,10 @@ def prepare_timestamp_table(columns, schema, timezone):
     """
     import os
     import time
-    import pandas as pd
+    from pandas.core.dtypes.dtypes import DatetimeTZDtype
     import pyarrow as pa
 
-    if any(not isinstance(column.dtype, pd.DatetimeTZDtype) for column in columns):
+    if any(type(column.dtype) is not DatetimeTZDtype for column in columns):
         if (timezone != "UTC" or os.environ.get("TZ") != "UTC"
                 or time.tzname != ("UTC", "UTC")):
             return None
