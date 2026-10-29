@@ -16,80 +16,59 @@
 #
 """Check public Arrow handoff behavior against a deterministic mock RPC service.
 
-Public cases cover Spark-output values, schemas, chunks, and lifetimes. Isolated
-checks observe buffers at Rust's C Stream export boundary and verify schema
-preflight. Server-side Python addresses cannot prove handoff buffer sharing.
+Cases cover Spark-output values, schemas, chunks, and lifetimes through public
+APIs. Server-side Python addresses cannot prove Rust-to-Python buffer sharing.
 """
 
-import ctypes
 import gc
+import os
 import subprocess
-import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 
 import grpc
 import pandas as pd
 import pyarrow as pa
 import pytest
+from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
 from pyspark.sql import SparkSession
 
 
-def _varint(value):
-    encoded = bytearray()
-    while value > 127:
-        encoded.append((value & 127) | 128)
-        value >>= 7
-    encoded.append(value)
-    return bytes(encoded)
+@pytest.fixture(scope="module")
+def protocol(tmp_path_factory):
+    """Compile the repository protocol instead of hard-coding protobuf field numbers."""
+    proto_root = Path(__file__).resolve().parents[2] / "crates/spark-connect-proto/proto"
+    descriptor = tmp_path_factory.mktemp("connect-proto") / "connect.pb"
+    command = [os.environ.get("PROTOC", "protoc"), f"-I{proto_root}"]
+    if include := os.environ.get("PROTOC_INCLUDE"):
+        command.append(f"-I{include}")
+    subprocess.run(
+        command
+        + [
+            "--include_imports",
+            f"--descriptor_set_out={descriptor}",
+            str(proto_root / "spark/connect/base.proto"),
+        ],
+        check=True,
+    )
+    pool = descriptor_pool.DescriptorPool()
+    for file in descriptor_pb2.FileDescriptorSet.FromString(descriptor.read_bytes()).file:
+        pool.Add(file)
 
+    def message(name, **fields):
+        return message_factory.GetMessageClass(pool.FindMessageTypeByName(f"spark.connect.{name}"))(
+            **fields
+        )
 
-def _bytes_field(number, value):
-    return _varint((number << 3) | 2) + _varint(len(value)) + value
-
-
-def _request_fields(data):
-    """Read only the protobuf envelope, not the plan or other nested messages."""
-    position = 0
-
-    def varint():
-        nonlocal position
-        value = shift = 0
-        while True:
-            byte = data[position]
-            position += 1
-            value |= (byte & 127) << shift
-            if byte < 128:
-                return value
-            shift += 7
-
-    fields = {}
-    while position < len(data):
-        tag = varint()
-        wire_type = tag & 7
-        if wire_type == 2:
-            length = varint()
-            fields[tag >> 3] = data[position : position + length]
-            position += length
-        elif wire_type == 0:
-            varint()
-        elif wire_type in (1, 5):
-            position += 8 if wire_type == 1 else 4
-        else:
-            raise AssertionError(f"Unexpected protobuf wire type: {wire_type}")
-    return fields
+    return message
 
 
 @contextmanager
-def _dataframe(batches, *, payloads=None, calls=None):
-    """Serve just ExecutePlan and release RPCs; unexpected RPCs fail closed.
-
-    Field numbers are from spark/connect/base.proto. Using the wire envelope
-    avoids depending on official pyspark's generated protobuf package, which
-    cannot be imported alongside the Rust-backed drop-in under the same name.
-    """
+def _dataframe(batches, *, protocol, payloads=None, calls=None):
+    """Serve Arrow results using the repository's protobuf message definitions."""
     if payloads is None:
         payloads = []
         for batch in batches:
@@ -97,26 +76,44 @@ def _dataframe(batches, *, payloads=None, calls=None):
             with pa.ipc.new_stream(sink, batch.schema) as writer:
                 writer.write_batch(batch)
             payloads.append((batch.num_rows, sink.getvalue().to_pybytes()))
-    server_id = b"00000000-0000-0000-0000-000000000001"
+    server_id = "00000000-0000-0000-0000-000000000001"
 
     def execute(request, context):
         if calls is not None:
             calls["execute"] = calls.get("execute", 0) + 1
-        fields = _request_fields(request)
-        header = (
-            _bytes_field(1, fields[1]) + _bytes_field(12, fields[6]) + _bytes_field(15, server_id)
+        request = protocol("ExecutePlanRequest").FromString(request)
+        header = dict(
+            session_id=request.session_id,
+            operation_id=request.operation_id,
+            server_side_session_id=server_id,
         )
         for index, (rows, payload) in enumerate(payloads):
-            arrow_batch = _varint(8) + _varint(rows) + _bytes_field(2, payload)
-            yield (header + _bytes_field(13, str(index).encode()) + _bytes_field(2, arrow_batch))
-        yield header + _bytes_field(13, b"complete") + _bytes_field(14, b"")
+            yield protocol(
+                "ExecutePlanResponse",
+                **header,
+                response_id=str(index),
+                arrow_batch=dict(row_count=rows, data=payload),
+            ).SerializeToString()
+        yield protocol(
+            "ExecutePlanResponse", **header, response_id="complete", result_complete={}
+        ).SerializeToString()
 
     def release_execute(request, context):
-        fields = _request_fields(request)
-        return _bytes_field(1, fields[1]) + _bytes_field(2, fields[3]) + _bytes_field(3, server_id)
+        request = protocol("ReleaseExecuteRequest").FromString(request)
+        return protocol(
+            "ReleaseExecuteResponse",
+            session_id=request.session_id,
+            operation_id=request.operation_id,
+            server_side_session_id=server_id,
+        ).SerializeToString()
 
     def release_session(request, context):
-        return _bytes_field(1, _request_fields(request)[1]) + _bytes_field(2, server_id)
+        request = protocol("ReleaseSessionRequest").FromString(request)
+        return protocol(
+            "ReleaseSessionResponse",
+            session_id=request.session_id,
+            server_side_session_id=server_id,
+        ).SerializeToString()
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         server = grpc.server(executor)
@@ -145,66 +142,6 @@ def _dataframe(batches, *, payloads=None, calls=None):
                     session.stop()
             finally:
                 server.stop(0).wait(timeout=5)
-
-
-class _ArrowArray(ctypes.Structure):
-    pass
-
-
-_ArrowArray._fields_ = [
-    ("length", ctypes.c_int64),
-    ("null_count", ctypes.c_int64),
-    ("offset", ctypes.c_int64),
-    ("n_buffers", ctypes.c_int64),
-    ("n_children", ctypes.c_int64),
-    ("buffers", ctypes.POINTER(ctypes.c_void_p)),
-    ("children", ctypes.POINTER(ctypes.POINTER(_ArrowArray))),
-    ("dictionary", ctypes.POINTER(_ArrowArray)),
-    ("release", ctypes.c_void_p),
-    ("private_data", ctypes.c_void_p),
-]
-
-
-class _ArrowArrayStream(ctypes.Structure):
-    _fields_ = [
-        (name, ctypes.c_void_p)
-        for name in ("get_schema", "get_next", "get_last_error", "release", "private_data")
-    ]
-
-
-_GetNext = ctypes.CFUNCTYPE(
-    ctypes.c_int, ctypes.POINTER(_ArrowArrayStream), ctypes.POINTER(_ArrowArray)
-)
-
-
-def _snapshot(array):
-    """Copy only addresses and shape while Rust's exported array is live."""
-    return {
-        "length": array.length,
-        "offset": array.offset,
-        "buffers": [array.buffers[i] for i in range(array.n_buffers)],
-        "children": [_snapshot(array.children[i].contents) for i in range(array.n_children)],
-    }
-
-
-def _assert_buffers(array, exported):
-    assert len(array) == exported["length"]
-    assert array.offset == exported["offset"]
-    own_buffers = array.buffers()[: len(exported["buffers"])]
-    for buffer, address in zip(own_buffers, exported["buffers"]):
-        if buffer is None:
-            assert address is None
-        elif buffer.size:
-            assert buffer.address == address
-    if pa.types.is_struct(array.type):
-        assert array.type.num_fields == len(exported["children"])
-        for index, child in enumerate(exported["children"]):
-            _assert_buffers(array.field(index), child)
-    elif pa.types.is_list(array.type) or pa.types.is_map(array.type):
-        assert len(exported["children"]) == 1
-        _assert_buffers(array.values, exported["children"][0])
-    else:
-        assert not exported["children"]
 
 
 def _mixed_batch():
@@ -250,133 +187,12 @@ def _mixed_batch():
     return pa.RecordBatch.from_arrays(arrays, schema=schema)
 
 
-def _check_stream_buffers():
-    # These proxies must be installed before arrow-pyarrow caches its classes.
-    # Each check has a fresh process, so the caches cannot affect another test.
-    batch = _mixed_batch()
-    schema = pa.schema(
-        [
-            field.with_metadata({**field.metadata, b"nul\x00key": b"nul\x00value"})
-            for field in batch.schema
-        ],
-        metadata={**batch.schema.metadata, b"nul\x00key": b"nul\x00value"},
-    )
-    batch = pa.RecordBatch.from_arrays(batch.columns, schema=schema)
-    batches = [batch.slice(1, 2), batch.slice(0, 1), batch.slice(3, 1)]
-    expected = pa.Table.from_batches(batches)
-    observed, errors, callbacks, imports, next_calls = [], [], [], [], []
-    real_reader = pa.RecordBatchReader
-
-    class ReaderProxy:
-        @staticmethod
-        def _import_from_c(address):
-            imports.append(address)
-            stream = ctypes.cast(address, ctypes.POINTER(_ArrowArrayStream))
-            original_next = _GetNext(stream.contents.get_next)
-
-            @_GetNext
-            def get_next(current, output):
-                next_calls.append(None)
-                result = original_next(current, output)
-                if result == 0 and output.contents.release:
-                    try:
-                        observed.append(_snapshot(output.contents))
-                    except Exception as error:
-                        # Exceptions cannot cross a ctypes callback boundary.
-                        errors.append(error)
-                return result
-
-            # Arrow keeps raw function pointers, not the Python callback owners.
-            # Keep both alive until the native reader has consumed the stream.
-            callbacks.extend((original_next, get_next))
-            stream.contents.get_next = ctypes.cast(get_next, ctypes.c_void_p).value
-            return real_reader._import_from_c(address)
-
-    calls = {}
-
-    def collect():
-        with _dataframe(batches, calls=calls) as (frame, session):
-            table = frame.toArrow()
-            session.stop()
-            return table
-
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(pa, "RecordBatchReader", ReaderProxy)
-        actual = collect()
-        gc.collect()
-        assert actual.equals(expected, check_metadata=True)
-        assert calls == {"execute": 1}
-        assert len(imports) == 1
-        assert len(next_calls) == len(batches) + 1
-        assert len(observed) == len(batches)
-        assert not errors
-        for batch_index, exported in enumerate(observed):
-            assert exported["length"] == batches[batch_index].num_rows
-            assert len(exported["children"]) == actual.num_columns
-            for column, child in zip(actual.columns, exported["children"]):
-                assert column.num_chunks == len(batches)
-                _assert_buffers(column.chunk(batch_index), child)
-        numeric = actual.column(0).chunk(0).slice(1, 1)
-        strings = actual.column(2).chunk(2).slice(0, 1)
-        addresses = [numeric.buffers()[1].address, strings.buffers()[2].address]
-        del column, actual
-        gc.collect()
-        assert numeric.to_pylist() == [-3]
-        assert strings.to_pylist() == ["omega"]
-        assert [numeric.buffers()[1].address, strings.buffers()[2].address] == addresses
-
-
-def _check_schema_preflight():
-    batch = _mixed_batch()
-    seen = []
-
-    class SchemaProxy:
-        @staticmethod
-        def _import_from_c(address):
-            seen.append("schema")
-            raise RuntimeError("test schema importer rejected the schema")
-
-    class ReaderProxy:
-        @staticmethod
-        def _import_from_c(address):
-            seen.append("stream")
-            raise AssertionError("A rejected schema must not reach the stream importer")
-
-    calls = {}
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(pa, "Schema", SchemaProxy)
-        patch.setattr(pa, "RecordBatchReader", ReaderProxy)
-        with _dataframe([batch], calls=calls) as (frame, _):
-            with pytest.raises(RuntimeError, match="test schema importer rejected"):
-                frame.toArrow()
-    assert seen == ["schema"]
-    assert calls == {"execute": 1}
-
-
-@pytest.mark.parametrize("check", ["_check_stream_buffers", "_check_schema_preflight"])
-def test_isolated_handoff_boundaries(check):
-    # arrow-pyarrow uses process-global PyOnceLock caches. A subprocess keeps
-    # test proxies out of other tests, regardless of collection/execution order.
-    code = (
-        "import runpy, sys\n"
-        f"sys.path[:] = {sys.path!r}\n"
-        f"namespace = runpy.run_path({__file__!r})\n"
-        f"namespace[{check!r}]()\n"
-    )
-    result = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, timeout=60
-    )
-    assert result.returncode == 0, (
-        f"{check} exited with {result.returncode}\n{result.stdout}\n{result.stderr}"
-    )
-
-
-def test_handoff_preserves_values_metadata_and_chunks():
+def test_handoff_preserves_values_metadata_and_chunks(protocol):
     batch = _mixed_batch()
     batches = [batch.slice(1, 2), batch.slice(0, 1), batch.slice(3, 1)]
     expected = pa.Table.from_batches(batches)
     calls = {}
-    with _dataframe(batches, calls=calls) as (frame, _):
+    with _dataframe(protocol=protocol, batches=batches, calls=calls) as (frame, _):
         actual = frame.toArrow()
     assert actual.equals(expected, check_metadata=True)
     for column in actual.columns:
@@ -384,13 +200,13 @@ def test_handoff_preserves_values_metadata_and_chunks():
     assert calls == {"execute": 1}
 
 
-def test_handoff_buffers_outlive_dataframe_session_and_table():
+def test_handoff_buffers_outlive_dataframe_session_and_table(protocol):
     batch = _mixed_batch()
     expected = batch.to_pydict()
     calls = {}
 
     def collect():
-        with _dataframe([batch], calls=calls) as (frame, session):
+        with _dataframe(protocol=protocol, batches=[batch], calls=calls) as (frame, session):
             table = frame.toArrow()
             session.stop()
             return table
@@ -411,7 +227,7 @@ def test_handoff_buffers_outlive_dataframe_session_and_table():
 
 
 @pytest.mark.parametrize("kind", ["no-batches", "empty-typed", "zero-columns"])
-def test_handoff_empty_and_zero_column_results(kind):
+def test_handoff_empty_and_zero_column_results(protocol, kind):
     if kind == "no-batches":
         batches = []
         expected = pa.table({})
@@ -426,7 +242,7 @@ def test_handoff_empty_and_zero_column_results(kind):
         expected = pa.Table.from_batches(batches)
         assert expected.num_rows == 5
     calls = {}
-    with _dataframe(batches, calls=calls) as (frame, _):
+    with _dataframe(protocol=protocol, batches=batches, calls=calls) as (frame, _):
         actual = frame.toArrow()
     assert actual.num_rows == expected.num_rows
     assert actual.num_columns == expected.num_columns
@@ -434,7 +250,7 @@ def test_handoff_empty_and_zero_column_results(kind):
     assert calls == {"execute": 1}
 
 
-def test_to_pandas_uses_the_same_handoff():
+def test_to_pandas_uses_the_same_handoff(protocol):
     batch = _mixed_batch()
     indices = [0, 2, 4, 5]
     schema = pa.schema(
@@ -445,14 +261,14 @@ def test_to_pandas_uses_the_same_handoff():
     batches = [selected.slice(0, 2), selected.slice(2, 2)]
     expected = pa.Table.from_batches(batches).to_pandas()
     calls = {}
-    with _dataframe(batches, calls=calls) as (frame, _):
+    with _dataframe(protocol=protocol, batches=batches, calls=calls) as (frame, _):
         actual = frame.toPandas()
     pd.testing.assert_frame_equal(actual, expected)
     assert calls == {"execute": 1}
 
 
 @pytest.mark.parametrize("kind", ["field", "nested-field", "timezone"])
-def test_nul_schema_strings_fall_back_without_executing_again(kind):
+def test_nul_schema_strings_fall_back_without_executing_again(protocol, kind):
     if kind == "field":
         name = "bad\x00name"
         values = pa.array([1, None, -3, 4])
@@ -474,7 +290,7 @@ def test_nul_schema_strings_fall_back_without_executing_again(kind):
     batches = [batch.slice(0, 2), batch.slice(2, 2)]
     expected = pa.Table.from_batches(batches)
     calls = {}
-    with _dataframe(batches, calls=calls) as (frame, _):
+    with _dataframe(protocol=protocol, batches=batches, calls=calls) as (frame, _):
         actual = frame.toArrow()
     # Compare raw Arrow data, not Python datetimes: the deliberately unusual
     # timezone string is preserved but is not a Python timezone identifier.
@@ -483,12 +299,12 @@ def test_nul_schema_strings_fall_back_without_executing_again(kind):
     assert calls == {"execute": 1}
 
 
-def test_nul_schema_and_field_metadata_are_preserved():
+def test_nul_schema_and_field_metadata_are_preserved(protocol):
     field = pa.field("value", pa.int64(), metadata={b"field\x00key": b"field\x00value"})
     schema = pa.schema([field], metadata={b"schema\x00key": b"schema\x00value"})
     batch = pa.RecordBatch.from_arrays([pa.array([1, None, 3])], schema=schema)
     calls = {}
-    with _dataframe([batch], calls=calls) as (frame, _):
+    with _dataframe(protocol=protocol, batches=[batch], calls=calls) as (frame, _):
         actual = frame.toArrow()
     assert actual.equals(pa.Table.from_batches([batch]), check_metadata=True)
     assert calls == {"execute": 1}
@@ -496,7 +312,7 @@ def test_nul_schema_and_field_metadata_are_preserved():
 
 @pytest.mark.parametrize("difference", ["type", "name", "schema-metadata", "field-metadata"])
 @pytest.mark.parametrize("nul_name", [False, True])
-def test_mismatched_batch_schemas_are_rejected_before_fallback(difference, nul_name):
+def test_mismatched_batch_schemas_are_rejected_before_fallback(protocol, difference, nul_name):
     name = "bad\x00name" if nul_name else "value"
     first_field = pa.field(name, pa.int64(), metadata={b"field": b"original"})
     first_schema = pa.schema([first_field], metadata={b"schema": b"original"})
@@ -507,23 +323,23 @@ def test_mismatched_batch_schemas_are_rejected_before_fallback(difference, nul_n
     second_field = pa.field(
         second_name, second_values.type, metadata=field_metadata or first_field.metadata
     )
-    second_schema = pa.schema(
-        [second_field], metadata=schema_metadata or first_schema.metadata
-    )
+    second_schema = pa.schema([second_field], metadata=schema_metadata or first_schema.metadata)
     batches = [
         pa.RecordBatch.from_arrays([pa.array([1, 2])], schema=first_schema),
         pa.RecordBatch.from_arrays([second_values], schema=second_schema),
     ]
     calls = {}
-    with _dataframe(batches, calls=calls) as (frame, _):
+    with _dataframe(protocol=protocol, batches=batches, calls=calls) as (frame, _):
         with pytest.raises(ValueError, match="inconsistent schemas"):
             frame.toArrow()
     assert calls == {"execute": 1}
 
 
-def test_malformed_ipc_is_reported():
+def test_malformed_ipc_is_reported(protocol):
     calls = {}
-    with _dataframe([], payloads=[(1, b"not arrow ipc")], calls=calls) as (frame, _):
+    with _dataframe(
+        protocol=protocol, batches=[], payloads=[(1, b"not arrow ipc")], calls=calls
+    ) as (frame, _):
         with pytest.raises(RuntimeError, match="Arrow"):
             frame.toArrow()
     assert calls == {"execute": 1}

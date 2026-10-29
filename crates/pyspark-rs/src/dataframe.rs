@@ -1174,7 +1174,7 @@ impl PyDataFrame {
         let batches = py
             .detach(|| self.dataframe.collect_record_batches())
             .to_pyerr()?;
-        crate::arrow::record_batches_to_pyarrow(py, batches)
+        crate::pyarrow_export::record_batches_to_pyarrow(py, batches)
     }
 
     /// Collect the DataFrame into a pandas DataFrame.

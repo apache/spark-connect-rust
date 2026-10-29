@@ -104,32 +104,11 @@ results survive transient disconnects.
 
 ### Python Arrow table handoff
 
-`DataFrame.toArrow()` collects the decoded Arrow batches in Rust. Its `pyspark-rs`
-wrapper uses arrow-rs's `IntoPyArrow` to export one boxed `RecordBatchReader`
-through the Arrow C Stream Interface. PyArrow imports that reader
-once and calls `read_all()` to build the table. Native callbacks transfer batch
-descriptors and ownership without calling Python for each batch. C Stream is
-not an IPC byte stream, and this path still holds all result batches in memory
-before the handoff; it does not stream results from the network into Python.
-
-Compatible Arrow value and offset buffers are shared rather than serialized
-again. Schema descriptors still need allocation, sliced validity bitmaps may
-need realignment, and `toPandas()` may copy during pandas conversion. The server's
-IPC responses must still be decoded. Row materialization in `collect()` is
-unchanged and is not zero-copy.
-
-The bridge preserves batch boundaries and schema metadata, and rejects batches
-with inconsistent schemas, including metadata. It targets Spark results: maps
-are unsorted and fields are not dictionary-encoded. It does not repair ordering
-flags for generic Arrow inputs. Field names or timezones containing
-NUL use an IPC compatibility fallback over the collected batches, without
-another RPC; length-prefixed schema metadata can contain NUL without fallback.
-An empty batch vector still produces an empty table with an empty schema.
-
-The schema is imported separately before the reader so older PyArrow versions
-can reject unsupported schemas without entering their stream importer. The
-reader's C callbacks and release handling are provided by arrow-rs, not custom
-client callbacks. PyO3 remains at 0.28.3.
+`toArrow()` collects decoded batches and uses arrow-rs's `IntoPyArrow` for one
+boxed `RecordBatchReader`. Compatible value and offset buffers are shared;
+network decoding, sliced validity bitmaps, and pandas conversion may still copy.
+Batch schema consistency is validated before export. Field names or timezones
+containing NUL use IPC over the collected batches, without another RPC. Empty batch vectors retain the empty-schema behavior.
 
 ## Two front-ends, one core
 
@@ -181,7 +160,7 @@ See [Rust UDFs via WebAssembly](udfs.md) for the full story.
 3. **Correctness is gated in CI** - golden-proto tests guard plan building; the
    official Apache Spark Connect test suite guards transport and Arrow paths (see
    the CI notes under `dev/design/`).
-4. **Version = Spark version** - the published crate/wheel version tracks the Spark release
+4. **Version = Spark version** - the crate/wheel version tracks the Spark release
    it targets, so the number tells you which Spark it speaks.
 
 For the deeper design write-ups (design notes, CI, the official test suite, and

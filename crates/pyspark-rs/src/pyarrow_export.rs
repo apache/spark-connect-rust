@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::FileWriter;
-use arrow::pyarrow::{IntoPyArrow, ToPyArrow};
+use arrow::pyarrow::IntoPyArrow;
 use arrow::record_batch::{RecordBatch, RecordBatchIterator, RecordBatchReader};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -48,8 +48,8 @@ pub(crate) fn record_batches_to_pyarrow(
         ));
     }
     if schema.fields().iter().any(|field| field_needs_ipc(field)) {
-        // C schema strings cannot contain NUL. Reuse the collected batches for
-        // the IPC compatibility path without executing the request again.
+        // Arrow 58.3 panics when exporting NUL-containing C strings. Reuse
+        // the collected batches for IPC without executing the request again.
         let bytes = py
             .detach(|| -> arrow::error::Result<Vec<u8>> {
                 let mut bytes = Vec::new();
@@ -70,9 +70,6 @@ pub(crate) fn record_batches_to_pyarrow(
             .unbind());
     }
 
-    // Older PyArrow can abort on unsupported stream schemas. Use its fallible
-    // standalone schema importer before handing over the reader.
-    schema.to_pyarrow(py)?;
     let reader: Box<dyn RecordBatchReader + Send> = Box::new(RecordBatchIterator::new(
         batches.into_iter().map(Ok),
         schema,
