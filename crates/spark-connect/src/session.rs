@@ -290,6 +290,21 @@ impl SparkSession {
         Ok(DataFrame::new(self.clone(), plan))
     }
 
+    /// Create an inline local relation from columns with the same encoding as local rows.
+    ///
+    /// Unlike imported Arrow input, this path does not read server configuration or
+    /// upload artifacts. Callers must supply one column per struct field.
+    pub fn create_dataframe_from_columns(
+        &self,
+        columns: Vec<arrow::array::ArrayRef>,
+        schema: DataType,
+    ) -> Result<DataFrame> {
+        let arrow_schema = arrow::datatypes::Schema::new(schema_to_arrow_fields(&schema)?);
+        let data = Some(columns_to_arrow_ipc(columns, arrow_schema)?);
+        let plan = LogicalPlan::LocalRelation { schema, data };
+        Ok(DataFrame::new(self.clone(), plan))
+    }
+
     /// Create a DataFrameReader for reading data from various sources.
     ///
     /// Mirrors `pyspark.sql.SparkSession.read`.
@@ -607,17 +622,12 @@ pub fn row_width_mismatch(row_index: usize, actual: usize, expected: usize) -> S
 /// Convert Arrow RecordBatch data to IPC bytes.
 /// Used by createDataFrame to package local data.
 fn rows_to_arrow_ipc(rows: &[Row], schema: &DataType) -> Result<Vec<u8>> {
-    use arrow::datatypes::Schema as ArrowSchema;
-    use arrow::ipc::writer::StreamWriter;
-    use arrow::record_batch::RecordBatch;
-
     if rows.is_empty() {
         return Ok(vec![]);
     }
 
-    // Convert our schema to Arrow schema
-    let arrow_schema_vec = schema_to_arrow_fields(schema)?;
-    let arrow_schema = ArrowSchema::new(arrow_schema_vec);
+    // Validate the schema before converting values, preserving row-path error ordering.
+    let arrow_schema = arrow::datatypes::Schema::new(schema_to_arrow_fields(schema)?);
 
     // Build column arrays from rows
     let mut columns = vec![];
@@ -640,6 +650,16 @@ fn rows_to_arrow_ipc(rows: &[Row], schema: &DataType) -> Result<Vec<u8>> {
             .collect();
         columns.push(values_to_arrow(&column, &field.data_type)?);
     }
+
+    columns_to_arrow_ipc(columns, arrow_schema)
+}
+
+fn columns_to_arrow_ipc(
+    columns: Vec<arrow::array::ArrayRef>,
+    arrow_schema: arrow::datatypes::Schema,
+) -> Result<Vec<u8>> {
+    use arrow::ipc::writer::StreamWriter;
+    use arrow::record_batch::RecordBatch;
 
     // Create RecordBatch
     let batch = RecordBatch::try_new(Arc::new(arrow_schema), columns)
