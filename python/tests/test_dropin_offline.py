@@ -664,6 +664,43 @@ def test_udtf_call_without_session_raises():
         T2(1)
 
 
+def test_udtf_return_type_connect_validation_and_command():
+    # A Connect DDL string (including invalid DDL) is validated by the server,
+    # not when decorating the class or constructing the DataFrame. Isolate the
+    # active session so the other offline tests still start without a session.
+    import subprocess
+    import sys
+
+    subprocess.run([sys.executable, "-c", """
+from pyspark.sql import SparkSession, DataFrame, functions as F, types as T
+from pyspark.serializers import CloudPickleSerializer
+
+spark = SparkSession.builder.remote("sc://localhost:15002").getOrCreate()
+class Echo:
+    def eval(self, value):
+        yield (value,)
+
+schema = T.StructType([T.StructField("value", T.LongType())])
+for return_type in ["value BIGINT", "STRUCT<value: BIGINT>",
+                    "value ARRAY<STRUCT<x: INT>>", "invalid DDL !!!", "INT", schema]:
+    for decorate in [False, True]:
+        fn = (F.udtf(returnType=return_type)(Echo) if decorate else
+              F.udtf(Echo, returnType=return_type))
+        assert isinstance(fn(F.lit(1)), DataFrame)
+        handler = CloudPickleSerializer().loads(fn.command)
+        assert isinstance(handler, type)
+        assert list(handler().eval(7)) == [(7,)]
+        assert fn.returnType == return_type
+
+# Dynamic schemas omit return_type and leave analysis to the Python handler.
+class Dynamic(Echo):
+    @staticmethod
+    def analyze(value):
+        pass
+assert isinstance(F.udtf(Dynamic)(F.lit(1)), DataFrame)
+"""], check=True)
+
+
 def test_spark_conf_stub():
     from pyspark import SparkConf
     c = SparkConf().set("a", "1").setAll({"b": "2", "c": "3"})
