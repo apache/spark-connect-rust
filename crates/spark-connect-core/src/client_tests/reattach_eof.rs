@@ -16,6 +16,7 @@
 // under the License.
 
 use super::transport_test_support::{MockServer, Reply};
+use super::ReattachableResponseStream;
 use crate::RetryPolicy;
 use prost::Message;
 use spark_connect_proto::{
@@ -239,4 +240,41 @@ async fn reattach_retry_budget_after_clean_eof_is_respected() {
         .contains("last"));
     assert_eq!(server.requests().len(), 3);
     server.assert_finished();
+}
+
+#[test]
+fn test_clean_eof_requires_result_complete() {
+    // Graceful reattachment is part of the protocol, even with error retries disabled.
+    let policy = RetryPolicy::no_retries();
+    assert!(ReattachableResponseStream::should_reattach(false, None, &policy).unwrap());
+    assert!(!ReattachableResponseStream::should_reattach(true, None, &policy).unwrap());
+}
+
+#[test]
+fn test_stream_end_preserves_error_classification() {
+    let policy = RetryPolicy::default();
+    for (completed, status, resume) in [
+        (false, tonic::Status::unavailable("stream dropped"), true),
+        (
+            false,
+            tonic::Status::internal("INVALID_CURSOR.DISCONNECTED"),
+            true,
+        ),
+        (
+            false,
+            tonic::Status::invalid_argument("invalid plan"),
+            false,
+        ),
+        (true, tonic::Status::unavailable("stream dropped"), false),
+    ] {
+        let result =
+            ReattachableResponseStream::should_reattach(completed, Some(status.clone()), &policy);
+        if resume {
+            assert!(result.unwrap());
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(error.grpc_code(), Some(status.code() as i32));
+            assert!(error.message().contains(status.message()));
+        }
+    }
 }

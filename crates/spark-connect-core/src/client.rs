@@ -904,13 +904,27 @@ impl ReattachableResponseStream {
         }
     }
 
-    /// Next response, reattaching on clean EOF or a transient mid-stream drop.
+    /// Decide whether a stream ending needs reattachment; no status means clean EOF.
+    fn should_reattach(
+        completed: bool,
+        status: Option<tonic::Status>,
+        retry_policy: &RetryPolicy,
+    ) -> Result<bool> {
+        match status {
+            Some(status) if completed || !retry_policy.can_retry(&status) => {
+                Err(SparkError::from_grpc_status(status))
+            }
+            _ => Ok(!completed),
+        }
+    }
+
+    /// Next response, reattaching on EOF or a transient drop until ResultComplete.
     pub async fn message(&mut self) -> Result<Option<ExecutePlanResponse>> {
         if self.done {
             return Ok(None);
         }
         loop {
-            match self.stream.message().await {
+            let status = match self.stream.message().await {
                 Ok(Some(resp)) => {
                     self.iter.set_last_response_id(&resp).await;
                     if self.iter.is_completed().await {
@@ -918,16 +932,16 @@ impl ReattachableResponseStream {
                     }
                     return Ok(Some(resp));
                 }
-                // Spark can close a stream at its duration or size limit while the
-                // execution is still running. Only ResultComplete ends iteration.
-                Ok(None) => {}
-                Err(status) => {
-                    // Only reattach a still-running execution on a retriable drop.
-                    if self.iter.is_completed().await || !self.retry_policy.can_retry(&status) {
-                        return Err(SparkError::from_grpc_status(status));
-                    }
-                }
+                Ok(None) => None,
+                Err(status) => Some(status),
+            };
+            if !Self::should_reattach(self.iter.is_completed().await, status, &self.retry_policy)? {
+                self.done = true;
+                return Ok(None);
             }
+
+            // A clean EOF before ResultComplete is a server-requested reattach,
+            // not query completion. Use the same resume path as a transient error.
             loop {
                 let reattach = self.iter.create_reattach_request().await;
                 let mut req = Request::new(reattach);
