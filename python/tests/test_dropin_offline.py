@@ -2938,18 +2938,27 @@ def test_schema_cache_returned_schema_and_lists_are_independent(schema_cache_ana
     service.data_type = schema_cache_schema(nested=True)
     df = spark.range(10)
     original = df.schema
+    expected_json = original.jsonValue()
     modified = df.schema
     assert original is not modified
+    # Retain nested getter results so these assertions verify actual Python mutations.
+    nested = modified.fields[0].dataType
+    nested.add("extra_nested", T.StringType())
+    metadata = nested.fields[0].metadata
+    metadata["note"] = "changed"
+    assert nested.fieldNames() == ["inner", "extra_nested"]
+    assert metadata == {"note": "changed"}
     modified.add("extra", T.StringType())
     assert len(modified.fields) == 2
     assert len(original.fields) == 1
+    assert original.jsonValue() == expected_json
     columns = df.columns
     columns.append("extra")
     dtypes = df.dtypes
     dtypes.clear()
     assert columns == ["id", "extra"]
     assert dtypes == []
-    assert df.schema.jsonValue() == original.jsonValue()
+    assert df.schema.jsonValue() == expected_json
     assert df.columns == ["id"]
     assert df.dtypes == [("id", "struct<inner:bigint>")]
     assert service.calls == 1
