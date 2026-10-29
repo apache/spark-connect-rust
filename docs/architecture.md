@@ -114,9 +114,10 @@ batch vectors retain the empty-schema behavior.
 The Arrow handoff has been tested locally with PyArrow 10.0.0 (Python 3.9)
 and 26.0.0 (Python 3.12). CI installs the latest PyArrow; it does not pin or
 separately test the declared PyArrow 10 minimum. The native live-server smoke
-tests in `python/tests/test_arrow_e2e.py` are run manually with `SPARK_REMOTE`;
-no workflow currently invokes them. Official parity tests exercise the Rust
-transport with official PySpark and do not cover the native `toArrow()` path.
+tests in `python/tests/test_arrow_e2e.py` run in the Connect parity CI job
+against its live server and built native extension. Official parity tests
+exercise the Rust transport with official PySpark; the separate native smoke
+step covers the drop-in `toArrow()` path.
 
 
 ## Two front-ends, one core
