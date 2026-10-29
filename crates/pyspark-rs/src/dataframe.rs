@@ -1495,9 +1495,9 @@ impl PyDataFrame {
     }
 
     /// Ordinary schema-bearing representation; eager row rendering is not supported.
-    fn __repr__(&self) -> PyResult<String> {
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         let fields = self
-            .dtypes()?
+            .dtypes(py)?
             .into_iter()
             .map(|(name, dtype)| format!("{name}: {dtype}"))
             .collect::<Vec<_>>()
