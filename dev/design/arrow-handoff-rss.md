@@ -28,8 +28,8 @@ reported 416.27 → 481.66 MiB; variation between runs remains unexplained. A cl
 of flat post-GC RSS is not supported.
 
 To reproduce, run the following from the PR checkout with its tests available,
-setting `PYTHONPATH` to the Python package containing the extension under test.
-For the master control, build master and point `PYTHONPATH` at that checkout;
+setting `PYTHONPATH` to `<PR checkout>/python`, the directory containing `pyspark`.
+For the master control, build master and set `PYTHONPATH` to `<master checkout>/python`;
 keep this test harness and all other environment settings the same. `PROTOC`
 and `PROTOC_INCLUDE` must identify an installed protocol compiler and includes.
 The baseline IPC implementation does not include the new test file, so the
