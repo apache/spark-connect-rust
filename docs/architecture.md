@@ -102,6 +102,15 @@ triggers `ExecutePlan`. If the response stream breaks mid-flight, the core's
 reattachable-execute iterator resumes from the last response it saw, so long
 results survive transient disconnects.
 
+### Python Arrow table handoff
+
+`toArrow()` collects decoded batches and uses arrow-rs's `IntoPyArrow` for one
+boxed `RecordBatchReader`. Compatible value and offset buffers are shared;
+network decoding, sliced validity bitmaps, and pandas conversion may still copy.
+Batch schema consistency is validated before export. Field names or timezones
+containing NUL use IPC over the collected batches, without another RPC. Empty
+batch vectors retain the empty-schema behavior.
+
 ## Two front-ends, one core
 
 === "Rust (native)"

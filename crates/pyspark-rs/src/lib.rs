@@ -37,6 +37,7 @@ mod ml;
 mod observation;
 mod pipelines;
 mod profiler;
+mod pyarrow_export;
 mod readwriter;
 mod resource;
 mod row;
