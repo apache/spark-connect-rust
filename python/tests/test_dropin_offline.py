@@ -2755,3 +2755,180 @@ for schema in schemas:
     else:
         raise AssertionError("expected a width validation error")
 """], check=True)
+
+
+# ------------------------------------------------------- DataFrame completion
+
+def _completion_varint(value):
+    result = bytearray()
+    while value > 127:
+        result.append((value & 127) | 128)
+        value >>= 7
+    result.append(value)
+    return bytes(result)
+
+
+def _completion_message(field, value):
+    if isinstance(value, str):
+        value = value.encode()
+    return _completion_varint(field * 8 + 2) + _completion_varint(len(value)) + value
+
+
+def _completion_schema(names=("id",)):
+    # DataType.struct=21, Struct.fields=1, DataType.long=7.
+    return _completion_message(21, b"".join(_completion_message(1, _completion_field(name, _completion_message(7, b"")))
+                                  for name in names))
+
+
+def _completion_field(name, data_type):
+    return (_completion_message(1, name) + _completion_message(2, data_type) + b"\x18\x01"
+            + _completion_message(4, '{"note":"original"}'))
+
+
+def _completion_serve(connection):
+    from concurrent.futures import ThreadPoolExecutor
+    import grpc
+
+    # A separate process also exercises columns/dtypes, whose first access may
+    # hold the client's GIL while waiting for the RPC.
+    class Service:
+        calls = 0
+        data_type = _completion_schema()
+        failure = None
+
+        def analyze(self, request, context):
+            self.calls += 1
+            if self.failure == "rpc":
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT, "schema unavailable")
+            if self.failure == "no-result":
+                return b""
+            if self.failure == "missing-schema":
+                return _completion_message(2, b"")
+            if self.failure == "invalid-type":
+                return _completion_message(2, _completion_message(1, b""))
+            # base.proto: AnalyzePlanResponse.schema=2, Schema.schema=1.
+            return _completion_message(2, _completion_message(1, self.data_type))
+
+    service = Service()
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        server = grpc.server(executor)
+        handler = grpc.unary_unary_rpc_method_handler(service.analyze)
+        server.add_generic_rpc_handlers((grpc.method_handlers_generic_handler(
+            "spark.connect.SparkConnectService", {"AnalyzePlan": handler}),))
+        port = server.add_insecure_port("127.0.0.1:0")
+        server.start()
+        connection.send(port)
+        try:
+            while True:
+                command = connection.recv()
+                if command[0] == "stop":
+                    break
+                if command[0] == "get":
+                    connection.send(getattr(service, command[1]))
+                elif command[0] == "set":
+                    setattr(service, command[1], command[2])
+                    connection.send(None)
+        finally:
+            server.stop(0).wait()
+
+
+class _CompletionRemoteService:
+    def __init__(self, connection):
+        object.__setattr__(self, "connection", connection)
+
+    def __getattr__(self, name):
+        self.connection.send(("get", name))
+        assert self.connection.poll(10), "Mock server did not respond"
+        return self.connection.recv()
+
+    def __setattr__(self, name, value):
+        self.connection.send(("set", name, value))
+        assert self.connection.poll(10), "Mock server did not respond"
+        self.connection.recv()
+
+
+@pytest.fixture
+def completion_analyzed():
+    import multiprocessing
+    from pyspark.sql import SparkSession
+
+    pytest.importorskip("grpc")
+    context = multiprocessing.get_context("spawn")
+    parent, child = context.Pipe()
+    process = context.Process(target=_completion_serve, args=(child,))
+    process.start()
+    try:
+        assert parent.poll(20), "Mock server did not start"
+        port = parent.recv()
+        spark = SparkSession.builder.remote(f"sc://127.0.0.1:{port}").getOrCreate()
+        yield spark, _CompletionRemoteService(parent)
+    finally:
+        if process.is_alive():
+            parent.send(("stop",))
+        process.join(10)
+        if process.is_alive():
+            process.terminate()
+            process.join(10)
+        parent.close()
+        child.close()
+
+
+@pytest.mark.parametrize("names", [
+    ["z", "a"],
+    ["with space", "a.b", "with`tick", "", "123", "class", "雪", "_private"],
+    ["id", "id", "select", "columns", "__dir__", "_ipython_key_completions_"],
+    [],
+])
+def test_completion_matches_python_connect(completion_analyzed, names):
+    from pyspark.sql import Column
+
+    spark, service = completion_analyzed
+    service.data_type = _completion_schema(names)
+    df = spark.range(10)
+    assert df._ipython_key_completions_() == names
+    assert service.calls == 1
+    expected = sorted(set(dir(type(df))) | set(names))
+    # Each first access must analyze its own fresh plan, with or without caching.
+    assert spark.range(10).__dir__() == expected
+    assert service.calls == 2
+    assert dir(spark.range(10)) == expected
+    assert service.calls == 3
+    assert callable(df.select)
+    assert callable(df.__dir__)
+    assert callable(df._ipython_key_completions_)
+    assert df.columns == names
+    for name in names:
+        assert isinstance(df[name], Column)
+    assert df.schema.fieldNames() == names
+
+
+def test_completion_lists_are_independent(completion_analyzed):
+    spark, service = completion_analyzed
+    df = spark.range(10)
+    df._ipython_key_completions_().append("extra")
+    df.__dir__().clear()
+    assert df._ipython_key_completions_() == ["id"]
+    assert "select" in dir(df)
+    service.data_type = _completion_schema(["changed"])
+    assert spark.range(10)._ipython_key_completions_() == ["changed"]
+
+
+@pytest.mark.parametrize("method", ["__dir__", "_ipython_key_completions_"])
+@pytest.mark.parametrize("failure", ["rpc", "no-result", "missing-schema", "invalid-type"])
+def test_completion_propagates_schema_errors_and_can_retry(completion_analyzed, method, failure):
+    spark, service = completion_analyzed
+    df = spark.range(10)
+    service.failure = failure
+    message = {
+        "rpc": "schema unavailable",
+        "no-result": "no schema in response",
+        "missing-schema": "Schema is missing",
+        "invalid-type": "DataType kind not set",
+    }[failure]
+    for count in (1, 2):
+        with pytest.raises(Exception, match=message):
+            getattr(df, method)()
+        assert service.calls == count
+    service.failure = None
+    assert "id" in getattr(df, method)()
+    assert service.calls == 3
