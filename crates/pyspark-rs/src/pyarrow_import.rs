@@ -47,12 +47,19 @@ pub(crate) fn create_dataframe(
         (None, None, None)
     } else {
         py.detach(|| -> PyResult<_> {
-            let conf = session.conf();
+            let values = session
+                .conf()
+                .get_many(&[
+                    "spark.sql.timestampType",
+                    "spark.sql.session.timeZone",
+                    "spark.sql.execution.arrow.useLargeVarTypes",
+                ])
+                .to_pyerr()?;
+            let mut values = values.into_iter();
             Ok((
-                conf.get("spark.sql.timestampType").to_pyerr()?,
-                conf.get("spark.sql.session.timeZone").to_pyerr()?,
-                conf.get("spark.sql.execution.arrow.useLargeVarTypes")
-                    .to_pyerr()?,
+                values.next().flatten(),
+                values.next().flatten(),
+                values.next().flatten(),
             ))
         })?
     };
