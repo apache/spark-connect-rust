@@ -57,6 +57,8 @@ pub struct SparkSession {
     /// Whether `stop()` has been called on this session (shared across clones).
     /// Backs `is_stopped`.
     stopped: Arc<AtomicBool>,
+    /// Successful server version, shared by handles for this session only.
+    server_version: Arc<Mutex<Option<String>>>,
 }
 
 impl SparkSession {
@@ -71,6 +73,7 @@ impl SparkSession {
             progress_handler_id: Arc::new(AtomicU64::new(0)),
             profiler: Arc::new(ProfilerCollector::new()),
             stopped: Arc::new(AtomicBool::new(false)),
+            server_version: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -203,6 +206,7 @@ impl SparkSession {
             progress_handler_id: Arc::new(AtomicU64::new(0)),
             profiler: Arc::new(ProfilerCollector::new()),
             stopped: Arc::new(AtomicBool::new(false)),
+            server_version: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -374,7 +378,14 @@ impl SparkSession {
     /// Return the Spark version of the connected server.
     ///
     /// Mirrors `pyspark.sql.SparkSession.version`.
+    /// Only successful lookups are cached, including after `stop()`, matching
+    /// Python Connect's cached property. New sessions resolve independently.
     pub fn version(&self) -> Result<String> {
+        // Serialize the first lookup across clones; errors leave the cache empty.
+        let mut cached = self.server_version.lock().unwrap();
+        if let Some(version) = cached.as_ref() {
+            return Ok(version.clone());
+        }
         let mut request = proto::AnalyzePlanRequest::default();
         request.session_id = self.client.session_id().to_string();
         request.user_context = Some(proto::UserContext::default());
@@ -383,7 +394,10 @@ impl SparkSession {
         ));
         let resp = block_on(self.client.analyze_plan(request))?;
         match resp.result {
-            Some(proto::analyze_plan_response::Result::SparkVersion(v)) => Ok(v.version),
+            Some(proto::analyze_plan_response::Result::SparkVersion(v)) => {
+                *cached = Some(v.version.clone());
+                Ok(v.version)
+            }
             _ => Err(SparkError::connect_msg(
                 "AnalyzePlan response did not contain a spark version",
             )),
@@ -554,6 +568,7 @@ impl Clone for SparkSession {
             progress_handler_id: Arc::clone(&self.progress_handler_id),
             profiler: Arc::clone(&self.profiler),
             stopped: Arc::clone(&self.stopped),
+            server_version: Arc::clone(&self.server_version),
         }
     }
 }
@@ -1222,6 +1237,21 @@ mod tests {
             .remote("sc://localhost:15002")
             .get_or_create()
             .expect("failed to build session")
+    }
+
+    #[test]
+    fn version_cache_follows_session_identity() {
+        let spark = session();
+        let handle = spark.clone();
+        *spark.server_version.lock().unwrap() = Some("4.3.0".into());
+        assert_eq!(handle.version().unwrap(), "4.3.0");
+        assert!(Arc::ptr_eq(&spark.server_version, &handle.server_version));
+        for other in [spark.new_session(), spark.clone_session(), session()] {
+            assert!(!Arc::ptr_eq(&spark.server_version, &other.server_version));
+            assert!(other.server_version.lock().unwrap().is_none());
+        }
+        spark.stopped.store(true, Ordering::SeqCst);
+        assert_eq!(handle.version().unwrap(), "4.3.0");
     }
 
     #[test]
