@@ -6,15 +6,15 @@ Python side has real, measurable coverage in CI without a running server. Tests
 that require a live server live in test_dropin_e2e.py and are gated on SPARK_REMOTE.
 """
 
-from concurrent.futures import ThreadPoolExecutor as schema_cache_ThreadPoolExecutor
-import multiprocessing as schema_cache_multiprocessing
+import multiprocessing
 import pickle
-from threading import Event as schema_cache_Event
+import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 
 import pytest
 
-from pyspark.sql import SparkSession as schema_cache_SparkSession
-from pyspark.sql import types as T
+from pyspark.sql import SparkSession, types as T
 
 
 # --------------------------------------------------------------------------- types
@@ -2807,7 +2807,7 @@ def schema_cache_serve(connection):
         failure = None
         release_calls = 0
         block_response = False
-        response_gate = schema_cache_Event()
+        response_gate = Event()
 
         def release(self, request, context):
             self.release_calls += 1
@@ -2832,7 +2832,7 @@ def schema_cache_serve(connection):
             return schema_cache_message(2, schema_cache_message(1, self.data_type))
 
     service = Service()
-    with schema_cache_ThreadPoolExecutor(max_workers=4) as executor:
+    with ThreadPoolExecutor(max_workers=4) as executor:
         server = schema_cache_grpc.server(executor)
         handlers = {
             "AnalyzePlan": schema_cache_grpc.unary_unary_rpc_method_handler(service.analyze),
@@ -2851,10 +2851,10 @@ def schema_cache_serve(connection):
                 if command[0] == "get":
                     connection.send(getattr(service, command[1]))
                 elif command[0] == "set":
-                    if command[1] == "allow_response":
-                        service.response_gate.set()
-                    else:
-                        setattr(service, command[1], command[2])
+                    setattr(service, command[1], command[2])
+                    connection.send(None)
+                elif command[0] == "release":
+                    service.response_gate.set()
                     connection.send(None)
         finally:
             server.stop(0).wait()
@@ -2874,11 +2874,16 @@ class schema_cache_RemoteService:
         assert self.connection.poll(10), "Mock server did not respond"
         self.connection.recv()
 
+    def release_response(self):
+        self.connection.send(("release",))
+        assert self.connection.poll(10), "Mock server did not respond"
+        self.connection.recv()
+
 
 @pytest.fixture
 def schema_cache_analyzed():
     pytest.importorskip("grpc")
-    context = schema_cache_multiprocessing.get_context("spawn")
+    context = multiprocessing.get_context("spawn")
     parent, child = context.Pipe()
     process = context.Process(target=schema_cache_serve, args=(child,))
     process.start()
@@ -2887,7 +2892,7 @@ def schema_cache_analyzed():
     try:
         assert parent.poll(20), "Mock server did not start"
         port = parent.recv()
-        spark = schema_cache_SparkSession.builder.remote(f"sc://127.0.0.1:{port}").getOrCreate()
+        spark = SparkSession.builder.remote(f"sc://127.0.0.1:{port}").getOrCreate()
         yield spark, service
     finally:
         try:
@@ -2991,7 +2996,7 @@ def test_schema_cache_failures_are_not_cached(schema_cache_analyzed, failure):
 def test_schema_cache_concurrent_schema_access_issues_one_analysis(schema_cache_analyzed):
     spark, service = schema_cache_analyzed
     df = spark.range(10)
-    with schema_cache_ThreadPoolExecutor(max_workers=8) as pool:
+    with ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(lambda _: df.schema, range(8)))
     assert all(schema.jsonValue() == results[0].jsonValue() for schema in results)
     assert len({id(schema) for schema in results}) == 8
@@ -3007,14 +3012,14 @@ def test_schema_cache_metadata_wait_releases_gil(schema_cache_analyzed, accessor
     def allow_response_after_request():
         for _ in range(500):
             if service.calls:
-                service.allow_response = True
+                service.release_response()
                 return
-            schema_cache_Event().wait(0.01)
+            time.sleep(0.01)
         raise AssertionError("Metadata request never reached the server")
 
     # This Python thread must run while the main thread waits for the RPC. The
     # server bounds its wait, so retaining the GIL fails instead of deadlocking.
-    with schema_cache_ThreadPoolExecutor(max_workers=1) as pool:
+    with ThreadPoolExecutor(max_workers=1) as pool:
         allowed = pool.submit(allow_response_after_request)
         result = getattr(df, accessor)
         allowed.result(timeout=10)

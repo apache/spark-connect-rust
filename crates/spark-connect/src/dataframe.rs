@@ -786,7 +786,10 @@ impl DataFrame {
             .lock()
             // The cache contains only None or a fully decoded schema, so a
             // panic during analysis cannot leave a partially written value.
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .unwrap_or_else(|poisoned| {
+                self.schema_cache.clear_poison();
+                poisoned.into_inner()
+            });
         if let Some(schema) = cached.as_ref() {
             return Ok(schema.clone());
         }
@@ -2925,7 +2928,9 @@ mod cache_tests {
         let schema = DataType::Struct { fields: vec![] };
         *cached = Some(schema.clone());
         drop(cached);
+        assert!(df.schema_cache.is_poisoned());
         assert_eq!(df.schema().unwrap(), schema);
+        assert!(!df.schema_cache.is_poisoned());
         assert_eq!(cloned.schema().unwrap(), schema);
     }
 
