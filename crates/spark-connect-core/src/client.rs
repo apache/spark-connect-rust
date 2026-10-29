@@ -846,7 +846,8 @@ impl SparkConnectClient {
         Ok(result)
     }
 
-    /// Populate typed requests without overwriting caller-supplied identity fields.
+    /// Ensure the required context message exists, even without a configured user ID.
+    /// Fill a missing ID from the connection while preserving all explicit fields.
     fn fill_user_context(&self, context: &mut Option<UserContext>) {
         let context = context.get_or_insert_with(UserContext::default);
         if let Some(user_id) = &self.user_id {

@@ -16,6 +16,7 @@
 // under the License.
 
 use super::transport_test_support::{MockServer, Reply};
+use super::{ChannelBuilder, ExecutePlanResponseReattachableIterator, SparkConnectClient};
 use crate::CHUNK_SIZE;
 use prost::Message;
 use spark_connect_proto::{
@@ -284,4 +285,86 @@ async fn raw_requests_remain_byte_exact_including_unknown_fields() {
         [execute, analyze, reattach]
     );
     server.assert_finished();
+}
+
+#[tokio::test]
+async fn test_fill_user_context_missing_id_survives_reattach_and_release() {
+    let builder = ChannelBuilder::parse("sc://localhost/;user_id=test_user").unwrap();
+    let client = SparkConnectClient::connect(&builder).await.unwrap();
+    let expected = Some(UserContext {
+        user_id: "test_user".to_string(),
+        ..Default::default()
+    });
+
+    for user_context in [None, Some(UserContext::default())] {
+        let mut request = ExecutePlanRequest {
+            user_context,
+            ..Default::default()
+        };
+        client.fill_user_context(&mut request.user_context);
+        assert_eq!(request.user_context, expected);
+
+        let iter = ExecutePlanResponseReattachableIterator::new(request);
+        assert_eq!(iter.request().user_context, expected);
+        assert_eq!(iter.create_reattach_request().await.user_context, expected);
+        assert_eq!(
+            iter.create_release_request(true).await.user_context,
+            expected
+        );
+        assert_eq!(
+            iter.create_release_request(false).await.user_context,
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_fill_user_context_preserves_explicit_id_and_other_fields() {
+    let builder = ChannelBuilder::parse("sc://localhost/;user_id=test_user").unwrap();
+    let client = SparkConnectClient::connect(&builder).await.unwrap();
+
+    for user_id in ["", "explicit_user"] {
+        let mut context = UserContext {
+            user_id: user_id.to_string(),
+            user_name: "original_name".to_string(),
+            extensions: vec![Default::default()],
+        };
+        context.extensions[0].type_url = "type.googleapis.com/test.Context".to_string();
+        context.extensions[0].value = vec![1, 2, 3];
+        let mut expected = context.clone();
+        expected.user_id = if user_id.is_empty() {
+            "test_user"
+        } else {
+            user_id
+        }
+        .to_string();
+        let mut request = AnalyzePlanRequest {
+            user_context: Some(context),
+            ..Default::default()
+        };
+
+        client.fill_user_context(&mut request.user_context);
+        assert_eq!(request.user_context, Some(expected));
+    }
+}
+
+#[tokio::test]
+async fn test_fill_user_context_without_configured_id_keeps_message_present() {
+    let builder = ChannelBuilder::parse("sc://localhost").unwrap();
+    let client = SparkConnectClient::connect(&builder).await.unwrap();
+    assert_eq!(client.user_id(), None);
+
+    for mut context in [
+        None,
+        Some(UserContext::default()),
+        Some(UserContext {
+            user_id: "request_user".to_string(),
+            user_name: "original_name".to_string(),
+            ..Default::default()
+        }),
+    ] {
+        let expected = context.clone().unwrap_or_default();
+        client.fill_user_context(&mut context);
+        assert_eq!(context, Some(expected));
+    }
 }
