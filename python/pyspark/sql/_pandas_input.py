@@ -82,7 +82,9 @@ def prepare_date_table(frame, schema):
     from pyspark._pyspark import DateType, StructField, StructType as NativeStructType
     from pyspark.sql import types as sql_types
 
-    if type(frame) is not pd.DataFrame or type(schema) is not NativeStructType or len(frame) < 1000:
+    # Keep smaller frames on the row path to avoid the importer's config RPC overhead.
+    if (type(frame) is not pd.DataFrame or type(schema) is not NativeStructType
+            or len(frame) < 10000):
         return None
     # The row path reads native fields directly. Class attributes are mutable,
     # so customized Python schema access must not select a different Arrow path.

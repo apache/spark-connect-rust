@@ -859,7 +859,7 @@ def test_date_columns_preserve_every_ipc_cell(protocol, monkeypatch, cached, ver
 
     dates = [date.min, date.max, date(4, 2, 29), date(1600, 2, 29),
              date(1900, 2, 28), date(1900, 3, 1), date(1969, 12, 31),
-             date(1970, 1, 1), date(2000, 2, 29), date(2100, 3, 1)] * 100
+             date(1970, 1, 1), date(2000, 2, 29), date(2100, 3, 1)] * 1000
     nullable = [None if i % 7 == 0 else value for i, value in enumerate(reversed(dates))]
     expected = [dates, nullable, [None] * len(dates)]
     frame = pd.DataFrame(dict(zip(["original", "b", "c"], expected)), dtype=object)
@@ -876,7 +876,7 @@ def test_date_columns_preserve_every_ipc_cell(protocol, monkeypatch, cached, ver
         monkeypatch.setattr(pd.DataFrame, method, no_rows)
     monkeypatch.setattr(pd.DataFrame, "values", property(no_rows))
     monkeypatch.setattr(pd.Series, "tolist", no_rows)
-    overrides = {"spark.sql.session.localRelationCacheThreshold": "1" if cached else "9999999"}
+    overrides = {"spark.sql.session.localRelationCacheThreshold": "1" if cached else "999999999"}
     with _arrow_input_service(protocol, **overrides) as (spark, state):
         df = spark.createDataFrame(frame, schema, verifySchema=verify)
         df.toArrow()
@@ -913,18 +913,18 @@ def test_date_column_guard_preserves_row_fallback(reason):
         def toordinal(self):
             raise AssertionError("guard must not call conversion hooks")
 
-    values = [date(2020, 1, 1)] * 1000
+    values = [date(2020, 1, 1)] * 10000
     frame = pd.DataFrame({"day": values}, dtype=object)
     schema = T.StructType([T.StructField("day", T.DateType())])
     if reason == "small":
-        frame = frame.iloc[:999]
+        frame = frame.iloc[:9999]
     elif reason == "empty":
         frame = frame.iloc[:0]
     elif reason in ("inferred", "names", "ddl", "cast"):
         schema = {"inferred": None, "names": ["day"], "ddl": "day DATE",
                   "cast": T.StructType([T.StructField("day", T.StringType())])}[reason]
     elif reason == "mixed_schema":
-        frame["long"] = np.arange(1000)
+        frame["long"] = np.arange(10000)
         schema.add("long", T.LongType())
     elif reason == "width":
         schema.add("extra", T.DateType())
@@ -970,7 +970,7 @@ def test_date_public_fallback_keeps_hooks(protocol, monkeypatch, reason):
     class Frame(pd.DataFrame):
         pass
 
-    values = [date(2020, 1, 1)] * (999 if reason == "small" else 1000)
+    values = [date(2020, 1, 1)] * (9999 if reason == "small" else 10000)
     if reason in ("nan", "pd_na", "nat", "nonnullable_null"):
         values[-1] = {"nan": float("nan"), "pd_na": pd.NA, "nat": pd.NaT,
                       "nonnullable_null": None}[reason]
@@ -1033,9 +1033,9 @@ from pathlib import Path
 import pandas as pd
 from pyspark.sql import types as T
 
-frame = pd.DataFrame({"day": [date(2020, 1, 1)] * 1000}, dtype=object)
+frame = pd.DataFrame({"day": [date(2020, 1, 1)] * 10000}, dtype=object)
 schema = T.StructType([T.StructField("day", T.DateType(), True, {"source": "native"})])
-class_name, attribute, before_import = sys.argv[1:]
+class_name, attribute, before_import = sys.argv[1:4]
 if before_import == "False":
     import pyspark.sql._pandas_input
 cls = getattr(T, class_name)
@@ -1052,7 +1052,12 @@ else:
              "dataType": T.DateType(), "nullable": False, "metadata": {"changed": True}}[attribute]
     replacement = property(lambda self: value)
 setattr(cls, attribute, replacement)
-from tests.test_arrow_handoff import _arrow_input_service, protocol
+import importlib.util
+spec = importlib.util.spec_from_file_location("date_schema_capture", sys.argv[4])
+capture = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = capture
+spec.loader.exec_module(capture)
+_arrow_input_service, protocol = capture._arrow_input_service, capture.protocol
 class Factory:
     def mktemp(self, name):
         return Path(tempfile.mkdtemp(prefix=name))
@@ -1061,8 +1066,9 @@ with _arrow_input_service(protocol.__wrapped__(Factory())) as (spark, state):
     assert state["config_requests"] == [], state["config_requests"]
     table = state["input_tables"][0]
     assert table.schema.names == ["day"], table.schema
-    assert table.column(0).to_pylist() == [date(2020, 1, 1)] * 1000
+    assert table.column(0).to_pylist() == [date(2020, 1, 1)] * 10000
 '''
     result = subprocess.run([sys.executable, "-c", script, class_name, attribute,
-                             str(before_import)], capture_output=True, text=True, timeout=30)
+                             str(before_import), __file__],
+                            capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
