@@ -294,38 +294,15 @@ impl SparkSession {
     ///
     /// `schema` is the Spark schema applied by the server. All batches must share
     /// the same Arrow schema; IPC serialization is still required for transport.
+    /// Non-empty inputs read the server's local-relation configuration. Large inputs
+    /// are uploaded as cache artifacts and referenced by hash in the resulting plan.
     pub fn create_dataframe_from_arrow(
         &self,
         batches: Vec<arrow::record_batch::RecordBatch>,
         schema: DataType,
     ) -> Result<DataFrame> {
-        let data = if let Some(first) = batches.first() {
-            let arrow_schema = first.schema();
-            let mut buffer = Vec::new();
-            {
-                let mut writer =
-                    arrow::ipc::writer::StreamWriter::try_new(&mut buffer, &arrow_schema)
-                        .map_err(|e| SparkError::connect_msg(e.to_string()))?;
-                for batch in &batches {
-                    if batch.schema() != arrow_schema {
-                        return Err(SparkError::connect_msg("Arrow batch schemas must match"));
-                    }
-                    writer
-                        .write(batch)
-                        .map_err(|e| SparkError::connect_msg(e.to_string()))?;
-                }
-                writer
-                    .finish()
-                    .map_err(|e| SparkError::connect_msg(e.to_string()))?;
-            }
-            Some(buffer)
-        } else {
-            None
-        };
-        Ok(DataFrame::new(
-            self.clone(),
-            LogicalPlan::LocalRelation { schema, data },
-        ))
+        let plan = crate::arrow_input::create_relation(&self.client, batches, schema)?;
+        Ok(DataFrame::new(self.clone(), plan))
     }
 
     /// Create a DataFrameReader for reading data from various sources.
@@ -1276,12 +1253,12 @@ mod tests {
             fields: vec![struct_field("x", DataType::Integer)],
         };
         let spark = session();
-        let df = spark
-            .create_dataframe_from_arrow(vec![batch.clone(), batch.clone()], schema.clone())
-            .unwrap();
+        let plan =
+            crate::arrow_input::inline_relation(&[batch.clone(), batch.clone()], schema.clone())
+                .unwrap();
         let LogicalPlan::LocalRelation {
             data: Some(data), ..
-        } = df.plan()
+        } = &plan
         else {
             panic!("expected Arrow local relation")
         };

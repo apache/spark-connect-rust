@@ -228,6 +228,11 @@ pub enum LogicalPlan {
         schema: DataType,
         data: Option<Vec<u8>>,
     },
+    /// Local Arrow data uploaded as session-scoped cache artifacts.
+    ChunkedCachedLocalRelation {
+        data_hashes: Vec<String>,
+        schema_hash: Option<String>,
+    },
     /// CachedRemoteRelation: a reference to a cached remote relation.
     CachedRemoteRelation { relation_id: String },
     /// Read: `spark.read.format(...).load(...)` or `spark.read.table(...)`.
@@ -944,6 +949,17 @@ impl LogicalPlan {
                     Some(proto::relation::RelType::SubqueryAlias(Box::new(sq_alias)));
             }
 
+            LogicalPlan::ChunkedCachedLocalRelation {
+                data_hashes,
+                schema_hash,
+            } => {
+                relation.rel_type = Some(proto::relation::RelType::ChunkedCachedLocalRelation(
+                    proto::ChunkedCachedLocalRelation {
+                        data_hashes: data_hashes.clone(),
+                        schema_hash: schema_hash.clone(),
+                    },
+                ));
+            }
             LogicalPlan::LocalRelation { schema, data } => {
                 let mut local = proto::LocalRelation::default();
                 if let Some(d) = data {
