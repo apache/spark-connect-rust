@@ -280,7 +280,7 @@ fn struct_to_ddl_tree_and_nullable() {
     assert_eq!(st.to_ddl().unwrap(), "a int,b string NOT NULL");
     let tree = st.tree_string().unwrap();
     assert!(tree.starts_with("root\n"));
-    assert!(tree.contains("a: int (nullable = true)"));
+    assert!(tree.contains("a: integer (nullable = true)"));
     assert!(tree.contains("b: string (nullable = false)"));
     // toNullable makes every field nullable.
     if let DataType::Struct { fields } = st.to_nullable() {
@@ -314,7 +314,7 @@ fn tree_string_with_depth_truncates_nested_structs() {
     // Full depth shows the nested field, rendering the struct as the bare type name.
     let full = nested.tree_string().unwrap();
     assert!(full.contains("outer: struct (nullable = true)"));
-    assert!(full.contains("inner: int (nullable = true)"));
+    assert!(full.contains("inner: integer (nullable = true)"));
     // max_depth = 1 prints only the top level; the nested field is omitted.
     let shallow = nested.tree_string_with_depth(1).unwrap();
     assert!(shallow.contains("outer: struct (nullable = true)"));

@@ -865,7 +865,11 @@ impl DataType {
         match self {
             DataType::Struct { .. } => {
                 let mut out = String::from("root\n");
-                self.append_tree(&mut out, " |", 1, max_depth);
+                self.append_tree(
+                    &mut out,
+                    " |",
+                    if max_depth > 0 { max_depth } else { i32::MAX },
+                );
                 Ok(out)
             }
             _ => Err(SparkError::value(
@@ -875,33 +879,77 @@ impl DataType {
         }
     }
 
-    fn append_tree(&self, out: &mut String, prefix: &str, depth: i32, max_depth: i32) {
-        if let DataType::Struct { fields } = self {
-            for f in fields {
-                // A nested struct is rendered as the bare type name ("struct") and its
-                // fields are shown by recursing below, so `max_depth` can truncate them.
-                // Using `simple_string()` here would inline the children (e.g.
-                // "struct<inner:int>"), leaking them past `max_depth`. Non-struct types
-                // have no depth-controlled children, so their simple string is used.
-                let is_struct = matches!(f.data_type, DataType::Struct { .. });
-                let type_repr = if is_struct {
-                    f.data_type.type_name()
-                } else {
-                    f.data_type.simple_string()
-                };
-                out.push_str(&format!(
-                    "{}-- {}: {} (nullable = {})\n",
-                    prefix, f.name, type_repr, f.nullable
-                ));
-                if is_struct && depth < max_depth {
-                    f.data_type.append_tree(
-                        out,
-                        &format!("{}    |", prefix.trim_end_matches('|')),
-                        depth + 1,
-                        max_depth,
-                    );
+    fn tree_type_name(&self) -> String {
+        match self {
+            DataType::Decimal { .. }
+            | DataType::Char { .. }
+            | DataType::Varchar { .. }
+            | DataType::Time { .. }
+            | DataType::YearMonthInterval { .. }
+            | DataType::DayTimeInterval { .. } => self.simple_string(),
+            _ => self.type_name(),
+        }
+    }
+
+    fn append_tree(&self, out: &mut String, prefix: &str, remaining: i32) {
+        if remaining <= 0 {
+            return;
+        }
+        let child_prefix = format!("{prefix}    |");
+        match self {
+            DataType::Struct { fields } => {
+                for f in fields {
+                    let name = f
+                        .name
+                        .replace('\n', "\\n")
+                        .replace('\r', "\\r")
+                        .replace('\t', "\\t")
+                        .replace('\x0c', "\\f")
+                        .replace('\x08', "\\b")
+                        .replace('\x0b', "\\v")
+                        .replace('\x07', "\\a");
+                    out.push_str(&format!(
+                        "{}-- {}: {} (nullable = {})\n",
+                        prefix,
+                        name,
+                        f.data_type.tree_type_name(),
+                        f.nullable
+                    ));
+                    f.data_type.append_tree(out, &child_prefix, remaining - 1);
                 }
             }
+            DataType::Array {
+                element_type,
+                contains_null,
+            } => {
+                out.push_str(&format!(
+                    "{}-- element: {} (containsNull = {})\n",
+                    prefix,
+                    element_type.tree_type_name(),
+                    contains_null
+                ));
+                element_type.append_tree(out, &child_prefix, remaining - 1);
+            }
+            DataType::Map {
+                key_type,
+                value_type,
+                value_contains_null,
+            } => {
+                out.push_str(&format!(
+                    "{}-- key: {}\n",
+                    prefix,
+                    key_type.tree_type_name()
+                ));
+                key_type.append_tree(out, &child_prefix, remaining - 1);
+                out.push_str(&format!(
+                    "{}-- value: {} (valueContainsNull = {})\n",
+                    prefix,
+                    value_type.tree_type_name(),
+                    value_contains_null
+                ));
+                value_type.append_tree(out, &child_prefix, remaining - 1);
+            }
+            _ => {}
         }
     }
 

@@ -1359,13 +1359,25 @@ impl PyDataFrame {
         self.dataframe.is_empty().to_pyerr()
     }
 
-    /// Print the schema of the DataFrame. `level` (max nesting depth to print) is
-    /// accepted for signature parity with reference pyspark; the connect core does not
-    /// yet thread a depth into the schema tree-string, so it is currently ignored.
+    /// Print the schema through Python stdout, honoring the maximum nesting depth.
     #[pyo3(signature = (level=None))]
-    #[allow(unused_variables)]
-    fn printSchema(&self, level: Option<i32>) -> PyResult<()> {
-        self.dataframe.show(0).to_pyerr()
+    fn printSchema(&self, py: Python<'_>, level: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+        let schema = py.detach(|| self.dataframe.schema()).to_pyerr()?;
+        // Reference PySpark treats false values and nonpositive depths as unlimited.
+        // Positive fractional depths include the partially remaining level as well.
+        let depth = match level {
+            Some(level) if level.is_truthy()? && level.gt(0)? => {
+                if level.ge(i32::MAX)? {
+                    i32::MAX
+                } else {
+                    level.extract::<f64>()?.ceil() as i32
+                }
+            }
+            _ => i32::MAX,
+        };
+        let tree = schema.tree_string_with_depth(depth).to_pyerr()?;
+        py.import("builtins")?.getattr("print")?.call1((tree,))?;
+        Ok(())
     }
 
     /// Get the schema as a list of (name, type) tuples.
