@@ -34,7 +34,7 @@ def prepare_int64_table(frame, schema):
 
     width = len(frame.columns)
     if not width or not frame.columns.is_unique or not all(
-        isinstance(name, str) for name in frame.columns
+        isinstance(name, str) and "\x00" not in name for name in frame.columns
     ):
         return None
     dtypes = frame.dtypes
@@ -47,12 +47,13 @@ def prepare_int64_table(frame, schema):
         return None
     if isinstance(schema, StructType):
         if len(schema.fields) != width or not all(
-            isinstance(field.dataType, LongType) for field in schema.fields
+            isinstance(field.dataType, LongType) and "\x00" not in field.name
+            for field in schema.fields
         ):
             return None
     elif schema is not None:
         if not isinstance(schema, (list, tuple)) or len(schema) != width or not all(
-            isinstance(name, str) for name in schema
+            isinstance(name, str) and "\x00" not in name for name in schema
         ):
             return None
 

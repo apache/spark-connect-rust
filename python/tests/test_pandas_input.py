@@ -159,3 +159,24 @@ def test_small_numpy_frames_avoid_importer_configuration_overhead():
     assert prepare_int64_table(pd.DataFrame({"a": np.arange(999, dtype=np.int64)}), None) is None
     assert prepare_int64_table(pd.DataFrame({"a": np.arange(1000, dtype=np.int64)}), None) is not None
     assert prepare_int64_table(pd.DataFrame({"a": pd.Series([None], dtype="Int64")}), None) is not None
+
+
+@pytest.mark.parametrize("schema_kind", ["inferred", "names", "explicit"])
+def test_nul_names_keep_lossless_ipc_row_fallback(protocol, schema_kind):
+    import pyarrow as pa
+
+    name = "a\x00b"
+    frame = pd.DataFrame({name if schema_kind == "inferred" else "original":
+                          np.arange(1000, dtype=np.int64)})
+    schema = None
+    if schema_kind == "names":
+        schema = [name]
+    elif schema_kind == "explicit":
+        schema = T.StructType([T.StructField(name, T.LongType())])
+    # C Stream field names are NUL-terminated; IPC preserves the full string.
+    assert prepare_int64_table(frame, schema) is None
+    with _arrow_input_service(protocol) as (spark, state):
+        spark.createDataFrame(frame, schema).toArrow()
+        assert state["result"] == (1000, 0, 999)
+        payload = state["relations"][0].local_relation.data
+        assert pa.ipc.open_stream(payload).schema.names == [name]
