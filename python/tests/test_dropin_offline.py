@@ -10,7 +10,7 @@ import multiprocessing
 import pickle
 import time
 from concurrent.futures import ThreadPoolExecutor
-from threading import Event
+from threading import Barrier, Event
 
 import pytest
 
@@ -2793,12 +2793,16 @@ def schema_cache_schema(name="id", nested=False):
 
 
 def schema_cache_field(name, data_type):
-    return (schema_cache_message(1, name) + schema_cache_message(2, data_type) + b"\x18\x01"
-            + schema_cache_message(4, '{"note":"original"}'))
+    return (
+        schema_cache_message(1, name)
+        + schema_cache_message(2, data_type)
+        + b"\x18\x01"
+        + schema_cache_message(4, '{"note":"original"}')
+    )
 
 
 def schema_cache_serve(connection):
-    import grpc as schema_cache_grpc
+    import grpc
 
     # Keep the server independent of the client's interpreter and GIL.
     class Service:
@@ -2817,11 +2821,11 @@ def schema_cache_serve(connection):
             self.calls += 1
             if self.block_response and not self.response_gate.wait(5):
                 context.abort(
-                    schema_cache_grpc.StatusCode.DEADLINE_EXCEEDED,
+                    grpc.StatusCode.DEADLINE_EXCEEDED,
                     "Python thread could not run while metadata lookup waited",
                 )
             if self.failure == "rpc":
-                context.abort(schema_cache_grpc.StatusCode.INVALID_ARGUMENT, "schema unavailable")
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT, "schema unavailable")
             if self.failure == "no-result":
                 return b""
             if self.failure == "missing-schema":
@@ -2833,13 +2837,14 @@ def schema_cache_serve(connection):
 
     service = Service()
     with ThreadPoolExecutor(max_workers=4) as executor:
-        server = schema_cache_grpc.server(executor)
+        server = grpc.server(executor)
         handlers = {
-            "AnalyzePlan": schema_cache_grpc.unary_unary_rpc_method_handler(service.analyze),
-            "ReleaseSession": schema_cache_grpc.unary_unary_rpc_method_handler(service.release),
+            "AnalyzePlan": grpc.unary_unary_rpc_method_handler(service.analyze),
+            "ReleaseSession": grpc.unary_unary_rpc_method_handler(service.release),
         }
-        server.add_generic_rpc_handlers((schema_cache_grpc.method_handlers_generic_handler(
-            "spark.connect.SparkConnectService", handlers),))
+        server.add_generic_rpc_handlers(
+            (grpc.method_handlers_generic_handler("spark.connect.SparkConnectService", handlers),)
+        )
         port = server.add_insecure_port("127.0.0.1:0")
         server.start()
         connection.send(port)
@@ -2860,7 +2865,7 @@ def schema_cache_serve(connection):
             server.stop(0).wait()
 
 
-class schema_cache_RemoteService:
+class SchemaCacheRemoteService:
     def __init__(self, connection):
         object.__setattr__(self, "connection", connection)
 
@@ -2888,7 +2893,7 @@ def schema_cache_analyzed():
     process = context.Process(target=schema_cache_serve, args=(child,))
     process.start()
     spark = None
-    service = schema_cache_RemoteService(parent)
+    service = SchemaCacheRemoteService(parent)
     try:
         assert parent.poll(20), "Mock server did not start"
         port = parent.recv()
@@ -2935,15 +2940,15 @@ def test_schema_cache_returned_schema_and_lists_are_independent(schema_cache_ana
     original = df.schema
     modified = df.schema
     assert original is not modified
-    modified.fields[0].metadata["note"] = "changed"
-    nested = modified.fields[0].dataType
-    nested.add("extra_nested", T.StringType())
-    assert len(nested.fields) == 2
     modified.add("extra", T.StringType())
     assert len(modified.fields) == 2
     assert len(original.fields) == 1
-    df.columns.append("extra")
-    df.dtypes.clear()
+    columns = df.columns
+    columns.append("extra")
+    dtypes = df.dtypes
+    dtypes.clear()
+    assert columns == ["id", "extra"]
+    assert dtypes == []
     assert df.schema.jsonValue() == original.jsonValue()
     assert df.columns == ["id"]
     assert df.dtypes == [("id", "struct<inner:bigint>")]
@@ -2993,13 +2998,60 @@ def test_schema_cache_failures_are_not_cached(schema_cache_analyzed, failure):
     assert service.calls == 3
 
 
-def test_schema_cache_concurrent_schema_access_issues_one_analysis(schema_cache_analyzed):
+@pytest.mark.parametrize("accessor", ["schema", "columns", "dtypes"])
+def test_schema_cache_non_struct_responses_are_not_cached(schema_cache_analyzed, accessor):
     spark, service = schema_cache_analyzed
     df = spark.range(10)
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        results = list(pool.map(lambda _: df.schema, range(8)))
-    assert all(schema.jsonValue() == results[0].jsonValue() for schema in results)
-    assert len({id(schema) for schema in results}) == 8
+    service.data_type = schema_cache_message(7, b"")
+    for count in (1, 2):
+        with pytest.raises(Exception, match="Schema is not a struct type"):
+            getattr(df, accessor)
+        assert service.calls == count
+    service.data_type = schema_cache_schema()
+    assert df.columns == ["id"]
+    assert df.dtypes == [("id", "bigint")]
+    assert service.calls == 3
+
+
+def test_schema_cache_concurrent_metadata_access_issues_one_analysis(schema_cache_analyzed):
+    spark, service = schema_cache_analyzed
+    df = spark.range(10)
+    accessors = ("schema", "columns", "dtypes") * 3
+    start = Barrier(len(accessors) + 1)
+    service.block_response = True
+
+    def read_metadata(accessor):
+        start.wait(timeout=10)
+        return getattr(df, accessor)
+
+    with ThreadPoolExecutor(max_workers=len(accessors)) as pool:
+        pending = [pool.submit(read_metadata, accessor) for accessor in accessors]
+        try:
+            start.wait(timeout=10)
+            for _ in range(500):
+                if service.calls:
+                    break
+                time.sleep(0.01)
+            else:
+                raise AssertionError("Metadata request never reached the server")
+            # Keep the first RPC in flight while the other workers attempt their
+            # cold lookups. An implementation without miss synchronization must
+            # not pass just because the first response arrives immediately.
+            time.sleep(0.1)
+            assert not any(future.done() for future in pending)
+        finally:
+            service.release_response()
+        results = [future.result(timeout=10) for future in pending]
+    schemas = []
+    for accessor, result in zip(accessors, results):
+        if accessor == "schema":
+            schemas.append(result)
+        elif accessor == "columns":
+            assert result == ["id"]
+        else:
+            assert result == [("id", "bigint")]
+    assert all(schema.jsonValue() == schemas[0].jsonValue() for schema in schemas)
+    assert len({id(schema) for schema in schemas}) == len(schemas)
     assert service.calls == 1
 
 

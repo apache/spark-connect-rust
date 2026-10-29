@@ -802,6 +802,9 @@ impl DataFrame {
                     .schema
                     .ok_or_else(|| SparkError::connect_msg("Schema is missing"))?,
             )?;
+            if !matches!(&schema, DataType::Struct { .. }) {
+                return Err(SparkError::connect_msg("Schema is not a struct type"));
+            }
             *cached = Some(schema.clone());
             Ok(schema)
         } else {
@@ -2902,6 +2905,52 @@ mod cache_tests {
             assert!(!Arc::ptr_eq(&df.schema_cache, &derived.schema_cache));
             assert!(derived.schema_cache.lock().unwrap().is_none());
         }
+    }
+
+    #[test]
+    fn schema_cache_returns_independent_nested_values() {
+        let spark = SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .unwrap();
+        let df = spark.range(3).unwrap();
+        let cloned = df.clone();
+        let schema = DataType::from_json(&serde_json::json!({
+            "type": "struct",
+            "fields": [{
+                "name": "outer",
+                "type": {
+                    "type": "struct",
+                    "fields": [{
+                        "name": "inner",
+                        "type": "long",
+                        "nullable": true,
+                        "metadata": {"details": {"labels": ["original"]}}
+                    }]
+                },
+                "nullable": true,
+                "metadata": {}
+            }]
+        }))
+        .unwrap();
+        *df.schema_cache.lock().unwrap() = Some(schema.clone());
+
+        let mut changed = df.schema().unwrap();
+        let unchanged = df.schema().unwrap();
+        let DataType::Struct { fields } = &mut changed else {
+            panic!("Expected outer struct");
+        };
+        let DataType::Struct { fields } = &mut fields[0].data_type else {
+            panic!("Expected nested struct");
+        };
+        fields[0].name = "changed".to_string();
+        fields[0].metadata.get_mut("details").unwrap()["labels"][0] = serde_json::json!("changed");
+        assert_eq!(fields[0].name, "changed");
+        assert_eq!(fields[0].metadata["details"]["labels"][0], "changed");
+        assert_ne!(changed, schema);
+        assert_eq!(unchanged, schema);
+        assert_eq!(df.schema_cache.lock().unwrap().as_ref(), Some(&schema));
+        assert_eq!(cloned.schema().unwrap(), schema);
     }
 
     #[test]
