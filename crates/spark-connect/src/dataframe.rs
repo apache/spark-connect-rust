@@ -2971,6 +2971,12 @@ mod cache_tests {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| frame.schema()))
             });
             assert!(result.is_err());
+            // Poisoning proves the lock spans the analysis boundary without
+            // relying on thread scheduling to produce contended cache misses.
+            assert!(
+                frame.schema_cache.is_poisoned(),
+                "schema analysis must hold the shared cache lock"
+            );
         }
         let mut cached = df.schema_cache.lock().unwrap_err().into_inner();
         assert!(cached.is_none());
