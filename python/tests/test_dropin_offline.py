@@ -2977,19 +2977,55 @@ def test_decimal_scale_subclass_hooks(decimal_scale_ipc_session, hook):
     assert table.equals(expected)
 
 
-@pytest.mark.parametrize("text", ["1E+3", "1E-7", "-0E-7", "NaN", "sNaN42", "Infinity", "-Infinity"])
+@pytest.mark.parametrize("text", ["NaN", "sNaN42", "Infinity", "-Infinity"])
 @pytest.mark.parametrize("capitals", [0, 1])
 def test_decimal_scale_existing_errors(decimal_scale_ipc_session, text, capitals):
     from decimal import Decimal, localcontext
 
     spark, payload = decimal_scale_ipc_session
-    # Scientific parser support is tracked separately. These inputs still fail
-    # in the unchanged core parser, including Decimal's non-finite spellings.
+    # Non-finite Decimal inputs retain the existing core-parser errors.
     with localcontext() as context:
         context.capitals = capitals
-        with pytest.raises(RuntimeError, match="invalid digit found in string"):
+        with pytest.raises(RuntimeError) as error:
             spark.createDataFrame([(Decimal(text),)], ["v"])
+    # Both parser versions reject non-finite values, with distinct exact messages.
+    assert str(error.value) in {
+        f"invalid decimal '{text.lstrip('+-')}': invalid digit found in string",
+        f"invalid or overflowing decimal '{text}'",
+    }
     assert not payload.exists()
+
+
+@pytest.mark.parametrize("text", ["1E+3", "1E-7", "-0E-7", "1.2300E-7"])
+@pytest.mark.parametrize("capitals", [0, 1])
+def test_decimal_scale_scientific_compatibility(decimal_scale_ipc_session, text, capitals):
+    from decimal import Decimal, localcontext
+    import pyarrow as pa
+
+    spark, payload = decimal_scale_ipc_session
+    value = Decimal(text)
+    with localcontext() as context:
+        context.capitals = capitals
+        try:
+            frame = spark.createDataFrame([(value,), (None,)], ["v"])
+        except RuntimeError as error:
+            # The original core parser rejects scientific notation. Its separate
+            # parser fix may accept it; accepted values must retain exact scale.
+            assert "invalid digit found in string" in str(error)
+            assert not payload.exists()
+            return
+    frame.collect()
+    scale = max(-value.as_tuple().exponent, 0)
+    expected = pa.table({"v": pa.array([value, None], type=pa.decimal128(38, scale))})
+    table = pa.ipc.open_stream(payload.read_bytes()).read_all()
+    table.validate(full=True)
+    assert table.schema == expected.schema
+    assert table.equals(expected)
+    actual = table.column(0).combine_chunks()
+    wanted = expected.column(0).combine_chunks()
+    assert actual[0].is_valid
+    assert not actual[1].is_valid
+    assert actual.buffers()[1][:16] == wanted.buffers()[1][:16]
 
 
 def test_decimal_scale_avoids_coefficient_tuple(decimal_scale_ipc_session):
