@@ -5006,6 +5006,238 @@ def test_local_input_native_numbers_inside_nested_values(mock_connect):
     assert dict(actual["mapping"]) == {"x": 2**63 - 1}
 
 
+# Exact list/tuple conversion and separate-process input IPC regressions.
+from datetime import date as container_input_date, datetime as container_input_datetime
+from decimal import Decimal as ContainerInputDecimal
+
+from pyspark.sql import Row as ContainerInputRow
+
+
+@pytest.mark.parametrize("container", [list, tuple])
+def test_container_input_values_and_errors(container_input_capture_input, container):
+    array_schema = T.StructType([T.StructField("value", T.ArrayType(T.LongType()))])
+    for value, expected in [(container([1, None, -3]), [1, None, -3]),
+                            (container(), []),
+                            (container([1, 2, 255]), [1, 2, 255])]:
+        table = container_input_capture_input([(value,)], array_schema)
+        assert table.column(0)[0].as_py() == expected
+    binary_schema = T.StructType([T.StructField("value", T.BinaryType())])
+    for value in (b"abc", bytearray(b"abc")):
+        table = container_input_capture_input([(value,)], binary_schema)
+        assert table.column(0)[0].as_py() == b"abc"
+    nested_schema = T.StructType([
+        T.StructField("value", T.ArrayType(T.ArrayType(T.LongType())))])
+    value = container([container([1, None]), container([2]), container()])
+    table = container_input_capture_input([(value,)], nested_schema)
+    assert table.column(0)[0].as_py() == [[1, None], [2], []]
+    with pytest.raises(TypeError, match="unsupported value type"):
+        container_input_capture_input([(container([object()]),)], array_schema)
+
+
+@pytest.mark.parametrize("container", [list, tuple])
+def test_container_input_subclass_numeric_precedence(container_input_capture_input, container):
+    trace = []
+
+    class Indexed(container):
+        def __index__(self):
+            trace.append("index")
+            return 42
+
+    class Floating(container):
+        def __float__(self):
+            trace.append("float")
+            return 1.25
+
+    class Iterated(container):
+        def __iter__(self):
+            raise AssertionError("existing built-in iterator must remain in use")
+
+    cases = [(Indexed([1, 2]), T.LongType(), 42),
+             (Floating([1, 2]), T.DoubleType(), 1.25),
+             (Iterated([1, 2]), T.ArrayType(T.LongType()), [1, 2])]
+    for value, dtype, expected in cases:
+        schema = T.StructType([T.StructField("value", dtype)])
+        table = container_input_capture_input([(value,)], schema)
+        assert table.column(0)[0].as_py() == expected
+    assert trace == ["index", "float"]
+
+
+def test_container_input_recursive_leaf_and_row_types(container_input_capture_input):
+    from datetime import timezone
+
+    record = ContainerInputRow(
+        flag=True, number=42, ratio=1.25, text="text", blob=b"abc",
+        decimal=ContainerInputDecimal("-12.340"),
+        date=container_input_date(2000, 2, 29),
+        timestamp=container_input_datetime(2020, 1, 1),
+        child=ContainerInputRow(x=1, y="a"), missing=None)
+    record_schema = T.StructType([
+        T.StructField("flag", T.BooleanType()), T.StructField("number", T.LongType()),
+        T.StructField("ratio", T.DoubleType()), T.StructField("text", T.StringType()),
+        T.StructField("blob", T.BinaryType()), T.StructField("decimal", T.DecimalType(18, 3)),
+        T.StructField("date", T.DateType()), T.StructField("timestamp", T.TimestampType()),
+        T.StructField("child", T.StructType([
+            T.StructField("x", T.LongType()), T.StructField("y", T.StringType())])),
+        T.StructField("missing", T.LongType()),
+    ])
+    table = container_input_capture_input(
+        [(record,)], T.StructType([T.StructField("value", record_schema)]))
+    result = table.column(0)[0].as_py()
+    expected_timestamp = container_input_datetime.fromtimestamp(
+        record.timestamp.timestamp(), timezone.utc)
+    assert result == {
+        "flag": True, "number": 42, "ratio": 1.25, "text": "text", "blob": b"abc",
+        "decimal": ContainerInputDecimal("-12.340"), "date": container_input_date(2000, 2, 29),
+        "timestamp": expected_timestamp, "child": {"x": 1, "y": "a"}, "missing": None,
+    }
+    assert type(result["flag"]) is bool
+    assert type(result["decimal"]) is ContainerInputDecimal
+
+
+def _container_input_fields(data):
+    """Decode only the small protobuf envelope around a local Arrow relation."""
+    def varint(pos):
+        value, shift = 0, 0
+        while True:
+            byte = data[pos]
+            pos += 1
+            value |= (byte & 127) << shift
+            if byte < 128:
+                return value, pos
+            shift += 7
+
+    result, pos = {}, 0
+    while pos < len(data):
+        tag, pos = varint(pos)
+        wire = tag & 7
+        if wire == 2:
+            length, pos = varint(pos)
+            result[tag >> 3] = data[pos:pos + length]
+            pos += length
+        elif wire == 0:
+            _, pos = varint(pos)
+        elif wire in (1, 5):
+            pos += 8 if wire == 1 else 4
+        else:
+            raise AssertionError(f"unexpected protobuf wire type: {wire}")
+    return result
+
+
+def _container_input_capture_server(connection):
+    from concurrent.futures import ThreadPoolExecutor
+    import grpc
+
+    captured = []
+
+    def execute(request, context):
+        # ExecutePlanRequest.plan=3 -> Plan.root=1. Names/pandas input
+        # uses Relation.to_df=18 -> ToDF.input=1 before local_relation=11.
+        relation = _container_input_fields(
+            _container_input_fields(_container_input_fields(request)[3])[1])
+        if 18 in relation:
+            relation = _container_input_fields(_container_input_fields(relation[18])[1])
+        assert 11 in relation, relation
+        captured.append(_container_input_fields(relation[11])[1])
+        context.abort(grpc.StatusCode.INVALID_ARGUMENT, "captured container input")
+        yield b""  # Make this a streaming handler.
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        server = grpc.server(executor)
+        server.add_generic_rpc_handlers((grpc.method_handlers_generic_handler(
+            "spark.connect.SparkConnectService", {
+                "ExecutePlan": grpc.unary_stream_rpc_method_handler(execute),
+            }),))
+        port = server.add_insecure_port("127.0.0.1:0")
+        server.start()
+        connection.send(port)
+        try:
+            while True:
+                command = connection.recv()
+                if command == "stop":
+                    break
+                assert command == "get"
+                connection.send(captured.pop(0))
+        finally:
+            server.stop(0).wait()
+
+
+@pytest.fixture
+def container_input_capture_input():
+    import multiprocessing
+    import sys
+    from pathlib import Path
+
+    # importlib-mode pytest does not add the tests namespace to sys.path.
+    # Spawned children need it to import this server target; append it so the
+    # installed wheel still takes precedence over the source pyspark package.
+    test_container_input_root = str(Path(__file__).resolve().parents[1])
+    if test_container_input_root not in sys.path:
+        sys.path.append(test_container_input_root)
+    pytest.importorskip("grpc")
+    from pyspark.sql import SparkSession
+
+    context = multiprocessing.get_context("spawn")
+    parent, child = context.Pipe()
+    process = context.Process(target=_container_input_capture_server, args=(child,))
+    process.start()
+    try:
+        assert parent.poll(20), "capture service failed to start"
+        spark = SparkSession.builder.remote(f"sc://127.0.0.1:{parent.recv()}").getOrCreate()
+
+        def capture(data, schema):
+            import pyarrow as pa
+            df = spark.createDataFrame(data, schema=schema)
+            with pytest.raises(Exception, match="captured container input"):
+                df.collect()
+            parent.send("get")
+            assert parent.poll(10), "capture service failed to return the IPC payload"
+            return pa.ipc.open_stream(parent.recv()).read_all()
+
+        yield capture
+    finally:
+        if process.is_alive():
+            parent.send("stop")
+        process.join(10)
+        if process.is_alive():
+            process.terminate()
+            process.join(10)
+        parent.close()
+        child.close()
+
+
+@pytest.mark.parametrize("source", ["tuples", "pandas"])
+@pytest.mark.parametrize("schema_kind", ["inferred", "names", "explicit", "ddl"])
+@pytest.mark.parametrize("container", [list, tuple])
+def test_container_input_array_input_ipc(container_input_capture_input, source, schema_kind, container):
+    import pyarrow as pa
+    from pyspark.sql import types as T
+
+    values = [container([1, None, -3]), container(), None, container([255, 256])]
+    schema = {"inferred": None, "names": ["items"], "ddl": "items array<bigint>",
+              "explicit": T.StructType([T.StructField("items", T.ArrayType(T.LongType()))])}[schema_kind]
+    data = [(value,) for value in values]
+    if source == "pandas":
+        pd = pytest.importorskip("pandas")
+        data = pd.DataFrame(data, columns=["items"])
+    table = container_input_capture_input(data, schema)
+    assert table.column(0).type == pa.list_(pa.int64())
+    assert table.column(0).to_pylist() == [[1, None, -3], [], None, [255, 256]]
+
+
+def test_container_input_nested_array_struct_binary_ipc(container_input_capture_input):
+    from pyspark.sql import types as T
+
+    schema = T.StructType([
+        T.StructField("nested", T.ArrayType(T.ArrayType(T.LongType()))),
+        T.StructField("record", T.StructType([
+            T.StructField("x", T.LongType()), T.StructField("y", T.StringType())])),
+        T.StructField("blob", T.BinaryType()),
+    ])
+    table = container_input_capture_input([([[1, None], (), None], ContainerInputRow(x=7, y="row"), b"abc")], schema)
+    assert table.to_pylist() == [{"nested": [[1, None], [], None],
+                                  "record": {"x": 7, "y": "row"}, "blob": b"abc"}]
+
+
 # --------------------------------------------------------------------------- printSchema
 
 
