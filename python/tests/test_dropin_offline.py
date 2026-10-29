@@ -6,10 +6,14 @@ Python side has real, measurable coverage in CI without a running server. Tests
 that require a live server live in test_dropin_e2e.py and are gated on SPARK_REMOTE.
 """
 
+from concurrent.futures import ThreadPoolExecutor as schema_cache_ThreadPoolExecutor
+import multiprocessing as schema_cache_multiprocessing
 import pickle
+from threading import Event as schema_cache_Event
 
 import pytest
 
+from pyspark.sql import SparkSession as schema_cache_SparkSession
 from pyspark.sql import types as T
 
 
@@ -2756,31 +2760,11 @@ for schema in schemas:
         raise AssertionError("expected a width validation error")
 """], check=True)
 
-# Licensed to the Apache Software Foundation (ASF) under one or more
-# contributor license agreements. See the NOTICE file distributed with
-# this work for additional information regarding copyright ownership.
-# The ASF licenses this file to You under the Apache License, Version 2.0
-# (the "License"); you may not use this file except in compliance with
-# the License. You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-
 
 # --------------------------------------------------------------------------- schema cache
-# Schema RPC regressions live here because coverage.yml explicitly selects this
-# file. The separate-process fixture needs no live Spark server and leaves other
-# offline tests available even if optional grpcio is not installed.
-from concurrent.futures import ThreadPoolExecutor as schema_cache_ThreadPoolExecutor
-import multiprocessing as schema_cache_multiprocessing
-
-from pyspark.sql import SparkSession as schema_cache_SparkSession
+# The separate-process fixture exercises the real transport without Spark.
+# Tiny wire encoders are used because the drop-in package does not ship the
+# generated AnalyzePlan/ReleaseSession protobuf classes.
 
 
 def schema_cache_varint(value):
@@ -2801,7 +2785,10 @@ def schema_cache_message(field, value):
 def schema_cache_schema(name="id", nested=False):
     # types.proto: DataType.long=7, .struct=21; Struct.fields=1;
     # StructField: name=1, data_type=2, nullable=3, metadata=4.
-    data_type = schema_cache_message(21, schema_cache_message(1, schema_cache_field("inner", schema_cache_message(7, b"")))) if nested else schema_cache_message(7, b"")
+    data_type = schema_cache_message(7, b"")
+    if nested:
+        inner_field = schema_cache_field("inner", data_type)
+        data_type = schema_cache_message(21, schema_cache_message(1, inner_field))
     return schema_cache_message(21, schema_cache_message(1, schema_cache_field(name, data_type)))
 
 
@@ -2813,15 +2800,26 @@ def schema_cache_field(name, data_type):
 def schema_cache_serve(connection):
     import grpc as schema_cache_grpc
 
-    # A separate process also exercises columns/dtypes, whose first access may
-    # hold the client's GIL while waiting for the RPC.
+    # Keep the server independent of the client's interpreter and GIL.
     class Service:
         calls = 0
         data_type = schema_cache_schema()
         failure = None
+        release_calls = 0
+        block_response = False
+        response_gate = schema_cache_Event()
+
+        def release(self, request, context):
+            self.release_calls += 1
+            return b""
 
         def analyze(self, request, context):
             self.calls += 1
+            if self.block_response and not self.response_gate.wait(5):
+                context.abort(
+                    schema_cache_grpc.StatusCode.DEADLINE_EXCEEDED,
+                    "Python thread could not run while metadata lookup waited",
+                )
             if self.failure == "rpc":
                 context.abort(schema_cache_grpc.StatusCode.INVALID_ARGUMENT, "schema unavailable")
             if self.failure == "no-result":
@@ -2836,9 +2834,12 @@ def schema_cache_serve(connection):
     service = Service()
     with schema_cache_ThreadPoolExecutor(max_workers=4) as executor:
         server = schema_cache_grpc.server(executor)
-        handler = schema_cache_grpc.unary_unary_rpc_method_handler(service.analyze)
+        handlers = {
+            "AnalyzePlan": schema_cache_grpc.unary_unary_rpc_method_handler(service.analyze),
+            "ReleaseSession": schema_cache_grpc.unary_unary_rpc_method_handler(service.release),
+        }
         server.add_generic_rpc_handlers((schema_cache_grpc.method_handlers_generic_handler(
-            "spark.connect.SparkConnectService", {"AnalyzePlan": handler}),))
+            "spark.connect.SparkConnectService", handlers),))
         port = server.add_insecure_port("127.0.0.1:0")
         server.start()
         connection.send(port)
@@ -2850,7 +2851,10 @@ def schema_cache_serve(connection):
                 if command[0] == "get":
                     connection.send(getattr(service, command[1]))
                 elif command[0] == "set":
-                    setattr(service, command[1], command[2])
+                    if command[1] == "allow_response":
+                        service.response_gate.set()
+                    else:
+                        setattr(service, command[1], command[2])
                     connection.send(None)
         finally:
             server.stop(0).wait()
@@ -2878,20 +2882,28 @@ def schema_cache_analyzed():
     parent, child = context.Pipe()
     process = context.Process(target=schema_cache_serve, args=(child,))
     process.start()
+    spark = None
+    service = schema_cache_RemoteService(parent)
     try:
         assert parent.poll(20), "Mock server did not start"
         port = parent.recv()
         spark = schema_cache_SparkSession.builder.remote(f"sc://127.0.0.1:{port}").getOrCreate()
-        yield spark, schema_cache_RemoteService(parent)
+        yield spark, service
     finally:
-        if process.is_alive():
-            parent.send(("stop",))
-        process.join(10)
-        if process.is_alive():
-            process.terminate()
+        try:
+            if spark is not None:
+                released = service.release_calls
+                spark.stop()
+                assert service.release_calls == released + 1
+        finally:
+            if process.is_alive():
+                parent.send(("stop",))
             process.join(10)
-        parent.close()
-        child.close()
+            if process.is_alive():
+                process.terminate()
+                process.join(10)
+            parent.close()
+            child.close()
 
 
 @pytest.mark.parametrize("first", ["schema", "columns", "dtypes"])
@@ -2947,7 +2959,10 @@ def test_schema_cache_derived_and_new_plans_resolve_independently(schema_cache_a
     fresh = spark.range(10)
     assert fresh.columns == ["renamed"]
     other_session = spark.newSession()
-    assert other_session.range(10).columns == ["renamed"]
+    try:
+        assert other_session.range(10).columns == ["renamed"]
+    finally:
+        other_session.stop()
     assert service.calls == 4
     assert df.columns == ["id"]
 
@@ -2980,4 +2995,33 @@ def test_schema_cache_concurrent_schema_access_issues_one_analysis(schema_cache_
         results = list(pool.map(lambda _: df.schema, range(8)))
     assert all(schema.jsonValue() == results[0].jsonValue() for schema in results)
     assert len({id(schema) for schema in results}) == 8
+    assert service.calls == 1
+
+
+@pytest.mark.parametrize("accessor", ["schema", "columns", "dtypes"])
+def test_schema_cache_metadata_wait_releases_gil(schema_cache_analyzed, accessor):
+    spark, service = schema_cache_analyzed
+    df = spark.range(10)
+    service.block_response = True
+
+    def allow_response_after_request():
+        for _ in range(500):
+            if service.calls:
+                service.allow_response = True
+                return
+            schema_cache_Event().wait(0.01)
+        raise AssertionError("Metadata request never reached the server")
+
+    # This Python thread must run while the main thread waits for the RPC. The
+    # server bounds its wait, so retaining the GIL fails instead of deadlocking.
+    with schema_cache_ThreadPoolExecutor(max_workers=1) as pool:
+        allowed = pool.submit(allow_response_after_request)
+        result = getattr(df, accessor)
+        allowed.result(timeout=10)
+    if accessor == "schema":
+        assert isinstance(result, T.StructType)
+    elif accessor == "columns":
+        assert result == ["id"]
+    else:
+        assert result == [("id", "bigint")]
     assert service.calls == 1

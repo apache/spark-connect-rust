@@ -773,13 +773,20 @@ impl DataFrame {
     }
 
     /// Get the schema of this DataFrame.
+    ///
+    /// The first successful lookup is cached and shared with exact clones.
+    /// Changes to external table or view metadata do not invalidate this cache;
+    /// construct a new DataFrame to resolve the schema again. Each call returns
+    /// an independent value, and failed lookups can be retried.
     pub fn schema(&self) -> Result<DataType> {
         // Keep the lock during analysis so concurrent accesses issue only one
         // successful RPC. Errors leave the cache empty and can be retried.
         let mut cached = self
             .schema_cache
             .lock()
-            .map_err(|_| SparkError::connect_msg("Schema cache lock poisoned"))?;
+            // The cache contains only None or a fully decoded schema, so a
+            // panic during analysis cannot leave a partially written value.
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(schema) = cached.as_ref() {
             return Ok(schema.clone());
         }
@@ -2892,6 +2899,34 @@ mod cache_tests {
             assert!(!Arc::ptr_eq(&df.schema_cache, &derived.schema_cache));
             assert!(derived.schema_cache.lock().unwrap().is_none());
         }
+    }
+
+    #[test]
+    fn schema_cache_recovers_after_analysis_panics() {
+        let spark = SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .unwrap();
+        let df = spark.range(3).unwrap();
+        let cloned = df.clone();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        // Calling the synchronous API inside a runtime panics during analysis.
+        // A clone must still attempt analysis afterward, rather than returning
+        // a permanent cache-poisoning error.
+        for frame in [&df, &cloned] {
+            let result = runtime.block_on(async {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| frame.schema()))
+            });
+            assert!(result.is_err());
+        }
+        let mut cached = df.schema_cache.lock().unwrap_err().into_inner();
+        assert!(cached.is_none());
+        let schema = DataType::Struct { fields: vec![] };
+        *cached = Some(schema.clone());
+        drop(cached);
+        assert_eq!(df.schema().unwrap(), schema);
+        assert_eq!(cloned.schema().unwrap(), schema);
     }
 
     #[test]

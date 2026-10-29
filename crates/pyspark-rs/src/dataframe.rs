@@ -1302,8 +1302,8 @@ impl PyDataFrame {
 
     /// Column names (a property, mirroring `DataFrame.columns`).
     #[getter]
-    fn columns(&self) -> PyResult<Vec<String>> {
-        self.dataframe.columns().to_pyerr()
+    fn columns(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        py.detach(|| self.dataframe.columns()).to_pyerr()
     }
 
     /// Get the last `num` rows as a list of Rows (eager, like pyspark `tail`).
@@ -1374,8 +1374,8 @@ impl PyDataFrame {
 
     /// Get the schema as a list of (name, type) tuples.
     #[getter]
-    fn dtypes(&self) -> PyResult<Vec<(String, String)>> {
-        let schema = self.dataframe.schema().to_pyerr()?;
+    fn dtypes(&self, py: Python<'_>) -> PyResult<Vec<(String, String)>> {
+        let schema = py.detach(|| self.dataframe.schema()).to_pyerr()?;
         match schema {
             spark_connect::types::DataType::Struct { fields } => {
                 let dtypes = fields
