@@ -74,18 +74,55 @@ def prepare_date_table(frame, schema):
     Those cases must keep the existing row conversion and its error ordering.
     """
     from datetime import date
+    import sys
 
     import numpy as np
     import pandas as pd
+    from pandas.core.frame import DataFrame
+    from pandas.core.series import Series
     from types import GetSetDescriptorType, WrapperDescriptorType
 
-    from pyspark._pyspark import DateType, StructField, StructType as NativeStructType
+    from pyspark._pyspark import (
+        BooleanType, ByteType, ShortType, IntegerType, LongType, FloatType,
+        DoubleType, DecimalType, StringType, BinaryType, DateType, StructField,
+        StructType as NativeStructType,
+    )
     from pyspark.sql import types as sql_types
 
     # Keep smaller frames on the row path to avoid the importer's config RPC overhead.
-    if (type(frame) is not pd.DataFrame or type(schema) is not NativeStructType
+    if (pd.DataFrame is not DataFrame or type(frame) is not DataFrame
+            or type(schema) is not NativeStructType
             or len(frame) < 10000):
         return None
+    # Earlier converter branches must not recognize a date as another type.
+    # Check loaded converters and globals captured by older importer functions.
+    if sys.modules.get("pyspark.sql.types") is not sql_types:
+        return None
+    importer = sys.modules.get("pyspark.sql._arrow_input")
+    if importer is not None and getattr(importer, "StructType", None) is not NativeStructType:
+        return None
+    converter = sys.modules.get("pyspark.sql.pandas.types")
+    namespaces = [vars(sql_types)]
+    if converter is not None:
+        namespaces.append(vars(converter))
+    if importer is not None:
+        for name in ("from_arrow_schema", "to_arrow_schema"):
+            # Newer importers resolve these functions locally in prepare_table.
+            if name not in vars(importer):
+                continue
+            namespace = getattr(getattr(importer, name, None), "__globals__", None)
+            if type(namespace) is not dict:
+                return None
+            namespaces.append(namespace)
+    for name, cls in (
+        ("BooleanType", BooleanType), ("ByteType", ByteType), ("ShortType", ShortType),
+        ("IntegerType", IntegerType), ("LongType", LongType), ("FloatType", FloatType),
+        ("DoubleType", DoubleType), ("DecimalType", DecimalType), ("StringType", StringType),
+        ("BinaryType", BinaryType), ("DateType", DateType), ("StructField", StructField),
+        ("StructType", NativeStructType),
+    ):
+        if any(namespace.get(name) is not cls for namespace in namespaces):
+            return None
     # The row path reads native fields directly. Class attributes are mutable,
     # so customized Python schema access must not select a different Arrow path.
     for name, cls in (("DateType", DateType), ("StructField", StructField),
@@ -115,10 +152,22 @@ def prepare_date_table(frame, schema):
         for field in schema.fields
     ) or len(set(schema.names)) != width:
         return None
-    if not all(dtype == np.dtype("object") for dtype in frame.dtypes):
+    if not all(type(dtype) is type(np.dtype("object")) and dtype == np.dtype("object")
+               for dtype in frame.dtypes):
         return None
+    # A custom ExtensionArray can report an object dtype while its Arrow hook
+    # emits different cells. Trust only pandas' concrete NumPy backing array.
+    try:
+        from pandas.core.arrays.numpy_ import NumpyExtensionArray
+    except ImportError:
+        try:
+            from pandas.core.arrays.numpy_ import PandasArray as NumpyExtensionArray
+        except ImportError:
+            return None
     columns = [frame.iloc[:, i] for i in range(width)]
     for column, field in zip(columns, schema.fields):
+        if type(column) is not Series or type(column.array) is not NumpyExtensionArray:
+            return None
         # Arrow rejects nulls in non-nullable fields; let the row path retain
         # its existing behavior for that input instead.
         if not all(type(value) is date or (value is None and field.nullable)

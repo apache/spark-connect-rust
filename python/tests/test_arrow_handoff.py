@@ -1074,3 +1074,249 @@ with _arrow_input_service(protocol.__wrapped__(Factory())) as (spark, state):
                              str(before_import), __file__],
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("dtype_mode", ["equal", "class_spoof", "exact_numpy"])
+def test_date_custom_extension_dtype_cannot_impersonate_numpy_object(protocol, dtype_mode):
+    from pandas.api.extensions import ExtensionArray, ExtensionDtype, take
+    from pyspark.sql._pandas_input import prepare_date_table
+
+    arrow_calls = []
+
+    class ObjectEqualDtype(ExtensionDtype):
+        name = "object_equal_date"
+        type = date
+        kind = "O"
+        na_value = None
+
+        @classmethod
+        def construct_array_type(cls):
+            return DifferentArrowArray
+
+        def __eq__(self, other):
+            return (isinstance(other, ObjectEqualDtype)
+                    or isinstance(other, np.dtype) and other.kind == "O")
+
+        def __hash__(self):
+            return hash(self.name)
+
+    class DifferentArrowArray(ExtensionArray):
+        def __init__(self, values):
+            self._values = np.asarray(values, dtype=object)
+
+        @property
+        def dtype(self):
+            return ObjectEqualDtype()
+
+        @property
+        def nbytes(self):
+            return self._values.nbytes
+
+        def __len__(self):
+            return len(self._values)
+
+        def __getitem__(self, key):
+            result = self._values[key]
+            return type(self)(result) if isinstance(result, np.ndarray) else result
+
+        def isna(self):
+            return pd.isna(self._values)
+
+        def take(self, indices, allow_fill=False, fill_value=None):
+            return type(self)(take(self._values, indices, allow_fill=allow_fill,
+                                   fill_value=fill_value))
+
+        def copy(self):
+            return type(self)(self._values.copy())
+
+        @classmethod
+        def _from_sequence(cls, scalars, *, dtype=None, copy=False):
+            values = np.asarray(scalars, dtype=object)
+            return cls(values.copy() if copy else values)
+
+        def to_numpy(self, dtype=None, copy=False, na_value=None):
+            if dtype is not None:
+                return self._values.astype(dtype, copy=copy)
+            return self._values.copy() if copy else self._values
+
+        def __arrow_array__(self, type=None):
+            arrow_calls.append("arrow")
+            # A scan of to_numpy() cannot establish the values this hook emits.
+            return pa.array([date(2020, 1, 2)] * len(self), type=type)
+
+    array = DifferentArrowArray([date(2020, 1, 1)] * 10000)
+    frame = pd.DataFrame({"day": pd.Series(array, copy=False)})
+    schema = T.StructType([T.StructField("day", T.DateType())])
+    if dtype_mode == "exact_numpy":
+        # An ExtensionArray may change its advertised dtype after construction.
+        # The dtype and NumPy scan both pass while its Arrow hook changes cells.
+        DifferentArrowArray.dtype = property(lambda self: np.dtype("object"))
+        DifferentArrowArray.__array__ = lambda self, dtype=None, copy=None: self._values
+    elif dtype_mode == "class_spoof":
+        def spoof_class(self, name):
+            if name == "__class__":
+                return type(np.dtype("object"))
+            return object.__getattribute__(self, name)
+
+        ObjectEqualDtype.__getattribute__ = spoof_class
+    dtype = frame.dtypes.iloc[0]
+    assert type(frame) is pd.DataFrame
+    assert type(frame.iloc[:, 0].array) is DifferentArrowArray
+    assert type(dtype) is (type(np.dtype("object")) if dtype_mode == "exact_numpy"
+                           else ObjectEqualDtype)
+    assert isinstance(dtype, np.dtype) is (dtype_mode != "equal")
+    assert dtype == np.dtype("object")
+    assert prepare_date_table(frame, schema) is None
+    with _arrow_input_service(protocol) as (spark, state):
+        if dtype_mode == "exact_numpy":
+            # This deliberately inconsistent EA already fails pandas' row-path
+            # astype(object). Preserve that error before importer configuration.
+            with pytest.raises(TypeError, match="cannot set astype"):
+                spark.createDataFrame(frame, schema)
+            assert state["input_tables"] == []
+        else:
+            spark.createDataFrame(frame, schema).toArrow()
+            assert state["input_tables"][0].column(0).to_pylist() == [date(2020, 1, 1)] * 10000
+        assert state["config_requests"] == []
+    assert arrow_calls == []
+
+
+def test_date_rebound_dataframe_alias_keeps_subclass_on_row_path(monkeypatch):
+    from pyspark.sql._pandas_input import prepare_date_table
+
+    class Frame(pd.DataFrame):
+        pass
+
+    frame = Frame({"day": [date(2020, 1, 1)] * 10000}, dtype=object)
+    schema = T.StructType([T.StructField("day", T.DateType())])
+    monkeypatch.setattr(pd, "DataFrame", Frame)
+    assert prepare_date_table(frame, schema) is None
+
+
+def _date_alias_guard_process(mode, argument):
+    """Keep mutations of converter aliases isolated from other tests."""
+    import sys
+
+    if mode == "captured_alias":
+        import pyspark.sql._arrow_input as importer
+        if not hasattr(importer, "to_arrow_schema"):
+            pytest.skip("this importer resolves converters locally and holds no captured aliases")
+
+    script = r'''
+import importlib
+import importlib.util
+import json
+import sys
+import tempfile
+from datetime import date
+from pathlib import Path
+import pandas as pd
+import pyarrow as pa
+from pyspark.sql import types as T
+from pyspark import _pyspark as native
+
+spec = importlib.util.spec_from_file_location("date_alias_capture", sys.argv[3])
+capture = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = capture
+spec.loader.exec_module(capture)
+values = [date.min, date.max, date(1969, 12, 31), None] * 2500
+frame = pd.DataFrame({"original": values}, dtype=object)
+schema = T.StructType([T.StructField("renamed", T.DateType(), True, {"source": "native"})])
+mode, argument = sys.argv[1:3]
+if mode in ("public_alias", "converter_alias", "captured_alias"):
+    replacement = native.BooleanType if argument == "DateType" else native.DateType
+    if mode == "public_alias":
+        sys.modules.pop("pyspark.sql.pandas.types", None)
+        setattr(T, argument, replacement)
+    else:
+        converter = importlib.import_module("pyspark.sql.pandas.types")
+        if mode == "captured_alias":
+            importer = importlib.import_module("pyspark.sql._arrow_input")
+        setattr(converter, argument, replacement)
+        if mode == "captured_alias":
+            sys.modules.pop("pyspark.sql.pandas.types")
+            current = importlib.import_module("pyspark.sql.pandas.types")
+            assert current is not converter
+            assert importer.to_arrow_schema.__globals__ is vars(converter)
+elif mode == "importer_alias":
+    importer = importlib.import_module("pyspark.sql._arrow_input")
+    importer.StructType = None if argument == "none" else native.DateType
+elif mode == "importer_function":
+    importer = importlib.import_module("pyspark.sql._arrow_input")
+    setattr(importer, argument, None)
+else:
+    raise AssertionError(mode)
+class Factory:
+    def mktemp(self, name):
+        return Path(tempfile.mkdtemp(prefix=name))
+with capture._arrow_input_service(capture.protocol.__wrapped__(Factory())) as (spark, state):
+    spark.createDataFrame(frame, schema).toArrow()
+    assert state["config_requests"] == [], state["config_requests"]
+    table = state["input_tables"][0]
+    assert table.schema.names == ["renamed"], table.schema
+    assert table.column(0).type == pa.date32()
+    assert table.column(0).to_pylist() == values
+    assert table.schema.field(0).nullable
+    assert table.schema.field(0).metadata is None
+    relation_schema = json.loads(state["relations"][0].local_relation.schema)
+    assert relation_schema["fields"][0]["metadata"] == {"source": "native"}
+'''
+    result = subprocess.run([sys.executable, "-c", script, mode, argument, __file__],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("class_name", [
+    "BooleanType", "ByteType", "ShortType", "IntegerType", "LongType", "FloatType",
+    "DoubleType", "DecimalType", "StringType", "BinaryType", "DateType", "StructField", "StructType",
+])
+@pytest.mark.parametrize("mode", ["public_alias", "converter_alias", "captured_alias"])
+def test_date_rebound_converter_aliases_keep_native_row_path(class_name, mode):
+    _date_alias_guard_process(mode, class_name)
+
+
+@pytest.mark.parametrize("replacement", ["none", "date"])
+def test_date_rebound_importer_schema_alias_keeps_native_row_path(replacement):
+    _date_alias_guard_process("importer_alias", replacement)
+
+
+@pytest.mark.parametrize("name", ["from_arrow_schema", "to_arrow_schema"])
+def test_date_present_invalid_importer_function_keeps_native_row_path(name):
+    _date_alias_guard_process("importer_function", name)
+
+
+def test_date_warm_importer_without_global_converter_aliases(protocol, monkeypatch):
+    import pyspark.sql._arrow_input as importer
+    import sys
+    import types
+
+    original = importer.prepare_table
+
+    def local_imports(table, schema, *configs):
+        from pyspark.sql.pandas.types import from_arrow_schema, to_arrow_schema
+
+        table, resolved, names = original(table, schema, *configs)
+        assert from_arrow_schema(table.schema).fields
+        assert to_arrow_schema(resolved).names == table.column_names
+        return table, resolved, names
+
+    values = [date.min, date.max, date(1970, 1, 1), None] * 2500
+    frame = pd.DataFrame({"day": values}, dtype=object)
+    schema = T.StructType([T.StructField("renamed", T.DateType())])
+    with _arrow_input_service(protocol) as (spark, state):
+        spark.createDataFrame(pa.table({"warm": [1, 2]})).toArrow()
+        # Exercise the local-import shape on this branch's pinned dependency.
+        substitute = types.ModuleType(importer.__name__)
+        substitute.StructType = T.StructType
+        substitute.prepare_table = local_imports
+        monkeypatch.setitem(sys.modules, importer.__name__, substitute)
+
+        def no_rows(*args, **kwargs):
+            raise AssertionError("warm date input must stay columnar")
+
+        monkeypatch.setattr(pd.DataFrame, "astype", no_rows)
+        for _ in range(3):
+            spark.createDataFrame(frame, schema).toArrow()
+        for table in state["input_tables"][1:]:
+            assert table.column_names == ["renamed"]
+            assert table.column(0).to_pylist() == values
