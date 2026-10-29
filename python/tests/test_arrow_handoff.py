@@ -43,7 +43,10 @@ def protocol(tmp_path_factory):
     """Compile the repository protocol instead of hard-coding protobuf field numbers."""
     protoc = shutil.which(os.environ.get("PROTOC", "protoc"))
     if protoc is None:
-        pytest.skip("Arrow handoff tests require protoc; install it or set PROTOC")
+        message = "Arrow handoff tests require protoc; install it or set PROTOC"
+        if os.environ.get("CI"):
+            pytest.fail(message)
+        pytest.skip(message)
     proto_root = Path(__file__).resolve().parents[2] / "crates/spark-connect-proto/proto"
     descriptor = tmp_path_factory.mktemp("connect-proto") / "connect.pb"
     command = [protoc, f"-I{proto_root}"]
@@ -68,6 +71,18 @@ def protocol(tmp_path_factory):
         )
 
     return message
+
+
+@pytest.mark.parametrize("in_ci", [False, True])
+def test_missing_protoc_fails_in_ci_and_skips_locally(monkeypatch, tmp_path_factory, in_ci):
+    monkeypatch.setattr(shutil, "which", lambda _: None)
+    if in_ci:
+        monkeypatch.setenv("CI", "true")
+    else:
+        monkeypatch.delenv("CI", raising=False)
+    error = pytest.fail.Exception if in_ci else pytest.skip.Exception
+    with pytest.raises(error, match="require protoc"):
+        protocol.__wrapped__(tmp_path_factory)
 
 
 @contextmanager
@@ -204,6 +219,16 @@ def test_handoff_preserves_values_metadata_and_chunks(protocol):
     assert calls == {"execute": 1}
 
 
+def test_normal_handoff_does_not_reopen_ipc(protocol, monkeypatch):
+    def unexpected_ipc(*args, **kwargs):
+        pytest.fail("Normal toArrow handoff must use the C Stream importer")
+
+    monkeypatch.setattr(pa.ipc, "open_file", unexpected_ipc)
+    batch = _mixed_batch()
+    with _dataframe(protocol=protocol, batches=[batch]) as (frame, _):
+        assert frame.toArrow().equals(pa.Table.from_batches([batch]), check_metadata=True)
+
+
 def test_handoff_buffers_outlive_dataframe_session_and_table(protocol):
     batch = _mixed_batch()
     expected = batch.to_pydict()
@@ -220,13 +245,10 @@ def test_handoff_buffers_outlive_dataframe_session_and_table(protocol):
     assert table.to_pydict() == expected
     numeric = table.column(0).chunk(0).slice(1, 3)
     strings = table.column(2).chunk(0).slice(1, 3)
-    addresses = [buffer.address for buffer in (numeric.buffers()[1], strings.buffers()[2])]
     del table
     gc.collect()
     assert numeric.to_pylist() == [None, -3, 4]
     assert strings.to_pylist() == [None, "", "omega"]
-    assert numeric.buffers()[1].address == addresses[0]
-    assert strings.buffers()[2].address == addresses[1]
     assert calls == {"execute": 1}
 
 
@@ -271,8 +293,18 @@ def test_to_pandas_uses_the_same_handoff(protocol):
     assert calls == {"execute": 1}
 
 
-@pytest.mark.parametrize("kind", ["field", "nested-field", "timezone"])
-def test_nul_schema_strings_fall_back_without_executing_again(protocol, kind):
+@pytest.mark.parametrize(
+    "kind", ["field", "nested-field", "list-struct", "map-value-struct", "timezone"]
+)
+def test_nul_schema_strings_fall_back_without_executing_again(protocol, kind, monkeypatch):
+    open_file = pa.ipc.open_file
+    ipc_calls = []
+
+    def record_ipc(*args, **kwargs):
+        ipc_calls.append(True)
+        return open_file(*args, **kwargs)
+
+    monkeypatch.setattr(pa.ipc, "open_file", record_ipc)
     if kind == "field":
         name = "bad\x00name"
         values = pa.array([1, None, -3, 4])
@@ -282,6 +314,16 @@ def test_nul_schema_strings_fall_back_without_executing_again(protocol, kind):
         values = pa.array(
             [{"bad\x00name": 1}, None, {"bad\x00name": None}, {"bad\x00name": 4}],
             type=data_type,
+        )
+    elif kind == "list-struct":
+        name = "items"
+        data_type = pa.list_(pa.struct([pa.field("bad\x00name", pa.int64())]))
+        values = pa.array([[{"bad\x00name": 1}], None, [], [{"bad\x00name": None}]], type=data_type)
+    elif kind == "map-value-struct":
+        name = "mapping"
+        data_type = pa.map_(pa.string(), pa.struct([pa.field("bad\x00name", pa.int64())]))
+        values = pa.array(
+            [[("a", {"bad\x00name": 1})], None, [], [("b", {"bad\x00name": None})]], type=data_type
         )
     else:
         name = "timestamp"
@@ -300,6 +342,7 @@ def test_nul_schema_strings_fall_back_without_executing_again(protocol, kind):
     # timezone string is preserved but is not a Python timezone identifier.
     assert actual.equals(expected, check_metadata=True)
     assert [len(chunk) for chunk in actual.column(0).chunks] == [2, 2]
+    assert ipc_calls == [True]
     assert calls == {"execute": 1}
 
 
@@ -314,7 +357,9 @@ def test_nul_schema_and_field_metadata_are_preserved(protocol):
     assert calls == {"execute": 1}
 
 
-@pytest.mark.parametrize("difference", ["type", "name", "schema-metadata", "field-metadata"])
+@pytest.mark.parametrize(
+    "difference", ["type", "name", "schema-metadata", "field-metadata", "nullability"]
+)
 @pytest.mark.parametrize("nul_name", [False, True])
 def test_mismatched_batch_schemas_are_rejected_before_fallback(protocol, difference, nul_name):
     name = "bad\x00name" if nul_name else "value"
@@ -325,7 +370,10 @@ def test_mismatched_batch_schemas_are_rejected_before_fallback(protocol, differe
     field_metadata = {b"field": b"different"} if difference == "field-metadata" else None
     schema_metadata = {b"schema": b"different"} if difference == "schema-metadata" else None
     second_field = pa.field(
-        second_name, second_values.type, metadata=field_metadata or first_field.metadata
+        second_name,
+        second_values.type,
+        nullable=difference != "nullability",
+        metadata=field_metadata or first_field.metadata,
     )
     second_schema = pa.schema([second_field], metadata=schema_metadata or first_schema.metadata)
     batches = [

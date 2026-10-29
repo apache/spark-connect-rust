@@ -48,8 +48,10 @@ pub(crate) fn record_batches_to_pyarrow(
         ));
     }
     if schema.fields().iter().any(|field| field_needs_ipc(field)) {
-        // Arrow 58.3 panics when exporting NUL-containing C strings. Reuse
-        // the collected batches for IPC without executing the request again.
+        // Arrow 58.3 panics on NUL-containing C strings inside the C stream
+        // `get_schema` callback. Unwinding across that extern "C" boundary
+        // aborts Python instead of raising an exception. Check before export,
+        // then reuse the collected batches for IPC without another request.
         // CString::new(...).unwrap() in FFI_ArrowSchema::try_new / with_name:
         // https://github.com/apache/arrow-rs/blob/58.3.0/arrow-schema/src/ffi.rs#L148
         // https://github.com/apache/arrow-rs/blob/58.3.0/arrow-schema/src/ffi.rs#L174
