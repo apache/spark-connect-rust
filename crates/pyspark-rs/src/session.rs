@@ -354,7 +354,7 @@ impl PySparkSession {
             }
         }
 
-        // Supported pandas integer columns use the existing Arrow importer. Other
+        // Supported pandas integer/timestamp columns use the existing Arrow importer. Other
         // dtypes/schema conversions retain the row path with NaN/NaT mapped to None.
         let mut pandas_columns: Option<Vec<String>> = None;
         let is_pandas = py
@@ -369,6 +369,27 @@ impl PySparkSession {
                 .call1((data, schema))?;
             if !table.is_none() {
                 return crate::pyarrow_import::create_dataframe(py, &self.session, &table, schema);
+            }
+            let helper = py.import("pyspark.sql._pandas_input")?;
+            let columns = helper.getattr("timestamp_columns")?.call1((data, schema))?;
+            if !columns.is_none() {
+                let timezone = py.detach(|| {
+                    self.session
+                        .conf()
+                        .get("spark.sql.session.timeZone")
+                        .to_pyerr()
+                })?;
+                let table = helper
+                    .getattr("prepare_timestamp_table")?
+                    .call1((columns, schema, timezone))?;
+                if !table.is_none() {
+                    return crate::pyarrow_import::create_dataframe(
+                        py,
+                        &self.session,
+                        &table,
+                        schema,
+                    );
+                }
             }
         }
         let data_owned: Bound<'_, PyList>;

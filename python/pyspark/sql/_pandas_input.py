@@ -64,3 +64,63 @@ def prepare_int64_table(frame, schema):
         [pa.array(frame.iloc[:, i], type=pa.int64(), from_pandas=True) for i in range(width)],
         names=list(frame.columns),
     )
+
+
+def timestamp_columns(frame, schema):
+    """Select only explicit, microsecond-aligned datetime64 timestamp columns.
+
+    Inference (including TimestampNTZ preferences), object/mixed columns, other
+    units and submicrosecond truncation retain the row path. Check the integer
+    buffers separately so NaT's sentinel never participates in alignment tests.
+    """
+    import numpy as np
+    import pandas as pd
+    from pyspark.sql.types import TimestampType
+
+    if not isinstance(schema, StructType) or not len(frame) or not len(frame.columns):
+        return None
+    if len(schema.fields) != len(frame.columns) or not frame.columns.is_unique:
+        return None
+    if not all(isinstance(name, str) and "\x00" not in name for name in frame.columns):
+        return None
+    if not all(type(field.dataType) is TimestampType and "\x00" not in field.name
+               for field in schema.fields):
+        return None
+    columns = []
+    for i, dtype in enumerate(frame.dtypes):
+        if isinstance(dtype, pd.DatetimeTZDtype):
+            unit = dtype.unit
+        elif isinstance(dtype, np.dtype) and dtype.kind == "M":
+            unit = np.datetime_data(dtype)[0]
+        else:
+            return None
+        if unit not in ("ns", "us"):
+            return None
+        column = frame.iloc[:, i]
+        if unit == "ns" and np.any(column.array.asi8[column.notna()] % 1000):
+            return None
+        columns.append(column)
+    return columns
+
+
+def prepare_timestamp_table(columns, schema, timezone):
+    """Preserve instants without row materialization or a host-zone conversion.
+
+    Aware columns carry their own timezone. Naive columns are deliberately
+    restricted to UTC host/session pairs: the existing row path uses the host
+    zone, unlike Python Connect's session-zone conversion (and DST fold policy).
+    """
+    import os
+    import time
+    import pandas as pd
+    import pyarrow as pa
+
+    if any(not isinstance(column.dtype, pd.DatetimeTZDtype) for column in columns):
+        if (timezone != "UTC" or os.environ.get("TZ") != "UTC"
+                or time.tzname != ("UTC", "UTC")):
+            return None
+    return pa.Table.from_arrays(
+        [pa.array(column, type=pa.timestamp("us", tz="UTC"), from_pandas=True)
+         for column in columns],
+        names=schema.names,
+    )

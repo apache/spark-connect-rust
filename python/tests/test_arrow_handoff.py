@@ -350,7 +350,7 @@ def test_malformed_ipc_is_reported(protocol):
 
 
 @contextmanager
-def _arrow_input_service(protocol, *, upload_error=None, **overrides):
+def _arrow_input_service(protocol, *, upload_error=None, capture_tables=False, **overrides):
     """Resolve cache artifacts at a mock service with a 4 MiB receive limit."""
     import hashlib
     import zlib
@@ -366,7 +366,7 @@ def _arrow_input_service(protocol, *, upload_error=None, **overrides):
         "spark.sql.session.localRelationBatchOfChunksSizeBytes": str(1024**3),
     }
     config.update(overrides)
-    state = {"cache": {}, "uploads": 0, "relations": [], "message_sizes": []}
+    state = {"cache": {}, "uploads": 0, "relations": [], "message_sizes": [], "tables": []}
     server_id = "00000000-0000-0000-0000-000000000001"
 
     def configure(raw, context):
@@ -436,6 +436,8 @@ def _arrow_input_service(protocol, *, upload_error=None, **overrides):
             payloads = [relation.local_relation.data]
         rows, first, last = 0, None, None
         for payload in payloads:
+            if capture_tables:
+                state["tables"].append(pa.ipc.open_stream(payload).read_all())
             for batch in pa.ipc.open_stream(payload):
                 rows += batch.num_rows
                 if batch.num_rows:
@@ -560,3 +562,113 @@ def test_arrow_input_duplicate_chunks_preserve_multiplicity(protocol):
         assert len(set(cached.dataHashes)) == 1
         assert len(state["cache"]) == 2  # One schema and one unique data chunk.
         assert state["result"] == (20, 1, 1)
+
+
+@pytest.mark.parametrize("zone", ["UTC", "America/Los_Angeles", "Asia/Kathmandu"])
+@pytest.mark.parametrize("unit", ["ns", "us"])
+def test_pandas_timestamp_ipc_preserves_every_microsecond(protocol, monkeypatch, zone, unit):
+    import json
+    from pyspark.sql import types as T
+
+    monkeypatch.setenv("TZ", "America/New_York")
+    # Include both sides of DST transitions, both fall-back folds, pre-epoch,
+    # ns-range boundaries, and NaT. Inspect the full emitted IPC, not a plan flag.
+    micros = [-9223372036854775, -1, 0, 1, 1583661599999999, 1583661600000000,
+              1604219400000000, 1604223000000000, 9223372036854775, None]
+    values = pd.to_datetime(pd.Series(micros, dtype="Int64"), unit="us", utc=True).dt.tz_convert("America/Los_Angeles")
+    frame = pd.DataFrame({"a": pd.Series(values).dt.as_unit(unit),
+                          "b": pd.Series(values).dt.as_unit(unit)})
+    schema = T.StructType([T.StructField("renamed_a", T.TimestampType(), True, {"source": "test"}),
+                           T.StructField("b", T.TimestampType())])
+
+    def no_rows(*args, **kwargs):
+        raise AssertionError("supported timestamps must not materialize Python rows")
+
+    monkeypatch.setattr(pd.DataFrame, "astype", no_rows)
+    with _arrow_input_service(protocol, capture_tables=True, **{"spark.sql.session.timeZone": zone}) as (spark, state):
+        spark.createDataFrame(frame, schema).toArrow()
+        table = pa.concat_tables(state["tables"])
+        for column in table.columns:
+            assert column.type == pa.timestamp("us", tz="UTC")
+            assert column.cast(pa.int64()).to_pylist() == micros
+        assert table.column_names == ["renamed_a", "b"]
+        relation = state["relations"][0].local_relation
+        actual = json.loads(relation.schema)
+        assert [field["type"] for field in actual["fields"]] == ["timestamp", "timestamp"]
+        assert actual["fields"][0]["metadata"] == {"source": "test"}
+
+
+def test_pandas_naive_timestamp_utc_ipc(protocol, monkeypatch):
+    from pyspark.sql import types as T
+    import time
+    monkeypatch.setenv("TZ", "UTC")
+    monkeypatch.setattr(time, "tzname", ("UTC", "UTC"))
+    frame = pd.DataFrame({"a": pd.to_datetime(["1969-12-31 23:59:59.999999", None,
+                                               "2020-01-01 00:00:00.123456"])})
+    schema = T.StructType([T.StructField("a", T.TimestampType())])
+    monkeypatch.setattr(pd.DataFrame, "astype", lambda *a, **k: pytest.fail("row conversion"))
+    with _arrow_input_service(protocol, capture_tables=True) as (spark, state):
+        spark.createDataFrame(frame, schema).toArrow()
+        assert state["tables"][0].column(0).cast(pa.int64()).to_pylist() == [
+            -1, None, 1577836800123456]
+
+
+@pytest.mark.parametrize("dtype", ["datetime64[ns]", "datetime64[us]", "datetime64[ms]",
+                                    "datetime64[s]", "object"])
+def test_pandas_timestamp_eligibility(dtype):
+    from pyspark.sql import types as T
+    from pyspark.sql._pandas_input import timestamp_columns
+    frame = pd.DataFrame({"a": pd.Series([datetime(2020, 1, 1), None], dtype=dtype)})
+    schema = T.StructType([T.StructField("a", T.TimestampType())])
+    assert (timestamp_columns(frame, schema) is not None) == (dtype in (
+        "datetime64[ns]", "datetime64[us]"))
+    for unsupported in (None, ["a"], "a timestamp",
+                        T.StructType([T.StructField("a", T.TimestampNTZType())]),
+                        T.StructType([T.StructField("a", T.LongType())])):
+        assert timestamp_columns(frame, unsupported) is None
+
+
+def test_pandas_timestamp_precision_and_timezone_fallback(monkeypatch):
+    from pyspark.sql import types as T
+    from pyspark.sql._pandas_input import timestamp_columns, prepare_timestamp_table
+    schema = T.StructType([T.StructField("a", T.TimestampType())])
+    for nanos in (-1, 1, 1001):
+        frame = pd.DataFrame({"a": pd.to_datetime([nanos, None], unit="ns")})
+        assert timestamp_columns(frame, schema) is None
+    frame = pd.DataFrame({"a": pd.to_datetime([0, None], unit="ns")})
+    columns = timestamp_columns(frame, schema)
+    monkeypatch.setenv("TZ", "UTC")
+    assert prepare_timestamp_table(columns, schema, "America/Los_Angeles") is None
+    monkeypatch.setenv("TZ", "America/Los_Angeles")
+    assert prepare_timestamp_table(columns, schema, "UTC") is None
+    monkeypatch.delenv("TZ")
+    assert prepare_timestamp_table(columns, schema, "UTC") is None
+
+
+@pytest.mark.parametrize("has_null", [False, True])
+def test_pandas_timestamp_non_nullable_schema(protocol, has_null):
+    from pyspark.sql import types as T
+    values = [pd.Timestamp("2020-01-01", tz="UTC"),
+              pd.NaT if has_null else pd.Timestamp("2020-01-02", tz="UTC")]
+    frame = pd.DataFrame({"a": values})
+    schema = T.StructType([T.StructField("a", T.TimestampType(), False)])
+    with _arrow_input_service(protocol, capture_tables=True) as (spark, state):
+        if has_null:
+            with pytest.raises(ValueError, match="null"):
+                spark.createDataFrame(frame, schema)
+            assert not state["relations"]
+        else:
+            spark.createDataFrame(frame, schema).toArrow()
+            assert not state["tables"][0].schema.field(0).nullable
+
+
+def test_pandas_timestamp_mixed_and_arrow_dtypes_fallback():
+    from pyspark.sql import types as T
+    from pyspark.sql._pandas_input import timestamp_columns
+    schema = T.StructType([T.StructField("a", T.TimestampType())])
+    frame = pd.DataFrame({"a": pd.Series([datetime(2020, 1, 1)],
+                                         dtype=pd.ArrowDtype(pa.timestamp("us")))})
+    assert timestamp_columns(frame, schema) is None
+    frame = pd.DataFrame({"a": pd.to_datetime([0], unit="us"), "b": [1]})
+    schema.add("b", T.LongType())
+    assert timestamp_columns(frame, schema) is None
