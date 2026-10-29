@@ -148,9 +148,11 @@ def test_completion_matches_python_connect(analyzed, names):
     assert df._ipython_key_completions_() == names
     assert service.calls == 1
     expected = sorted(set(dir(type(df))) | set(names))
-    assert df.__dir__() == expected
-    assert dir(df) == expected
-    assert service.calls == 3  # No schema caching in this independent change.
+    # Each first access must analyze its own fresh plan, with or without caching.
+    assert spark.range(10).__dir__() == expected
+    assert service.calls == 2
+    assert dir(spark.range(10)) == expected
+    assert service.calls == 3
     assert callable(df.select)
     assert callable(df.__dir__)
     assert callable(df._ipython_key_completions_)
@@ -168,7 +170,7 @@ def test_completion_lists_are_independent(analyzed):
     assert df._ipython_key_completions_() == ["id"]
     assert "select" in dir(df)
     service.data_type = _schema(["changed"])
-    assert df._ipython_key_completions_() == ["changed"]
+    assert spark.range(10)._ipython_key_completions_() == ["changed"]
 
 
 @pytest.mark.parametrize("method", ["__dir__", "_ipython_key_completions_"])
