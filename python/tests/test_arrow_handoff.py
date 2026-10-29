@@ -352,7 +352,7 @@ def test_malformed_ipc_is_reported(protocol):
 
 
 @contextmanager
-def _arrow_input_service(protocol, *, upload_error=None, **overrides):
+def _arrow_input_service(protocol, *, upload_error=None, config_error=False, **overrides):
     """Resolve cache artifacts at a mock service with a 4 MiB receive limit."""
     import hashlib
     import zlib
@@ -368,11 +368,15 @@ def _arrow_input_service(protocol, *, upload_error=None, **overrides):
         "spark.sql.session.localRelationBatchOfChunksSizeBytes": str(1024**3),
     }
     config.update(overrides)
-    state = {"cache": {}, "uploads": 0, "relations": [], "message_sizes": []}
+    state = {"cache": {}, "uploads": 0, "relations": [], "message_sizes": [],
+             "input_tables": [], "config_requests": []}
     server_id = "00000000-0000-0000-0000-000000000001"
 
     def configure(raw, context):
         request = protocol("ConfigRequest").FromString(raw)
+        state["config_requests"].append(list(request.operation.get.keys))
+        if config_error:
+            context.abort(grpc.StatusCode.UNAVAILABLE, "configuration unavailable")
         return protocol("ConfigResponse", session_id=request.session_id,
                         pairs=[dict(key=k, value=config[k]) for k in request.operation.get.keys]
                         ).SerializeToString()
@@ -437,14 +441,17 @@ def _arrow_input_service(protocol, *, upload_error=None, **overrides):
         else:
             payloads = [relation.local_relation.data]
         rows, first, last = 0, None, None
+        batches = []
         for payload in payloads:
             for batch in pa.ipc.open_stream(payload):
+                batches.append(batch)
                 rows += batch.num_rows
                 if batch.num_rows:
                     if first is None:
                         first = batch.column(0)[0].as_py()
                     last = batch.column(0)[-1].as_py()
         state["result"] = (rows, first, last)
+        state["input_tables"].append(pa.Table.from_batches(batches))
         result = pa.table({"rows": [rows]})
         sink = pa.BufferOutputStream()
         with pa.ipc.new_stream(sink, result.schema) as writer:
@@ -683,14 +690,17 @@ def test_nullable_inference_does_not_depend_on_first_value(protocol):
 
 
 @pytest.mark.parametrize("verify", [True, False])
-def test_non_nullable_schema_is_preserved(protocol, verify):
+@pytest.mark.parametrize("config_error", [False, True])
+def test_non_nullable_schema_is_preserved(protocol, verify, config_error):
     frame = pd.DataFrame({"a": pd.Series([1, None], dtype="Int64")})
     schema = T.StructType([T.StructField("a", T.LongType(), False)])
-    with _arrow_input_service(protocol) as (spark, state):
-        with pytest.raises(ValueError, match="null"):
+    assert prepare_int64_table(frame, schema) is None
+    with _arrow_input_service(protocol, config_error=config_error) as (spark, state):
+        with pytest.raises(RuntimeError, match="null"):
             spark.createDataFrame(frame, schema, verifySchema=verify)
         assert not state["relations"]
         assert not state["uploads"]
+        assert state["config_requests"] == []
 
 
 def test_small_numpy_frames_avoid_importer_configuration_overhead():
@@ -718,3 +728,341 @@ def test_nul_names_keep_lossless_ipc_row_fallback(protocol, schema_kind):
         assert state["result"] == (1000, 0, 999)
         payload = state["relations"][0].local_relation.data
         assert pa.ipc.open_stream(payload).schema.names == [name]
+
+
+@pytest.mark.parametrize("nullable", [False, True])
+@pytest.mark.parametrize("rows", [999, 1000])
+def test_integer_explicit_renamed_schema_preserves_all_ipc_cells(protocol, monkeypatch, nullable, rows):
+    values = ([2**53 + 1, -(2**63), 2**63 - 1, 0] * 250)[:rows]
+    other = [None if nullable and i % 7 == 0 else value
+             for i, value in enumerate(reversed(values))]
+    frame = pd.DataFrame({"original": np.asarray(values, dtype="int64"),
+                          "second": pd.Series(other, dtype="Int64" if nullable else "int64")})
+    schema = T.StructType([
+        T.StructField("renamed", T.LongType(), False, {"source": "native", "id": 3}),
+        T.StructField("nullable", T.LongType(), True, {"tag": [1, 2]}),
+    ])
+
+    def no_rows(*args, **kwargs):
+        raise AssertionError("trusted integer columns must stay columnar")
+
+    if rows >= 1000 or nullable:
+        monkeypatch.setattr(pd.DataFrame, "astype", no_rows)
+    with _arrow_input_service(protocol) as (spark, state):
+        spark.createDataFrame(frame, schema).toArrow()
+        table = state["input_tables"][0]
+        assert table.column_names == ["renamed", "nullable"]
+        assert [column.to_pylist() for column in table.columns] == [values, other]
+        assert table.schema.field(0).type == pa.int64()
+        assert table.schema.field(0).nullable is False
+        assert table.schema.field(1).nullable is True
+        if rows >= 1000 or nullable:
+            from pyspark.sql.pandas.types import from_arrow_schema
+            assert from_arrow_schema(table.schema).json() == schema.json(), (
+                from_arrow_schema(table.schema).json(), schema.json(), table.schema)
+            assert state["config_requests"]
+        else:
+            assert state["config_requests"] == []
+
+
+def test_integer_dataframe_and_name_subclasses_keep_fallback(monkeypatch):
+    class Frame(pd.DataFrame):
+        pass
+
+    class Name(str):
+        pass
+
+    class Names(list):
+        pass
+
+    frame = pd.DataFrame({"a": np.arange(1000, dtype="int64")})
+    assert prepare_int64_table(Frame(frame), None) is None
+    assert prepare_int64_table(frame, Names(["a"])) is None
+    assert prepare_int64_table(frame, [Name("a")]) is None
+    assert prepare_int64_table(pd.DataFrame({Name("a"): frame["a"]}), None) is None
+    monkeypatch.setattr(pd, "DataFrame", Frame)
+    assert prepare_int64_table(Frame(frame), None) is None
+
+
+def test_integer_missing_internal_pandas_array_class_keeps_fallback():
+    import sys
+
+    script = r'''
+import sys
+import types
+import numpy as np
+import pandas as pd
+from pyspark.sql._pandas_input import prepare_int64_table
+frame = pd.DataFrame({"a": np.arange(1000, dtype="int64")})
+nullable = pd.DataFrame({"a": pd.Series([None, 1], dtype="Int64")})
+# Older pandas exposes PandasArray rather than NumpyExtensionArray. Missing
+# optional internals must disable the optimization without breaking pandas input.
+sys.modules["pandas.core.arrays.numpy_"] = types.ModuleType("pandas.core.arrays.numpy_")
+assert prepare_int64_table(frame, None) is None
+assert prepare_int64_table(nullable, None) is None
+'''
+    result = subprocess.run([sys.executable, "-c", script],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("class_spoof", [False, True])
+def test_integer_custom_extension_dtype_cannot_select_arrow(protocol, class_spoof):
+    from pandas.api.extensions import ExtensionArray, ExtensionDtype, take
+
+    arrow_calls = []
+
+    class Int64EqualDtype(ExtensionDtype):
+        name = "int64_equal"
+        type = int
+        kind = "i"
+        na_value = None
+
+        @classmethod
+        def construct_array_type(cls):
+            return DifferentArrowArray
+
+        def __eq__(self, other):
+            return (isinstance(other, Int64EqualDtype)
+                    or isinstance(other, np.dtype) and other == np.dtype("int64"))
+
+        def __hash__(self):
+            return hash(self.name)
+
+    class DifferentArrowArray(ExtensionArray):
+        def __init__(self, values):
+            self._values = np.asarray(values, dtype=object)
+
+        @property
+        def dtype(self):
+            return Int64EqualDtype()
+
+        @property
+        def nbytes(self):
+            return self._values.nbytes
+
+        def __len__(self):
+            return len(self._values)
+
+        def __getitem__(self, key):
+            result = self._values[key]
+            return type(self)(result) if isinstance(result, np.ndarray) else result
+
+        def isna(self):
+            return pd.isna(self._values)
+
+        def take(self, indices, allow_fill=False, fill_value=None):
+            return type(self)(take(self._values, indices, allow_fill=allow_fill,
+                                   fill_value=fill_value))
+
+        def copy(self):
+            return type(self)(self._values.copy())
+
+        @classmethod
+        def _from_sequence(cls, scalars, *, dtype=None, copy=False):
+            values = np.asarray(scalars, dtype=object)
+            return cls(values.copy() if copy else values)
+
+        def to_numpy(self, dtype=None, copy=False, na_value=None):
+            if dtype is not None:
+                return self._values.astype(dtype, copy=copy)
+            return self._values.copy() if copy else self._values
+
+        def __arrow_array__(self, type=None):
+            arrow_calls.append("arrow")
+            return pa.array([-7] * len(self), type=type)
+
+    values = [2**53 + 1, None, -(2**63), 0] * 250
+    frame = pd.DataFrame({"a": pd.Series(DifferentArrowArray(values), copy=False)})
+    if class_spoof:
+        Int64EqualDtype.__getattribute__ = lambda self, name: (
+            type(np.dtype("int64")) if name == "__class__"
+            else object.__getattribute__(self, name))
+    assert frame.dtypes.iloc[0] == np.dtype("int64")
+    assert isinstance(frame.dtypes.iloc[0], np.dtype) is class_spoof
+    schema = T.StructType([T.StructField("renamed", T.LongType())])
+    assert prepare_int64_table(frame, schema) is None
+    with _arrow_input_service(protocol) as (spark, state):
+        spark.createDataFrame(frame, schema).toArrow()
+        assert state["config_requests"] == []
+        assert state["input_tables"][0].column(0).to_pylist() == values
+    assert arrow_calls == []
+
+
+@pytest.mark.parametrize("custom", ["dtype", "array"])
+def test_integer_nullable_dtype_and_array_subclasses_keep_fallback(protocol, custom):
+    from pandas.core.arrays.integer import IntegerArray, Int64Dtype
+
+    arrow_calls = []
+
+    class CustomDtype(Int64Dtype):
+        pass
+
+    class CustomArray(IntegerArray):
+        @property
+        def dtype(self):
+            if custom == "dtype":
+                return CustomDtype()
+            return Int64Dtype()
+
+        def __arrow_array__(self, type=None):
+            arrow_calls.append("arrow")
+            return pa.array([-7] * len(self), type=type)
+
+    values = [2**53 + 1, 0, -(2**63), 7] * 250
+    array = CustomArray(np.asarray(values, dtype="int64"), np.zeros(1000, dtype=bool))
+    frame = pd.DataFrame({"a": pd.Series(array, copy=False)})
+    assert type(frame["a"].array) is CustomArray
+    schema = T.StructType([T.StructField("a", T.LongType())])
+    assert prepare_int64_table(frame, schema) is None
+    with _arrow_input_service(protocol) as (spark, state):
+        spark.createDataFrame(frame, schema).toArrow()
+        assert state["config_requests"] == []
+        assert state["input_tables"][0].column(0).to_pylist() == values
+    assert arrow_calls == []
+
+
+def _integer_guard_process(mode, argument, before_import=False):
+    """Class mutation and converter imports must be isolated from other tests."""
+    import sys
+
+    if mode == "captured_alias":
+        import pyspark.sql._arrow_input as importer
+        if not hasattr(importer, "to_arrow_schema"):
+            pytest.skip("this importer resolves converters locally and holds no captured aliases")
+
+    script = r'''
+import importlib
+import importlib.util
+import sys
+import tempfile
+from pathlib import Path
+import numpy as np
+import pandas as pd
+from pyspark.sql import types as T
+from pyspark import _pyspark as native
+
+spec = importlib.util.spec_from_file_location("integer_guard_capture", sys.argv[4])
+capture = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = capture
+spec.loader.exec_module(capture)
+values = [2**53 + 1, -(2**63), 2**63 - 1, 0] * 250
+frame = pd.DataFrame({"renamed": np.asarray(values, dtype="int64")})
+schema = T.StructType([T.StructField("renamed", T.LongType(), False, {"source": "native"})])
+mode, argument, before_import = sys.argv[1:4]
+if before_import == "True":
+    sys.modules.pop("pyspark.sql._pandas_input", None)
+if mode == "descriptor":
+    class_name, attribute = argument.split(":")
+    cls = getattr(native, class_name)
+    if attribute == "alias":
+        setattr(T, class_name, object)
+    elif attribute == "__getattribute__":
+        setattr(cls, attribute, lambda self, name: object.__getattribute__(self, name))
+    elif attribute == "__class__":
+        setattr(cls, "__getattribute__", lambda self, name: (
+            object if name == "__class__" else object.__getattribute__(self, name)))
+    elif attribute == "__iter__":
+        setattr(cls, attribute, lambda self: iter([T.StructField("changed", T.BooleanType())]))
+    else:
+        value = {"names": ["changed"], "fields": [], "name": "changed",
+                 "dataType": T.BooleanType(), "nullable": True,
+                 "metadata": {"changed": True}}[attribute]
+        setattr(cls, attribute, property(lambda self: value))
+elif mode in ("public_alias", "converter_alias", "captured_alias"):
+    replacement = native.BooleanType if argument == "LongType" else native.LongType
+    if mode == "public_alias":
+        sys.modules.pop("pyspark.sql.pandas.types", None)
+        assert "pyspark.sql.pandas.types" not in sys.modules
+        setattr(T, argument, replacement)
+    else:
+        converter = importlib.import_module("pyspark.sql.pandas.types")
+        if mode == "captured_alias":
+            importer = importlib.import_module("pyspark.sql._arrow_input")
+        setattr(converter, argument, replacement)
+        if mode == "captured_alias":
+            sys.modules.pop("pyspark.sql.pandas.types")
+            current = importlib.import_module("pyspark.sql.pandas.types")
+            assert current is not converter
+            assert importer.to_arrow_schema.__globals__ is vars(converter)
+elif mode == "importer_alias":
+    importer = importlib.import_module("pyspark.sql._arrow_input")
+    importer.StructType = None if argument == "none" else native.LongType
+else:
+    raise AssertionError(mode)
+class Factory:
+    def mktemp(self, name):
+        return Path(tempfile.mkdtemp(prefix=name))
+with capture._arrow_input_service(capture.protocol.__wrapped__(Factory())) as (spark, state):
+    spark.createDataFrame(frame, schema).toArrow()
+    assert state["config_requests"] == [], state["config_requests"]
+    table = state["input_tables"][0]
+    assert table.schema.names == ["renamed"], table.schema
+    assert table.column(0).type == __import__("pyarrow").int64()
+    assert table.column(0).to_pylist() == values
+'''
+    result = subprocess.run([sys.executable, "-c", script, mode, argument,
+                             str(before_import), __file__],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("class_name,attribute", [
+    ("StructType", "fields"), ("StructType", "names"), ("StructType", "__iter__"),
+    ("StructField", "name"), ("StructField", "dataType"), ("StructField", "nullable"),
+    ("StructField", "metadata"), ("StructType", "__getattribute__"),
+    ("StructField", "__getattribute__"), ("LongType", "__getattribute__"),
+    ("StructType", "__class__"), ("StructField", "__class__"), ("LongType", "__class__"),
+    ("StructType", "alias"), ("StructField", "alias"), ("LongType", "alias"),
+])
+@pytest.mark.parametrize("before_import", [False, True])
+def test_integer_custom_schema_descriptors_keep_native_row_path(class_name, attribute, before_import):
+    _integer_guard_process("descriptor", f"{class_name}:{attribute}", before_import)
+
+
+@pytest.mark.parametrize("class_name", ["BooleanType", "ByteType", "ShortType", "IntegerType", "LongType"])
+@pytest.mark.parametrize("mode", ["public_alias", "converter_alias", "captured_alias"])
+def test_integer_rebound_converter_aliases_keep_native_row_path(class_name, mode):
+    _integer_guard_process(mode, class_name)
+
+
+@pytest.mark.parametrize("replacement", ["none", "long"])
+def test_integer_rebound_importer_schema_alias_keeps_native_row_path(replacement):
+    _integer_guard_process("importer_alias", replacement)
+
+
+def test_integer_warm_importer_without_global_converter_aliases(protocol, monkeypatch):
+    import pyspark.sql._arrow_input as importer
+
+    original = importer.prepare_table
+
+    def local_imports(table, schema, *configs):
+        # Newer importers import converters within prepare_table. Exercise that
+        # module shape even on the pinned PR118 dependency used by this branch.
+        from pyspark.sql.pandas.types import from_arrow_schema, to_arrow_schema
+        table, resolved, names = original(table, schema, *configs)
+        assert from_arrow_schema(table.schema).fields
+        assert to_arrow_schema(resolved).names == table.column_names
+        return table, resolved, names
+
+    frame = pd.DataFrame({"a": np.arange(1000, dtype="int64")})
+    schema = T.StructType([T.StructField("renamed", T.LongType())])
+    with _arrow_input_service(protocol) as (spark, state):
+        spark.createDataFrame(pa.table({"warm": [1, 2]})).toArrow()
+        # Keep original's module globals available in the dependency importer;
+        # the full-stack validation separately uses the actual local-import helper.
+        import types
+        substitute = types.ModuleType(importer.__name__)
+        substitute.StructType = T.StructType
+        substitute.prepare_table = local_imports
+        monkeypatch.setitem(__import__("sys").modules, importer.__name__, substitute)
+
+        def no_rows(*args, **kwargs):
+            raise AssertionError("warm integer input must stay columnar")
+
+        monkeypatch.setattr(pd.DataFrame, "astype", no_rows)
+        for _ in range(3):
+            spark.createDataFrame(frame, schema).toArrow()
+        for table in state["input_tables"][1:]:
+            assert table.column_names == ["renamed"]
+            assert table.column(0).to_pylist() == list(range(1000))
