@@ -3,7 +3,7 @@
 //! Provides transformations and actions for working with distributed data.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use spark_connect_core::client::ReattachableResponseStream;
 use spark_connect_core::error::{Result, SparkError};
@@ -26,6 +26,9 @@ use crate::udf::CommonInlineUserDefinedFunctionExpression;
 pub struct DataFrame {
     pub(crate) session: SparkSession,
     pub(crate) plan: Arc<LogicalPlan>,
+    // Exact clones share this cache. Every new plan starts with an empty cache,
+    // even when its input has already been analyzed.
+    schema_cache: Arc<Mutex<Option<DataType>>>,
 }
 
 /// Iterator over rows from a DataFrame, yielded lazily as the server streams results.
@@ -206,6 +209,7 @@ impl DataFrame {
         DataFrame {
             session,
             plan: Arc::new(plan),
+            schema_cache: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -770,13 +774,26 @@ impl DataFrame {
 
     /// Get the schema of this DataFrame.
     pub fn schema(&self) -> Result<DataType> {
+        // Keep the lock during analysis so concurrent accesses issue only one
+        // successful RPC. Errors leave the cache empty and can be retried.
+        let mut cached = self
+            .schema_cache
+            .lock()
+            .map_err(|_| SparkError::connect_msg("Schema cache lock poisoned"))?;
+        if let Some(schema) = cached.as_ref() {
+            return Ok(schema.clone());
+        }
         let request = self.build_analyze_request()?;
         let response = block_on(self.session.client().analyze_plan(request))?;
 
         if let Some(proto::analyze_plan_response::Result::Schema(schema)) = response.result {
-            Ok(DataType::from_proto(&schema.schema.ok_or_else(|| {
-                SparkError::connect_msg("Schema is missing")
-            })?)?)
+            let schema = DataType::from_proto(
+                &schema
+                    .schema
+                    .ok_or_else(|| SparkError::connect_msg("Schema is missing"))?,
+            )?;
+            *cached = Some(schema.clone());
+            Ok(schema)
         } else {
             Err(SparkError::connect_msg(
                 "Schema analyze failed: no schema in response",
@@ -1746,10 +1763,7 @@ impl DataFrame {
             left: Arc::clone(&self.plan),
             right: Arc::clone(&other.plan),
         };
-        Ok(DataFrame {
-            plan: Arc::new(plan),
-            session: self.session.clone(),
-        })
+        Ok(DataFrame::new(self.session.clone(), plan))
     }
 
     /// Register this DataFrame as a temporary table (deprecated - use createTempView).
@@ -2849,6 +2863,36 @@ fn micros_to_time_string(micros: i64) -> String {
 mod cache_tests {
     use super::*;
     use prost::Message;
+
+    #[test]
+    fn schema_cache_follows_exact_clones_but_not_new_plans() {
+        let spark = SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .unwrap();
+        let df = spark.range(3).unwrap();
+        let cloned_before_analysis = df.clone();
+        let schema = DataType::Struct { fields: vec![] };
+        *df.schema_cache.lock().unwrap() = Some(schema.clone());
+
+        // These accesses succeed without a server, including a clone created
+        // before the schema was populated.
+        assert_eq!(cloned_before_analysis.schema().unwrap(), schema);
+        assert_eq!(df.clone().schema().unwrap(), schema);
+        assert!(Arc::ptr_eq(
+            &df.schema_cache,
+            &cloned_before_analysis.schema_cache
+        ));
+        for derived in [
+            df.limit(1),
+            df.select(["id"]),
+            df.zip(&df).unwrap(),
+            spark.range(3).unwrap(),
+        ] {
+            assert!(!Arc::ptr_eq(&df.schema_cache, &derived.schema_cache));
+            assert!(derived.schema_cache.lock().unwrap().is_none());
+        }
+    }
 
     #[test]
     fn cache_default_is_memory_and_disk_deser() {
