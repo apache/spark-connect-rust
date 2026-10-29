@@ -78,9 +78,10 @@ def prepare_date_table(frame, schema):
 
     import numpy as np
     import pandas as pd
+    from pandas.core import frame as frame_module, generic as generic_module
     from pandas.core.frame import DataFrame
     from pandas.core.series import Series
-    from types import GetSetDescriptorType, WrapperDescriptorType
+    from types import FunctionType, GetSetDescriptorType, WrapperDescriptorType
 
     from pyspark._pyspark import (
         BooleanType, ByteType, ShortType, IntegerType, LongType, FloatType,
@@ -92,7 +93,23 @@ def prepare_date_table(frame, schema):
     # Keep smaller frames on the row path to avoid the importer's config RPC overhead.
     if (pd.DataFrame is not DataFrame or type(frame) is not DataFrame
             or type(schema) is not NativeStructType
-            or len(frame) < 10000):
+            or len(frame) < 10000
+            or any(name in vars(frame) for name in ("astype", "notna", "where"))):
+        return None
+    # The row path calls these normalization methods. Custom class or instance
+    # hooks must retain those calls and the values they produce before Arrow RPCs.
+    for name, module, qualname in (
+        ("astype", generic_module, "NDFrame.astype"),
+        ("notna", frame_module, "DataFrame.notna"),
+        ("where", generic_module, "NDFrame.where"),
+    ):
+        method = getattr(DataFrame, name)
+        if (type(method) is not FunctionType or method.__name__ != name
+                or method.__qualname__ != qualname or method.__module__ != module.__name__
+                or method.__globals__ is not vars(module)):
+            return None
+    if (DataFrame.astype is not generic_module.NDFrame.astype
+            or DataFrame.where is not generic_module.NDFrame.where):
         return None
     # Earlier converter branches must not recognize a date as another type.
     # Check loaded converters and globals captured by older importer functions.

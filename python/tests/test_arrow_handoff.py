@@ -872,7 +872,7 @@ def test_date_columns_preserve_every_ipc_cell(protocol, monkeypatch, cached, ver
     def no_rows(*args, **kwargs):
         raise AssertionError("date fast path must not materialize Python rows")
 
-    for method in ("astype", "notna", "to_numpy", "iterrows", "itertuples"):
+    for method in ("to_numpy", "iterrows", "itertuples"):
         monkeypatch.setattr(pd.DataFrame, method, no_rows)
     monkeypatch.setattr(pd.DataFrame, "values", property(no_rows))
     monkeypatch.setattr(pd.Series, "tolist", no_rows)
@@ -1314,9 +1314,56 @@ def test_date_warm_importer_without_global_converter_aliases(protocol, monkeypat
         def no_rows(*args, **kwargs):
             raise AssertionError("warm date input must stay columnar")
 
-        monkeypatch.setattr(pd.DataFrame, "astype", no_rows)
+        monkeypatch.setattr(pd.DataFrame, "values", property(no_rows))
         for _ in range(3):
             spark.createDataFrame(frame, schema).toArrow()
         for table in state["input_tables"][1:]:
             assert table.column_names == ["renamed"]
             assert table.column(0).to_pylist() == values
+
+
+@pytest.mark.parametrize("location", ["class", "instance"])
+@pytest.mark.parametrize("method", ["astype", "notna", "where"])
+def test_date_custom_normalization_hooks_keep_native_row_path(
+    protocol, monkeypatch, location, method
+):
+    from types import MethodType
+    from pyspark.sql._pandas_input import prepare_date_table
+
+    values = [date(2020, 1, 1)] * 10000
+    frame = pd.DataFrame({"original": values}, dtype=object)
+    schema = T.StructType([T.StructField("renamed", T.DateType())])
+    original = getattr(pd.DataFrame, method)
+    calls = []
+
+    def replacement(self, *args, **kwargs):
+        calls.append(method)
+        result = original(self, *args, **kwargs)
+        if method == "notna":
+            result.iat[-1, 0] = False
+        else:
+            result.iat[0, 0] = date(2020, 1, 2 if method == "astype" else 3)
+        return result
+
+    if location == "class":
+        monkeypatch.setattr(pd.DataFrame, method, replacement)
+    else:
+        # Avoid pandas' attribute-to-column routing when installing an instance hook.
+        monkeypatch.setitem(vars(frame), method, MethodType(replacement, frame))
+    assert prepare_date_table(frame, schema) is None
+    expected = values.copy()
+    if method == "notna":
+        expected[-1] = None
+    elif method == "astype":
+        expected[0] = date(2020, 1, 2)
+    elif location == "class":
+        expected[0] = date(2020, 1, 3)
+    with _arrow_input_service(protocol) as (spark, state):
+        spark.createDataFrame(frame, schema).toArrow()
+        assert state["config_requests"] == []
+        table = state["input_tables"][0]
+        assert table.column_names == ["renamed"]
+        assert table.column(0).to_pylist() == expected
+    # astype returns a new frame, so an original instance's where hook is not
+    # used by the native normalization sequence. Preserve that ordering too.
+    assert calls == ([] if method == "where" and location == "instance" else [method])
