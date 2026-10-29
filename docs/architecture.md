@@ -111,15 +111,6 @@ Batch schema consistency is validated before export. Field names or timezones
 containing NUL use IPC over the collected batches, without another RPC. Empty
 batch vectors retain the empty-schema behavior.
 
-The Arrow handoff has been tested locally with PyArrow 10.0.0 (Python 3.9)
-and 26.0.0 (Python 3.12). CI installs the latest PyArrow; it does not pin or
-separately test the declared PyArrow 10 minimum. The native live-server smoke
-tests in `python/tests/test_arrow_e2e.py` run in the Connect parity CI job
-against its live server and built native extension. Official parity tests
-exercise the Rust transport with official PySpark; the separate native smoke
-step covers the drop-in `toArrow()` path.
-
-
 ## Two front-ends, one core
 
 === "Rust (native)"
