@@ -37,8 +37,13 @@ def prepare_int64_table(frame, schema):
         isinstance(name, str) for name in frame.columns
     ):
         return None
+    dtypes = frame.dtypes
     if not all(dtype == np.dtype("int64") or isinstance(dtype, pd.Int64Dtype)
-               for dtype in frame.dtypes):
+               for dtype in dtypes):
+        return None
+    # The importer's configuration RPCs outweigh row conversion for small NumPy
+    # frames. Nullable extension columns still use Arrow for reliable null typing.
+    if len(frame) < 1000 and not any(isinstance(dtype, pd.Int64Dtype) for dtype in dtypes):
         return None
     if isinstance(schema, StructType):
         if len(schema.fields) != width or not all(

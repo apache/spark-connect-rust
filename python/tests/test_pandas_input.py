@@ -128,7 +128,8 @@ def test_integer_scales_reach_mock_service(protocol, monkeypatch, rows, explicit
     def no_rows(*args, **kwargs):
         raise AssertionError("integer input must stay columnar at every scale")
 
-    monkeypatch.setattr(pd.DataFrame, "astype", no_rows)
+    if rows >= 1000:
+        monkeypatch.setattr(pd.DataFrame, "astype", no_rows)
     with _arrow_input_service(protocol) as (spark, state):
         spark.createDataFrame(frame, schema if explicit else None).toArrow()
         assert state["result"] == (rows, 2**53 + 1, 2**53 + rows)
@@ -152,3 +153,9 @@ def test_non_nullable_schema_is_preserved(protocol, verify):
             spark.createDataFrame(frame, schema, verifySchema=verify)
         assert not state["relations"]
         assert not state["uploads"]
+
+
+def test_small_numpy_frames_avoid_importer_configuration_overhead():
+    assert prepare_int64_table(pd.DataFrame({"a": np.arange(999, dtype=np.int64)}), None) is None
+    assert prepare_int64_table(pd.DataFrame({"a": np.arange(1000, dtype=np.int64)}), None) is not None
+    assert prepare_int64_table(pd.DataFrame({"a": pd.Series([None], dtype="Int64")}), None) is not None

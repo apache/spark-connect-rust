@@ -119,7 +119,10 @@ materialized; casts, buffer alignment, and IPC serialization may still copy.
 Empty tables require an explicit schema, matching PySpark Connect.
 Pandas inputs with only NumPy `int64` or pandas nullable `Int64` columns also
 use this importer, preserving integer precision and null masks without Python
-rows. This initial path accepts inferred schemas, complete string column names,
+rows. Small frames (fewer than 1,000 rows) with only NumPy columns retain the
+row path to avoid configuration RPC overhead. Nullable `Int64` columns always
+use Arrow so schema inference does not depend on the first value being non-null.
+This initial path accepts inferred schemas, complete string column names,
 and explicit `StructType` schemas whose fields are all `LongType`. Other dtypes,
 DDL/atomic schemas, schema conversions, and duplicate/non-string input names
 retain the existing row conversion path. `verifySchema` remains ignored for
