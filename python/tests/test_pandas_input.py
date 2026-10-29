@@ -115,3 +115,21 @@ def test_duplicate_names_fallback_and_nullable_masks():
 @pytest.mark.parametrize("dtype", ["int32", "uint64", "Int32", "UInt64", "int64[pyarrow]"])
 def test_other_integer_dtypes_keep_row_fallback(dtype):
     assert prepare_int64_table(pd.DataFrame({"a": pd.Series([1, 2], dtype=dtype)}), None) is None
+
+
+@pytest.mark.parametrize("rows", [100, 1000, 100000, 1000000])
+@pytest.mark.parametrize("explicit", [False, True])
+def test_integer_scales_reach_mock_service(protocol, monkeypatch, rows, explicit):
+    values = np.arange(rows, dtype=np.int64) + (2**53 + 1)
+    frame = pd.DataFrame({name: values for name in ("a", "b", "c")})
+    schema = T.StructType([T.StructField(name, T.LongType()) for name in frame.columns])
+
+    def no_rows(*args, **kwargs):
+        raise AssertionError("integer input must stay columnar at every scale")
+
+    monkeypatch.setattr(pd.DataFrame, "astype", no_rows)
+    with _arrow_input_service(protocol) as (spark, state):
+        spark.createDataFrame(frame, schema if explicit else None).toArrow()
+        assert state["result"] == (rows, 2**53 + 1, 2**53 + rows)
+        if frame.memory_usage(index=False).sum() > 1048576:
+            assert state["relations"][0].HasField("chunked_cached_local_relation")
