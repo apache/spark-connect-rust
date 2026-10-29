@@ -425,6 +425,9 @@ def _arrow_input_service(protocol, *, upload_error=None, **overrides):
         request = protocol("ExecutePlanRequest").FromString(raw)
         relation = request.plan.root
         state["relations"].append(relation)
+        # Column-name schemas wrap the local input with a rename relation.
+        if relation.HasField("to_df"):
+            relation = relation.to_df.input
         if relation.HasField("chunked_cached_local_relation"):
             cached = relation.chunked_cached_local_relation
             payloads = [state["cache"]["cache/" + h] for h in cached.dataHashes]
