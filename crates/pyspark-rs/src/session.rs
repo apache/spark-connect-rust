@@ -966,6 +966,23 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
         return Ok(Value::Double(f.value()));
     }
 
+    // Exact built-in containers cannot implement numeric protocols. Convert them
+    // before Decimal/numeric probing; subclasses retain the generic precedence below.
+    if let Ok(list) = obj.cast_exact::<pyo3::types::PyList>() {
+        let items = list
+            .iter()
+            .map(|item| py_to_value(&item))
+            .collect::<PyResult<Vec<_>>>()?;
+        return Ok(Value::List(items));
+    }
+    if let Ok(tuple) = obj.cast_exact::<pyo3::types::PyTuple>() {
+        let items = tuple
+            .iter()
+            .map(|item| py_to_value(&item))
+            .collect::<PyResult<Vec<_>>>()?;
+        return Ok(Value::List(items));
+    }
+
     // Check for bool (before int because bool is a subclass of int in Python)
     if let Ok(b) = obj.extract::<bool>() {
         return Ok(Value::Bool(b));
