@@ -133,3 +133,21 @@ def test_integer_scales_reach_mock_service(protocol, monkeypatch, rows, explicit
         assert state["result"] == (rows, 2**53 + 1, 2**53 + rows)
         if frame.memory_usage(index=False).sum() > 1048576:
             assert state["relations"][0].HasField("chunked_cached_local_relation")
+
+
+def test_nullable_inference_does_not_depend_on_first_value(protocol):
+    frame = pd.DataFrame({"a": pd.Series([None, 2**53 + 1], dtype="Int64")})
+    with _arrow_input_service(protocol) as (spark, state):
+        spark.createDataFrame(frame).toArrow()
+        assert state["result"] == (2, None, 2**53 + 1)
+
+
+@pytest.mark.parametrize("verify", [True, False])
+def test_non_nullable_schema_is_preserved(protocol, verify):
+    frame = pd.DataFrame({"a": pd.Series([1, None], dtype="Int64")})
+    schema = T.StructType([T.StructField("a", T.LongType(), False)])
+    with _arrow_input_service(protocol) as (spark, state):
+        with pytest.raises(ValueError, match="null"):
+            spark.createDataFrame(frame, schema, verifySchema=verify)
+        assert not state["relations"]
+        assert not state["uploads"]
