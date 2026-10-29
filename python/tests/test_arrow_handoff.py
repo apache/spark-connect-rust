@@ -689,3 +689,88 @@ def test_arrow_input_empty_skips_all_configs(protocol):
             spark.createDataFrame(table)
         assert state["config_requests"] == []
         assert state["uploads"] == 0
+
+
+@pytest.mark.parametrize("rows", [10000, 30000, 60000, 1000000])
+def test_canonical_arrow_input_matches_normalized_ipc_and_uploads(protocol, monkeypatch, rows):
+    import json
+    import sys
+    import numpy as np
+    from pyspark.sql import pandas as pandas_package
+    from pyspark.sql.types import LongType, StructField, StructType
+
+    values = np.arange(rows, dtype=np.int64)
+    values[0], values[-1] = -(2**63), 2**63 - 1
+    # Different column chunk boundaries also exercise native record batch alignment.
+    table = pa.table({
+        "x": pa.chunked_array([values[:7], values[7:]]),
+        "y": pa.chunked_array([pa.array([None], type=pa.int64()),
+                               pa.array(values[1:])]),
+        "z": pa.chunked_array([values[:31], values[31:]]),
+    })
+    schema = StructType([StructField(name, LongType()) for name in table.column_names])
+    monkeypatch.setattr(pandas_package, "types", getattr(pandas_package, "types", None),
+                        raising=False)
+    monkeypatch.delitem(sys.modules, "pyspark.sql.pandas.types", raising=False)
+    with _arrow_input_service(protocol) as (spark, state):
+        spark.createDataFrame(table, schema).collect()
+        assert "pyspark.sql.pandas.types" not in sys.modules
+        first_uploads = state["uploads"]
+        first_cache = dict(state["cache"])
+        # A loaded converter deliberately selects the established normalization path.
+        from importlib import import_module
+
+        converters = import_module("pyspark.sql.pandas.types")
+
+        assert converters is sys.modules["pyspark.sql.pandas.types"]
+        state["config"].update(dict(zip(_NORMALIZATION_KEYS, [
+            "TIMESTAMP_NTZ", "America/Los_Angeles", "true"])))
+        spark.createDataFrame(table, schema).collect()
+        assert state["config_requests"] == [_NORMALIZATION_KEYS, _UPLOAD_KEYS] * 2
+        assert state["uploads"] == first_uploads
+        assert state["cache"] == first_cache
+        for actual in state["input_tables"]:
+            assert actual.equals(table, check_metadata=True)
+            assert actual.to_pydict() == table.to_pydict()
+        first, second = state["relations"]
+        assert first.WhichOneof("rel_type") == second.WhichOneof("rel_type")
+        if table.nbytes < 1048576:
+            assert first.HasField("local_relation")
+            assert first.local_relation.data == second.local_relation.data
+            assert first.local_relation.schema == second.local_relation.schema
+            assert first_uploads == 0
+            fields = json.loads(first.local_relation.schema)["fields"]
+        else:
+            assert first.HasField("chunked_cached_local_relation")
+            assert first.chunked_cached_local_relation == second.chunked_cached_local_relation
+            assert first_uploads == 1
+            fields = json.loads(state["spark_schema"])["fields"]
+        assert fields == [dict(name=name, type="long", nullable=True, metadata={})
+                          for name in table.column_names]
+
+
+@pytest.mark.parametrize("failure,match", [
+    ("crc", "CRC check failed"), ("missing", "Missing cache artifact"),
+    ("limit", "LOCAL_RELATION_SIZE_LIMIT_EXCEEDED"),
+    ("config", "configuration read failed"),
+])
+def test_canonical_arrow_input_preserves_failures(protocol, monkeypatch, failure, match):
+    import sys
+    from pyspark.sql.types import LongType, StructField, StructType
+
+    monkeypatch.delitem(sys.modules, "pyspark.sql.pandas.types", raising=False)
+    options = {"spark.sql.session.localRelationCacheThreshold": "0"}
+    if failure == "limit":
+        options["spark.sql.session.localRelationSizeLimit"] = "10"
+    with _arrow_input_service(protocol, upload_error=failure, **options) as (spark, state):
+        if failure == "config":
+            state["config_error"] = grpc.StatusCode.INVALID_ARGUMENT
+        with pytest.raises(Exception, match=match):
+            spark.createDataFrame(pa.table({"x": [1, None, 2]}),
+                                  StructType([StructField("x", LongType())]))
+        assert "pyspark.sql.pandas.types" not in sys.modules
+        assert not state["relations"]
+        assert state["uploads"] == (1 if failure in ("crc", "missing") else 0)
+        assert state["config_requests"] == (
+            [_NORMALIZATION_KEYS] if failure == "config" else [_NORMALIZATION_KEYS, _UPLOAD_KEYS]
+        )
