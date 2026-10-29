@@ -2755,3 +2755,773 @@ for schema in schemas:
     else:
         raise AssertionError("expected a width validation error")
 """], check=True)
+
+
+# Inspect the local-input IPC through a real transport boundary. The subprocess
+# avoids sharing the GIL with native RPC calls and needs no JVM or Spark server.
+_DECIMAL_SCALE_IPC_SERVER = r"""
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+import grpc
+import pyarrow as pa
+from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
+pool = descriptor_pool.DescriptorPool()
+for file in descriptor_pb2.FileDescriptorSet.FromString(Path(sys.argv[1]).read_bytes()).file:
+    pool.Add(file)
+def message(name, **fields):
+    cls = message_factory.GetMessageClass(pool.FindMessageTypeByName('spark.connect.' + name))
+    return cls(**fields)
+def config(raw, context):
+    request = message('ConfigRequest').FromString(raw)
+    response = message('ConfigResponse', session_id=request.session_id,
+                       server_side_session_id='00000000-0000-0000-0000-000000000001')
+    values = {
+        'spark.sql.session.timeZone': 'UTC',
+        'spark.sql.timestampType': 'TIMESTAMP_LTZ',
+        'spark.sql.session.localRelationCacheThreshold': str(1 << 60),
+        'spark.sql.session.localRelationSizeLimit': str(1 << 60),
+        'spark.sql.session.localRelationChunkSizeRows': '10000',
+        'spark.sql.session.localRelationChunkSizeBytes': str(16 << 20),
+        'spark.sql.session.localRelationBatchOfChunksSizeBytes': str(64 << 20),
+    }
+    operation = request.operation
+    if operation.HasField('get'):
+        keys = operation.get.keys
+    elif operation.HasField('get_with_default'):
+        keys = [pair.key for pair in operation.get_with_default.pairs]
+    else:
+        context.abort(grpc.StatusCode.INVALID_ARGUMENT, 'unexpected config operation')
+    for key in keys:
+        response.pairs.add(key=key, value=values.get(key, 'false'))
+    return response.SerializeToString()
+def execute(raw, context):
+    request = message('ExecutePlanRequest').FromString(raw)
+    relation = request.plan.root
+    # Python's pandas path wraps the local relation to assign column names.
+    if relation.HasField('to_df'):
+        relation = relation.to_df.input
+    assert relation.HasField('local_relation'), relation
+    payload = relation.local_relation.data
+    Path(sys.argv[2]).write_bytes(payload)
+    table = pa.ipc.open_stream(payload).read_all()
+    header = dict(session_id=request.session_id, operation_id=request.operation_id,
+                  server_side_session_id='00000000-0000-0000-0000-000000000001')
+    response = message('ExecutePlanResponse', **header, response_id='batch',
+                       arrow_batch=dict(data=payload, row_count=table.num_rows))
+    for field in table.schema:
+        output = response.schema.struct.fields.add(name=field.name, nullable=True)
+        output.data_type.decimal.precision = field.type.precision
+        output.data_type.decimal.scale = field.type.scale
+    yield response.SerializeToString()
+    yield message('ExecutePlanResponse', **header, response_id='complete',
+                  result_complete={}).SerializeToString()
+def release_session(raw, context):
+    request = message('ReleaseSessionRequest').FromString(raw)
+    return message('ReleaseSessionResponse', session_id=request.session_id,
+                   server_side_session_id='00000000-0000-0000-0000-000000000001').SerializeToString()
+def release_execute(raw, context):
+    request = message('ReleaseExecuteRequest').FromString(raw)
+    return message('ReleaseExecuteResponse', session_id=request.session_id,
+                   operation_id=request.operation_id,
+                   server_side_session_id='00000000-0000-0000-0000-000000000001').SerializeToString()
+with ThreadPoolExecutor(max_workers=4) as executor:
+    server = grpc.server(executor)
+    server.add_generic_rpc_handlers((grpc.method_handlers_generic_handler(
+        'spark.connect.SparkConnectService', {
+            'Config': grpc.unary_unary_rpc_method_handler(config),
+            'ExecutePlan': grpc.unary_stream_rpc_method_handler(execute),
+            'ReleaseSession': grpc.unary_unary_rpc_method_handler(release_session),
+            'ReleaseExecute': grpc.unary_unary_rpc_method_handler(release_execute),
+        }),))
+    port = server.add_insecure_port('127.0.0.1:0')
+    assert port
+    server.start()
+    print(port, flush=True)
+    sys.stdin.readline()
+    server.stop(0).wait()
+"""
+
+
+@pytest.fixture(scope="module")
+def decimal_scale_ipc_protocol(tmp_path_factory):
+    import os
+    from pathlib import Path
+    import shutil
+    import subprocess
+
+    pytest.importorskip("grpc")
+    pytest.importorskip("pyarrow")
+    protoc = shutil.which(os.environ.get("PROTOC", "protoc"))
+    if protoc is None:
+        pytest.skip("Decimal IPC transport tests require protoc")
+    proto_root = Path(__file__).resolve().parents[2] / "crates/spark-connect-proto/proto"
+    descriptor = tmp_path_factory.mktemp("decimal-proto") / "connect.pb"
+    command = [protoc, f"-I{proto_root}"]
+    if include := os.environ.get("PROTOC_INCLUDE"):
+        command.append(f"-I{include}")
+    subprocess.run(command + ["--include_imports", f"--descriptor_set_out={descriptor}",
+                             str(proto_root / "spark/connect/base.proto")], check=True)
+    return descriptor
+
+
+@pytest.fixture
+def decimal_scale_ipc_session(decimal_scale_ipc_protocol, tmp_path):
+    import subprocess
+    import sys
+    from pyspark.sql import SparkSession
+
+    payload = tmp_path / "input.arrow"
+    process = subprocess.Popen(
+        [sys.executable, "-u", "-c", _DECIMAL_SCALE_IPC_SERVER, str(decimal_scale_ipc_protocol), str(payload)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+    )
+    spark = None
+    try:
+        port = int(process.stdout.readline())
+        spark = SparkSession.builder.remote(f"sc://127.0.0.1:{port}").create()
+        yield spark, payload
+    finally:
+        try:
+            if spark is not None:
+                spark.stop()
+        finally:
+            process.communicate("stop\n", timeout=20)
+            assert process.returncode == 0
+
+
+
+@pytest.mark.parametrize("kind", ["tuples", "pandas"])
+@pytest.mark.parametrize("schema_mode", ["explicit", "names", "inferred"])
+@pytest.mark.parametrize("texts", [
+    ["123.4500", "-2.3400", "0.0000", "-0.0000", None],
+    ["1.2300E+2", "-2.3400E+2", "0.00", "-0.00", None],
+    ["0.001234500", "-0.000002300", "0.000000", None],
+    ["123", "-4", "0", None],
+])
+def test_decimal_scale_input_ipc(decimal_scale_ipc_session, kind, schema_mode, texts):
+    from decimal import Decimal, Inexact, ROUND_UP, localcontext
+    import pyarrow as pa
+
+    spark, payload = decimal_scale_ipc_session
+    values = [None if text is None else Decimal(text) for text in texts]
+    name = "col0" if schema_mode == "inferred" and kind == "tuples" else "v"
+    scale = 9 if schema_mode == "explicit" else -values[0].as_tuple().exponent
+    precision = 18 if schema_mode == "explicit" else 38
+    schema = None
+    if schema_mode == "names":
+        schema = [name]
+    elif schema_mode == "explicit":
+        schema = T.StructType([T.StructField(name, T.DecimalType(precision, scale))])
+    data = [(value,) for value in values]
+    if kind == "pandas":
+        pd = pytest.importorskip("pandas")
+        data = pd.DataFrame({name: values})
+    # String conversion must not round or consult arithmetic traps/precision.
+    with localcontext() as context:
+        context.prec = 2
+        context.rounding = ROUND_UP
+        context.traps[Inexact] = True
+        context.capitals = 0
+        spark.createDataFrame(data, schema).collect()
+    table = pa.ipc.open_stream(payload.read_bytes()).read_all()
+    expected = pa.table({name: pa.array(values, type=pa.decimal128(precision, scale))})
+    table.validate(full=True)
+    assert table.schema == expected.schema
+    assert table.equals(expected)
+    actual = table.column(0).combine_chunks()
+    wanted = expected.column(0).combine_chunks()
+    for index, value in enumerate(values):
+        assert actual[index].is_valid == (value is not None)
+        if value is not None:
+            offset = index * 16
+            assert actual.buffers()[1][offset:offset + 16] == wanted.buffers()[1][offset:offset + 16]
+
+
+@pytest.mark.parametrize("hook", ["plain", "tuple", "str", "both", "tuple_error", "str_error"])
+def test_decimal_scale_subclass_hooks(decimal_scale_ipc_session, hook):
+    from decimal import Decimal
+    import pyarrow as pa
+
+    calls = []
+
+    class CustomDecimal(Decimal):
+        def __str__(self):
+            calls.append("str")
+            if hook == "str_error":
+                raise LookupError("decimal str hook")
+            return "2.300" if hook in ("str", "both") else super().__str__()
+
+        def as_tuple(self):
+            calls.append("tuple")
+            if hook == "tuple_error":
+                raise LookupError("decimal tuple hook")
+            result = super().as_tuple()
+            return result._replace(exponent=-5) if hook in ("tuple", "both") else result
+
+    spark, payload = decimal_scale_ipc_session
+    if hook.endswith("error"):
+        with pytest.raises(LookupError, match="decimal .* hook"):
+            spark.createDataFrame([(CustomDecimal("1.20"),)], ["v"])
+        assert calls == (["str"] if hook == "str_error" else ["str", "tuple"])
+        assert not payload.exists()
+        return
+    spark.createDataFrame([(CustomDecimal("1.20"),), (None,)], ["v"]).collect()
+    assert calls == ["str", "tuple"]
+    scale = 5 if hook in ("tuple", "both") else 2
+    value = Decimal("2.30") if hook in ("str", "both") else Decimal("1.20")
+    table = pa.ipc.open_stream(payload.read_bytes()).read_all()
+    expected = pa.table({"v": pa.array([value, None], type=pa.decimal128(38, scale))})
+    table.validate(full=True)
+    assert table.schema == expected.schema
+    assert table.equals(expected)
+
+
+@pytest.mark.parametrize("text", ["NaN", "sNaN42", "Infinity", "-Infinity"])
+@pytest.mark.parametrize("capitals", [0, 1])
+def test_decimal_scale_existing_errors(decimal_scale_ipc_session, text, capitals):
+    from decimal import Decimal, localcontext
+
+    spark, payload = decimal_scale_ipc_session
+    # Non-finite Decimal inputs retain the existing core-parser errors.
+    with localcontext() as context:
+        context.capitals = capitals
+        with pytest.raises(RuntimeError) as error:
+            spark.createDataFrame([(Decimal(text),)], ["v"])
+    # Both parser versions reject non-finite values, with distinct exact messages.
+    assert str(error.value) in {
+        f"invalid decimal '{text.lstrip('+-')}': invalid digit found in string",
+        f"invalid or overflowing decimal '{text}'",
+    }
+    assert not payload.exists()
+
+
+@pytest.mark.parametrize("text", ["1E+3", "1E-7", "-0E-7", "1.2300E-7"])
+@pytest.mark.parametrize("capitals", [0, 1])
+def test_decimal_scale_scientific_compatibility(decimal_scale_ipc_session, text, capitals):
+    from decimal import Decimal, localcontext
+    import pyarrow as pa
+
+    spark, payload = decimal_scale_ipc_session
+    value = Decimal(text)
+    with localcontext() as context:
+        context.capitals = capitals
+        try:
+            frame = spark.createDataFrame([(value,), (None,)], ["v"])
+        except RuntimeError as error:
+            # The original core parser rejects scientific notation. Its separate
+            # parser fix may accept it; accepted values must retain exact scale.
+            assert "invalid digit found in string" in str(error)
+            assert not payload.exists()
+            return
+    frame.collect()
+    scale = max(-value.as_tuple().exponent, 0)
+    expected = pa.table({"v": pa.array([value, None], type=pa.decimal128(38, scale))})
+    table = pa.ipc.open_stream(payload.read_bytes()).read_all()
+    table.validate(full=True)
+    assert table.schema == expected.schema
+    assert table.equals(expected)
+    actual = table.column(0).combine_chunks()
+    wanted = expected.column(0).combine_chunks()
+    assert actual[0].is_valid
+    assert not actual[1].is_valid
+    assert actual.buffers()[1][:16] == wanted.buffers()[1][:16]
+
+
+def test_decimal_scale_avoids_coefficient_tuple(decimal_scale_ipc_session):
+    import cProfile
+    from decimal import Decimal
+
+    spark, _ = decimal_scale_ipc_session
+    tuple_constructor = type(Decimal("1.20").as_tuple()).__new__.__code__
+    values = [(Decimal("123.4500"),), (Decimal("-2.3000"),), (None,)]
+    profile = cProfile.Profile()
+    profile.enable()
+    try:
+        spark.createDataFrame(values, ["v"])
+    finally:
+        profile.disable()
+    assert not any(entry.code is tuple_constructor for entry in profile.getstats())
+
+
+# SPARK-60704: construction-local Decimal resolution. Capture the original
+# LocalRelation schema as well as every IPC cell, independently of the echo result.
+_DECIMAL_LOOKUP_IPC_SERVER = _DECIMAL_SCALE_IPC_SERVER.replace(
+    "Path(sys.argv[2]).write_bytes(payload)",
+    "Path(sys.argv[2]).write_bytes(payload)\n"
+    "    Path(sys.argv[2] + '.schema').write_text(relation.local_relation.schema)",
+).replace(
+    "        output.data_type.decimal.precision = field.type.precision\n"
+    "        output.data_type.decimal.scale = field.type.scale",
+    """        if pa.types.is_decimal(field.type):
+            output.data_type.decimal.precision = field.type.precision
+            output.data_type.decimal.scale = field.type.scale
+        elif pa.types.is_int64(field.type):
+            output.data_type.long.SetInParent()
+        elif pa.types.is_string(field.type):
+            output.data_type.string.SetInParent()
+        elif pa.types.is_float64(field.type):
+            output.data_type.double.SetInParent()
+        elif pa.types.is_date32(field.type):
+            output.data_type.date.SetInParent()
+        elif pa.types.is_list(field.type):
+            output.data_type.array.element_type.long.SetInParent()
+            output.data_type.array.contains_null = True
+        else:
+            raise AssertionError(field.type)""",
+)
+
+
+@pytest.fixture
+def decimal_lookup_ipc_session(decimal_scale_ipc_protocol, tmp_path):
+    import subprocess
+    import sys
+    from pyspark.sql import SparkSession
+
+    payload = tmp_path / "lookup.arrow"
+    process = subprocess.Popen(
+        [sys.executable, "-u", "-c", _DECIMAL_LOOKUP_IPC_SERVER,
+         str(decimal_scale_ipc_protocol), str(payload)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+    )
+    spark = None
+    try:
+        port = int(process.stdout.readline())
+        spark = SparkSession.builder.remote(f"sc://127.0.0.1:{port}").create()
+        yield spark, payload
+    finally:
+        try:
+            if spark is not None:
+                spark.stop()
+        finally:
+            process.communicate("stop\n", timeout=20)
+            assert process.returncode == 0
+
+
+def _decimal_lookup_assert_cells(payload, values, names, scales, precision=38):
+    import pyarrow as pa
+
+    table = pa.ipc.open_stream(payload.read_bytes()).read_all()
+    expected = pa.table({name: pa.array([row[i] for row in values],
+                                      type=pa.decimal128(precision, scales[i]))
+                         for i, name in enumerate(names)})
+    table.validate(full=True)
+    assert table.schema == expected.schema
+    assert table.equals(expected)
+    for i in range(len(names)):
+        actual = table.column(i).combine_chunks()
+        wanted = expected.column(i).combine_chunks()
+        for j, row in enumerate(values):
+            assert actual[j].is_valid == (row[i] is not None)
+            if row[i] is not None:
+                offset = j * 16
+                assert actual.buffers()[1][offset:offset + 16] == wanted.buffers()[1][offset:offset + 16]
+
+
+@pytest.mark.parametrize("kind", ["tuples", "lists", "pandas"])
+@pytest.mark.parametrize("mode,all_null", [("explicit", False), ("names", False),
+                                         ("inferred", False), ("explicit", True)])
+def test_decimal_lookup_input_cells(decimal_lookup_ipc_session, kind, mode, all_null):
+    from decimal import Decimal, Inexact, Rounded, ROUND_UP, localcontext
+    import json
+
+    spark, payload = decimal_lookup_ipc_session
+    values = [(Decimal("123.4500"), Decimal("-2.300000")),
+              (Decimal("-0.0000"), None), (None, Decimal("0.000000"))]
+    if all_null:
+        values = [(None, None)] * 3
+    names = ["col0", "col1"] if mode == "inferred" and kind != "pandas" else ["a", "b"]
+    scales = [9, 9] if mode == "explicit" else [4, 6]
+    metadata = {"description": "decimal lookup", "nested": {"x": [1, True]}}
+    schema = None
+    if mode == "names":
+        schema = names
+    elif mode == "explicit":
+        schema = T.StructType([T.StructField(n, T.DecimalType(38, 9), True, metadata)
+                               for n in names])
+    data = values
+    if kind == "lists":
+        data = [list(row) for row in values]
+    elif kind == "pandas":
+        pd = pytest.importorskip("pandas")
+        data = pd.DataFrame(values, columns=names)
+    before = None if schema is None or isinstance(schema, list) else schema.json()
+    with localcontext() as context:
+        context.prec = 2
+        context.rounding = ROUND_UP
+        context.traps[Inexact] = True
+        context.traps[Rounded] = True
+        context.capitals = 0
+        frame = spark.createDataFrame(data, schema)
+        assert not payload.exists(), "construction must remain local"
+        frame.collect()
+    _decimal_lookup_assert_cells(payload, values, names, scales)
+    if mode == "explicit":
+        assert schema.json() == before
+        captured = json.loads(payload.with_suffix(".arrow.schema").read_text())
+        assert [f["metadata"] for f in captured["fields"]] == [metadata, metadata]
+
+
+@pytest.mark.parametrize("kind", ["tuples", "pandas"])
+@pytest.mark.parametrize("explicit", [False, True])
+def test_decimal_lookup_all_large_input_cells(decimal_lookup_ipc_session, kind, explicit):
+    from decimal import Decimal, Inexact, Rounded, localcontext
+
+    spark, payload = decimal_lookup_ipc_session
+    values = [(None if i % 11 == 10 else Decimal(f"{i}.1200"),
+               None if i % 7 == 6 else Decimal("-2.3400"),
+               Decimal("-0.0000" if i % 2 else "0.0000")) for i in range(10000)]
+    names = ["a", "b", "c"]
+    precision = 18 if explicit else 38
+    schema = (T.StructType([T.StructField(name, T.DecimalType(precision, 4)) for name in names])
+              if explicit else names)
+    data = values
+    if kind == "pandas":
+        pd = pytest.importorskip("pandas")
+        data = pd.DataFrame(values, columns=names)
+    with localcontext() as context:
+        context.prec = 2
+        context.traps[Inexact] = True
+        context.traps[Rounded] = True
+        frame = spark.createDataFrame(data, schema)
+        assert not payload.exists()
+        frame.collect()
+    # Validate all 30,000 cells and validity bits, including each non-null
+    # physical Decimal128 coefficient; never sample only the first or last row.
+    _decimal_lookup_assert_cells(payload, values, names, [4, 4, 4], precision)
+
+
+@pytest.mark.parametrize("kind", ["tuples", "lists", "pandas"])
+@pytest.mark.parametrize("hook", ["str", "tuple", "str_error", "tuple_error", "rebind"])
+def test_decimal_lookup_subclass_fallback(decimal_lookup_ipc_session, monkeypatch, kind, hook):
+    import decimal
+
+    Decimal = decimal.Decimal
+    calls = []
+
+    class LookupDecimal(Decimal):
+        def __str__(self):
+            calls.append("str")
+            if hook == "str_error":
+                raise LookupError("lookup str hook")
+            if hook == "rebind":
+                monkeypatch.setattr(decimal, "Decimal", int)
+            return "2.300" if hook == "str" else super().__str__()
+
+        def as_tuple(self):
+            calls.append("tuple")
+            if hook == "tuple_error":
+                raise LookupError("lookup tuple hook")
+            return super().as_tuple()._replace(exponent=-7)
+
+    values = [(Decimal("1.200"),), (LookupDecimal("3.400"),), (None,)]
+    data = values
+    if kind == "lists":
+        data = [list(row) for row in values]
+    elif kind == "pandas":
+        pd = pytest.importorskip("pandas")
+        data = pd.DataFrame(values, columns=["v"])
+    spark, payload = decimal_lookup_ipc_session
+    schema = T.StructType([T.StructField("v", T.DecimalType(38, 9))])
+    if hook.endswith("error"):
+        with pytest.raises(LookupError, match="lookup .* hook"):
+            spark.createDataFrame(data, schema)
+        assert calls == (["str"] if hook == "str_error" else ["str", "tuple"])
+        assert not payload.exists()
+    else:
+        spark.createDataFrame(data, schema).collect()
+        assert calls == ["str", "tuple"]
+        expected = [(Decimal("1.200"),),
+                    (Decimal("2.300" if hook == "str" else "3.400"),), (None,)]
+        _decimal_lookup_assert_cells(payload, expected, ["v"], [9])
+
+
+@pytest.mark.parametrize("patch", ["attribute", "missing", "invalid", "module", "module_hook"])
+def test_decimal_lookup_module_fallback(decimal_lookup_ipc_session, monkeypatch, patch):
+    import decimal
+    import sys
+    import types
+
+    value = decimal.Decimal("1.25")
+    calls = []
+
+    class LookupModule(types.ModuleType):
+        def __getattribute__(self, name):
+            if name == "Decimal":
+                calls.append(name)
+            return super().__getattribute__(name)
+
+    class LookupMeta(type):
+        def __instancecheck__(self, value):
+            calls.append("instance")
+            raise LookupError("lookup instance hook")
+
+    class LookupReplacement(metaclass=LookupMeta):
+        pass
+
+    spark, payload = decimal_lookup_ipc_session
+    schema = T.StructType([T.StructField("v", T.DecimalType(38, 2))])
+    if patch == "attribute":
+        monkeypatch.setattr(decimal, "Decimal", LookupReplacement)
+    elif patch == "missing":
+        monkeypatch.delattr(decimal, "Decimal")
+    elif patch == "invalid":
+        monkeypatch.setattr(decimal, "Decimal", 1)
+    else:
+        module = LookupModule("decimal") if patch == "module_hook" else types.ModuleType("decimal")
+        module.Decimal = decimal.Decimal
+        monkeypatch.setitem(sys.modules, "decimal", module)
+    if patch in ("attribute", "missing", "invalid"):
+        error = {"attribute": LookupError, "missing": AttributeError, "invalid": TypeError}[patch]
+        with pytest.raises(error):
+            spark.createDataFrame([(None,), (value,)], schema)
+        assert calls == (["instance"] if patch == "attribute" else [])
+        assert not payload.exists()
+    else:
+        spark.createDataFrame([(value,), (None,)], schema).collect()
+        _decimal_lookup_assert_cells(payload, [(value,), (None,)], ["v"], [2])
+        assert calls == (["Decimal"] if patch == "module_hook" else [])
+
+
+def test_decimal_lookup_preserves_error_order(decimal_lookup_ipc_session, monkeypatch):
+    import decimal
+
+    calls = []
+
+    class LookupExplodes(decimal.Decimal):
+        def __str__(self):
+            calls.append("str")
+            raise LookupError("first cell error")
+
+    spark, payload = decimal_lookup_ipc_session
+    schema = T.StructType([T.StructField("a", T.DecimalType(18, 2)),
+                           T.StructField("b", T.DecimalType(18, 2))])
+    # Preflight may notice the later width error, but must not raise it before
+    # converting the earlier hook-bearing value through the generic path.
+    with pytest.raises(LookupError, match="first cell error"):
+        spark.createDataFrame([(LookupExplodes("1.20"), None), (None,)], schema)
+    assert calls == ["str"]
+    assert not payload.exists()
+    monkeypatch.delattr(decimal, "Decimal")
+    # An all-null explicit input never observes decimal.Decimal in the baseline.
+    spark.createDataFrame([(None, None)], schema).collect()
+    _decimal_lookup_assert_cells(payload, [(None, None)], ["a", "b"], [2, 2], precision=18)
+
+
+def test_decimal_lookup_reduces_imports(decimal_lookup_ipc_session, monkeypatch):
+    import builtins
+    from decimal import Decimal
+    import sys
+
+    if not getattr(Decimal, "__flags__", 0) & (1 << 8):
+        pytest.skip("construction guard requires an immutable C Decimal type")
+    if not getattr(sys, "_is_gil_enabled", lambda: True)():
+        pytest.skip("whole-input construction guard requires the GIL")
+    spark, _ = decimal_lookup_ipc_session
+    schema = T.StructType([T.StructField("v", T.DecimalType(18, 2))])
+    values = [(Decimal("1.20"),)] * 100
+    # Warm optional pandas import so the measurement counts only construction.
+    spark.createDataFrame(values, schema)
+    original = builtins.__import__
+    calls = []
+
+    def lookup_import(name, *args, **kwargs):
+        if name == "decimal":
+            calls.append(name)
+        return original(name, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(builtins, "__import__", lookup_import)
+        spark.createDataFrame(values, schema)
+    assert calls == [], len(calls)
+
+
+def test_decimal_lookup_without_gil_falls_back(decimal_lookup_ipc_session, monkeypatch):
+    import builtins
+    from decimal import Decimal
+    import sys
+
+    spark, payload = decimal_lookup_ipc_session
+    values = [(Decimal("1.20"),), (Decimal("-2.30"),)]
+    schema = T.StructType([T.StructField("v", T.DecimalType(18, 2))])
+    spark.createDataFrame(values, schema)
+    original = builtins.__import__
+    calls = []
+
+    def lookup_import(name, *args, **kwargs):
+        if name == "decimal":
+            calls.append(name)
+        return original(name, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sys, "_is_gil_enabled", lambda: False, raising=False)
+        patch.setattr(builtins, "__import__", lookup_import)
+        frame = spark.createDataFrame(values, schema)
+    assert calls == ["decimal", "decimal"]
+    frame.collect()
+    _decimal_lookup_assert_cells(payload, values, ["v"], [2], precision=18)
+
+
+@pytest.mark.parametrize("kind", ["tuples", "lists", "pandas"])
+def test_decimal_lookup_mixed_cells(decimal_lookup_ipc_session, kind):
+    from decimal import Decimal
+
+    spark, payload = decimal_lookup_ipc_session
+    values = [(Decimal("1.20"),), (3,), (2.5,), ("4.20",), (True,), (None,)]
+    data = values
+    if kind == "lists":
+        data = [list(row) for row in values]
+    elif kind == "pandas":
+        pd = pytest.importorskip("pandas")
+        data = pd.DataFrame(values, columns=["v"])
+    schema = T.StructType([T.StructField("v", T.DecimalType(18, 2))])
+    # This optimization must not start accepting or coercing the other cells.
+    with pytest.raises(RuntimeError, match="^Type mismatch in row data$"):
+        spark.createDataFrame(data, schema)
+    assert not payload.exists()
+
+
+@pytest.mark.parametrize("container", ["outer", "list", "tuple", "dict", "scalar"])
+def test_decimal_lookup_container_fallback(decimal_lookup_ipc_session, container):
+    from decimal import Decimal
+
+    class LookupList(list):
+        pass
+
+    class LookupTuple(tuple):
+        pass
+
+    spark, payload = decimal_lookup_ipc_session
+    value = Decimal("1.20")
+    data = {"outer": LookupList([(value,)]), "list": [LookupList([value])],
+            "tuple": [LookupTuple([value])], "dict": [{"v": value}],
+            "scalar": [value]}[container]
+    schema = T.StructType([T.StructField("v", T.DecimalType(18, 2))])
+    spark.createDataFrame(data, schema).collect()
+    _decimal_lookup_assert_cells(payload, [(value,)], ["v"], [2], precision=18)
+
+
+def test_decimal_lookup_double_rebinding(decimal_lookup_ipc_session, monkeypatch):
+    import decimal
+    import _decimal
+
+    spark, payload = decimal_lookup_ipc_session
+    monkeypatch.setattr(decimal, "Decimal", bool)
+    monkeypatch.setattr(_decimal, "Decimal", bool)
+    schema = T.StructType([T.StructField("v", T.DecimalType(18, 2))])
+    # bool wins before decimal detection even when both module names are rebound.
+    with pytest.raises(RuntimeError, match="^Type mismatch in row data$"):
+        spark.createDataFrame([(True,), (None,)], schema)
+    assert not payload.exists()
+
+
+@pytest.mark.parametrize("kind", ["tuples", "lists", "pandas"])
+def test_decimal_lookup_mixed_schema_cells(decimal_lookup_ipc_session, kind):
+    from datetime import date
+    from decimal import Decimal
+    import json
+    import pyarrow as pa
+
+    spark, payload = decimal_lookup_ipc_session
+    values = [(Decimal("1.200"), 3, "x", 2.5, [1, 2], date(2024, 2, 29)),
+              (Decimal("-0.000"), -4, "", -0.5, [], date(1970, 1, 1)),
+              (None, None, None, None, None, None)]
+    names = ["d", "n", "s", "f", "a", "date"]
+    types = [T.DecimalType(18, 3), T.LongType(), T.StringType(), T.DoubleType(),
+             T.ArrayType(T.LongType()), T.DateType()]
+    schema = T.StructType([T.StructField(name, dtype, True, {"position": i})
+                           for i, (name, dtype) in enumerate(zip(names, types))])
+    data = values
+    if kind == "lists":
+        data = [list(row) for row in values]
+    elif kind == "pandas":
+        pd = pytest.importorskip("pandas")
+        data = pd.DataFrame(values, columns=names, dtype=object)
+    before = schema.json()
+    spark.createDataFrame(data, schema).collect()
+    arrow_types = [pa.decimal128(18, 3), pa.int64(), pa.string(), pa.float64(),
+                   pa.list_(pa.int64()), pa.date32()]
+    expected = pa.table({name: pa.array([row[i] for row in values], type=arrow_types[i])
+                         for i, name in enumerate(names)})
+    actual = pa.ipc.open_stream(payload.read_bytes()).read_all()
+    actual.validate(full=True)
+    assert actual.schema == expected.schema
+    assert actual.equals(expected)
+    for i in range(len(names)):
+        for j in range(len(values)):
+            assert actual.column(i)[j].is_valid == expected.column(i)[j].is_valid
+            assert actual.column(i)[j].as_py() == expected.column(i)[j].as_py()
+    assert schema.json() == before
+    assert json.loads(payload.with_suffix(".arrow.schema").read_text()) == json.loads(before)
+
+
+@pytest.mark.parametrize("kind", ["tuples", "pandas"])
+@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("capitals", [0, 1])
+@pytest.mark.parametrize("text", ["1E+3", "1E-7", "-0E-7", "1.2300E-7", "1E-18"])
+def test_decimal_lookup_scientific_cells(decimal_lookup_ipc_session, kind, explicit, capitals, text):
+    from decimal import Decimal, Inexact, Rounded, localcontext
+    import os
+    from pathlib import Path
+
+    value = Decimal(text)
+    values = [(value,), (None,)]
+    scale = 18 if explicit else max(-value.as_tuple().exponent, 0)
+    schema = T.StructType([T.StructField("v", T.DecimalType(38, scale))]) if explicit else ["v"]
+    data = values
+    if kind == "pandas":
+        pd = pytest.importorskip("pandas")
+        data = pd.DataFrame(values, columns=["v"])
+    spark, payload = decimal_lookup_ipc_session
+    with localcontext() as context:
+        context.capitals = capitals
+        context.prec = 2
+        context.traps[Inexact] = True
+        context.traps[Rounded] = True
+        try:
+            frame = spark.createDataFrame(data, schema)
+        except RuntimeError as error:
+            # The unchanged production parser rejects these scientific strings.
+            # With the independent PR132 parser, every cell below must be exact.
+            assert "invalid digit found in string" in str(error)
+            assert not payload.exists()
+            assert not os.environ.get("DECIMAL_LOOKUP_REQUIRE_SCIENTIFIC")
+            return
+    frame.collect()
+    _decimal_lookup_assert_cells(payload, values, ["v"], [scale])
+    if destination := os.environ.get("DECIMAL_LOOKUP_CAPTURE_DIR"):
+        directory = Path(destination)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / f"{text}-{kind}-{explicit}-{capitals}.arrow").write_bytes(payload.read_bytes())
+
+
+@pytest.mark.parametrize("kind", ["tuples", "pandas"])
+@pytest.mark.parametrize("text", ["NaN", "sNaN42", "Infinity", "-Infinity", "1E+1000000000",
+                                 "1E-1000000000", "9999999999999999999999999999999999999999"])
+def test_decimal_lookup_special_errors(decimal_lookup_ipc_session, kind, text):
+    from decimal import Decimal, InvalidOperation
+
+    spark, payload = decimal_lookup_ipc_session
+    value = Decimal(text)
+    data = [(value,)]
+    if kind == "pandas":
+        pd = pytest.importorskip("pandas")
+        data = pd.DataFrame({"v": [value]})
+    schema = T.StructType([T.StructField("v", T.DecimalType(18, 2))])
+    if kind == "pandas" and text == "NaN":
+        # The existing pandas normalizer maps quiet NaN to None before conversion.
+        spark.createDataFrame(data, schema).collect()
+        _decimal_lookup_assert_cells(payload, [(None,)], ["v"], [2], precision=18)
+        return
+    if kind == "pandas" and text == "sNaN42":
+        with pytest.raises(InvalidOperation) as error:
+            spark.createDataFrame(data, schema)
+        assert error.value.args == ([InvalidOperation],)
+        assert not payload.exists()
+        return
+    # Preserve parser errors and overflow rejection, including on the fast path.
+    with pytest.raises(RuntimeError) as error:
+        spark.createDataFrame(data, schema)
+    assert any(fragment in str(error.value) for fragment in
+               ("invalid digit found in string", "too large to fit", "overflow", "precision"))
+    assert not payload.exists()
