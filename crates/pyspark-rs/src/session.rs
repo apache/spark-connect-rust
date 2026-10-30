@@ -354,8 +354,9 @@ impl PySparkSession {
             }
         }
 
-        // Supported pandas integer columns use the existing Arrow importer. Other
-        // dtypes/schema conversions retain the row path with NaN/NaT mapped to None.
+        // Supported pandas integer columns use the existing Arrow importer.
+        // Double columns retain inline row transport without materializing rows.
+        // Other conversions retain the row path with NaN/NaT mapped to None.
         let mut pandas_columns: Option<Vec<String>> = None;
         let is_pandas = py
             .import("pandas")
@@ -369,6 +370,22 @@ impl PySparkSession {
                 .call1((data, schema))?;
             if !table.is_none() {
                 return crate::pyarrow_import::create_dataframe(py, &self.session, &table, schema);
+            }
+            let ipc = py
+                .import("pyspark.sql._pandas_input")?
+                .getattr("prepare_float64_input")?
+                .call1((data, schema))?;
+            if !ipc.is_none() {
+                let schema = schema.ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(
+                        "float64 input requires a struct schema",
+                    )
+                })?;
+                let schema = crate::types::py_to_data_type(schema)?;
+                return Ok(PyDataFrame::new(
+                    self.session
+                        .create_dataframe_from_inline_arrow_ipc(ipc.extract()?, schema),
+                ));
             }
         }
         let data_owned: Bound<'_, PyList>;

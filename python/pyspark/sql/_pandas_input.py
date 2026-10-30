@@ -249,3 +249,138 @@ def prepare_int64_table(frame, schema):
         [pa.array(column, type=pa.int64(), from_pandas=True) for column in columns],
         names=names,
     )
+
+def prepare_float64_table(frame, schema):
+    """Keep explicit native double columns columnar without changing pandas nulls."""
+    import numpy as np
+    import pandas as pd
+    from pandas.core import frame as frame_module, generic as generic_module
+    from pandas.core.frame import DataFrame
+    from pandas.core.series import Series
+    from types import FunctionType, GetSetDescriptorType, WrapperDescriptorType
+
+    from pyspark import _pyspark as native
+    from pyspark.sql import types as sql_types
+
+    # First-use Arrow imports outweigh the conversion saving for smaller frames.
+    # Keep those on the existing row path.
+    if (pd.DataFrame is not DataFrame or type(frame) is not DataFrame
+            or type(schema) is not native.StructType or len(frame) < 100000
+            or any(name in vars(frame) for name in ("astype", "notna"))):
+        return None
+    if not _has_canonical_columns(frame.columns):
+        return None
+    # Class or instance conversion hooks must retain the row path's calls.
+    for name, module in (("astype", generic_module), ("notna", frame_module),
+                         ("where", generic_module)):
+        method = getattr(DataFrame, name)
+        if (type(method) is not FunctionType or method.__name__ != name
+                or method.__module__ != module.__name__ or method.__globals__ is not vars(module)):
+            return None
+    if (DataFrame.astype is not generic_module.NDFrame.astype
+            or DataFrame.where is not generic_module.NDFrame.where):
+        return None
+    width = len(frame.columns)
+    if not width or not frame.columns.is_unique or not all(
+        type(name) is str and "\x00" not in name for name in frame.columns
+    ):
+        return None
+    double_dtype = np.dtype("float64")
+    if not all(type(dtype) is type(double_dtype) and dtype == double_dtype
+               for dtype in frame.dtypes):
+        return None
+    # A custom ExtensionArray can advertise the literal NumPy dtype while its
+    # Arrow hook emits other values. Accept only pandas' concrete NumPy storage.
+    try:
+        from pandas.core.arrays.numpy_ import NumpyExtensionArray
+    except ImportError:
+        try:
+            from pandas.core.arrays.numpy_ import PandasArray as NumpyExtensionArray
+        except ImportError:
+            return None
+    columns = [frame.iloc[:, i] for i in range(width)]
+    if any(type(column) is not Series or type(column.array) is not NumpyExtensionArray
+           for column in columns):
+        return None
+    # Native row conversion reads Rust fields, bypassing mutable Python accessors.
+    for name in ("DoubleType", "StructField", "StructType"):
+        cls = getattr(native, name)
+        if (getattr(sql_types, name, None) is not cls
+                or cls.__getattribute__ is not object.__getattribute__
+                or any("__class__" in vars(base) for base in cls.__mro__ if base is not object)):
+            return None
+    for cls, names, descriptor_type in (
+        (native.StructType, ("fields", "names"), GetSetDescriptorType),
+        (native.StructType, ("__iter__",), WrapperDescriptorType),
+        (native.StructField, ("name", "dataType", "nullable", "metadata"), GetSetDescriptorType),
+    ):
+        for name in names:
+            descriptor = vars(cls).get(name)
+            if (type(descriptor) is not descriptor_type
+                    or descriptor.__objclass__ is not cls or descriptor.__name__ != name):
+                return None
+    fields = schema.fields
+    if len(fields) != width or not all(
+        type(field) is native.StructField and type(field.dataType) is native.DoubleType
+        and type(field.name) is str and "\x00" not in field.name for field in fields
+    ) or len(set(schema.names)) != width:
+        return None
+
+    from pyspark.sql import _arrow_input
+    from pyspark.sql.pandas import types as pandas_types
+
+    for name in ("to_arrow_schema", "to_arrow_type", "to_arrow_metadata",
+                 "_check_arrow_table_timestamps_localize"):
+        converter = getattr(pandas_types, name)
+        if (type(converter) is not FunctionType or converter.__name__ != name
+                or converter.__module__ != pandas_types.__name__
+                or converter.__globals__ is not vars(pandas_types)):
+            return None
+    # Earlier converter branches can reinterpret DoubleType after alias rebinding.
+    for name in ("BooleanType", "ByteType", "ShortType", "IntegerType", "LongType",
+                 "FloatType", "DoubleType", "StructField", "StructType"):
+        cls = getattr(native, name)
+        if (getattr(sql_types, name, None) is not cls
+                or getattr(pandas_types, name, None) is not cls):
+            return None
+    if (_arrow_input.StructType is not native.StructType
+            or getattr(_arrow_input, "to_arrow_schema", pandas_types.to_arrow_schema)
+            is not pandas_types.to_arrow_schema
+            or getattr(_arrow_input, "_check_arrow_table_timestamps_localize",
+                       pandas_types._check_arrow_table_timestamps_localize)
+            is not pandas_types._check_arrow_table_timestamps_localize):
+        return None
+
+    # Use the same pandas missing-value semantics as the row path, including the
+    # legacy use_inf_as_na option. Infinities and signed zero otherwise stay intact.
+    valid = frame.notna()
+    if any(not field.nullable and not valid.iloc[:, i].all()
+           for i, field in enumerate(fields)):
+        return None
+
+    import pyarrow as pa
+
+    return pa.Table.from_arrays(
+        [pa.array(column, type=pa.float64(),
+                  mask=~valid.iloc[:, i], from_pandas=False)
+         for i, column in enumerate(columns)],
+        # Match the row serializer's physical fields. The complete Spark
+        # metadata remains in the explicit logical schema, not Arrow metadata.
+        schema=pa.schema([pa.field(field.name, pa.float64(), nullable=field.nullable)
+                          for field in fields]),
+    )
+
+
+def prepare_float64_input(frame, schema):
+    """Serialize supported double columns with the existing row transport policy."""
+    table = prepare_float64_table(frame, schema)
+    if table is None:
+        return None
+
+    import pyarrow as pa
+
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    return sink.getvalue().to_pybytes()
+
