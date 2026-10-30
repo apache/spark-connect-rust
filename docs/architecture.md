@@ -79,6 +79,10 @@ flowchart LR
 When you call an action such as `count()` or `show()`, the lazily-built plan is
 serialized and sent to the server; results stream back as Arrow batches.
 
+Day-time intervals are returned as Python `datetime.timedelta` values, including
+nested values and nulls. Creating DataFrames from `timedelta` inputs or collected
+interval rows is not yet supported; see [SPARK-60659](https://issues.apache.org/jira/browse/SPARK-60659).
+
 ```mermaid
 sequenceDiagram
     participant App as Your code (Rust or pyspark)
