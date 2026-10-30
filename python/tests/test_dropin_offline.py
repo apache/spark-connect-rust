@@ -2755,3 +2755,18 @@ for schema in schemas:
     else:
         raise AssertionError("expected a width validation error")
 """], check=True)
+
+
+def test_create_dataframe_integer_tuples_offline():
+    # Isolate the mock fixture's active session from the rest of the offline suite.
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    for dependency in ("grpc", "pandas", "pyarrow"):
+        pytest.importorskip(dependency)
+    result = subprocess.run(
+        [sys.executable, str(Path(__file__).with_name("integer_tuple_cases.py"))],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
