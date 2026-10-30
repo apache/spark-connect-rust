@@ -800,6 +800,73 @@ impl SparkConnectClient {
         Ok(())
     }
 
+    /// Upload session-scoped cache blobs, returning SHA-256 hashes in input order.
+    /// Existing artifacts and duplicate blobs are uploaded only once.
+    pub async fn cache_artifacts(&self, blobs: Vec<Vec<u8>>) -> Result<Vec<String>> {
+        use crate::artifact::InMemoryArtifact;
+        use sha2::{Digest, Sha256};
+        use std::collections::HashSet;
+
+        let hashes: Vec<String> = blobs
+            .iter()
+            .map(|blob| format!("{:x}", Sha256::digest(blob)))
+            .collect();
+        let names: Vec<String> = hashes.iter().map(|hash| format!("cache/{hash}")).collect();
+        let unique: HashSet<&str> = names.iter().map(String::as_str).collect();
+        if unique.is_empty() {
+            return Ok(hashes);
+        }
+        let cached = self
+            .artifact_status(&unique.into_iter().collect::<Vec<_>>())
+            .await?;
+        let mut seen = HashSet::new();
+        let mut artifacts = Vec::new();
+        for (blob, name) in blobs.into_iter().zip(names) {
+            if !cached.get(&name).copied().unwrap_or(false) && seen.insert(name.clone()) {
+                artifacts.push(NamedArtifact::new(
+                    name,
+                    Box::new(InMemoryArtifact::new(blob)),
+                ));
+            }
+        }
+        if artifacts.is_empty() {
+            return Ok(hashes);
+        }
+        let expected: HashSet<String> = artifacts.iter().map(|a| a.name.clone()).collect();
+        let mut requests = build_artifact_request_stream(self.session_id.clone(), artifacts)?;
+        for request in &mut requests {
+            request.user_context = Some(UserContext {
+                user_id: self.user_id.clone().unwrap_or_default(),
+                ..Default::default()
+            });
+        }
+        let mut req = Request::new(futures::stream::iter(requests));
+        self._attach_metadata(&mut req);
+        let response = self
+            .stub
+            .clone()
+            .add_artifacts(req)
+            .await
+            .map_err(SparkError::from_grpc_status)?
+            .into_inner();
+        let mut received = HashSet::new();
+        for summary in response.artifacts {
+            if !summary.is_crc_successful {
+                return Err(SparkError::connect_msg(format!(
+                    "CRC check failed for artifact: {}",
+                    summary.name
+                )));
+            }
+            received.insert(summary.name);
+        }
+        if !expected.is_subset(&received) {
+            return Err(SparkError::connect_msg(
+                "Missing cache artifact upload acknowledgement",
+            ));
+        }
+        Ok(hashes)
+    }
+
     /// Check artifact status on the server.
     ///
     /// Mirrors functionality from `pyspark.sql.connect.client.artifact.ArtifactManager.is_cached_artifact`.
