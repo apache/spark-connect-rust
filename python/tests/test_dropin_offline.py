@@ -3223,7 +3223,7 @@ def test_print_schema_default_and_failure_retry(mock_connect, capsys, failure):
 def test_schema_tree_type_names_and_escaped_field_names():
     schema = T.StructType(
         [
-            T.StructField("line\n\r\t\f\b\v\a", T.LongType(), False),
+            T.StructField("é🌱\\n\n\r\t\f\b\v\a", T.LongType(), False),
             T.StructField("decimal", T.DecimalType(10, 2)),
             T.StructField("small", T.ByteType()),
             T.StructField("short", T.ShortType()),
@@ -3231,7 +3231,7 @@ def test_schema_tree_type_names_and_escaped_field_names():
     )
     expected = (
         "root\n"
-        " |-- line\\n\\r\\t\\f\\b\\v\\a: long (nullable = false)\n"
+        " |-- é🌱\\n\\n\\r\\t\\f\\b\\v\\a: long (nullable = false)\n"
         " |-- decimal: decimal(10,2) (nullable = true)\n"
         " |-- small: byte (nullable = true)\n"
         " |-- short: short (nullable = true)\n"

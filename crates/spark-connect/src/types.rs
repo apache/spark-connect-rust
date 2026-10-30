@@ -4,7 +4,7 @@
 //! and the Spark Connect protobuf representation.
 
 use std::collections::BTreeMap;
-use std::fmt;
+use std::fmt::{self, Write};
 use std::hash::{Hash, Hasher};
 
 use spark_connect_core::error::{Result, SparkError};
@@ -910,22 +910,27 @@ impl DataType {
         match self {
             DataType::Struct { fields } => {
                 for f in fields {
-                    let name = f
-                        .name
-                        .replace('\n', "\\n")
-                        .replace('\r', "\\r")
-                        .replace('\t', "\\t")
-                        .replace('\x0c', "\\f")
-                        .replace('\x08', "\\b")
-                        .replace('\x0b', "\\v")
-                        .replace('\x07', "\\a");
-                    out.push_str(&format!(
-                        "{}-- {}: {} (nullable = {})\n",
-                        prefix,
-                        name,
+                    out.push_str(prefix);
+                    out.push_str("-- ");
+                    for ch in f.name.chars() {
+                        match ch {
+                            '\n' => out.push_str("\\n"),
+                            '\r' => out.push_str("\\r"),
+                            '\t' => out.push_str("\\t"),
+                            '\x0c' => out.push_str("\\f"),
+                            '\x08' => out.push_str("\\b"),
+                            '\x0b' => out.push_str("\\v"),
+                            '\x07' => out.push_str("\\a"),
+                            _ => out.push(ch),
+                        }
+                    }
+                    writeln!(
+                        out,
+                        ": {} (nullable = {})",
                         f.data_type.tree_type_name(),
                         f.nullable
-                    ));
+                    )
+                    .expect("writing to a String cannot fail");
                     f.data_type.append_tree(out, &child_prefix, remaining - 1);
                 }
             }
@@ -933,12 +938,14 @@ impl DataType {
                 element_type,
                 contains_null,
             } => {
-                out.push_str(&format!(
-                    "{}-- element: {} (containsNull = {})\n",
+                writeln!(
+                    out,
+                    "{}-- element: {} (containsNull = {})",
                     prefix,
                     element_type.tree_type_name(),
                     contains_null
-                ));
+                )
+                .expect("writing to a String cannot fail");
                 element_type.append_tree(out, &child_prefix, remaining - 1);
             }
             DataType::Map {
@@ -946,18 +953,17 @@ impl DataType {
                 value_type,
                 value_contains_null,
             } => {
-                out.push_str(&format!(
-                    "{}-- key: {}\n",
-                    prefix,
-                    key_type.tree_type_name()
-                ));
+                writeln!(out, "{}-- key: {}", prefix, key_type.tree_type_name())
+                    .expect("writing to a String cannot fail");
                 key_type.append_tree(out, &child_prefix, remaining - 1);
-                out.push_str(&format!(
-                    "{}-- value: {} (valueContainsNull = {})\n",
+                writeln!(
+                    out,
+                    "{}-- value: {} (valueContainsNull = {})",
                     prefix,
                     value_type.tree_type_name(),
                     value_contains_null
-                ));
+                )
+                .expect("writing to a String cannot fail");
                 value_type.append_tree(out, &child_prefix, remaining - 1);
             }
             _ => {}
