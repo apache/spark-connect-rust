@@ -58,10 +58,19 @@ def serve(connection):
     # they wait for a response.
     class Service:
         calls = 0
+        execute_calls = 0
         data_type = struct_schema()
         failure = None
         block_response = False
         response_gate = Event()
+
+        def reset(self):
+            self.calls = 0
+            self.execute_calls = 0
+            self.data_type = struct_schema()
+            self.failure = None
+            self.block_response = False
+            self.response_gate.clear()
 
         def analyze(self, request, context):
             self.calls += 1
@@ -81,11 +90,17 @@ def serve(connection):
             # base.proto: AnalyzePlanResponse.schema=2, Schema.schema=1.
             return message_field(2, message_field(1, self.data_type))
 
+        def execute(self, request, context):
+            self.execute_calls += 1
+            context.abort(grpc.StatusCode.INTERNAL, "printSchema must not execute a plan")
+            yield b""
+
     service = Service()
     with ThreadPoolExecutor(max_workers=4) as executor:
         server = grpc.server(executor)
         handlers = {
             "AnalyzePlan": grpc.unary_unary_rpc_method_handler(service.analyze),
+            "ExecutePlan": grpc.unary_stream_rpc_method_handler(service.execute),
             "ReleaseSession": grpc.unary_unary_rpc_method_handler(lambda request, context: b""),
         }
         server.add_generic_rpc_handlers(
@@ -107,6 +122,9 @@ def serve(connection):
                 elif command[0] == "release":
                     service.response_gate.set()
                     connection.send(None)
+                elif command[0] == "reset":
+                    service.reset()
+                    connection.send(None)
         finally:
             server.stop(0).wait()
 
@@ -127,6 +145,11 @@ class RemoteService:
 
     def release_response(self):
         self.connection.send(("release",))
+        assert self.connection.poll(10), "Mock server did not respond"
+        self.connection.recv()
+
+    def reset(self):
+        self.connection.send(("reset",))
         assert self.connection.poll(10), "Mock server did not respond"
         self.connection.recv()
 

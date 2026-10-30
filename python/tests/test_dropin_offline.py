@@ -2764,11 +2764,18 @@ for schema in schemas:
 # --------------------------------------------------------------------------- schema cache
 
 
-@pytest.fixture
-def mock_connect():
+@pytest.fixture(scope="module")
+def _shared_mock_connect():
     pytest.importorskip("grpc")
     with mock_connect_session() as session:
         yield session
+
+
+@pytest.fixture
+def mock_connect(_shared_mock_connect):
+    spark, service = _shared_mock_connect
+    service.reset()
+    return spark, service
 
 
 @pytest.mark.parametrize("first", ["schema", "columns", "dtypes"])
@@ -3087,138 +3094,38 @@ def test_schema_cache_metadata_wait_releases_gil(mock_connect, accessor):
     assert service.calls == 1
 
 
-# printSchema uses a separate mock process so the real transport is exercised.
-def _print_schema_varint(value):
-    result = bytearray()
-    while value > 127:
-        result.append((value & 127) | 128)
-        value >>= 7
-    result.append(value)
-    return bytes(result)
-
-
-def _print_schema_message(field, value):
-    if isinstance(value, str):
-        value = value.encode()
-    return _print_schema_varint(field * 8 + 2) + _print_schema_varint(len(value)) + value
-
-
-def _print_schema_type():
-    msg = _print_schema_message
-    field = _print_schema_field
-    integer = msg(6, b"")
-    long = msg(7, b"")
-    string = msg(11, b"")
-    struct = lambda *fields: msg(21, b"".join(msg(1, f) for f in fields))
-    array = msg(20, msg(1, struct(field("item", long))) + b"\x10\x00")
-    mapping = msg(22, msg(1, string) + msg(2, struct(field("value", integer))) + b"\x18\x01")
-    return struct(field("outer", struct(field("inner", integer, False))),
-                  field("items", array, False), field("lookup", mapping))
+# --------------------------------------------------------------------------- printSchema
 
 
 def _print_schema_field(name, data_type, nullable=True):
-    return (_print_schema_message(1, name) + _print_schema_message(2, data_type) + (b"\x18\x01" if nullable else b"\x18\x00")
-            + _print_schema_message(4, '{"note":"original"}'))
+    return (
+        message_field(1, name)
+        + message_field(2, data_type)
+        + (b"\x18\x01" if nullable else b"\x18\x00")
+    )
 
 
-def _print_schema_serve(connection):
-    import grpc
-    from concurrent.futures import ThreadPoolExecutor
-    # A separate process also exercises columns/dtypes, whose first access may
-    # hold the client's GIL while waiting for the RPC.
-    class Service:
-        calls = 0
-        execute_calls = 0
-        data_type = _print_schema_type()
-        failure = None
+def _print_schema_type():
+    def struct(*fields):
+        return message_field(21, b"".join(message_field(1, field) for field in fields))
 
-        def analyze(self, request, context):
-            self.calls += 1
-            if self.failure == "rpc":
-                context.abort(grpc.StatusCode.INVALID_ARGUMENT, "schema unavailable")
-            if self.failure == "no-result":
-                return b""
-            if self.failure == "missing-schema":
-                return _print_schema_message(2, b"")
-            if self.failure == "invalid-type":
-                return _print_schema_message(2, _print_schema_message(1, b""))
-            # base.proto: AnalyzePlanResponse.schema=2, Schema.schema=1.
-            # session_id is the first length-delimited field in these requests.
-            assert request[0] == 10 and request[1] < 128
-            session_id = request[2:2 + request[1]]
-            return (_print_schema_message(1, session_id)
-                    + _print_schema_message(2, _print_schema_message(1, self.data_type)))
-
-        def execute(self, request, context):
-            self.execute_calls += 1
-            context.abort(grpc.StatusCode.INTERNAL, "printSchema must not execute a plan")
-            yield b""
-
-    service = Service()
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        server = grpc.server(executor)
-        handler = grpc.unary_unary_rpc_method_handler(service.analyze)
-        server.add_generic_rpc_handlers((grpc.method_handlers_generic_handler(
-            "spark.connect.SparkConnectService", {"AnalyzePlan": handler, "ExecutePlan": grpc.unary_stream_rpc_method_handler(service.execute),
-             "ReleaseSession": grpc.unary_unary_rpc_method_handler(lambda request, context: request[:2 + request[1]])}),))
-        port = server.add_insecure_port("127.0.0.1:0")
-        server.start()
-        connection.send(port)
-        try:
-            while True:
-                command = connection.recv()
-                if command[0] == "stop":
-                    break
-                if command[0] == "get":
-                    connection.send(getattr(service, command[1]))
-                elif command[0] == "set":
-                    setattr(service, command[1], command[2])
-                    connection.send(None)
-        finally:
-            server.stop(0).wait()
-
-
-class _PrintSchemaService:
-    def __init__(self, connection):
-        object.__setattr__(self, "connection", connection)
-
-    def __getattr__(self, name):
-        self.connection.send(("get", name))
-        assert self.connection.poll(10), "Mock server did not respond"
-        return self.connection.recv()
-
-    def __setattr__(self, name, value):
-        self.connection.send(("set", name, value))
-        assert self.connection.poll(10), "Mock server did not respond"
-        self.connection.recv()
-
-
-@pytest.fixture
-def print_schema_service():
-    import multiprocessing
-    pytest.importorskip("grpc")
-    context = multiprocessing.get_context("spawn")
-    parent, child = context.Pipe()
-    process = context.Process(target=_print_schema_serve, args=(child,))
-    spark = None
-    process.start()
-    try:
-        assert parent.poll(20), "Mock server did not start"
-        port = parent.recv()
-        from pyspark.sql import SparkSession
-        spark = SparkSession.builder.remote(f"sc://127.0.0.1:{port}").create()
-        yield spark, _PrintSchemaService(parent)
-    finally:
-        if spark is not None:
-            spark.stop()
-        if process.is_alive():
-            parent.send(("stop",))
-        process.join(10)
-        if process.is_alive():
-            process.terminate()
-            process.join(10)
-        parent.close()
-        child.close()
+    integer = message_field(6, b"")
+    long = message_field(7, b"")
+    string = message_field(11, b"")
+    array = message_field(
+        20, message_field(1, struct(_print_schema_field("item", long))) + b"\x10\x00"
+    )
+    mapping = message_field(
+        22,
+        message_field(1, string)
+        + message_field(2, struct(_print_schema_field("value", integer)))
+        + b"\x18\x01",
+    )
+    return struct(
+        _print_schema_field("outer", struct(_print_schema_field("inner", integer, False))),
+        _print_schema_field("items", array, False),
+        _print_schema_field("lookup", mapping),
+    )
 
 
 _PRINT_SCHEMA_LEVEL1 = (
@@ -3251,31 +3158,45 @@ _PRINT_SCHEMA_FULL = (
 )
 
 
-@pytest.mark.parametrize("level, expected", [
-    (None, _PRINT_SCHEMA_FULL), (0, _PRINT_SCHEMA_FULL),
-    (-1, _PRINT_SCHEMA_FULL), (-10, _PRINT_SCHEMA_FULL),
-    (1, _PRINT_SCHEMA_LEVEL1), (2, _PRINT_SCHEMA_LEVEL2),
-    (3, _PRINT_SCHEMA_FULL), (2**100, _PRINT_SCHEMA_FULL),
-    (False, _PRINT_SCHEMA_FULL), (True, _PRINT_SCHEMA_LEVEL1),
-    (0.5, _PRINT_SCHEMA_LEVEL1), (1.5, _PRINT_SCHEMA_LEVEL2),
-    (float("inf"), _PRINT_SCHEMA_FULL), (float("nan"), _PRINT_SCHEMA_FULL),
-    ("", _PRINT_SCHEMA_FULL), ([], _PRINT_SCHEMA_FULL), ({}, _PRINT_SCHEMA_FULL),
-])
-def test_print_schema_exact_python_stdout(print_schema_service, capsys, level, expected):
-    spark, service = print_schema_service
+@pytest.mark.parametrize(
+    "level, expected",
+    [
+        (None, _PRINT_SCHEMA_FULL),
+        (0, _PRINT_SCHEMA_FULL),
+        (-1, _PRINT_SCHEMA_FULL),
+        (-10, _PRINT_SCHEMA_FULL),
+        (1, _PRINT_SCHEMA_LEVEL1),
+        (2, _PRINT_SCHEMA_LEVEL2),
+        (3, _PRINT_SCHEMA_FULL),
+        (2**100, _PRINT_SCHEMA_FULL),
+        (False, _PRINT_SCHEMA_FULL),
+        (True, _PRINT_SCHEMA_LEVEL1),
+        (0.5, _PRINT_SCHEMA_LEVEL1),
+        (1.5, _PRINT_SCHEMA_LEVEL2),
+        (float("inf"), _PRINT_SCHEMA_FULL),
+        (float("nan"), _PRINT_SCHEMA_FULL),
+        ("", _PRINT_SCHEMA_FULL),
+        ([], _PRINT_SCHEMA_FULL),
+        ({}, _PRINT_SCHEMA_FULL),
+    ],
+)
+def test_print_schema_exact_python_stdout(mock_connect, capsys, level, expected):
+    spark, service = mock_connect
+    service.data_type = _print_schema_type()
     df = spark.range(10)
     for _ in range(2):
         assert df.printSchema(level) is None
         captured = capsys.readouterr()
         assert captured.out == expected
         assert captured.err == ""
-    assert service.calls >= 1
+    assert service.calls == 1
     assert service.execute_calls == 0
 
 
 @pytest.mark.parametrize("level", ["two", [1], object(), 1 + 2j])
-def test_print_schema_invalid_depth(print_schema_service, capsys, level):
-    spark, service = print_schema_service
+def test_print_schema_invalid_depth(mock_connect, capsys, level):
+    spark, service = mock_connect
+    service.data_type = _print_schema_type()
     with pytest.raises(TypeError):
         spark.range(10).printSchema(level)
     assert capsys.readouterr().out == ""
@@ -3283,8 +3204,9 @@ def test_print_schema_invalid_depth(print_schema_service, capsys, level):
 
 
 @pytest.mark.parametrize("failure", ["rpc", "no-result", "missing-schema", "invalid-type"])
-def test_print_schema_default_and_failure_retry(print_schema_service, capsys, failure):
-    spark, service = print_schema_service
+def test_print_schema_default_and_failure_retry(mock_connect, capsys, failure):
+    spark, service = mock_connect
+    service.data_type = _print_schema_type()
     df = spark.range(10)
     service.failure = failure
     with pytest.raises(Exception):
@@ -3299,12 +3221,14 @@ def test_print_schema_default_and_failure_retry(print_schema_service, capsys, fa
 
 
 def test_schema_tree_type_names_and_escaped_field_names():
-    schema = T.StructType([
-        T.StructField("line\n\r\t\f\b\v\a", T.LongType(), False),
-        T.StructField("decimal", T.DecimalType(10, 2)),
-        T.StructField("small", T.ByteType()),
-        T.StructField("short", T.ShortType()),
-    ])
+    schema = T.StructType(
+        [
+            T.StructField("line\n\r\t\f\b\v\a", T.LongType(), False),
+            T.StructField("decimal", T.DecimalType(10, 2)),
+            T.StructField("small", T.ByteType()),
+            T.StructField("short", T.ShortType()),
+        ]
+    )
     expected = (
         "root\n"
         " |-- line\\n\\r\\t\\f\\b\\v\\a: long (nullable = false)\n"
@@ -3315,3 +3239,25 @@ def test_schema_tree_type_names_and_escaped_field_names():
     assert schema.treeString() == expected
     assert schema.treeString(0) == expected
     assert schema.treeString(-1) == expected
+
+
+@pytest.mark.parametrize(
+    "python_class, expected",
+    [
+        ("pyspark.ml.linalg.VectorUDT", "vectorudt"),
+        ("example.CustomType", "customtype"),
+        (None, "udt"),
+    ],
+)
+def test_print_schema_udt_class_name(mock_connect, capsys, python_class, expected):
+    spark, service = mock_connect
+    udt = message_field(1, "udt")
+    if python_class is not None:
+        udt += message_field(3, python_class)
+    service.data_type = message_field(
+        21, message_field(1, _print_schema_field("features", message_field(23, udt)))
+    )
+    assert spark.range(10).printSchema() is None
+    assert capsys.readouterr().out == f"root\n |-- features: {expected} (nullable = true)\n\n"
+    assert service.calls == 1
+    assert service.execute_calls == 0

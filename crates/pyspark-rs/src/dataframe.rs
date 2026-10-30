@@ -1362,7 +1362,7 @@ impl PyDataFrame {
     /// Print the schema through Python stdout, honoring the maximum nesting depth.
     #[pyo3(signature = (level=None))]
     fn printSchema(&self, py: Python<'_>, level: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
-        let schema = py.detach(|| self.dataframe.schema()).to_pyerr()?;
+        let schema = py.detach(|| self.dataframe.schema().to_pyerr())?;
         // Reference PySpark treats false values and nonpositive depths as unlimited.
         // Positive fractional depths include the partially remaining level as well.
         let depth = match level {

@@ -887,6 +887,17 @@ impl DataType {
             | DataType::Time { .. }
             | DataType::YearMonthInterval { .. }
             | DataType::DayTimeInterval { .. } => self.simple_string(),
+            DataType::Udt {
+                python_class: Some(python_class),
+                ..
+            } => python_class
+                .rsplit('.')
+                .next()
+                .filter(|class_name| !class_name.is_empty())
+                // UserDefinedType.typeName() preserves the entire class name,
+                // unlike DataType.typeName(), which strips the "Type" suffix.
+                .map(str::to_lowercase)
+                .unwrap_or_else(|| self.type_name()),
             _ => self.type_name(),
         }
     }
