@@ -3113,6 +3113,61 @@ def test_arrow_input_empty_and_width_errors():
         prepare_table(pa.table({"x": [1]}), ["a", "b"], "TIMESTAMP_LTZ", "UTC", "false")
 
 
+@pytest.mark.parametrize("schema,expected_type", [
+    pytest.param(T.ArrayType(T.LongType()), "ArrayType", id="array"),
+    pytest.param(T.MapType(T.StringType(), T.LongType()), "MapType", id="map"),
+])
+@pytest.mark.parametrize("empty", [False, True], ids=["nonempty", "empty"])
+def test_arrow_input_unsupported_schema_types(schema, expected_type, empty):
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql._arrow_input import prepare_table
+
+    table = pa.table({"x": pa.array([] if empty else [1], type=pa.int64())})
+    with pytest.raises(PySparkTypeError) as error:
+        prepare_table(table, schema, "TIMESTAMP_LTZ", "UTC", "false")
+    assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+    assert error.value.getMessageParameters() == {
+        "arg_name": "schema", "expected_type": "list, None or StructType",
+        "arg_type": expected_type,
+    }
+
+
+@pytest.mark.parametrize("schema", [
+    None, T.LongType(), T.StructType([T.StructField("x", T.LongType())]), ["x"], ("x",),
+])
+def test_arrow_input_supported_schema_types(schema):
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.sql._arrow_input import prepare_table
+
+    table = pa.table({"x": [1]})
+    normalized, result, names = prepare_table(table, schema, "TIMESTAMP_LTZ", "UTC", "false")
+    assert normalized.equals(table)
+    if isinstance(schema, (T.AtomicType, T.StructType)):
+        assert result is schema
+    else:
+        assert result.names == ["x"]
+    assert names == (["x"] if isinstance(schema, (list, tuple)) else None)
+
+
+def test_arrow_input_array_and_map_struct_fields_allowed():
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.sql._arrow_input import prepare_table
+
+    table = pa.table({
+        "items": pa.array([[1, None]], type=pa.list_(pa.int64())),
+        "lookup": pa.array([[("a", 1)]], type=pa.map_(pa.string(), pa.int64())),
+    })
+    schema = T.StructType([
+        T.StructField("items", T.ArrayType(T.LongType())),
+        T.StructField("lookup", T.MapType(T.StringType(), T.LongType())),
+    ])
+    normalized, result, names = prepare_table(table, schema, "TIMESTAMP_LTZ", "UTC", "false")
+    assert normalized.equals(table)
+    assert result is schema
+    assert names is None
+
+
 @pytest.mark.parametrize("schema,expected_length", [
     pytest.param(T.StructType([T.StructField("x", T.IntegerType())]), "1", id="too-few-fields"),
     pytest.param(T.StructType([

@@ -599,6 +599,54 @@ def test_arrow_input_upload_limits_and_chunk_order(protocol):
         assert state["uploads"] == 0
 
 
+@pytest.mark.parametrize("size_limit", ["3221225472", "3221225472b", "3GB", " 3gb "])
+def test_arrow_input_upload_accepts_byte_size_limits(protocol, size_limit):
+    import numpy as np
+
+    rows = 262144
+    table = pa.table({"id": np.arange(rows, dtype=np.int64)})
+    with _arrow_input_service(protocol, **{
+        "spark.sql.session.localRelationSizeLimit": size_limit,
+    }) as (spark, state):
+        spark.createDataFrame(table).toArrow()
+        assert state["uploads"] > 0
+        assert state["relations"][0].HasField("chunked_cached_local_relation")
+        assert state["result"] == (rows, 0, rows - 1)
+
+
+@pytest.mark.parametrize("size_limit", ["1024", "1024b", "1KB"])
+def test_arrow_input_byte_size_limits_are_enforced(protocol, size_limit):
+    from pyspark.errors import AnalysisException
+
+    with _arrow_input_service(protocol, **{
+        "spark.sql.session.localRelationCacheThreshold": "0",
+        "spark.sql.session.localRelationSizeLimit": size_limit,
+    }) as (spark, state):
+        with pytest.raises(AnalysisException, match="LOCAL_RELATION_SIZE_LIMIT_EXCEEDED") as error:
+            spark.createDataFrame(pa.table({"id": list(range(1000))}))
+        assert "limit (1024 bytes)" in str(error.value)
+        assert state["uploads"] == 0
+
+
+@pytest.mark.parametrize("setting,value", [
+    ("SizeLimit", "0"),
+    ("SizeLimit", "-1GB"),
+    ("SizeLimit", "1.5GB"),
+    ("SizeLimit", "3XB"),
+    ("SizeLimit", "18446744073709551616"),
+    ("SizeLimit", "18446744073709551615GB"),
+    ("ChunkSizeRows", "1KB"),
+])
+def test_arrow_input_rejects_invalid_upload_sizes(protocol, setting, value):
+    key = f"spark.sql.session.localRelation{setting}"
+    with _arrow_input_service(protocol, **{
+        "spark.sql.session.localRelationCacheThreshold": "0", key: value,
+    }) as (spark, state):
+        with pytest.raises(Exception, match=f"Invalid configuration: {key}"):
+            spark.createDataFrame(pa.table({"id": [1]}))
+        assert state["uploads"] == 0
+
+
 @pytest.mark.parametrize("failure,match", [("crc", "CRC check failed"),
                                           ("missing", "Missing cache artifact")])
 @pytest.mark.parametrize("rows", [2, 4000000])

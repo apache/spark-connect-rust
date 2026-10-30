@@ -53,16 +53,39 @@ impl ArrowInputOptions {
     }
 
     fn upload_value(&self, index: usize) -> Result<usize> {
-        self.values[index + 3]
+        let value = self.values[index + 3]
             .as_deref()
-            .unwrap_or(Self::UPLOAD_DEFAULTS[index])
-            .parse::<usize>()
-            .ok()
+            .unwrap_or(Self::UPLOAD_DEFAULTS[index]);
+        // Spark 4.2 uses decimal bytes; older bytesConf values may include units.
+        let parsed = if index == 1 {
+            parse_byte_size(value)
+        } else {
+            value.parse::<usize>().ok()
+        };
+        parsed
             .filter(|value| index == 0 || *value > 0)
             .ok_or_else(|| {
                 SparkError::connect_msg(format!("Invalid configuration: {}", Self::KEYS[index + 3]))
             })
     }
+}
+
+fn parse_byte_size(value: &str) -> Option<usize> {
+    let value = value.trim().to_ascii_lowercase();
+    let number = value.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+    let exponent = match &value[number.len()..] {
+        "" | "b" => 0,
+        "k" | "kb" => 1,
+        "m" | "mb" => 2,
+        "g" | "gb" => 3,
+        "t" | "tb" => 4,
+        "p" | "pb" => 5,
+        _ => return None,
+    };
+    number
+        .parse::<usize>()
+        .ok()?
+        .checked_mul(1024usize.checked_pow(exponent)?)
 }
 
 struct Options {

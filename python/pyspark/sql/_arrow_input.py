@@ -18,7 +18,7 @@
 
 """Schema normalization for the native Arrow Table input path."""
 
-from pyspark.errors import PySparkValueError
+from pyspark.errors import PySparkTypeError, PySparkValueError
 from pyspark.sql.pandas.types import (
     _check_arrow_table_timestamps_localize,
     from_arrow_schema,
@@ -29,6 +29,15 @@ from pyspark.sql.types import AtomicType, StructType
 
 def prepare_table(table, schema, timestamp_type, timezone, large_types):
     """Match Connect's Arrow casts without converting any column to Python rows."""
+    if schema is not None and not isinstance(schema, (AtomicType, StructType, list, tuple)):
+        raise PySparkTypeError(
+            errorClass="NOT_EXPECTED_TYPE",
+            messageParameters={
+                "arg_name": "schema",
+                "expected_type": "list, None or StructType",
+                "arg_type": type(schema).__name__,
+            },
+        )
     names = list(schema) if isinstance(schema, (list, tuple)) else None
     explicit = schema is not None and names is None
     if len(table) == 0:
