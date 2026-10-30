@@ -127,12 +127,7 @@ def serve(connection):
 
         def analyze(self, request, context):
             self.calls += 1
-            payload = _local_relation_data(request)
-            if payload is not None:
-                import pyarrow as pa
-
-                table = pa.ipc.open_stream(payload).read_all()
-                self.local_relation = (table.to_pylist(), str(table.schema))
+            self.local_relation = _local_relation_data(request)
             if self.block_response and not self.response_gate.wait(5):
                 context.abort(
                     grpc.StatusCode.DEADLINE_EXCEEDED,

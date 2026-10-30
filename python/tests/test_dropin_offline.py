@@ -3153,23 +3153,23 @@ def test_exact_string_nested_strings_and_nulls():
 @pytest.mark.parametrize("source", ["tuples", "pandas"])
 @pytest.mark.parametrize("schema_mode", ["inferred", "names", "explicit"])
 def test_exact_string_input_ipc(mock_connect, source, schema_mode):
-    import pandas as pd
-
-    pytest.importorskip("pyarrow")
+    pd = pytest.importorskip("pandas")
+    pa = pytest.importorskip("pyarrow")
     spark, service = mock_connect
     rows = [("雪😀", "a\x00b"), ("", None), (None, "1.25"), ("e\u0301", "\uffff")]
     data = pd.DataFrame(rows, columns=["a", "b"]) if source == "pandas" else rows
     schema = (T.StructType([T.StructField("a", T.StringType()), T.StructField("b", T.StringType())])
               if schema_mode == "explicit" else ["a", "b"] if schema_mode == "names" else None)
     spark.createDataFrame(data, schema).schema
-    actual, arrow_schema = service.local_relation
+    table = pa.ipc.open_stream(service.local_relation).read_all()
+    actual, arrow_schema = table.to_pylist(), str(table.schema)
     names = ["col0", "col1"] if source == "tuples" and schema_mode == "inferred" else ["a", "b"]
     assert actual == [dict(zip(names, row)) for row in rows]
     assert all(f"{name}: string" in arrow_schema for name in names)
 
 
 def test_exact_string_nested_input_ipc(mock_connect):
-    pytest.importorskip("pyarrow")
+    pa = pytest.importorskip("pyarrow")
     spark, service = mock_connect
     schema = T.StructType([
         T.StructField("items", T.ArrayType(T.StringType())),
@@ -3179,7 +3179,7 @@ def test_exact_string_nested_input_ipc(mock_connect):
     rows = [(["雪", None, ""], {"x": "😀", "null": None}, Row(text="a\x00b")),
             (None, None, None)]
     spark.createDataFrame(rows, schema).schema
-    actual, _ = service.local_relation
+    actual = pa.ipc.open_stream(service.local_relation).read_all().to_pylist()
     # Arrow map columns decode as ordered key/value pairs.
     assert actual == [
         {"items": ["雪", None, ""], "mapping": [("null", None), ("x", "😀")],
@@ -3190,9 +3190,8 @@ def test_exact_string_nested_input_ipc(mock_connect):
 
 @pytest.mark.parametrize("source", ["tuples", "pandas"])
 def test_exact_string_batch_input_ipc(mock_connect, source):
-    import pandas as pd
-
-    pytest.importorskip("pyarrow")
+    pd = pytest.importorskip("pandas")
+    pa = pytest.importorskip("pyarrow")
     spark, service = mock_connect
     names = ["a", "b", "c"]
     rows = [(f"雪😀-{i}", str(i), None if i % 7 == 0 else "a\x00b")
@@ -3200,5 +3199,5 @@ def test_exact_string_batch_input_ipc(mock_connect, source):
     data = pd.DataFrame(rows, columns=names) if source == "pandas" else rows
     schema = T.StructType([T.StructField(name, T.StringType()) for name in names])
     spark.createDataFrame(data, schema).schema
-    actual, _ = service.local_relation
+    actual = pa.ipc.open_stream(service.local_relation).read_all().to_pylist()
     assert actual == [dict(zip(names, row)) for row in rows]
