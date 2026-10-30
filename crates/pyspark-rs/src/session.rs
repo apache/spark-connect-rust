@@ -955,6 +955,14 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
         return Ok(Value::Null);
     }
 
+    // Exact dates cannot implement numeric protocols or override toordinal. Skip
+    // the generic Decimal/numeric probes; subclasses (including datetime) must
+    // retain the fallback ordering below. PyDate also supports abi3 wheels.
+    if let Ok(date) = obj.cast_exact::<pyo3::types::PyDate>() {
+        let ordinal: i64 = date.call_method0("toordinal")?.extract()?;
+        return Ok(Value::Date((ordinal - 719163i64) as i32));
+    }
+
     // Check for bool (before int because bool is a subclass of int in Python)
     if let Ok(b) = obj.extract::<bool>() {
         return Ok(Value::Bool(b));

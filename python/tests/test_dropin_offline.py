@@ -2755,3 +2755,215 @@ for schema in schemas:
     else:
         raise AssertionError("expected a width validation error")
 """], check=True)
+
+# --------------------------------------------------------------------------- exact date input
+
+from datetime import (
+    date as _exact_date_date, datetime as _exact_date_datetime,
+    timezone as _exact_date_timezone,
+)
+from decimal import Decimal as _exact_date_Decimal
+from pyspark.sql import Row as _exact_date_Row
+
+
+@pytest.mark.parametrize("value", [
+    _exact_date_date.min, _exact_date_date.max, _exact_date_date(1, 3, 1), _exact_date_date(4, 2, 29),
+    _exact_date_date(1600, 2, 29), _exact_date_date(1900, 2, 28), _exact_date_date(1900, 3, 1),
+    _exact_date_date(1969, 12, 31), _exact_date_date(1970, 1, 1), _exact_date_date(1970, 1, 2),
+    _exact_date_date(2000, 2, 29), _exact_date_date(2100, 3, 1),
+])
+def test_exact_date_builtin_roundtrip(value):
+    actual = _exact_date_Row(value=value).value
+    assert type(actual) is _exact_date_date
+    assert actual == value
+
+
+def test_exact_date_subclass_protocol_precedence():
+    trace = []
+
+    class Indexed(_exact_date_date):
+        def __index__(self):
+            trace.append("index")
+            return 42
+
+        def toordinal(self):
+            raise AssertionError("numeric extraction must precede date conversion")
+
+    class Floating(_exact_date_date):
+        def __float__(self):
+            trace.append("float")
+            return 1.25
+
+        def toordinal(self):
+            raise AssertionError("numeric extraction must precede date conversion")
+
+    class Ordinal(_exact_date_date):
+        def toordinal(self):
+            trace.append("ordinal")
+            return _exact_date_date(2000, 2, 29).toordinal()
+
+    class Plain(_exact_date_date):
+        pass
+
+    assert _exact_date_Row(value=Indexed(2020, 1, 1)).value == 42
+    assert _exact_date_Row(value=Floating(2020, 1, 1)).value == 1.25
+    assert _exact_date_Row(value=Ordinal(2020, 1, 1)).value == _exact_date_date(2000, 2, 29)
+    assert type(_exact_date_Row(value=Plain(2020, 1, 1)).value) is _exact_date_date
+    assert trace == ["index", "float", "ordinal"]
+
+
+def test_exact_date_datetime_timestamp_encoding():
+    pd = pytest.importorskip("pandas")
+    for value in [_exact_date_datetime(2020, 2, 29, 12, 34, 56, 123456),
+                  _exact_date_datetime(2020, 2, 29, tzinfo=_exact_date_timezone.utc),
+                  pd.Timestamp("2020-02-29 12:34:56.123456"),
+                  pd.Timestamp("2020-02-29 12:34:56.123456Z")]:
+        actual = _exact_date_Row(value=value).value
+        assert type(actual) is _exact_date_datetime
+        expected = value.to_pydatetime() if isinstance(value, pd.Timestamp) else value
+        assert actual == _exact_date_datetime.fromtimestamp(expected.timestamp())
+
+
+def test_exact_date_nested_unrelated_values():
+    value = _exact_date_Row(items=[_exact_date_date.min, None, _exact_date_date.max],
+                mapping={"epoch": _exact_date_date(1970, 1, 1)},
+                nested=_exact_date_Row(day=_exact_date_date(2000, 2, 29)),
+                amount=_exact_date_Decimal("-12.340"), number=42, flag=True, label="date")
+    actual = _exact_date_Row(value=value).value
+    assert actual.items == [_exact_date_date.min, None, _exact_date_date.max]
+    assert actual.mapping == {"epoch": _exact_date_date(1970, 1, 1)}
+    assert actual.nested.day == _exact_date_date(2000, 2, 29)
+    assert actual.amount == _exact_date_Decimal("-12.340")
+    assert (actual.number, actual.flag, actual.label) == (42, True, "date")
+
+
+def test_exact_date_named_impostor_rejected():
+    impostor = type("date", (), {"toordinal": lambda self: 719163})
+    with pytest.raises(TypeError, match="unsupported value type"):
+        _exact_date_Row(value=impostor())
+
+
+def _exact_date_fields(data):
+    """Decode only the small protobuf envelope around a local Arrow relation."""
+    def _exact_date_varint(pos):
+        value, shift = 0, 0
+        while True:
+            byte = data[pos]
+            pos += 1
+            value |= (byte & 127) << shift
+            if byte < 128:
+                return value, pos
+            shift += 7
+
+    result, pos = {}, 0
+    while pos < len(data):
+        tag, pos = _exact_date_varint(pos)
+        wire = tag & 7
+        if wire == 2:
+            length, pos = _exact_date_varint(pos)
+            result[tag >> 3] = data[pos:pos + length]
+            pos += length
+        elif wire == 0:
+            _, pos = _exact_date_varint(pos)
+        elif wire in (1, 5):
+            pos += 8 if wire == 1 else 4
+        else:
+            raise AssertionError(f"unexpected protobuf wire type: {wire}")
+    return result
+
+
+def _exact_date_capture_server(connection):
+    from concurrent.futures import ThreadPoolExecutor
+    import grpc
+
+    captured = []
+
+    def _exact_date_execute(request, context):
+        # ExecutePlanRequest.plan=3 -> Plan.root=1 ->
+        # Relation.local_relation=11 -> LocalRelation.data=1.
+        captured.append(_exact_date_fields(_exact_date_fields(_exact_date_fields(_exact_date_fields(request)[3])[1])[11])[1])
+        context.abort(grpc.StatusCode.INVALID_ARGUMENT, "captured date input")
+        yield b""  # Make this a streaming handler.
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        server = grpc.server(executor)
+        server.add_generic_rpc_handlers((grpc.method_handlers_generic_handler(
+            "spark.connect.SparkConnectService", {
+                "ExecutePlan": grpc.unary_stream_rpc_method_handler(_exact_date_execute),
+            }),))
+        port = server.add_insecure_port("127.0.0.1:0")
+        server.start()
+        connection.send(port)
+        try:
+            while True:
+                command = connection.recv()
+                if command == "stop":
+                    break
+                assert command == "get"
+                connection.send(captured.pop(0))
+        finally:
+            server.stop(0).wait()
+
+
+@pytest.fixture
+def exact_date_capture_input():
+    import multiprocessing
+    pytest.importorskip("grpc")
+    from pyspark.sql import SparkSession
+
+    context = multiprocessing.get_context("spawn")
+    parent, child = context.Pipe()
+    process = context.Process(target=_exact_date_capture_server, args=(child,))
+    process.start()
+    try:
+        assert parent.poll(20), "capture service failed to start"
+        spark = SparkSession.builder.remote(f"sc://127.0.0.1:{parent.recv()}").getOrCreate()
+
+        def _exact_date_capture(data, schema):
+            import pyarrow as pa
+            df = spark.createDataFrame(data, schema=schema)
+            with pytest.raises(Exception, match="captured date input"):
+                df.collect()
+            parent.send("get")
+            assert parent.poll(10), "capture service failed to return the IPC payload"
+            return pa.ipc.open_stream(parent.recv()).read_all()
+
+        yield _exact_date_capture
+    finally:
+        if process.is_alive():
+            parent.send("stop")
+        process.join(10)
+        if process.is_alive():
+            process.terminate()
+            process.join(10)
+        parent.close()
+        child.close()
+
+
+@pytest.mark.parametrize("source", ["tuples", "pandas"])
+@pytest.mark.parametrize("schema_kind", ["inferred", "names", "explicit", "ddl"])
+def test_exact_date_ipc_calendar_range(exact_date_capture_input, source, schema_kind):
+    import calendar
+    import pyarrow as pa
+    from pyspark.sql import types as T
+
+    # Every year's endpoints and leap day cover the complete supported calendar
+    # range, including non-leap centuries, without relying on the Rust decoder.
+    dates = [_exact_date_date.min, _exact_date_date.max, _exact_date_date(1969, 12, 31), _exact_date_date(1970, 1, 1),
+             _exact_date_date(1970, 1, 2), None]
+    for year in range(1, 10000):
+        dates.extend([_exact_date_date(year, 1, 1), _exact_date_date(year, 12, 31)])
+        if calendar.isleap(year):
+            dates.append(_exact_date_date(year, 2, 29))
+    schema = {"inferred": None, "names": ["day"], "ddl": "day date",
+              "explicit": T.StructType([T.StructField("day", T.DateType())])}[schema_kind]
+    data = [(value,) for value in dates]
+    if source == "pandas":
+        pd = pytest.importorskip("pandas")
+        data = pd.DataFrame(data, columns=["day"])
+    table = exact_date_capture_input(data, schema)
+    assert table.column(0).type == pa.date32()
+    assert table.column(0).to_pylist() == dates
+    epoch = _exact_date_date(1970, 1, 1)
+    expected_days = [None if value is None else (value - epoch).days for value in dates]
+    assert table.column(0).cast(pa.int32()).to_pylist() == expected_days
