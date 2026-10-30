@@ -520,6 +520,12 @@ def _prepare_arrow_string_input(frame, schema, dtypes):
             or any(type(block) is not ExtensionBlock or "iget" in vars(block)
                    for block in manager.blocks)):
         return None
+    # The canonical properties can expose customized cached index arrays.
+    # Decline subclasses before iget_values can invoke their indexing hooks.
+    for cache in (manager.blknos, manager.blklocs):
+        if (type(cache) is not np.ndarray or cache.ndim != 1
+                or cache.dtype != np.dtype("intp") or len(cache) != len(schema.fields)):
+            return None
     arrays = []
     for i, field in enumerate(schema.fields):
         array = manager.iget_values(i)

@@ -336,6 +336,54 @@ def test_arrow_string_custom_storage_extraction_hooks_decline_without_calling(
     assert calls == []
 
 
+@pytest.mark.parametrize("cache_name", ["blknos", "blklocs"])
+def test_arrow_string_public_cached_index_subclass_matches_native_row_control(
+    protocol, monkeypatch, missing_kind, cache_name
+):
+    calls = []
+
+    class CachedIndexError(Exception):
+        pass
+
+    class CustomIndexes(np.ndarray):
+        def __getitem__(self, key):
+            calls.append(cache_name)
+            raise CachedIndexError("custom cached index must not be read during eligibility")
+
+    values = ["plain", "\x00", "é", "🙂"] * 2500
+    tables = []
+    for row_control in (False, True):
+        frame = _frame({"text": values}, missing_kind)
+        _assert_backend(frame, missing_kind)
+        manager = vars(frame)["_mgr"]
+        cache = getattr(manager, cache_name)
+        assert type(cache) is np.ndarray
+        assert cache.dtype == np.dtype("intp")
+        assert cache.shape == (1,)
+        custom_cache = cache.view(CustomIndexes)
+        setattr(manager, "_" + cache_name, custom_cache)
+        assert type(getattr(manager, cache_name)) is CustomIndexes
+        schema = _schema()
+        calls.clear()
+        # Both cached arrays normally feed iget_values through __getitem__.
+        # Decline this subclass before indexing, while preserving ordinary row
+        # normalization, which does not need to index the original caches.
+        assert prepare_string_input(frame, schema) is None
+        assert calls == []
+        with monkeypatch.context() as control:
+            if row_control:
+                control.setattr(pandas_input, "prepare_string_input", lambda *args: None)
+            with _arrow_input_service(protocol, config_error=True) as (spark, state):
+                spark.createDataFrame(frame, schema).toArrow()
+                _assert_inline(state, schema, [values])
+                tables.append(state["input_tables"][0])
+        assert calls == []
+        with pytest.raises(CachedIndexError, match="custom cached index must not be read"):
+            custom_cache[0]
+        assert calls == [cache_name]
+    assert tables[0].equals(tables[1], check_metadata=True)
+
+
 @pytest.mark.parametrize("target", ["manager", "block"])
 def test_arrow_string_public_storage_class_alias_matches_native_row_control(
     protocol, monkeypatch, missing_kind, target
