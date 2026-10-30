@@ -1375,19 +1375,15 @@ impl PyDataFrame {
     /// Get the schema as a list of (name, type) tuples.
     #[getter]
     fn dtypes(&self, py: Python<'_>) -> PyResult<Vec<(String, String)>> {
-        let schema = py.detach(|| self.dataframe.schema().to_pyerr())?;
-        match schema {
-            spark_connect::types::DataType::Struct { fields } => {
-                let dtypes = fields
-                    .iter()
-                    .map(|f| (f.name.clone(), f.data_type.simple_string()))
-                    .collect();
-                Ok(dtypes)
-            }
-            _ => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Schema is not a struct type",
-            )),
-        }
+        let spark_connect::types::DataType::Struct { fields } =
+            py.detach(|| self.dataframe.schema().to_pyerr())?
+        else {
+            unreachable!("schema() validates struct responses")
+        };
+        Ok(fields
+            .into_iter()
+            .map(|field| (field.name, field.data_type.simple_string()))
+            .collect())
     }
 
     /// Additional set operation: unionAll (alias for union).

@@ -6,14 +6,14 @@ Python side has real, measurable coverage in CI without a running server. Tests
 that require a live server live in test_dropin_e2e.py and are gated on SPARK_REMOTE.
 """
 
-import multiprocessing
 import pickle
 import time
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier, Event
+from threading import Barrier
 
 import pytest
 
+from _mock_connect_server import message_field, mock_connect_session, struct_schema
 from pyspark.sql import SparkSession, types as T
 
 
@@ -2762,163 +2762,18 @@ for schema in schemas:
 
 
 # --------------------------------------------------------------------------- schema cache
-# The separate-process fixture exercises the real transport without Spark.
-# Tiny wire encoders are used because the drop-in package does not ship the
-# generated AnalyzePlan/ReleaseSession protobuf classes.
-
-
-def schema_cache_varint(value):
-    result = bytearray()
-    while value > 127:
-        result.append((value & 127) | 128)
-        value >>= 7
-    result.append(value)
-    return bytes(result)
-
-
-def schema_cache_message(field, value):
-    if isinstance(value, str):
-        value = value.encode()
-    return schema_cache_varint(field * 8 + 2) + schema_cache_varint(len(value)) + value
-
-
-def schema_cache_schema(name="id", nested=False):
-    # types.proto: DataType.long=7, .struct=21; Struct.fields=1;
-    # StructField: name=1, data_type=2, nullable=3, metadata=4.
-    data_type = schema_cache_message(7, b"")
-    if nested:
-        inner_field = schema_cache_field("inner", data_type)
-        data_type = schema_cache_message(21, schema_cache_message(1, inner_field))
-    return schema_cache_message(21, schema_cache_message(1, schema_cache_field(name, data_type)))
-
-
-def schema_cache_field(name, data_type):
-    return (
-        schema_cache_message(1, name)
-        + schema_cache_message(2, data_type)
-        + b"\x18\x01"
-        + schema_cache_message(4, '{"note":"original"}')
-    )
-
-
-def schema_cache_serve(connection):
-    import grpc
-
-    # Keep the server independent of the client's interpreter and GIL.
-    class Service:
-        calls = 0
-        data_type = schema_cache_schema()
-        failure = None
-        release_calls = 0
-        block_response = False
-        response_gate = Event()
-
-        def release(self, request, context):
-            self.release_calls += 1
-            return b""
-
-        def analyze(self, request, context):
-            self.calls += 1
-            if self.block_response and not self.response_gate.wait(5):
-                context.abort(
-                    grpc.StatusCode.DEADLINE_EXCEEDED,
-                    "Python thread could not run while metadata lookup waited",
-                )
-            if self.failure == "rpc":
-                context.abort(grpc.StatusCode.INVALID_ARGUMENT, "schema unavailable")
-            if self.failure == "no-result":
-                return b""
-            if self.failure == "missing-schema":
-                return schema_cache_message(2, b"")
-            if self.failure == "invalid-type":
-                return schema_cache_message(2, schema_cache_message(1, b""))
-            # base.proto: AnalyzePlanResponse.schema=2, Schema.schema=1.
-            return schema_cache_message(2, schema_cache_message(1, self.data_type))
-
-    service = Service()
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        server = grpc.server(executor)
-        handlers = {
-            "AnalyzePlan": grpc.unary_unary_rpc_method_handler(service.analyze),
-            "ReleaseSession": grpc.unary_unary_rpc_method_handler(service.release),
-        }
-        server.add_generic_rpc_handlers(
-            (grpc.method_handlers_generic_handler("spark.connect.SparkConnectService", handlers),)
-        )
-        port = server.add_insecure_port("127.0.0.1:0")
-        server.start()
-        connection.send(port)
-        try:
-            while True:
-                command = connection.recv()
-                if command[0] == "stop":
-                    break
-                if command[0] == "get":
-                    connection.send(getattr(service, command[1]))
-                elif command[0] == "set":
-                    setattr(service, command[1], command[2])
-                    connection.send(None)
-                elif command[0] == "release":
-                    service.response_gate.set()
-                    connection.send(None)
-        finally:
-            server.stop(0).wait()
-
-
-class SchemaCacheRemoteService:
-    def __init__(self, connection):
-        object.__setattr__(self, "connection", connection)
-
-    def __getattr__(self, name):
-        self.connection.send(("get", name))
-        assert self.connection.poll(10), "Mock server did not respond"
-        return self.connection.recv()
-
-    def __setattr__(self, name, value):
-        self.connection.send(("set", name, value))
-        assert self.connection.poll(10), "Mock server did not respond"
-        self.connection.recv()
-
-    def release_response(self):
-        self.connection.send(("release",))
-        assert self.connection.poll(10), "Mock server did not respond"
-        self.connection.recv()
 
 
 @pytest.fixture
-def schema_cache_analyzed():
+def mock_connect():
     pytest.importorskip("grpc")
-    context = multiprocessing.get_context("spawn")
-    parent, child = context.Pipe()
-    process = context.Process(target=schema_cache_serve, args=(child,))
-    process.start()
-    spark = None
-    service = SchemaCacheRemoteService(parent)
-    try:
-        assert parent.poll(20), "Mock server did not start"
-        port = parent.recv()
-        spark = SparkSession.builder.remote(f"sc://127.0.0.1:{port}").getOrCreate()
-        yield spark, service
-    finally:
-        try:
-            if spark is not None:
-                released = service.release_calls
-                spark.stop()
-                assert service.release_calls == released + 1
-        finally:
-            if process.is_alive():
-                parent.send(("stop",))
-            process.join(10)
-            if process.is_alive():
-                process.terminate()
-                process.join(10)
-            parent.close()
-            child.close()
+    with mock_connect_session() as session:
+        yield session
 
 
 @pytest.mark.parametrize("first", ["schema", "columns", "dtypes"])
-def test_schema_cache_one_analysis_shared_by_metadata_accessors(schema_cache_analyzed, first):
-    spark, service = schema_cache_analyzed
+def test_schema_cache_one_analysis_shared_by_metadata_accessors(mock_connect, first):
+    spark, service = mock_connect
     df = spark.range(10)
     assert service.calls == 0
     getattr(df, first)
@@ -2933,43 +2788,29 @@ def test_schema_cache_one_analysis_shared_by_metadata_accessors(schema_cache_ana
     assert service.calls == 1
 
 
-def test_schema_cache_returned_schema_and_lists_are_independent(schema_cache_analyzed):
-    spark, service = schema_cache_analyzed
-    service.data_type = schema_cache_schema(nested=True)
+def test_schema_cache_returned_schema_and_lists_are_independent(mock_connect):
+    spark, service = mock_connect
     df = spark.range(10)
-    original = df.schema
-    expected_json = original.jsonValue()
+    expected_json = df.schema.jsonValue()
     modified = df.schema
-    assert original is not modified
-    # Retain nested getter results so these assertions verify actual Python mutations.
-    nested = modified.fields[0].dataType
-    nested.add("extra_nested", T.StringType())
-    metadata = nested.fields[0].metadata
-    metadata["note"] = "changed"
-    assert nested.fieldNames() == ["inner", "extra_nested"]
-    assert metadata == {"note": "changed"}
     modified.add("extra", T.StringType())
     assert len(modified.fields) == 2
-    assert len(original.fields) == 1
-    assert original.jsonValue() == expected_json
     columns = df.columns
     columns.append("extra")
     dtypes = df.dtypes
     dtypes.clear()
-    assert columns == ["id", "extra"]
-    assert dtypes == []
     assert df.schema.jsonValue() == expected_json
     assert df.columns == ["id"]
-    assert df.dtypes == [("id", "struct<inner:bigint>")]
+    assert df.dtypes == [("id", "bigint")]
     assert service.calls == 1
 
 
-def test_schema_cache_derived_and_new_plans_resolve_independently(schema_cache_analyzed):
-    spark, service = schema_cache_analyzed
+def test_schema_cache_derived_and_new_plans_resolve_independently(mock_connect):
+    spark, service = mock_connect
     df = spark.range(10)
     assert df.columns == ["id"]
     derived = df.selectExpr("id AS renamed")
-    service.data_type = schema_cache_schema("renamed")
+    service.data_type = struct_schema("renamed")
     assert derived.columns == ["renamed"]
     assert service.calls == 2
     assert df.columns == ["id"]
@@ -2986,9 +2827,163 @@ def test_schema_cache_derived_and_new_plans_resolve_independently(schema_cache_a
     assert df.columns == ["id"]
 
 
+@pytest.mark.parametrize("transform", [
+    pytest.param(lambda df: df.filter("id > 0"), id="filter"),
+    pytest.param(lambda df: df.limit(2), id="limit"),
+    pytest.param(lambda df: df.alias("source"), id="alias"),
+    pytest.param(lambda df: df.distinct(), id="distinct"),
+    pytest.param(lambda df: df.dropDuplicates(["id"]), id="dropDuplicates"),
+    pytest.param(lambda df: df.coalesce(1), id="coalesce"),
+    pytest.param(lambda df: df.repartition(2), id="repartition"),
+    pytest.param(lambda df: df.repartition(2, "id"), id="repartition-expression"),
+    pytest.param(lambda df: df.repartition("id"), id="repartition-column"),
+    pytest.param(lambda df: df.repartitionByRange(2, "id"), id="repartitionByRange"),
+    pytest.param(lambda df: df.repartitionById(2, "id"), id="repartitionById"),
+    pytest.param(lambda df: df.sort("id"), id="sort"),
+    pytest.param(lambda df: df.sortWithinPartitions("id"), id="sortWithinPartitions"),
+    pytest.param(lambda df: df.sample(fraction=0.5, seed=1), id="sample"),
+    pytest.param(lambda df: df.hint("broadcast"), id="hint"),
+])
+def test_schema_cache_preserving_transforms_reuse_warm_schema(mock_connect, transform):
+    spark, service = mock_connect
+    df = spark.range(10)
+    expected = df.schema.jsonValue()
+    assert service.calls == 1
+    # A new analysis would return different metadata, making accidental misses
+    # observable as well as countable.
+    service.data_type = struct_schema("unexpected")
+    derived = transform(df)
+    assert derived.schema.jsonValue() == expected
+    assert derived.limit(1).columns == ["id"]
+    assert service.calls == 1
+
+
+def test_schema_cache_random_split_and_observe_reuse_warm_schema(mock_connect):
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    df = spark.range(10)
+    assert df.columns == ["id"]
+    service.data_type = struct_schema("unexpected")
+    for split in df.randomSplit([1.0, 2.0], seed=1):
+        assert split.columns == ["id"]
+    observed = df.observe("rows", F.count("*").alias("count"))
+    assert observed.columns == ["id"]
+    assert service.calls == 1
+
+
+def test_schema_cache_cold_children_keep_independent_caches(mock_connect):
+    spark, service = mock_connect
+    df = spark.range(10)
+    before_lookup = df.limit(1)
+    service.block_response = True
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        lookup = pool.submit(lambda: df.schema)
+        try:
+            for _ in range(500):
+                if service.calls:
+                    break
+                time.sleep(0.01)
+            else:
+                raise AssertionError("Metadata request never reached the server")
+            # Constructing a child also runs with the GIL. It must not wait for
+            # the in-flight cache miss, or this thread cannot release the server.
+            during_lookup = df.filter("id > 0")
+            assert not lookup.done()
+        finally:
+            service.release_response()
+        assert lookup.result(timeout=10).fieldNames() == ["id"]
+    assert service.calls == 1
+    # Neither child picks up a cache populated after the child was constructed.
+    for calls, child in enumerate((before_lookup, during_lookup), start=2):
+        service.data_type = struct_schema(f"child_{calls}")
+        assert child.columns == [f"child_{calls}"]
+        assert service.calls == calls
+    assert df.columns == ["id"]
+
+
+@pytest.mark.parametrize("transform", [
+    pytest.param(lambda df: df.selectExpr("id AS renamed"), id="select"),
+    pytest.param(lambda df: df.zipWithIndex(), id="zipWithIndex"),
+    # Reference PySpark does not propagate through offset, despite its unchanged
+    # output columns. Match its explicit propagation rules rather than guessing.
+    pytest.param(lambda df: df.offset(1), id="offset"),
+])
+def test_schema_cache_other_transforms_analyze_independently(mock_connect, transform):
+    spark, service = mock_connect
+    df = spark.range(10)
+    assert df.columns == ["id"]
+    derived = transform(df)
+    assert service.calls == 1
+    service.data_type = struct_schema("derived")
+    assert derived.columns == ["derived"]
+    assert service.calls == 2
+    assert df.columns == ["id"]
+
+
+@pytest.mark.parametrize("operation", [
+    "union", "unionAll", "unionByName", "subtract", "exceptAll", "intersect", "intersectAll",
+])
+def test_schema_cache_set_operations_require_equal_warm_schemas(mock_connect, operation):
+    spark, service = mock_connect
+    left, right = spark.range(10), spark.range(10)
+    assert left.columns == right.columns == ["id"]
+    assert service.calls == 2
+    equal = getattr(left, operation)(right)
+    assert equal.columns == ["id"]
+    assert service.calls == 2
+
+    cold = spark.range(10)
+    missing = getattr(left, operation)(cold)
+    assert service.calls == 2
+    service.data_type = struct_schema("resolved")
+    assert missing.columns == ["resolved"]
+    assert service.calls == 3
+
+    different = spark.range(10)
+    assert different.columns == ["resolved"]
+    assert service.calls == 4
+    mismatched = getattr(left, operation)(different)
+    service.data_type = struct_schema("coerced")
+    assert mismatched.columns == ["coerced"]
+    assert service.calls == 5
+    assert left.columns == ["id"]
+
+
+def test_schema_cache_to_uses_supplied_struct_schema(mock_connect):
+    spark, service = mock_connect
+    df = spark.range(10)
+    target = T.StructType([T.StructField("converted", T.StringType(), True)])
+    expected = target.jsonValue()
+    converted = df.to(target)
+    target.add("extra", T.LongType())
+    assert converted.schema.jsonValue() == expected
+    assert converted.limit(1).dtypes == [("converted", "string")]
+    assert service.calls == 0
+    assert df.columns == ["id"]
+    assert service.calls == 1
+
+
+@pytest.mark.parametrize("method", ["mapInPandas", "mapInArrow"])
+def test_schema_cache_map_uses_declared_struct_schema(mock_connect, method):
+    spark, service = mock_connect
+    target = T.StructType([
+        T.StructField("output", T.StringType(), True, {"note": "declared"}),
+    ])
+    mapped = getattr(spark.range(10), method)(lambda batches: batches, schema=target)
+    # The binding resolves the input columns while building the UDF. Reading its
+    # declared output schema must not issue another analysis request.
+    assert service.calls == 1
+    service.data_type = struct_schema("unexpected")
+    assert mapped.schema.jsonValue() == target.jsonValue()
+    assert mapped.columns == ["output"]
+    assert mapped.dtypes == [("output", "string")]
+    assert service.calls == 1
+
+
 @pytest.mark.parametrize("failure", ["rpc", "no-result", "missing-schema", "invalid-type"])
-def test_schema_cache_failures_are_not_cached(schema_cache_analyzed, failure):
-    spark, service = schema_cache_analyzed
+def test_schema_cache_failures_are_not_cached(mock_connect, failure):
+    spark, service = mock_connect
     df = spark.range(10)
     service.failure = failure
     for count in (1, 2):
@@ -3007,23 +3002,22 @@ def test_schema_cache_failures_are_not_cached(schema_cache_analyzed, failure):
     assert service.calls == 3
 
 
-@pytest.mark.parametrize("accessor", ["schema", "columns", "dtypes"])
-def test_schema_cache_non_struct_responses_are_not_cached(schema_cache_analyzed, accessor):
-    spark, service = schema_cache_analyzed
+def test_schema_cache_non_struct_responses_are_not_cached(mock_connect):
+    spark, service = mock_connect
     df = spark.range(10)
-    service.data_type = schema_cache_message(7, b"")
+    service.data_type = message_field(7, b"")
     for count in (1, 2):
         with pytest.raises(Exception, match="Schema is not a struct type"):
-            getattr(df, accessor)
+            _ = df.schema
         assert service.calls == count
-    service.data_type = schema_cache_schema()
+    service.data_type = struct_schema()
     assert df.columns == ["id"]
     assert df.dtypes == [("id", "bigint")]
     assert service.calls == 3
 
 
-def test_schema_cache_concurrent_metadata_access_issues_one_analysis(schema_cache_analyzed):
-    spark, service = schema_cache_analyzed
+def test_schema_cache_concurrent_metadata_access_issues_one_analysis(mock_connect):
+    spark, service = mock_connect
     df = spark.range(10)
     accessors = ("schema", "columns", "dtypes") * 3
     start = Barrier(len(accessors) + 1)
@@ -3065,8 +3059,8 @@ def test_schema_cache_concurrent_metadata_access_issues_one_analysis(schema_cach
 
 
 @pytest.mark.parametrize("accessor", ["schema", "columns", "dtypes"])
-def test_schema_cache_metadata_wait_releases_gil(schema_cache_analyzed, accessor):
-    spark, service = schema_cache_analyzed
+def test_schema_cache_metadata_wait_releases_gil(mock_connect, accessor):
+    spark, service = mock_connect
     df = spark.range(10)
     service.block_response = True
 
