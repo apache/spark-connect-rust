@@ -280,6 +280,8 @@ def timestamp_columns(frame, schema):
     if (pd.DataFrame is not DataFrame or type(frame) is not DataFrame
             or type(schema) is not NativeStructType or not len(frame)):
         return None
+    if not _has_canonical_columns(frame.columns):
+        return None
     # Native row conversion reads the native schema directly. The Arrow importer
     # also consults Python descriptors and public or captured converter aliases.
     if sys.modules.get("pyspark.sql.types") is not sql_types:

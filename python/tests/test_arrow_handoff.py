@@ -1704,3 +1704,193 @@ def test_timestamp_warm_local_converter_imports_keep_columnar_route(protocol, mo
         table = state["tables"][-1]
         assert table.column_names == ["renamed"]
         assert table.column(0).cast(pa.int64()).to_pylist() == [0, 1000, None]
+
+
+def _timestamp_columns_fixture(unit):
+    values = [-2000000, -1000000, 0, 1000000, None] * 2000
+    frame = pd.DataFrame({
+        "original": pd.to_datetime(pd.Series(values, dtype="Int64"), unit="us", utc=True).dt.as_unit(unit)
+    })
+    schema = T.StructType([
+        T.StructField("renamed", T.TimestampType(), True, {"source": "columns", "id": 3})
+    ])
+    return values, frame, schema
+
+
+def _assert_timestamp_columns_row_input(state, values, schema):
+    import json
+
+    assert not state["config_requests"]
+    assert not state["uploads"]
+    assert len(state["input_tables"]) == 1
+    table = state["input_tables"][0]
+    assert table.num_rows == 10000
+    assert table.schema.equals(
+        pa.schema([pa.field("renamed", pa.timestamp("us", tz="UTC"), nullable=True)]),
+        check_metadata=True,
+    )
+    assert table.column(0).cast(pa.int64()).to_pylist() == values
+    assert table.column(0).is_null().to_pylist() == [value is None for value in values]
+    assert json.loads(state["relations"][0].local_relation.schema) == json.loads(schema.json())
+
+
+@pytest.mark.parametrize("unit", ["ns", "us"])
+@pytest.mark.parametrize("location", ["subclass", "instance", "class", "owner"])
+@pytest.mark.parametrize("behavior", ["raise", "mutate"])
+def test_timestamp_columns_tolist_hooks_keep_native_order(
+    protocol, monkeypatch, unit, location, behavior
+):
+    from types import MethodType
+    from pandas.core.base import IndexOpsMixin
+
+    values, frame, schema = _timestamp_columns_fixture(unit)
+    original_tolist = pd.Index.tolist
+    original_notna, original_astype = frame.notna, frame.astype
+    calls = []
+
+    class ColumnsError(RuntimeError):
+        pass
+
+    def notna(*args, **kwargs):
+        calls.append("notna")
+        return original_notna(*args, **kwargs)
+
+    def astype(*args, **kwargs):
+        calls.append("astype")
+        return original_astype(*args, **kwargs)
+
+    def tolist(index):
+        if index is frame.columns:
+            calls.append("tolist")
+            if behavior == "raise":
+                raise ColumnsError("columns hook precedes timestamp normalization")
+            # Install spies inside the public hook, leaving eligibility inputs
+            # ordinary until native conversion observes the customized labels.
+            monkeypatch.setitem(vars(frame), "notna", notna)
+            monkeypatch.setitem(vars(frame), "astype", astype)
+            frame.iat[0, 0] = pd.Timestamp(7000000, unit="us", tz="UTC")
+            frame.iat[-1, 0] = pd.NaT
+        return original_tolist(index)
+
+    if location == "subclass":
+        class Columns(pd.Index):
+            pass
+        monkeypatch.setattr(Columns, "tolist", tolist)
+        labels = pd.Index(["original"], dtype=object)
+        frame.columns = Columns._simple_new(labels._values, name=None)
+        assert type(frame.columns) is Columns
+    elif location == "instance":
+        monkeypatch.setitem(vars(frame.columns), "tolist", MethodType(tolist, frame.columns))
+    else:
+        monkeypatch.setattr(pd.Index if location == "class" else IndexOpsMixin,
+                            "tolist", tolist)
+
+    with _arrow_input_service(protocol) as (spark, state):
+        if behavior == "raise":
+            with pytest.raises(ColumnsError, match="columns hook precedes timestamp normalization"):
+                spark.createDataFrame(frame, schema)
+            assert calls == ["tolist"]
+            assert not state["config_requests"]
+            assert not state["uploads"]
+            assert not state["relations"]
+            assert not state["input_tables"]
+        else:
+            spark.createDataFrame(frame, schema).toArrow()
+            expected = values.copy()
+            expected[0], expected[-1] = 7000000, None
+            _assert_timestamp_columns_row_input(state, expected, schema)
+            assert calls == ["tolist", "notna", "astype"]
+
+
+@pytest.mark.parametrize("unit", ["ns", "us"])
+def test_timestamp_rebound_index_values_keeps_native_error(protocol, monkeypatch, unit):
+    _, frame, schema = _timestamp_columns_fixture(unit)
+    columns, original = frame.columns, pd.Index._values.fget
+    calls = []
+
+    def values(index):
+        if index is columns:
+            calls.append("_values")
+            raise RuntimeError("columns backing hook precedes timestamp normalization")
+        return original(index)
+
+    monkeypatch.setattr(pd.Index, "_values", property(values))
+    with _arrow_input_service(protocol) as (spark, state):
+        with pytest.raises(RuntimeError, match="columns backing hook precedes timestamp normalization"):
+            spark.createDataFrame(frame, schema)
+        assert calls == ["_values"]
+        assert not state["config_requests"]
+        assert not state["uploads"]
+        assert not state["relations"]
+
+
+@pytest.mark.parametrize("unit", ["ns", "us"])
+def test_timestamp_rebound_index_data_keeps_native_read_order(protocol, monkeypatch, unit):
+    values, frame, schema = _timestamp_columns_fixture(unit)
+    columns, backing = frame.columns, vars(frame.columns)["_data"]
+    original_notna, original_astype = frame.notna, frame.astype
+    calls, normalizing = [], False
+
+    class ColumnsDataError(RuntimeError):
+        pass
+
+    def notna(*args, **kwargs):
+        nonlocal normalizing
+        normalizing = True
+        calls.append("notna")
+        return original_notna(*args, **kwargs)
+
+    def astype(*args, **kwargs):
+        calls.append("astype")
+        return original_astype(*args, **kwargs)
+
+    def data(index):
+        if index is columns:
+            if not normalizing:
+                calls.append("_data")
+                if calls.count("_data") > 1:
+                    raise ColumnsDataError("columns storage read twice before timestamp normalization")
+                monkeypatch.setitem(vars(frame), "notna", notna)
+                monkeypatch.setitem(vars(frame), "astype", astype)
+            return backing
+        return vars(index)["_data"]
+
+    def set_data(index, value):
+        vars(index)["_data"] = value
+
+    monkeypatch.setattr(pd.Index, "_data", property(data, set_data), raising=False)
+    with _arrow_input_service(protocol) as (spark, state):
+        spark.createDataFrame(frame, schema).toArrow()
+        assert calls == ["_data", "notna", "astype"]
+        _assert_timestamp_columns_row_input(state, values, schema)
+
+
+@pytest.mark.parametrize("unit", ["ns", "us"])
+@pytest.mark.parametrize("storage", ["object", "default", "python", "pyarrow", "python_nan", "pyarrow_nan"])
+def test_timestamp_canonical_columns_storage_stays_columnar(protocol, monkeypatch, unit, storage):
+    from pyspark.sql.pandas.types import to_arrow_schema
+    import json
+
+    values, frame, schema = _timestamp_columns_fixture(unit)
+    if storage == "object":
+        frame.columns = pd.Index(["original"], dtype=object)
+    elif storage != "default":
+        kind = storage.removesuffix("_nan")
+        dtype = (pd.StringDtype(storage=kind, na_value=np.nan)
+                 if storage.endswith("_nan") else pd.StringDtype(storage=kind))
+        frame.columns = pd.Index(pd.array(["original"], dtype=dtype))
+
+    def no_rows(*args, **kwargs):
+        raise AssertionError("canonical timestamp labels must retain columnar construction")
+
+    monkeypatch.setattr(pd.DataFrame, "astype", no_rows)
+    with _arrow_input_service(protocol) as (spark, state):
+        spark.createDataFrame(frame, schema).toArrow()
+        assert state["config_requests"]
+        assert len(state["input_tables"]) == 1
+        table = state["input_tables"][0]
+        assert table.num_rows == 10000
+        assert table.column(0).cast(pa.int64()).to_pylist() == values
+        assert table.column(0).is_null().to_pylist() == [value is None for value in values]
+        assert table.schema.equals(to_arrow_schema(schema, timezone="UTC"), check_metadata=True)
+        assert json.loads(state["relations"][0].local_relation.schema) == json.loads(schema.json())
