@@ -383,4 +383,3 @@ def prepare_float64_input(frame, schema):
     with pa.ipc.new_stream(sink, table.schema) as writer:
         writer.write_table(table)
     return sink.getvalue().to_pybytes()
-
