@@ -340,9 +340,10 @@ impl SparkConnectClient {
     }
 
     /// Execute a plan as a reattachable stream: retries the initial call and, if the
-    /// response stream drops mid-flight (e.g. `UNAVAILABLE` / `INVALID_CURSOR.DISCONNECTED`)
-    /// before `ResultComplete`, transparently resumes it with `ReattachExecute` from the
-    /// last observed `response_id`. Mirrors the reference reattachable execute path.
+    /// response stream ends cleanly or drops mid-flight (e.g. `UNAVAILABLE` /
+    /// `INVALID_CURSOR.DISCONNECTED`) before `ResultComplete`, transparently resumes
+    /// it with `ReattachExecute` from the last observed `response_id`.
+    /// Mirrors the reference reattachable execute path.
     pub async fn execute_plan_reattachable(
         &self,
         request: ExecutePlanRequest,
@@ -867,9 +868,9 @@ impl SparkConnectClient {
 
 /// A reattachable, retrying response stream for a reattachable ExecutePlan.
 ///
-/// Drives the gRPC response stream and, on a transient mid-stream disconnect
-/// before `ResultComplete`, resumes it via `ReattachExecute` from the last
-/// observed `response_id` (with backoff). Mirrors
+/// Drives the gRPC response stream and, on a transient mid-stream disconnect or
+/// clean EOF before `ResultComplete`, resumes it via `ReattachExecute` from the
+/// last observed `response_id` (with backoff). Mirrors
 /// `pyspark.sql.connect.client.reattach.ExecutePlanResponseReattachableIterator`.
 pub struct ReattachableResponseStream {
     stub: SparkConnectServiceClient<Channel>,
@@ -903,13 +904,27 @@ impl ReattachableResponseStream {
         }
     }
 
-    /// Next response, transparently reattaching on a transient mid-stream drop.
+    /// Decide whether a stream ending needs reattachment; no status means clean EOF.
+    fn should_reattach(
+        completed: bool,
+        status: Option<tonic::Status>,
+        retry_policy: &RetryPolicy,
+    ) -> Result<bool> {
+        match status {
+            Some(status) if completed || !retry_policy.can_retry(&status) => {
+                Err(SparkError::from_grpc_status(status))
+            }
+            _ => Ok(!completed),
+        }
+    }
+
+    /// Next response, reattaching on EOF or a transient drop until ResultComplete.
     pub async fn message(&mut self) -> Result<Option<ExecutePlanResponse>> {
         if self.done {
             return Ok(None);
         }
         loop {
-            match self.stream.message().await {
+            let status = match self.stream.message().await {
                 Ok(Some(resp)) => {
                     self.iter.set_last_response_id(&resp).await;
                     if self.iter.is_completed().await {
@@ -917,39 +932,37 @@ impl ReattachableResponseStream {
                     }
                     return Ok(Some(resp));
                 }
-                Ok(None) => {
-                    self.done = true;
-                    return Ok(None);
-                }
-                Err(status) => {
-                    // Only reattach a still-running execution on a retriable drop.
-                    if self.iter.is_completed().await || !self.retry_policy.can_retry(&status) {
-                        return Err(SparkError::from_grpc_status(status));
+                Ok(None) => None,
+                Err(status) => Some(status),
+            };
+            if !Self::should_reattach(self.iter.is_completed().await, status, &self.retry_policy)? {
+                self.done = true;
+                return Ok(None);
+            }
+
+            // A clean EOF before ResultComplete is a server-requested reattach,
+            // not query completion. Use the same resume path as a transient error.
+            loop {
+                let reattach = self.iter.create_reattach_request().await;
+                let mut req = Request::new(reattach);
+                self.attach_metadata(&mut req);
+                match self.stub.reattach_execute(req).await {
+                    Ok(r) => {
+                        self.stream = r.into_inner();
+                        break;
                     }
-                    loop {
-                        let reattach = self.iter.create_reattach_request().await;
-                        let mut req = Request::new(reattach);
-                        self.attach_metadata(&mut req);
-                        match self.stub.reattach_execute(req).await {
-                            Ok(r) => {
-                                self.stream = r.into_inner();
-                                break;
-                            }
-                            Err(e) => {
-                                if self.retry_policy.can_retry(&e) {
-                                    if let Some(w) = self.retry_state.next_attempt(None) {
-                                        tokio::time::sleep(std::time::Duration::from_millis(w))
-                                            .await;
-                                        continue;
-                                    }
-                                }
-                                return Err(SparkError::from_grpc_status(e));
+                    Err(e) => {
+                        if self.retry_policy.can_retry(&e) {
+                            if let Some(w) = self.retry_state.next_attempt(None) {
+                                tokio::time::sleep(std::time::Duration::from_millis(w)).await;
+                                continue;
                             }
                         }
+                        return Err(SparkError::from_grpc_status(e));
                     }
-                    // Resume reading on the freshly reattached stream.
                 }
             }
+            // Resume reading on the freshly reattached stream.
         }
     }
 }
@@ -1140,3 +1153,11 @@ mod tests {
         let _result = client.get_config_with_defaults(&pairs);
     }
 }
+
+#[cfg(test)]
+#[path = "client_tests/support.rs"]
+mod transport_test_support;
+
+#[cfg(test)]
+#[path = "client_tests/reattach_eof.rs"]
+mod reattach_eof_tests;
