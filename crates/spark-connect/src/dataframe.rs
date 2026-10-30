@@ -210,6 +210,7 @@ impl DataFrame {
         Self::new_with_schema(session, plan, None)
     }
 
+    /// Seed declared struct output schemas without analyzing the plan.
     pub(crate) fn new_with_schema(
         session: SparkSession,
         plan: LogicalPlan,
@@ -242,10 +243,13 @@ impl DataFrame {
         self.schema_cache.try_lock().ok()?.clone()
     }
 
+    /// Selected schema-preserving transformations snapshot the resolved schema,
+    /// mirroring Spark 4.2 `_cached_schema` propagation. Other plans resolve independently.
     fn with_cached_schema(&self, plan: LogicalPlan) -> Self {
         Self::new_with_cached_schema(self.session.clone(), plan, self.cached_schema())
     }
 
+    /// Set operations propagate only exactly equal cached schemas from the same session.
     fn with_merged_schema(&self, other: &DataFrame, plan: LogicalPlan) -> Self {
         // A right-hand plan from another session is analyzed in our session;
         // its previously resolved schema is not evidence about that resolution.
@@ -823,10 +827,6 @@ impl DataFrame {
     /// Get the schema of this DataFrame.
     ///
     /// The first successful lookup is cached and shared with exact clones.
-    /// Selected schema-preserving transformations snapshot an already resolved
-    /// schema; set operations do so only when both cached input schemas match
-    /// exactly in the same session. Declared struct output schemas also seed
-    /// the cache. Other plans resolve independently.
     /// Concurrent lookups on the same DataFrame or its clones wait for a single
     /// analysis RPC, so a stalled analysis blocks those metadata readers.
     /// Changes to external table or view metadata do not invalidate this cache;
@@ -846,7 +846,9 @@ impl DataFrame {
                 self.schema_cache.clear_poison();
                 poisoned.into_inner()
             });
-        if let Some(schema) = cached.as_ref() {
+        if let Some(schema) = cached.clone() {
+            // Copy the schema after unlocking so propagation can snapshot it.
+            drop(cached);
             return Ok(schema.as_ref().clone());
         }
         let request = self.build_analyze_request()?;
@@ -861,8 +863,10 @@ impl DataFrame {
             if !matches!(&schema, DataType::Struct { .. }) {
                 return Err(SparkError::connect_msg("Schema is not a struct type"));
             }
-            *cached = Some(Arc::new(schema.clone()));
-            Ok(schema)
+            let schema = Arc::new(schema);
+            *cached = Some(Arc::clone(&schema));
+            drop(cached);
+            Ok(schema.as_ref().clone())
         } else {
             Err(SparkError::connect_msg(
                 "Schema analyze failed: no schema in response",
