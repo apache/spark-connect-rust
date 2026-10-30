@@ -990,6 +990,93 @@ def test_row_iteration():
     assert values == [1, 2, 3]
 
 
+@pytest.mark.parametrize("value", [
+    None, False, True, 0, -1, -(2**63), 2**63 - 1,
+    0.0, -0.0, 1.25, float("inf"), float("-inf"),
+])
+def test_row_native_number_values_and_types(value):
+    from pyspark.sql import Row
+    import struct
+
+    actual = Row(value=value).value
+    assert type(actual) is type(value)
+    if type(value) is float:
+        assert struct.pack(">d", actual) == struct.pack(">d", value)
+    else:
+        assert actual == value
+
+
+def test_row_overflow_preserves_current_conversion_behavior():
+    from pyspark.sql import Row
+
+    # Known parity gap: classic PySpark Row preserves arbitrary Python ints.
+    # These assertions only guard that the numeric fast path retains the current
+    # generic fallback; they should change when that separate parity gap is fixed.
+    for value in (2**63, -(2**63) - 1):
+        actual = Row(value=value).value
+        assert type(actual) is float
+        assert actual == float(value)
+    with pytest.raises(TypeError, match="unsupported value type.*int"):
+        Row(value=2**20000)
+
+
+def test_row_nan_payload():
+    from pyspark.sql import Row
+    import struct
+
+    bits = bytes.fromhex("7ff8000000000042")
+    value = struct.unpack(">d", bits)[0]
+    assert struct.pack(">d", Row(value=value).value) == bits
+
+
+def test_row_number_subclasses_decimal_and_conversion_protocols():
+    from decimal import Decimal
+    from pyspark.sql import Row
+
+    trace = []
+
+    class IntSubclass(int):
+        def __float__(self):
+            raise AssertionError("int subclass must retain integer conversion")
+
+    class FloatSubclass(float):
+        def __float__(self):
+            raise AssertionError("float subclass must retain float extraction")
+
+    class Indexable:
+        def __index__(self):
+            trace.append("index")
+            return 42
+
+    class Floatable:
+        def __float__(self):
+            trace.append("float")
+            return -1.25
+
+    class DecimalSubclass(Decimal):
+        pass
+
+    for value, expected in [(IntSubclass(13), 13), (FloatSubclass(2.25), 2.25),
+                            (Indexable(), 42), (Floatable(), -1.25)]:
+        actual = Row(value=value).value
+        assert type(actual) is type(expected)
+        assert actual == expected
+    assert trace == ["index", "float"]
+    for value in (Decimal("-12.340"), DecimalSubclass("1.25")):
+        actual = Row(value=value).value
+        assert type(actual) is Decimal
+        assert actual == value
+
+
+def test_row_native_numbers_inside_nested_values():
+    from pyspark.sql import Row
+
+    value = Row(items=[1, -1.25, None, True], mapping={"x": 2**63 - 1})
+    actual = Row(value=value).value
+    assert list(actual.items) == [1, -1.25, None, True]
+    assert actual.mapping == {"x": 2**63 - 1}
+
+
 def test_datatype_from_ddl_parsing():
     """Test DataType.fromDDL parsing of DDL strings."""
     # StructField DDL parsing
@@ -2755,3 +2842,197 @@ for schema in schemas:
     else:
         raise AssertionError("expected a width validation error")
 """], check=True)
+
+
+# Exact list/tuple conversion and separate-process input IPC regressions.
+from datetime import date as container_input_date, datetime as container_input_datetime
+from decimal import Decimal as ContainerInputDecimal
+
+from pyspark.sql import Row as ContainerInputRow
+
+
+@pytest.mark.parametrize("container", [list, tuple])
+def test_container_input_values_and_errors(container):
+    value = container([1, None, [2, None], (3, 4)])
+    assert ContainerInputRow(value=value).value == [1, None, [2, None], [3, 4]]
+    assert ContainerInputRow(value=container()).value == []
+    assert ContainerInputRow(value=container([1, 2, 255])).value == [1, 2, 255]
+    assert ContainerInputRow(value=b"abc").value == b"abc"
+    assert ContainerInputRow(value=bytearray(b"abc")).value == b"abc"
+    with pytest.raises(TypeError, match="unsupported value type"):
+        ContainerInputRow(value=container([object()]))
+
+
+@pytest.mark.parametrize("container", [list, tuple])
+def test_container_input_subclass_numeric_precedence(container):
+    trace = []
+
+    class Indexed(container):
+        def __index__(self):
+            trace.append("index")
+            return 42
+
+    class Floating(container):
+        def __float__(self):
+            trace.append("float")
+            return 1.25
+
+    class Iterated(container):
+        def __iter__(self):
+            raise AssertionError("existing built-in iterator must remain in use")
+
+    assert ContainerInputRow(value=Indexed([1, 2])).value == 42
+    assert ContainerInputRow(value=Floating([1, 2])).value == 1.25
+    assert ContainerInputRow(value=Iterated([1, 2])).value == [1, 2]
+    assert trace == ["index", "float"]
+
+
+def test_container_input_recursive_leaf_and_row_types():
+    row = ContainerInputRow(x=1, y="a")
+    values = [True, 42, 1.25, "text", b"abc", ContainerInputDecimal("-12.340"),
+              container_input_date(2000, 2, 29), container_input_datetime(2020, 1, 1), row, None]
+    result = ContainerInputRow(value=values).value
+    assert result == values
+    assert type(result[0]) is bool
+    assert type(result[5]) is ContainerInputDecimal
+    assert isinstance(result[8], ContainerInputRow)
+    assert result[8].__fields__ == ["x", "y"]
+
+
+def _container_input_fields(data):
+    """Decode only the small protobuf envelope around a local Arrow relation."""
+    def varint(pos):
+        value, shift = 0, 0
+        while True:
+            byte = data[pos]
+            pos += 1
+            value |= (byte & 127) << shift
+            if byte < 128:
+                return value, pos
+            shift += 7
+
+    result, pos = {}, 0
+    while pos < len(data):
+        tag, pos = varint(pos)
+        wire = tag & 7
+        if wire == 2:
+            length, pos = varint(pos)
+            result[tag >> 3] = data[pos:pos + length]
+            pos += length
+        elif wire == 0:
+            _, pos = varint(pos)
+        elif wire in (1, 5):
+            pos += 8 if wire == 1 else 4
+        else:
+            raise AssertionError(f"unexpected protobuf wire type: {wire}")
+    return result
+
+
+def _container_input_capture_server(connection):
+    from concurrent.futures import ThreadPoolExecutor
+    import grpc
+
+    captured = []
+
+    def execute(request, context):
+        # ExecutePlanRequest.plan=3 -> Plan.root=1 ->
+        # Relation.local_relation=11 -> LocalRelation.data=1.
+        captured.append(_container_input_fields(_container_input_fields(_container_input_fields(_container_input_fields(request)[3])[1])[11])[1])
+        context.abort(grpc.StatusCode.INVALID_ARGUMENT, "captured container input")
+        yield b""  # Make this a streaming handler.
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        server = grpc.server(executor)
+        server.add_generic_rpc_handlers((grpc.method_handlers_generic_handler(
+            "spark.connect.SparkConnectService", {
+                "ExecutePlan": grpc.unary_stream_rpc_method_handler(execute),
+            }),))
+        port = server.add_insecure_port("127.0.0.1:0")
+        server.start()
+        connection.send(port)
+        try:
+            while True:
+                command = connection.recv()
+                if command == "stop":
+                    break
+                assert command == "get"
+                connection.send(captured.pop(0))
+        finally:
+            server.stop(0).wait()
+
+
+@pytest.fixture
+def container_input_capture_input():
+    import multiprocessing
+    import sys
+    from pathlib import Path
+
+    # importlib-mode pytest does not add the tests namespace to sys.path.
+    # Spawned children need it to import this server target; append it so the
+    # installed wheel still takes precedence over the source pyspark package.
+    test_container_input_root = str(Path(__file__).resolve().parents[1])
+    if test_container_input_root not in sys.path:
+        sys.path.append(test_container_input_root)
+    pytest.importorskip("grpc")
+    from pyspark.sql import SparkSession
+
+    context = multiprocessing.get_context("spawn")
+    parent, child = context.Pipe()
+    process = context.Process(target=_container_input_capture_server, args=(child,))
+    process.start()
+    try:
+        assert parent.poll(20), "capture service failed to start"
+        spark = SparkSession.builder.remote(f"sc://127.0.0.1:{parent.recv()}").getOrCreate()
+
+        def capture(data, schema):
+            import pyarrow as pa
+            df = spark.createDataFrame(data, schema=schema)
+            with pytest.raises(Exception, match="captured container input"):
+                df.collect()
+            parent.send("get")
+            assert parent.poll(10), "capture service failed to return the IPC payload"
+            return pa.ipc.open_stream(parent.recv()).read_all()
+
+        yield capture
+    finally:
+        if process.is_alive():
+            parent.send("stop")
+        process.join(10)
+        if process.is_alive():
+            process.terminate()
+            process.join(10)
+        parent.close()
+        child.close()
+
+
+@pytest.mark.parametrize("source", ["tuples", "pandas"])
+@pytest.mark.parametrize("schema_kind", ["inferred", "names", "explicit", "ddl"])
+@pytest.mark.parametrize("container", [list, tuple])
+def test_container_input_array_input_ipc(container_input_capture_input, source, schema_kind, container):
+    import pyarrow as pa
+    from pyspark.sql import types as T
+
+    values = [container([1, None, -3]), container(), None, container([255, 256])]
+    schema = {"inferred": None, "names": ["items"], "ddl": "items array<bigint>",
+              "explicit": T.StructType([T.StructField("items", T.ArrayType(T.LongType()))])}[schema_kind]
+    data = [(value,) for value in values]
+    if source == "pandas":
+        pd = pytest.importorskip("pandas")
+        data = pd.DataFrame(data, columns=["items"])
+    table = container_input_capture_input(data, schema)
+    assert table.column(0).type == pa.list_(pa.int64())
+    assert table.column(0).to_pylist() == [[1, None, -3], [], None, [255, 256]]
+
+
+def test_container_input_nested_array_struct_binary_ipc(container_input_capture_input):
+    from pyspark.sql import types as T
+
+    schema = T.StructType([
+        T.StructField("nested", T.ArrayType(T.ArrayType(T.LongType()))),
+        T.StructField("record", T.StructType([
+            T.StructField("x", T.LongType()), T.StructField("y", T.StringType())])),
+        T.StructField("blob", T.BinaryType()),
+    ])
+    table = container_input_capture_input([([[1, None], (), None], ContainerInputRow(x=7, y="row"), b"abc")], schema)
+    assert table.to_pylist() == [{"nested": [[1, None], [], None],
+                                  "record": {"x": 7, "y": "row"}, "blob": b"abc"}]
