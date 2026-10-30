@@ -804,12 +804,18 @@ impl SparkConnectClient {
     /// Existing artifacts and duplicate blobs are uploaded only once.
     pub async fn cache_artifacts(&self, blobs: Vec<Vec<u8>>) -> Result<Vec<String>> {
         use crate::artifact::InMemoryArtifact;
-        use sha2::{Digest, Sha256};
+        use ring::digest::{digest, SHA256};
         use std::collections::HashSet;
 
         let hashes: Vec<String> = blobs
             .iter()
-            .map(|blob| format!("{:x}", Sha256::digest(blob)))
+            .map(|blob| {
+                digest(&SHA256, blob)
+                    .as_ref()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            })
             .collect();
         let names: Vec<String> = hashes.iter().map(|hash| format!("cache/{hash}")).collect();
         let unique: HashSet<&str> = names.iter().map(String::as_str).collect();
@@ -833,7 +839,11 @@ impl SparkConnectClient {
             return Ok(hashes);
         }
         let expected: HashSet<String> = artifacts.iter().map(|a| a.name.clone()).collect();
-        let mut requests = build_artifact_request_stream(self.session_id.clone(), artifacts)?;
+        let mut requests = crate::artifact::build_artifact_request_stream_with_chunk_size(
+            self.session_id.clone(),
+            artifacts,
+            crate::artifact::CACHE_CHUNK_SIZE,
+        )?;
         for request in &mut requests {
             request.user_context = Some(UserContext {
                 user_id: self.user_id.clone().unwrap_or_default(),

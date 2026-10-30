@@ -533,12 +533,15 @@ def _arrow_input_service(protocol, *, upload_error=None, **overrides):
 
 
 @pytest.mark.parametrize("rows", [2, 17000000])
-def test_arrow_input_upload_above_grpc_limit(protocol, rows):
+@pytest.mark.parametrize("batch_bytes", [64 * 1024**2, 1024**3])
+def test_arrow_input_upload_above_grpc_limit(protocol, rows, batch_bytes):
     import numpy as np
     import json
 
     table = pa.table({"id": np.arange(rows, dtype=np.int64)})
-    with _arrow_input_service(protocol) as (spark, state):
+    with _arrow_input_service(protocol, **{
+        "spark.sql.session.localRelationBatchOfChunksSizeBytes": str(batch_bytes)
+    }) as (spark, state):
         df = spark.createDataFrame(table)
         assert df.isLocal()
         assert df.toArrow().column(0).to_pylist() == [rows]
@@ -550,7 +553,7 @@ def test_arrow_input_upload_above_grpc_limit(protocol, rows):
             assert table.nbytes > 128 * 1024**2
             assert state["relations"][0].HasField("chunked_cached_local_relation")
             assert state["relations"][0].ByteSize() < 1024**2
-            assert max(state["message_sizes"]) < 33 * 1024
+            assert max(state["message_sizes"]) < 1025 * 1024
             assert json.loads(state["spark_schema"])["fields"][0]["name"] == "id"
             uploads = state["uploads"]
             spark.createDataFrame(table).toArrow()
@@ -587,17 +590,25 @@ def test_arrow_input_upload_limits_and_chunk_order(protocol):
 
 @pytest.mark.parametrize("failure,match", [("crc", "CRC check failed"),
                                           ("missing", "Missing cache artifact")])
-def test_arrow_input_upload_failure(protocol, failure, match):
+@pytest.mark.parametrize("rows", [2, 4000000])
+def test_arrow_input_upload_failure(protocol, failure, match, rows):
+    import numpy as np
+
+    # The larger input spans multiple upload batches.
     with _arrow_input_service(protocol, upload_error=failure,
-                             **{"spark.sql.session.localRelationCacheThreshold": "0"}) as (spark, state):
+                             **{"spark.sql.session.localRelationCacheThreshold": "0",
+                                "spark.sql.session.localRelationBatchOfChunksSizeBytes":
+                                    str(8 * 1024**2)}) as (spark, state):
         with pytest.raises(Exception, match=match):
-            spark.createDataFrame(pa.table({"id": [1, 2]}))
+            spark.createDataFrame(pa.table({"id": np.arange(rows, dtype=np.int64)}))
         assert not state["relations"]
 
 
-def test_arrow_input_duplicate_chunks_preserve_multiplicity(protocol):
+@pytest.mark.parametrize("batch_bytes", [500, 1024**3])
+def test_arrow_input_duplicate_chunks_preserve_multiplicity(protocol, batch_bytes):
     options = {"spark.sql.session.localRelationCacheThreshold": "0",
-               "spark.sql.session.localRelationChunkSizeRows": "5"}
+               "spark.sql.session.localRelationChunkSizeRows": "5",
+               "spark.sql.session.localRelationBatchOfChunksSizeBytes": str(batch_bytes)}
     with _arrow_input_service(protocol, **options) as (spark, state):
         spark.createDataFrame(pa.table({"id": [1] * 20})).toArrow()
         cached = state["relations"][0].chunked_cached_local_relation
