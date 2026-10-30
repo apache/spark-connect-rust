@@ -663,7 +663,7 @@ def test_arrow_string_public_invalid_utf8_matches_native_row_control(
             with _arrow_input_service(protocol, config_error=True) as (spark, state):
                 # Normalization decodes the final invalid string before the
                 # native row validator can reject the first, nonnullable null.
-                with pytest.raises((UnicodeDecodeError, pa.ArrowInvalid)) as error:
+                with pytest.raises((UnicodeDecodeError, pa.ArrowException)) as error:
                     spark.createDataFrame(frame, schema)
                 errors.append((type(error.value), str(error.value)))
                 assert state["config_requests"] == []
