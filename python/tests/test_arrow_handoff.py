@@ -779,7 +779,12 @@ def test_integer_dataframe_and_name_subclasses_keep_fallback(monkeypatch):
     assert prepare_int64_table(Frame(frame), None) is None
     assert prepare_int64_table(frame, Names(["a"])) is None
     assert prepare_int64_table(frame, [Name("a")]) is None
-    assert prepare_int64_table(pd.DataFrame({Name("a"): frame["a"]}), None) is None
+    # Pandas 3 normalizes constructor labels to plain strings by default.
+    # An object Index keeps the subclass this fallback regression exercises.
+    named_frame = frame.copy()
+    named_frame.columns = pd.Index([Name("a")], dtype=object)
+    assert type(named_frame.columns[0]) is Name
+    assert prepare_int64_table(named_frame, None) is None
     monkeypatch.setattr(pd, "DataFrame", Frame)
     assert prepare_int64_table(Frame(frame), None) is None
 
