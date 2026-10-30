@@ -1082,7 +1082,7 @@ pub(crate) fn datetime_to_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
 }
 
 /// If `obj` is a `decimal.Decimal`, return it as a `Value::Decimal` (string value + scale
-/// from `as_tuple()`); otherwise `None`. Checked before int/float in `py_to_value` because
+/// from its exponent); otherwise `None`. Checked before int/float in `py_to_value` because
 /// Decimal defines `__float__`/`__int__`.
 fn decimal_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Option<Value>> {
     let py = obj.py();
@@ -1095,20 +1095,46 @@ fn decimal_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Option<Value>> {
         return Ok(None);
     }
     let dec_str: String = obj.str()?.extract()?;
-    let as_tuple = obj.call_method0("as_tuple")?;
-    let mut scale: Option<i32> = None;
-    if let Ok(exp_obj) = as_tuple.get_item(2) {
-        if !exp_obj.is_none() {
-            if let Ok(exp) = exp_obj.extract::<i64>() {
-                if exp <= 0 {
-                    scale = Some((-exp) as i32);
+    let scale = if obj.get_type().is(&decimal_cls) {
+        // Exact Decimal strings preserve the coefficient's trailing zeros and exponent.
+        // Subclasses may override either __str__ or as_tuple, so keep their old path.
+        decimal_string_scale(&dec_str)
+    } else {
+        let as_tuple = obj.call_method0("as_tuple")?;
+        let mut scale = None;
+        if let Ok(exp_obj) = as_tuple.get_item(2) {
+            if !exp_obj.is_none() {
+                if let Ok(exp) = exp_obj.extract::<i64>() {
+                    if exp <= 0 {
+                        scale = Some((-exp) as i32);
+                    }
                 }
             }
         }
-    }
+        scale
+    };
     Ok(Some(Value::Decimal {
         value: dec_str,
         precision: None,
         scale,
     }))
+}
+
+/// Match Decimal.as_tuple().exponent from an exact Decimal's canonical string.
+fn decimal_string_scale(value: &str) -> Option<i32> {
+    let unsigned = value.trim_start_matches(['-', '+']);
+    // Infinity and [s]NaN have non-integer tuple exponents and no inferred scale.
+    if !unsigned.as_bytes().first()?.is_ascii_digit() {
+        return None;
+    }
+    let (coefficient, exponent) = match unsigned.split_once(['E', 'e']) {
+        Some((coefficient, exponent)) => (coefficient, exponent.parse::<i64>().ok()?),
+        None => (unsigned, 0),
+    };
+    let fractional_digits = coefficient
+        .split_once('.')
+        .map_or(0, |(_, digits)| digits.len() as i64);
+    let exponent = exponent - fractional_digits;
+    // Preserve the existing scale conversion, including its i32 cast.
+    (exponent <= 0).then(|| (-exponent) as i32)
 }
