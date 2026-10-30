@@ -19,6 +19,101 @@
 """Conservative columnar pandas input; unsupported conversions use the row path."""
 
 
+def _has_canonical_columns(columns):
+    """Decline label containers whose row-path ``tolist`` can run custom hooks."""
+    from types import FunctionType
+
+    import numpy as np
+    import pandas as pd
+    from pandas.core import base as base_module
+    from pandas.core.indexes import base as index_module
+
+    Index = index_module.Index
+    if (pd.Index is not Index or type(columns) is not Index
+            or Index.__getattribute__ is not object.__getattribute__
+            or "tolist" in vars(columns)):
+        return False
+
+    def ordinary(method, name, module):
+        return (type(method) is FunctionType and method.__name__ == name
+                and method.__module__ == module.__name__
+                and method.__globals__ is vars(module))
+
+    # The native row path calls columns.tolist() before normalizing any cells.
+    # Decline overrides without invoking them, so fallback preserves that order.
+    if (Index.tolist is not base_module.IndexOpsMixin.tolist
+            or not ordinary(Index.tolist, "tolist", base_module)):
+        return False
+    values = vars(Index).get("_values")
+    if (type(values) is not property
+            or not ordinary(values.fget, "_values", index_module)):
+        return False
+    backing = vars(columns).get("_data")
+    if type(backing) is np.ndarray:
+        return True
+
+    try:
+        from pandas.core.arrays import numpy_ as numpy_module, string_ as string_module
+        from pandas.core.arrays import string_arrow as string_arrow_module
+        from pandas.core.arrays.arrow import array as arrow_module
+    except ImportError:
+        # Older pandas releases may lack these concrete string storage types.
+        return False
+
+    python_strings = tuple(vars(string_module).get(name) for name in
+                           ("StringArray", "StringArrayNumpySemantics"))
+    arrow_strings = tuple(vars(string_arrow_module).get(name) for name in
+                          ("ArrowStringArray", "ArrowStringArrayNumpySemantics"))
+    cls = type(backing)
+    if not any(cls is candidate for candidate in python_strings + arrow_strings):
+        return False
+    if (cls.__getattribute__ is not object.__getattribute__
+            or any(name in vars(backing) for name in
+                   ("tolist", "to_numpy", "isna", "fillna", "_hasna"))
+            or getattr(cls, "tolist", None) is not getattr(
+                vars(string_module).get("BaseStringArray"), "tolist", None)
+            or not ordinary(getattr(cls, "tolist", None), "tolist", string_module)):
+        return False
+    if any(cls is candidate for candidate in python_strings):
+        owner, module = vars(numpy_module).get("NumpyExtensionArray"), numpy_module
+        string_array = vars(string_module).get("StringArray")
+        if owner is None or string_array is None:
+            return False
+        try:
+            storage = object.__getattribute__(backing, "_ndarray")
+        except AttributeError:
+            return False
+        if type(storage) is not np.ndarray:
+            return False
+        isna = vars(string_array).get("isna", getattr(owner, "isna", None))
+        isna_module = string_module if "isna" in vars(string_array) else module
+    else:
+        import pyarrow as pa
+
+        owner, module = vars(arrow_module).get("ArrowExtensionArray"), arrow_module
+        if owner is None:
+            return False
+        try:
+            storage = object.__getattribute__(backing, "_pa_array")
+        except AttributeError:
+            return False
+        if type(storage) is not pa.ChunkedArray:
+            return False
+        isna, isna_module = getattr(owner, "isna", None), module
+        hasna = getattr(cls, "_hasna", None)
+        if (type(hasna) is not property
+                or not ordinary(hasna.fget, "_hasna", module)
+                or getattr(cls, "fillna", None) is not getattr(owner, "fillna", None)
+                or not ordinary(getattr(cls, "fillna", None), "fillna", module)):
+            return False
+    # BaseStringArray.tolist delegates to to_numpy, which consults isna (or
+    # Arrow's _hasna). Authenticate those direct hooks as well as the storage.
+    return (getattr(cls, "to_numpy", None) is getattr(owner, "to_numpy", None)
+            and ordinary(getattr(cls, "to_numpy", None), "to_numpy", module)
+            and getattr(cls, "isna", None) is isna
+            and ordinary(getattr(cls, "isna", None), "isna", isna_module))
+
+
 def prepare_int64_table(frame, schema):
     """Return an Arrow table only when each column is already a signed 64-bit integer.
 
@@ -52,6 +147,8 @@ def prepare_int64_table(frame, schema):
     if pd.DataFrame is not DataFrame or type(frame) is not DataFrame:
         return None
 
+    if not _has_canonical_columns(frame.columns):
+        return None
     width = len(frame.columns)
     if not width or not frame.columns.is_unique or not all(
         type(name) is str and "\x00" not in name for name in frame.columns
