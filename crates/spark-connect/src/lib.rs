@@ -5,6 +5,7 @@
 
 #![allow(clippy::result_large_err)] // SparkError is large; changing the type would break the API
 
+mod arrow_input;
 pub mod catalog;
 pub mod column;
 pub mod conf;
@@ -35,6 +36,8 @@ pub mod wasm_udf;
 pub mod window;
 
 // Re-export commonly used types
+#[doc(hidden)]
+pub use arrow_input::ArrowInputOptions;
 pub use column::{col, lit, lit_boolean, lit_double, lit_string, Column};
 pub use dataframe::{DataFrame, LocalRowIterator};
 pub use datasource::{CommonInlineUserDefinedDataSourceExpression, PythonDataSourcePayload};
