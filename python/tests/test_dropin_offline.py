@@ -2755,3 +2755,410 @@ for schema in schemas:
     else:
         raise AssertionError("expected a width validation error")
 """], check=True)
+
+
+@pytest.mark.parametrize("names,expected", [(None, None), (["a"], ["a", "_2"]), ([], ["_1", "_2"])])
+def test_arrow_input_normalization(names, expected):
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.sql._arrow_input import prepare_table
+
+    table = pa.table({"x": pa.chunked_array([[1], [2]]), "y": ["a", None]})
+    normalized, schema, columns = prepare_table(table, names, "TIMESTAMP_LTZ", "UTC", "false")
+    assert normalized.equals(table)
+    assert schema.names == ["x", "y"]
+    assert columns == expected
+
+
+def test_arrow_input_empty_and_width_errors():
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql._arrow_input import prepare_table
+
+    empty = pa.table({"x": pa.array([], type=pa.int64())})
+    with pytest.raises(PySparkValueError, match="CANNOT_INFER_EMPTY_SCHEMA"):
+        prepare_table(empty, None, None, None, None)
+    schema = T.StructType([T.StructField("x", T.LongType())])
+    assert prepare_table(empty, schema, None, None, None)[1] is schema
+    with pytest.raises(PySparkValueError, match="AXIS_LENGTH_MISMATCH"):
+        prepare_table(pa.table({"x": [1]}), ["a", "b"], "TIMESTAMP_LTZ", "UTC", "false")
+
+
+@pytest.mark.parametrize("timestamp_type,expected", [("TIMESTAMP_NTZ", T.TimestampNTZType), ("TIMESTAMP_LTZ", T.TimestampType)])
+def test_arrow_input_timestamps(timestamp_type, expected):
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.sql._arrow_input import prepare_table
+
+    table = pa.table({"t": pa.array([1001], type=pa.timestamp("ns"))})
+    normalized, schema, _ = prepare_table(table, None, timestamp_type, "UTC", "false")
+    assert isinstance(schema.fields[0].dataType, expected)
+    assert normalized.column(0).type.unit == "us"
+    assert normalized.column(0).cast(pa.int64()).to_pylist() == [1]
+
+
+def test_arrow_input_explicit_cast_and_nested_values():
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.sql._arrow_input import prepare_table
+
+    table = pa.table({"x": [1, 2], "nested": [[1, None], []]})
+    schema = T.StructType([T.StructField("x", T.IntegerType()),
+                           T.StructField("nested", T.ArrayType(T.LongType()))])
+    normalized, result, _ = prepare_table(table, schema, "TIMESTAMP_LTZ", "UTC", "false")
+    assert result is schema
+    assert normalized.column(0).type == pa.int32()
+    assert normalized.to_pylist() == table.to_pylist()
+    with pytest.raises(pa.ArrowInvalid):
+        prepare_table(pa.table({"x": [2**40]}), T.StructType([T.StructField("x", T.IntegerType())]),
+                      "TIMESTAMP_LTZ", "UTC", "false")
+
+
+def _arrow_input_ipc_bytes(table):
+    import pyarrow as pa
+
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    return sink.getvalue().to_pybytes()
+
+
+@pytest.mark.parametrize("layout", ["nullable", "sliced", "chunked", "empty"])
+def test_arrow_input_canonical_int64_preserves_ipc(layout):
+    pytest.importorskip("pyarrow")
+    import subprocess
+    import sys
+
+    subprocess.run([sys.executable, "-c", """
+import sys
+import pyarrow as pa
+from pyspark.sql import types as T
+from pyspark.sql._arrow_input import prepare_table
+
+values = [-(2**63), None, 0, 2**63 - 1]
+layout = sys.argv[1]
+if layout == "sliced":
+    column = pa.array([99, *values, 99], type=pa.int64()).slice(1, len(values))
+elif layout == "chunked":
+    column = pa.chunked_array([values[:1], values[1:3], values[3:]], type=pa.int64())
+else:
+    column = pa.array([] if layout == "empty" else values, type=pa.int64())
+table = pa.table({"x": column, "y": column})
+schema = T.StructType([T.StructField(name, T.LongType()) for name in table.column_names])
+heavy_modules = ("pyspark.errors", "pyspark.sql.pandas.types")
+assert all(name not in sys.modules for name in heavy_modules)
+for large_types in ("false", "true", None):
+    normalized, result_schema, names = prepare_table(
+        table, schema, "TIMESTAMP_LTZ", "UTC", large_types
+    )
+    assert normalized is table
+    assert result_schema is schema and names is None
+assert all(name not in sys.modules for name in heavy_modules)
+
+# A noncanonical input must still load the general path after warm fast calls.
+fallback = pa.table({"x": pa.array([1, None], type=pa.int32()),
+                     "y": pa.array([2, None], type=pa.int32())})
+converted, result_schema, names = prepare_table(fallback, schema, "TIMESTAMP_LTZ", "UTC", "false")
+assert all(column.type == pa.int64() for column in converted.columns)
+assert converted.to_pylist() == fallback.to_pylist()
+assert result_schema is schema and names is None
+assert all(name in sys.modules for name in heavy_modules)
+
+# Import the general converter only after checking the fast path and repeated
+# calls. Its cast is the oracle for cells, schema metadata, and IPC bytes.
+from pyspark.sql.pandas.types import to_arrow_schema
+expected = table.cast(to_arrow_schema(schema, timezone="UTC")).rename_columns(schema.names)
+def ipc_bytes(value):
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, value.schema) as writer:
+        writer.write_table(value)
+    return sink.getvalue().to_pybytes()
+assert normalized.schema.equals(expected.schema, check_metadata=True)
+assert normalized.to_pylist() == expected.to_pylist()
+assert ipc_bytes(normalized) == ipc_bytes(expected)
+""", layout], check=True)
+
+
+@pytest.mark.parametrize("kind", [
+    "schema_metadata", "schema_metadata_empty", "field_metadata", "field_metadata_empty",
+    "source_nonnullable", "target_metadata",
+    "target_nonnullable", "different_names", "cast", "int32", "inferred", "names",
+    "custom_type", "duplicate_names",
+])
+def test_arrow_input_noncanonical_uses_general_conversion(kind, monkeypatch):
+    import sys
+
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.sql._arrow_input import prepare_table
+    from pyspark.sql import pandas as pandas_package
+    from pyspark.sql.pandas import types as pandas_types
+
+    table = pa.table({"x": pa.array([1, None, 2], type=pa.int64())})
+    schema = T.StructType([T.StructField("x", T.LongType())])
+    if kind in ("schema_metadata", "schema_metadata_empty"):
+        metadata = {} if kind == "schema_metadata_empty" else {b"source": b"test"}
+        table = table.replace_schema_metadata(metadata)
+    elif kind in ("field_metadata", "field_metadata_empty"):
+        metadata = {} if kind == "field_metadata_empty" else {b"source": b"test"}
+        table = table.cast(pa.schema([
+            pa.field("x", pa.int64(), metadata=metadata)
+        ]))
+    elif kind == "source_nonnullable":
+        table = pa.table({"x": [1, 2]}, schema=pa.schema([
+            pa.field("x", pa.int64(), nullable=False)
+        ]))
+    elif kind == "target_metadata":
+        schema = T.StructType([T.StructField("x", T.LongType(), metadata={"note": "test"})])
+    elif kind == "target_nonnullable":
+        table = pa.table({"x": [1, 2]})
+        schema = T.StructType([T.StructField("x", T.LongType(), nullable=False)])
+    elif kind == "different_names":
+        schema = T.StructType([T.StructField("renamed", T.LongType())])
+    elif kind == "cast":
+        schema = T.StructType([T.StructField("x", T.IntegerType())])
+    elif kind == "int32":
+        table = pa.table({"x": pa.array([1, None, 2], type=pa.int32())})
+    elif kind == "inferred":
+        schema = None
+    elif kind == "names":
+        schema = ["renamed"]
+    elif kind == "custom_type":
+        class CustomType(T.DataType):
+            pass
+
+        schema = CustomType()
+    elif kind == "duplicate_names":
+        table = pa.Table.from_arrays([table.column(0), table.column(0)], names=["x", "x"])
+        schema = T.StructType([T.StructField("x", T.LongType()), T.StructField("x", T.LongType())])
+
+    expected_schema = (
+        schema if isinstance(schema, T.StructType) else pandas_types.from_arrow_schema(table.schema)
+    )
+    expected_error = None
+    try:
+        expected = table.cast(pandas_types.to_arrow_schema(
+            expected_schema, error_on_duplicated_field_names_in_struct=True, timezone="UTC"
+        )).rename_columns(expected_schema.names)
+    except Exception as error:
+        expected_error = (type(error), str(error))
+    # A previously imported converter already disables the fast path. Remove
+    # its module entry so each case proves its own guard rejects the input.
+    # Restore both import-system references after the test.
+    monkeypatch.setattr(pandas_package, "types", pandas_types)
+    monkeypatch.delitem(sys.modules, "pyspark.sql.pandas.types")
+    try:
+        normalized, result_schema, names = prepare_table(
+            table, schema, "TIMESTAMP_LTZ", "UTC", "false"
+        )
+    except Exception as error:
+        assert expected_error == (type(error), str(error))
+        assert "pyspark.sql.pandas.types" in sys.modules
+        return
+    assert expected_error is None
+    assert "pyspark.sql.pandas.types" in sys.modules
+    assert normalized.schema.equals(expected.schema, check_metadata=True)
+    assert normalized.to_pylist() == expected.to_pylist()
+    assert _arrow_input_ipc_bytes(normalized) == _arrow_input_ipc_bytes(expected)
+    if kind == "names":
+        assert names == ["renamed"]
+    else:
+        assert names is None
+    if schema is not None and kind != "names":
+        assert result_schema is schema
+
+
+def test_arrow_input_respects_loaded_converter_hook(monkeypatch):
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.sql._arrow_input import prepare_table
+    from pyspark.sql.pandas import types as pandas_types
+
+    table = pa.table({"x": [1, None, 2]})
+    schema = T.StructType([T.StructField("x", T.LongType())])
+    calls = []
+
+    def custom_arrow_schema(actual_schema, **kwargs):
+        calls.append(actual_schema)
+        return pa.schema([pa.field("x", pa.int32())])
+
+    monkeypatch.setattr(pandas_types, "to_arrow_schema", custom_arrow_schema)
+    normalized, result_schema, names = prepare_table(
+        table, schema, "TIMESTAMP_LTZ", "UTC", "false"
+    )
+    assert calls == [schema]
+    assert normalized.column(0).type == pa.int32()
+    assert normalized.to_pylist() == table.to_pylist()
+    assert result_schema is schema and names is None
+
+
+@pytest.mark.parametrize("alias", [
+    "StructType", "StructField", "BooleanType", "ByteType", "ShortType",
+    "IntegerType", "LongType",
+])
+def test_arrow_input_respects_rebound_type_aliases(alias):
+    pytest.importorskip("pyarrow")
+    import subprocess
+    import sys
+
+    subprocess.run([sys.executable, "-c", """
+import sys
+import pyarrow as pa
+from pyspark.sql import types as T
+from pyspark.sql._arrow_input import prepare_table
+
+table = pa.table({"x": [1, None, 2]})
+schema = T.StructType([T.StructField("x", T.LongType())])
+alias = sys.argv[1]
+original = getattr(T, alias)
+replacement = T.DataType if alias in ("StructType", "StructField") else T.LongType
+if alias == "LongType":
+    replacement = T.IntegerType
+
+def capture(operation):
+    try:
+        value = operation()
+    except Exception as error:
+        return ("error", type(error), str(error))
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, value.schema) as writer:
+        writer.write_table(value)
+    return ("ok", value.schema.serialize().to_pybytes(), value.to_pylist(), sink.getvalue().to_pybytes())
+
+assert "pyspark.sql.pandas.types" not in sys.modules
+try:
+    setattr(T, alias, replacement)
+    actual = capture(lambda: prepare_table(table, schema, "TIMESTAMP_LTZ", "UTC", "false")[0])
+    assert "pyspark.sql.pandas.types" in sys.modules
+    from pyspark.sql.pandas.types import to_arrow_schema
+    expected = capture(lambda: table.cast(to_arrow_schema(
+        schema, error_on_duplicated_field_names_in_struct=True, timezone="UTC"
+    )).rename_columns(schema.names))
+    assert actual == expected, (alias, actual, expected)
+finally:
+    setattr(T, alias, original)
+""", alias], check=True)
+
+
+@pytest.mark.parametrize("hook", [
+    "names", "__iter__", "field_metadata", "long_getattribute",
+])
+def test_arrow_input_respects_native_descriptors_changed_before_import(hook):
+    pytest.importorskip("pyarrow")
+    import subprocess
+    import sys
+
+    subprocess.run([sys.executable, "-c", """
+import sys
+import pyarrow as pa
+from pyspark.sql import types as T
+
+table = pa.table({"x": [1, None, 2]})
+schema = T.StructType([T.StructField("x", T.LongType())])
+hook = sys.argv[1]
+owner = T.StructType
+attribute = hook
+if hook == "names":
+    replacement = property(lambda self: ["renamed"])
+elif hook == "__iter__":
+    replacement = lambda self: iter([T.StructField("x", T.IntegerType())])
+elif hook == "field_metadata":
+    owner, attribute = T.StructField, "metadata"
+    replacement = property(lambda self: {"hook": "custom"})
+else:
+    owner, attribute = T.LongType, "__getattribute__"
+    def replacement(self, name):
+        return T.BooleanType if name == "__class__" else object.__getattribute__(self, name)
+missing = object()
+original = vars(owner).get(attribute, missing)
+
+try:
+    setattr(owner, attribute, replacement)
+    from pyspark.sql._arrow_input import prepare_table
+    assert "pyspark.sql.pandas.types" not in sys.modules
+    normalized, result_schema, names = prepare_table(table, schema, "TIMESTAMP_LTZ", "UTC", "false")
+    assert "pyspark.sql.pandas.types" in sys.modules
+    from pyspark.sql.pandas.types import to_arrow_schema
+    expected = table.cast(to_arrow_schema(
+        schema, error_on_duplicated_field_names_in_struct=True, timezone="UTC"
+    )).rename_columns(schema.names)
+    assert normalized.schema.equals(expected.schema, check_metadata=True)
+    assert normalized.to_pylist() == expected.to_pylist()
+    assert result_schema is schema
+    assert names is None
+finally:
+    if original is missing:
+        delattr(owner, attribute)
+    else:
+        setattr(owner, attribute, original)
+""", hook], check=True)
+
+
+def test_arrow_input_roundtrip_live_server():
+    """Run explicitly with SPARK_REMOTE; also checks imported buffers own their lifetime."""
+    import gc
+    import os
+    pa = pytest.importorskip("pyarrow")
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("requires SPARK_REMOTE")
+    from pyspark.sql import SparkSession
+
+    spark = SparkSession.builder.remote(remote).getOrCreate()
+    try:
+        table = pa.table({"x": pa.chunked_array([[1, 2], [3]]), "nested": [[1], None, []]})
+        df = spark.createDataFrame(table, ["id", "items"])
+        del table
+        gc.collect()
+        assert df.columns == ["id", "items"]
+        assert [(r[0], r[1]) for r in df.collect()] == [(1, [1]), (2, None), (3, [])]
+        empty = spark.createDataFrame(pa.table({"x": pa.array([], type=pa.int64())}),
+                                     T.StructType([T.StructField("x", T.LongType())]))
+        assert empty.count() == 0
+        assert empty.columns == ["x"]
+    finally:
+        spark.stop()
+
+
+@pytest.mark.parametrize("kind", ["slice", "dictionary", "decimal", "null", "struct", "nul"])
+def test_arrow_input_types_live_server(kind):
+    import os
+    from decimal import Decimal
+    pa = pytest.importorskip("pyarrow")
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("requires SPARK_REMOTE")
+    from pyspark.sql import SparkSession
+
+    tables = {
+        "slice": pa.table({"x": pa.array([0, 1, 2, 3]).slice(1, 2)}),
+        "dictionary": pa.table({"x": pa.array(["a", None, "b", "a"]).dictionary_encode()}),
+        "decimal": pa.table({"x": pa.array([Decimal("1.23"), None], type=pa.decimal128(10, 2))}),
+        "null": pa.table({"x": pa.nulls(2)}),
+        "struct": pa.table({"x": [{"a": [1, None]}, None]}),
+        "nul": pa.table({"a\0b": [1, 2]}),
+    }
+    spark = SparkSession.builder.remote(remote).getOrCreate()
+    try:
+        table = tables[kind]
+        df = spark.createDataFrame(table)
+        assert df.columns == table.column_names
+        assert df.toArrow().to_pylist() == table.to_pylist()
+    finally:
+        spark.stop()
+
+
+def test_arrow_input_large_upload_live_server():
+    """A table larger than one gRPC message must use uploaded cache artifacts."""
+    import os
+    pa = pytest.importorskip("pyarrow")
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("requires SPARK_REMOTE")
+    from pyspark.sql import SparkSession
+
+    rows = 140000
+    table = pa.table({"payload": [b"x" * 1024] * rows})
+    assert table.nbytes > 128 * 1024**2
+    spark = SparkSession.builder.remote(remote).getOrCreate()
+    try:
+        df = spark.createDataFrame(table)
+        assert df.count() == rows
+        assert df.selectExpr("sum(length(payload)) AS total").collect()[0][0] == rows * 1024
+    finally:
+        spark.stop()
