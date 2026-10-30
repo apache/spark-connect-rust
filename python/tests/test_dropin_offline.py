@@ -7,10 +7,14 @@ that require a live server live in test_dropin_e2e.py and are gated on SPARK_REM
 """
 
 import pickle
+import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import pytest
 
-from pyspark.sql import types as T
+from _mock_connect_server import message_field, mock_connect_session, struct_schema
+from pyspark.sql import SparkSession, types as T
 
 
 # --------------------------------------------------------------------------- types
@@ -2755,3 +2759,329 @@ for schema in schemas:
     else:
         raise AssertionError("expected a width validation error")
 """], check=True)
+
+
+# --------------------------------------------------------------------------- schema cache
+
+
+@pytest.fixture
+def mock_connect():
+    pytest.importorskip("grpc")
+    with mock_connect_session() as session:
+        yield session
+
+
+@pytest.mark.parametrize("first", ["schema", "columns", "dtypes"])
+def test_schema_cache_one_analysis_shared_by_metadata_accessors(mock_connect, first):
+    spark, service = mock_connect
+    df = spark.range(10)
+    assert service.calls == 0
+    getattr(df, first)
+    assert service.calls == 1
+    for _ in range(3):
+        schema = df.schema
+        assert isinstance(schema, T.StructType)
+        expected = T.StructType([T.StructField("id", T.LongType(), True, {"note": "original"})])
+        assert schema.jsonValue() == expected.jsonValue()
+        assert df.columns == ["id"]
+        assert df.dtypes == [("id", "bigint")]
+    assert service.calls == 1
+
+
+def test_schema_cache_returned_schema_and_lists_are_independent(mock_connect):
+    spark, service = mock_connect
+    df = spark.range(10)
+    expected_json = df.schema.jsonValue()
+    modified = df.schema
+    modified.add("extra", T.StringType())
+    assert len(modified.fields) == 2
+    columns = df.columns
+    columns.append("extra")
+    dtypes = df.dtypes
+    dtypes.clear()
+    assert df.schema.jsonValue() == expected_json
+    assert df.columns == ["id"]
+    assert df.dtypes == [("id", "bigint")]
+    assert service.calls == 1
+
+
+def test_schema_cache_derived_and_new_plans_resolve_independently(mock_connect):
+    spark, service = mock_connect
+    df = spark.range(10)
+    assert df.columns == ["id"]
+    derived = df.selectExpr("id AS renamed")
+    service.data_type = struct_schema("renamed")
+    assert derived.columns == ["renamed"]
+    assert service.calls == 2
+    assert df.columns == ["id"]
+    # Rebuilding the same source must observe updated server metadata, while the
+    # original immutable DataFrame retains its already-resolved schema.
+    fresh = spark.range(10)
+    assert fresh.columns == ["renamed"]
+    other_session = spark.newSession()
+    try:
+        assert other_session.range(10).columns == ["renamed"]
+    finally:
+        other_session.stop()
+    assert service.calls == 4
+    assert df.columns == ["id"]
+
+
+@pytest.mark.parametrize("transform", [
+    pytest.param(lambda df: df.filter("id > 0"), id="filter"),
+    pytest.param(lambda df: df.limit(2), id="limit"),
+    pytest.param(lambda df: df.alias("source"), id="alias"),
+    pytest.param(lambda df: df.distinct(), id="distinct"),
+    pytest.param(lambda df: df.dropDuplicates(["id"]), id="dropDuplicates"),
+    pytest.param(lambda df: df.coalesce(1), id="coalesce"),
+    pytest.param(lambda df: df.repartition(2), id="repartition"),
+    pytest.param(lambda df: df.repartition(2, "id"), id="repartition-expression"),
+    pytest.param(lambda df: df.repartition("id"), id="repartition-column"),
+    pytest.param(lambda df: df.repartitionByRange(2, "id"), id="repartitionByRange"),
+    pytest.param(lambda df: df.repartitionById(2, "id"), id="repartitionById"),
+    pytest.param(lambda df: df.sort("id"), id="sort"),
+    pytest.param(lambda df: df.sortWithinPartitions("id"), id="sortWithinPartitions"),
+    pytest.param(lambda df: df.sample(fraction=0.5, seed=1), id="sample"),
+    pytest.param(lambda df: df.hint("broadcast"), id="hint"),
+])
+def test_schema_cache_preserving_transforms_reuse_warm_schema(mock_connect, transform):
+    spark, service = mock_connect
+    df = spark.range(10)
+    expected = df.schema.jsonValue()
+    assert service.calls == 1
+    # A new analysis would return different metadata, making accidental misses
+    # observable as well as countable.
+    service.data_type = struct_schema("unexpected")
+    derived = transform(df)
+    assert derived.schema.jsonValue() == expected
+    assert derived.limit(1).columns == ["id"]
+    assert service.calls == 1
+
+
+def test_schema_cache_random_split_and_observe_reuse_warm_schema(mock_connect):
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    df = spark.range(10)
+    assert df.columns == ["id"]
+    service.data_type = struct_schema("unexpected")
+    for split in df.randomSplit([1.0, 2.0], seed=1):
+        assert split.columns == ["id"]
+    observed = df.observe("rows", F.count("*").alias("count"))
+    assert observed.columns == ["id"]
+    assert service.calls == 1
+
+
+def test_schema_cache_cold_children_keep_independent_caches(mock_connect):
+    spark, service = mock_connect
+    df = spark.range(10)
+    before_lookup = df.limit(1)
+    service.block_response = True
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        lookup = pool.submit(lambda: df.schema)
+        try:
+            for _ in range(500):
+                if service.calls:
+                    break
+                time.sleep(0.01)
+            else:
+                raise AssertionError("Metadata request never reached the server")
+            # Constructing a child also runs with the GIL. It must not wait for
+            # the in-flight cache miss, or this thread cannot release the server.
+            during_lookup = df.filter("id > 0")
+            assert not lookup.done()
+        finally:
+            service.release_response()
+        assert lookup.result(timeout=10).fieldNames() == ["id"]
+    assert service.calls == 1
+    # Neither child picks up a cache populated after the child was constructed.
+    for calls, child in enumerate((before_lookup, during_lookup), start=2):
+        service.data_type = struct_schema(f"child_{calls}")
+        assert child.columns == [f"child_{calls}"]
+        assert service.calls == calls
+    assert df.columns == ["id"]
+
+
+@pytest.mark.parametrize("transform", [
+    pytest.param(lambda df: df.selectExpr("id AS renamed"), id="select"),
+    pytest.param(lambda df: df.zipWithIndex(), id="zipWithIndex"),
+    # Reference PySpark does not propagate through offset, despite its unchanged
+    # output columns. Match its explicit propagation rules rather than guessing.
+    pytest.param(lambda df: df.offset(1), id="offset"),
+])
+def test_schema_cache_other_transforms_analyze_independently(mock_connect, transform):
+    spark, service = mock_connect
+    df = spark.range(10)
+    assert df.columns == ["id"]
+    derived = transform(df)
+    assert service.calls == 1
+    service.data_type = struct_schema("derived")
+    assert derived.columns == ["derived"]
+    assert service.calls == 2
+    assert df.columns == ["id"]
+
+
+@pytest.mark.parametrize("operation", [
+    "union", "unionAll", "unionByName", "subtract", "exceptAll", "intersect", "intersectAll",
+])
+def test_schema_cache_set_operations_require_equal_warm_schemas(mock_connect, operation):
+    spark, service = mock_connect
+    left, right = spark.range(10), spark.range(10)
+    assert left.columns == right.columns == ["id"]
+    assert service.calls == 2
+    equal = getattr(left, operation)(right)
+    assert equal.columns == ["id"]
+    assert service.calls == 2
+
+    cold = spark.range(10)
+    missing = getattr(left, operation)(cold)
+    assert service.calls == 2
+    service.data_type = struct_schema("resolved")
+    assert missing.columns == ["resolved"]
+    assert service.calls == 3
+
+    different = spark.range(10)
+    assert different.columns == ["resolved"]
+    assert service.calls == 4
+    mismatched = getattr(left, operation)(different)
+    service.data_type = struct_schema("coerced")
+    assert mismatched.columns == ["coerced"]
+    assert service.calls == 5
+    assert left.columns == ["id"]
+
+
+def test_schema_cache_to_uses_supplied_struct_schema(mock_connect):
+    spark, service = mock_connect
+    df = spark.range(10)
+    target = T.StructType([T.StructField("converted", T.StringType(), True)])
+    expected = target.jsonValue()
+    converted = df.to(target)
+    target.add("extra", T.LongType())
+    assert converted.schema.jsonValue() == expected
+    assert converted.limit(1).dtypes == [("converted", "string")]
+    assert service.calls == 0
+    assert df.columns == ["id"]
+    assert service.calls == 1
+
+
+@pytest.mark.parametrize("method", ["mapInPandas", "mapInArrow"])
+def test_schema_cache_map_uses_declared_struct_schema(mock_connect, method):
+    spark, service = mock_connect
+    target = T.StructType([
+        T.StructField("output", T.StringType(), True, {"note": "declared"}),
+    ])
+    mapped = getattr(spark.range(10), method)(lambda batches: batches, schema=target)
+    # The binding resolves the input columns while building the UDF. Reading its
+    # declared output schema must not issue another analysis request.
+    assert service.calls == 1
+    service.data_type = struct_schema("unexpected")
+    assert mapped.schema.jsonValue() == target.jsonValue()
+    assert mapped.columns == ["output"]
+    assert mapped.dtypes == [("output", "string")]
+    assert service.calls == 1
+
+
+@pytest.mark.parametrize("failure", ["rpc", "no-result", "missing-schema", "invalid-type"])
+def test_schema_cache_failures_are_not_cached(mock_connect, failure):
+    spark, service = mock_connect
+    df = spark.range(10)
+    service.failure = failure
+    for count in (1, 2):
+        message = {
+            "rpc": "schema unavailable",
+            "no-result": "no schema in response",
+            "missing-schema": "Schema is missing",
+            "invalid-type": "DataType kind not set",
+        }[failure]
+        with pytest.raises(Exception, match=message):
+            _ = df.schema
+        assert service.calls == count
+    service.failure = None
+    assert df.columns == ["id"]
+    assert df.dtypes == [("id", "bigint")]
+    assert service.calls == 3
+
+
+def test_schema_cache_non_struct_responses_are_not_cached(mock_connect):
+    spark, service = mock_connect
+    df = spark.range(10)
+    service.data_type = message_field(7, b"")
+    for count in (1, 2):
+        with pytest.raises(Exception, match="Schema is not a struct type"):
+            _ = df.schema
+        assert service.calls == count
+    service.data_type = struct_schema()
+    assert df.columns == ["id"]
+    assert df.dtypes == [("id", "bigint")]
+    assert service.calls == 3
+
+
+def test_schema_cache_concurrent_metadata_access_issues_one_analysis(mock_connect):
+    spark, service = mock_connect
+    df = spark.range(10)
+    accessors = ("schema", "columns", "dtypes") * 3
+    start = Barrier(len(accessors) + 1)
+    service.block_response = True
+
+    def read_metadata(accessor):
+        start.wait(timeout=10)
+        return getattr(df, accessor)
+
+    with ThreadPoolExecutor(max_workers=len(accessors)) as pool:
+        pending = [pool.submit(read_metadata, accessor) for accessor in accessors]
+        try:
+            start.wait(timeout=10)
+            for _ in range(500):
+                if service.calls:
+                    break
+                time.sleep(0.01)
+            else:
+                raise AssertionError("Metadata request never reached the server")
+            # Keep the first RPC in flight while the other workers attempt their
+            # cold lookups. An implementation without miss synchronization must
+            # not pass just because the first response arrives immediately.
+            time.sleep(0.1)
+            assert not any(future.done() for future in pending)
+        finally:
+            service.release_response()
+        results = [future.result(timeout=10) for future in pending]
+    schemas = []
+    for accessor, result in zip(accessors, results):
+        if accessor == "schema":
+            schemas.append(result)
+        elif accessor == "columns":
+            assert result == ["id"]
+        else:
+            assert result == [("id", "bigint")]
+    assert all(schema.jsonValue() == schemas[0].jsonValue() for schema in schemas)
+    assert len({id(schema) for schema in schemas}) == len(schemas)
+    assert service.calls == 1
+
+
+@pytest.mark.parametrize("accessor", ["schema", "columns", "dtypes"])
+def test_schema_cache_metadata_wait_releases_gil(mock_connect, accessor):
+    spark, service = mock_connect
+    df = spark.range(10)
+    service.block_response = True
+
+    def allow_response_after_request():
+        for _ in range(500):
+            if service.calls:
+                service.release_response()
+                return
+            time.sleep(0.01)
+        raise AssertionError("Metadata request never reached the server")
+
+    # This Python thread must run while the main thread waits for the RPC. The
+    # server bounds its wait, so retaining the GIL fails instead of deadlocking.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        allowed = pool.submit(allow_response_after_request)
+        result = getattr(df, accessor)
+        allowed.result(timeout=10)
+    if accessor == "schema":
+        assert isinstance(result, T.StructType)
+    elif accessor == "columns":
+        assert result == ["id"]
+    else:
+        assert result == [("id", "bigint")]
+    assert service.calls == 1
