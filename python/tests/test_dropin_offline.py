@@ -169,6 +169,66 @@ def test_functions_udtf_and_arrow_decorators():
 
 # --------------------------------------------------------------------------- functions / columns
 
+def test_functions_exports_fresh_process():
+    import subprocess
+    import sys
+    import textwrap
+
+    result = subprocess.run([sys.executable, "-c", textwrap.dedent('''
+        import importlib
+        import inspect
+        import sys
+        from pyspark.sql import functions as F
+
+        initial = ["col", "lit", "expr", "sum", "count", "avg", "max", "min",
+                   "when", "udf", "pandas_udf"]
+
+        def check_exports():
+            assert type(F.__all__) is list
+            assert F.__all__[:len(initial)] == initial
+            assert len(F.__all__) == len(set(F.__all__))
+            assert all(callable(getattr(F, name)) for name in F.__all__)
+            assert not any(name.startswith("_") for name in F.__all__)
+            for name in ("OrderingColumn", "PartitioningColumn", "SelectedColumn"):
+                assert name in F.__all__
+                assert inspect.isclass(getattr(F, name))
+            namespace = {}
+            exec("from pyspark.sql.functions import *", namespace)
+            assert [name for name in namespace if name != "__builtins__"] == F.__all__
+            assert all(namespace[name] is getattr(F, name) for name in F.__all__)
+            builtin = importlib.import_module("pyspark.sql.functions.builtin")
+            assert builtin is F.builtin is sys.modules[builtin.__name__]
+            assert type(builtin.__all__) is list
+            assert builtin.__all__ == F.__all__
+            assert builtin.__all__ is not F.__all__
+            assert all(getattr(builtin, name) is getattr(F, name) for name in F.__all__)
+            builtin_namespace = {}
+            exec("from pyspark.sql.functions.builtin import *", builtin_namespace)
+            assert [name for name in builtin_namespace if name != "__builtins__"] == F.__all__
+            assert all(builtin_namespace[name] is getattr(F, name) for name in F.__all__)
+            part = importlib.import_module("pyspark.sql.functions.partitioning")
+            assert part is F.partitioning is sys.modules[part.__name__]
+            assert part.__all__ == ["years", "months", "days", "hours", "bucket"]
+            assert all(getattr(part, name) is getattr(F, name) for name in part.__all__)
+            assert F.random is F.rand
+            assert F.column is not F.col
+            assert list(inspect.signature(F.first).parameters) == ["col", "ignorenulls"]
+            assert repr(inspect.signature(F.first).parameters["ignorenulls"].default) == "<unset>"
+            assert list(inspect.signature(F.split).parameters) == ["str", "pattern", "limit"]
+            return F.__all__.copy()
+
+        expected = check_exports()
+        for _ in range(2):
+            old_all = F.__all__
+            old_all.append("caller_added_name")
+            F.builtin.__all__.append("builtin_only_name")
+            importlib.reload(F)
+            assert F.__all__ is not old_all
+            assert check_exports() == expected
+    ''')], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_functions_build_columns():
     from pyspark.sql import functions as F
     c = F.col("id")
