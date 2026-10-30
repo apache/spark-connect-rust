@@ -2755,3 +2755,207 @@ for schema in schemas:
     else:
         raise AssertionError("expected a width validation error")
 """], check=True)
+
+
+# Positional DataFrame indexing via a separate-process mock gRPC service.
+from concurrent.futures import ThreadPoolExecutor as positional_indexing_ThreadPoolExecutor
+import multiprocessing as positional_indexing_multiprocessing
+
+from pyspark.sql import (
+    SparkSession as positional_indexing_SparkSession, Column as positional_indexing_Column,
+)
+
+
+def positional_indexing_varint(value):
+    result = bytearray()
+    while value > 127:
+        result.append((value & 127) | 128)
+        value >>= 7
+    result.append(value)
+    return bytes(result)
+
+
+def positional_indexing_message(field, value):
+    if isinstance(value, str):
+        value = value.encode()
+    return positional_indexing_varint(field * 8 + 2) + positional_indexing_varint(len(value)) + value
+
+
+def positional_indexing_schema(name="id", nested=False):
+    # types.proto: DataType.long=7, .struct=21; Struct.fields=1;
+    # StructField: name=1, data_type=2, nullable=3, metadata=4.
+    data_type = positional_indexing_message(21, positional_indexing_message(1, positional_indexing_field("inner", positional_indexing_message(7, b"")))) if nested else positional_indexing_message(7, b"")
+    return positional_indexing_message(21, positional_indexing_message(1, positional_indexing_field(name, data_type)))
+
+
+def positional_indexing_field(name, data_type):
+    return (positional_indexing_message(1, name) + positional_indexing_message(2, data_type) + b"\x18\x01"
+            + positional_indexing_message(4, '{"note":"original"}'))
+
+
+def positional_indexing_serve(connection):
+    import grpc as positional_indexing_grpc
+    # A separate process also exercises columns/dtypes, whose first access may
+    # hold the client's GIL while waiting for the RPC.
+    class Service:
+        calls = 0
+        data_type = positional_indexing_schema()
+        failure = None
+
+        def analyze(self, request, context):
+            self.calls += 1
+            # Both clients serialize the UUID session identifier as field 1.
+            # Echo it so reference Python can verify response integrity.
+            assert request[0] == 10 and request[1] < 128
+            session = request[:2 + request[1]]
+            if self.failure == "rpc":
+                context.abort(positional_indexing_grpc.StatusCode.INVALID_ARGUMENT, "schema unavailable")
+            if self.failure == "no-result":
+                return b""
+            if self.failure == "missing-schema":
+                return positional_indexing_message(2, b"")
+            if self.failure == "invalid-type":
+                return positional_indexing_message(2, positional_indexing_message(1, b""))
+            # base.proto: AnalyzePlanResponse.schema=2, Schema.schema=1.
+            return session + positional_indexing_message(2, positional_indexing_message(1, self.data_type))
+
+    service = Service()
+    with positional_indexing_ThreadPoolExecutor(max_workers=4) as executor:
+        server = positional_indexing_grpc.server(executor)
+        handler = positional_indexing_grpc.unary_unary_rpc_method_handler(service.analyze)
+        release = positional_indexing_grpc.unary_unary_rpc_method_handler(
+            lambda request, context: request[:2 + request[1]])
+        config = positional_indexing_grpc.unary_unary_rpc_method_handler(
+            lambda request, context: request[:2 + request[1]] + positional_indexing_message(
+                2, positional_indexing_message(1, "spark.python.sql.dataFrameDebugging.enabled")
+                + positional_indexing_message(2, "false")))
+        server.add_generic_rpc_handlers((positional_indexing_grpc.method_handlers_generic_handler(
+            "spark.connect.SparkConnectService", {
+                "AnalyzePlan": handler, "ReleaseSession": release, "Config": config}),))
+        port = server.add_insecure_port("127.0.0.1:0")
+        server.start()
+        connection.send(port)
+        try:
+            while True:
+                command = connection.recv()
+                if command[0] == "stop":
+                    break
+                if command[0] == "get":
+                    connection.send(getattr(service, command[1]))
+                elif command[0] == "set":
+                    setattr(service, command[1], command[2])
+                    connection.send(None)
+        finally:
+            server.stop(0).wait()
+
+
+class positional_indexing_RemoteService:
+    def __init__(self, connection):
+        object.__setattr__(self, "connection", connection)
+
+    def __getattr__(self, name):
+        self.connection.send(("get", name))
+        assert self.connection.poll(10), "Mock server did not respond"
+        return self.connection.recv()
+
+    def __setattr__(self, name, value):
+        self.connection.send(("set", name, value))
+        assert self.connection.poll(10), "Mock server did not respond"
+        self.connection.recv()
+
+
+@pytest.fixture
+def positional_indexing_analyzed():
+    pytest.importorskip("grpc")
+    context = positional_indexing_multiprocessing.get_context("spawn")
+    parent, child = context.Pipe()
+    process = context.Process(target=positional_indexing_serve, args=(child,))
+    process.start()
+    spark = None
+    try:
+        assert parent.poll(20), "Mock server did not start"
+        port = parent.recv()
+        spark = positional_indexing_SparkSession.builder.remote(f"sc://127.0.0.1:{port}").create()
+        yield spark, positional_indexing_RemoteService(parent)
+    finally:
+        if spark is not None:
+            spark.stop()
+        if process.is_alive():
+            parent.send(("stop",))
+        process.join(10)
+        if process.is_alive():
+            process.terminate()
+            process.join(10)
+        parent.close()
+        child.close()
+
+
+def positional_indexing_columns(*names):
+    return positional_indexing_message(21, b"".join(positional_indexing_message(1, positional_indexing_field(name, positional_indexing_message(7, b""))) for name in names))
+
+
+@pytest.mark.parametrize("index, name", [
+    (0, "first"), (1, "second"), (2, "last"),
+    (-1, "last"), (-2, "second"), (-3, "first"),
+    (False, "first"), (True, "second"),
+])
+def test_positional_indexing_positional_column(positional_indexing_analyzed, index, name):
+    spark, service = positional_indexing_analyzed
+    service.data_type = positional_indexing_columns("first", "second", "last")
+    df = spark.range(10)
+    column = df[index]
+    assert isinstance(column, positional_indexing_Column)
+    assert repr(column) == repr(df[name])
+    assert service.calls == 1
+
+
+@pytest.mark.parametrize("names, index", [
+    (("a", "b"), 2), (("a", "b"), -3),
+    (("a",), 10**100), (("a",), -(10**100)),
+    ((), 0), ((), -1), ((), False), (("a",), True),
+])
+def test_positional_indexing_positional_bounds(positional_indexing_analyzed, names, index):
+    spark, service = positional_indexing_analyzed
+    service.data_type = positional_indexing_columns(*names)
+    with pytest.raises(IndexError):
+        spark.range(10)[index]
+    assert service.calls == 1
+
+
+def test_positional_indexing_integer_subclass_and_string_lookup(positional_indexing_analyzed):
+    class Position(int):
+        pass
+    class Name(str):
+        pass
+    spark, service = positional_indexing_analyzed
+    service.data_type = positional_indexing_columns("a.b", "with space", "a.b")
+    df = spark.range(10)
+    assert repr(df[Position(-2)]) == repr(df[Name("with space")])
+    assert repr(df[0]) == repr(df["a.b"])
+    before = service.calls
+    for name in ["missing", "*", "`a.b`", ""]:
+        assert isinstance(df[name], positional_indexing_Column)
+    assert service.calls == before
+
+
+def test_positional_indexing_invalid_index_types_do_not_analyze(positional_indexing_analyzed):
+    class Position:
+        def __index__(self):
+            return 0
+    spark, service = positional_indexing_analyzed
+    df = spark.range(10)
+    for value in [0.0, None, b"id", slice(0, 1), Position()]:
+        with pytest.raises(TypeError):
+            df[value]
+    assert service.calls == 0
+
+
+def test_positional_indexing_positional_propagates_schema_failure(positional_indexing_analyzed):
+    spark, service = positional_indexing_analyzed
+    service.failure = "rpc"
+    df = spark.range(10)
+    with pytest.raises(Exception, match="schema unavailable"):
+        df[0]
+    assert service.calls == 1
+    assert isinstance(df["id"], positional_indexing_Column)
+    assert service.calls == 1

@@ -1,7 +1,7 @@
 //! PyO3 wrapper for spark_connect::dataframe::DataFrame.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyTuple};
+use pyo3::types::{PyDict, PyInt, PyList, PyTuple};
 use spark_connect::dataframe::{DataFrame, LocalRowIterator};
 use spark_connect::plan::JoinType;
 use spark_connect::udf::{eval_type, CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
@@ -1432,9 +1432,20 @@ impl PyDataFrame {
         }
     }
 
-    /// Column access by name (`df["col"]`).
-    fn __getitem__(&self, item: &str) -> PyColumn {
-        PyColumn::new(spark_connect::functions::col(item))
+    /// Column access by name (`df["col"]`) or position (`df[0]`).
+    fn __getitem__(&self, py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
+        let name = if item.is_instance_of::<PyInt>() {
+            let columns = py.detach(|| self.dataframe.columns()).to_pyerr()?;
+            // Use Python list indexing for negative indices, bools (an int
+            // subclass), and IndexError even for integers larger than isize.
+            PyList::new(py, columns)?
+                .as_any()
+                .get_item(item)?
+                .extract::<String>()?
+        } else {
+            item.extract::<String>()?
+        };
+        Ok(PyColumn::new(spark_connect::functions::col(&name)))
     }
 
     /// Private column accessor used by pandas-on-Spark (`sdf._col(name)`); mirrors the
