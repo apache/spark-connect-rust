@@ -395,4 +395,3 @@ def prepare_string_input(frame, schema):
            for array in arrays):
         return None
     return _pandas_string_ipc(arrays, schema)
-
