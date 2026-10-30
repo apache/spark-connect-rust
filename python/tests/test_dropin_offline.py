@@ -363,6 +363,16 @@ def test_structtype_add_reflected_in_json():
     assert st.fieldNames() == ["a", "b"]
 
 
+def test_structtype_add_reflected_in_the_base_data_type():
+    # Regression: add() must update the base DataType too, which str() and the schemas of
+    # mapInArrow/mapInPandas/applyInPandas/... read (via resolve_datatype).
+    built = T.StructType([T.StructField("a", T.LongType()), T.StructField("b", T.LongType())])
+    assert str(T.StructType().add("a", T.LongType()).add("b", T.LongType())) == str(built)
+    st = T.StructType([T.StructField("a", T.LongType())])
+    st.add("b", T.LongType())
+    assert str(st) == str(built) == "struct<a:bigint,b:bigint>"
+
+
 def test_datatype_object_model():
     # json / jsonValue / typeName / simpleString / needConversion match official pyspark.
     assert T.IntegerType().typeName() == "integer"

@@ -125,29 +125,47 @@ impl ExecutePlanResponseReattachableIterator {
 
     /// Create a ReleaseExecuteRequest to release buffered responses.
     pub async fn create_release_request(&self, release_all: bool) -> ReleaseExecuteRequest {
-        let mut release = ReleaseExecuteRequest {
+        if release_all {
+            self.release_all_request()
+        } else if let Some(id) = self.last_response_id().await {
+            self.release_until_request(&id)
+        } else {
+            self.release_request(None)
+        }
+    }
+
+    /// A ReleaseExecuteRequest that releases the whole execution.
+    pub fn release_all_request(&self) -> ReleaseExecuteRequest {
+        self.release_request(Some(
+            spark_connect_proto::release_execute_request::Release::ReleaseAll(
+                spark_connect_proto::release_execute_request::ReleaseAll {},
+            ),
+        ))
+    }
+
+    /// A ReleaseExecuteRequest that releases the responses up to and including `response_id`.
+    pub fn release_until_request(&self, response_id: &str) -> ReleaseExecuteRequest {
+        self.release_request(Some(
+            spark_connect_proto::release_execute_request::Release::ReleaseUntil(
+                spark_connect_proto::release_execute_request::ReleaseUntil {
+                    response_id: response_id.to_string(),
+                },
+            ),
+        ))
+    }
+
+    fn release_request(
+        &self,
+        release: Option<spark_connect_proto::release_execute_request::Release>,
+    ) -> ReleaseExecuteRequest {
+        ReleaseExecuteRequest {
             session_id: self.request.session_id.clone(),
             user_context: self.request.user_context.clone(),
             operation_id: self.operation_id.clone(),
             client_type: self.request.client_type.clone(),
+            release,
             ..Default::default()
-        };
-
-        if release_all {
-            release.release = Some(
-                spark_connect_proto::release_execute_request::Release::ReleaseAll(
-                    spark_connect_proto::release_execute_request::ReleaseAll {},
-                ),
-            );
-        } else if let Some(id) = self.last_response_id().await {
-            release.release = Some(
-                spark_connect_proto::release_execute_request::Release::ReleaseUntil(
-                    spark_connect_proto::release_execute_request::ReleaseUntil { response_id: id },
-                ),
-            );
         }
-
-        release
     }
 }
 
@@ -284,6 +302,40 @@ mod tests {
             &release.release,
             Some(spark_connect_proto::release_execute_request::Release::ReleaseUntil(_))
         ));
+    }
+
+    #[test]
+    fn test_release_requests_without_awaiting() {
+        let request = ExecutePlanRequest {
+            session_id: "session-123".to_string(),
+            operation_id: Some("op-456".to_string()),
+            ..Default::default()
+        };
+
+        let iter = ExecutePlanResponseReattachableIterator::new(request);
+
+        let all = iter.release_all_request();
+        assert_eq!(all.session_id, "session-123");
+        assert_eq!(all.operation_id, "op-456".to_string());
+        assert!(matches!(
+            &all.release,
+            Some(spark_connect_proto::release_execute_request::Release::ReleaseAll(_))
+        ));
+
+        let until = iter.release_until_request("response-789");
+        assert_eq!(until.operation_id, "op-456".to_string());
+        assert!(matches!(
+            &until.release,
+            Some(spark_connect_proto::release_execute_request::Release::ReleaseUntil(r))
+                if r.response_id == "response-789"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_create_release_request_until_without_response() {
+        // Nothing has been read yet, so there is nothing to release until.
+        let iter = ExecutePlanResponseReattachableIterator::new(ExecutePlanRequest::default());
+        assert!(iter.create_release_request(false).await.release.is_none());
     }
 
     #[tokio::test]

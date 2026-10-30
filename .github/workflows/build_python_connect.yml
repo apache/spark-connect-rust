@@ -213,12 +213,14 @@ jobs:
             --exclude "test_artifact.py,test_artifact_localcluster.py,test_parity_resources.py" \
             2>&1 | tee /tmp/parity_ours.log
 
-      - name: Native Arrow handoff smoke tests (against the live server)
+      - name: Drop-in live-server tests (native Arrow handoff and API behaviors)
+        # The parity gate above runs the reference pyspark over our transport, so the
+        # drop-in's own Rust-backed classes are only exercised against a server here.
         working-directory: python
         env:
           SPARK_REMOTE: sc://localhost:15002
           PYTHONPATH: ${{ github.workspace }}/python
-        run: python -m pytest tests/test_arrow_e2e.py -q
+        run: python -m pytest tests/test_arrow_e2e.py tests/test_dropin_e2e.py -q
 
       - name: Restart Connect server in local-cluster mode
         # Resource profiles and artifact distribution across executors can only be
@@ -367,10 +369,14 @@ jobs:
           PYSPARK_DRIVER_PYTHON: python
         run: |
           SPARK_HOME="${{ steps.spark-download.outputs.SPARK_HOME }}"
+          # A small senderMaxStreamSize makes the server end the response stream of every
+          # result over 1 MiB before it is complete, so that the client's reattach path is
+          # exercised (by default it only is for results over 1 GiB or 2 minutes).
           "${SPARK_HOME}/sbin/start-connect-server.sh" \
             --packages "org.apache.spark:spark-connect_2.13:${SPARK_VERSION}" \
             --driver-memory 3g \
             --conf spark.sql.session.localRelationSizeLimit=1073741824 \
+            --conf spark.connect.execute.reattachable.senderMaxStreamSize=1048576 \
             > /tmp/connect-server.log 2>&1 &
           for i in $(seq 1 90); do
             if (echo > /dev/tcp/localhost/15002) 2>/dev/null; then

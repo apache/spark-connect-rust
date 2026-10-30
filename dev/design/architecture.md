@@ -86,6 +86,9 @@ PyArrow's pandas conversion, which may copy.
 Scalar input conversion and row materialization stay in `pyspark-rs`. `collect()`
 still uses the native client's owned rows; `createDataFrame(pandas)` still
 materializes Python rows. Neither path is claimed to be zero-copy.
+`createDataFrame(pyarrow.Table)` converts the table with PyArrow as the reference
+client does (timestamp localization, a cast to the target schema) and sends it as an
+Arrow IPC stream.
 
 The Arrow handoff has been tested locally with PyArrow 10.0.0 (Python 3.9)
 and 26.0.0 (Python 3.12). CI installs the latest PyArrow; it does not pin or

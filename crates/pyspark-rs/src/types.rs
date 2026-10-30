@@ -1701,6 +1701,10 @@ impl PyStructType {
         {
             let mut me = slf.borrow_mut();
             me.fields.push(new_field);
+            // The base `DataType` is what `str()` and the schemas of `mapInArrow` and
+            // friends read, so it must follow the fields.
+            let fields = me.fields.clone();
+            me.as_super().inner = DataType::Struct { fields };
         }
         Ok(slf)
     }

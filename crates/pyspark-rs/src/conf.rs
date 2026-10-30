@@ -17,6 +17,25 @@ impl PyRuntimeConf {
     }
 }
 
+/// The `default` argument of `RuntimeConf.get`, where pyspark tells an omitted default apart
+/// from None: `get(key, None)` returns None for an unset key, while `get(key)` raises.
+pub enum ConfDefault {
+    Omitted,
+    Given(Option<String>),
+}
+
+impl<'a, 'py> FromPyObject<'a, 'py> for ConfDefault {
+    type Error = PyErr;
+
+    fn extract(obj: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        if obj.is_none() {
+            Ok(ConfDefault::Given(None))
+        } else {
+            Ok(ConfDefault::Given(Some(obj.extract()?)))
+        }
+    }
+}
+
 // Every method round-trips to the server (`block_on(client.set_config/get_configs)`
 // in the core), so each releases the GIL across the RPC via `py.detach`; otherwise a
 // Python thread stays blocked for the whole call.
@@ -30,16 +49,16 @@ impl PyRuntimeConf {
         py.detach(|| self.conf.set(key, &v)).to_pyerr()
     }
 
-    /// Get a configuration value. With a `default`, an unknown key returns the default
-    /// (server `GetWithDefault`) rather than raising; without one, an unknown key raises,
-    /// mirroring `RuntimeConfig.get`.
-    #[pyo3(signature = (key, default=None))]
-    fn get(&self, py: Python<'_>, key: &str, default: Option<String>) -> PyResult<Option<String>> {
+    /// Get a configuration value. With a `default`, which may be None, an unknown key returns
+    /// the default (server `GetWithDefault`) rather than raising; without one, an unknown key
+    /// raises, mirroring `RuntimeConfig.get`.
+    #[pyo3(signature = (key, default=ConfDefault::Omitted))]
+    fn get(&self, py: Python<'_>, key: &str, default: ConfDefault) -> PyResult<Option<String>> {
         match default {
-            Some(d) => py
-                .detach(|| self.conf.get_with_default(key, Some(&d)))
+            ConfDefault::Given(d) => py
+                .detach(|| self.conf.get_with_default(key, d.as_deref()))
                 .to_pyerr(),
-            None => py.detach(|| self.conf.get(key)).to_pyerr(),
+            ConfDefault::Omitted => py.detach(|| self.conf.get(key)).to_pyerr(),
         }
     }
 
