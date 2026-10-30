@@ -16,6 +16,8 @@ The selected framing change reduced the 136 MB creation-plus-query median from
 These are **localhost fixture measurements without Spark query execution**,
 using ten fresh-process samples per client. They do not establish remote Spark
 performance. A separate live localhost Spark check verified the uploaded values.
+These measurements preceded the follow-up that batches normalization and upload
+settings into one configuration RPC; they are not a rerun of that follow-up.
 
 ## Required before merging: real remote Spark measurements
 
@@ -74,7 +76,7 @@ Keep server execution time visible rather than attributing the entire query
 latency to the client. Record sampling intervals and any unavailable counters.
 
 The 0.8 MB input is a control: the framing change does not optimize its inline
-path, which remains slower than PySpark in the localhost results. Preserve this
+path, which was slower than PySpark in these localhost results. Preserve this
 result alongside larger-input gains.
 
 Reassess frame size if the remote workload regresses. Do not enable parallel

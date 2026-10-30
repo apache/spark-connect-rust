@@ -445,6 +445,38 @@ impl SparkConnectClient {
         Ok(keys.iter().map(|k| config_dict.get(*k).cloned()).collect())
     }
 
+    /// Get registered defaults and session overrides, returning None for unknown keys.
+    pub async fn get_config_options(&self, keys: &[&str]) -> Result<Vec<Option<String>>> {
+        let request = ConfigRequest {
+            session_id: self.session_id.clone(),
+            user_context: Some(UserContext {
+                user_id: self.user_id.clone().unwrap_or_default(),
+                ..Default::default()
+            }),
+            operation: Some(spark_connect_proto::config_request::Operation {
+                op_type: Some(
+                    spark_connect_proto::config_request::operation::OpType::GetOption(
+                        spark_connect_proto::config_request::GetOption {
+                            keys: keys.iter().map(|key| key.to_string()).collect(),
+                        },
+                    ),
+                ),
+            }),
+            ..Default::default()
+        };
+        let values: BTreeMap<_, _> = self
+            .config(request)
+            .await?
+            .pairs
+            .into_iter()
+            .map(|pair| (pair.key, pair.value))
+            .collect();
+        Ok(keys
+            .iter()
+            .map(|key| values.get(*key).cloned().flatten())
+            .collect())
+    }
+
     /// Set configuration values for the session.
     ///
     /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.set_config`.
@@ -739,33 +771,7 @@ impl SparkConnectClient {
 
         // Build request stream with proper chunking/batching
         let requests = build_artifact_request_stream(self.session_id.clone(), artifacts)?;
-
-        // Create a futures stream from the requests
-        let request_stream = futures::stream::iter(requests);
-
-        // Call the AddArtifacts streaming RPC
-        let mut req = Request::new(request_stream);
-        self._attach_metadata(&mut req);
-
-        let response = self
-            .stub
-            .clone()
-            .add_artifacts(req)
-            .await
-            .map_err(SparkError::from_grpc_status)?
-            .into_inner();
-
-        // Check that all artifacts were successfully received
-        for summary in response.artifacts {
-            if !summary.is_crc_successful {
-                return Err(SparkError::connect_msg(format!(
-                    "CRC check failed for artifact: {}",
-                    summary.name
-                )));
-            }
-        }
-
-        Ok(())
+        self.upload_artifact_requests(requests, None).await
     }
 
     /// Upload a single local file as an artifact under an explicit artifact name
@@ -779,25 +785,7 @@ impl SparkConnectClient {
             Box::new(FileArtifact::new(local_path)),
         )];
         let requests = build_artifact_request_stream(self.session_id.clone(), artifacts)?;
-        let request_stream = futures::stream::iter(requests);
-        let mut req = Request::new(request_stream);
-        self._attach_metadata(&mut req);
-        let response = self
-            .stub
-            .clone()
-            .add_artifacts(req)
-            .await
-            .map_err(SparkError::from_grpc_status)?
-            .into_inner();
-        for summary in response.artifacts {
-            if !summary.is_crc_successful {
-                return Err(SparkError::connect_msg(format!(
-                    "CRC check failed for artifact: {}",
-                    summary.name
-                )));
-            }
-        }
-        Ok(())
+        self.upload_artifact_requests(requests, None).await
     }
 
     /// Upload session-scoped cache blobs, returning SHA-256 hashes in input order.
@@ -839,11 +827,23 @@ impl SparkConnectClient {
             return Ok(hashes);
         }
         let expected: HashSet<String> = artifacts.iter().map(|a| a.name.clone()).collect();
-        let mut requests = crate::artifact::build_artifact_request_stream_with_chunk_size(
+        let requests = crate::artifact::build_artifact_request_stream_with_chunk_size(
             self.session_id.clone(),
             artifacts,
             crate::artifact::CACHE_CHUNK_SIZE,
         )?;
+        self.upload_artifact_requests(requests, Some(&expected))
+            .await?;
+        Ok(hashes)
+    }
+
+    /// Send artifact frames with the same user context and validate the response.
+    /// Cache uploads also require an acknowledgement for every requested artifact.
+    async fn upload_artifact_requests(
+        &self,
+        mut requests: Vec<spark_connect_proto::AddArtifactsRequest>,
+        expected_cache_names: Option<&std::collections::HashSet<String>>,
+    ) -> Result<()> {
         for request in &mut requests {
             request.user_context = Some(UserContext {
                 user_id: self.user_id.clone().unwrap_or_default(),
@@ -859,7 +859,7 @@ impl SparkConnectClient {
             .await
             .map_err(SparkError::from_grpc_status)?
             .into_inner();
-        let mut received = HashSet::new();
+        let mut received = std::collections::HashSet::new();
         for summary in response.artifacts {
             if !summary.is_crc_successful {
                 return Err(SparkError::connect_msg(format!(
@@ -867,14 +867,18 @@ impl SparkConnectClient {
                     summary.name
                 )));
             }
-            received.insert(summary.name);
+            if expected_cache_names.is_some() {
+                received.insert(summary.name);
+            }
         }
-        if !expected.is_subset(&received) {
-            return Err(SparkError::connect_msg(
-                "Missing cache artifact upload acknowledgement",
-            ));
+        if let Some(expected) = expected_cache_names {
+            if !expected.is_subset(&received) {
+                return Err(SparkError::connect_msg(
+                    "Missing cache artifact upload acknowledgement",
+                ));
+            }
         }
-        Ok(hashes)
+        Ok(())
     }
 
     /// Check artifact status on the server.

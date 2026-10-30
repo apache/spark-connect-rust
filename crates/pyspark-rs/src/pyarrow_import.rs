@@ -43,27 +43,20 @@ pub(crate) fn create_dataframe(
     let schema = schema.unwrap_or_else(|| py.None());
     // Empty input needs only the explicit schema, and no server configuration.
     let empty: bool = table.call_method0("__len__")?.extract::<usize>()? == 0;
-    let (timestamp_type, timezone, large_types) = if empty {
-        (None, None, None)
+    let options = if empty {
+        None
     } else {
-        py.detach(|| -> PyResult<_> {
-            let conf = session.conf();
-            Ok((
-                conf.get("spark.sql.timestampType").to_pyerr()?,
-                conf.get("spark.sql.session.timeZone").to_pyerr()?,
-                conf.get("spark.sql.execution.arrow.useLargeVarTypes")
-                    .to_pyerr()?,
-            ))
-        })?
+        Some(py.detach(|| session.arrow_input_options().to_pyerr())?)
     };
     let result = helper.getattr("prepare_table")?.call1((
         table,
         schema,
-        timestamp_type,
-        timezone,
-        large_types,
+        options.as_ref().and_then(|o| o.timestamp_type()),
+        options.as_ref().and_then(|o| o.timezone()),
+        options.as_ref().and_then(|o| o.use_large_var_types()),
     ))?;
     let normalized = result.get_item(0)?;
+    // Native local relations carry inferred schemas to preserve timestamp-type normalization.
     let spark_schema = crate::types::py_to_data_type(&result.get_item(1)?)?;
     let names: Option<Vec<String>> = result.get_item(2)?.extract()?;
     let batches = if empty {
@@ -75,9 +68,13 @@ pub(crate) fn create_dataframe(
             .0
     };
     let dataframe = py.detach(|| {
-        session
-            .create_dataframe_from_arrow(batches, spark_schema)
-            .to_pyerr()
+        match options.as_ref() {
+            Some(options) => {
+                session.create_dataframe_from_arrow_with_options(batches, spark_schema, options)
+            }
+            None => session.create_dataframe_from_arrow(batches, spark_schema),
+        }
+        .to_pyerr()
     })?;
     let dataframe = match names {
         Some(names) => dataframe.to_df(names.iter().map(String::as_str).collect()),

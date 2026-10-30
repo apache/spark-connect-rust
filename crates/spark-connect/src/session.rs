@@ -301,7 +301,24 @@ impl SparkSession {
         batches: Vec<arrow::record_batch::RecordBatch>,
         schema: DataType,
     ) -> Result<DataFrame> {
-        let plan = crate::arrow_input::create_relation(&self.client, batches, schema)?;
+        let plan = crate::arrow_input::create_relation(&self.client, batches, schema, None)?;
+        Ok(DataFrame::new(self.clone(), plan))
+    }
+
+    /// Read Arrow normalization and upload settings together in one configuration RPC.
+    pub fn arrow_input_options(&self) -> Result<crate::ArrowInputOptions> {
+        crate::ArrowInputOptions::from_client(&self.client)
+    }
+
+    /// Create an Arrow DataFrame using the same settings snapshot as normalization.
+    pub fn create_dataframe_from_arrow_with_options(
+        &self,
+        batches: Vec<arrow::record_batch::RecordBatch>,
+        schema: DataType,
+        options: &crate::ArrowInputOptions,
+    ) -> Result<DataFrame> {
+        let plan =
+            crate::arrow_input::create_relation(&self.client, batches, schema, Some(options))?;
         Ok(DataFrame::new(self.clone(), plan))
     }
 
