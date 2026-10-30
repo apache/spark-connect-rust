@@ -35,9 +35,11 @@ mod functions;
 mod group;
 mod ml;
 mod observation;
+mod pandas_input;
 mod pipelines;
 mod profiler;
 mod pyarrow_export;
+mod pyarrow_import;
 mod readwriter;
 mod resource;
 mod row;
@@ -122,6 +124,8 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDataFrameReader>()?;
     m.add_class::<PyStatFunctions>()?;
     m.add_class::<storagelevel::PyStorageLevel>()?;
+
+    m.add_function(wrap_pyfunction!(pandas_input::_pandas_string_ipc, m)?)?;
 
     // Spark Declarative Pipelines (SDP) command execution
     m.add_class::<pipelines::PyPipelineRunStream>()?;
