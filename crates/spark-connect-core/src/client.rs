@@ -198,8 +198,9 @@ impl SparkConnectClient {
     /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.execute_plan`.
     pub async fn execute_plan(
         &self,
-        request: ExecutePlanRequest,
+        mut request: ExecutePlanRequest,
     ) -> Result<Streaming<ExecutePlanResponse>> {
+        self.fill_user_context(&mut request.user_context);
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
         let resp = self.stub.clone().execute_plan(req).await;
@@ -302,7 +303,11 @@ impl SparkConnectClient {
     /// Analyze a plan and return metadata about it.
     ///
     /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.analyze_plan`.
-    pub async fn analyze_plan(&self, request: AnalyzePlanRequest) -> Result<AnalyzePlanResponse> {
+    pub async fn analyze_plan(
+        &self,
+        mut request: AnalyzePlanRequest,
+    ) -> Result<AnalyzePlanResponse> {
+        self.fill_user_context(&mut request.user_context);
         self.with_retry(|| {
             let mut req = Request::new(request.clone());
             self._attach_metadata(&mut req);
@@ -345,8 +350,9 @@ impl SparkConnectClient {
     /// last observed `response_id`. Mirrors the reference reattachable execute path.
     pub async fn execute_plan_reattachable(
         &self,
-        request: ExecutePlanRequest,
+        mut request: ExecutePlanRequest,
     ) -> Result<ReattachableResponseStream> {
+        self.fill_user_context(&mut request.user_context);
         let iter = ExecutePlanResponseReattachableIterator::new(request);
         let start = iter.request().clone();
         let stream = self
@@ -738,7 +744,10 @@ impl SparkConnectClient {
         }
 
         // Build request stream with proper chunking/batching
-        let requests = build_artifact_request_stream(self.session_id.clone(), artifacts)?;
+        let mut requests = build_artifact_request_stream(self.session_id.clone(), artifacts)?;
+        for request in &mut requests {
+            self.fill_user_context(&mut request.user_context);
+        }
 
         // Create a futures stream from the requests
         let request_stream = futures::stream::iter(requests);
@@ -778,7 +787,10 @@ impl SparkConnectClient {
             name.to_string(),
             Box::new(FileArtifact::new(local_path)),
         )];
-        let requests = build_artifact_request_stream(self.session_id.clone(), artifacts)?;
+        let mut requests = build_artifact_request_stream(self.session_id.clone(), artifacts)?;
+        for request in &mut requests {
+            self.fill_user_context(&mut request.user_context);
+        }
         let request_stream = futures::stream::iter(requests);
         let mut req = Request::new(request_stream);
         self._attach_metadata(&mut req);
@@ -832,6 +844,17 @@ impl SparkConnectClient {
         }
 
         Ok(result)
+    }
+
+    /// Ensure the required context message exists, even without a configured user ID.
+    /// Fill a missing ID from the connection while preserving all explicit fields.
+    fn fill_user_context(&self, context: &mut Option<UserContext>) {
+        let context = context.get_or_insert_with(UserContext::default);
+        if let Some(user_id) = &self.user_id {
+            if context.user_id.is_empty() {
+                context.user_id.clone_from(user_id);
+            }
+        }
     }
 
     /// Attach metadata headers to a request.
@@ -1140,3 +1163,11 @@ mod tests {
         let _result = client.get_config_with_defaults(&pairs);
     }
 }
+
+#[cfg(test)]
+#[path = "client_tests/support.rs"]
+mod transport_test_support;
+
+#[cfg(test)]
+#[path = "client_tests/user_context.rs"]
+mod user_context_tests;
