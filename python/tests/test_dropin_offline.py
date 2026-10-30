@@ -16,6 +16,10 @@ import pytest
 from _mock_connect_server import message_field, mock_connect_session, struct_schema
 from pyspark.sql import SparkSession, types as T
 
+# Collected here so the existing offline CI suite exercises real Arrow results.
+from day_time_interval_cases import DayTimeIntervalTests  # noqa: F401
+from interval_input_cases import IntervalInputConversionTests  # noqa: F401
+
 
 # --------------------------------------------------------------------------- types
 

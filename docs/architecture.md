@@ -79,6 +79,12 @@ flowchart LR
 When you call an action such as `count()` or `show()`, the lazily-built plan is
 serialized and sent to the server; results stream back as Arrow batches.
 
+Day-time intervals use signed 64-bit microseconds in Rust (`Value::DayTimeInterval`)
+and Python `datetime.timedelta` values. `createDataFrame` supports inferred and
+explicit interval schemas, including nested structs, lists, maps, and nulls.
+Collected rows can be passed back with their schema. Python inputs outside the
+signed 64-bit microsecond range raise `OverflowError` without rounding.
+
 ```mermaid
 sequenceDiagram
     participant App as Your code (Rust or pyspark)
