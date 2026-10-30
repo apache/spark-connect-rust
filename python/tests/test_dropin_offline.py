@@ -3090,7 +3090,9 @@ def test_schema_cache_metadata_wait_releases_gil(mock_connect, accessor):
 # Exact built-in string conversion and full outbound Arrow IPC guards.
 
 
-@pytest.mark.parametrize("text", ["", "1.25", "-42", "NaN", "a\x00b", "é雪😀", "e\u0301", "\uffff"])
+@pytest.mark.parametrize("text", [
+    "", "1.25", "-42", "NaN", "a\x00b", "é雪😀", "e\u0301", "\uffff",
+])
 def test_exact_string_roundtrip(text):
     actual = Row(value=text).value
     assert type(actual) is str
@@ -3104,12 +3106,15 @@ def test_exact_string_surrogate_error_preserves_generic_fallback(text):
 
 
 def test_exact_string_subclass_protocol_order():
+    # Pin existing behavior with PyO3 0.28, not a desired contract for str
+    # subclasses. Revisit conversion order when upgrading PyO3.
     trace = []
 
     class IndexString(str):
         def __index__(self):
             trace.append("index")
             return 17
+
         def __float__(self):
             raise AssertionError("index must take precedence")
 
@@ -3117,6 +3122,7 @@ def test_exact_string_subclass_protocol_order():
         def __float__(self):
             trace.append("float")
             return 2.5
+
         def __str__(self):
             raise AssertionError("numeric conversion must take precedence")
 
@@ -3124,9 +3130,11 @@ def test_exact_string_subclass_protocol_order():
         def __index__(self):
             trace.append("bad index")
             raise ValueError("index rejected")
+
         def __float__(self):
             trace.append("bad float")
             raise ValueError("float rejected")
+
         def __str__(self):
             raise AssertionError("string extraction must retain the underlying text")
 
@@ -3134,9 +3142,13 @@ def test_exact_string_subclass_protocol_order():
         def __str__(self):
             raise AssertionError("string extraction must not call __str__")
 
-    for value, expected in [(IndexString("x"), 17), (FloatString("x"), 2.5),
-                            (FallbackString("original"), "original"),
-                            (PlainString("plain"), "plain")]:
+    cases = [
+        (IndexString("x"), 17),
+        (FloatString("x"), 2.5),
+        (FallbackString("original"), "original"),
+        (PlainString("plain"), "plain"),
+    ]
+    for value, expected in cases:
         actual = Row(value=value).value
         assert type(actual) is type(expected)
         assert actual == expected
@@ -3144,7 +3156,10 @@ def test_exact_string_subclass_protocol_order():
 
 
 def test_exact_string_nested_strings_and_nulls():
-    value = Row(items=["雪", None, ""], mapping={"x": "😀", "null": None})
+    value = Row(
+        items=["雪", None, ""],
+        mapping={"x": "😀", "null": None},
+    )
     actual = Row(value=value).value
     assert list(actual.items) == ["雪", None, ""]
     assert actual.mapping == {"x": "😀", "null": None}
@@ -3156,14 +3171,31 @@ def test_exact_string_input_ipc(mock_connect, source, schema_mode):
     pd = pytest.importorskip("pandas")
     pa = pytest.importorskip("pyarrow")
     spark, service = mock_connect
-    rows = [("雪😀", "a\x00b"), ("", None), (None, "1.25"), ("e\u0301", "\uffff")]
+    rows = [
+        ("雪😀", "a\x00b"),
+        ("", None),
+        (None, "1.25"),
+        ("e\u0301", "\uffff"),
+    ]
     data = pd.DataFrame(rows, columns=["a", "b"]) if source == "pandas" else rows
-    schema = (T.StructType([T.StructField("a", T.StringType()), T.StructField("b", T.StringType())])
-              if schema_mode == "explicit" else ["a", "b"] if schema_mode == "names" else None)
+    if schema_mode == "explicit":
+        schema = T.StructType([
+            T.StructField("a", T.StringType()),
+            T.StructField("b", T.StringType()),
+        ])
+    elif schema_mode == "names":
+        schema = ["a", "b"]
+    else:
+        schema = None
+
     spark.createDataFrame(data, schema).schema
     table = pa.ipc.open_stream(service.local_relation).read_all()
-    actual, arrow_schema = table.to_pylist(), str(table.schema)
-    names = ["col0", "col1"] if source == "tuples" and schema_mode == "inferred" else ["a", "b"]
+    actual = table.to_pylist()
+    arrow_schema = str(table.schema)
+    if source == "tuples" and schema_mode == "inferred":
+        names = ["col0", "col1"]
+    else:
+        names = ["a", "b"]
     assert actual == [dict(zip(names, row)) for row in rows]
     assert all(f"{name}: string" in arrow_schema for name in names)
 
@@ -3174,16 +3206,24 @@ def test_exact_string_nested_input_ipc(mock_connect):
     schema = T.StructType([
         T.StructField("items", T.ArrayType(T.StringType())),
         T.StructField("mapping", T.MapType(T.StringType(), T.StringType())),
-        T.StructField("nested", T.StructType([T.StructField("text", T.StringType())])),
+        T.StructField("nested", T.StructType([
+            T.StructField("text", T.StringType()),
+        ])),
     ])
-    rows = [(["雪", None, ""], {"x": "😀", "null": None}, Row(text="a\x00b")),
-            (None, None, None)]
+    rows = [
+        (["雪", None, ""], {"x": "😀", "null": None}, Row(text="a\x00b")),
+        (None, None, None),
+    ]
     spark.createDataFrame(rows, schema).schema
-    actual = pa.ipc.open_stream(service.local_relation).read_all().to_pylist()
+    table = pa.ipc.open_stream(service.local_relation).read_all()
+    actual = table.to_pylist()
     # Arrow map columns decode as ordered key/value pairs.
     assert actual == [
-        {"items": ["雪", None, ""], "mapping": [("null", None), ("x", "😀")],
-         "nested": {"text": "a\x00b"}},
+        {
+            "items": ["雪", None, ""],
+            "mapping": [("null", None), ("x", "😀")],
+            "nested": {"text": "a\x00b"},
+        },
         {"items": None, "mapping": None, "nested": None},
     ]
 
@@ -3194,10 +3234,13 @@ def test_exact_string_batch_input_ipc(mock_connect, source):
     pa = pytest.importorskip("pyarrow")
     spark, service = mock_connect
     names = ["a", "b", "c"]
-    rows = [(f"雪😀-{i}", str(i), None if i % 7 == 0 else "a\x00b")
-            for i in range(256)]
+    rows = [
+        (f"雪😀-{i}", str(i), None if i % 7 == 0 else "a\x00b")
+        for i in range(256)
+    ]
     data = pd.DataFrame(rows, columns=names) if source == "pandas" else rows
     schema = T.StructType([T.StructField(name, T.StringType()) for name in names])
     spark.createDataFrame(data, schema).schema
-    actual = pa.ipc.open_stream(service.local_relation).read_all().to_pylist()
+    table = pa.ipc.open_stream(service.local_relation).read_all()
+    actual = table.to_pylist()
     assert actual == [dict(zip(names, row)) for row in rows]

@@ -48,7 +48,7 @@ _LOCAL_RELATION_DATA = 1  # relations.proto: LocalRelation.data
 
 
 def _message_fields(data):
-    """Read singular protobuf fields without generated service classes."""
+    """Read length-delimited protobuf fields, skipping scalar fields."""
     def read_varint(position):
         value = 0
         for shift in range(0, 64, 7):
@@ -85,18 +85,22 @@ def _message_fields(data):
             if end > len(data):
                 raise ValueError("truncated protobuf field")
             value, position = data[position:end], end
-        fields[field] = value
+        if wire_type == 2:
+            fields[field] = value
     return fields
 
 
 def _local_relation_data(request):
-    for field in (
-        _ANALYZE_SCHEMA, _SCHEMA_PLAN, _PLAN_ROOT,
-        _RELATION_LOCAL_RELATION, _LOCAL_RELATION_DATA,
-    ):
-        request = _message_fields(request).get(field)
-        if request is None:
-            return None
+    try:
+        for field in (
+            _ANALYZE_SCHEMA, _SCHEMA_PLAN, _PLAN_ROOT,
+            _RELATION_LOCAL_RELATION, _LOCAL_RELATION_DATA,
+        ):
+            request = _message_fields(request).get(field)
+            if request is None:
+                return None
+    except (ValueError, TypeError):
+        return None
     return request
 
 
@@ -119,6 +123,7 @@ def serve(connection):
     # they wait for a response.
     class Service:
         calls = 0
+        # Raw IPC from the latest AnalyzePlan request; None for non-local/unparseable requests.
         local_relation = None
         data_type = struct_schema()
         failure = None
