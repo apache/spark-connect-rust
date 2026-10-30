@@ -39,6 +39,71 @@ def message_field(field, value):
     return varint(field * 8 + 2) + varint(len(value)) + value
 
 
+# Field numbers from crates/spark-connect-proto/proto/spark/connect/:
+_ANALYZE_SCHEMA = 4  # base.proto: AnalyzePlanRequest.schema
+_SCHEMA_PLAN = 1  # base.proto: AnalyzePlanRequest.Schema.plan
+_PLAN_ROOT = 1  # base.proto: Plan.root
+_RELATION_LOCAL_RELATION = 11  # relations.proto: Relation.local_relation
+_LOCAL_RELATION_DATA = 1  # relations.proto: LocalRelation.data
+
+
+def _message_fields(data):
+    """Read length-delimited protobuf fields, skipping scalar fields."""
+    def read_varint(position):
+        value = 0
+        for shift in range(0, 64, 7):
+            if position >= len(data):
+                raise ValueError("truncated protobuf varint")
+            byte = data[position]
+            position += 1
+            if shift == 63 and byte > 1:
+                raise ValueError("protobuf varint exceeds 64 bits")
+            value |= (byte & 127) << shift
+            if byte < 128:
+                return value, position
+        raise ValueError("protobuf varint exceeds 64 bits")
+
+    fields = {}
+    position = 0
+    while position < len(data):
+        tag, position = read_varint(position)
+        field, wire_type = tag >> 3, tag & 7
+        if not field:
+            raise ValueError("protobuf field number must be positive")
+        if wire_type == 0:
+            value, position = read_varint(position)
+        else:
+            if wire_type == 1:
+                size = 8
+            elif wire_type == 2:
+                size, position = read_varint(position)
+            elif wire_type == 5:
+                size = 4
+            else:
+                raise ValueError(f"unsupported protobuf wire type {wire_type}")
+            end = position + size
+            if end > len(data):
+                raise ValueError("truncated protobuf field")
+            value, position = data[position:end], end
+        if wire_type == 2:
+            fields[field] = value
+    return fields
+
+
+def _local_relation_data(request):
+    try:
+        for field in (
+            _ANALYZE_SCHEMA, _SCHEMA_PLAN, _PLAN_ROOT,
+            _RELATION_LOCAL_RELATION, _LOCAL_RELATION_DATA,
+        ):
+            request = _message_fields(request).get(field)
+            if request is None:
+                return None
+    except (ValueError, TypeError):
+        return None
+    return request
+
+
 def struct_schema(name="id"):
     # types.proto: DataType.long=7, .struct=21; Struct.fields=1;
     # StructField: name=1, data_type=2, nullable=3, metadata=4.
@@ -58,6 +123,8 @@ def serve(connection):
     # they wait for a response.
     class Service:
         calls = 0
+        # Raw IPC from the latest AnalyzePlan request; None for non-local/unparseable requests.
+        local_relation = None
         data_type = struct_schema()
         failure = None
         block_response = False
@@ -65,6 +132,7 @@ def serve(connection):
 
         def analyze(self, request, context):
             self.calls += 1
+            self.local_relation = _local_relation_data(request)
             if self.block_response and not self.response_gate.wait(5):
                 context.abort(
                     grpc.StatusCode.DEADLINE_EXCEEDED,

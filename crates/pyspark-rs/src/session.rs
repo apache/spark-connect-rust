@@ -955,6 +955,14 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
         return Ok(Value::Null);
     }
 
+    // Exact built-in strings cannot implement numeric conversion protocols.
+    // Keep subclasses and strings that fail UTF-8 extraction on the generic path.
+    if let Ok(s) = obj.cast_exact::<pyo3::types::PyString>() {
+        if let Ok(s) = s.extract::<String>() {
+            return Ok(Value::String(s));
+        }
+    }
+
     // Check for bool (before int because bool is a subclass of int in Python)
     if let Ok(b) = obj.extract::<bool>() {
         return Ok(Value::Bool(b));
