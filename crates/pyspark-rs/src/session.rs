@@ -370,6 +370,20 @@ impl PySparkSession {
             if !table.is_none() {
                 return crate::pyarrow_import::create_dataframe(py, &self.session, &table, schema);
             }
+            let ipc = py
+                .import("pyspark.sql._pandas_input")?
+                .getattr("prepare_string_input")?
+                .call1((data, schema))?;
+            if !ipc.is_none() {
+                let schema = schema.ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err("string input requires a struct schema")
+                })?;
+                let schema = crate::types::py_to_data_type(schema)?;
+                return Ok(PyDataFrame::new(
+                    self.session
+                        .create_dataframe_from_inline_arrow_ipc(ipc.extract()?, schema),
+                ));
+            }
         }
         let data_owned: Bound<'_, PyList>;
         let data: &Bound<'_, PyList> = if is_pandas {

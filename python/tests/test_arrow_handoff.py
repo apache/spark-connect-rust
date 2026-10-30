@@ -1372,3 +1372,900 @@ def test_integer_rebound_index_data_keeps_native_read_order(
                  "metadata": metadata}
             ],
         }
+
+
+@pytest.mark.parametrize("location", [
+    "subclass", "instance", "class", "owner", "backing_subclass", "backing_instance",
+    "backing_to_numpy", "backing_class_tolist", "backing_class_to_numpy",
+    "arrow_instance", "arrow_to_numpy", "arrow_class_tolist",
+    "arrow_class_to_numpy",
+])
+@pytest.mark.parametrize("behavior", ["raise", "mutate"])
+def test_string_columns_tolist_hooks_keep_native_order(
+    protocol, monkeypatch, location, behavior
+):
+    from types import MethodType
+    from pandas.core.base import IndexOpsMixin
+
+    values = ["plain"] * 10000
+    frame = pd.DataFrame({"original": values}, dtype=object)
+    schema = T.StructType([T.StructField("renamed", T.StringType())])
+    original_tolist = pd.Index.tolist
+    original_notna, original_astype = frame.notna, frame.astype
+    hook_name = next((name for name in ("to_numpy", "isna")
+                      if location.endswith("_" + name)), "tolist")
+    calls = []
+
+    class ColumnsError(RuntimeError):
+        pass
+
+    def notna(*args, **kwargs):
+        calls.append("notna")
+        return original_notna(*args, **kwargs)
+
+    def astype(*args, **kwargs):
+        calls.append("astype")
+        return original_astype(*args, **kwargs)
+
+    def before_tolist():
+        calls.append(hook_name)
+        if behavior == "raise":
+            raise ColumnsError("columns hook precedes pandas normalization")
+        # Install spies only when native conversion calls the columns hook.
+        # Before eligibility, normalization methods are the canonical methods.
+        monkeypatch.setitem(vars(frame), "notna", notna)
+        monkeypatch.setitem(vars(frame), "astype", astype)
+        frame.iat[0, 0], frame.iat[-1, 0] = "changed", None
+
+    def tolist(index):
+        before_tolist()
+        return original_tolist(index)
+
+    if location == "subclass":
+        class Columns(pd.Index):
+            pass
+        monkeypatch.setattr(Columns, "tolist", tolist)
+        frame.columns = Columns._simple_new(np.asarray(["original"], dtype=object), name=None)
+        assert type(frame.columns) is Columns
+    elif location == "instance":
+        monkeypatch.setitem(vars(frame.columns), "tolist", MethodType(tolist, frame.columns))
+        assert type(frame.columns) is pd.Index
+    elif location == "backing_subclass":
+        class Names(np.ndarray):
+            def tolist(self):
+                before_tolist()
+                return super().tolist()
+        backing = np.asarray(["original"], dtype=object).view(Names)
+        frame.columns = pd.Index._simple_new(backing, name=None)
+        assert type(frame.columns) is pd.Index
+        assert type(frame.columns._values) is Names
+    elif location.startswith(("backing_", "arrow_")):
+        storage = "pyarrow" if location.startswith("arrow_") else "python"
+        frame.columns = pd.Index(pd.array(["original"], dtype=pd.StringDtype(storage=storage)))
+        backing = frame.columns._values
+        original = getattr(backing, hook_name)
+
+        def backing_tolist(*args, **kwargs):
+            before_tolist()
+            return original(*args, **kwargs)
+
+        def class_tolist(self, *args, **kwargs):
+            return backing_tolist(*args, **kwargs)
+
+        if "_class_" in location:
+            monkeypatch.setattr(type(backing), hook_name, class_tolist)
+        else:
+            monkeypatch.setitem(vars(backing), hook_name, backing_tolist)
+        assert type(frame.columns) is pd.Index
+    else:
+        monkeypatch.setattr(pd.Index if location == "class" else IndexOpsMixin,
+                            "tolist", tolist)
+
+    assert calls == []
+    with _arrow_input_service(protocol) as (spark, state):
+        if behavior == "raise":
+            with pytest.raises(ColumnsError,
+                               match="columns hook precedes pandas normalization"):
+                spark.createDataFrame(frame, schema)
+            assert calls == [hook_name]
+            assert state["config_requests"] == []
+            assert state["input_tables"] == []
+            assert state["uploads"] == 0
+        else:
+            spark.createDataFrame(frame, schema).toArrow()
+            expected = values.copy()
+            expected[0], expected[-1] = "changed", None
+            table = state["input_tables"][0]
+            assert table.schema.names == ["renamed"]
+            assert table.column(0).type == pa.string()
+            assert table.column(0).to_pylist() == expected
+            assert table.column(0).is_null().to_pylist() == [False] * 9999 + [True]
+            assert state["config_requests"] == []
+            assert state["uploads"] == 0
+            assert calls == [hook_name, "notna", "astype"]
+
+
+
+def test_string_rebound_index_values_keeps_native_error(protocol, monkeypatch):
+
+    frame = pd.DataFrame({"original": ["plain"] * 10000}, dtype=object)
+    schema = T.StructType([T.StructField("renamed", T.StringType())])
+    columns = frame.columns
+    original = pd.Index._values.fget
+    calls = []
+
+    def values(index):
+        if index is columns:
+            calls.append("_values")
+            raise RuntimeError("columns backing hook precedes normalization")
+        return original(index)
+
+    monkeypatch.setattr(pd.Index, "_values", property(values))
+    assert calls == []
+    with _arrow_input_service(protocol) as (spark, state):
+        with pytest.raises(RuntimeError,
+                           match="columns backing hook precedes normalization"):
+            spark.createDataFrame(frame, schema)
+        assert calls == ["_values"]
+        assert state["config_requests"] == []
+        assert state["input_tables"] == []
+
+
+
+@pytest.mark.parametrize("nullable", [False, True])
+def test_string_rebound_index_data_keeps_native_read_order(protocol, monkeypatch, nullable):
+    import json
+
+    values = ["plain", "é", "漢字", ""] * 2500
+    if nullable:
+        values[1] = None
+    frame = pd.DataFrame({"original": values}, dtype=object)
+    schema = T.StructType([
+        T.StructField("renamed", T.StringType(), nullable, {"source": "native"})
+    ])
+    columns, backing = frame.columns, vars(frame.columns)["_data"]
+    original_notna, original_astype = frame.notna, frame.astype
+    calls = []
+    normalizing = False
+
+    class ColumnsDataError(RuntimeError):
+        pass
+
+    def notna(*args, **kwargs):
+        nonlocal normalizing
+        normalizing = True
+        calls.append("notna")
+        return original_notna(*args, **kwargs)
+
+    def astype(*args, **kwargs):
+        calls.append("astype")
+        return original_astype(*args, **kwargs)
+
+    def data(index):
+        if index is columns:
+            if not normalizing:
+                calls.append("_data")
+                if calls.count("_data") > 1:
+                    raise ColumnsDataError("columns storage read twice before normalization")
+                # Canonical normalization remains intact before eligibility.
+                monkeypatch.setitem(vars(frame), "notna", notna)
+                monkeypatch.setitem(vars(frame), "astype", astype)
+            return backing
+        return vars(index)["_data"]
+
+    def set_data(index, value):
+        # Keep ordinary storage initialization for indexes created by pandas.
+        vars(index)["_data"] = value
+
+    monkeypatch.setattr(pd.Index, "_data", property(data, set_data), raising=False)
+    with _arrow_input_service(protocol) as (spark, state):
+        spark.createDataFrame(frame, schema).toArrow()
+        assert calls == ["_data", "notna", "astype"]
+        assert not state["config_requests"]
+        assert state["uploads"] == 0
+        assert len(state["input_tables"]) == 1
+        table = state["input_tables"][0]
+        assert table.column(0).to_pylist() == values
+        assert table.column(0).is_null().to_pylist() == [value is None for value in values]
+        assert table.schema.equals(
+            pa.schema([pa.field("renamed", pa.string(), nullable=nullable)]),
+            check_metadata=True,
+        )
+        assert json.loads(state["relations"][0].local_relation.schema) == {
+            "type": "struct", "fields": [
+                {"name": "renamed", "type": "string", "nullable": nullable,
+                 "metadata": {"source": "native"}}
+            ],
+        }
+
+
+
+@pytest.mark.parametrize("kind", [
+    "object", "default", "python", "pyarrow", "python_numpy", "pyarrow_numpy",
+])
+def test_string_canonical_column_storage_stays_eligible(kind):
+    from pyspark.sql._pandas_input import _has_canonical_columns, prepare_string_input
+
+    frame = pd.DataFrame({"original": ["plain"] * 10000}, dtype=object)
+    schema = T.StructType([T.StructField("renamed", T.StringType())])
+    if kind == "object":
+        frame.columns = pd.Index(np.asarray(["original"], dtype=object), dtype=object)
+    elif kind == "default":
+        frame.columns = pd.Index(["original"])
+    elif kind.endswith("_numpy"):
+        from pandas.core.arrays import string_ as strings, string_arrow as arrow_strings
+
+        module = strings if kind.startswith("python") else arrow_strings
+        name = ("StringArrayNumpySemantics" if kind.startswith("python")
+                else "ArrowStringArrayNumpySemantics")
+        cls = getattr(module, name, None)
+        if cls is None:
+            pytest.skip("older infer-string storage class is absent")
+        frame.columns = pd.Index._simple_new(cls._from_sequence(["original"]), name=None)
+    else:
+        frame.columns = pd.Index(pd.array(["original"], dtype=pd.StringDtype(storage=kind)))
+    assert _has_canonical_columns(frame.columns)
+    assert type(prepare_string_input(frame, schema)) is bytes
+
+
+
+@pytest.mark.parametrize("missing", ["module", "owner", "base"])
+def test_string_absent_private_columns_storage_keeps_row_fallback(monkeypatch, missing):
+    import builtins
+    from pandas.core.arrays import numpy_ as numpy_module, string_ as string_module
+    from pyspark.sql._pandas_input import _has_canonical_columns
+
+    columns = pd.Index(pd.array(["original"], dtype=pd.StringDtype(storage="python")))
+    if missing == "module":
+        original = builtins.__import__
+
+        def without_arrow(name, *args, **kwargs):
+            if name == "pandas.core.arrays.arrow":
+                raise ImportError("private storage module is absent")
+            return original(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", without_arrow)
+    elif missing == "owner":
+        monkeypatch.delattr(numpy_module, "NumpyExtensionArray")
+    else:
+        monkeypatch.delattr(string_module, "BaseStringArray")
+    assert not _has_canonical_columns(columns)
+
+
+
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize("verify", [False, True])
+@pytest.mark.parametrize("large", ["false", "true"])
+def test_string_columns_preserve_every_ipc_cell(protocol, monkeypatch, cached, verify, large):
+    import json
+
+    from pyspark.sql.pandas.types import from_arrow_metadata
+
+    strings = ["", "plain", "é", "e\u0301", "\x00embedded\x00", "漢字", "🙂",
+               "\U0010ffff", "\uffff", "\u202eright-to-left"] * 1000
+    nullable = [None if i % 7 == 0 else value for i, value in enumerate(reversed(strings))]
+    expected = [strings, nullable, [None] * len(strings)]
+    frame = pd.DataFrame(dict(zip(["original", "b", "c"], expected)), dtype=object)
+    schema = T.StructType([
+        T.StructField("renamed.`text", T.StringType(), False, {"source": "string", "id": 3}),
+        T.StructField("nullable", T.StringType(), True, {"tag": [1, 2]}),
+        T.StructField("all_null", T.StringType()),
+    ])
+
+    def no_rows(*args, **kwargs):
+        raise AssertionError("string fast path must not materialize Python rows")
+
+    for method in ("to_numpy", "iterrows", "itertuples"):
+        monkeypatch.setattr(pd.DataFrame, method, no_rows)
+    monkeypatch.setattr(pd.DataFrame, "values", property(no_rows))
+    monkeypatch.setattr(pd.Series, "tolist", no_rows)
+    overrides = {
+        "spark.sql.session.localRelationCacheThreshold": "1" if cached else "999999999",
+        "spark.sql.execution.arrow.useLargeVarTypes": large,
+        "spark.sql.session.localRelationChunkSizeRows": "997",
+    }
+    with _arrow_input_service(protocol, **overrides) as (spark, state):
+        spark.createDataFrame(frame, schema, verifySchema=verify).toArrow()
+        table = state["input_tables"][0]
+        assert table.num_rows == len(strings)
+        assert table.schema.names == schema.names
+        for column, values, field in zip(table.columns, expected, schema.fields):
+            assert column.type == pa.string()
+            assert column.to_pylist() == values
+            actual_field = table.schema.field(field.name)
+            assert actual_field.nullable == field.nullable
+            assert from_arrow_metadata(actual_field.metadata) is None
+            spark_field = json.loads(state["relations"][0].local_relation.schema)["fields"][
+                schema.names.index(field.name)]
+            assert spark_field["metadata"] == field.metadata
+        assert state["config_requests"] == []
+        assert state["uploads"] == 0
+
+
+
+@pytest.mark.parametrize("reason", [
+    "small", "empty", "inferred", "names", "ddl", "cast", "atomic", "mixed_schema",
+    "width", "duplicate_input", "duplicate_schema", "input_nul", "schema_nul",
+    "input_number", "datetime", "date", "nan", "pd_na", "nat", "mixed", "bytes",
+    "nonnullable_null", "frame_subclass", "string_subclass", "string_dtype",
+    "arrow_string_dtype", "late_unsupported", "surrogate", "late_surrogate", "collation",
+])
+def test_string_column_guard_preserves_row_fallback(reason):
+    from pyspark.sql._pandas_input import prepare_string_input
+
+    class Frame(pd.DataFrame):
+        pass
+
+    class Text(str):
+        def __str__(self):
+            raise AssertionError("guard must not call conversion hooks")
+
+    class Unsupported:
+        def __str__(self):
+            raise AssertionError("guard must not stringify unsupported objects")
+
+    values = ["plain"] * 10000
+    frame = pd.DataFrame({"text": values}, dtype=object)
+    schema = T.StructType([T.StructField("text", T.StringType())])
+    if reason == "small":
+        frame = frame.iloc[:9999]
+    elif reason == "empty":
+        frame = frame.iloc[:0]
+    elif reason in ("inferred", "names", "ddl", "cast", "atomic"):
+        schema = {"inferred": None, "names": ["text"], "ddl": "text STRING",
+                  "cast": T.StructType([T.StructField("text", T.LongType())]),
+                  "atomic": T.StringType()}[reason]
+    elif reason == "mixed_schema":
+        frame["long"] = np.arange(10000)
+        schema.add("long", T.LongType())
+    elif reason == "width":
+        schema.add("extra", T.StringType())
+    elif reason in ("duplicate_input", "duplicate_schema"):
+        frame["other"] = values
+        schema.add("other", T.StringType())
+        if reason == "duplicate_input":
+            frame.columns = ["text", "text"]
+        else:
+            schema = T.StructType([T.StructField("text", T.StringType())] * 2)
+    elif reason in ("input_nul", "input_number"):
+        frame.columns = ["text\x00" if reason == "input_nul" else 1]
+    elif reason == "schema_nul":
+        schema = T.StructType([T.StructField("text\x00", T.StringType())])
+    elif reason == "frame_subclass":
+        frame = Frame(frame)
+    elif reason in ("string_dtype", "arrow_string_dtype"):
+        frame = pd.DataFrame({"text": pd.Series(
+            values, dtype=pd.StringDtype(storage="pyarrow" if reason == "arrow_string_dtype"
+                                        else "python"))})
+    elif reason == "collation":
+        schema = T.StructType([T.StructField("text", T.StringType("UTF8_LCASE"))])
+    else:
+        value = {
+            "datetime": datetime(2020, 1, 1), "date": date(2020, 1, 1),
+            "nan": float("nan"), "pd_na": pd.NA, "nat": pd.NaT, "mixed": 42,
+            "bytes": b"plain", "nonnullable_null": None, "string_subclass": Text("plain"),
+            "late_unsupported": Unsupported(), "surrogate": "\ud800", "late_surrogate": "\udfff",
+        }[reason]
+        if reason == "nonnullable_null":
+            schema = T.StructType([T.StructField("text", T.StringType(), False)])
+        if reason in ("late_unsupported", "late_surrogate"):
+            # pandas 3 infers StringDtype for a newly assigned list column.
+            # Keep these unsupported-object fixtures on concrete object storage.
+            frame["other"] = pd.Series(values, dtype=object)
+            schema.add("other", T.StringType())
+            backing = frame["other"].array._ndarray
+            assert type(backing) is np.ndarray and backing.dtype == np.dtype("object")
+        frame.iat[-1, -1] = value
+        if reason in ("late_unsupported", "late_surrogate"):
+            assert frame.iat[-1, -1] is value
+    assert prepare_string_input(frame, schema) is None
+
+
+
+@pytest.mark.parametrize("reason", [
+    "string_subclass", "frame_subclass", "nan", "pd_na", "nat", "string_dtype",
+    "nonnullable_null", "inferred", "names", "ddl", "small", "collation", "cast", "mixed",
+])
+def test_string_public_fallback_keeps_row_semantics(protocol, monkeypatch, reason):
+    calls = []
+
+    class Text(str):
+        def __str__(self):
+            calls.append("str")
+            return "changed"
+
+    class Frame(pd.DataFrame):
+        pass
+
+    values = ["plain"] * (9999 if reason == "small" else 10000)
+    if reason in ("nan", "pd_na", "nat", "nonnullable_null", "mixed"):
+        values[-1] = {"nan": float("nan"), "pd_na": pd.NA, "nat": pd.NaT,
+                      "nonnullable_null": None, "mixed": 42}[reason]
+    elif reason == "string_subclass":
+        values[-1] = Text("plain")
+    frame_type = Frame if reason == "frame_subclass" else pd.DataFrame
+    frame = frame_type({"text": values}, dtype="string" if reason == "string_dtype" else object)
+    schema = T.StructType([T.StructField("text", T.StringType(), reason != "nonnullable_null")])
+    if reason == "inferred":
+        schema = None
+    elif reason == "names":
+        schema = ["renamed"]
+    elif reason == "ddl":
+        schema = "text STRING"
+    elif reason == "collation":
+        schema = T.StructType([T.StructField("text", T.StringType("UTF8_LCASE"))])
+    elif reason == "cast":
+        schema = T.StructType([T.StructField("text", T.LongType())])
+    astype = pd.DataFrame.astype
+
+    def record_rows(self, *args, **kwargs):
+        calls.append("astype")
+        return astype(self, *args, **kwargs)
+
+    monkeypatch.setattr(pd.DataFrame, "astype", record_rows)
+    with _arrow_input_service(protocol) as (spark, state):
+        if reason in ("nonnullable_null", "cast", "mixed"):
+            from pyspark.errors import PySparkRuntimeError
+
+            message = ("Column 'text' is declared as non-nullable but contains null values"
+                       if reason == "nonnullable_null" else "Type mismatch in row data")
+            with pytest.raises(PySparkRuntimeError, match=message):
+                spark.createDataFrame(frame, schema)
+            assert calls == ["astype"]
+            assert state["config_requests"] == []
+            assert state["relations"] == []
+            return
+        spark.createDataFrame(frame, schema).toArrow()
+        assert calls == ["astype"]  # Native extraction keeps str.__str__ overrides uncalled.
+        table = state["input_tables"][0]
+        assert table.schema.names == ["renamed" if reason == "names" else "text"]
+        expected = ["plain"] * len(values)
+        if reason in ("nan", "pd_na", "nat"):
+            expected[-1] = None
+        assert table.column(0).to_pylist() == expected
+        assert state["config_requests"] == []
+
+
+
+@pytest.mark.parametrize("surrogate", ["\ud800", "\udfff"])
+def test_string_surrogate_fallback_precedes_importer_configuration(protocol, monkeypatch, surrogate):
+    values = ["plain"] * 10000
+    values[-1] = surrogate
+    frame = pd.DataFrame({"text": values}, dtype=object)
+    schema = T.StructType([T.StructField("text", T.StringType())])
+    astype = pd.DataFrame.astype
+    calls = []
+
+    def record_rows(self, *args, **kwargs):
+        calls.append("astype")
+        return astype(self, *args, **kwargs)
+
+    monkeypatch.setattr(pd.DataFrame, "astype", record_rows)
+    with _arrow_input_service(protocol) as (spark, state):
+        state["config_error"] = grpc.StatusCode.INVALID_ARGUMENT
+        with pytest.raises(TypeError, match="unsupported value type for createDataFrame: str"):
+            spark.createDataFrame(frame, schema)
+        assert calls == ["astype"]
+        assert state["config_requests"] == []
+        assert state["relations"] == []
+        assert state["uploads"] == 0
+
+
+
+@pytest.mark.parametrize("class_name,attribute", [
+    ("StructType", "names"), ("StructType", "fields"), ("StructType", "__iter__"),
+    ("StructField", "name"), ("StructField", "dataType"), ("StructField", "nullable"),
+    ("StructField", "metadata"), ("StringType", "isUTF8BinaryCollation"),
+    ("StructType", "__getattribute__"), ("StructField", "__getattribute__"),
+    ("StringType", "__getattribute__"), ("StructType", "__class__"),
+    ("StructField", "__class__"), ("StringType", "__class__"),
+    ("StructType", "alias"), ("StructField", "alias"), ("StringType", "alias"),
+])
+@pytest.mark.parametrize("before_import", [False, True])
+def test_string_custom_schema_descriptors_keep_native_row_path(
+    protocol, class_name, attribute, before_import
+):
+    import sys
+
+    script = r'''
+import sys
+import tempfile
+from pathlib import Path
+import pandas as pd
+from pyspark.sql import types as T
+
+import importlib.util
+spec = importlib.util.spec_from_file_location("string_schema_capture", sys.argv[4])
+capture = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = capture
+spec.loader.exec_module(capture)
+_arrow_input_service, protocol = capture._arrow_input_service, capture.protocol
+frame = pd.DataFrame({"text": ["plain"] * 10000}, dtype=object)
+schema = T.StructType([T.StructField("text", T.StringType(), True, {"source": "native"})])
+class_name, attribute, before_import = sys.argv[1:4]
+if before_import == "True":
+    # The capture module imports prepare_int64_table; force the public call to
+    # import a new helper after the class or public alias has been customized.
+    sys.modules.pop("pyspark.sql._pandas_input", None)
+assert ("pyspark.sql._pandas_input" in sys.modules) == (before_import == "False")
+cls = getattr(T, class_name)
+if attribute == "alias":
+    setattr(T, class_name, object)
+else:
+    if attribute == "__getattribute__":
+        replacement = lambda self, name: object.__getattribute__(self, name)
+    elif attribute == "__iter__":
+        replacement = lambda self: iter([T.StructField("changed", T.StringType())])
+    elif attribute == "__class__":
+        attribute = "__getattribute__"
+        replacement = lambda self, name: object if name == "__class__" else (
+            object.__getattribute__(self, name))
+    elif attribute == "isUTF8BinaryCollation":
+        replacement = lambda self: False
+    else:
+        value = {"names": ["changed"], "fields": [], "name": "changed",
+                 "dataType": T.StringType(), "nullable": False, "metadata": {"changed": True}}[attribute]
+        replacement = property(lambda self: value)
+    setattr(cls, attribute, replacement)
+class Factory:
+    def mktemp(self, name):
+        return Path(tempfile.mkdtemp(prefix=name))
+with _arrow_input_service(protocol.__wrapped__(Factory())) as (spark, state):
+    spark.createDataFrame(frame, schema).toArrow()
+    assert state["config_requests"] == [], state["config_requests"]
+    table = state["input_tables"][0]
+    assert table.schema.names == ["text"], table.schema
+    assert table.column(0).to_pylist() == ["plain"] * 10000
+'''
+    result = subprocess.run([sys.executable, "-c", script, class_name, attribute,
+                             str(before_import), __file__],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+
+def test_string_rebound_pandas_alias_keeps_subclass_fallback(monkeypatch):
+    from pyspark.sql._pandas_input import prepare_string_input
+
+    class Frame(pd.DataFrame):
+        pass
+
+    frame = Frame({"text": ["plain"] * 10000}, dtype=object)
+    schema = T.StructType([T.StructField("text", T.StringType())])
+    monkeypatch.setattr(pd, "DataFrame", Frame)
+    assert prepare_string_input(frame, schema) is None
+
+
+
+@pytest.mark.parametrize("class_name", [
+    "BooleanType", "ByteType", "ShortType", "IntegerType", "LongType",
+    "FloatType", "DoubleType", "DecimalType",
+])
+@pytest.mark.parametrize("converter_loaded", [False, True])
+def test_string_rebound_preceding_converter_alias_keeps_native_row_path(
+    protocol, class_name, converter_loaded
+):
+    import sys
+
+    script = r'''
+import importlib.util
+import sys
+import tempfile
+from pathlib import Path
+import pandas as pd
+from pyspark.sql import types as T
+
+spec = importlib.util.spec_from_file_location("string_alias_capture", sys.argv[3])
+capture = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = capture
+spec.loader.exec_module(capture)
+_arrow_input_service, protocol = capture._arrow_input_service, capture.protocol
+values = ["plain", "", "\x00", "é", "漢字", "🙂", None, "tail"] * 1250
+frame = pd.DataFrame({"text": values}, dtype=object)
+schema = T.StructType([T.StructField("text", T.StringType())])
+class_name, converter_loaded = sys.argv[1:3]
+if converter_loaded == "True":
+    import pyspark.sql.pandas.types as converter
+    setattr(converter, class_name, T.StringType)
+else:
+    sys.modules.pop("pyspark.sql.pandas.types", None)
+    setattr(T, class_name, T.StringType)
+    assert "pyspark.sql.pandas.types" not in sys.modules
+class Factory:
+    def mktemp(self, name):
+        return Path(tempfile.mkdtemp(prefix=name))
+with _arrow_input_service(protocol.__wrapped__(Factory())) as (spark, state):
+    spark.createDataFrame(frame, schema).toArrow()
+    assert state["config_requests"] == [], state["config_requests"]
+    table = state["input_tables"][0]
+    assert table.schema.names == ["text"], table.schema
+    assert table.column(0).to_pylist() == values
+'''
+    result = subprocess.run([sys.executable, "-c", script, class_name,
+                             str(converter_loaded), __file__],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+
+@pytest.mark.parametrize("replacement", ["string", "none"])
+def test_string_rebound_importer_schema_alias_keeps_native_row_path(protocol, replacement):
+    import sys
+
+    script = r'''
+import importlib.util
+import json
+import sys
+import tempfile
+from pathlib import Path
+import pandas as pd
+from pyspark.sql import types as T
+
+spec = importlib.util.spec_from_file_location("string_importer_capture", sys.argv[2])
+capture = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = capture
+spec.loader.exec_module(capture)
+_arrow_input_service, protocol = capture._arrow_input_service, capture.protocol
+strings = ["plain", "", "\x00", "é", "漢字", "🙂", "e\u0301", "tail"] * 1250
+nullable = [None if i % 7 == 0 else value for i, value in enumerate(reversed(strings))]
+expected = [strings, nullable, [None] * len(strings)]
+frame = pd.DataFrame(dict(zip(["original", "b", "c"], expected)), dtype=object)
+schema = T.StructType([
+    T.StructField("text", T.StringType(), False, {"source": "native", "id": 3}),
+    T.StructField("nullable", T.StringType(), True, {"tag": [1, 2]}),
+    T.StructField("all_null", T.StringType()),
+])
+import pyspark.sql._arrow_input as importer
+importer.StructType = T.StringType if sys.argv[1] == "string" else None
+class Factory:
+    def mktemp(self, name):
+        return Path(tempfile.mkdtemp(prefix=name))
+with _arrow_input_service(protocol.__wrapped__(Factory())) as (spark, state):
+    spark.createDataFrame(frame, schema).toArrow()
+    assert state["config_requests"] == [], state["config_requests"]
+    table = state["input_tables"][0]
+    assert table.schema.names == schema.names, table.schema
+    spark_fields = json.loads(state["relations"][0].local_relation.schema)["fields"]
+    for column, values, field, spark_field in zip(table.columns, expected, schema.fields, spark_fields):
+        assert column.to_pylist() == values
+        actual_field = table.schema.field(field.name)
+        assert actual_field.nullable == field.nullable
+        assert actual_field.metadata is None
+        assert spark_field["metadata"] == field.metadata
+'''
+    result = subprocess.run([sys.executable, "-c", script, replacement, __file__],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+
+@pytest.mark.parametrize("dtype_mode", ["equal", "class_spoof", "exact_numpy"])
+def test_string_custom_extension_dtype_cannot_impersonate_numpy_object(protocol, dtype_mode):
+    from pandas.api.extensions import ExtensionArray, ExtensionDtype, take
+    from pyspark.sql._pandas_input import prepare_string_input
+
+    arrow_calls = []
+
+    class ObjectEqualDtype(ExtensionDtype):
+        name = "object_equal_string"
+        type = str
+        kind = "O"
+        na_value = None
+
+        @classmethod
+        def construct_array_type(cls):
+            return DifferentArrowArray
+
+        def __eq__(self, other):
+            return (isinstance(other, ObjectEqualDtype)
+                    or isinstance(other, np.dtype) and other.kind == "O")
+
+        def __hash__(self):
+            return hash(self.name)
+
+    class DifferentArrowArray(ExtensionArray):
+        def __init__(self, values):
+            self._values = np.asarray(values, dtype=object)
+
+        @property
+        def dtype(self):
+            return ObjectEqualDtype()
+
+        @property
+        def nbytes(self):
+            return self._values.nbytes
+
+        def __len__(self):
+            return len(self._values)
+
+        def __getitem__(self, key):
+            result = self._values[key]
+            return type(self)(result) if isinstance(result, np.ndarray) else result
+
+        def isna(self):
+            return pd.isna(self._values)
+
+        def take(self, indices, allow_fill=False, fill_value=None):
+            return type(self)(take(self._values, indices, allow_fill=allow_fill,
+                                   fill_value=fill_value))
+
+        def copy(self):
+            return type(self)(self._values.copy())
+
+        @classmethod
+        def _from_sequence(cls, scalars, *, dtype=None, copy=False):
+            values = np.asarray(scalars, dtype=object)
+            return cls(values.copy() if copy else values)
+
+        def to_numpy(self, dtype=None, copy=False, na_value=None):
+            if dtype is not None:
+                return self._values.astype(dtype, copy=copy)
+            return self._values.copy() if copy else self._values
+
+        def __arrow_array__(self, type=None):
+            arrow_calls.append("arrow")
+            # A scan of to_numpy() cannot establish the values this hook emits.
+            return pa.array(["different"] * len(self), type=type)
+
+    array = DifferentArrowArray(["plain"] * 10000)
+    frame = pd.DataFrame({"text": pd.Series(array, copy=False)})
+    schema = T.StructType([T.StructField("text", T.StringType())])
+    if dtype_mode == "exact_numpy":
+        # An ExtensionArray may change its advertised dtype after construction.
+        # The dtype and NumPy scan both pass while its Arrow hook changes cells.
+        DifferentArrowArray.dtype = property(lambda self: np.dtype("object"))
+        DifferentArrowArray.__array__ = lambda self, dtype=None, copy=None: self._values
+    elif dtype_mode == "class_spoof":
+        def spoof_class(self, name):
+            if name == "__class__":
+                return type(np.dtype("object"))
+            return object.__getattribute__(self, name)
+
+        ObjectEqualDtype.__getattribute__ = spoof_class
+    dtype = frame.dtypes.iloc[0]
+    assert type(frame) is pd.DataFrame
+    assert type(frame.iloc[:, 0].array) is DifferentArrowArray
+    assert type(dtype) is (type(np.dtype("object")) if dtype_mode == "exact_numpy"
+                           else ObjectEqualDtype)
+    assert isinstance(dtype, np.dtype) is (dtype_mode != "equal")
+    assert dtype == np.dtype("object")
+    assert prepare_string_input(frame, schema) is None
+    with _arrow_input_service(protocol) as (spark, state):
+        if dtype_mode == "exact_numpy":
+            # This deliberately inconsistent EA already fails pandas' row-path
+            # astype(object). Preserve that error before importer configuration.
+            with pytest.raises(TypeError, match="cannot set astype"):
+                spark.createDataFrame(frame, schema)
+            assert state["input_tables"] == []
+        else:
+            spark.createDataFrame(frame, schema).toArrow()
+            assert state["input_tables"][0].column(0).to_pylist() == ["plain"] * 10000
+        assert state["config_requests"] == []
+    assert arrow_calls == []
+
+
+
+@pytest.mark.parametrize("method", ["astype", "notna"])
+def test_string_instance_conversion_hooks_keep_row_fallback(protocol, method):
+    frame = pd.DataFrame({"text": ["plain"] * 10000}, dtype=object)
+    schema = T.StructType([T.StructField("text", T.StringType())])
+    original = getattr(frame, method)
+    calls = []
+    expected = ["plain"] * 10000
+    if method == "astype":
+        expected[0] = "changed"
+
+        def customized(*args, **kwargs):
+            calls.append(method)
+            result = original(*args, **kwargs)
+            result.iat[0, 0] = "changed"
+            return result
+    else:
+        expected[0] = None
+
+        def customized(*args, **kwargs):
+            calls.append(method)
+            result = original(*args, **kwargs)
+            result.iat[0, 0] = False
+            return result
+    setattr(frame, method, customized)
+    with _arrow_input_service(protocol) as (spark, state):
+        spark.createDataFrame(frame, schema).toArrow()
+        assert calls == [method]
+        assert state["config_requests"] == []
+        assert state["uploads"] == 0
+        assert state["input_tables"][0].column(0).to_pylist() == expected
+
+
+
+@pytest.mark.parametrize("method", ["astype", "notna", "where"])
+@pytest.mark.parametrize("before_import", [False, True])
+def test_string_class_conversion_hooks_keep_row_fallback(
+    protocol, monkeypatch, method, before_import
+):
+    import importlib
+    import sys
+
+    name = "pyspark.sql._pandas_input"
+    if before_import:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    else:
+        importlib.import_module(name)
+    frame = pd.DataFrame({"text": ["plain"] * 10000}, dtype=object)
+    schema = T.StructType([T.StructField("text", T.StringType())])
+    original = getattr(pd.DataFrame, method)
+    calls = []
+    expected = ["plain"] * 10000
+    expected[0] = None if method == "notna" else "changed"
+
+    def customized(self, *args, **kwargs):
+        calls.append(method)
+        result = original(self, *args, **kwargs)
+        result.iat[0, 0] = False if method == "notna" else "changed"
+        return result
+
+    monkeypatch.setattr(pd.DataFrame, method, customized)
+    with _arrow_input_service(protocol) as (spark, state):
+        spark.createDataFrame(frame, schema).toArrow()
+        assert calls == [method]
+        assert state["config_requests"] == []
+        assert state["uploads"] == 0
+        assert state["input_tables"][0].column(0).to_pylist() == expected
+
+
+
+def test_string_instance_where_override_keeps_existing_row_behavior(protocol):
+    from pyspark.sql._pandas_input import prepare_string_input
+
+    frame = pd.DataFrame({"text": ["plain"] * 10000}, dtype=object)
+    schema = T.StructType([T.StructField("text", T.StringType())])
+
+    def customized(*args, **kwargs):
+        raise AssertionError("row normalization calls where on the astype result")
+
+    frame.where = customized
+    assert prepare_string_input(frame, schema) is None
+    with _arrow_input_service(protocol) as (spark, state):
+        spark.createDataFrame(frame, schema).toArrow()
+        assert state["config_requests"] == []
+        assert state["input_tables"][0].column(0).to_pylist() == ["plain"] * 10000
+
+
+
+def test_string_native_backing_does_not_add_series_conversion_hooks(protocol, monkeypatch):
+    frame = pd.DataFrame({"text": ["plain"] * 10000}, dtype=object)
+    schema = T.StructType([T.StructField("text", T.StringType())])
+
+    def customized(*args, **kwargs):
+        raise AssertionError("native string input must not call Series.to_numpy")
+
+    monkeypatch.setattr(pd.Series, "to_numpy", customized)
+    with _arrow_input_service(protocol) as (spark, state):
+        spark.createDataFrame(frame, schema).toArrow()
+        assert state["config_requests"] == []
+        assert state["input_tables"][0].column(0).to_pylist() == ["plain"] * 10000
+
+
+
+def test_string_large_inline_input_keeps_row_transport_and_schema(protocol):
+    values = ["漢字-🙂-" + str(i) for i in range(100000)]
+    frame = pd.DataFrame({"text": values}, dtype=object)
+    schema = T.StructType([T.StructField("renamed", T.StringType(), False,
+                                        {"source": "inline-string", "size": len(values)})])
+    with _arrow_input_service(protocol, **{
+        "spark.sql.session.localRelationCacheThreshold": "1",
+        "spark.sql.session.localRelationSizeLimit": "1",
+        "spark.sql.execution.arrow.useLargeVarTypes": "true",
+    }) as (spark, state):
+        spark.createDataFrame(frame, schema).toArrow()
+        assert state["config_requests"] == []
+        assert state["uploads"] == 0
+        table = state["input_tables"][0]
+        assert table.schema.names == ["renamed"]
+        assert table.column(0).type == pa.string()
+        assert table.schema.field(0).nullable is False
+        assert table.schema.field(0).metadata is None
+        assert table.column(0).to_pylist() == values
+        assert __import__("json").loads(state["relations"][0].local_relation.schema) == (
+            __import__("json").loads(schema.json()))
+

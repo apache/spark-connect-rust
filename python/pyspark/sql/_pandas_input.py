@@ -249,3 +249,125 @@ def prepare_int64_table(frame, schema):
         [pa.array(column, type=pa.int64(), from_pandas=True) for column in columns],
         names=names,
     )
+
+
+def prepare_string_input(frame, schema):
+    """Prepare inline IPC for explicit columns of exact strings or None.
+
+    Inspect every object before Arrow conversion: str subclasses can override
+    conversion hooks, and pandas treats several other objects as missing values.
+    Those cases must keep the existing row conversion and its error ordering.
+    """
+    import sys
+
+    import numpy as np
+    import pandas as pd
+    from pandas.core import frame as frame_module, generic as generic_module
+    from pandas.core.frame import DataFrame
+    from pandas.core.series import Series
+    from types import FunctionType, GetSetDescriptorType, MethodDescriptorType, WrapperDescriptorType
+
+    from pyspark._pyspark import (
+        BooleanType, ByteType, ShortType, IntegerType, LongType, FloatType,
+        DoubleType, DecimalType, StringType, StructField, StructType as NativeStructType,
+    )
+    from pyspark.sql import types as sql_types
+
+    # Keep small frames on the established row path.
+    if (pd.DataFrame is not DataFrame or type(frame) is not DataFrame
+            or type(schema) is not NativeStructType
+            or len(frame) < 10000
+            or any(name in vars(frame) for name in ("astype", "notna", "where"))):
+        return None
+    # Preserve the direct normalization hooks used by the existing row path.
+    for name, module in (("astype", generic_module), ("notna", frame_module),
+                         ("where", generic_module)):
+        method = getattr(DataFrame, name)
+        if (type(method) is not FunctionType or method.__name__ != name
+                or method.__module__ != module.__name__ or method.__globals__ is not vars(module)):
+            return None
+    if (DataFrame.astype is not generic_module.NDFrame.astype
+            or DataFrame.where is not generic_module.NDFrame.where):
+        return None
+    # Earlier converter branches must not recognize a string as another type.
+    # Check a loaded converter too: it keeps its own imported type aliases.
+    if sys.modules.get("pyspark.sql.types") is not sql_types:
+        return None
+    importer = sys.modules.get("pyspark.sql._arrow_input")
+    if importer is not None and getattr(importer, "StructType", None) is not NativeStructType:
+        return None
+    converter = sys.modules.get("pyspark.sql.pandas.types")
+    for name, cls in (
+        ("BooleanType", BooleanType), ("ByteType", ByteType), ("ShortType", ShortType),
+        ("IntegerType", IntegerType), ("LongType", LongType), ("FloatType", FloatType),
+        ("DoubleType", DoubleType), ("DecimalType", DecimalType), ("StringType", StringType),
+        ("StructField", StructField), ("StructType", NativeStructType),
+    ):
+        if (getattr(sql_types, name, None) is not cls
+                or converter is not None and getattr(converter, name, None) is not cls):
+            return None
+    # The row path reads native fields directly. Class attributes are mutable,
+    # so customized Python schema access must not select a different Arrow path.
+    for name, cls in (("StringType", StringType), ("StructField", StructField),
+                      ("StructType", NativeStructType)):
+        if (getattr(sql_types, name, None) is not cls
+                or cls.__getattribute__ is not object.__getattribute__
+                or any("__class__" in vars(base) for base in cls.__mro__ if base is not object)):
+            return None
+    for cls, names, descriptor_type in (
+        (NativeStructType, ("fields", "names"), GetSetDescriptorType),
+        (NativeStructType, ("__iter__",), WrapperDescriptorType),
+        (StructField, ("name", "dataType", "nullable", "metadata"), GetSetDescriptorType),
+        (StringType, ("isUTF8BinaryCollation",), MethodDescriptorType),
+    ):
+        for name in names:
+            descriptor = vars(cls).get(name)
+            if (type(descriptor) is not descriptor_type
+                    or descriptor.__objclass__ is not cls or descriptor.__name__ != name):
+                return None
+    if not _has_canonical_columns(frame.columns):
+        return None
+    width = len(frame.columns)
+    if not width or len(schema.fields) != width or not frame.columns.is_unique:
+        return None
+    if not all(type(name) is str and "\x00" not in name for name in frame.columns):
+        return None
+    if not all(
+        type(field) is StructField and type(field.dataType) is StringType
+        and field.dataType.isUTF8BinaryCollation()
+        and type(field.name) is str and "\x00" not in field.name
+        for field in schema.fields
+    ) or len(set(schema.names)) != width:
+        return None
+    if not all(type(dtype) is type(np.dtype("object")) and dtype == np.dtype("object")
+               for dtype in frame.dtypes):
+        return None
+    # A custom ExtensionArray may report a genuine NumPy dtype while its
+    # Arrow hook emits different values from to_numpy(). Trust only pandas'
+    # concrete NumPy backing array, including its name in older pandas releases.
+    try:
+        from pandas.core.arrays.numpy_ import NumpyExtensionArray
+    except ImportError:
+        try:
+            from pandas.core.arrays.numpy_ import PandasArray as NumpyExtensionArray
+        except ImportError:
+            return None
+    columns = [frame.iloc[:, i] for i in range(width)]
+    if any(type(column) is not Series or type(column.array) is not NumpyExtensionArray
+           for column in columns):
+        return None
+
+    from pyspark._pyspark import _pandas_string_ipc
+
+    # Preflight exact object types before the native Arrow buffer traversal.
+    # Unsupported values, non-nullable None, and surrogates return to the row
+    # path before serialization. Keep its inline transport and configuration
+    # behavior rather than selecting the public Arrow import/upload policy.
+    arrays = [column.array._ndarray for column in columns]
+    if any(type(array) is not np.ndarray or array.ndim != 1
+           or type(array.dtype) is not type(np.dtype("object"))
+           or array.dtype != np.dtype("object") or len(array) != len(frame)
+           for array in arrays):
+        return None
+    return _pandas_string_ipc(arrays, schema)
+
