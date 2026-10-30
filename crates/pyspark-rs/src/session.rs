@@ -242,6 +242,129 @@ impl PySparkSession {
     pub fn new(session: SparkSession) -> Self {
         PySparkSession { session }
     }
+
+    /// `createDataFrame` of a pyarrow Table, as the reference client does it: the column
+    /// names come from a list `schema` (extra columns are named `_N`), or else from the table;
+    /// the Spark types come from a `StructType` (or DDL) `schema`, or else from the Arrow
+    /// types. The table is cast to the Arrow form of those types, with its timestamps
+    /// localized to the session time zone, and sent as an Arrow IPC stream.
+    fn create_dataframe_from_arrow(
+        &self,
+        py: Python<'_>,
+        table: &Bound<'_, PyAny>,
+        schema: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let mut names: Option<Vec<String>> = None;
+        let mut user_schema: Option<DataType> = None;
+        match schema {
+            None => names = Some(table.getattr("column_names")?.extract()?),
+            Some(s) => {
+                if let Ok(mut given) = s.extract::<Vec<String>>() {
+                    let num_columns: usize = table.getattr("num_columns")?.extract()?;
+                    given.extend((given.len()..num_columns).map(|i| format!("_{}", i + 1)));
+                    names = Some(given);
+                } else {
+                    user_schema = Some(crate::types::py_to_data_type(s)?);
+                }
+            }
+        }
+        // As the reference does for any empty input: a relation of the user's schema, which
+        // a list of names does not give.
+        if table.len()? == 0 {
+            return match user_schema {
+                Some(dt) => Ok(PyDataFrame::new(
+                    py.detach(|| self.session.create_dataframe(vec![], dt))
+                        .to_pyerr()?,
+                )),
+                None => Err(crate::column::raise_pyspark(
+                    py,
+                    "PySparkValueError",
+                    "CANNOT_INFER_EMPTY_SCHEMA",
+                    &[],
+                )),
+            };
+        }
+
+        let conf = self.session.conf();
+        let configs = py
+            .detach(|| {
+                conf.get_many(&[
+                    "spark.sql.timestampType",
+                    "spark.sql.session.timeZone",
+                    "spark.sql.execution.arrow.useLargeVarTypes",
+                ])
+            })
+            .to_pyerr()?;
+        let config = |i: usize| configs.get(i).cloned().flatten();
+        let prefer_timestamp_ntz = config(0).as_deref() == Some("TIMESTAMP_NTZ");
+        let timezone = config(1);
+        let prefers_large_types = config(2).as_deref() == Some("true");
+
+        let types = py.import("pyspark.sql.pandas.types")?;
+        let spark_schema = match &user_schema {
+            Some(dt @ DataType::Struct { .. }) => {
+                crate::types::data_type_to_py(py, dt)?.into_bound(py)
+            }
+            _ => types.call_method1(
+                "from_arrow_schema",
+                (table.getattr("schema")?, prefer_timestamp_ntz),
+            )?,
+        };
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("error_on_duplicated_field_names_in_struct", true)?;
+        kwargs.set_item("timezone", "UTC")?;
+        kwargs.set_item("prefers_large_types", prefers_large_types)?;
+        let arrow_schema = types.call_method("to_arrow_schema", (&spark_schema,), Some(&kwargs))?;
+        let converted = types
+            .call_method1(
+                "_check_arrow_table_timestamps_localize",
+                (table, &spark_schema, true, timezone),
+            )?
+            .call_method1("cast", (arrow_schema,))?
+            .call_method1("rename_columns", (spark_schema.getattr("names")?,))?;
+
+        let pa = py.import("pyarrow")?;
+        let sink = pa.call_method0("BufferOutputStream")?;
+        let writer = pa
+            .getattr("ipc")?
+            .call_method1("new_stream", (&sink, converted.getattr("schema")?))?;
+        writer.call_method1("write_table", (&converted,))?;
+        writer.call_method0("close")?;
+        let stream = sink.call_method0("getvalue")?.call_method0("to_pybytes")?;
+        let data = stream.cast::<pyo3::types::PyBytes>()?.as_bytes().to_vec();
+
+        // The reference sends the user's schema, or none for the server to read the Arrow
+        // one; the plan always carries a schema, so the Arrow one is sent explicitly.
+        let relation_schema = match user_schema {
+            Some(dt) => dt,
+            None => crate::types::py_to_data_type(&spark_schema)?,
+        };
+        let df = self
+            .session
+            .create_dataframe_from_arrow(data, relation_schema);
+        // Like the reference, apply the column names with toDF.
+        Ok(PyDataFrame::new(match names {
+            Some(names) if !names.is_empty() => {
+                df.to_df(names.iter().map(String::as_str).collect())
+            }
+            _ => df,
+        }))
+    }
+}
+
+/// Whether `obj` is an instance of `module.class`, without importing `module` when it is not
+/// loaded yet: an instance can only exist once its module was imported.
+fn is_loaded_instance(
+    py: Python<'_>,
+    obj: &Bound<'_, PyAny>,
+    module: &str,
+    class: &str,
+) -> PyResult<bool> {
+    let modules = py.import("sys")?.getattr("modules")?;
+    match modules.cast::<PyDict>()?.get_item(module)? {
+        Some(m) => obj.is_instance(&m.getattr(class)?),
+        None => Ok(false),
+    }
 }
 
 #[pymethods]
@@ -326,7 +449,8 @@ impl PySparkSession {
         Ok(PyDataFrame::new(df))
     }
 
-    /// Create a DataFrame from a list of tuples/lists and an optional schema.
+    /// Create a DataFrame from a list of tuples/lists and an optional schema. A pandas
+    /// DataFrame or a pyarrow Table is accepted too, as in pyspark.
     ///
     /// If schema is a list of strings, those are used as column names (all types inferred as string).
     /// If schema is None, columns are named col0, col1, etc. and all types are string.
@@ -347,6 +471,10 @@ impl PySparkSession {
         // directly and does not perform that extra verification, so both are accepted for
         // signature parity. See PARITY_GAP_ANALYSIS.md.
         let _ = (samplingRatio, verifySchema);
+
+        if is_loaded_instance(py, data, "pyarrow", "Table")? {
+            return self.create_dataframe_from_arrow(py, data, schema);
+        }
 
         // Accept a pandas DataFrame (as pyspark does): convert it to a list of row lists
         // with NaN/NaT mapped to None, and take its column names as the default schema.

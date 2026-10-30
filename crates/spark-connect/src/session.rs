@@ -290,6 +290,19 @@ impl SparkSession {
         Ok(DataFrame::new(self.clone(), plan))
     }
 
+    /// Create a DataFrame from rows that are already encoded as an Arrow IPC stream, whose
+    /// Arrow schema matches `schema`.
+    ///
+    /// Mirrors `pyspark.sql.SparkSession.createDataFrame(pyarrow.Table)`, which sends the
+    /// table as an Arrow IPC stream in a `LocalRelation`.
+    pub fn create_dataframe_from_arrow(&self, data: Vec<u8>, schema: DataType) -> DataFrame {
+        let plan = LogicalPlan::LocalRelation {
+            schema,
+            data: Some(data),
+        };
+        DataFrame::new(self.clone(), plan)
+    }
+
     /// Create a DataFrameReader for reading data from various sources.
     ///
     /// Mirrors `pyspark.sql.SparkSession.read`.
@@ -1228,6 +1241,21 @@ mod tests {
     fn session_is_not_stopped_initially() {
         let spark = session();
         assert!(!spark.is_stopped());
+    }
+
+    #[test]
+    fn create_dataframe_from_arrow_sends_the_stream_and_schema() {
+        let schema = DataType::Struct {
+            fields: vec![struct_field("id", DataType::Long)],
+        };
+        let df = session().create_dataframe_from_arrow(vec![1, 2, 3], schema.clone());
+        match df.plan().to_proto().rel_type {
+            Some(proto::relation::RelType::LocalRelation(local)) => {
+                assert_eq!(local.data.as_deref(), Some(&[1u8, 2, 3][..]));
+                assert_eq!(local.schema, Some(schema.json()));
+            }
+            other => panic!("expected LocalRelation, got {other:?}"),
+        }
     }
 
     #[test]

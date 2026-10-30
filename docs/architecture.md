@@ -98,9 +98,13 @@ sequenceDiagram
 ```
 
 Transformations are **lazy** - they only build up the plan. Only an *action*
-triggers `ExecutePlan`. If the response stream breaks mid-flight, the core's
-reattachable-execute iterator resumes from the last response it saw, so long
-results survive transient disconnects.
+triggers `ExecutePlan`. If the response stream breaks mid-flight, or the server
+ends it before the result is complete (as it does after
+`spark.connect.execute.reattachable.senderMaxStreamDuration` or
+`senderMaxStreamSize`), the core's reattachable-execute iterator resumes from the
+last response it saw, so long results survive transient disconnects. Like the
+reference client, it releases each response it has read, and the whole execution
+once the result is complete, so the server does not keep them.
 
 ### Python Arrow table handoff
 

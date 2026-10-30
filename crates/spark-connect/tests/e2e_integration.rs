@@ -6,13 +6,78 @@
 //! Run with: `SPARK_REMOTE=sc://localhost:15002 cargo test --test e2e_integration`
 //! Or simply skip with: `cargo test --test e2e_integration` (will skip all tests)
 
+use std::time::Duration;
+
 use spark_connect::column::{col, lit};
 use spark_connect::row::Value;
 use spark_connect::session::SparkSession;
 use spark_connect::types::DataType;
+use spark_connect_core::runtime::block_on;
+use spark_connect_core::{ChannelBuilder, SparkConnectClient};
+use spark_connect_proto as proto;
 
 fn should_run() -> bool {
     std::env::var("SPARK_REMOTE").is_ok()
+}
+
+fn remote_url() -> String {
+    std::env::var("SPARK_REMOTE").unwrap_or_else(|_| "sc://localhost:15002".to_string())
+}
+
+async fn connect_client() -> SparkConnectClient {
+    let builder = ChannelBuilder::parse(&remote_url()).expect("Failed to parse SPARK_REMOTE");
+    SparkConnectClient::connect(&builder)
+        .await
+        .expect("Failed to connect")
+}
+
+/// A request to run `query`, with an operation ID of its own, which it returns as well.
+fn sql_execute_request(
+    client: &SparkConnectClient,
+    query: &str,
+) -> (proto::ExecutePlanRequest, String) {
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let mut relation = proto::Relation::default();
+    relation.rel_type = Some(proto::relation::RelType::Sql(proto::Sql {
+        query: query.to_string(),
+        ..Default::default()
+    }));
+    let mut plan = proto::Plan::default();
+    plan.op_type = Some(proto::plan::OpType::Root(relation));
+    let request = proto::ExecutePlanRequest {
+        session_id: client.session_id().to_string(),
+        user_context: Some(proto::UserContext::default()),
+        operation_id: Some(operation_id.clone()),
+        plan: Some(plan),
+        ..Default::default()
+    };
+    (request, operation_id)
+}
+
+/// Waits until the server no longer knows `operation_id`, as the client releases executions
+/// in the background: `ReattachExecute` of a released execution fails with
+/// `OPERATION_NOT_FOUND`, while it replays the responses of a kept one.
+async fn assert_released(client: &SparkConnectClient, operation_id: &str) {
+    for _ in 0..100 {
+        let request = proto::ReattachExecuteRequest {
+            session_id: client.session_id().to_string(),
+            user_context: Some(proto::UserContext::default()),
+            operation_id: operation_id.to_string(),
+            ..Default::default()
+        };
+        let error = match client.reattach_execute(request).await {
+            Err(e) => e.to_string(),
+            Ok(mut stream) => match stream.message().await {
+                Err(status) => status.message().to_string(),
+                Ok(_) => String::new(),
+            },
+        };
+        if error.contains("OPERATION_NOT_FOUND") {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("The server still has operation {operation_id}");
 }
 
 #[test]
@@ -477,4 +542,80 @@ fn test_collect_batch_larger_than_grpc_default_cap() {
         n,
         "Expected the full {n}-byte string to round-trip through collect()"
     );
+}
+
+/// The server ends the response stream of a reattachable execution before the result is
+/// complete after `spark.connect.execute.reattachable.senderMaxStreamDuration` or
+/// `senderMaxStreamSize`, and the client reads the rest by reattaching. CI's server sets a
+/// small `senderMaxStreamSize`, so that this result takes several streams.
+#[test]
+fn test_collect_reads_a_result_across_stream_ends() {
+    if !should_run() {
+        println!(
+            "Skipping test_collect_reads_a_result_across_stream_ends - set SPARK_REMOTE to run"
+        );
+        return;
+    }
+    let session = SparkSession::builder()
+        .remote(&remote_url())
+        .get_or_create()
+        .expect("Failed to create session");
+
+    let n: i64 = 300_000;
+    let rows = session
+        .range(n)
+        .expect("Failed to create range DataFrame")
+        .collect()
+        .expect("Failed to collect rows");
+
+    assert_eq!(rows.len() as i64, n);
+    let sum: i64 = rows
+        .iter()
+        .map(|row| match row.get(0) {
+            Some(Value::Long(id)) => *id,
+            other => panic!("Expected Long value, got {:?}", other),
+        })
+        .sum();
+    assert_eq!(sum, n * (n - 1) / 2);
+}
+
+/// Once its result is complete, the client releases an execution, so that the server does not
+/// keep it, with its request and buffered responses, until it is abandoned.
+#[test]
+fn test_completed_execution_is_released() {
+    if !should_run() {
+        println!("Skipping test_completed_execution_is_released - set SPARK_REMOTE to run");
+        return;
+    }
+    block_on(async {
+        let client = connect_client().await;
+        let (request, operation_id) = sql_execute_request(&client, "SELECT 1");
+        let mut stream = client
+            .execute_plan_reattachable(request)
+            .await
+            .expect("Failed to execute");
+        while stream.message().await.expect("Failed to read").is_some() {}
+        assert_released(&client, &operation_id).await;
+    });
+}
+
+/// A stream dropped before its result is complete releases its execution as well.
+#[test]
+fn test_dropped_stream_releases_its_execution() {
+    if !should_run() {
+        println!("Skipping test_dropped_stream_releases_its_execution - set SPARK_REMOTE to run");
+        return;
+    }
+    block_on(async {
+        let client = connect_client().await;
+        let (request, operation_id) =
+            sql_execute_request(&client, "SELECT id FROM range(100000000)");
+        let mut stream = client
+            .execute_plan_reattachable(request)
+            .await
+            .expect("Failed to execute");
+        stream.message().await.expect("Failed to read");
+        drop(stream);
+        assert_released(&client, &operation_id).await;
+    });
 }

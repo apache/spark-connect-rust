@@ -123,10 +123,13 @@ jobs:
         run: |
           SPARK_HOME="${{ steps.spark-download.outputs.SPARK_HOME }}"
           echo "Starting Connect server on sc://localhost:15002"
+          # As for the behavioral e2e tests: a small senderMaxStreamSize exercises the
+          # client's reattach path on every result over 1 MiB.
           "${SPARK_HOME}/sbin/start-connect-server.sh" \
             --packages "org.apache.spark:spark-connect_2.13:${SPARK_VERSION}" \
             --driver-memory 3g \
             --conf spark.sql.session.localRelationSizeLimit=1073741824 \
+            --conf spark.connect.execute.reattachable.senderMaxStreamSize=1048576 \
             > /tmp/connect-server.log 2>&1 &
           for i in $(seq 1 90); do
             if (echo > /dev/tcp/localhost/15002) 2>/dev/null; then

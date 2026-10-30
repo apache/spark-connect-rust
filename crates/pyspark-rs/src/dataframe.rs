@@ -400,7 +400,16 @@ impl PyDataFrame {
                 "numPartitions must be positive, got {numPartitions}"
             )));
         }
-        let col = to_column(partitionIdCol)?;
+        // A `ColumnOrName`, as in pyspark: a string is a column name, not a literal.
+        let col = if let Ok(c) = partitionIdCol.extract::<Bound<'_, PyColumn>>() {
+            c.borrow().column.clone()
+        } else if let Ok(name) = partitionIdCol.extract::<String>() {
+            spark_connect::functions::col(&name)
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "partitionIdCol should be a Column or a column name (str)",
+            ));
+        };
         Ok(PyDataFrame::new(
             self.dataframe.repartition_by_id(numPartitions, col),
         ))
