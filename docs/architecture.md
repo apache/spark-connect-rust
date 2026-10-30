@@ -111,6 +111,19 @@ Batch schema consistency is validated before export. Field names or timezones
 containing NUL use IPC over the collected batches, without another RPC. Empty
 batch vectors retain the empty-schema behavior.
 
+`createDataFrame(pyarrow_table)` uses the reverse boundary: Spark's schema and
+timestamp conversion helpers normalize the table, then arrow-rs imports its
+`RecordBatchReader` through the C Stream interface. The Rust core serializes
+those batches to IPC for the local relation sent to Spark. No Python rows are
+materialized; casts, buffer alignment, and IPC serialization may still copy.
+Empty tables require an explicit schema, matching PySpark Connect.
+Inputs at or above `spark.sql.session.localRelationCacheThreshold` are serialized
+into independent IPC streams and uploaded as session-scoped cache artifacts.
+The plan carries `ChunkedCachedLocalRelation` hashes instead of embedding the
+entire payload. Chunk sizes, upload batch sizes, and the total relation size
+limit follow the server's local-relation settings; artifact RPC messages use
+32 KiB pieces, with SHA-256 deduplication and CRC checks.
+
 ## Two front-ends, one core
 
 === "Rust (native)"

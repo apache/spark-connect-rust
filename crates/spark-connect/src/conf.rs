@@ -58,8 +58,16 @@ impl RuntimeConf {
     /// println!("Shuffle partitions: {:?}", value);
     /// ```
     pub fn get(&self, key: &str) -> Result<Option<String>> {
-        let results = block_on(self.client.get_configs(&[key]))?;
+        let results = self.get_many(&[key])?;
         Ok(results.into_iter().next().flatten())
+    }
+
+    /// Get configuration values in one request, in the same order as `keys`.
+    ///
+    /// Missing keys return `None`, as with [`Self::get`]. Values are read from
+    /// the server on every call; they are not cached locally.
+    pub fn get_many(&self, keys: &[&str]) -> Result<Vec<Option<String>>> {
+        block_on(self.client.get_configs(keys))
     }
 
     /// Get a configuration value, returning `default` when the key is unset — instead of

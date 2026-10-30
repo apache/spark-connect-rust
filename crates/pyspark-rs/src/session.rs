@@ -348,6 +348,12 @@ impl PySparkSession {
         // signature parity. See PARITY_GAP_ANALYSIS.md.
         let _ = (samplingRatio, verifySchema);
 
+        if let Ok(pa) = py.import("pyarrow") {
+            if data.is_instance(&pa.getattr("Table")?)? {
+                return crate::pyarrow_import::create_dataframe(py, &self.session, data, schema);
+            }
+        }
+
         // Accept a pandas DataFrame (as pyspark does): convert it to a list of row lists
         // with NaN/NaT mapped to None, and take its column names as the default schema.
         // pandas-on-Spark always passes an explicit `schema`, so this mainly needs to
