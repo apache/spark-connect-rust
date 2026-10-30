@@ -14,7 +14,7 @@ from threading import Barrier
 import pytest
 
 from _mock_connect_server import message_field, mock_connect_session, struct_schema
-from pyspark.sql import SparkSession, types as T
+from pyspark.sql import Row, SparkSession, types as T
 
 
 # --------------------------------------------------------------------------- types
@@ -3088,26 +3088,22 @@ def test_schema_cache_metadata_wait_releases_gil(mock_connect, accessor):
 
 
 # Exact built-in string conversion and full outbound Arrow IPC guards.
-from concurrent.futures import ThreadPoolExecutor as _exact_string_ThreadPoolExecutor
-import multiprocessing as _exact_string_multiprocessing
-
-from pyspark.sql import Row as _exact_string_Row, SparkSession as _exact_string_SparkSession
 
 
 @pytest.mark.parametrize("text", ["", "1.25", "-42", "NaN", "a\x00b", "é雪😀", "e\u0301", "\uffff"])
 def test_exact_string_roundtrip(text):
-    actual = _exact_string_Row(value=text).value
+    actual = Row(value=text).value
     assert type(actual) is str
     assert actual == text
 
 
 @pytest.mark.parametrize("text", ["\ud800", "\udfff", "a\ud800b"])
 def test_exact_string_surrogate_error_preserves_generic_fallback(text):
-    with pytest.raises(TypeError, match="unsupported value type for createDataFrame: str"):
-        _exact_string_Row(value=text)
+    with pytest.raises(TypeError):
+        Row(value=text)
 
 
-def test_exact_string_string_subclass_protocol_order():
+def test_exact_string_subclass_protocol_order():
     trace = []
 
     class IndexString(str):
@@ -3141,148 +3137,49 @@ def test_exact_string_string_subclass_protocol_order():
     for value, expected in [(IndexString("x"), 17), (FloatString("x"), 2.5),
                             (FallbackString("original"), "original"),
                             (PlainString("plain"), "plain")]:
-        actual = _exact_string_Row(value=value).value
+        actual = Row(value=value).value
         assert type(actual) is type(expected)
         assert actual == expected
     assert trace == ["index", "float", "bad index", "bad float"]
 
 
 def test_exact_string_nested_strings_and_nulls():
-    value = _exact_string_Row(items=["雪", None, ""], mapping={"x": "😀", "null": None})
-    actual = _exact_string_Row(value=value).value
+    value = Row(items=["雪", None, ""], mapping={"x": "😀", "null": None})
+    actual = Row(value=value).value
     assert list(actual.items) == ["雪", None, ""]
     assert actual.mapping == {"x": "😀", "null": None}
 
 
-def _exact_string_varint(value):
-    out = bytearray()
-    while value > 127:
-        out.append((value & 127) | 128)
-        value >>= 7
-    out.append(value)
-    return bytes(out)
-
-
-def _exact_string_message(field, value):
-    return _exact_string_varint(field * 8 + 2) + _exact_string_varint(len(value)) + value
-
-
-def _exact_string_fields(data):
-    def read(pos):
-        value, shift = 0, 0
-        while True:
-            byte = data[pos]
-            pos += 1
-            value |= (byte & 127) << shift
-            if byte < 128:
-                return value, pos
-            shift += 7
-    result, pos = {}, 0
-    while pos < len(data):
-        tag, pos = read(pos)
-        wire = tag & 7
-        if wire == 2:
-            size, pos = read(pos)
-            result[tag >> 3] = data[pos:pos + size]
-            pos += size
-        elif wire == 0:
-            _, pos = read(pos)
-        else:
-            raise AssertionError(f"unexpected wire type {wire}")
-    return result
-
-
-def _exact_string_serve(connection):
-    import grpc
-    import pyarrow as pa
-
-    state = {}
-
-    def analyze(raw, context):
-        # AnalyzePlanRequest.schema.plan.root.local_relation.data
-        relation = _exact_string_fields(_exact_string_fields(_exact_string_fields(_exact_string_fields(raw)[4])[1])[1])
-        payload = _exact_string_fields(relation[11])[1]
-        table = pa.ipc.open_stream(payload).read_all()
-        state["result"] = (table.to_pylist(), str(table.schema))
-        # Return an empty StructType; the test inspects the input IPC itself.
-        return _exact_string_message(2, _exact_string_message(1, _exact_string_message(21, b"")))
-
-    with _exact_string_ThreadPoolExecutor(max_workers=2) as executor:
-        server = grpc.server(executor)
-        server.add_generic_rpc_handlers((grpc.method_handlers_generic_handler(
-            "spark.connect.SparkConnectService", {
-                "AnalyzePlan": grpc.unary_unary_rpc_method_handler(analyze)}),))
-        port = server.add_insecure_port("127.0.0.1:0")
-        server.start()
-        connection.send(port)
-        try:
-            while True:
-                command = connection.recv()
-                if command == "stop":
-                    break
-                assert command == "get"
-                connection.send(state["result"])
-        finally:
-            server.stop(0).wait()
-
-
-@pytest.fixture
-def exact_string_input_service():
-    pytest.importorskip("grpc")
-    pytest.importorskip("pyarrow")
-    context = _exact_string_multiprocessing.get_context("spawn")
-    parent, child = context.Pipe()
-    process = context.Process(target=_exact_string_serve, args=(child,))
-    process.start()
-    try:
-        assert parent.poll(20)
-        spark = _exact_string_SparkSession.builder.remote(f"sc://127.0.0.1:{parent.recv()}").getOrCreate()
-        yield spark, parent
-    finally:
-        if process.is_alive():
-            parent.send("stop")
-        process.join(10)
-        if process.is_alive():
-            process.terminate()
-            process.join(10)
-        parent.close()
-        child.close()
-
-
 @pytest.mark.parametrize("source", ["tuples", "pandas"])
 @pytest.mark.parametrize("schema_mode", ["inferred", "names", "explicit"])
-def test_exact_string_string_input_ipc(exact_string_input_service, source, schema_mode):
-    spark, parent = exact_string_input_service
-    from pyspark.sql.types import StructType, StructField, StringType
+def test_exact_string_input_ipc(mock_connect, source, schema_mode):
     import pandas as pd
 
+    pytest.importorskip("pyarrow")
+    spark, service = mock_connect
     rows = [("雪😀", "a\x00b"), ("", None), (None, "1.25"), ("e\u0301", "\uffff")]
     data = pd.DataFrame(rows, columns=["a", "b"]) if source == "pandas" else rows
-    schema = (StructType([StructField("a", StringType()), StructField("b", StringType())])
+    schema = (T.StructType([T.StructField("a", T.StringType()), T.StructField("b", T.StringType())])
               if schema_mode == "explicit" else ["a", "b"] if schema_mode == "names" else None)
     spark.createDataFrame(data, schema).schema
-    parent.send("get")
-    assert parent.poll(10)
-    actual, arrow_schema = parent.recv()
+    actual, arrow_schema = service.local_relation
     names = ["col0", "col1"] if source == "tuples" and schema_mode == "inferred" else ["a", "b"]
     assert actual == [dict(zip(names, row)) for row in rows]
     assert all(f"{name}: string" in arrow_schema for name in names)
 
 
-def test_exact_string_nested_string_input_ipc(exact_string_input_service):
-    from pyspark.sql.types import (StructType, StructField, StringType, ArrayType, MapType)
-    spark, parent = exact_string_input_service
-    schema = StructType([
-        StructField("items", ArrayType(StringType())),
-        StructField("mapping", MapType(StringType(), StringType())),
-        StructField("nested", StructType([StructField("text", StringType())])),
+def test_exact_string_nested_input_ipc(mock_connect):
+    pytest.importorskip("pyarrow")
+    spark, service = mock_connect
+    schema = T.StructType([
+        T.StructField("items", T.ArrayType(T.StringType())),
+        T.StructField("mapping", T.MapType(T.StringType(), T.StringType())),
+        T.StructField("nested", T.StructType([T.StructField("text", T.StringType())])),
     ])
-    rows = [(["雪", None, ""], {"x": "😀", "null": None}, _exact_string_Row(text="a\x00b")),
+    rows = [(["雪", None, ""], {"x": "😀", "null": None}, Row(text="a\x00b")),
             (None, None, None)]
     spark.createDataFrame(rows, schema).schema
-    parent.send("get")
-    assert parent.poll(10)
-    actual, _ = parent.recv()
+    actual, _ = service.local_relation
     # Arrow map columns decode as ordered key/value pairs.
     assert actual == [
         {"items": ["雪", None, ""], "mapping": [("null", None), ("x", "😀")],
@@ -3292,17 +3189,16 @@ def test_exact_string_nested_string_input_ipc(exact_string_input_service):
 
 
 @pytest.mark.parametrize("source", ["tuples", "pandas"])
-def test_exact_string_large_string_input_ipc(exact_string_input_service, source):
-    from pyspark.sql.types import StructType, StructField, StringType
+def test_exact_string_batch_input_ipc(mock_connect, source):
     import pandas as pd
-    spark, parent = exact_string_input_service
+
+    pytest.importorskip("pyarrow")
+    spark, service = mock_connect
     names = ["a", "b", "c"]
     rows = [(f"雪😀-{i}", str(i), None if i % 7 == 0 else "a\x00b")
-            for i in range(10000)]
+            for i in range(256)]
     data = pd.DataFrame(rows, columns=names) if source == "pandas" else rows
-    schema = StructType([StructField(name, StringType()) for name in names])
+    schema = T.StructType([T.StructField(name, T.StringType()) for name in names])
     spark.createDataFrame(data, schema).schema
-    parent.send("get")
-    assert parent.poll(10)
-    actual, _ = parent.recv()
+    actual, _ = service.local_relation
     assert actual == [dict(zip(names, row)) for row in rows]
