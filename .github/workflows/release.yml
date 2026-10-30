@@ -292,7 +292,37 @@ jobs:
         shell: bash
         run: |
           python -m pip install --upgrade maturin
-          args=(--release --out dist --target "${{ matrix.target }}")
+          # abi3 is passed here (not in pyproject) so the free-threaded leg can build
+          # without it — abi3 and the free-threaded ABI are mutually exclusive.
+          args=(--release --out dist --target "${{ matrix.target }}" --features pyo3/abi3-py39)
+          if [[ "${{ matrix.zig }}" == "true" ]]; then
+            python -m pip install ziglang
+            args+=(--zig)
+          fi
+          maturin build "${args[@]}"
+      - name: Set up free-threaded interpreters
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        uses: actions/setup-python@v5
+        with:
+          python-version: |
+            3.13t
+            3.14t
+      - name: Build free-threaded wheels with maturin
+        # The free-threaded (PEP 703) ABI is incompatible with abi3, so these are
+        # separate, version-specific cp313t/cp314t wheels built without the abi3
+        # feature (dropped from pyproject; the abi3 leg passes it explicitly). They
+        # land in the same dist/ and are uploaded alongside the abi3 wheel. x86_64
+        # Linux for now -- the aarch64 free-threaded cross-compile needs pyo3 to
+        # detect the target's free-threaded ABI and is a follow-up.
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          # The preceding setup-python made a free-threaded interpreter the default
+          # `python`, but maturin and ziglang were pip-installed into 3.11 by the abi3
+          # step. Reinstall them here so maturin runs and can locate zig via
+          # `python -m ziglang` under the now-default free-threaded interpreter.
+          python -m pip install --upgrade maturin
+          args=(--release --out dist --target "${{ matrix.target }}" --interpreter python3.13t python3.14t)
           if [[ "${{ matrix.zig }}" == "true" ]]; then
             python -m pip install ziglang
             args+=(--zig)
