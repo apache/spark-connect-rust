@@ -3113,6 +3113,65 @@ def test_arrow_input_empty_and_width_errors():
         prepare_table(pa.table({"x": [1]}), ["a", "b"], "TIMESTAMP_LTZ", "UTC", "false")
 
 
+@pytest.mark.parametrize("schema,expected_length", [
+    pytest.param(T.StructType([T.StructField("x", T.IntegerType())]), "1", id="too-few-fields"),
+    pytest.param(T.StructType([
+        T.StructField("x", T.LongType()), T.StructField("y", T.LongType()),
+        T.StructField("z", T.LongType()),
+    ]), "3", id="too-many-fields"),
+    pytest.param(T.LongType(), "1", id="atomic-multiple-columns"),
+])
+def test_arrow_input_explicit_schema_width_errors(schema, expected_length):
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql._arrow_input import prepare_table
+
+    # The first value would overflow the one-field IntegerType schema. Width
+    # validation must produce the structured Spark error before an Arrow cast.
+    table = pa.table({"x": [2**40], "y": [2]})
+    with pytest.raises(PySparkValueError) as error:
+        prepare_table(table, schema, "TIMESTAMP_LTZ", "UTC", "false")
+    assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
+    assert error.value.getMessageParameters() == {
+        "expected_length": expected_length, "actual_length": "2",
+    }
+
+
+@pytest.mark.parametrize("schema,values", [
+    pytest.param(T.StructType([T.StructField("x", T.LongType())]),
+                 {"x": [1, 2]}, id="single-field"),
+    pytest.param(T.StructType([
+        T.StructField("x", T.LongType()), T.StructField("y", T.LongType()),
+    ]), {"x": [1, 2], "y": [3, 4]}, id="multiple-fields"),
+    pytest.param(T.LongType(), {"x": [1, 2]}, id="atomic-single-column"),
+])
+def test_arrow_input_explicit_schema_matching_width(schema, values):
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.sql._arrow_input import prepare_table
+
+    table = pa.table(values)
+    normalized, result, names = prepare_table(table, schema, "TIMESTAMP_LTZ", "UTC", "false")
+    assert normalized.equals(table)
+    assert result is schema
+    assert names is None
+
+
+@pytest.mark.parametrize("schema", [
+    T.StructType([]),
+    T.StructType([T.StructField("x", T.LongType()), T.StructField("y", T.LongType())]),
+    T.LongType(),
+])
+def test_arrow_input_empty_explicit_schema_skips_width_validation(schema):
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.sql._arrow_input import prepare_table
+
+    table = pa.table({"x": pa.array([], type=pa.int64())})
+    normalized, result, names = prepare_table(table, schema, None, None, None)
+    assert normalized is table
+    assert result is schema
+    assert names is None
+
+
 @pytest.mark.parametrize("timestamp_type,expected", [("TIMESTAMP_NTZ", T.TimestampNTZType), ("TIMESTAMP_LTZ", T.TimestampType)])
 def test_arrow_input_timestamps(timestamp_type, expected):
     pa = pytest.importorskip("pyarrow")

@@ -24,7 +24,7 @@ from pyspark.sql.pandas.types import (
     from_arrow_schema,
     to_arrow_schema,
 )
-from pyspark.sql.types import StructType
+from pyspark.sql.types import AtomicType, StructType
 
 
 def prepare_table(table, schema, timestamp_type, timezone, large_types):
@@ -35,6 +35,20 @@ def prepare_table(table, schema, timestamp_type, timezone, large_types):
         if not explicit:
             raise PySparkValueError(errorClass="CANNOT_INFER_EMPTY_SCHEMA", messageParameters={})
         return table, schema, None
+
+    expected_columns = None
+    if isinstance(schema, StructType):
+        expected_columns = len(schema.fields)
+    elif isinstance(schema, AtomicType):
+        expected_columns = 1
+    if expected_columns is not None and expected_columns != table.num_columns:
+        raise PySparkValueError(
+            errorClass="AXIS_LENGTH_MISMATCH",
+            messageParameters={
+                "expected_length": str(expected_columns),
+                "actual_length": str(table.num_columns),
+            },
+        )
 
     if names is not None:
         names.extend(f"_{i + 1}" for i in range(len(names), table.num_columns))

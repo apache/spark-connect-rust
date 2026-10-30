@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Native toArrow smoke tests against a live Spark Connect server."""
+"""Native Arrow input and output checks against a live Spark Connect server."""
 
 import os
 from datetime import date, datetime, timezone
@@ -65,3 +65,42 @@ def test_to_arrow_empty_result(session):
     table = session.range(0).toArrow()
     assert isinstance(table, pa.Table)
     assert table.num_rows == 0
+
+
+def test_create_dataframe_arrow_cached_upload(session):
+    """Exercise real-server config values and cached input above the default 1 MiB."""
+    import numpy as np
+
+    rows = 262144
+    table = pa.table({"id": np.arange(rows, dtype=np.int64)})
+    assert table.nbytes == 2 * 1024**2
+    # Clear inherited session overrides so CI exercises registered server defaults.
+    session.conf.unset("spark.sql.session.localRelationCacheThreshold")
+    session.conf.unset("spark.sql.session.localRelationSizeLimit")
+    threshold = int(session.conf.get("spark.sql.session.localRelationCacheThreshold"))
+    assert threshold == 1024**2
+    assert table.nbytes >= threshold
+    # Spark 4.2 declares this setting as longConf and returns decimal bytes.
+    assert session.conf.get("spark.sql.session.localRelationSizeLimit") == "3221225472"
+
+    frame = session.createDataFrame(table)
+    actual = frame.selectExpr("count(*) AS rows", "sum(id) AS checksum").collect()[0]
+    assert actual[0] == rows
+    assert actual[1] == rows * (rows - 1) // 2
+    assert frame.isLocal()
+
+
+@pytest.mark.parametrize("schema,expected_width", [
+    ("x long", "1"),
+    ("x long, y long, z long", "3"),
+    ("long", "1"),
+])
+def test_create_dataframe_arrow_explicit_schema_width(session, schema, expected_width):
+    from pyspark.errors import PySparkValueError
+
+    with pytest.raises(PySparkValueError) as error:
+        session.createDataFrame(pa.table({"x": [1], "y": [2]}), schema)
+    assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
+    assert error.value.getMessageParameters() == {
+        "expected_length": expected_width, "actual_length": "2",
+    }

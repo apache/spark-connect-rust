@@ -10,8 +10,8 @@ use spark_connect_core::runtime::block_on;
 use crate::plan::LogicalPlan;
 use crate::types::DataType;
 
-/// A snapshot of server settings used to normalize and upload one Arrow input.
-/// Reuse it when normalization and IPC serialization happen in separate layers.
+/// Internal settings snapshot shared with the Python Arrow importer; not a stable API.
+#[doc(hidden)]
 pub struct ArrowInputOptions {
     values: Vec<Option<String>>,
 }
