@@ -1443,8 +1443,15 @@ impl PyDataFrame {
         PyColumn::new(spark_connect::functions::col(item))
     }
 
-    fn __repr__(&self) -> String {
-        "DataFrame".to_string()
+    /// Ordinary schema-bearing representation; eager row rendering is not supported.
+    fn __repr__(&self) -> PyResult<String> {
+        let fields = self
+            .dtypes()?
+            .into_iter()
+            .map(|(name, dtype)| format!("{name}: {dtype}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Ok(format!("DataFrame[{fields}]"))
     }
 
     /// `DataFrame.mapInPandas` — map an iterator of pandas DataFrames.
