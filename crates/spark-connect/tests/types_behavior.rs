@@ -280,7 +280,7 @@ fn struct_to_ddl_tree_and_nullable() {
     assert_eq!(st.to_ddl().unwrap(), "a int,b string NOT NULL");
     let tree = st.tree_string().unwrap();
     assert!(tree.starts_with("root\n"));
-    assert!(tree.contains("a: int (nullable = true)"));
+    assert!(tree.contains("a: integer (nullable = true)"));
     assert!(tree.contains("b: string (nullable = false)"));
     // toNullable makes every field nullable.
     if let DataType::Struct { fields } = st.to_nullable() {
@@ -314,11 +314,94 @@ fn tree_string_with_depth_truncates_nested_structs() {
     // Full depth shows the nested field, rendering the struct as the bare type name.
     let full = nested.tree_string().unwrap();
     assert!(full.contains("outer: struct (nullable = true)"));
-    assert!(full.contains("inner: int (nullable = true)"));
+    assert!(full.contains("inner: integer (nullable = true)"));
     // max_depth = 1 prints only the top level; the nested field is omitted.
     let shallow = nested.tree_string_with_depth(1).unwrap();
     assert!(shallow.contains("outer: struct (nullable = true)"));
     assert!(!shallow.contains("inner"));
+}
+
+#[test]
+fn tree_string_uses_python_udt_class_names() {
+    use spark_connect::types::StructField;
+    let udt = |python_class: &str| DataType::Udt {
+        type_str: "udt".to_string(),
+        jvm_class: None,
+        python_class: Some(python_class.to_string()),
+        serialized_python_class: None,
+        sql_type: Some(Box::new(DataType::Integer)),
+    };
+    let schema = DataType::Struct {
+        fields: vec![
+            StructField {
+                name: "features".to_string(),
+                data_type: udt("pyspark.ml.linalg.VectorUDT"),
+                nullable: true,
+                metadata: Default::default(),
+            },
+            StructField {
+                name: "array".to_string(),
+                data_type: DataType::Array {
+                    element_type: Box::new(udt("example.CustomType")),
+                    contains_null: false,
+                },
+                nullable: false,
+                metadata: Default::default(),
+            },
+            StructField {
+                name: "map".to_string(),
+                data_type: DataType::Map {
+                    key_type: Box::new(DataType::String {
+                        collation: String::new(),
+                    }),
+                    value_type: Box::new(udt("UnqualifiedUDT")),
+                    value_contains_null: true,
+                },
+                nullable: true,
+                metadata: Default::default(),
+            },
+        ],
+    };
+
+    assert_eq!(
+        schema.tree_string().unwrap(),
+        concat!(
+            "root\n",
+            " |-- features: vectorudt (nullable = true)\n",
+            " |-- array: array (nullable = false)\n",
+            " |    |-- element: customtype (containsNull = false)\n",
+            " |-- map: map (nullable = true)\n",
+            " |    |-- key: string\n",
+            " |    |-- value: unqualifiedudt (valueContainsNull = true)\n",
+        )
+    );
+}
+
+#[test]
+fn tree_string_keeps_generic_udt_name_without_python_class() {
+    use spark_connect::types::StructField;
+    for python_class in [None, Some(""), Some("example.")] {
+        let schema = DataType::Struct {
+            fields: vec![StructField {
+                name: "features".to_string(),
+                data_type: DataType::Udt {
+                    type_str: "udt".to_string(),
+                    jvm_class: Some("example.VectorUDT".to_string()),
+                    python_class: python_class.map(str::to_string),
+                    serialized_python_class: None,
+                    sql_type: Some(Box::new(DataType::Integer)),
+                },
+                nullable: true,
+                metadata: Default::default(),
+            }],
+        };
+
+        assert_eq!(
+            schema.tree_string().unwrap(),
+            "root\n |-- features: udt (nullable = true)\n",
+            "python_class = {python_class:?}"
+        );
+    }
 }
 
 #[test]
