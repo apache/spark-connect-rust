@@ -683,12 +683,16 @@ __all__ = [
 
 # Add all other function names (dynamically)
 import inspect
-for name, obj in list(globals().items()):
+_export_globals = list(globals().items())
+_exported_names = set(__all__)
+for name, obj in _export_globals:
     if (callable(obj) and
         not name.startswith('_') and
-        name not in __all__ and
+        name not in _exported_names and
         name not in ['inspect', 'importlib', '_gen_module', 'spec', 'os']):
         __all__.append(name)
+        _exported_names.add(name)
+del _export_globals, _exported_names
 
 # Expose the `builtin` submodule at ``pyspark.sql.functions.builtin``. Upstream v4.2.0 splits
 # functions into a package whose ``builtin`` submodule holds the actual functions and whose
