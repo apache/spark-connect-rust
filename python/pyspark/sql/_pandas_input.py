@@ -252,7 +252,7 @@ def prepare_int64_table(frame, schema):
 
 
 def prepare_string_input(frame, schema):
-    """Prepare inline IPC for explicit columns of exact strings or None.
+    """Prepare inline IPC for eligible object or Arrow-backed string columns.
 
     Inspect every object before Arrow conversion: str subclasses can override
     conversion hooks, and pandas treats several other objects as missing values.
@@ -339,9 +339,10 @@ def prepare_string_input(frame, schema):
         for field in schema.fields
     ) or len(set(schema.names)) != width:
         return None
+    dtypes = frame.dtypes
     if not all(type(dtype) is type(np.dtype("object")) and dtype == np.dtype("object")
-               for dtype in frame.dtypes):
-        return None
+               for dtype in dtypes):
+        return _prepare_arrow_string_input(frame, schema, dtypes)
     # A custom ExtensionArray may report a genuine NumPy dtype while its
     # Arrow hook emits different values from to_numpy(). Trust only pandas'
     # concrete NumPy backing array, including its name in older pandas releases.
@@ -370,3 +371,215 @@ def prepare_string_input(frame, schema):
            for array in arrays):
         return None
     return _pandas_string_ipc(arrays, schema)
+
+
+
+def _prepare_arrow_string_input(frame, schema, dtypes):
+    """Encode canonical Arrow string storage after the common String guards.
+
+    Bypass neither pandas conversion hooks nor its missing-value policy. Inspect
+    concrete storage directly only when the hooks used by row normalization are
+    ordinary pandas implementations. Other extension arrays keep the row path.
+    """
+    from types import FunctionType
+
+    import numpy as np
+    import pandas as pd
+    try:
+        import pyarrow as pa
+        from pyarrow import lib as arrow_lib
+        from pandas.core.arrays import base as base_module
+        from pandas.core.arrays import string_ as string_module
+        from pandas.core.arrays import string_arrow as string_arrow_module
+        from pandas.core.arrays.arrow import array as arrow_module
+        from pandas.core import frame as frame_module, series as series_module
+        from pandas.core.dtypes import base as dtype_module
+        from pandas.core.internals import blocks as blocks_module, managers as managers_module
+        from pandas._libs import internals as native_internals, missing as missing_module
+    except ImportError:
+        return None
+
+    StringDtype = string_module.StringDtype
+    ArrowStringArray = string_arrow_module.ArrowStringArray
+    ArrowExtensionArray = arrow_module.ArrowExtensionArray
+    ExtensionArray = base_module.ExtensionArray
+    Series = series_module.Series
+    if (pd.StringDtype is not StringDtype or pd.Series is not Series
+            or pd.NA is not missing_module.NA
+            or pa.ChunkedArray is not arrow_lib.ChunkedArray
+            or pa.StringArray is not arrow_lib.StringArray
+            or pa.LargeStringArray is not arrow_lib.LargeStringArray
+            or not all(type(dtype) is StringDtype for dtype in dtypes)):
+        return None
+
+    def ordinary(method, name, module):
+        return (type(method) is FunctionType and method.__name__ == name
+                and method.__module__ == module.__name__
+                and method.__globals__ is vars(module))
+
+    def property_hook(cls, name, module):
+        descriptor = getattr(cls, name, None)
+        return (type(descriptor) is property and descriptor.fset is None
+                and descriptor.fdel is None
+                and ordinary(descriptor.fget, name, module))
+
+    # astype(object) delegates through ExtensionArray.astype, __array__ and
+    # to_numpy. Nullable conversion also uses isna, _hasna and __getitem__.
+    hooks = {
+        "astype": (ArrowStringArray, string_arrow_module),
+        "__array__": (ArrowExtensionArray, arrow_module),
+        "to_numpy": (ArrowExtensionArray, arrow_module),
+        "isna": (ArrowExtensionArray, arrow_module),
+        "fillna": (ArrowExtensionArray, arrow_module),
+        "__getitem__": (ArrowExtensionArray, arrow_module),
+    }
+    if (any(name in vars(frame) for name in ("isna",))
+            or not ordinary(frame_module.DataFrame.isna, "isna", frame_module)
+            or not ordinary(ExtensionArray.astype, "astype", base_module)
+            or not property_hook(Series, "array", series_module)
+            or Series.__getattribute__ is not object.__getattribute__):
+        return None
+    for name, module in (("name", string_module), ("na_value", string_module),
+                         ("type", string_module), ("kind", dtype_module)):
+        if not property_hook(StringDtype, name, module):
+            return None
+    # pandas 2 stores storage as a plain instance value; pandas 3 uses a property.
+    storage_descriptor = vars(StringDtype).get("storage")
+    if storage_descriptor is not None and not property_hook(StringDtype, "storage", string_module):
+        return None
+    for name, module in (("__eq__", string_module), ("__ne__", dtype_module),
+                         ("__from_arrow__", string_module)):
+        if not ordinary(getattr(StringDtype, name, None), name, module):
+            return None
+    if (StringDtype.__getattribute__ is not object.__getattribute__
+            or StringDtype.__setattr__ is not object.__setattr__
+            or StringDtype.__new__ is not object.__new__
+            or not ordinary(StringDtype.__init__, "__init__", string_module)
+            or string_arrow_module.StringDtype is not StringDtype
+            or arrow_module.StringDtype is not StringDtype):
+        return None
+    dtype_hooks = ("name", "na_value", "type", "kind", "__eq__", "__ne__", "__from_arrow__")
+    for dtype in dtypes:
+        state = vars(dtype)
+        if any(name in state for name in dtype_hooks):
+            return None
+        for name in ("_na_value", "_storage"):
+            if any(name in vars(base) for base in StringDtype.__mro__):
+                return None
+        storage = state.get("_storage") if storage_descriptor is not None else state.get("storage")
+        missing = state.get("_na_value")
+        if (type(storage) is not str or storage != "pyarrow"
+                or not (missing is pd.NA or type(missing) is float and np.isnan(missing))):
+            return None
+
+    if (pd.arrays.ArrowStringArray is not ArrowStringArray
+            or ArrowStringArray.__name__ != "ArrowStringArray"
+            or ArrowStringArray.__qualname__ != "ArrowStringArray"
+            or ArrowStringArray.__module__ not in (string_arrow_module.__name__, "pandas.arrays")):
+        return None
+    numpy_strings = vars(string_arrow_module).get("ArrowStringArrayNumpySemantics")
+    if numpy_strings is not None and (
+        not isinstance(numpy_strings, type)
+        or numpy_strings.__name__ != "ArrowStringArrayNumpySemantics"
+        or numpy_strings.__qualname__ != "ArrowStringArrayNumpySemantics"
+        or numpy_strings.__module__ != string_arrow_module.__name__
+        or numpy_strings.__bases__ != (ArrowStringArray,)
+    ):
+        return None
+    classes = (ArrowStringArray, numpy_strings)
+    # Read authenticated manager storage without constructing a Series: iloc
+    # calls len(backing) before the concrete array type can be checked. A custom
+    # extension subclass must reach row normalization before running that hook.
+    manager = vars(frame).get("_mgr")
+    BlockManager, ExtensionBlock = managers_module.BlockManager, blocks_module.ExtensionBlock
+    if (type(BlockManager) is not type
+            or BlockManager.__name__ != "BlockManager"
+            or BlockManager.__qualname__ != "BlockManager"
+            or BlockManager.__module__ != managers_module.__name__
+            or BlockManager.__bases__ != (native_internals.BlockManager, managers_module.BaseBlockManager)
+            or type(ExtensionBlock) is not type
+            or ExtensionBlock.__name__ != "ExtensionBlock"
+            or ExtensionBlock.__qualname__ != "ExtensionBlock"
+            or ExtensionBlock.__module__ != blocks_module.__name__
+            or ExtensionBlock.__bases__ != (blocks_module.EABackedBlock,)
+            or any("_mgr" in vars(base) for base in type(frame).__mro__)
+            or type(manager) is not BlockManager
+            or BlockManager.__getattribute__ is not object.__getattribute__
+            or not ordinary(BlockManager.iget_values, "iget_values", managers_module)
+            or not ordinary(ExtensionBlock.iget, "iget", blocks_module)
+            or not property_hook(BlockManager, "blknos", managers_module)
+            or not property_hook(BlockManager, "blklocs", managers_module)
+            or BlockManager.blocks is not native_internals.BlockManager.blocks
+            or ExtensionBlock.values is not native_internals.Block.values
+            or BlockManager._rebuild_blknos_and_blklocs is not
+               native_internals.BlockManager._rebuild_blknos_and_blklocs
+            or any(name in vars(manager) for name in
+                   ("iget_values", "blknos", "blklocs", "_rebuild_blknos_and_blklocs"))):
+        return None
+    if (ExtensionBlock.__getattribute__ is not object.__getattribute__
+            or any(type(block) is not ExtensionBlock or "iget" in vars(block)
+                   for block in manager.blocks)):
+        return None
+    arrays = []
+    for i, field in enumerate(schema.fields):
+        array = manager.iget_values(i)
+        cls = type(array)
+        if (not any(cls is candidate for candidate in classes)
+                or cls.__getattribute__ is not object.__getattribute__
+                or cls.__setattr__ is not object.__setattr__
+                or cls.__new__ is not object.__new__
+                or any("__class__" in vars(base) for base in cls.__mro__ if base is not object)):
+            return None
+        state = vars(array)
+        if any(name in state for name in (*hooks, "dtype", "_hasna", "__len__",
+                                         "_from_pyarrow_array", "__init__")):
+            return None
+        for name, (owner, module) in hooks.items():
+            method = getattr(cls, name, None)
+            if method is not getattr(owner, name, None) or not ordinary(method, name, module):
+                return None
+        if (not property_hook(cls, "dtype", string_arrow_module)
+                or not property_hook(cls, "_hasna", arrow_module)
+                or not ordinary(cls.__init__, "__init__", string_arrow_module)
+                or not ordinary(ArrowExtensionArray.__init__, "__init__", arrow_module)):
+            return None
+        length_owner = ArrowStringArray if "__len__" in vars(ArrowStringArray) else ArrowExtensionArray
+        length_module = string_arrow_module if length_owner is ArrowStringArray else arrow_module
+        if not ordinary(getattr(cls, "__len__", None), "__len__", length_module):
+            return None
+        has_factory = any("_from_pyarrow_array" in vars(base) for base in cls.__mro__)
+        if storage_descriptor is not None and not has_factory:
+            return None
+        if has_factory:
+            factory = getattr(cls, "_from_pyarrow_array", None)
+            if not ordinary(factory, "_from_pyarrow_array", string_arrow_module):
+                return None
+        # Never invoke a descriptor installed over either private backing field.
+        if any(name in vars(base) for base in cls.__mro__ for name in ("_pa_array", "_dtype")):
+            return None
+        backing, dtype = state.get("_pa_array"), state.get("_dtype")
+        if (type(backing) is not arrow_lib.ChunkedArray or dtype is not dtypes.iloc[i]
+                or len(backing) != len(frame)
+                or backing.type not in (pa.string(), pa.large_string())
+                or any(type(chunk) not in (arrow_lib.StringArray, arrow_lib.LargeStringArray)
+                       for chunk in backing.chunks)):
+            return None
+        try:
+            # Full validation rejects malformed offsets and UTF-8 before either
+            # casting or IPC can bypass the row path's decoding error/order.
+            backing.validate(full=True)
+            if not field.nullable and backing.null_count:
+                return None
+            arrays.append(backing.cast(pa.string(), safe=True))
+        except (pa.ArrowException, OverflowError):
+            return None
+
+    fields = [pa.field(field.name, pa.string(), nullable=field.nullable)
+              for field in schema.fields]
+    table = pa.Table.from_arrays(arrays, schema=pa.schema(fields))
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    # Keep the existing inline LocalRelation bridge: the public Table importer
+    # consults configuration and can upload artifacts before returning a plan.
+    return sink.getvalue().to_pybytes()

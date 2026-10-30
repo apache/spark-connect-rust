@@ -1758,7 +1758,13 @@ def test_string_column_guard_preserves_row_fallback(reason):
         frame.iat[-1, -1] = value
         if reason in ("late_unsupported", "late_surrogate"):
             assert frame.iat[-1, -1] is value
-    assert prepare_string_input(frame, schema) is None
+    result = prepare_string_input(frame, schema)
+    if reason == "arrow_string_dtype":
+        # Canonical Arrow-backed StringDtype now has its own inline path.
+        # The explicit backend suite checks every cell and storage identity.
+        assert type(result) is bytes
+    else:
+        assert result is None
 
 
 
