@@ -360,6 +360,23 @@ impl SparkSession {
         Ok(DataFrame::new(self.clone(), plan))
     }
 
+    /// Internal binding bridge for Arrow IPC already validated and encoded from
+    /// local rows or columns. Retains the row path's inline transport policy.
+    #[doc(hidden)]
+    pub fn create_dataframe_from_inline_arrow_ipc(
+        &self,
+        data: Vec<u8>,
+        schema: DataType,
+    ) -> DataFrame {
+        DataFrame::new(
+            self.clone(),
+            LogicalPlan::LocalRelation {
+                schema,
+                data: Some(data),
+            },
+        )
+    }
+
     /// Create a local DataFrame from Arrow batches without materializing rows.
     ///
     /// `schema` optionally supplies the Spark schema applied by the server. With
