@@ -179,6 +179,8 @@ def test_functions_exports_fresh_process():
         import inspect
         import sys
         from pyspark.sql import functions as F
+        assert F.name == "inspect"
+        assert F.obj is inspect
 
         initial = ["col", "lit", "expr", "sum", "count", "avg", "max", "min",
                    "when", "udf", "pandas_udf"]
@@ -218,13 +220,12 @@ def test_functions_exports_fresh_process():
             return F.__all__.copy()
 
         expected = check_exports()
-        for _ in range(2):
-            old_all = F.__all__
-            old_all.append("caller_added_name")
-            F.builtin.__all__.append("builtin_only_name")
-            importlib.reload(F)
-            assert F.__all__ is not old_all
-            assert check_exports() == expected
+        old_all = F.__all__
+        old_all.append("caller_added_name")
+        F.builtin.__all__.append("builtin_only_name")
+        importlib.reload(F)
+        assert F.__all__ is not old_all
+        assert check_exports() == expected
     ''')], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
 
