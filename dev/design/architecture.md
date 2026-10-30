@@ -87,6 +87,14 @@ Scalar input conversion and row materialization stay in `pyspark-rs`. `collect()
 still uses the native client's owned rows; `createDataFrame(pandas)` still
 materializes Python rows. Neither path is claimed to be zero-copy.
 
+The Arrow handoff has been tested locally with PyArrow 10.0.0 (Python 3.9)
+and 26.0.0 (Python 3.12). CI installs the latest PyArrow; it does not pin or
+separately test the declared PyArrow 10 minimum. The native live-server smoke
+tests in `python/tests/test_arrow_e2e.py` run in the Connect parity CI job
+against its live server and built native extension. Official parity tests
+exercise the Rust transport with official PySpark; the separate native smoke
+step covers the drop-in `toArrow()` path.
+
 ## UDF strategy (full compatibility)
 
 Python/pandas UDFs are **serialized, not executed** on the client:
