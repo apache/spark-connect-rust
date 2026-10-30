@@ -602,6 +602,181 @@ def test_arrow_input_duplicate_chunks_preserve_multiplicity(protocol):
 
 # Signed-int64 pandas input uses the same Arrow importer and mock service.
 
+@pytest.mark.parametrize("storage", ["object", "default", "python", "pyarrow", "python_nan", "pyarrow_nan"])
+@pytest.mark.parametrize("dtype", ["int64", "Int64"])
+def test_integer_canonical_columns_storage_stays_columnar(protocol, monkeypatch, storage, dtype):
+    from pyspark.sql._pandas_input import _has_canonical_columns
+
+    values = [2**53 + 1, -(2**63), 2**63 - 1, 0] * 250
+    if dtype == "Int64":
+        values[1] = None
+    frame = pd.DataFrame({"original": pd.Series(values, dtype=dtype)})
+    if storage == "object":
+        frame.columns = pd.Index(["original"], dtype=object)
+    elif storage != "default":
+        kind = storage.removesuffix("_nan")
+        label_dtype = (pd.StringDtype(storage=kind, na_value=np.nan)
+                       if storage.endswith("_nan") else pd.StringDtype(storage=kind))
+        frame.columns = pd.Index(pd.array(["original"], dtype=label_dtype))
+    assert _has_canonical_columns(frame.columns)
+    assert prepare_int64_table(frame, None).column(0).to_pylist() == values
+
+    def no_rows(*args, **kwargs):
+        raise AssertionError("ordinary columns must retain integer columnar construction")
+
+    monkeypatch.setattr(pd.DataFrame, "astype", no_rows)
+    with _arrow_input_service(protocol) as (spark, state):
+        spark.createDataFrame(frame).toArrow()
+        assert state["input_tables"][0].column(0).to_pylist() == values
+        assert state["config_requests"]
+
+
+@pytest.mark.parametrize("dtype", ["int64", "Int64"])
+@pytest.mark.parametrize("schema_kind", ["inferred", "names", "explicit"])
+@pytest.mark.parametrize("location", [
+    "subclass", "instance", "class", "owner", "backing_subclass", "backing_instance",
+    "backing_to_numpy",
+])
+@pytest.mark.parametrize("behavior", ["raise", "mutate"])
+def test_integer_columns_tolist_hooks_keep_native_order(
+    protocol, monkeypatch, dtype, schema_kind, location, behavior
+):
+    from types import MethodType
+    from pandas.core.base import IndexOpsMixin
+
+    values = [2**53 + 1, -(2**63), 2**63 - 1, 0] * 250
+    if dtype == "Int64":
+        values[1] = None
+    frame = pd.DataFrame({"original": pd.Series(values, dtype=dtype)})
+    schema = None
+    expected_name = "original"
+    nullable = True
+    metadata = {}
+    if schema_kind == "names":
+        schema = ["renamed"]
+        expected_name = "renamed"
+    elif schema_kind == "explicit":
+        nullable, metadata = dtype == "Int64", {"source": "native"}
+        schema = T.StructType([T.StructField("renamed", T.LongType(), nullable, metadata)])
+        expected_name = "renamed"
+    original_tolist = pd.Index.tolist
+    original_notna, original_astype = frame.notna, frame.astype
+    hook_name = "to_numpy" if location == "backing_to_numpy" else "tolist"
+    calls = []
+
+    class ColumnsError(RuntimeError):
+        pass
+
+    def notna(*args, **kwargs):
+        calls.append("notna")
+        return original_notna(*args, **kwargs)
+
+    def astype(*args, **kwargs):
+        calls.append("astype")
+        return original_astype(*args, **kwargs)
+
+    def before_tolist():
+        calls.append(hook_name)
+        if behavior == "raise":
+            raise ColumnsError("columns hook precedes pandas normalization")
+        # Install spies only when native conversion calls the columns hook.
+        # Before eligibility, normalization methods are the canonical methods.
+        monkeypatch.setitem(vars(frame), "notna", notna)
+        monkeypatch.setitem(vars(frame), "astype", astype)
+        frame.iat[0, 0] = 2**53 + 7
+        frame.iat[-1, 0] = None if dtype == "Int64" else -(2**63) + 1
+
+    def tolist(index):
+        before_tolist()
+        return original_tolist(index)
+
+    if location == "subclass":
+        class Columns(pd.Index):
+            pass
+        monkeypatch.setattr(Columns, "tolist", tolist)
+        labels = pd.Index(["original"], dtype=object)
+        frame.columns = Columns._simple_new(labels._values, name=None)
+        assert type(frame.columns) is Columns
+    elif location == "instance":
+        monkeypatch.setitem(vars(frame.columns), "tolist", MethodType(tolist, frame.columns))
+        assert type(frame.columns) is pd.Index
+    elif location == "backing_subclass":
+        class Names(np.ndarray):
+            def tolist(self):
+                before_tolist()
+                return super().tolist()
+        backing = np.asarray(["original"], dtype=object).view(Names)
+        frame.columns = pd.Index._simple_new(backing, name=None)
+        assert type(frame.columns) is pd.Index
+        assert type(frame.columns._values) is Names
+    elif location in ("backing_instance", "backing_to_numpy"):
+        frame.columns = pd.Index(pd.array(["original"], dtype="string"))
+        backing = frame.columns._values
+        original = getattr(backing, hook_name)
+
+        def backing_tolist(*args, **kwargs):
+            before_tolist()
+            return original(*args, **kwargs)
+
+        monkeypatch.setitem(vars(backing), hook_name, backing_tolist)
+        assert type(frame.columns) is pd.Index
+    else:
+        monkeypatch.setattr(pd.Index if location == "class" else IndexOpsMixin,
+                            "tolist", tolist)
+
+    with _arrow_input_service(protocol) as (spark, state):
+        if behavior == "raise":
+            with pytest.raises(ColumnsError,
+                               match="columns hook precedes pandas normalization"):
+                spark.createDataFrame(frame, schema)
+            assert calls == [hook_name]
+            assert state["config_requests"] == []
+            assert state["input_tables"] == []
+        else:
+            spark.createDataFrame(frame, schema).toArrow()
+            expected = values.copy()
+            expected[0], expected[-1] = 2**53 + 7, (None if dtype == "Int64" else -(2**63) + 1)
+            table = state["input_tables"][0]
+            assert table.num_rows == 1000
+            assert table.column_names == [expected_name]
+            assert table.column(0).type == pa.int64()
+            assert table.column(0).to_pylist() == expected
+            assert table.column(0).null_count == sum(value is None for value in expected)
+            assert table.schema.field(0).nullable is nullable
+            assert table.schema.field(0).metadata is None
+            import json
+            logical = json.loads(state["relations"][0].local_relation.schema)
+            assert logical == {"type": "struct", "fields": [{
+                "name": expected_name, "type": "long", "nullable": nullable,
+                "metadata": metadata,
+            }]}
+            assert state["config_requests"] == []
+            assert calls == [hook_name, "notna", "astype"]
+
+
+def test_integer_rebound_index_values_keeps_native_error(protocol, monkeypatch):
+    frame = pd.DataFrame({"original": np.arange(1000, dtype=np.int64)})
+    schema = T.StructType([T.StructField("renamed", T.LongType())])
+    columns = frame.columns
+    original = pd.Index._values.fget
+    calls = []
+
+    def values(index):
+        if index is columns:
+            calls.append("_values")
+            raise RuntimeError("columns backing hook precedes normalization")
+        return original(index)
+
+    monkeypatch.setattr(pd.Index, "_values", property(values))
+    with _arrow_input_service(protocol) as (spark, state):
+        with pytest.raises(RuntimeError,
+                           match="columns backing hook precedes normalization"):
+            spark.createDataFrame(frame, schema)
+        assert calls == ["_values"]
+        assert state["config_requests"] == []
+        assert state["input_tables"] == []
+
+
 @pytest.mark.parametrize("schema_kind", ["inferred", "names", "explicit"])
 @pytest.mark.parametrize("verify", [True, False])
 def test_integer_columns_preserve_values_without_python_rows(protocol, monkeypatch, schema_kind, verify):
