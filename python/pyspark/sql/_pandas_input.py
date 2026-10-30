@@ -281,6 +281,8 @@ def prepare_date_table(frame, schema):
             or len(frame) < 10000
             or any(name in vars(frame) for name in ("astype", "notna", "where"))):
         return None
+    if not _has_canonical_columns(frame.columns):
+        return None
     # The row path calls these normalization methods. Custom class or instance
     # hooks must retain those calls and the values they produce before Arrow RPCs.
     for name, module, qualname in (
