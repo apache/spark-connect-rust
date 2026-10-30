@@ -1298,3 +1298,77 @@ def test_normal_handoff_does_not_reopen_ipc(protocol, monkeypatch):
     batch = _mixed_batch()
     with _dataframe(protocol=protocol, batches=[batch]) as (frame, _):
         assert frame.toArrow().equals(pa.Table.from_batches([batch]), check_metadata=True)
+
+
+@pytest.mark.parametrize("dtype", ["int64", "Int64"])
+@pytest.mark.parametrize("schema_kind", ["inferred", "names", "explicit"])
+def test_integer_rebound_index_data_keeps_native_read_order(
+    protocol, monkeypatch, dtype, schema_kind
+):
+    import json
+
+    values = [2**53 + 1, -(2**63), 2**63 - 1, 0] * 250
+    if dtype == "Int64":
+        values[1] = None
+    frame = pd.DataFrame({"original": pd.Series(values, dtype=dtype)})
+    schema, expected_name, nullable, metadata = None, "original", True, {}
+    if schema_kind == "names":
+        schema, expected_name = ["renamed"], "renamed"
+    elif schema_kind == "explicit":
+        expected_name, nullable, metadata = "renamed", dtype == "Int64", {"source": "native"}
+        schema = T.StructType([T.StructField(expected_name, T.LongType(), nullable, metadata)])
+    columns, backing = frame.columns, vars(frame.columns)["_data"]
+    original_notna, original_astype = frame.notna, frame.astype
+    calls = []
+    normalizing = False
+
+    class ColumnsDataError(RuntimeError):
+        pass
+
+    def notna(*args, **kwargs):
+        nonlocal normalizing
+        normalizing = True
+        calls.append("notna")
+        return original_notna(*args, **kwargs)
+
+    def astype(*args, **kwargs):
+        calls.append("astype")
+        return original_astype(*args, **kwargs)
+
+    def data(index):
+        if index is columns:
+            if not normalizing:
+                calls.append("_data")
+                if calls.count("_data") > 1:
+                    raise ColumnsDataError("columns storage read twice before normalization")
+                # Install spies only when the native columns storage hook runs.
+                # Canonical frame methods remain intact before eligibility.
+                monkeypatch.setitem(vars(frame), "notna", notna)
+                monkeypatch.setitem(vars(frame), "astype", astype)
+            return backing
+        return vars(index)["_data"]
+
+    def set_data(index, value):
+        # Preserve ordinary storage initialization for indexes pandas creates
+        # while normalizing values; only reads of the input columns are hooked.
+        vars(index)["_data"] = value
+
+    monkeypatch.setattr(pd.Index, "_data", property(data, set_data), raising=False)
+    with _arrow_input_service(protocol) as (spark, state):
+        spark.createDataFrame(frame, schema).toArrow()
+        assert calls == ["_data", "notna", "astype"]
+        assert not state["config_requests"]
+        assert len(state["input_tables"]) == 1
+        table = state["input_tables"][0]
+        assert table.column(0).to_pylist() == values
+        assert table.column(0).null_count == sum(value is None for value in values)
+        assert table.schema.equals(
+            pa.schema([pa.field(expected_name, pa.int64(), nullable=nullable)]),
+            check_metadata=True,
+        )
+        assert json.loads(state["relations"][0].local_relation.schema) == {
+            "type": "struct", "fields": [
+                {"name": expected_name, "type": "long", "nullable": nullable,
+                 "metadata": metadata}
+            ],
+        }

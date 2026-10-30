@@ -48,6 +48,8 @@ def _has_canonical_columns(columns):
     if (type(values) is not property
             or not ordinary(values.fget, "_values", index_module)):
         return False
+    if any("_data" in vars(base) for base in Index.__mro__):
+        return False
     backing = vars(columns).get("_data")
     if type(backing) is np.ndarray:
         return True
