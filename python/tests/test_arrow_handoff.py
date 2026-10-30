@@ -2268,4 +2268,3 @@ def test_string_large_inline_input_keeps_row_transport_and_schema(protocol):
         assert table.column(0).to_pylist() == values
         assert __import__("json").loads(state["relations"][0].local_relation.schema) == (
             __import__("json").loads(schema.json()))
-
