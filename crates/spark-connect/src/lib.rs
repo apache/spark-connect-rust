@@ -36,6 +36,8 @@ pub mod wasm_udf;
 pub mod window;
 
 // Re-export commonly used types
+#[doc(hidden)]
+pub use arrow_input::ArrowInputOptions;
 pub use column::{col, lit, lit_boolean, lit_double, lit_string, Column};
 pub use dataframe::{DataFrame, LocalRowIterator};
 pub use datasource::{CommonInlineUserDefinedDataSourceExpression, PythonDataSourcePayload};

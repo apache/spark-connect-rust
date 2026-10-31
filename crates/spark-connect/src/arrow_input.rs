@@ -10,8 +10,85 @@ use spark_connect_core::runtime::block_on;
 use crate::plan::LogicalPlan;
 use crate::types::DataType;
 
+/// Internal settings snapshot shared with the Python Arrow importer; not a stable API.
+#[doc(hidden)]
+pub struct ArrowInputOptions {
+    values: Vec<Option<String>>,
+}
+
+impl ArrowInputOptions {
+    const KEYS: [&'static str; 8] = [
+        "spark.sql.timestampType",
+        "spark.sql.session.timeZone",
+        "spark.sql.execution.arrow.useLargeVarTypes",
+        "spark.sql.session.localRelationCacheThreshold",
+        "spark.sql.session.localRelationSizeLimit",
+        "spark.sql.session.localRelationChunkSizeRows",
+        "spark.sql.session.localRelationChunkSizeBytes",
+        "spark.sql.session.localRelationBatchOfChunksSizeBytes",
+    ];
+    // SQLConf defaults for servers that do not expose the upload settings.
+    const UPLOAD_DEFAULTS: [&'static str; 5] =
+        ["1048576", "3221225472", "10000", "16777216", "1073741824"];
+
+    pub(crate) fn from_client(client: &SparkConnectClient) -> Result<Self> {
+        Ok(Self {
+            values: block_on(client.get_config_options(&Self::KEYS))?,
+        })
+    }
+
+    /// Server timestamp type, including its registered default.
+    pub fn timestamp_type(&self) -> Option<&str> {
+        self.values[0].as_deref()
+    }
+
+    /// Server session timezone; do not substitute a client-local timezone.
+    pub fn timezone(&self) -> Option<&str> {
+        self.values[1].as_deref()
+    }
+
+    /// Whether the server prefers large Arrow string and binary offsets.
+    pub fn use_large_var_types(&self) -> Option<&str> {
+        self.values[2].as_deref()
+    }
+
+    fn upload_value(&self, index: usize) -> Result<usize> {
+        let value = self.values[index + 3]
+            .as_deref()
+            .unwrap_or(Self::UPLOAD_DEFAULTS[index]);
+        // Spark 4.2 uses decimal bytes; older bytesConf values may include units.
+        let parsed = if index == 1 {
+            parse_byte_size(value)
+        } else {
+            value.parse::<usize>().ok()
+        };
+        parsed
+            .filter(|value| index == 0 || *value > 0)
+            .ok_or_else(|| {
+                SparkError::connect_msg(format!("Invalid configuration: {}", Self::KEYS[index + 3]))
+            })
+    }
+}
+
+fn parse_byte_size(value: &str) -> Option<usize> {
+    let value = value.trim().to_ascii_lowercase();
+    let number = value.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+    let exponent = match &value[number.len()..] {
+        "" | "b" => 0,
+        "k" | "kb" => 1,
+        "m" | "mb" => 2,
+        "g" | "gb" => 3,
+        "t" | "tb" => 4,
+        "p" | "pb" => 5,
+        _ => return None,
+    };
+    number
+        .parse::<usize>()
+        .ok()?
+        .checked_mul(1024usize.checked_pow(exponent)?)
+}
+
 struct Options {
-    cache_threshold: usize,
     size_limit: usize,
     chunk_rows: usize,
     chunk_bytes: usize,
@@ -19,31 +96,14 @@ struct Options {
 }
 
 impl Options {
-    fn from_client(client: &SparkConnectClient) -> Result<Self> {
-        let keys = [
-            "spark.sql.session.localRelationCacheThreshold",
-            "spark.sql.session.localRelationSizeLimit",
-            "spark.sql.session.localRelationChunkSizeRows",
-            "spark.sql.session.localRelationChunkSizeBytes",
-            "spark.sql.session.localRelationBatchOfChunksSizeBytes",
-        ];
-        let values = block_on(client.get_configs(&keys))?;
-        let mut parsed = Vec::new();
-        for (i, key) in keys.iter().enumerate() {
-            let value = values
-                .get(i)
-                .and_then(Option::as_deref)
-                .and_then(|v| v.parse::<usize>().ok())
-                .filter(|v| i == 0 || *v > 0)
-                .ok_or_else(|| {
-                    SparkError::connect_msg(format!("Invalid or missing configuration: {key}"))
-                })?;
-            parsed.push(value);
-        }
+    fn from_input(options: &ArrowInputOptions) -> Result<Self> {
+        let parsed = (0..5)
+            .map(|index| options.upload_value(index))
+            .collect::<Result<Vec<_>>>()?;
         Ok(Self {
-            cache_threshold: parsed[0],
             size_limit: parsed[1],
             chunk_rows: parsed[2],
+            // Match upstream's min(chunk size, upload batch size).
             chunk_bytes: parsed[3].min(parsed[4]),
             upload_batch_bytes: parsed[4],
         })
@@ -81,13 +141,21 @@ pub(crate) fn create_relation(
     client: &SparkConnectClient,
     batches: Vec<RecordBatch>,
     schema: DataType,
+    options: Option<&ArrowInputOptions>,
 ) -> Result<LogicalPlan> {
     // Validate before any RPC, and preserve the offline empty-input path.
     validate(&batches)?;
     if batches.iter().all(|batch| batch.num_rows() == 0) {
         return inline_relation(&batches, schema);
     }
-    let options = Options::from_client(client)?;
+    let fetched;
+    let options = match options {
+        Some(options) => options,
+        None => {
+            fetched = ArrowInputOptions::from_client(client)?;
+            &fetched
+        }
+    };
     // Count the logical slices rather than their potentially much larger backing buffers.
     let bytes: usize = batches
         .iter()
@@ -98,9 +166,11 @@ pub(crate) fn create_relation(
                 .unwrap_or_else(|_| a.get_buffer_memory_size())
         })
         .sum();
-    if bytes < options.cache_threshold {
+    if bytes < options.upload_value(0)? {
         return inline_relation(&batches, schema);
     }
+    // Chunk and batch settings are irrelevant to inline inputs.
+    let options = Options::from_input(options)?;
 
     let mut pending = Vec::new();
     let mut pending_size = 0;
@@ -128,6 +198,7 @@ pub(crate) fn create_relation(
         pending.push(chunk);
         Ok(())
     };
+    // Carry inferred schemas too, preserving the client's timestamp-type normalization.
     enqueue(schema.json().into_bytes())?;
     serialize_chunks(&batches, &options, &mut enqueue)?;
     hashes.extend(block_on(client.cache_artifacts(pending))?);
@@ -195,7 +266,6 @@ mod tests {
         .unwrap();
         for (chunk_rows, chunk_bytes) in [(700, usize::MAX), (10000, 1024)] {
             let options = Options {
-                cache_threshold: 0,
                 size_limit: usize::MAX,
                 chunk_rows,
                 chunk_bytes,

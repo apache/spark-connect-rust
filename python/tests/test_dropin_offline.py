@@ -2761,135 +2761,6 @@ for schema in schemas:
 """], check=True)
 
 
-@pytest.mark.parametrize("names,expected", [(None, None), (["a"], ["a", "_2"]), ([], ["_1", "_2"])])
-def test_arrow_input_normalization(names, expected):
-    pa = pytest.importorskip("pyarrow")
-    from pyspark.sql._arrow_input import prepare_table
-
-    table = pa.table({"x": pa.chunked_array([[1], [2]]), "y": ["a", None]})
-    normalized, schema, columns = prepare_table(table, names, "TIMESTAMP_LTZ", "UTC", "false")
-    assert normalized.equals(table)
-    assert schema.names == ["x", "y"]
-    assert columns == expected
-
-
-def test_arrow_input_empty_and_width_errors():
-    pa = pytest.importorskip("pyarrow")
-    from pyspark.errors import PySparkValueError
-    from pyspark.sql._arrow_input import prepare_table
-
-    empty = pa.table({"x": pa.array([], type=pa.int64())})
-    with pytest.raises(PySparkValueError, match="CANNOT_INFER_EMPTY_SCHEMA"):
-        prepare_table(empty, None, None, None, None)
-    schema = T.StructType([T.StructField("x", T.LongType())])
-    assert prepare_table(empty, schema, None, None, None)[1] is schema
-    with pytest.raises(PySparkValueError, match="AXIS_LENGTH_MISMATCH"):
-        prepare_table(pa.table({"x": [1]}), ["a", "b"], "TIMESTAMP_LTZ", "UTC", "false")
-
-
-@pytest.mark.parametrize("timestamp_type,expected", [("TIMESTAMP_NTZ", T.TimestampNTZType), ("TIMESTAMP_LTZ", T.TimestampType)])
-def test_arrow_input_timestamps(timestamp_type, expected):
-    pa = pytest.importorskip("pyarrow")
-    from pyspark.sql._arrow_input import prepare_table
-
-    table = pa.table({"t": pa.array([1001], type=pa.timestamp("ns"))})
-    normalized, schema, _ = prepare_table(table, None, timestamp_type, "UTC", "false")
-    assert isinstance(schema.fields[0].dataType, expected)
-    assert normalized.column(0).type.unit == "us"
-    assert normalized.column(0).cast(pa.int64()).to_pylist() == [1]
-
-
-def test_arrow_input_explicit_cast_and_nested_values():
-    pa = pytest.importorskip("pyarrow")
-    from pyspark.sql._arrow_input import prepare_table
-
-    table = pa.table({"x": [1, 2], "nested": [[1, None], []]})
-    schema = T.StructType([T.StructField("x", T.IntegerType()),
-                           T.StructField("nested", T.ArrayType(T.LongType()))])
-    normalized, result, _ = prepare_table(table, schema, "TIMESTAMP_LTZ", "UTC", "false")
-    assert result is schema
-    assert normalized.column(0).type == pa.int32()
-    assert normalized.to_pylist() == table.to_pylist()
-    with pytest.raises(pa.ArrowInvalid):
-        prepare_table(pa.table({"x": [2**40]}), T.StructType([T.StructField("x", T.IntegerType())]),
-                      "TIMESTAMP_LTZ", "UTC", "false")
-
-
-def test_arrow_input_roundtrip_live_server():
-    """Run explicitly with SPARK_REMOTE; also checks imported buffers own their lifetime."""
-    import gc
-    import os
-    pa = pytest.importorskip("pyarrow")
-    remote = os.environ.get("SPARK_REMOTE")
-    if not remote:
-        pytest.skip("requires SPARK_REMOTE")
-    from pyspark.sql import SparkSession
-
-    spark = SparkSession.builder.remote(remote).getOrCreate()
-    try:
-        table = pa.table({"x": pa.chunked_array([[1, 2], [3]]), "nested": [[1], None, []]})
-        df = spark.createDataFrame(table, ["id", "items"])
-        del table
-        gc.collect()
-        assert df.columns == ["id", "items"]
-        assert [(r[0], r[1]) for r in df.collect()] == [(1, [1]), (2, None), (3, [])]
-        empty = spark.createDataFrame(pa.table({"x": pa.array([], type=pa.int64())}),
-                                     T.StructType([T.StructField("x", T.LongType())]))
-        assert empty.count() == 0
-        assert empty.columns == ["x"]
-    finally:
-        spark.stop()
-
-
-@pytest.mark.parametrize("kind", ["slice", "dictionary", "decimal", "null", "struct", "nul"])
-def test_arrow_input_types_live_server(kind):
-    import os
-    from decimal import Decimal
-    pa = pytest.importorskip("pyarrow")
-    remote = os.environ.get("SPARK_REMOTE")
-    if not remote:
-        pytest.skip("requires SPARK_REMOTE")
-    from pyspark.sql import SparkSession
-
-    tables = {
-        "slice": pa.table({"x": pa.array([0, 1, 2, 3]).slice(1, 2)}),
-        "dictionary": pa.table({"x": pa.array(["a", None, "b", "a"]).dictionary_encode()}),
-        "decimal": pa.table({"x": pa.array([Decimal("1.23"), None], type=pa.decimal128(10, 2))}),
-        "null": pa.table({"x": pa.nulls(2)}),
-        "struct": pa.table({"x": [{"a": [1, None]}, None]}),
-        "nul": pa.table({"a\0b": [1, 2]}),
-    }
-    spark = SparkSession.builder.remote(remote).getOrCreate()
-    try:
-        table = tables[kind]
-        df = spark.createDataFrame(table)
-        assert df.columns == table.column_names
-        assert df.toArrow().to_pylist() == table.to_pylist()
-    finally:
-        spark.stop()
-
-
-def test_arrow_input_large_upload_live_server():
-    """A table larger than one gRPC message must use uploaded cache artifacts."""
-    import os
-    pa = pytest.importorskip("pyarrow")
-    remote = os.environ.get("SPARK_REMOTE")
-    if not remote:
-        pytest.skip("requires SPARK_REMOTE")
-    from pyspark.sql import SparkSession
-
-    rows = 140000
-    table = pa.table({"payload": [b"x" * 1024] * rows})
-    assert table.nbytes > 128 * 1024**2
-    spark = SparkSession.builder.remote(remote).getOrCreate()
-    try:
-        df = spark.createDataFrame(table)
-        assert df.count() == rows
-        assert df.selectExpr("sum(length(payload)) AS total").collect()[0][0] == rows * 1024
-    finally:
-        spark.stop()
-
-
 # --------------------------------------------------------------------------- schema cache
 
 
@@ -3214,3 +3085,246 @@ def test_schema_cache_metadata_wait_releases_gil(mock_connect, accessor):
     else:
         assert result == [("id", "bigint")]
     assert service.calls == 1
+
+
+@pytest.mark.parametrize("names,expected", [(None, None), (["a"], ["a", "_2"]), ([], ["_1", "_2"])])
+def test_arrow_input_normalization(names, expected):
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.sql._arrow_input import prepare_table
+
+    table = pa.table({"x": pa.chunked_array([[1], [2]]), "y": ["a", None]})
+    normalized, schema, columns = prepare_table(table, names, "TIMESTAMP_LTZ", "UTC", "false")
+    assert normalized.equals(table)
+    assert schema.names == ["x", "y"]
+    assert columns == expected
+
+
+def test_arrow_input_empty_and_width_errors():
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql._arrow_input import prepare_table
+
+    empty = pa.table({"x": pa.array([], type=pa.int64())})
+    with pytest.raises(PySparkValueError, match="CANNOT_INFER_EMPTY_SCHEMA"):
+        prepare_table(empty, None, None, None, None)
+    schema = T.StructType([T.StructField("x", T.LongType())])
+    assert prepare_table(empty, schema, None, None, None)[1] is schema
+    with pytest.raises(PySparkValueError, match="AXIS_LENGTH_MISMATCH"):
+        prepare_table(pa.table({"x": [1]}), ["a", "b"], "TIMESTAMP_LTZ", "UTC", "false")
+
+
+@pytest.mark.parametrize("schema,expected_type", [
+    pytest.param(T.ArrayType(T.LongType()), "ArrayType", id="array"),
+    pytest.param(T.MapType(T.StringType(), T.LongType()), "MapType", id="map"),
+])
+@pytest.mark.parametrize("empty", [False, True], ids=["nonempty", "empty"])
+def test_arrow_input_unsupported_schema_types(schema, expected_type, empty):
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql._arrow_input import prepare_table
+
+    table = pa.table({"x": pa.array([] if empty else [1], type=pa.int64())})
+    with pytest.raises(PySparkTypeError) as error:
+        prepare_table(table, schema, "TIMESTAMP_LTZ", "UTC", "false")
+    assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+    assert error.value.getMessageParameters() == {
+        "arg_name": "schema", "expected_type": "list, None or StructType",
+        "arg_type": expected_type,
+    }
+
+
+@pytest.mark.parametrize("schema", [
+    None, T.LongType(), T.StructType([T.StructField("x", T.LongType())]), ["x"], ("x",),
+])
+def test_arrow_input_supported_schema_types(schema):
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.sql._arrow_input import prepare_table
+
+    table = pa.table({"x": [1]})
+    normalized, result, names = prepare_table(table, schema, "TIMESTAMP_LTZ", "UTC", "false")
+    assert normalized.equals(table)
+    if isinstance(schema, (T.AtomicType, T.StructType)):
+        assert result is schema
+    else:
+        assert result.names == ["x"]
+    assert names == (["x"] if isinstance(schema, (list, tuple)) else None)
+
+
+def test_arrow_input_array_and_map_struct_fields_allowed():
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.sql._arrow_input import prepare_table
+
+    table = pa.table({
+        "items": pa.array([[1, None]], type=pa.list_(pa.int64())),
+        "lookup": pa.array([[("a", 1)]], type=pa.map_(pa.string(), pa.int64())),
+    })
+    schema = T.StructType([
+        T.StructField("items", T.ArrayType(T.LongType())),
+        T.StructField("lookup", T.MapType(T.StringType(), T.LongType())),
+    ])
+    normalized, result, names = prepare_table(table, schema, "TIMESTAMP_LTZ", "UTC", "false")
+    assert normalized.equals(table)
+    assert result is schema
+    assert names is None
+
+
+@pytest.mark.parametrize("schema,expected_length", [
+    pytest.param(T.StructType([T.StructField("x", T.IntegerType())]), "1", id="too-few-fields"),
+    pytest.param(T.StructType([
+        T.StructField("x", T.LongType()), T.StructField("y", T.LongType()),
+        T.StructField("z", T.LongType()),
+    ]), "3", id="too-many-fields"),
+    pytest.param(T.LongType(), "1", id="atomic-multiple-columns"),
+])
+def test_arrow_input_explicit_schema_width_errors(schema, expected_length):
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql._arrow_input import prepare_table
+
+    # The first value would overflow the one-field IntegerType schema. Width
+    # validation must produce the structured Spark error before an Arrow cast.
+    table = pa.table({"x": [2**40], "y": [2]})
+    with pytest.raises(PySparkValueError) as error:
+        prepare_table(table, schema, "TIMESTAMP_LTZ", "UTC", "false")
+    assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
+    assert error.value.getMessageParameters() == {
+        "expected_length": expected_length, "actual_length": "2",
+    }
+
+
+@pytest.mark.parametrize("schema,values", [
+    pytest.param(T.StructType([T.StructField("x", T.LongType())]),
+                 {"x": [1, 2]}, id="single-field"),
+    pytest.param(T.StructType([
+        T.StructField("x", T.LongType()), T.StructField("y", T.LongType()),
+    ]), {"x": [1, 2], "y": [3, 4]}, id="multiple-fields"),
+    pytest.param(T.LongType(), {"x": [1, 2]}, id="atomic-single-column"),
+])
+def test_arrow_input_explicit_schema_matching_width(schema, values):
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.sql._arrow_input import prepare_table
+
+    table = pa.table(values)
+    normalized, result, names = prepare_table(table, schema, "TIMESTAMP_LTZ", "UTC", "false")
+    assert normalized.equals(table)
+    assert result is schema
+    assert names is None
+
+
+@pytest.mark.parametrize("schema", [
+    T.StructType([]),
+    T.StructType([T.StructField("x", T.LongType()), T.StructField("y", T.LongType())]),
+    T.LongType(),
+])
+def test_arrow_input_empty_explicit_schema_skips_width_validation(schema):
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.sql._arrow_input import prepare_table
+
+    table = pa.table({"x": pa.array([], type=pa.int64())})
+    normalized, result, names = prepare_table(table, schema, None, None, None)
+    assert normalized is table
+    assert result is schema
+    assert names is None
+
+
+@pytest.mark.parametrize("timestamp_type,expected", [("TIMESTAMP_NTZ", T.TimestampNTZType), ("TIMESTAMP_LTZ", T.TimestampType)])
+def test_arrow_input_timestamps(timestamp_type, expected):
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.sql._arrow_input import prepare_table
+
+    table = pa.table({"t": pa.array([1001], type=pa.timestamp("ns"))})
+    normalized, schema, _ = prepare_table(table, None, timestamp_type, "UTC", "false")
+    assert isinstance(schema.fields[0].dataType, expected)
+    assert normalized.column(0).type.unit == "us"
+    assert normalized.column(0).cast(pa.int64()).to_pylist() == [1]
+
+
+def test_arrow_input_explicit_cast_and_nested_values():
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.sql._arrow_input import prepare_table
+
+    table = pa.table({"x": [1, 2], "nested": [[1, None], []]})
+    schema = T.StructType([T.StructField("x", T.IntegerType()),
+                           T.StructField("nested", T.ArrayType(T.LongType()))])
+    normalized, result, _ = prepare_table(table, schema, "TIMESTAMP_LTZ", "UTC", "false")
+    assert result is schema
+    assert normalized.column(0).type == pa.int32()
+    assert normalized.to_pylist() == table.to_pylist()
+    with pytest.raises(pa.ArrowInvalid):
+        prepare_table(pa.table({"x": [2**40]}), T.StructType([T.StructField("x", T.IntegerType())]),
+                      "TIMESTAMP_LTZ", "UTC", "false")
+
+
+def test_arrow_input_roundtrip_live_server():
+    """Run explicitly with SPARK_REMOTE; also checks imported buffers own their lifetime."""
+    import gc
+    import os
+    pa = pytest.importorskip("pyarrow")
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("requires SPARK_REMOTE")
+    from pyspark.sql import SparkSession
+
+    spark = SparkSession.builder.remote(remote).getOrCreate()
+    try:
+        table = pa.table({"x": pa.chunked_array([[1, 2], [3]]), "nested": [[1], None, []]})
+        df = spark.createDataFrame(table, ["id", "items"])
+        del table
+        gc.collect()
+        assert df.columns == ["id", "items"]
+        assert [(r[0], r[1]) for r in df.collect()] == [(1, [1]), (2, None), (3, [])]
+        empty = spark.createDataFrame(pa.table({"x": pa.array([], type=pa.int64())}),
+                                     T.StructType([T.StructField("x", T.LongType())]))
+        assert empty.count() == 0
+        assert empty.columns == ["x"]
+    finally:
+        spark.stop()
+
+
+@pytest.mark.parametrize("kind", ["slice", "dictionary", "decimal", "null", "struct", "nul"])
+def test_arrow_input_types_live_server(kind):
+    import os
+    from decimal import Decimal
+    pa = pytest.importorskip("pyarrow")
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("requires SPARK_REMOTE")
+    from pyspark.sql import SparkSession
+
+    tables = {
+        "slice": pa.table({"x": pa.array([0, 1, 2, 3]).slice(1, 2)}),
+        "dictionary": pa.table({"x": pa.array(["a", None, "b", "a"]).dictionary_encode()}),
+        "decimal": pa.table({"x": pa.array([Decimal("1.23"), None], type=pa.decimal128(10, 2))}),
+        "null": pa.table({"x": pa.nulls(2)}),
+        "struct": pa.table({"x": [{"a": [1, None]}, None]}),
+        "nul": pa.table({"a\0b": [1, 2]}),
+    }
+    spark = SparkSession.builder.remote(remote).getOrCreate()
+    try:
+        table = tables[kind]
+        df = spark.createDataFrame(table)
+        assert df.columns == table.column_names
+        assert df.toArrow().to_pylist() == table.to_pylist()
+    finally:
+        spark.stop()
+
+
+def test_arrow_input_large_upload_live_server():
+    """A table larger than one gRPC message must use uploaded cache artifacts."""
+    import os
+    pa = pytest.importorskip("pyarrow")
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("requires SPARK_REMOTE")
+    from pyspark.sql import SparkSession
+
+    rows = 140000
+    table = pa.table({"payload": [b"x" * 1024] * rows})
+    assert table.nbytes > 128 * 1024**2
+    spark = SparkSession.builder.remote(remote).getOrCreate()
+    try:
+        df = spark.createDataFrame(table)
+        assert df.count() == rows
+        assert df.selectExpr("sum(length(payload)) AS total").collect()[0][0] == rows * 1024
+    finally:
+        spark.stop()

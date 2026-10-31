@@ -301,7 +301,26 @@ impl SparkSession {
         batches: Vec<arrow::record_batch::RecordBatch>,
         schema: DataType,
     ) -> Result<DataFrame> {
-        let plan = crate::arrow_input::create_relation(&self.client, batches, schema)?;
+        let plan = crate::arrow_input::create_relation(&self.client, batches, schema, None)?;
+        Ok(DataFrame::new(self.clone(), plan))
+    }
+
+    /// Internal settings handoff for the Python Arrow importer; not a stable API.
+    #[doc(hidden)]
+    pub fn arrow_input_options(&self) -> Result<crate::ArrowInputOptions> {
+        crate::ArrowInputOptions::from_client(&self.client)
+    }
+
+    /// Internal Arrow import entry point using the normalization settings snapshot.
+    #[doc(hidden)]
+    pub fn create_dataframe_from_arrow_with_options(
+        &self,
+        batches: Vec<arrow::record_batch::RecordBatch>,
+        schema: DataType,
+        options: &crate::ArrowInputOptions,
+    ) -> Result<DataFrame> {
+        let plan =
+            crate::arrow_input::create_relation(&self.client, batches, schema, Some(options))?;
         Ok(DataFrame::new(self.clone(), plan))
     }
 

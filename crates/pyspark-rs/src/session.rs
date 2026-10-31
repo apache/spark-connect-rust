@@ -348,10 +348,13 @@ impl PySparkSession {
         // signature parity. See PARITY_GAP_ANALYSIS.md.
         let _ = (samplingRatio, verifySchema);
 
-        if let Ok(pa) = py.import("pyarrow") {
-            if data.is_instance(&pa.getattr("Table")?)? {
-                return crate::pyarrow_import::create_dataframe(py, &self.session, data, schema);
-            }
+        // A caller holding a Table has already imported PyArrow.
+        let pa = py
+            .import("sys")?
+            .getattr("modules")?
+            .call_method1("get", ("pyarrow",))?;
+        if !pa.is_none() && data.is_instance(&pa.getattr("Table")?)? {
+            return crate::pyarrow_import::create_dataframe(py, &self.session, data, schema);
         }
 
         // Supported pandas integer columns use the existing Arrow importer. Other

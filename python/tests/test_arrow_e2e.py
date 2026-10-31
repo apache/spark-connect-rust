@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Native toArrow smoke tests against a live Spark Connect server."""
+"""Native Arrow input and output checks against a live Spark Connect server."""
 
 import os
 from datetime import date, datetime, timezone
@@ -65,3 +65,68 @@ def test_to_arrow_empty_result(session):
     table = session.range(0).toArrow()
     assert isinstance(table, pa.Table)
     assert table.num_rows == 0
+
+
+def test_create_dataframe_arrow_cached_upload(session):
+    """Exercise real-server config values and cached input above the default 1 MiB."""
+    import numpy as np
+
+    rows = 262144
+    table = pa.table({"id": np.arange(rows, dtype=np.int64)})
+    assert table.nbytes == 2 * 1024**2
+    isolated = session.newSession()
+    try:
+        # Clear inherited session overrides so CI exercises registered server defaults.
+        isolated.conf.unset("spark.sql.session.localRelationCacheThreshold")
+        isolated.conf.unset("spark.sql.session.localRelationSizeLimit")
+        threshold = int(isolated.conf.get("spark.sql.session.localRelationCacheThreshold"))
+        assert threshold == 1024**2
+        assert table.nbytes >= threshold
+        # Spark 4.2 declares this setting as longConf and returns decimal bytes.
+        assert isolated.conf.get("spark.sql.session.localRelationSizeLimit") == "3221225472"
+
+        frame = isolated.createDataFrame(table)
+        actual = frame.selectExpr("count(*) AS rows", "sum(id) AS checksum").collect()[0]
+        assert actual[0] == rows
+        assert actual[1] == rows * (rows - 1) // 2
+        assert frame.isLocal()
+    finally:
+        isolated.stop()
+
+
+@pytest.mark.parametrize("schema,expected_width", [
+    ("x long", "1"),
+    ("x long, y long, z long", "3"),
+    ("long", "1"),
+])
+def test_create_dataframe_arrow_explicit_schema_width(session, schema, expected_width):
+    from pyspark.errors import PySparkValueError
+
+    with pytest.raises(PySparkValueError) as error:
+        session.createDataFrame(pa.table({"x": [1], "y": [2]}), schema)
+    assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
+    assert error.value.getMessageParameters() == {
+        "expected_length": expected_width, "actual_length": "2",
+    }
+
+
+@pytest.mark.parametrize("schema_kind", ["array", "map"])
+@pytest.mark.parametrize("ddl", [False, True], ids=["datatype", "ddl"])
+@pytest.mark.parametrize("empty", [False, True], ids=["nonempty", "empty"])
+def test_create_dataframe_arrow_unsupported_schema(session, schema_kind, ddl, empty):
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import types as T
+
+    schema, expected_type = {
+        "array": (("array<long>" if ddl else T.ArrayType(T.LongType())), "ArrayType"),
+        "map": (("map<string,long>" if ddl else T.MapType(T.StringType(), T.LongType())),
+                "MapType"),
+    }[schema_kind]
+    table = pa.table({"x": pa.array([] if empty else [1], type=pa.int64())})
+    with pytest.raises(PySparkTypeError) as error:
+        session.createDataFrame(table, schema)
+    assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+    assert error.value.getMessageParameters() == {
+        "arg_name": "schema", "expected_type": "list, None or StructType",
+        "arg_type": expected_type,
+    }

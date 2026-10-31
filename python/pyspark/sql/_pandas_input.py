@@ -140,7 +140,7 @@ def prepare_int64_table(frame, schema):
         return None
 
     from pyspark._pyspark import (
-        BooleanType, ByteType, ShortType, IntegerType, LongType, StructField, StructType,
+        AtomicType, BooleanType, ByteType, ShortType, IntegerType, LongType, StructField, StructType,
     )
     from pyspark.sql import types as sql_types
 
@@ -173,8 +173,14 @@ def prepare_int64_table(frame, schema):
     if sys.modules.get("pyspark.sql.types") is not sql_types:
         return None
     importer = sys.modules.get("pyspark.sql._arrow_input")
-    if importer is not None and getattr(importer, "StructType", None) is not StructType:
+    if vars(sql_types).get("AtomicType") is not AtomicType:
         return None
+    if importer is not None:
+        if getattr(importer, "StructType", None) is not StructType:
+            return None
+        # Newer importers also use this alias while validating schema widths.
+        if "AtomicType" in vars(importer) and importer.AtomicType is not AtomicType:
+            return None
     converter = sys.modules.get("pyspark.sql.pandas.types")
     namespaces = [vars(sql_types)]
     if converter is not None:

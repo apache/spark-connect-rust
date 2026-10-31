@@ -18,23 +18,46 @@
 
 """Schema normalization for the native Arrow Table input path."""
 
-from pyspark.errors import PySparkValueError
+from pyspark.errors import PySparkTypeError, PySparkValueError
 from pyspark.sql.pandas.types import (
     _check_arrow_table_timestamps_localize,
     from_arrow_schema,
     to_arrow_schema,
 )
-from pyspark.sql.types import StructType
+from pyspark.sql.types import AtomicType, StructType
 
 
 def prepare_table(table, schema, timestamp_type, timezone, large_types):
     """Match Connect's Arrow casts without converting any column to Python rows."""
+    if schema is not None and not isinstance(schema, (AtomicType, StructType, list, tuple)):
+        raise PySparkTypeError(
+            errorClass="NOT_EXPECTED_TYPE",
+            messageParameters={
+                "arg_name": "schema",
+                "expected_type": "list, None or StructType",
+                "arg_type": type(schema).__name__,
+            },
+        )
     names = list(schema) if isinstance(schema, (list, tuple)) else None
     explicit = schema is not None and names is None
     if len(table) == 0:
         if not explicit:
             raise PySparkValueError(errorClass="CANNOT_INFER_EMPTY_SCHEMA", messageParameters={})
         return table, schema, None
+
+    expected_columns = None
+    if isinstance(schema, StructType):
+        expected_columns = len(schema.fields)
+    elif isinstance(schema, AtomicType):
+        expected_columns = 1
+    if expected_columns is not None and expected_columns != table.num_columns:
+        raise PySparkValueError(
+            errorClass="AXIS_LENGTH_MISMATCH",
+            messageParameters={
+                "expected_length": str(expected_columns),
+                "actual_length": str(table.num_columns),
+            },
+        )
 
     if names is not None:
         names.extend(f"_{i + 1}" for i in range(len(names), table.num_columns))

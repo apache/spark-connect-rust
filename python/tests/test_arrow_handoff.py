@@ -403,11 +403,15 @@ def _arrow_input_service(protocol, *, upload_error=None, config_error=False, **o
 
     def configure(raw, context):
         request = protocol("ConfigRequest").FromString(raw)
-        state["config_requests"].append(list(request.operation.get.keys))
+        state["user_context"] = request.user_context
+        operation = request.operation.WhichOneof("op_type")
+        keys = getattr(request.operation, operation).keys
+        state["config_requests"].append((operation, list(keys)))
         if config_error:
             context.abort(grpc.StatusCode.UNAVAILABLE, "configuration unavailable")
         return protocol("ConfigResponse", session_id=request.session_id,
-                        pairs=[dict(key=k, value=config[k]) for k in request.operation.get.keys]
+                        pairs=[dict(key=k, value=config[k]) for k in keys
+                               if config.get(k) is not None]
                         ).SerializeToString()
 
     def statuses(raw, context):
@@ -434,6 +438,8 @@ def _arrow_input_service(protocol, *, upload_error=None, config_error=False, **o
         for raw in requests:
             state["message_sizes"].append(len(raw))
             request = protocol("AddArtifactsRequest").FromString(raw)
+            assert request.HasField("user_context")
+            assert request.user_context == state["user_context"]
             session_id = request.session_id
             if request.HasField("batch"):
                 for artifact in request.batch.artifacts:
@@ -526,13 +532,19 @@ def _arrow_input_service(protocol, *, upload_error=None, config_error=False, **o
 
 
 @pytest.mark.parametrize("rows", [2, 17000000])
-def test_arrow_input_upload_above_grpc_limit(protocol, rows):
+@pytest.mark.parametrize("batch_bytes", [64 * 1024**2, 1024**3])
+def test_arrow_input_upload_above_grpc_limit(protocol, rows, batch_bytes):
     import numpy as np
     import json
 
     table = pa.table({"id": np.arange(rows, dtype=np.int64)})
-    with _arrow_input_service(protocol) as (spark, state):
+    with _arrow_input_service(protocol, **{
+        "spark.sql.session.localRelationBatchOfChunksSizeBytes": str(batch_bytes)
+    }) as (spark, state):
         df = spark.createDataFrame(table)
+        assert len(state["config_requests"]) == 1
+        assert state["config_requests"][0][0] == "get_option"
+        assert len(state["config_requests"][0][1]) == 8
         assert df.isLocal()
         assert df.toArrow().column(0).to_pylist() == [rows]
         assert state["result"] == (rows, 0, rows - 1)
@@ -543,7 +555,7 @@ def test_arrow_input_upload_above_grpc_limit(protocol, rows):
             assert table.nbytes > 128 * 1024**2
             assert state["relations"][0].HasField("chunked_cached_local_relation")
             assert state["relations"][0].ByteSize() < 1024**2
-            assert max(state["message_sizes"]) < 33 * 1024
+            assert max(state["message_sizes"]) < 1025 * 1024
             assert json.loads(state["spark_schema"])["fields"][0]["name"] == "id"
             uploads = state["uploads"]
             spark.createDataFrame(table).toArrow()
@@ -578,19 +590,75 @@ def test_arrow_input_upload_limits_and_chunk_order(protocol):
         assert state["uploads"] == 0
 
 
+@pytest.mark.parametrize("size_limit", ["3221225472", "3221225472b", "3GB", " 3gb "])
+def test_arrow_input_upload_accepts_byte_size_limits(protocol, size_limit):
+    import numpy as np
+
+    rows = 262144
+    table = pa.table({"id": np.arange(rows, dtype=np.int64)})
+    with _arrow_input_service(protocol, **{
+        "spark.sql.session.localRelationSizeLimit": size_limit,
+    }) as (spark, state):
+        spark.createDataFrame(table).toArrow()
+        assert state["uploads"] > 0
+        assert state["relations"][0].HasField("chunked_cached_local_relation")
+        assert state["result"] == (rows, 0, rows - 1)
+
+
+@pytest.mark.parametrize("size_limit", ["1024", "1024b", "1KB"])
+def test_arrow_input_byte_size_limits_are_enforced(protocol, size_limit):
+    from pyspark.errors import AnalysisException
+
+    with _arrow_input_service(protocol, **{
+        "spark.sql.session.localRelationCacheThreshold": "0",
+        "spark.sql.session.localRelationSizeLimit": size_limit,
+    }) as (spark, state):
+        with pytest.raises(AnalysisException, match="LOCAL_RELATION_SIZE_LIMIT_EXCEEDED") as error:
+            spark.createDataFrame(pa.table({"id": list(range(1000))}))
+        assert "limit (1024 bytes)" in str(error.value)
+        assert state["uploads"] == 0
+
+
+@pytest.mark.parametrize("setting,value", [
+    ("SizeLimit", "0"),
+    ("SizeLimit", "-1GB"),
+    ("SizeLimit", "1.5GB"),
+    ("SizeLimit", "3XB"),
+    ("SizeLimit", "18446744073709551616"),
+    ("SizeLimit", "18446744073709551615GB"),
+    ("ChunkSizeRows", "1KB"),
+])
+def test_arrow_input_rejects_invalid_upload_sizes(protocol, setting, value):
+    key = f"spark.sql.session.localRelation{setting}"
+    with _arrow_input_service(protocol, **{
+        "spark.sql.session.localRelationCacheThreshold": "0", key: value,
+    }) as (spark, state):
+        with pytest.raises(Exception, match=f"Invalid configuration: {key}"):
+            spark.createDataFrame(pa.table({"id": [1]}))
+        assert state["uploads"] == 0
+
+
 @pytest.mark.parametrize("failure,match", [("crc", "CRC check failed"),
                                           ("missing", "Missing cache artifact")])
-def test_arrow_input_upload_failure(protocol, failure, match):
+@pytest.mark.parametrize("rows", [2, 4000000])
+def test_arrow_input_upload_failure(protocol, failure, match, rows):
+    import numpy as np
+
+    # The larger input spans multiple upload batches.
     with _arrow_input_service(protocol, upload_error=failure,
-                             **{"spark.sql.session.localRelationCacheThreshold": "0"}) as (spark, state):
+                             **{"spark.sql.session.localRelationCacheThreshold": "0",
+                                "spark.sql.session.localRelationBatchOfChunksSizeBytes":
+                                    str(8 * 1024**2)}) as (spark, state):
         with pytest.raises(Exception, match=match):
-            spark.createDataFrame(pa.table({"id": [1, 2]}))
+            spark.createDataFrame(pa.table({"id": np.arange(rows, dtype=np.int64)}))
         assert not state["relations"]
 
 
-def test_arrow_input_duplicate_chunks_preserve_multiplicity(protocol):
+@pytest.mark.parametrize("batch_bytes", [500, 1024**3])
+def test_arrow_input_duplicate_chunks_preserve_multiplicity(protocol, batch_bytes):
     options = {"spark.sql.session.localRelationCacheThreshold": "0",
-               "spark.sql.session.localRelationChunkSizeRows": "5"}
+               "spark.sql.session.localRelationChunkSizeRows": "5",
+               "spark.sql.session.localRelationBatchOfChunksSizeBytes": str(batch_bytes)}
     with _arrow_input_service(protocol, **options) as (spark, state):
         spark.createDataFrame(pa.table({"id": [1] * 20})).toArrow()
         cached = state["relations"][0].chunked_cached_local_relation
@@ -1194,6 +1262,18 @@ elif mode in ("public_alias", "converter_alias", "captured_alias"):
             current = importlib.import_module("pyspark.sql.pandas.types")
             assert current is not converter
             assert importer.to_arrow_schema.__globals__ is vars(converter)
+elif mode == "atomic_alias":
+    scope, replacement = argument.split(":")
+    replacement = None if replacement == "none" else native.LongType
+    if scope == "public_before":
+        sys.modules.pop("pyspark.sql._arrow_input", None)
+        T.AtomicType = replacement
+    elif scope == "public_after":
+        importlib.import_module("pyspark.sql._arrow_input")
+        T.AtomicType = replacement
+    else:
+        importer = importlib.import_module("pyspark.sql._arrow_input")
+        importer.AtomicType = replacement
 elif mode == "importer_alias":
     importer = importlib.import_module("pyspark.sql._arrow_input")
     importer.StructType = None if argument == "none" else native.LongType
@@ -1238,6 +1318,12 @@ def test_integer_rebound_converter_aliases_keep_native_row_path(class_name, mode
 @pytest.mark.parametrize("replacement", ["none", "long"])
 def test_integer_rebound_importer_schema_alias_keeps_native_row_path(replacement):
     _integer_guard_process("importer_alias", replacement)
+
+
+@pytest.mark.parametrize("scope", ["public_before", "public_after", "importer"])
+@pytest.mark.parametrize("replacement", ["none", "long"])
+def test_integer_rebound_atomic_alias_keeps_native_row_path(scope, replacement):
+    _integer_guard_process("atomic_alias", f"{scope}:{replacement}")
 
 
 def test_integer_warm_importer_without_global_converter_aliases(protocol, monkeypatch):
@@ -1372,3 +1458,77 @@ def test_integer_rebound_index_data_keeps_native_read_order(
                  "metadata": metadata}
             ],
         }
+
+
+@pytest.mark.parametrize("data", [[[1]], pd.DataFrame({"id": [1]})])
+def test_non_arrow_input_does_not_import_pyarrow(protocol, monkeypatch, data):
+    import builtins
+    import sys
+
+    imported = []
+    original_import = builtins.__import__
+
+    def import_module(name, *args, **kwargs):
+        if name == "pyarrow":
+            imported.append(name)
+            raise ImportError("PyArrow is unavailable")
+        return original_import(name, *args, **kwargs)
+
+    with _arrow_input_service(protocol) as (spark, state):
+        monkeypatch.setitem(sys.modules, "pyarrow", None)
+        monkeypatch.setattr(builtins, "__import__", import_module)
+        spark.createDataFrame(data)
+        assert imported == []
+        assert state["config_requests"] == []
+
+
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize("missing", [
+    "spark.sql.session.localRelationSizeLimit",
+    "spark.sql.session.localRelationChunkSizeRows",
+    "spark.sql.session.localRelationChunkSizeBytes",
+    "spark.sql.session.localRelationBatchOfChunksSizeBytes",
+    "all",
+])
+def test_arrow_input_missing_upload_settings_use_defaults(protocol, missing, cached):
+    options = {missing: None} if missing != "all" else {
+        f"spark.sql.session.localRelation{suffix}": None
+        for suffix in ["SizeLimit", "ChunkSizeRows", "ChunkSizeBytes", "BatchOfChunksSizeBytes"]
+    }
+    options["spark.sql.session.localRelationCacheThreshold"] = "0" if cached else "1048576"
+    with _arrow_input_service(protocol, **options) as (spark, state):
+        spark.createDataFrame(pa.table({"id": [1, 2]})).toArrow()
+        assert state["result"] == (2, 1, 2)
+        assert len(state["config_requests"]) == 1
+        assert bool(state["uploads"]) == cached
+
+
+def test_arrow_input_ignores_chunk_settings_for_inline_input(protocol):
+    options = {
+        "spark.sql.session.localRelationChunkSizeRows": "invalid",
+        "spark.sql.session.localRelationChunkSizeBytes": "0",
+    }
+    with _arrow_input_service(protocol, **options) as (spark, state):
+        spark.createDataFrame(pa.table({"id": [1, 2]})).toArrow()
+        assert state["result"] == (2, 1, 2)
+        assert state["uploads"] == 0
+        assert len(state["config_requests"]) == 1
+    options["spark.sql.session.localRelationCacheThreshold"] = "0"
+    with _arrow_input_service(protocol, **options) as (spark, state):
+        with pytest.raises(Exception, match="Invalid configuration"):
+            spark.createDataFrame(pa.table({"id": [1, 2]}))
+        assert state["uploads"] == 0
+
+
+@pytest.mark.parametrize("rows", [2, 200000])
+def test_arrow_input_missing_cache_threshold_uses_default(protocol, rows):
+    import numpy as np
+
+    table = pa.table({"id": np.arange(rows, dtype=np.int64)})
+    with _arrow_input_service(protocol, **{
+        "spark.sql.session.localRelationCacheThreshold": None
+    }) as (spark, state):
+        spark.createDataFrame(table).toArrow()
+        assert state["result"] == (rows, 0, rows - 1)
+        assert bool(state["uploads"]) == (table.nbytes >= 1048576)
+        assert len(state["config_requests"]) == 1
