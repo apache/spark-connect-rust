@@ -34,11 +34,10 @@ import shutil
 import subprocess
 import tempfile
 
-from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
-
 try:
     import grpc
     import pyarrow as pa
+    from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
 except ImportError:
     grpc = pa = None
 
@@ -47,9 +46,9 @@ from pyspark.sql import Row, SparkSession, types as T
 
 def _messages():
     proto_root = Path(__file__).resolve().parents[2] / "crates/spark-connect-proto/proto"
-    compiler = os.environ.get("PROTOC") or shutil.which("protoc")
+    compiler = shutil.which(os.environ.get("PROTOC") or "protoc")
     if not compiler:
-        raise RuntimeError("protoc is required for the interval fixture")
+        raise unittest.SkipTest("protoc is required for the interval fixture")
     with tempfile.TemporaryDirectory() as directory:
         output = Path(directory) / "connect.pb"
         command = [compiler, f"-I{proto_root}", "--include_imports",
@@ -91,7 +90,7 @@ def _type(data_type, message):
     return result
 
 
-@unittest.skipIf(grpc is None or pa is None, "grpcio and pyarrow are required")
+@unittest.skipIf(grpc is None or pa is None, "grpcio, pyarrow and protobuf are required")
 class DayTimeIntervalTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
