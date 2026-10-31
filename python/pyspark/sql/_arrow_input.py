@@ -86,4 +86,8 @@ def prepare_table(table, schema, timestamp_type, timezone, large_types):
                 "actual_length": str(normalized.num_columns),
             },
         )
-    return normalized, schema if explicit else inferred, names
+    # Match Connect: inferred Arrow schemas travel in IPC, without an extra
+    # Spark schema that would trigger server-side casts on every query.
+    if not explicit and names is None:
+        names = table.column_names
+    return normalized, schema if explicit else None, names

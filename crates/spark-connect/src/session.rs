@@ -286,22 +286,26 @@ impl SparkSession {
         } else {
             Some(rows_to_arrow_ipc(&rows, &schema)?)
         };
-        let plan = LogicalPlan::LocalRelation { schema, data };
+        let plan = LogicalPlan::LocalRelation {
+            schema: Some(schema),
+            data,
+        };
         Ok(DataFrame::new(self.clone(), plan))
     }
 
     /// Create a local DataFrame from Arrow batches without materializing rows.
     ///
-    /// `schema` is the Spark schema applied by the server. All batches must share
-    /// the same Arrow schema; IPC serialization is still required for transport.
+    /// `schema` optionally supplies the Spark schema applied by the server. With
+    /// `None`, Spark infers it from Arrow. All batches must share the same Arrow
+    /// schema; IPC serialization is still required for transport.
     /// Non-empty inputs read the server's local-relation configuration. Large inputs
     /// are uploaded as cache artifacts and referenced by hash in the resulting plan.
     pub fn create_dataframe_from_arrow(
         &self,
         batches: Vec<arrow::record_batch::RecordBatch>,
-        schema: DataType,
+        schema: impl Into<Option<DataType>>,
     ) -> Result<DataFrame> {
-        let plan = crate::arrow_input::create_relation(&self.client, batches, schema, None)?;
+        let plan = crate::arrow_input::create_relation(&self.client, batches, schema.into(), None)?;
         Ok(DataFrame::new(self.clone(), plan))
     }
 
@@ -316,11 +320,15 @@ impl SparkSession {
     pub fn create_dataframe_from_arrow_with_options(
         &self,
         batches: Vec<arrow::record_batch::RecordBatch>,
-        schema: DataType,
+        schema: impl Into<Option<DataType>>,
         options: &crate::ArrowInputOptions,
     ) -> Result<DataFrame> {
-        let plan =
-            crate::arrow_input::create_relation(&self.client, batches, schema, Some(options))?;
+        let plan = crate::arrow_input::create_relation(
+            &self.client,
+            batches,
+            schema.into(),
+            Some(options),
+        )?;
         Ok(DataFrame::new(self.clone(), plan))
     }
 
@@ -437,7 +445,7 @@ impl SparkSession {
     /// `SparkSession.emptyDataFrame`.
     pub fn empty_data_frame(&self) -> Result<DataFrame> {
         let plan = LogicalPlan::LocalRelation {
-            schema: DataType::Struct { fields: vec![] },
+            schema: Some(DataType::Struct { fields: vec![] }),
             data: None,
         };
         Ok(DataFrame::new(self.clone(), plan))
@@ -1272,9 +1280,11 @@ mod tests {
             fields: vec![struct_field("x", DataType::Integer)],
         };
         let spark = session();
-        let plan =
-            crate::arrow_input::inline_relation(&[batch.clone(), batch.clone()], schema.clone())
-                .unwrap();
+        let plan = crate::arrow_input::inline_relation(
+            &[batch.clone(), batch.clone()],
+            Some(schema.clone()),
+        )
+        .unwrap();
         let LogicalPlan::LocalRelation {
             data: Some(data), ..
         } = &plan

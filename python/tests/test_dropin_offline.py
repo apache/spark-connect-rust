@@ -3087,7 +3087,7 @@ def test_schema_cache_metadata_wait_releases_gil(mock_connect, accessor):
     assert service.calls == 1
 
 
-@pytest.mark.parametrize("names,expected", [(None, None), (["a"], ["a", "_2"]), ([], ["_1", "_2"])])
+@pytest.mark.parametrize("names,expected", [(None, ["x", "y"]), (["a"], ["a", "_2"]), ([], ["_1", "_2"])])
 def test_arrow_input_normalization(names, expected):
     pa = pytest.importorskip("pyarrow")
     from pyspark.sql._arrow_input import prepare_table
@@ -3095,7 +3095,7 @@ def test_arrow_input_normalization(names, expected):
     table = pa.table({"x": pa.chunked_array([[1], [2]]), "y": ["a", None]})
     normalized, schema, columns = prepare_table(table, names, "TIMESTAMP_LTZ", "UTC", "false")
     assert normalized.equals(table)
-    assert schema.names == ["x", "y"]
+    assert schema is None
     assert columns == expected
 
 
@@ -3146,8 +3146,8 @@ def test_arrow_input_supported_schema_types(schema):
     if isinstance(schema, (T.AtomicType, T.StructType)):
         assert result is schema
     else:
-        assert result.names == ["x"]
-    assert names == (["x"] if isinstance(schema, (list, tuple)) else None)
+        assert result is None
+    assert names == (None if isinstance(schema, (T.AtomicType, T.StructType)) else ["x"])
 
 
 def test_arrow_input_array_and_map_struct_fields_allowed():
@@ -3234,7 +3234,8 @@ def test_arrow_input_timestamps(timestamp_type, expected):
 
     table = pa.table({"t": pa.array([1001], type=pa.timestamp("ns"))})
     normalized, schema, _ = prepare_table(table, None, timestamp_type, "UTC", "false")
-    assert isinstance(schema.fields[0].dataType, expected)
+    assert schema is None
+    assert normalized.column(0).type.tz == ("UTC" if expected is T.TimestampType else None)
     assert normalized.column(0).type.unit == "us"
     assert normalized.column(0).cast(pa.int64()).to_pylist() == [1]
 

@@ -56,8 +56,12 @@ pub(crate) fn create_dataframe(
         options.as_ref().and_then(|o| o.use_large_var_types()),
     ))?;
     let normalized = result.get_item(0)?;
-    // Native local relations carry inferred schemas to preserve timestamp-type normalization.
-    let spark_schema = crate::types::py_to_data_type(&result.get_item(1)?)?;
+    let schema = result.get_item(1)?;
+    let spark_schema = if schema.is_none() {
+        None
+    } else {
+        Some(crate::types::py_to_data_type(&schema)?)
+    };
     let names: Option<Vec<String>> = result.get_item(2)?.extract()?;
     let batches = if empty {
         Vec::new()

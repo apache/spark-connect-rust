@@ -1694,8 +1694,13 @@ impl DataFrame {
 
     /// Check if this DataFrame is local (collected).
     pub fn is_local(&self) -> bool {
+        let mut plan = self.plan.as_ref();
+        // Arrow input uses toDF to apply inferred or supplied column names.
+        while let LogicalPlan::ToDF { input, .. } = plan {
+            plan = input.as_ref();
+        }
         matches!(
-            self.plan.as_ref(),
+            plan,
             LogicalPlan::LocalRelation { .. } | LogicalPlan::ChunkedCachedLocalRelation { .. }
         )
     }

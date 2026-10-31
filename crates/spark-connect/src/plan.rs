@@ -225,7 +225,7 @@ pub enum LogicalPlan {
     },
     /// LocalRelation: data supplied locally.
     LocalRelation {
-        schema: DataType,
+        schema: Option<DataType>,
         data: Option<Vec<u8>>,
     },
     /// Local Arrow data uploaded as session-scoped cache artifacts.
@@ -965,9 +965,9 @@ impl LogicalPlan {
                 if let Some(d) = data {
                     local.data = Some(d.clone().into());
                 }
-                // Carry the schema (JSON) so the server applies the user's column
-                // names/types; required when no Arrow `data` is provided (emptyDataFrame).
-                local.schema = Some(schema.json());
+                // Explicit schemas apply server-side casts. Inferred Arrow input
+                // omits this to avoid a redundant projection on every query.
+                local.schema = schema.as_ref().map(DataType::json);
                 relation.rel_type = Some(proto::relation::RelType::LocalRelation(local));
             }
 
@@ -1757,7 +1757,10 @@ pub fn subquery_alias(input: impl Into<Arc<LogicalPlan>>, alias: impl Into<Strin
 
 /// Create a LocalRelation plan.
 pub fn local_relation(schema: DataType, data: Option<Vec<u8>>) -> LogicalPlan {
-    LogicalPlan::LocalRelation { schema, data }
+    LogicalPlan::LocalRelation {
+        schema: Some(schema),
+        data,
+    }
 }
 
 /// Create a CachedRemoteRelation plan.

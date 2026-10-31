@@ -120,7 +120,9 @@ Empty tables require an explicit schema, matching PySpark Connect.
 Inputs at or above `spark.sql.session.localRelationCacheThreshold` are serialized
 into independent IPC streams and uploaded as session-scoped cache artifacts.
 The plan carries `ChunkedCachedLocalRelation` hashes instead of embedding the
-entire payload. Chunk sizes, upload batch sizes, and the total relation size
+entire payload. Spark infers omitted schemas from the Arrow streams; explicit
+schemas travel in the local relation or a separate schema artifact.
+Chunk sizes, upload batch sizes, and the total relation size
 limit follow the server's local-relation settings; artifact RPC messages use
 32 KiB pieces, with SHA-256 deduplication and CRC checks.
 

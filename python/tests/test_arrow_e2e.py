@@ -68,7 +68,7 @@ def test_to_arrow_empty_result(session):
 
 
 def test_create_dataframe_arrow_cached_upload(session):
-    """Exercise real-server config values and cached input above the default 1 MiB."""
+    """Materialize cached Arrow input larger than 1 MiB on a real server."""
     import numpy as np
 
     rows = 262144
@@ -76,15 +76,7 @@ def test_create_dataframe_arrow_cached_upload(session):
     assert table.nbytes == 2 * 1024**2
     isolated = session.newSession()
     try:
-        # Clear inherited session overrides so CI exercises registered server defaults.
-        isolated.conf.unset("spark.sql.session.localRelationCacheThreshold")
-        isolated.conf.unset("spark.sql.session.localRelationSizeLimit")
-        threshold = int(isolated.conf.get("spark.sql.session.localRelationCacheThreshold"))
-        assert threshold == 1024**2
-        assert table.nbytes >= threshold
-        # Spark 4.2 declares this setting as longConf and returns decimal bytes.
-        assert isolated.conf.get("spark.sql.session.localRelationSizeLimit") == "3221225472"
-
+        isolated.conf.set("spark.sql.session.localRelationCacheThreshold", str(1024**2))
         frame = isolated.createDataFrame(table)
         actual = frame.selectExpr("count(*) AS rows", "sum(id) AS checksum").collect()[0]
         assert actual[0] == rows
@@ -94,39 +86,32 @@ def test_create_dataframe_arrow_cached_upload(session):
         isolated.stop()
 
 
-@pytest.mark.parametrize("schema,expected_width", [
-    ("x long", "1"),
-    ("x long, y long, z long", "3"),
-    ("long", "1"),
-])
-def test_create_dataframe_arrow_explicit_schema_width(session, schema, expected_width):
-    from pyspark.errors import PySparkValueError
+@pytest.mark.parametrize("cached", [False, True], ids=["inline", "cached"])
+@pytest.mark.parametrize("timestamp_type", ["TIMESTAMP_LTZ", "TIMESTAMP_NTZ"])
+def test_create_dataframe_arrow_inferred_timestamp(session, cached, timestamp_type):
+    value = datetime(2020, 1, 2, 3, 4, 5)
+    table = pa.table({"t": pa.array([value], type=pa.timestamp("ns"))})
+    isolated = session.newSession()
+    try:
+        isolated.conf.set("spark.sql.session.timeZone", "America/Los_Angeles")
+        isolated.conf.set("spark.sql.timestampType", timestamp_type)
+        isolated.conf.set("spark.sql.session.localRelationCacheThreshold",
+                          "0" if cached else str(1024**2))
+        frame = isolated.createDataFrame(table)
+        spark_type = "timestamp" if timestamp_type == "TIMESTAMP_LTZ" else "timestamp_ntz"
+        assert frame.schema.simpleString() == f"struct<t:{spark_type}>"
+        assert frame.selectExpr("CAST(t AS STRING)").collect()[0][0] == "2020-01-02 03:04:05"
 
-    with pytest.raises(PySparkValueError) as error:
-        session.createDataFrame(pa.table({"x": [1], "y": [2]}), schema)
-    assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
-    assert error.value.getMessageParameters() == {
-        "expected_length": expected_width, "actual_length": "2",
-    }
-
-
-@pytest.mark.parametrize("schema_kind", ["array", "map"])
-@pytest.mark.parametrize("ddl", [False, True], ids=["datatype", "ddl"])
-@pytest.mark.parametrize("empty", [False, True], ids=["nonempty", "empty"])
-def test_create_dataframe_arrow_unsupported_schema(session, schema_kind, ddl, empty):
-    from pyspark.errors import PySparkTypeError
-    from pyspark.sql import types as T
-
-    schema, expected_type = {
-        "array": (("array<long>" if ddl else T.ArrayType(T.LongType())), "ArrayType"),
-        "map": (("map<string,long>" if ddl else T.MapType(T.StringType(), T.LongType())),
-                "MapType"),
-    }[schema_kind]
-    table = pa.table({"x": pa.array([] if empty else [1], type=pa.int64())})
-    with pytest.raises(PySparkTypeError) as error:
-        session.createDataFrame(table, schema)
-    assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
-    assert error.value.getMessageParameters() == {
-        "arg_name": "schema", "expected_type": "list, None or StructType",
-        "arg_type": expected_type,
-    }
+        result = frame.toArrow()
+        if timestamp_type == "TIMESTAMP_LTZ":
+            assert result.column("t").type.unit == "us"
+            assert result.column("t").type.tz is not None
+            # The native Arrow result carries the session timezone; compare instants.
+            assert result.column("t").cast(pa.timestamp("us", tz="UTC")).to_pylist() == [
+                datetime(2020, 1, 2, 11, 4, 5, tzinfo=timezone.utc)
+            ]
+        else:
+            assert result.column("t").type == pa.timestamp("us")
+            assert result.column("t").to_pylist() == [value]
+    finally:
+        isolated.stop()

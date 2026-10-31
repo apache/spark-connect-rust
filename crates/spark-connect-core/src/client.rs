@@ -445,38 +445,6 @@ impl SparkConnectClient {
         Ok(keys.iter().map(|k| config_dict.get(*k).cloned()).collect())
     }
 
-    /// Get registered defaults and session overrides, returning None for unknown keys.
-    pub async fn get_config_options(&self, keys: &[&str]) -> Result<Vec<Option<String>>> {
-        let request = ConfigRequest {
-            session_id: self.session_id.clone(),
-            user_context: Some(UserContext {
-                user_id: self.user_id.clone().unwrap_or_default(),
-                ..Default::default()
-            }),
-            operation: Some(spark_connect_proto::config_request::Operation {
-                op_type: Some(
-                    spark_connect_proto::config_request::operation::OpType::GetOption(
-                        spark_connect_proto::config_request::GetOption {
-                            keys: keys.iter().map(|key| key.to_string()).collect(),
-                        },
-                    ),
-                ),
-            }),
-            ..Default::default()
-        };
-        let values: BTreeMap<_, _> = self
-            .config(request)
-            .await?
-            .pairs
-            .into_iter()
-            .map(|pair| (pair.key, pair.value))
-            .collect();
-        Ok(keys
-            .iter()
-            .map(|key| values.get(*key).cloned().flatten())
-            .collect())
-    }
-
     /// Set configuration values for the session.
     ///
     /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.set_config`.
@@ -792,14 +760,13 @@ impl SparkConnectClient {
     /// Existing artifacts and duplicate blobs are uploaded only once.
     pub async fn cache_artifacts(&self, blobs: Vec<Vec<u8>>) -> Result<Vec<String>> {
         use crate::artifact::InMemoryArtifact;
-        use ring::digest::{digest, SHA256};
+        use sha2::{Digest, Sha256};
         use std::collections::HashSet;
 
         let hashes: Vec<String> = blobs
             .iter()
             .map(|blob| {
-                digest(&SHA256, blob)
-                    .as_ref()
+                Sha256::digest(blob)
                     .iter()
                     .map(|byte| format!("{byte:02x}"))
                     .collect::<String>()
@@ -827,29 +794,19 @@ impl SparkConnectClient {
             return Ok(hashes);
         }
         let expected: HashSet<String> = artifacts.iter().map(|a| a.name.clone()).collect();
-        let requests = crate::artifact::build_artifact_request_stream_with_chunk_size(
-            self.session_id.clone(),
-            artifacts,
-            crate::artifact::CACHE_CHUNK_SIZE,
-        )?;
+        let requests = build_artifact_request_stream(self.session_id.clone(), artifacts)?;
         self.upload_artifact_requests(requests, Some(&expected))
             .await?;
         Ok(hashes)
     }
 
-    /// Send artifact frames with the same user context and validate the response.
+    /// Send artifact frames and validate the response.
     /// Cache uploads also require an acknowledgement for every requested artifact.
     async fn upload_artifact_requests(
         &self,
-        mut requests: Vec<spark_connect_proto::AddArtifactsRequest>,
+        requests: Vec<spark_connect_proto::AddArtifactsRequest>,
         expected_cache_names: Option<&std::collections::HashSet<String>>,
     ) -> Result<()> {
-        for request in &mut requests {
-            request.user_context = Some(UserContext {
-                user_id: self.user_id.clone().unwrap_or_default(),
-                ..Default::default()
-            });
-        }
         let mut req = Request::new(futures::stream::iter(requests));
         self._attach_metadata(&mut req);
         let response = self
