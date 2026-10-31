@@ -348,16 +348,32 @@ impl PySparkSession {
         // signature parity. See PARITY_GAP_ANALYSIS.md.
         let _ = (samplingRatio, verifySchema);
 
-        // Accept a pandas DataFrame (as pyspark does): convert it to a list of row lists
-        // with NaN/NaT mapped to None, and take its column names as the default schema.
-        // pandas-on-Spark always passes an explicit `schema`, so this mainly needs to
-        // deliver the row values; the list path below handles the rest.
+        // A caller holding a Table has already imported PyArrow.
+        let pa = py
+            .import("sys")?
+            .getattr("modules")?
+            .call_method1("get", ("pyarrow",))?;
+        if !pa.is_none() && data.is_instance(&pa.getattr("Table")?)? {
+            return crate::pyarrow_import::create_dataframe(py, &self.session, data, schema);
+        }
+
+        // Supported pandas integer columns use the existing Arrow importer. Other
+        // dtypes/schema conversions retain the row path with NaN/NaT mapped to None.
         let mut pandas_columns: Option<Vec<String>> = None;
         let is_pandas = py
             .import("pandas")
             .and_then(|m| m.getattr("DataFrame"))
             .and_then(|c| data.is_instance(&c))
             .unwrap_or(false);
+        if is_pandas {
+            let table = py
+                .import("pyspark.sql._pandas_input")?
+                .getattr("prepare_int64_table")?
+                .call1((data, schema))?;
+            if !table.is_none() {
+                return crate::pyarrow_import::create_dataframe(py, &self.session, &table, schema);
+            }
+        }
         let data_owned: Bound<'_, PyList>;
         let data: &Bound<'_, PyList> = if is_pandas {
             pandas_columns = Some(data.getattr("columns")?.call_method0("tolist")?.extract()?);

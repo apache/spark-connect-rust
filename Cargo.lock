@@ -86,6 +86,7 @@ dependencies = [
  "prost",
  "prost-types",
  "regex",
+ "ring",
  "serde_json",
  "tempfile",
  "thiserror",

@@ -1694,7 +1694,10 @@ impl DataFrame {
 
     /// Check if this DataFrame is local (collected).
     pub fn is_local(&self) -> bool {
-        matches!(self.plan.as_ref(), LogicalPlan::LocalRelation { .. })
+        matches!(
+            self.plan.as_ref(),
+            LogicalPlan::LocalRelation { .. } | LogicalPlan::ChunkedCachedLocalRelation { .. }
+        )
     }
 
     /// Check if this DataFrame is streaming.
