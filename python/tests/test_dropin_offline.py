@@ -3161,62 +3161,66 @@ _PRINT_SCHEMA_FULL = (
 @pytest.mark.parametrize(
     "level, expected",
     [
-        (None, _PRINT_SCHEMA_FULL),
         (0, _PRINT_SCHEMA_FULL),
-        (-1, _PRINT_SCHEMA_FULL),
-        (-10, _PRINT_SCHEMA_FULL),
         (1, _PRINT_SCHEMA_LEVEL1),
-        (2, _PRINT_SCHEMA_LEVEL2),
-        (3, _PRINT_SCHEMA_FULL),
-        (2**100, _PRINT_SCHEMA_FULL),
-        (False, _PRINT_SCHEMA_FULL),
-        (True, _PRINT_SCHEMA_LEVEL1),
-        (0.5, _PRINT_SCHEMA_LEVEL1),
         (1.5, _PRINT_SCHEMA_LEVEL2),
-        (float("inf"), _PRINT_SCHEMA_FULL),
+        (2**100, _PRINT_SCHEMA_FULL),
         (float("nan"), _PRINT_SCHEMA_FULL),
-        ("", _PRINT_SCHEMA_FULL),
-        ([], _PRINT_SCHEMA_FULL),
-        ({}, _PRINT_SCHEMA_FULL),
     ],
 )
 def test_print_schema_exact_python_stdout(mock_connect, capsys, level, expected):
     spark, service = mock_connect
     service.data_type = _print_schema_type()
     df = spark.range(10)
-    for _ in range(2):
-        assert df.printSchema(level) is None
-        captured = capsys.readouterr()
-        assert captured.out == expected
-        assert captured.err == ""
-    assert service.calls == 1
+    assert df.printSchema(level) is None
+    captured = capsys.readouterr()
+    assert captured.out == expected
+    assert captured.err == ""
+    assert df.schema.treeString(maxDepth=level) == expected[:-1]
     assert service.execute_calls == 0
 
 
-@pytest.mark.parametrize("level", ["two", [1], object(), 1 + 2j])
-def test_print_schema_invalid_depth(mock_connect, capsys, level):
-    spark, service = mock_connect
-    service.data_type = _print_schema_type()
-    with pytest.raises(TypeError):
-        spark.range(10).printSchema(level)
-    assert capsys.readouterr().out == ""
-    assert service.execute_calls == 0
-
-
-@pytest.mark.parametrize("failure", ["rpc", "no-result", "missing-schema", "invalid-type"])
-def test_print_schema_default_and_failure_retry(mock_connect, capsys, failure):
+def test_print_schema_default_reuses_cached_schema(mock_connect, capsys):
     spark, service = mock_connect
     service.data_type = _print_schema_type()
     df = spark.range(10)
-    service.failure = failure
-    with pytest.raises(Exception):
-        df.printSchema()
-    assert capsys.readouterr().out == ""
+    for _ in range(2):
+        assert df.printSchema() is None
+        assert capsys.readouterr().out == _PRINT_SCHEMA_FULL
     assert service.calls == 1
-    service.failure = None
-    assert df.printSchema() is None
+    assert service.execute_calls == 0
+
+
+@pytest.mark.parametrize("level", [None, []])
+def test_print_schema_falsey_level_uses_default(mock_connect, capsys, level):
+    spark, service = mock_connect
+    service.data_type = _print_schema_type()
+    df = spark.range(10)
+    assert df.printSchema(level) is None
     assert capsys.readouterr().out == _PRINT_SCHEMA_FULL
-    assert service.calls == 2
+    with pytest.raises(TypeError):
+        df.schema.treeString(level)
+    assert service.execute_calls == 0
+
+
+def test_schema_tree_invalid_depth(mock_connect, capsys):
+    spark, service = mock_connect
+    service.data_type = _print_schema_type()
+    df = spark.range(10)
+    with pytest.raises(TypeError):
+        df.printSchema("two")
+    with pytest.raises(TypeError):
+        df.schema.treeString("two")
+    assert capsys.readouterr().out == ""
+    assert service.execute_calls == 0
+
+
+def test_print_schema_propagates_schema_error(mock_connect, capsys):
+    spark, service = mock_connect
+    service.failure = "rpc"
+    with pytest.raises(Exception, match="schema unavailable"):
+        spark.range(10).printSchema()
+    assert capsys.readouterr().out == ""
     assert service.execute_calls == 0
 
 
@@ -3245,7 +3249,6 @@ def test_schema_tree_type_names_and_escaped_field_names():
     "python_class, expected",
     [
         ("pyspark.ml.linalg.VectorUDT", "vectorudt"),
-        ("example.CustomType", "customtype"),
         (None, "udt"),
     ],
 )

@@ -1362,19 +1362,17 @@ impl PyDataFrame {
     /// Print the schema through Python stdout, honoring the maximum nesting depth.
     #[pyo3(signature = (level=None))]
     fn printSchema(&self, py: Python<'_>, level: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
-        let schema = py.detach(|| self.dataframe.schema().to_pyerr())?;
-        // Reference PySpark treats false values and nonpositive depths as unlimited.
-        // Positive fractional depths include the partially remaining level as well.
-        let depth = match level {
-            Some(level) if level.is_truthy()? && level.gt(0)? => {
-                if level.ge(i32::MAX)? {
-                    i32::MAX
-                } else {
-                    level.extract::<f64>()?.ceil() as i32
-                }
-            }
-            _ => i32::MAX,
+        // Reference's `if level:` selects the default for false values before
+        // resolving the schema; positive fractional depths behave as ceil(level).
+        let level = match level {
+            Some(level) if level.is_truthy()? => Some(level),
+            _ => None,
         };
+        let schema = py.detach(|| self.dataframe.schema().to_pyerr())?;
+        let depth = level
+            .map(crate::types::normalize_tree_depth)
+            .transpose()?
+            .unwrap_or(i32::MAX);
         let tree = schema.tree_string_with_depth(depth).to_pyerr()?;
         py.import("builtins")?.getattr("print")?.call1((tree,))?;
         Ok(())

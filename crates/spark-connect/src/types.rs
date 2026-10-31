@@ -858,9 +858,10 @@ impl DataType {
         self.tree_string_with_depth(i32::MAX)
     }
 
-    /// Like [`DataType::tree_string`], but stops recursing into nested structs
-    /// once `max_depth` nesting levels have been printed (top-level fields are
-    /// depth 1). Mirrors `StructType.treeString(maxDepth)`.
+    /// Like [`DataType::tree_string`], but limits nesting through structs,
+    /// arrays, and maps to `max_depth` levels. Top-level fields are depth 1;
+    /// zero or negative values print the full tree.
+    /// Mirrors `StructType.treeString(maxDepth)`.
     pub fn tree_string_with_depth(&self, max_depth: i32) -> Result<String> {
         match self {
             DataType::Struct { .. } => {
@@ -906,24 +907,13 @@ impl DataType {
         if remaining <= 0 {
             return;
         }
-        let child_prefix = format!("{prefix}    |");
         match self {
             DataType::Struct { fields } => {
+                let child_prefix = format!("{prefix}    |");
                 for f in fields {
                     out.push_str(prefix);
                     out.push_str("-- ");
-                    for ch in f.name.chars() {
-                        match ch {
-                            '\n' => out.push_str("\\n"),
-                            '\r' => out.push_str("\\r"),
-                            '\t' => out.push_str("\\t"),
-                            '\x0c' => out.push_str("\\f"),
-                            '\x08' => out.push_str("\\b"),
-                            '\x0b' => out.push_str("\\v"),
-                            '\x07' => out.push_str("\\a"),
-                            _ => out.push(ch),
-                        }
-                    }
+                    push_escaped_name(out, &f.name);
                     writeln!(
                         out,
                         ": {} (nullable = {})",
@@ -938,6 +928,7 @@ impl DataType {
                 element_type,
                 contains_null,
             } => {
+                let child_prefix = format!("{prefix}    |");
                 writeln!(
                     out,
                     "{}-- element: {} (containsNull = {})",
@@ -953,6 +944,7 @@ impl DataType {
                 value_type,
                 value_contains_null,
             } => {
+                let child_prefix = format!("{prefix}    |");
                 writeln!(out, "{}-- key: {}", prefix, key_type.tree_type_name())
                     .expect("writing to a String cannot fail");
                 key_type.append_tree(out, &child_prefix, remaining - 1);
@@ -1039,6 +1031,21 @@ impl DataType {
                 "INVALID_TYPE",
                 &[("detail", "add() can only be called on StructType")],
             )),
+        }
+    }
+}
+
+fn push_escaped_name(out: &mut String, name: &str) {
+    for ch in name.chars() {
+        match ch {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\x0c' => out.push_str("\\f"),
+            '\x08' => out.push_str("\\b"),
+            '\x0b' => out.push_str("\\v"),
+            '\x07' => out.push_str("\\a"),
+            _ => out.push(ch),
         }
     }
 }

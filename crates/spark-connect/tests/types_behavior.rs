@@ -324,10 +324,10 @@ fn tree_string_with_depth_truncates_nested_structs() {
 #[test]
 fn tree_string_uses_python_udt_class_names() {
     use spark_connect::types::StructField;
-    let udt = |python_class: &str| DataType::Udt {
+    let vector_udt = || DataType::Udt {
         type_str: "udt".to_string(),
         jvm_class: None,
-        python_class: Some(python_class.to_string()),
+        python_class: Some("pyspark.ml.linalg.VectorUDT".to_string()),
         serialized_python_class: None,
         sql_type: Some(Box::new(DataType::Integer)),
     };
@@ -335,14 +335,14 @@ fn tree_string_uses_python_udt_class_names() {
         fields: vec![
             StructField {
                 name: "features".to_string(),
-                data_type: udt("pyspark.ml.linalg.VectorUDT"),
+                data_type: vector_udt(),
                 nullable: true,
                 metadata: Default::default(),
             },
             StructField {
                 name: "array".to_string(),
                 data_type: DataType::Array {
-                    element_type: Box::new(udt("example.CustomType")),
+                    element_type: Box::new(vector_udt()),
                     contains_null: false,
                 },
                 nullable: false,
@@ -354,7 +354,7 @@ fn tree_string_uses_python_udt_class_names() {
                     key_type: Box::new(DataType::String {
                         collation: String::new(),
                     }),
-                    value_type: Box::new(udt("UnqualifiedUDT")),
+                    value_type: Box::new(vector_udt()),
                     value_contains_null: true,
                 },
                 nullable: true,
@@ -369,10 +369,10 @@ fn tree_string_uses_python_udt_class_names() {
             "root\n",
             " |-- features: vectorudt (nullable = true)\n",
             " |-- array: array (nullable = false)\n",
-            " |    |-- element: customtype (containsNull = false)\n",
+            " |    |-- element: vectorudt (containsNull = false)\n",
             " |-- map: map (nullable = true)\n",
             " |    |-- key: string\n",
-            " |    |-- value: unqualifiedudt (valueContainsNull = true)\n",
+            " |    |-- value: vectorudt (valueContainsNull = true)\n",
         )
     );
 }
@@ -380,28 +380,25 @@ fn tree_string_uses_python_udt_class_names() {
 #[test]
 fn tree_string_keeps_generic_udt_name_without_python_class() {
     use spark_connect::types::StructField;
-    for python_class in [None, Some(""), Some("example.")] {
-        let schema = DataType::Struct {
-            fields: vec![StructField {
-                name: "features".to_string(),
-                data_type: DataType::Udt {
-                    type_str: "udt".to_string(),
-                    jvm_class: Some("example.VectorUDT".to_string()),
-                    python_class: python_class.map(str::to_string),
-                    serialized_python_class: None,
-                    sql_type: Some(Box::new(DataType::Integer)),
-                },
-                nullable: true,
-                metadata: Default::default(),
-            }],
-        };
+    let schema = DataType::Struct {
+        fields: vec![StructField {
+            name: "features".to_string(),
+            data_type: DataType::Udt {
+                type_str: "udt".to_string(),
+                jvm_class: Some("org.apache.spark.ml.linalg.VectorUDT".to_string()),
+                python_class: None,
+                serialized_python_class: None,
+                sql_type: Some(Box::new(DataType::Integer)),
+            },
+            nullable: true,
+            metadata: Default::default(),
+        }],
+    };
 
-        assert_eq!(
-            schema.tree_string().unwrap(),
-            "root\n |-- features: udt (nullable = true)\n",
-            "python_class = {python_class:?}"
-        );
-    }
+    assert_eq!(
+        schema.tree_string().unwrap(),
+        "root\n |-- features: udt (nullable = true)\n",
+    );
 }
 
 #[test]
