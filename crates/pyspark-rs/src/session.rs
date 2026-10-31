@@ -881,8 +881,8 @@ impl PyConnectClientStub {
 }
 
 /// Infer the Spark `DataType` for a `createDataFrame` column from its (first) value.
-/// Scalars, Date/Timestamp, and Decimal map precisely; Null and nested collections
-/// fall back to String (createDataFrame here does not deep-infer nested schemas).
+/// Nested collections are inferred recursively; nulls and empty collections use
+/// String as a fallback. Interval input conversion is tracked in SPARK-60659.
 fn value_to_datatype(v: &Value) -> DataType {
     let utf8 = || DataType::String {
         collation: "UTF8_BINARY".to_string(),
@@ -899,6 +899,10 @@ fn value_to_datatype(v: &Value) -> DataType {
         Value::Binary(_) => DataType::Binary,
         Value::Date(_) => DataType::Date,
         Value::Timestamp(_) => DataType::Timestamp,
+        Value::DayTimeInterval(_) => DataType::DayTimeInterval {
+            start_field: 0,
+            end_field: 3,
+        },
         Value::Decimal {
             precision, scale, ..
         } => DataType::Decimal {
