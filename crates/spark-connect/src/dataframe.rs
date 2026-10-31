@@ -3,7 +3,7 @@
 //! Provides transformations and actions for working with distributed data.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use spark_connect_core::client::ReattachableResponseStream;
 use spark_connect_core::error::{Result, SparkError};
@@ -26,6 +26,10 @@ use crate::udf::CommonInlineUserDefinedFunctionExpression;
 pub struct DataFrame {
     pub(crate) session: SparkSession,
     pub(crate) plan: Arc<LogicalPlan>,
+    // Exact clones share this cache. Derived plans can snapshot an already
+    // resolved schema, but have their own cache for subsequent analysis.
+    // The resolved value is immutable, so propagation need not copy wide schemas.
+    schema_cache: Arc<Mutex<Option<Arc<DataType>>>>,
 }
 
 /// Iterator over rows from a DataFrame, yielded lazily as the server streams results.
@@ -203,10 +207,61 @@ fn spawn_prefetch(
 impl DataFrame {
     /// Create a new DataFrame.
     pub(crate) fn new(session: SparkSession, plan: LogicalPlan) -> Self {
+        Self::new_with_schema(session, plan, None)
+    }
+
+    /// Seed declared struct output schemas without analyzing the plan.
+    pub(crate) fn new_with_schema(
+        session: SparkSession,
+        plan: LogicalPlan,
+        schema: Option<DataType>,
+    ) -> Self {
+        Self::new_with_cached_schema(
+            session,
+            plan,
+            schema
+                .filter(|schema| matches!(schema, DataType::Struct { .. }))
+                .map(Arc::new),
+        )
+    }
+
+    fn new_with_cached_schema(
+        session: SparkSession,
+        plan: LogicalPlan,
+        schema: Option<Arc<DataType>>,
+    ) -> Self {
         DataFrame {
             session,
             plan: Arc::new(plan),
+            schema_cache: Arc::new(Mutex::new(schema)),
         }
+    }
+
+    fn cached_schema(&self) -> Option<Arc<DataType>> {
+        // Propagation snapshots resolved metadata; it must not wait for an
+        // in-flight analysis. Python transformations can still hold the GIL.
+        self.schema_cache.try_lock().ok()?.clone()
+    }
+
+    /// Selected schema-preserving transformations snapshot the resolved schema,
+    /// mirroring Spark 4.2 `_cached_schema` propagation. Other plans resolve independently.
+    fn with_cached_schema(&self, plan: LogicalPlan) -> Self {
+        Self::new_with_cached_schema(self.session.clone(), plan, self.cached_schema())
+    }
+
+    /// Set operations propagate only exactly equal cached schemas from the same session.
+    fn with_merged_schema(&self, other: &DataFrame, plan: LogicalPlan) -> Self {
+        // A right-hand plan from another session is analyzed in our session;
+        // its previously resolved schema is not evidence about that resolution.
+        if self.session.client().session_id() != other.session.client().session_id() {
+            return Self::new(self.session.clone(), plan);
+        }
+        // Snapshot separately, including for self-unions; never lock both inputs.
+        let schema = match (self.cached_schema(), other.cached_schema()) {
+            (Some(left), Some(right)) if left == right => Some(left),
+            _ => None,
+        };
+        Self::new_with_cached_schema(self.session.clone(), plan, schema)
     }
 
     /// Get the underlying logical plan.
@@ -231,7 +286,7 @@ impl DataFrame {
             input: Arc::clone(&self.plan),
             condition,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_cached_schema(plan)
     }
 
     /// Alias for filter().
@@ -300,7 +355,7 @@ impl DataFrame {
             input: Arc::clone(&self.plan),
             limit: n,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_cached_schema(plan)
     }
 
     /// Skip the first n rows.
@@ -329,7 +384,7 @@ impl DataFrame {
             column_names: vec![],
             within_watermark: false,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_cached_schema(plan)
     }
 
     /// Remove duplicate rows, optionally on specific columns.
@@ -345,7 +400,7 @@ impl DataFrame {
             column_names: cols,
             within_watermark: false,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_cached_schema(plan)
     }
 
     /// Sort rows.
@@ -355,7 +410,7 @@ impl DataFrame {
             order: columns,
             is_global: true,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_cached_schema(plan)
     }
 
     /// Alias for sort().
@@ -451,7 +506,7 @@ impl DataFrame {
             by_name: false,
             allow_missing_columns: false,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_merged_schema(other, plan)
     }
 
     /// Union by name.
@@ -471,7 +526,7 @@ impl DataFrame {
             by_name: true,
             allow_missing_columns,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_merged_schema(other, plan)
     }
 
     /// Intersect with another DataFrame.
@@ -484,7 +539,7 @@ impl DataFrame {
             by_name: false,
             allow_missing_columns: false,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_merged_schema(other, plan)
     }
 
     /// Subtract (except) another DataFrame.
@@ -497,7 +552,7 @@ impl DataFrame {
             by_name: false,
             allow_missing_columns: false,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_merged_schema(other, plan)
     }
 
     /// Repartition.
@@ -507,7 +562,7 @@ impl DataFrame {
             num_partitions,
             shuffle: true,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_cached_schema(plan)
     }
 
     /// Coalesce.
@@ -517,7 +572,7 @@ impl DataFrame {
             num_partitions,
             shuffle: false,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_cached_schema(plan)
     }
 
     /// Add a hint.
@@ -531,7 +586,7 @@ impl DataFrame {
             name: name.to_string(),
             parameters: parameters.into_iter().map(Into::into).collect(),
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_cached_schema(plan)
     }
 
     /// Marks a DataFrame as eligible for broadcast join (smaller table).
@@ -556,7 +611,7 @@ impl DataFrame {
             input: Arc::clone(&self.plan),
             alias: alias.to_string(),
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_cached_schema(plan)
     }
 
     /// Map over each partition with a pandas UDF (`DataFrame.mapInPandas`).
@@ -586,12 +641,13 @@ impl DataFrame {
         func: CommonInlineUserDefinedFunctionExpression,
         is_barrier: bool,
     ) -> DataFrame {
+        let schema = func.python_udf.output_type.clone();
         let plan = LogicalPlan::MapPartitions {
             input: Arc::clone(&self.plan),
             func,
             is_barrier,
         };
-        DataFrame::new(self.session.clone(), plan)
+        Self::new_with_schema(self.session.clone(), plan, Some(schema))
     }
 
     /// Apply a function to each row for its side effects (`DataFrame.foreach`).
@@ -629,7 +685,7 @@ impl DataFrame {
             with_replacement,
             seed,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_cached_schema(plan)
     }
 
     /// Group by columns for aggregation.
@@ -769,14 +825,48 @@ impl DataFrame {
     }
 
     /// Get the schema of this DataFrame.
+    ///
+    /// The first successful lookup is cached and shared with exact clones.
+    /// Concurrent lookups on the same DataFrame or its clones wait for a single
+    /// analysis RPC, so a stalled analysis blocks those metadata readers.
+    /// Changes to external table or view metadata do not invalidate this cache;
+    /// recreate the DataFrame from its source to resolve the schema again.
+    /// Each call returns an independent value, and failed lookups can be retried.
     pub fn schema(&self) -> Result<DataType> {
+        // Keep the lock during analysis so concurrent accesses issue only one
+        // successful RPC. Errors leave the cache empty and can be retried.
+        let mut cached = self
+            .schema_cache
+            .lock()
+            // Unlike the other cache locks, this guard spans a blocking RPC.
+            // Recover defensively from Rust callers that panic during analysis
+            // (for example, by calling the sync API inside a Tokio runtime).
+            // The slot contains only None or a complete schema, so it is safe.
+            .unwrap_or_else(|poisoned| {
+                self.schema_cache.clear_poison();
+                poisoned.into_inner()
+            });
+        if let Some(schema) = cached.clone() {
+            // Copy the schema after unlocking so propagation can snapshot it.
+            drop(cached);
+            return Ok(schema.as_ref().clone());
+        }
         let request = self.build_analyze_request()?;
         let response = block_on(self.session.client().analyze_plan(request))?;
 
         if let Some(proto::analyze_plan_response::Result::Schema(schema)) = response.result {
-            Ok(DataType::from_proto(&schema.schema.ok_or_else(|| {
-                SparkError::connect_msg("Schema is missing")
-            })?)?)
+            let schema = DataType::from_proto(
+                &schema
+                    .schema
+                    .ok_or_else(|| SparkError::connect_msg("Schema is missing"))?,
+            )?;
+            if !matches!(&schema, DataType::Struct { .. }) {
+                return Err(SparkError::connect_msg("Schema is not a struct type"));
+            }
+            let schema = Arc::new(schema);
+            *cached = Some(Arc::clone(&schema));
+            drop(cached);
+            Ok(schema.as_ref().clone())
         } else {
             Err(SparkError::connect_msg(
                 "Schema analyze failed: no schema in response",
@@ -806,11 +896,10 @@ impl DataFrame {
 
     /// Get column names.
     pub fn columns(&self) -> Result<Vec<String>> {
-        let schema = self.schema()?;
-        match schema {
-            DataType::Struct { fields } => Ok(fields.iter().map(|f| f.name.clone()).collect()),
-            _ => Err(SparkError::connect_msg("Schema is not a struct type")),
-        }
+        let DataType::Struct { fields } = self.schema()? else {
+            unreachable!("schema() validates struct responses")
+        };
+        Ok(fields.into_iter().map(|field| field.name).collect())
     }
 
     /// Build an ExecutePlanRequest from the logical plan.
@@ -1089,7 +1178,7 @@ impl DataFrame {
             num_partitions: Some(num_partitions),
             partition_exprs: columns,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_cached_schema(plan)
     }
 
     /// Repartition into `num_partitions` by hashing the given column expressions.
@@ -1104,7 +1193,7 @@ impl DataFrame {
             num_partitions,
             expressions: columns,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_cached_schema(plan)
     }
 
     /// Alias for to_df().
@@ -1161,7 +1250,7 @@ impl DataFrame {
             name: name.to_string(),
             exprs,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_cached_schema(plan)
     }
 
     /// Get stat functions.
@@ -1356,7 +1445,7 @@ impl DataFrame {
             order: columns,
             is_global: false,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_cached_schema(plan)
     }
 
     /// Drop duplicates within a watermark.
@@ -1400,7 +1489,7 @@ impl DataFrame {
                 with_replacement: false,
                 seed,
             };
-            results.push(DataFrame::new(self.session.clone(), plan));
+            results.push(self.with_cached_schema(plan));
             cumulative = upper;
         }
 
@@ -1441,17 +1530,13 @@ impl DataFrame {
 
     /// Get dtypes (column names and types).
     pub fn dtypes(&self) -> Result<Vec<(String, String)>> {
-        let schema = self.schema()?;
-        match schema {
-            DataType::Struct { fields } => {
-                let dtypes = fields
-                    .iter()
-                    .map(|f| (f.name.clone(), f.data_type.to_string()))
-                    .collect();
-                Ok(dtypes)
-            }
-            _ => Err(SparkError::connect_msg("Schema is not a struct type")),
-        }
+        let DataType::Struct { fields } = self.schema()? else {
+            unreachable!("schema() validates struct responses")
+        };
+        Ok(fields
+            .into_iter()
+            .map(|field| (field.name, field.data_type.to_string()))
+            .collect())
     }
 
     /// Compute the server-side semantic hash of this DataFrame's logical plan,
@@ -1539,7 +1624,7 @@ impl DataFrame {
             by_name: false,
             allow_missing_columns: false,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_merged_schema(other, plan)
     }
 
     /// Except all rows.
@@ -1552,7 +1637,7 @@ impl DataFrame {
             by_name: false,
             allow_missing_columns: false,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_merged_schema(other, plan)
     }
 
     /// Intersect all rows.
@@ -1565,7 +1650,7 @@ impl DataFrame {
             by_name: false,
             allow_missing_columns: false,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_merged_schema(other, plan)
     }
 
     /// Unpivot columns (like melt).
@@ -1702,9 +1787,9 @@ impl DataFrame {
     pub fn to(&self, schema: DataType) -> DataFrame {
         let plan = LogicalPlan::ToSchema {
             input: Arc::clone(&self.plan),
-            schema,
+            schema: schema.clone(),
         };
-        DataFrame::new(self.session.clone(), plan)
+        Self::new_with_schema(self.session.clone(), plan, Some(schema))
     }
 
     /// Check if the DataFrame exists (is not empty).
@@ -1749,10 +1834,7 @@ impl DataFrame {
             left: Arc::clone(&self.plan),
             right: Arc::clone(&other.plan),
         };
-        Ok(DataFrame {
-            plan: Arc::new(plan),
-            session: self.session.clone(),
-        })
+        Ok(DataFrame::new(self.session.clone(), plan))
     }
 
     /// Register this DataFrame as a temporary table (deprecated - use createTempView).
@@ -2852,6 +2934,168 @@ fn micros_to_time_string(micros: i64) -> String {
 mod cache_tests {
     use super::*;
     use prost::Message;
+
+    #[test]
+    fn schema_cache_shares_exact_clones_but_not_changed_plans_or_new_sources() {
+        let spark = SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .unwrap();
+        let df = spark.range(3).unwrap();
+        let cloned_before_analysis = df.clone();
+        let schema = DataType::Struct { fields: vec![] };
+        *df.schema_cache.lock().unwrap() = Some(Arc::new(schema.clone()));
+
+        // These accesses succeed without a server, including a clone created
+        // before the schema was populated.
+        assert_eq!(cloned_before_analysis.schema().unwrap(), schema);
+        assert_eq!(df.clone().schema().unwrap(), schema);
+        assert!(Arc::ptr_eq(
+            &df.schema_cache,
+            &cloned_before_analysis.schema_cache
+        ));
+        for derived in [
+            df.select(["id"]),
+            df.zip(&df).unwrap(),
+            spark.range(3).unwrap(),
+        ] {
+            assert!(!Arc::ptr_eq(&df.schema_cache, &derived.schema_cache));
+            assert!(derived.schema_cache.lock().unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn schema_propagation_snapshots_without_waiting_for_analysis() {
+        let spark = SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .unwrap();
+        let df = spark.range(3).unwrap();
+        let early_child = df.limit(1);
+        let schema = DataType::Struct { fields: vec![] };
+        *df.schema_cache.lock().unwrap() = Some(Arc::new(schema.clone()));
+        let warm_child = df.limit(1);
+        assert_eq!(warm_child.schema().unwrap(), schema);
+        assert!(!Arc::ptr_eq(&df.schema_cache, &warm_child.schema_cache));
+        assert!(early_child.cached_schema().is_none());
+
+        // Even when an input lock is held, constructing unary and binary plans
+        // must finish. Release it before joining so a regression fails boundedly.
+        let guard = df.schema_cache.lock().unwrap();
+        let input = df.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            tx.send((input.limit(1), input.union(&input))).unwrap();
+        });
+        let result = rx.recv_timeout(std::time::Duration::from_secs(5));
+        drop(guard);
+        worker.join().unwrap();
+        let (unary, binary) = result.expect("plan construction must not wait for schema analysis");
+        assert!(unary.cached_schema().is_none());
+        assert!(binary.cached_schema().is_none());
+    }
+
+    #[test]
+    fn schema_propagation_merges_only_exact_schemas_from_the_same_session() {
+        let spark = SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .unwrap();
+        let df = spark.range(3).unwrap();
+        let schema = serde_json::json!({
+            "type": "struct",
+            "fields": [{"name": "id", "type": "long", "nullable": true,
+                        "metadata": {"note": "original"}}]
+        });
+        let left = df.to(DataType::from_json(&schema).unwrap());
+        assert_eq!(left.union(&left).schema().unwrap(), left.schema().unwrap());
+        let mut changes = vec![];
+        for (key, value) in [
+            ("name", serde_json::json!("renamed")),
+            ("type", serde_json::json!("double")),
+            ("nullable", serde_json::json!(false)),
+            ("metadata", serde_json::json!({"note": "changed"})),
+        ] {
+            let mut changed = schema.clone();
+            changed["fields"][0][key] = value;
+            changes.push(DataType::from_json(&changed).unwrap());
+        }
+        for changed in changes {
+            assert!(left.union(&df.to(changed)).cached_schema().is_none());
+        }
+        assert!(left.union(&df).cached_schema().is_none());
+        let other_session = spark.new_session();
+        let other = other_session.range(3).unwrap().to(left.schema().unwrap());
+        assert!(left.union(&other).cached_schema().is_none());
+    }
+
+    #[test]
+    fn schema_propagation_seeds_only_struct_output_schemas() {
+        use crate::udf::PythonUDFPayload;
+
+        let spark = SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .unwrap();
+        let df = spark.range(3).unwrap();
+        let schema = DataType::Struct { fields: vec![] };
+        let udf = |output_type| {
+            CommonInlineUserDefinedFunctionExpression::new(
+                "map".to_string(),
+                true,
+                vec![],
+                PythonUDFPayload::new(output_type, 205, vec![], "3.12".to_string()),
+            )
+        };
+        for output in [
+            df.to(schema.clone()),
+            df.map_in_pandas(udf(schema.clone()), false),
+            df.map_in_arrow(udf(schema.clone()), false),
+        ] {
+            assert_eq!(output.schema().unwrap(), schema);
+        }
+        assert!(df.to(DataType::Long).cached_schema().is_none());
+        assert!(df
+            .map_in_arrow(udf(DataType::Long), false)
+            .cached_schema()
+            .is_none());
+    }
+
+    #[test]
+    fn schema_cache_recovers_after_analysis_panics() {
+        let spark = SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .unwrap();
+        let df = spark.range(3).unwrap();
+        let cloned = df.clone();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        // Calling the synchronous API inside a runtime panics during analysis.
+        // A clone must still attempt analysis afterward, rather than returning
+        // a permanent cache-poisoning error.
+        for frame in [&df, &cloned] {
+            let result = runtime.block_on(async {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| frame.schema()))
+            });
+            assert!(result.is_err());
+            // Poisoning proves the lock spans the analysis boundary without
+            // relying on thread scheduling to produce contended cache misses.
+            assert!(
+                frame.schema_cache.is_poisoned(),
+                "schema analysis must hold the shared cache lock"
+            );
+        }
+        let mut cached = df.schema_cache.lock().unwrap_err().into_inner();
+        assert!(cached.is_none());
+        let schema = DataType::Struct { fields: vec![] };
+        *cached = Some(Arc::new(schema.clone()));
+        drop(cached);
+        assert!(df.schema_cache.is_poisoned());
+        assert_eq!(df.schema().unwrap(), schema);
+        assert!(!df.schema_cache.is_poisoned());
+        assert_eq!(cloned.schema().unwrap(), schema);
+    }
 
     #[test]
     fn cache_default_is_memory_and_disk_deser() {
