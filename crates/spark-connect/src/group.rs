@@ -141,6 +141,7 @@ impl GroupedData {
     }
 
     fn group_map(&self, func: CommonInlineUserDefinedFunctionExpression) -> DataFrame {
+        let schema = func.python_udf.output_type.clone();
         let plan = LogicalPlan::GroupMap {
             input: Arc::clone(&self.dataframe.plan),
             grouping_expressions: self.grouping_expressions(),
@@ -154,7 +155,7 @@ impl GroupedData {
             state_schema: None,
             transform_with_state_info: None,
         };
-        DataFrame::new(self.dataframe.session.clone(), plan)
+        DataFrame::new_with_schema(self.dataframe.session.clone(), plan, Some(schema))
     }
 
     /// Apply a stateful pandas UDF to each group (`GroupedData.applyInPandasWithState`).
@@ -525,6 +526,7 @@ impl CoGroupedData {
     }
 
     fn cogroup_map(&self, func: CommonInlineUserDefinedFunctionExpression) -> DataFrame {
+        let schema = func.python_udf.output_type.clone();
         let plan = LogicalPlan::CoGroupMap {
             input: Arc::clone(&self.left.dataframe.plan),
             input_grouping_expressions: self.left.grouping_expressions(),
@@ -532,7 +534,7 @@ impl CoGroupedData {
             other_grouping_expressions: self.right.grouping_expressions(),
             func,
         };
-        DataFrame::new(self.left.dataframe.session.clone(), plan)
+        DataFrame::new_with_schema(self.left.dataframe.session.clone(), plan, Some(schema))
     }
 }
 
@@ -569,6 +571,44 @@ mod tests {
             panic!("expected crosstab");
         };
         assert!(Arc::ptr_eq(input, &df.plan));
+    }
+
+    #[test]
+    fn grouped_udfs_reuse_declared_output_schema() {
+        use crate::udf::{eval_type, PythonUDFPayload};
+
+        let spark = session();
+        let grouped = spark.range(10).unwrap().group_by(Vec::<Column>::new());
+        let cogrouped = grouped.cogroup(&grouped);
+        let schema = DataType::from_json(&serde_json::json!({
+            "type": "struct",
+            "fields": [{
+                "name": "result",
+                "type": "long",
+                "nullable": false,
+                "metadata": {"description": "declared output"}
+            }]
+        }))
+        .unwrap();
+        let udf = |eval_type| {
+            CommonInlineUserDefinedFunctionExpression::new(
+                "output".to_string(),
+                true,
+                vec![],
+                PythonUDFPayload::new(schema.clone(), eval_type, vec![], "3.12".to_string()),
+            )
+        };
+
+        // These accesses must work without a server and use the supplied output
+        // schema, which differs from the unresolved input's `id` column.
+        for result in [
+            grouped.apply_in_pandas(udf(eval_type::SQL_GROUPED_MAP_PANDAS_UDF)),
+            grouped.apply_in_arrow(udf(eval_type::SQL_GROUPED_MAP_ARROW_UDF)),
+            cogrouped.apply_in_pandas(udf(eval_type::SQL_COGROUPED_MAP_PANDAS_UDF)),
+            cogrouped.apply_in_arrow(udf(eval_type::SQL_COGROUPED_MAP_ARROW_UDF)),
+        ] {
+            assert_eq!(result.schema().unwrap(), schema);
+        }
     }
 
     #[test]

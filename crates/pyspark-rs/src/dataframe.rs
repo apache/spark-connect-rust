@@ -1166,19 +1166,15 @@ impl PyDataFrame {
     /// Collect the DataFrame into a `pyarrow.Table`.
     ///
     /// Mirrors `pyspark.sql.DataFrame.toArrow()`: the result is decoded from the
-    /// server's Arrow IPC stream and handed to `pyarrow` (no row-by-row copy).
+    /// server's Arrow IPC stream and handed to `pyarrow` through arrow-rs's
+    /// reader conversion, sharing compatible decoded Arrow value buffers. Bitmap alignment
+    /// and schemas requiring the IPC compatibility fallback can still copy.
     #[pyo3(name = "toArrow")]
     fn to_arrow(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        use pyo3::types::PyBytes;
-        // `DataFrame::to_arrow` produces Arrow IPC *file* bytes (FileWriter).
-        let bytes = py.detach(|| self.dataframe.to_arrow()).to_pyerr()?;
-        let pa = py.import("pyarrow")?;
-        let py_bytes = PyBytes::new(py, &bytes);
-        let table = pa
-            .getattr("ipc")?
-            .call_method1("open_file", (py_bytes,))?
-            .call_method0("read_all")?;
-        Ok(table.unbind())
+        let batches = py
+            .detach(|| self.dataframe.collect_record_batches())
+            .to_pyerr()?;
+        crate::pyarrow_export::record_batches_to_pyarrow(py, batches)
     }
 
     /// Collect the DataFrame into a pandas DataFrame.
@@ -1302,8 +1298,8 @@ impl PyDataFrame {
 
     /// Column names (a property, mirroring `DataFrame.columns`).
     #[getter]
-    fn columns(&self) -> PyResult<Vec<String>> {
-        self.dataframe.columns().to_pyerr()
+    fn columns(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        py.detach(|| self.dataframe.columns().to_pyerr())
     }
 
     /// Get the last `num` rows as a list of Rows (eager, like pyspark `tail`).
@@ -1374,20 +1370,16 @@ impl PyDataFrame {
 
     /// Get the schema as a list of (name, type) tuples.
     #[getter]
-    fn dtypes(&self) -> PyResult<Vec<(String, String)>> {
-        let schema = self.dataframe.schema().to_pyerr()?;
-        match schema {
-            spark_connect::types::DataType::Struct { fields } => {
-                let dtypes = fields
-                    .iter()
-                    .map(|f| (f.name.clone(), f.data_type.simple_string()))
-                    .collect();
-                Ok(dtypes)
-            }
-            _ => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Schema is not a struct type",
-            )),
-        }
+    fn dtypes(&self, py: Python<'_>) -> PyResult<Vec<(String, String)>> {
+        let spark_connect::types::DataType::Struct { fields } =
+            py.detach(|| self.dataframe.schema().to_pyerr())?
+        else {
+            unreachable!("schema() validates struct responses")
+        };
+        Ok(fields
+            .into_iter()
+            .map(|field| (field.name, field.data_type.simple_string()))
+            .collect())
     }
 
     /// Additional set operation: unionAll (alias for union).
