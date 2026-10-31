@@ -21,6 +21,7 @@
 
 def _has_canonical_columns(columns):
     """Decline label containers whose row-path ``tolist`` can run custom hooks."""
+    import sys
     from types import FunctionType
 
     import numpy as np
@@ -53,6 +54,12 @@ def _has_canonical_columns(columns):
     backing = vars(columns).get("_data")
     if type(backing) is np.ndarray:
         return True
+
+    # Arrow-backed labels already hold PyArrow storage. Do not import optional
+    # Arrow modules just to decide whether a fallback input is eligible.
+    pa = sys.modules.get("pyarrow")
+    if pa is None:
+        return False
 
     try:
         from pandas.core.arrays import numpy_ as numpy_module, string_ as string_module
@@ -90,8 +97,6 @@ def _has_canonical_columns(columns):
         isna = vars(string_array).get("isna", getattr(owner, "isna", None))
         isna_module = string_module if "isna" in vars(string_array) else module
     else:
-        import pyarrow as pa
-
         owner, module = vars(arrow_module).get("ArrowExtensionArray"), arrow_module
         if owner is None:
             return False
@@ -178,8 +183,8 @@ def prepare_int64_table(frame, schema):
     if importer is not None:
         if getattr(importer, "StructType", None) is not StructType:
             return None
-        # Newer importers also use this alias while validating schema widths.
-        if "AtomicType" in vars(importer) and importer.AtomicType is not AtomicType:
+        # The importer uses this alias while validating schema widths.
+        if vars(importer).get("AtomicType") is not AtomicType:
             return None
     converter = sys.modules.get("pyspark.sql.pandas.types")
     namespaces = [vars(sql_types)]
