@@ -11,7 +11,7 @@ Usage (see scripts/run_rust_official_tests.sh):
     RUST_PYSPARK_SO=/path/to/python/pyspark/_pyspark.so \
     SPARK_CONNECT_TESTING_REMOTE=sc://localhost:15002 SPARK_TESTING=1 \
     SPARK_SKIP_CONNECT_COMPAT_TESTS=1 \
-    PYTHONPATH=/repo/scripts:/path/to/spark-v4.2.0/python \
+    PYTHONPATH=/repo/scripts:/path/to/spark-v4.3.0/python \
     python -m pytest -p rust_transport_plugin <official test file>
 """
 
