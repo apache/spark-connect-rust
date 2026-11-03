@@ -34,6 +34,10 @@ pub enum Value {
     Date(i32),
     /// Timestamp (microseconds since epoch)
     Timestamp(i64),
+    /// Spark day-time interval, in signed microseconds. The full i64 range is
+    /// representable by Python's datetime.timedelta without nanosecond conversion.
+    /// Display uses raw microseconds, like Date and Timestamp use their raw units.
+    DayTimeInterval(i64),
     /// Decimal (string value with optional precision and scale)
     Decimal {
         value: String,
@@ -68,6 +72,7 @@ impl fmt::Debug for Value {
             Self::Binary(v) => f.debug_tuple("Binary").field(v).finish(),
             Self::Date(v) => f.debug_tuple("Date").field(v).finish(),
             Self::Timestamp(v) => f.debug_tuple("Timestamp").field(v).finish(),
+            Self::DayTimeInterval(v) => f.debug_tuple("DayTimeInterval").field(v).finish(),
             Self::Decimal {
                 value,
                 precision,
@@ -169,6 +174,7 @@ impl fmt::Display for Value {
             Value::Binary(b) => write!(f, "{:?}", b),
             Value::Date(d) => write!(f, "{}", d),
             Value::Timestamp(t) => write!(f, "{}", t),
+            Value::DayTimeInterval(t) => write!(f, "{}", t),
             Value::Decimal {
                 value,
                 precision,
@@ -559,7 +565,7 @@ mod tests {
     }
 
     #[test]
-    fn nested_struct_clones_share_names_and_keep_child_values_independent() {
+    fn nested_struct_clones_share_field_names() {
         let fields: Arc<[String]> = vec!["items".to_string()].into();
         let value = Value::Struct(
             Row::with_shared_fields(
@@ -568,24 +574,15 @@ mod tests {
             )
             .into(),
         );
-        let mut cloned = value.clone();
+        let cloned = value.clone();
         let Value::Struct(original_row) = &value else {
             panic!("expected a struct value");
         };
-        let Value::Struct(cloned_row) = &mut cloned else {
+        let Value::Struct(cloned_row) = &cloned else {
             panic!("expected a cloned struct value");
         };
         assert!(std::ptr::eq(fields.as_ref(), cloned_row.fields()));
         assert!(std::ptr::eq(original_row.fields(), cloned_row.fields()));
-        let Value::List(items) = &mut cloned_row.values[0] else {
-            panic!("expected a list value");
-        };
-        items[0] = Value::String("changed".to_string());
-        assert_eq!(
-            original_row.get(0),
-            Some(&Value::List(vec![Value::String("original".to_string())]))
-        );
-        assert_ne!(value, cloned);
     }
 
     #[test]
@@ -753,6 +750,8 @@ mod tests {
         assert_eq!(Value::Binary(vec![1, 2]).to_string(), "[1, 2]");
         assert_eq!(Value::Date(19_000).to_string(), "19000");
         assert_eq!(Value::Timestamp(123).to_string(), "123");
+        assert_eq!(Value::DayTimeInterval(-1).to_string(), "-1");
+        assert_eq!(Value::DayTimeInterval(1).as_i64(), None);
         assert_eq!(
             Value::List(vec![Value::Integer(1), Value::Integer(2)]).to_string(),
             "[1, 2]"

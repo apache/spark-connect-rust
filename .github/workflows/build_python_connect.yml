@@ -213,6 +213,13 @@ jobs:
             --exclude "test_artifact.py,test_artifact_localcluster.py,test_parity_resources.py" \
             2>&1 | tee /tmp/parity_ours.log
 
+      - name: Native Arrow handoff smoke tests (against the live server)
+        working-directory: python
+        env:
+          SPARK_REMOTE: sc://localhost:15002
+          PYTHONPATH: ${{ github.workspace }}/python
+        run: python -m pytest tests/test_arrow_e2e.py -q
+
       - name: Restart Connect server in local-cluster mode
         # Resource profiles and artifact distribution across executors can only be
         # exercised against a real multi-executor cluster, so - mirroring Apache's

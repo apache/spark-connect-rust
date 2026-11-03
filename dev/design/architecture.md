@@ -67,9 +67,33 @@ Server-streaming RPCs (`ExecutePlan`) are consumed into Arrow record batches.
 
 ## Data path
 
-Results arrive as Arrow IPC streams. `arrow-rs` decodes them; hand-off to Python
-uses the **Arrow C Data Interface** (zero-copy to `pyarrow`), which is also how
-we build `toPandas()` / `createDataFrame(pandas)` without re-serializing.
+Results arrive as Arrow IPC streams. `arrow-rs` decodes them; `toArrow()` collects
+all batches into a Rust vector. `pyspark-rs` uses arrow-rs's `IntoPyArrow` for
+one boxed `RecordBatchReader`, importing it as a PyArrow
+`RecordBatchReader`, and calls `read_all()`. PyArrow pulls batches through native
+callbacks that do not call Python, avoiding a per-batch Python import loop.
+This is an in-process buffer handoff, not network streaming or bounded-memory
+result collection.
+
+Compatible Arrow value and offset buffers are shared with PyArrow; sliced
+validity bitmaps may need realignment. The bridge validates batch schema
+consistency, including metadata. Schemas with embedded
+NUL field names or timezones use an IPC compatibility fallback, without another
+RPC. Spark results use unsorted maps and are not dictionary-encoded; this path
+does not repair generic Arrow ordering flags. `toPandas()` then calls
+PyArrow's pandas conversion, which may copy.
+
+Scalar input conversion and row materialization stay in `pyspark-rs`. `collect()`
+still uses the native client's owned rows; `createDataFrame(pandas)` still
+materializes Python rows. Neither path is claimed to be zero-copy.
+
+The Arrow handoff has been tested locally with PyArrow 10.0.0 (Python 3.9)
+and 26.0.0 (Python 3.12). CI installs the latest PyArrow; it does not pin or
+separately test the declared PyArrow 10 minimum. The native live-server smoke
+tests in `python/tests/test_arrow_e2e.py` run in the Connect parity CI job
+against its live server and built native extension. Official parity tests
+exercise the Rust transport with official PySpark; the separate native smoke
+step covers the drop-in `toArrow()` path.
 
 ## UDF strategy (full compatibility)
 

@@ -79,6 +79,10 @@ flowchart LR
 When you call an action such as `count()` or `show()`, the lazily-built plan is
 serialized and sent to the server; results stream back as Arrow batches.
 
+Day-time intervals are returned as Python `datetime.timedelta` values, including
+nested values and nulls. Creating DataFrames from `timedelta` inputs or collected
+interval rows is not yet supported; see [SPARK-60659](https://issues.apache.org/jira/browse/SPARK-60659).
+
 ```mermaid
 sequenceDiagram
     participant App as Your code (Rust or pyspark)
@@ -101,6 +105,15 @@ Transformations are **lazy** - they only build up the plan. Only an *action*
 triggers `ExecutePlan`. If the response stream breaks mid-flight, the core's
 reattachable-execute iterator resumes from the last response it saw, so long
 results survive transient disconnects.
+
+### Python Arrow table handoff
+
+`toArrow()` collects decoded batches and uses arrow-rs's `IntoPyArrow` for one
+boxed `RecordBatchReader`. Compatible value and offset buffers are shared;
+network decoding, sliced validity bitmaps, and pandas conversion may still copy.
+Batch schema consistency is validated before export. Field names or timezones
+containing NUL use IPC over the collected batches, without another RPC. Empty
+batch vectors retain the empty-schema behavior.
 
 ## Two front-ends, one core
 

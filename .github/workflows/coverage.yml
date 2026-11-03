@@ -226,7 +226,9 @@ jobs:
 
       - name: Measure Python coverage with offline test suite
         run: |
-          cd python && PYTHONPATH=$(pwd) python -m coverage run --rcfile=.coveragerc -m pytest tests/test_dropin_offline.py
+          cd python
+          PYTHONPATH=$(pwd) python -m coverage run --rcfile=.coveragerc -m pytest \
+            tests/test_dropin_offline.py tests/test_arrow_handoff.py
           PYTHONPATH=$(pwd) python -m coverage json --rcfile=.coveragerc -o coverage-python.json
 
       - name: Parse Python coverage and create badge JSON
