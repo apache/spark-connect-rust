@@ -63,5 +63,8 @@ pub use storage::StorageLevelExt;
 pub use streaming::{
     DataStreamReader, DataStreamWriter, StreamingQuery, StreamingQueryManager, Trigger,
 };
-pub use types::{DataType, StructField};
+pub use types::{
+    DataType, DateType, DayTimeIntervalType, GeographyType, GeometryType, SpatialType, StructField,
+    YearMonthIntervalType,
+};
 pub use window::{FrameBound, FrameType, Window, WindowSpec};

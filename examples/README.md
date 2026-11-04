@@ -69,7 +69,7 @@ Read a file into a dataframe, save the result as a deltalake table, and append a
 The Delta Lake jars need to be added onto the server before it starts:
 
 ```bash
-$ $SPARK_HOME/sbin/start-connect-server.sh --packages "org.apache.spark:spark-connect_2.13:4.2.0,io.delta:delta-spark_2.13:4.2.0" \
+$ $SPARK_HOME/sbin/start-connect-server.sh --packages "org.apache.spark:spark-connect_2.13:4.3.0,io.delta:delta-spark_2.13:4.3.0" \
       --conf "spark.driver.extraJavaOptions=-Divy.cache.dir=/tmp -Divy.home=/tmp" \
       --conf "spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension" \
       --conf "spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog"
