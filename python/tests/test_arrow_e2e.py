@@ -88,6 +88,18 @@ def test_create_dataframe_arrow_cached_upload(session):
         isolated.stop()
 
 
+@pytest.mark.parametrize("schema", [None, []], ids=["inferred", "empty-list"])
+def test_create_dataframe_arrow_zero_columns(session, schema):
+    table = pa.table({"a": [1, 2]}).select([])
+    frame = session.createDataFrame(table, schema)
+    # As in PySpark, no toDF is applied without column names, so the frame is local.
+    assert frame.isLocal()
+    assert frame.columns == []
+    # Both clients first cast the input to its Spark schema, and for a zero-column table
+    # that cast decides the row count (PyArrow drops the rows).
+    assert frame.count() == table.cast(pa.schema([])).num_rows
+
+
 @pytest.mark.parametrize("cached", [False, True], ids=["inline", "cached"])
 @pytest.mark.parametrize("timestamp_type", ["TIMESTAMP_LTZ", "TIMESTAMP_NTZ"])
 def test_create_dataframe_arrow_inferred_timestamp(session, cached, timestamp_type):

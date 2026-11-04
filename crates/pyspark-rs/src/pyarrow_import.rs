@@ -18,6 +18,7 @@
 //! PyArrow Table input through arrow-rs's owned C Stream importer.
 
 use arrow::pyarrow::{FromPyArrow, Table};
+use arrow::record_batch::RecordBatch;
 use pyo3::prelude::*;
 use spark_connect::session::SparkSession;
 
@@ -67,9 +68,14 @@ pub(crate) fn create_dataframe(
         Vec::new()
     } else {
         // PyArrow 10 readers support _export_to_c, even without PyCapsules.
-        Table::from_pyarrow_bound(&normalized.call_method0("to_reader")?)?
-            .into_inner()
-            .0
+        let (mut batches, arrow_schema) =
+            Table::from_pyarrow_bound(&normalized.call_method0("to_reader")?)?.into_inner();
+        // The cast drops the rows of a zero-column table, leaving no batches. Keep its
+        // schema, as PySpark's IPC stream does, so the relation still carries one.
+        if batches.is_empty() {
+            batches.push(RecordBatch::new_empty(arrow_schema));
+        }
+        batches
     };
     let dataframe = py.detach(|| {
         match options.as_ref() {
@@ -80,9 +86,12 @@ pub(crate) fn create_dataframe(
         }
         .to_pyerr()
     })?;
+    // As in PySpark, column names are applied with toDF only when there are any.
     let dataframe = match names {
-        Some(names) => dataframe.to_df(names.iter().map(String::as_str).collect()),
-        None => dataframe,
+        Some(names) if !names.is_empty() => {
+            dataframe.to_df(names.iter().map(String::as_str).collect())
+        }
+        _ => dataframe,
     };
     Ok(PyDataFrame::new(dataframe))
 }

@@ -609,6 +609,25 @@ def test_arrow_input_upload_above_grpc_limit(protocol):
         assert all(schema == table.schema for schema in state["arrow_schemas"])
 
 
+@pytest.mark.parametrize("kind", ["inferred", "empty-list", "struct"])
+def test_arrow_input_zero_column_table(protocol, kind):
+    from pyspark.sql import types as T
+
+    # The input cast drops the rows of a zero-column table, leaving no batches.
+    table = pa.table({"a": [1, 2]}).select([])
+    schema = {"inferred": None, "empty-list": [], "struct": T.StructType([])}[kind]
+    explicit = kind == "struct"
+    with _arrow_input_service(protocol) as (spark, state):
+        frame = spark.createDataFrame(table, schema)
+        # As in PySpark, no toDF is applied without column names, so the frame is local.
+        assert frame.isLocal()
+        assert frame.toArrow().column(0).to_pylist() == [0]
+        assert "column_names" not in state
+        # The relation still carries the Arrow schema, as PySpark's IPC stream does.
+        assert state["arrow_schemas"] == [pa.schema([])]
+        assert state["relations"][0].local_relation.HasField("schema") == explicit
+
+
 @pytest.mark.parametrize("schema,expected_width", [
     ("x long", "1"),
     ("x long, y long, z long", "3"),
