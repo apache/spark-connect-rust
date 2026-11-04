@@ -30,6 +30,22 @@ except ImportError:
         QueryContext,
     )
 
+
+def _operation_id(self):  # type: ignore[no-untyped-def]
+    """The Spark Connect ExecutePlan operation ID, when available.
+
+    .. versionadded:: 4.3.0
+    """
+    return getattr(self, "_operation_id", None)
+
+
+# pyspark 4.3.0 adds ``SparkConnectException.operation_id``. In this drop-in the Connect
+# exception classes ARE the canonical base classes (``connect.SparkConnectException`` aliases
+# ``PySparkException``), so the property lives on that shared base; the Rust transport sets
+# ``_operation_id`` on errors raised for an ExecutePlan. ``base.py`` is vendored, hence here.
+if not hasattr(PySparkException, "operation_id"):
+    PySparkException.operation_id = property(_operation_id)  # type: ignore[attr-defined]
+
 __all__ = [
     "PySparkException",
     "PySparkAssertionError",

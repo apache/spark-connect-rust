@@ -39,6 +39,44 @@ def message_field(field, value):
     return varint(field * 8 + 2) + varint(len(value)) + value
 
 
+def varint_field(field, value):
+    return varint(field * 8) + varint(value & (2**64 - 1))
+
+
+def parse_message(data):
+    """Decode protobuf wire bytes into {field: [value, ...]}: varints as ints and
+    length-delimited fields as bytes (decode nested messages with another call)."""
+    fields, i = {}, 0
+
+    def read_varint():
+        nonlocal i
+        shift = result = 0
+        while True:
+            byte = data[i]
+            i += 1
+            result |= (byte & 127) << shift
+            shift += 7
+            if byte < 128:
+                return result
+
+    while i < len(data):
+        key = read_varint()
+        field, wire = key >> 3, key & 7
+        if wire == 0:
+            value = read_varint()
+        elif wire == 2:
+            size = read_varint()
+            value, i = data[i : i + size], i + size
+        elif wire == 1:
+            value, i = data[i : i + 8], i + 8
+        elif wire == 5:
+            value, i = data[i : i + 4], i + 4
+        else:
+            raise ValueError(f"unsupported wire type {wire}")
+        fields.setdefault(field, []).append(value)
+    return fields
+
+
 def struct_schema(name="id"):
     # types.proto: DataType.long=7, .struct=21; Struct.fields=1;
     # StructField: name=1, data_type=2, nullable=3, metadata=4.
@@ -81,12 +119,36 @@ def serve(connection):
             # base.proto: AnalyzePlanResponse.schema=2, Schema.schema=1.
             return message_field(2, message_field(1, self.data_type))
 
+        # ExecutePlan records each request and streams one response carrying
+        # `execute_payload` (raw ExecutePlanResponse fields), then ResultComplete; with
+        # `execute_failure` set it aborts instead. Responses echo the request's
+        # operation id, as the server does.
+        execute_requests = []
+        execute_payload = b""
+        execute_failure = None
+
+        def execute(self, request, context):
+            self.execute_requests.append(request)
+            if self.execute_failure:
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT, self.execute_failure)
+            # ExecutePlanRequest.operation_id=6; ExecutePlanResponse.operation_id=12,
+            # response_id=13, result_complete=14.
+            operation_id = parse_message(request).get(6, [b""])[0]
+            header = message_field(12, operation_id)
+            yield header + message_field(13, "r1") + self.execute_payload
+            yield header + message_field(13, "r2") + message_field(14, b"")
+
     service = Service()
     with ThreadPoolExecutor(max_workers=4) as executor:
         server = grpc.server(executor)
         handlers = {
             "AnalyzePlan": grpc.unary_unary_rpc_method_handler(service.analyze),
             "ReleaseSession": grpc.unary_unary_rpc_method_handler(lambda request, context: b""),
+            "ExecutePlan": grpc.unary_stream_rpc_method_handler(service.execute),
+            "ReattachExecute": grpc.unary_stream_rpc_method_handler(
+                lambda request, context: iter([message_field(14, b"")])
+            ),
+            "ReleaseExecute": grpc.unary_unary_rpc_method_handler(lambda request, context: b""),
         }
         server.add_generic_rpc_handlers(
             (grpc.method_handlers_generic_handler("spark.connect.SparkConnectService", handlers),)

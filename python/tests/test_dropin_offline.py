@@ -13,7 +13,13 @@ from threading import Barrier
 
 import pytest
 
-from _mock_connect_server import message_field, mock_connect_session, struct_schema
+from _mock_connect_server import (
+    message_field,
+    mock_connect_session,
+    parse_message,
+    struct_schema,
+    varint_field,
+)
 from pyspark.sql import SparkSession, types as T
 
 # Collected here so the existing offline CI suite exercises real Arrow results.
@@ -3228,3 +3234,311 @@ def test_schema_cache_metadata_wait_releases_gil(mock_connect, accessor):
     else:
         assert result == [("id", "bigint")]
     assert service.calls == 1
+
+
+# --------------------------------------------------------------------------- 4.3.0 gaps
+
+
+def test_timestamp_nanos_types_roundtrip_and_pickle():
+    # Spark's TimestampNTZNanosType/TimestampLTZNanosType (precision 7..9) materialize as
+    # their own types, not as TimeType / a microsecond TimestampType.
+    for cls, name in ((T.TimestampNTZNanosType, "timestamp_ntz"),
+                      (T.TimestampLTZNanosType, "timestamp_ltz")):
+        t = cls(8)
+        assert t.precision == 8
+        assert t.simpleString() == t.typeName() == f"{name}(8)"
+        assert t.json() == f'"{name}(8)"'
+        assert cls().precision == 9
+        assert isinstance(t, T.DatetimeType)
+        assert repr(pickle.loads(pickle.dumps(t))) == repr(t)
+        assert repr(T._parse_datatype_json_string(f'"{name}(7)"')) == repr(cls(7))
+        with pytest.raises(ValueError):
+            cls(6)
+    nested = T.StructType([T.StructField("a", T.ArrayType(T.TimestampLTZNanosType(9)))])
+    assert pickle.loads(pickle.dumps(nested)).simpleString() == "struct<a:array<timestamp_ltz(9)>>"
+
+
+def test_instr_regexp_replace_optional_args():
+    from pyspark.sql import functions as F
+
+    captured = []
+    orig = F._call_function
+    F._call_function = lambda fname, *args: captured.append((fname, args)) or orig(fname, *args)
+    try:
+        F.instr("s", "a")
+        assert captured[-1][1][1:] == ("a",)
+        # occurrence without start searches from position 1 (pyspark 4.3.0).
+        F.instr("s", "a", occurrence=2)
+        assert captured[-1][1][1:] == ("a", 1, 2)
+        F.instr("s", "a", start=None, occurrence=None)
+        assert len(captured[-1][1]) == 2
+        F.instr("s", "a", 3)
+        assert captured[-1][1][1:] == ("a", 3)
+        F.regexp_replace("s", "a", "b")
+        assert len(captured[-1][1]) == 3
+        F.regexp_replace("s", "a", "b", position=None)
+        assert len(captured[-1][1]) == 3
+        F.regexp_replace("s", "a", "b", 4)
+        assert captured[-1][1][1:] == ("a", "b", 4)
+    finally:
+        F._call_function = orig
+
+
+def test_variant_delete_requires_paths():
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql import functions as F
+
+    with pytest.raises(PySparkValueError, match="CANNOT_BE_EMPTY"):
+        F.variant_delete("v")
+
+
+def _offline_session():
+    # Port 1: nothing listens; the channel is lazy, so the session builds offline.
+    return SparkSession.builder.remote("sc://localhost:1").getOrCreate()
+
+
+def test_session_context_manager_stops_session():
+    spark = _offline_session()
+    with spark as s:
+        assert s is spark
+        assert not s.is_stopped
+    # __exit__ stops it; stop() is best-effort (the release RPC fails offline) and
+    # idempotent.
+    assert spark.is_stopped
+    spark.stop()
+    assert SparkSession.getActiveSession() is None
+
+
+def test_sql_context_connect_backed():
+    import warnings
+
+    from pyspark.errors import PySparkNotImplementedError
+    from pyspark.sql import HiveContext, SQLContext
+    from pyspark.sql.connect import context as cctx
+
+    spark = _offline_session()
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            ctx = SQLContext.getOrCreate()
+        assert any(issubclass(w.category, FutureWarning) for w in caught)
+        assert isinstance(ctx, cctx.SQLContext)
+        assert ctx.sparkSession.session_id == spark.session_id
+        # Cached per session (getActiveSession returns a fresh wrapper each call).
+        assert SQLContext.getOrCreate() is ctx
+        assert cctx.SQLContext._get_or_create_from_session(spark) is ctx
+        with pytest.raises(PySparkNotImplementedError):
+            ctx.registerJavaFunction("f", "com.example.F")
+        with pytest.raises(PySparkNotImplementedError):
+            HiveContext.getOrCreate()
+        with pytest.raises(PySparkNotImplementedError):
+            cctx.HiveContext(spark)
+        with pytest.raises(PySparkNotImplementedError):
+            SQLContext(None)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            cctx.SQLContext(spark)
+        assert any(issubclass(w.category, FutureWarning) for w in caught)
+        assert ctx.udf is not None and ctx.read is not None
+        # Stopping a different session leaves the cache; stopping its own clears it.
+        other = spark.newSession()
+        other.stop()
+        assert cctx.SQLContext._instantiatedContext is ctx
+        spark.stop()
+        assert cctx.SQLContext._instantiatedContext is None
+    finally:
+        cctx.SQLContext._instantiatedContext = None
+        spark.stop()
+
+
+def test_execution_info_and_operation_id():
+    from pyspark.errors import AnalysisException
+    from pyspark.errors.exceptions.connect import SparkConnectException
+    from pyspark.sql.connect.client import PlanObservedMetrics
+    from pyspark.sql.metrics import ExecutionInfo
+
+    spark = _offline_session()
+    try:
+        # No action ran yet.
+        assert spark.range(1).executionInfo is None
+    finally:
+        spark.stop()
+    ei = ExecutionInfo([], [PlanObservedMetrics("o", [1, 2], [])], "op-1")
+    assert ei.operation_id == "op-1"
+    assert ei.flows == [("o", {"observed_metric_0": 1, "observed_metric_1": 2})]
+    assert ei.metrics is None
+    # SparkConnectException.operation_id (4.3.0): None unless the transport stamped it.
+    err = AnalysisException("boom")
+    assert isinstance(err, SparkConnectException)
+    assert err.operation_id is None
+    err._operation_id = "op-2"
+    assert err.operation_id == "op-2"
+
+
+def test_create_auto_cdc_flow_scd2_track_history():
+    from pyspark import pipelines as dp
+    from pyspark.errors import PySparkValueError
+    from pyspark.pipelines.graph_element_registry import graph_element_registration_context
+    from pyspark.pipelines.tests.local_graph_element_registry import LocalGraphElementRegistry
+    from pyspark.sql.functions import col
+
+    registry = LocalGraphElementRegistry()
+    with graph_element_registration_context(registry):
+        dp.create_streaming_table("t")
+        dp.create_auto_cdc_flow(
+            target="t", source="s", keys=["k"], sequence_by="seq",
+            stored_as_scd_type=2, track_history_column_list=["a", col("b")],
+            spark_conf={"k": "v"},
+        )
+        with pytest.raises(PySparkValueError, match="CANNOT_SET_TOGETHER"):
+            dp.create_auto_cdc_flow(
+                target="t", source="s", keys=["k"], sequence_by="seq",
+                stored_as_scd_type=2, track_history_column_list=["a"],
+                track_history_except_column_list=["b"],
+            )
+        with pytest.raises(PySparkValueError, match="INVALID_MULTIPLE_ARGUMENT_CONDITIONS"):
+            dp.create_auto_cdc_flow(
+                target="t", source="s", keys=["k"], sequence_by="seq",
+                stored_as_scd_type=1, track_history_column_list=["a"],
+            )
+    flow = registry.auto_cdc_flows[0]
+    assert flow.stored_as_scd_type == 2
+    assert len(flow.track_history_column_list) == 2
+    assert flow.spark_conf == {"k": "v"}
+
+
+# --------------------------------------------------------------------------- ExecutePlan (mock)
+
+
+def _request_operation_id(request):
+    # ExecutePlanRequest.operation_id=6.
+    return parse_message(request)[6][0].decode()
+
+
+def test_execution_info_decodes_observed_metrics_and_operation_id(mock_connect):
+    import datetime
+
+    spark, service = mock_connect
+    ts = 1_700_000_000_123_456
+    # expressions.proto Literal: integer=6, string=13, date=16, timestamp=17,
+    # day_time_interval=21, map=23 (keys=3, values=4), struct=24 (elements=2),
+    # data_type=100; types.proto DataType.struct=21 (fields=1; StructField.name=1).
+    struct_type = message_field(
+        21, message_field(1, message_field(1, "a")) + message_field(1, message_field(1, "b"))
+    )
+    struct_literal = message_field(
+        24, message_field(2, varint_field(6, 7)) + message_field(2, message_field(13, "x"))
+    ) + message_field(100, struct_type)
+    map_literal = message_field(
+        23, message_field(3, message_field(13, "k")) + message_field(4, varint_field(16, 1))
+    )
+    # base.proto ObservedMetrics: name=1, values=2, keys=3; ExecutePlanResponse.observed_metrics=6.
+    observed = message_field(1, "o")
+    for literal in (
+        varint_field(17, ts),
+        struct_literal,
+        map_literal,
+        varint_field(21, 90_061_000_001),
+    ):
+        observed += message_field(2, literal)
+    for key in ("ts", "s", "m", "dt"):
+        observed += message_field(3, key)
+    service.execute_payload = message_field(6, observed)
+
+    assert spark.range(1).executionInfo is None
+    spark.range(1).collect()
+    info = spark.range(1).executionInfo
+    assert info.operation_id == _request_operation_id(service.execute_requests[-1])
+    ((name, pairs),) = info.flows
+    assert name == "o"
+    assert pairs["ts"] == datetime.datetime.fromtimestamp(ts // 10**6).replace(
+        microsecond=ts % 10**6
+    )
+    assert (pairs["s"].a, pairs["s"].b) == (7, "x")
+    assert pairs["m"] == {"k": datetime.date(1970, 1, 2)}
+    assert pairs["dt"] == datetime.timedelta(microseconds=90_061_000_001)
+
+
+def test_execution_info_unsupported_literal_raises_on_flows(mock_connect):
+    from pyspark.errors import PySparkTypeError
+
+    spark, service = mock_connect
+    # Literal.calendar_interval=19 (months=1): the reference rejects it in _to_value.
+    observed = message_field(1, "o") + message_field(2, message_field(19, varint_field(1, 2)))
+    service.execute_payload = message_field(6, observed)
+    spark.range(1).collect()
+    info = spark.range(1).executionInfo
+    assert info.operation_id == _request_operation_id(service.execute_requests[-1])
+    with pytest.raises(PySparkTypeError, match="UNSUPPORTED_LITERAL"):
+        info.flows
+
+
+def test_execute_plan_error_carries_operation_id(mock_connect):
+    from pyspark.errors import PySparkException
+
+    spark, service = mock_connect
+    service.execute_failure = "plan rejected"
+    with pytest.raises(PySparkException, match="plan rejected") as error:
+        spark.range(1).collect()
+    assert error.value.operation_id == _request_operation_id(service.execute_requests[-1])
+
+
+def _sent_define_flow(request):
+    """The DefineFlow in a captured ExecutePlanRequest: plan=3 -> command=2 ->
+    pipeline_command=19 -> define_flow=3."""
+    message = parse_message(request)
+    for field in (3, 2, 19, 3):
+        message = parse_message(message[field][0])
+    return message
+
+
+def _unparsed_identifiers(expressions):
+    # Expression.unresolved_attribute=2, UnresolvedAttribute.unparsed_identifier=1.
+    return [
+        parse_message(parse_message(e)[2][0])[1][0].decode() for e in expressions
+    ]
+
+
+def test_connect_registry_sends_auto_cdc_define_flow(mock_connect):
+    from pyspark import pipelines as dp
+    from pyspark.pipelines.graph_element_registry import graph_element_registration_context
+    from pyspark.pipelines.spark_connect_graph_element_registry import (
+        SparkConnectGraphElementRegistry,
+    )
+
+    spark, service = mock_connect
+    with graph_element_registration_context(SparkConnectGraphElementRegistry(spark, "g")):
+        dp.create_auto_cdc_flow(
+            target="t", source="s", keys=["k"], sequence_by="seq",
+            stored_as_scd_type=2, name="scd2",
+            track_history_column_list=["a", "b"], spark_conf={"c": "v"},
+        )
+        dp.create_auto_cdc_flow(
+            target="t", source="s", keys=["k"], sequence_by="seq",
+            stored_as_scd_type="2", name="scd2_except",
+            track_history_except_column_list=["z"],
+        )
+        dp.create_auto_cdc_flow(
+            target="t", source="s", keys=["k"], sequence_by="seq", name="plain"
+        )
+    scd2, scd2_except, plain = (_sent_define_flow(r) for r in service.execute_requests[-3:])
+
+    # DefineFlow: flow_name=2, sql_conf=4 (entries key=1, value=2), auto_cdc_flow_details=10;
+    # AutoCdcFlowDetails: stored_as_scd_type=10, track_history_column_list=11,
+    # track_history_except_column_list=12.
+    assert scd2[2] == [b"scd2"]
+    assert [parse_message(e) for e in scd2[4]] == [{1: [b"c"], 2: [b"v"]}]
+    details = parse_message(scd2[10][0])
+    assert details[10] == [2]
+    assert _unparsed_identifiers(details[11]) == ["a", "b"]
+    assert 12 not in details
+
+    details = parse_message(scd2_except[10][0])
+    assert details[10] == [2]
+    assert 11 not in details
+    assert _unparsed_identifiers(details[12]) == ["z"]
+
+    details = parse_message(plain[10][0])
+    assert 4 not in plain
+    assert 10 not in details and 11 not in details and 12 not in details
+

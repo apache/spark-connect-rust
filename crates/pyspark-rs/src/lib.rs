@@ -84,8 +84,8 @@ use types::{
     PyDayTimeIntervalType, PyDecimalType, PyDoubleType, PyFloatType, PyFractionalType,
     PyGeographyType, PyGeometryType, PyIntegerType, PyIntegralType, PyLongType, PyMapType,
     PyNullType, PyNumericType, PyShortType, PySpatialType, PyStringType, PyStructField,
-    PyStructType, PyTimeType, PyTimestampNTZType, PyTimestampType, PyVarcharType, PyVariantType,
-    PyYearMonthIntervalType,
+    PyStructType, PyTimeType, PyTimestampLTZNanosType, PyTimestampNTZNanosType, PyTimestampNTZType,
+    PyTimestampType, PyVarcharType, PyVariantType, PyYearMonthIntervalType,
 };
 use window::{PyFrameBound, PyWindow, PyWindowSpec};
 
@@ -189,6 +189,8 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDateType>()?;
     m.add_class::<PyTimestampType>()?;
     m.add_class::<PyTimestampNTZType>()?;
+    m.add_class::<PyTimestampNTZNanosType>()?;
+    m.add_class::<PyTimestampLTZNanosType>()?;
     m.add_class::<PyArrayType>()?;
     m.add_class::<PyMapType>()?;
     m.add_class::<PyStructField>()?;

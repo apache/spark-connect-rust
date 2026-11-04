@@ -2085,6 +2085,152 @@ impl PyTimeType {
     }
 }
 
+/// Spark's `TimestampNTZNanosType(precision)` (precision 7..=9; default 9). PySpark 4.3.0 has no
+/// Python class for the nanosecond timestamp types, but the server reports them in
+/// schemas, so they materialize as this class instead of being mapped to a lossy type.
+#[pyclass(name = "TimestampNTZNanosType", module = "pyspark.sql.types", extends = PyDatetimeType)]
+pub struct PyTimestampNTZNanosType {
+    pub precision: i32,
+}
+
+#[pymethods]
+impl PyTimestampNTZNanosType {
+    #[pyo3(name = "json")]
+    fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Ok(py_to_data_type(slf.as_any())?.json())
+    }
+    #[pyo3(name = "jsonValue")]
+    fn __obj_json_value<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let v = py_to_data_type(slf.as_any())?.json_value();
+        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+    }
+    #[pyo3(name = "needConversion")]
+    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[pyo3(name = "toInternal")]
+    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        let dt = DataType::TimestampNtzNanos {
+            precision: self.precision,
+        };
+        type_reduce(py, &dt.json())
+    }
+    #[new]
+    #[pyo3(signature = (precision=9))]
+    fn new(precision: i32) -> PyResult<pyo3::PyClassInitializer<Self>> {
+        if !(7..=9).contains(&precision) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "TimestampNTZNanosType precision must be in 7..9, got {}",
+                precision
+            )));
+        }
+        Ok(init_chain!(
+            DataType::TimestampNtzNanos { precision },
+            PyTimestampNTZNanosType { precision },
+            [PyAtomicType, PyDatetimeType],
+            value
+        ))
+    }
+    #[getter]
+    fn precision(&self) -> i32 {
+        self.precision
+    }
+    fn __repr__(&self) -> String {
+        format!("TimestampNTZNanosType({})", self.precision)
+    }
+    #[pyo3(name = "simpleString")]
+    fn simple_string(&self) -> String {
+        format!("timestamp_ntz({})", self.precision)
+    }
+    #[pyo3(name = "typeName")]
+    fn type_name(&self) -> String {
+        format!("timestamp_ntz({})", self.precision)
+    }
+}
+
+/// Spark's `TimestampLTZNanosType(precision)` (precision 7..=9; default 9). PySpark 4.3.0 has no
+/// Python class for the nanosecond timestamp types, but the server reports them in
+/// schemas, so they materialize as this class instead of being mapped to a lossy type.
+#[pyclass(name = "TimestampLTZNanosType", module = "pyspark.sql.types", extends = PyDatetimeType)]
+pub struct PyTimestampLTZNanosType {
+    pub precision: i32,
+}
+
+#[pymethods]
+impl PyTimestampLTZNanosType {
+    #[pyo3(name = "json")]
+    fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Ok(py_to_data_type(slf.as_any())?.json())
+    }
+    #[pyo3(name = "jsonValue")]
+    fn __obj_json_value<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let v = py_to_data_type(slf.as_any())?.json_value();
+        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+    }
+    #[pyo3(name = "needConversion")]
+    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[pyo3(name = "toInternal")]
+    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        let dt = DataType::TimestampLtzNanos {
+            precision: self.precision,
+        };
+        type_reduce(py, &dt.json())
+    }
+    #[new]
+    #[pyo3(signature = (precision=9))]
+    fn new(precision: i32) -> PyResult<pyo3::PyClassInitializer<Self>> {
+        if !(7..=9).contains(&precision) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "TimestampLTZNanosType precision must be in 7..9, got {}",
+                precision
+            )));
+        }
+        Ok(init_chain!(
+            DataType::TimestampLtzNanos { precision },
+            PyTimestampLTZNanosType { precision },
+            [PyAtomicType, PyDatetimeType],
+            value
+        ))
+    }
+    #[getter]
+    fn precision(&self) -> i32 {
+        self.precision
+    }
+    fn __repr__(&self) -> String {
+        format!("TimestampLTZNanosType({})", self.precision)
+    }
+    #[pyo3(name = "simpleString")]
+    fn simple_string(&self) -> String {
+        format!("timestamp_ltz({})", self.precision)
+    }
+    #[pyo3(name = "typeName")]
+    fn type_name(&self) -> String {
+        format!("timestamp_ltz({})", self.precision)
+    }
+}
+
 #[pyclass(name = "CalendarIntervalType", module = "pyspark.sql.types", extends = PyDataType)]
 pub struct PyCalendarIntervalType;
 
@@ -2620,6 +2766,24 @@ pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAn
                 value
             ))
         }
+        DataType::TimestampNtzNanos { precision } => {
+            let precision = *precision;
+            obj!(init_chain!(
+                DataType::TimestampNtzNanos { precision },
+                PyTimestampNTZNanosType { precision },
+                [PyAtomicType, PyDatetimeType],
+                value
+            ))
+        }
+        DataType::TimestampLtzNanos { precision } => {
+            let precision = *precision;
+            obj!(init_chain!(
+                DataType::TimestampLtzNanos { precision },
+                PyTimestampLTZNanosType { precision },
+                [PyAtomicType, PyDatetimeType],
+                value
+            ))
+        }
         DataType::CalendarInterval => obj!(init_chain!(
             DataType::CalendarInterval,
             PyCalendarIntervalType,
@@ -2743,6 +2907,16 @@ pub(crate) fn py_to_data_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
     }
     if obj.extract::<PyRef<PyTimestampNTZType>>().is_ok() {
         return Ok(DataType::TimestampNtz);
+    }
+    if let Ok(t) = obj.extract::<PyRef<PyTimestampNTZNanosType>>() {
+        return Ok(DataType::TimestampNtzNanos {
+            precision: t.precision,
+        });
+    }
+    if let Ok(t) = obj.extract::<PyRef<PyTimestampLTZNanosType>>() {
+        return Ok(DataType::TimestampLtzNanos {
+            precision: t.precision,
+        });
     }
     if let Ok(d) = obj.extract::<PyRef<PyDecimalType>>() {
         return Ok(DataType::Decimal {

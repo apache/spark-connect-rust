@@ -373,6 +373,13 @@ def variant_delete(v, *paths):
         v: a variant column
         *paths: one or more path expressions (Column or str)
     """
+    if len(paths) == 0:
+        from pyspark.errors import PySparkValueError
+
+        raise PySparkValueError(
+            errorClass="CANNOT_BE_EMPTY",
+            messageParameters={"item": "paths"},
+        )
     _a = [v]
     _a.extend(paths)
     return _dispatch("variant_delete", _a)
@@ -511,6 +518,29 @@ def lag(col, offset=1, default=None):
 def lead(col, offset=1, default=None):
     """lead(col, offset=1, default=None): value offset rows after the current row."""
     return _wrap(_call_function("lead", _to_col(col), _pyfunc_lit(offset), _pyfunc_lit(default)))
+
+
+def instr(str, substr, start=None, occurrence=None):
+    """instr(str, substr, start=None, occurrence=None): 1-based position of substr.
+
+    Mirrors pyspark.sql.connect.functions.instr: ``occurrence`` without ``start``
+    searches from position 1.
+    """
+    # Non-column args stay raw; the core turns them into literals (as `lit` would).
+    args = [str, substr]
+    if start is not None or occurrence is not None:
+        args.append(start if start is not None else 1)
+    if occurrence is not None:
+        args.append(occurrence)
+    return _dispatch("instr", args)
+
+
+def regexp_replace(string, pattern, replacement, position=None):
+    """regexp_replace(string, pattern, replacement, position=None)."""
+    args = [string, pattern, replacement]
+    if position is not None:
+        args.append(position)
+    return _dispatch("regexp_replace", args)
 
 
 def json_tuple(col, *fields):

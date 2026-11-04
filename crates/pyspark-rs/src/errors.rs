@@ -55,6 +55,7 @@ fn kind_to_pyspark_class_name(kind: SparkErrorKind) -> &'static str {
 /// exception based on the error kind. Falls back to PyRuntimeError if import fails.
 pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
     let msg = err.message();
+    let operation_id = err.operation_id.clone();
     let class_name = kind_to_pyspark_class_name(err.kind);
 
     // Try to acquire the GIL and import the exception class from pyspark.errors
@@ -75,6 +76,11 @@ pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
                 // This creates a PyObject exception instance
                 match exc_class.call1((msg.clone(),)) {
                     Ok(exc_instance) => {
+                        // Mirror the reference client, which stamps `_operation_id` on
+                        // errors raised for an ExecutePlan (read via `operation_id`).
+                        if let Some(op) = &operation_id {
+                            let _ = exc_instance.setattr("_operation_id", op);
+                        }
                         // Convert the exception instance to a PyErr.
                         // We use unsafe code to construct the PyErr from the exception value.
                         PyErr::from_value(exc_instance)

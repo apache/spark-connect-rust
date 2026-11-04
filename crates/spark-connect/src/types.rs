@@ -50,6 +50,13 @@ pub enum DataType {
     TimestampNtz,
     /// `pyspark.sql.types.TimeType`
     Time { precision: i32 },
+    /// Spark's `TimestampNTZNanosType(precision)` (precision 7..=9): a timestamp
+    /// without time zone with nanosecond-capable fractional seconds. PySpark 4.3.0
+    /// has no Python class for it; this mirrors the server/proto type.
+    TimestampNtzNanos { precision: i32 },
+    /// Spark's `TimestampLTZNanosType(precision)` (precision 7..=9): a timestamp
+    /// with local time zone with nanosecond-capable fractional seconds.
+    TimestampLtzNanos { precision: i32 },
     /// `pyspark.sql.types.CalendarIntervalType`
     CalendarInterval,
     /// `pyspark.sql.types.YearMonthIntervalType`
@@ -191,6 +198,8 @@ impl DataType {
             DataType::Date
             | DataType::Timestamp
             | DataType::TimestampNtz
+            | DataType::TimestampNtzNanos { .. }
+            | DataType::TimestampLtzNanos { .. }
             | DataType::Time { .. }
             | DataType::DayTimeInterval { .. }
             | DataType::YearMonthInterval { .. }
@@ -229,6 +238,8 @@ impl DataType {
             DataType::Timestamp => "timestamp".to_string(),
             DataType::TimestampNtz => "timestamp_ntz".to_string(),
             DataType::Time { .. } => "time".to_string(),
+            DataType::TimestampNtzNanos { precision } => format!("timestamp_ntz({})", precision),
+            DataType::TimestampLtzNanos { precision } => format!("timestamp_ltz({})", precision),
             DataType::CalendarInterval => "interval".to_string(),
             DataType::YearMonthInterval { .. } => "interval".to_string(),
             DataType::DayTimeInterval { .. } => "interval".to_string(),
@@ -280,6 +291,8 @@ impl DataType {
             DataType::Timestamp => "timestamp".to_string(),
             DataType::TimestampNtz => "timestamp_ntz".to_string(),
             DataType::Time { precision } => format!("time({})", precision),
+            DataType::TimestampNtzNanos { precision } => format!("timestamp_ntz({})", precision),
+            DataType::TimestampLtzNanos { precision } => format!("timestamp_ltz({})", precision),
             DataType::CalendarInterval => "interval".to_string(),
             DataType::YearMonthInterval {
                 start_field,
@@ -369,6 +382,12 @@ impl DataType {
             DataType::TimestampNtz => serde_json::json!("timestamp_ntz"),
             DataType::Time { precision } => {
                 serde_json::json!(format!("time({})", precision))
+            }
+            DataType::TimestampNtzNanos { precision } => {
+                serde_json::json!(format!("timestamp_ntz({})", precision))
+            }
+            DataType::TimestampLtzNanos { precision } => {
+                serde_json::json!(format!("timestamp_ltz({})", precision))
             }
             DataType::CalendarInterval => serde_json::json!("interval"),
             DataType::YearMonthInterval {
@@ -565,6 +584,22 @@ impl DataType {
                 let mut time_type = spark_connect_proto::data_type::Time::default();
                 time_type.precision = Some(*precision);
                 proto.kind = Some(spark_connect_proto::data_type::Kind::Time(time_type));
+            }
+            DataType::TimestampNtzNanos { precision } => {
+                proto.kind = Some(spark_connect_proto::data_type::Kind::TimestampNtzNanos(
+                    spark_connect_proto::data_type::TimestampNtzNanos {
+                        precision: Some(*precision),
+                        ..Default::default()
+                    },
+                ));
+            }
+            DataType::TimestampLtzNanos { precision } => {
+                proto.kind = Some(spark_connect_proto::data_type::Kind::TimestampLtzNanos(
+                    spark_connect_proto::data_type::TimestampLtzNanos {
+                        precision: Some(*precision),
+                        ..Default::default()
+                    },
+                ));
             }
             DataType::CalendarInterval => {
                 proto.kind = Some(spark_connect_proto::data_type::Kind::CalendarInterval(
@@ -802,12 +837,16 @@ impl DataType {
             Some(spark_connect_proto::data_type::Kind::Unparsed(u)) => Ok(DataType::Unparsed {
                 data_type_string: u.data_type_string.clone(),
             }),
+            // Precision defaults to 9 when omitted (types.proto).
             Some(spark_connect_proto::data_type::Kind::TimestampNtzNanos(tn)) => {
-                let precision = tn.precision.unwrap_or(9);
-                Ok(DataType::Time { precision })
+                Ok(DataType::TimestampNtzNanos {
+                    precision: tn.precision.unwrap_or(9),
+                })
             }
-            Some(spark_connect_proto::data_type::Kind::TimestampLtzNanos(_)) => {
-                Ok(DataType::Timestamp)
+            Some(spark_connect_proto::data_type::Kind::TimestampLtzNanos(tl)) => {
+                Ok(DataType::TimestampLtzNanos {
+                    precision: tl.precision.unwrap_or(9),
+                })
             }
             None => Err(SparkError::connect_msg("DataType kind not set")),
         }
@@ -1097,6 +1136,9 @@ fn parse_json_type_string(s: &str) -> Result<DataType> {
         s if s.starts_with("char(") => parse_char(s),
         s if s.starts_with("varchar(") => parse_varchar(s),
         s if s.starts_with("time(") => parse_time(s),
+        s if s.starts_with("timestamp_ntz(") || s.starts_with("timestamp_ltz(") => {
+            parse_timestamp_nanos(s)
+        }
         s if s.starts_with("interval") => parse_interval_string(s),
         s if s.starts_with("string collate") => {
             let collation = s.trim_start_matches("string collate").trim().to_string();
@@ -1311,6 +1353,36 @@ fn parse_time(s: &str) -> Result<DataType> {
     })?;
 
     Ok(DataType::Time { precision })
+}
+
+/// Parses `timestamp_ntz(p)` / `timestamp_ltz(p)` (p in 7..=9), mirroring the
+/// `TIMESTAMP_{NTZ,LTZ}_NANOS_TYPE` patterns in Scala `DataType.nameToType`.
+fn parse_timestamp_nanos(s: &str) -> Result<DataType> {
+    let (ntz, rest) = if let Some(r) = s.strip_prefix("timestamp_ntz(") {
+        (true, r)
+    } else if let Some(r) = s.strip_prefix("timestamp_ltz(") {
+        (false, r)
+    } else {
+        return Err(SparkError::value(
+            "INVALID_DATATYPE_FORMAT",
+            &[("detail", "Invalid timestamp format")],
+        ));
+    };
+    let precision = rest
+        .strip_suffix(")")
+        .and_then(|p| p.trim().parse::<i32>().ok())
+        .filter(|p| (7..=9).contains(p))
+        .ok_or_else(|| {
+            SparkError::value(
+                "INVALID_DATATYPE_FORMAT",
+                &[("detail", "Invalid timestamp precision (expected 7..9)")],
+            )
+        })?;
+    Ok(if ntz {
+        DataType::TimestampNtzNanos { precision }
+    } else {
+        DataType::TimestampLtzNanos { precision }
+    })
 }
 
 fn parse_interval_string(s: &str) -> Result<DataType> {
@@ -1585,6 +1657,9 @@ fn parse_single_type(input: &str) -> Result<DataType> {
                 parse_varchar(&trimmed)
             } else if trimmed.starts_with("time(") {
                 parse_time(&trimmed)
+            } else if trimmed.starts_with("timestamp_ntz(") || trimmed.starts_with("timestamp_ltz(")
+            {
+                parse_timestamp_nanos(&trimmed)
             } else if trimmed.starts_with("interval") {
                 parse_interval_string(&trimmed)
             } else if trimmed.starts_with("string collate") {

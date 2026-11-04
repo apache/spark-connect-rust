@@ -143,6 +143,8 @@ VENDORED_FILES=(
   "sql/datasource_internal.py"
   "sql/internal.py"
   "sql/profiler.py"
+  # ExecutionInfo / PlanMetrics / MetricValue (DataFrame.executionInfo).
+  "sql/metrics.py"
 
   # Streaming (excluding adapted context, dstream, util)
   "streaming/__init__.py"

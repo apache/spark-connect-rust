@@ -721,9 +721,52 @@ impl PySparkSession {
         PyStreamingQueryManager::new(self.session.streams())
     }
 
-    /// Stop this Spark session.
+    /// Stop this Spark session. Best-effort and idempotent, mirroring pyspark: a failure
+    /// to release the session on the server is logged, not raised. Also clears the
+    /// active session and the cached `SQLContext` if they belong to this session.
     fn stop(&self, py: Python<'_>) -> PyResult<()> {
-        py.detach(|| self.session.stop()).to_pyerr()
+        if let Err(e) = py.detach(|| self.session.stop()) {
+            let logger = py
+                .import("logging")?
+                .call_method1("getLogger", ("pyspark",))?;
+            logger.call_method1(
+                "warning",
+                (format!(
+                    "session.stop(): Session could not be released. Error: {e}"
+                ),),
+            )?;
+        }
+        let sid = self.session.session_id();
+        {
+            let mut slot = active_slot().lock().unwrap();
+            if slot.as_ref().is_some_and(|s| s.session_id() == sid) {
+                *slot = None;
+            }
+        }
+        // Only touch the SQLContext cache if the module was ever imported (as pyspark does).
+        let modules = py.import("sys")?.getattr("modules")?;
+        if let Ok(ctx_mod) = modules.get_item("pyspark.sql.connect.context") {
+            ctx_mod.call_method1("_reset_instantiated_context", (sid,))?;
+        }
+        Ok(())
+    }
+
+    /// Enable `with SparkSession.builder.(...).getOrCreate() as session:` syntax.
+    fn __enter__(slf: Py<Self>) -> Py<Self> {
+        slf
+    }
+
+    /// Stop the session when leaving a `with` block (mirrors pyspark 4.3.0).
+    #[pyo3(signature = (exc_type=None, exc_value=None, traceback=None))]
+    fn __exit__(
+        &self,
+        py: Python<'_>,
+        exc_type: Option<Py<PyAny>>,
+        exc_value: Option<Py<PyAny>>,
+        traceback: Option<Py<PyAny>>,
+    ) -> PyResult<()> {
+        let _ = (exc_type, exc_value, traceback);
+        self.stop(py)
     }
 
     /// Get the UDF registration API (`spark.udf`). Returns the
