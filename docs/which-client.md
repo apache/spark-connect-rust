@@ -40,7 +40,7 @@ also why the two are separate implementations that can have separate bugs.
     import pyspark
     pyspark.__rust_client__   # True only in pyspark-client-rust
     pyspark.__engine__        # "rust"
-    pyspark.__version__       # the Spark version this client targets, e.g. "4.2.0"
+    pyspark.__version__       # the Spark version this client targets, e.g. "4.3.0"
     ```
 
 === "Log on connect"
@@ -49,7 +49,7 @@ also why the two are separate implementations that can have separate bugs.
     `pyspark` logger:
 
     ```
-    pyspark-client-rust 4.2.0 active: Spark Connect client backed by the native Rust
+    pyspark-client-rust 4.3.0 active: Spark Connect client backed by the native Rust
     engine (tonic), a drop-in for pyspark-client -- not the reference Python client.
     ```
 
@@ -79,6 +79,6 @@ bug we want to hear about, since the goal is byte-for-byte parity.
 
 ## Server compatibility
 
-This client speaks to Apache Spark Connect servers **4.2.0 and later** (see
-[Compatibility](compatibility.md)). To talk to servers older than 4.2, keep using the
+This client speaks to Apache Spark Connect servers **4.3.0 and later** (see
+[Compatibility](compatibility.md)). To talk to servers older than 4.3, keep using the
 reference client; the two can coexist in separate environments.

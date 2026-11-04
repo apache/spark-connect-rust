@@ -9,9 +9,9 @@ hot paths (plan building, gRPC transport, Arrow decode) in Rust.
 
 ## Source of truth
 
-- **Protocol**: Spark Connect protobuf `v4.2.0` - vendored under
+- **Protocol**: Spark Connect protobuf `v4.3.0` - vendored under
   `crates/spark-connect-proto/proto/`, SHA pinned in `proto/SPARK_SHA.txt`.
-  Developed and validated against Apache Spark 4.2.0 (wire-compatible).
+  Developed and validated against Apache Spark 4.3.0 (wire-compatible).
 - **Python reference**: `python/pyspark/sql/connect/**` (+ `sql/types.py`,
   `errors/exceptions/**`). This is the code we mirror line-by-line.
 - **Prior art (same author)**: `spark-connect-ruby`, `spark-connect-scala3`,
