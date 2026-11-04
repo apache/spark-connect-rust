@@ -4,7 +4,8 @@
 
 use std::collections::BTreeMap;
 use std::str::FromStr;
-use tonic::metadata::MetadataValue;
+use std::time::Duration;
+use tonic::metadata::{MetadataMap, MetadataValue};
 use tonic::transport::{Channel, ClientTlsConfig};
 use tonic::{Request, Response, Streaming};
 use uuid::Uuid;
@@ -341,8 +342,10 @@ impl SparkConnectClient {
 
     /// Execute a plan as a reattachable stream: retries the initial call and, if the
     /// response stream drops mid-flight (e.g. `UNAVAILABLE` / `INVALID_CURSOR.DISCONNECTED`)
-    /// before `ResultComplete`, transparently resumes it with `ReattachExecute` from the
-    /// last observed `response_id`. Mirrors the reference reattachable execute path.
+    /// or the server ends it before `ResultComplete`, transparently resumes it with
+    /// `ReattachExecute` from the last observed `response_id`. The stream releases the
+    /// execution on the server with `ReleaseExecute` (see [`ReattachableResponseStream`]).
+    /// Mirrors the reference reattachable execute path.
     pub async fn execute_plan_reattachable(
         &self,
         request: ExecutePlanRequest,
@@ -368,6 +371,7 @@ impl SparkConnectClient {
             iter,
             stream,
             done: false,
+            released: false,
         })
     }
 
@@ -867,9 +871,13 @@ impl SparkConnectClient {
 
 /// A reattachable, retrying response stream for a reattachable ExecutePlan.
 ///
-/// Drives the gRPC response stream and, on a transient mid-stream disconnect
-/// before `ResultComplete`, resumes it via `ReattachExecute` from the last
-/// observed `response_id` (with backoff). Mirrors
+/// Drives the gRPC response stream and resumes it via `ReattachExecute` from the last
+/// observed `response_id` (with backoff) whenever it ends before `ResultComplete`: on a
+/// transient mid-stream disconnect, and when the server completes the stream on purpose
+/// (after `spark.connect.execute.reattachable.senderMaxStreamDuration` or
+/// `senderMaxStreamSize`). It releases each response once it is read, and the whole
+/// execution once the result is complete, the stream fails, or it is dropped, so that the
+/// server does not keep them until the execution is abandoned. Mirrors
 /// `pyspark.sql.connect.client.reattach.ExecutePlanResponseReattachableIterator`.
 pub struct ReattachableResponseStream {
     stub: SparkConnectServiceClient<Channel>,
@@ -881,11 +889,14 @@ pub struct ReattachableResponseStream {
     iter: ExecutePlanResponseReattachableIterator,
     stream: Streaming<ExecutePlanResponse>,
     done: bool,
+    /// Whether `ReleaseAll` was sent, after which nothing else is released.
+    released: bool,
 }
 
 impl ReattachableResponseStream {
-    fn attach_metadata<T>(&self, req: &mut Request<T>) {
-        let metadata = req.metadata_mut();
+    /// The gRPC metadata of every request about this execution.
+    fn metadata_map(&self) -> MetadataMap {
+        let mut metadata = MetadataMap::new();
         if let Ok(v) = MetadataValue::from_str(&self.user_agent) {
             let _ = metadata.insert("user-agent", v);
         }
@@ -901,9 +912,15 @@ impl ReattachableResponseStream {
                 }
             }
         }
+        metadata
     }
 
-    /// Next response, transparently reattaching on a transient mid-stream drop.
+    fn attach_metadata<T>(&self, req: &mut Request<T>) {
+        *req.metadata_mut() = self.metadata_map();
+    }
+
+    /// Next response, transparently reattaching whenever the stream ends before
+    /// `ResultComplete`.
     pub async fn message(&mut self) -> Result<Option<ExecutePlanResponse>> {
         if self.done {
             return Ok(None);
@@ -914,43 +931,120 @@ impl ReattachableResponseStream {
                     self.iter.set_last_response_id(&resp).await;
                     if self.iter.is_completed().await {
                         self.done = true;
+                        self.release_all();
+                    } else if !resp.response_id.is_empty() {
+                        self.release_until(&resp.response_id);
                     }
                     return Ok(Some(resp));
                 }
-                Ok(None) => {
-                    self.done = true;
-                    return Ok(None);
-                }
+                // The server completes a reattachable stream before `ResultComplete` on
+                // purpose, after `senderMaxStreamDuration` or `senderMaxStreamSize`: the rest
+                // of the result is read by reattaching.
+                Ok(None) => self.reattach().await?,
                 Err(status) => {
                     // Only reattach a still-running execution on a retriable drop.
                     if self.iter.is_completed().await || !self.retry_policy.can_retry(&status) {
-                        return Err(SparkError::from_grpc_status(status));
+                        return Err(self.fail(SparkError::from_grpc_status(status)));
                     }
-                    loop {
-                        let reattach = self.iter.create_reattach_request().await;
-                        let mut req = Request::new(reattach);
-                        self.attach_metadata(&mut req);
-                        match self.stub.reattach_execute(req).await {
-                            Ok(r) => {
-                                self.stream = r.into_inner();
-                                break;
-                            }
-                            Err(e) => {
-                                if self.retry_policy.can_retry(&e) {
-                                    if let Some(w) = self.retry_state.next_attempt(None) {
-                                        tokio::time::sleep(std::time::Duration::from_millis(w))
-                                            .await;
-                                        continue;
-                                    }
-                                }
-                                return Err(SparkError::from_grpc_status(e));
-                            }
-                        }
-                    }
-                    // Resume reading on the freshly reattached stream.
+                    self.reattach().await?;
                 }
             }
         }
+    }
+
+    /// Resumes the execution from the last response read, retrying transient failures.
+    async fn reattach(&mut self) -> Result<()> {
+        loop {
+            let mut req = Request::new(self.iter.create_reattach_request().await);
+            self.attach_metadata(&mut req);
+            match self.stub.reattach_execute(req).await {
+                Ok(r) => {
+                    self.stream = r.into_inner();
+                    return Ok(());
+                }
+                Err(e) => {
+                    if self.retry_policy.can_retry(&e) {
+                        if let Some(w) = self.retry_state.next_attempt(None) {
+                            tokio::time::sleep(Duration::from_millis(w)).await;
+                            continue;
+                        }
+                    }
+                    return Err(self.fail(SparkError::from_grpc_status(e)));
+                }
+            }
+        }
+    }
+
+    /// Ends the stream with `error`, releasing the execution as the reference client does
+    /// when an execution fails.
+    fn fail(&mut self, error: SparkError) -> SparkError {
+        self.done = true;
+        self.release_all();
+        error
+    }
+
+    /// Releases the responses up to and including `response_id`, which were read.
+    fn release_until(&self, response_id: &str) {
+        if !self.released {
+            self.spawn_release(self.iter.release_until_request(response_id));
+        }
+    }
+
+    /// Releases the whole execution.
+    fn release_all(&mut self) {
+        if !self.released {
+            self.released = true;
+            self.spawn_release(self.iter.release_all_request());
+        }
+    }
+
+    /// Sends `request` in the background, so that reading is not delayed, retrying under the
+    /// client's retry policy. Like the reference client, a failure is only logged: the server
+    /// removes an execution that is never released once it has been detached for
+    /// `spark.connect.execute.manager.detachedTimeout`.
+    fn spawn_release(&self, request: ReleaseExecuteRequest) {
+        let mut stub = self.stub.clone();
+        let metadata = self.metadata_map();
+        let policy = self.retry_policy.clone();
+        let release = async move {
+            let mut state = RetryPolicyState::new(policy.clone());
+            loop {
+                let mut req = Request::new(request.clone());
+                *req.metadata_mut() = metadata.clone();
+                match stub.release_execute(req).await {
+                    Ok(_) => return,
+                    Err(status) => {
+                        if policy.can_retry(&status) {
+                            if let Some(w) = state.next_attempt(None) {
+                                tokio::time::sleep(Duration::from_millis(w)).await;
+                                continue;
+                            }
+                        }
+                        tracing::warn!(
+                            "ReleaseExecute of operation {} failed: {}",
+                            request.operation_id,
+                            status
+                        );
+                        return;
+                    }
+                }
+            }
+        };
+        // A stream is read inside a runtime, but it can be dropped outside of any, for
+        // example after the `block_on` that read it.
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => drop(handle.spawn(release)),
+            Err(_) => drop(crate::runtime::get_runtime().spawn(release)),
+        }
+    }
+}
+
+impl Drop for ReattachableResponseStream {
+    /// A stream dropped before its result is complete, for example by a caller that stopped
+    /// reading, still holds its execution on the server: release it, as the reference client
+    /// does when its iterator is closed.
+    fn drop(&mut self) {
+        self.release_all();
     }
 }
 

@@ -70,6 +70,12 @@ impl RuntimeConf {
         Ok(results.into_iter().next().flatten())
     }
 
+    /// Get several configuration values in one request, in the order of `keys`; an unknown
+    /// key errors as in `get`. Mirrors the reference client's `get_config_dict`.
+    pub fn get_many(&self, keys: &[&str]) -> Result<Vec<Option<String>>> {
+        block_on(self.client.get_configs(keys))
+    }
+
     /// Get all configuration values as a HashMap.
     ///
     /// # Example
