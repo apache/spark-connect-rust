@@ -565,6 +565,8 @@ def test_arrow_input_schema_handoff(protocol, cached, explicit):
         "spark.sql.session.localRelationCacheThreshold": "0" if cached else "1048576",
     }) as (spark, state):
         frame = spark.createDataFrame(table, schema)
+        # As in PySpark: inferred column names are applied with toDF, which is not local.
+        assert frame.isLocal() == explicit
         assert frame.toArrow().column(0).to_pylist() == [2]
         assert state["result"] == (2, 1, 2)
         assert state["arrow_schemas"] == [table.schema]
@@ -597,7 +599,7 @@ def test_arrow_input_upload_above_grpc_limit(protocol):
     assert table.nbytes > 128 * 1024**2
     with _arrow_input_service(protocol) as (spark, state):
         df = spark.createDataFrame(table)
-        assert df.isLocal()
+        assert not df.isLocal()
         assert df.toArrow().column(0).to_pylist() == [rows]
         assert state["result"] == (rows, 0, rows - 1)
         assert state["relations"][0].HasField("chunked_cached_local_relation")

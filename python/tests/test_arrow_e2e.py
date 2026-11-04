@@ -81,7 +81,9 @@ def test_create_dataframe_arrow_cached_upload(session):
         actual = frame.selectExpr("count(*) AS rows", "sum(id) AS checksum").collect()[0]
         assert actual[0] == rows
         assert actual[1] == rows * (rows - 1) // 2
-        assert frame.isLocal()
+        # As in PySpark, inferred column names are applied with toDF, which the server
+        # resolves into a Project, so the frame is not local.
+        assert not frame.isLocal()
     finally:
         isolated.stop()
 
