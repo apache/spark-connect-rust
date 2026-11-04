@@ -40,6 +40,7 @@ omit =
     */pyspark/sql/variant_utils.py
     */pyspark/sql/datasource_internal.py
     */pyspark/sql/profiler.py
+    */pyspark/sql/metrics.py
     */pyspark/serializers.py
     */pyspark/loose_version.py
     */pyspark/_globals.py

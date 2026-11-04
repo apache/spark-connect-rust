@@ -31,6 +31,9 @@ pub struct ExecutionInfo {
     /// Observed metrics collected during execution (also where `observe(...)`
     /// and UDF-profiler results surface).
     pub observed_metrics: Vec<proto::execute_plan_response::ObservedMetrics>,
+    /// The server-assigned ExecutePlan operation id (`ExecutePlanResponse.operation_id`).
+    /// Mirrors `ExecutionInfo.operation_id` (new in pyspark 4.3.0).
+    pub operation_id: Option<String>,
 }
 
 /// A Spark Connect session for interacting with a remote Spark cluster.
@@ -543,10 +546,14 @@ impl SparkSession {
     }
 
     /// Stop this Spark session.
+    ///
+    /// Idempotent, mirroring pyspark: the session is marked stopped even if releasing it
+    /// on the server fails, and stopping an already stopped session is a no-op.
     pub fn stop(&self) -> Result<()> {
-        block_on(self.client.release_session())?;
-        self.stopped.store(true, Ordering::SeqCst);
-        Ok(())
+        if self.stopped.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+        block_on(self.client.release_session())
     }
 
     /// Whether `stop()` has been called on this session. Mirrors
@@ -713,6 +720,10 @@ fn datatype_to_arrow(dt: &DataType) -> Result<arrow::datatypes::DataType> {
         // TIMESTAMP (LTZ) and TIMESTAMP_NTZ are both micros; NTZ carries no zone.
         DataType::Timestamp => A::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
         DataType::TimestampNtz => A::Timestamp(TimeUnit::Microsecond, None),
+        DataType::TimestampLtzNanos { .. } => {
+            A::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()))
+        }
+        DataType::TimestampNtzNanos { .. } => A::Timestamp(TimeUnit::Nanosecond, None),
         DataType::Time { .. } => A::Time64(TimeUnit::Microsecond),
         DataType::Decimal { precision, scale } => A::Decimal128(*precision as u8, *scale as i8),
         DataType::Array {
@@ -1235,6 +1246,22 @@ mod tests {
             .remote("sc://localhost:15002")
             .get_or_create()
             .expect("failed to build session")
+    }
+
+    #[test]
+    fn stop_is_idempotent_and_marks_stopped() {
+        // Port 1: nothing listens, so the ReleaseSession RPC fails fast. The session is
+        // still marked stopped (pyspark's stop() is best-effort) and a second stop() is a
+        // no-op that does not retry the release.
+        let spark = SparkSession::builder()
+            .remote("sc://localhost:1")
+            .get_or_create()
+            .expect("failed to build session");
+        let other = spark.clone();
+        let _ = spark.stop();
+        assert!(spark.is_stopped());
+        assert!(other.is_stopped(), "stopped flag is shared across clones");
+        assert!(spark.stop().is_ok());
     }
 
     #[test]

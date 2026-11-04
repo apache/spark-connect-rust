@@ -359,7 +359,8 @@ impl SparkConnectClient {
                 let mut stub = self.stub.clone();
                 async move { stub.execute_plan(req).await.map(Response::into_inner) }
             })
-            .await?;
+            .await
+            .map_err(|e| e.with_operation_id(iter.operation_id()))?;
         let retry_policy = self.retry_policy.clone();
         Ok(ReattachableResponseStream {
             stub: self.stub.clone(),
@@ -977,10 +978,11 @@ impl ReattachableResponseStream {
 
     /// Ends the stream with `error`, releasing the execution as the reference client does
     /// when an execution fails.
+    /// The error carries the ExecutePlan operation id (`SparkConnectException.operation_id`).
     fn fail(&mut self, error: SparkError) -> SparkError {
         self.done = true;
         self.release_all();
-        error
+        error.with_operation_id(self.iter.operation_id())
     }
 
     /// Releases the responses up to and including `response_id`, which were read.

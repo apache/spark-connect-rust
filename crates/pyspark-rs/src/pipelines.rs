@@ -162,12 +162,14 @@ pub fn pipeline_define_flow(
 }
 
 /// `PipelineCommand.DefineFlow` carrying an Auto-CDC flow body. `stored_as_scd_type` is
-/// the `SCDType` enum value (0 unspecified, 1 SCD_TYPE_1, 2 SCD_TYPE_2).
+/// the `SCDType` enum value (0 unspecified, 1 SCD_TYPE_1, 2 SCD_TYPE_2). The SCD2-only
+/// track-history lists and `sql_conf` are validated client-side in `pipelines/api.py`.
 #[pyfunction]
 #[pyo3(signature = (
     session, dataflow_graph_id, flow_name, target, source, keys, sequence_by,
     apply_as_deletes=None, column_list=None, except_column_list=None,
-    stored_as_scd_type=0, scl_file=None, scl_line=None
+    stored_as_scd_type=0, scl_file=None, scl_line=None,
+    track_history_column_list=None, track_history_except_column_list=None, sql_conf=None
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn pipeline_define_auto_cdc_flow(
@@ -184,27 +186,28 @@ pub fn pipeline_define_auto_cdc_flow(
     stored_as_scd_type: i32,
     scl_file: Option<String>,
     scl_line: Option<i32>,
+    track_history_column_list: Option<Vec<PyRef<'_, PyColumn>>>,
+    track_history_except_column_list: Option<Vec<PyRef<'_, PyColumn>>>,
+    sql_conf: Option<HashMap<String, String>>,
 ) -> PyResult<()> {
     let to_expr = |c: &PyColumn| c.column.expression().to_proto();
+    let to_exprs = |cs: Option<Vec<PyRef<'_, PyColumn>>>| {
+        cs.unwrap_or_default()
+            .iter()
+            .map(|c| to_expr(c))
+            .collect::<Vec<_>>()
+    };
     let details = proto::pipeline_command::define_flow::AutoCdcFlowDetails {
         source: Some(source),
         keys: keys.iter().map(|c| to_expr(c)).collect(),
         sequence_by: Some(to_expr(&sequence_by)),
         apply_as_deletes: apply_as_deletes.as_ref().map(|c| to_expr(c)),
         apply_as_truncates: None,
-        column_list: column_list
-            .unwrap_or_default()
-            .iter()
-            .map(|c| to_expr(c))
-            .collect(),
-        except_column_list: except_column_list
-            .unwrap_or_default()
-            .iter()
-            .map(|c| to_expr(c))
-            .collect(),
+        column_list: to_exprs(column_list),
+        except_column_list: to_exprs(except_column_list),
         stored_as_scd_type,
-        track_history_column_list: vec![],
-        track_history_except_column_list: vec![],
+        track_history_column_list: to_exprs(track_history_column_list),
+        track_history_except_column_list: to_exprs(track_history_except_column_list),
         ignore_null_updates_column_list: vec![],
         ignore_null_updates_except_column_list: vec![],
     };
@@ -217,7 +220,17 @@ pub fn pipeline_define_auto_cdc_flow(
     let scl = scl(scl_file, scl_line);
     session
         .py()
-        .detach(|| pipelines::define_auto_cdc_flow(&sess, &gid, &fname, &tgt, details, scl))
+        .detach(|| {
+            pipelines::define_auto_cdc_flow(
+                &sess,
+                &gid,
+                &fname,
+                &tgt,
+                details,
+                sql_conf.unwrap_or_default(),
+                scl,
+            )
+        })
         .to_pyerr()
 }
 

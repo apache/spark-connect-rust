@@ -23,3 +23,41 @@ try:
 except ImportError:
     # If Rust backend not available, guard the export
     __all__ = []
+
+
+from typing import Any, Dict, List
+
+from pyspark.sql.metrics import ObservedMetrics
+
+
+class PlanObservedMetrics(ObservedMetrics):
+    """Observed metrics of one ``observe(...)`` node, as carried by
+    ``DataFrame.executionInfo.flows``. Mirrors ``pyspark.sql.connect.client.core
+    .PlanObservedMetrics``; the Rust transport has already decoded the literal values."""
+
+    def __init__(self, name: str, metrics: List[Any], keys: List[str]):
+        self._name = name
+        self._metrics = metrics
+        self._keys = keys if keys else [f"observed_metric_{i}" for i in range(len(metrics))]
+
+    def __repr__(self) -> str:
+        return f"Plan observed({self._name}={self._metrics})"
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def metrics(self) -> List[Any]:
+        return self._metrics
+
+    @property
+    def pairs(self) -> Dict[str, Any]:
+        return {self._keys[i]: self._metrics[i] for i in range(len(self._metrics))}
+
+    @property
+    def keys(self) -> List[str]:
+        return self._keys
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"name": self._name, "keys": self._keys, "pairs": self.pairs}

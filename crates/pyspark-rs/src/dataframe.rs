@@ -1230,20 +1230,48 @@ impl PyDataFrame {
         py.detach(|| self.dataframe.show(n)).to_pyerr()
     }
 
-    /// Execution metrics from the most recent action. Mirrors `DataFrame.executionInfo`.
+    /// Execution info from the most recent action, as a `pyspark.sql.metrics.ExecutionInfo`
+    /// (plan metrics, observed-metric flows, and the ExecutePlan `operation_id`). Mirrors
+    /// `DataFrame.executionInfo`; `None` before any action ran.
     #[getter]
     #[pyo3(name = "executionInfo")]
     fn execution_info(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let info = self.dataframe.execution_info().to_pyerr()?;
-        let dict = pyo3::types::PyDict::new(py);
-        dict.set_item("has_metrics", info.metrics.is_some())?;
-        let names: Vec<String> = info
-            .observed_metrics
-            .iter()
-            .map(|m| m.name.clone())
-            .collect();
-        dict.set_item("observed_metrics", names)?;
-        Ok(dict.into_any().unbind())
+        let Ok(info) = self.dataframe.execution_info() else {
+            return Ok(py.None());
+        };
+        let metrics_mod = py.import("pyspark.sql.metrics")?;
+        let plan_metrics_cls = metrics_mod.getattr("PlanMetrics")?;
+        let metric_value_cls = metrics_mod.getattr("MetricValue")?;
+        // Mirrors SparkConnectClient._build_metrics.
+        let plan_metrics = pyo3::types::PyList::empty(py);
+        if let Some(m) = &info.metrics {
+            for x in &m.metrics {
+                let values = pyo3::types::PyList::empty(py);
+                for (k, v) in &x.execution_metrics {
+                    values.append(metric_value_cls.call1((k, v.value, &v.metric_type))?)?;
+                }
+                plan_metrics
+                    .append(plan_metrics_cls.call1((&x.name, x.plan_id, x.parent, values))?)?;
+            }
+        }
+        let observed_cls = py
+            .import("pyspark.sql.connect.client")?
+            .getattr("PlanObservedMetrics")?;
+        let observed = pyo3::types::PyList::empty(py);
+        for o in &info.observed_metrics {
+            let values = o
+                .values
+                .iter()
+                .map(|l| literal_to_py(py, l))
+                .collect::<PyResult<Vec<_>>>()?;
+            observed.append(observed_cls.call1((&o.name, values, o.keys.clone()))?)?;
+        }
+        let ei = metrics_mod.getattr("ExecutionInfo")?.call1((
+            plan_metrics,
+            observed,
+            info.operation_id.clone(),
+        ))?;
+        Ok(ei.unbind())
     }
 
     /// Convert to a pandas-on-Spark DataFrame. Mirrors `DataFrame.pandas_api`;
@@ -2490,4 +2518,41 @@ impl PyLocalRowIterator {
             }
         }
     }
+}
+
+/// Convert an observed-metric literal to a Python value (mirrors
+/// `LiteralExpression._to_value` for the scalar kinds observations produce). Kinds
+/// without a natural Python scalar fall back to their rendered string.
+fn literal_to_py(
+    py: Python<'_>,
+    literal: &spark_connect_proto::expression::Literal,
+) -> PyResult<Py<PyAny>> {
+    use pyo3::IntoPyObjectExt;
+    use spark_connect_proto::expression::literal::LiteralType;
+    Ok(match &literal.literal_type {
+        None | Some(LiteralType::Null(_)) => py.None(),
+        Some(LiteralType::Boolean(b)) => b.into_py_any(py)?,
+        Some(LiteralType::Byte(v))
+        | Some(LiteralType::Short(v))
+        | Some(LiteralType::Integer(v)) => v.into_py_any(py)?,
+        Some(LiteralType::Long(v)) => v.into_py_any(py)?,
+        Some(LiteralType::Float(v)) => (*v as f64).into_py_any(py)?,
+        Some(LiteralType::Double(v)) => v.into_py_any(py)?,
+        Some(LiteralType::String(s)) => s.into_py_any(py)?,
+        Some(LiteralType::Binary(b)) => pyo3::types::PyBytes::new(py, b).into_any().unbind(),
+        Some(LiteralType::Decimal(d)) => py
+            .import("decimal")?
+            .getattr("Decimal")?
+            .call1((&d.value,))?
+            .unbind(),
+        Some(LiteralType::Array(a)) => {
+            let items = a
+                .elements
+                .iter()
+                .map(|e| literal_to_py(py, e))
+                .collect::<PyResult<Vec<_>>>()?;
+            items.into_py_any(py)?
+        }
+        Some(_) => spark_connect::profiler::format_literal(literal).into_py_any(py)?,
+    })
 }

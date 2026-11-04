@@ -1910,6 +1910,9 @@ fn capture_execution(
     info: &mut ExecutionInfo,
     session: &SparkSession,
 ) {
+    if info.operation_id.is_none() && !resp.operation_id.is_empty() {
+        info.operation_id = Some(resp.operation_id.clone());
+    }
     if let Some(metrics) = resp.metrics.take() {
         info.metrics = Some(metrics);
     }
@@ -3295,6 +3298,21 @@ mod conversion_tests {
 mod plan_construction_tests {
     use super::*;
     use crate::session::SparkSession;
+
+    #[test]
+    fn capture_execution_records_first_operation_id() {
+        let spark = session();
+        let mut info = ExecutionInfo::default();
+        let mut resp = proto::ExecutePlanResponse::default();
+        // An empty operation id (e.g. a synthetic response) is not recorded.
+        capture_execution(&mut resp, &mut info, &spark);
+        assert_eq!(info.operation_id, None);
+        resp.operation_id = "op-1".to_string();
+        capture_execution(&mut resp, &mut info, &spark);
+        resp.operation_id = "op-2".to_string();
+        capture_execution(&mut resp, &mut info, &spark);
+        assert_eq!(info.operation_id.as_deref(), Some("op-1"));
+    }
 
     fn session() -> SparkSession {
         SparkSession::builder()

@@ -53,6 +53,8 @@ _OUTPUT_TYPE_SINK = 4
 
 # spark.connect.PipelineCommand.DefineFlow.SCDType enum values.
 _SCD_TYPE_1 = 1
+_SCD_TYPE_2 = 2
+_SCD_TYPE_BY_VALUE = {"1": _SCD_TYPE_1, "2": _SCD_TYPE_2}
 
 
 def _scl(loc: SourceCodeLocation):
@@ -165,7 +167,12 @@ class SparkConnectGraphElementRegistry(GraphElementRegistry):
 
     def register_auto_cdc_flow(self, flow: AutoCdcFlow) -> None:
         scl_file, scl_line = _scl(flow.source_code_location)
-        stored_as_scd_type = _SCD_TYPE_1 if flow.stored_as_scd_type is not None else 0
+        # SCDType enum value: 0 unspecified, else SCD_TYPE_1 / SCD_TYPE_2.
+        stored_as_scd_type = (
+            _SCD_TYPE_BY_VALUE[str(flow.stored_as_scd_type)]
+            if flow.stored_as_scd_type is not None
+            else 0
+        )
         _define_auto_cdc_flow(
             self._spark,
             self._dataflow_graph_id,
@@ -180,6 +187,13 @@ class SparkConnectGraphElementRegistry(GraphElementRegistry):
             stored_as_scd_type,
             scl_file,
             scl_line,
+            list(flow.track_history_column_list)
+            if flow.track_history_column_list is not None
+            else None,
+            list(flow.track_history_except_column_list)
+            if flow.track_history_except_column_list is not None
+            else None,
+            dict(flow.spark_conf) if flow.spark_conf else None,
         )
 
     def register_sql(self, sql_text: str, file_path: Path) -> None:

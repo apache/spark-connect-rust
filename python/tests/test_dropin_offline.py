@@ -3228,3 +3228,174 @@ def test_schema_cache_metadata_wait_releases_gil(mock_connect, accessor):
     else:
         assert result == [("id", "bigint")]
     assert service.calls == 1
+
+
+# --------------------------------------------------------------------------- 4.3.0 gaps
+
+
+def test_timestamp_nanos_types_roundtrip_and_pickle():
+    # Spark's TimestampNTZNanosType/TimestampLTZNanosType (precision 7..9) materialize as
+    # their own types, not as TimeType / a microsecond TimestampType.
+    for cls, name in ((T.TimestampNTZNanosType, "timestamp_ntz"),
+                      (T.TimestampLTZNanosType, "timestamp_ltz")):
+        t = cls(8)
+        assert t.precision == 8
+        assert t.simpleString() == t.typeName() == f"{name}(8)"
+        assert t.json() == f'"{name}(8)"'
+        assert cls().precision == 9
+        assert isinstance(t, T.DatetimeType)
+        assert repr(pickle.loads(pickle.dumps(t))) == repr(t)
+        assert repr(T._parse_datatype_json_string(f'"{name}(7)"')) == repr(cls(7))
+        with pytest.raises(ValueError):
+            cls(6)
+    nested = T.StructType([T.StructField("a", T.ArrayType(T.TimestampLTZNanosType(9)))])
+    assert pickle.loads(pickle.dumps(nested)).simpleString() == "struct<a:array<timestamp_ltz(9)>>"
+
+
+def test_instr_regexp_replace_optional_args():
+    from pyspark.sql import functions as F
+
+    captured = []
+    orig = F._call_function
+    F._call_function = lambda fname, *args: captured.append((fname, args)) or orig(fname, *args)
+    try:
+        F.instr("s", "a")
+        assert captured[-1][1][1:] == ("a",)
+        # occurrence without start searches from position 1 (pyspark 4.3.0).
+        F.instr("s", "a", occurrence=2)
+        assert captured[-1][1][1:] == ("a", 1, 2)
+        F.instr("s", "a", start=None, occurrence=None)
+        assert len(captured[-1][1]) == 2
+        F.instr("s", "a", 3)
+        assert captured[-1][1][1:] == ("a", 3)
+        F.regexp_replace("s", "a", "b")
+        assert len(captured[-1][1]) == 3
+        F.regexp_replace("s", "a", "b", position=None)
+        assert len(captured[-1][1]) == 3
+        F.regexp_replace("s", "a", "b", 4)
+        assert captured[-1][1][1:] == ("a", "b", 4)
+    finally:
+        F._call_function = orig
+
+
+def test_variant_delete_requires_paths():
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql import functions as F
+
+    with pytest.raises(PySparkValueError, match="CANNOT_BE_EMPTY"):
+        F.variant_delete("v")
+
+
+def _offline_session():
+    # Port 1: nothing listens; the channel is lazy, so the session builds offline.
+    return SparkSession.builder.remote("sc://localhost:1").getOrCreate()
+
+
+def test_session_context_manager_stops_session():
+    spark = _offline_session()
+    with spark as s:
+        assert s is spark
+        assert not s.is_stopped
+    # __exit__ stops it; stop() is best-effort (the release RPC fails offline) and
+    # idempotent.
+    assert spark.is_stopped
+    spark.stop()
+    assert SparkSession.getActiveSession() is None
+
+
+def test_sql_context_connect_backed():
+    import warnings
+
+    from pyspark.errors import PySparkNotImplementedError
+    from pyspark.sql import HiveContext, SQLContext
+    from pyspark.sql.connect import context as cctx
+
+    spark = _offline_session()
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            ctx = SQLContext.getOrCreate()
+        assert any(issubclass(w.category, FutureWarning) for w in caught)
+        assert isinstance(ctx, cctx.SQLContext)
+        assert ctx.sparkSession.session_id == spark.session_id
+        # Cached per session (getActiveSession returns a fresh wrapper each call).
+        assert SQLContext.getOrCreate() is ctx
+        assert cctx.SQLContext._get_or_create_from_session(spark) is ctx
+        with pytest.raises(PySparkNotImplementedError):
+            ctx.registerJavaFunction("f", "com.example.F")
+        with pytest.raises(PySparkNotImplementedError):
+            HiveContext.getOrCreate()
+        with pytest.raises(PySparkNotImplementedError):
+            cctx.HiveContext(spark)
+        with pytest.raises(PySparkNotImplementedError):
+            SQLContext(None)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            cctx.SQLContext(spark)
+        assert any(issubclass(w.category, FutureWarning) for w in caught)
+        assert ctx.udf is not None and ctx.read is not None
+        # Stopping a different session leaves the cache; stopping its own clears it.
+        other = spark.newSession()
+        other.stop()
+        assert cctx.SQLContext._instantiatedContext is ctx
+        spark.stop()
+        assert cctx.SQLContext._instantiatedContext is None
+    finally:
+        cctx.SQLContext._instantiatedContext = None
+        spark.stop()
+
+
+def test_execution_info_and_operation_id():
+    from pyspark.errors import AnalysisException
+    from pyspark.errors.exceptions.connect import SparkConnectException
+    from pyspark.sql.connect.client import PlanObservedMetrics
+    from pyspark.sql.metrics import ExecutionInfo
+
+    spark = _offline_session()
+    try:
+        # No action ran yet.
+        assert spark.range(1).executionInfo is None
+    finally:
+        spark.stop()
+    ei = ExecutionInfo([], [PlanObservedMetrics("o", [1, 2], [])], "op-1")
+    assert ei.operation_id == "op-1"
+    assert ei.flows == [("o", {"observed_metric_0": 1, "observed_metric_1": 2})]
+    assert ei.metrics is None
+    # SparkConnectException.operation_id (4.3.0): None unless the transport stamped it.
+    err = AnalysisException("boom")
+    assert isinstance(err, SparkConnectException)
+    assert err.operation_id is None
+    err._operation_id = "op-2"
+    assert err.operation_id == "op-2"
+
+
+def test_create_auto_cdc_flow_scd2_track_history():
+    from pyspark import pipelines as dp
+    from pyspark.errors import PySparkValueError
+    from pyspark.pipelines.graph_element_registry import graph_element_registration_context
+    from pyspark.pipelines.tests.local_graph_element_registry import LocalGraphElementRegistry
+    from pyspark.sql.functions import col
+
+    registry = LocalGraphElementRegistry()
+    with graph_element_registration_context(registry):
+        dp.create_streaming_table("t")
+        dp.create_auto_cdc_flow(
+            target="t", source="s", keys=["k"], sequence_by="seq",
+            stored_as_scd_type=2, track_history_column_list=["a", col("b")],
+            spark_conf={"k": "v"},
+        )
+        with pytest.raises(PySparkValueError, match="CANNOT_SET_TOGETHER"):
+            dp.create_auto_cdc_flow(
+                target="t", source="s", keys=["k"], sequence_by="seq",
+                stored_as_scd_type=2, track_history_column_list=["a"],
+                track_history_except_column_list=["b"],
+            )
+        with pytest.raises(PySparkValueError, match="INVALID_MULTIPLE_ARGUMENT_CONDITIONS"):
+            dp.create_auto_cdc_flow(
+                target="t", source="s", keys=["k"], sequence_by="seq",
+                stored_as_scd_type=1, track_history_column_list=["a"],
+            )
+    flow = registry.auto_cdc_flows[0]
+    assert flow.stored_as_scd_type == 2
+    assert len(flow.track_history_column_list) == 2
+    assert flow.spark_conf == {"k": "v"}

@@ -180,13 +180,14 @@ pub fn define_auto_cdc_flow(
     flow_name: &str,
     target_dataset_name: &str,
     details: define_flow::AutoCdcFlowDetails,
+    sql_conf: HashMap<String, String>,
     source_code_location: Option<proto::SourceCodeLocation>,
 ) -> Result<()> {
     let inner = DefineFlow {
         dataflow_graph_id: Some(dataflow_graph_id.to_string()),
         flow_name: Some(flow_name.to_string()),
         target_dataset_name: Some(target_dataset_name.to_string()),
-        sql_conf: HashMap::new(),
+        sql_conf,
         client_id: None,
         source_code_location,
         once: None,
