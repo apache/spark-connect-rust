@@ -400,7 +400,16 @@ impl PyDataFrame {
                 "numPartitions must be positive, got {numPartitions}"
             )));
         }
-        let col = to_column(partitionIdCol)?;
+        // A `ColumnOrName`, as in pyspark: a string is a column name, not a literal.
+        let col = if let Ok(c) = partitionIdCol.extract::<Bound<'_, PyColumn>>() {
+            c.borrow().column.clone()
+        } else if let Ok(name) = partitionIdCol.extract::<String>() {
+            spark_connect::functions::col(&name)
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "partitionIdCol should be a Column or a column name (str)",
+            ));
+        };
         Ok(PyDataFrame::new(
             self.dataframe.repartition_by_id(numPartitions, col),
         ))
@@ -412,6 +421,14 @@ impl PyDataFrame {
     #[allow(non_snake_case)]
     fn zipWithIndex(&self, indexColName: &str) -> PyDataFrame {
         PyDataFrame::new(self.dataframe.zip_with_index(indexColName))
+    }
+
+    /// Zip this DataFrame with another column-wise (side-by-side). Mirrors
+    /// `DataFrame.zip(other)`.
+    fn zip(&self, other: &PyDataFrame) -> PyResult<PyDataFrame> {
+        Ok(PyDataFrame::new(
+            self.dataframe.zip(&other.dataframe).to_pyerr()?,
+        ))
     }
 
     /// Union with another DataFrame.
@@ -1213,20 +1230,48 @@ impl PyDataFrame {
         py.detach(|| self.dataframe.show(n)).to_pyerr()
     }
 
-    /// Execution metrics from the most recent action. Mirrors `DataFrame.executionInfo`.
+    /// Execution info from the most recent action, as a `pyspark.sql.metrics.ExecutionInfo`
+    /// (plan metrics, observed-metric flows, and the ExecutePlan `operation_id`). Mirrors
+    /// `DataFrame.executionInfo`; `None` before any action ran.
     #[getter]
     #[pyo3(name = "executionInfo")]
     fn execution_info(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let info = self.dataframe.execution_info().to_pyerr()?;
-        let dict = pyo3::types::PyDict::new(py);
-        dict.set_item("has_metrics", info.metrics.is_some())?;
-        let names: Vec<String> = info
-            .observed_metrics
-            .iter()
-            .map(|m| m.name.clone())
-            .collect();
-        dict.set_item("observed_metrics", names)?;
-        Ok(dict.into_any().unbind())
+        let Ok(info) = self.dataframe.execution_info() else {
+            return Ok(py.None());
+        };
+        let metrics_mod = py.import("pyspark.sql.metrics")?;
+        let plan_metrics_cls = metrics_mod.getattr("PlanMetrics")?;
+        let metric_value_cls = metrics_mod.getattr("MetricValue")?;
+        // Mirrors SparkConnectClient._build_metrics.
+        let plan_metrics = pyo3::types::PyList::empty(py);
+        if let Some(m) = &info.metrics {
+            for x in &m.metrics {
+                let values = pyo3::types::PyList::empty(py);
+                for (k, v) in &x.execution_metrics {
+                    values.append(metric_value_cls.call1((k, v.value, &v.metric_type))?)?;
+                }
+                plan_metrics
+                    .append(plan_metrics_cls.call1((&x.name, x.plan_id, x.parent, values))?)?;
+            }
+        }
+        let observed_cls = py
+            .import("pyspark.sql.connect.client")?
+            .getattr("PlanObservedMetrics")?;
+        let observed = pyo3::types::PyList::empty(py);
+        for o in &info.observed_metrics {
+            let values = o
+                .values
+                .iter()
+                .map(|l| literal_to_py(py, l, None))
+                .collect::<PyResult<Vec<_>>>()?;
+            observed.append(observed_cls.call1((&o.name, values, o.keys.clone()))?)?;
+        }
+        let ei = metrics_mod.getattr("ExecutionInfo")?.call1((
+            plan_metrics,
+            observed,
+            info.operation_id.clone(),
+        ))?;
+        Ok(ei.unbind())
     }
 
     /// Convert to a pandas-on-Spark DataFrame. Mirrors `DataFrame.pandas_api`;
@@ -1672,6 +1717,25 @@ impl PyMergeIntoWriter {
 
 #[pymethods]
 impl PyMergeIntoWriter {
+    /// Nested builder-class references, mirroring pyspark's `MergeIntoWriter.WhenMatched`
+    /// etc. (the objects returned by `whenMatched()` / `whenNotMatched()` /
+    /// `whenNotMatchedBySource()`).
+    #[classattr]
+    #[allow(non_snake_case)]
+    fn WhenMatched(py: Python<'_>) -> Py<pyo3::types::PyType> {
+        py.get_type::<PyWhenMatched>().unbind()
+    }
+    #[classattr]
+    #[allow(non_snake_case)]
+    fn WhenNotMatched(py: Python<'_>) -> Py<pyo3::types::PyType> {
+        py.get_type::<PyWhenNotMatched>().unbind()
+    }
+    #[classattr]
+    #[allow(non_snake_case)]
+    fn WhenNotMatchedBySource(py: Python<'_>) -> Py<pyo3::types::PyType> {
+        py.get_type::<PyWhenNotMatchedBySource>().unbind()
+    }
+
     #[pyo3(name = "whenMatched", signature = (condition=None))]
     fn when_matched(&mut self, condition: Option<&PyColumn>) -> PyResult<PyWhenMatched> {
         let cond = condition.map(|c| c.column.clone());
@@ -2454,4 +2518,153 @@ impl PyLocalRowIterator {
             }
         }
     }
+}
+
+/// Convert an observed-metric literal to a Python value. Mirrors
+/// `LiteralExpression._to_value`, which `PlanObservedMetrics.pairs` applies: the kinds it
+/// decodes map to the same Python values, and for any other kind (which the reference
+/// rejects with `UNSUPPORTED_LITERAL`) this returns an `_UnsupportedLiteral` marker, so
+/// the error surfaces when `flows` is read, as in the reference, not when the
+/// `ExecutionInfo` is built.
+///
+/// `data_type` is the literal's type when the enclosing literal carries it; a struct's
+/// field names come from it, else from the literal's own `data_type`, else from the
+/// deprecated `struct_type`.
+fn literal_to_py(
+    py: Python<'_>,
+    literal: &spark_connect_proto::expression::Literal,
+    data_type: Option<&spark_connect_proto::DataType>,
+) -> PyResult<Py<PyAny>> {
+    use pyo3::IntoPyObjectExt;
+    use spark_connect_proto::data_type::Kind;
+    use spark_connect_proto::expression::literal::LiteralType;
+    let data_type = data_type.or(literal.data_type.as_ref());
+    let datetime = || py.import("datetime");
+    Ok(match &literal.literal_type {
+        None | Some(LiteralType::Null(_)) => py.None(),
+        Some(LiteralType::Boolean(b)) => b.into_py_any(py)?,
+        Some(LiteralType::Byte(v))
+        | Some(LiteralType::Short(v))
+        | Some(LiteralType::Integer(v)) => v.into_py_any(py)?,
+        Some(LiteralType::Long(v)) => v.into_py_any(py)?,
+        Some(LiteralType::Float(v)) => (*v as f64).into_py_any(py)?,
+        Some(LiteralType::Double(v)) => v.into_py_any(py)?,
+        Some(LiteralType::String(s)) => s.into_py_any(py)?,
+        Some(LiteralType::Binary(b)) => pyo3::types::PyBytes::new(py, b).into_any().unbind(),
+        Some(LiteralType::Decimal(d)) => py
+            .import("decimal")?
+            .getattr("Decimal")?
+            .call1((&d.value,))?
+            .unbind(),
+        // DateType.fromInternal: days since the epoch (ordinal 719163).
+        Some(LiteralType::Date(days)) => datetime()?
+            .getattr("date")?
+            .call_method1("fromordinal", (*days as i64 + 719_163,))?
+            .unbind(),
+        // TimeType.fromInternal: nanoseconds of the day, truncated to microseconds.
+        Some(LiteralType::Time(t)) => {
+            let nano = t.nano;
+            datetime()?
+                .getattr("time")?
+                .call1((
+                    nano.div_euclid(3_600_000_000_000),
+                    nano.rem_euclid(3_600_000_000_000) / 60_000_000_000,
+                    nano.rem_euclid(60_000_000_000) / 1_000_000_000,
+                    nano.rem_euclid(1_000_000_000) / 1_000,
+                ))?
+                .unbind()
+        }
+        // TimestampType.fromInternal: a naive local datetime, built from whole seconds so
+        // the microseconds are exact.
+        Some(LiteralType::Timestamp(ts)) => {
+            let kwargs = pyo3::types::PyDict::new(py);
+            kwargs.set_item("microsecond", ts.rem_euclid(1_000_000))?;
+            datetime()?
+                .getattr("datetime")?
+                .call_method1("fromtimestamp", (ts.div_euclid(1_000_000),))?
+                .call_method("replace", (), Some(&kwargs))?
+                .unbind()
+        }
+        // TimestampNTZType.fromInternal: the UTC wall clock, without a zone.
+        Some(LiteralType::TimestampNtz(ts)) => {
+            let dt = datetime()?;
+            let utc = dt.getattr("timezone")?.getattr("utc")?;
+            let kwargs = pyo3::types::PyDict::new(py);
+            kwargs.set_item("microsecond", ts.rem_euclid(1_000_000))?;
+            kwargs.set_item("tzinfo", py.None())?;
+            dt.getattr("datetime")?
+                .call_method1("fromtimestamp", (ts.div_euclid(1_000_000), utc))?
+                .call_method("replace", (), Some(&kwargs))?
+                .unbind()
+        }
+        // DayTimeIntervalType.fromInternal: timedelta(microseconds=v).
+        Some(LiteralType::DayTimeInterval(micros)) => {
+            let kwargs = pyo3::types::PyDict::new(py);
+            kwargs.set_item("microseconds", micros)?;
+            datetime()?
+                .getattr("timedelta")?
+                .call((), Some(&kwargs))?
+                .unbind()
+        }
+        Some(LiteralType::Array(a)) => {
+            let element_type = match data_type.and_then(|t| t.kind.as_ref()) {
+                Some(Kind::Array(t)) => t.element_type.as_deref(),
+                _ => None,
+            };
+            let items = a
+                .elements
+                .iter()
+                .map(|e| literal_to_py(py, e, element_type))
+                .collect::<PyResult<Vec<_>>>()?;
+            items.into_py_any(py)?
+        }
+        Some(LiteralType::Map(m)) => {
+            let (key_type, value_type) = match data_type.and_then(|t| t.kind.as_ref()) {
+                Some(Kind::Map(t)) => (t.key_type.as_deref(), t.value_type.as_deref()),
+                _ => (None, None),
+            };
+            let dict = pyo3::types::PyDict::new(py);
+            for (k, v) in m.keys.iter().zip(&m.values) {
+                dict.set_item(
+                    literal_to_py(py, k, key_type)?,
+                    literal_to_py(py, v, value_type)?,
+                )?;
+            }
+            dict.into_any().unbind()
+        }
+        Some(LiteralType::Struct(s)) => {
+            #[allow(deprecated)]
+            let struct_type = match data_type.and_then(|t| t.kind.as_ref()) {
+                Some(Kind::Struct(t)) => Some(t),
+                _ => match s.struct_type.as_ref().and_then(|t| t.kind.as_ref()) {
+                    Some(Kind::Struct(t)) => Some(t),
+                    _ => None,
+                },
+            };
+            let fields = struct_type.map(|t| t.fields.as_slice()).unwrap_or_default();
+            let names = (0..s.elements.len())
+                .map(|i| match fields.get(i) {
+                    Some(f) => f.name.clone(),
+                    None => format!("_{}", i + 1),
+                })
+                .collect::<Vec<_>>();
+            let values = s
+                .elements
+                .iter()
+                .enumerate()
+                .map(|(i, e)| {
+                    literal_to_py(py, e, fields.get(i).and_then(|f| f.data_type.as_ref()))
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            py.import("pyspark.sql.types")?
+                .getattr("_create_row")?
+                .call1((names, values))?
+                .unbind()
+        }
+        Some(_) => py
+            .import("pyspark.sql.connect.client")?
+            .getattr("_UnsupportedLiteral")?
+            .call1((format!("{literal:?}"),))?
+            .unbind(),
+    })
 }

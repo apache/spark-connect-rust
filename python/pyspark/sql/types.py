@@ -17,6 +17,8 @@ try:
         AnyTimeType, AnsiIntervalType, SpatialType,
         GeometryType, GeographyType,
         VariantVal, Geometry, Geography,
+        # Spark's nanosecond timestamp types (no PySpark 4.3.0 class; not in __all__).
+        TimestampNTZNanosType, TimestampLTZNanosType,
     )
     # Row lives in the Rust core; upstream code imports it from pyspark.sql.types too.
     from pyspark._pyspark import Row
@@ -73,7 +75,8 @@ except ImportError:  # pragma: no cover - defensive fallback when the extension 
 
     class DateType(DataType):
         """Date data type."""
-        pass
+
+        EPOCH_ORDINAL = 719163
 
     class TimestampType(DataType):
         """Timestamp data type."""
@@ -264,6 +267,11 @@ __all__ = [
     "YearMonthIntervalType",
     "DayTimeIntervalType",
     "VariantType",
+    "VariantVal",
+    "GeometryType",
+    "GeographyType",
+    "Geometry",
+    "Geography",
     "_drop_metadata",
     "_parse_datatype_json_string",
     "_parse_datatype_json_value",
@@ -307,6 +315,10 @@ def _parse_datatype_json_value(v):
         m = _re.match(r"time\((\d+)\)$", v)
         if m:
             return TimeType(int(m.group(1)))
+        m = _re.match(r"timestamp_(ntz|ltz)\(\s*(\d+)\s*\)$", v)
+        if m:
+            cls = TimestampNTZNanosType if m.group(1) == "ntz" else TimestampLTZNanosType
+            return cls(int(m.group(2)))
         if v == "calendarinterval":
             return CalendarIntervalType()
         _ym = {"year": 0, "month": 1}

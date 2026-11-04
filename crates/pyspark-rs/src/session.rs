@@ -50,9 +50,11 @@ impl PySparkSessionBuilder {
     }
 
     /// Set the remote Spark Connect server URL. Returns the builder (chainable).
-    fn remote(&self, url: &str) -> PySparkSessionBuilder {
+    /// Mirrors `SparkSession.Builder.remote(location="sc://localhost")`.
+    #[pyo3(signature = (location="sc://localhost"))]
+    fn remote(&self, location: &str) -> PySparkSessionBuilder {
         let mut b = self.clone();
-        b.remote_url = Some(url.to_string());
+        b.remote_url = Some(location.to_string());
         b
     }
 
@@ -99,13 +101,25 @@ impl PySparkSessionBuilder {
     /// already-running remote server, so this is a no-op (chainable), matching
     /// pyspark's Connect behavior.
     #[pyo3(name = "appName")]
-    fn app_name(&self, _name: &str) -> PySparkSessionBuilder {
+    fn app_name(&self, name: &str) -> PySparkSessionBuilder {
+        let _ = name;
         self.clone()
     }
 
     /// `master` - not applicable to a remote Connect session (no local cluster to
     /// point at); accepted and ignored for API parity, like pyspark Connect.
-    fn master(&self, _url: &str) -> PySparkSessionBuilder {
+    fn master(&self, master: &str) -> PySparkSessionBuilder {
+        let _ = master;
+        self.clone()
+    }
+
+    /// `_registerHook` - register an execution-hook factory (mirrors pyspark's Builder).
+    /// Accepted for API parity; this native-transport client sends ExecutePlanRequests
+    /// from Rust, so registered `Hook.on_execute_plan` callbacks are not invoked (see
+    /// `PyHook`). Chainable, matching the builder pattern.
+    #[pyo3(name = "_registerHook")]
+    fn register_hook(&self, hook_factory: &Bound<'_, PyAny>) -> PySparkSessionBuilder {
+        let _ = hook_factory;
         self.clone()
     }
 
@@ -232,6 +246,28 @@ fn log_client_banner(py: Python<'_>) {
     });
 }
 
+/// `SparkSession.Hook` - injects behavior around plan execution (mirrors pyspark's
+/// `SparkSession.Hook`). In pyspark, `on_execute_plan` rewrites the Python
+/// `ExecutePlanRequest` before the gRPC client sends it. This client uses a native Rust
+/// transport that builds and sends the request in Rust (there is no Python request to
+/// rewrite), so the hook is a passthrough - the same architectural reason
+/// `SparkSession.client` is absent. Exposed for API parity and subclassing.
+#[pyclass(name = "Hook", module = "pyspark.sql.connect.session", subclass)]
+pub struct PyHook;
+
+#[pymethods]
+impl PyHook {
+    #[new]
+    fn new() -> Self {
+        PyHook
+    }
+
+    /// Called before sending an ExecutePlanRequest; returns the (unchanged) request.
+    fn on_execute_plan<'py>(&self, request: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        request
+    }
+}
+
 /// Python wrapper for a Spark session.
 #[pyclass(name = "SparkSession", module = "pyspark.sql.session")]
 pub struct PySparkSession {
@@ -241,6 +277,22 @@ pub struct PySparkSession {
 impl PySparkSession {
     pub fn new(session: SparkSession) -> Self {
         PySparkSession { session }
+    }
+}
+
+/// Whether `obj` is an instance of `module.class`, without importing `module` when it is not
+/// loaded yet: an instance can only exist once its module was imported. A `None` entry in
+/// `sys.modules` blocks the import, so it counts as not loaded.
+fn is_loaded_instance(
+    py: Python<'_>,
+    obj: &Bound<'_, PyAny>,
+    module: &str,
+    class: &str,
+) -> PyResult<bool> {
+    let modules = py.import("sys")?.getattr("modules")?;
+    match modules.cast::<PyDict>()?.get_item(module)? {
+        Some(m) if !m.is_none() => obj.is_instance(&m.getattr(class)?),
+        _ => Ok(false),
     }
 }
 
@@ -326,7 +378,8 @@ impl PySparkSession {
         Ok(PyDataFrame::new(df))
     }
 
-    /// Create a DataFrame from a list of tuples/lists and an optional schema.
+    /// Create a DataFrame from a list of tuples/lists and an optional schema. A pandas
+    /// DataFrame or a pyarrow Table is accepted too, as in pyspark.
     ///
     /// If schema is a list of strings, those are used as column names (all types inferred as string).
     /// If schema is None, columns are named col0, col1, etc. and all types are string.
@@ -349,11 +402,7 @@ impl PySparkSession {
         let _ = (samplingRatio, verifySchema);
 
         // A caller holding a Table has already imported PyArrow.
-        let pa = py
-            .import("sys")?
-            .getattr("modules")?
-            .call_method1("get", ("pyarrow",))?;
-        if !pa.is_none() && data.is_instance(&pa.getattr("Table")?)? {
+        if is_loaded_instance(py, data, "pyarrow", "Table")? {
             return crate::pyarrow_import::create_dataframe(py, &self.session, data, schema);
         }
 
@@ -566,9 +615,52 @@ impl PySparkSession {
         PyStreamingQueryManager::new(self.session.streams())
     }
 
-    /// Stop this Spark session.
+    /// Stop this Spark session. Best-effort and idempotent, mirroring pyspark: a failure
+    /// to release the session on the server is logged, not raised. Also clears the
+    /// active session and the cached `SQLContext` if they belong to this session.
     fn stop(&self, py: Python<'_>) -> PyResult<()> {
-        py.detach(|| self.session.stop()).to_pyerr()
+        if let Err(e) = py.detach(|| self.session.stop()) {
+            let logger = py
+                .import("logging")?
+                .call_method1("getLogger", ("pyspark",))?;
+            logger.call_method1(
+                "warning",
+                (format!(
+                    "session.stop(): Session could not be released. Error: {e}"
+                ),),
+            )?;
+        }
+        let sid = self.session.session_id();
+        {
+            let mut slot = active_slot().lock().unwrap();
+            if slot.as_ref().is_some_and(|s| s.session_id() == sid) {
+                *slot = None;
+            }
+        }
+        // Only touch the SQLContext cache if the module was ever imported (as pyspark does).
+        let modules = py.import("sys")?.getattr("modules")?;
+        if let Ok(ctx_mod) = modules.get_item("pyspark.sql.connect.context") {
+            ctx_mod.call_method1("_reset_instantiated_context", (sid,))?;
+        }
+        Ok(())
+    }
+
+    /// Enable `with SparkSession.builder.(...).getOrCreate() as session:` syntax.
+    fn __enter__(slf: Py<Self>) -> Py<Self> {
+        slf
+    }
+
+    /// Stop the session when leaving a `with` block (mirrors pyspark 4.3.0).
+    #[pyo3(signature = (exc_type=None, exc_value=None, traceback=None))]
+    fn __exit__(
+        &self,
+        py: Python<'_>,
+        exc_type: Option<Py<PyAny>>,
+        exc_value: Option<Py<PyAny>>,
+        traceback: Option<Py<PyAny>>,
+    ) -> PyResult<()> {
+        let _ = (exc_type, exc_value, traceback);
+        self.stop(py)
     }
 
     /// Get the UDF registration API (`spark.udf`). Returns the
@@ -662,6 +754,13 @@ impl PySparkSession {
     #[allow(non_snake_case)]
     fn Builder(py: Python<'_>) -> Py<pyo3::types::PyType> {
         py.get_type::<PySparkSessionBuilder>().unbind()
+    }
+
+    /// The execution hook base class, reached as `SparkSession.Hook` (mirrors pyspark).
+    #[classattr]
+    #[allow(non_snake_case)]
+    fn Hook(py: Python<'_>) -> Py<pyo3::types::PyType> {
+        py.get_type::<PyHook>().unbind()
     }
 
     /// UDTF registration accessor, mirroring `SparkSession.udtf.register(name, cls)`.
@@ -890,8 +989,8 @@ impl PyConnectClientStub {
 }
 
 /// Infer the Spark `DataType` for a `createDataFrame` column from its (first) value.
-/// Scalars, Date/Timestamp, and Decimal map precisely; Null and nested collections
-/// fall back to String (createDataFrame here does not deep-infer nested schemas).
+/// Nested collections are inferred recursively; nulls and empty collections use
+/// String as a fallback. Interval input conversion is tracked in SPARK-60659.
 fn value_to_datatype(v: &Value) -> DataType {
     let utf8 = || DataType::String {
         collation: "UTF8_BINARY".to_string(),
@@ -908,6 +1007,10 @@ fn value_to_datatype(v: &Value) -> DataType {
         Value::Binary(_) => DataType::Binary,
         Value::Date(_) => DataType::Date,
         Value::Timestamp(_) => DataType::Timestamp,
+        Value::DayTimeInterval(_) => DataType::DayTimeInterval {
+            start_field: 0,
+            end_field: 3,
+        },
         Value::Decimal {
             precision, scale, ..
         } => DataType::Decimal {

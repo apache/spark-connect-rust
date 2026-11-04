@@ -31,6 +31,8 @@ fn all_scalar_variants() -> Vec<DataType> {
         DataType::Timestamp,
         DataType::TimestampNtz,
         DataType::Time { precision: 6 },
+        DataType::TimestampNtzNanos { precision: 9 },
+        DataType::TimestampLtzNanos { precision: 7 },
         DataType::CalendarInterval,
         DataType::YearMonthInterval {
             start_field: 0,
@@ -307,4 +309,41 @@ fn from_ddl_full_grammar() {
     // Malformed input must error, not panic.
     assert!(DataType::from_ddl("array<").is_err());
     assert!(DataType::from_ddl("struct<a:>").is_err());
+}
+
+#[test]
+fn timestamp_nanos_types() {
+    use spark_connect_proto::data_type::{Kind, TimestampLtzNanos, TimestampNtzNanos};
+
+    let ntz = DataType::TimestampNtzNanos { precision: 8 };
+    let ltz = DataType::TimestampLtzNanos { precision: 9 };
+    // Names mirror Scala TimestampNTZNanosType / TimestampLTZNanosType.typeName.
+    assert_eq!(ntz.simple_string(), "timestamp_ntz(8)");
+    assert_eq!(ntz.type_name(), "timestamp_ntz(8)");
+    assert_eq!(ltz.json(), "\"timestamp_ltz(9)\"");
+    assert!(ntz.need_conversion());
+    assert_eq!(
+        DataType::from_json_str("\"timestamp_ntz(8)\"").unwrap(),
+        ntz
+    );
+    assert_eq!(DataType::from_ddl("timestamp_ltz(9)").unwrap(), ltz);
+    // Precision outside 7..=9 is rejected.
+    assert!(DataType::from_json_str("\"timestamp_ntz(6)\"").is_err());
+
+    // Proto kinds map to the nanos variants (not TIME / micros TIMESTAMP), and an
+    // omitted precision defaults to 9 per types.proto.
+    let mut p = spark_connect_proto::DataType::default();
+    p.kind = Some(Kind::TimestampNtzNanos(TimestampNtzNanos::default()));
+    assert_eq!(
+        DataType::from_proto(&p).unwrap(),
+        DataType::TimestampNtzNanos { precision: 9 }
+    );
+    p.kind = Some(Kind::TimestampLtzNanos(TimestampLtzNanos {
+        precision: Some(7),
+        ..Default::default()
+    }));
+    assert_eq!(
+        DataType::from_proto(&p).unwrap(),
+        DataType::TimestampLtzNanos { precision: 7 }
+    );
 }

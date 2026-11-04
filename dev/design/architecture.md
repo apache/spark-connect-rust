@@ -9,9 +9,9 @@ hot paths (plan building, gRPC transport, Arrow decode) in Rust.
 
 ## Source of truth
 
-- **Protocol**: Spark Connect protobuf `v4.2.0` - vendored under
+- **Protocol**: Spark Connect protobuf `v4.3.0` - vendored under
   `crates/spark-connect-proto/proto/`, SHA pinned in `proto/SPARK_SHA.txt`.
-  Developed and validated against Apache Spark 4.2.0 (wire-compatible).
+  Developed and validated against Apache Spark 4.3.0 (wire-compatible).
 - **Python reference**: `python/pyspark/sql/connect/**` (+ `sql/types.py`,
   `errors/exceptions/**`). This is the code we mirror line-by-line.
 - **Prior art (same author)**: `spark-connect-ruby`, `spark-connect-scala3`,
@@ -86,6 +86,12 @@ PyArrow's pandas conversion, which may copy.
 Scalar input conversion and row materialization stay in `pyspark-rs`. `collect()`
 still uses the native client's owned rows; `createDataFrame(pandas)` still
 materializes Python rows. Neither path is claimed to be zero-copy.
+`createDataFrame(pyarrow.Table)` normalizes the table with PySpark's helpers as the
+reference client does (timestamp localization, a cast to the target schema), imports
+it into arrow-rs through the C Stream interface, and serializes the batches to Arrow
+IPC in Rust: inline in a `LocalRelation`, or, at or above
+`spark.sql.session.localRelationCacheThreshold`, as session-scoped cache artifacts
+referenced by a `ChunkedCachedLocalRelation` (see `docs/architecture.md`).
 
 The Arrow handoff has been tested locally with PyArrow 10.0.0 (Python 3.9)
 and 26.0.0 (Python 3.12). CI installs the latest PyArrow; it does not pin or

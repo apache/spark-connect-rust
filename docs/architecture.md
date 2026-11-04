@@ -36,7 +36,7 @@ flowchart TD
         ARROW["Arrow result decode"]
     end
 
-    SERVER["Spark Connect server (Spark 4.2+, :15002)"]
+    SERVER["Spark Connect server (Spark 4.3+, :15002)"]
     OUT["Rows / Arrow - optionally DataFusion or Polars (Rust); pandas (Python)"]
 
     PY --> SKIN --> EXT --> API
@@ -79,6 +79,10 @@ flowchart LR
 When you call an action such as `count()` or `show()`, the lazily-built plan is
 serialized and sent to the server; results stream back as Arrow batches.
 
+Day-time intervals are returned as Python `datetime.timedelta` values, including
+nested values and nulls. Creating DataFrames from `timedelta` inputs or collected
+interval rows is not yet supported; see [SPARK-60659](https://issues.apache.org/jira/browse/SPARK-60659).
+
 ```mermaid
 sequenceDiagram
     participant App as Your code (Rust or pyspark)
@@ -98,9 +102,13 @@ sequenceDiagram
 ```
 
 Transformations are **lazy** - they only build up the plan. Only an *action*
-triggers `ExecutePlan`. If the response stream breaks mid-flight, the core's
-reattachable-execute iterator resumes from the last response it saw, so long
-results survive transient disconnects.
+triggers `ExecutePlan`. If the response stream breaks mid-flight, or the server
+ends it before the result is complete (as it does after
+`spark.connect.execute.reattachable.senderMaxStreamDuration` or
+`senderMaxStreamSize`), the core's reattachable-execute iterator resumes from the
+last response it saw, so long results survive transient disconnects. Like the
+reference client, it releases each response it has read, and the whole execution
+once the result is complete, so the server does not keep them.
 
 ### Python Arrow table handoff
 

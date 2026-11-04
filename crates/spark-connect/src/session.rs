@@ -31,6 +31,11 @@ pub struct ExecutionInfo {
     /// Observed metrics collected during execution (also where `observe(...)`
     /// and UDF-profiler results surface).
     pub observed_metrics: Vec<proto::execute_plan_response::ObservedMetrics>,
+    /// The ExecutePlan operation id: assigned by the client before the request is sent
+    /// (the request's id, or a new UUID) and echoed by the server in
+    /// `ExecutePlanResponse.operation_id`. Mirrors `ExecutionInfo.operation_id` (new in
+    /// pyspark 4.3.0).
+    pub operation_id: Option<String>,
 }
 
 /// A Spark Connect session for interacting with a remote Spark cluster.
@@ -572,10 +577,14 @@ impl SparkSession {
     }
 
     /// Stop this Spark session.
+    ///
+    /// Idempotent, mirroring pyspark: the session is marked stopped even if releasing it
+    /// on the server fails, and stopping an already stopped session is a no-op.
     pub fn stop(&self) -> Result<()> {
-        block_on(self.client.release_session())?;
-        self.stopped.store(true, Ordering::SeqCst);
-        Ok(())
+        if self.stopped.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+        block_on(self.client.release_session())
     }
 
     /// Whether `stop()` has been called on this session. Mirrors
@@ -742,6 +751,10 @@ fn datatype_to_arrow(dt: &DataType) -> Result<arrow::datatypes::DataType> {
         // TIMESTAMP (LTZ) and TIMESTAMP_NTZ are both micros; NTZ carries no zone.
         DataType::Timestamp => A::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
         DataType::TimestampNtz => A::Timestamp(TimeUnit::Microsecond, None),
+        DataType::TimestampLtzNanos { .. } => {
+            A::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()))
+        }
+        DataType::TimestampNtzNanos { .. } => A::Timestamp(TimeUnit::Nanosecond, None),
         DataType::Time { .. } => A::Time64(TimeUnit::Microsecond),
         DataType::Decimal { precision, scale } => A::Decimal128(*precision as u8, *scale as i8),
         DataType::Array {
@@ -893,6 +906,27 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
                 .collect();
             let arr = TimestampMicrosecondArray::from(vals?);
             let arr = if matches!(dt, DataType::TimestampNtz) {
+                arr
+            } else {
+                arr.with_timezone("UTC")
+            };
+            Ok(Arc::new(arr))
+        }
+        // Row values are microseconds (collect truncates nanosecond columns to micros), so
+        // scale them up to the nanosecond unit `to_arrow_type` declares for these types.
+        DataType::TimestampNtzNanos { .. } | DataType::TimestampLtzNanos { .. } => {
+            let vals: Result<Vec<Option<i64>>> = values
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Timestamp(t) => t.checked_mul(1_000).map(Some).ok_or_else(|| {
+                        SparkError::connect_msg("Timestamp out of range for nanosecond precision")
+                    }),
+                    _ => Err(SparkError::connect_msg("Type mismatch in row data")),
+                })
+                .collect();
+            let arr = TimestampNanosecondArray::from(vals?);
+            let arr = if matches!(dt, DataType::TimestampNtzNanos { .. }) {
                 arr
             } else {
                 arr.with_timezone("UTC")
@@ -1316,6 +1350,22 @@ mod tests {
     }
 
     #[test]
+    fn stop_is_idempotent_and_marks_stopped() {
+        // Port 1: nothing listens, so the ReleaseSession RPC fails fast. The session is
+        // still marked stopped (pyspark's stop() is best-effort) and a second stop() is a
+        // no-op that does not retry the release.
+        let spark = SparkSession::builder()
+            .remote("sc://localhost:1")
+            .get_or_create()
+            .expect("failed to build session");
+        let other = spark.clone();
+        let _ = spark.stop();
+        assert!(spark.is_stopped());
+        assert!(other.is_stopped(), "stopped flag is shared across clones");
+        assert!(spark.stop().is_ok());
+    }
+
+    #[test]
     fn session_is_not_stopped_initially() {
         let spark = session();
         assert!(!spark.is_stopped());
@@ -1472,6 +1522,85 @@ mod tests {
             BinaryArray,
             vec![Some(&[0_u8, 255, 1][..]), None, Some(&[][..])]
         );
+    }
+
+    #[test]
+    fn input_ipc_scales_nanos_timestamps_and_keeps_zone() {
+        use arrow::array::{ListArray, TimestampNanosecondArray};
+        use arrow::datatypes::{DataType as A, TimeUnit};
+        let ntz = DataType::TimestampNtzNanos { precision: 9 };
+        let ltz = DataType::TimestampLtzNanos { precision: 7 };
+        let array = DataType::Array {
+            element_type: Box::new(ltz.clone()),
+            contains_null: true,
+        };
+        let schema = schema(vec![ntz, ltz, array]);
+        let rows = vec![
+            row(vec![
+                Value::Timestamp(1_700_000_000_123_456),
+                Value::Timestamp(-1),
+                Value::List(vec![Value::Timestamp(2), Value::Null]),
+            ]),
+            row(vec![Value::Null, Value::Null, Value::List(vec![])]),
+        ];
+        let batch = read_batch(&rows, &schema);
+        let column = |i: usize| {
+            batch
+                .column(i)
+                .as_any()
+                .downcast_ref::<TimestampNanosecondArray>()
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(
+            batch.schema().field(0).data_type(),
+            &A::Timestamp(TimeUnit::Nanosecond, None)
+        );
+        assert_eq!(
+            batch.schema().field(1).data_type(),
+            &A::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()))
+        );
+        assert_eq!(
+            column(0),
+            TimestampNanosecondArray::from(vec![Some(1_700_000_000_123_456_000), None])
+        );
+        assert_eq!(
+            column(1),
+            TimestampNanosecondArray::from(vec![Some(-1_000), None]).with_timezone("UTC")
+        );
+        let list = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let first = list.value(0);
+        assert_eq!(
+            first
+                .as_any()
+                .downcast_ref::<TimestampNanosecondArray>()
+                .unwrap(),
+            &TimestampNanosecondArray::from(vec![Some(2_000), None]).with_timezone("UTC")
+        );
+        assert_eq!(list.value_length(1), 0);
+
+        // An empty input with a nanos schema builds too, as for the micros types.
+        let empty = rows_to_arrow_ipc(
+            &[],
+            &schema_one(DataType::TimestampNtzNanos { precision: 9 }),
+        );
+        assert!(empty.is_ok(), "{empty:?}");
+
+        let overflow = rows_to_arrow_ipc(
+            &[row(vec![Value::Timestamp(i64::MAX)])],
+            &schema_one(DataType::TimestampNtzNanos { precision: 9 }),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(overflow.contains("out of range"), "{overflow}");
+    }
+
+    fn schema_one(dt: DataType) -> DataType {
+        schema(vec![dt])
     }
 
     #[test]

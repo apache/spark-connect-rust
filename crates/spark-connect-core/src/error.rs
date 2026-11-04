@@ -173,6 +173,9 @@ pub struct SparkError {
     /// Raw `grpc-status-details-bin` (a serialized `google.rpc.Status`), if present.
     /// Lets the PyO3 layer reconstruct the exact typed pyspark exception.
     pub grpc_details: Option<Vec<u8>>,
+    /// The ExecutePlan operation id the error was raised for, if known. Backs
+    /// `SparkConnectException.operation_id` (new in pyspark 4.3.0).
+    pub operation_id: Option<String>,
 }
 
 /// The PySpark exception hierarchy leaf we map to.
@@ -265,6 +268,7 @@ impl SparkError {
             server_stacktrace: None,
             grpc_code: None,
             grpc_details: None,
+            operation_id: None,
         }
     }
 
@@ -285,6 +289,7 @@ impl SparkError {
             server_stacktrace: None,
             grpc_code: None,
             grpc_details: None,
+            operation_id: None,
         }
     }
 
@@ -303,6 +308,7 @@ impl SparkError {
             server_stacktrace: None,
             grpc_code: None,
             grpc_details: None,
+            operation_id: None,
         }
     }
 
@@ -367,6 +373,7 @@ impl SparkError {
                     server_stacktrace,
                     grpc_code: None,
                     grpc_details: None,
+                    operation_id: None,
                 },
                 None => Self::connect_msg(format!("[{}] {}", status.code(), message)),
             }
@@ -377,6 +384,12 @@ impl SparkError {
             err.grpc_details = Some(details);
         }
         err
+    }
+
+    /// Attach the ExecutePlan operation id this error was raised for.
+    pub fn with_operation_id(mut self, operation_id: impl Into<String>) -> Self {
+        self.operation_id = Some(operation_id.into());
+        self
     }
 
     /// Get the error condition (error class).
@@ -736,6 +749,16 @@ fn parse_error_conditions_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_with_operation_id() {
+        let err = SparkError::connect_msg("boom");
+        assert_eq!(err.operation_id, None);
+        let err = err.with_operation_id("op-123");
+        assert_eq!(err.operation_id.as_deref(), Some("op-123"));
+        let from_status = SparkError::from_grpc_status(Status::internal("x"));
+        assert_eq!(from_status.operation_id, None);
+    }
 
     #[test]
     fn test_render_simple_message() {
