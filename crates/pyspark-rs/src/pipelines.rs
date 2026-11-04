@@ -163,7 +163,8 @@ pub fn pipeline_define_flow(
 
 /// `PipelineCommand.DefineFlow` carrying an Auto-CDC flow body. `stored_as_scd_type` is
 /// the `SCDType` enum value (0 unspecified, 1 SCD_TYPE_1, 2 SCD_TYPE_2). The SCD2-only
-/// track-history lists and `sql_conf` are validated client-side in `pipelines/api.py`.
+/// track-history lists are validated client-side in `pipelines/api.py`; `sql_conf` is
+/// forwarded as given.
 #[pyfunction]
 #[pyo3(signature = (
     session, dataflow_graph_id, flow_name, target, source, keys, sequence_by,

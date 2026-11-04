@@ -30,6 +30,18 @@ from typing import Any, Dict, List
 from pyspark.sql.metrics import ObservedMetrics
 
 
+class _UnsupportedLiteral:
+    """An observed-metric literal of a kind ``LiteralExpression._to_value`` rejects. The
+    Rust transport decodes eagerly, so it leaves this marker and ``pairs`` raises the
+    reference's ``UNSUPPORTED_LITERAL`` when read, as the reference does."""
+
+    def __init__(self, literal: str):
+        self.literal = literal
+
+    def __repr__(self) -> str:
+        return f"_UnsupportedLiteral({self.literal})"
+
+
 class PlanObservedMetrics(ObservedMetrics):
     """Observed metrics of one ``observe(...)`` node, as carried by
     ``DataFrame.executionInfo.flows``. Mirrors ``pyspark.sql.connect.client.core
@@ -53,6 +65,14 @@ class PlanObservedMetrics(ObservedMetrics):
 
     @property
     def pairs(self) -> Dict[str, Any]:
+        for metric in self._metrics:
+            if isinstance(metric, _UnsupportedLiteral):
+                from pyspark.errors import PySparkTypeError
+
+                raise PySparkTypeError(
+                    errorClass="UNSUPPORTED_LITERAL",
+                    messageParameters={"literal": metric.literal},
+                )
         return {self._keys[i]: self._metrics[i] for i in range(len(self._metrics))}
 
     @property
