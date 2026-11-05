@@ -460,19 +460,19 @@ def test_user_defined_type_repr_is_its_class_name():
     assert repr(ExamplePointUDT()) == str(ExamplePointUDT()) == "ExamplePointUDT()"
 
 
-@pytest.mark.parametrize("ddl,expected", [
+@pytest.mark.parametrize("ddl, cls, expected", [
     # The examples of pyspark's DataType.fromDDL.
-    ("b string, a int",
+    ("b string, a int", T.StructType,
      "StructType([StructField('b', StringType(), True), StructField('a', IntegerType(), True)])"),
-    ("decimal(10,10)", "DecimalType(10,10)"),
-    ("b: string, a: int",
+    ("decimal(10,10)", T.DecimalType, "DecimalType(10,10)"),
+    ("b: string, a: int", T.StructType,
      "StructType([StructField('b', StringType(), True), StructField('a', IntegerType(), True)])"),
-    ("int", "IntegerType()"),
+    ("int", T.IntegerType, "IntegerType()"),
 ])
-def test_datatype_from_ddl_returns_the_concrete_type(ddl, expected):
+def test_datatype_from_ddl_returns_the_concrete_type(ddl, cls, expected):
     parsed = T.DataType.fromDDL(ddl)
     assert repr(parsed) == expected
-    assert type(parsed).__name__ == expected.split("(")[0]
+    assert isinstance(parsed, cls)
     # The classmethod parses DDL the same way from any data type class.
     assert repr(T.LongType.fromDDL(ddl)) == expected
 
