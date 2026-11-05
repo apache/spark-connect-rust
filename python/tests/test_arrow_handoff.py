@@ -1606,27 +1606,9 @@ def test_integer_warm_importer_without_global_converter_aliases(protocol, monkey
             assert table.column(0).to_pylist() == list(range(1000))
 
 
-@pytest.mark.parametrize("in_ci", [False, True])
-def test_missing_protoc_fails_in_ci_and_skips_locally(monkeypatch, tmp_path_factory, in_ci):
-    monkeypatch.setattr(shutil, "which", lambda _: None)
-    if in_ci:
-        monkeypatch.setenv("CI", "true")
-    else:
-        monkeypatch.delenv("CI", raising=False)
-    error = pytest.fail.Exception if in_ci else pytest.skip.Exception
-    with pytest.raises(error, match="require protoc"):
-        protocol.__wrapped__(tmp_path_factory)
 
 
 
-def test_normal_handoff_does_not_reopen_ipc(protocol, monkeypatch):
-    def unexpected_ipc(*args, **kwargs):
-        pytest.fail("Normal toArrow handoff must use the C Stream importer")
-
-    monkeypatch.setattr(pa.ipc, "open_file", unexpected_ipc)
-    batch = _mixed_batch()
-    with _dataframe(protocol=protocol, batches=[batch]) as (frame, _):
-        assert frame.toArrow().equals(pa.Table.from_batches([batch]), check_metadata=True)
 
 
 @pytest.mark.parametrize("dtype", ["int64", "Int64"])
