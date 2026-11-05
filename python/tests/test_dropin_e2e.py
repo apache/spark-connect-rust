@@ -297,3 +297,28 @@ def test_server_errors_carry_their_condition_and_details(session):
     assert context.fragment() == "1/0"
     # spark.sql.connect.serverStacktrace.enabled is true by default.
     assert "\n\nJVM stacktrace:\norg.apache.spark.SparkArithmeticException" in str(e)
+
+
+def test_collected_rows_behave_as_pyspark_rows(session):
+    import pickle
+
+    from pyspark.sql import Row
+
+    rows = session.range(1).collect()
+    assert repr(rows) == "[Row(id=0)]"
+    assert rows[0] == Row(id=0) and hash(rows[0]) == hash(Row(id=0))
+    assert repr(pickle.loads(pickle.dumps(rows[0]))) == "Row(id=0)"
+    row = session.range(1).selectExpr(
+        "named_struct('b', 1, 'c', array(1, 2)) AS a",
+        "date'2020-01-02' AS d",
+        "1.50BD AS n",
+        "CAST(NULL AS INT) AS z",
+    ).first()
+    assert repr(row) == (
+        "Row(a=Row(b=1, c=[1, 2]), d=datetime.date(2020, 1, 2), n=Decimal('1.50'), z=None)"
+    )
+    assert row.asDict(recursive=True)["a"] == {"b": 1, "c": [1, 2]}
+    # Columns of the same name, as of a join, keep both values through pickling.
+    duplicate = session.range(1).selectExpr("1 AS a", "2 AS a").first()
+    assert repr(duplicate) == "Row(a=1, a=2)" and duplicate.asDict() == {"a": 2}
+    assert repr(pickle.loads(pickle.dumps(duplicate))) == "Row(a=1, a=2)"

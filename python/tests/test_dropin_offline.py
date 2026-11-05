@@ -6,6 +6,8 @@ Python side has real, measurable coverage in CI without a running server. Tests
 that require a live server live in test_dropin_e2e.py and are gated on SPARK_REMOTE.
 """
 
+import datetime
+import decimal
 import json
 import pickle
 import time
@@ -1205,10 +1207,11 @@ def test_row_construction_and_access():
     assert r2["a"] == 10
     assert r2.b == 20
 
-    # contains check
-    assert 1 in r
-    assert 10 in r2
-    assert 99 not in r
+    # `in` tests the field names of a row that has them, as in PySpark, and the values of
+    # one that does not.
+    assert "x" in r and "b" in r2
+    assert 1 not in r
+    assert 1 in Row(1, 2) and 99 not in Row(1, 2)
 
 
 def test_row_iteration():
@@ -1218,6 +1221,124 @@ def test_row_iteration():
     r = Row(a=1, b=2, c=3)
     values = list(r)
     assert values == [1, 2, 3]
+
+
+class _Thing:
+    def __repr__(self):
+        return "Thing()"
+
+
+@pytest.mark.parametrize(
+    "make, expected",
+    [
+        (lambda R: R(x=1, y="a"), "Row(x=1, y='a')"),
+        (lambda R: R(1, 2), "<Row(1, 2)>"),
+        (lambda R: R("a", "b"), "<Row('a', 'b')>"),
+        (lambda R: R(), "<Row()>"),
+        (lambda R: R(a=R(b=1, c=[1, 2]), d={"k": None}), "Row(a=Row(b=1, c=[1, 2]), d={'k': None})"),
+        (
+            lambda R: R(d=datetime.date(2020, 1, 2), n=decimal.Decimal("1.50"), b=b"\x00"),
+            "Row(d=datetime.date(2020, 1, 2), n=Decimal('1.50'), b=b'\\x00')",
+        ),
+        (lambda R: R(a=None, f=1.5, t=True), "Row(a=None, f=1.5, t=True)"),
+        # A row keeps the values it was made with, as they are.
+        (lambda R: R(a=(1, 2), s={1}, o=_Thing()), "Row(a=(1, 2), s={1}, o=Thing())"),
+        (lambda R: R("name", "age")("Alice", 11), "Row(name='Alice', age=11)"),
+        (lambda R: R("name", "age")("Alice"), "Row(name='Alice')"),
+    ],
+)
+def test_row_repr(make, expected):
+    from pyspark.sql import Row
+
+    row = make(Row)
+    assert repr(row) == expected
+    assert str(row) == expected
+
+
+def test_row_behaves_as_a_tuple_of_its_values():
+    import pickle
+
+    from pyspark.sql import Row
+
+    r = Row(a=1, b="x")
+    # Equality, order and hash are those of the tuple of values; the names do not count.
+    assert r == (1, "x") and (1, "x") == r and r == Row(c=1, d="x")
+    assert r != [1, "x"] and r != (1,)
+    assert Row(a=1) < Row(a=2) and Row(a=1) < (2,) and not Row(a=2) <= (1,)
+    assert sorted([Row(x=2), Row(x=1)]) == [Row(x=1), Row(x=2)]
+    assert hash(r) == hash((1, "x"))
+    assert len({Row(a=1), Row(a=1)}) == 1 and {Row(a=1): 5}[Row(a=1)] == 5
+    # Slices, concatenation and repetition are tuples.
+    assert r[0:1] == (1,) and type(r[0:1]) is tuple and r[::-1] == ("x", 1)
+    assert r + (3,) == (1, "x", 3) and (0,) + r == (0, 1, "x")
+    assert r * 2 == (1, "x", 1, "x") and 2 * r == (1, "x", 1, "x")
+    assert list(reversed(r)) == ["x", 1] and r[-1] == "x" and list(r) == [1, "x"]
+    with pytest.raises(IndexError, match="tuple index out of range"):
+        r[5]
+    assert (r.count(1), r.index("x")) == (1, 1)
+    with pytest.raises(ValueError, match="x not in tuple"):
+        Row(a=1, b=2).index(2, 0, 1)
+    # Pickled rows keep their names, also when two fields share one.
+    for row in [r, Row(1, 2), Row(a=Row(b=[Row(c=1)])), Row("a", "b")(1, 2)]:
+        restored = pickle.loads(pickle.dumps(row))
+        assert repr(restored) == repr(row)
+    assert pickle.loads(pickle.dumps(Row(1, 2))) == (1, 2)
+
+
+def test_row_fields():
+    from pyspark.errors import (
+        PySparkAttributeError,
+        PySparkRuntimeError,
+        PySparkTypeError,
+        PySparkValueError,
+    )
+    from pyspark.sql import Row
+
+    r = Row(a=1, b="x")
+    assert r.__fields__ == ["a", "b"] and hasattr(r, "__fields__")
+    assert not hasattr(Row(1, 2), "__fields__")
+    # `in` tests the names of a row with names, and the values of one without.
+    assert "a" in r and 1 not in r and 1 in Row(1, 2)
+    with pytest.raises(PySparkAttributeError) as error:
+        r.missing
+    assert error.value.getCondition() == "ATTRIBUTE_NOT_SUPPORTED"
+    assert error.value.getMessageParameters() == {"attr_name": "missing"}
+    with pytest.raises(PySparkValueError):
+        r["missing"]
+    with pytest.raises(PySparkAttributeError) as error:
+        Row(1, 2)["a"]
+    assert error.value.getMessageParameters() == {"attr_name": "__fields__"}
+    with pytest.raises(PySparkRuntimeError) as error:
+        r.a = 2
+    assert error.value.getCondition() == "READ_ONLY"
+    renamed = Row(a=1, b=2)
+    renamed.__fields__ = ["p", "q"]
+    assert repr(renamed) == "Row(p=1, q=2)" and renamed.p == 1
+    with pytest.raises(PySparkValueError) as error:
+        Row(1, a=2)
+    assert error.value.getCondition() == "CANNOT_SET_TOGETHER"
+    with pytest.raises(PySparkValueError) as error:
+        Row("name", "age")(1, 2, 3)
+    assert error.value.getCondition() == "TOO_MANY_VALUES"
+    assert error.value.getMessageParameters() == {
+        "expected": "2",
+        "item": "fields",
+        "actual": "3",
+    }
+
+
+def test_row_as_dict():
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import Row
+
+    nested = Row(a=Row(b=1), c=[Row(d=2)], e={"k": Row(f=3)})
+    assert nested.asDict() == {"a": Row(b=1), "c": [Row(d=2)], "e": {"k": Row(f=3)}}
+    assert type(nested.asDict()["a"]) is Row
+    assert nested.asDict(recursive=True) == {"a": {"b": 1}, "c": [{"d": 2}], "e": {"k": {"f": 3}}}
+    for row in [Row(1, 2), Row()]:
+        with pytest.raises(PySparkTypeError) as error:
+            row.asDict()
+        assert error.value.getCondition() == "CANNOT_CONVERT_TYPE"
 
 
 def test_datatype_from_ddl_parsing():
@@ -2713,10 +2834,10 @@ def test_drop_metadata_and_create_row():
     _drop_metadata(_IT())
     r = _create_row(["a", "b"], [1, 2])
     assert r["a"] == 1 and r["b"] == 2
-    # _create_row accepts an existing Row as the field source (Row.__fields__ is a list attr).
-    r2 = _create_row(r, [3, 4])
-    assert r2["a"] == 3 and r2["b"] == 4
     assert list(r.__fields__) == ["a", "b"]
+    # The fields can be a row class, whose values name them, as Row.__call__ passes it.
+    r2 = _create_row(T.Row("a", "b"), [3, 4])
+    assert r2["a"] == 3 and r2.b == 4
 
 
 # ------------------------------------------- API parity: version, properties, signatures

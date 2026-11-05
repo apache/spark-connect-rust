@@ -377,13 +377,7 @@ def _drop_metadata(d):
     return d
 
 def _create_row(fields, values):
-    """Build a Row with the given field names (mirrors pyspark.sql.types._create_row).
-
-    Upstream builds ``Row(*values)`` then sets ``__fields__``; our Rust ``Row`` carries its
-    field names from construction instead, so build it from the (name, value) pairs.
-    """
-    try:
-        names = list(fields.__fields__)  # `fields` may itself be a Row
-    except AttributeError:
-        names = list(fields)
-    return Row(**{name: value for name, value in zip(names, values)})
+    """A Row of ``values`` named by ``fields``, as in PySpark, whose pickled rows call it."""
+    row = Row(*values)
+    row.__fields__ = fields
+    return row
