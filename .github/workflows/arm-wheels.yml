@@ -45,7 +45,7 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   arm-wheels:
@@ -63,5 +63,6 @@ jobs:
       runner: ${{ matrix.os }}
       target: ${{ matrix.target }}
       zig: ${{ matrix.zig || false }}
+      artifact_retention_days: 1
       source_repository: ${{ github.repository }}
       source_ref: ${{ github.sha }}

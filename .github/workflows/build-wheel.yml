@@ -37,6 +37,14 @@ on:
         description: Use Zig for Linux cross-linking
         default: false
         type: boolean
+      use_cache:
+        description: Restore and save cached Cargo dependency sources
+        default: true
+        type: boolean
+      artifact_retention_days:
+        description: Days to retain wheel artifacts (0 uses the repository default)
+        default: 0
+        type: number
       source_repository:
         description: Repository containing the wheel source
         required: true
@@ -80,6 +88,7 @@ jobs:
               rustup target add "$WHEEL_TARGET" ;;
           esac
       - name: Cache Cargo sources
+        if: inputs.use_cache
         uses: actions/cache@v4
         with:
           path: |
@@ -116,3 +125,4 @@ jobs:
         with:
           name: wheels-${{ inputs.target }}
           path: dist/*.whl
+          retention-days: ${{ inputs.artifact_retention_days }}

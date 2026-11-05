@@ -260,8 +260,11 @@ jobs:
       runner: ${{ matrix.os }}
       target: ${{ matrix.target }}
       zig: ${{ matrix.zig || false }}
+      # Keep release dependency sources independent of workflow caches.
+      use_cache: false
       # Keep the release source canonical and pinned by resolve, including when
-      # the workflow is dispatched from a committer's fork.
+      # the workflow is dispatched from a committer's fork. This literal must
+      # match env.UPSTREAM_REPO; env is unavailable in reusable-workflow with:.
       source_repository: apache/spark-connect-rust
       source_ref: ${{ needs.resolve.outputs.sha }}
 
