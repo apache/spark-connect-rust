@@ -200,6 +200,64 @@ impl PyDataType {
     fn simpleString(&self) -> String {
         self.inner.simple_string()
     }
+
+    // Equality/hashing are defined once here and inherited by every concrete type class
+    // (and by pure-Python subclasses such as `UserDefinedType`). Mirrors pyspark's
+    // `DataType.__eq__`/`__ne__`/`__hash__`.
+    fn __eq__(slf: &Bound<'_, Self>, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        data_type_eq(slf.as_any(), other)
+    }
+
+    fn __ne__(slf: &Bound<'_, Self>, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        Ok(!data_type_eq(slf.as_any(), other)?)
+    }
+
+    /// pyspark hashes `str(self)`. Hash the simple string of the same live core type that
+    /// `__eq__` compares, so equal types always hash equal (`str()` can lag behind the
+    /// live fields of a mutated `StructType`). A `UserDefinedType` is compared by class
+    /// and `__dict__` rather than by core type, so it keeps pyspark's `hash(str(self))`.
+    fn __hash__(slf: &Bound<'_, Self>) -> PyResult<isize> {
+        let any = slf.as_any();
+        if is_udt(any)? {
+            return any.str()?.hash();
+        }
+        let s = py_to_data_type(any)?.simple_string();
+        pyo3::types::PyString::new(any.py(), &s).hash()
+    }
+}
+
+/// Whether `obj` is an instance of the pure-Python `pyspark.sql.types.UserDefinedType`.
+fn is_udt(obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    match obj
+        .py()
+        .import("pyspark.sql.types")
+        .and_then(|m| m.getattr("UserDefinedType"))
+    {
+        Ok(cls) => obj.is_instance(&cls),
+        Err(_) => Ok(false),
+    }
+}
+
+/// `DataType.__eq__` with pyspark semantics. pyspark compares
+/// `isinstance(other, self.__class__) and self.__dict__ == other.__dict__`; the Rust-backed
+/// classes keep their state in Rust rather than `__dict__`, so compare the core `DataType`
+/// built from each side's live fields instead (a mutated `StructType` compares by its
+/// current fields, and a bare `DataType` returned by `fromDDL` equals the concrete class).
+/// `UserDefinedType` is a pure-Python subclass whose state does live in `__dict__`, so it
+/// keeps pyspark's formula verbatim.
+fn data_type_eq(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if !b.is_instance_of::<PyDataType>() {
+        return Ok(false);
+    }
+    let a_udt = is_udt(a)?;
+    if a_udt || is_udt(b)? {
+        // A non-UDT `self` is never a superclass of a UDT other than the bare base,
+        // whose (empty) state pyspark would compare; treat that as unequal too.
+        return Ok(a_udt
+            && b.is_instance(&a.get_type())?
+            && a.getattr("__dict__")?.eq(b.getattr("__dict__")?)?);
+    }
+    Ok(py_to_data_type(a)? == py_to_data_type(b)?)
 }
 
 // Define concrete type classes
@@ -1585,6 +1643,11 @@ impl PyStructField {
         } else {
             false
         }
+    }
+    /// pyspark: `hash(str(self))` (inherited from `DataType`). Defining `__eq__` alone
+    /// would leave StructField unhashable.
+    fn __hash__(slf: &Bound<'_, Self>) -> PyResult<isize> {
+        slf.str()?.hash()
     }
 }
 

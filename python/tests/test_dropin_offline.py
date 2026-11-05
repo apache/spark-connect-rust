@@ -106,6 +106,120 @@ def test_structfield_construction():
     assert "n" in st.simpleString()
 
 
+# --------------------------------------------------------------------------- type equality
+# Expected results are what PySpark 4.3.0 returns (`DataType.__eq__` is
+# `isinstance(other, self.__class__) and self.__dict__ == other.__dict__`, `__hash__` is
+# `hash(str(self))`).
+
+def _eq_cases():
+    F = T.StructField
+    return [
+        T.NullType, T.BooleanType, T.ByteType, T.ShortType, T.IntegerType, T.LongType,
+        T.FloatType, T.DoubleType, T.StringType, lambda: T.StringType("UTF8_LCASE"),
+        T.BinaryType, T.DateType, T.TimestampType, T.TimestampNTZType, T.VariantType,
+        T.CalendarIntervalType, T.DecimalType, lambda: T.DecimalType(10, 2),
+        lambda: T.DecimalType(12, 2), lambda: T.CharType(5), lambda: T.CharType(6),
+        lambda: T.VarcharType(5), lambda: T.TimeType(3), lambda: T.TimeType(6),
+        lambda: T.YearMonthIntervalType(0, 1), lambda: T.YearMonthIntervalType(0, 0),
+        lambda: T.DayTimeIntervalType(0, 3), lambda: T.DayTimeIntervalType(1, 3),
+        lambda: T.GeometryType(0), lambda: T.GeometryType(4326),
+        lambda: T.GeographyType(4326),
+        lambda: T.ArrayType(T.IntegerType()), lambda: T.ArrayType(T.IntegerType(), False),
+        lambda: T.ArrayType(T.LongType()),
+        lambda: T.MapType(T.StringType(), T.IntegerType()),
+        lambda: T.MapType(T.StringType(), T.IntegerType(), False),
+        lambda: T.StructType([F("a", T.IntegerType())]),
+        lambda: T.StructType([F("a", T.IntegerType(), False)]),
+        lambda: T.StructType([F("b", T.IntegerType())]),
+        lambda: T.StructType([F("a", T.IntegerType(), True, {"k": "v"})]),
+        lambda: T.StructType(),
+        lambda: T.StructType([
+            F("x", T.ArrayType(T.MapType(T.StringType(), T.DecimalType(10, 2))))
+        ]),
+    ]
+
+
+def test_datatype_eq_and_hash_match_pyspark():
+    cases = _eq_cases()
+    left = [f() for f in cases]
+    right = [f() for f in cases]
+    for i, a in enumerate(left):
+        for j, b in enumerate(right):
+            # Every case is a distinct type, so equal exactly on the diagonal.
+            assert (a == b) is (i == j), (a, b)
+            assert (a != b) is (i != j), (a, b)
+        assert hash(a) == hash(right[i]), a
+    assert type(T.LongType()).__eq__ is not object.__eq__
+
+
+def test_datatype_eq_across_construction_paths():
+    import json
+
+    st = T.StructType([T.StructField("a", T.IntegerType())])
+    assert T.IntegerType() == T.DataType.fromDDL("int")
+    assert T.DataType.fromDDL("int") == T.IntegerType()
+    assert hash(T.DataType.fromDDL("int")) == hash(T.IntegerType())
+    assert T.DataType.fromDDL("bigint") != T.IntegerType()
+    assert T._parse_datatype_json_string(json.dumps("integer")) == T.IntegerType()
+    assert T._parse_datatype_json_string(st.json()) == st
+    assert pickle.loads(pickle.dumps(st)) == st
+    assert T.StructType().add("a", T.IntegerType()) == st
+
+
+def test_datatype_eq_with_non_datatypes():
+    for t in (T.IntegerType(), T.StructType([T.StructField("a", T.IntegerType())])):
+        assert (t == "int") is False
+        assert (t == None) is False  # noqa: E711
+        assert t != "int"
+    assert (T.StructField("a", T.LongType()) == T.LongType()) is False
+
+
+def test_mutated_structtype_compares_by_live_fields():
+    target = T.StructType([T.StructField("a", T.IntegerType())])
+    s = T.StructType()
+    assert s != target
+    s.add("a", T.IntegerType())
+    assert s == target
+    assert hash(s) == hash(target)
+
+
+def test_datatypes_usable_in_sets_and_dicts():
+    assert len({T.LongType(), T.LongType(), T.IntegerType()}) == 2
+    assert {T.ArrayType(T.LongType()): 1}.get(T.ArrayType(T.LongType())) == 1
+    fa, fa2, fb = (
+        T.StructField("a", T.LongType()),
+        T.StructField("a", T.LongType()),
+        T.StructField("a", T.IntegerType()),
+    )
+    assert fa == fa2 and fa != fb
+    assert hash(fa) == hash(fa2)
+    assert len({fa, fa2, fb}) == 2
+
+
+def test_user_defined_type_eq_and_hash():
+    class PointUDT(T.UserDefinedType):
+        @classmethod
+        def sqlType(cls):
+            return T.ArrayType(T.DoubleType(), False)
+
+    class OtherUDT(T.UserDefinedType):
+        @classmethod
+        def sqlType(cls):
+            return T.ArrayType(T.DoubleType(), False)
+
+    # pyspark: same class and equal __dict__ -> equal; a different UDT class (even with
+    # the same sqlType) or a non-UDT type -> unequal.
+    assert PointUDT() == PointUDT()
+    assert hash(PointUDT()) == hash(PointUDT())
+    assert PointUDT() != OtherUDT()
+    assert PointUDT() != T.ArrayType(T.DoubleType(), False)
+    assert T.ArrayType(T.DoubleType(), False) != PointUDT()
+    assert T.LongType() != PointUDT()
+    u = PointUDT()
+    u.extra = 1
+    assert u != PointUDT()
+
+
 # --------------------------------------------------------------------------- StorageLevel
 
 def test_storage_level():
