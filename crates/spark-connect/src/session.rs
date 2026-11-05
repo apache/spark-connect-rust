@@ -256,9 +256,12 @@ impl SparkSession {
         Ok(DataFrame::new(self.clone(), plan))
     }
 
-    /// Execute a SQL query and return a DataFrame.
+    /// Execute a SQL statement and return a DataFrame.
     ///
-    /// Mirrors `pyspark.sql.SparkSession.sql(sqlQuery)`.
+    /// Mirrors `pyspark.sql.SparkSession.sql(sqlQuery)`: the statement is sent at once, so a
+    /// command such as `CREATE VIEW` or `SET` takes effect here and a statement that does not
+    /// parse or resolve fails here, while a query still runs only when an action is taken on
+    /// the DataFrame.
     pub fn sql(&self, query: &str) -> Result<DataFrame> {
         self.sql_with_args(query, Vec::new(), std::collections::HashMap::new())
     }
@@ -271,12 +274,41 @@ impl SparkSession {
         pos_args: Vec<crate::expression::Expression>,
         named_args: std::collections::HashMap<String, crate::expression::Expression>,
     ) -> Result<DataFrame> {
-        let plan = LogicalPlan::Sql {
+        let plan = Arc::new(LogicalPlan::Sql {
             query: query.to_string(),
             pos_args,
             named_args,
+        });
+        // As pyspark, run the statement as a command now. The server executes a command and
+        // returns a relation of its result; for a query it returns the query's relation, which
+        // then runs at an action.
+        let command = proto::SqlCommand {
+            input: Some(crate::dataframe::build_input_relation(&plan, self)),
+            ..Default::default()
         };
-        Ok(DataFrame::new(self.clone(), plan))
+        let responses = crate::dataframe::execute_command_collect(
+            self,
+            proto::command::CommandType::SqlCommand(command),
+        )?;
+        let returned = responses
+            .into_iter()
+            .find_map(|response| match response.response_type {
+                Some(proto::execute_plan_response::ResponseType::SqlCommandResult(result)) => {
+                    result.relation
+                }
+                _ => None,
+            });
+        Ok(DataFrame::new(
+            self.clone(),
+            match returned {
+                Some(relation) => LogicalPlan::CachedRelation {
+                    relation: Box::new(relation),
+                },
+                // A server that returns no result relation runs the query lazily, as pyspark
+                // then does.
+                None => Arc::unwrap_or_clone(plan),
+            },
+        ))
     }
 
     /// Create a DataFrame from a collection of Rows and a schema.

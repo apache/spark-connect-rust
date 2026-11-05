@@ -225,3 +225,35 @@ fn server_errors_carry_their_condition_and_details() {
     assert_eq!(contexts.len(), 1);
     assert_eq!(contexts[0].fragment(), "1/0");
 }
+
+/// As pyspark, `sql()` sends the statement at once: a command takes effect without an
+/// action, its result is the local relation the server returned, and a statement that
+/// does not parse fails at `sql()`.
+#[test]
+fn sql_runs_statements_eagerly() {
+    if !should_run() {
+        return;
+    }
+    // A session of its own, so that the view and the setting stay local to this test.
+    let spark = session().new_session();
+    spark
+        .sql("CREATE OR REPLACE TEMP VIEW eager_sql_v AS SELECT 1 AS x")
+        .expect("create view");
+    let rows = spark.table("eager_sql_v").unwrap().collect().unwrap();
+    assert_eq!(rows.len(), 1);
+    spark
+        .sql("SET spark.sql.shuffle.partitions=7")
+        .expect("set");
+    assert_eq!(
+        spark.conf().get("spark.sql.shuffle.partitions").unwrap(),
+        Some("7".to_string())
+    );
+    let databases = spark.sql("SHOW DATABASES").expect("show databases");
+    assert!(databases.is_local());
+    assert!(!databases.collect().unwrap().is_empty());
+    let query = spark.sql("SELECT 1 AS x").expect("query");
+    assert!(!query.is_local());
+    assert_eq!(query.collect().unwrap().len(), 1);
+    assert!(spark.sql("SELEC 1").is_err());
+    let _ = spark.stop();
+}

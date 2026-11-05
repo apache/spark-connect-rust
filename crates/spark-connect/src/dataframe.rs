@@ -1685,12 +1685,22 @@ impl DataFrame {
     ///
     /// Mirrors the server's `Dataset.isLocal`: only a local relation itself is local. The
     /// server resolves `toDF`, which Arrow input with inferred or listed column names
-    /// applies, into a `Project`, which is not.
+    /// applies, into a `Project`, which is not. The result of a command run by
+    /// `SparkSession::sql` is the local relation the server returned.
     pub fn is_local(&self) -> bool {
-        matches!(
-            self.plan.as_ref(),
-            LogicalPlan::LocalRelation { .. } | LogicalPlan::ChunkedCachedLocalRelation { .. }
-        )
+        use proto::relation::RelType;
+        match self.plan.as_ref() {
+            LogicalPlan::LocalRelation { .. } | LogicalPlan::ChunkedCachedLocalRelation { .. } => {
+                true
+            }
+            LogicalPlan::CachedRelation { relation } => matches!(
+                relation.rel_type,
+                Some(RelType::LocalRelation(_))
+                    | Some(RelType::CachedLocalRelation(_))
+                    | Some(RelType::ChunkedCachedLocalRelation(_))
+            ),
+            _ => false,
+        }
     }
 
     /// Check if this DataFrame is streaming.
@@ -3124,6 +3134,41 @@ mod plan_construction_tests {
         assert!(!local.to_df(vec![]).is_local());
         assert!(!cached.to_df(vec!["x"]).is_local());
         assert!(!spark.range(1).unwrap().is_local());
+    }
+
+    #[test]
+    fn a_relation_the_server_returned_is_sent_back_with_its_own_plan_id() {
+        use proto::relation::RelType;
+        // A session of its own, whose plan IDs start at 1.
+        let spark = session().new_session();
+        let returned = |rel_type: RelType| {
+            let relation = proto::Relation {
+                common: Some(proto::RelationCommon {
+                    plan_id: Some(42),
+                    ..Default::default()
+                }),
+                rel_type: Some(rel_type),
+            };
+            DataFrame::new(
+                spark.clone(),
+                LogicalPlan::CachedRelation {
+                    relation: Box::new(relation),
+                },
+            )
+        };
+        // The result of a command is the local relation the server returned.
+        assert!(returned(RelType::LocalRelation(proto::LocalRelation::default())).is_local());
+        let query = returned(RelType::Sql(proto::Sql {
+            query: "SELECT 1".to_string(),
+            ..Default::default()
+        }));
+        assert!(!query.is_local());
+        let relation = build_input_relation(&query.plan, &spark);
+        match relation.rel_type {
+            Some(RelType::Sql(sql)) => assert_eq!(sql.query, "SELECT 1"),
+            other => panic!("expected the returned SQL relation, got {other:?}"),
+        }
+        assert_eq!(relation.common.and_then(|common| common.plan_id), Some(1));
     }
 
     #[test]
