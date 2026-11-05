@@ -8,6 +8,7 @@ that require a live server live in test_dropin_e2e.py and are gated on SPARK_REM
 
 import pickle
 import time
+from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
@@ -2953,11 +2954,16 @@ def test_create_dataframe_empty_pandas_is_local_as_pyspark():
     assert _local_create_dataframe(pd.DataFrame({"a": [], "b": []}), "a long, b string").isLocal()
 
 
+_Pair = namedtuple("_Pair", ["x", "y"])
+
+
 @pytest.mark.parametrize("data,schema,expected,actual", [
     ([(1,)], ["a", "b"], "2", "1"),
     ([(1,), (2,)], ["a", "b"], "2", "1"),
     ([(1, 2), (3, 4, 5)], ["a"], "3", "2"),
     ([T.Row(x=1, y=2)], ["a"], "1", "2"),
+    # A namedtuple, as a Row, does not extend the names.
+    ([_Pair(1, 2)], ["a"], "1", "2"),
 ])
 def test_create_dataframe_name_width_errors_as_pyspark(data, schema, expected, actual):
     from pyspark.errors import PySparkValueError

@@ -18,10 +18,3 @@ difference is intentional or tracked for a fix.
   `decimal(38,18)`. This client takes each top-level field's type from its first non-null
   value, and a nested type from the first non-null element or map value.
 - **NumPy ndarray input** (tracked by SPARK-60772). Not accepted yet.
-
-## `SparkSession.sql`
-
-- **Statements run at the first action** (tracked by SPARK-60909). PySpark sends the
-  statement when `sql()` is called, so a command such as `CREATE TEMP VIEW` or `SET` takes
-  effect at once. This client runs it only when an action is taken on the returned
-  DataFrame.

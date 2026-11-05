@@ -21,6 +21,7 @@ values here are those of the reference client; the tests pass with it as well.
 """
 
 import os
+from collections import namedtuple
 from datetime import date, datetime
 
 import pyarrow as pa
@@ -172,6 +173,9 @@ def test_create_dataframe_from_empty_arrow_table(session):
         assert error.value.getCondition() == "CANNOT_INFER_EMPTY_SCHEMA"
 
 
+_Pair = namedtuple("_Pair", ["x", "y"])
+
+
 @pytest.mark.parametrize(
     "data, schema, columns, rows",
     [
@@ -182,6 +186,9 @@ def test_create_dataframe_from_empty_arrow_table(session):
         ([(1, 2)], ("a", "b"), ["a", "b"], [(1, 2)]),
         ([Row(x=1, y=2)], ["a", "b"], ["a", "b"], [(1, 2)]),
         ([{"y": 2, "x": 1}], ["a", "b"], ["a", "b"], [(1, 2)]),
+        # A namedtuple is named by its fields, as a Row is.
+        ([_Pair(1, 2), _Pair(3, 4)], None, ["x", "y"], [(1, 2), (3, 4)]),
+        ([_Pair(1, 2)], ["a", "b"], ["a", "b"], [(1, 2)]),
     ],
 )
 def test_create_dataframe_rows_column_names(session, data, schema, columns, rows):

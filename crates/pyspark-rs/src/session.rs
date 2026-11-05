@@ -506,32 +506,26 @@ impl PySparkSession {
         }
 
         // How a row carries its values, as in pyspark: positionally (lists, tuples and
-        // scalars), positionally with names of its own (Rows), or by name (dicts, and other
-        // objects through their `__dict__`, whose keys are sorted as `_infer_schema` does).
+        // scalars), positionally with names of its own (Rows, and namedtuples by their
+        // `_fields`), or by name (dicts, and other objects through their `__dict__`, whose
+        // keys are sorted as `_infer_schema` does).
         enum Item {
             Plain(Vec<Value>),
             Named(Vec<String>, Vec<Value>),
             Record(Vec<(String, Value)>),
         }
+        let record = |dict: &Bound<'_, PyDict>| -> PyResult<Item> {
+            let mut pairs: Vec<(String, Value)> = Vec::with_capacity(dict.len());
+            for (k, v) in dict.iter() {
+                pairs.push((k.str()?.to_string(), py_to_value(&v)?));
+            }
+            pairs.sort_by(|a, b| a.0.cmp(&b.0));
+            Ok(Item::Record(pairs))
+        };
         let mut items: Vec<Item> = Vec::with_capacity(data.len());
         for item in data.iter() {
-            let record = match item.cast::<PyDict>() {
-                Ok(dict) => Some(dict.clone()),
-                Err(_) if item.extract::<PyRef<PyRow>>().is_ok() => None,
-                Err(_) if item.cast::<PyList>().is_ok() => None,
-                Err(_) if item.cast::<pyo3::types::PyTuple>().is_ok() => None,
-                Err(_) => match item.getattr("__dict__") {
-                    Ok(attributes) => attributes.cast_into::<PyDict>().ok(),
-                    Err(_) => None,
-                },
-            };
-            items.push(if let Some(dict) = record {
-                let mut pairs: Vec<(String, Value)> = Vec::with_capacity(dict.len());
-                for (k, v) in dict.iter() {
-                    pairs.push((k.str()?.to_string(), py_to_value(&v)?));
-                }
-                pairs.sort_by(|a, b| a.0.cmp(&b.0));
-                Item::Record(pairs)
+            items.push(if let Ok(dict) = item.cast::<PyDict>() {
+                record(dict)?
             } else if let Ok(pyrow) = item.extract::<PyRef<PyRow>>() {
                 Item::Named(pyrow.row.fields().to_vec(), pyrow.row.values().to_vec())
             } else if let Ok(lst) = item.cast::<PyList>() {
@@ -541,12 +535,23 @@ impl PySparkSession {
                         .collect::<PyResult<_>>()?,
                 )
             } else if let Ok(tuple) = item.cast::<pyo3::types::PyTuple>() {
-                Item::Plain(
-                    tuple
-                        .iter()
-                        .map(|v| py_to_value(&v))
-                        .collect::<PyResult<_>>()?,
-                )
+                let values = tuple
+                    .iter()
+                    .map(|v| py_to_value(&v))
+                    .collect::<PyResult<_>>()?;
+                match tuple
+                    .getattr("_fields")
+                    .and_then(|fields| fields.extract::<Vec<String>>())
+                {
+                    Ok(fields) => Item::Named(fields, values),
+                    Err(_) => Item::Plain(values),
+                }
+            } else if let Some(attributes) = item
+                .getattr("__dict__")
+                .ok()
+                .and_then(|attributes| attributes.cast_into::<PyDict>().ok())
+            {
+                record(&attributes)?
             } else {
                 // A scalar row (int/str/float/...): a single-field row, matching
                 // `createDataFrame([1, 2, 3], IntegerType())`. The field name comes from
@@ -568,10 +573,11 @@ impl PySparkSession {
         // The keys of the dict rows, in the order pyspark merges their schemas: each row's
         // sorted keys that no earlier row had.
         let mut record_names: Vec<String> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         for item in &items {
             if let Item::Record(pairs) = item {
                 for (key, _) in pairs {
-                    if !record_names.contains(key) {
+                    if seen.insert(key.as_str()) {
                         record_names.push(key.clone());
                     }
                 }
@@ -596,11 +602,13 @@ impl PySparkSession {
         };
         let default_names = extend(&[], plain_width);
         // A dict row's value for `name`, as pyspark looks it up: null when the key is missing.
+        // The pairs are sorted by key, and the first of equal keys is taken.
         let lookup = |pairs: &[(String, Value)], name: &String| {
-            pairs
-                .iter()
-                .find(|(key, _)| key == name)
-                .map_or(Value::Null, |(_, value)| value.clone())
+            let index = pairs.partition_point(|(key, _)| key < name);
+            match pairs.get(index) {
+                Some((key, value)) if key == name => value.clone(),
+                _ => Value::Null,
+            }
         };
 
         let mut rows: Vec<Row> = Vec::with_capacity(items.len());
