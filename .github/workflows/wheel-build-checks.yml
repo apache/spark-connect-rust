@@ -28,7 +28,7 @@ on:
       - Cargo.lock
       - '**/Cargo.toml'
       - '**/build.rs'
-      - crates/**
+      - python/pyspark/**
       - pyproject.toml
       - .cargo/**
       - rust-toolchain*
@@ -63,6 +63,7 @@ jobs:
       runner: ${{ matrix.os }}
       target: ${{ matrix.target }}
       zig: ${{ matrix.zig || false }}
+      timeout_minutes: 45
       artifact_retention_days: 1
       source_repository: ${{ github.repository }}
       source_ref: ${{ github.sha }}

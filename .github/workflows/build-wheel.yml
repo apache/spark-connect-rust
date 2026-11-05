@@ -37,10 +37,10 @@ on:
         description: Use Zig for Linux cross-linking
         default: false
         type: boolean
-      use_cache:
-        description: Restore and save cached Cargo dependency sources
-        default: true
-        type: boolean
+      timeout_minutes:
+        description: Maximum build duration in minutes
+        default: 360
+        type: number
       artifact_retention_days:
         description: Days to retain wheel artifacts (0 uses the repository default)
         default: 0
@@ -61,7 +61,7 @@ jobs:
   build:
     name: Build wheel (${{ inputs.target }})
     runs-on: ${{ inputs.runner }}
-    timeout-minutes: 45
+    timeout-minutes: ${{ inputs.timeout_minutes }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -87,17 +87,6 @@ jobs:
             *)
               rustup target add "$WHEEL_TARGET" ;;
           esac
-      - name: Cache Cargo sources
-        if: inputs.use_cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          # Recompile artifacts so each check exercises the current C/assembler
-          # toolchain, including Zig, rather than reusing compiled assembly.
-          key: ${{ runner.os }}-wheel-sources-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-wheel-sources-
       - name: Install protoc
         shell: bash
         run: |

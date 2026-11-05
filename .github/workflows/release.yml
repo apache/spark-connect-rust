@@ -133,6 +133,7 @@ jobs:
       github.repository != 'apache/spark-connect-rust' ||
       (inputs.release-version == '' && inputs.rc-count == '')
     outputs:
+      repo: ${{ env.UPSTREAM_REPO }}
       mode: ${{ steps.r.outputs.mode }}
       version: ${{ steps.r.outputs.version }}
       rc_tag: ${{ steps.r.outputs.rc_tag }}
@@ -260,12 +261,11 @@ jobs:
       runner: ${{ matrix.os }}
       target: ${{ matrix.target }}
       zig: ${{ matrix.zig || false }}
-      # Keep release dependency sources independent of workflow caches.
-      use_cache: false
+      # Preserve the previous release job's six-hour limit.
+      timeout_minutes: 360
       # Keep the release source canonical and pinned by resolve, including when
-      # the workflow is dispatched from a committer's fork. This literal must
-      # match env.UPSTREAM_REPO; env is unavailable in reusable-workflow with:.
-      source_repository: apache/spark-connect-rust
+      # the workflow is dispatched from a committer's fork.
+      source_repository: ${{ needs.resolve.outputs.repo }}
       source_ref: ${{ needs.resolve.outputs.sha }}
 
   build-sdist:
