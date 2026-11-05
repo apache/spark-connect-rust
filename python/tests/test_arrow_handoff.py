@@ -29,6 +29,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from urllib.parse import quote
 
 import grpc
 import pandas as pd
@@ -398,7 +399,15 @@ def test_malformed_ipc_is_reported(protocol):
 
 
 @contextmanager
-def _arrow_input_service(protocol, *, upload_error=None, **overrides):
+def _arrow_input_service(
+    protocol,
+    *,
+    upload_error=None,
+    user_id=None,
+    user_agent=None,
+    allow_file_artifacts=False,
+    **overrides,
+):
     """Resolve cache artifacts at a mock service with a 4 MiB receive limit."""
     import hashlib
     import zlib
@@ -415,8 +424,22 @@ def _arrow_input_service(protocol, *, upload_error=None, **overrides):
     }
     config.update(overrides)
     state = {"cache": {}, "uploads": 0, "relations": [], "message_sizes": [],
-             "config_requests": []}
+             "config_requests": [], "upload_contexts": [], "status_contexts": []}
     server_id = "00000000-0000-0000-0000-000000000001"
+
+    def attribution(request, context):
+        grpc_user_agent = dict(context.invocation_metadata()).get("user-agent")
+        assert grpc_user_agent, "artifact RPC is missing a non-empty user-agent header"
+        # Keep only scalar envelope fields; do not retain another payload copy.
+        return {
+            "session_id": request.session_id,
+            "has_user_context": request.HasField("user_context"),
+            "user_id": request.user_context.user_id,
+            "user_name": request.user_context.user_name,
+            "has_client_type": request.HasField("client_type"),
+            "client_type": request.client_type,
+            "grpc_user_agent": grpc_user_agent,
+        }
 
     def configure(raw, context):
         request = protocol("ConfigRequest").FromString(raw)
@@ -430,6 +453,7 @@ def _arrow_input_service(protocol, *, upload_error=None, **overrides):
 
     def statuses(raw, context):
         request = protocol("ArtifactStatusesRequest").FromString(raw)
+        state["status_contexts"].append(attribution(request, context))
         return protocol("ArtifactStatusesResponse", session_id=request.session_id,
                         statuses={name: dict(exists=name in state["cache"])
                                   for name in request.names}).SerializeToString()
@@ -440,7 +464,8 @@ def _arrow_input_service(protocol, *, upload_error=None, **overrides):
         session_id = None
 
         def save(name, data):
-            assert name == "cache/" + hashlib.sha256(data).hexdigest()
+            if not (allow_file_artifacts and name.startswith(("files/", "forward_to_fs/"))):
+                assert name == "cache/" + hashlib.sha256(data).hexdigest()
             assert name not in state["cache"], "cached artifacts should not be uploaded again"
             state["cache"][name] = bytes(data)
             summaries.append(dict(name=name, is_crc_successful=True))
@@ -452,6 +477,9 @@ def _arrow_input_service(protocol, *, upload_error=None, **overrides):
         for raw in requests:
             state["message_sizes"].append(len(raw))
             request = protocol("AddArtifactsRequest").FromString(raw)
+            state["upload_contexts"].append({
+                **attribution(request, context), "payload": request.WhichOneof("payload")
+            })
             session_id = request.session_id
             if request.HasField("batch"):
                 for artifact in request.batch.artifacts:
@@ -545,12 +573,102 @@ def _arrow_input_service(protocol, *, upload_error=None, **overrides):
             })])
         port = server.add_insecure_port("127.0.0.1:0")
         server.start()
-        session = SparkSession.builder.remote(f"sc://127.0.0.1:{port}").getOrCreate()
+        remote = f"sc://127.0.0.1:{port}/"
+        for key, value in [("user_id", user_id), ("user_agent", user_agent)]:
+            if value is not None:
+                remote += f";{key}={quote(value, safe='')}"
+        session = SparkSession.builder.remote(remote).getOrCreate()
         try:
             yield session, state
         finally:
             session.stop()
             server.stop(0).wait(timeout=5)
+
+
+def _assert_artifact_contexts(contexts, *, session_id, user_id, user_agent):
+    assert contexts
+    client_types = {context["client_type"] for context in contexts}
+    assert len(client_types) == 1
+    client_type = client_types.pop()
+    assert client_type
+    assert client_type.startswith(user_agent)
+    for context in contexts:
+        grpc_user_agent = context["grpc_user_agent"]
+        assert grpc_user_agent == client_type or grpc_user_agent.startswith(client_type + " ")
+        assert context["session_id"] == session_id
+        # PySpark's ArtifactManager sends a present context even without a user ID.
+        assert context["has_user_context"]
+        assert context["user_id"] == user_id
+        assert context["user_name"] == ""
+        assert context["has_client_type"]
+
+
+@pytest.mark.parametrize("user_id,user_agent", [
+    (None, None),
+    ("artifact-user@example.com", "artifact wire test"),
+], ids=["default-user", "configured-user"])
+def test_cached_arrow_upload_attribution_on_every_frame(protocol, monkeypatch, user_id, user_agent):
+    from pyspark.sql import types as T
+
+    # Exercise ChannelBuilder's default prefix when no URL or environment value is set.
+    monkeypatch.delenv("SPARK_CONNECT_USER_AGENT", raising=False)
+    table = pa.table({"id": range(10_000)})
+    schema = T.StructType([T.StructField("id", T.LongType())])
+    with _arrow_input_service(protocol, user_id=user_id, user_agent=user_agent, **{
+        "spark.sql.session.localRelationCacheThreshold": "0",
+    }) as (spark, state):
+        # The explicit schema is batched; the IPC data spans begin/chunk frames.
+        spark.createDataFrame(table, schema)
+        assert {context["payload"] for context in state["upload_contexts"]} == {
+            "batch", "begin_chunk", "chunk"
+        }
+        assert state["status_contexts"]
+        _assert_artifact_contexts(
+            state["upload_contexts"] + state["status_contexts"],
+            session_id=spark.session_id,
+            user_id=user_id or "",
+            user_agent=user_agent or "_SPARK_CONNECT_PYTHON",
+        )
+
+
+@pytest.mark.parametrize("user_id,user_agent", [
+    (None, None),
+    ("file-user@example.com", "file wire test"),
+], ids=["default-user", "configured-user"])
+@pytest.mark.parametrize("upload", ["file", "named"])
+def test_file_upload_attribution_on_every_frame(
+    protocol, monkeypatch, tmp_path, user_id, user_agent, upload
+):
+    monkeypatch.delenv("SPARK_CONNECT_USER_AGENT", raising=False)
+    small, large = tmp_path / "small.txt", tmp_path / "large.txt"
+    small.write_bytes(b"small artifact")
+    chunk_size = 32 * 1024  # Mirrors CHUNK_SIZE in crates/spark-connect-core/src/artifact.rs.
+    large_size = chunk_size * 3 + 1  # BeginChunk followed by three Chunk frames.
+    large.write_bytes(bytes(index % 256 for index in range(large_size)))
+    with _arrow_input_service(
+        protocol, user_id=user_id, user_agent=user_agent, allow_file_artifacts=True
+    ) as (spark, state):
+        if upload == "file":
+            spark.addArtifacts(str(small), str(large))
+            artifact_names = ["files/small.txt", "files/large.txt"]
+        else:
+            destinations = ["/wire/small.txt", "/wire/large.txt"]
+            for path, destination in zip([small, large], destinations):
+                spark.copyFromLocalToFs(str(path), destination)
+            artifact_names = ["forward_to_fs/" + destination for destination in destinations]
+        assert {context["payload"] for context in state["upload_contexts"]} == {
+            "batch", "begin_chunk", "chunk"
+        }
+        assert state["cache"][artifact_names[0]] == small.read_bytes()
+        assert state["cache"][artifact_names[1]] == large.read_bytes()
+        assert state["uploads"] == (1 if upload == "file" else 2)
+        assert not state["status_contexts"]
+        _assert_artifact_contexts(
+            state["upload_contexts"],
+            session_id=spark.session_id,
+            user_id=user_id or "",
+            user_agent=user_agent or "_SPARK_CONNECT_PYTHON",
+        )
 
 
 @pytest.mark.parametrize("cached", [False, True], ids=["inline", "cached"])

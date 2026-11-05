@@ -96,6 +96,7 @@ impl NamedArtifact {
 
 /// Frame cached in-memory artifacts as they are consumed by the upload stream.
 /// Payload slices share the original allocation instead of copying each chunk.
+/// The allocation is freed when its last slice is dropped, not chunk by chunk.
 pub(crate) fn cache_artifact_requests(
     session_id: String,
     artifacts: Vec<(String, Bytes)>,
@@ -533,6 +534,15 @@ mod tests {
 
     #[test]
     fn test_cache_requests_release_storage_on_drop() {
+        assert_cache_requests_release_storage(false);
+    }
+
+    #[test]
+    fn test_cache_requests_release_storage_on_exhaustion() {
+        assert_cache_requests_release_storage(true);
+    }
+
+    fn assert_cache_requests_release_storage(exhaust_stream: bool) {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
 
@@ -555,6 +565,7 @@ mod tests {
 
         let first_drops = Arc::new(AtomicUsize::new(0));
         let second_drops = Arc::new(AtomicUsize::new(0));
+        let third_drops = Arc::new(AtomicUsize::new(0));
         let first = Bytes::from_owner(TrackedData {
             data: vec![1; CHUNK_SIZE + 1],
             drops: first_drops.clone(),
@@ -563,18 +574,42 @@ mod tests {
             data: vec![2; CHUNK_SIZE + 1],
             drops: second_drops.clone(),
         });
+        let third = Bytes::from_owner(TrackedData {
+            data: vec![3; CHUNK_SIZE + 1],
+            drops: third_drops.clone(),
+        });
         let mut requests = cache_artifact_requests(
             "session".to_string(),
-            vec![("first".to_string(), first), ("second".to_string(), second)],
+            vec![
+                ("first".to_string(), first),
+                ("second".to_string(), second),
+                ("third".to_string(), third),
+            ],
         );
-        let first_request = requests.next().unwrap();
-
+        // Each CHUNK_SIZE + 1 blob emits BeginChunk followed by one Chunk.
+        drop(requests.next().unwrap());
+        let first_final_request = requests.next().unwrap();
         assert_eq!(first_drops.load(Ordering::SeqCst), 0);
+        drop(first_final_request);
+        // A consumed blob is released while later blobs remain queued.
+        assert_eq!(first_drops.load(Ordering::SeqCst), 1);
         assert_eq!(second_drops.load(Ordering::SeqCst), 0);
+
+        let second_initial_request = requests.next().unwrap();
+        if exhaust_stream {
+            // Consume the second blob's Chunk and both frames of the third blob.
+            drop(requests.next().unwrap());
+            drop(requests.next().unwrap());
+            drop(requests.next().unwrap());
+            assert!(requests.next().is_none());
+        }
         drop(requests);
-        assert_eq!(first_drops.load(Ordering::SeqCst), 0);
+        // An earlier frame keeps its allocation alive after either early drop
+        // or complete exhaustion of the iterator.
+        assert_eq!(second_drops.load(Ordering::SeqCst), 0);
+        assert_eq!(third_drops.load(Ordering::SeqCst), 1);
+        drop(second_initial_request);
         assert_eq!(second_drops.load(Ordering::SeqCst), 1);
-        drop(first_request);
         assert_eq!(first_drops.load(Ordering::SeqCst), 1);
     }
 }
