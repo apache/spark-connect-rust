@@ -1486,7 +1486,7 @@ impl PyDataFrame {
     /// Column access by name (`df["col"]`) or position (`df[0]`).
     fn __getitem__(&self, py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
         let name = if item.is_instance_of::<PyInt>() {
-            let columns = py.detach(|| self.dataframe.columns()).to_pyerr()?;
+            let columns = self.columns(py)?;
             // Use Python list indexing for negative indices, bools (an int
             // subclass), and IndexError even for integers larger than isize.
             PyList::new(py, columns)?
