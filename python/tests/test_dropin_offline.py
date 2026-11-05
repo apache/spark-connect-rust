@@ -4061,15 +4061,19 @@ else:
     column = pa.array([] if layout == "empty" else values, type=pa.int64())
 table = pa.table({"x": column, "y": column})
 schema = T.StructType([T.StructField(name, T.LongType()) for name in table.column_names])
-heavy_modules = ("pyspark.errors", "pyspark.sql.pandas.types")
-assert all(name not in sys.modules for name in heavy_modules)
+# Errors are already imported during current client startup. Only the general
+# Arrow converter remains deferred by this shortcut.
+startup_errors = sys.modules["pyspark.errors"]
+converter_modules = ("pyspark.sql.pandas.types",)
+assert all(name not in sys.modules for name in converter_modules)
 for large_types in ("false", "true", None):
     normalized, result_schema, names = prepare_table(
         table, schema, "TIMESTAMP_LTZ", "UTC", large_types
     )
     assert normalized is table
     assert result_schema is schema and names is None
-assert all(name not in sys.modules for name in heavy_modules)
+assert all(name not in sys.modules for name in converter_modules)
+assert sys.modules["pyspark.errors"] is startup_errors
 
 # A noncanonical input must still load the general path after warm fast calls.
 fallback = pa.table({"x": pa.array([1, None], type=pa.int32()),
@@ -4078,7 +4082,8 @@ converted, result_schema, names = prepare_table(fallback, schema, "TIMESTAMP_LTZ
 assert all(column.type == pa.int64() for column in converted.columns)
 assert converted.to_pylist() == fallback.to_pylist()
 assert result_schema is schema and names is None
-assert all(name in sys.modules for name in heavy_modules)
+assert all(name in sys.modules for name in converter_modules)
+assert sys.modules["pyspark.errors"] is startup_errors
 
 # Import the general converter only after checking the fast path and repeated
 # calls. Its cast is the oracle for cells, schema metadata, and IPC bytes.
@@ -4147,6 +4152,24 @@ def test_arrow_input_noncanonical_uses_general_conversion(kind, monkeypatch):
         table = pa.Table.from_arrays([table.column(0), table.column(0)], names=["x", "x"])
         schema = T.StructType([T.StructField("x", T.LongType()), T.StructField("x", T.LongType())])
 
+    if kind == "custom_type":
+        from pyspark.errors import PySparkTypeError
+
+        # Current master validates supported schema categories before invoking
+        # general Arrow conversion. Preserve its structured error and ordering.
+        monkeypatch.setattr(pandas_package, "types", pandas_types)
+        monkeypatch.delitem(sys.modules, "pyspark.sql.pandas.types")
+        with pytest.raises(PySparkTypeError) as error:
+            prepare_table(table, schema, "TIMESTAMP_LTZ", "UTC", "false")
+        assert type(error.value) is PySparkTypeError
+        assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+        assert error.value.getMessageParameters() == {
+            "arg_name": "schema", "expected_type": "list, None or StructType",
+            "arg_type": "CustomType",
+        }
+        assert "pyspark.sql.pandas.types" not in sys.modules
+        return
+
     expected_schema = (
         schema if isinstance(schema, T.StructType) else pandas_types.from_arrow_schema(table.schema)
     )
@@ -4177,10 +4200,16 @@ def test_arrow_input_noncanonical_uses_general_conversion(kind, monkeypatch):
     assert _arrow_input_ipc_bytes(normalized) == _arrow_input_ipc_bytes(expected)
     if kind == "names":
         assert names == ["renamed"]
+    elif kind == "inferred":
+        assert names == table.column_names
     else:
         assert names is None
     if schema is not None and kind != "names":
         assert result_schema is schema
+    else:
+        # Inferred and renamed inputs keep their types in Arrow, with names
+        # applied by the current importer through a toDF wrapper.
+        assert result_schema is None
 
 
 def test_arrow_input_respects_loaded_converter_hook(monkeypatch):
