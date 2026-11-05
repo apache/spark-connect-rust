@@ -257,12 +257,12 @@ pub trait Transformer: Send + Sync {
     }
 
     /// Build the MlRelation for this transformation.
-    fn build_ml_relation(&self, input_plan: &LogicalPlan) -> proto::MlRelation {
+    fn build_ml_relation(&self, input: &DataFrame) -> proto::MlRelation {
         let mut transform = proto::ml_relation::Transform::default();
         transform.operator = Some(proto::ml_relation::transform::Operator::Transformer(
             self.operator().to_proto(),
         ));
-        transform.input = Some(Box::new(input_plan.to_proto()));
+        transform.input = Some(Box::new(input.relation()));
         transform.params = Some(self.params().to_proto());
 
         let mut ml_relation = proto::MlRelation::default();
@@ -304,7 +304,7 @@ fn evaluate_via_command(
     params: &Params,
     df: &DataFrame,
 ) -> spark_connect_core::error::Result<f64> {
-    let dataset = crate::dataframe::build_input_relation(&df.plan, &df.session)?;
+    let dataset = df.relation();
     let evaluate = proto::ml_command::Evaluate {
         evaluator: Some(operator.to_proto()),
         params: Some(params.to_proto()),
@@ -448,7 +448,7 @@ impl Transformer for StandardScalerModel {
 
     fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
         // Build an MlRelation for transformation
-        let ml_relation = self.build_ml_relation(&df.plan);
+        let ml_relation = self.build_ml_relation(df);
 
         // Wrap it in a Relation
         let mut relation = proto::Relation::default();
@@ -539,7 +539,7 @@ impl Transformer for VectorAssembler {
     }
 
     fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
-        let ml_relation = self.build_ml_relation(&df.plan);
+        let ml_relation = self.build_ml_relation(df);
         let mut relation = proto::Relation::default();
         relation.common = Some(proto::RelationCommon::default());
         relation.rel_type = Some(proto::relation::RelType::MlRelation(Box::new(ml_relation)));
@@ -658,7 +658,7 @@ impl Transformer for StringIndexerModel {
     }
 
     fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
-        let ml_relation = self.build_ml_relation(&df.plan);
+        let ml_relation = self.build_ml_relation(df);
         let mut relation = proto::Relation::default();
         relation.common = Some(proto::RelationCommon::default());
         relation.rel_type = Some(proto::relation::RelType::MlRelation(Box::new(ml_relation)));
@@ -783,7 +783,7 @@ impl Transformer for MaxAbsScalerModel {
     }
 
     fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
-        let ml_relation = self.build_ml_relation(&df.plan);
+        let ml_relation = self.build_ml_relation(df);
         let mut relation = proto::Relation::default();
         relation.common = Some(proto::RelationCommon::default());
         relation.rel_type = Some(proto::relation::RelType::MlRelation(Box::new(ml_relation)));
@@ -934,7 +934,7 @@ impl Transformer for LogisticRegressionModel {
     }
 
     fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
-        let ml_relation = self.build_ml_relation(&df.plan);
+        let ml_relation = self.build_ml_relation(df);
         let mut relation = proto::Relation::default();
         relation.common = Some(proto::RelationCommon::default());
         relation.rel_type = Some(proto::relation::RelType::MlRelation(Box::new(ml_relation)));
@@ -1194,7 +1194,7 @@ impl Transformer for PipelineModel {
     }
 
     fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
-        let ml_relation = self.build_ml_relation(&df.plan);
+        let ml_relation = self.build_ml_relation(df);
         let mut relation = proto::Relation::default();
         relation.common = Some(proto::RelationCommon::default());
         relation.rel_type = Some(proto::relation::RelType::MlRelation(Box::new(ml_relation)));
@@ -1383,7 +1383,7 @@ impl Transformer for CrossValidatorModel {
         &mut self.params
     }
     fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
-        let ml_relation = self.build_ml_relation(&df.plan);
+        let ml_relation = self.build_ml_relation(df);
         let mut relation = proto::Relation::default();
         relation.common = Some(proto::RelationCommon::default());
         relation.rel_type = Some(proto::relation::RelType::MlRelation(Box::new(ml_relation)));
