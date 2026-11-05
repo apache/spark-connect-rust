@@ -38,6 +38,7 @@ fn merge_action(
 }
 
 /// Fluent builder for a MERGE INTO command. Create it via [`crate::dataframe::DataFrame::merge_into`].
+#[derive(Clone)]
 pub struct MergeIntoWriter {
     session: SparkSession,
     source_plan: Arc<LogicalPlan>,

@@ -21,6 +21,7 @@ use crate::udf::PythonUDFPayload;
 /// DataStreamReader for reading streaming data from various sources.
 ///
 /// Mirrors `pyspark.sql.connect.streaming.DataStreamReader`.
+#[derive(Clone)]
 pub struct DataStreamReader {
     session: SparkSession,
     format: Option<String>,
@@ -69,6 +70,21 @@ impl DataStreamReader {
     pub fn name(mut self, source_name: &str) -> Self {
         self.source_name = Some(source_name.to_string());
         self
+    }
+
+    /// The configured source format, if any.
+    pub fn get_format(&self) -> Option<&str> {
+        self.format.as_deref()
+    }
+
+    /// The configured schema (a DDL/JSON string; empty when unset).
+    pub fn get_schema(&self) -> &str {
+        &self.schema
+    }
+
+    /// The configured read options.
+    pub fn get_options(&self) -> &HashMap<String, String> {
+        &self.options
     }
 
     /// Load streaming data from the specified path(s).
@@ -242,6 +258,7 @@ pub enum Trigger {
 /// DataStreamWriter for writing streaming data to various sinks.
 ///
 /// Mirrors `pyspark.sql.connect.streaming.DataStreamWriter`.
+#[derive(Clone)]
 pub struct DataStreamWriter {
     session: SparkSession,
     plan: Arc<LogicalPlan>,

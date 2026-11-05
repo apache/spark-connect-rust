@@ -1436,7 +1436,7 @@ impl PyDataFrame {
     #[getter]
     fn write(&self) -> PyDataFrameWriter {
         PyDataFrameWriter {
-            inner: Some(self.dataframe.write()),
+            inner: self.dataframe.write(),
         }
     }
 
@@ -1444,7 +1444,7 @@ impl PyDataFrame {
     #[pyo3(name = "writeTo")]
     fn write_to(&self, table: &str) -> PyDataFrameWriterV2 {
         PyDataFrameWriterV2 {
-            inner: Some(self.dataframe.write_to(table)),
+            inner: self.dataframe.write_to(table),
         }
     }
 
@@ -1469,7 +1469,7 @@ impl PyDataFrame {
     #[pyo3(name = "mergeInto")]
     fn merge_into(&self, table: &str, condition: &PyColumn) -> PyMergeIntoWriter {
         PyMergeIntoWriter {
-            inner: Some(self.dataframe.merge_into(table, condition.column.clone())),
+            inner: self.dataframe.merge_into(table, condition.column.clone()),
         }
     }
 
@@ -1702,17 +1702,28 @@ fn build_replacement_pairs(
 }
 
 /// Python wrapper for `MergeIntoWriter` (`df.mergeInto(...)`).
+///
+/// Mirrors PySpark's mutable writer: `withSchemaEvolution` and every clause action
+/// (`whenMatched().updateAll()`, ...) change this object and return it, and `merge`
+/// leaves it usable. The core writer is a consuming builder, so the wrapped value is
+/// replaced in place and `merge` runs on a clone.
 #[pyclass(name = "MergeIntoWriter", module = "pyspark.sql.merge")]
 pub struct PyMergeIntoWriter {
-    inner: Option<spark_connect::MergeIntoWriter>,
+    inner: spark_connect::MergeIntoWriter,
 }
 
-impl PyMergeIntoWriter {
-    fn take(&mut self) -> PyResult<spark_connect::MergeIntoWriter> {
-        self.inner.take().ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err("MergeIntoWriter already consumed")
-        })
+/// Apply a clause action to the parent writer in place and return that same writer
+/// (PySpark's clause methods append to `self.writer` and return it).
+fn merge_clause_action(
+    py: Python<'_>,
+    writer: &Py<PyMergeIntoWriter>,
+    action: impl FnOnce(spark_connect::MergeIntoWriter) -> spark_connect::MergeIntoWriter,
+) -> PyResult<Py<PyMergeIntoWriter>> {
+    {
+        let mut w = writer.bind(py).try_borrow_mut()?;
+        w.inner = action(w.inner.clone());
     }
+    Ok(writer.clone_ref(py))
 }
 
 #[pymethods]
@@ -1737,41 +1748,40 @@ impl PyMergeIntoWriter {
     }
 
     #[pyo3(name = "whenMatched", signature = (condition=None))]
-    fn when_matched(&mut self, condition: Option<&PyColumn>) -> PyResult<PyWhenMatched> {
-        let cond = condition.map(|c| c.column.clone());
-        Ok(PyWhenMatched {
-            inner: Some(self.take()?.when_matched(cond)),
-        })
+    fn when_matched(slf: &Bound<'_, Self>, condition: Option<&PyColumn>) -> PyWhenMatched {
+        PyWhenMatched {
+            writer: slf.clone().unbind(),
+            condition: condition.map(|c| c.column.clone()),
+        }
     }
 
     #[pyo3(name = "whenNotMatched", signature = (condition=None))]
-    fn when_not_matched(&mut self, condition: Option<&PyColumn>) -> PyResult<PyWhenNotMatched> {
-        let cond = condition.map(|c| c.column.clone());
-        Ok(PyWhenNotMatched {
-            inner: Some(self.take()?.when_not_matched(cond)),
-        })
+    fn when_not_matched(slf: &Bound<'_, Self>, condition: Option<&PyColumn>) -> PyWhenNotMatched {
+        PyWhenNotMatched {
+            writer: slf.clone().unbind(),
+            condition: condition.map(|c| c.column.clone()),
+        }
     }
 
     #[pyo3(name = "whenNotMatchedBySource", signature = (condition=None))]
     fn when_not_matched_by_source(
-        &mut self,
+        slf: &Bound<'_, Self>,
         condition: Option<&PyColumn>,
-    ) -> PyResult<PyWhenNotMatchedBySource> {
-        let cond = condition.map(|c| c.column.clone());
-        Ok(PyWhenNotMatchedBySource {
-            inner: Some(self.take()?.when_not_matched_by_source(cond)),
-        })
+    ) -> PyWhenNotMatchedBySource {
+        PyWhenNotMatchedBySource {
+            writer: slf.clone().unbind(),
+            condition: condition.map(|c| c.column.clone()),
+        }
     }
 
     #[pyo3(name = "withSchemaEvolution")]
-    fn with_schema_evolution(&mut self) -> PyResult<PyMergeIntoWriter> {
-        Ok(PyMergeIntoWriter {
-            inner: Some(self.take()?.with_schema_evolution()),
-        })
+    fn with_schema_evolution(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().with_schema_evolution();
+        slf
     }
 
-    fn merge(&mut self) -> PyResult<()> {
-        self.take()?.merge().to_pyerr()
+    fn merge(&self) -> PyResult<()> {
+        self.inner.clone().merge().to_pyerr()
     }
 }
 
@@ -1785,124 +1795,99 @@ fn assignments_to_map(
         .collect()
 }
 
-/// `whenMatched(...)` clause builder.
+/// `whenMatched(...)` clause builder. Holds its parent writer, like PySpark's
+/// `MergeIntoWriter.WhenMatched`; each action may be called more than once.
 #[pyclass(name = "WhenMatched", module = "pyspark.sql.merge")]
 pub struct PyWhenMatched {
-    inner: Option<spark_connect::merge::WhenMatched>,
+    writer: Py<PyMergeIntoWriter>,
+    condition: Option<spark_connect::column::Column>,
 }
 
 #[pymethods]
 impl PyWhenMatched {
     #[pyo3(name = "updateAll")]
-    fn update_all(&mut self) -> PyResult<PyMergeIntoWriter> {
-        let w = self
-            .inner
-            .take()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("clause already consumed"))?;
-        Ok(PyMergeIntoWriter {
-            inner: Some(w.update_all()),
-        })
+    fn update_all(&self, py: Python<'_>) -> PyResult<Py<PyMergeIntoWriter>> {
+        let cond = self.condition.clone();
+        merge_clause_action(py, &self.writer, |w| w.when_matched(cond).update_all())
     }
 
     fn update(
-        &mut self,
+        &self,
         py: Python<'_>,
         assignments: std::collections::HashMap<String, Py<PyColumn>>,
-    ) -> PyResult<PyMergeIntoWriter> {
-        let w = self
-            .inner
-            .take()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("clause already consumed"))?;
-        Ok(PyMergeIntoWriter {
-            inner: Some(w.update(assignments_to_map(py, assignments))),
-        })
+    ) -> PyResult<Py<PyMergeIntoWriter>> {
+        let cond = self.condition.clone();
+        let map = assignments_to_map(py, assignments);
+        merge_clause_action(py, &self.writer, |w| w.when_matched(cond).update(map))
     }
 
-    fn delete(&mut self) -> PyResult<PyMergeIntoWriter> {
-        let w = self
-            .inner
-            .take()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("clause already consumed"))?;
-        Ok(PyMergeIntoWriter {
-            inner: Some(w.delete()),
-        })
+    fn delete(&self, py: Python<'_>) -> PyResult<Py<PyMergeIntoWriter>> {
+        let cond = self.condition.clone();
+        merge_clause_action(py, &self.writer, |w| w.when_matched(cond).delete())
     }
 }
 
-/// `whenNotMatched(...)` clause builder.
+/// `whenNotMatched(...)` clause builder. Holds its parent writer, like PySpark's
+/// `MergeIntoWriter.WhenNotMatched`.
 #[pyclass(name = "WhenNotMatched", module = "pyspark.sql.merge")]
 pub struct PyWhenNotMatched {
-    inner: Option<spark_connect::merge::WhenNotMatched>,
+    writer: Py<PyMergeIntoWriter>,
+    condition: Option<spark_connect::column::Column>,
 }
 
 #[pymethods]
 impl PyWhenNotMatched {
     #[pyo3(name = "insertAll")]
-    fn insert_all(&mut self) -> PyResult<PyMergeIntoWriter> {
-        let w = self
-            .inner
-            .take()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("clause already consumed"))?;
-        Ok(PyMergeIntoWriter {
-            inner: Some(w.insert_all()),
-        })
+    fn insert_all(&self, py: Python<'_>) -> PyResult<Py<PyMergeIntoWriter>> {
+        let cond = self.condition.clone();
+        merge_clause_action(py, &self.writer, |w| w.when_not_matched(cond).insert_all())
     }
 
     fn insert(
-        &mut self,
+        &self,
         py: Python<'_>,
         assignments: std::collections::HashMap<String, Py<PyColumn>>,
-    ) -> PyResult<PyMergeIntoWriter> {
-        let w = self
-            .inner
-            .take()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("clause already consumed"))?;
-        Ok(PyMergeIntoWriter {
-            inner: Some(w.insert(assignments_to_map(py, assignments))),
-        })
+    ) -> PyResult<Py<PyMergeIntoWriter>> {
+        let cond = self.condition.clone();
+        let map = assignments_to_map(py, assignments);
+        merge_clause_action(py, &self.writer, |w| w.when_not_matched(cond).insert(map))
     }
 }
 
-/// `whenNotMatchedBySource(...)` clause builder.
+/// `whenNotMatchedBySource(...)` clause builder. Holds its parent writer, like
+/// PySpark's `MergeIntoWriter.WhenNotMatchedBySource`.
 #[pyclass(name = "WhenNotMatchedBySource", module = "pyspark.sql.merge")]
 pub struct PyWhenNotMatchedBySource {
-    inner: Option<spark_connect::merge::WhenNotMatchedBySource>,
+    writer: Py<PyMergeIntoWriter>,
+    condition: Option<spark_connect::column::Column>,
 }
 
 #[pymethods]
 impl PyWhenNotMatchedBySource {
     #[pyo3(name = "updateAll")]
-    fn update_all(&mut self) -> PyResult<PyMergeIntoWriter> {
-        let w = self
-            .inner
-            .take()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("clause already consumed"))?;
-        Ok(PyMergeIntoWriter {
-            inner: Some(w.update_all()),
+    fn update_all(&self, py: Python<'_>) -> PyResult<Py<PyMergeIntoWriter>> {
+        let cond = self.condition.clone();
+        merge_clause_action(py, &self.writer, |w| {
+            w.when_not_matched_by_source(cond).update_all()
         })
     }
 
     fn update(
-        &mut self,
+        &self,
         py: Python<'_>,
         assignments: std::collections::HashMap<String, Py<PyColumn>>,
-    ) -> PyResult<PyMergeIntoWriter> {
-        let w = self
-            .inner
-            .take()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("clause already consumed"))?;
-        Ok(PyMergeIntoWriter {
-            inner: Some(w.update(assignments_to_map(py, assignments))),
+    ) -> PyResult<Py<PyMergeIntoWriter>> {
+        let cond = self.condition.clone();
+        let map = assignments_to_map(py, assignments);
+        merge_clause_action(py, &self.writer, |w| {
+            w.when_not_matched_by_source(cond).update(map)
         })
     }
 
-    fn delete(&mut self) -> PyResult<PyMergeIntoWriter> {
-        let w = self
-            .inner
-            .take()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("clause already consumed"))?;
-        Ok(PyMergeIntoWriter {
-            inner: Some(w.delete()),
+    fn delete(&self, py: Python<'_>) -> PyResult<Py<PyMergeIntoWriter>> {
+        let cond = self.condition.clone();
+        merge_clause_action(py, &self.writer, |w| {
+            w.when_not_matched_by_source(cond).delete()
         })
     }
 }
@@ -1910,16 +1895,10 @@ impl PyWhenNotMatchedBySource {
 /// Python wrapper for the V1 `DataFrameWriter` (`df.write`).
 #[pyclass(name = "DataFrameWriter", module = "pyspark.sql.readwriter")]
 pub struct PyDataFrameWriter {
-    inner: Option<spark_connect::readwriter::DataFrameWriter>,
+    inner: spark_connect::readwriter::DataFrameWriter,
 }
 
-impl PyDataFrameWriter {
-    fn take(&mut self) -> PyResult<spark_connect::readwriter::DataFrameWriter> {
-        self.inner.take().ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("DataFrameWriter already consumed")
-        })
-    }
-}
+impl PyDataFrameWriter {}
 
 /// Apply the shared `format` / `mode` / `partitionBy` / `**options` arguments that
 /// reference `DataFrameWriter.save` and `.saveAsTable` accept inline, mirroring
@@ -1959,34 +1938,38 @@ fn apply_write_common(
 
 #[pymethods]
 impl PyDataFrameWriter {
-    fn mode(&mut self, saveMode: &str) -> PyResult<PyDataFrameWriter> {
-        Ok(PyDataFrameWriter {
-            inner: Some(self.take()?.mode(saveMode)),
-        })
+    fn mode<'py>(mut slf: PyRefMut<'py, Self>, saveMode: &str) -> PyResult<PyRefMut<'py, Self>> {
+        slf.inner = slf.inner.clone().mode(saveMode);
+        Ok(slf)
     }
 
-    fn format(&mut self, source: &str) -> PyResult<PyDataFrameWriter> {
-        Ok(PyDataFrameWriter {
-            inner: Some(self.take()?.format(source)),
-        })
+    fn format<'py>(mut slf: PyRefMut<'py, Self>, source: &str) -> PyResult<PyRefMut<'py, Self>> {
+        slf.inner = slf.inner.clone().format(source);
+        Ok(slf)
     }
 
-    fn option(&mut self, key: &str, value: &Bound<'_, PyAny>) -> PyResult<PyDataFrameWriter> {
+    fn option<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        key: &str,
+        value: &Bound<'_, PyAny>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
         // None -> option left unset; bools -> "true"/"false" (reference `to_str`).
         match crate::coerce_option_value(value)? {
-            Some(v) => Ok(PyDataFrameWriter {
-                inner: Some(self.take()?.option(key, &v)),
-            }),
-            None => Ok(PyDataFrameWriter {
-                inner: Some(self.take()?),
-            }),
+            Some(v) => {
+                slf.inner = slf.inner.clone().option(key, &v);
+                Ok(slf)
+            }
+            None => Ok(slf),
         }
     }
 
     // Mirrors reference `DataFrameWriter.options(**options)`: keyword args; None values
     // skipped, booleans lowercased.
     #[pyo3(signature = (**options))]
-    fn options(&mut self, options: Option<&Bound<'_, PyDict>>) -> PyResult<PyDataFrameWriter> {
+    fn options<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        options: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
         let mut map = std::collections::HashMap::new();
         if let Some(options) = options {
             for (k, v) in options.iter() {
@@ -1995,46 +1978,51 @@ impl PyDataFrameWriter {
                 }
             }
         }
-        Ok(PyDataFrameWriter {
-            inner: Some(self.take()?.options(map)),
-        })
+        slf.inner = slf.inner.clone().options(map);
+        Ok(slf)
     }
 
     #[pyo3(name = "partitionBy", signature = (*cols))]
-    fn partition_by(&mut self, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrameWriter> {
-        Ok(PyDataFrameWriter {
-            inner: Some(self.take()?.partition_by(flatten_str_cols(cols)?)),
-        })
+    fn partition_by<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        cols: Vec<Bound<'_, PyAny>>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        slf.inner = slf.inner.clone().partition_by(flatten_str_cols(cols)?);
+        Ok(slf)
     }
 
     #[pyo3(name = "bucketBy", signature = (numBuckets, col, *cols))]
-    fn bucket_by(
-        &mut self,
+    fn bucket_by<'py>(
+        mut slf: PyRefMut<'py, Self>,
         numBuckets: i32,
         col: String,
         cols: Vec<String>,
-    ) -> PyResult<PyDataFrameWriter> {
+    ) -> PyResult<PyRefMut<'py, Self>> {
         let mut all = vec![col];
         all.extend(cols);
-        Ok(PyDataFrameWriter {
-            inner: Some(self.take()?.bucket_by(numBuckets, all)),
-        })
+        slf.inner = slf.inner.clone().bucket_by(numBuckets, all);
+        Ok(slf)
     }
 
     #[pyo3(name = "sortBy", signature = (col, *cols))]
-    fn sort_by(&mut self, col: String, cols: Vec<String>) -> PyResult<PyDataFrameWriter> {
+    fn sort_by<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        col: String,
+        cols: Vec<String>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
         let mut all = vec![col];
         all.extend(cols);
-        Ok(PyDataFrameWriter {
-            inner: Some(self.take()?.sort_by(all)),
-        })
+        slf.inner = slf.inner.clone().sort_by(all);
+        Ok(slf)
     }
 
     #[pyo3(name = "clusterBy", signature = (*cols))]
-    fn cluster_by(&mut self, cols: Vec<String>) -> PyResult<PyDataFrameWriter> {
-        Ok(PyDataFrameWriter {
-            inner: Some(self.take()?.cluster_by(cols)),
-        })
+    fn cluster_by<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        cols: Vec<String>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        slf.inner = slf.inner.clone().cluster_by(cols);
+        Ok(slf)
     }
 
     /// Write to an external JDBC table. Connection details go through `properties`.
@@ -2046,17 +2034,17 @@ impl PyDataFrameWriter {
         mode: Option<&str>,
         properties: Option<std::collections::HashMap<String, String>>,
     ) -> PyResult<()> {
-        let mut w = self
-            .take()?
-            .format("jdbc")
-            .option("url", url)
-            .option("dbtable", table);
+        // Same order as PySpark: format, mode, properties, then url/dbtable (which
+        // win over same-named properties), all kept on the writer, then save.
+        let mut w = self.inner.clone().format("jdbc");
         if let Some(m) = mode {
             w = w.mode(m);
         }
         if let Some(props) = properties {
             w = w.options(props);
         }
+        w = w.option("url", url).option("dbtable", table);
+        self.inner = w.clone();
         w.save(None).to_pyerr()
     }
 
@@ -2070,7 +2058,9 @@ impl PyDataFrameWriter {
         partitionBy: Option<&Bound<'_, PyAny>>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        let w = apply_write_common(self.take()?, format, mode, partitionBy, options)?;
+        let w = apply_write_common(self.inner.clone(), format, mode, partitionBy, options)?;
+        // PySpark sets the inline format/mode/partitionBy/options on the writer itself.
+        self.inner = w.clone();
         w.save(path.as_deref()).to_pyerr()
     }
 
@@ -2084,7 +2074,8 @@ impl PyDataFrameWriter {
         partitionBy: Option<&Bound<'_, PyAny>>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        let w = apply_write_common(self.take()?, format, mode, partitionBy, options)?;
+        let w = apply_write_common(self.inner.clone(), format, mode, partitionBy, options)?;
+        self.inner = w.clone();
         w.save_as_table(name).to_pyerr()
     }
 
@@ -2092,10 +2083,12 @@ impl PyDataFrameWriter {
     /// mirroring reference `DataFrameWriter.insertInto(tableName, overwrite=None)`.
     #[pyo3(name = "insertInto", signature = (tableName, overwrite=None))]
     fn insert_into(&mut self, tableName: &str, overwrite: Option<bool>) -> PyResult<()> {
-        let mut w = self.take()?;
+        let mut w = self.inner.clone();
         if let Some(ow) = overwrite {
             w = w.mode(if ow { "overwrite" } else { "append" });
         }
+        // PySpark sets the overwrite/append mode on the writer itself.
+        self.inner = w.clone();
         w.insert_into(tableName).to_pyerr()
     }
 
@@ -2110,7 +2103,7 @@ impl PyDataFrameWriter {
         partitionBy: Option<&Bound<'_, PyAny>>,
         compression: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
-        let mut w = self.take()?;
+        let mut w = self.inner.clone();
         if let Some(m) = mode {
             w = w.mode(&m.str()?.to_string());
         }
@@ -2123,6 +2116,8 @@ impl PyDataFrameWriter {
             w = w.partition_by(cols);
         }
         w = wset_opt(w, "compression", compression)?;
+        // PySpark sets the mode/options/format on the writer itself, then saves.
+        self.inner = w.clone().format("parquet");
         w.parquet(path).to_pyerr()
     }
 
@@ -2141,7 +2136,7 @@ impl PyDataFrameWriter {
         encoding: Option<&Bound<'_, PyAny>>,
         ignoreNullFields: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
-        let mut w = self.take()?;
+        let mut w = self.inner.clone();
         if let Some(m) = mode {
             w = w.mode(&m.str()?.to_string());
         }
@@ -2151,6 +2146,8 @@ impl PyDataFrameWriter {
         w = wset_opt(w, "lineSep", lineSep)?;
         w = wset_opt(w, "encoding", encoding)?;
         w = wset_opt(w, "ignoreNullFields", ignoreNullFields)?;
+        // PySpark sets the mode/options/format on the writer itself, then saves.
+        self.inner = w.clone().format("json");
         w.json(path).to_pyerr()
     }
 
@@ -2179,7 +2176,7 @@ impl PyDataFrameWriter {
         emptyValue: Option<&Bound<'_, PyAny>>,
         lineSep: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
-        let mut w = self.take()?;
+        let mut w = self.inner.clone();
         if let Some(m) = mode {
             w = w.mode(&m.str()?.to_string());
         }
@@ -2199,6 +2196,8 @@ impl PyDataFrameWriter {
         w = wset_opt(w, "encoding", encoding)?;
         w = wset_opt(w, "emptyValue", emptyValue)?;
         w = wset_opt(w, "lineSep", lineSep)?;
+        // PySpark sets the mode/options/format on the writer itself, then saves.
+        self.inner = w.clone().format("csv");
         w.csv(path).to_pyerr()
     }
 
@@ -2213,7 +2212,7 @@ impl PyDataFrameWriter {
         partitionBy: Option<&Bound<'_, PyAny>>,
         compression: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
-        let mut w = self.take()?;
+        let mut w = self.inner.clone();
         if let Some(m) = mode {
             w = w.mode(&m.str()?.to_string());
         }
@@ -2226,6 +2225,8 @@ impl PyDataFrameWriter {
             w = w.partition_by(cols);
         }
         w = wset_opt(w, "compression", compression)?;
+        // PySpark sets the mode/options/format on the writer itself, then saves.
+        self.inner = w.clone().format("orc");
         w.orc(path).to_pyerr()
     }
 
@@ -2239,9 +2240,11 @@ impl PyDataFrameWriter {
         compression: Option<&Bound<'_, PyAny>>,
         lineSep: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
-        let mut w = self.take()?;
+        let mut w = self.inner.clone();
         w = wset_opt(w, "compression", compression)?;
         w = wset_opt(w, "lineSep", lineSep)?;
+        // PySpark sets the mode/options/format on the writer itself, then saves.
+        self.inner = w.clone().format("text");
         w.text(path).to_pyerr()
     }
 
@@ -2266,7 +2269,7 @@ impl PyDataFrameWriter {
         encoding: Option<&Bound<'_, PyAny>>,
         validateName: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
-        let mut w = self.take()?;
+        let mut w = self.inner.clone();
         w = wset_opt(w, "rowTag", rowTag)?;
         if let Some(m) = mode {
             w = w.mode(&m.str()?.to_string());
@@ -2282,6 +2285,8 @@ impl PyDataFrameWriter {
         w = wset_opt(w, "compression", compression)?;
         w = wset_opt(w, "encoding", encoding)?;
         w = wset_opt(w, "validateName", validateName)?;
+        // PySpark sets the mode/options/format on the writer itself, then saves.
+        self.inner = w.clone().format("xml");
         w.xml(path).to_pyerr()
     }
 }
@@ -2289,41 +2294,40 @@ impl PyDataFrameWriter {
 /// Python wrapper for the V2 `DataFrameWriter` (`df.writeTo`).
 #[pyclass(name = "DataFrameWriterV2", module = "pyspark.sql.readwriter")]
 pub struct PyDataFrameWriterV2 {
-    inner: Option<spark_connect::readwriter::DataFrameWriterV2>,
+    inner: spark_connect::readwriter::DataFrameWriterV2,
 }
 
-impl PyDataFrameWriterV2 {
-    fn take(&mut self) -> PyResult<spark_connect::readwriter::DataFrameWriterV2> {
-        self.inner.take().ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("DataFrameWriterV2 already consumed")
-        })
-    }
-}
+impl PyDataFrameWriterV2 {}
 
 #[pymethods]
 impl PyDataFrameWriterV2 {
-    fn using(&mut self, provider: &str) -> PyResult<PyDataFrameWriterV2> {
-        Ok(PyDataFrameWriterV2 {
-            inner: Some(self.take()?.using(provider)),
-        })
+    fn using<'py>(mut slf: PyRefMut<'py, Self>, provider: &str) -> PyResult<PyRefMut<'py, Self>> {
+        slf.inner = slf.inner.clone().using(provider);
+        Ok(slf)
     }
 
     // None -> option left unset; bools -> "true"/"false" (reference `to_str`), same as
     // the other reader/writer option bindings.
-    fn option(&mut self, key: &str, value: &Bound<'_, PyAny>) -> PyResult<PyDataFrameWriterV2> {
+    fn option<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        key: &str,
+        value: &Bound<'_, PyAny>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
         match crate::coerce_option_value(value)? {
-            Some(v) => Ok(PyDataFrameWriterV2 {
-                inner: Some(self.take()?.option(key, &v)),
-            }),
-            None => Ok(PyDataFrameWriterV2 {
-                inner: Some(self.take()?),
-            }),
+            Some(v) => {
+                slf.inner = slf.inner.clone().option(key, &v);
+                Ok(slf)
+            }
+            None => Ok(slf),
         }
     }
 
     // Mirrors reference `DataFrameWriterV2.options(**options)`; None skipped, bools lowercased.
     #[pyo3(signature = (**options))]
-    fn options(&mut self, options: Option<&Bound<'_, PyDict>>) -> PyResult<PyDataFrameWriterV2> {
+    fn options<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        options: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
         let mut map = std::collections::HashMap::new();
         if let Some(options) = options {
             for (k, v) in options.iter() {
@@ -2332,65 +2336,72 @@ impl PyDataFrameWriterV2 {
                 }
             }
         }
-        Ok(PyDataFrameWriterV2 {
-            inner: Some(self.take()?.options(map)),
-        })
+        slf.inner = slf.inner.clone().options(map);
+        Ok(slf)
     }
 
     #[pyo3(name = "tableProperty")]
-    fn table_property(&mut self, property: &str, value: &str) -> PyResult<PyDataFrameWriterV2> {
-        Ok(PyDataFrameWriterV2 {
-            inner: Some(self.take()?.table_property(property, value)),
-        })
+    fn table_property<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        property: &str,
+        value: &str,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        slf.inner = slf.inner.clone().table_property(property, value);
+        Ok(slf)
     }
 
     #[pyo3(name = "partitionedBy", signature = (col, *cols))]
-    fn partitioned_by(
-        &mut self,
+    fn partitioned_by<'py>(
+        mut slf: PyRefMut<'py, Self>,
         col: Bound<'_, PyAny>,
         cols: Vec<Bound<'_, PyAny>>,
-    ) -> PyResult<PyDataFrameWriterV2> {
+    ) -> PyResult<PyRefMut<'py, Self>> {
         let mut all = vec![col];
         all.extend(cols);
         let columns = to_column_list(all)?;
-        Ok(PyDataFrameWriterV2 {
-            inner: Some(self.take()?.partition_by(columns)),
-        })
+        slf.inner = slf.inner.clone().partition_by(columns);
+        Ok(slf)
     }
 
     #[pyo3(name = "clusterBy", signature = (col, *cols))]
-    fn cluster_by(&mut self, col: String, cols: Vec<String>) -> PyResult<PyDataFrameWriterV2> {
+    fn cluster_by<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        col: String,
+        cols: Vec<String>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
         let mut all = vec![col];
         all.extend(cols);
-        Ok(PyDataFrameWriterV2 {
-            inner: Some(self.take()?.cluster_by(all)),
-        })
+        slf.inner = slf.inner.clone().cluster_by(all);
+        Ok(slf)
     }
 
     fn create(&mut self) -> PyResult<()> {
-        self.take()?.create().to_pyerr()
+        self.inner.clone().create().to_pyerr()
     }
 
     fn replace(&mut self) -> PyResult<()> {
-        self.take()?.replace().to_pyerr()
+        self.inner.clone().replace().to_pyerr()
     }
 
     #[pyo3(name = "createOrReplace")]
     fn create_or_replace(&mut self) -> PyResult<()> {
-        self.take()?.create_or_replace().to_pyerr()
+        self.inner.clone().create_or_replace().to_pyerr()
     }
 
     fn append(&mut self) -> PyResult<()> {
-        self.take()?.append().to_pyerr()
+        self.inner.clone().append().to_pyerr()
     }
 
     fn overwrite(&mut self, condition: &PyColumn) -> PyResult<()> {
-        self.take()?.overwrite(condition.column.clone()).to_pyerr()
+        self.inner
+            .clone()
+            .overwrite(condition.column.clone())
+            .to_pyerr()
     }
 
     #[pyo3(name = "overwritePartitions")]
     fn overwrite_partitions(&mut self) -> PyResult<()> {
-        self.take()?.overwrite_partitions().to_pyerr()
+        self.inner.clone().overwrite_partitions().to_pyerr()
     }
 }
 
