@@ -33,8 +33,9 @@ class IntervalInputConversionTests(unittest.TestCase):
                 with self.subTest(micros=micros, data=data):
                     with self.assertRaisesRegex(OverflowError, "64-bit microseconds"):
                         spark.createDataFrame(data)
+            # A Python Row stores objects unchanged; native conversion starts here.
             with self.assertRaises(OverflowError):
-                Row(interval=value)
+                spark.createDataFrame([Row(interval=value)])
             with self.assertRaises(OverflowError):
                 spark.createDataFrame([value], T.DayTimeIntervalType())
         for value in (timedelta.min, timedelta.max):
