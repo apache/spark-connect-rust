@@ -422,7 +422,7 @@ def _arrow_input_service(
              "config_requests": [], "upload_contexts": [], "status_contexts": []}
     server_id = "00000000-0000-0000-0000-000000000001"
 
-    def attribution(request):
+    def attribution(request, context):
         # Keep only scalar envelope fields; do not retain another payload copy.
         return {
             "session_id": request.session_id,
@@ -431,6 +431,7 @@ def _arrow_input_service(
             "user_name": request.user_context.user_name,
             "has_client_type": request.HasField("client_type"),
             "client_type": request.client_type,
+            "grpc_user_agent": dict(context.invocation_metadata())["user-agent"],
         }
 
     def configure(raw, context):
@@ -445,7 +446,7 @@ def _arrow_input_service(
 
     def statuses(raw, context):
         request = protocol("ArtifactStatusesRequest").FromString(raw)
-        state["status_contexts"].append(attribution(request))
+        state["status_contexts"].append(attribution(request, context))
         return protocol("ArtifactStatusesResponse", session_id=request.session_id,
                         statuses={name: dict(exists=name in state["cache"])
                                   for name in request.names}).SerializeToString()
@@ -470,7 +471,7 @@ def _arrow_input_service(
             state["message_sizes"].append(len(raw))
             request = protocol("AddArtifactsRequest").FromString(raw)
             state["upload_contexts"].append({
-                **attribution(request), "payload": request.WhichOneof("payload")
+                **attribution(request, context), "payload": request.WhichOneof("payload")
             })
             session_id = request.session_id
             if request.HasField("batch"):
@@ -582,11 +583,15 @@ def _assert_artifact_contexts(contexts, *, session_id, user_id, user_agent):
     client_types = {context["client_type"] for context in contexts}
     assert len(client_types) == 1
     client_type = client_types.pop()
-    assert client_type.startswith(f"{user_agent} spark/")
-    assert " os/" in client_type
-    assert client_type.endswith(" python/rust")
+    assert client_type
+    assert client_type.startswith(user_agent)
     for context in contexts:
+        # Tonic appends its transport token to the configured channel user-agent.
+        channel_user_agent, transport_agent = context["grpc_user_agent"].rsplit(" ", 1)
+        assert transport_agent.startswith("tonic/")
+        assert client_type == channel_user_agent
         assert context["session_id"] == session_id
+        # PySpark's ArtifactManager sends a present context even without a user ID.
         assert context["has_user_context"]
         assert context["user_id"] == user_id
         assert context["user_name"] == ""
