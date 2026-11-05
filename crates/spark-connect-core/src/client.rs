@@ -18,7 +18,9 @@ use spark_connect_proto::{
     ReleaseExecuteRequest, ReleaseExecuteResponse, ReleaseSessionRequest, UserContext,
 };
 
-use crate::artifact::{build_artifact_request_stream, FileArtifact, NamedArtifact};
+use crate::artifact::{
+    build_artifact_request_stream, cache_artifact_requests, FileArtifact, NamedArtifact,
+};
 use crate::channel::{ChannelBuilder, GRPC_MAX_MESSAGE_LENGTH_DEFAULT};
 use crate::error::{Result, SparkError};
 use crate::reattach::ExecutePlanResponseReattachableIterator;
@@ -744,7 +746,8 @@ impl SparkConnectClient {
 
         // Build request stream with proper chunking/batching
         let requests = build_artifact_request_stream(self.session_id.clone(), artifacts)?;
-        self.upload_artifact_requests(requests, None).await
+        self.upload_artifact_requests(futures::stream::iter(requests), None)
+            .await
     }
 
     /// Upload a single local file as an artifact under an explicit artifact name
@@ -758,13 +761,14 @@ impl SparkConnectClient {
             Box::new(FileArtifact::new(local_path)),
         )];
         let requests = build_artifact_request_stream(self.session_id.clone(), artifacts)?;
-        self.upload_artifact_requests(requests, None).await
+        self.upload_artifact_requests(futures::stream::iter(requests), None)
+            .await
     }
 
     /// Upload session-scoped cache blobs, returning SHA-256 hashes in input order.
     /// Existing artifacts and duplicate blobs are uploaded only once.
     pub async fn cache_artifacts(&self, blobs: Vec<Vec<u8>>) -> Result<Vec<String>> {
-        use crate::artifact::InMemoryArtifact;
+        use bytes::Bytes;
         use sha2::{Digest, Sha256};
         use std::collections::HashSet;
 
@@ -789,18 +793,15 @@ impl SparkConnectClient {
         let mut artifacts = Vec::new();
         for (blob, name) in blobs.into_iter().zip(names) {
             if !cached.get(&name).copied().unwrap_or(false) && seen.insert(name.clone()) {
-                artifacts.push(NamedArtifact::new(
-                    name,
-                    Box::new(InMemoryArtifact::new(blob)),
-                ));
+                artifacts.push((name, Bytes::from(blob)));
             }
         }
         if artifacts.is_empty() {
             return Ok(hashes);
         }
-        let expected: HashSet<String> = artifacts.iter().map(|a| a.name.clone()).collect();
-        let requests = build_artifact_request_stream(self.session_id.clone(), artifacts)?;
-        self.upload_artifact_requests(requests, Some(&expected))
+        let expected: HashSet<String> = artifacts.iter().map(|(name, _)| name.clone()).collect();
+        let requests = cache_artifact_requests(self.session_id.clone(), artifacts);
+        self.upload_artifact_requests(futures::stream::iter(requests), Some(&expected))
             .await?;
         Ok(hashes)
     }
@@ -809,10 +810,10 @@ impl SparkConnectClient {
     /// Cache uploads also require an acknowledgement for every requested artifact.
     async fn upload_artifact_requests(
         &self,
-        requests: Vec<spark_connect_proto::AddArtifactsRequest>,
+        requests: impl futures::Stream<Item = spark_connect_proto::AddArtifactsRequest> + Send + 'static,
         expected_cache_names: Option<&std::collections::HashSet<String>>,
     ) -> Result<()> {
-        let mut req = Request::new(futures::stream::iter(requests));
+        let mut req = Request::new(requests);
         self._attach_metadata(&mut req);
         let response = self
             .stub
