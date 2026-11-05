@@ -62,11 +62,35 @@ fn set_opt(
     }
 }
 
-/// Resolve a reader `schema` arg (a StructType/DataType or a DDL string) to the
-/// reader's DDL schema.
+/// A reader `schema` as pyspark's `DataFrameReader.schema` and `DataStreamReader.schema`
+/// send it: a StructType as its JSON, which keeps field metadata, and a string as is, for
+/// the server to parse. Anything else raises `NOT_EXPECTED_TYPE`.
+pub(crate) fn reader_schema(schema: &Bound<'_, PyAny>) -> PyResult<String> {
+    if let Ok(schema) = schema.extract::<String>() {
+        return Ok(schema);
+    }
+    if let Ok(st) = schema.extract::<PyRef<crate::types::PyStructType>>() {
+        return Ok(spark_connect::types::DataType::Struct {
+            fields: st.fields.clone(),
+        }
+        .json());
+    }
+    let arg_type = schema.get_type().name()?.to_string();
+    Err(crate::column::raise_pyspark(
+        schema.py(),
+        "PySparkTypeError",
+        "NOT_EXPECTED_TYPE",
+        &[
+            ("arg_name", "schema"),
+            ("expected_type", "str or struct type"),
+            ("arg_type", &arg_type),
+        ],
+    ))
+}
+
+/// Apply the `schema` argument of a format method, as pyspark does through `schema()`.
 fn apply_reader_schema(r: DataFrameReader, v: &Bound<'_, PyAny>) -> PyResult<DataFrameReader> {
-    let dt = crate::types::py_to_data_type(v)?;
-    Ok(r.schema(dt.simple_string()))
+    Ok(r.schema(reader_schema(v)?))
 }
 
 #[pymethods]
@@ -77,10 +101,14 @@ impl PyDataFrameReader {
         slf
     }
 
-    /// Set the schema (a DDL string).
-    fn schema<'py>(mut slf: PyRefMut<'py, Self>, schema: &str) -> PyRefMut<'py, Self> {
-        slf.inner = slf.inner.clone().schema(schema.to_string());
-        slf
+    /// Set the schema: a StructType or a DDL string, as in pyspark.
+    fn schema<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        schema: &Bound<'_, PyAny>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let schema = reader_schema(schema)?;
+        slf.inner = slf.inner.clone().schema(schema);
+        Ok(slf)
     }
 
     /// Set a single read option. `None` leaves the option unset (not the string

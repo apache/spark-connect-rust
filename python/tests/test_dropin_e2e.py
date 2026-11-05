@@ -258,6 +258,24 @@ def test_create_dataframe_infers_types_past_nulls(session, data, simple_string, 
     assert [tuple(r) for r in df.collect()] == rows
 
 
+@pytest.mark.parametrize("ddl", [False, True], ids=["StructType", "DDL"])
+def test_reader_schema_keeps_field_metadata(session, tmp_path, ddl):
+    (tmp_path / "t.csv").write_text("1,x\n2,y\n")
+    path = str(tmp_path / "t.csv")
+    if ddl:
+        schema = "a long COMMENT 'the key', b string"
+    else:
+        schema = StructType(
+            [StructField("a", LongType(), True, {"comment": "the key"}), StructField("b", StringType())]
+        )
+    for df in (session.read.schema(schema).csv(path), session.read.csv(path, schema=schema)):
+        assert df.schema.fields[0].metadata == {"comment": "the key"}
+        assert [tuple(r) for r in df.collect()] == [(1, "x"), (2, "y")]
+    stream = session.readStream.schema(schema).csv(str(tmp_path))
+    assert stream.isStreaming
+    assert stream.schema.fields[0].metadata == {"comment": "the key"}
+
+
 def test_collect_reads_a_result_across_stream_ends(session):
     # Takes several response streams when the server's senderMaxStreamSize is small.
     n = 300_000
