@@ -26,7 +26,7 @@ from datetime import date, datetime
 
 import pyarrow as pa
 import pytest
-from pyspark.errors import PySparkValueError
+from pyspark.errors import AnalysisException, PySparkValueError
 from pyspark.sql import Row, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
@@ -340,3 +340,24 @@ def test_collected_rows_behave_as_pyspark_rows(session):
     duplicate = session.range(1).selectExpr("1 AS a", "2 AS a").first()
     assert repr(duplicate) == "Row(a=1, a=2)" and duplicate.asDict() == {"a": 2}
     assert repr(pickle.loads(pickle.dumps(duplicate))) == "Row(a=1, a=2)"
+
+
+def test_sql_runs_statements_eagerly(session):
+    # sql() sends the statement at once: a command takes effect without an action, and the
+    # DataFrame of its result is the local relation the server returned.
+    session.sql("CREATE OR REPLACE TEMP VIEW eager_sql_v AS SELECT 1 AS x")
+    assert [tuple(r) for r in session.table("eager_sql_v").collect()] == [(1,)]
+    session.sql("SET spark.connect.rust.test.eager=on")
+    assert session.conf.get("spark.connect.rust.test.eager") == "on"
+    databases = session.sql("SHOW DATABASES")
+    assert databases.isLocal()
+    assert "default" in [r[0] for r in databases.collect()]
+    # A query still runs at the action.
+    query = session.sql("SELECT 1 AS x")
+    assert not query.isLocal()
+    assert [tuple(r) for r in query.collect()] == [(1,)]
+
+
+def test_sql_fails_at_a_statement_that_does_not_parse(session):
+    with pytest.raises(AnalysisException, match="PARSE_SYNTAX_ERROR"):
+        session.sql("SELEC 1")

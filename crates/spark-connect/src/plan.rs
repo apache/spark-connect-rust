@@ -235,6 +235,9 @@ pub enum LogicalPlan {
     },
     /// CachedRemoteRelation: a reference to a cached remote relation.
     CachedRemoteRelation { relation_id: String },
+    /// A relation the server returned, such as the result of `SparkSession::sql`, sent back
+    /// as is (pyspark's `CachedRelation`).
+    CachedRelation { relation: Box<proto::Relation> },
     /// Read: `spark.read.format(...).load(...)` or `spark.read.table(...)`.
     Read {
         read_type: crate::readwriter::ReadType,
@@ -1052,6 +1055,13 @@ impl LogicalPlan {
                 let mut cached = proto::CachedRemoteRelation::default();
                 cached.relation_id = relation_id.clone();
                 relation.rel_type = Some(proto::relation::RelType::CachedRemoteRelation(cached));
+            }
+
+            LogicalPlan::CachedRelation { relation: returned } => {
+                // Keep the relation as the server returned it; only its plan ID is this node's.
+                let common = relation.common.take();
+                relation = (**returned).clone();
+                relation.common = common;
             }
 
             LogicalPlan::Read {

@@ -110,6 +110,11 @@ last response it saw, so long results survive transient disconnects. Like the
 reference client, it releases each response it has read, and the whole execution
 once the result is complete, so the server does not keep them.
 
+`spark.sql()` is the exception, as in the reference client: it sends the
+statement at once. A command such as `CREATE VIEW` or `SET` takes effect there,
+and its DataFrame holds the result the server returned; a statement that does not
+parse or resolve fails there. A query's DataFrame still runs at an action.
+
 Each plan node gets its plan ID once, the first time it is sent, and keeps it, as
 in the reference client. Re-executing a DataFrame therefore sends the same
 relation, and a DataFrame built on another keeps that input's plan IDs, so the
