@@ -53,11 +53,12 @@ async fn wait_ready(grpc: &mut tonic::client::Grpc<Channel>) -> Result<()> {
 }
 
 /// Avoid a blocking-pool round trip for small artifact batches.
-const ARTIFACT_HASH_INLINE_MAX_BYTES: usize = 1024 * 1024;
+/// Keep synchronous work small on async workers, including CPUs without SHA acceleration.
+const ARTIFACT_HASH_INLINE_MAX_BYTES: usize = 256 * 1024;
 /// Bound per-blob digest and encoding work even when every blob is empty.
 const ARTIFACT_HASH_INLINE_MAX_BLOBS: usize = 128;
 
-/// Hash up to 128 blobs totaling at most 1 MiB inline; offload larger batches.
+/// Hash up to 128 blobs totaling at most 256 KiB inline; offload larger batches.
 /// Returns the original buffers for upload framing. If the caller is dropped after
 /// blocking hashing starts, the task retains the blob buffers until it finishes.
 async fn hash_artifact_blobs(blobs: Vec<Vec<u8>>) -> Result<(Vec<Vec<u8>>, Vec<String>)> {
@@ -1288,7 +1289,7 @@ mod tests {
         assert!(!pending, "the inline size limit is inclusive");
         assert_eq!(
             hashes,
-            ["9bc1b2a288b26af7257a36277ae3816a7d4f16e89c1e7e77d0a5c48bad62b360"]
+            ["dd3dde87623d9a6b354c68c943d189c89c63652d945e7bbdf0986cae91a49521"]
         );
     }
 
@@ -1306,8 +1307,8 @@ mod tests {
         assert_eq!(
             hashes,
             [
-                "85a84a75886e8a526dbec4e16e3375faa307b4aead79c9ed3264c0477a6f6eba",
-                "8d666ffa0196841cce7c504d43bf27e311775220d2490a23a2f984a43d901015",
+                "b44ffb72fcc259676bd80495fef1b44b808ca8f1ffe1b1706a4d7911b0e31f11",
+                "7e009ea4ef882e385b3c0bcbbfa8d009bb0a633bdd764415c09182ee0e75da73",
             ]
         );
     }
