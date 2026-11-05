@@ -4609,3 +4609,43 @@ def test_merge_into_writer_mutates_and_returns_self(offline_spark):
     m.whenNotMatched().insertAll()
     m.withSchemaEvolution()
     assert m.whenMatched().updateAll() is m
+
+
+# --------------------------------------------------------------------------- reader schema
+
+def _sent_read_schema(request):
+    """The DataSource.schema of a captured AnalyzePlanRequest: schema=4 -> plan=1 -> root=1 ->
+    read=2 -> data_source=2 -> schema=2."""
+    message = parse_message(request)
+    for field in (4, 1, 1, 2, 2):
+        message = parse_message(message[field][0])
+    return message[2][0].decode()
+
+
+@pytest.mark.parametrize("read", [
+    lambda spark, schema: spark.read.schema(schema).csv("unused.csv"),
+    lambda spark, schema: spark.read.csv("unused.csv", schema=schema),
+    lambda spark, schema: spark.read.load("unused", format="json", schema=schema),
+    lambda spark, schema: spark.readStream.schema(schema).csv("unused"),
+    lambda spark, schema: spark.readStream.csv("unused", schema=schema),
+    lambda spark, schema: spark.readStream.load("unused", format="json", schema=schema),
+], ids=["read.schema", "read.csv", "read.load", "readStream.schema", "readStream.csv",
+        "readStream.load"])
+def test_reader_schema_is_sent_as_pyspark_sends_it(mock_connect, read):
+    from pyspark.errors import PySparkTypeError
+
+    spark, service = mock_connect
+    struct = T.StructType([T.StructField("a", T.LongType(), True, {"comment": "key"})])
+    # pyspark sends a StructType as its JSON and a string as is, for the server to parse.
+    for schema, sent in [
+        (struct, '{"fields":[{"metadata":{"comment":"key"},"name":"a","nullable":true,'
+                 '"type":"long"}],"type":"struct"}'),
+        ("a long COMMENT 'key'", "a long COMMENT 'key'"),
+    ]:
+        read(spark, schema).columns
+        assert _sent_read_schema(service.analyze_requests[-1]) == sent
+    with pytest.raises(PySparkTypeError) as error:
+        read(spark, T.LongType())
+    assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+    assert error.value.getMessageParameters() == {
+        "arg_name": "schema", "expected_type": "str or struct type", "arg_type": "LongType"}

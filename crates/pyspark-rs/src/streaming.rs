@@ -57,11 +57,10 @@ fn set_ropt(
     }
 }
 
-/// Apply a `schema` argument (a DDL string or a StructType) to a streaming reader,
-/// mirroring the batch `apply_reader_schema`.
+/// Apply a `schema` argument (a StructType or a DDL string) to a streaming reader, as the
+/// batch reader does.
 fn apply_stream_schema(r: DataStreamReader, v: &Bound<'_, PyAny>) -> PyResult<DataStreamReader> {
-    let dt = crate::types::py_to_data_type(v)?;
-    Ok(r.schema(dt.simple_string()))
+    Ok(r.schema(crate::readwriter::reader_schema(v)?))
 }
 
 /// Coerce a `partitionBy` argument (a single column name or a list of names) to a
@@ -96,8 +95,13 @@ impl PyDataStreamReader {
         Ok(slf)
     }
 
-    fn schema<'py>(mut slf: PyRefMut<'py, Self>, schema: &str) -> PyResult<PyRefMut<'py, Self>> {
-        slf.inner = slf.inner.clone().schema(schema);
+    /// Set the schema: a StructType or a DDL string, as in pyspark.
+    fn schema<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        schema: &Bound<'_, PyAny>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let schema = crate::readwriter::reader_schema(schema)?;
+        slf.inner = slf.inner.clone().schema(&schema);
         Ok(slf)
     }
 

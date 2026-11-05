@@ -434,19 +434,13 @@ impl DataType {
             }
             DataType::Variant => serde_json::json!("variant"),
             DataType::Geometry { srid } => {
-                if *srid == -1 {
-                    serde_json::json!("geometry(SRID:ANY)")
-                } else {
-                    serde_json::json!(format!("geometry(OGC:CRS84)"))
-                }
+                serde_json::json!(format!("geometry({})", spatial_crs(*srid)))
             }
-            DataType::Geography { srid } => {
-                if *srid == -1 {
-                    serde_json::json!("geography(SRID:ANY, SPHERICAL)")
-                } else {
-                    serde_json::json!(format!("geography(OGC:CRS84, SPHERICAL)"))
-                }
-            }
+            DataType::Geography { srid } => serde_json::json!(format!(
+                "geography({}, {})",
+                spatial_crs(*srid),
+                GeographyType::DEFAULT_ALG
+            )),
             DataType::Udt {
                 type_str: _,
                 jvm_class,
@@ -1456,16 +1450,12 @@ fn parse_geometry(s: &str) -> Result<DataType> {
             )
         })?;
 
-    let srid = if inner.to_lowercase() == "any" {
-        -1
-    } else {
-        inner.parse::<i32>().map_err(|_| {
-            SparkError::value(
-                "INVALID_DATATYPE_FORMAT",
-                &[("detail", "Invalid geometry srid")],
-            )
-        })?
-    };
+    let srid = spatial_srid(inner).ok_or_else(|| {
+        SparkError::value(
+            "INVALID_DATATYPE_FORMAT",
+            &[("detail", "Invalid geometry srid")],
+        )
+    })?;
 
     Ok(DataType::Geometry { srid })
 }
@@ -1481,23 +1471,49 @@ fn parse_geography(s: &str) -> Result<DataType> {
             )
         })?;
 
-    let srid = if inner.to_lowercase() == "any" {
-        -1
-    } else {
-        inner
-            .split(',')
-            .next()
-            .unwrap_or("4326")
-            .parse::<i32>()
-            .map_err(|_| {
-                SparkError::value(
-                    "INVALID_DATATYPE_FORMAT",
-                    &[("detail", "Invalid geography srid")],
-                )
-            })?
-    };
+    // The JSON form also names the algorithm, as in `OGC:CRS84, SPHERICAL`.
+    let crs = inner.split(',').next().unwrap_or_default();
+    let srid = spatial_srid(crs).ok_or_else(|| {
+        SparkError::value(
+            "INVALID_DATATYPE_FORMAT",
+            &[("detail", "Invalid geography srid")],
+        )
+    })?;
 
     Ok(DataType::Geography { srid })
+}
+
+/// The coordinate reference system that a spatial type's SRID is named by in its JSON, as
+/// PySpark's `geo_utils` names the SRIDs that it supports: `SRID:0`, `EPSG:3857` and
+/// `OGC:CRS84` for 4326, and `SRID:ANY` for a mixed SRID. Another SRID, which PySpark does not
+/// accept, is named `SRID:<srid>`.
+fn spatial_crs(srid: i32) -> String {
+    match srid {
+        SpatialType::MIXED_SRID => SpatialType::MIXED_CRS.to_string(),
+        3857 => "EPSG:3857".to_string(),
+        GeometryType::DEFAULT_SRID => GeometryType::DEFAULT_CRS.to_string(),
+        other => format!("SRID:{other}"),
+    }
+}
+
+/// The SRID of a spatial type's CRS, as [`spatial_crs`] names it, or of the SRID itself, as
+/// in a DDL string such as `geometry(4326)`, or `any`.
+fn spatial_srid(crs: &str) -> Option<i32> {
+    let crs = crs.trim();
+    if crs.eq_ignore_ascii_case("any") || crs.eq_ignore_ascii_case(SpatialType::MIXED_CRS) {
+        return Some(SpatialType::MIXED_SRID);
+    }
+    if crs.eq_ignore_ascii_case(GeometryType::DEFAULT_CRS) {
+        return Some(GeometryType::DEFAULT_SRID);
+    }
+    if crs.eq_ignore_ascii_case("EPSG:3857") {
+        return Some(3857);
+    }
+    let number = match crs.get(..5) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("SRID:") => &crs[5..],
+        _ => crs,
+    };
+    number.parse().ok()
 }
 
 /// Main DDL parser: parses DDL strings into DataType.
