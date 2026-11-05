@@ -381,3 +381,94 @@ def test_maps_keep_their_entries_in_order_with_keys_of_their_type(session):
     df = session.createDataFrame([({2: "b", 1: "a"},)])
     assert df.schema.simpleString() == "struct<_1:map<bigint,string>>"
     assert list(df.first()[0].items()) == [(2, "b"), (1, "a")]
+
+
+def test_create_dataframe_merges_the_types_of_every_row_as_pyspark(session):
+    import array
+    import decimal
+
+    Point = namedtuple("Point", ["x", "y"])
+
+    class Attributes:
+        def __init__(self):
+            self.b = 1
+            self.a = "x"
+
+    cases = [
+        # A string absorbs another atomic type, whose values become strings, and a null
+        # takes the type of another row.
+        ([(1, None), ("a", 2.5), (True, None)], "struct<_1:string,_2:double>",
+         [("1", None), ("a", 2.5), ("true", None)]),
+        ([([1, "a"],)], "struct<_1:array<string>>", [(["1", "a"],)]),
+        ([{"a": 1}, {"a": "x"}], "struct<a:string>", [("1",), ("x",)]),
+        ([({"a": [1]},), ({"a": [None]},)], "struct<_1:map<string,array<bigint>>>",
+         [({"a": [1]},), ({"a": [None]},)]),
+        # A decimal is decimal(38,18), a tuple, a namedtuple or an object a struct, and an
+        # array.array an array of its typecode.
+        ([(decimal.Decimal("1.5"),)], "struct<_1:decimal(38,18)>",
+         [(decimal.Decimal("1.500000000000000000"),)]),
+        ([((1, 2),)], "struct<_1:struct<_1:bigint,_2:bigint>>", [(Row(_1=1, _2=2),)]),
+        ([(Point(1, 2),)], "struct<_1:struct<x:bigint,y:bigint>>", [(Row(x=1, y=2),)]),
+        ([(Attributes(),)], "struct<_1:struct<a:string,b:bigint>>", [(Row(a="x", b=1),)]),
+        ([(array.array("i", [1, 2]),)], "struct<_1:array<int>>", [([1, 2],)]),
+    ]
+    for data, schema, rows in cases:
+        df = session.createDataFrame(data)
+        assert df.schema.simpleString() == schema, data
+        assert [tuple(r) for r in df.collect()] == rows, data
+    for text in ["1.25", "a\x00b", "\uffff"]:
+        # A string stays text, and shares a string column with an integer.
+        df = session.createDataFrame([Row(value=text), Row(value=5)])
+        assert [tuple(r) for r in df.collect()] == [(text,), ("5",)]
+
+
+def test_create_dataframe_raises_merge_errors_as_pyspark(session):
+    from pyspark.errors import PySparkException
+
+    cases = [
+        ([(1,), (2.5,)], "CANNOT_MERGE_TYPE", {"data_type1": "LongType", "data_type2": "DoubleType"}),
+        # A merge error within a value names its field.
+        ([([1, 2.5],)], "CANNOT_INFER_TYPE_FOR_FIELD", {"field_name": "_1"}),
+        ([({"a": 1, "b": 2.5},)], "CANNOT_INFER_TYPE_FOR_FIELD", {"field_name": "_1"}),
+        # A type that stays null cannot be determined.
+        ([({"k": None},)], "CANNOT_DETERMINE_TYPE", {}),
+        ([([None],)], "CANNOT_DETERMINE_TYPE", {}),
+    ]
+    for data, condition, parameters in cases:
+        with pytest.raises(PySparkException) as error:
+            session.createDataFrame(data)
+        assert error.value.getCondition() == condition, data
+        assert error.value.getMessageParameters() == parameters, data
+
+
+def test_create_dataframe_infers_by_the_session_configurations_as_pyspark(session):
+    naive = datetime(2020, 1, 2, 3, 4, 5)
+    cases = [
+        ("spark.sql.pyspark.legacy.inferMapTypeFromFirstPair.enabled", "true",
+         [({"a": 1, "b": 2.5},)], "struct<_1:map<string,bigint>>", [({"a": 1, "b": 2},)]),
+        ("spark.sql.pyspark.legacy.inferArrayTypeFromFirstElement.enabled", "true",
+         [([1, 2.5],)], "struct<_1:array<bigint>>", [([1, 2],)]),
+        ("spark.sql.pyspark.inferNestedDictAsStruct.enabled", "true",
+         [({"a": {"b": 1}, "c": None},)], "struct<_1:struct<a:struct<b:bigint>>>",
+         [(Row(a=Row(b=1)),)]),
+        # A naive datetime is TIMESTAMP_NTZ, but not in a list, whose elements PySpark
+        # infers without `prefer_timestamp_ntz`.
+        ("spark.sql.timestampType", "TIMESTAMP_NTZ", [(naive,)], "struct<_1:timestamp_ntz>",
+         [(naive,)]),
+        ("spark.sql.timestampType", "TIMESTAMP_NTZ", [([naive],)], "struct<_1:array<timestamp>>",
+         None),
+        # PySpark passes the elements of a list `prefer_timestamp_ntz` for
+        # `infer_map_from_first_pair`, so that a dict in a list takes the map type of its
+        # first pair.
+        ("spark.sql.timestampType", "TIMESTAMP_NTZ", [([{"a": 1, "b": 2.5}],)],
+         "struct<_1:array<map<string,bigint>>>", [([{"a": 1, "b": 2}],)]),
+    ]
+    for key, value, data, schema, rows in cases:
+        session.conf.set(key, value)
+        try:
+            df = session.createDataFrame(data)
+            assert df.schema.simpleString() == schema, (key, data)
+            if rows is not None:
+                assert [tuple(r) for r in df.collect()] == rows, (key, data)
+        finally:
+            session.conf.unset(key)

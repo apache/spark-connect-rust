@@ -90,6 +90,15 @@ impl PyRow {
         }
     }
 
+    /// The field names, if the row has them (`__fields__`), and the values, as the tuple
+    /// that a PySpark row is, for reading the row as PySpark's schema inference does.
+    pub(crate) fn parts<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(Option<&[String]>, Bound<'py, PyTuple>)> {
+        Ok((self.named.then(|| self.fields()), self.values(py)?))
+    }
+
     /// The row with Spark values, for the rest of the client, which converts the values of a
     /// row made in Python as it converts those of a tuple.
     pub(crate) fn to_row(&self, py: Python<'_>) -> PyResult<Row> {

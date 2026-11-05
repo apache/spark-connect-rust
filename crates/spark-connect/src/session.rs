@@ -724,8 +724,9 @@ fn rows_to_arrow_ipc(rows: &[Row], schema: &DataType) -> Result<Vec<u8>> {
         columns.push(values_to_arrow(&column, &field.data_type)?);
     }
 
-    // Create RecordBatch
-    let batch = RecordBatch::try_new(Arc::new(arrow_schema), columns)
+    // Create RecordBatch, with the number of rows, which a batch without columns needs.
+    let options = arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(rows.len()));
+    let batch = RecordBatch::try_new_with_options(Arc::new(arrow_schema), columns, &options)
         .map_err(|e| SparkError::connect_msg(format!("Failed to create Arrow batch: {}", e)))?;
 
     // Write to IPC stream
@@ -1031,14 +1032,19 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
                     }
                     Value::Struct(sf) => {
                         valid.append(true);
+                        // A struct of the declared fields in order, as the Python client
+                        // converts one, is taken by position, so that fields of the same
+                        // name keep their own values. Otherwise match by field name, else
+                        // by position.
+                        let in_order = sf.len() == fields.len()
+                            && sf.fields().iter().zip(fields).all(|(n, f)| *n == f.name);
                         for (i, f) in fields.iter().enumerate() {
-                            // Prefer match by field name, else positional.
-                            let val = sf
-                                .get_by_name(&f.name)
-                                .or_else(|| sf.get(i))
-                                .cloned()
-                                .unwrap_or(Value::Null);
-                            cols[i].push(val);
+                            let val = if in_order {
+                                sf.get(i)
+                            } else {
+                                sf.get_by_name(&f.name).or_else(|| sf.get(i))
+                            };
+                            cols[i].push(val.cloned().unwrap_or(Value::Null));
                         }
                     }
                     // A Python dict supplied for a struct field (e.g. array<struct> data)
@@ -1072,11 +1078,15 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
                 })
                 .collect::<Result<Vec<_>>>()?
                 .into();
-            Ok(Arc::new(StructArray::new(
+            // A struct without fields takes its length from the values.
+            StructArray::try_new_with_length(
                 afields,
                 arrays,
                 Some(NullBuffer::new(valid.finish())),
-            )))
+                values.len(),
+            )
+            .map(|array| Arc::new(array) as Arc<dyn Array>)
+            .map_err(|e| SparkError::connect_msg(format!("struct build: {e}")))
         }
         DataType::Map {
             key_type,
@@ -1733,12 +1743,48 @@ mod tests {
     }
 
     #[test]
-    fn input_ipc_preserves_empty_input_and_zero_column_error() {
+    fn struct_values_of_the_declared_fields_are_taken_by_position() {
+        // Fields of the same name keep their own values.
+        let fields = vec![
+            struct_field("a", DataType::Long),
+            struct_field("a", DataType::Long),
+        ];
+        let names = vec!["a".to_string(), "a".to_string()];
+        let value = Value::Struct(Row::new(names, vec![Value::Long(1), Value::Long(2)]).into());
+        let array = values_to_arrow(&[value], &DataType::Struct { fields }).unwrap();
+        let array = array.as_any().downcast_ref::<StructArray>().unwrap();
+        let column = |i: usize| {
+            let column = array
+                .column(i)
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>();
+            column.unwrap().value(0)
+        };
+        assert_eq!((column(0), column(1)), (1, 2));
+    }
+
+    #[test]
+    fn struct_values_without_fields_keep_their_length() {
+        let empty = Value::Struct(Row::empty().into());
+        let array = values_to_arrow(&[empty, Value::Null], &DataType::Struct { fields: vec![] });
+        let array = array.unwrap();
+        assert_eq!(array.len(), 2);
+        assert!(array.is_valid(0));
+        assert!(array.is_null(1));
+    }
+
+    #[test]
+    fn input_ipc_preserves_empty_input_and_rows_without_columns() {
         assert!(rows_to_arrow_ipc(&[], &DataType::Long).unwrap().is_empty());
-        let error = rows_to_arrow_ipc(&[Row::empty()], &schema(vec![]))
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("Failed to create Arrow batch"), "{error}");
+        // Rows without columns keep their number, as PySpark's table without columns does.
+        let data = rows_to_arrow_ipc(&[Row::empty(), Row::empty()], &schema(vec![])).unwrap();
+        let batches = StreamReader::try_new(Cursor::new(data), None)
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_columns(), 0);
+        assert_eq!(batches[0].num_rows(), 2);
     }
 
     #[test]
