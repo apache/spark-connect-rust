@@ -3831,7 +3831,9 @@ def test_pandas_read_sql_table_reader_stage(offline_spark, monkeypatch):
     # Drive the vendored read_sql_table itself up to the point it hands the loaded
     # frame on. default_session() asks the server for a config, so point it at the
     # offline session, and stop at _get_index_map (the first step after the read).
-    ns = pytest.importorskip("pyspark.pandas.namespace")
+    # pandas-on-Spark does not import under pandas >= 3.0 (pyspark.pandas.frame
+    # needs pandas.tseries.frequencies.DateOffset), so skip on any ImportError.
+    ns = pytest.importorskip("pyspark.pandas.namespace", exc_type=ImportError)
 
     class _Loaded(Exception):
         pass
