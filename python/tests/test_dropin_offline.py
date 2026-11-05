@@ -5002,3 +5002,40 @@ def test_print_schema_udt_class_name(mock_connect, capsys, python_class, expecte
     assert capsys.readouterr().out == f"root\n |-- features: {expected} (nullable = true)\n\n"
     assert service.calls == 1
     assert service.execute_calls == 0
+
+
+# --------------------------------------------------------------------------- sql kwargs
+
+
+def test_sql_formatter_formats_values_as_pyspark():
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.sql_formatter import SQLStringFormatter
+
+    spark = _offline_session()
+    df = spark.range(1)
+    formatter = SQLStringFormatter(spark)
+    query = formatter.format(
+        "SELECT {c}, {d.id}, {s}, {n} FROM {df} JOIN {df}",
+        c=F.col("id"), d=df, s="it's \\", n=1, df=df)
+    # A DataFrame named twice is one reference.
+    [(view, name)] = formatter._temp_views
+    assert view is df and name.startswith("_pyspark_connect_temp_view_")
+    assert query == f"SELECT id, id, 'it\\'s \\\\', 1 FROM {name} JOIN {name}"
+
+
+def test_sql_keyword_argument_errors_as_pyspark():
+    from pyspark.errors import PySparkTypeError, PySparkValueError
+    from pyspark.sql import functions as F
+
+    # Raised before the statement is sent, as in PySpark.
+    spark = _offline_session()
+    with pytest.raises(IndexError):
+        spark.sql("SELECT {} AS v", x=1)
+    with pytest.raises(KeyError):
+        spark.sql("SELECT {y} AS v", x=1)
+    with pytest.raises(PySparkValueError, match="in c should be a plain column reference"):
+        spark.sql("SELECT {c}", c=F.col("id") + 1)
+    with pytest.raises(PySparkTypeError) as error:
+        spark.sql("SELECT ? AS v", args=(1,))
+    assert error.value.getCondition() == "INVALID_TYPE"
+    assert error.value.getMessageParameters() == {"arg_name": "args", "arg_type": "tuple"}
