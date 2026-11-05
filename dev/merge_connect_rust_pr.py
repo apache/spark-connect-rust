@@ -35,6 +35,8 @@ from urllib.request import urlopen
 from urllib.request import Request
 from urllib.error import HTTPError
 
+from spark_jira_utils import unreleased_connect_rust_versions
+
 try:
     import jira.client
 
@@ -306,19 +308,12 @@ def resolve_jira_issue(merge_branches, comment, default_jira_id=""):
     if issue.fields.assignee is None:
         choose_jira_assignee(issue)
 
-    versions = asf_jira.project_versions("SPARK")
-    # Consider only connect-rust-x.y.z, unreleased, unarchived versions. spark-connect-rust
-    # ships on its own `connect-rust-*` version line rather than the core Spark x.y.z versions,
-    # so that its JIRAs are tracked in the connect-rust release notes instead of leaking into
-    # the core Spark release notes.
-    versions = [
-        x
-        for x in versions
-        if not x.raw["released"]
-        and not x.raw["archived"]
-        and re.match(r"connect-rust-\d+\.\d+\.\d+", x.name)
-    ]
-    versions = sorted(versions, key=lambda x: x.name, reverse=True)
+    # Consider only connect-rust-x.y.z, unreleased, unarchived versions, newest first and
+    # compared numerically, as dev/create_spark_jira.py does. spark-connect-rust ships on its
+    # own `connect-rust-*` version line rather than the core Spark x.y.z versions, so that its
+    # JIRAs are tracked in the connect-rust release notes instead of leaking into the core
+    # Spark release notes.
+    versions = unreleased_connect_rust_versions(asf_jira)
 
     default_fix_versions = []
     for b in merge_branches:
