@@ -26,7 +26,7 @@ from datetime import date, datetime
 import pyarrow as pa
 import pytest
 from pyspark.errors import PySparkValueError
-from pyspark.sql import SparkSession
+from pyspark.sql import Row, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
     ArrayType,
@@ -170,6 +170,42 @@ def test_create_dataframe_from_empty_arrow_table(session):
         with pytest.raises(PySparkValueError) as error:
             session.createDataFrame(*args)
         assert error.value.getCondition() == "CANNOT_INFER_EMPTY_SCHEMA"
+
+
+@pytest.mark.parametrize(
+    "data, schema, columns, rows",
+    [
+        ([(1, 2)], None, ["_1", "_2"], [(1, 2)]),
+        ([[1, 2]], ["a"], ["a", "_2"], [(1, 2)]),
+        ([(1, 2), (3, 4)], ["a"], ["a", "_2"], [(1, 2), (3, 4)]),
+        ([(1, 2)], [], ["_1", "_2"], [(1, 2)]),
+        ([(1, 2)], ("a", "b"), ["a", "b"], [(1, 2)]),
+        ([Row(x=1, y=2)], ["a", "b"], ["a", "b"], [(1, 2)]),
+        ([{"y": 2, "x": 1}], ["a", "b"], ["a", "b"], [(1, 2)]),
+    ],
+)
+def test_create_dataframe_rows_column_names(session, data, schema, columns, rows):
+    df = session.createDataFrame(data, schema)
+    assert df.columns == columns
+    assert [tuple(r) for r in df.collect()] == rows
+    assert df.isLocal() is (schema is None)
+
+
+@pytest.mark.parametrize(
+    "frame, schema, columns",
+    [
+        ({"a": [1, 2], "b": ["x", "y"]}, None, ["a", "b"]),
+        ({"a": [1, 2], "b": ["x", "y"]}, ["c"], ["c", "_2"]),
+        ({"a": [1, 2], "b": ["x", "y"]}, "a long, b string", ["a", "b"]),
+        ({0: [1, 2], 1: ["x", "y"]}, None, ["0", "1"]),
+    ],
+)
+def test_create_dataframe_pandas_column_names(session, frame, schema, columns):
+    pd = pytest.importorskip("pandas")
+    df = session.createDataFrame(pd.DataFrame(frame), schema)
+    assert df.columns == columns
+    assert [tuple(r) for r in df.collect()] == [(1, "x"), (2, "y")]
+    assert not df.isLocal()
 
 
 def test_collect_reads_a_result_across_stream_ends(session):

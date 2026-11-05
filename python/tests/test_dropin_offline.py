@@ -2903,11 +2903,85 @@ for schema in schemas:
     try:
         spark.createDataFrame([(1, 2), (3,)], schema=schema)
     except PySparkValueError as error:
+        # The same error as pyspark, for every kind of schema.
         assert type(error) is PySparkValueError, type(error)
-        assert str(error) == "Row 1 has 1 values, but the schema has 2 fields", error
+        assert error.getCondition() == "AXIS_LENGTH_MISMATCH", error
+        assert error.getMessageParameters() == {
+            "expected_length": "2", "actual_length": "1"}, error
     else:
         raise AssertionError("expected a width validation error")
 """], check=True)
+
+
+def _local_create_dataframe(*args):
+    # The local relation and its toDF are built without a server.
+    return _offline_session().createDataFrame(*args)
+
+
+@pytest.mark.parametrize("data,schema,expected", [
+    # Column names are applied with toDF, as in pyspark, so the result is not local.
+    ([(1, 2)], ["a", "b"], False),
+    ([(1, 2)], ("a", "b"), False),
+    ([(1, 2)], ["a"], False),
+    ([(1, 2)], [], False),
+    ([T.Row(x=1, y=2)], ["a", "b"], False),
+    ([{"x": 1, "y": 2}], ["a", "b"], False),
+    # Without names to apply, the local relation itself is local.
+    ([(1, 2)], None, True),
+    ([T.Row(x=1, y=2)], None, True),
+    ([(1, 2)], "a long, b long", True),
+    ([1, 2], T.LongType(), True),
+    ([], "a long", True),
+])
+def test_create_dataframe_rows_is_local_as_pyspark(data, schema, expected):
+    assert _local_create_dataframe(data, schema).isLocal() is expected
+
+
+@pytest.mark.parametrize("schema", [None, ["c", "d"], ["c"], "a long, b string",
+                                    T.StructType([T.StructField("a", T.LongType()),
+                                                  T.StructField("b", T.StringType())])])
+def test_create_dataframe_pandas_is_not_local_as_pyspark(schema):
+    pd = pytest.importorskip("pandas")
+    # pyspark applies the columns, or the field names of the schema, with toDF.
+    df = _local_create_dataframe(pd.DataFrame({"a": [1, 2], "b": ["x", "y"]}), schema)
+    assert not df.isLocal()
+    # Empty input returns the relation of its schema, without toDF.
+    assert _local_create_dataframe(pd.DataFrame({"a": [], "b": []}), "a long, b string").isLocal()
+
+
+@pytest.mark.parametrize("data,schema,expected,actual", [
+    ([(1,)], ["a", "b"], "2", "1"),
+    ([(1,), (2,)], ["a", "b"], "2", "1"),
+    ([(1, 2), (3, 4, 5)], ["a"], "3", "2"),
+    ([T.Row(x=1, y=2)], ["a"], "1", "2"),
+])
+def test_create_dataframe_name_width_errors_as_pyspark(data, schema, expected, actual):
+    from pyspark.errors import PySparkValueError
+
+    with pytest.raises(PySparkValueError) as error:
+        _local_create_dataframe(data, schema)
+    assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
+    assert error.value.getMessageParameters() == {
+        "expected_length": expected, "actual_length": actual}
+
+
+def test_create_dataframe_pandas_errors_as_pyspark():
+    pd = pytest.importorskip("pandas")
+    from pyspark.errors import PySparkTypeError, PySparkValueError
+
+    pdf = pd.DataFrame({"a": [1, 2], "b": ["x", "y"]})
+    with pytest.raises(PySparkTypeError) as error:
+        _local_create_dataframe(pdf, T.LongType())
+    assert error.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW"
+    assert error.value.getMessageParameters() == {"data_type": "LongType()"}
+    with pytest.raises(PySparkValueError) as error:
+        _local_create_dataframe(pdf, ["c", "d", "e"])
+    assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
+    for data, schema in [(pd.DataFrame(index=[0, 1]), None), ([], None), ([], ["a"]),
+                         (pdf.iloc[:0], None), (pdf.iloc[:0], ["a", "b"])]:
+        with pytest.raises(PySparkValueError) as error:
+            _local_create_dataframe(data, schema)
+        assert error.value.getCondition() == "CANNOT_INFER_EMPTY_SCHEMA"
 
 
 # --------------------------------------------------------------------------- schema cache
