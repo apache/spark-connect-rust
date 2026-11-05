@@ -400,8 +400,13 @@ def test_malformed_ipc_is_reported(protocol):
 
 @contextmanager
 def _arrow_input_service(
-    protocol, *, upload_error=None, user_id=None, user_agent=None,
-    allow_file_artifacts=False, **overrides
+    protocol,
+    *,
+    upload_error=None,
+    user_id=None,
+    user_agent=None,
+    allow_file_artifacts=False,
+    **overrides,
 ):
     """Resolve cache artifacts at a mock service with a 4 MiB receive limit."""
     import hashlib

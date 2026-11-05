@@ -53,7 +53,8 @@ async fn wait_ready(grpc: &mut tonic::client::Grpc<Channel>) -> Result<()> {
 }
 
 /// Hash on the blocking pool and return the original buffers for upload framing.
-/// Once started, the blocking task finishes even if the caller is dropped.
+/// If the caller is dropped after hashing starts, the blocking task retains the
+/// blob buffers until hashing finishes.
 async fn hash_artifact_blobs(blobs: Vec<Vec<u8>>) -> Result<(Vec<Vec<u8>>, Vec<String>)> {
     use sha2::{Digest, Sha256};
 
@@ -898,6 +899,14 @@ impl SparkConnectClient {
         Ok(hashes)
     }
 
+    /// ArtifactManager includes a context even when no user ID is configured.
+    fn artifact_user_context(&self) -> UserContext {
+        UserContext {
+            user_id: self.user_id.clone().unwrap_or_default(),
+            ..Default::default()
+        }
+    }
+
     /// Send artifact frames and validate the response.
     /// Cache uploads also require an acknowledgement for every requested artifact.
     /// The stream is consumed once; retries must rebuild the frames and restart
@@ -909,10 +918,7 @@ impl SparkConnectClient {
     ) -> Result<()> {
         use futures::StreamExt;
 
-        let user_context = UserContext {
-            user_id: self.user_id.clone().unwrap_or_default(),
-            ..Default::default()
-        };
+        let user_context = self.artifact_user_context();
         let client_type = self.user_agent.clone();
         let requests = requests.map(move |mut request| {
             request.user_context = Some(user_context.clone());
@@ -956,10 +962,7 @@ impl SparkConnectClient {
     ) -> Result<std::collections::HashMap<String, bool>> {
         let mut request = ArtifactStatusesRequest::default();
         request.session_id = self.session_id.clone();
-        request.user_context = Some(UserContext {
-            user_id: self.user_id.clone().unwrap_or_default(),
-            ..Default::default()
-        });
+        request.user_context = Some(self.artifact_user_context());
         request.client_type = Some(self.user_agent.clone());
         request.names = names.iter().map(|n| n.to_string()).collect();
 
