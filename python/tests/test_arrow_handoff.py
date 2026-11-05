@@ -591,7 +591,7 @@ def _assert_artifact_contexts(contexts, *, session_id, user_id, user_agent):
     assert len(client_types) == 1
     client_type = client_types.pop()
     assert client_type
-    assert client_type.startswith(user_agent)
+    assert client_type.startswith(user_agent + " spark/")
     for context in contexts:
         grpc_user_agent = context["grpc_user_agent"]
         assert grpc_user_agent == client_type or grpc_user_agent.startswith(client_type + " ")
@@ -656,9 +656,11 @@ def test_file_upload_attribution_on_every_frame(
             for path, destination in zip([small, large], destinations):
                 spark.copyFromLocalToFs(str(path), destination)
             artifact_names = ["forward_to_fs/" + destination for destination in destinations]
-        assert {context["payload"] for context in state["upload_contexts"]} == {
-            "batch", "begin_chunk", "chunk"
-        }
+        payloads = {context["payload"] for context in state["upload_contexts"]}
+        assert payloads == {"batch", "begin_chunk", "chunk"}, (
+            f"Expected all artifact frame kinds, got {payloads}. "
+            "This fixture assumes a 32 KiB CHUNK_SIZE; adjust its sizes if CHUNK_SIZE changes."
+        )
         assert state["cache"][artifact_names[0]] == small.read_bytes()
         assert state["cache"][artifact_names[1]] == large.read_bytes()
         assert state["uploads"] == (1 if upload == "file" else 2)
