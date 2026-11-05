@@ -96,6 +96,7 @@ def serve(connection):
     # they wait for a response.
     class Service:
         calls = 0
+        execute_calls = 0
         data_type = struct_schema()
         failure = None
         block_response = False
@@ -103,6 +104,24 @@ def serve(connection):
 
         # Each AnalyzePlanRequest, recorded.
         analyze_requests = []
+
+        def reset(self):
+            # Back to the state of a new server: the tests of a module share one.
+            self.calls = 0
+            self.execute_calls = 0
+            self.data_type = struct_schema()
+            self.failure = None
+            self.block_response = False
+            self.response_gate.clear()
+            self.analyze_requests = []
+            self.execute_requests = []
+            self.execute_payload = b""
+            self.execute_failure = None
+            self.execute_error = None
+            self.error_details = b""
+            self.fetched_error_ids = []
+            self.confs = {}
+            self.read_confs = []
 
         def analyze(self, request, context):
             self.calls += 1
@@ -143,6 +162,7 @@ def serve(connection):
         read_confs = []
 
         def execute(self, request, context):
+            self.execute_calls += 1
             self.execute_requests.append(request)
             if self.execute_failure:
                 context.abort(grpc.StatusCode.INVALID_ARGUMENT, self.execute_failure)
@@ -226,6 +246,9 @@ def serve(connection):
                 elif command[0] == "release":
                     service.response_gate.set()
                     connection.send(None)
+                elif command[0] == "reset":
+                    service.reset()
+                    connection.send(None)
         finally:
             server.stop(0).wait()
 
@@ -246,6 +269,11 @@ class RemoteService:
 
     def release_response(self):
         self.connection.send(("release",))
+        assert self.connection.poll(10), "Mock server did not respond"
+        self.connection.recv()
+
+    def reset(self):
+        self.connection.send(("reset",))
         assert self.connection.poll(10), "Mock server did not respond"
         self.connection.recv()
 

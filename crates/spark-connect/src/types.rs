@@ -4,7 +4,7 @@
 //! and the Spark Connect protobuf representation.
 
 use std::collections::BTreeMap;
-use std::fmt;
+use std::fmt::{self, Write};
 use std::hash::{Hash, Hasher};
 
 use spark_connect_core::error::{Result, SparkError};
@@ -943,14 +943,19 @@ impl DataType {
         self.tree_string_with_depth(i32::MAX)
     }
 
-    /// Like [`DataType::tree_string`], but stops recursing into nested structs
-    /// once `max_depth` nesting levels have been printed (top-level fields are
-    /// depth 1). Mirrors `StructType.treeString(maxDepth)`.
+    /// Like [`DataType::tree_string`], but limits nesting through structs,
+    /// arrays, and maps to `max_depth` levels. Top-level fields are depth 1;
+    /// zero or negative values print the full tree.
+    /// Mirrors `StructType.treeString(maxDepth)`.
     pub fn tree_string_with_depth(&self, max_depth: i32) -> Result<String> {
         match self {
             DataType::Struct { .. } => {
                 let mut out = String::from("root\n");
-                self.append_tree(&mut out, " |", 1, max_depth);
+                self.append_tree(
+                    &mut out,
+                    " |",
+                    if max_depth > 0 { max_depth } else { i32::MAX },
+                );
                 Ok(out)
             }
             _ => Err(SparkError::value(
@@ -960,33 +965,85 @@ impl DataType {
         }
     }
 
-    fn append_tree(&self, out: &mut String, prefix: &str, depth: i32, max_depth: i32) {
-        if let DataType::Struct { fields } = self {
-            for f in fields {
-                // A nested struct is rendered as the bare type name ("struct") and its
-                // fields are shown by recursing below, so `max_depth` can truncate them.
-                // Using `simple_string()` here would inline the children (e.g.
-                // "struct<inner:int>"), leaking them past `max_depth`. Non-struct types
-                // have no depth-controlled children, so their simple string is used.
-                let is_struct = matches!(f.data_type, DataType::Struct { .. });
-                let type_repr = if is_struct {
-                    f.data_type.type_name()
-                } else {
-                    f.data_type.simple_string()
-                };
-                out.push_str(&format!(
-                    "{}-- {}: {} (nullable = {})\n",
-                    prefix, f.name, type_repr, f.nullable
-                ));
-                if is_struct && depth < max_depth {
-                    f.data_type.append_tree(
+    fn tree_type_name(&self) -> String {
+        match self {
+            DataType::Decimal { .. }
+            | DataType::Char { .. }
+            | DataType::Varchar { .. }
+            | DataType::Time { .. }
+            | DataType::YearMonthInterval { .. }
+            | DataType::DayTimeInterval { .. } => self.simple_string(),
+            DataType::Udt {
+                python_class: Some(python_class),
+                ..
+            } => python_class
+                .rsplit('.')
+                .next()
+                .filter(|class_name| !class_name.is_empty())
+                // UserDefinedType.typeName() preserves the entire class name,
+                // unlike DataType.typeName(), which strips the "Type" suffix.
+                .map(str::to_lowercase)
+                .unwrap_or_else(|| self.type_name()),
+            _ => self.type_name(),
+        }
+    }
+
+    fn append_tree(&self, out: &mut String, prefix: &str, remaining: i32) {
+        if remaining <= 0 {
+            return;
+        }
+        match self {
+            DataType::Struct { fields } => {
+                let child_prefix = format!("{prefix}    |");
+                for f in fields {
+                    out.push_str(prefix);
+                    out.push_str("-- ");
+                    push_escaped_name(out, &f.name);
+                    writeln!(
                         out,
-                        &format!("{}    |", prefix.trim_end_matches('|')),
-                        depth + 1,
-                        max_depth,
-                    );
+                        ": {} (nullable = {})",
+                        f.data_type.tree_type_name(),
+                        f.nullable
+                    )
+                    .expect("writing to a String cannot fail");
+                    f.data_type.append_tree(out, &child_prefix, remaining - 1);
                 }
             }
+            DataType::Array {
+                element_type,
+                contains_null,
+            } => {
+                let child_prefix = format!("{prefix}    |");
+                writeln!(
+                    out,
+                    "{}-- element: {} (containsNull = {})",
+                    prefix,
+                    element_type.tree_type_name(),
+                    contains_null
+                )
+                .expect("writing to a String cannot fail");
+                element_type.append_tree(out, &child_prefix, remaining - 1);
+            }
+            DataType::Map {
+                key_type,
+                value_type,
+                value_contains_null,
+            } => {
+                let child_prefix = format!("{prefix}    |");
+                writeln!(out, "{}-- key: {}", prefix, key_type.tree_type_name())
+                    .expect("writing to a String cannot fail");
+                key_type.append_tree(out, &child_prefix, remaining - 1);
+                writeln!(
+                    out,
+                    "{}-- value: {} (valueContainsNull = {})",
+                    prefix,
+                    value_type.tree_type_name(),
+                    value_contains_null
+                )
+                .expect("writing to a String cannot fail");
+                value_type.append_tree(out, &child_prefix, remaining - 1);
+            }
+            _ => {}
         }
     }
 
@@ -1059,6 +1116,21 @@ impl DataType {
                 "INVALID_TYPE",
                 &[("detail", "add() can only be called on StructType")],
             )),
+        }
+    }
+}
+
+fn push_escaped_name(out: &mut String, name: &str) {
+    for ch in name.chars() {
+        match ch {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\x0c' => out.push_str("\\f"),
+            '\x08' => out.push_str("\\b"),
+            '\x0b' => out.push_str("\\v"),
+            '\x07' => out.push_str("\\a"),
+            _ => out.push(ch),
         }
     }
 }

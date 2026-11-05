@@ -4,6 +4,17 @@ use pyo3::prelude::*;
 use spark_connect::types::{DataType, StructField};
 use std::collections::BTreeMap;
 
+/// Normalize the depth used by both Python schema-tree entry points.
+pub(crate) fn normalize_tree_depth(depth: &Bound<'_, PyAny>) -> PyResult<i32> {
+    // Reference compares > 0 at each level, so positive fractional depths
+    // behave as ceil(depth). Nonpositive depths and NaN print the full tree.
+    if !depth.gt(0)? || depth.ge(i32::MAX)? {
+        Ok(i32::MAX)
+    } else {
+        Ok(depth.extract::<f64>()?.ceil() as i32)
+    }
+}
+
 /// Make a DataType picklable so it round-trips to an official-pyspark UDF worker:
 /// pickle reconstructs it via `pyspark.sql.types._parse_datatype_json_string(json)`
 /// (session-free, present in both our shim and the worker's official pyspark).
@@ -1765,12 +1776,17 @@ impl PyStructType {
 
     /// Tree string. Mirrors `StructType.treeString(maxDepth)`.
     #[allow(non_snake_case)]
-    #[pyo3(name = "treeString", signature = (maxDepth = 2147483647))]
-    fn __st_tree_string(&self, maxDepth: i32) -> PyResult<String> {
+    #[pyo3(
+        name = "treeString",
+        signature = (maxDepth = Python::attach(|py| pyo3::types::PyInt::new(py, i32::MAX).into_any().unbind())),
+        text_signature = "($self, maxDepth=2147483647)"
+    )]
+    fn __st_tree_string(&self, py: Python<'_>, maxDepth: Py<PyAny>) -> PyResult<String> {
+        let depth = normalize_tree_depth(maxDepth.bind(py))?;
         DataType::Struct {
             fields: self.fields.clone(),
         }
-        .tree_string_with_depth(maxDepth)
+        .tree_string_with_depth(depth)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
     }
 
