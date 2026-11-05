@@ -419,13 +419,62 @@ def test_structtype_add_reflected_in_json():
 
 
 def test_structtype_add_reflected_in_the_base_data_type():
-    # Regression: add() must update the base DataType too, which str() and the schemas of
-    # mapInArrow/mapInPandas/applyInPandas/... read (via resolve_datatype).
+    # Regression: add() must update the base DataType too, which the schemas of
+    # mapInArrow/mapInPandas/applyInPandas/... read (via resolve_datatype). The base
+    # implementation of simpleString reads it.
     built = T.StructType([T.StructField("a", T.LongType()), T.StructField("b", T.LongType())])
-    assert str(T.StructType().add("a", T.LongType()).add("b", T.LongType())) == str(built)
+    chained = T.StructType().add("a", T.LongType()).add("b", T.LongType())
     st = T.StructType([T.StructField("a", T.LongType())])
     st.add("b", T.LongType())
-    assert str(st) == str(built) == "struct<a:bigint,b:bigint>"
+    for added in (chained, st):
+        assert T.DataType.simpleString(added) == "struct<a:bigint,b:bigint>"
+        assert str(added) == str(built) == repr(built)
+
+
+@pytest.mark.parametrize("data_type,expected", [
+    (T.LongType(), "LongType()"),
+    (T.TimestampNTZType(), "TimestampNTZType()"),
+    (T.VariantType(), "VariantType()"),
+    (T.DecimalType(10, 2), "DecimalType(10,2)"),
+    (T.CharType(5), "CharType(5)"),
+    (T.DayTimeIntervalType(0, 3), "DayTimeIntervalType(0, 3)"),
+    (T.YearMonthIntervalType(), "YearMonthIntervalType(0, 1)"),
+    (T.ArrayType(T.StringType(), False), "ArrayType(StringType(), False)"),
+    (T.MapType(T.StringType(), T.LongType()), "MapType(StringType(), LongType(), True)"),
+    (T.StructType([T.StructField("a", T.LongType()),
+                   T.StructField("b", T.ArrayType(T.StringType()), False)]),
+     "StructType([StructField('a', LongType(), True), "
+     "StructField('b', ArrayType(StringType(), True), False)])"),
+    (T.StructType(), "StructType([])"),
+    (T.DataType(), "DataType()"),
+])
+def test_datatype_str_is_its_repr_as_pyspark(data_type, expected):
+    # pyspark data types define only __repr__, so str() is the same.
+    assert repr(data_type) == expected
+    assert str(data_type) == expected
+
+
+def test_user_defined_type_repr_is_its_class_name():
+    from pyspark.testing.objects import ExamplePointUDT
+
+    assert repr(ExamplePointUDT()) == str(ExamplePointUDT()) == "ExamplePointUDT()"
+
+
+@pytest.mark.parametrize("ddl,expected", [
+    # The examples of pyspark's DataType.fromDDL.
+    ("b string, a int",
+     "StructType([StructField('b', StringType(), True), StructField('a', IntegerType(), True)])"),
+    ("decimal(10,10)", "DecimalType(10,10)"),
+    ("b: string, a: int",
+     "StructType([StructField('b', StringType(), True), StructField('a', IntegerType(), True)])"),
+    ("int", "IntegerType()"),
+])
+def test_datatype_from_ddl_returns_the_concrete_type(ddl, expected):
+    parsed = T.DataType.fromDDL(ddl)
+    assert repr(parsed) == expected
+    assert type(parsed).__name__ == expected.split("(")[0]
+    # The classmethod parses DDL the same way from any data type class.
+    assert repr(T.LongType.fromDDL(ddl)) == expected
 
 
 def test_datatype_object_model():
