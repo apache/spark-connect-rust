@@ -58,23 +58,40 @@ def get_jira_client():
 CONNECT_RUST_VERSION = re.compile(r"connect-rust-(\d+)\.(\d+)\.(\d+)")
 
 
-def detect_affected_version(asf_jira):
-    """Return the newest unreleased connect-rust-x.y.z version, or exit."""
+def warn(msg):
+    print(msg, file=sys.stderr)
+
+
+def unreleased_connect_rust_versions(asf_jira):
+    """Return the unreleased, unarchived connect-rust-x.y.z versions, newest first.
+
+    Versions compare numerically, so connect-rust-4.10.0 is newer than connect-rust-4.9.0.
+    """
     versions = []
     for x in asf_jira.project_versions("SPARK"):
         match = CONNECT_RUST_VERSION.fullmatch(x.name)
         if match and not x.raw["released"] and not x.raw["archived"]:
-            versions.append((tuple(int(n) for n in match.groups()), x.name))
+            versions.append((tuple(int(n) for n in match.groups()), x))
+    return [x for _, x in sorted(versions, key=lambda pair: pair[0], reverse=True)]
+
+
+def detect_affected_version(asf_jira):
+    """Return the newest unreleased connect-rust-x.y.z version, or exit."""
+    versions = unreleased_connect_rust_versions(asf_jira)
     if not versions:
         fail(
             "Cannot detect an unreleased connect-rust-x.y.z version. "
             "Please create the ticket manually at %s" % JIRA_API_BASE
         )
-    return max(versions)[1]
+    return versions[0].name
 
 
 def find_release_umbrella(asf_jira, version):
-    """Return the key of the release umbrella Epic of `version`, or None unless exactly one."""
+    """Return the key of the release umbrella Epic of `version`, or None unless exactly one.
+
+    The summary search is a fuzzy text match, so only an Epic with exactly the umbrella
+    summary counts.
+    """
     summary = "spark-connect-rust %s release" % version
     issues = asf_jira.search_issues(
         'project = SPARK AND issuetype = Epic AND summary ~ "\\"%s\\""' % summary
@@ -96,11 +113,16 @@ def create_jira_issue(
 ):
     """Create a JIRA issue and return the issue key (e.g. SPARK-12345).
 
-    Affects and Fix Version/s are both `version`, by default the newest unreleased
-    connect-rust-x.y.z version. Issues other than subtasks are linked as "is part of" that
-    version's release umbrella Epic, when there is exactly one.
+    Affects and Fix Version/s are both `version`, an unreleased connect-rust-x.y.z version,
+    by default the newest one. Issues other than subtasks are linked as "is part of" that
+    version's release umbrella Epic, when there is exactly one. Once the issue exists, a
+    failing later step only warns, so that its key is still returned.
     """
-    version = version if version else detect_affected_version(asf_jira)
+    if version:
+        if version not in [v.name for v in unreleased_connect_rust_versions(asf_jira)]:
+            fail("%s is not an unreleased connect-rust-x.y.z version." % version)
+    else:
+        version = detect_affected_version(asf_jira)
 
     issue_dict = {
         "project": {"key": "SPARK"},
@@ -118,24 +140,34 @@ def create_jira_issue(
 
     try:
         new_issue = asf_jira.create_issue(fields=issue_dict)
-        new_issue.update(fields={"fixVersions": [{"name": version}]})
     except Exception as e:
         fail("Failed to create JIRA issue: %s" % e)
 
+    # Setting a Fix Version can need a permission that contributors lack, and the create
+    # screen omits the field for them, so set it separately and only warn on failure.
+    try:
+        new_issue.update(fields={"fixVersions": [{"name": version}]})
+    except Exception as e:
+        warn(
+            "Created %s, but could not set its Fix Version to %s: %s" % (new_issue.key, version, e)
+        )
+
     if not parent:
-        umbrella = find_release_umbrella(asf_jira, version)
-        if umbrella:
-            incorporates = next(
-                t.name for t in asf_jira.issue_link_types() if t.outward == "incorporates"
-            )
-            # The umbrella incorporates the new issue, which "is part of" the umbrella.
-            asf_jira.create_issue_link(
-                incorporates, inwardIssue=umbrella, outwardIssue=new_issue.key
-            )
-        else:
-            print(
-                "No single release umbrella Epic for %s; link %s to it by hand."
-                % (version, new_issue.key),
-                file=sys.stderr,
+        try:
+            umbrella = find_release_umbrella(asf_jira, version)
+            if umbrella:
+                # The umbrella incorporates the new issue, which "is part of" the umbrella.
+                asf_jira.create_issue_link(
+                    "Incorporates", inwardIssue=umbrella, outwardIssue=new_issue.key
+                )
+            else:
+                warn(
+                    "No single release umbrella Epic for %s; link %s to it by hand."
+                    % (version, new_issue.key)
+                )
+        except Exception as e:
+            warn(
+                "Created %s, but could not link it to the %s release umbrella: %s"
+                % (new_issue.key, version, e)
             )
     return new_issue.key

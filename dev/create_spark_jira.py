@@ -41,8 +41,8 @@ def main():
     parser.add_argument(
         "-v",
         "--version",
-        help="connect-rust-x.y.z version for Affects and Fix Version/s "
-        "(default: the newest unreleased one)",
+        help="Unreleased connect-rust-x.y.z version for Affects and Fix Version/s, e.g. "
+        "for a maintenance line (default: the newest unreleased one)",
     )
     parser.add_argument(
         "-d",

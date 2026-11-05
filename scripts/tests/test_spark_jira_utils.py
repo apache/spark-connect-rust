@@ -34,43 +34,51 @@ def version(name, released=False, archived=False):
 
 
 class FakeIssue:
-    def __init__(self, key, summary="", fields=None):
+    def __init__(self, key, summary="", fields=None, fail_update=False):
         self.key = key
         self.fields = SimpleNamespace(summary=summary)
         self.created_fields = fields
         self.updates = []
+        self.fail_update = fail_update
 
     def update(self, fields):
+        if self.fail_update:
+            raise RuntimeError("no permission to set the Fix Version")
         self.updates.append(fields)
 
 
 class FakeJira:
-    def __init__(self, versions, epics=()):
+    def __init__(self, versions, epics=(), fail_update=False, fail_search=False, fail_link=False):
         self.versions = versions
         self.epics = list(epics)
         self.created = []
         self.links = []
+        self.fail_update, self.fail_search, self.fail_link = fail_update, fail_search, fail_link
 
     def project_versions(self, project):
         assert project == "SPARK"
         return self.versions
 
     def search_issues(self, jql):
+        # JIRA's `summary ~` text search is fuzzy, so it can return other Epics too.
         assert "issuetype = Epic" in jql
-        return [epic for epic in self.epics if epic.fields.summary in jql]
+        if self.fail_search:
+            raise RuntimeError("search failed")
+        return self.epics
 
     def create_issue(self, fields):
-        issue = FakeIssue(f"SPARK-{100 + len(self.created)}", fields["summary"], fields)
+        issue = FakeIssue(
+            f"SPARK-{100 + len(self.created)}",
+            fields["summary"],
+            fields,
+            fail_update=self.fail_update,
+        )
         self.created.append(issue)
         return issue
 
-    def issue_link_types(self):
-        return [
-            SimpleNamespace(name="Reference", outward="relates to", inward="relates to"),
-            SimpleNamespace(name="Incorporates", outward="incorporates", inward="is part of"),
-        ]
-
     def create_issue_link(self, link_type, inwardIssue, outwardIssue):
+        if self.fail_link:
+            raise RuntimeError("link failed")
         self.links.append((link_type, inwardIssue, outwardIssue))
 
 
@@ -84,7 +92,19 @@ VERSIONS = [
 ]
 
 
-class DetectAffectedVersionTests(unittest.TestCase):
+def create(jira, **kwargs):
+    """Create an issue and return its key with what was printed to stderr."""
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr):
+        key = utils.create_jira_issue(jira, "Title", "Connect", **kwargs)
+    return key, stderr.getvalue()
+
+
+class VersionTests(unittest.TestCase):
+    def test_unreleased_connect_rust_versions_newest_first(self):
+        names = [v.name for v in utils.unreleased_connect_rust_versions(FakeJira(VERSIONS))]
+        self.assertEqual(names, ["connect-rust-4.10.0", "connect-rust-4.9.0"])
+
     def test_newest_unreleased_connect_rust_version_compared_numerically(self):
         self.assertEqual(utils.detect_affected_version(FakeJira(VERSIONS)), "connect-rust-4.10.0")
 
@@ -92,22 +112,30 @@ class DetectAffectedVersionTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
             utils.detect_affected_version(FakeJira([version("5.0.0"), version("4.1.2")]))
 
+    def test_an_explicit_version_must_be_an_unreleased_connect_rust_version(self):
+        for name in ["4.10.0", "connect-rust-9.0.0", "connect-rust-8.0.0", "connect-rust-1.0.0"]:
+            jira = FakeJira(VERSIONS, epics=[UMBRELLA])
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+                utils.create_jira_issue(jira, "Title", "Connect", version=name)
+            self.assertEqual(jira.created, [], name)
+
 
 class CreateJiraIssueTests(unittest.TestCase):
     def test_both_versions_and_the_release_umbrella_link(self):
         jira = FakeJira(VERSIONS, epics=[UMBRELLA])
-        key = utils.create_jira_issue(jira, "Title", "Connect", issue_type="Bug")
+        key, stderr = create(jira, issue_type="Bug")
         (issue,) = jira.created
         self.assertEqual(key, issue.key)
         self.assertEqual(issue.created_fields["versions"], [{"name": "connect-rust-4.10.0"}])
         self.assertEqual(issue.created_fields["issuetype"], {"name": "Bug"})
         self.assertEqual(issue.updates, [{"fixVersions": [{"name": "connect-rust-4.10.0"}]}])
         self.assertEqual(jira.links, [("Incorporates", "SPARK-59102", key)])
+        self.assertEqual(stderr, "")
 
     def test_explicit_version_and_its_own_umbrella(self):
         other = FakeIssue("SPARK-59035", "spark-connect-rust connect-rust-4.9.0 release")
         jira = FakeJira(VERSIONS, epics=[UMBRELLA, other])
-        key = utils.create_jira_issue(jira, "Title", "Connect", version="connect-rust-4.9.0")
+        key, _ = create(jira, version="connect-rust-4.9.0")
         (issue,) = jira.created
         self.assertEqual(issue.created_fields["versions"], [{"name": "connect-rust-4.9.0"}])
         self.assertEqual(issue.updates, [{"fixVersions": [{"name": "connect-rust-4.9.0"}]}])
@@ -115,19 +143,37 @@ class CreateJiraIssueTests(unittest.TestCase):
 
     def test_subtasks_are_not_linked_to_the_umbrella(self):
         jira = FakeJira(VERSIONS, epics=[UMBRELLA])
-        utils.create_jira_issue(jira, "Title", "Connect", parent="SPARK-1")
+        create(jira, parent="SPARK-1")
         (issue,) = jira.created
         self.assertEqual(issue.created_fields["issuetype"], {"name": "Sub-task"})
         self.assertEqual(issue.updates, [{"fixVersions": [{"name": "connect-rust-4.10.0"}]}])
         self.assertEqual(jira.links, [])
 
-    def test_a_missing_umbrella_is_reported_but_not_fatal(self):
-        jira = FakeJira(VERSIONS)
-        stderr = io.StringIO()
-        with contextlib.redirect_stderr(stderr):
-            key = utils.create_jira_issue(jira, "Title", "Connect")
-        self.assertEqual(jira.links, [])
-        self.assertIn(key, stderr.getvalue())
+    def test_only_a_single_umbrella_with_the_exact_summary_is_linked(self):
+        near = FakeIssue("SPARK-2", "spark-connect-rust connect-rust-4.10.0 release notes")
+        twin = FakeIssue("SPARK-3", UMBRELLA.fields.summary)
+        for epics in ([], [near], [UMBRELLA, twin]):
+            jira = FakeJira(VERSIONS, epics=epics)
+            key, stderr = create(jira)
+            self.assertEqual(jira.links, [], epics)
+            self.assertIn("No single release umbrella Epic for connect-rust-4.10.0", stderr)
+            self.assertIn(key, stderr)
+        jira = FakeJira(VERSIONS, epics=[near, UMBRELLA])
+        key, _ = create(jira)
+        self.assertEqual(jira.links, [("Incorporates", "SPARK-59102", key)])
+
+    def test_steps_after_the_issue_exists_warn_and_keep_the_key(self):
+        jira = FakeJira(VERSIONS, epics=[UMBRELLA], fail_update=True)
+        key, stderr = create(jira)
+        self.assertIn("could not set its Fix Version", stderr)
+        self.assertIn(key, stderr)
+        self.assertEqual(jira.links, [("Incorporates", "SPARK-59102", key)])
+        for failure in ("fail_search", "fail_link"):
+            jira = FakeJira(VERSIONS, epics=[UMBRELLA], **{failure: True})
+            key, stderr = create(jira)
+            self.assertEqual(key, jira.created[0].key)
+            self.assertIn("could not link it to the connect-rust-4.10.0 release umbrella", stderr)
+            self.assertIn(key, stderr)
 
 
 if __name__ == "__main__":
