@@ -52,6 +52,27 @@ async fn wait_ready(grpc: &mut tonic::client::Grpc<Channel>) -> Result<()> {
     }
 }
 
+/// Hash on the blocking pool and return the original buffers for upload framing.
+/// Once started, the blocking task finishes even if the caller is dropped.
+async fn hash_artifact_blobs(blobs: Vec<Vec<u8>>) -> Result<(Vec<Vec<u8>>, Vec<String>)> {
+    use sha2::{Digest, Sha256};
+
+    tokio::task::spawn_blocking(move || {
+        let hashes = blobs
+            .iter()
+            .map(|blob| {
+                Sha256::digest(blob)
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            })
+            .collect();
+        (blobs, hashes)
+    })
+    .await
+    .map_err(|error| SparkError::connect_msg(format!("Artifact hashing task failed: {error}")))
+}
+
 /// A Spark Connect client for communicating with a remote Spark server.
 ///
 /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient`.
@@ -849,23 +870,14 @@ impl SparkConnectClient {
     /// Existing artifacts and duplicate blobs are uploaded only once.
     pub async fn cache_artifacts(&self, blobs: Vec<Vec<u8>>) -> Result<Vec<String>> {
         use bytes::Bytes;
-        use sha2::{Digest, Sha256};
         use std::collections::HashSet;
 
-        let hashes: Vec<String> = blobs
-            .iter()
-            .map(|blob| {
-                Sha256::digest(blob)
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>()
-            })
-            .collect();
+        if blobs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (blobs, hashes) = hash_artifact_blobs(blobs).await?;
         let names: Vec<String> = hashes.iter().map(|hash| format!("cache/{hash}")).collect();
         let unique: HashSet<&str> = names.iter().map(String::as_str).collect();
-        if unique.is_empty() {
-            return Ok(hashes);
-        }
         let cached = self
             .artifact_status(&unique.into_iter().collect::<Vec<_>>())
             .await?;
@@ -893,6 +905,18 @@ impl SparkConnectClient {
         requests: impl futures::Stream<Item = spark_connect_proto::AddArtifactsRequest> + Send + 'static,
         expected_cache_names: Option<&std::collections::HashSet<String>>,
     ) -> Result<()> {
+        use futures::StreamExt;
+
+        let user_context = UserContext {
+            user_id: self.user_id.clone().unwrap_or_default(),
+            ..Default::default()
+        };
+        let client_type = self.user_agent.clone();
+        let requests = requests.map(move |mut request| {
+            request.user_context = Some(user_context.clone());
+            request.client_type = Some(client_type.clone());
+            request
+        });
         let mut req = Request::new(requests);
         self._attach_metadata(&mut req);
         let response = match self.stub.clone().add_artifacts(req).await {
@@ -934,6 +958,7 @@ impl SparkConnectClient {
             user_id: self.user_id.clone().unwrap_or_default(),
             ..Default::default()
         });
+        request.client_type = Some(self.user_agent.clone());
         request.names = names.iter().map(|n| n.to_string()).collect();
 
         let mut req = Request::new(request);
@@ -1166,6 +1191,59 @@ impl Drop for ReattachableResponseStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_artifact_hashing_yields_and_preserves_buffers() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let (release, wait) = std::sync::mpsc::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                started.send(()).unwrap();
+                let _ = wait.recv();
+            });
+            ready.await.unwrap();
+
+            let blobs = vec![Vec::new(), b"abc".to_vec(), b"abc".to_vec()];
+            let allocations: Vec<_> = blobs
+                .iter()
+                .map(|blob| (blob.as_ptr(), blob.capacity()))
+                .collect();
+            let mut hashing = std::pin::pin!(hash_artifact_blobs(blobs));
+            let pending = futures::poll!(&mut hashing).is_pending();
+            // Release the blocking pool before asserting so failures cannot hang shutdown.
+            release.send(()).unwrap();
+            blocker.await.unwrap();
+            assert!(
+                pending,
+                "hashing must yield while the blocking pool is busy"
+            );
+
+            let (blobs, hashes) = hashing.await.unwrap();
+            assert_eq!(
+                hashes,
+                [
+                    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                ]
+            );
+            for (blob, allocation) in blobs.iter().zip(allocations) {
+                assert_eq!((blob.as_ptr(), blob.capacity()), allocation);
+            }
+        });
+    }
+
+    #[tokio::test]
+    async fn test_empty_cache_artifacts_needs_no_server() {
+        let builder = ChannelBuilder::parse("sc://localhost").unwrap();
+        let client = SparkConnectClient::connect(&builder).await.unwrap();
+        assert!(client.cache_artifacts(Vec::new()).await.unwrap().is_empty());
+    }
 
     #[tokio::test]
     async fn test_session_id_generation() {

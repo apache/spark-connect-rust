@@ -96,6 +96,7 @@ impl NamedArtifact {
 
 /// Frame cached in-memory artifacts as they are consumed by the upload stream.
 /// Payload slices share the original allocation instead of copying each chunk.
+/// The allocation is freed when its last slice is dropped, not chunk by chunk.
 pub(crate) fn cache_artifact_requests(
     session_id: String,
     artifacts: Vec<(String, Bytes)>,
