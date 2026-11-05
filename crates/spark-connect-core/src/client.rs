@@ -900,6 +900,8 @@ impl SparkConnectClient {
 
     /// Send artifact frames and validate the response.
     /// Cache uploads also require an acknowledgement for every requested artifact.
+    /// The stream is consumed once; retries must rebuild the frames and restart
+    /// AddArtifacts rather than resume a partially consumed stream.
     async fn upload_artifact_requests(
         &self,
         requests: impl futures::Stream<Item = spark_connect_proto::AddArtifactsRequest> + Send + 'static,

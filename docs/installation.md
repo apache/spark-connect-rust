@@ -38,6 +38,11 @@ cargo build --release
 **Build requirements:**
 - Rust toolchain (`rustup` / `cargo`)
 - `protobuf-compiler`
+- For non-Windows aarch64 targets, a C compiler/assembler and archiver that
+  support the target, required by `sha2-asm`. Install `build-essential` on
+  Debian/Ubuntu or Xcode Command Line Tools on macOS. Cross-compilation needs
+  the corresponding target tools, configured for the `cc` crate (for example,
+  through its target-specific `CC_<target>` and `AR_<target>` variables).
 
 ## Python (Drop-in Replacement)
 
@@ -88,6 +93,10 @@ pip install dist/pyspark_client_rust-*.whl
 - Python 3.9 or later
 - Rust toolchain (`rustup` / `cargo`)
 - `protobuf-compiler`
+- For non-Windows aarch64 targets, the C toolchain described in the
+  [Rust source build requirements](#build-from-source).
+
+Installing a prebuilt Python wheel does not require a C toolchain.
 
 ## Version and Compatibility
 

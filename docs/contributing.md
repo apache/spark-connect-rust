@@ -12,7 +12,9 @@ disabled. Reference the JIRA key in your pull request title, e.g.
 
 ## Building and testing
 
-Requires a Rust toolchain and `protobuf-compiler`.
+Requires a Rust toolchain and `protobuf-compiler`. Non-Windows aarch64 builds
+also need the target C tools described in the
+[source build requirements](installation.md#build-from-source).
 
 ```bash
 cargo build                 # build the library crates
