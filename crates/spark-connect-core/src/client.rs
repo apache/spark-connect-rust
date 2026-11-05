@@ -53,6 +53,7 @@ async fn wait_ready(grpc: &mut tonic::client::Grpc<Channel>) -> Result<()> {
 /// A Spark Connect client for communicating with a remote Spark server.
 ///
 /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient`.
+#[derive(Clone)]
 pub struct SparkConnectClient {
     /// The tonic gRPC channel.
     channel: Channel,
@@ -203,9 +204,10 @@ impl SparkConnectClient {
     ) -> Result<Streaming<ExecutePlanResponse>> {
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
-        let resp = self.stub.clone().execute_plan(req).await;
-        resp.map(Response::into_inner)
-            .map_err(SparkError::from_grpc_status)
+        match self.stub.clone().execute_plan(req).await {
+            Ok(response) => Ok(response.into_inner()),
+            Err(status) => Err(self.error_from_status(status).await),
+        }
     }
 
     /// Execute a plan, forwarding raw request bytes and returning a raw response stream.
@@ -257,9 +259,10 @@ impl SparkConnectClient {
     ) -> Result<Streaming<ExecutePlanResponse>> {
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
-        let resp = self.stub.clone().reattach_execute(req).await;
-        resp.map(Response::into_inner)
-            .map_err(SparkError::from_grpc_status)
+        match self.stub.clone().reattach_execute(req).await {
+            Ok(response) => Ok(response.into_inner()),
+            Err(status) => Err(self.error_from_status(status).await),
+        }
     }
 
     /// Release a (portion of a) running execution's response stream.
@@ -271,9 +274,10 @@ impl SparkConnectClient {
     ) -> Result<ReleaseExecuteResponse> {
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
-        let resp = self.stub.clone().release_execute(req).await;
-        resp.map(Response::into_inner)
-            .map_err(SparkError::from_grpc_status)
+        match self.stub.clone().release_execute(req).await {
+            Ok(response) => Ok(response.into_inner()),
+            Err(status) => Err(self.error_from_status(status).await),
+        }
     }
 
     /// Analyze a plan, forwarding the raw request bytes without decoding them.
@@ -334,7 +338,7 @@ impl SparkConnectClient {
                             continue;
                         }
                     }
-                    return Err(SparkError::from_grpc_status(status));
+                    return Err(self.error_from_status(status).await);
                 }
             }
         }
@@ -363,10 +367,7 @@ impl SparkConnectClient {
             .map_err(|e| e.with_operation_id(iter.operation_id()))?;
         let retry_policy = self.retry_policy.clone();
         Ok(ReattachableResponseStream {
-            stub: self.stub.clone(),
-            user_agent: self.user_agent.clone(),
-            user_id: self.user_id.clone(),
-            metadata: self.metadata.clone(),
+            client: self.clone(),
             retry_state: RetryPolicyState::new(retry_policy.clone()),
             retry_policy,
             iter,
@@ -389,6 +390,83 @@ impl SparkConnectClient {
         let resp = self.stub.clone().fetch_error_details(req).await;
         resp.map(Response::into_inner)
             .map_err(SparkError::from_grpc_status)
+    }
+
+    /// The error for a failed RPC, as `SparkConnectClient._handle_rpc_error` raises it. An
+    /// error that the server raised gets the details that `FetchErrorDetails` returns when the
+    /// server keeps them, and shows the server's stack trace when
+    /// `spark.sql.connect.serverStacktrace.enabled` or `spark.sql.pyspark.jvmStacktrace.enabled`
+    /// is true. As the error is raised either way, failing to read those is not.
+    pub async fn error_from_status(&self, status: tonic::Status) -> SparkError {
+        let error = SparkError::from_grpc_status(status);
+        let Some(server) = &error.server else {
+            return error;
+        };
+        let details = match &server.error_id {
+            Some(error_id) => self.error_details(error_id).await,
+            None => None,
+        };
+        let display_stacktrace = self.display_server_stacktrace().await;
+        error.with_details(details, display_stacktrace)
+    }
+
+    /// The details of the error that the server keeps under `error_id`, or `None` if they
+    /// cannot be fetched. Mirrors `SparkConnectClient._fetch_enriched_error`.
+    async fn error_details(&self, error_id: &str) -> Option<FetchErrorDetailsResponse> {
+        let request = FetchErrorDetailsRequest {
+            session_id: self.session_id.clone(),
+            error_id: error_id.to_string(),
+            client_type: Some(self.user_agent.clone()),
+            user_context: self.user_id.as_ref().map(|user_id| UserContext {
+                user_id: user_id.clone(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut req = Request::new(request);
+        self._attach_metadata(&mut req);
+        let response = self.stub.clone().fetch_error_details(req).await.ok()?;
+        Some(response.into_inner())
+    }
+
+    /// Whether the message of an error that the server raised shows the server's stack
+    /// trace. Mirrors `SparkConnectClient._display_server_stack_trace`, which shows it when a
+    /// config cannot be read.
+    async fn display_server_stacktrace(&self) -> bool {
+        match self
+            .conf_while_raising("spark.sql.connect.serverStacktrace.enabled")
+            .await
+        {
+            Some(enabled) if enabled == "true" => true,
+            Some(_) => self
+                .conf_while_raising("spark.sql.pyspark.jvmStacktrace.enabled")
+                .await
+                .is_none_or(|enabled| enabled == "true"),
+            None => true,
+        }
+    }
+
+    /// The value of a config, or `None` if it cannot be read. Read once, while an error is
+    /// raised, so that a failure is neither retried nor raised.
+    async fn conf_while_raising(&self, key: &str) -> Option<String> {
+        use spark_connect_proto::config_request::{operation::OpType, Get, Operation};
+        let request = ConfigRequest {
+            session_id: self.session_id.clone(),
+            user_context: Some(UserContext {
+                user_id: self.user_id.clone().unwrap_or_default(),
+                ..Default::default()
+            }),
+            operation: Some(Operation {
+                op_type: Some(OpType::Get(Get {
+                    keys: vec![key.to_string()],
+                })),
+            }),
+            ..Default::default()
+        };
+        let mut req = Request::new(request);
+        self._attach_metadata(&mut req);
+        let response = self.stub.clone().config(req).await.ok()?.into_inner();
+        response.pairs.into_iter().next()?.value
     }
 
     /// Update or fetch configurations.
@@ -677,8 +755,10 @@ impl SparkConnectClient {
 
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
-        let resp = self.stub.clone().release_session(req).await;
-        resp.map(|_| ()).map_err(SparkError::from_grpc_status)
+        match self.stub.clone().release_session(req).await {
+            Ok(_) => Ok(()),
+            Err(status) => Err(self.error_from_status(status).await),
+        }
     }
 
     /// Add artifacts to this session.
@@ -814,13 +894,10 @@ impl SparkConnectClient {
     ) -> Result<()> {
         let mut req = Request::new(futures::stream::iter(requests));
         self._attach_metadata(&mut req);
-        let response = self
-            .stub
-            .clone()
-            .add_artifacts(req)
-            .await
-            .map_err(SparkError::from_grpc_status)?
-            .into_inner();
+        let response = match self.stub.clone().add_artifacts(req).await {
+            Ok(response) => response.into_inner(),
+            Err(status) => return Err(self.error_from_status(status).await),
+        };
         let mut received = std::collections::HashSet::new();
         for summary in response.artifacts {
             if !summary.is_crc_successful {
@@ -860,13 +937,10 @@ impl SparkConnectClient {
 
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
-        let response = self
-            .stub
-            .clone()
-            .artifact_status(req)
-            .await
-            .map_err(SparkError::from_grpc_status)?
-            .into_inner();
+        let response = match self.stub.clone().artifact_status(req).await {
+            Ok(response) => response.into_inner(),
+            Err(status) => return Err(self.error_from_status(status).await),
+        };
 
         // Build map of artifact name -> exists status
         let mut result = std::collections::HashMap::new();
@@ -919,10 +993,8 @@ impl SparkConnectClient {
 /// server does not keep them until the execution is abandoned. Mirrors
 /// `pyspark.sql.connect.client.reattach.ExecutePlanResponseReattachableIterator`.
 pub struct ReattachableResponseStream {
-    stub: SparkConnectServiceClient<Channel>,
-    user_agent: String,
-    user_id: Option<String>,
-    metadata: Vec<(String, String)>,
+    /// The client that started the execution, whose stub, headers and session it uses.
+    client: SparkConnectClient,
     retry_policy: RetryPolicy,
     retry_state: RetryPolicyState,
     iter: ExecutePlanResponseReattachableIterator,
@@ -936,15 +1008,15 @@ impl ReattachableResponseStream {
     /// The gRPC metadata of every request about this execution.
     fn metadata_map(&self) -> MetadataMap {
         let mut metadata = MetadataMap::new();
-        if let Ok(v) = MetadataValue::from_str(&self.user_agent) {
+        if let Ok(v) = MetadataValue::from_str(&self.client.user_agent) {
             let _ = metadata.insert("user-agent", v);
         }
-        if let Some(user_id) = &self.user_id {
+        if let Some(user_id) = &self.client.user_id {
             if let Ok(v) = MetadataValue::from_str(user_id) {
                 let _ = metadata.insert("user_id", v);
             }
         }
-        for (k, v) in &self.metadata {
+        for (k, v) in &self.client.metadata {
             if let Ok(v) = MetadataValue::from_str(v) {
                 if let Ok(key) = tonic::metadata::MetadataKey::from_bytes(k.as_bytes()) {
                     let _ = metadata.insert(key, v);
@@ -983,7 +1055,8 @@ impl ReattachableResponseStream {
                 Err(status) => {
                     // Only reattach a still-running execution on a retriable drop.
                     if self.iter.is_completed().await || !self.retry_policy.can_retry(&status) {
-                        return Err(self.fail(SparkError::from_grpc_status(status)));
+                        let error = self.client.error_from_status(status).await;
+                        return Err(self.fail(error));
                     }
                     self.reattach().await?;
                 }
@@ -996,7 +1069,7 @@ impl ReattachableResponseStream {
         loop {
             let mut req = Request::new(self.iter.create_reattach_request().await);
             self.attach_metadata(&mut req);
-            match self.stub.reattach_execute(req).await {
+            match self.client.stub.clone().reattach_execute(req).await {
                 Ok(r) => {
                     self.stream = r.into_inner();
                     return Ok(());
@@ -1008,7 +1081,8 @@ impl ReattachableResponseStream {
                             continue;
                         }
                     }
-                    return Err(self.fail(SparkError::from_grpc_status(e)));
+                    let error = self.client.error_from_status(e).await;
+                    return Err(self.fail(error));
                 }
             }
         }
@@ -1043,7 +1117,7 @@ impl ReattachableResponseStream {
     /// removes an execution that is never released once it has been detached for
     /// `spark.connect.execute.manager.detachedTimeout`.
     fn spawn_release(&self, request: ReleaseExecuteRequest) {
-        let mut stub = self.stub.clone();
+        let mut stub = self.client.stub.clone();
         let metadata = self.metadata_map();
         let policy = self.retry_policy.clone();
         let release = async move {

@@ -177,3 +177,37 @@ def test_collect_reads_a_result_across_stream_ends(session):
     n = 300_000
     assert len(session.range(n).collect()) == n
     assert session.range(n).toArrow().num_rows == n
+
+
+def test_server_errors_carry_their_condition_and_details(session):
+    from pyspark.errors import AnalysisException, ArithmeticException, ParseException
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException, SQLQueryContext
+
+    with pytest.raises(ParseException) as error:
+        session.sql("SELEC 1").collect()
+    e = error.value
+    assert isinstance(e, SparkConnectGrpcException)
+    assert e.getCondition() == "PARSE_SYNTAX_ERROR"
+    assert e.getSqlState() == "42601"
+    assert e.getMessageParameters() == {"error": "'SELEC'", "hint": ""}
+    # The server's message, which names the condition once.
+    assert str(e).count("[PARSE_SYNTAX_ERROR]") == 1
+    assert e.getStackTrace().startswith("org.apache.spark.sql.catalyst.parser.ParseException")
+
+    with pytest.raises(AnalysisException) as error:
+        session.table("no_such_table_xyz").collect()
+    e = error.value
+    assert e.getCondition() == "TABLE_OR_VIEW_NOT_FOUND"
+    assert e.getSqlState() == "42P01"
+    assert list(e.getMessageParameters()) == ["relationName", "searchPath"]
+    assert e.getMessageParameters()["relationName"] == "`no_such_table_xyz`"
+
+    with pytest.raises(ArithmeticException) as error:
+        session.sql("SELECT 1/0").collect()
+    e = error.value
+    assert e.getCondition() == "DIVIDE_BY_ZERO"
+    [context] = e.getQueryContext()
+    assert isinstance(context, SQLQueryContext)
+    assert context.fragment() == "1/0"
+    # spark.sql.connect.serverStacktrace.enabled is true by default.
+    assert "\n\nJVM stacktrace:\norg.apache.spark.SparkArithmeticException" in str(e)

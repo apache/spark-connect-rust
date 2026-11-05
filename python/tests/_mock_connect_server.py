@@ -126,17 +126,68 @@ def serve(connection):
         execute_requests = []
         execute_payload = b""
         execute_failure = None
+        # With `execute_error` set to (message, reason, metadata), ExecutePlan fails as the
+        # server does for an error that it raised: INTERNAL, with a google.rpc.Status of an
+        # ErrorInfo of `reason` and `metadata` in grpc-status-details-bin.
+        execute_error = None
+        # FetchErrorDetails returns `error_details` (raw FetchErrorDetailsResponse fields) and
+        # records the error id asked for. Config Get returns the values in `confs`, and fails
+        # for a key without one, as the server does for an unset config; it records the keys.
+        error_details = b""
+        fetched_error_ids = []
+        confs = {}
+        read_confs = []
 
         def execute(self, request, context):
             self.execute_requests.append(request)
             if self.execute_failure:
                 context.abort(grpc.StatusCode.INVALID_ARGUMENT, self.execute_failure)
+            if self.execute_error:
+                message, reason, metadata = self.execute_error
+                # google.rpc: Status.code=1, message=2, details=3; Any.type_url=1, value=2;
+                # ErrorInfo.reason=1, domain=2, metadata=3 (entries of key=1, value=2).
+                info = message_field(1, reason) + message_field(2, "org.apache.spark")
+                for key, value in metadata.items():
+                    info += message_field(3, message_field(1, key) + message_field(2, value))
+                status = (
+                    varint_field(1, grpc.StatusCode.INTERNAL.value[0])
+                    + message_field(2, message)
+                    + message_field(
+                        3,
+                        message_field(1, "type.googleapis.com/google.rpc.ErrorInfo")
+                        + message_field(2, info),
+                    )
+                )
+                context.set_trailing_metadata((("grpc-status-details-bin", status),))
+                context.abort(grpc.StatusCode.INTERNAL, message)
             # ExecutePlanRequest.operation_id=6; ExecutePlanResponse.operation_id=12,
             # response_id=13, result_complete=14.
             operation_id = parse_message(request).get(6, [b""])[0]
             header = message_field(12, operation_id)
             yield header + message_field(13, "r1") + self.execute_payload
             yield header + message_field(13, "r2") + message_field(14, b"")
+
+        def fetch_error_details(self, request, context):
+            # FetchErrorDetailsRequest.error_id=3.
+            self.fetched_error_ids.append(parse_message(request)[3][0].decode())
+            return self.error_details
+
+        def config(self, request, context):
+            # ConfigRequest.session_id=1, operation=3, Operation.get=2, Get.keys=1;
+            # ConfigResponse.session_id=1, pairs=2, KeyValue.key=1, value=2.
+            request = parse_message(request)
+            operation = parse_message(request[3][0])
+            if 2 not in operation:
+                context.abort(grpc.StatusCode.UNIMPLEMENTED, "only Get is served")
+            keys = [key.decode() for key in parse_message(operation[2][0]).get(1, [])]
+            self.read_confs.extend(keys)
+            if any(key not in self.confs for key in keys):
+                context.abort(grpc.StatusCode.INTERNAL, "[SQL_CONF_NOT_FOUND]")
+            # The response names the session, as the server's does.
+            return message_field(1, request[1][0]) + b"".join(
+                message_field(2, message_field(1, key) + message_field(2, self.confs[key]))
+                for key in keys
+            )
 
     service = Service()
     with ThreadPoolExecutor(max_workers=4) as executor:
@@ -149,6 +200,8 @@ def serve(connection):
                 lambda request, context: iter([message_field(14, b"")])
             ),
             "ReleaseExecute": grpc.unary_unary_rpc_method_handler(lambda request, context: b""),
+            "FetchErrorDetails": grpc.unary_unary_rpc_method_handler(service.fetch_error_details),
+            "Config": grpc.unary_unary_rpc_method_handler(service.config),
         }
         server.add_generic_rpc_handlers(
             (grpc.method_handlers_generic_handler("spark.connect.SparkConnectService", handlers),)
