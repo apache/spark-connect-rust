@@ -20,7 +20,7 @@
 
 
 def _has_canonical_columns(columns):
-    """Decline label containers whose row-path ``tolist`` can run custom hooks."""
+    """Decline label containers whose row-path iteration can run custom hooks."""
     import sys
     from types import FunctionType
 
@@ -32,7 +32,7 @@ def _has_canonical_columns(columns):
     Index = index_module.Index
     if (pd.Index is not Index or type(columns) is not Index
             or Index.__getattribute__ is not object.__getattribute__
-            or "tolist" in vars(columns)):
+            or "__iter__" in vars(columns)):
         return False
 
     def ordinary(method, name, module):
@@ -40,10 +40,10 @@ def _has_canonical_columns(columns):
                 and method.__module__ == module.__name__
                 and method.__globals__ is vars(module))
 
-    # The native row path calls columns.tolist() before normalizing any cells.
+    # The native row path iterates columns before normalizing any cells.
     # Decline overrides without invoking them, so fallback preserves that order.
-    if (Index.tolist is not base_module.IndexOpsMixin.tolist
-            or not ordinary(Index.tolist, "tolist", base_module)):
+    if (Index.__iter__ is not base_module.IndexOpsMixin.__iter__
+            or not ordinary(Index.__iter__, "__iter__", base_module)):
         return False
     values = vars(Index).get("_values")
     if (type(values) is not property
@@ -63,6 +63,8 @@ def _has_canonical_columns(columns):
 
     try:
         from pandas.core.arrays import numpy_ as numpy_module, string_ as string_module
+        from pandas.core.arrays import base as array_base_module, _mixins as mixins_module
+        from pandas._libs.arrays import NDArrayBacked
         from pandas.core.arrays import string_arrow as string_arrow_module
         from pandas.core.arrays.arrow import array as arrow_module
     except ImportError:
@@ -78,7 +80,8 @@ def _has_canonical_columns(columns):
         return False
     if (cls.__getattribute__ is not object.__getattribute__
             or any(name in vars(backing) for name in
-                   ("tolist", "to_numpy", "isna", "fillna", "_hasna"))
+                   ("__iter__", "__getitem__", "__len__", "_box_func",
+                    "tolist", "to_numpy", "isna", "fillna", "_hasna"))
             or getattr(cls, "tolist", None) is not getattr(
                 vars(string_module).get("BaseStringArray"), "tolist", None)
             or not ordinary(getattr(cls, "tolist", None), "tolist", string_module)):
@@ -94,6 +97,16 @@ def _has_canonical_columns(columns):
             return False
         if type(storage) is not np.ndarray:
             return False
+        # ExtensionArray iteration dispatches through len and indexed boxing.
+        for name, module in (("__iter__", array_base_module),
+                             ("__getitem__", mixins_module), ("_box_func", mixins_module)):
+            if not ordinary(getattr(cls, name, None), name, module):
+                return False
+        if (getattr(cls, "__len__", None) is not NDArrayBacked.__len__
+                or getattr(cls, "ndim", None) is not NDArrayBacked.ndim
+                or any("_ndarray" in vars(base) for base in cls.__mro__
+                       if base is not NDArrayBacked)):
+            return False
         isna = vars(string_array).get("isna", getattr(owner, "isna", None))
         isna_module = string_module if "isna" in vars(string_array) else module
     else:
@@ -104,7 +117,8 @@ def _has_canonical_columns(columns):
             storage = object.__getattribute__(backing, "_pa_array")
         except AttributeError:
             return False
-        if type(storage) is not pa.ChunkedArray:
+        if (type(storage) is not pa.ChunkedArray
+                or not ordinary(getattr(cls, "__iter__", None), "__iter__", module)):
             return False
         isna, isna_module = getattr(owner, "isna", None), module
         hasna = getattr(cls, "_hasna", None)
@@ -113,8 +127,8 @@ def _has_canonical_columns(columns):
                 or getattr(cls, "fillna", None) is not getattr(owner, "fillna", None)
                 or not ordinary(getattr(cls, "fillna", None), "fillna", module)):
             return False
-    # BaseStringArray.tolist delegates to to_numpy, which consults isna (or
-    # Arrow's _hasna). Authenticate those direct hooks as well as the storage.
+    # Keep the existing storage/conversion authentication as well as the
+    # iterator hooks: these objects also supply labels to pandas normalization.
     return (getattr(cls, "to_numpy", None) is getattr(owner, "to_numpy", None)
             and ordinary(getattr(cls, "to_numpy", None), "to_numpy", module)
             and getattr(cls, "isna", None) is isna
