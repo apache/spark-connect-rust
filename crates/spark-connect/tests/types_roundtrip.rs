@@ -108,15 +108,7 @@ fn proto_roundtrip_all_variants() {
 
 #[test]
 fn json_roundtrip_all_variants() {
-    // Geometry/Geography JSON is intentionally excluded: their json encoding is
-    // lossy today (emits a fixed CRS token rather than the numeric srid), so it does
-    // not round-trip. Their proto encoding round-trips and is covered above.
-    let is_geo = |d: &DataType| matches!(d, DataType::Geometry { .. } | DataType::Geography { .. });
-    for dt in all_scalar_variants()
-        .into_iter()
-        .chain(nested_variants())
-        .filter(|d| !is_geo(d))
-    {
+    for dt in all_scalar_variants().into_iter().chain(nested_variants()) {
         let value = dt.json_value();
         let s = dt.json();
         assert!(!s.is_empty());
@@ -345,5 +337,36 @@ fn timestamp_nanos_types() {
     assert_eq!(
         DataType::from_proto(&p).unwrap(),
         DataType::TimestampLtzNanos { precision: 7 }
+    );
+}
+
+/// Spatial types name their SRID by its CRS in JSON, as PySpark does, and read it back.
+#[test]
+fn spatial_json_names_the_crs_as_pyspark() {
+    for (dt, json) in [
+        (DataType::Geometry { srid: 4326 }, "\"geometry(OGC:CRS84)\""),
+        (DataType::Geometry { srid: 3857 }, "\"geometry(EPSG:3857)\""),
+        (DataType::Geometry { srid: 0 }, "\"geometry(SRID:0)\""),
+        (DataType::Geometry { srid: -1 }, "\"geometry(SRID:ANY)\""),
+        (
+            DataType::Geography { srid: 4326 },
+            "\"geography(OGC:CRS84, SPHERICAL)\"",
+        ),
+        (
+            DataType::Geography { srid: -1 },
+            "\"geography(SRID:ANY, SPHERICAL)\"",
+        ),
+    ] {
+        assert_eq!(dt.json(), json);
+        assert_eq!(DataType::from_json(&dt.json_value()).unwrap(), dt);
+    }
+    // The DDL forms name the SRID itself.
+    assert_eq!(
+        DataType::from_ddl("geometry(3857)").unwrap(),
+        DataType::Geometry { srid: 3857 }
+    );
+    assert_eq!(
+        DataType::from_ddl("geography(any)").unwrap(),
+        DataType::Geography { srid: -1 }
     );
 }

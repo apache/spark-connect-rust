@@ -8,31 +8,26 @@ use spark_connect::readwriter::DataFrameReader;
 
 use crate::dataframe::PyDataFrame;
 
-/// Python wrapper for the batch DataFrameReader. The core reader is a consuming
-/// builder, so each step takes the inner value and returns a fresh wrapper (mirrors
-/// the existing PyDataStreamReader).
+/// Python wrapper for the batch DataFrameReader.
+///
+/// PySpark's reader is mutable: `format`/`schema`/`option`/`options` change `self`
+/// and return it, and a reader can be used again after a read. The core reader is a
+/// consuming builder, so the setters replace the wrapped value in place and return
+/// the same Python object, and the terminal reads build their DataFrame from a clone.
 #[pyclass(name = "DataFrameReader", module = "pyspark.sql.readwriter")]
 pub struct PyDataFrameReader {
-    inner: Option<DataFrameReader>,
+    inner: DataFrameReader,
 }
 
 impl PyDataFrameReader {
     pub fn new(reader: DataFrameReader) -> Self {
-        PyDataFrameReader {
-            inner: Some(reader),
-        }
+        PyDataFrameReader { inner: reader }
     }
 
-    fn take(&mut self) -> PyResult<DataFrameReader> {
-        self.inner.take().ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("DataFrameReader already consumed")
-        })
-    }
-
-    /// Take the inner reader and apply per-call `**options` (skipping None,
-    /// lowercasing bools) before a format-specific read.
-    fn take_with_opts(&mut self, options: Option<&Bound<'_, PyDict>>) -> PyResult<DataFrameReader> {
-        let mut r = self.take()?;
+    /// A copy of the current reader with per-call `**options` applied (skipping
+    /// None, lowercasing bools), for a format-specific read.
+    fn with_opts(&self, options: Option<&Bound<'_, PyDict>>) -> PyResult<DataFrameReader> {
+        let mut r = self.inner.clone();
         if let Some(opts) = options {
             for (k, v) in opts.iter() {
                 if let Some(val) = crate::coerce_option_value(&v)? {
@@ -41,6 +36,14 @@ impl PyDataFrameReader {
             }
         }
         Ok(r)
+    }
+
+    /// Keep the options of a format-specific read on this reader, as PySpark does
+    /// (its `json`/`csv`/... set the options and the format on `self`, then `load`).
+    /// Called only after every argument was validated, so a failed call leaves the
+    /// reader unchanged.
+    fn commit(&mut self, r: &DataFrameReader, format: &str) {
+        self.inner = r.clone().format(format);
     }
 }
 
@@ -59,40 +62,75 @@ fn set_opt(
     }
 }
 
-/// Resolve a reader `schema` arg (a StructType/DataType or a DDL string) to the
-/// reader's DDL schema.
+/// A reader `schema` as pyspark's `DataFrameReader.schema` and `DataStreamReader.schema`
+/// send it: a StructType as its JSON, which keeps field metadata, and a string as is, for
+/// the server to parse. Anything else raises `NOT_EXPECTED_TYPE`.
+pub(crate) fn reader_schema(schema: &Bound<'_, PyAny>) -> PyResult<String> {
+    if let Ok(schema) = schema.extract::<String>() {
+        return Ok(schema);
+    }
+    if let Ok(st) = schema.extract::<PyRef<crate::types::PyStructType>>() {
+        return Ok(spark_connect::types::DataType::Struct {
+            fields: st.fields.clone(),
+        }
+        .json());
+    }
+    let arg_type = schema.get_type().name()?.to_string();
+    Err(crate::column::raise_pyspark(
+        schema.py(),
+        "PySparkTypeError",
+        "NOT_EXPECTED_TYPE",
+        &[
+            ("arg_name", "schema"),
+            ("expected_type", "str or struct type"),
+            ("arg_type", &arg_type),
+        ],
+    ))
+}
+
+/// Apply the `schema` argument of a format method, as pyspark does through `schema()`.
 fn apply_reader_schema(r: DataFrameReader, v: &Bound<'_, PyAny>) -> PyResult<DataFrameReader> {
-    let dt = crate::types::py_to_data_type(v)?;
-    Ok(r.schema(dt.simple_string()))
+    Ok(r.schema(reader_schema(v)?))
 }
 
 #[pymethods]
 impl PyDataFrameReader {
     /// Set the source format (e.g. "parquet", "json", "csv").
-    fn format(&mut self, source: &str) -> PyResult<PyDataFrameReader> {
-        Ok(PyDataFrameReader::new(self.take()?.format(source)))
+    fn format<'py>(mut slf: PyRefMut<'py, Self>, source: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().format(source);
+        slf
     }
 
-    /// Set the schema (a DDL string).
-    fn schema(&mut self, schema: &str) -> PyResult<PyDataFrameReader> {
-        Ok(PyDataFrameReader::new(
-            self.take()?.schema(schema.to_string()),
-        ))
+    /// Set the schema: a StructType or a DDL string, as in pyspark.
+    fn schema<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        schema: &Bound<'_, PyAny>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let schema = reader_schema(schema)?;
+        slf.inner = slf.inner.clone().schema(schema);
+        Ok(slf)
     }
 
     /// Set a single read option. `None` leaves the option unset (not the string
     /// "None"); booleans lowercase to "true"/"false" (reference `to_str` semantics).
-    fn option(&mut self, key: &str, value: &Bound<'_, PyAny>) -> PyResult<PyDataFrameReader> {
-        match crate::coerce_option_value(value)? {
-            Some(v) => Ok(PyDataFrameReader::new(self.take()?.option(key, &v))),
-            None => Ok(PyDataFrameReader::new(self.take()?)),
+    fn option<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        key: &str,
+        value: &Bound<'_, PyAny>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        if let Some(v) = crate::coerce_option_value(value)? {
+            slf.inner = slf.inner.clone().option(key, &v);
         }
+        Ok(slf)
     }
 
     /// Set multiple read options. Mirrors reference `DataFrameReader.options(**options)`
     /// - keyword args; `None` values are skipped and booleans lowercased.
     #[pyo3(signature = (**options))]
-    fn options(&mut self, options: Option<&Bound<'_, PyDict>>) -> PyResult<PyDataFrameReader> {
+    fn options<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        options: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
         let mut map = HashMap::new();
         if let Some(options) = options {
             for (k, v) in options.iter() {
@@ -101,7 +139,26 @@ impl PyDataFrameReader {
                 }
             }
         }
-        Ok(PyDataFrameReader::new(self.take()?.options(map)))
+        slf.inner = slf.inner.clone().options(map);
+        Ok(slf)
+    }
+
+    /// The configured source format (PySpark Connect's `DataFrameReader._format`).
+    #[getter]
+    fn _format(&self) -> Option<String> {
+        self.inner.get_format().map(str::to_string)
+    }
+
+    /// The configured schema string, empty when unset (`DataFrameReader._schema`).
+    #[getter]
+    fn _schema(&self) -> String {
+        self.inner.get_schema().to_string()
+    }
+
+    /// The configured read options (`DataFrameReader._options`); a copy.
+    #[getter]
+    fn _options(&self) -> HashMap<String, String> {
+        self.inner.get_options().clone()
     }
 
     /// Load data from the (optional) path. Mirrors the reference
@@ -116,25 +173,27 @@ impl PyDataFrameReader {
         schema: Option<&Bound<'_, PyAny>>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
-        let mut r = self.take_with_opts(options)?;
+        let mut r = self.with_opts(options)?;
         if let Some(f) = format {
             r = r.format(f);
         }
         if let Some(s) = schema {
             r = apply_reader_schema(r, s)?;
         }
+        // PySpark's one-shot load sets format/schema/options on the reader itself.
+        self.inner = r.clone();
         Ok(PyDataFrame::new(r.load(path)))
     }
 
     /// Read a table by name.
-    fn table(&mut self, tableName: &str) -> PyResult<PyDataFrame> {
-        Ok(PyDataFrame::new(self.take()?.table(tableName)))
+    fn table(&self, tableName: &str) -> PyResult<PyDataFrame> {
+        Ok(PyDataFrame::new(self.inner.clone().table(tableName)))
     }
 
     /// Read the CDC changes of a named table. Mirrors `DataFrameReader.changes`.
     #[allow(non_snake_case)]
-    fn changes(&mut self, tableName: &str) -> PyResult<PyDataFrame> {
-        Ok(PyDataFrame::new(self.take()?.changes(tableName)))
+    fn changes(&self, tableName: &str) -> PyResult<PyDataFrame> {
+        Ok(PyDataFrame::new(self.inner.clone().changes(tableName)))
     }
 
     /// Read JSON file(s) - full pyspark signature; each named option is
@@ -170,7 +229,7 @@ impl PyDataFrameReader {
         allowNonNumericNumbers: Option<&Bound<'_, PyAny>>,
         useUnsafeRow: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let mut r = self.take()?;
+        let mut r = self.inner.clone();
         if let Some(v) = schema {
             r = apply_reader_schema(r, v)?;
         }
@@ -202,6 +261,7 @@ impl PyDataFrameReader {
         r = set_opt(r, "modifiedAfter", modifiedAfter)?;
         r = set_opt(r, "allowNonNumericNumbers", allowNonNumericNumbers)?;
         r = set_opt(r, "useUnsafeRow", useUnsafeRow)?;
+        self.commit(&r, "json");
         Ok(PyDataFrame::new(r.json(path)))
     }
 
@@ -219,9 +279,9 @@ impl PyDataFrameReader {
                 "parquet() currently supports exactly one path",
             ));
         }
-        Ok(PyDataFrame::new(
-            self.take_with_opts(options)?.parquet(&paths[0]),
-        ))
+        let r = self.with_opts(options)?;
+        self.commit(&r, "parquet");
+        Ok(PyDataFrame::new(r.parquet(&paths[0])))
     }
 
     /// Read CSV file(s) - full pyspark signature; each named option is
@@ -265,7 +325,7 @@ impl PyDataFrameReader {
         modifiedAfter: Option<&Bound<'_, PyAny>>,
         unescapedQuoteHandling: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let mut r = self.take()?;
+        let mut r = self.inner.clone();
         if let Some(v) = schema {
             r = apply_reader_schema(r, v)?;
         }
@@ -305,6 +365,7 @@ impl PyDataFrameReader {
         r = set_opt(r, "modifiedBefore", modifiedBefore)?;
         r = set_opt(r, "modifiedAfter", modifiedAfter)?;
         r = set_opt(r, "unescapedQuoteHandling", unescapedQuoteHandling)?;
+        self.commit(&r, "csv");
         Ok(PyDataFrame::new(r.csv(path)))
     }
 
@@ -321,12 +382,13 @@ impl PyDataFrameReader {
         modifiedBefore: Option<&Bound<'_, PyAny>>,
         modifiedAfter: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let mut r = self.take()?;
+        let mut r = self.inner.clone();
         r = set_opt(r, "mergeSchema", mergeSchema)?;
         r = set_opt(r, "pathGlobFilter", pathGlobFilter)?;
         r = set_opt(r, "recursiveFileLookup", recursiveFileLookup)?;
         r = set_opt(r, "modifiedBefore", modifiedBefore)?;
         r = set_opt(r, "modifiedAfter", modifiedAfter)?;
+        self.commit(&r, "orc");
         Ok(PyDataFrame::new(r.orc(path)))
     }
 
@@ -344,13 +406,14 @@ impl PyDataFrameReader {
         modifiedBefore: Option<&Bound<'_, PyAny>>,
         modifiedAfter: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let mut r = self.take()?;
+        let mut r = self.inner.clone();
         r = set_opt(r, "wholetext", wholetext)?;
         r = set_opt(r, "lineSep", lineSep)?;
         r = set_opt(r, "pathGlobFilter", pathGlobFilter)?;
         r = set_opt(r, "recursiveFileLookup", recursiveFileLookup)?;
         r = set_opt(r, "modifiedBefore", modifiedBefore)?;
         r = set_opt(r, "modifiedAfter", modifiedAfter)?;
+        self.commit(&r, "text");
         Ok(PyDataFrame::new(r.text(paths)))
     }
 
@@ -381,7 +444,7 @@ impl PyDataFrameReader {
         samplingRatio: Option<&Bound<'_, PyAny>>,
         locale: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let mut r = self.take()?;
+        let mut r = self.inner.clone();
         r = set_opt(r, "rowTag", rowTag)?;
         if let Some(v) = schema {
             r = apply_reader_schema(r, v)?;
@@ -403,6 +466,7 @@ impl PyDataFrameReader {
         r = set_opt(r, "multiLine", multiLine)?;
         r = set_opt(r, "samplingRatio", samplingRatio)?;
         r = set_opt(r, "locale", locale)?;
+        self.commit(&r, "xml");
         Ok(PyDataFrame::new(r.xml(path)))
     }
 
@@ -424,7 +488,7 @@ impl PyDataFrameReader {
         predicates: Option<Vec<String>>,
         properties: Option<HashMap<String, String>>,
     ) -> PyResult<PyDataFrame> {
-        let mut r = self.take()?;
+        let mut r = self.inner.clone();
         if let Some(c) = column {
             r = r.option("partitionColumn", &c);
         }
@@ -442,6 +506,12 @@ impl PyDataFrameReader {
                 r = r.option(&k, &v);
             }
         }
+        // PySpark's jdbc also leaves format/url/dbtable on the reader.
+        self.inner = r
+            .clone()
+            .format("jdbc")
+            .option("url", url)
+            .option("dbtable", table);
         Ok(PyDataFrame::new(r.jdbc(url, table, predicates)))
     }
 }

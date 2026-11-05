@@ -101,8 +101,12 @@ def serve(connection):
         block_response = False
         response_gate = Event()
 
+        # Each AnalyzePlanRequest, recorded.
+        analyze_requests = []
+
         def analyze(self, request, context):
             self.calls += 1
+            self.analyze_requests.append(request)
             if self.block_response and not self.response_gate.wait(5):
                 context.abort(
                     grpc.StatusCode.DEADLINE_EXCEEDED,
