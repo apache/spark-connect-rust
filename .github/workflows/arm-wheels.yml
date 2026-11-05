@@ -1,0 +1,67 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+
+# Build-only checks complement the native ARM transport tests in rust.yml.
+name: Release wheel build checks
+
+on:
+  pull_request:
+    branches: [master, "branch-*"]
+    paths: &wheel-build-paths
+      - Cargo.toml
+      - Cargo.lock
+      - '**/Cargo.toml'
+      - '**/build.rs'
+      - crates/**
+      - pyproject.toml
+      - .cargo/**
+      - rust-toolchain*
+      - .github/workflows/release.yml
+      - .github/workflows/build-wheel.yml
+      - .github/workflows/arm-wheels.yml
+  push:
+    branches: [master, "branch-*"]
+    paths: *wheel-build-paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  arm-wheels:
+    name: Release wheel (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Exercise Linux ARM assembly through zig cc on an x86 host.
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu, zig: true }
+          # Exercise both the x86_64 and aarch64 slices.
+          - { os: macos-latest, target: universal2-apple-darwin }
+    uses: ./.github/workflows/build-wheel.yml
+    with:
+      runner: ${{ matrix.os }}
+      target: ${{ matrix.target }}
+      zig: ${{ matrix.zig || false }}
+      source_repository: ${{ github.repository }}
+      source_ref: ${{ github.sha }}

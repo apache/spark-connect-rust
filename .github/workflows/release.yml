@@ -247,7 +247,6 @@ jobs:
     name: Build wheel (${{ matrix.target }})
     needs: resolve
     if: needs.resolve.outputs.mode == 'dryrun' || needs.resolve.outputs.mode == 'rc'
-    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
@@ -256,52 +255,15 @@ jobs:
           - { os: ubuntu-latest,  target: aarch64-unknown-linux-gnu, zig: true }
           - { os: macos-latest,   target: universal2-apple-darwin }
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: ${{ env.UPSTREAM_REPO }}
-          ref: ${{ needs.resolve.outputs.sha }}
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Install Rust toolchain
-        shell: bash
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-      - name: Add Rust target(s)
-        shell: bash
-        run: |
-          case "${{ matrix.target }}" in
-            universal2-apple-darwin)
-              rustup target add x86_64-apple-darwin aarch64-apple-darwin ;;
-            *)
-              rustup target add "${{ matrix.target }}" ;;
-          esac
-      - name: Install protoc
-        shell: bash
-        run: |
-          case "$RUNNER_OS" in
-            Linux)   sudo apt-get update && sudo apt-get install -y protobuf-compiler ;;
-            macOS)   brew install protobuf ;;
-            Windows) choco install protoc -y ;;
-          esac
-      - name: Build abi3 wheel with maturin
-        # abi3-py39 produces one wheel per (platform, arch) valid for CPython 3.9+.
-        # `--zig` cross-links the Linux wheels against an old glibc (manylinux2014).
-        shell: bash
-        run: |
-          python -m pip install --upgrade maturin
-          args=(--release --out dist --target "${{ matrix.target }}")
-          if [[ "${{ matrix.zig }}" == "true" ]]; then
-            python -m pip install ziglang
-            args+=(--zig)
-          fi
-          maturin build "${args[@]}"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheels-${{ matrix.target }}
-          path: dist/*.whl
+    uses: ./.github/workflows/build-wheel.yml
+    with:
+      runner: ${{ matrix.os }}
+      target: ${{ matrix.target }}
+      zig: ${{ matrix.zig || false }}
+      # Keep the release source canonical and pinned by resolve, including when
+      # the workflow is dispatched from a committer's fork.
+      source_repository: apache/spark-connect-rust
+      source_ref: ${{ needs.resolve.outputs.sha }}
 
   build-sdist:
     name: Build source distribution
