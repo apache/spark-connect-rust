@@ -512,6 +512,44 @@ def test_type_class_hierarchy():
     assert issubclass(T.AtomicType, T.DataType)
 
 
+@pytest.mark.parametrize("make, expected", [
+    (lambda: T.GeometryType("ANY"), "GeometryType(ANY)"),
+    (lambda: T.GeographyType("ANY"), "GeographyType(ANY)"),
+    (lambda: T.GeometryType(0), "GeometryType(0)"),
+    (lambda: T.GeometryType(3857), "GeometryType(3857)"),
+    (lambda: T.GeometryType(4326), "GeometryType(4326)"),
+    (lambda: T.GeographyType(4326), "GeographyType(4326)"),
+])
+def test_spatial_types_take_the_srids_that_pyspark_knows(make, expected):
+    spatial = make()
+    assert repr(spatial) == expected
+    # "ANY" is the mixed SRID.
+    assert (spatial.srid == -1) is ("ANY" in expected)
+
+
+@pytest.mark.parametrize("make, srid", [
+    (lambda: T.GeometryType(2000), "2000"),
+    (lambda: T.GeometryType(-1), "-1"),
+    (lambda: T.GeometryType("any"), "any"),
+    (lambda: T.GeometryType("4326"), "4326"),
+    (lambda: T.GeographyType(3857), "3857"),
+    (lambda: T.GeographyType(0), "0"),
+])
+def test_spatial_types_reject_other_srids_as_pyspark(make, srid):
+    from pyspark.errors import IllegalArgumentException
+
+    with pytest.raises(IllegalArgumentException) as error:
+        make()
+    assert error.value.getCondition() == "ST_INVALID_SRID_VALUE"
+    assert error.value.getMessageParameters() == {"srid": srid}
+
+
+def test_spatial_types_need_an_srid():
+    for spatial in [T.GeometryType, T.GeographyType]:
+        with pytest.raises(TypeError):
+            spatial()
+
+
 def test_spatial_types():
     g = T.GeometryType(4326)
     assert [c.__name__ for c in type(g).__mro__ if c.__name__ != "object"] == [
