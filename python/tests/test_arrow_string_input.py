@@ -854,11 +854,19 @@ def test_arrow_string_public_errors_precede_rpc(protocol, missing_kind, reason, 
     elif reason == "width":
         schema.add("extra", T.StringType())
         error = PySparkValueError
-        match = "Row 0 has 1 values, but the schema has 2 fields"
+        # The native row fallback now reports structured schema-width errors.
+        match = (r"^\[AXIS_LENGTH_MISMATCH\] Length mismatch: Expected axis has 2 elements, "
+                 r"new values have 1 elements\.$")
     assert prepare_string_input(frame, schema) is None
     with _arrow_input_service(protocol, config_error=True) as (spark, state):
-        with pytest.raises(error, match=match):
+        with pytest.raises(error, match=match) as raised:
             spark.createDataFrame(frame, schema, verifySchema=verify)
+        if reason == "width":
+            assert type(raised.value) is PySparkValueError
+            assert raised.value.getCondition() == "AXIS_LENGTH_MISMATCH"
+            assert raised.value.getMessageParameters() == {
+                "expected_length": "2", "actual_length": "1",
+            }
         assert state["config_requests"] == []
         assert state["uploads"] == 0
         assert state["relations"] == []
