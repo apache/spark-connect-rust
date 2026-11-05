@@ -2431,22 +2431,27 @@ impl PyGeometryType {
     const MIXED_CRS: &'static str = "SRID:ANY";
     #[classattr]
     const MIXED_SRID: i32 = -1;
+    /// As PySpark's `GeometryType(srid)`: `"ANY"` for a mixed SRID, or an SRID of a
+    /// coordinate reference system that PySpark knows.
     #[new]
-    #[pyo3(signature = (srid=0))]
-    fn new(srid: i32) -> pyo3::PyClassInitializer<Self> {
-        init_chain!(
+    fn new(srid: &Bound<'_, PyAny>) -> PyResult<pyo3::PyClassInitializer<Self>> {
+        let srid = spatial_type_srid(srid, false)?;
+        Ok(init_chain!(
             DataType::Geometry { srid },
             PyGeometryType { srid },
             [PyAtomicType, PySpatialType],
             value
-        )
+        ))
     }
     #[getter]
     fn srid(&self) -> i32 {
         self.srid
     }
     fn __repr__(&self) -> String {
-        format!("GeometryType({})", self.srid)
+        match self.srid {
+            -1 => "GeometryType(ANY)".to_string(),
+            srid => format!("GeometryType({srid})"),
+        }
     }
     #[pyo3(name = "simpleString")]
     fn simple_string(&self) -> String {
@@ -2475,22 +2480,27 @@ impl PyGeographyType {
     const MIXED_CRS: &'static str = "SRID:ANY";
     #[classattr]
     const MIXED_SRID: i32 = -1;
+    /// As PySpark's `GeographyType(srid)`: `"ANY"` for a mixed SRID, or an SRID of a
+    /// geographic coordinate reference system that PySpark knows.
     #[new]
-    #[pyo3(signature = (srid=0))]
-    fn new(srid: i32) -> pyo3::PyClassInitializer<Self> {
-        init_chain!(
+    fn new(srid: &Bound<'_, PyAny>) -> PyResult<pyo3::PyClassInitializer<Self>> {
+        let srid = spatial_type_srid(srid, true)?;
+        Ok(init_chain!(
             DataType::Geography { srid },
             PyGeographyType { srid },
             [PyAtomicType, PySpatialType],
             value
-        )
+        ))
     }
     #[getter]
     fn srid(&self) -> i32 {
         self.srid
     }
     fn __repr__(&self) -> String {
-        format!("GeographyType({})", self.srid)
+        match self.srid {
+            -1 => "GeographyType(ANY)".to_string(),
+            srid => format!("GeographyType({srid})"),
+        }
     }
     #[pyo3(name = "simpleString")]
     fn simple_string(&self) -> String {
@@ -2500,6 +2510,38 @@ impl PyGeographyType {
     fn type_name(&self) -> &'static str {
         "geography"
     }
+}
+
+/// The SRID of a spatial type that PySpark constructs from `srid`: `"ANY"` gives the mixed
+/// SRID, and an integer must be an SRID that PySpark's spatial reference system mappers know,
+/// 0, 3857 and 4326 for a geometry and 4326 for a geography in PySpark 4.3.0. Anything else
+/// raises `ST_INVALID_SRID_VALUE`, as in PySpark.
+fn spatial_type_srid(srid: &Bound<'_, PyAny>, geographic: bool) -> PyResult<i32> {
+    use pyo3::types::{PyInt, PyString};
+    if let Ok(name) = srid.cast::<PyString>() {
+        if name.to_cow()? == "ANY" {
+            return Ok(spark_connect::types::SpatialType::MIXED_SRID);
+        }
+    }
+    let known: &[i64] = if geographic {
+        &[4326]
+    } else {
+        &[0, 3857, 4326]
+    };
+    if srid.is_instance_of::<PyInt>() {
+        if let Ok(value) = srid.extract::<i64>() {
+            if known.contains(&value) {
+                return Ok(value as i32);
+            }
+        }
+    }
+    let srid_str = srid.str()?.to_string();
+    Err(crate::column::raise_pyspark(
+        srid.py(),
+        "IllegalArgumentException",
+        "ST_INVALID_SRID_VALUE",
+        &[("srid", &srid_str)],
+    ))
 }
 
 /// Convert a Python DataType object (any of the type classes) or a DDL string into
