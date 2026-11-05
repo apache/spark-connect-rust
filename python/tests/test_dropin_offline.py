@@ -24,7 +24,7 @@ from _mock_connect_server import (
     struct_schema,
     varint_field,
 )
-from pyspark.sql import SparkSession, types as T
+from pyspark.sql import Row, SparkSession, types as T
 
 # Collected here so the existing offline CI suite exercises real Arrow results.
 from day_time_interval_cases import DayTimeIntervalTests  # noqa: F401
@@ -4649,3 +4649,41 @@ def test_reader_schema_is_sent_as_pyspark_sends_it(mock_connect, read):
     assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
     assert error.value.getMessageParameters() == {
         "arg_name": "schema", "expected_type": "str or struct type", "arg_type": "LongType"}
+
+
+# Exact built-in string conversion guards. A Row made in Python keeps its values as they
+# are, as PySpark's does, so these check the conversion that createDataFrame makes.
+
+
+@pytest.mark.parametrize("text", [
+    "", "1.25", "-42", "NaN", "a\x00b", "é雪😀", "e\u0301", "\uffff",
+])
+def test_exact_string_converts_as_text(text):
+    from pyspark.errors import PySparkRuntimeError
+
+    # A string, even when it reads as a number: it shares a column with a string, not with
+    # an integer.
+    assert _local_create_dataframe([Row(value=text), Row(value="y")]).isLocal()
+    with pytest.raises(PySparkRuntimeError):
+        _local_create_dataframe([Row(value=text), Row(value=5)])
+
+
+@pytest.mark.parametrize("text", ["\ud800", "\udfff", "a\ud800b"])
+def test_exact_string_surrogate_error_preserves_generic_fallback(text):
+    with pytest.raises(TypeError):
+        _local_create_dataframe([Row(value=text)])
+
+
+def test_exact_string_subclass_uses_generic_conversion():
+    # Pin existing subclass behavior; treating subclasses as text is a separate
+    # behavior change.
+    from pyspark.errors import PySparkRuntimeError
+
+    class IndexString(str):
+        def __index__(self):
+            return 17
+
+    # Converted through __index__, it shares a column with an integer, not with a string.
+    assert _local_create_dataframe([Row(value=IndexString("x")), Row(value=5)]).isLocal()
+    with pytest.raises(PySparkRuntimeError):
+        _local_create_dataframe([Row(value=IndexString("x")), Row(value="y")])
