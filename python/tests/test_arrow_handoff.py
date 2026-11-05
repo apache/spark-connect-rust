@@ -2102,18 +2102,21 @@ def _assert_timestamp_columns_row_input(state, values, schema):
 
 
 @pytest.mark.parametrize("unit", ["ns", "us"])
-@pytest.mark.parametrize("location", ["subclass", "instance", "class", "owner"])
+@pytest.mark.parametrize("location", [
+    "subclass", "class", "owner", "backing_subclass_item", "backing_class_iter",
+    "backing_class_getitem", "backing_instance_box",
+])
 @pytest.mark.parametrize("behavior", ["raise", "mutate"])
-def test_timestamp_columns_tolist_hooks_keep_native_order(
+def test_timestamp_columns_iterator_hooks_keep_native_order(
     protocol, monkeypatch, unit, location, behavior
 ):
-    from types import MethodType
     from pandas.core.base import IndexOpsMixin
 
     values, frame, schema = _timestamp_columns_fixture(unit)
-    original_tolist = pd.Index.tolist
+    original_iter = pd.Index.__iter__
     original_notna, original_astype = frame.notna, frame.astype
     calls = []
+    invoked = False
 
     class ColumnsError(RuntimeError):
         pass
@@ -2126,37 +2129,82 @@ def test_timestamp_columns_tolist_hooks_keep_native_order(
         calls.append("astype")
         return original_astype(*args, **kwargs)
 
-    def tolist(index):
-        if index is frame.columns:
-            calls.append("tolist")
-            if behavior == "raise":
-                raise ColumnsError("columns hook precedes timestamp normalization")
-            # Install spies inside the public hook, leaving eligibility inputs
-            # ordinary until native conversion observes the customized labels.
-            monkeypatch.setitem(vars(frame), "notna", notna)
-            monkeypatch.setitem(vars(frame), "astype", astype)
-            frame.iat[0, 0] = pd.Timestamp(7000000, unit="us", tz="UTC")
-            frame.iat[-1, 0] = pd.NaT
-        return original_tolist(index)
+    def before_hook():
+        nonlocal invoked
+        if invoked:
+            return
+        invoked = True
+        calls.append("columns iterator")
+        if behavior == "raise":
+            raise ColumnsError("timestamp columns hook precedes pandas normalization")
+        # Install spies only when native iteration reaches the columns hook.
+        # Before eligibility, normalization methods are the canonical methods.
+        monkeypatch.setitem(vars(frame), "notna", notna)
+        monkeypatch.setitem(vars(frame), "astype", astype)
+        frame.iat[0, 0] = pd.Timestamp(7000000, unit="us", tz="UTC")
+        frame.iat[-1, 0] = pd.NaT
+
+    def iterate(index):
+        if index is columns:
+            before_hook()
+        return original_iter(index)
 
     if location == "subclass":
         class Columns(pd.Index):
             pass
-        monkeypatch.setattr(Columns, "tolist", tolist)
+        monkeypatch.setattr(Columns, "__iter__", iterate)
         labels = pd.Index(["original"], dtype=object)
         frame.columns = Columns._simple_new(labels._values, name=None)
         assert type(frame.columns) is Columns
-    elif location == "instance":
-        monkeypatch.setitem(vars(frame.columns), "tolist", MethodType(tolist, frame.columns))
+    elif location == "backing_subclass_item":
+        # IndexOpsMixin iteration calls ndarray.item, rather than ndarray.__iter__.
+        class Names(np.ndarray):
+            def item(self, *args):
+                before_hook()
+                return super().item(*args)
+        backing = np.asarray(["original"], dtype=object).view(Names)
+        frame.columns = pd.Index._simple_new(backing, name=None)
+        assert type(frame.columns._values) is Names
+    elif location.startswith("backing_"):
+        frame.columns = pd.Index(pd.array(["original"], dtype=pd.StringDtype(storage="python")))
+        backing = frame.columns._values
+        if location == "backing_class_iter":
+            original = type(backing).__iter__
+
+            def backing_iter(array):
+                if array is backing:
+                    before_hook()
+                return original(array)
+
+            monkeypatch.setattr(type(backing), "__iter__", backing_iter)
+        elif location == "backing_class_getitem":
+            original = type(backing).__getitem__
+
+            def backing_getitem(array, key):
+                if array is backing:
+                    before_hook()
+                return original(array, key)
+
+            monkeypatch.setattr(type(backing), "__getitem__", backing_getitem)
+        else:
+            original = backing._box_func
+
+            def box(value):
+                before_hook()
+                return original(value)
+
+            monkeypatch.setitem(vars(backing), "_box_func", box)
     else:
         monkeypatch.setattr(pd.Index if location == "class" else IndexOpsMixin,
-                            "tolist", tolist)
+                            "__iter__", iterate)
+    columns = frame.columns
 
     with _arrow_input_service(protocol) as (spark, state):
         if behavior == "raise":
-            with pytest.raises(ColumnsError, match="columns hook precedes timestamp normalization"):
+            with pytest.raises(ColumnsError,
+                               match="timestamp columns hook precedes pandas normalization"):
                 spark.createDataFrame(frame, schema)
-            assert calls == ["tolist"]
+            assert calls == ["columns iterator"]
             assert not state["config_requests"]
             assert not state["uploads"]
             assert not state["relations"]
@@ -2166,7 +2214,7 @@ def test_timestamp_columns_tolist_hooks_keep_native_order(
             expected = values.copy()
             expected[0], expected[-1] = 7000000, None
             _assert_timestamp_columns_row_input(state, expected, schema)
-            assert calls == ["tolist", "notna", "astype"]
+            assert calls == ["columns iterator", "notna", "astype"]
 
 
 @pytest.mark.parametrize("unit", ["ns", "us"])
@@ -2197,6 +2245,7 @@ def test_timestamp_rebound_index_data_keeps_native_read_order(protocol, monkeypa
     columns, backing = frame.columns, vars(frame.columns)["_data"]
     original_notna, original_astype = frame.notna, frame.astype
     calls, normalizing = [], False
+    allowed_reads = None
 
     class ColumnsDataError(RuntimeError):
         pass
@@ -2215,8 +2264,8 @@ def test_timestamp_rebound_index_data_keeps_native_read_order(protocol, monkeypa
         if index is columns:
             if not normalizing:
                 calls.append("_data")
-                if calls.count("_data") > 1:
-                    raise ColumnsDataError("columns storage read twice before timestamp normalization")
+                if allowed_reads is not None and calls.count("_data") > allowed_reads:
+                    raise ColumnsDataError("eligibility added a columns storage read")
                 monkeypatch.setitem(vars(frame), "notna", notna)
                 monkeypatch.setitem(vars(frame), "astype", astype)
             return backing
@@ -2226,10 +2275,31 @@ def test_timestamp_rebound_index_data_keeps_native_read_order(protocol, monkeypa
         vars(index)["_data"] = value
 
     monkeypatch.setattr(pd.Index, "_data", property(data, set_data), raising=False)
+    import pyspark.sql._pandas_input as helper
+
+    # Measure current native fallback dispatch without either eligibility probe.
+    with monkeypatch.context() as baseline:
+        baseline.setattr(helper, "prepare_int64_table", lambda *_: None)
+        baseline.setattr(helper, "timestamp_columns", lambda *_: None)
+        with _arrow_input_service(protocol) as (spark, state):
+            spark.createDataFrame(frame, schema).toArrow()
+            _assert_timestamp_columns_row_input(state, values, schema)
+            control_table = state["input_tables"][0]
+    baseline_calls = calls.copy()
+    allowed_reads = baseline_calls.index("notna")
+    assert allowed_reads > 0
+    assert baseline_calls == ["_data"] * allowed_reads + ["notna", "astype"]
+    calls.clear()
+    normalizing = False
+    # Restore ordinary methods before candidate eligibility; the storage hook
+    # installs observers only when the native columns iterator starts.
+    monkeypatch.delitem(vars(frame), "notna")
+    monkeypatch.delitem(vars(frame), "astype")
     with _arrow_input_service(protocol) as (spark, state):
         spark.createDataFrame(frame, schema).toArrow()
-        assert calls == ["_data", "notna", "astype"]
+        assert calls == baseline_calls
         _assert_timestamp_columns_row_input(state, values, schema)
+        assert state["input_tables"][0].equals(control_table, check_metadata=True)
 
 
 @pytest.mark.parametrize("unit", ["ns", "us"])
