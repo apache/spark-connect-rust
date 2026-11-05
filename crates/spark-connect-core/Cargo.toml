@@ -26,6 +26,7 @@ serde_json = "1"
 regex = "1"
 prost-types.workspace = true
 crc32fast = "1"
+sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3"

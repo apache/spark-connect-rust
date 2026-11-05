@@ -744,33 +744,7 @@ impl SparkConnectClient {
 
         // Build request stream with proper chunking/batching
         let requests = build_artifact_request_stream(self.session_id.clone(), artifacts)?;
-
-        // Create a futures stream from the requests
-        let request_stream = futures::stream::iter(requests);
-
-        // Call the AddArtifacts streaming RPC
-        let mut req = Request::new(request_stream);
-        self._attach_metadata(&mut req);
-
-        let response = self
-            .stub
-            .clone()
-            .add_artifacts(req)
-            .await
-            .map_err(SparkError::from_grpc_status)?
-            .into_inner();
-
-        // Check that all artifacts were successfully received
-        for summary in response.artifacts {
-            if !summary.is_crc_successful {
-                return Err(SparkError::connect_msg(format!(
-                    "CRC check failed for artifact: {}",
-                    summary.name
-                )));
-            }
-        }
-
-        Ok(())
+        self.upload_artifact_requests(requests, None).await
     }
 
     /// Upload a single local file as an artifact under an explicit artifact name
@@ -784,8 +758,61 @@ impl SparkConnectClient {
             Box::new(FileArtifact::new(local_path)),
         )];
         let requests = build_artifact_request_stream(self.session_id.clone(), artifacts)?;
-        let request_stream = futures::stream::iter(requests);
-        let mut req = Request::new(request_stream);
+        self.upload_artifact_requests(requests, None).await
+    }
+
+    /// Upload session-scoped cache blobs, returning SHA-256 hashes in input order.
+    /// Existing artifacts and duplicate blobs are uploaded only once.
+    pub async fn cache_artifacts(&self, blobs: Vec<Vec<u8>>) -> Result<Vec<String>> {
+        use crate::artifact::InMemoryArtifact;
+        use sha2::{Digest, Sha256};
+        use std::collections::HashSet;
+
+        let hashes: Vec<String> = blobs
+            .iter()
+            .map(|blob| {
+                Sha256::digest(blob)
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            })
+            .collect();
+        let names: Vec<String> = hashes.iter().map(|hash| format!("cache/{hash}")).collect();
+        let unique: HashSet<&str> = names.iter().map(String::as_str).collect();
+        if unique.is_empty() {
+            return Ok(hashes);
+        }
+        let cached = self
+            .artifact_status(&unique.into_iter().collect::<Vec<_>>())
+            .await?;
+        let mut seen = HashSet::new();
+        let mut artifacts = Vec::new();
+        for (blob, name) in blobs.into_iter().zip(names) {
+            if !cached.get(&name).copied().unwrap_or(false) && seen.insert(name.clone()) {
+                artifacts.push(NamedArtifact::new(
+                    name,
+                    Box::new(InMemoryArtifact::new(blob)),
+                ));
+            }
+        }
+        if artifacts.is_empty() {
+            return Ok(hashes);
+        }
+        let expected: HashSet<String> = artifacts.iter().map(|a| a.name.clone()).collect();
+        let requests = build_artifact_request_stream(self.session_id.clone(), artifacts)?;
+        self.upload_artifact_requests(requests, Some(&expected))
+            .await?;
+        Ok(hashes)
+    }
+
+    /// Send artifact frames and validate the response.
+    /// Cache uploads also require an acknowledgement for every requested artifact.
+    async fn upload_artifact_requests(
+        &self,
+        requests: Vec<spark_connect_proto::AddArtifactsRequest>,
+        expected_cache_names: Option<&std::collections::HashSet<String>>,
+    ) -> Result<()> {
+        let mut req = Request::new(futures::stream::iter(requests));
         self._attach_metadata(&mut req);
         let response = self
             .stub
@@ -794,12 +821,23 @@ impl SparkConnectClient {
             .await
             .map_err(SparkError::from_grpc_status)?
             .into_inner();
+        let mut received = std::collections::HashSet::new();
         for summary in response.artifacts {
             if !summary.is_crc_successful {
                 return Err(SparkError::connect_msg(format!(
                     "CRC check failed for artifact: {}",
                     summary.name
                 )));
+            }
+            if expected_cache_names.is_some() {
+                received.insert(summary.name);
+            }
+        }
+        if let Some(expected) = expected_cache_names {
+            if !expected.is_subset(&received) {
+                return Err(SparkError::connect_msg(
+                    "Missing cache artifact upload acknowledgement",
+                ));
             }
         }
         Ok(())

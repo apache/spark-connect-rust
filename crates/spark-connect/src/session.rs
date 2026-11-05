@@ -291,21 +291,50 @@ impl SparkSession {
         } else {
             Some(rows_to_arrow_ipc(&rows, &schema)?)
         };
-        let plan = LogicalPlan::LocalRelation { schema, data };
+        let plan = LogicalPlan::LocalRelation {
+            schema: Some(schema),
+            data,
+        };
         Ok(DataFrame::new(self.clone(), plan))
     }
 
-    /// Create a DataFrame from rows that are already encoded as an Arrow IPC stream, whose
-    /// Arrow schema matches `schema`.
+    /// Create a local DataFrame from Arrow batches without materializing rows.
     ///
-    /// Mirrors `pyspark.sql.SparkSession.createDataFrame(pyarrow.Table)`, which sends the
-    /// table as an Arrow IPC stream in a `LocalRelation`.
-    pub fn create_dataframe_from_arrow(&self, data: Vec<u8>, schema: DataType) -> DataFrame {
-        let plan = LogicalPlan::LocalRelation {
-            schema,
-            data: Some(data),
-        };
-        DataFrame::new(self.clone(), plan)
+    /// `schema` optionally supplies the Spark schema applied by the server. With
+    /// `None`, Spark infers it from Arrow. All batches must share the same Arrow
+    /// schema; IPC serialization is still required for transport.
+    /// Non-empty inputs read the server's local-relation configuration. Large inputs
+    /// are uploaded as cache artifacts and referenced by hash in the resulting plan.
+    pub fn create_dataframe_from_arrow(
+        &self,
+        batches: Vec<arrow::record_batch::RecordBatch>,
+        schema: impl Into<Option<DataType>>,
+    ) -> Result<DataFrame> {
+        let plan = crate::arrow_input::create_relation(&self.client, batches, schema.into(), None)?;
+        Ok(DataFrame::new(self.clone(), plan))
+    }
+
+    /// Internal settings handoff for the Python Arrow importer; not a stable API.
+    #[doc(hidden)]
+    pub fn arrow_input_options(&self) -> Result<crate::ArrowInputOptions> {
+        crate::ArrowInputOptions::from_client(&self.client)
+    }
+
+    /// Internal Arrow import entry point using the normalization settings snapshot.
+    #[doc(hidden)]
+    pub fn create_dataframe_from_arrow_with_options(
+        &self,
+        batches: Vec<arrow::record_batch::RecordBatch>,
+        schema: impl Into<Option<DataType>>,
+        options: &crate::ArrowInputOptions,
+    ) -> Result<DataFrame> {
+        let plan = crate::arrow_input::create_relation(
+            &self.client,
+            batches,
+            schema.into(),
+            Some(options),
+        )?;
+        Ok(DataFrame::new(self.clone(), plan))
     }
 
     /// Create a DataFrameReader for reading data from various sources.
@@ -421,7 +450,7 @@ impl SparkSession {
     /// `SparkSession.emptyDataFrame`.
     pub fn empty_data_frame(&self) -> Result<DataFrame> {
         let plan = LogicalPlan::LocalRelation {
-            schema: DataType::Struct { fields: vec![] },
+            schema: Some(DataType::Struct { fields: vec![] }),
             data: None,
         };
         Ok(DataFrame::new(self.clone(), plan))
@@ -1272,6 +1301,55 @@ mod tests {
     }
 
     #[test]
+    fn arrow_local_relation_preserves_batches_and_rejects_schema_mismatch() {
+        use arrow::array::Array;
+        use arrow::datatypes::{DataType as ArrowType, Field, Schema};
+        let arrow_schema = Arc::new(Schema::new(vec![Field::new("x", ArrowType::Int32, true)]));
+        let batch = RecordBatch::try_new(
+            arrow_schema,
+            vec![Arc::new(Int32Array::from(vec![Some(1), None]))],
+        )
+        .unwrap();
+        let schema = DataType::Struct {
+            fields: vec![struct_field("x", DataType::Integer)],
+        };
+        let spark = session();
+        let plan = crate::arrow_input::inline_relation(
+            &[batch.clone(), batch.clone()],
+            Some(schema.clone()),
+        )
+        .unwrap();
+        let LogicalPlan::LocalRelation {
+            data: Some(data), ..
+        } = &plan
+        else {
+            panic!("expected Arrow local relation")
+        };
+        let batches = StreamReader::try_new(Cursor::new(data), None)
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0], batch);
+        assert!(batches[1].column(0).is_null(1));
+        let other = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("y", ArrowType::Int32, true)])),
+            batch.columns().to_vec(),
+        )
+        .unwrap();
+        assert!(spark
+            .create_dataframe_from_arrow(vec![batch, other], schema.clone())
+            .is_err());
+        assert!(matches!(
+            spark
+                .create_dataframe_from_arrow(vec![], schema)
+                .unwrap()
+                .plan(),
+            LogicalPlan::LocalRelation { data: None, .. }
+        ));
+    }
+
+    #[test]
     fn stop_is_idempotent_and_marks_stopped() {
         // Port 1: nothing listens, so the ReleaseSession RPC fails fast. The session is
         // still marked stopped (pyspark's stop() is best-effort) and a second stop() is a
@@ -1291,21 +1369,6 @@ mod tests {
     fn session_is_not_stopped_initially() {
         let spark = session();
         assert!(!spark.is_stopped());
-    }
-
-    #[test]
-    fn create_dataframe_from_arrow_sends_the_stream_and_schema() {
-        let schema = DataType::Struct {
-            fields: vec![struct_field("id", DataType::Long)],
-        };
-        let df = session().create_dataframe_from_arrow(vec![1, 2, 3], schema.clone());
-        match df.plan().to_proto().rel_type {
-            Some(proto::relation::RelType::LocalRelation(local)) => {
-                assert_eq!(local.data.as_deref(), Some(&[1u8, 2, 3][..]));
-                assert_eq!(local.schema, Some(schema.json()));
-            }
-            other => panic!("expected LocalRelation, got {other:?}"),
-        }
     }
 
     #[test]

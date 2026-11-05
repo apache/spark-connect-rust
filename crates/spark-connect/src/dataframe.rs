@@ -1693,8 +1693,15 @@ impl DataFrame {
     }
 
     /// Check if this DataFrame is local (collected).
+    ///
+    /// Mirrors the server's `Dataset.isLocal`: only a local relation itself is local. The
+    /// server resolves `toDF`, which Arrow input with inferred or listed column names
+    /// applies, into a `Project`, which is not.
     pub fn is_local(&self) -> bool {
-        matches!(self.plan.as_ref(), LogicalPlan::LocalRelation { .. })
+        matches!(
+            self.plan.as_ref(),
+            LogicalPlan::LocalRelation { .. } | LogicalPlan::ChunkedCachedLocalRelation { .. }
+        )
     }
 
     /// Check if this DataFrame is streaming.
@@ -3319,6 +3326,25 @@ mod plan_construction_tests {
             .remote("sc://localhost:15002")
             .get_or_create()
             .expect("failed to build session")
+    }
+
+    #[test]
+    fn is_local_only_for_a_local_relation_itself() {
+        let spark = session();
+        let local = spark.empty_data_frame().unwrap();
+        let cached = DataFrame::new(
+            spark.clone(),
+            LogicalPlan::ChunkedCachedLocalRelation {
+                data_hashes: vec!["hash".to_string()],
+                schema_hash: None,
+            },
+        );
+        assert!(local.is_local());
+        assert!(cached.is_local());
+        // As in PySpark, where the server resolves toDF into a Project.
+        assert!(!local.to_df(vec![]).is_local());
+        assert!(!cached.to_df(vec!["x"]).is_local());
+        assert!(!spark.range(1).unwrap().is_local());
     }
 
     #[test]
