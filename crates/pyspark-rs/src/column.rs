@@ -30,6 +30,20 @@ pub(crate) fn raise_pyspark(
     build().unwrap_or_else(|e| e)
 }
 
+/// The unparsed identifier of `column` if it is a plain column reference, such as `col("a")`
+/// or `df.a`, and None for another expression. `SparkSession.sql` formats such a column in a
+/// query as its name, as PySpark's formatter does a `ColumnReference`. A function rather than
+/// an attribute, as a Column's attributes are its fields in PySpark.
+#[pyfunction]
+pub(crate) fn column_reference_name(column: PyRef<'_, PyColumn>) -> Option<String> {
+    match column.column.expression().node() {
+        spark_connect::expression::ExpressionNode::ColumnReference(reference) => {
+            Some(reference.name.clone())
+        }
+        _ => None,
+    }
+}
+
 /// Python wrapper for a Spark Column.
 #[pyclass(name = "Column", module = "pyspark.sql.connect.column")]
 pub struct PyColumn {

@@ -223,6 +223,13 @@ pub enum LogicalPlan {
         input: Arc<LogicalPlan>,
         alias: String,
     },
+    /// WithRelations: a plan with the plans that it refers to, such as a SQL query with the
+    /// DataFrames that `SparkSession.sql` takes as keyword arguments, each a `SubqueryAlias`
+    /// whose alias the query names.
+    WithRelations {
+        root: Arc<LogicalPlan>,
+        references: Vec<Arc<LogicalPlan>>,
+    },
     /// LocalRelation: data supplied locally.
     LocalRelation {
         schema: Option<DataType>,
@@ -1027,6 +1034,19 @@ impl LogicalPlan {
                 sq_alias.alias = alias.clone();
                 relation.rel_type =
                     Some(proto::relation::RelType::SubqueryAlias(Box::new(sq_alias)));
+            }
+
+            LogicalPlan::WithRelations { root, references } => {
+                let with_relations = proto::WithRelations {
+                    root: Some(Box::new(relation_of(root, plan_ids))),
+                    references: references
+                        .iter()
+                        .map(|reference| relation_of(reference, plan_ids))
+                        .collect(),
+                };
+                relation.rel_type = Some(proto::relation::RelType::WithRelations(Box::new(
+                    with_relations,
+                )));
             }
 
             LogicalPlan::ChunkedCachedLocalRelation {
@@ -2004,5 +2024,50 @@ mod argfix_tests {
             }
             _ => panic!("expected FillNa"),
         }
+    }
+}
+
+#[cfg(test)]
+mod with_relations_tests {
+    use super::*;
+    use spark_connect_proto as proto;
+
+    /// As PySpark sends `sql()` with DataFrames: a `WithRelations` whose root is the query
+    /// and whose references are `SubqueryAlias`es of the DataFrames, each node with a plan
+    /// ID of its own.
+    #[test]
+    fn with_relations_sends_the_root_and_its_references() {
+        let ids = PlanIds::new();
+        let df = Arc::new(range(0, 3, 1));
+        let plan = Arc::new(LogicalPlan::WithRelations {
+            root: Arc::new(sql("SELECT * FROM v")),
+            references: vec![Arc::new(subquery_alias(df.clone(), "v"))],
+        });
+        let relation = relation_with_ids(&plan, &ids);
+        let Some(proto::relation::RelType::WithRelations(with)) = &relation.rel_type else {
+            panic!("expected WithRelations: {relation:?}");
+        };
+        let root = with.root.as_deref().expect("root");
+        assert!(
+            matches!(&root.rel_type, Some(proto::relation::RelType::Sql(s)) if s.query == "SELECT * FROM v")
+        );
+        assert_eq!(with.references.len(), 1);
+        let Some(proto::relation::RelType::SubqueryAlias(alias)) = &with.references[0].rel_type
+        else {
+            panic!("expected SubqueryAlias");
+        };
+        assert_eq!(alias.alias, "v");
+        let input = alias.input.as_deref().expect("input");
+        assert!(matches!(
+            &input.rel_type,
+            Some(proto::relation::RelType::Range(_))
+        ));
+        let id = |r: &proto::Relation| r.common.as_ref().and_then(|c| c.plan_id);
+        let all = [id(&relation), id(root), id(&with.references[0]), id(input)];
+        assert!(all.iter().all(Option::is_some), "{all:?}");
+        let distinct: std::collections::HashSet<_> = all.iter().collect();
+        assert_eq!(distinct.len(), 4, "{all:?}");
+        // The DataFrame keeps its own plan ID as a reference.
+        assert_eq!(id(input), Some(ids.id_of(&df)));
     }
 }

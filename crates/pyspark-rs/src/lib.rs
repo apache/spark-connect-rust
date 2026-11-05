@@ -128,6 +128,7 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // The core DataType JSON grammar, which `pyspark.sql.types` parses type JSON with.
     m.add_function(wrap_pyfunction!(types::parse_datatype_json, m)?)?;
+    m.add_function(wrap_pyfunction!(column::column_reference_name, m)?)?;
 
     // Spark Declarative Pipelines (SDP) command execution
     m.add_class::<pipelines::PyPipelineRunStream>()?;

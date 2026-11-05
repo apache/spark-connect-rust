@@ -644,12 +644,17 @@ impl PySparkSession {
         Ok(PyDataFrame::new(df))
     }
 
-    /// Execute a SQL query and return a DataFrame. `args` binds parameters: a list fills
-    /// positional `?` parameters, a dict fills named (`:name`) parameters. Values are always
-    /// literals (a string arg is a string literal, never a column reference).
+    /// Execute a SQL query and return a DataFrame, as PySpark Connect does. `args` binds
+    /// parameters: a list fills positional `?` parameters and a dict named `:name` ones, each
+    /// value as a literal (a string arg is a string literal, never a column reference).
+    ///
+    /// Keyword arguments format the query, as `str.format` does, with the formatter of
+    /// `pyspark.sql.connect.sql_formatter`: a DataFrame becomes the name of a reference that
+    /// is sent with the query, a column reference its name, a string its SQL literal, and
+    /// another value its string.
     #[pyo3(signature = (sqlQuery, args=None, **kwargs))]
     fn sql(
-        &self,
+        slf: &Bound<'_, Self>,
         sqlQuery: &str,
         args: Option<Bound<'_, PyAny>>,
         kwargs: Option<Bound<'_, PyDict>>,
@@ -661,34 +666,54 @@ impl PySparkSession {
             }
             Ok(crate::functions::to_column(v)?.expression().clone())
         }
+        let py = slf.py();
         let mut pos: Vec<spark_connect::expression::Expression> = Vec::new();
         let mut named: std::collections::HashMap<String, spark_connect::expression::Expression> =
             std::collections::HashMap::new();
         if let Some(a) = args {
             if let Ok(d) = a.cast::<PyDict>() {
                 for (k, v) in d.iter() {
-                    named.insert(k.extract::<String>()?, to_lit(&v)?);
+                    // As PySpark, which asserts that a name is a string.
+                    let k = k
+                        .cast::<pyo3::types::PyString>()
+                        .map_err(|_| pyo3::exceptions::PyAssertionError::new_err(()))?;
+                    named.insert(k.to_cow()?.into_owned(), to_lit(&v)?);
                 }
             } else if let Ok(lst) = a.cast::<PyList>() {
                 for v in lst.iter() {
                     pos.push(to_lit(&v)?);
                 }
             } else {
-                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                    "args must be a list (positional) or dict (named)",
+                return Err(crate::column::raise_pyspark(
+                    py,
+                    "PySparkTypeError",
+                    "INVALID_TYPE",
+                    &[
+                        ("arg_name", "args"),
+                        ("arg_type", &a.get_type().name()?.to_string()),
+                    ],
                 ));
             }
         }
-        // Named parameters may also be supplied as **kwargs (reference parity); merge them
-        // into the named-args map alongside any dict passed via `args`.
-        if let Some(kw) = kwargs {
-            for (k, v) in kw.iter() {
-                named.insert(k.extract::<String>()?, to_lit(&v)?);
+        let mut query = sqlQuery.to_string();
+        let mut references = Vec::new();
+        if let Some(kwargs) = kwargs.filter(|kwargs| !kwargs.is_empty()) {
+            let formatter = py
+                .import("pyspark.sql.connect.sql_formatter")?
+                .getattr("SQLStringFormatter")?
+                .call1((slf,))?;
+            query = formatter
+                .call_method("format", (sqlQuery,), Some(&kwargs))?
+                .extract()?;
+            for view in formatter.getattr("_temp_views")?.try_iter()? {
+                let (df, name): (PyRef<'_, PyDataFrame>, String) = view?.extract()?;
+                references.push((df.dataframe.clone(), name));
             }
         }
-        let df = self
+        let df = slf
+            .borrow()
             .session
-            .sql_with_args(sqlQuery, pos, named)
+            .sql_with_references(&query, pos, named, references)
             .to_pyerr()?;
         Ok(PyDataFrame::new(df))
     }

@@ -363,6 +363,41 @@ def test_sql_fails_at_a_statement_that_does_not_parse(session):
         session.sql("SELEC 1")
 
 
+def test_sql_formats_the_query_with_keyword_arguments_as_pyspark(session):
+    from decimal import Decimal
+
+    df = session.range(2)
+    other = session.createDataFrame([(0, "a"), (1, "b")], "id long, s string")
+    cases = [
+        # A value becomes its string, a string its SQL literal, and a column reference its
+        # name, as `str.format` with PySpark's formatter does.
+        (lambda: session.sql("SELECT {x} AS v", x=1), [(1,)]),
+        (lambda: session.sql("SELECT {s} AS s", s="it's a \\ test"), [("it's a \\ test",)]),
+        (lambda: session.sql("SELECT {c} AS c FROM {df}", c=F.col("id"), df=df), [(0,), (1,)]),
+        (lambda: session.sql("SELECT {df.id} AS c FROM {df}", df=df), [(0,), (1,)]),
+        (lambda: session.sql("SELECT {x:.2f} AS v", x=1.5), [(Decimal("1.50"),)]),
+        # A DataFrame is a reference sent with the query, one for each DataFrame.
+        (lambda: session.sql("SELECT count(*) AS n FROM {df}", df=session.range(3)), [(3,)]),
+        (lambda: session.sql("SELECT * FROM {a} UNION ALL SELECT * FROM {a}", a=df),
+         [(0,), (1,), (0,), (1,)]),
+        (lambda: session.sql(
+            "SELECT a.id, b.s FROM {a} a JOIN {b} b ON a.id = b.id ORDER BY a.id", a=df, b=other),
+         [(0, "a"), (1, "b")]),
+        # `args` still binds parameters, and braces are only formatted with keyword arguments.
+        (lambda: session.sql("SELECT {x} + :p AS v", args={"p": 1}, x=2), [(3,)]),
+        (lambda: session.sql("SELECT '{{}}' AS v"), [("{{}}",)]),
+        (lambda: session.sql("SELECT '{{}}' AS v, {x} AS x", x=1), [("{}", 1)]),
+    ]
+    for run, rows in cases:
+        assert [tuple(r) for r in run().collect()] == rows
+
+
+def test_sql_keyword_arguments_are_not_parameters_as_pyspark(session):
+    with pytest.raises(AnalysisException) as error:
+        session.sql("SELECT :p AS v", p=5).collect()
+    assert error.value.getCondition() == "UNBOUND_SQL_PARAMETER"
+
+
 def test_maps_keep_their_entries_in_order_with_keys_of_their_type(session):
     row = session.range(1).selectExpr(
         "map(2, 'b', 1, 'a') AS ints",

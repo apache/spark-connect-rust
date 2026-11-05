@@ -257,3 +257,38 @@ fn sql_runs_statements_eagerly() {
     assert!(spark.sql("SELEC 1").is_err());
     let _ = spark.stop();
 }
+
+/// As pyspark's `sql()` with DataFrames as keyword arguments: each DataFrame is sent with
+/// the statement as a reference, which the server resolves the name in the query to, also
+/// when the query names it twice, and a command can read one too.
+#[test]
+fn sql_resolves_the_dataframes_that_the_query_names() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::row::Value;
+    use std::collections::HashMap;
+
+    let spark = session().new_session();
+    let ids = spark.range(3).expect("range");
+    let df = spark
+        .sql_with_references(
+            "SELECT count(*) AS n FROM refs_ids a JOIN refs_ids b USING (id)",
+            Vec::new(),
+            HashMap::new(),
+            vec![(ids.clone(), "refs_ids".to_string())],
+        )
+        .expect("query");
+    let rows = df.collect().expect("collect");
+    assert_eq!(rows[0].get(0), Some(&Value::Long(3)));
+    let shown = spark
+        .sql_with_references(
+            "SELECT * FROM refs_ids WHERE id > 0",
+            Vec::new(),
+            HashMap::new(),
+            vec![(ids, "refs_ids".to_string())],
+        )
+        .expect("filter");
+    assert_eq!(shown.collect().expect("collect").len(), 2);
+    let _ = spark.stop();
+}

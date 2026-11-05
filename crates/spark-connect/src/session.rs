@@ -274,11 +274,41 @@ impl SparkSession {
         pos_args: Vec<crate::expression::Expression>,
         named_args: std::collections::HashMap<String, crate::expression::Expression>,
     ) -> Result<DataFrame> {
-        let plan = Arc::new(LogicalPlan::Sql {
+        self.sql_with_references(query, pos_args, named_args, Vec::new())
+    }
+
+    /// SQL with parameters and with DataFrames that the query names, mirroring
+    /// `SparkSession.sql(query, args, **kwargs)` with DataFrames in `kwargs`: each
+    /// `(DataFrame, name)` is sent along with the query, as a reference that the server
+    /// resolves `name` in the query to.
+    pub fn sql_with_references(
+        &self,
+        query: &str,
+        pos_args: Vec<crate::expression::Expression>,
+        named_args: std::collections::HashMap<String, crate::expression::Expression>,
+        references: Vec<(DataFrame, String)>,
+    ) -> Result<DataFrame> {
+        let sql = Arc::new(LogicalPlan::Sql {
             query: query.to_string(),
             pos_args,
             named_args,
         });
+        let plan = if references.is_empty() {
+            sql
+        } else {
+            Arc::new(LogicalPlan::WithRelations {
+                root: sql,
+                references: references
+                    .into_iter()
+                    .map(|(df, alias)| {
+                        Arc::new(LogicalPlan::SubqueryAlias {
+                            input: df.plan,
+                            alias,
+                        })
+                    })
+                    .collect(),
+            })
+        };
         // As pyspark, run the statement as a command now. The server executes a command and
         // returns a relation of its result; for a query it returns the query's relation, which
         // then runs at an action.
