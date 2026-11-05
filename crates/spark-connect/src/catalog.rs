@@ -1034,7 +1034,13 @@ impl Catalog {
         let mut rows = vec![];
 
         loop {
-            let resp = block_on(stream.message()).map_err(SparkError::from_grpc_status)?;
+            let client = self.session.client();
+            let resp = block_on(async {
+                match stream.message().await {
+                    Ok(resp) => Ok(resp),
+                    Err(status) => Err(client.error_from_status(status).await),
+                }
+            })?;
             let Some(resp) = resp else {
                 break;
             };

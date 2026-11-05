@@ -8,7 +8,7 @@ use crate::functions::to_column;
 
 /// Raise a `pyspark.errors` exception (`class_name`) carrying the given `error_class`
 /// condition and message parameters, mirroring the reference Column guard-rails.
-fn raise_pyspark(
+pub(crate) fn raise_pyspark(
     py: Python<'_>,
     class_name: &str,
     error_class: &str,

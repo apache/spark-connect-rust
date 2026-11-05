@@ -75,7 +75,7 @@ The CI workflow integrates this test gate following Spark's `build_python_connec
 2. **Install wheel** into CI environment
 3. **Remove bundled pyspark.zip/py4j** to ensure pure-client mode
 4. **Point PYTHONPATH** at our installed package
-5. **Start Spark 4.2.0 Connect server** (configured as needed)
+5. **Start Spark 4.3.0 Connect server** (configured as needed)
 6. **Run test script** against the manifest
 
 ### CI Command (Reference)
@@ -189,7 +189,7 @@ Our package must be on PYTHONPATH:
 
 Check environment differences:
 1. **Python version**: Must match (3.11 in official CI)
-2. **Spark version**: Must be 4.2.0+
+2. **Spark version**: Must be 4.3.0+
 3. **Dependencies**: All versions in `requirements-connect-test.txt` installed
 4. **Connect server**: Same configuration as local testing
 

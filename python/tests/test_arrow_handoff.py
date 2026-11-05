@@ -395,3 +395,377 @@ def test_malformed_ipc_is_reported(protocol):
         with pytest.raises(RuntimeError, match="Arrow"):
             frame.toArrow()
     assert calls == {"execute": 1}
+
+
+@contextmanager
+def _arrow_input_service(protocol, *, upload_error=None, **overrides):
+    """Resolve cache artifacts at a mock service with a 4 MiB receive limit."""
+    import hashlib
+    import zlib
+
+    config = {
+        "spark.sql.timestampType": "TIMESTAMP_LTZ",
+        "spark.sql.session.timeZone": "UTC",
+        "spark.sql.execution.arrow.useLargeVarTypes": "false",
+        "spark.sql.session.localRelationCacheThreshold": "1048576",
+        "spark.sql.session.localRelationSizeLimit": str(3 * 1024**3),
+        "spark.sql.session.localRelationChunkSizeRows": "10000",
+        "spark.sql.session.localRelationChunkSizeBytes": str(16 * 1024**2),
+        "spark.sql.session.localRelationBatchOfChunksSizeBytes": str(1024**3),
+    }
+    config.update(overrides)
+    state = {"cache": {}, "uploads": 0, "relations": [], "message_sizes": [],
+             "config_requests": []}
+    server_id = "00000000-0000-0000-0000-000000000001"
+
+    def configure(raw, context):
+        request = protocol("ConfigRequest").FromString(raw)
+        operation = request.operation.WhichOneof("op_type")
+        keys = getattr(request.operation, operation).keys
+        state["config_requests"].append((operation, list(keys)))
+        return protocol("ConfigResponse", session_id=request.session_id,
+                        pairs=[dict(key=k, value=config[k]) for k in keys
+                               if config.get(k) is not None]
+                        ).SerializeToString()
+
+    def statuses(raw, context):
+        request = protocol("ArtifactStatusesRequest").FromString(raw)
+        return protocol("ArtifactStatusesResponse", session_id=request.session_id,
+                        statuses={name: dict(exists=name in state["cache"])
+                                  for name in request.names}).SerializeToString()
+
+    def upload(requests, context):
+        summaries = []
+        name, expected, buffer = None, 0, bytearray()
+        session_id = None
+
+        def save(name, data):
+            assert name == "cache/" + hashlib.sha256(data).hexdigest()
+            assert name not in state["cache"], "cached artifacts should not be uploaded again"
+            state["cache"][name] = bytes(data)
+            summaries.append(dict(name=name, is_crc_successful=True))
+
+        def checked(chunk):
+            assert zlib.crc32(chunk.data) == chunk.crc
+            return chunk.data
+
+        for raw in requests:
+            state["message_sizes"].append(len(raw))
+            request = protocol("AddArtifactsRequest").FromString(raw)
+            session_id = request.session_id
+            if request.HasField("batch"):
+                for artifact in request.batch.artifacts:
+                    save(artifact.name, checked(artifact.data))
+            elif request.HasField("begin_chunk"):
+                begin = request.begin_chunk
+                name, expected = begin.name, begin.total_bytes
+                buffer = bytearray(checked(begin.initial_chunk))
+            else:
+                buffer.extend(checked(request.chunk))
+            if name is not None and len(buffer) == expected:
+                save(name, buffer)
+                name, buffer = None, bytearray()
+        assert name is None
+        state["uploads"] += 1
+        if upload_error == "crc":
+            summaries[0]["is_crc_successful"] = False
+        elif upload_error == "missing":
+            summaries = []
+        return protocol("AddArtifactsResponse", session_id=session_id,
+                        artifacts=summaries).SerializeToString()
+
+    def execute(raw, context):
+        request = protocol("ExecutePlanRequest").FromString(raw)
+        relation = request.plan.root
+        while relation.HasField("to_df"):
+            state["column_names"] = list(relation.to_df.column_names)
+            relation = relation.to_df.input
+        state["relations"].append(relation)
+        if relation.HasField("chunked_cached_local_relation"):
+            cached = relation.chunked_cached_local_relation
+            payloads = [state["cache"]["cache/" + h] for h in cached.dataHashes]
+            state["spark_schema"] = (
+                state["cache"]["cache/" + cached.schemaHash].decode()
+                if cached.HasField("schemaHash") else None
+            )
+        else:
+            payloads = [relation.local_relation.data]
+            state["spark_schema"] = (
+                relation.local_relation.schema
+                if relation.local_relation.HasField("schema") else None
+            )
+        rows, first, last = 0, None, None
+        state["arrow_schemas"], state["batch_rows"] = [], []
+        for payload in payloads:
+            reader = pa.ipc.open_stream(payload)
+            state["arrow_schemas"].append(reader.schema)
+            stream_rows = []
+            state["batch_rows"].append(stream_rows)
+            for batch in reader:
+                stream_rows.append(batch.num_rows)
+                rows += batch.num_rows
+                if batch.num_rows:
+                    if first is None:
+                        first = batch.column(0)[0].as_py()
+                    last = batch.column(0)[-1].as_py()
+        state["result"] = (rows, first, last)
+        result = pa.table({"rows": [rows]})
+        sink = pa.BufferOutputStream()
+        with pa.ipc.new_stream(sink, result.schema) as writer:
+            writer.write_table(result)
+        header = dict(session_id=request.session_id, operation_id=request.operation_id,
+                      server_side_session_id=server_id)
+        yield protocol("ExecutePlanResponse", **header, response_id="0",
+                       arrow_batch=dict(row_count=1, data=sink.getvalue().to_pybytes())
+                       ).SerializeToString()
+        yield protocol("ExecutePlanResponse", **header, response_id="1",
+                       result_complete={}).SerializeToString()
+
+    def release(raw, context):
+        request = protocol("ReleaseExecuteRequest").FromString(raw)
+        return protocol("ReleaseExecuteResponse", session_id=request.session_id,
+                        operation_id=request.operation_id,
+                        server_side_session_id=server_id).SerializeToString()
+
+    def stop(raw, context):
+        request = protocol("ReleaseSessionRequest").FromString(raw)
+        return protocol("ReleaseSessionResponse", session_id=request.session_id,
+                        server_side_session_id=server_id).SerializeToString()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        server = grpc.server(executor, options=[("grpc.max_receive_message_length", 4 * 1024**2)])
+        server.add_generic_rpc_handlers([grpc.method_handlers_generic_handler(
+            "spark.connect.SparkConnectService", {
+                "Config": grpc.unary_unary_rpc_method_handler(configure),
+                "ArtifactStatus": grpc.unary_unary_rpc_method_handler(statuses),
+                "AddArtifacts": grpc.stream_unary_rpc_method_handler(upload),
+                "ExecutePlan": grpc.unary_stream_rpc_method_handler(execute),
+                "ReleaseExecute": grpc.unary_unary_rpc_method_handler(release),
+                "ReleaseSession": grpc.unary_unary_rpc_method_handler(stop),
+            })])
+        port = server.add_insecure_port("127.0.0.1:0")
+        server.start()
+        session = SparkSession.builder.remote(f"sc://127.0.0.1:{port}").getOrCreate()
+        try:
+            yield session, state
+        finally:
+            session.stop()
+            server.stop(0).wait(timeout=5)
+
+
+@pytest.mark.parametrize("cached", [False, True], ids=["inline", "cached"])
+@pytest.mark.parametrize("explicit", [False, True], ids=["inferred", "explicit"])
+def test_arrow_input_schema_handoff(protocol, cached, explicit):
+    import json
+    from pyspark.sql import types as T
+
+    table = pa.table({"id": [1, 2]})
+    schema = T.StructType([T.StructField("id", T.LongType())]) if explicit else None
+    with _arrow_input_service(protocol, **{
+        "spark.sql.session.localRelationCacheThreshold": "0" if cached else "1048576",
+    }) as (spark, state):
+        frame = spark.createDataFrame(table, schema)
+        # As in PySpark: inferred column names are applied with toDF, which is not local.
+        assert frame.isLocal() == explicit
+        assert frame.toArrow().column(0).to_pylist() == [2]
+        assert state["result"] == (2, 1, 2)
+        assert state["arrow_schemas"] == [table.schema]
+        assert len(state["config_requests"]) == 1
+        assert state["config_requests"][0][0] == "get"
+        assert len(state["config_requests"][0][1]) == 8
+        relation = state["relations"][0]
+        if cached:
+            local = relation.chunked_cached_local_relation
+            assert local.HasField("schemaHash") == explicit
+            assert len(state["cache"]) == (2 if explicit else 1)
+            uploads = state["uploads"]
+            spark.createDataFrame(table, schema).toArrow()
+            assert state["uploads"] == uploads
+        else:
+            assert state["uploads"] == 0
+            assert relation.local_relation.HasField("schema") == explicit
+        if explicit:
+            assert json.loads(state["spark_schema"]) == json.loads(schema.json())
+        else:
+            assert state["spark_schema"] is None
+            assert state["column_names"] == ["id"]
+
+
+def test_arrow_input_upload_above_grpc_limit(protocol):
+    import numpy as np
+
+    rows = 128 * 1024**2 // 8 + 1
+    table = pa.table({"id": np.arange(rows, dtype=np.int64)})
+    assert table.nbytes > 128 * 1024**2
+    with _arrow_input_service(protocol) as (spark, state):
+        df = spark.createDataFrame(table)
+        assert not df.isLocal()
+        assert df.toArrow().column(0).to_pylist() == [rows]
+        assert state["result"] == (rows, 0, rows - 1)
+        assert state["relations"][0].HasField("chunked_cached_local_relation")
+        assert state["relations"][0].ByteSize() < 1024**2
+        assert max(state["message_sizes"]) < 33 * 1024
+        assert state["spark_schema"] is None
+        assert all(schema == table.schema for schema in state["arrow_schemas"])
+
+
+@pytest.mark.parametrize("kind", ["inferred", "empty-list", "struct"])
+def test_arrow_input_zero_column_table(protocol, kind):
+    from pyspark.sql import types as T
+
+    # The input cast drops the rows of a zero-column table, leaving no batches.
+    table = pa.table({"a": [1, 2]}).select([])
+    schema = {"inferred": None, "empty-list": [], "struct": T.StructType([])}[kind]
+    explicit = kind == "struct"
+    with _arrow_input_service(protocol) as (spark, state):
+        frame = spark.createDataFrame(table, schema)
+        # As in PySpark, no toDF is applied without column names, so the frame is local.
+        assert frame.isLocal()
+        assert frame.toArrow().column(0).to_pylist() == [0]
+        assert "column_names" not in state
+        # The relation still carries the Arrow schema, as PySpark's IPC stream does.
+        assert state["arrow_schemas"] == [pa.schema([])]
+        assert state["relations"][0].local_relation.HasField("schema") == explicit
+
+
+@pytest.mark.parametrize("schema,expected_width", [
+    ("x long", "1"),
+    ("x long, y long, z long", "3"),
+    ("long", "1"),
+])
+def test_arrow_input_ddl_width_errors(protocol, schema, expected_width):
+    from pyspark.errors import PySparkValueError
+
+    with _arrow_input_service(protocol) as (spark, state):
+        with pytest.raises(PySparkValueError) as error:
+            spark.createDataFrame(pa.table({"x": [1], "y": [2]}), schema)
+        assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
+        assert error.value.getMessageParameters() == {
+            "expected_length": expected_width, "actual_length": "2",
+        }
+        assert not state["relations"]
+        assert state["uploads"] == 0
+
+
+@pytest.mark.parametrize("schema,expected_type", [
+    ("array<long>", "ArrayType"),
+    ("map<string,long>", "MapType"),
+])
+def test_arrow_input_unsupported_ddl_schema(protocol, schema, expected_type):
+    from pyspark.errors import PySparkTypeError
+
+    with _arrow_input_service(protocol) as (spark, state):
+        with pytest.raises(PySparkTypeError) as error:
+            spark.createDataFrame(pa.table({"x": [1]}), schema)
+        assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+        assert error.value.getMessageParameters() == {
+            "arg_name": "schema", "expected_type": "list, None or StructType",
+            "arg_type": expected_type,
+        }
+        assert not state["relations"]
+        assert state["uploads"] == 0
+
+
+def test_arrow_input_upload_limits_and_chunk_order(protocol):
+    import numpy as np
+    from pyspark.errors import AnalysisException
+    table = pa.table({"id": np.arange(100, dtype=np.int64)})
+    options = {
+        "spark.sql.session.localRelationCacheThreshold": "0",
+        "spark.sql.session.localRelationChunkSizeRows": "7",
+        "spark.sql.session.localRelationChunkSizeBytes": "500",
+        "spark.sql.session.localRelationBatchOfChunksSizeBytes": "1000",
+    }
+    with _arrow_input_service(protocol, **options) as (spark, state):
+        df = spark.createDataFrame(table)
+        df.toArrow()
+        assert state["result"] == (100, 0, 99)
+        assert state["uploads"] > 1
+        cached = state["relations"][0].chunked_cached_local_relation
+        assert len(cached.dataHashes) > 1
+        assert all(rows <= 7 for stream in state["batch_rows"] for rows in stream)
+        assert any(sum(stream) > 7 for stream in state["batch_rows"])
+        actual = [
+            value
+            for hash in cached.dataHashes
+            for batch in pa.ipc.open_stream(state["cache"]["cache/" + hash])
+            for value in batch.column(0).to_pylist()
+        ]
+        assert actual == list(range(100))
+
+    options["spark.sql.session.localRelationSizeLimit"] = "10"
+    with _arrow_input_service(protocol, **options) as (spark, state):
+        with pytest.raises(AnalysisException, match="LOCAL_RELATION_SIZE_LIMIT_EXCEEDED"):
+            spark.createDataFrame(table)
+        assert not state["relations"]
+        assert state["uploads"] == 0
+
+
+@pytest.mark.parametrize("setting,value", [
+    ("SizeLimit", "0"),
+    ("SizeLimit", "-1"),
+    ("SizeLimit", "18446744073709551616"),
+    ("ChunkSizeRows", "0"),
+])
+def test_arrow_input_rejects_invalid_upload_sizes(protocol, setting, value):
+    key = f"spark.sql.session.localRelation{setting}"
+    with _arrow_input_service(protocol, **{
+        "spark.sql.session.localRelationCacheThreshold": "0", key: value,
+    }) as (spark, state):
+        with pytest.raises(Exception, match=f"Invalid configuration: {key}"):
+            spark.createDataFrame(pa.table({"id": [1]}))
+        assert state["uploads"] == 0
+
+
+@pytest.mark.parametrize("failure,match", [("crc", "CRC check failed"),
+                                          ("missing", "Missing cache artifact")])
+@pytest.mark.parametrize("rows", [2, 4000000])
+def test_arrow_input_upload_failure(protocol, failure, match, rows):
+    import numpy as np
+
+    # The larger input spans multiple upload batches.
+    with _arrow_input_service(protocol, upload_error=failure,
+                             **{"spark.sql.session.localRelationCacheThreshold": "0",
+                                "spark.sql.session.localRelationBatchOfChunksSizeBytes":
+                                    str(8 * 1024**2)}) as (spark, state):
+        with pytest.raises(Exception, match=match):
+            spark.createDataFrame(pa.table({"id": np.arange(rows, dtype=np.int64)}))
+        assert not state["relations"]
+
+
+@pytest.mark.parametrize("batch_bytes", [500, 1024**3])
+def test_arrow_input_duplicate_chunks_preserve_multiplicity(protocol, batch_bytes):
+    options = {"spark.sql.session.localRelationCacheThreshold": "0",
+               "spark.sql.session.localRelationChunkSizeRows": "5",
+               "spark.sql.session.localRelationChunkSizeBytes": "1",
+               "spark.sql.session.localRelationBatchOfChunksSizeBytes": str(batch_bytes)}
+    with _arrow_input_service(protocol, **options) as (spark, state):
+        spark.createDataFrame(pa.table({"id": [1] * 20})).toArrow()
+        cached = state["relations"][0].chunked_cached_local_relation
+        assert len(cached.dataHashes) == 4
+        assert len(set(cached.dataHashes)) == 1
+        assert not cached.HasField("schemaHash")
+        assert len(state["cache"]) == 1
+        assert state["result"] == (20, 1, 1)
+
+
+@pytest.mark.parametrize("data", [[[1]], pd.DataFrame({"id": [1]})])
+def test_non_arrow_input_does_not_import_pyarrow(protocol, monkeypatch, data):
+    import builtins
+    import sys
+
+    imported = []
+    original_import = builtins.__import__
+
+    def import_module(name, *args, **kwargs):
+        if name == "pyarrow":
+            imported.append(name)
+            raise ImportError("PyArrow is unavailable")
+        return original_import(name, *args, **kwargs)
+
+    with _arrow_input_service(protocol) as (spark, state):
+        monkeypatch.setitem(sys.modules, "pyarrow", None)
+        monkeypatch.setattr(builtins, "__import__", import_module)
+        spark.createDataFrame(data)
+        assert imported == []
+        assert state["config_requests"] == []

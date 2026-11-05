@@ -186,3 +186,42 @@ fn session_progress_handlers() {
     spark.remove_progress_handler(id);
     spark.clear_progress_handlers();
 }
+
+/// A server error carries its kind, condition, parameters, SQL state, stack trace and query
+/// contexts, as the reference client reads them.
+#[test]
+fn server_errors_carry_their_condition_and_details() {
+    use spark_connect::SparkErrorKind;
+    if !should_run() {
+        return;
+    }
+    let spark = session();
+    // Raised at `sql()`, or at the action where `sql()` does not run the statement.
+    let err = match spark.sql("SELEC 1") {
+        Ok(df) => df.collect().expect_err("a syntax error"),
+        Err(err) => err,
+    };
+    assert_eq!(err.kind, SparkErrorKind::Parse);
+    assert_eq!(err.get_condition().as_deref(), Some("PARSE_SYNTAX_ERROR"));
+    assert_eq!(err.get_sql_state().as_deref(), Some("42601"));
+    assert_eq!(err.params.get("error").map(String::as_str), Some("'SELEC'"));
+    // The server's message, which names the condition once.
+    assert_eq!(err.to_string().matches("[PARSE_SYNTAX_ERROR]").count(), 1);
+    assert!(err
+        .get_stacktrace()
+        .unwrap()
+        .starts_with("org.apache.spark.sql.catalyst.parser.ParseException"));
+    // spark.sql.connect.serverStacktrace.enabled is true by default.
+    assert!(err.server.as_ref().unwrap().display_stacktrace);
+
+    let err = spark
+        .sql("SELECT 1/0")
+        .expect("a query")
+        .collect()
+        .expect_err("a division by zero");
+    assert_eq!(err.kind, SparkErrorKind::Arithmetic);
+    assert_eq!(err.get_condition().as_deref(), Some("DIVIDE_BY_ZERO"));
+    let contexts = err.get_query_context();
+    assert_eq!(contexts.len(), 1);
+    assert_eq!(contexts[0].fragment(), "1/0");
+}

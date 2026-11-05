@@ -268,6 +268,8 @@ pub enum LiteralExpression {
     Date(i32),
     Timestamp(i64),
     TimestampNtz(i64),
+    /// Signed microseconds in a Spark day-time interval.
+    DayTimeInterval(i64),
     Time {
         nano: i64,
         precision: i32,
@@ -315,6 +317,9 @@ impl LiteralExpression {
             }
             LiteralExpression::TimestampNtz(v) => {
                 proto::expression::literal::LiteralType::TimestampNtz(*v)
+            }
+            LiteralExpression::DayTimeInterval(v) => {
+                proto::expression::literal::LiteralType::DayTimeInterval(*v)
             }
             LiteralExpression::Time { nano, precision } => {
                 let mut time = proto::expression::literal::Time::default();
@@ -365,6 +370,7 @@ impl LiteralExpression {
             LiteralExpression::Binary(v) => format!("{v:?}"),
             LiteralExpression::Date(v) => v.to_string(),
             LiteralExpression::Timestamp(v) | LiteralExpression::TimestampNtz(v) => v.to_string(),
+            LiteralExpression::DayTimeInterval(v) => v.to_string(),
             LiteralExpression::Time { nano, .. } => nano.to_string(),
             LiteralExpression::Array { elements, .. } => {
                 let inner: Vec<String> = elements.iter().map(|e| e.render()).collect();

@@ -36,7 +36,7 @@ flowchart TD
         ARROW["Arrow result decode"]
     end
 
-    SERVER["Spark Connect server (Spark 4.2+, :15002)"]
+    SERVER["Spark Connect server (Spark 4.3+, :15002)"]
     OUT["Rows / Arrow - optionally DataFusion or Polars (Rust); pandas (Python)"]
 
     PY --> SKIN --> EXT --> API
@@ -79,6 +79,10 @@ flowchart LR
 When you call an action such as `count()` or `show()`, the lazily-built plan is
 serialized and sent to the server; results stream back as Arrow batches.
 
+Day-time intervals are returned as Python `datetime.timedelta` values, including
+nested values and nulls. Creating DataFrames from `timedelta` inputs or collected
+interval rows is not yet supported; see [SPARK-60659](https://issues.apache.org/jira/browse/SPARK-60659).
+
 ```mermaid
 sequenceDiagram
     participant App as Your code (Rust or pyspark)
@@ -98,9 +102,13 @@ sequenceDiagram
 ```
 
 Transformations are **lazy** - they only build up the plan. Only an *action*
-triggers `ExecutePlan`. If the response stream breaks mid-flight, the core's
-reattachable-execute iterator resumes from the last response it saw, so long
-results survive transient disconnects.
+triggers `ExecutePlan`. If the response stream breaks mid-flight, or the server
+ends it before the result is complete (as it does after
+`spark.connect.execute.reattachable.senderMaxStreamDuration` or
+`senderMaxStreamSize`), the core's reattachable-execute iterator resumes from the
+last response it saw, so long results survive transient disconnects. Like the
+reference client, it releases each response it has read, and the whole execution
+once the result is complete, so the server does not keep them.
 
 ### Python Arrow table handoff
 
@@ -110,6 +118,21 @@ network decoding, sliced validity bitmaps, and pandas conversion may still copy.
 Batch schema consistency is validated before export. Field names or timezones
 containing NUL use IPC over the collected batches, without another RPC. Empty
 batch vectors retain the empty-schema behavior.
+
+`createDataFrame(pyarrow_table)` uses the reverse boundary: Spark's schema and
+timestamp conversion helpers normalize the table, then arrow-rs imports its
+`RecordBatchReader` through the C Stream interface. The Rust core serializes
+those batches to IPC for the local relation sent to Spark. No Python rows are
+materialized; casts, buffer alignment, and IPC serialization may still copy.
+Empty tables require an explicit schema, matching PySpark Connect.
+Inputs at or above `spark.sql.session.localRelationCacheThreshold` are serialized
+into independent IPC streams and uploaded as session-scoped cache artifacts.
+The plan carries `ChunkedCachedLocalRelation` hashes instead of embedding the
+entire payload. Spark infers omitted schemas from the Arrow streams; explicit
+schemas travel in the local relation or a separate schema artifact.
+Chunk sizes, upload batch sizes, and the total relation size
+limit follow the server's local-relation settings; artifact RPC messages use
+32 KiB pieces, with SHA-256 deduplication and CRC checks.
 
 ## Two front-ends, one core
 

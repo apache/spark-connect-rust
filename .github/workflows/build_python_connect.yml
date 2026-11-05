@@ -17,7 +17,7 @@
 # under the License.
 #
 
-name: Python Connect Parity (Spark 4.2.0)
+name: Python Connect Parity (Spark 4.3.0)
 
 # Cancel an in-progress run when a newer commit supersedes it (per workflow + ref).
 concurrency:
@@ -25,8 +25,8 @@ concurrency:
   cancel-in-progress: true
 
 # Mirrors Apache Spark's build_python_connect.yml approach, adapted for the
-# Rust-backed client: download the Spark 4.2.0 Connect server, start it, pull the
-# official v4.2.0 connect test files, and run them through our client - the gate is
+# Rust-backed client: download the Spark 4.3.0 Connect server, start it, pull the
+# official v4.3.0 connect test files, and run them through our client - the gate is
 # "every test passes except the checked-in known-environmental-failures manifest".
 # A separate job enforces Rust test coverage across all crates.
 
@@ -38,7 +38,7 @@ on:
   workflow_dispatch:
 
 env:
-  SPARK_VERSION: "4.2.0"
+  SPARK_VERSION: "4.3.0"
   RUST_PARITY_LOG_DIR: /tmp/parity-test-logs
   SPARK_CONNECT_TESTING_REMOTE: sc://localhost:15002
   SPARK_TESTING: "1"
@@ -47,7 +47,7 @@ env:
 jobs:
   # ---------------------------------------------------------------------------
   # Parity gate: the official connect suite through our client, against a real
-  # Spark 4.2.0 Connect server (see scripts/run_official_tests.py).
+  # Spark 4.3.0 Connect server (see scripts/run_official_tests.py).
   # ---------------------------------------------------------------------------
   connect-parity:
     name: Connect parity (official suite via our client, Python ${{ matrix.python-version }})
@@ -121,8 +121,8 @@ jobs:
       - name: Download Apache Spark ${{ env.SPARK_VERSION }} (Connect server)
         id: spark-download
         run: |
-          PKG="spark-${SPARK_VERSION}-bin-hadoop3"
-          if [ ! -d "${HOME}/spark-dist/${PKG}" ]; then
+          PKG="spark-${SPARK_VERSION}-bin-hadoop3-connect"
+          if [ ! -d "${HOME}/spark-dist/spark-4.3.0-bin-hadoop3"* ]; then
             URL="https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/${PKG}.tgz"
             mkdir -p "${HOME}/spark-dist"
             echo "Downloading ${URL}"
@@ -132,7 +132,8 @@ jobs:
           else
             echo "Using cached Spark distribution."
           fi
-          echo "SPARK_HOME=${HOME}/spark-dist/${PKG}" >> "$GITHUB_OUTPUT"
+          SPARK_HOME=$(find "${HOME}/spark-dist" -maxdepth 1 -type d -name 'spark-4.3.0-bin-hadoop3*' | head -1)
+          echo "SPARK_HOME=${SPARK_HOME}" >> "$GITHUB_OUTPUT"
 
       - name: Cache Spark ${{ env.SPARK_VERSION }} source (official test files)
         uses: actions/cache@v4
@@ -164,7 +165,6 @@ jobs:
           # this one server, and a 1g default degrades late in the run (GC pressure),
           # which is what made the streaming listener/observation files flake.
           "${SPARK_HOME}/sbin/start-connect-server.sh" \
-            --packages "org.apache.spark:spark-connect_2.13:${SPARK_VERSION}" \
             --driver-memory 3g \
             --conf spark.sql.session.localRelationSizeLimit=1073741824 \
             > /tmp/connect-server.log 2>&1 &
@@ -213,12 +213,14 @@ jobs:
             --exclude "test_artifact.py,test_artifact_localcluster.py,test_parity_resources.py" \
             2>&1 | tee /tmp/parity_ours.log
 
-      - name: Native Arrow handoff smoke tests (against the live server)
+      - name: Drop-in live-server tests (native Arrow handoff and API behaviors)
+        # The parity gate above runs the reference pyspark over our transport, so the
+        # drop-in's own Rust-backed classes are only exercised against a server here.
         working-directory: python
         env:
           SPARK_REMOTE: sc://localhost:15002
           PYTHONPATH: ${{ github.workspace }}/python
-        run: python -m pytest tests/test_arrow_e2e.py -q
+        run: python -m pytest tests/test_arrow_e2e.py tests/test_dropin_e2e.py -q
 
       - name: Restart Connect server in local-cluster mode
         # Resource profiles and artifact distribution across executors can only be
@@ -239,11 +241,9 @@ jobs:
             sleep 1
           done
           echo "Starting Connect server in local-cluster mode..."
-          # Keep --packages: local-cluster launches real executor JVMs that each need the
-          # spark-connect jar on their classpath, so it is not redundant here.
+          # The -connect distribution bundles the Connect jar, so no --packages is needed.
           "${SPARK_HOME}/sbin/start-connect-server.sh" \
             --master "local-cluster[2, 4, 1024]" \
-            --packages "org.apache.spark:spark-connect_2.13:${SPARK_VERSION}" \
             --driver-memory 3g \
             --conf spark.sql.session.localRelationSizeLimit=1073741824 \
             > /tmp/connect-server-localcluster.log 2>&1 &
@@ -289,7 +289,7 @@ jobs:
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
-  # Behavioral e2e tests (Rust drop-in against a live server), in their OWN job
+  # Behavioral e2e tests (Rust drop-in against a live 4.3.0 server), in their OWN job
   # with a separate Connect server so they never share server state with the
   # parity gate. The parity gate then starts against a server nothing else has
   # touched, which avoids the SPARK-59032 arrow-UDF hang (a UDF that crashes a
@@ -348,8 +348,8 @@ jobs:
       - name: Download Apache Spark ${{ env.SPARK_VERSION }} (Connect server)
         id: spark-download
         run: |
-          PKG="spark-${SPARK_VERSION}-bin-hadoop3"
-          if [ ! -d "${HOME}/spark-dist/${PKG}" ]; then
+          PKG="spark-${SPARK_VERSION}-bin-hadoop3-connect"
+          if [ ! -d "${HOME}/spark-dist/spark-4.3.0-bin-hadoop3"* ]; then
             URL="https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/${PKG}.tgz"
             mkdir -p "${HOME}/spark-dist"
             echo "Downloading ${URL}"
@@ -359,7 +359,8 @@ jobs:
           else
             echo "Using cached Spark distribution."
           fi
-          echo "SPARK_HOME=${HOME}/spark-dist/${PKG}" >> "$GITHUB_OUTPUT"
+          SPARK_HOME=$(find "${HOME}/spark-dist" -maxdepth 1 -type d -name 'spark-4.3.0-bin-hadoop3*' | head -1)
+          echo "SPARK_HOME=${SPARK_HOME}" >> "$GITHUB_OUTPUT"
 
       - name: Start Spark Connect server
         env:
@@ -367,10 +368,13 @@ jobs:
           PYSPARK_DRIVER_PYTHON: python
         run: |
           SPARK_HOME="${{ steps.spark-download.outputs.SPARK_HOME }}"
+          # A small senderMaxStreamSize makes the server end the response stream of every
+          # result over 1 MiB before it is complete, so that the client's reattach path is
+          # exercised (by default it only is for results over 1 GiB or 2 minutes).
           "${SPARK_HOME}/sbin/start-connect-server.sh" \
-            --packages "org.apache.spark:spark-connect_2.13:${SPARK_VERSION}" \
             --driver-memory 3g \
             --conf spark.sql.session.localRelationSizeLimit=1073741824 \
+            --conf spark.connect.execute.reattachable.senderMaxStreamSize=1048576 \
             > /tmp/connect-server.log 2>&1 &
           for i in $(seq 1 90); do
             if (echo > /dev/tcp/localhost/15002) 2>/dev/null; then
@@ -390,7 +394,7 @@ jobs:
             -- --test-threads=1
 
   # ---------------------------------------------------------------------------
-  # E2E performance benchmark: our client vs reference, same 4.2.0 server.
+  # E2E performance benchmark: our client vs reference, same 4.3.0 server.
   # ---------------------------------------------------------------------------
   connect-benchmark:
     name: E2E benchmark vs reference
@@ -442,8 +446,8 @@ jobs:
           key: spark-source-${{ env.SPARK_VERSION }}
       - name: Download & start Spark ${{ env.SPARK_VERSION }} server
         run: |
-          PKG="spark-${SPARK_VERSION}-bin-hadoop3"
-          if [ ! -d "${HOME}/spark-dist/${PKG}" ]; then
+          PKG="spark-${SPARK_VERSION}-bin-hadoop3-connect"
+          if [ ! -d "${HOME}/spark-dist/spark-4.3.0-bin-hadoop3"* ]; then
             mkdir -p "${HOME}/spark-dist"
             wget -q -O "/tmp/${PKG}.tgz" "https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/${PKG}.tgz"
             tar -xzf "/tmp/${PKG}.tgz" -C "${HOME}/spark-dist"
@@ -452,12 +456,12 @@ jobs:
           if [ ! -d "${HOME}/spark-source/python" ]; then
             git clone --depth 1 --branch "v${SPARK_VERSION}" https://github.com/apache/spark.git "${HOME}/spark-source"
           fi
-          "${HOME}/spark-dist/${PKG}/sbin/start-connect-server.sh" \
-            --packages "org.apache.spark:spark-connect_2.13:${SPARK_VERSION}" > /tmp/server.log 2>&1 &
+          SPARK_HOME=$(find "${HOME}/spark-dist" -maxdepth 1 -type d -name 'spark-4.3.0-bin-hadoop3*' | head -1)
+          "${SPARK_HOME}/sbin/start-connect-server.sh" > /tmp/server.log 2>&1 &
           for i in $(seq 1 90); do (echo > /dev/tcp/localhost/15002) 2>/dev/null && break; sleep 1; done
       - name: Benchmark reference client
         run: |
-          # Reference uses the pip-installed pyspark 4.2.0 (no ./python on the path).
+          # Reference uses the pip-installed pyspark 4.3.0 (no ./python on the path).
           python scripts/benchmark_e2e.py --isolate --label reference --out /tmp/bench_reference.json
       - name: Benchmark our client
         run: |

@@ -1693,8 +1693,15 @@ impl DataFrame {
     }
 
     /// Check if this DataFrame is local (collected).
+    ///
+    /// Mirrors the server's `Dataset.isLocal`: only a local relation itself is local. The
+    /// server resolves `toDF`, which Arrow input with inferred or listed column names
+    /// applies, into a `Project`, which is not.
     pub fn is_local(&self) -> bool {
-        matches!(self.plan.as_ref(), LogicalPlan::LocalRelation { .. })
+        matches!(
+            self.plan.as_ref(),
+            LogicalPlan::LocalRelation { .. } | LogicalPlan::ChunkedCachedLocalRelation { .. }
+        )
     }
 
     /// Check if this DataFrame is streaming.
@@ -1910,6 +1917,9 @@ fn capture_execution(
     info: &mut ExecutionInfo,
     session: &SparkSession,
 ) {
+    if info.operation_id.is_none() && !resp.operation_id.is_empty() {
+        info.operation_id = Some(resp.operation_id.clone());
+    }
     if let Some(metrics) = resp.metrics.take() {
         info.metrics = Some(metrics);
     }
@@ -2318,6 +2328,7 @@ fn map_key_to_string(v: Value) -> String {
         Value::Double(x) => x.to_string(),
         Value::Date(d) => d.to_string(),
         Value::Timestamp(t) => t.to_string(),
+        interval @ Value::DayTimeInterval(_) => interval.to_string(),
         Value::Decimal { value, .. } => value,
         other => format!("{other:?}"),
     }
@@ -2473,6 +2484,12 @@ fn arrow_value_at_with_layout(
     }
     if let Some(arr) = array.as_any().downcast_ref::<Date64Array>() {
         return Ok(Value::Date((arr.value(index) / 86_400_000) as i32));
+    }
+    // Spark DayTimeIntervalType uses Duration(Microsecond), not an Arrow
+    // Interval physical type. Keep signed micros exactly, including i64::MIN.
+    // Other duration units remain unsupported rather than being rounded.
+    if let Some(arr) = array.as_any().downcast_ref::<DurationMicrosecondArray>() {
+        return Ok(Value::DayTimeInterval(arr.value(index)));
     }
     // Nested: list, struct, map (recurse).
     if let Some(arr) = array.as_any().downcast_ref::<ListArray>() {
@@ -3289,11 +3306,45 @@ mod plan_construction_tests {
     use super::*;
     use crate::session::SparkSession;
 
+    #[test]
+    fn capture_execution_records_first_operation_id() {
+        let spark = session();
+        let mut info = ExecutionInfo::default();
+        let mut resp = proto::ExecutePlanResponse::default();
+        // An empty operation id (e.g. a synthetic response) is not recorded.
+        capture_execution(&mut resp, &mut info, &spark);
+        assert_eq!(info.operation_id, None);
+        resp.operation_id = "op-1".to_string();
+        capture_execution(&mut resp, &mut info, &spark);
+        resp.operation_id = "op-2".to_string();
+        capture_execution(&mut resp, &mut info, &spark);
+        assert_eq!(info.operation_id.as_deref(), Some("op-1"));
+    }
+
     fn session() -> SparkSession {
         SparkSession::builder()
             .remote("sc://localhost:15002")
             .get_or_create()
             .expect("failed to build session")
+    }
+
+    #[test]
+    fn is_local_only_for_a_local_relation_itself() {
+        let spark = session();
+        let local = spark.empty_data_frame().unwrap();
+        let cached = DataFrame::new(
+            spark.clone(),
+            LogicalPlan::ChunkedCachedLocalRelation {
+                data_hashes: vec!["hash".to_string()],
+                schema_hash: None,
+            },
+        );
+        assert!(local.is_local());
+        assert!(cached.is_local());
+        // As in PySpark, where the server resolves toDF into a Project.
+        assert!(!local.to_df(vec![]).is_local());
+        assert!(!cached.to_df(vec!["x"]).is_local());
+        assert!(!spark.range(1).unwrap().is_local());
     }
 
     #[test]
@@ -3709,6 +3760,90 @@ mod arrow_value_tests {
     use std::sync::Arc;
 
     #[test]
+    fn day_time_interval_microseconds_are_exact() {
+        let values = vec![
+            Some(i64::MIN),
+            Some(i64::MIN + 1),
+            Some(-172_800_000_001),
+            Some(-1),
+            Some(0),
+            Some(1),
+            Some(172_800_000_001),
+            Some(i64::MAX - 1),
+            Some(i64::MAX),
+            None,
+        ];
+        let array = DurationMicrosecondArray::from(values.clone());
+        for (i, value) in values.iter().enumerate() {
+            assert_eq!(
+                arrow_value_at(&array, i).unwrap(),
+                value.map(Value::DayTimeInterval).unwrap_or(Value::Null)
+            );
+        }
+        let sliced = array.slice(2, 5);
+        for i in 0..sliced.len() {
+            assert_eq!(
+                arrow_value_at(&sliced, i).unwrap(),
+                Value::DayTimeInterval(values[i + 2].unwrap())
+            );
+        }
+        let nulls = DurationMicrosecondArray::from(vec![None, None]);
+        assert_eq!(arrow_value_at(&nulls, 1).unwrap(), Value::Null);
+        for array in [
+            Arc::new(DurationSecondArray::from(vec![1])) as ArrayRef,
+            Arc::new(DurationMillisecondArray::from(vec![1])),
+            Arc::new(DurationNanosecondArray::from(vec![1])),
+        ] {
+            assert!(arrow_value_at(array.as_ref(), 0).is_err());
+        }
+    }
+
+    #[test]
+    fn day_time_interval_ipc_empty_and_multiple_batches() {
+        use arrow::datatypes::{Schema, TimeUnit};
+        use arrow::ipc::writer::StreamWriter;
+        use arrow::record_batch::RecordBatch;
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "interval",
+            ArrowDataType::Duration(TimeUnit::Microsecond),
+            true,
+        )]));
+        let mut data = Vec::new();
+        let mut writer = StreamWriter::try_new(&mut data, &schema).unwrap();
+        for values in [
+            vec![],
+            vec![Some(i64::MIN), None],
+            vec![],
+            vec![Some(i64::MAX)],
+        ] {
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![Arc::new(DurationMicrosecondArray::from(values))],
+            )
+            .unwrap();
+            writer.write(&batch).unwrap();
+        }
+        writer.finish().unwrap();
+        drop(writer);
+        let rows = decode_arrow_batch(&proto::execute_plan_response::ArrowBatch {
+            data: data.into(),
+            row_count: 3,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|r| r.get(0).unwrap().clone())
+                .collect::<Vec<_>>(),
+            vec![
+                Value::DayTimeInterval(i64::MIN),
+                Value::Null,
+                Value::DayTimeInterval(i64::MAX)
+            ]
+        );
+    }
+
+    #[test]
     fn primitives_and_signed_ints() {
         assert!(matches!(
             arrow_value_at(&BooleanArray::from(vec![true]), 0).unwrap(),
@@ -3898,7 +4033,7 @@ mod arrow_value_tests {
             arrow_value_at(&with_null, 0).unwrap(),
             Value::Null
         ));
-        // Duration has no dedicated Value arm -> the final unsupported-type Err.
+        // Only microsecond durations are supported (Spark's physical encoding).
         let dur = DurationSecondArray::from(vec![1i64]);
         assert!(arrow_value_at(&dur, 0).is_err());
     }
@@ -3915,6 +4050,7 @@ mod arrow_value_tests {
         assert_eq!(map_key_to_string(Value::Double(2.5)), "2.5");
         assert_eq!(map_key_to_string(Value::Date(5)), "5");
         assert_eq!(map_key_to_string(Value::Timestamp(6)), "6");
+        assert_eq!(map_key_to_string(Value::DayTimeInterval(-1)), "-1");
         assert_eq!(
             map_key_to_string(Value::Decimal {
                 value: "7.5".to_string(),

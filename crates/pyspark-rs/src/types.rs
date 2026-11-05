@@ -61,12 +61,6 @@ macro_rules! init_chain {
     };
 }
 
-impl PyDataType {
-    pub fn new(inner: DataType) -> Self {
-        PyDataType { inner }
-    }
-}
-
 /// Construct a `StructType` Python object (with its full base chain) from fields.
 fn py_new_struct(py: Python<'_>, fields: Vec<StructField>) -> PyResult<Py<PyStructType>> {
     Py::new(
@@ -179,27 +173,87 @@ impl PyDataType {
     }
     #[classmethod]
     #[pyo3(name = "fromDDL")]
-    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
-        DataType::from_ddl(ddl)
-            .map(PyDataType::new)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    fn __obj_from_ddl(cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<Py<PyAny>> {
+        let dt = DataType::from_ddl(ddl)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        // The concrete type, as pyspark returns (a StructType for a list of fields). The
+        // subclasses inherit this classmethod, so that any of them parses DDL the same way.
+        data_type_to_py(cls.py(), &dt)
     }
     #[pyo3(name = "typeName")]
     fn __dt_type_name(&self) -> String {
         self.inner.type_name()
     }
 
-    fn __repr__(&self) -> String {
-        self.inner.simple_string()
-    }
-
-    fn __str__(&self) -> String {
-        self.inner.simple_string()
+    /// As pyspark's `DataType.__repr__`: the class name, for the base class and for
+    /// pure-Python subclasses (such as a `UserDefinedType`) that do not define their own;
+    /// the concrete types override it. There is no `__str__`, so `str()` is `repr()`, as
+    /// in pyspark.
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Ok(format!("{}()", slf.get_type().name()?))
     }
 
     fn simpleString(&self) -> String {
         self.inner.simple_string()
     }
+
+    // Equality/hashing are defined once here and inherited by every concrete type class
+    // (and by pure-Python subclasses such as `UserDefinedType`). Mirrors pyspark's
+    // `DataType.__eq__`/`__ne__`/`__hash__`.
+    fn __eq__(slf: &Bound<'_, Self>, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        data_type_eq(slf.as_any(), other)
+    }
+
+    fn __ne__(slf: &Bound<'_, Self>, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        Ok(!data_type_eq(slf.as_any(), other)?)
+    }
+
+    /// pyspark hashes `str(self)`. Hash the simple string of the same live core type that
+    /// `__eq__` compares, so equal types always hash equal (`str()` can lag behind the
+    /// live fields of a mutated `StructType`). A `UserDefinedType` is compared by class
+    /// and `__dict__` rather than by core type, so it keeps pyspark's `hash(str(self))`.
+    fn __hash__(slf: &Bound<'_, Self>) -> PyResult<isize> {
+        let any = slf.as_any();
+        if is_udt(any)? {
+            return any.str()?.hash();
+        }
+        let s = py_to_data_type(any)?.simple_string();
+        pyo3::types::PyString::new(any.py(), &s).hash()
+    }
+}
+
+/// Whether `obj` is an instance of the pure-Python `pyspark.sql.types.UserDefinedType`.
+fn is_udt(obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    match obj
+        .py()
+        .import("pyspark.sql.types")
+        .and_then(|m| m.getattr("UserDefinedType"))
+    {
+        Ok(cls) => obj.is_instance(&cls),
+        Err(_) => Ok(false),
+    }
+}
+
+/// `DataType.__eq__` with pyspark semantics. pyspark compares
+/// `isinstance(other, self.__class__) and self.__dict__ == other.__dict__`; the Rust-backed
+/// classes keep their state in Rust rather than `__dict__`, so compare the core `DataType`
+/// built from each side's live fields instead (a mutated `StructType` compares by its
+/// current fields, and a bare `DataType` returned by `fromDDL` equals the concrete class).
+/// `UserDefinedType` is a pure-Python subclass whose state does live in `__dict__`, so it
+/// keeps pyspark's formula verbatim.
+fn data_type_eq(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if !b.is_instance_of::<PyDataType>() {
+        return Ok(false);
+    }
+    let a_udt = is_udt(a)?;
+    if a_udt || is_udt(b)? {
+        // A non-UDT `self` is never a superclass of a UDT other than the bare base,
+        // whose (empty) state pyspark would compare; treat that as unequal too.
+        return Ok(a_udt
+            && b.is_instance(&a.get_type())?
+            && a.getattr("__dict__")?.eq(b.getattr("__dict__")?)?);
+    }
+    Ok(py_to_data_type(a)? == py_to_data_type(b)?)
 }
 
 // Define concrete type classes
@@ -232,13 +286,6 @@ impl PyNullType {
     #[pyo3(name = "toInternal")]
     fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
         obj
-    }
-    #[classmethod]
-    #[pyo3(name = "fromDDL")]
-    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
-        DataType::from_ddl(ddl)
-            .map(PyDataType::new)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"void\"")
@@ -290,13 +337,6 @@ impl PyBooleanType {
     fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
         obj
     }
-    #[classmethod]
-    #[pyo3(name = "fromDDL")]
-    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
-        DataType::from_ddl(ddl)
-            .map(PyDataType::new)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
-    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"boolean\"")
     }
@@ -346,13 +386,6 @@ impl PyByteType {
     #[pyo3(name = "toInternal")]
     fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
         obj
-    }
-    #[classmethod]
-    #[pyo3(name = "fromDDL")]
-    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
-        DataType::from_ddl(ddl)
-            .map(PyDataType::new)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"byte\"")
@@ -408,13 +441,6 @@ impl PyShortType {
     fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
         obj
     }
-    #[classmethod]
-    #[pyo3(name = "fromDDL")]
-    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
-        DataType::from_ddl(ddl)
-            .map(PyDataType::new)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
-    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"short\"")
     }
@@ -468,13 +494,6 @@ impl PyIntegerType {
     #[pyo3(name = "toInternal")]
     fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
         obj
-    }
-    #[classmethod]
-    #[pyo3(name = "fromDDL")]
-    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
-        DataType::from_ddl(ddl)
-            .map(PyDataType::new)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"integer\"")
@@ -530,13 +549,6 @@ impl PyLongType {
     fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
         obj
     }
-    #[classmethod]
-    #[pyo3(name = "fromDDL")]
-    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
-        DataType::from_ddl(ddl)
-            .map(PyDataType::new)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
-    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"long\"")
     }
@@ -591,13 +603,6 @@ impl PyFloatType {
     fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
         obj
     }
-    #[classmethod]
-    #[pyo3(name = "fromDDL")]
-    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
-        DataType::from_ddl(ddl)
-            .map(PyDataType::new)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
-    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"float\"")
     }
@@ -651,13 +656,6 @@ impl PyDoubleType {
     #[pyo3(name = "toInternal")]
     fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
         obj
-    }
-    #[classmethod]
-    #[pyo3(name = "fromDDL")]
-    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
-        DataType::from_ddl(ddl)
-            .map(PyDataType::new)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"double\"")
@@ -715,13 +713,6 @@ impl PyDecimalType {
     #[pyo3(name = "toInternal")]
     fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
         obj
-    }
-    #[classmethod]
-    #[pyo3(name = "fromDDL")]
-    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
-        DataType::from_ddl(ddl)
-            .map(PyDataType::new)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         let dt = DataType::Decimal {
@@ -805,13 +796,6 @@ impl PyStringType {
     #[pyo3(name = "toInternal")]
     fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
         obj
-    }
-    #[classmethod]
-    #[pyo3(name = "fromDDL")]
-    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
-        DataType::from_ddl(ddl)
-            .map(PyDataType::new)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         let dt = DataType::String {
@@ -900,13 +884,6 @@ impl PyBinaryType {
     fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
         obj
     }
-    #[classmethod]
-    #[pyo3(name = "fromDDL")]
-    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
-        DataType::from_ddl(ddl)
-            .map(PyDataType::new)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
-    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"binary\"")
     }
@@ -932,6 +909,9 @@ pub struct PyDateType;
 
 #[pymethods]
 impl PyDateType {
+    /// Number of days from 0001-01-01 to 1970-01-01 (mirrors pyspark's DateType.EPOCH_ORDINAL).
+    #[classattr]
+    const EPOCH_ORDINAL: i32 = 719163;
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
@@ -956,13 +936,6 @@ impl PyDateType {
     #[pyo3(name = "toInternal")]
     fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
         obj
-    }
-    #[classmethod]
-    #[pyo3(name = "fromDDL")]
-    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
-        DataType::from_ddl(ddl)
-            .map(PyDataType::new)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"date\"")
@@ -1013,13 +986,6 @@ impl PyTimestampType {
     #[pyo3(name = "toInternal")]
     fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
         obj
-    }
-    #[classmethod]
-    #[pyo3(name = "fromDDL")]
-    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
-        DataType::from_ddl(ddl)
-            .map(PyDataType::new)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"timestamp\"")
@@ -1074,13 +1040,6 @@ impl PyTimestampNTZType {
     #[pyo3(name = "toInternal")]
     fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
         obj
-    }
-    #[classmethod]
-    #[pyo3(name = "fromDDL")]
-    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
-        DataType::from_ddl(ddl)
-            .map(PyDataType::new)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"timestamp_ntz\"")
@@ -1149,13 +1108,6 @@ impl PyArrayType {
     #[pyo3(name = "toInternal")]
     fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
         obj
-    }
-    #[classmethod]
-    #[pyo3(name = "fromDDL")]
-    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
-        DataType::from_ddl(ddl)
-            .map(PyDataType::new)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         let dt = DataType::Array {
@@ -1282,13 +1234,6 @@ impl PyMapType {
     #[pyo3(name = "toInternal")]
     fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
         obj
-    }
-    #[classmethod]
-    #[pyo3(name = "fromDDL")]
-    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
-        DataType::from_ddl(ddl)
-            .map(PyDataType::new)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         let dt = DataType::Map {
@@ -1583,6 +1528,11 @@ impl PyStructField {
             false
         }
     }
+    /// pyspark: `hash(str(self))` (inherited from `DataType`). Defining `__eq__` alone
+    /// would leave StructField unhashable.
+    fn __hash__(slf: &Bound<'_, Self>) -> PyResult<isize> {
+        slf.str()?.hash()
+    }
 }
 
 #[pyclass(name = "StructType", module = "pyspark.sql.types", extends = PyDataType)]
@@ -1616,13 +1566,6 @@ impl PyStructType {
     #[pyo3(name = "toInternal")]
     fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
         obj
-    }
-    #[classmethod]
-    #[pyo3(name = "fromDDL")]
-    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
-        DataType::from_ddl(ddl)
-            .map(PyDataType::new)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         let dt = DataType::Struct {
@@ -1701,6 +1644,10 @@ impl PyStructType {
         {
             let mut me = slf.borrow_mut();
             me.fields.push(new_field);
+            // The base `DataType` is what `str()` and the schemas of `mapInArrow` and
+            // friends read, so it must follow the fields.
+            let fields = me.fields.clone();
+            me.as_super().inner = DataType::Struct { fields };
         }
         Ok(slf)
     }
@@ -1907,13 +1854,6 @@ impl PyCharType {
     fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
         obj
     }
-    #[classmethod]
-    #[pyo3(name = "fromDDL")]
-    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
-        DataType::from_ddl(ddl)
-            .map(PyDataType::new)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
-    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         let dt = DataType::Char {
             length: self.length,
@@ -1973,13 +1913,6 @@ impl PyVarcharType {
     #[pyo3(name = "toInternal")]
     fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
         obj
-    }
-    #[classmethod]
-    #[pyo3(name = "fromDDL")]
-    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
-        DataType::from_ddl(ddl)
-            .map(PyDataType::new)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         let dt = DataType::Varchar {
@@ -2041,13 +1974,6 @@ impl PyTimeType {
     fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
         obj
     }
-    #[classmethod]
-    #[pyo3(name = "fromDDL")]
-    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
-        DataType::from_ddl(ddl)
-            .map(PyDataType::new)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
-    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         let dt = DataType::Time {
             precision: self.precision,
@@ -2075,6 +2001,152 @@ impl PyTimeType {
     #[pyo3(name = "typeName")]
     fn type_name(&self) -> &'static str {
         "time"
+    }
+}
+
+/// Spark's `TimestampNTZNanosType(precision)` (precision 7..=9; default 9). PySpark 4.3.0 has no
+/// Python class for the nanosecond timestamp types, but the server reports them in
+/// schemas, so they materialize as this class instead of being mapped to a lossy type.
+#[pyclass(name = "TimestampNTZNanosType", module = "pyspark.sql.types", extends = PyDatetimeType)]
+pub struct PyTimestampNTZNanosType {
+    pub precision: i32,
+}
+
+#[pymethods]
+impl PyTimestampNTZNanosType {
+    #[pyo3(name = "json")]
+    fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Ok(py_to_data_type(slf.as_any())?.json())
+    }
+    #[pyo3(name = "jsonValue")]
+    fn __obj_json_value<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let v = py_to_data_type(slf.as_any())?.json_value();
+        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+    }
+    #[pyo3(name = "needConversion")]
+    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[pyo3(name = "toInternal")]
+    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        let dt = DataType::TimestampNtzNanos {
+            precision: self.precision,
+        };
+        type_reduce(py, &dt.json())
+    }
+    #[new]
+    #[pyo3(signature = (precision=9))]
+    fn new(precision: i32) -> PyResult<pyo3::PyClassInitializer<Self>> {
+        if !(7..=9).contains(&precision) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "TimestampNTZNanosType precision must be in 7..9, got {}",
+                precision
+            )));
+        }
+        Ok(init_chain!(
+            DataType::TimestampNtzNanos { precision },
+            PyTimestampNTZNanosType { precision },
+            [PyAtomicType, PyDatetimeType],
+            value
+        ))
+    }
+    #[getter]
+    fn precision(&self) -> i32 {
+        self.precision
+    }
+    fn __repr__(&self) -> String {
+        format!("TimestampNTZNanosType({})", self.precision)
+    }
+    #[pyo3(name = "simpleString")]
+    fn simple_string(&self) -> String {
+        format!("timestamp_ntz({})", self.precision)
+    }
+    #[pyo3(name = "typeName")]
+    fn type_name(&self) -> String {
+        format!("timestamp_ntz({})", self.precision)
+    }
+}
+
+/// Spark's `TimestampLTZNanosType(precision)` (precision 7..=9; default 9). PySpark 4.3.0 has no
+/// Python class for the nanosecond timestamp types, but the server reports them in
+/// schemas, so they materialize as this class instead of being mapped to a lossy type.
+#[pyclass(name = "TimestampLTZNanosType", module = "pyspark.sql.types", extends = PyDatetimeType)]
+pub struct PyTimestampLTZNanosType {
+    pub precision: i32,
+}
+
+#[pymethods]
+impl PyTimestampLTZNanosType {
+    #[pyo3(name = "json")]
+    fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Ok(py_to_data_type(slf.as_any())?.json())
+    }
+    #[pyo3(name = "jsonValue")]
+    fn __obj_json_value<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let v = py_to_data_type(slf.as_any())?.json_value();
+        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+    }
+    #[pyo3(name = "needConversion")]
+    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    #[pyo3(name = "toInternal")]
+    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
+        obj
+    }
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        let dt = DataType::TimestampLtzNanos {
+            precision: self.precision,
+        };
+        type_reduce(py, &dt.json())
+    }
+    #[new]
+    #[pyo3(signature = (precision=9))]
+    fn new(precision: i32) -> PyResult<pyo3::PyClassInitializer<Self>> {
+        if !(7..=9).contains(&precision) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "TimestampLTZNanosType precision must be in 7..9, got {}",
+                precision
+            )));
+        }
+        Ok(init_chain!(
+            DataType::TimestampLtzNanos { precision },
+            PyTimestampLTZNanosType { precision },
+            [PyAtomicType, PyDatetimeType],
+            value
+        ))
+    }
+    #[getter]
+    fn precision(&self) -> i32 {
+        self.precision
+    }
+    fn __repr__(&self) -> String {
+        format!("TimestampLTZNanosType({})", self.precision)
+    }
+    #[pyo3(name = "simpleString")]
+    fn simple_string(&self) -> String {
+        format!("timestamp_ltz({})", self.precision)
+    }
+    #[pyo3(name = "typeName")]
+    fn type_name(&self) -> String {
+        format!("timestamp_ltz({})", self.precision)
     }
 }
 
@@ -2108,13 +2180,6 @@ impl PyCalendarIntervalType {
     fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
         obj
     }
-    #[classmethod]
-    #[pyo3(name = "fromDDL")]
-    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
-        DataType::from_ddl(ddl)
-            .map(PyDataType::new)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
-    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"calendarinterval\"")
     }
@@ -2143,6 +2208,10 @@ pub struct PyYearMonthIntervalType {
 
 #[pymethods]
 impl PyYearMonthIntervalType {
+    #[classattr]
+    const YEAR: i32 = 0;
+    #[classattr]
+    const MONTH: i32 = 1;
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
@@ -2167,13 +2236,6 @@ impl PyYearMonthIntervalType {
     #[pyo3(name = "toInternal")]
     fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
         obj
-    }
-    #[classmethod]
-    #[pyo3(name = "fromDDL")]
-    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
-        DataType::from_ddl(ddl)
-            .map(PyDataType::new)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         let dt = DataType::YearMonthInterval {
@@ -2222,6 +2284,14 @@ pub struct PyDayTimeIntervalType {
 
 #[pymethods]
 impl PyDayTimeIntervalType {
+    #[classattr]
+    const DAY: i32 = 0;
+    #[classattr]
+    const HOUR: i32 = 1;
+    #[classattr]
+    const MINUTE: i32 = 2;
+    #[classattr]
+    const SECOND: i32 = 3;
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
@@ -2246,13 +2316,6 @@ impl PyDayTimeIntervalType {
     #[pyo3(name = "toInternal")]
     fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
         obj
-    }
-    #[classmethod]
-    #[pyo3(name = "fromDDL")]
-    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
-        DataType::from_ddl(ddl)
-            .map(PyDataType::new)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         let dt = DataType::DayTimeInterval {
@@ -2323,13 +2386,6 @@ impl PyVariantType {
     fn __obj_to_internal<'py>(&self, variant: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
         variant
     }
-    #[classmethod]
-    #[pyo3(name = "fromDDL")]
-    fn __obj_from_ddl(_cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<PyDataType> {
-        DataType::from_ddl(ddl)
-            .map(PyDataType::new)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
-    }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"variant\"")
     }
@@ -2350,6 +2406,16 @@ impl PyVariantType {
     }
 }
 
+// Class constants shared by all spatial types (SpatialType is macro-generated with no
+// #[pymethods], so this companion block adds the reference SpatialType.MIXED_* constants).
+#[pymethods]
+impl PySpatialType {
+    #[classattr]
+    const MIXED_CRS: &'static str = "SRID:ANY";
+    #[classattr]
+    const MIXED_SRID: i32 = -1;
+}
+
 #[pyclass(name = "GeometryType", module = "pyspark.sql.types", extends = PySpatialType)]
 pub struct PyGeometryType {
     pub srid: i32,
@@ -2357,6 +2423,14 @@ pub struct PyGeometryType {
 
 #[pymethods]
 impl PyGeometryType {
+    #[classattr]
+    const DEFAULT_CRS: &'static str = "OGC:CRS84";
+    #[classattr]
+    const DEFAULT_SRID: i32 = 4326;
+    #[classattr]
+    const MIXED_CRS: &'static str = "SRID:ANY";
+    #[classattr]
+    const MIXED_SRID: i32 = -1;
     #[new]
     #[pyo3(signature = (srid=0))]
     fn new(srid: i32) -> pyo3::PyClassInitializer<Self> {
@@ -2391,6 +2465,16 @@ pub struct PyGeographyType {
 
 #[pymethods]
 impl PyGeographyType {
+    #[classattr]
+    const DEFAULT_ALG: &'static str = "SPHERICAL";
+    #[classattr]
+    const DEFAULT_CRS: &'static str = "OGC:CRS84";
+    #[classattr]
+    const DEFAULT_SRID: i32 = 4326;
+    #[classattr]
+    const MIXED_CRS: &'static str = "SRID:ANY";
+    #[classattr]
+    const MIXED_SRID: i32 = -1;
     #[new]
     #[pyo3(signature = (srid=0))]
     fn new(srid: i32) -> pyo3::PyClassInitializer<Self> {
@@ -2573,6 +2657,24 @@ pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAn
                 value
             ))
         }
+        DataType::TimestampNtzNanos { precision } => {
+            let precision = *precision;
+            obj!(init_chain!(
+                DataType::TimestampNtzNanos { precision },
+                PyTimestampNTZNanosType { precision },
+                [PyAtomicType, PyDatetimeType],
+                value
+            ))
+        }
+        DataType::TimestampLtzNanos { precision } => {
+            let precision = *precision;
+            obj!(init_chain!(
+                DataType::TimestampLtzNanos { precision },
+                PyTimestampLTZNanosType { precision },
+                [PyAtomicType, PyDatetimeType],
+                value
+            ))
+        }
         DataType::CalendarInterval => obj!(init_chain!(
             DataType::CalendarInterval,
             PyCalendarIntervalType,
@@ -2697,6 +2799,16 @@ pub(crate) fn py_to_data_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
     if obj.extract::<PyRef<PyTimestampNTZType>>().is_ok() {
         return Ok(DataType::TimestampNtz);
     }
+    if let Ok(t) = obj.extract::<PyRef<PyTimestampNTZNanosType>>() {
+        return Ok(DataType::TimestampNtzNanos {
+            precision: t.precision,
+        });
+    }
+    if let Ok(t) = obj.extract::<PyRef<PyTimestampLTZNanosType>>() {
+        return Ok(DataType::TimestampLtzNanos {
+            precision: t.precision,
+        });
+    }
     if let Ok(d) = obj.extract::<PyRef<PyDecimalType>>() {
         return Ok(DataType::Decimal {
             precision: d.precision,
@@ -2778,9 +2890,10 @@ pub(crate) fn py_to_data_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
             });
         }
     }
-    // The bare base `DataType` (e.g. from `fromDDL`) is matched LAST: concrete subclasses
-    // (which all share the PyDataType base) are handled above via their own fields, so a
-    // mutated StructType reflects its live fields rather than the base's snapshot.
+    // The bare base `DataType`, which only `DataType()` and pure-Python subclasses are, is
+    // matched LAST: concrete subclasses (which all share the PyDataType base) are handled
+    // above via their own fields, so a mutated StructType reflects its live fields rather
+    // than the base's snapshot.
     if let Ok(d) = obj.extract::<PyRef<PyDataType>>() {
         return Ok(d.inner.clone());
     }
