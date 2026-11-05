@@ -1,6 +1,6 @@
 //! Server-gated breadth coverage: build DataFrames with (nearly) every operation and
-//! execute them, so the per-operation execution methods and the recursive
-//! `assign_plan_ids` match over `RelType` variants in `dataframe.rs` actually run.
+//! execute them, so the per-operation execution methods and the serialization of
+//! every plan node, with its plan ID, actually run.
 //! Correctness is asserted elsewhere; here the point is to exercise the reachable
 //! execution surface, so most calls are resilient (`let _ = ...`) and a few safe ones
 //! are asserted. Run with SPARK_REMOTE set.
@@ -35,8 +35,8 @@ fn expr(c: spark_connect::column::Column) -> spark_connect::expression::Expressi
 }
 
 /// Relational transforms: project, filter, joins, set ops, aggregates, sort, slicing,
-/// dedup, repartition, sample, reshape. Each is collected so `assign_plan_ids` walks
-/// the corresponding `RelType` arm.
+/// dedup, repartition, sample, reshape. Each is collected so the corresponding plan
+/// node is serialized with its plan ID.
 #[test]
 fn transforms_execute() {
     if !should_run() {

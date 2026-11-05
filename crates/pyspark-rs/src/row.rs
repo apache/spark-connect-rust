@@ -1,19 +1,128 @@
 //! PyO3 wrapper for spark_connect::row::Row, mirroring `pyspark.sql.Row`.
 
-use pyo3::exceptions::{PyAttributeError, PyIndexError, PyKeyError};
+use pyo3::basic::CompareOp;
+use pyo3::exceptions::PyIndexError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList, PySlice, PyString, PyTuple};
 use spark_connect::row::{Row, Value};
 
-/// Python wrapper for a Spark Row.
+use crate::column::raise_pyspark;
+
+/// Python wrapper for a Spark Row. Behaves as `pyspark.sql.Row`, a `tuple` subclass, does,
+/// though it cannot subclass `tuple` itself.
 #[pyclass(name = "Row", module = "pyspark.sql.types")]
 pub struct PyRow {
-    pub(crate) row: Row,
+    data: RowData,
+    /// Whether the row has field names (`__fields__`). As in PySpark, a row made of values
+    /// alone, such as `Row(1, 2)` or the row class `Row("name", "age")`, has none; the rest
+    /// of the client knows its fields as `_1`, `_2`, and so on.
+    named: bool,
+}
+
+enum RowData {
+    /// A row that the server returned, whose Spark values become Python values on access.
+    Spark(Row),
+    /// A row made in Python, which holds its Python values as they are, as PySpark's does.
+    Python {
+        fields: Vec<String>,
+        values: Py<PyTuple>,
+    },
 }
 
 impl PyRow {
     pub fn new(row: Row) -> Self {
-        PyRow { row }
+        PyRow {
+            data: RowData::Spark(row),
+            named: true,
+        }
+    }
+
+    /// A row made in Python of `values`, named by `fields`.
+    fn of_python(fields: Vec<String>, values: Bound<'_, PyTuple>, named: bool) -> Self {
+        PyRow {
+            data: RowData::Python {
+                fields,
+                values: values.unbind(),
+            },
+            named,
+        }
+    }
+
+    fn fields(&self) -> &[String] {
+        match &self.data {
+            RowData::Spark(row) => row.fields(),
+            RowData::Python { fields, .. } => fields,
+        }
+    }
+
+    /// The values, as the tuple that a PySpark row is.
+    fn values<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        match &self.data {
+            RowData::Spark(row) => {
+                let values = row
+                    .values()
+                    .iter()
+                    .map(|v| value_to_py(py, v))
+                    .collect::<PyResult<Vec<_>>>()?;
+                PyTuple::new(py, values)
+            }
+            RowData::Python { values, .. } => Ok(values.bind(py).clone()),
+        }
+    }
+
+    /// The value of the field at `index`, which is in range.
+    fn value<'py>(&self, py: Python<'py>, index: usize) -> PyResult<Bound<'py, PyAny>> {
+        match &self.data {
+            RowData::Spark(row) => value_to_py(py, row.get_unchecked(index)),
+            RowData::Python { values, .. } => values.bind(py).get_item(index),
+        }
+    }
+
+    /// The value of the first field named `name`, if any.
+    fn value_by_name<'py>(
+        &self,
+        py: Python<'py>,
+        name: &str,
+    ) -> PyResult<Option<Bound<'py, PyAny>>> {
+        match self.fields().iter().position(|field| field == name) {
+            Some(index) => self.value(py, index).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// The row with Spark values, for the rest of the client, which converts the values of a
+    /// row made in Python as it converts those of a tuple.
+    pub(crate) fn to_row(&self, py: Python<'_>) -> PyResult<Row> {
+        match &self.data {
+            RowData::Spark(row) => Ok(row.clone()),
+            RowData::Python { fields, values } => {
+                let values = values
+                    .bind(py)
+                    .iter()
+                    .map(|v| crate::session::py_to_value(&v))
+                    .collect::<PyResult<Vec<_>>>()?;
+                Ok(Row::new(fields.clone(), values))
+            }
+        }
+    }
+
+    /// What PySpark raises for an attribute that a row does not have.
+    fn no_attribute(py: Python<'_>, name: &str) -> PyErr {
+        raise_pyspark(
+            py,
+            "PySparkAttributeError",
+            "ATTRIBUTE_NOT_SUPPORTED",
+            &[("attr_name", name)],
+        )
+    }
+
+    /// The values of `other` as a tuple, if it is a row or a tuple, as a tuple operation
+    /// takes them.
+    fn tuple_of<'py>(other: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyTuple>>> {
+        if let Ok(row) = other.cast::<PyRow>() {
+            return row.borrow().values(other.py()).map(Some);
+        }
+        Ok(other.cast::<PyTuple>().ok().cloned())
     }
 }
 
@@ -49,6 +158,18 @@ pub fn value_to_py<'py>(py: Python<'py>, v: &Value) -> PyResult<Bound<'py, PyAny
             datetime_cls
                 .call_method1("fromtimestamp", (seconds,))?
                 .into_any()
+        }
+        Value::DayTimeInterval(micros) => {
+            // Normalize using integer arithmetic: neither floats nor an intermediate
+            // nanosecond duration can preserve the full signed i64 microsecond range.
+            // The resulting +/-107 million days fit timedelta's +/-999999999 days.
+            let days = micros.div_euclid(86_400_000_000);
+            let remainder = micros.rem_euclid(86_400_000_000);
+            py.import("datetime")?.getattr("timedelta")?.call1((
+                days,
+                remainder / 1_000_000,
+                remainder % 1_000_000,
+            ))?
         }
         Value::Decimal { value, .. } => {
             // Convert to Python decimal.Decimal by instantiating the class
@@ -92,155 +213,304 @@ pub fn value_to_py<'py>(py: Python<'py>, v: &Value) -> PyResult<Bound<'py, PyAny
 
 #[pymethods]
 impl PyRow {
-    /// Construct a Row, mirroring `pyspark.sql.Row`:
-    /// `Row(name=value, ...)` yields named fields; `Row(v1, v2, ...)` yields
-    /// positional fields named `_1`, `_2`, ....
+    /// Construct a Row, mirroring `pyspark.sql.Row`: `Row(name=value, ...)` makes a row with
+    /// field names, and `Row(v1, v2, ...)` one of values alone, which can also serve as a row
+    /// class: `Row("name", "age")("Alice", 11)`.
     #[new]
     #[pyo3(signature = (*args, **kwargs))]
     fn __new__(
-        args: &Bound<'_, pyo3::types::PyTuple>,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
+        let kwargs = kwargs.filter(|kw| !kw.is_empty());
         if let Some(kw) = kwargs {
             if !args.is_empty() {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "Row cannot mix positional and keyword arguments",
+                return Err(raise_pyspark(
+                    py,
+                    "PySparkValueError",
+                    "CANNOT_SET_TOGETHER",
+                    &[("arg_list", "args and kwargs")],
                 ));
             }
             let mut fields = Vec::with_capacity(kw.len());
             let mut values = Vec::with_capacity(kw.len());
             for (k, v) in kw.iter() {
                 fields.push(k.extract::<String>()?);
-                values.push(crate::session::py_to_value(&v)?);
+                values.push(v);
             }
-            Ok(PyRow::new(Row::new(fields, values)))
+            Ok(PyRow::of_python(fields, PyTuple::new(py, values)?, true))
         } else {
-            let mut values = Vec::with_capacity(args.len());
-            for v in args.iter() {
-                values.push(crate::session::py_to_value(&v)?);
-            }
-            let fields = (0..values.len()).map(|i| format!("_{}", i + 1)).collect();
-            Ok(PyRow::new(Row::new(fields, values)))
+            let fields = (0..args.len()).map(|i| format!("_{}", i + 1)).collect();
+            Ok(PyRow::of_python(fields, args.clone(), false))
         }
     }
 
     /// Number of fields.
     fn __len__(&self) -> usize {
-        self.row.len()
+        self.fields().len()
     }
 
-    /// `x in row` — membership over the row's values (pyspark `Row` subclasses `tuple`,
-    /// so `value in row` tests the values). Compares with Python equality.
+    fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyIterator>> {
+        self.values(py)?.try_iter()
+    }
+
+    fn __reversed__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        py.import("builtins")?
+            .getattr("reversed")?
+            .call1((self.values(py)?,))
+    }
+
+    /// `x in row` tests the field names of a row that has them, and the values otherwise.
     fn __contains__(&self, py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<bool> {
-        for v in self.row.values() {
-            if value_to_py(py, v)?.eq(item)? {
-                return Ok(true);
-            }
+        if self.named {
+            return PyList::new(py, self.fields())?.contains(item);
         }
-        Ok(false)
+        self.values(py)?.contains(item)
     }
 
-    /// Index (int, supports negative) or field-name (str) access. Raises
-    /// IndexError / KeyError like pyspark so the Row is a proper sequence.
+    /// An index or a slice, as of a tuple, or a field name.
     fn __getitem__<'py>(
         &self,
         py: Python<'py>,
-        key: &Bound<'_, PyAny>,
+        key: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if key.cast::<PySlice>().is_ok() {
+            return self.values(py)?.as_any().get_item(key);
+        }
         if let Ok(mut i) = key.extract::<isize>() {
-            let n = self.row.len() as isize;
+            let n = self.fields().len() as isize;
             if i < 0 {
                 i += n;
             }
             if i < 0 || i >= n {
-                return Err(PyIndexError::new_err("Row index out of range"));
+                return Err(PyIndexError::new_err("tuple index out of range"));
             }
-            return value_to_py(py, self.row.get(i as usize).unwrap());
+            return self.value(py, i as usize);
         }
-        if let Ok(name) = key.extract::<String>() {
-            return match self.row.get_by_name(&name) {
-                Some(v) => value_to_py(py, v),
-                None => Err(PyKeyError::new_err(name)),
-            };
+        // As PySpark looks the key up in `__fields__`, which a row without names lacks.
+        if !self.named {
+            return Err(Self::no_attribute(py, "__fields__"));
         }
-        Err(PyKeyError::new_err("Row key must be int or str"))
+        if let Ok(name) = key.cast::<PyString>() {
+            if let Some(value) = self.value_by_name(py, &name.to_cow()?)? {
+                return Ok(value);
+            }
+        }
+        let error = py.import("pyspark.errors")?.getattr("PySparkValueError")?;
+        Err(PyErr::from_value(error.call1((key,))?))
     }
 
     /// Attribute access by field name (`row.id`).
     fn __getattr__<'py>(&self, py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
-        match self.row.get_by_name(name) {
-            Some(v) => value_to_py(py, v),
-            None => Err(PyAttributeError::new_err(name.to_string())),
+        if !name.starts_with("__") && self.named {
+            if let Some(value) = self.value_by_name(py, name)? {
+                return Ok(value);
+            }
         }
+        Err(Self::no_attribute(py, name))
     }
 
-    /// Field names, in order. A list ATTRIBUTE (pyspark's `Row.__fields__` is a list, not a
-    /// method), so `list(row.__fields__)` and `row.__fields__` work as in the reference.
+    /// Only `__fields__` can be set, which names the fields, as in PySpark.
+    fn __setattr__(
+        &mut self,
+        py: Python<'_>,
+        name: &str,
+        value: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        if name != "__fields__" {
+            return Err(raise_pyspark(
+                py,
+                "PySparkRuntimeError",
+                "READ_ONLY",
+                &[("object", "Row")],
+            ));
+        }
+        let mut names = value
+            .try_iter()?
+            .map(|name| name?.str().map(|name| name.to_string()))
+            .collect::<PyResult<Vec<_>>>()?;
+        // PySpark pairs names with values as `zip` does; fields beyond the names keep theirs.
+        let fields = self.fields();
+        names.truncate(fields.len());
+        names.extend(fields[names.len()..].iter().cloned());
+        match &mut self.data {
+            RowData::Spark(row) => *row = Row::new(names, row.values().to_vec()),
+            RowData::Python { fields, .. } => *fields = names,
+        }
+        self.named = true;
+        Ok(())
+    }
+
+    /// Field names, in order: a list attribute, as PySpark's `Row.__fields__` is. A row
+    /// without names has none.
     #[getter]
-    fn __fields__(&self) -> Vec<String> {
-        self.row.fields().to_vec()
+    fn __fields__(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        if !self.named {
+            return Err(Self::no_attribute(py, "__fields__"));
+        }
+        Ok(self.fields().to_vec())
     }
 
-    /// As a dict of field name -> value (mirrors `Row.asDict`).
+    /// As a dict of field name -> value (mirrors `Row.asDict`), with nested rows, also in
+    /// lists and dicts, as dicts if `recursive`.
     #[pyo3(name = "asDict")]
     #[pyo3(signature = (recursive=false))]
     fn as_dict<'py>(&self, py: Python<'py>, recursive: bool) -> PyResult<Bound<'py, PyDict>> {
-        let _ = recursive; // nested structs are already converted to dicts by value_to_py
+        fn conv<'py>(obj: Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+            let py = obj.py();
+            if let Ok(row) = obj.cast::<PyRow>() {
+                return Ok(row.borrow().as_dict(py, true)?.into_any());
+            }
+            if let Ok(list) = obj.cast::<PyList>() {
+                let items = list.iter().map(conv).collect::<PyResult<Vec<_>>>()?;
+                return Ok(PyList::new(py, items)?.into_any());
+            }
+            if let Ok(dict) = obj.cast::<PyDict>() {
+                let converted = PyDict::new(py);
+                for (k, v) in dict.iter() {
+                    converted.set_item(k, conv(v)?)?;
+                }
+                return Ok(converted.into_any());
+            }
+            Ok(obj)
+        }
+        if !self.named {
+            return Err(raise_pyspark(
+                py,
+                "PySparkTypeError",
+                "CANNOT_CONVERT_TYPE",
+                &[("from_type", "Row"), ("to_type", "dict")],
+            ));
+        }
         let dict = PyDict::new(py);
-        for (name, val) in self.row.fields().iter().zip(self.row.values()) {
-            dict.set_item(name, value_to_py(py, val)?)?;
+        for (name, value) in self.fields().iter().zip(self.values(py)?.iter()) {
+            dict.set_item(name, if recursive { conv(value)? } else { value })?;
         }
         Ok(dict)
     }
 
-    fn __repr__(&self) -> String {
-        format!("{}", self.row)
+    /// A row class, such as `Row("name", "age")`, makes a row of `args` named by its values.
+    #[pyo3(signature = (*args))]
+    fn __call__(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<PyRow> {
+        if args.len() > self.fields().len() {
+            let (expected, actual) = (self.fields().len().to_string(), args.len().to_string());
+            return Err(raise_pyspark(
+                py,
+                "PySparkValueError",
+                "TOO_MANY_VALUES",
+                &[
+                    ("expected", expected.as_str()),
+                    ("item", "fields"),
+                    ("actual", actual.as_str()),
+                ],
+            ));
+        }
+        let fields = self
+            .values(py)?
+            .iter()
+            .take(args.len())
+            .map(|name| name.str().map(|name| name.to_string()))
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(PyRow::of_python(fields, args.clone(), true))
     }
 
-    fn __eq__(&self, other: &PyRow) -> bool {
-        self.row == other.row
+    /// Pickles as PySpark's row does: with `_create_row` from the field names and values, or
+    /// as `Row(*values)` for a row without names.
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
+        let py = slf.py();
+        let row = slf.borrow();
+        let values = row.values(py)?;
+        if row.named {
+            let create_row = py.import("pyspark.sql.types")?.getattr("_create_row")?;
+            let args = (PyList::new(py, row.fields())?, values).into_pyobject(py)?;
+            return (create_row, args).into_pyobject(py);
+        }
+        (slf.get_type(), values).into_pyobject(py)
+    }
+
+    /// `Row(name='Alice', age=11)`, with the `repr()` of each value, or `<Row('a', 'b')>` for
+    /// a row without names, as PySpark prints a row.
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        let values = self.values(py)?;
+        let mut parts = Vec::with_capacity(values.len());
+        if self.named {
+            for (name, value) in self.fields().iter().zip(values.iter()) {
+                parts.push(format!("{}={}", name, value.repr()?));
+            }
+            return Ok(format!("Row({})", parts.join(", ")));
+        }
+        for value in values.iter() {
+            parts.push(value.repr()?.to_string());
+        }
+        Ok(format!("<Row({})>", parts.join(", ")))
+    }
+
+    /// Hashes as the tuple of its values does.
+    fn __hash__(&self, py: Python<'_>) -> PyResult<isize> {
+        self.values(py)?.hash()
+    }
+
+    /// Compares as the tuple of its values does, with another row or a tuple.
+    fn __richcmp__<'py>(
+        &self,
+        other: &Bound<'py, PyAny>,
+        op: CompareOp,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let py = other.py();
+        match Self::tuple_of(other)? {
+            Some(other) => self.values(py)?.rich_compare(other, op),
+            None => Ok(py.NotImplemented().into_bound(py)),
+        }
+    }
+
+    /// Concatenates as a tuple does, into a tuple.
+    fn __add__<'py>(&self, other: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        let py = other.py();
+        match Self::tuple_of(other)? {
+            Some(other) => self.values(py)?.as_any().add(other),
+            None => Ok(py.NotImplemented().into_bound(py)),
+        }
+    }
+
+    fn __radd__<'py>(&self, other: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        let py = other.py();
+        match Self::tuple_of(other)? {
+            Some(other) => other.as_any().add(self.values(py)?),
+            None => Ok(py.NotImplemented().into_bound(py)),
+        }
+    }
+
+    /// Repeats as a tuple does, into a tuple.
+    fn __mul__<'py>(&self, times: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        self.values(times.py())?.as_any().mul(times)
+    }
+
+    fn __rmul__<'py>(&self, times: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        self.__mul__(times)
     }
 
     /// Number of occurrences of `value` among the row's values (tuple.count).
     fn count(&self, py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<usize> {
-        let mut n = 0;
-        for v in self.row.values() {
-            if value_to_py(py, v)?.eq(value)? {
-                n += 1;
-            }
-        }
-        Ok(n)
+        self.values(py)?
+            .as_any()
+            .call_method1("count", (value,))?
+            .extract()
     }
 
-    /// Index of the first occurrence of `value` (tuple.index); raises ValueError if
-    /// not found. `start`/`stop` bound the search, with Python's negative-index rules.
-    #[pyo3(signature = (value, start=0, stop=None))]
+    /// Index of the first occurrence of `value` among the row's values (tuple.index).
+    #[pyo3(signature = (value, *args))]
     fn index(
         &self,
         py: Python<'_>,
         value: &Bound<'_, PyAny>,
-        start: isize,
-        stop: Option<isize>,
+        args: &Bound<'_, PyTuple>,
     ) -> PyResult<usize> {
-        let len = self.row.len() as isize;
-        let norm = |i: isize| -> isize {
-            if i < 0 {
-                (len + i).max(0)
-            } else {
-                i.min(len)
-            }
-        };
-        let lo = norm(start);
-        let hi = stop.map(norm).unwrap_or(len);
-        let mut i = lo;
-        while i < hi {
-            if value_to_py(py, self.row.get(i as usize).unwrap())?.eq(value)? {
-                return Ok(i as usize);
-            }
-            i += 1;
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "tuple.index(x): x not in tuple",
-        ))
+        let mut call = vec![value.clone()];
+        call.extend(args.iter());
+        self.values(py)?
+            .as_any()
+            .call_method1("index", PyTuple::new(py, call)?)?
+            .extract()
     }
 }

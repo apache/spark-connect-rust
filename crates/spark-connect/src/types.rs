@@ -50,6 +50,13 @@ pub enum DataType {
     TimestampNtz,
     /// `pyspark.sql.types.TimeType`
     Time { precision: i32 },
+    /// Spark's `TimestampNTZNanosType(precision)` (precision 7..=9): a timestamp
+    /// without time zone with nanosecond-capable fractional seconds. PySpark 4.3.0
+    /// has no Python class for it; this mirrors the server/proto type.
+    TimestampNtzNanos { precision: i32 },
+    /// Spark's `TimestampLTZNanosType(precision)` (precision 7..=9): a timestamp
+    /// with local time zone with nanosecond-capable fractional seconds.
+    TimestampLtzNanos { precision: i32 },
     /// `pyspark.sql.types.CalendarIntervalType`
     CalendarInterval,
     /// `pyspark.sql.types.YearMonthIntervalType`
@@ -86,6 +93,58 @@ pub enum DataType {
     /// `pyspark.sql.connect.types.UnparsedDataType` - a DDL type string left for
     /// the server to parse (round-trips through the `unparsed` proto).
     Unparsed { data_type_string: String },
+}
+
+/// Field-index constants for [`DataType::YearMonthInterval`], mirroring
+/// `pyspark.sql.types.YearMonthIntervalType`.
+pub struct YearMonthIntervalType;
+impl YearMonthIntervalType {
+    pub const YEAR: i32 = 0;
+    pub const MONTH: i32 = 1;
+}
+
+/// Field-index constants for [`DataType::DayTimeInterval`], mirroring
+/// `pyspark.sql.types.DayTimeIntervalType`.
+pub struct DayTimeIntervalType;
+impl DayTimeIntervalType {
+    pub const DAY: i32 = 0;
+    pub const HOUR: i32 = 1;
+    pub const MINUTE: i32 = 2;
+    pub const SECOND: i32 = 3;
+}
+
+/// Constants for [`DataType::Date`], mirroring `pyspark.sql.types.DateType`.
+pub struct DateType;
+impl DateType {
+    /// Number of days from 0001-01-01 to 1970-01-01.
+    pub const EPOCH_ORDINAL: i32 = 719163;
+}
+
+/// CRS/SRID constants shared by the spatial types, mirroring
+/// `pyspark.sql.types.SpatialType`.
+pub struct SpatialType;
+impl SpatialType {
+    pub const MIXED_CRS: &'static str = "SRID:ANY";
+    pub const MIXED_SRID: i32 = -1;
+}
+
+/// Constants for [`DataType::Geometry`], mirroring `pyspark.sql.types.GeometryType`.
+pub struct GeometryType;
+impl GeometryType {
+    pub const DEFAULT_CRS: &'static str = "OGC:CRS84";
+    pub const DEFAULT_SRID: i32 = 4326;
+    pub const MIXED_CRS: &'static str = "SRID:ANY";
+    pub const MIXED_SRID: i32 = -1;
+}
+
+/// Constants for [`DataType::Geography`], mirroring `pyspark.sql.types.GeographyType`.
+pub struct GeographyType;
+impl GeographyType {
+    pub const DEFAULT_ALG: &'static str = "SPHERICAL";
+    pub const DEFAULT_CRS: &'static str = "OGC:CRS84";
+    pub const DEFAULT_SRID: i32 = 4326;
+    pub const MIXED_CRS: &'static str = "SRID:ANY";
+    pub const MIXED_SRID: i32 = -1;
 }
 
 /// A field in a StructType, mirroring `pyspark.sql.types.StructField`.
@@ -139,6 +198,8 @@ impl DataType {
             DataType::Date
             | DataType::Timestamp
             | DataType::TimestampNtz
+            | DataType::TimestampNtzNanos { .. }
+            | DataType::TimestampLtzNanos { .. }
             | DataType::Time { .. }
             | DataType::DayTimeInterval { .. }
             | DataType::YearMonthInterval { .. }
@@ -177,6 +238,8 @@ impl DataType {
             DataType::Timestamp => "timestamp".to_string(),
             DataType::TimestampNtz => "timestamp_ntz".to_string(),
             DataType::Time { .. } => "time".to_string(),
+            DataType::TimestampNtzNanos { precision } => format!("timestamp_ntz({})", precision),
+            DataType::TimestampLtzNanos { precision } => format!("timestamp_ltz({})", precision),
             DataType::CalendarInterval => "interval".to_string(),
             DataType::YearMonthInterval { .. } => "interval".to_string(),
             DataType::DayTimeInterval { .. } => "interval".to_string(),
@@ -228,6 +291,8 @@ impl DataType {
             DataType::Timestamp => "timestamp".to_string(),
             DataType::TimestampNtz => "timestamp_ntz".to_string(),
             DataType::Time { precision } => format!("time({})", precision),
+            DataType::TimestampNtzNanos { precision } => format!("timestamp_ntz({})", precision),
+            DataType::TimestampLtzNanos { precision } => format!("timestamp_ltz({})", precision),
             DataType::CalendarInterval => "interval".to_string(),
             DataType::YearMonthInterval {
                 start_field,
@@ -318,6 +383,12 @@ impl DataType {
             DataType::Time { precision } => {
                 serde_json::json!(format!("time({})", precision))
             }
+            DataType::TimestampNtzNanos { precision } => {
+                serde_json::json!(format!("timestamp_ntz({})", precision))
+            }
+            DataType::TimestampLtzNanos { precision } => {
+                serde_json::json!(format!("timestamp_ltz({})", precision))
+            }
             DataType::CalendarInterval => serde_json::json!("interval"),
             DataType::YearMonthInterval {
                 start_field,
@@ -363,19 +434,13 @@ impl DataType {
             }
             DataType::Variant => serde_json::json!("variant"),
             DataType::Geometry { srid } => {
-                if *srid == -1 {
-                    serde_json::json!("geometry(SRID:ANY)")
-                } else {
-                    serde_json::json!(format!("geometry(OGC:CRS84)"))
-                }
+                serde_json::json!(format!("geometry({})", spatial_crs(*srid)))
             }
-            DataType::Geography { srid } => {
-                if *srid == -1 {
-                    serde_json::json!("geography(SRID:ANY, SPHERICAL)")
-                } else {
-                    serde_json::json!(format!("geography(OGC:CRS84, SPHERICAL)"))
-                }
-            }
+            DataType::Geography { srid } => serde_json::json!(format!(
+                "geography({}, {})",
+                spatial_crs(*srid),
+                GeographyType::DEFAULT_ALG
+            )),
             DataType::Udt {
                 type_str: _,
                 jvm_class,
@@ -513,6 +578,22 @@ impl DataType {
                 let mut time_type = spark_connect_proto::data_type::Time::default();
                 time_type.precision = Some(*precision);
                 proto.kind = Some(spark_connect_proto::data_type::Kind::Time(time_type));
+            }
+            DataType::TimestampNtzNanos { precision } => {
+                proto.kind = Some(spark_connect_proto::data_type::Kind::TimestampNtzNanos(
+                    spark_connect_proto::data_type::TimestampNtzNanos {
+                        precision: Some(*precision),
+                        ..Default::default()
+                    },
+                ));
+            }
+            DataType::TimestampLtzNanos { precision } => {
+                proto.kind = Some(spark_connect_proto::data_type::Kind::TimestampLtzNanos(
+                    spark_connect_proto::data_type::TimestampLtzNanos {
+                        precision: Some(*precision),
+                        ..Default::default()
+                    },
+                ));
             }
             DataType::CalendarInterval => {
                 proto.kind = Some(spark_connect_proto::data_type::Kind::CalendarInterval(
@@ -750,12 +831,16 @@ impl DataType {
             Some(spark_connect_proto::data_type::Kind::Unparsed(u)) => Ok(DataType::Unparsed {
                 data_type_string: u.data_type_string.clone(),
             }),
+            // Precision defaults to 9 when omitted (types.proto).
             Some(spark_connect_proto::data_type::Kind::TimestampNtzNanos(tn)) => {
-                let precision = tn.precision.unwrap_or(9);
-                Ok(DataType::Time { precision })
+                Ok(DataType::TimestampNtzNanos {
+                    precision: tn.precision.unwrap_or(9),
+                })
             }
-            Some(spark_connect_proto::data_type::Kind::TimestampLtzNanos(_)) => {
-                Ok(DataType::Timestamp)
+            Some(spark_connect_proto::data_type::Kind::TimestampLtzNanos(tl)) => {
+                Ok(DataType::TimestampLtzNanos {
+                    precision: tl.precision.unwrap_or(9),
+                })
             }
             None => Err(SparkError::connect_msg("DataType kind not set")),
         }
@@ -1117,6 +1202,9 @@ fn parse_json_type_string(s: &str) -> Result<DataType> {
         s if s.starts_with("char(") => parse_char(s),
         s if s.starts_with("varchar(") => parse_varchar(s),
         s if s.starts_with("time(") => parse_time(s),
+        s if s.starts_with("timestamp_ntz(") || s.starts_with("timestamp_ltz(") => {
+            parse_timestamp_nanos(s)
+        }
         s if s.starts_with("interval") => parse_interval_string(s),
         s if s.starts_with("string collate") => {
             let collation = s.trim_start_matches("string collate").trim().to_string();
@@ -1333,6 +1421,36 @@ fn parse_time(s: &str) -> Result<DataType> {
     Ok(DataType::Time { precision })
 }
 
+/// Parses `timestamp_ntz(p)` / `timestamp_ltz(p)` (p in 7..=9), mirroring the
+/// `TIMESTAMP_{NTZ,LTZ}_NANOS_TYPE` patterns in Scala `DataType.nameToType`.
+fn parse_timestamp_nanos(s: &str) -> Result<DataType> {
+    let (ntz, rest) = if let Some(r) = s.strip_prefix("timestamp_ntz(") {
+        (true, r)
+    } else if let Some(r) = s.strip_prefix("timestamp_ltz(") {
+        (false, r)
+    } else {
+        return Err(SparkError::value(
+            "INVALID_DATATYPE_FORMAT",
+            &[("detail", "Invalid timestamp format")],
+        ));
+    };
+    let precision = rest
+        .strip_suffix(")")
+        .and_then(|p| p.trim().parse::<i32>().ok())
+        .filter(|p| (7..=9).contains(p))
+        .ok_or_else(|| {
+            SparkError::value(
+                "INVALID_DATATYPE_FORMAT",
+                &[("detail", "Invalid timestamp precision (expected 7..9)")],
+            )
+        })?;
+    Ok(if ntz {
+        DataType::TimestampNtzNanos { precision }
+    } else {
+        DataType::TimestampLtzNanos { precision }
+    })
+}
+
 fn parse_interval_string(s: &str) -> Result<DataType> {
     if s == "interval" {
         return Ok(DataType::CalendarInterval);
@@ -1404,16 +1522,12 @@ fn parse_geometry(s: &str) -> Result<DataType> {
             )
         })?;
 
-    let srid = if inner.to_lowercase() == "any" {
-        -1
-    } else {
-        inner.parse::<i32>().map_err(|_| {
-            SparkError::value(
-                "INVALID_DATATYPE_FORMAT",
-                &[("detail", "Invalid geometry srid")],
-            )
-        })?
-    };
+    let srid = spatial_srid(inner).ok_or_else(|| {
+        SparkError::value(
+            "INVALID_DATATYPE_FORMAT",
+            &[("detail", "Invalid geometry srid")],
+        )
+    })?;
 
     Ok(DataType::Geometry { srid })
 }
@@ -1429,23 +1543,49 @@ fn parse_geography(s: &str) -> Result<DataType> {
             )
         })?;
 
-    let srid = if inner.to_lowercase() == "any" {
-        -1
-    } else {
-        inner
-            .split(',')
-            .next()
-            .unwrap_or("4326")
-            .parse::<i32>()
-            .map_err(|_| {
-                SparkError::value(
-                    "INVALID_DATATYPE_FORMAT",
-                    &[("detail", "Invalid geography srid")],
-                )
-            })?
-    };
+    // The JSON form also names the algorithm, as in `OGC:CRS84, SPHERICAL`.
+    let crs = inner.split(',').next().unwrap_or_default();
+    let srid = spatial_srid(crs).ok_or_else(|| {
+        SparkError::value(
+            "INVALID_DATATYPE_FORMAT",
+            &[("detail", "Invalid geography srid")],
+        )
+    })?;
 
     Ok(DataType::Geography { srid })
+}
+
+/// The coordinate reference system that a spatial type's SRID is named by in its JSON, as
+/// PySpark's `geo_utils` names the SRIDs that it supports: `SRID:0`, `EPSG:3857` and
+/// `OGC:CRS84` for 4326, and `SRID:ANY` for a mixed SRID. Another SRID, which PySpark does not
+/// accept, is named `SRID:<srid>`.
+fn spatial_crs(srid: i32) -> String {
+    match srid {
+        SpatialType::MIXED_SRID => SpatialType::MIXED_CRS.to_string(),
+        3857 => "EPSG:3857".to_string(),
+        GeometryType::DEFAULT_SRID => GeometryType::DEFAULT_CRS.to_string(),
+        other => format!("SRID:{other}"),
+    }
+}
+
+/// The SRID of a spatial type's CRS, as [`spatial_crs`] names it, or of the SRID itself, as
+/// in a DDL string such as `geometry(4326)`, or `any`.
+fn spatial_srid(crs: &str) -> Option<i32> {
+    let crs = crs.trim();
+    if crs.eq_ignore_ascii_case("any") || crs.eq_ignore_ascii_case(SpatialType::MIXED_CRS) {
+        return Some(SpatialType::MIXED_SRID);
+    }
+    if crs.eq_ignore_ascii_case(GeometryType::DEFAULT_CRS) {
+        return Some(GeometryType::DEFAULT_SRID);
+    }
+    if crs.eq_ignore_ascii_case("EPSG:3857") {
+        return Some(3857);
+    }
+    let number = match crs.get(..5) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("SRID:") => &crs[5..],
+        _ => crs,
+    };
+    number.parse().ok()
 }
 
 /// Main DDL parser: parses DDL strings into DataType.
@@ -1605,6 +1745,9 @@ fn parse_single_type(input: &str) -> Result<DataType> {
                 parse_varchar(&trimmed)
             } else if trimmed.starts_with("time(") {
                 parse_time(&trimmed)
+            } else if trimmed.starts_with("timestamp_ntz(") || trimmed.starts_with("timestamp_ltz(")
+            {
+                parse_timestamp_nanos(&trimmed)
             } else if trimmed.starts_with("interval") {
                 parse_interval_string(&trimmed)
             } else if trimmed.starts_with("string collate") {

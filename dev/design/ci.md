@@ -64,7 +64,7 @@ The job is matrix-tested across Python versions (3.9, 3.11) to ensure broad comp
 ```bash
 maturin build --release --out dist
 ```
-This produces a wheel (`pyspark_client_rust-4.2.0-*.whl`) containing:
+This produces a wheel (`pyspark_client_rust-4.3.0-*.whl`) containing:
 - The compiled PyO3 extension module (`_pyspark.so` / `.pyd`)
 - The pure-Python drop-in package (`python/pyspark/...`)
 
@@ -74,13 +74,14 @@ pip install dist/pyspark_client_rust-*.whl
 pip install pytest pandas pyarrow numpy grpcio cloudpickle
 ```
 
-#### 4. Download & start Spark Connect server (4.2.0)
-- Downloads official Spark 4.2.0 binary distribution
+#### 4. Download & start Spark Connect server (4.3.0)
+- Downloads the official Spark 4.3.0 binary distribution with the Connect server bundled
+  (`spark-4.3.0-bin-hadoop3-connect.tgz`)
 - Starts the Connect server on `sc://localhost:15002`
 - Waits for readiness (nc connectivity check, up to 60 seconds)
 
 #### 5. Clone Apache Spark test suite
-- Clones Apache Spark at tag `v4.2.0`
+- Clones Apache Spark at tag `v4.3.0`
 - Test files are discovered from `python/pyspark/**/tests/connect/**/test_*.py`
 
 #### 6. Run Connect test modules
@@ -148,10 +149,10 @@ To run the Connect test suite locally:
    pip install dist/pyspark_client_rust-*.whl
    ```
 
-2. **Start a Spark Connect server** (requires Java + Spark 4.2.0):
+2. **Start a Spark Connect server** (requires Java + Spark 4.3.0):
    ```bash
    # In one terminal:
-   export SPARK_HOME=~/spark-dist/spark-4.2.0-bin-hadoop3
+   export SPARK_HOME=~/spark-dist/spark-4.3.0-bin-hadoop3-connect
    ${SPARK_HOME}/sbin/start-connect-server.sh
    ```
 

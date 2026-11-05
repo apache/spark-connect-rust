@@ -17,6 +17,8 @@ try:
         AnyTimeType, AnsiIntervalType, SpatialType,
         GeometryType, GeographyType,
         VariantVal, Geometry, Geography,
+        # Spark's nanosecond timestamp types (no PySpark 4.3.0 class; not in __all__).
+        TimestampNTZNanosType, TimestampLTZNanosType,
     )
     # Row lives in the Rust core; upstream code imports it from pyspark.sql.types too.
     from pyspark._pyspark import Row
@@ -73,7 +75,8 @@ except ImportError:  # pragma: no cover - defensive fallback when the extension 
 
     class DateType(DataType):
         """Date data type."""
-        pass
+
+        EPOCH_ORDINAL = 719163
 
     class TimestampType(DataType):
         """Timestamp data type."""
@@ -264,6 +267,11 @@ __all__ = [
     "YearMonthIntervalType",
     "DayTimeIntervalType",
     "VariantType",
+    "VariantVal",
+    "GeometryType",
+    "GeographyType",
+    "Geometry",
+    "Geography",
     "_drop_metadata",
     "_parse_datatype_json_string",
     "_parse_datatype_json_value",
@@ -307,6 +315,10 @@ def _parse_datatype_json_value(v):
         m = _re.match(r"time\((\d+)\)$", v)
         if m:
             return TimeType(int(m.group(1)))
+        m = _re.match(r"timestamp_(ntz|ltz)\(\s*(\d+)\s*\)$", v)
+        if m:
+            cls = TimestampNTZNanosType if m.group(1) == "ntz" else TimestampLTZNanosType
+            return cls(int(m.group(2)))
         if v == "calendarinterval":
             return CalendarIntervalType()
         _ym = {"year": 0, "month": 1}
@@ -365,13 +377,7 @@ def _drop_metadata(d):
     return d
 
 def _create_row(fields, values):
-    """Build a Row with the given field names (mirrors pyspark.sql.types._create_row).
-
-    Upstream builds ``Row(*values)`` then sets ``__fields__``; our Rust ``Row`` carries its
-    field names from construction instead, so build it from the (name, value) pairs.
-    """
-    try:
-        names = list(fields.__fields__)  # `fields` may itself be a Row
-    except AttributeError:
-        names = list(fields)
-    return Row(**{name: value for name, value in zip(names, values)})
+    """A Row of ``values`` named by ``fields``, as in PySpark, whose pickled rows call it."""
+    row = Row(*values)
+    row.__fields__ = fields
+    return row

@@ -2,7 +2,7 @@
 //!
 //! Provides the entry point for DataFrame operations and SQL queries.
 
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use spark_connect_core::channel::ChannelBuilder;
@@ -12,7 +12,7 @@ use spark_connect_core::runtime::block_on;
 use spark_connect_proto as proto;
 
 use crate::dataframe::DataFrame;
-use crate::plan::LogicalPlan;
+use crate::plan::{LogicalPlan, PlanIds};
 use crate::profiler::ProfilerCollector;
 use crate::row::{Row, Value};
 use crate::types::DataType;
@@ -31,6 +31,11 @@ pub struct ExecutionInfo {
     /// Observed metrics collected during execution (also where `observe(...)`
     /// and UDF-profiler results surface).
     pub observed_metrics: Vec<proto::execute_plan_response::ObservedMetrics>,
+    /// The ExecutePlan operation id: assigned by the client before the request is sent
+    /// (the request's id, or a new UUID) and echoed by the server in
+    /// `ExecutePlanResponse.operation_id`. Mirrors `ExecutionInfo.operation_id` (new in
+    /// pyspark 4.3.0).
+    pub operation_id: Option<String>,
 }
 
 /// A Spark Connect session for interacting with a remote Spark cluster.
@@ -39,8 +44,8 @@ pub struct ExecutionInfo {
 pub struct SparkSession {
     /// Shared gRPC client
     client: Arc<SparkConnectClient>,
-    /// Plan ID counter for unique IDs in nested plans
-    plan_id_counter: Arc<AtomicI64>,
+    /// Stable plan IDs for the plan nodes this session serializes.
+    plan_ids: Arc<PlanIds>,
     /// Operation tags attached to every ExecutePlan request from this session.
     /// Mirrors `pyspark.sql.connect.session.SparkSession`'s addTag/removeTag/getTags.
     tags: Arc<Mutex<Vec<String>>>,
@@ -64,7 +69,7 @@ impl SparkSession {
     fn new(client: SparkConnectClient) -> Self {
         SparkSession {
             client: Arc::new(client),
-            plan_id_counter: Arc::new(AtomicI64::new(1)),
+            plan_ids: Arc::new(PlanIds::new()),
             tags: Arc::new(Mutex::new(Vec::new())),
             last_execution: Arc::new(Mutex::new(None)),
             progress_handlers: Arc::new(Mutex::new(Vec::new())),
@@ -192,11 +197,11 @@ impl SparkSession {
 
     /// Start a brand-new session over the same connection. Mirrors
     /// `SparkSession.newSession` — a fresh server-side session (new session id),
-    /// with its own tags and plan-id counter.
+    /// with its own tags and plan IDs.
     pub fn new_session(&self) -> SparkSession {
         SparkSession {
             client: Arc::new(self.client.with_new_session_id()),
-            plan_id_counter: Arc::new(AtomicI64::new(1)),
+            plan_ids: Arc::new(PlanIds::new()),
             tags: Arc::new(Mutex::new(Vec::new())),
             last_execution: Arc::new(Mutex::new(None)),
             progress_handlers: Arc::new(Mutex::new(Vec::new())),
@@ -212,9 +217,9 @@ impl SparkSession {
         self.new_session()
     }
 
-    /// Get the next plan ID (atomic post-increment).
-    pub(crate) fn next_plan_id(&self) -> i64 {
-        self.plan_id_counter.fetch_add(1, Ordering::SeqCst)
+    /// The stable plan IDs of the plan nodes this session serializes.
+    pub(crate) fn plan_ids(&self) -> &PlanIds {
+        &self.plan_ids
     }
 
     /// Get the underlying client.
@@ -251,9 +256,12 @@ impl SparkSession {
         Ok(DataFrame::new(self.clone(), plan))
     }
 
-    /// Execute a SQL query and return a DataFrame.
+    /// Execute a SQL statement and return a DataFrame.
     ///
-    /// Mirrors `pyspark.sql.SparkSession.sql(sqlQuery)`.
+    /// Mirrors `pyspark.sql.SparkSession.sql(sqlQuery)`: the statement is sent at once, so a
+    /// command such as `CREATE VIEW` or `SET` takes effect here and a statement that does not
+    /// parse or resolve fails here, while a query still runs only when an action is taken on
+    /// the DataFrame.
     pub fn sql(&self, query: &str) -> Result<DataFrame> {
         self.sql_with_args(query, Vec::new(), std::collections::HashMap::new())
     }
@@ -266,12 +274,41 @@ impl SparkSession {
         pos_args: Vec<crate::expression::Expression>,
         named_args: std::collections::HashMap<String, crate::expression::Expression>,
     ) -> Result<DataFrame> {
-        let plan = LogicalPlan::Sql {
+        let plan = Arc::new(LogicalPlan::Sql {
             query: query.to_string(),
             pos_args,
             named_args,
+        });
+        // As pyspark, run the statement as a command now. The server executes a command and
+        // returns a relation of its result; for a query it returns the query's relation, which
+        // then runs at an action.
+        let command = proto::SqlCommand {
+            input: Some(crate::dataframe::build_input_relation(&plan, self)),
+            ..Default::default()
         };
-        Ok(DataFrame::new(self.clone(), plan))
+        let responses = crate::dataframe::execute_command_collect(
+            self,
+            proto::command::CommandType::SqlCommand(command),
+        )?;
+        let returned = responses
+            .into_iter()
+            .find_map(|response| match response.response_type {
+                Some(proto::execute_plan_response::ResponseType::SqlCommandResult(result)) => {
+                    result.relation
+                }
+                _ => None,
+            });
+        Ok(DataFrame::new(
+            self.clone(),
+            match returned {
+                Some(relation) => LogicalPlan::CachedRelation {
+                    relation: Box::new(relation),
+                },
+                // A server that returns no result relation runs the query lazily, as pyspark
+                // then does.
+                None => Arc::unwrap_or_clone(plan),
+            },
+        ))
     }
 
     /// Create a DataFrame from a collection of Rows and a schema.
@@ -286,7 +323,49 @@ impl SparkSession {
         } else {
             Some(rows_to_arrow_ipc(&rows, &schema)?)
         };
-        let plan = LogicalPlan::LocalRelation { schema, data };
+        let plan = LogicalPlan::LocalRelation {
+            schema: Some(schema),
+            data,
+        };
+        Ok(DataFrame::new(self.clone(), plan))
+    }
+
+    /// Create a local DataFrame from Arrow batches without materializing rows.
+    ///
+    /// `schema` optionally supplies the Spark schema applied by the server. With
+    /// `None`, Spark infers it from Arrow. All batches must share the same Arrow
+    /// schema; IPC serialization is still required for transport.
+    /// Non-empty inputs read the server's local-relation configuration. Large inputs
+    /// are uploaded as cache artifacts and referenced by hash in the resulting plan.
+    pub fn create_dataframe_from_arrow(
+        &self,
+        batches: Vec<arrow::record_batch::RecordBatch>,
+        schema: impl Into<Option<DataType>>,
+    ) -> Result<DataFrame> {
+        let plan = crate::arrow_input::create_relation(&self.client, batches, schema.into(), None)?;
+        Ok(DataFrame::new(self.clone(), plan))
+    }
+
+    /// Internal settings handoff for the Python Arrow importer; not a stable API.
+    #[doc(hidden)]
+    pub fn arrow_input_options(&self) -> Result<crate::ArrowInputOptions> {
+        crate::ArrowInputOptions::from_client(&self.client)
+    }
+
+    /// Internal Arrow import entry point using the normalization settings snapshot.
+    #[doc(hidden)]
+    pub fn create_dataframe_from_arrow_with_options(
+        &self,
+        batches: Vec<arrow::record_batch::RecordBatch>,
+        schema: impl Into<Option<DataType>>,
+        options: &crate::ArrowInputOptions,
+    ) -> Result<DataFrame> {
+        let plan = crate::arrow_input::create_relation(
+            &self.client,
+            batches,
+            schema.into(),
+            Some(options),
+        )?;
         Ok(DataFrame::new(self.clone(), plan))
     }
 
@@ -403,7 +482,7 @@ impl SparkSession {
     /// `SparkSession.emptyDataFrame`.
     pub fn empty_data_frame(&self) -> Result<DataFrame> {
         let plan = LogicalPlan::LocalRelation {
-            schema: DataType::Struct { fields: vec![] },
+            schema: Some(DataType::Struct { fields: vec![] }),
             data: None,
         };
         Ok(DataFrame::new(self.clone(), plan))
@@ -530,10 +609,14 @@ impl SparkSession {
     }
 
     /// Stop this Spark session.
+    ///
+    /// Idempotent, mirroring pyspark: the session is marked stopped even if releasing it
+    /// on the server fails, and stopping an already stopped session is a no-op.
     pub fn stop(&self) -> Result<()> {
-        block_on(self.client.release_session())?;
-        self.stopped.store(true, Ordering::SeqCst);
-        Ok(())
+        if self.stopped.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+        block_on(self.client.release_session())
     }
 
     /// Whether `stop()` has been called on this session. Mirrors
@@ -547,7 +630,7 @@ impl Clone for SparkSession {
     fn clone(&self) -> Self {
         SparkSession {
             client: Arc::clone(&self.client),
-            plan_id_counter: Arc::clone(&self.plan_id_counter),
+            plan_ids: Arc::clone(&self.plan_ids),
             tags: Arc::clone(&self.tags),
             last_execution: Arc::clone(&self.last_execution),
             progress_handlers: Arc::clone(&self.progress_handlers),
@@ -596,9 +679,9 @@ impl Default for SparkSessionBuilder {
     }
 }
 
-/// Construct the shared local-input width error for Rust and Python callers.
-#[doc(hidden)]
-pub fn row_width_mismatch(row_index: usize, actual: usize, expected: usize) -> SparkError {
+/// The error for a row of `create_dataframe` whose width differs from the schema's. The
+/// Python client checks widths itself, raising pyspark's `AXIS_LENGTH_MISMATCH`.
+fn row_width_mismatch(row_index: usize, actual: usize, expected: usize) -> SparkError {
     SparkError::value_msg(format!(
         "Row {row_index} has {actual} values, but the schema has {expected} fields"
     ))
@@ -700,6 +783,10 @@ fn datatype_to_arrow(dt: &DataType) -> Result<arrow::datatypes::DataType> {
         // TIMESTAMP (LTZ) and TIMESTAMP_NTZ are both micros; NTZ carries no zone.
         DataType::Timestamp => A::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
         DataType::TimestampNtz => A::Timestamp(TimeUnit::Microsecond, None),
+        DataType::TimestampLtzNanos { .. } => {
+            A::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()))
+        }
+        DataType::TimestampNtzNanos { .. } => A::Timestamp(TimeUnit::Nanosecond, None),
         DataType::Time { .. } => A::Time64(TimeUnit::Microsecond),
         DataType::Decimal { precision, scale } => A::Decimal128(*precision as u8, *scale as i8),
         DataType::Array {
@@ -851,6 +938,27 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
                 .collect();
             let arr = TimestampMicrosecondArray::from(vals?);
             let arr = if matches!(dt, DataType::TimestampNtz) {
+                arr
+            } else {
+                arr.with_timezone("UTC")
+            };
+            Ok(Arc::new(arr))
+        }
+        // Row values are microseconds (collect truncates nanosecond columns to micros), so
+        // scale them up to the nanosecond unit `to_arrow_type` declares for these types.
+        DataType::TimestampNtzNanos { .. } | DataType::TimestampLtzNanos { .. } => {
+            let vals: Result<Vec<Option<i64>>> = values
+                .iter()
+                .map(|v| match v {
+                    Value::Null => Ok(None),
+                    Value::Timestamp(t) => t.checked_mul(1_000).map(Some).ok_or_else(|| {
+                        SparkError::connect_msg("Timestamp out of range for nanosecond precision")
+                    }),
+                    _ => Err(SparkError::connect_msg("Type mismatch in row data")),
+                })
+                .collect();
+            let arr = TimestampNanosecondArray::from(vals?);
+            let arr = if matches!(dt, DataType::TimestampNtzNanos { .. }) {
                 arr
             } else {
                 arr.with_timezone("UTC")
@@ -1225,6 +1333,71 @@ mod tests {
     }
 
     #[test]
+    fn arrow_local_relation_preserves_batches_and_rejects_schema_mismatch() {
+        use arrow::array::Array;
+        use arrow::datatypes::{DataType as ArrowType, Field, Schema};
+        let arrow_schema = Arc::new(Schema::new(vec![Field::new("x", ArrowType::Int32, true)]));
+        let batch = RecordBatch::try_new(
+            arrow_schema,
+            vec![Arc::new(Int32Array::from(vec![Some(1), None]))],
+        )
+        .unwrap();
+        let schema = DataType::Struct {
+            fields: vec![struct_field("x", DataType::Integer)],
+        };
+        let spark = session();
+        let plan = crate::arrow_input::inline_relation(
+            &[batch.clone(), batch.clone()],
+            Some(schema.clone()),
+        )
+        .unwrap();
+        let LogicalPlan::LocalRelation {
+            data: Some(data), ..
+        } = &plan
+        else {
+            panic!("expected Arrow local relation")
+        };
+        let batches = StreamReader::try_new(Cursor::new(data), None)
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0], batch);
+        assert!(batches[1].column(0).is_null(1));
+        let other = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("y", ArrowType::Int32, true)])),
+            batch.columns().to_vec(),
+        )
+        .unwrap();
+        assert!(spark
+            .create_dataframe_from_arrow(vec![batch, other], schema.clone())
+            .is_err());
+        assert!(matches!(
+            spark
+                .create_dataframe_from_arrow(vec![], schema)
+                .unwrap()
+                .plan(),
+            LogicalPlan::LocalRelation { data: None, .. }
+        ));
+    }
+
+    #[test]
+    fn stop_is_idempotent_and_marks_stopped() {
+        // Port 1: nothing listens, so the ReleaseSession RPC fails fast. The session is
+        // still marked stopped (pyspark's stop() is best-effort) and a second stop() is a
+        // no-op that does not retry the release.
+        let spark = SparkSession::builder()
+            .remote("sc://localhost:1")
+            .get_or_create()
+            .expect("failed to build session");
+        let other = spark.clone();
+        let _ = spark.stop();
+        assert!(spark.is_stopped());
+        assert!(other.is_stopped(), "stopped flag is shared across clones");
+        assert!(spark.stop().is_ok());
+    }
+
+    #[test]
     fn session_is_not_stopped_initially() {
         let spark = session();
         assert!(!spark.is_stopped());
@@ -1381,6 +1554,85 @@ mod tests {
             BinaryArray,
             vec![Some(&[0_u8, 255, 1][..]), None, Some(&[][..])]
         );
+    }
+
+    #[test]
+    fn input_ipc_scales_nanos_timestamps_and_keeps_zone() {
+        use arrow::array::{ListArray, TimestampNanosecondArray};
+        use arrow::datatypes::{DataType as A, TimeUnit};
+        let ntz = DataType::TimestampNtzNanos { precision: 9 };
+        let ltz = DataType::TimestampLtzNanos { precision: 7 };
+        let array = DataType::Array {
+            element_type: Box::new(ltz.clone()),
+            contains_null: true,
+        };
+        let schema = schema(vec![ntz, ltz, array]);
+        let rows = vec![
+            row(vec![
+                Value::Timestamp(1_700_000_000_123_456),
+                Value::Timestamp(-1),
+                Value::List(vec![Value::Timestamp(2), Value::Null]),
+            ]),
+            row(vec![Value::Null, Value::Null, Value::List(vec![])]),
+        ];
+        let batch = read_batch(&rows, &schema);
+        let column = |i: usize| {
+            batch
+                .column(i)
+                .as_any()
+                .downcast_ref::<TimestampNanosecondArray>()
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(
+            batch.schema().field(0).data_type(),
+            &A::Timestamp(TimeUnit::Nanosecond, None)
+        );
+        assert_eq!(
+            batch.schema().field(1).data_type(),
+            &A::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()))
+        );
+        assert_eq!(
+            column(0),
+            TimestampNanosecondArray::from(vec![Some(1_700_000_000_123_456_000), None])
+        );
+        assert_eq!(
+            column(1),
+            TimestampNanosecondArray::from(vec![Some(-1_000), None]).with_timezone("UTC")
+        );
+        let list = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let first = list.value(0);
+        assert_eq!(
+            first
+                .as_any()
+                .downcast_ref::<TimestampNanosecondArray>()
+                .unwrap(),
+            &TimestampNanosecondArray::from(vec![Some(2_000), None]).with_timezone("UTC")
+        );
+        assert_eq!(list.value_length(1), 0);
+
+        // An empty input with a nanos schema builds too, as for the micros types.
+        let empty = rows_to_arrow_ipc(
+            &[],
+            &schema_one(DataType::TimestampNtzNanos { precision: 9 }),
+        );
+        assert!(empty.is_ok(), "{empty:?}");
+
+        let overflow = rows_to_arrow_ipc(
+            &[row(vec![Value::Timestamp(i64::MAX)])],
+            &schema_one(DataType::TimestampNtzNanos { precision: 9 }),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(overflow.contains("out of range"), "{overflow}");
+    }
+
+    fn schema_one(dt: DataType) -> DataType {
+        schema(vec![dt])
     }
 
     #[test]

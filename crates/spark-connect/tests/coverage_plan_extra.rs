@@ -66,6 +66,7 @@ fn nafill_covers_all_value_literal_arms() {
         Value::String("s".to_string()),
         Value::Date(5),
         Value::Timestamp(6),
+        Value::DayTimeInterval(5),
         Value::Decimal {
             value: "1.23".to_string(),
             precision: Some(5),

@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Native toArrow smoke tests against a live Spark Connect server."""
+"""Native Arrow input and output checks against a live Spark Connect server."""
 
 import os
 from datetime import date, datetime, timezone
@@ -65,3 +65,67 @@ def test_to_arrow_empty_result(session):
     table = session.range(0).toArrow()
     assert isinstance(table, pa.Table)
     assert table.num_rows == 0
+
+
+def test_create_dataframe_arrow_cached_upload(session):
+    """Materialize cached Arrow input larger than 1 MiB on a real server."""
+    import numpy as np
+
+    rows = 262144
+    table = pa.table({"id": np.arange(rows, dtype=np.int64)})
+    assert table.nbytes == 2 * 1024**2
+    isolated = session.newSession()
+    try:
+        isolated.conf.set("spark.sql.session.localRelationCacheThreshold", str(1024**2))
+        frame = isolated.createDataFrame(table)
+        actual = frame.selectExpr("count(*) AS rows", "sum(id) AS checksum").collect()[0]
+        assert actual[0] == rows
+        assert actual[1] == rows * (rows - 1) // 2
+        # As in PySpark, inferred column names are applied with toDF, which the server
+        # resolves into a Project, so the frame is not local.
+        assert not frame.isLocal()
+    finally:
+        isolated.stop()
+
+
+@pytest.mark.parametrize("schema", [None, []], ids=["inferred", "empty-list"])
+def test_create_dataframe_arrow_zero_columns(session, schema):
+    table = pa.table({"a": [1, 2]}).select([])
+    frame = session.createDataFrame(table, schema)
+    # As in PySpark, no toDF is applied without column names, so the frame is local.
+    assert frame.isLocal()
+    assert frame.columns == []
+    # Both clients first cast the input to its Spark schema, and for a zero-column table
+    # that cast decides the row count (PyArrow drops the rows).
+    assert frame.count() == table.cast(pa.schema([])).num_rows
+
+
+@pytest.mark.parametrize("cached", [False, True], ids=["inline", "cached"])
+@pytest.mark.parametrize("timestamp_type", ["TIMESTAMP_LTZ", "TIMESTAMP_NTZ"])
+def test_create_dataframe_arrow_inferred_timestamp(session, cached, timestamp_type):
+    value = datetime(2020, 1, 2, 3, 4, 5)
+    table = pa.table({"t": pa.array([value], type=pa.timestamp("ns"))})
+    isolated = session.newSession()
+    try:
+        isolated.conf.set("spark.sql.session.timeZone", "America/Los_Angeles")
+        isolated.conf.set("spark.sql.timestampType", timestamp_type)
+        isolated.conf.set("spark.sql.session.localRelationCacheThreshold",
+                          "0" if cached else str(1024**2))
+        frame = isolated.createDataFrame(table)
+        spark_type = "timestamp" if timestamp_type == "TIMESTAMP_LTZ" else "timestamp_ntz"
+        assert frame.schema.simpleString() == f"struct<t:{spark_type}>"
+        assert frame.selectExpr("CAST(t AS STRING)").collect()[0][0] == "2020-01-02 03:04:05"
+
+        result = frame.toArrow()
+        if timestamp_type == "TIMESTAMP_LTZ":
+            assert result.column("t").type.unit == "us"
+            assert result.column("t").type.tz is not None
+            # The native Arrow result carries the session timezone; compare instants.
+            assert result.column("t").cast(pa.timestamp("us", tz="UTC")).to_pylist() == [
+                datetime(2020, 1, 2, 11, 4, 5, tzinfo=timezone.utc)
+            ]
+        else:
+            assert result.column("t").type == pa.timestamp("us")
+            assert result.column("t").to_pylist() == [value]
+    finally:
+        isolated.stop()

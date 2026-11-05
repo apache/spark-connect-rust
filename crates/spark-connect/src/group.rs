@@ -26,6 +26,7 @@ fn value_to_lit_expr(v: crate::row::Value) -> Expression {
         Value::Float(x) => L::double(x as f64),
         Value::Double(x) => L::double(x),
         Value::String(s) => L::string(s),
+        Value::DayTimeInterval(v) => L::DayTimeInterval(v),
         other => L::string(format!("{:?}", other)),
     };
     Expression::literal(lit)
@@ -674,6 +675,36 @@ mod tests {
         let pivot_grouped = grouped.pivot(crate::column::col("category"), None);
         assert_eq!(pivot_grouped.group_type, AggregateGroupType::Pivot);
         assert!(pivot_grouped.pivot_col.is_some());
+    }
+
+    #[test]
+    fn pivot_day_time_intervals_are_exact_literals() {
+        use spark_connect_proto::{expression::literal::LiteralType, relation::RelType};
+        let values = [i64::MIN, -1, 0, i64::MAX];
+        let frame = session().range(1).unwrap();
+        let pivot = frame
+            .group_by(vec![] as Vec<Column>)
+            .pivot(
+                crate::column::col("interval"),
+                Some(
+                    values
+                        .into_iter()
+                        .map(crate::row::Value::DayTimeInterval)
+                        .collect(),
+                ),
+            )
+            .count();
+        let Some(RelType::Aggregate(aggregate)) = pivot.plan.to_proto().rel_type else {
+            panic!("expected Aggregate");
+        };
+        let literals = aggregate.pivot.unwrap().values;
+        assert_eq!(literals.len(), values.len());
+        for (literal, micros) in literals.iter().zip(values) {
+            assert_eq!(
+                literal.literal_type,
+                Some(LiteralType::DayTimeInterval(micros))
+            );
+        }
     }
 
     #[test]

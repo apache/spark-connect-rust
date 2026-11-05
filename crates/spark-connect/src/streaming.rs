@@ -21,6 +21,7 @@ use crate::udf::PythonUDFPayload;
 /// DataStreamReader for reading streaming data from various sources.
 ///
 /// Mirrors `pyspark.sql.connect.streaming.DataStreamReader`.
+#[derive(Clone)]
 pub struct DataStreamReader {
     session: SparkSession,
     format: Option<String>,
@@ -69,6 +70,21 @@ impl DataStreamReader {
     pub fn name(mut self, source_name: &str) -> Self {
         self.source_name = Some(source_name.to_string());
         self
+    }
+
+    /// The configured source format, if any.
+    pub fn get_format(&self) -> Option<&str> {
+        self.format.as_deref()
+    }
+
+    /// The configured schema (a DDL/JSON string; empty when unset).
+    pub fn get_schema(&self) -> &str {
+        &self.schema
+    }
+
+    /// The configured read options.
+    pub fn get_options(&self) -> &HashMap<String, String> {
+        &self.options
     }
 
     /// Load streaming data from the specified path(s).
@@ -242,6 +258,7 @@ pub enum Trigger {
 /// DataStreamWriter for writing streaming data to various sinks.
 ///
 /// Mirrors `pyspark.sql.connect.streaming.DataStreamWriter`.
+#[derive(Clone)]
 pub struct DataStreamWriter {
     session: SparkSession,
     plan: Arc<LogicalPlan>,
@@ -358,7 +375,10 @@ impl DataStreamWriter {
     /// Internal method to build and execute the write stream command.
     fn _start_internal(self) -> Result<StreamingQuery> {
         let mut write_op = proto::WriteStreamOperationStart::default();
-        write_op.input = Some(self.plan.to_proto());
+        write_op.input = Some(crate::plan::relation_with_ids(
+            &self.plan,
+            self.session.plan_ids(),
+        ));
 
         if let Some(fmt) = &self.format {
             write_op.format = fmt.clone();
@@ -459,9 +479,13 @@ impl DataStreamWriter {
         let mut query_id = String::new();
         let mut run_id = String::new();
         let mut name = self.query_name.clone();
-        while let Some(resp) =
-            block_on(response_stream.message()).map_err(SparkError::from_grpc_status)?
-        {
+        let client = self.session.client();
+        while let Some(resp) = block_on(async {
+            match response_stream.message().await {
+                Ok(resp) => Ok(resp),
+                Err(status) => Err(client.error_from_status(status).await),
+            }
+        })? {
             if let Some(
                 proto::execute_plan_response::ResponseType::WriteStreamOperationStartResult(res),
             ) = resp.response_type

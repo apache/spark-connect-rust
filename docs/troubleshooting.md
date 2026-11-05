@@ -7,13 +7,13 @@ Common issues and solutions when using Spark Connect Rust.
 **Symptom:** `Error: Failed to connect to sc://localhost:15002` or connection timeout.
 
 **Solution:**
-1. Verify the server is running: `$SPARK_HOME/sbin/start-connect-server.sh --packages "org.apache.spark:spark-connect_2.13:4.2.0"`
+1. Verify the server is running: `$SPARK_HOME/sbin/start-connect-server.sh --packages "org.apache.spark:spark-connect_2.13:4.3.0"`
 2. Check the port is correct. By default it's `15002`. To verify, look for `spark.connect.grpc.binding.port` in the server logs.
 3. If connecting to a remote server, verify network connectivity: `ping spark.example.com` and check firewalls.
-4. Ensure Apache Spark 4.2.0 or later is installed: `$SPARK_HOME/bin/spark-shell --version`
+4. Ensure Apache Spark 4.3.0 or later is installed: `$SPARK_HOME/bin/spark-shell --version`
 
 !!! tip
-    Run the server in the foreground to see startup messages: `$SPARK_HOME/sbin/start-connect-server.sh --packages "org.apache.spark:spark-connect_2.13:4.2.0" 2>&1`
+    Run the server in the foreground to see startup messages: `$SPARK_HOME/sbin/start-connect-server.sh --packages "org.apache.spark:spark-connect_2.13:4.3.0" 2>&1`
 
 ### TLS / Authentication Error
 
@@ -61,6 +61,6 @@ This is normal. The JVM and Spark runtime warm up on first use. Subsequent queri
 **Symptom:** Errors about incompatible schema or unexpected null values.
 
 **Solution:**
-1. Verify the Spark Connect server and client are compatible versions: both should be Spark 4.2.0 or later.
+1. Verify the Spark Connect server and client are compatible versions: both should be Spark 4.3.0 or later.
 2. If you recently upgraded Apache Spark, restart the Spark Connect server to apply the new version.
 3. Check that data on disk matches the expected schema (e.g., after schema changes, re-write the data).

@@ -51,13 +51,13 @@ export SPARK_HOME=/path/to/spark
 
 # Start the server on sc://localhost:15002
 $SPARK_HOME/sbin/start-connect-server.sh \
-  --packages "org.apache.spark:spark-connect_2.13:4.2.0"
+  --packages "org.apache.spark:spark-connect_2.13:4.3.0"
 ```
 
 The server listens on port `15002` by default. To use a different port, add `--conf spark.connect.grpc.binding.port=<port>`.
 
 !!! tip
-    The Spark Connect server requires a JVM and Apache Spark 4.2.0 or later. Stop it with `$SPARK_HOME/sbin/stop-connect-server.sh`.
+    The Spark Connect server requires a JVM and Apache Spark 4.3.0 or later. Stop it with `$SPARK_HOME/sbin/stop-connect-server.sh`.
 
 ## Remote Connections
 

@@ -5,6 +5,7 @@
 
 #![allow(clippy::result_large_err)] // SparkError is large; changing the type would break the API
 
+mod arrow_input;
 pub mod catalog;
 pub mod column;
 pub mod conf;
@@ -35,6 +36,8 @@ pub mod wasm_udf;
 pub mod window;
 
 // Re-export commonly used types
+#[doc(hidden)]
+pub use arrow_input::ArrowInputOptions;
 pub use column::{col, lit, lit_boolean, lit_double, lit_string, Column};
 pub use dataframe::{DataFrame, LocalRowIterator};
 pub use datasource::{CommonInlineUserDefinedDataSourceExpression, PythonDataSourcePayload};
@@ -55,7 +58,10 @@ pub use resource::{
 pub use session::{SparkSession, SparkSessionBuilder};
 /// Re-exported so fallible APIs (e.g. the `#[spark_wasm_udf]`-generated UDF
 /// constructors) can name the client's `Result`/error types.
-pub use spark_connect_core::error::{Result, SparkError};
+pub use spark_connect_core::error::{
+    BreakingChangeInfo, QueryContext, QueryContextType, Result, ServerErrorInfo, SparkError,
+    SparkErrorKind,
+};
 /// Re-exported so `persist(...)` / `storage_level()` have a public storage-level type.
 pub use spark_connect_proto::StorageLevel;
 /// Named `StorageLevel` presets (`MEMORY_AND_DISK`, `DISK_ONLY`, ...) mirroring `pyspark.StorageLevel`.
@@ -63,5 +69,8 @@ pub use storage::StorageLevelExt;
 pub use streaming::{
     DataStreamReader, DataStreamWriter, StreamingQuery, StreamingQueryManager, Trigger,
 };
-pub use types::{DataType, StructField};
+pub use types::{
+    DataType, DateType, DayTimeIntervalType, GeographyType, GeometryType, SpatialType, StructField,
+    YearMonthIntervalType,
+};
 pub use window::{FrameBound, FrameType, Window, WindowSpec};

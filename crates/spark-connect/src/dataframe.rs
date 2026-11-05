@@ -902,11 +902,15 @@ impl DataFrame {
         Ok(fields.into_iter().map(|field| field.name).collect())
     }
 
+    /// This DataFrame's relation for a request. Its plan nodes keep the same plan IDs each
+    /// time, as in PySpark, so the server can reuse the plans it already resolved.
+    pub(crate) fn relation(&self) -> proto::Relation {
+        crate::plan::relation_with_ids(&self.plan, self.session.plan_ids())
+    }
+
     /// Build an ExecutePlanRequest from the logical plan.
     fn build_execute_request(&self) -> Result<proto::ExecutePlanRequest> {
-        // Build proto from plan with plan_id assignment
-        let mut relation = self.plan.to_proto();
-        assign_plan_ids(&mut relation, &self.session)?;
+        let relation = self.relation();
 
         let mut request = proto::ExecutePlanRequest::default();
         request.session_id = self.session.client().session_id().to_string();
@@ -922,8 +926,7 @@ impl DataFrame {
 
     /// Build an AnalyzePlanRequest from the logical plan.
     fn build_analyze_request(&self) -> Result<proto::AnalyzePlanRequest> {
-        let mut relation = self.plan.to_proto();
-        assign_plan_ids(&mut relation, &self.session)?;
+        let relation = self.relation();
 
         let mut plan = proto::Plan::default();
         plan.op_type = Some(proto::plan::OpType::Root(relation));
@@ -990,14 +993,6 @@ impl DataFrame {
         }
     }
 
-    /// Build this DataFrame's plan as a proto `Relation` with plan ids assigned
-    /// (the shape the `Persist`/`Unpersist`/`GetStorageLevel` analyze ops take).
-    fn analyze_relation(&self) -> Result<proto::Relation> {
-        let mut relation = self.plan.to_proto();
-        assign_plan_ids(&mut relation, &self.session)?;
-        Ok(relation)
-    }
-
     fn analyze_request(
         &self,
         analyze: proto::analyze_plan_request::Analyze,
@@ -1022,7 +1017,7 @@ impl DataFrame {
     /// Mirrors `pyspark.sql.DataFrame.persist(storageLevel)`.
     pub fn persist(&self, storage_level: proto::StorageLevel) -> Result<DataFrame> {
         let persist = proto::analyze_plan_request::Persist {
-            relation: Some(self.analyze_relation()?),
+            relation: Some(self.relation()),
             storage_level: Some(storage_level),
         };
         let request = self.analyze_request(proto::analyze_plan_request::Analyze::Persist(persist));
@@ -1033,7 +1028,7 @@ impl DataFrame {
     /// Remove this DataFrame from cache. Mirrors `DataFrame.unpersist(blocking)`.
     pub fn unpersist(&self, blocking: bool) -> Result<DataFrame> {
         let unpersist = proto::analyze_plan_request::Unpersist {
-            relation: Some(self.analyze_relation()?),
+            relation: Some(self.relation()),
             blocking: Some(blocking),
         };
         let request =
@@ -1057,7 +1052,7 @@ impl DataFrame {
     /// materialize server-side and return a handle to the checkpointed data.
     fn checkpoint_impl(&self, local: bool, eager: bool) -> Result<DataFrame> {
         let mut cmd = proto::CheckpointCommand::default();
-        cmd.relation = Some(self.plan.to_proto());
+        cmd.relation = Some(self.relation());
         cmd.local = local;
         cmd.eager = eager;
         let responses = execute_command_collect(
@@ -1106,8 +1101,7 @@ impl DataFrame {
     /// Build + execute a real `CreateDataFrameViewCommand` (was previously a
     /// silent no-op that passed the query relation through and never created a view).
     fn create_view(&self, name: &str, replace: bool, global: bool) -> Result<()> {
-        let mut input = self.plan.to_proto();
-        assign_plan_ids(&mut input, &self.session)?;
+        let input = self.relation();
         let mut cmd = proto::CreateDataFrameViewCommand::default();
         cmd.input = Some(input);
         cmd.name = name.to_string();
@@ -1143,8 +1137,7 @@ impl DataFrame {
                 ))
             }
         };
-        let mut relation = self.plan.to_proto();
-        assign_plan_ids(&mut relation, &self.session)?;
+        let relation = self.relation();
         let mut plan = proto::Plan::default();
         plan.op_type = Some(proto::plan::OpType::Root(relation));
         let mut ex = proto::analyze_plan_request::Explain::default();
@@ -1226,8 +1219,7 @@ impl DataFrame {
 
     /// Get the input files for this DataFrame. Mirrors `pyspark.sql.DataFrame.inputFiles`.
     pub fn input_files(&self) -> Result<Vec<String>> {
-        let mut relation = self.plan.to_proto();
-        assign_plan_ids(&mut relation, &self.session)?;
+        let relation = self.relation();
         let mut plan = proto::Plan::default();
         plan.op_type = Some(proto::plan::OpType::Root(relation));
         let mut inp = proto::analyze_plan_request::InputFiles::default();
@@ -1506,7 +1498,7 @@ impl DataFrame {
     /// Get the storage level of this DataFrame. Mirrors `DataFrame.storageLevel`.
     pub fn storage_level(&self) -> Result<proto::StorageLevel> {
         let get = proto::analyze_plan_request::GetStorageLevel {
-            relation: Some(self.analyze_relation()?),
+            relation: Some(self.relation()),
         };
         let request =
             self.analyze_request(proto::analyze_plan_request::Analyze::GetStorageLevel(get));
@@ -1542,8 +1534,7 @@ impl DataFrame {
     /// Compute the server-side semantic hash of this DataFrame's logical plan,
     /// mirroring `DataFrame.semanticHash()` (an AnalyzePlan request).
     pub fn semantic_hash(&self) -> Result<i32> {
-        let mut relation = self.plan.to_proto();
-        assign_plan_ids(&mut relation, &self.session)?;
+        let relation = self.relation();
         let mut plan = proto::Plan::default();
         plan.op_type = Some(proto::plan::OpType::Root(relation));
         let mut request = proto::AnalyzePlanRequest::default();
@@ -1564,10 +1555,8 @@ impl DataFrame {
     /// Whether two DataFrames have the same semantics, mirroring
     /// `DataFrame.sameSemantics(other)` (a server-side AnalyzePlan comparison).
     pub fn same_semantics(&self, other: &DataFrame) -> Result<bool> {
-        let mut self_rel = self.plan.to_proto();
-        assign_plan_ids(&mut self_rel, &self.session)?;
-        let mut other_rel = other.plan.to_proto();
-        assign_plan_ids(&mut other_rel, &other.session)?;
+        let self_rel = self.relation();
+        let other_rel = other.relation();
         let mut target_plan = proto::Plan::default();
         target_plan.op_type = Some(proto::plan::OpType::Root(self_rel));
         let mut other_plan = proto::Plan::default();
@@ -1693,8 +1682,25 @@ impl DataFrame {
     }
 
     /// Check if this DataFrame is local (collected).
+    ///
+    /// Mirrors the server's `Dataset.isLocal`: only a local relation itself is local. The
+    /// server resolves `toDF`, which Arrow input with inferred or listed column names
+    /// applies, into a `Project`, which is not. The result of a command run by
+    /// `SparkSession::sql` is the local relation the server returned.
     pub fn is_local(&self) -> bool {
-        matches!(self.plan.as_ref(), LogicalPlan::LocalRelation { .. })
+        use proto::relation::RelType;
+        match self.plan.as_ref() {
+            LogicalPlan::LocalRelation { .. } | LogicalPlan::ChunkedCachedLocalRelation { .. } => {
+                true
+            }
+            LogicalPlan::CachedRelation { relation } => matches!(
+                relation.rel_type,
+                Some(RelType::LocalRelation(_))
+                    | Some(RelType::CachedLocalRelation(_))
+                    | Some(RelType::ChunkedCachedLocalRelation(_))
+            ),
+            _ => false,
+        }
     }
 
     /// Check if this DataFrame is streaming.
@@ -1851,12 +1857,10 @@ impl DataFrame {
 /// Shared by write operations (which embed a fully-formed input relation inside
 /// a `Command`) so they go through the same plan-id assignment as `collect()`.
 pub(crate) fn build_input_relation(
-    plan: &LogicalPlan,
+    plan: &Arc<LogicalPlan>,
     session: &SparkSession,
-) -> Result<proto::Relation> {
-    let mut relation = plan.to_proto();
-    assign_plan_ids(&mut relation, session)?;
-    Ok(relation)
+) -> proto::Relation {
+    crate::plan::relation_with_ids(plan, session.plan_ids())
 }
 
 /// Execute a `Command` against the server and drain the response stream.
@@ -1910,6 +1914,9 @@ fn capture_execution(
     info: &mut ExecutionInfo,
     session: &SparkSession,
 ) {
+    if info.operation_id.is_none() && !resp.operation_id.is_empty() {
+        info.operation_id = Some(resp.operation_id.clone());
+    }
     if let Some(metrics) = resp.metrics.take() {
         info.metrics = Some(metrics);
     }
@@ -1924,214 +1931,6 @@ fn capture_execution(
     {
         session.notify_progress(progress);
     }
-}
-
-/// Assign unique plan_ids to all relations in a tree (post-order traversal).
-pub(crate) fn assign_plan_ids(
-    relation: &mut proto::Relation,
-    session: &SparkSession,
-) -> Result<()> {
-    if let Some(rel_type) = &mut relation.rel_type {
-        use proto::relation::RelType;
-        match rel_type {
-            RelType::Range(_) => {}
-            RelType::Sql(_) => {}
-            RelType::LocalRelation(_) => {}
-            RelType::CachedRemoteRelation(_) => {}
-            RelType::Project(proj) => {
-                if let Some(input) = &mut proj.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Filter(filter) => {
-                if let Some(input) = &mut filter.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Join(join) => {
-                if let Some(left) = &mut join.left {
-                    assign_plan_ids(left, session)?;
-                }
-                if let Some(right) = &mut join.right {
-                    assign_plan_ids(right, session)?;
-                }
-            }
-            RelType::SetOp(set_op) => {
-                if let Some(left) = &mut set_op.left_input {
-                    assign_plan_ids(left, session)?;
-                }
-                if let Some(right) = &mut set_op.right_input {
-                    assign_plan_ids(right, session)?;
-                }
-            }
-            RelType::Aggregate(agg) => {
-                if let Some(input) = &mut agg.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Sort(sort) => {
-                if let Some(input) = &mut sort.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Limit(limit) => {
-                if let Some(input) = &mut limit.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Offset(offset) => {
-                if let Some(input) = &mut offset.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Tail(tail) => {
-                if let Some(input) = &mut tail.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Deduplicate(dedup) => {
-                if let Some(input) = &mut dedup.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Repartition(repartition) => {
-                if let Some(input) = &mut repartition.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::RepartitionByExpression(repart_expr) => {
-                if let Some(input) = &mut repart_expr.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::WithColumns(with_cols) => {
-                if let Some(input) = &mut with_cols.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::WithColumnsRenamed(with_renamed) => {
-                if let Some(input) = &mut with_renamed.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Drop(drop) => {
-                if let Some(input) = &mut drop.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::ToDf(to_df) => {
-                if let Some(input) = &mut to_df.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::ToSchema(to_schema) => {
-                if let Some(input) = &mut to_schema.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Hint(hint) => {
-                if let Some(input) = &mut hint.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Unpivot(unpivot) => {
-                if let Some(input) = &mut unpivot.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Sample(sample) => {
-                if let Some(input) = &mut sample.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::FillNa(fill_na) => {
-                if let Some(input) = &mut fill_na.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::DropNa(drop_na) => {
-                if let Some(input) = &mut drop_na.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Replace(replace) => {
-                if let Some(input) = &mut replace.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Describe(describe) => {
-                if let Some(input) = &mut describe.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Summary(summary) => {
-                if let Some(input) = &mut summary.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::SubqueryAlias(sq_alias) => {
-                if let Some(input) = &mut sq_alias.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::CachedLocalRelation(_cached) => {
-                // CachedLocalRelation doesn't have nested plans, it's just a reference with a hash
-            }
-            RelType::WithWatermark(watermark) => {
-                if let Some(input) = &mut watermark.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Crosstab(stat) => {
-                if let Some(input) = &mut stat.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::FreqItems(stat) => {
-                if let Some(input) = &mut stat.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::ApproxQuantile(stat) => {
-                if let Some(input) = &mut stat.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Corr(stat) => {
-                if let Some(input) = &mut stat.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Cov(stat) => {
-                if let Some(input) = &mut stat.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::SampleBy(stat) => {
-                if let Some(input) = &mut stat.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::CollectMetrics(metrics) => {
-                if let Some(input) = &mut metrics.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            _ => {
-                // Handle any other relation types that we haven't explicitly handled
-            }
-        }
-    }
-
-    // Assign plan_id to this relation
-    if relation.common.is_none() {
-        relation.common = Some(proto::RelationCommon::default());
-    }
-    if let Some(common) = &mut relation.common {
-        common.plan_id = Some(session.next_plan_id());
-    }
-
-    Ok(())
 }
 
 /// Decode an Arrow batch into rows.
@@ -2318,6 +2117,7 @@ fn map_key_to_string(v: Value) -> String {
         Value::Double(x) => x.to_string(),
         Value::Date(d) => d.to_string(),
         Value::Timestamp(t) => t.to_string(),
+        interval @ Value::DayTimeInterval(_) => interval.to_string(),
         Value::Decimal { value, .. } => value,
         other => format!("{other:?}"),
     }
@@ -2473,6 +2273,12 @@ fn arrow_value_at_with_layout(
     }
     if let Some(arr) = array.as_any().downcast_ref::<Date64Array>() {
         return Ok(Value::Date((arr.value(index) / 86_400_000) as i32));
+    }
+    // Spark DayTimeIntervalType uses Duration(Microsecond), not an Arrow
+    // Interval physical type. Keep signed micros exactly, including i64::MIN.
+    // Other duration units remain unsupported rather than being rounded.
+    if let Some(arr) = array.as_any().downcast_ref::<DurationMicrosecondArray>() {
+        return Ok(Value::DayTimeInterval(arr.value(index)));
     }
     // Nested: list, struct, map (recurse).
     if let Some(arr) = array.as_any().downcast_ref::<ListArray>() {
@@ -3289,11 +3095,80 @@ mod plan_construction_tests {
     use super::*;
     use crate::session::SparkSession;
 
+    #[test]
+    fn capture_execution_records_first_operation_id() {
+        let spark = session();
+        let mut info = ExecutionInfo::default();
+        let mut resp = proto::ExecutePlanResponse::default();
+        // An empty operation id (e.g. a synthetic response) is not recorded.
+        capture_execution(&mut resp, &mut info, &spark);
+        assert_eq!(info.operation_id, None);
+        resp.operation_id = "op-1".to_string();
+        capture_execution(&mut resp, &mut info, &spark);
+        resp.operation_id = "op-2".to_string();
+        capture_execution(&mut resp, &mut info, &spark);
+        assert_eq!(info.operation_id.as_deref(), Some("op-1"));
+    }
+
     fn session() -> SparkSession {
         SparkSession::builder()
             .remote("sc://localhost:15002")
             .get_or_create()
             .expect("failed to build session")
+    }
+
+    #[test]
+    fn is_local_only_for_a_local_relation_itself() {
+        let spark = session();
+        let local = spark.empty_data_frame().unwrap();
+        let cached = DataFrame::new(
+            spark.clone(),
+            LogicalPlan::ChunkedCachedLocalRelation {
+                data_hashes: vec!["hash".to_string()],
+                schema_hash: None,
+            },
+        );
+        assert!(local.is_local());
+        assert!(cached.is_local());
+        // As in PySpark, where the server resolves toDF into a Project.
+        assert!(!local.to_df(vec![]).is_local());
+        assert!(!cached.to_df(vec!["x"]).is_local());
+        assert!(!spark.range(1).unwrap().is_local());
+    }
+
+    #[test]
+    fn a_relation_the_server_returned_is_sent_back_with_its_own_plan_id() {
+        use proto::relation::RelType;
+        // A session of its own, whose plan IDs start at 1.
+        let spark = session().new_session();
+        let returned = |rel_type: RelType| {
+            let relation = proto::Relation {
+                common: Some(proto::RelationCommon {
+                    plan_id: Some(42),
+                    ..Default::default()
+                }),
+                rel_type: Some(rel_type),
+            };
+            DataFrame::new(
+                spark.clone(),
+                LogicalPlan::CachedRelation {
+                    relation: Box::new(relation),
+                },
+            )
+        };
+        // The result of a command is the local relation the server returned.
+        assert!(returned(RelType::LocalRelation(proto::LocalRelation::default())).is_local());
+        let query = returned(RelType::Sql(proto::Sql {
+            query: "SELECT 1".to_string(),
+            ..Default::default()
+        }));
+        assert!(!query.is_local());
+        let relation = build_input_relation(&query.plan, &spark);
+        match relation.rel_type {
+            Some(RelType::Sql(sql)) => assert_eq!(sql.query, "SELECT 1"),
+            other => panic!("expected the returned SQL relation, got {other:?}"),
+        }
+        assert_eq!(relation.common.and_then(|common| common.plan_id), Some(1));
     }
 
     #[test]
@@ -3368,24 +3243,31 @@ mod plan_construction_tests {
         assert!(std::ptr::eq(source.plan(), cloned_table_arg.plan()));
     }
 
-    #[test]
-    fn shared_self_join_serializes_each_occurrence_with_distinct_ids() {
-        use crate::functions::col;
-        use crate::plan;
+    /// Plan IDs in pre-order, for the relation shapes these tests build.
+    fn plan_ids_of(relation: &proto::Relation) -> Vec<i64> {
         use proto::relation::RelType;
-
-        fn ids(relation: &proto::Relation, out: &mut Vec<i64>) {
+        fn walk(relation: &proto::Relation, out: &mut Vec<i64>) {
             out.push(relation.common.as_ref().unwrap().plan_id.unwrap());
             match relation.rel_type.as_ref().unwrap() {
                 RelType::Join(join) => {
-                    ids(join.left.as_ref().unwrap(), out);
-                    ids(join.right.as_ref().unwrap(), out);
+                    walk(join.left.as_ref().unwrap(), out);
+                    walk(join.right.as_ref().unwrap(), out);
                 }
-                RelType::Project(project) => ids(project.input.as_ref().unwrap(), out),
+                RelType::Project(project) => walk(project.input.as_ref().unwrap(), out),
+                RelType::Filter(filter) => walk(filter.input.as_ref().unwrap(), out),
                 RelType::Range(_) => {}
                 _ => panic!("unexpected relation"),
             }
         }
+        let mut out = Vec::new();
+        walk(relation, &mut out);
+        out
+    }
+
+    #[test]
+    fn shared_self_join_serializes_each_occurrence_with_the_same_ids() {
+        use crate::functions::col;
+        use crate::plan;
 
         let spark = session();
         let projected = spark.range(10).unwrap().select(vec![col("id")]);
@@ -3404,17 +3286,69 @@ mod plan_construction_tests {
         .to_proto();
         assert_eq!(joined.plan.to_proto(), expected);
 
-        let first = build_input_relation(joined.plan(), &spark).unwrap();
-        let second = build_input_relation(joined.plan(), &spark).unwrap();
-        let mut all_ids = Vec::new();
-        ids(&first, &mut all_ids);
-        ids(&second, &mut all_ids);
-        assert_eq!(all_ids.len(), 10);
-        all_ids.sort_unstable();
-        all_ids.dedup();
-        assert_eq!(all_ids.len(), 10);
-        // Assigning IDs mutates only the fresh protobuf, never the shared client plan.
+        // As in PySpark, a shared node has one plan ID wherever it occurs, and serializing
+        // the same plan again gives the same relation.
+        let first = build_input_relation(&joined.plan, &spark);
+        let second = build_input_relation(&joined.plan, &spark);
+        assert_eq!(first, second);
+        let ids = plan_ids_of(&first);
+        assert_eq!(ids.len(), 5);
+        assert_eq!(ids[1..3], ids[3..5]);
+        assert_ne!(ids[0], ids[1]);
+        assert_ne!(ids[1], ids[2]);
+        // Assigning IDs fills only the fresh protobuf, never the shared client plan.
         assert_eq!(joined.plan.to_proto(), expected);
+    }
+
+    #[test]
+    fn derived_dataframes_keep_the_plan_ids_of_their_inputs() {
+        use crate::column::lit;
+        use crate::functions::col;
+
+        let spark = session();
+        let base = spark.range(3).unwrap().select(vec![col("id")]);
+        let base_relation = base.relation();
+        let derived = base.filter(col("id").gt(lit(1)));
+        let derived_relation = derived.relation();
+        let Some(proto::relation::RelType::Filter(filter)) = &derived_relation.rel_type else {
+            panic!("expected filter");
+        };
+        assert_eq!(filter.input.as_deref(), Some(&base_relation));
+        assert_eq!(derived.relation(), derived_relation);
+        // Separately built plans, even equal ones, are distinct nodes with distinct IDs.
+        let other = spark.range(3).unwrap().select(vec![col("id")]);
+        assert_eq!(other.plan.to_proto(), base.plan.to_proto());
+        let (mine, theirs) = (plan_ids_of(&base_relation), plan_ids_of(&other.relation()));
+        assert!(mine.iter().all(|id| !theirs.contains(id)));
+    }
+
+    #[test]
+    fn plan_ids_of_dropped_nodes_are_pruned_and_never_reused() {
+        // A session of its own, so that other tests' plans do not change its entries.
+        let spark = session().new_session();
+        let kept = spark.range(1).unwrap();
+        let kept_ids = plan_ids_of(&kept.relation());
+        let mut seen: std::collections::HashSet<i64> = kept_ids.iter().copied().collect();
+        // Each plan is dropped at once, so pruning frees its allocation for a later plan to
+        // reuse. A new node must still never get the ID of a dropped one.
+        for end in 0..5000 {
+            for id in plan_ids_of(&spark.range(end).unwrap().relation()) {
+                assert!(seen.insert(id), "plan ID {id} was assigned twice");
+            }
+            // With one live node, pruning keeps the map at most MIN_PRUNE_AT entries.
+            assert!(spark.plan_ids().len() <= 1024, "{}", spark.plan_ids().len());
+        }
+        assert_eq!(plan_ids_of(&kept.relation()), kept_ids);
+    }
+
+    #[test]
+    fn a_new_session_numbers_its_own_plans() {
+        let spark = session();
+        let (one, two) = (spark.new_session(), spark.new_session());
+        assert_eq!(plan_ids_of(&one.range(1).unwrap().relation()), vec![1]);
+        assert_eq!(plan_ids_of(&one.range(2).unwrap().relation()), vec![2]);
+        // The plans of one session do not advance the numbering of another.
+        assert_eq!(plan_ids_of(&two.range(1).unwrap().relation()), vec![1]);
     }
 
     #[test]
@@ -3484,7 +3418,7 @@ mod plan_construction_tests {
         let df2 = spark.range(5).unwrap();
         let e = || col("id").expression().clone();
         let ser = |d: &DataFrame| {
-            build_input_relation(d.plan(), &spark).expect("plan serializes to a relation");
+            build_input_relation(&d.plan, &spark);
         };
 
         ser(&df.select(vec![col("id")]));
@@ -3550,7 +3484,7 @@ mod plan_construction_tests {
         use crate::streaming::Trigger;
         let spark = session();
         let ser = |d: &DataFrame| {
-            build_input_relation(d.plan(), &spark).expect("stream plan serializes");
+            build_input_relation(&d.plan, &spark);
         };
         ser(&spark
             .read_stream()
@@ -3655,7 +3589,7 @@ mod plan_construction_tests {
 
         let spark = session();
         let ser = |d: &DataFrame| {
-            build_input_relation(d.plan(), &spark).expect("exotic plan serializes");
+            build_input_relation(&d.plan, &spark);
         };
         let df = spark.range(5).unwrap();
         let df2 = spark.range(5).unwrap();
@@ -3707,6 +3641,90 @@ mod arrow_value_tests {
         i256, DataType as ArrowDataType, Field, Int32Type, IntervalDayTime, IntervalMonthDayNano,
     };
     use std::sync::Arc;
+
+    #[test]
+    fn day_time_interval_microseconds_are_exact() {
+        let values = vec![
+            Some(i64::MIN),
+            Some(i64::MIN + 1),
+            Some(-172_800_000_001),
+            Some(-1),
+            Some(0),
+            Some(1),
+            Some(172_800_000_001),
+            Some(i64::MAX - 1),
+            Some(i64::MAX),
+            None,
+        ];
+        let array = DurationMicrosecondArray::from(values.clone());
+        for (i, value) in values.iter().enumerate() {
+            assert_eq!(
+                arrow_value_at(&array, i).unwrap(),
+                value.map(Value::DayTimeInterval).unwrap_or(Value::Null)
+            );
+        }
+        let sliced = array.slice(2, 5);
+        for i in 0..sliced.len() {
+            assert_eq!(
+                arrow_value_at(&sliced, i).unwrap(),
+                Value::DayTimeInterval(values[i + 2].unwrap())
+            );
+        }
+        let nulls = DurationMicrosecondArray::from(vec![None, None]);
+        assert_eq!(arrow_value_at(&nulls, 1).unwrap(), Value::Null);
+        for array in [
+            Arc::new(DurationSecondArray::from(vec![1])) as ArrayRef,
+            Arc::new(DurationMillisecondArray::from(vec![1])),
+            Arc::new(DurationNanosecondArray::from(vec![1])),
+        ] {
+            assert!(arrow_value_at(array.as_ref(), 0).is_err());
+        }
+    }
+
+    #[test]
+    fn day_time_interval_ipc_empty_and_multiple_batches() {
+        use arrow::datatypes::{Schema, TimeUnit};
+        use arrow::ipc::writer::StreamWriter;
+        use arrow::record_batch::RecordBatch;
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "interval",
+            ArrowDataType::Duration(TimeUnit::Microsecond),
+            true,
+        )]));
+        let mut data = Vec::new();
+        let mut writer = StreamWriter::try_new(&mut data, &schema).unwrap();
+        for values in [
+            vec![],
+            vec![Some(i64::MIN), None],
+            vec![],
+            vec![Some(i64::MAX)],
+        ] {
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![Arc::new(DurationMicrosecondArray::from(values))],
+            )
+            .unwrap();
+            writer.write(&batch).unwrap();
+        }
+        writer.finish().unwrap();
+        drop(writer);
+        let rows = decode_arrow_batch(&proto::execute_plan_response::ArrowBatch {
+            data: data.into(),
+            row_count: 3,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|r| r.get(0).unwrap().clone())
+                .collect::<Vec<_>>(),
+            vec![
+                Value::DayTimeInterval(i64::MIN),
+                Value::Null,
+                Value::DayTimeInterval(i64::MAX)
+            ]
+        );
+    }
 
     #[test]
     fn primitives_and_signed_ints() {
@@ -3898,7 +3916,7 @@ mod arrow_value_tests {
             arrow_value_at(&with_null, 0).unwrap(),
             Value::Null
         ));
-        // Duration has no dedicated Value arm -> the final unsupported-type Err.
+        // Only microsecond durations are supported (Spark's physical encoding).
         let dur = DurationSecondArray::from(vec![1i64]);
         assert!(arrow_value_at(&dur, 0).is_err());
     }
@@ -3915,6 +3933,7 @@ mod arrow_value_tests {
         assert_eq!(map_key_to_string(Value::Double(2.5)), "2.5");
         assert_eq!(map_key_to_string(Value::Date(5)), "5");
         assert_eq!(map_key_to_string(Value::Timestamp(6)), "6");
+        assert_eq!(map_key_to_string(Value::DayTimeInterval(-1)), "-1");
         assert_eq!(
             map_key_to_string(Value::Decimal {
                 value: "7.5".to_string(),

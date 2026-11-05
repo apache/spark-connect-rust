@@ -38,6 +38,7 @@ mod observation;
 mod pipelines;
 mod profiler;
 mod pyarrow_export;
+mod pyarrow_import;
 mod readwriter;
 mod resource;
 mod row;
@@ -72,7 +73,7 @@ use resource::{
     PyExecutorResourceRequests, PyResourceProfile, PyResourceProfileBuilder, PyTaskResourceRequests,
 };
 use row::PyRow;
-use session::{PySparkSession, PySparkSessionBuilder};
+use session::{PyHook, PySparkSession, PySparkSessionBuilder};
 use stat::PyStatFunctions;
 use streaming::{
     PyDataStreamReader, PyDataStreamWriter, PyListenerEventStream, PyStreamingQuery,
@@ -84,14 +85,15 @@ use types::{
     PyDayTimeIntervalType, PyDecimalType, PyDoubleType, PyFloatType, PyFractionalType,
     PyGeographyType, PyGeometryType, PyIntegerType, PyIntegralType, PyLongType, PyMapType,
     PyNullType, PyNumericType, PyShortType, PySpatialType, PyStringType, PyStructField,
-    PyStructType, PyTimeType, PyTimestampNTZType, PyTimestampType, PyVarcharType, PyVariantType,
-    PyYearMonthIntervalType,
+    PyStructType, PyTimeType, PyTimestampLTZNanosType, PyTimestampNTZNanosType, PyTimestampNTZType,
+    PyTimestampType, PyVarcharType, PyVariantType, PyYearMonthIntervalType,
 };
 use window::{PyFrameBound, PyWindow, PyWindowSpec};
 
 #[pymodule(gil_used = false)]
 fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySparkSession>()?;
+    m.add_class::<PyHook>()?;
     m.add_class::<session::PyConnectClientStub>()?;
     m.add_class::<PySparkSessionBuilder>()?;
     m.add_class::<PyDataFrame>()?;
@@ -188,6 +190,8 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDateType>()?;
     m.add_class::<PyTimestampType>()?;
     m.add_class::<PyTimestampNTZType>()?;
+    m.add_class::<PyTimestampNTZNanosType>()?;
+    m.add_class::<PyTimestampLTZNanosType>()?;
     m.add_class::<PyArrayType>()?;
     m.add_class::<PyMapType>()?;
     m.add_class::<PyStructField>()?;
