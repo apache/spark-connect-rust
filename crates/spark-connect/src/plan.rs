@@ -5,7 +5,7 @@
 
 use spark_connect_proto as proto;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 
 use crate::column::Column;
 use crate::expression::{Expression, ExpressionNode};
@@ -25,8 +25,8 @@ pub struct TransformWithStateInfo {
 ///
 /// Each variant represents a different relation type that can be executed.
 /// Child plans are immutable shared nodes, so adding a transformation does not clone
-/// its ancestors. Call `to_proto()` to materialize a fresh protobuf tree; sharing
-/// does not deduplicate relation occurrences or their execution-time plan IDs.
+/// its ancestors. Call `to_proto()` to materialize a fresh protobuf tree without plan
+/// IDs; requests give every shared node its stable plan ID (see `PlanIds`).
 #[derive(Debug, Clone)]
 pub enum LogicalPlan {
     /// A range of integers: `range(start, end, step)`.
@@ -407,9 +407,86 @@ pub enum SetOpType {
     Except,
 }
 
+/// Plan IDs that stay the same each time a plan node is serialized, as PySpark assigns
+/// them once per plan. The server caches resolved plans keyed by the whole relation, so
+/// re-executing a DataFrame, or building on one it already resolved, reuses that work.
+///
+/// A node is identified by its `Arc` allocation. Each entry holds a `Weak` to the node,
+/// which keeps the allocation, and so the key, from being reused while the entry exists.
+/// Entries of dropped nodes are pruned as the map grows.
+#[derive(Debug)]
+pub(crate) struct PlanIds {
+    nodes: Mutex<PlanIdNodes>,
+}
+
+/// The state of `PlanIds`, all guarded by its one lock.
+#[derive(Debug)]
+struct PlanIdNodes {
+    next: i64,
+    ids: HashMap<usize, (Weak<LogicalPlan>, i64)>,
+    prune_at: usize,
+}
+
+impl PlanIds {
+    const MIN_PRUNE_AT: usize = 1024;
+
+    pub(crate) fn new() -> Self {
+        PlanIds {
+            nodes: Mutex::new(PlanIdNodes {
+                next: 1,
+                ids: HashMap::new(),
+                prune_at: Self::MIN_PRUNE_AT,
+            }),
+        }
+    }
+
+    /// The plan ID of `node`, assigned the first time it is serialized.
+    pub(crate) fn id_of(&self, node: &Arc<LogicalPlan>) -> i64 {
+        let key = Arc::as_ptr(node) as usize;
+        let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        // The entry's `Weak` keeps its allocation from being freed, so a live node at this
+        // address is the node the entry was made for.
+        if let Some((_, id)) = nodes.ids.get(&key) {
+            return *id;
+        }
+        if nodes.ids.len() >= nodes.prune_at {
+            nodes.ids.retain(|_, (node, _)| node.strong_count() > 0);
+            nodes.prune_at = (nodes.ids.len() * 2).max(Self::MIN_PRUNE_AT);
+        }
+        let id = nodes.next;
+        nodes.next += 1;
+        nodes.ids.insert(key, (Arc::downgrade(node), id));
+        id
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.nodes.lock().unwrap().ids.len()
+    }
+}
+
+/// Serialize a shared plan node for a request: the node and every node below it carry
+/// their stable plan IDs.
+pub(crate) fn relation_with_ids(node: &Arc<LogicalPlan>, ids: &PlanIds) -> proto::Relation {
+    relation_of(node, Some(ids))
+}
+
+/// Serialize a child node, with its stable plan ID when `ids` is given.
+fn relation_of(node: &Arc<LogicalPlan>, ids: Option<&PlanIds>) -> proto::Relation {
+    let mut relation = node.to_proto_with(ids);
+    if let Some(ids) = ids {
+        relation.common.get_or_insert_with(Default::default).plan_id = Some(ids.id_of(node));
+    }
+    relation
+}
+
 impl LogicalPlan {
-    /// Convert this logical plan to a `spark.connect.Relation` protobuf.
+    /// Convert this logical plan to a `spark.connect.Relation` protobuf, without plan IDs.
     pub fn to_proto(&self) -> proto::Relation {
+        self.to_proto_with(None)
+    }
+
+    fn to_proto_with(&self, plan_ids: Option<&PlanIds>) -> proto::Relation {
         let mut relation = proto::Relation::default();
         relation.common = Some(proto::RelationCommon::default());
 
@@ -448,7 +525,7 @@ impl LogicalPlan {
 
             LogicalPlan::Project { input, columns } => {
                 let mut project = proto::Project::default();
-                project.input = Some(Box::new(input.to_proto()));
+                project.input = Some(Box::new(relation_of(input, plan_ids)));
                 for col in columns {
                     project.expressions.push(col.to_proto());
                 }
@@ -457,7 +534,7 @@ impl LogicalPlan {
 
             LogicalPlan::Filter { input, condition } => {
                 let mut filter = proto::Filter::default();
-                filter.input = Some(Box::new(input.to_proto()));
+                filter.input = Some(Box::new(relation_of(input, plan_ids)));
                 filter.condition = Some(condition.to_proto());
                 relation.rel_type = Some(proto::relation::RelType::Filter(Box::new(filter)));
             }
@@ -472,7 +549,7 @@ impl LogicalPlan {
                 grouping_sets,
             } => {
                 let mut agg = proto::Aggregate::default();
-                agg.input = Some(Box::new(input.to_proto()));
+                agg.input = Some(Box::new(relation_of(input, plan_ids)));
                 agg.group_type = match group_type {
                     AggregateGroupType::GroupBy => proto::aggregate::GroupType::Groupby as i32,
                     AggregateGroupType::Rollup => proto::aggregate::GroupType::Rollup as i32,
@@ -523,8 +600,8 @@ impl LogicalPlan {
                 using_columns,
             } => {
                 let mut join = proto::Join::default();
-                join.left = Some(Box::new(left.to_proto()));
-                join.right = Some(Box::new(right.to_proto()));
+                join.left = Some(Box::new(relation_of(left, plan_ids)));
+                join.right = Some(Box::new(relation_of(right, plan_ids)));
                 join.join_type = match join_type {
                     JoinType::Inner => proto::join::JoinType::Inner as i32,
                     JoinType::LeftOuter => proto::join::JoinType::LeftOuter as i32,
@@ -548,8 +625,8 @@ impl LogicalPlan {
                 on,
             } => {
                 let mut lj = proto::LateralJoin::default();
-                lj.left = Some(Box::new(left.to_proto()));
-                lj.right = Some(Box::new(right.to_proto()));
+                lj.left = Some(Box::new(relation_of(left, plan_ids)));
+                lj.right = Some(Box::new(relation_of(right, plan_ids)));
                 lj.join_type = match join_type {
                     JoinType::Inner => proto::join::JoinType::Inner as i32,
                     JoinType::LeftOuter => proto::join::JoinType::LeftOuter as i32,
@@ -574,8 +651,8 @@ impl LogicalPlan {
                 allow_missing_columns,
             } => {
                 let mut set_op = proto::SetOperation::default();
-                set_op.left_input = Some(Box::new(left.to_proto()));
-                set_op.right_input = Some(Box::new(right.to_proto()));
+                set_op.left_input = Some(Box::new(relation_of(left, plan_ids)));
+                set_op.right_input = Some(Box::new(relation_of(right, plan_ids)));
                 set_op.set_op_type = match set_op_type {
                     SetOpType::Union => proto::set_operation::SetOpType::Union as i32,
                     SetOpType::Intersect => proto::set_operation::SetOpType::Intersect as i32,
@@ -589,21 +666,21 @@ impl LogicalPlan {
 
             LogicalPlan::Limit { input, limit } => {
                 let mut lim = proto::Limit::default();
-                lim.input = Some(Box::new(input.to_proto()));
+                lim.input = Some(Box::new(relation_of(input, plan_ids)));
                 lim.limit = *limit;
                 relation.rel_type = Some(proto::relation::RelType::Limit(Box::new(lim)));
             }
 
             LogicalPlan::Offset { input, offset } => {
                 let mut off = proto::Offset::default();
-                off.input = Some(Box::new(input.to_proto()));
+                off.input = Some(Box::new(relation_of(input, plan_ids)));
                 off.offset = *offset;
                 relation.rel_type = Some(proto::relation::RelType::Offset(Box::new(off)));
             }
 
             LogicalPlan::Tail { input, limit } => {
                 let mut tail = proto::Tail::default();
-                tail.input = Some(Box::new(input.to_proto()));
+                tail.input = Some(Box::new(relation_of(input, plan_ids)));
                 tail.limit = *limit;
                 relation.rel_type = Some(proto::relation::RelType::Tail(Box::new(tail)));
             }
@@ -615,7 +692,7 @@ impl LogicalPlan {
                 within_watermark,
             } => {
                 let mut dedup = proto::Deduplicate::default();
-                dedup.input = Some(Box::new(input.to_proto()));
+                dedup.input = Some(Box::new(relation_of(input, plan_ids)));
                 dedup.all_columns_as_keys = Some(*all_columns_as_keys);
                 dedup.column_names.extend(column_names.clone());
                 dedup.within_watermark = Some(*within_watermark);
@@ -631,7 +708,7 @@ impl LogicalPlan {
                 // numbers, so a future proto reorder can't silently change meaning.
                 use proto::expression::sort_order::{NullOrdering as PbNulls, SortDirection};
                 let mut sort = proto::Sort::default();
-                sort.input = Some(Box::new(input.to_proto()));
+                sort.input = Some(Box::new(relation_of(input, plan_ids)));
                 for expr in order {
                     // Extract SortOrder from Expression if it's SortOrder type
                     if let ExpressionNode::SortOrder(so) = expr.node() {
@@ -680,7 +757,7 @@ impl LogicalPlan {
                 seed,
             } => {
                 let mut sample = proto::Sample::default();
-                sample.input = Some(Box::new(input.to_proto()));
+                sample.input = Some(Box::new(relation_of(input, plan_ids)));
                 sample.lower_bound = *lower_bound;
                 sample.upper_bound = *upper_bound;
                 sample.with_replacement = Some(*with_replacement);
@@ -696,7 +773,7 @@ impl LogicalPlan {
                 shuffle,
             } => {
                 let mut repart = proto::Repartition::default();
-                repart.input = Some(Box::new(input.to_proto()));
+                repart.input = Some(Box::new(relation_of(input, plan_ids)));
                 repart.num_partitions = *num_partitions;
                 repart.shuffle = Some(*shuffle);
                 relation.rel_type = Some(proto::relation::RelType::Repartition(Box::new(repart)));
@@ -708,7 +785,7 @@ impl LogicalPlan {
                 expressions,
             } => {
                 let mut repart = proto::RepartitionByExpression::default();
-                repart.input = Some(Box::new(input.to_proto()));
+                repart.input = Some(Box::new(relation_of(input, plan_ids)));
                 // num_partitions is optional in the proto: <= 0 means "unset" so the
                 // server uses the default (the `df.repartition(*cols)` column-only form,
                 // where no partition count is given). A real count is always positive.
@@ -731,7 +808,7 @@ impl LogicalPlan {
                 columns,
             } => {
                 let mut wc = proto::WithColumns::default();
-                wc.input = Some(Box::new(input.to_proto()));
+                wc.input = Some(Box::new(relation_of(input, plan_ids)));
                 for (name, col) in column_names.iter().zip(columns.iter()) {
                     // Create an Alias expression for each column
                     let mut alias = proto::expression::Alias::default();
@@ -748,7 +825,7 @@ impl LogicalPlan {
                 metadata_json,
             } => {
                 let mut wc = proto::WithColumns::default();
-                wc.input = Some(Box::new(input.to_proto()));
+                wc.input = Some(Box::new(relation_of(input, plan_ids)));
                 let col_expr = crate::expression::Expression::column(column_name.clone());
                 let mut alias = proto::expression::Alias::default();
                 alias.expr = Some(Box::new(col_expr.to_proto()));
@@ -760,7 +837,7 @@ impl LogicalPlan {
 
             LogicalPlan::WithColumnsRenamed { input, renames } => {
                 let mut wcr = proto::WithColumnsRenamed::default();
-                wcr.input = Some(Box::new(input.to_proto()));
+                wcr.input = Some(Box::new(relation_of(input, plan_ids)));
                 for (old_name, new_name) in renames.iter() {
                     let mut rename = proto::with_columns_renamed::Rename::default();
                     rename.col_name = old_name.clone();
@@ -773,7 +850,7 @@ impl LogicalPlan {
 
             LogicalPlan::Drop { input, columns } => {
                 let mut drop = proto::Drop::default();
-                drop.input = Some(Box::new(input.to_proto()));
+                drop.input = Some(Box::new(relation_of(input, plan_ids)));
                 drop.column_names.extend(columns.clone());
                 relation.rel_type = Some(proto::relation::RelType::Drop(Box::new(drop)));
             }
@@ -783,14 +860,14 @@ impl LogicalPlan {
                 column_names,
             } => {
                 let mut to_df = proto::ToDf::default();
-                to_df.input = Some(Box::new(input.to_proto()));
+                to_df.input = Some(Box::new(relation_of(input, plan_ids)));
                 to_df.column_names.extend(column_names.clone());
                 relation.rel_type = Some(proto::relation::RelType::ToDf(Box::new(to_df)));
             }
 
             LogicalPlan::ToSchema { input, schema } => {
                 let mut to_schema = proto::ToSchema::default();
-                to_schema.input = Some(Box::new(input.to_proto()));
+                to_schema.input = Some(Box::new(relation_of(input, plan_ids)));
                 to_schema.schema = Some(schema.to_proto());
                 relation.rel_type = Some(proto::relation::RelType::ToSchema(Box::new(to_schema)));
             }
@@ -801,7 +878,7 @@ impl LogicalPlan {
                 parameters,
             } => {
                 let mut hint = proto::Hint::default();
-                hint.input = Some(Box::new(input.to_proto()));
+                hint.input = Some(Box::new(relation_of(input, plan_ids)));
                 hint.name = name.clone();
                 // Hint parameters are literal Expressions (e.g. `REPARTITION 10`).
                 // An integer-looking parameter becomes an Integer (int32) literal -
@@ -827,7 +904,7 @@ impl LogicalPlan {
                 value_column_name,
             } => {
                 let mut unpivot = proto::Unpivot::default();
-                unpivot.input = Some(Box::new(input.to_proto()));
+                unpivot.input = Some(Box::new(relation_of(input, plan_ids)));
                 for col in ids {
                     unpivot.ids.push(col.to_proto());
                 }
@@ -849,7 +926,7 @@ impl LogicalPlan {
                 columns,
             } => {
                 let mut na_fill = proto::NaFill::default();
-                na_fill.input = Some(Box::new(input.to_proto()));
+                na_fill.input = Some(Box::new(relation_of(input, plan_ids)));
                 na_fill.cols.extend(columns.clone());
                 na_fill.values.push(value_to_proto_literal(fill_value));
                 relation.rel_type = Some(proto::relation::RelType::FillNa(Box::new(na_fill)));
@@ -863,7 +940,7 @@ impl LogicalPlan {
                 // Per-column fill: cols[i] is filled with values[i] (Spark aligns them
                 // positionally when both are non-empty).
                 let mut na_fill = proto::NaFill::default();
-                na_fill.input = Some(Box::new(input.to_proto()));
+                na_fill.input = Some(Box::new(relation_of(input, plan_ids)));
                 na_fill.cols.extend(cols.clone());
                 na_fill
                     .values
@@ -878,7 +955,7 @@ impl LogicalPlan {
                 columns,
             } => {
                 let mut na_drop = proto::NaDrop::default();
-                na_drop.input = Some(Box::new(input.to_proto()));
+                na_drop.input = Some(Box::new(relation_of(input, plan_ids)));
                 na_drop.cols.extend(columns.clone());
                 // Mirror pyspark: an explicit `thresh` (min_non_null) wins; otherwise
                 // `how="all"` -> min_non_nulls=1 and `how="any"` -> unset (server default).
@@ -898,7 +975,7 @@ impl LogicalPlan {
                 columns,
             } => {
                 let mut na_replace = proto::NaReplace::default();
-                na_replace.input = Some(Box::new(input.to_proto()));
+                na_replace.input = Some(Box::new(relation_of(input, plan_ids)));
                 for (old_val, new_val) in replacements.iter() {
                     let mut replace = proto::na_replace::Replacement::default();
                     // A numeric-looking value becomes a Double literal; otherwise a
@@ -914,14 +991,14 @@ impl LogicalPlan {
 
             LogicalPlan::Describe { input, columns } => {
                 let mut describe = proto::StatDescribe::default();
-                describe.input = Some(Box::new(input.to_proto()));
+                describe.input = Some(Box::new(relation_of(input, plan_ids)));
                 describe.cols.extend(columns.clone());
                 relation.rel_type = Some(proto::relation::RelType::Describe(Box::new(describe)));
             }
 
             LogicalPlan::Summary { input, percentiles } => {
                 let mut summary = proto::StatSummary::default();
-                summary.input = Some(Box::new(input.to_proto()));
+                summary.input = Some(Box::new(relation_of(input, plan_ids)));
                 summary.statistics.extend(percentiles.clone());
                 relation.rel_type = Some(proto::relation::RelType::Summary(Box::new(summary)));
             }
@@ -929,7 +1006,7 @@ impl LogicalPlan {
             LogicalPlan::ColRegex { input, col_name } => {
                 // ColRegex is implemented as a Project with UnresolvedRegex expressions
                 let mut project = proto::Project::default();
-                project.input = Some(Box::new(input.to_proto()));
+                project.input = Some(Box::new(relation_of(input, plan_ids)));
                 let mut expr = proto::Expression::default();
                 expr.expr_type = Some(proto::expression::ExprType::UnresolvedRegex(
                     proto::expression::UnresolvedRegex {
@@ -943,7 +1020,7 @@ impl LogicalPlan {
 
             LogicalPlan::SubqueryAlias { input, alias } => {
                 let mut sq_alias = proto::SubqueryAlias::default();
-                sq_alias.input = Some(Box::new(input.to_proto()));
+                sq_alias.input = Some(Box::new(relation_of(input, plan_ids)));
                 sq_alias.alias = alias.clone();
                 relation.rel_type =
                     Some(proto::relation::RelType::SubqueryAlias(Box::new(sq_alias)));
@@ -1042,7 +1119,7 @@ impl LogicalPlan {
                 delay_threshold,
             } => {
                 let mut watermark = proto::WithWatermark::default();
-                watermark.input = Some(Box::new(input.to_proto()));
+                watermark.input = Some(Box::new(relation_of(input, plan_ids)));
                 watermark.event_time = time_column.clone();
                 watermark.delay_threshold = delay_threshold.clone();
                 relation.rel_type =
@@ -1055,7 +1132,7 @@ impl LogicalPlan {
                 partition_exprs,
             } => {
                 let mut repart = proto::RepartitionByExpression::default();
-                repart.input = Some(Box::new(input.to_proto()));
+                repart.input = Some(Box::new(relation_of(input, plan_ids)));
                 if let Some(n) = num_partitions {
                     repart.num_partitions = Some(*n);
                 }
@@ -1069,7 +1146,7 @@ impl LogicalPlan {
 
             LogicalPlan::StatCrosstab { input, col1, col2 } => {
                 let mut stat = proto::StatCrosstab::default();
-                stat.input = Some(Box::new(input.to_proto()));
+                stat.input = Some(Box::new(relation_of(input, plan_ids)));
                 stat.col1 = col1.clone();
                 stat.col2 = col2.clone();
                 relation.rel_type = Some(proto::relation::RelType::Crosstab(Box::new(stat)));
@@ -1081,7 +1158,7 @@ impl LogicalPlan {
                 support,
             } => {
                 let mut stat = proto::StatFreqItems::default();
-                stat.input = Some(Box::new(input.to_proto()));
+                stat.input = Some(Box::new(relation_of(input, plan_ids)));
                 stat.cols.extend(columns.clone());
                 stat.support = Some(*support);
                 relation.rel_type = Some(proto::relation::RelType::FreqItems(Box::new(stat)));
@@ -1094,7 +1171,7 @@ impl LogicalPlan {
                 relative_error,
             } => {
                 let mut stat = proto::StatApproxQuantile::default();
-                stat.input = Some(Box::new(input.to_proto()));
+                stat.input = Some(Box::new(relation_of(input, plan_ids)));
                 stat.cols.extend(columns.clone());
                 stat.probabilities.extend(probabilities.clone());
                 stat.relative_error = *relative_error;
@@ -1103,7 +1180,7 @@ impl LogicalPlan {
 
             LogicalPlan::StatCorr { input, col1, col2 } => {
                 let mut stat = proto::StatCorr::default();
-                stat.input = Some(Box::new(input.to_proto()));
+                stat.input = Some(Box::new(relation_of(input, plan_ids)));
                 stat.col1 = col1.clone();
                 stat.col2 = col2.clone();
                 relation.rel_type = Some(proto::relation::RelType::Corr(Box::new(stat)));
@@ -1111,7 +1188,7 @@ impl LogicalPlan {
 
             LogicalPlan::StatCov { input, col1, col2 } => {
                 let mut stat = proto::StatCov::default();
-                stat.input = Some(Box::new(input.to_proto()));
+                stat.input = Some(Box::new(relation_of(input, plan_ids)));
                 stat.col1 = col1.clone();
                 stat.col2 = col2.clone();
                 relation.rel_type = Some(proto::relation::RelType::Cov(Box::new(stat)));
@@ -1124,7 +1201,7 @@ impl LogicalPlan {
                 seed,
             } => {
                 let mut stat = proto::StatSampleBy::default();
-                stat.input = Some(Box::new(input.to_proto()));
+                stat.input = Some(Box::new(relation_of(input, plan_ids)));
                 // col field expects an Expression; create one from the column name
                 let mut col_expr = proto::Expression::default();
                 col_expr.expr_type = Some(proto::expression::ExprType::UnresolvedAttribute(
@@ -1153,7 +1230,7 @@ impl LogicalPlan {
 
             LogicalPlan::Observe { input, name, exprs } => {
                 let mut collect_metrics = proto::CollectMetrics::default();
-                collect_metrics.input = Some(Box::new(input.to_proto()));
+                collect_metrics.input = Some(Box::new(relation_of(input, plan_ids)));
                 collect_metrics.name = name.clone();
                 for expr in exprs {
                     collect_metrics.metrics.push(expr.to_proto());
@@ -1175,8 +1252,8 @@ impl LogicalPlan {
 
             LogicalPlan::Zip { left, right } => {
                 let mut zip = proto::Zip::default();
-                zip.left = Some(Box::new(left.to_proto()));
-                zip.right = Some(Box::new(right.to_proto()));
+                zip.left = Some(Box::new(relation_of(left, plan_ids)));
+                zip.right = Some(Box::new(relation_of(right, plan_ids)));
                 relation.rel_type = Some(proto::relation::RelType::Zip(Box::new(zip)));
             }
 
@@ -1192,7 +1269,7 @@ impl LogicalPlan {
                 index_columns,
             } => {
                 let mut transpose = proto::Transpose::default();
-                transpose.input = Some(Box::new(input.to_proto()));
+                transpose.input = Some(Box::new(relation_of(input, plan_ids)));
                 transpose.index_columns = index_columns.iter().map(|e| e.to_proto()).collect();
                 relation.rel_type = Some(proto::relation::RelType::Transpose(Box::new(transpose)));
                 return relation;
@@ -1203,7 +1280,7 @@ impl LogicalPlan {
                 is_barrier,
             } => {
                 let mut mp = proto::MapPartitions::default();
-                mp.input = Some(Box::new(input.to_proto()));
+                mp.input = Some(Box::new(relation_of(input, plan_ids)));
                 mp.func = Some(func.to_proto());
                 mp.is_barrier = Some(*is_barrier);
                 relation.rel_type = Some(proto::relation::RelType::MapPartitions(Box::new(mp)));
@@ -1222,7 +1299,7 @@ impl LogicalPlan {
                 transform_with_state_info,
             } => {
                 let mut gm = proto::GroupMap::default();
-                gm.input = Some(Box::new(input.to_proto()));
+                gm.input = Some(Box::new(relation_of(input, plan_ids)));
                 for e in grouping_expressions {
                     gm.grouping_expressions.push(e.to_proto());
                 }
@@ -1231,7 +1308,7 @@ impl LogicalPlan {
                     gm.sorting_expressions.push(e.to_proto());
                 }
                 if let Some(ii) = initial_input {
-                    gm.initial_input = Some(Box::new(ii.to_proto()));
+                    gm.initial_input = Some(Box::new(relation_of(ii, plan_ids)));
                 }
                 for e in initial_grouping_expressions {
                     gm.initial_grouping_expressions.push(e.to_proto());
@@ -1258,11 +1335,11 @@ impl LogicalPlan {
                 func,
             } => {
                 let mut cg = proto::CoGroupMap::default();
-                cg.input = Some(Box::new(input.to_proto()));
+                cg.input = Some(Box::new(relation_of(input, plan_ids)));
                 for e in input_grouping_expressions {
                     cg.input_grouping_expressions.push(e.to_proto());
                 }
-                cg.other = Some(Box::new(other.to_proto()));
+                cg.other = Some(Box::new(relation_of(other, plan_ids)));
                 for e in other_grouping_expressions {
                     cg.other_grouping_expressions.push(e.to_proto());
                 }
@@ -1279,8 +1356,8 @@ impl LogicalPlan {
                 direction,
             } => {
                 let mut nbj = proto::NearestByJoin::default();
-                nbj.left = Some(Box::new(left.to_proto()));
-                nbj.right = Some(Box::new(right.to_proto()));
+                nbj.left = Some(Box::new(relation_of(left, plan_ids)));
+                nbj.right = Some(Box::new(relation_of(right, plan_ids)));
                 nbj.ranking_expression = Some(ranking_expression.to_proto());
                 nbj.num_results = *num_results;
                 nbj.join_type = join_type.clone();

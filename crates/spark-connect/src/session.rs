@@ -2,7 +2,7 @@
 //!
 //! Provides the entry point for DataFrame operations and SQL queries.
 
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use spark_connect_core::channel::ChannelBuilder;
@@ -12,7 +12,7 @@ use spark_connect_core::runtime::block_on;
 use spark_connect_proto as proto;
 
 use crate::dataframe::DataFrame;
-use crate::plan::LogicalPlan;
+use crate::plan::{LogicalPlan, PlanIds};
 use crate::profiler::ProfilerCollector;
 use crate::row::{Row, Value};
 use crate::types::DataType;
@@ -44,8 +44,8 @@ pub struct ExecutionInfo {
 pub struct SparkSession {
     /// Shared gRPC client
     client: Arc<SparkConnectClient>,
-    /// Plan ID counter for unique IDs in nested plans
-    plan_id_counter: Arc<AtomicI64>,
+    /// Stable plan IDs for the plan nodes this session serializes.
+    plan_ids: Arc<PlanIds>,
     /// Operation tags attached to every ExecutePlan request from this session.
     /// Mirrors `pyspark.sql.connect.session.SparkSession`'s addTag/removeTag/getTags.
     tags: Arc<Mutex<Vec<String>>>,
@@ -69,7 +69,7 @@ impl SparkSession {
     fn new(client: SparkConnectClient) -> Self {
         SparkSession {
             client: Arc::new(client),
-            plan_id_counter: Arc::new(AtomicI64::new(1)),
+            plan_ids: Arc::new(PlanIds::new()),
             tags: Arc::new(Mutex::new(Vec::new())),
             last_execution: Arc::new(Mutex::new(None)),
             progress_handlers: Arc::new(Mutex::new(Vec::new())),
@@ -197,11 +197,11 @@ impl SparkSession {
 
     /// Start a brand-new session over the same connection. Mirrors
     /// `SparkSession.newSession` — a fresh server-side session (new session id),
-    /// with its own tags and plan-id counter.
+    /// with its own tags and plan IDs.
     pub fn new_session(&self) -> SparkSession {
         SparkSession {
             client: Arc::new(self.client.with_new_session_id()),
-            plan_id_counter: Arc::new(AtomicI64::new(1)),
+            plan_ids: Arc::new(PlanIds::new()),
             tags: Arc::new(Mutex::new(Vec::new())),
             last_execution: Arc::new(Mutex::new(None)),
             progress_handlers: Arc::new(Mutex::new(Vec::new())),
@@ -217,9 +217,9 @@ impl SparkSession {
         self.new_session()
     }
 
-    /// Get the next plan ID (atomic post-increment).
-    pub(crate) fn next_plan_id(&self) -> i64 {
-        self.plan_id_counter.fetch_add(1, Ordering::SeqCst)
+    /// The stable plan IDs of the plan nodes this session serializes.
+    pub(crate) fn plan_ids(&self) -> &PlanIds {
+        &self.plan_ids
     }
 
     /// Get the underlying client.
@@ -598,7 +598,7 @@ impl Clone for SparkSession {
     fn clone(&self) -> Self {
         SparkSession {
             client: Arc::clone(&self.client),
-            plan_id_counter: Arc::clone(&self.plan_id_counter),
+            plan_ids: Arc::clone(&self.plan_ids),
             tags: Arc::clone(&self.tags),
             last_execution: Arc::clone(&self.last_execution),
             progress_handlers: Arc::clone(&self.progress_handlers),

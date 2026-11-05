@@ -13,7 +13,7 @@ use spark_connect_core::error::{Result, SparkError};
 use spark_connect_core::runtime::block_on;
 use spark_connect_proto as proto;
 
-use crate::dataframe::{assign_plan_ids, execute_command_collect, DataFrame};
+use crate::dataframe::{execute_command_collect, DataFrame};
 use crate::session::SparkSession;
 use crate::types::DataType;
 
@@ -149,8 +149,7 @@ pub fn define_flow(
     sql_conf: HashMap<String, String>,
     source_code_location: Option<proto::SourceCodeLocation>,
 ) -> Result<()> {
-    let mut relation = relation_df.plan.to_proto();
-    assign_plan_ids(&mut relation, &relation_df.session)?;
+    let relation = relation_df.relation();
     let details =
         define_flow::Details::RelationFlowDetails(define_flow::WriteRelationFlowDetails {
             relation: Some(relation),
