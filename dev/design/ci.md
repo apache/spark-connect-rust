@@ -6,7 +6,7 @@ This document describes the GitHub Actions CI pipeline for the Spark Connect Rus
 
 ## Overview
 
-The main build and test workflows include:
+The CI consists of three main workflows:
 
 1. **Rust CI** (`.github/workflows/rust.yml`) - Build and test the pure-Rust crates
 2. **Python Connect Tests** (`.github/workflows/build_python_connect.yml`) - Build the PyO3 wheel and run Spark Connect integration tests
@@ -140,11 +140,13 @@ when packaged sources under `python/pyspark/`, protocol definitions under
 `crates/spark-connect-proto/proto/`, Cargo manifests or the lockfile, build scripts,
 packaging/toolchain configuration, or the wheel workflows change.
 Ordinary Rust source changes do not trigger these focused checks. The scheduled
-`release.yml` dry run builds current `master` every two days and can catch
-release-path regressions from those changes. Manual dispatch can check them sooner.
+`release.yml` dry run builds only `master`, so `branch-*` maintenance branches have
+no scheduled backstop for Rust source changes. To validate a maintenance branch,
+manually dispatch `release.yml` with `branch` set to that branch, empty
+`release-version` and `rc-count` inputs, and `finalize: false`.
 
-The shared recipe restores no dependency or compiled-artifact caches, so each
-run exercises the assembler toolchain. Checks have a 45-minute timeout;
+The shared recipe uses no dependency or build caches, so each run is a clean build
+matching the release. Checks have a 45-minute timeout;
 releases retain their six-hour limit. Check artifacts expire after one day;
 release artifacts retain the repository default. Checkout credentials are not
 persisted in either build.
