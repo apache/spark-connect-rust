@@ -50,6 +50,32 @@ class IntervalInputConversionTests(unittest.TestCase):
                 with self.assertRaisesRegex(TypeError, "cannot merge"):
                     spark.createDataFrame(data)
 
+    def test_non_interval_inputs_keep_encoder_coercions_and_errors(self):
+        from pyspark.errors import PySparkRuntimeError
+
+        spark = SparkSession.builder.remote("sc://127.0.0.1:1").create()
+        # The existing Double encoder accepts integer values in the same column.
+        for data in ([(1.0,), (2,)], [([1.0, 2],)], [({"x": 1.0, "y": 2},)]):
+            with self.subTest(data=data):
+                self.assertTrue(spark.createDataFrame(data).isLocal())
+        for data in ([("text",), (1,)], [(1,), ("text",)],
+                     [([1, "text"],)], [({"x": 1, "y": "text"},)]):
+            with self.subTest(data=data):
+                with self.assertRaisesRegex(PySparkRuntimeError, "Type mismatch in row data"):
+                    spark.createDataFrame(data)
+
+    def test_non_interval_parent_errors_still_precede_child_errors(self):
+        from pyspark.errors import PySparkRuntimeError
+
+        spark = SparkSession.builder.remote("sc://127.0.0.1:1").create()
+        for data, expected in (
+            ([([1, "bad child"],), (5,)], "expected array"),
+            ([({"x": 1, "y": "bad child"},), (5,)], "expected map"),
+        ):
+            with self.subTest(data=data):
+                with self.assertRaisesRegex(PySparkRuntimeError, expected):
+                    spark.createDataFrame(data)
+
     def test_bounds_and_null_first_inputs_build_without_rpc(self):
         spark = SparkSession.builder.remote("sc://127.0.0.1:1").create()
         for schema in (None, ["interval"], T.StructType([
