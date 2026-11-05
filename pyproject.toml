@@ -69,8 +69,10 @@ manifest-path = "crates/pyspark-rs/Cargo.toml"
 # the sdist with "License-File LICENSE does not exist in distribution file". Ship the
 # LICENSE in the sdist so it satisfies the declared metadata.
 include = [{ path = "LICENSE", format = "sdist" }]
-# Use abi3 for a stable ABI compatible across Python 3.9+.
-features = ["pyo3/abi3-py39", "pyo3/extension-module"]
+# abi3 is driven per build leg, not here: it is incompatible with the free-threaded
+# ABI, so the free-threaded (cp3xxt) wheel leg must build without it, while the
+# stable-ABI leg passes `--features pyo3/abi3-py39` explicitly (see release.yml).
+features = ["pyo3/extension-module"]
 # Keep tests out of the built wheel/sdist: our own offline suite lives outside the package
 # (python/tests), but the vendored pyspark tree carries upstream test modules
 # (e.g. pyspark/pipelines/tests, pyspark/testing/tests) that end users don't need.

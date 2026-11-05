@@ -1,0 +1,10 @@
+# Known environmental failures on free-threaded CPython only, applied on top of
+# parity_known_failures.txt by the free-threaded parity leg. Same format and drift check.
+#
+# protobuf publishes its C (upb) backend only as an abi3 wheel, which free-threaded
+# CPython cannot load, so pip installs the pure-Python backend there. The reference
+# client builds every request as a Python protobuf message and serializes it with
+# SerializeToString(); the pure-Python backend serializes recursively and overflows the
+# default recursion limit on very deep plans, where upb does not. The reference client
+# over grpcio hits the same overflow, so this is not a client regression.
+pyspark/sql/tests/connect/test_connect_error.py::SparkConnectErrorTests::test_recursion_handling_for_plan_logging  # 400-deep plan: pure-Python protobuf (no free-threaded upb wheel) overflows the recursion limit serializing the request
