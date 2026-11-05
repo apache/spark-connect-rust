@@ -1775,6 +1775,7 @@ impl PyStructType {
     }
 
     /// Tree string. Mirrors `StructType.treeString(maxDepth)`.
+    // Use an integer default so explicit None raises TypeError, matching PySpark.
     #[allow(non_snake_case)]
     #[pyo3(
         name = "treeString",
