@@ -289,50 +289,21 @@ def _parse_datatype_json_string(json_string):
 
 def _parse_datatype_json_value(v):
     """Recursively reconstruct a DataType from a parsed Spark-JSON value (a string for
-    atomic/parameterized types, or a dict for the nested struct/array/map forms)."""
-    import re as _re
+    atomic/parameterized types, or a dict for the nested struct/array/map forms).
+
+    The string forms (atomics, ``decimal(p,s)``, ``string collate X``, intervals,
+    ``geometry(<crs>)``, ``geography(<crs>, <alg>)``, ...) are parsed by the Rust core's
+    JSON grammar, so the drop-in keeps one grammar. The nested object forms recurse here,
+    because a ``udt`` leaf has to reconstruct its Python class."""
+    import json as _json
 
     if isinstance(v, str):
-        atomic = {
-            "void": NullType, "null": NullType, "boolean": BooleanType, "byte": ByteType,
-            "short": ShortType, "integer": IntegerType, "long": LongType, "float": FloatType,
-            "double": DoubleType, "string": StringType, "binary": BinaryType, "date": DateType,
-            "timestamp": TimestampType, "timestamp_ntz": TimestampNTZType, "variant": VariantType,
-        }
-        if v in atomic:
-            return atomic[v]()
-        m = _re.match(r"decimal\((\d+),\s*(\d+)\)$", v)
-        if m:
-            return DecimalType(int(m.group(1)), int(m.group(2)))
-        if v == "decimal":
-            return DecimalType()
-        m = _re.match(r"char\((\d+)\)$", v)
-        if m:
-            return CharType(int(m.group(1)))
-        m = _re.match(r"varchar\((\d+)\)$", v)
-        if m:
-            return VarcharType(int(m.group(1)))
-        m = _re.match(r"time\((\d+)\)$", v)
-        if m:
-            return TimeType(int(m.group(1)))
-        m = _re.match(r"timestamp_(ntz|ltz)\(\s*(\d+)\s*\)$", v)
-        if m:
-            cls = TimestampNTZNanosType if m.group(1) == "ntz" else TimestampLTZNanosType
-            return cls(int(m.group(2)))
-        if v == "calendarinterval":
-            return CalendarIntervalType()
-        _ym = {"year": 0, "month": 1}
-        _dt = {"day": 0, "hour": 1, "minute": 2, "second": 3}
-        m = _re.match(r"interval (\w+)(?: to (\w+))?$", v)
-        if m:
-            start, end = m.group(1), m.group(2)
-            if start in _ym:
-                s = _ym[start]
-                return YearMonthIntervalType(s, _ym.get(end, s) if end else s)
-            if start in _dt:
-                s = _dt[start]
-                return DayTimeIntervalType(s, _dt.get(end, s) if end else s)
-        raise ValueError(f"cannot parse datatype json: {v!r}")
+        from pyspark._pyspark import parse_datatype_json
+
+        try:
+            return parse_datatype_json(_json.dumps(v))
+        except ValueError:
+            raise ValueError(f"cannot parse datatype json: {v!r}") from None
     elif isinstance(v, dict):
         t = v.get("type")
         if t == "struct":

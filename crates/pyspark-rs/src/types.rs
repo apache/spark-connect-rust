@@ -146,6 +146,14 @@ impl PyDataType {
         }
     }
 
+    /// The fallback for the classes without their own `__reduce__`: a bare `DataType`
+    /// (an unparsed DDL type) and a pure-Python `UserDefinedType`, whose `json()` names
+    /// its Python class.
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<(Py<PyAny>, (String,))> {
+        let json: String = slf.call_method0("json")?.extract()?;
+        type_reduce(slf.py(), &json)
+    }
+
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
@@ -2447,6 +2455,9 @@ impl PyGeometryType {
     fn srid(&self) -> i32 {
         self.srid
     }
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        type_reduce(py, &DataType::Geometry { srid: self.srid }.json())
+    }
     fn __repr__(&self) -> String {
         match self.srid {
             -1 => "GeometryType(ANY)".to_string(),
@@ -2496,6 +2507,9 @@ impl PyGeographyType {
     fn srid(&self) -> i32 {
         self.srid
     }
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        type_reduce(py, &DataType::Geography { srid: self.srid }.json())
+    }
     fn __repr__(&self) -> String {
         match self.srid {
             -1 => "GeographyType(ANY)".to_string(),
@@ -2542,6 +2556,18 @@ fn spatial_type_srid(srid: &Bound<'_, PyAny>, geographic: bool) -> PyResult<i32>
         "ST_INVALID_SRID_VALUE",
         &[("srid", &srid_str)],
     ))
+}
+
+/// Parse a non-UDT DataType's Spark JSON (e.g. `"string collate UTF8_LCASE"`,
+/// `"geography(OGC:CRS84, SPHERICAL)"`, or a nested struct/array/map object) with the core
+/// grammar, into its concrete Python type object. `pyspark.sql.types._parse_datatype_json_value`
+/// delegates its atomic and parameterized string forms here, so the drop-in keeps one JSON
+/// grammar (the core's) instead of a second parser in Python.
+#[pyfunction]
+pub fn parse_datatype_json(py: Python<'_>, json: &str) -> PyResult<Py<PyAny>> {
+    let dt = DataType::from_json_str(json)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    data_type_to_py(py, &dt)
 }
 
 /// Convert a Python DataType object (any of the type classes) or a DDL string into
@@ -2781,9 +2807,12 @@ pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAn
                 value
             ))
         }
-        DataType::Udt { .. } | DataType::Unparsed { .. } => {
+        // An unparsed DDL string has no concrete Python class; keep it as a bare `DataType`.
+        // (The Python parser delegates JSON strings back here, so routing it there would loop.)
+        DataType::Unparsed { .. } => Py::new(py, PyDataType { inner: dt.clone() })?.into_any(),
+        DataType::Udt { .. } => {
             // A UDT reconstructs by re-importing its Python class; delegate to the Python
-            // parser (which also handles the unparsed-DDL fallback).
+            // parser.
             py.import("pyspark.sql.types")?
                 .getattr("_parse_datatype_json_string")?
                 .call1((dt.json(),))?

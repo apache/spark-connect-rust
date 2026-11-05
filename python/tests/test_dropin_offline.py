@@ -104,6 +104,104 @@ def test_parse_datatype_json_string_rejects_garbage():
         T._parse_datatype_json_string(json.dumps("not_a_type"))
 
 
+# One instance of every DataType variant the drop-in has, including the parameterized
+# forms whose JSON needs more than a bare type name (collations, spatial CRS names).
+EVERY_TYPE = [
+    T.NullType(), T.BooleanType(), T.ByteType(), T.ShortType(), T.IntegerType(),
+    T.LongType(), T.FloatType(), T.DoubleType(), T.DecimalType(), T.DecimalType(38, 18),
+    T.StringType(), T.StringType("UTF8_LCASE"), T.StringType("UNICODE_CI"),
+    T.CharType(5), T.VarcharType(9), T.BinaryType(), T.DateType(), T.TimestampType(),
+    T.TimestampNTZType(), T.TimestampNTZNanosType(9), T.TimestampLTZNanosType(7),
+    T.TimeType(3), T.CalendarIntervalType(), T.YearMonthIntervalType(0, 1),
+    T.YearMonthIntervalType(1, 1), T.DayTimeIntervalType(0, 3),
+    T.DayTimeIntervalType(2, 2), T.VariantType(),
+    T.GeometryType(0), T.GeometryType(3857), T.GeometryType(4326), T.GeometryType("ANY"),
+    T.GeographyType(4326), T.GeographyType("ANY"),
+    T.ArrayType(T.GeometryType(3857), False),
+    T.MapType(T.StringType("UTF8_LCASE"), T.GeographyType("ANY"), False),
+]
+
+
+@pytest.mark.parametrize("t", EVERY_TYPE, ids=repr)
+def test_every_datatype_pickle_roundtrip(t):
+    r = pickle.loads(pickle.dumps(t))
+    assert type(r) is type(t)
+    assert r == t and hash(r) == hash(t)
+    assert r.json() == t.json()
+
+
+def test_every_datatype_pickle_roundtrip_nested_in_struct():
+    st = T.StructType([
+        T.StructField(f"f{i}", t, i % 2 == 0, {"i": i, "tag": "v"})
+        for i, t in enumerate(EVERY_TYPE)
+    ])
+    nested = T.StructType([
+        T.StructField("s", st),
+        T.StructField("a", T.ArrayType(st)),
+        T.StructField("m", T.MapType(T.StringType("UNICODE"), st)),
+    ])
+    for t in (st, nested):
+        r = pickle.loads(pickle.dumps(t))
+        assert r == t
+        assert r.json() == t.json()
+    r = pickle.loads(pickle.dumps(st))
+    for got, want in zip(r.fields, st.fields):
+        assert type(got.dataType) is type(want.dataType)
+        assert got.dataType == want.dataType
+        assert got.metadata == want.metadata
+
+
+def test_spatial_and_collated_json_forms_parse():
+    import json
+    cases = {
+        "geometry(SRID:0)": T.GeometryType(0),
+        "geometry(EPSG:3857)": T.GeometryType(3857),
+        "geometry(OGC:CRS84)": T.GeometryType(4326),
+        "geometry(SRID:ANY)": T.GeometryType("ANY"),
+        "geography(OGC:CRS84, SPHERICAL)": T.GeographyType(4326),
+        "geography(SRID:ANY, SPHERICAL)": T.GeographyType("ANY"),
+        "string collate UTF8_LCASE": T.StringType("UTF8_LCASE"),
+    }
+    for j, want in cases.items():
+        assert T._parse_datatype_json_string(json.dumps(j)) == want
+        assert want.json() == json.dumps(j)
+
+
+def test_unparsed_datatype_pickle_roundtrip():
+    t = T._parse_datatype_json_value("unparsed(some_ddl)")
+    assert t.json() == '"unparsed(some_ddl)"'
+    r = pickle.loads(pickle.dumps(t))
+    assert r == t and r.json() == t.json()
+
+
+def test_user_defined_type_pickle_roundtrip():
+    import sys
+    import types as _pytypes
+
+    mod = _pytypes.ModuleType("_udt_pickle_mod")
+    sys.modules["_udt_pickle_mod"] = mod
+    src = (
+        "from pyspark.sql.types import UserDefinedType, ArrayType, DoubleType\n"
+        "class PointUDT(UserDefinedType):\n"
+        "    @classmethod\n"
+        "    def sqlType(cls): return ArrayType(DoubleType(), False)\n"
+        "    @classmethod\n"
+        "    def module(cls): return '_udt_pickle_mod'\n"
+    )
+    exec(compile(src, "_udt_pickle_mod", "exec"), mod.__dict__)
+    try:
+        u = mod.PointUDT()
+        assert isinstance(pickle.loads(pickle.dumps(u)), mod.PointUDT)
+        st = T.StructType([
+            T.StructField("p", u), T.StructField("g", T.GeometryType(4326)),
+        ])
+        r = pickle.loads(pickle.dumps(st))
+        assert isinstance(r.fields[0].dataType, mod.PointUDT)
+        assert r.fields[1].dataType == T.GeometryType(4326)
+    finally:
+        del sys.modules["_udt_pickle_mod"]
+
+
 def test_structfield_construction():
     f = T.StructField("n", T.IntegerType(), True)
     st = T.StructType([f])
