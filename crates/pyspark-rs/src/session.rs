@@ -527,7 +527,8 @@ impl PySparkSession {
             items.push(if let Ok(dict) = item.cast::<PyDict>() {
                 record(dict)?
             } else if let Ok(pyrow) = item.extract::<PyRef<PyRow>>() {
-                Item::Named(pyrow.row.fields().to_vec(), pyrow.row.values().to_vec())
+                let row = pyrow.to_row(py)?;
+                Item::Named(row.fields().to_vec(), row.values().to_vec())
             } else if let Ok(lst) = item.cast::<PyList>() {
                 Item::Plain(
                     lst.iter()
@@ -1259,7 +1260,7 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     // pyspark Row -> struct: its named fields (values already core Values), so a nested
     // Row inside createDataFrame data (e.g. Row(s=Row(x=1))) converts recursively.
     if let Ok(pyrow) = obj.extract::<PyRef<crate::row::PyRow>>() {
-        return Ok(Value::Struct(pyrow.row.clone().into()));
+        return Ok(Value::Struct(pyrow.to_row(obj.py())?.into()));
     }
 
     // dict -> map (keys coerced to their string form, values recursively converted)
