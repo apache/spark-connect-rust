@@ -12,7 +12,7 @@ The main build and test workflows include:
 2. **Python Connect Tests** (`.github/workflows/build_python_connect.yml`) - Build the PyO3 wheel and run Spark Connect integration tests
 3. **Release wheel build checks** (`.github/workflows/wheel-build-checks.yml`) - Build Linux aarch64 and macOS universal2 wheels using the release recipe
 
-Rust CI and Python Connect Tests run on pushes and pull requests targeting `master` and `branch-*`. Release wheel build checks run for changes to packaged Python sources, dependencies and build configuration, and can also be dispatched manually.
+Rust CI and Python Connect Tests run on pushes and pull requests targeting `master` and `branch-*`. Release wheel build checks run for changes to packaged Python sources, protocol definitions, dependencies and build configuration, and can also be dispatched manually.
 
 ## Rust CI (`rust.yml`)
 
@@ -130,15 +130,18 @@ Each failing test is a **gap in parity**. The fix process:
 ## Release wheel build checks (`wheel-build-checks.yml`)
 
 These checks use the same reusable `build-wheel.yml` recipe as `release.yml`.
-An x86 Linux runner cross-builds the Linux aarch64 wheel with Maturin and Zig.
+An x86_64 Linux runner cross-builds the Linux aarch64 wheel with Maturin and Zig.
 A macOS runner builds a universal2 wheel containing both x86_64 and aarch64
-slices. Native ARM transport tests in Rust CI provide runtime coverage.
+slices. These are build-only checks; Rust CI separately executes the native ARM
+core tests.
 
 The workflow runs on pushes and pull requests targeting `master` or `branch-*`
-when packaged sources under `python/pyspark/`, Cargo manifests or the lockfile,
-build scripts, packaging/toolchain configuration, or the wheel workflows change.
-Ordinary Rust source changes do not trigger these checks. The workflow also
-supports manual dispatch.
+when packaged sources under `python/pyspark/`, protocol definitions under
+`crates/spark-connect-proto/proto/`, Cargo manifests or the lockfile, build scripts,
+packaging/toolchain configuration, or the wheel workflows change.
+Ordinary Rust source changes do not trigger these focused checks. The scheduled
+`release.yml` dry run builds current `master` every two days and can catch
+release-path regressions from those changes. Manual dispatch can check them sooner.
 
 The shared recipe restores no dependency or compiled-artifact caches, so each
 run exercises the assembler toolchain. Checks have a 45-minute timeout;

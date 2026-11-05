@@ -59,7 +59,7 @@ permissions:
 
 jobs:
   build:
-    name: Build wheel (${{ inputs.target }})
+    name: Build
     runs-on: ${{ inputs.runner }}
     timeout-minutes: ${{ inputs.timeout_minutes }}
     steps:
@@ -97,7 +97,8 @@ jobs:
           esac
       - name: Build abi3 wheel with maturin
         # abi3-py39 produces one wheel per (platform, arch) valid for CPython 3.9+.
-        # --zig uses the same Linux cross-linking path for PR checks and releases.
+        # --zig cross-links Linux wheels against glibc 2.17 (manylinux2014),
+        # including aarch64 builds from an x86_64 host.
         shell: bash
         env:
           WHEEL_TARGET: ${{ inputs.target }}
