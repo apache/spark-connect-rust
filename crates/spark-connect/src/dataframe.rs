@@ -2603,7 +2603,10 @@ mod nested_decode_tests {
             Value::List(vec![value(40)]),
         ];
         let expected_maps = [
-            Value::Map(vec![(Value::String("b".into()), value(20)), (Value::String("c".into()), value(30))]),
+            Value::Map(vec![
+                (Value::String("b".into()), value(20)),
+                (Value::String("c".into()), value(30)),
+            ]),
             Value::Map(vec![(Value::String("d".into()), value(40))]),
         ];
         let list_layout = ArrowValueLayout::new(&list);
