@@ -3,7 +3,6 @@
 //! A Row represents a single record: an ordered collection of (field_name, value) pairs.
 //! Values are accessed by index or by field name. Supports all Spark SQL value types.
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
@@ -46,8 +45,9 @@ pub enum Value {
     },
     /// Array of values
     List(Vec<Value>),
-    /// Map of key-value pairs
-    Map(BTreeMap<String, Value>),
+    /// Map entries, in their order, with keys and values of their own types, as PySpark
+    /// reads a map into a dict.
+    Map(Vec<(Value, Value)>),
     /// Struct (nested Row), with ordered names and values.
     /// Construct with `Value::Struct(Row::new(fields, values).into())`.
     Struct(StructValue),
@@ -756,8 +756,7 @@ mod tests {
             Value::List(vec![Value::Integer(1), Value::Integer(2)]).to_string(),
             "[1, 2]"
         );
-        let mut m = std::collections::BTreeMap::new();
-        m.insert("k".to_string(), Value::Integer(9));
+        let m = vec![(Value::String("k".to_string()), Value::Integer(9))];
         assert_eq!(Value::Map(m).to_string(), "{k: 9}");
         assert_eq!(
             Value::Struct(Row::new(vec!["a".to_string()], vec![Value::Integer(1)]).into())

@@ -361,3 +361,23 @@ def test_sql_runs_statements_eagerly(session):
 def test_sql_fails_at_a_statement_that_does_not_parse(session):
     with pytest.raises(AnalysisException, match="PARSE_SYNTAX_ERROR"):
         session.sql("SELEC 1")
+
+
+def test_maps_keep_their_entries_in_order_with_keys_of_their_type(session):
+    row = session.range(1).selectExpr(
+        "map(2, 'b', 1, 'a') AS ints",
+        "map('b', 1, 'a', 2) AS strs",
+        "map(date'2020-01-02', 1) AS dates",
+        "map(named_struct('a', 1), 'x') AS structs",
+    ).first()
+    assert list(row.ints.items()) == [(2, "b"), (1, "a")]
+    assert list(row.strs.items()) == [("b", 1), ("a", 2)]
+    assert row.dates == {date(2020, 1, 2): 1}
+    assert row.structs == {Row(a=1): "x"}
+    # A list key is unhashable, as in PySpark. (PySpark raises at collect(); this client
+    # turns a row's values into Python ones when they are read.)
+    with pytest.raises(TypeError, match="unhashable"):
+        session.range(1).selectExpr("map(array(1), 'x') AS m").first().m
+    df = session.createDataFrame([({2: "b", 1: "a"},)])
+    assert df.schema.simpleString() == "struct<_1:map<bigint,string>>"
+    assert list(df.first()[0].items()) == [(2, "b"), (1, "a")]
