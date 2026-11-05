@@ -428,6 +428,8 @@ def _arrow_input_service(
     server_id = "00000000-0000-0000-0000-000000000001"
 
     def attribution(request, context):
+        grpc_user_agent = dict(context.invocation_metadata()).get("user-agent")
+        assert grpc_user_agent, "artifact RPC is missing a non-empty user-agent header"
         # Keep only scalar envelope fields; do not retain another payload copy.
         return {
             "session_id": request.session_id,
@@ -436,7 +438,7 @@ def _arrow_input_service(
             "user_name": request.user_context.user_name,
             "has_client_type": request.HasField("client_type"),
             "client_type": request.client_type,
-            "grpc_user_agent": dict(context.invocation_metadata())["user-agent"],
+            "grpc_user_agent": grpc_user_agent,
         }
 
     def configure(raw, context):
@@ -608,6 +610,7 @@ def _assert_artifact_contexts(contexts, *, session_id, user_id, user_agent):
 def test_cached_arrow_upload_attribution_on_every_frame(protocol, monkeypatch, user_id, user_agent):
     from pyspark.sql import types as T
 
+    # Exercise ChannelBuilder's default prefix when no URL or environment value is set.
     monkeypatch.delenv("SPARK_CONNECT_USER_AGENT", raising=False)
     table = pa.table({"id": range(10_000)})
     schema = T.StructType([T.StructField("id", T.LongType())])
@@ -639,7 +642,9 @@ def test_file_upload_attribution_on_every_frame(
     monkeypatch.delenv("SPARK_CONNECT_USER_AGENT", raising=False)
     small, large = tmp_path / "small.txt", tmp_path / "large.txt"
     small.write_bytes(b"small artifact")
-    large.write_bytes(bytes(range(256)) * 385)
+    chunk_size = 32 * 1024  # Mirrors CHUNK_SIZE in crates/spark-connect-core/src/artifact.rs.
+    large_size = chunk_size * 3 + 1  # BeginChunk followed by three Chunk frames.
+    large.write_bytes(bytes(index % 256 for index in range(large_size)))
     with _arrow_input_service(
         protocol, user_id=user_id, user_agent=user_agent, allow_file_artifacts=True
     ) as (spark, state):
