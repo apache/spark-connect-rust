@@ -2945,6 +2945,10 @@ def test_create_dataframe_pandas_is_not_local_as_pyspark(schema):
     # pyspark applies the columns, or the field names of the schema, with toDF.
     df = _local_create_dataframe(pd.DataFrame({"a": [1, 2], "b": ["x", "y"]}), schema)
     assert not df.isLocal()
+
+
+def test_create_dataframe_empty_pandas_is_local_as_pyspark():
+    pd = pytest.importorskip("pandas")
     # Empty input returns the relation of its schema, without toDF.
     assert _local_create_dataframe(pd.DataFrame({"a": [], "b": []}), "a long, b string").isLocal()
 
@@ -2970,10 +2974,12 @@ def test_create_dataframe_pandas_errors_as_pyspark():
     from pyspark.errors import PySparkTypeError, PySparkValueError
 
     pdf = pd.DataFrame({"a": [1, 2], "b": ["x", "y"]})
-    with pytest.raises(PySparkTypeError) as error:
-        _local_create_dataframe(pdf, T.LongType())
-    assert error.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW"
-    assert error.value.getMessageParameters() == {"data_type": "LongType()"}
+    # pyspark reports the parsed type, also for an atomic DDL string.
+    for schema, data_type in [(T.LongType(), "LongType()"), ("int", "IntegerType()")]:
+        with pytest.raises(PySparkTypeError) as error:
+            _local_create_dataframe(pdf, schema)
+        assert error.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW"
+        assert error.value.getMessageParameters() == {"data_type": data_type}
     with pytest.raises(PySparkValueError) as error:
         _local_create_dataframe(pdf, ["c", "d", "e"])
     assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
@@ -2982,6 +2988,16 @@ def test_create_dataframe_pandas_errors_as_pyspark():
         with pytest.raises(PySparkValueError) as error:
             _local_create_dataframe(data, schema)
         assert error.value.getCondition() == "CANNOT_INFER_EMPTY_SCHEMA"
+
+
+@pytest.mark.parametrize("data", [[(None,)], [(1, None)], [{"a": None}], [{"a": 1}, {"b": None}]])
+def test_create_dataframe_cannot_type_an_all_null_field_as_pyspark(data):
+    from pyspark.errors import PySparkValueError
+
+    # A field without a non-null value in any row has no type to infer.
+    with pytest.raises(PySparkValueError) as error:
+        _local_create_dataframe(data, None)
+    assert error.value.getCondition() == "CANNOT_DETERMINE_TYPE"
 
 
 # --------------------------------------------------------------------------- schema cache

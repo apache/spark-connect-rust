@@ -208,6 +208,49 @@ def test_create_dataframe_pandas_column_names(session, frame, schema, columns):
     assert not df.isLocal()
 
 
+class _Point:
+    def __init__(self, b, a):
+        self.b = b
+        self.a = a
+
+
+@pytest.mark.parametrize(
+    "data, schema, columns, rows",
+    [
+        # As pyspark, a dict row is read by name: missing keys are null, others ignored.
+        ([{"b": 1, "a": "x"}], "b long, a string", ["b", "a"], [(1, "x")]),
+        ([{"a": 1}], "a long, b string", ["a", "b"], [(1, None)]),
+        ([{"a": 1, "c": 3}], "a long", ["a"], [(1,)]),
+        # Without a schema, the fields are the rows' sorted keys, in the order first seen.
+        ([{"a": 1}, {"b": 2}], None, ["a", "b"], [(1, None), (None, 2)]),
+        ([{"b": 2, "a": 1}], None, ["a", "b"], [(1, 2)]),
+        ([{"b": 2, "a": 1}], ["x", "y"], ["x", "y"], [(1, 2)]),
+        ([{"a": 1}, {"a": 2, "b": 3}], ["x", "y"], ["x", "y"], [(1, None), (2, 3)]),
+        # Other objects are read through their __dict__.
+        ([_Point(2, "x")], None, ["a", "b"], [("x", 2)]),
+        ([_Point(2, "x")], "a string, b long", ["a", "b"], [("x", 2)]),
+    ],
+)
+def test_create_dataframe_dict_rows_by_name(session, data, schema, columns, rows):
+    df = session.createDataFrame(data, schema)
+    assert df.columns == columns
+    assert [tuple(r) for r in df.collect()] == rows
+
+
+@pytest.mark.parametrize(
+    "data, simple_string, rows",
+    [
+        ([(None, 1), (2, 3)], "struct<_1:bigint,_2:bigint>", [(None, 1), (2, 3)]),
+        ([{"a": None}, {"a": 1}], "struct<a:bigint>", [(None,), (1,)]),
+    ],
+)
+def test_create_dataframe_infers_types_past_nulls(session, data, simple_string, rows):
+    # A field takes the type of its first non-null value.
+    df = session.createDataFrame(data)
+    assert df.schema.simpleString() == simple_string
+    assert [tuple(r) for r in df.collect()] == rows
+
+
 def test_collect_reads_a_result_across_stream_ends(session):
     # Takes several response streams when the server's senderMaxStreamSize is small.
     n = 300_000
