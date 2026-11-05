@@ -647,9 +647,9 @@ impl Default for SparkSessionBuilder {
     }
 }
 
-/// Construct the shared local-input width error for Rust and Python callers.
-#[doc(hidden)]
-pub fn row_width_mismatch(row_index: usize, actual: usize, expected: usize) -> SparkError {
+/// The error for a row of `create_dataframe` whose width differs from the schema's. The
+/// Python client checks widths itself, raising pyspark's `AXIS_LENGTH_MISMATCH`.
+fn row_width_mismatch(row_index: usize, actual: usize, expected: usize) -> SparkError {
     SparkError::value_msg(format!(
         "Row {row_index} has {actual} values, but the schema has {expected} fields"
     ))

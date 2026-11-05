@@ -3,7 +3,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use spark_connect::row::{Row, Value};
-use spark_connect::session::{row_width_mismatch, SparkSession};
+use spark_connect::session::SparkSession;
 use spark_connect::types::{DataType, StructField};
 use spark_connect::udf::{CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
 
@@ -378,11 +378,14 @@ impl PySparkSession {
         Ok(PyDataFrame::new(df))
     }
 
-    /// Create a DataFrame from a list of tuples/lists and an optional schema. A pandas
-    /// DataFrame or a pyarrow Table is accepted too, as in pyspark.
+    /// Create a DataFrame from local data (a list of rows, a pandas DataFrame, or a pyarrow
+    /// Table) and an optional schema, as in pyspark.
     ///
-    /// If schema is a list of strings, those are used as column names (all types inferred as string).
-    /// If schema is None, columns are named col0, col1, etc. and all types are string.
+    /// Column names follow pyspark: without a schema, plain rows are named `_1`, `_2`, ...
+    /// and Rows and dicts keep their own names. A list of names, extended with `_2`, `_3`,
+    /// ... for wider plain rows, and the columns of a pandas DataFrame (or the field names
+    /// of its schema) are applied with `toDF`. Without a struct schema, the field types are
+    /// inferred from the first row.
     #[pyo3(signature = (data, schema=None, samplingRatio=None, verifySchema=None))]
     fn createDataFrame(
         &self,
@@ -406,10 +409,8 @@ impl PySparkSession {
             return crate::pyarrow_import::create_dataframe(py, &self.session, data, schema);
         }
 
-        // Accept a pandas DataFrame (as pyspark does): convert it to a list of row lists
-        // with NaN/NaT mapped to None, and take its column names as the default schema.
-        // pandas-on-Spark always passes an explicit `schema`, so this mainly needs to
-        // deliver the row values; the list path below handles the rest.
+        // A pandas DataFrame (as pyspark does): its rows as lists with NaN/NaT mapped to None,
+        // and its column labels, as strings, which are applied below.
         let mut pandas_columns: Option<Vec<String>> = None;
         let is_pandas = py
             .import("pandas")
@@ -418,7 +419,11 @@ impl PySparkSession {
             .unwrap_or(false);
         let data_owned: Bound<'_, PyList>;
         let data: &Bound<'_, PyList> = if is_pandas {
-            pandas_columns = Some(data.getattr("columns")?.call_method0("tolist")?.extract()?);
+            let mut labels = Vec::new();
+            for label in data.getattr("columns")?.try_iter()? {
+                labels.push(label?.str()?.extract::<String>()?);
+            }
+            pandas_columns = Some(labels);
             // df.astype(object).where(df.notna(), None).values.tolist() -> rows with None for NA.
             let notna = data.call_method0("notna")?;
             let obj = data.call_method1("astype", ("object",))?;
@@ -437,6 +442,7 @@ impl PySparkSession {
             Names(Vec<String>),
             Struct(Vec<StructField>),
         }
+        let mut atomic_schema: Option<DataType> = None;
         let spec = match schema {
             None => Spec::None,
             Some(s) => {
@@ -449,104 +455,228 @@ impl PySparkSession {
                     // column (matching pyspark createDataFrame(data, AtomicType())).
                     match crate::types::py_to_data_type(s)? {
                         DataType::Struct { fields } => Spec::Struct(fields),
-                        atomic => Spec::Struct(vec![spark_connect::types::StructField {
-                            name: "value".to_string(),
-                            data_type: atomic,
-                            nullable: true,
-                            metadata: std::collections::BTreeMap::new(),
-                        }]),
+                        atomic => {
+                            atomic_schema = Some(atomic.clone());
+                            Spec::Struct(vec![spark_connect::types::StructField {
+                                name: "value".to_string(),
+                                data_type: atomic,
+                                nullable: true,
+                                metadata: std::collections::BTreeMap::new(),
+                            }])
+                        }
                     }
                 }
             }
         };
 
-        let spec_names: Option<Vec<String>> = match &spec {
-            Spec::Names(n) => Some(n.clone()),
-            Spec::Struct(f) => Some(f.iter().map(|x| x.name.clone()).collect()),
-            Spec::None => None,
+        // As pyspark, empty input needs a schema to type its relation, and gets no toDF.
+        let empty = data.is_empty();
+        if empty && !matches!(spec, Spec::Struct(_)) {
+            return Err(crate::column::raise_pyspark(
+                py,
+                "PySparkValueError",
+                "CANNOT_INFER_EMPTY_SCHEMA",
+                &[],
+            ));
+        }
+        if !empty {
+            if let Some(columns) = &pandas_columns {
+                if let Some(atomic) = &atomic_schema {
+                    // pyspark reports str() of the parsed type, which is its repr.
+                    let data_type = crate::types::data_type_to_py(py, atomic)?
+                        .bind(py)
+                        .repr()?
+                        .extract::<String>()?;
+                    return Err(crate::column::raise_pyspark(
+                        py,
+                        "PySparkTypeError",
+                        "UNSUPPORTED_DATA_TYPE_FOR_ARROW",
+                        &[("data_type", &data_type)],
+                    ));
+                }
+                if matches!(spec, Spec::None) && columns.is_empty() {
+                    return Err(crate::column::raise_pyspark(
+                        py,
+                        "PySparkValueError",
+                        "CANNOT_INFER_EMPTY_SCHEMA",
+                        &[],
+                    ));
+                }
+            }
+        }
+
+        // How a row carries its values, as in pyspark: positionally (lists, tuples and
+        // scalars), positionally with names of its own (Rows, and namedtuples by their
+        // `_fields`), or by name (dicts, and other objects through their `__dict__`, whose
+        // keys are sorted as `_infer_schema` does).
+        enum Item {
+            Plain(Vec<Value>),
+            Named(Vec<String>, Vec<Value>),
+            Record(Vec<(String, Value)>),
+        }
+        let record = |dict: &Bound<'_, PyDict>| -> PyResult<Item> {
+            let mut pairs: Vec<(String, Value)> = Vec::with_capacity(dict.len());
+            for (k, v) in dict.iter() {
+                pairs.push((k.str()?.to_string(), py_to_value(&v)?));
+            }
+            pairs.sort_by(|a, b| a.0.cmp(&b.0));
+            Ok(Item::Record(pairs))
+        };
+        let mut items: Vec<Item> = Vec::with_capacity(data.len());
+        for item in data.iter() {
+            items.push(if let Ok(dict) = item.cast::<PyDict>() {
+                record(dict)?
+            } else if let Ok(pyrow) = item.extract::<PyRef<PyRow>>() {
+                Item::Named(pyrow.row.fields().to_vec(), pyrow.row.values().to_vec())
+            } else if let Ok(lst) = item.cast::<PyList>() {
+                Item::Plain(
+                    lst.iter()
+                        .map(|v| py_to_value(&v))
+                        .collect::<PyResult<_>>()?,
+                )
+            } else if let Ok(tuple) = item.cast::<pyo3::types::PyTuple>() {
+                let values = tuple
+                    .iter()
+                    .map(|v| py_to_value(&v))
+                    .collect::<PyResult<_>>()?;
+                match tuple
+                    .getattr("_fields")
+                    .and_then(|fields| fields.extract::<Vec<String>>())
+                {
+                    Ok(fields) => Item::Named(fields, values),
+                    Err(_) => Item::Plain(values),
+                }
+            } else if let Some(attributes) = item
+                .getattr("__dict__")
+                .ok()
+                .and_then(|attributes| attributes.cast_into::<PyDict>().ok())
+            {
+                record(&attributes)?
+            } else {
+                // A scalar row (int/str/float/...): a single-field row, matching
+                // `createDataFrame([1, 2, 3], IntegerType())`. The field name comes from
+                // the schema when given, else defaults below.
+                Item::Plain(vec![py_to_value(&item)?])
+            });
+        }
+
+        // Plain rows are as wide as the widest of them: pyspark's schema inference names
+        // them `_1`, `_2`, ..., and extends a shorter list of names the same way.
+        let plain_width = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Plain(values) => Some(values.len()),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        // The keys of the dict rows, in the order pyspark merges their schemas: each row's
+        // sorted keys that no earlier row had.
+        let mut record_names: Vec<String> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for item in &items {
+            if let Item::Record(pairs) = item {
+                for (key, _) in pairs {
+                    if seen.insert(key.as_str()) {
+                        record_names.push(key.clone());
+                    }
+                }
+            }
+        }
+        let extend = |names: &[String], width: usize| -> Vec<String> {
+            let mut names = names.to_vec();
+            names.extend((names.len()..width).map(|i| format!("_{}", i + 1)));
+            names
+        };
+        // The names pyspark applies with toDF: a list of names, and the columns of a pandas
+        // DataFrame or the field names of its schema.
+        let to_df_names: Option<Vec<String>> = match (&spec, &pandas_columns) {
+            _ if empty => None,
+            (Spec::Names(names), Some(columns)) => Some(extend(names, columns.len())),
+            (Spec::Names(names), None) => Some(extend(names, plain_width)),
+            (Spec::None, Some(columns)) => Some(columns.clone()),
+            (Spec::Struct(fields), Some(_)) => {
+                Some(fields.iter().map(|f| f.name.clone()).collect())
+            }
+            (_, None) => None,
+        };
+        let default_names = extend(&[], plain_width);
+        // A dict row's value for `name`, as pyspark looks it up: null when the key is missing.
+        // The pairs are sorted by key, and the first of equal keys is taken.
+        let lookup = |pairs: &[(String, Value)], name: &String| {
+            let index = pairs.partition_point(|(key, _)| key < name);
+            match pairs.get(index) {
+                Some((key, value)) if key == name => value.clone(),
+                _ => Value::Null,
+            }
         };
 
-        // Parse each item into values; a list/tuple carries no names, a Row carries its own.
-        let mut rows: Vec<Row> = vec![];
-        for item in data.iter() {
-            let (values, row_names): (Vec<Value>, Option<Vec<String>>) =
-                if let Ok(pyrow) = item.extract::<PyRef<PyRow>>() {
-                    (
-                        pyrow.row.values().to_vec(),
-                        Some(pyrow.row.fields().to_vec()),
-                    )
-                } else if let Ok(lst) = item.cast::<PyList>() {
-                    (
-                        lst.iter()
-                            .map(|v| py_to_value(&v))
-                            .collect::<PyResult<_>>()?,
-                        None,
-                    )
-                } else if let Ok(tuple) = item.cast::<pyo3::types::PyTuple>() {
-                    (
-                        tuple
-                            .iter()
-                            .map(|v| py_to_value(&v))
-                            .collect::<PyResult<_>>()?,
-                        None,
-                    )
-                } else if let Ok(dict) = item.cast::<PyDict>() {
-                    // A dict row: field names are its keys (sorted, mirroring pyspark's
-                    // `_infer_schema` for dicts), values in that key order.
-                    let mut pairs: Vec<(String, Bound<'_, PyAny>)> = Vec::with_capacity(dict.len());
-                    for (k, v) in dict.iter() {
-                        pairs.push((k.str()?.to_string(), v));
-                    }
-                    pairs.sort_by(|a, b| a.0.cmp(&b.0));
-                    let names: Vec<String> = pairs.iter().map(|(k, _)| k.clone()).collect();
-                    let values: Vec<Value> = pairs
-                        .iter()
-                        .map(|(_, v)| py_to_value(v))
-                        .collect::<PyResult<_>>()?;
-                    (values, Some(names))
-                } else {
-                    // A scalar row (int/str/float/...): a single-field row, matching
-                    // `createDataFrame([1, 2, 3], IntegerType())`. The field name comes from
-                    // the schema when given, else defaults below.
-                    (vec![py_to_value(&item)?], None)
-                };
-            let names = spec_names
-                .clone()
-                .or(row_names)
-                .or_else(|| pandas_columns.clone())
-                .unwrap_or_else(|| (0..values.len()).map(|i| format!("col{}", i)).collect());
+        let mut rows: Vec<Row> = Vec::with_capacity(items.len());
+        for item in items {
+            let (names, values) = match (&spec, &to_df_names, item) {
+                // A struct schema takes dict values by its field names, so that missing
+                // keys are null and other keys are ignored, and other rows by position.
+                (Spec::Struct(fields), _, item) => {
+                    let names: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
+                    let values = match item {
+                        Item::Record(pairs) => names.iter().map(|n| lookup(&pairs, n)).collect(),
+                        Item::Plain(values) | Item::Named(_, values) => values,
+                    };
+                    (names, values)
+                }
+                (_, names, Item::Record(pairs)) => (
+                    names.clone().unwrap_or_else(|| record_names.clone()),
+                    record_names.iter().map(|n| lookup(&pairs, n)).collect(),
+                ),
+                (_, Some(names), Item::Plain(values) | Item::Named(_, values)) => {
+                    (names.clone(), values)
+                }
+                (_, None, Item::Named(names, values)) => (names, values),
+                (_, None, Item::Plain(values)) => (default_names.clone(), values),
+            };
             if names.len() != values.len() {
-                return Err(row_width_mismatch(rows.len(), values.len(), names.len())).to_pyerr();
+                // As pyspark, which checks every row against the width of the schema.
+                return Err(crate::column::raise_pyspark(
+                    py,
+                    "PySparkValueError",
+                    "AXIS_LENGTH_MISMATCH",
+                    &[
+                        ("expected_length", &names.len().to_string()),
+                        ("actual_length", &values.len().to_string()),
+                    ],
+                ));
             }
             rows.push(Row::new(names, values));
         }
 
-        // An explicit struct schema wins; otherwise infer field types from the first row
-        // (which requires at least one row -- an empty dataset needs an explicit schema,
-        // matching pyspark which creates an empty DataFrame from schema + [] data).
+        // An explicit struct schema wins; otherwise each field takes the type of its first
+        // non-null value (empty input has a struct schema, checked above). pyspark merges
+        // the types of all rows, which gives the same type when they agree, and cannot
+        // type a field that is null in every row.
         let schema_dtype = match spec {
             Spec::Struct(fields) => DataType::Struct { fields },
             _ => {
-                if rows.is_empty() {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        "can not infer schema from empty dataset",
-                    ));
-                }
-                let fields: Vec<StructField> = rows[0]
-                    .fields()
-                    .iter()
-                    .enumerate()
-                    .map(|(i, name)| StructField {
+                let mut fields: Vec<StructField> = Vec::with_capacity(rows[0].len());
+                for (i, name) in rows[0].fields().iter().enumerate() {
+                    let Some(value) = rows
+                        .iter()
+                        .filter_map(|row| row.get(i))
+                        .find(|value| !matches!(value, Value::Null))
+                    else {
+                        return Err(crate::column::raise_pyspark(
+                            py,
+                            "PySparkValueError",
+                            "CANNOT_DETERMINE_TYPE",
+                            &[],
+                        ));
+                    };
+                    fields.push(StructField {
                         name: name.clone(),
-                        data_type: rows[0].get(i).map(value_to_datatype).unwrap_or(
-                            DataType::String {
-                                collation: "UTF8_BINARY".to_string(),
-                            },
-                        ),
+                        data_type: value_to_datatype(value),
                         nullable: true,
                         metadata: Default::default(),
-                    })
-                    .collect();
+                    });
+                }
                 DataType::Struct { fields }
             }
         };
@@ -554,7 +684,15 @@ impl PySparkSession {
         let df = py
             .detach(|| self.session.create_dataframe(rows, schema_dtype))
             .to_pyerr()?;
-        Ok(PyDataFrame::new(df))
+        // As pyspark, column names are applied with toDF. The local relation already carries
+        // them, so this only changes the plan, which the server resolves into a Project that
+        // is not local; it keeps isLocal() as in pyspark and is not redundant.
+        Ok(PyDataFrame::new(match to_df_names {
+            Some(names) if !names.is_empty() => {
+                df.to_df(names.iter().map(String::as_str).collect())
+            }
+            _ => df,
+        }))
     }
 
     /// Get the catalog API (`spark.catalog`).

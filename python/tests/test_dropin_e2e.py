@@ -21,12 +21,13 @@ values here are those of the reference client; the tests pass with it as well.
 """
 
 import os
+from collections import namedtuple
 from datetime import date, datetime
 
 import pyarrow as pa
 import pytest
 from pyspark.errors import PySparkValueError
-from pyspark.sql import SparkSession
+from pyspark.sql import Row, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
     ArrayType,
@@ -170,6 +171,91 @@ def test_create_dataframe_from_empty_arrow_table(session):
         with pytest.raises(PySparkValueError) as error:
             session.createDataFrame(*args)
         assert error.value.getCondition() == "CANNOT_INFER_EMPTY_SCHEMA"
+
+
+_Pair = namedtuple("_Pair", ["x", "y"])
+
+
+@pytest.mark.parametrize(
+    "data, schema, columns, rows",
+    [
+        ([(1, 2)], None, ["_1", "_2"], [(1, 2)]),
+        ([[1, 2]], ["a"], ["a", "_2"], [(1, 2)]),
+        ([(1, 2), (3, 4)], ["a"], ["a", "_2"], [(1, 2), (3, 4)]),
+        ([(1, 2)], [], ["_1", "_2"], [(1, 2)]),
+        ([(1, 2)], ("a", "b"), ["a", "b"], [(1, 2)]),
+        ([Row(x=1, y=2)], ["a", "b"], ["a", "b"], [(1, 2)]),
+        ([{"y": 2, "x": 1}], ["a", "b"], ["a", "b"], [(1, 2)]),
+        # A namedtuple is named by its fields, as a Row is.
+        ([_Pair(1, 2), _Pair(3, 4)], None, ["x", "y"], [(1, 2), (3, 4)]),
+        ([_Pair(1, 2)], ["a", "b"], ["a", "b"], [(1, 2)]),
+    ],
+)
+def test_create_dataframe_rows_column_names(session, data, schema, columns, rows):
+    df = session.createDataFrame(data, schema)
+    assert df.columns == columns
+    assert [tuple(r) for r in df.collect()] == rows
+    assert df.isLocal() is (schema is None)
+
+
+@pytest.mark.parametrize(
+    "frame, schema, columns",
+    [
+        ({"a": [1, 2], "b": ["x", "y"]}, None, ["a", "b"]),
+        ({"a": [1, 2], "b": ["x", "y"]}, ["c"], ["c", "_2"]),
+        ({"a": [1, 2], "b": ["x", "y"]}, "a long, b string", ["a", "b"]),
+        ({0: [1, 2], 1: ["x", "y"]}, None, ["0", "1"]),
+    ],
+)
+def test_create_dataframe_pandas_column_names(session, frame, schema, columns):
+    pd = pytest.importorskip("pandas")
+    df = session.createDataFrame(pd.DataFrame(frame), schema)
+    assert df.columns == columns
+    assert [tuple(r) for r in df.collect()] == [(1, "x"), (2, "y")]
+    assert not df.isLocal()
+
+
+class _Point:
+    def __init__(self, b, a):
+        self.b = b
+        self.a = a
+
+
+@pytest.mark.parametrize(
+    "data, schema, columns, rows",
+    [
+        # As pyspark, a dict row is read by name: missing keys are null, others ignored.
+        ([{"b": 1, "a": "x"}], "b long, a string", ["b", "a"], [(1, "x")]),
+        ([{"a": 1}], "a long, b string", ["a", "b"], [(1, None)]),
+        ([{"a": 1, "c": 3}], "a long", ["a"], [(1,)]),
+        # Without a schema, the fields are the rows' sorted keys, in the order first seen.
+        ([{"a": 1}, {"b": 2}], None, ["a", "b"], [(1, None), (None, 2)]),
+        ([{"b": 2, "a": 1}], None, ["a", "b"], [(1, 2)]),
+        ([{"b": 2, "a": 1}], ["x", "y"], ["x", "y"], [(1, 2)]),
+        ([{"a": 1}, {"a": 2, "b": 3}], ["x", "y"], ["x", "y"], [(1, None), (2, 3)]),
+        # Other objects are read through their __dict__.
+        ([_Point(2, "x")], None, ["a", "b"], [("x", 2)]),
+        ([_Point(2, "x")], "a string, b long", ["a", "b"], [("x", 2)]),
+    ],
+)
+def test_create_dataframe_dict_rows_by_name(session, data, schema, columns, rows):
+    df = session.createDataFrame(data, schema)
+    assert df.columns == columns
+    assert [tuple(r) for r in df.collect()] == rows
+
+
+@pytest.mark.parametrize(
+    "data, simple_string, rows",
+    [
+        ([(None, 1), (2, 3)], "struct<_1:bigint,_2:bigint>", [(None, 1), (2, 3)]),
+        ([{"a": None}, {"a": 1}], "struct<a:bigint>", [(None,), (1,)]),
+    ],
+)
+def test_create_dataframe_infers_types_past_nulls(session, data, simple_string, rows):
+    # A field takes the type of its first non-null value.
+    df = session.createDataFrame(data)
+    assert df.schema.simpleString() == simple_string
+    assert [tuple(r) for r in df.collect()] == rows
 
 
 def test_collect_reads_a_result_across_stream_ends(session):
