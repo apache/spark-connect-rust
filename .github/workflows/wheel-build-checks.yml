@@ -34,7 +34,7 @@ on:
       - rust-toolchain*
       - .github/workflows/release.yml
       - .github/workflows/build-wheel.yml
-      - .github/workflows/arm-wheels.yml
+      - .github/workflows/wheel-build-checks.yml
   push:
     branches: [master, "branch-*"]
     paths: *wheel-build-paths
@@ -48,8 +48,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  arm-wheels:
-    name: Release wheel (${{ matrix.target }})
+  wheel-builds:
+    name: Check
     strategy:
       fail-fast: false
       matrix:
