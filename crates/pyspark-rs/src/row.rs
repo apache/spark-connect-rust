@@ -185,9 +185,11 @@ pub fn value_to_py<'py>(py: Python<'py>, v: &Value) -> PyResult<Bound<'py, PyAny
             list.into_any()
         }
         Value::Map(m) => {
+            // Keys of their own type, in order; an unhashable key, such as an array, raises
+            // TypeError, as in PySpark.
             let dict = PyDict::new(py);
             for (k, val) in m {
-                dict.set_item(k, value_to_py(py, val)?)?;
+                dict.set_item(value_to_py(py, k)?, value_to_py(py, val)?)?;
             }
             dict.into_any()
         }

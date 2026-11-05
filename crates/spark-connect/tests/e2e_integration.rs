@@ -657,9 +657,10 @@ fn test_day_time_interval_real_server() {
     );
     assert_eq!(
         row.get(5),
-        Some(&Value::Map(
-            [("k".to_string(), Value::DayTimeInterval(micros))].into()
-        ))
+        Some(&Value::Map(vec![(
+            Value::String("k".to_string()),
+            Value::DayTimeInterval(micros)
+        )]))
     );
     for prefetch in [false, true] {
         let streamed: Vec<_> = frame
