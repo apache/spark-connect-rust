@@ -98,9 +98,9 @@ def _has_canonical_columns(columns):
         if type(storage) is not np.ndarray:
             return False
         # ExtensionArray iteration dispatches through len and indexed boxing.
-        for name, module in (("__iter__", array_base_module),
-                             ("__getitem__", mixins_module), ("_box_func", mixins_module)):
-            if not ordinary(getattr(cls, name, None), name, module):
+        for name, hook_module in (("__iter__", array_base_module),
+                                  ("__getitem__", mixins_module), ("_box_func", mixins_module)):
+            if not ordinary(getattr(cls, name, None), name, hook_module):
                 return False
         if (getattr(cls, "__len__", None) is not NDArrayBacked.__len__
                 or getattr(cls, "ndim", None) is not NDArrayBacked.ndim
