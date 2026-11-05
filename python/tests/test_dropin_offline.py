@@ -4418,3 +4418,194 @@ def test_connect_registry_sends_auto_cdc_define_flow(mock_connect):
     assert 4 not in plain
     assert 10 not in details and 11 not in details and 12 not in details
 
+
+# ------------------------------------------------- reader/writer in-place setters
+
+@pytest.fixture
+def offline_spark():
+    # The gRPC channel connects lazily, so building readers/writers and lazy
+    # DataFrames needs no server.
+    from pyspark.sql import SparkSession
+
+    return SparkSession.builder.remote("sc://localhost:1").getOrCreate()
+
+
+def test_reader_setters_mutate_and_return_self(offline_spark):
+    # PySpark: the setters change the reader and return it; the return value may be
+    # ignored (the pattern pandas-on-Spark read_sql_table uses).
+    r = offline_spark.read
+    assert r.option("a", "b") is r
+    assert r.options(c="d", skipped=None, flag=True) is r
+    assert r.schema("x INT") is r
+    assert r.format("jdbc") is r
+    assert r._format == "jdbc"
+    assert r._schema == "x INT"
+    assert r._options == {"a": "b", "c": "d", "flag": "true"}
+    assert type(r.load()).__name__ == "DataFrame"
+
+
+def test_reader_read_sql_table_pattern(offline_spark):
+    # Mirrors pyspark/pandas/namespace.py read_sql_table, which discards every
+    # setter's return value before loading.
+    reader = offline_spark.read
+    reader.option("dbtable", "t")
+    reader.option("url", "jdbc:postgresql:db")
+    reader.schema("id INT")
+    reader.options(fetchsize=10)
+    sdf = reader.format("jdbc").load()
+    assert type(sdf).__name__ == "DataFrame"
+    assert reader._options == {
+        "dbtable": "t", "url": "jdbc:postgresql:db", "fetchsize": "10",
+    }
+
+
+def test_pandas_read_sql_table_reader_stage(offline_spark, monkeypatch):
+    # Drive the vendored read_sql_table itself up to the point it hands the loaded
+    # frame on. default_session() asks the server for a config, so point it at the
+    # offline session, and stop at _get_index_map (the first step after the read).
+    # pandas-on-Spark does not import under pandas >= 3.0 (pyspark.pandas.frame
+    # needs pandas.tseries.frequencies.DateOffset), so skip on any ImportError.
+    ns = pytest.importorskip("pyspark.pandas.namespace", exc_type=ImportError)
+
+    class _Loaded(Exception):
+        pass
+
+    seen = {}
+
+    def fake_index_map(sdf, index_col):
+        seen["sdf"] = sdf
+        raise _Loaded
+
+    monkeypatch.setattr(ns, "default_session", lambda: offline_spark)
+    monkeypatch.setattr(ns, "_get_index_map", fake_index_map)
+    with pytest.raises(_Loaded):
+        ns.read_sql_table(
+            "t", "jdbc:postgresql:db", schema="id INT", options={"fetchsize": "1"}
+        )
+    assert type(seen["sdf"]).__name__ == "DataFrame"
+
+
+def test_reader_reusable_after_load(offline_spark):
+    r = offline_spark.read.format("parquet")
+    r.load("/a")
+    r.load("/b")
+    r.table("t")
+    r.csv("/c", header=True)
+    # Like PySpark, a format method keeps its options and format on the reader.
+    assert r._format == "csv"
+    assert r._options == {"header": "true"}
+    r.json("/d")
+    r.parquet("/e", mergeSchema=False)
+    r.jdbc("jdbc:x", "tbl", properties={"user": "u"})
+    assert r._format == "jdbc"
+    assert r._options["dbtable"] == "tbl" and r._options["user"] == "u"
+    assert r.option("k", "v") is r
+    assert type(r.load()).__name__ == "DataFrame"
+
+
+def test_reader_reusable_after_failed_read(offline_spark):
+    r = offline_spark.read.option("a", "b")
+    with pytest.raises(Exception):
+        r.csv("/p", schema=object())
+    with pytest.raises(Exception):
+        r.json("/p", schema=12)
+    # A failed call leaves the reader as it was.
+    assert r._options == {"a": "b"}
+    assert r._format is None
+    assert type(r.format("csv").load("/p")).__name__ == "DataFrame"
+
+
+def test_stream_reader_setters_mutate_and_return_self(offline_spark):
+    r = offline_spark.readStream
+    assert r.format("rate") is r
+    assert r.option("rowsPerSecond", 5) is r
+    assert r.options(numPartitions=2, skipped=None) is r
+    assert r.schema("v LONG") is r
+    assert r.name("src_1") is r
+    with pytest.raises(ValueError):
+        r.name("bad name")
+    assert r._format == "rate"
+    assert r._schema == "v LONG"
+    assert r._options == {"rowsPerSecond": "5", "numPartitions": "2"}
+    r.load()
+    r.json("/j")
+    assert r._format == "json"
+    r.xml("/x", rowTag="row")
+    assert r._format == "xml" and r._options["rowTag"] == "row"
+    r.table("t")
+    assert type(r.load()).__name__ == "DataFrame"
+
+
+def test_writer_setters_mutate_and_return_self(offline_spark):
+    w = offline_spark.range(3).write
+    assert w.mode("overwrite") is w
+    assert w.format("parquet") is w
+    assert w.option("a", "b") is w
+    assert w.option("skipped", None) is w
+    assert w.options(c="d") is w
+    assert w.partitionBy("id") is w
+    assert w.bucketBy(2, "id") is w
+    assert w.sortBy("id") is w
+    assert w.clusterBy("id") is w
+    # A failed format call (bad partitionBy) leaves the writer usable.
+    with pytest.raises(Exception):
+        w.parquet("/p", partitionBy=123)
+    assert w.mode("append") is w
+
+
+def test_writer_v2_setters_mutate_and_return_self(offline_spark):
+    from pyspark.sql import functions as F
+
+    w = offline_spark.range(3).writeTo("t")
+    assert w.using("parquet") is w
+    assert w.option("a", "b") is w
+    assert w.options(c="d") is w
+    assert w.tableProperty("p", "v") is w
+    assert w.partitionedBy(F.col("id")) is w
+    assert w.clusterBy("id") is w
+
+
+def test_stream_writer_setters_mutate_and_return_self(offline_spark):
+    w = offline_spark.readStream.format("rate").load().writeStream
+    assert w.outputMode("append") is w
+    assert w.format("memory") is w
+    assert w.option("a", "b") is w
+    assert w.options(c="d") is w
+    assert w.partitionBy("value") is w
+    assert w.clusterBy("value") is w
+    assert w.queryName("q") is w
+    with pytest.raises(ValueError):
+        w.trigger()
+    assert w.trigger(processingTime="1 second") is w
+    assert w.foreachBatch(lambda df, i: None) is w
+    assert w.foreach(lambda row: None) is w
+
+
+def test_merge_into_writer_mutates_and_returns_self(offline_spark):
+    # PySpark: withSchemaEvolution and every clause action change the writer and
+    # return that same writer; a clause object can be used more than once.
+    from pyspark.sql import functions as F
+
+    src = offline_spark.range(3)
+    m = src.mergeInto("target", F.col("id") == F.col("target.id"))
+    assert m.withSchemaEvolution() is m
+
+    matched = m.whenMatched(F.col("id") > 1)
+    assert matched.updateAll() is m
+    assert matched.update({"id": F.col("id")}) is m
+    assert matched.delete() is m
+    assert m.whenMatched().delete() is m
+
+    not_matched = m.whenNotMatched()
+    assert not_matched.insertAll() is m
+    assert not_matched.insert({"id": F.col("id")}) is m
+
+    by_source = m.whenNotMatchedBySource(F.col("target.id") < 0)
+    assert by_source.updateAll() is m
+    assert by_source.update({"id": F.lit(0)}) is m
+    assert by_source.delete() is m
+
+    # The ignore-the-return-value form keeps working on the original object.
+    m.whenNotMatched().insertAll()
+    m.withSchemaEvolution()
+    assert m.whenMatched().updateAll() is m

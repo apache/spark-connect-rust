@@ -16,6 +16,7 @@ use crate::session::SparkSession;
 /// DataFrameReader for reading data from various sources.
 ///
 /// Mirrors `pyspark.sql.connect.readwriter.DataFrameReader`.
+#[derive(Clone)]
 pub struct DataFrameReader {
     session: SparkSession,
     format: Option<String>,
@@ -56,6 +57,21 @@ impl DataFrameReader {
     pub fn options(mut self, options: HashMap<String, String>) -> Self {
         self.options.extend(options);
         self
+    }
+
+    /// The configured source format, if any.
+    pub fn get_format(&self) -> Option<&str> {
+        self.format.as_deref()
+    }
+
+    /// The configured schema (a DDL/JSON string; empty when unset).
+    pub fn get_schema(&self) -> &str {
+        &self.schema
+    }
+
+    /// The configured read options.
+    pub fn get_options(&self) -> &HashMap<String, String> {
+        &self.options
     }
 
     /// Load data from the specified path(s) with the configured format, schema, and options.
@@ -330,6 +346,7 @@ impl TableSaveMethod {
 /// DataFrameWriter for writing DataFrames to various destinations.
 ///
 /// Mirrors `pyspark.sql.connect.readwriter.DataFrameWriter`.
+#[derive(Clone)]
 pub struct DataFrameWriter {
     session: SparkSession,
     input_plan: Arc<LogicalPlan>,
@@ -515,6 +532,7 @@ impl DataFrameWriter {
 /// DataFrameWriterV2 for the v2 write API (`DataFrame.writeTo`).
 ///
 /// Mirrors `pyspark.sql.connect.readwriter.DataFrameWriterV2`.
+#[derive(Clone)]
 pub struct DataFrameWriterV2 {
     session: SparkSession,
     input_plan: Arc<LogicalPlan>,
