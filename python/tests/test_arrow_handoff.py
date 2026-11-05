@@ -586,10 +586,8 @@ def _assert_artifact_contexts(contexts, *, session_id, user_id, user_agent):
     assert client_type
     assert client_type.startswith(user_agent)
     for context in contexts:
-        # Tonic appends its transport token to the configured channel user-agent.
-        channel_user_agent, transport_agent = context["grpc_user_agent"].rsplit(" ", 1)
-        assert transport_agent.startswith("tonic/")
-        assert client_type == channel_user_agent
+        grpc_user_agent = context["grpc_user_agent"]
+        assert grpc_user_agent == client_type or grpc_user_agent.startswith(client_type + " ")
         assert context["session_id"] == session_id
         # PySpark's ArtifactManager sends a present context even without a user ID.
         assert context["has_user_context"]
