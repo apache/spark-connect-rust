@@ -205,7 +205,10 @@ fn day_time_interval_input_roundtrips() {
                 value.clone(),
                 Value::List(vec![Value::Null, value.clone()]),
                 Value::Struct(Row::new(vec!["leaf".into()], vec![value.clone()]).into()),
-                Value::Map([("k".into(), value), ("null".into(), Value::Null)].into()),
+                Value::Map(vec![
+                    (Value::String("k".into()), value),
+                    (Value::String("null".into()), Value::Null),
+                ]),
             ],
         ));
     }

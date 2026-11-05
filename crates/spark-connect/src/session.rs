@@ -1276,7 +1276,10 @@ mod tests {
                         vec![
                             value.clone(),
                             Value::List(vec![Value::Null, value.clone()]),
-                            Value::Map([("k".into(), value), ("null".into(), Value::Null)].into()),
+                            Value::Map(vec![
+                                (Value::String("k".into()), value),
+                                (Value::String("null".into()), Value::Null),
+                            ]),
                         ],
                     )
                     .into(),
