@@ -2495,6 +2495,41 @@ def test_row_asdict_ordering():
     assert keys == ["a", "b", "c"]
 
 
+def test_row_hash_matches_tuple():
+    """Row hashes like a tuple of its values (pyspark Row subclasses tuple)."""
+    from pyspark.sql import Row
+
+    assert hash(Row(a=1)) == hash(Row(a=1))
+    assert hash(Row(a=1, b="x")) == hash((1, "x"))
+    assert hash(Row(1, 2.5, None)) == hash((1, 2.5, None))
+    assert hash(Row()) == hash(())
+    # Nested struct values materialize as Rows, which are hashable too.
+    assert hash(Row(a=Row(b=1))) == hash(((1,),))
+
+
+def test_row_usable_in_set_and_dict():
+    """Equal Rows collapse in a set and work as dict keys."""
+    from pyspark.sql import Row
+
+    s = {Row(a=1, b=2), Row(a=1, b=2), Row(a=3, b=4)}
+    assert len(s) == 2
+    assert Row(a=1, b=2) in s
+    d = {Row(k="x"): 1}
+    assert d[Row(k="x")] == 1
+
+
+def test_row_hash_unhashable_values_raise():
+    """Rows holding list/dict values are unhashable, as a tuple holding them is."""
+    import pytest
+
+    from pyspark.sql import Row
+
+    with pytest.raises(TypeError):
+        hash(Row(a=[1, 2]))
+    with pytest.raises(TypeError):
+        hash(Row(a={"k": 1}))
+
+
 # --- Connect import-path shims + offline utility helpers ---------------------
 # The pyspark.sql.connect.* modules are thin re-exports that pandas-on-Spark and the
 # official connect tests import from; verify they import and re-export the Rust-backed

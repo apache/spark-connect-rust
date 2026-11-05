@@ -213,6 +213,20 @@ impl PyRow {
         self.row == other.row
     }
 
+    /// Hash like a tuple of the row's values, matching pyspark (`Row` subclasses
+    /// `tuple`, so `hash(Row(a=1)) == hash((1,))`). Consistent with `__eq__`: equal
+    /// rows have equal values, hence equal hashes. Unhashable values (array -> list,
+    /// map -> dict) raise TypeError, as they do inside a tuple.
+    fn __hash__(&self, py: Python<'_>) -> PyResult<isize> {
+        let vals = self
+            .row
+            .values()
+            .iter()
+            .map(|v| value_to_py(py, v))
+            .collect::<PyResult<Vec<_>>>()?;
+        pyo3::types::PyTuple::new(py, vals)?.hash()
+    }
+
     /// Number of occurrences of `value` among the row's values (tuple.count).
     fn count(&self, py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<usize> {
         let mut n = 0;
