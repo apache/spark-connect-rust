@@ -6,12 +6,13 @@ This document describes the GitHub Actions CI pipeline for the Spark Connect Rus
 
 ## Overview
 
-The CI consists of two main workflows:
+The CI consists of three main workflows:
 
 1. **Rust CI** (`.github/workflows/rust.yml`) - Build and test the pure-Rust crates
 2. **Python Connect Tests** (`.github/workflows/build_python_connect.yml`) - Build the PyO3 wheel and run Spark Connect integration tests
+3. **Release wheel build checks** (`.github/workflows/wheel-build-checks.yml`) - Build Linux aarch64 and macOS universal2 wheels using the release recipe
 
-Both workflows run on every push to main/master and on all pull requests.
+Rust CI and Python Connect Tests run on pushes and pull requests targeting `master` and `branch-*`. Release wheel build checks run for changes to packaged Python sources, protocol definitions, dependencies and build configuration, and can also be dispatched manually.
 
 ## Rust CI (`rust.yml`)
 
@@ -125,6 +126,30 @@ Each failing test is a **gap in parity**. The fix process:
 4. **Update ledger status**: Mark the row `done` (or `verified` if a golden proto is included)
 5. **Verify locally**: Run `scripts/run_official_connect_tests.py` with `--target-pyspark ./python`
 6. **Push & verify CI**: The workflow will show the test passing on the next run
+
+## Release wheel build checks (`wheel-build-checks.yml`)
+
+These checks use the same reusable `build-wheel.yml` recipe as `release.yml`.
+An x86_64 Linux runner cross-builds the Linux aarch64 wheel with Maturin and Zig.
+A macOS runner builds a universal2 wheel containing both x86_64 and aarch64
+slices. These are build-only checks; Rust CI separately executes the native ARM
+core tests.
+
+The workflow runs on pushes and pull requests targeting `master` or `branch-*`
+when packaged sources under `python/pyspark/`, protocol definitions under
+`crates/spark-connect-proto/proto/`, Cargo manifests or the lockfile, build scripts,
+packaging/toolchain configuration, or the wheel workflows change.
+Ordinary Rust source changes do not trigger these focused checks. The scheduled
+`release.yml` dry run builds only `master`, so `branch-*` maintenance branches have
+no scheduled backstop for Rust source changes. To validate a maintenance branch,
+manually dispatch `release.yml` with `branch` set to that branch, empty
+`release-version` and `rc-count` inputs, and `finalize: false`.
+
+The shared recipe uses no dependency or build caches, so each run is a clean build
+matching the release. Checks have a 45-minute timeout;
+releases retain their six-hour limit. Check artifacts expire after one day;
+release artifacts retain the repository default. Checkout credentials are not
+persisted in either build.
 
 ## Continuous improvement
 

@@ -1184,7 +1184,9 @@ fn parse_json_value(value: &serde_json::Value, _field_name: Option<&str>) -> Res
 
 fn parse_json_type_string(s: &str) -> Result<DataType> {
     match s {
-        "void" => Ok(DataType::Null),
+        // `null` and `calendarinterval` are lenient aliases that the drop-in's Python parser
+        // accepted before it delegated here.
+        "void" | "null" => Ok(DataType::Null),
         "boolean" => Ok(DataType::Boolean),
         "byte" => Ok(DataType::Byte),
         "short" => Ok(DataType::Short),
@@ -1196,8 +1198,13 @@ fn parse_json_type_string(s: &str) -> Result<DataType> {
         "date" => Ok(DataType::Date),
         "timestamp" => Ok(DataType::Timestamp),
         "timestamp_ntz" => Ok(DataType::TimestampNtz),
-        "interval" => Ok(DataType::CalendarInterval),
+        "interval" | "calendarinterval" => Ok(DataType::CalendarInterval),
         "variant" => Ok(DataType::Variant),
+        // A bare `decimal`, as `DecimalType().typeName()` names it, is the default decimal(10,0).
+        "decimal" => Ok(DataType::Decimal {
+            precision: 10,
+            scale: 0,
+        }),
         s if s.starts_with("decimal(") => parse_decimal(s),
         s if s.starts_with("char(") => parse_char(s),
         s if s.starts_with("varchar(") => parse_varchar(s),
@@ -1215,8 +1222,9 @@ fn parse_json_type_string(s: &str) -> Result<DataType> {
         }),
         s if s.starts_with("geometry(") => parse_geometry(s),
         s if s.starts_with("geography(") => parse_geography(s),
-        s if s.starts_with("unparsed(") => Ok(DataType::Unparsed {
-            data_type_string: s.to_string(),
+        // The inverse of `json_value`, which writes `unparsed(<data_type_string>)`.
+        s if s.starts_with("unparsed(") && s.ends_with(')') => Ok(DataType::Unparsed {
+            data_type_string: s["unparsed(".len()..s.len() - 1].to_string(),
         }),
         _ => Err(SparkError::value(
             "INVALID_DATATYPE_STRING",
@@ -3135,6 +3143,28 @@ mod tests {
             }
             _ => panic!("Expected Decimal type"),
         }
+    }
+
+    #[test]
+    fn test_from_json_unparsed_roundtrip() {
+        let dt = DataType::Unparsed {
+            data_type_string: "int".to_string(),
+        };
+        assert_eq!(DataType::from_json(&dt.json_value()).unwrap(), dt);
+    }
+
+    #[test]
+    fn test_from_json_lenient_aliases() {
+        let parse = |s: &str| DataType::from_json(&serde_json::json!(s)).unwrap();
+        assert_eq!(
+            parse("decimal"),
+            DataType::Decimal {
+                precision: 10,
+                scale: 0
+            }
+        );
+        assert_eq!(parse("null"), DataType::Null);
+        assert_eq!(parse("calendarinterval"), DataType::CalendarInterval);
     }
 
     #[test]

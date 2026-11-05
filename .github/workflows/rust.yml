@@ -89,6 +89,37 @@ jobs:
         # Enforce the "100% coverage, no followups" rule
         run: bash scripts/audit_no_stubs.sh
 
+  aarch64-core:
+    name: Core transport tests (aarch64 Linux)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache cargo & target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-aarch64-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-cargo-aarch64-
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential protobuf-compiler
+
+      - name: Test native aarch64 transport
+        # Compile sha2-asm with the target C toolchain before release builds need it.
+        run: cargo test --locked -p apache-spark-connect-core --release --lib --target aarch64-unknown-linux-gnu
+
   wasm-udf:
     name: WASM UDF feature
     runs-on: ubuntu-latest

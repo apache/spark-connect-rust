@@ -24,7 +24,7 @@ from _mock_connect_server import (
     struct_schema,
     varint_field,
 )
-from pyspark.sql import SparkSession, types as T
+from pyspark.sql import Row, SparkSession, types as T
 
 # Collected here so the existing offline CI suite exercises real Arrow results.
 from day_time_interval_cases import DayTimeIntervalTests  # noqa: F401
@@ -102,6 +102,104 @@ def test_parse_datatype_json_string_rejects_garbage():
     import json
     with pytest.raises(ValueError):
         T._parse_datatype_json_string(json.dumps("not_a_type"))
+
+
+# One instance of every DataType variant the drop-in has, including the parameterized
+# forms whose JSON needs more than a bare type name (collations, spatial CRS names).
+EVERY_TYPE = [
+    T.NullType(), T.BooleanType(), T.ByteType(), T.ShortType(), T.IntegerType(),
+    T.LongType(), T.FloatType(), T.DoubleType(), T.DecimalType(), T.DecimalType(38, 18),
+    T.StringType(), T.StringType("UTF8_LCASE"), T.StringType("UNICODE_CI"),
+    T.CharType(5), T.VarcharType(9), T.BinaryType(), T.DateType(), T.TimestampType(),
+    T.TimestampNTZType(), T.TimestampNTZNanosType(9), T.TimestampLTZNanosType(7),
+    T.TimeType(3), T.CalendarIntervalType(), T.YearMonthIntervalType(0, 1),
+    T.YearMonthIntervalType(1, 1), T.DayTimeIntervalType(0, 3),
+    T.DayTimeIntervalType(2, 2), T.VariantType(),
+    T.GeometryType(0), T.GeometryType(3857), T.GeometryType(4326), T.GeometryType("ANY"),
+    T.GeographyType(4326), T.GeographyType("ANY"),
+    T.ArrayType(T.GeometryType(3857), False),
+    T.MapType(T.StringType("UTF8_LCASE"), T.GeographyType("ANY"), False),
+]
+
+
+@pytest.mark.parametrize("t", EVERY_TYPE, ids=repr)
+def test_every_datatype_pickle_roundtrip(t):
+    r = pickle.loads(pickle.dumps(t))
+    assert type(r) is type(t)
+    assert r == t and hash(r) == hash(t)
+    assert r.json() == t.json()
+
+
+def test_every_datatype_pickle_roundtrip_nested_in_struct():
+    st = T.StructType([
+        T.StructField(f"f{i}", t, i % 2 == 0, {"i": i, "tag": "v"})
+        for i, t in enumerate(EVERY_TYPE)
+    ])
+    nested = T.StructType([
+        T.StructField("s", st),
+        T.StructField("a", T.ArrayType(st)),
+        T.StructField("m", T.MapType(T.StringType("UNICODE"), st)),
+    ])
+    for t in (st, nested):
+        r = pickle.loads(pickle.dumps(t))
+        assert r == t
+        assert r.json() == t.json()
+    r = pickle.loads(pickle.dumps(st))
+    for got, want in zip(r.fields, st.fields):
+        assert type(got.dataType) is type(want.dataType)
+        assert got.dataType == want.dataType
+        assert got.metadata == want.metadata
+
+
+def test_spatial_and_collated_json_forms_parse():
+    import json
+    cases = {
+        "geometry(SRID:0)": T.GeometryType(0),
+        "geometry(EPSG:3857)": T.GeometryType(3857),
+        "geometry(OGC:CRS84)": T.GeometryType(4326),
+        "geometry(SRID:ANY)": T.GeometryType("ANY"),
+        "geography(OGC:CRS84, SPHERICAL)": T.GeographyType(4326),
+        "geography(SRID:ANY, SPHERICAL)": T.GeographyType("ANY"),
+        "string collate UTF8_LCASE": T.StringType("UTF8_LCASE"),
+    }
+    for j, want in cases.items():
+        assert T._parse_datatype_json_string(json.dumps(j)) == want
+        assert want.json() == json.dumps(j)
+
+
+def test_unparsed_datatype_pickle_roundtrip():
+    t = T._parse_datatype_json_value("unparsed(some_ddl)")
+    assert t.json() == '"unparsed(some_ddl)"'
+    r = pickle.loads(pickle.dumps(t))
+    assert r == t and r.json() == t.json()
+
+
+def test_user_defined_type_pickle_roundtrip():
+    import sys
+    import types as _pytypes
+
+    mod = _pytypes.ModuleType("_udt_pickle_mod")
+    sys.modules["_udt_pickle_mod"] = mod
+    src = (
+        "from pyspark.sql.types import UserDefinedType, ArrayType, DoubleType\n"
+        "class PointUDT(UserDefinedType):\n"
+        "    @classmethod\n"
+        "    def sqlType(cls): return ArrayType(DoubleType(), False)\n"
+        "    @classmethod\n"
+        "    def module(cls): return '_udt_pickle_mod'\n"
+    )
+    exec(compile(src, "_udt_pickle_mod", "exec"), mod.__dict__)
+    try:
+        u = mod.PointUDT()
+        assert isinstance(pickle.loads(pickle.dumps(u)), mod.PointUDT)
+        st = T.StructType([
+            T.StructField("p", u), T.StructField("g", T.GeometryType(4326)),
+        ])
+        r = pickle.loads(pickle.dumps(st))
+        assert isinstance(r.fields[0].dataType, mod.PointUDT)
+        assert r.fields[1].dataType == T.GeometryType(4326)
+    finally:
+        del sys.modules["_udt_pickle_mod"]
 
 
 def test_structfield_construction():
@@ -510,6 +608,44 @@ def test_type_class_hierarchy():
     assert issubclass(T.IntegerType, T.NumericType)
     assert issubclass(T.NumericType, T.AtomicType)
     assert issubclass(T.AtomicType, T.DataType)
+
+
+@pytest.mark.parametrize("make, expected", [
+    (lambda: T.GeometryType("ANY"), "GeometryType(ANY)"),
+    (lambda: T.GeographyType("ANY"), "GeographyType(ANY)"),
+    (lambda: T.GeometryType(0), "GeometryType(0)"),
+    (lambda: T.GeometryType(3857), "GeometryType(3857)"),
+    (lambda: T.GeometryType(4326), "GeometryType(4326)"),
+    (lambda: T.GeographyType(4326), "GeographyType(4326)"),
+])
+def test_spatial_types_take_the_srids_that_pyspark_knows(make, expected):
+    spatial = make()
+    assert repr(spatial) == expected
+    # "ANY" is the mixed SRID.
+    assert (spatial.srid == -1) is ("ANY" in expected)
+
+
+@pytest.mark.parametrize("make, srid", [
+    (lambda: T.GeometryType(2000), "2000"),
+    (lambda: T.GeometryType(-1), "-1"),
+    (lambda: T.GeometryType("any"), "any"),
+    (lambda: T.GeometryType("4326"), "4326"),
+    (lambda: T.GeographyType(3857), "3857"),
+    (lambda: T.GeographyType(0), "0"),
+])
+def test_spatial_types_reject_other_srids_as_pyspark(make, srid):
+    from pyspark.errors import IllegalArgumentException
+
+    with pytest.raises(IllegalArgumentException) as error:
+        make()
+    assert error.value.getCondition() == "ST_INVALID_SRID_VALUE"
+    assert error.value.getMessageParameters() == {"srid": srid}
+
+
+def test_spatial_types_need_an_srid():
+    for spatial in [T.GeometryType, T.GeographyType]:
+        with pytest.raises(TypeError):
+            spatial()
 
 
 def test_spatial_types():
@@ -4656,6 +4792,44 @@ def test_reader_schema_is_sent_as_pyspark_sends_it(mock_connect, read):
     assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
     assert error.value.getMessageParameters() == {
         "arg_name": "schema", "expected_type": "str or struct type", "arg_type": "LongType"}
+
+
+# Exact built-in string conversion guards. A Row made in Python keeps its values as they
+# are, as PySpark's does, so these check the conversion that createDataFrame makes.
+
+
+@pytest.mark.parametrize("text", [
+    "", "1.25", "-42", "NaN", "a\x00b", "é雪😀", "e\u0301", "\uffff",
+])
+def test_exact_string_converts_as_text(text):
+    from pyspark.errors import PySparkRuntimeError
+
+    # A string, even when it reads as a number: it shares a column with a string, not with
+    # an integer.
+    assert _local_create_dataframe([Row(value=text), Row(value="y")]).isLocal()
+    with pytest.raises(PySparkRuntimeError):
+        _local_create_dataframe([Row(value=text), Row(value=5)])
+
+
+@pytest.mark.parametrize("text", ["\ud800", "\udfff", "a\ud800b"])
+def test_exact_string_surrogate_error_preserves_generic_fallback(text):
+    with pytest.raises(TypeError):
+        _local_create_dataframe([Row(value=text)])
+
+
+def test_exact_string_subclass_uses_generic_conversion():
+    # Pin existing subclass behavior; treating subclasses as text is a separate
+    # behavior change.
+    from pyspark.errors import PySparkRuntimeError
+
+    class IndexString(str):
+        def __index__(self):
+            return 17
+
+    # Converted through __index__, it shares a column with an integer, not with a string.
+    assert _local_create_dataframe([Row(value=IndexString("x")), Row(value=5)]).isLocal()
+    with pytest.raises(PySparkRuntimeError):
+        _local_create_dataframe([Row(value=IndexString("x")), Row(value="y")])
 
 
 # --------------------------------------------------------------------------- printSchema

@@ -2100,29 +2100,6 @@ fn record_batches_to_polars(
         .map_err(|e| SparkError::connect_msg(format!("Failed to create Polars DataFrame: {e}")))
 }
 
-/// Render a decoded map key ([`Value`]) as its natural scalar string, since
-/// `Value::Map` keys are `String`. Numeric/boolean keys use their value (`1`,
-/// `true`), decimals their preserved digits; non-scalar keys (rare) fall back to
-/// Debug. This must never use the enum's Debug form for scalars - a `map<int,…>`
-/// key has to be "1", not "Integer(1)".
-fn map_key_to_string(v: Value) -> String {
-    match v {
-        Value::String(s) => s,
-        Value::Bool(b) => b.to_string(),
-        Value::Byte(x) => x.to_string(),
-        Value::Short(x) => x.to_string(),
-        Value::Integer(x) => x.to_string(),
-        Value::Long(x) => x.to_string(),
-        Value::Float(x) => x.to_string(),
-        Value::Double(x) => x.to_string(),
-        Value::Date(d) => d.to_string(),
-        Value::Timestamp(t) => t.to_string(),
-        interval @ Value::DayTimeInterval(_) => interval.to_string(),
-        Value::Decimal { value, .. } => value,
-        other => format!("{other:?}"),
-    }
-}
-
 /// Immutable decoding metadata prepared once for each column in a record batch.
 /// Container layouts follow their children so struct names are also shared inside
 /// lists and maps, without retaining the Arrow arrays after decoding.
@@ -2342,16 +2319,13 @@ fn arrow_value_at_with_layout(
         let entries = arr.value(index);
         let keys = entries.column(0);
         let vals = entries.column(1);
-        let mut map = std::collections::BTreeMap::new();
+        // The entries in their order, with keys of their own type, as PySpark reads them.
+        let mut map = Vec::with_capacity(entries.len());
         for i in 0..entries.len() {
-            // A map key stringifies to its natural scalar form (e.g. `1`, `true`,
-            // `1.5`), not the Rust enum's Debug output - a `map<int,string>` key must
-            // be "1", never "Integer(1)".
-            let k = map_key_to_string(arrow_value_at_with_layout(keys.as_ref(), i, &children.0)?);
-            map.insert(
-                k,
+            map.push((
+                arrow_value_at_with_layout(keys.as_ref(), i, &children.0)?,
                 arrow_value_at_with_layout(vals.as_ref(), i, &children.1)?,
-            );
+            ));
         }
         return Ok(Value::Map(map));
     }
@@ -2549,7 +2523,7 @@ mod nested_decode_tests {
                 let Value::Map(map) = value else {
                     panic!("expected map");
                 };
-                leaves.push(as_struct(map.values().next().unwrap()));
+                leaves.push(as_struct(&map[0].1));
             }
         }
         assert_eq!(leaves.len(), 4);
@@ -2614,13 +2588,10 @@ mod nested_decode_tests {
         );
         assert_eq!(
             rows[0].get(1),
-            Some(&Value::Map(
-                [
-                    ("k1".to_string(), value(1)),
-                    ("k2".to_string(), Value::Null)
-                ]
-                .into()
-            ))
+            Some(&Value::Map(vec![
+                (Value::String("k1".to_string()), value(1)),
+                (Value::String("k2".to_string()), Value::Null)
+            ]))
         );
         assert_eq!(rows[1].get(0), Some(&Value::List(vec![])));
         assert_eq!(rows[1].get(1), Some(&Value::Map(Default::default())));
@@ -2629,9 +2600,10 @@ mod nested_decode_tests {
         assert_eq!(rows[3].get(0), Some(&Value::List(vec![value(4), value(5)])));
         assert_eq!(
             rows[3].get(1),
-            Some(&Value::Map(
-                [("k4".to_string(), value(4)), ("k5".to_string(), value(5))].into()
-            ))
+            Some(&Value::Map(vec![
+                (Value::String("k4".to_string()), value(4)),
+                (Value::String("k5".to_string()), value(5))
+            ]))
         );
         let (Value::List(first), Value::List(last)) =
             (rows[0].get(0).unwrap(), rows[3].get(0).unwrap())
@@ -2648,8 +2620,8 @@ mod nested_decode_tests {
             panic!("expected maps");
         };
         assert!(std::ptr::eq(
-            as_struct(&first["k1"]).fields(),
-            as_struct(&last["k4"]).fields()
+            as_struct(&first[0].1).fields(),
+            as_struct(&last[0].1).fields()
         ));
     }
 
@@ -3922,28 +3894,31 @@ mod arrow_value_tests {
     }
 
     #[test]
-    fn map_key_to_string_covers_scalar_arms() {
-        assert_eq!(map_key_to_string(Value::String("x".to_string())), "x");
-        assert_eq!(map_key_to_string(Value::Bool(true)), "true");
-        assert_eq!(map_key_to_string(Value::Byte(1)), "1");
-        assert_eq!(map_key_to_string(Value::Short(2)), "2");
-        assert_eq!(map_key_to_string(Value::Integer(3)), "3");
-        assert_eq!(map_key_to_string(Value::Long(4)), "4");
-        assert_eq!(map_key_to_string(Value::Float(1.5)), "1.5");
-        assert_eq!(map_key_to_string(Value::Double(2.5)), "2.5");
-        assert_eq!(map_key_to_string(Value::Date(5)), "5");
-        assert_eq!(map_key_to_string(Value::Timestamp(6)), "6");
-        assert_eq!(map_key_to_string(Value::DayTimeInterval(-1)), "-1");
-        assert_eq!(
-            map_key_to_string(Value::Decimal {
-                value: "7.5".to_string(),
-                precision: None,
-                scale: None,
-            }),
-            "7.5"
+    fn a_map_keeps_its_entries_in_order_with_keys_of_their_type() {
+        let entries = StructArray::from(vec![
+            (
+                Arc::new(Field::new("key", arrow::datatypes::DataType::Int32, false)),
+                Arc::new(Int32Array::from(vec![2, 1])) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("value", arrow::datatypes::DataType::Utf8, true)),
+                Arc::new(StringArray::from(vec!["b", "a"])) as ArrayRef,
+            ),
+        ]);
+        let map = MapArray::new(
+            Arc::new(Field::new("entries", entries.data_type().clone(), false)),
+            arrow::buffer::OffsetBuffer::new(vec![0, 2].into()),
+            entries,
+            None,
+            false,
         );
-        // Non-scalar key falls back to the Debug form.
-        let _ = map_key_to_string(Value::List(vec![]));
+        assert_eq!(
+            arrow_value_at(&map, 0).unwrap(),
+            Value::Map(vec![
+                (Value::Integer(2), Value::String("b".to_string())),
+                (Value::Integer(1), Value::String("a".to_string())),
+            ])
+        );
     }
 
     #[test]

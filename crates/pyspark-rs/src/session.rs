@@ -1183,14 +1183,17 @@ fn value_to_datatype(v: &Value) -> DataType {
                 .collect(),
         },
         Value::Map(m) => {
-            let value_type = m
-                .values()
-                .find(|x| !matches!(x, Value::Null))
-                .map(value_to_datatype)
-                .unwrap_or_else(utf8);
+            // The type of the first non-null key or value, as the other fields take theirs.
+            let first_type = |values: Vec<&Value>| {
+                values
+                    .into_iter()
+                    .find(|x| !matches!(x, Value::Null))
+                    .map(value_to_datatype)
+                    .unwrap_or_else(utf8)
+            };
             DataType::Map {
-                key_type: Box::new(utf8()),
-                value_type: Box::new(value_type),
+                key_type: Box::new(first_type(m.iter().map(|(k, _)| k).collect())),
+                value_type: Box::new(first_type(m.iter().map(|(_, v)| v).collect())),
                 value_contains_null: true,
             }
         }
@@ -1204,6 +1207,14 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     // Check for None
     if obj.is_none() {
         return Ok(Value::Null);
+    }
+
+    // Exact built-in strings cannot implement numeric conversion protocols.
+    // Keep subclasses and strings that fail UTF-8 extraction on the generic path.
+    if let Ok(s) = obj.cast_exact::<pyo3::types::PyString>() {
+        if let Ok(s) = s.extract::<String>() {
+            return Ok(Value::String(s));
+        }
     }
 
     // Check for bool (before int because bool is a subclass of int in Python)
@@ -1263,11 +1274,11 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
         return Ok(Value::Struct(pyrow.to_row(obj.py())?.into()));
     }
 
-    // dict -> map (keys coerced to their string form, values recursively converted)
+    // dict -> map, its entries in order with keys and values of their own types
     if let Ok(dict) = obj.cast::<pyo3::types::PyDict>() {
-        let mut map = std::collections::BTreeMap::new();
+        let mut map = Vec::with_capacity(dict.len());
         for (k, v) in dict.iter() {
-            map.insert(k.str()?.to_string(), py_to_value(&v)?);
+            map.push((py_to_value(&k)?, py_to_value(&v)?));
         }
         return Ok(Value::Map(map));
     }

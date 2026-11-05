@@ -1046,7 +1046,11 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
                     Value::Map(m) => {
                         valid.append(true);
                         for (i, f) in fields.iter().enumerate() {
-                            cols[i].push(m.get(&f.name).cloned().unwrap_or(Value::Null));
+                            let value = m.iter().find_map(|(key, value)| match key {
+                                Value::String(key) if *key == f.name => Some(value.clone()),
+                                _ => None,
+                            });
+                            cols[i].push(value.unwrap_or(Value::Null));
                         }
                     }
                     _ => return Err(SparkError::connect_msg("Type mismatch: expected struct")),
@@ -1092,7 +1096,7 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
                     Value::Map(m) => {
                         valid.append(true);
                         for (k, val) in m {
-                            keys.push(Value::String(k.clone()));
+                            keys.push(k.clone());
                             vals.push(val.clone());
                         }
                         offsets.push(keys.len() as i32);
@@ -1203,13 +1207,10 @@ mod tests {
                 )
                 .into(),
             ),
-            Value::Map(
-                [
-                    ("dup".to_string(), Value::Long(5)),
-                    ("other".to_string(), Value::Long(9)),
-                ]
-                .into(),
-            ),
+            Value::Map(vec![
+                (Value::String("dup".to_string()), Value::Long(5)),
+                (Value::String("other".to_string()), Value::Long(9)),
+            ]),
             Value::Null,
             Value::Struct(Row::new(vec!["dup".to_string()], vec![Value::Null]).into()),
         ];
@@ -1285,7 +1286,7 @@ mod tests {
                 vec!["items".to_string(), "lookup".to_string()],
                 vec![
                     Value::List(vec![leaf_value(), Value::Null]),
-                    Value::Map([("k".to_string(), leaf_value())].into()),
+                    Value::Map(vec![(Value::String("k".to_string()), leaf_value())]),
                 ],
             )
             .into(),

@@ -157,6 +157,14 @@ impl PyDataType {
         }
     }
 
+    /// The fallback for the classes without their own `__reduce__`: a bare `DataType`
+    /// (an unparsed DDL type) and a pure-Python `UserDefinedType`, whose `json()` names
+    /// its Python class.
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<(Py<PyAny>, (String,))> {
+        let json: String = slf.call_method0("json")?.extract()?;
+        type_reduce(slf.py(), &json)
+    }
+
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
@@ -2447,22 +2455,30 @@ impl PyGeometryType {
     const MIXED_CRS: &'static str = "SRID:ANY";
     #[classattr]
     const MIXED_SRID: i32 = -1;
+    /// As PySpark's `GeometryType(srid)`: `"ANY"` for a mixed SRID, or an SRID of a
+    /// coordinate reference system that PySpark knows.
     #[new]
-    #[pyo3(signature = (srid=0))]
-    fn new(srid: i32) -> pyo3::PyClassInitializer<Self> {
-        init_chain!(
+    fn new(srid: &Bound<'_, PyAny>) -> PyResult<pyo3::PyClassInitializer<Self>> {
+        let srid = spatial_type_srid(srid, false)?;
+        Ok(init_chain!(
             DataType::Geometry { srid },
             PyGeometryType { srid },
             [PyAtomicType, PySpatialType],
             value
-        )
+        ))
     }
     #[getter]
     fn srid(&self) -> i32 {
         self.srid
     }
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        type_reduce(py, &DataType::Geometry { srid: self.srid }.json())
+    }
     fn __repr__(&self) -> String {
-        format!("GeometryType({})", self.srid)
+        match self.srid {
+            -1 => "GeometryType(ANY)".to_string(),
+            srid => format!("GeometryType({srid})"),
+        }
     }
     #[pyo3(name = "simpleString")]
     fn simple_string(&self) -> String {
@@ -2491,22 +2507,30 @@ impl PyGeographyType {
     const MIXED_CRS: &'static str = "SRID:ANY";
     #[classattr]
     const MIXED_SRID: i32 = -1;
+    /// As PySpark's `GeographyType(srid)`: `"ANY"` for a mixed SRID, or an SRID of a
+    /// geographic coordinate reference system that PySpark knows.
     #[new]
-    #[pyo3(signature = (srid=0))]
-    fn new(srid: i32) -> pyo3::PyClassInitializer<Self> {
-        init_chain!(
+    fn new(srid: &Bound<'_, PyAny>) -> PyResult<pyo3::PyClassInitializer<Self>> {
+        let srid = spatial_type_srid(srid, true)?;
+        Ok(init_chain!(
             DataType::Geography { srid },
             PyGeographyType { srid },
             [PyAtomicType, PySpatialType],
             value
-        )
+        ))
     }
     #[getter]
     fn srid(&self) -> i32 {
         self.srid
     }
+    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+        type_reduce(py, &DataType::Geography { srid: self.srid }.json())
+    }
     fn __repr__(&self) -> String {
-        format!("GeographyType({})", self.srid)
+        match self.srid {
+            -1 => "GeographyType(ANY)".to_string(),
+            srid => format!("GeographyType({srid})"),
+        }
     }
     #[pyo3(name = "simpleString")]
     fn simple_string(&self) -> String {
@@ -2516,6 +2540,50 @@ impl PyGeographyType {
     fn type_name(&self) -> &'static str {
         "geography"
     }
+}
+
+/// The SRID of a spatial type that PySpark constructs from `srid`: `"ANY"` gives the mixed
+/// SRID, and an integer must be an SRID that PySpark's spatial reference system mappers know,
+/// 0, 3857 and 4326 for a geometry and 4326 for a geography in PySpark 4.3.0. Anything else
+/// raises `ST_INVALID_SRID_VALUE`, as in PySpark.
+fn spatial_type_srid(srid: &Bound<'_, PyAny>, geographic: bool) -> PyResult<i32> {
+    use pyo3::types::{PyInt, PyString};
+    if let Ok(name) = srid.cast::<PyString>() {
+        if name.to_cow()? == "ANY" {
+            return Ok(spark_connect::types::SpatialType::MIXED_SRID);
+        }
+    }
+    let known: &[i64] = if geographic {
+        &[4326]
+    } else {
+        &[0, 3857, 4326]
+    };
+    if srid.is_instance_of::<PyInt>() {
+        if let Ok(value) = srid.extract::<i64>() {
+            if known.contains(&value) {
+                return Ok(value as i32);
+            }
+        }
+    }
+    let srid_str = srid.str()?.to_string();
+    Err(crate::column::raise_pyspark(
+        srid.py(),
+        "IllegalArgumentException",
+        "ST_INVALID_SRID_VALUE",
+        &[("srid", &srid_str)],
+    ))
+}
+
+/// Parse a non-UDT DataType's Spark JSON (e.g. `"string collate UTF8_LCASE"`,
+/// `"geography(OGC:CRS84, SPHERICAL)"`, or a nested struct/array/map object) with the core
+/// grammar, into its concrete Python type object. `pyspark.sql.types._parse_datatype_json_value`
+/// delegates its atomic and parameterized string forms here, so the drop-in keeps one JSON
+/// grammar (the core's) instead of a second parser in Python.
+#[pyfunction]
+pub fn parse_datatype_json(py: Python<'_>, json: &str) -> PyResult<Py<PyAny>> {
+    let dt = DataType::from_json_str(json)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    data_type_to_py(py, &dt)
 }
 
 /// Convert a Python DataType object (any of the type classes) or a DDL string into
@@ -2755,9 +2823,12 @@ pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAn
                 value
             ))
         }
-        DataType::Udt { .. } | DataType::Unparsed { .. } => {
+        // An unparsed DDL string has no concrete Python class; keep it as a bare `DataType`.
+        // (The Python parser delegates JSON strings back here, so routing it there would loop.)
+        DataType::Unparsed { .. } => Py::new(py, PyDataType { inner: dt.clone() })?.into_any(),
+        DataType::Udt { .. } => {
             // A UDT reconstructs by re-importing its Python class; delegate to the Python
-            // parser (which also handles the unparsed-DDL fallback).
+            // parser.
             py.import("pyspark.sql.types")?
                 .getattr("_parse_datatype_json_string")?
                 .call1((dt.json(),))?
