@@ -6,6 +6,7 @@ Python side has real, measurable coverage in CI without a running server. Tests
 that require a live server live in test_dropin_e2e.py and are gated on SPARK_REMOTE.
 """
 
+import json
 import pickle
 import time
 from collections import namedtuple
@@ -3891,7 +3892,10 @@ def test_sql_context_connect_backed():
 
 def test_execution_info_and_operation_id():
     from pyspark.errors import AnalysisException
-    from pyspark.errors.exceptions.connect import SparkConnectException
+    from pyspark.errors.exceptions.connect import (
+        AnalysisException as ConnectAnalysisException,
+        SparkConnectException,
+    )
     from pyspark.sql.connect.client import PlanObservedMetrics
     from pyspark.sql.metrics import ExecutionInfo
 
@@ -3906,8 +3910,10 @@ def test_execution_info_and_operation_id():
     assert ei.flows == [("o", {"observed_metric_0": 1, "observed_metric_1": 2})]
     assert ei.metrics is None
     # SparkConnectException.operation_id (4.3.0): None unless the transport stamped it.
-    err = AnalysisException("boom")
+    err = ConnectAnalysisException("boom")
     assert isinstance(err, SparkConnectException)
+    assert isinstance(err, AnalysisException)
+    assert not isinstance(AnalysisException("boom"), SparkConnectException)
     assert err.operation_id is None
     err._operation_id = "op-2"
     assert err.operation_id == "op-2"
@@ -4019,6 +4025,217 @@ def test_execute_plan_error_carries_operation_id(mock_connect):
     with pytest.raises(PySparkException, match="plan rejected") as error:
         spark.range(1).collect()
     assert error.value.operation_id == _request_operation_id(service.execute_requests[-1])
+
+
+def _error_info(classes, **metadata):
+    """ErrorInfo metadata as the server sends it, with the exception classes, the most
+    specific first."""
+    return {"classes": json.dumps(classes), **metadata}
+
+
+def _stack_element(method, line):
+    # StackTraceElement.declaring_class=1, method_name=2, file_name=3, line_number=4.
+    return (
+        message_field(1, "org.apache.spark.Expr")
+        + message_field(2, method)
+        + message_field(3, "Expr.scala")
+        + varint_field(4, line)
+    )
+
+
+def _error_details(message, hierarchy, stack, throwable):
+    # FetchErrorDetailsResponse.root_error_idx=1, errors=2; Error.error_type_hierarchy=1,
+    # message=2, stack_trace=3, spark_throwable=5.
+    error = b"".join(message_field(1, name) for name in hierarchy) + message_field(2, message)
+    error += b"".join(message_field(3, element) for element in stack)
+    return varint_field(1, 0) + message_field(2, error + message_field(5, throwable))
+
+
+ARITHMETIC = ["org.apache.spark.SparkArithmeticException", "java.lang.ArithmeticException"]
+
+
+def test_a_server_error_is_raised_with_its_details(mock_connect):
+    import pyspark.errors as E
+    from pyspark.errors.exceptions import connect as C
+
+    spark, service = mock_connect
+    message = "[DIVIDE_BY_ZERO] Division by zero. SQLSTATE: 22012"
+    params = {"config": "spark.sql.ansi.enabled", "alternative": "try_divide"}
+    service.execute_error = (
+        # The status carries a message cut short; the details have all of it.
+        message[:24],
+        ARITHMETIC[0],
+        _error_info(
+            ARITHMETIC,
+            errorClass="DIVIDE_BY_ZERO",
+            sqlState="22012",
+            messageParameters=json.dumps(params),
+            errorId="error-1",
+        ),
+    )
+    # SparkThrowable.error_class=1, message_parameters=2 (entries of key=1, value=2),
+    # query_contexts=3, breaking_change_info=5; QueryContext.context_type=10, start_index=3,
+    # stop_index=4, fragment=5; BreakingChangeInfo.migration_message=1, mitigation_config=2
+    # (key=1, value=2).
+    throwable = message_field(1, "DIVIDE_BY_ZERO")
+    for key, value in params.items():
+        throwable += message_field(2, message_field(1, key) + message_field(2, value))
+    throwable += message_field(
+        3, varint_field(10, 0) + varint_field(3, 7) + varint_field(4, 9) + message_field(5, "1/0")
+    )
+    throwable += message_field(
+        5,
+        message_field(1, "Set the config.")
+        + message_field(2, message_field(1, "spark.sql.ansi.enabled") + message_field(2, "false")),
+    )
+    service.error_details = _error_details(
+        message, ARITHMETIC, [_stack_element("eval", 12)], throwable
+    )
+    service.confs = {"spark.sql.connect.serverStacktrace.enabled": "true"}
+    with pytest.raises(C.ArithmeticException) as error:
+        spark.range(1).collect()
+    e = error.value
+    # Both the Connect exception and the base one, as in the reference client.
+    assert isinstance(e, C.SparkConnectGrpcException)
+    assert isinstance(e, E.ArithmeticException)
+    assert service.fetched_error_ids == ["error-1"]
+    assert e.getCondition() == "DIVIDE_BY_ZERO"
+    assert e.getSqlState() == "22012"
+    # In the order that the server gave them.
+    assert list(e.getMessageParameters().items()) == list(params.items())
+    stacktrace = "\n".join(
+        [ARITHMETIC[0], "\tat org.apache.spark.Expr.eval(Expr.scala:12)"]
+    )
+    assert e.getStackTrace() == stacktrace
+    assert str(e) == message + "\n\nJVM stacktrace:\n" + stacktrace
+    [context] = e.getQueryContext()
+    assert type(context) is C.SQLQueryContext
+    assert (context.fragment(), context.startIndex(), context.stopIndex()) == ("1/0", 7, 9)
+    assert e.getBreakingChangeInfo() == {
+        "migration_message": ["Set the config."],
+        "needs_audit": True,
+        "mitigation_config": {"key": "spark.sql.ansi.enabled", "value": "false"},
+    }
+    assert e.getGrpcStatusCode() == C.StatusCode.INTERNAL
+    assert e.operation_id == _request_operation_id(service.execute_requests[-1])
+
+
+PARSE = [
+    "org.apache.spark.sql.catalyst.parser.ParseException",
+    "org.apache.spark.sql.AnalysisException",
+]
+PARSE_MESSAGE = "\n[PARSE_SYNTAX_ERROR] Syntax error at or near 'SELEC'. SQLSTATE: 42601"
+
+
+@pytest.mark.parametrize(
+    "confs, shown",
+    [
+        ({"spark.sql.connect.serverStacktrace.enabled": "true"}, True),
+        (
+            {
+                "spark.sql.connect.serverStacktrace.enabled": "false",
+                "spark.sql.pyspark.jvmStacktrace.enabled": "true",
+            },
+            True,
+        ),
+        (
+            {
+                "spark.sql.connect.serverStacktrace.enabled": "false",
+                "spark.sql.pyspark.jvmStacktrace.enabled": "false",
+            },
+            False,
+        ),
+        # A config that cannot be read shows it, as in the reference client.
+        ({}, True),
+        ({"spark.sql.connect.serverStacktrace.enabled": "false"}, True),
+    ],
+)
+def test_a_server_error_without_details_keeps_what_its_status_has(mock_connect, confs, shown):
+    from pyspark.errors.exceptions import connect as C
+
+    spark, service = mock_connect
+    stacktrace = PARSE[0] + "\n\tat org.apache.spark.sql.catalyst.parser.ParseErrorListener"
+    service.execute_error = (
+        PARSE_MESSAGE,
+        PARSE[0],
+        _error_info(
+            PARSE,
+            errorClass="PARSE_SYNTAX_ERROR",
+            sqlState="42601",
+            messageParameters=json.dumps({"error": "'SELEC'", "hint": ""}),
+            stackTrace=stacktrace,
+        ),
+    )
+    service.confs = confs
+    # The most specific class decides: a ParseException is also an AnalysisException.
+    with pytest.raises(C.ParseException) as error:
+        spark.range(1).collect()
+    e = error.value
+    assert isinstance(e, C.AnalysisException)
+    # Without an error id, there are no details to fetch.
+    assert service.fetched_error_ids == []
+    assert e.getCondition() == "PARSE_SYNTAX_ERROR"
+    assert e.getMessageParameters() == {"error": "'SELEC'", "hint": ""}
+    assert e.getStackTrace() == stacktrace
+    assert e.getQueryContext() == []
+    assert str(e) == (PARSE_MESSAGE + "\n\nJVM stacktrace:\n" + stacktrace if shown else PARSE_MESSAGE)
+
+
+@pytest.mark.parametrize(
+    "classes, message, expected, text",
+    [
+        (
+            ["java.lang.IllegalStateException"],
+            "boom",
+            "UnknownException",
+            "(java.lang.IllegalStateException) boom",
+        ),
+        (
+            ["org.apache.spark.SparkException", "org.apache.spark.api.python.PythonException"],
+            "boom",
+            "PythonException",
+            "\n  An exception was thrown from the Python worker. "
+            "Please see the stack trace below.\nboom",
+        ),
+        (
+            ["org.apache.spark.SparkException"],
+            "net.razorvine.pickle.PickleException: expected zero arguments",
+            "PickleException",
+            "net.razorvine.pickle.PickleException: expected zero arguments",
+        ),
+        (["org.apache.spark.SparkException"], "boom", "SparkException", "boom"),
+        (
+            ["org.apache.spark.sql.connect.common.InvalidPlanInput"],
+            "boom",
+            "InvalidPlanInput",
+            "boom",
+        ),
+    ],
+)
+def test_the_classes_of_a_server_error_pick_its_exception(
+    mock_connect, classes, message, expected, text
+):
+    from pyspark.errors.exceptions import connect as C
+
+    spark, service = mock_connect
+    service.execute_error = (message, classes[0], _error_info(classes))
+    service.confs = {
+        "spark.sql.connect.serverStacktrace.enabled": "false",
+        "spark.sql.pyspark.jvmStacktrace.enabled": "false",
+    }
+    with pytest.raises(C.SparkConnectGrpcException) as error:
+        spark.range(1).collect()
+    assert type(error.value).__name__ == expected
+    assert type(error.value) is getattr(C, expected)
+    assert str(error.value) == text
+
+
+def test_grpc_status_codes():
+    from pyspark.errors.exceptions.connect import StatusCode, _status_code
+
+    assert _status_code(13) is StatusCode.INTERNAL
+    assert _status_code(0) is StatusCode.OK
+    assert _status_code(99) is StatusCode.UNKNOWN
 
 
 def _sent_define_flow(request):

@@ -58,7 +58,10 @@ pub use resource::{
 pub use session::{SparkSession, SparkSessionBuilder};
 /// Re-exported so fallible APIs (e.g. the `#[spark_wasm_udf]`-generated UDF
 /// constructors) can name the client's `Result`/error types.
-pub use spark_connect_core::error::{Result, SparkError};
+pub use spark_connect_core::error::{
+    BreakingChangeInfo, QueryContext, QueryContextType, Result, ServerErrorInfo, SparkError,
+    SparkErrorKind,
+};
 /// Re-exported so `persist(...)` / `storage_level()` have a public storage-level type.
 pub use spark_connect_proto::StorageLevel;
 /// Named `StorageLevel` presets (`MEMORY_AND_DISK`, `DISK_ONLY`, ...) mirroring `pyspark.StorageLevel`.

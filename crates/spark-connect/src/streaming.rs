@@ -459,9 +459,13 @@ impl DataStreamWriter {
         let mut query_id = String::new();
         let mut run_id = String::new();
         let mut name = self.query_name.clone();
-        while let Some(resp) =
-            block_on(response_stream.message()).map_err(SparkError::from_grpc_status)?
-        {
+        let client = self.session.client();
+        while let Some(resp) = block_on(async {
+            match response_stream.message().await {
+                Ok(resp) => Ok(resp),
+                Err(status) => Err(client.error_from_status(status).await),
+            }
+        })? {
             if let Some(
                 proto::execute_plan_response::ResponseType::WriteStreamOperationStartResult(res),
             ) = resp.response_type
