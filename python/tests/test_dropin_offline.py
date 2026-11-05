@@ -6,6 +6,7 @@ Python side has real, measurable coverage in CI without a running server. Tests
 that require a live server live in test_dropin_e2e.py and are gated on SPARK_REMOTE.
 """
 
+import array
 import datetime
 import decimal
 import json
@@ -3462,6 +3463,71 @@ def test_create_dataframe_cannot_type_an_all_null_field_as_pyspark(data):
     assert error.value.getCondition() == "CANNOT_DETERMINE_TYPE"
 
 
+@pytest.mark.parametrize("data,condition,parameters", [
+    # The types of every row merge, as in PySpark, and types of other classes do not.
+    ([(1,), (2.5,)], "CANNOT_MERGE_TYPE", {"data_type1": "LongType", "data_type2": "DoubleType"}),
+    ([(True,), (1,)], "CANNOT_MERGE_TYPE", {"data_type1": "BooleanType", "data_type2": "LongType"}),
+    ([(decimal.Decimal("1.5"),), (1,)], "CANNOT_MERGE_TYPE",
+     {"data_type1": "DecimalType", "data_type2": "LongType"}),
+    # A row is a Row, a tuple, a list, a dict or an object, which None is not.
+    ([(1,), None], "CANNOT_INFER_SCHEMA_FOR_TYPE", {"data_type": "NoneType"}),
+    # A value of a type that cannot be inferred names its field.
+    ([({1, 2},)], "CANNOT_INFER_TYPE_FOR_FIELD", {"field_name": "_1"}),
+    ([(array.array("q", [1]),)], "CANNOT_INFER_TYPE_FOR_FIELD", {"field_name": "_1"}),
+])
+def test_create_dataframe_raises_inference_errors_as_pyspark(data, condition, parameters):
+    from pyspark.errors import PySparkTypeError
+
+    with pytest.raises(PySparkTypeError) as error:
+        _local_create_dataframe(data)
+    assert error.value.getCondition() == condition
+    assert error.value.getMessageParameters() == parameters
+
+
+def test_create_dataframe_checks_every_row_against_the_merged_schema():
+    from pyspark.errors import PySparkValueError
+
+    # Rows of different fields merge into one struct, which each Row must then fill.
+    with pytest.raises(PySparkValueError) as error:
+        _local_create_dataframe([Row(a=1), Row(b=2)])
+    assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
+    assert error.value.getMessageParameters() == {"expected_length": "2", "actual_length": "1"}
+
+
+@pytest.mark.parametrize("schema,arg_type", [
+    (T.ArrayType(T.LongType()), "ArrayType"),
+    (T.MapType(T.StringType(), T.LongType()), "MapType"),
+    ("array<int>", "ArrayType"),
+    (5, "int"),
+])
+def test_create_dataframe_schema_is_names_a_struct_or_an_atomic_type(schema, arg_type):
+    from pyspark.errors import PySparkTypeError
+
+    with pytest.raises(PySparkTypeError) as error:
+        _local_create_dataframe([(1,)], schema)
+    assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+    assert error.value.getMessageParameters() == {
+        "arg_name": "schema", "expected_type": "list, None or StructType", "arg_type": arg_type}
+
+
+def test_create_dataframe_of_a_dataframe_raises_as_pyspark():
+    from pyspark.errors import PySparkTypeError
+
+    spark = _offline_session()
+    with pytest.raises(PySparkTypeError) as error:
+        spark.createDataFrame(spark.range(1))
+    assert error.value.getCondition() == "INVALID_TYPE"
+    assert error.value.getMessageParameters() == {"arg_name": "data", "arg_type": "DataFrame"}
+
+
+def test_create_dataframe_warns_of_the_arguments_that_connect_ignores():
+    # As PySpark Connect, which ignores both.
+    with pytest.warns(UserWarning, match="'samplingRatio' is ignored"):
+        _local_create_dataframe([(1,)], None, 0.5)
+    with pytest.warns(UserWarning, match="'verifySchema' is ignored"):
+        _local_create_dataframe([(1,)], None, None, True)
+
+
 # --------------------------------------------------------------------------- schema cache
 
 
@@ -4802,34 +4868,36 @@ def test_reader_schema_is_sent_as_pyspark_sends_it(mock_connect, read):
     "", "1.25", "-42", "NaN", "a\x00b", "é雪😀", "e\u0301", "\uffff",
 ])
 def test_exact_string_converts_as_text(text):
-    from pyspark.errors import PySparkRuntimeError
-
-    # A string, even when it reads as a number: it shares a column with a string, not with
-    # an integer.
+    # A string, even when it reads as a number, is text: with a string or an integer in
+    # another row, the column is a string column, as PySpark merges the types (the live
+    # suite checks the values).
     assert _local_create_dataframe([Row(value=text), Row(value="y")]).isLocal()
-    with pytest.raises(PySparkRuntimeError):
-        _local_create_dataframe([Row(value=text), Row(value=5)])
+    assert _local_create_dataframe([Row(value=text), Row(value=5)]).isLocal()
 
 
 @pytest.mark.parametrize("text", ["\ud800", "\udfff", "a\ud800b"])
 def test_exact_string_surrogate_error_preserves_generic_fallback(text):
-    with pytest.raises(TypeError):
+    # As PySpark, where PyArrow cannot encode a lone surrogate either.
+    with pytest.raises(UnicodeEncodeError, match="surrogates not allowed"):
         _local_create_dataframe([Row(value=text)])
 
 
 def test_exact_string_subclass_uses_generic_conversion():
-    # Pin existing subclass behavior; treating subclasses as text is a separate
-    # behavior change.
-    from pyspark.errors import PySparkRuntimeError
+    from pyspark.errors import PySparkTypeError
 
     class IndexString(str):
         def __index__(self):
             return 17
 
-    # Converted through __index__, it shares a column with an integer, not with a string.
-    assert _local_create_dataframe([Row(value=IndexString("x")), Row(value=5)]).isLocal()
-    with pytest.raises(PySparkRuntimeError):
-        _local_create_dataframe([Row(value=IndexString("x")), Row(value="y")])
+    # As in PySpark, which takes an instance of a subclass by its `__dict__`: an empty
+    # struct, which merges with neither an integer nor a string.
+    assert _local_create_dataframe([Row(value=IndexString("x"))]).isLocal()
+    for other, data_type in [(5, "LongType"), ("y", "StringType")]:
+        with pytest.raises(PySparkTypeError) as error:
+            _local_create_dataframe([Row(value=IndexString("x")), Row(value=other)])
+        assert error.value.getCondition() == "CANNOT_MERGE_TYPE"
+        assert error.value.getMessageParameters() == {
+            "data_type1": "StructType", "data_type2": data_type}
 
 
 # --------------------------------------------------------------------------- printSchema

@@ -193,3 +193,11 @@ impl<T> ResultExt<T> for Result<T, SparkError> {
         self.map_err(spark_error_to_py_exception)
     }
 }
+
+/// For a boxed error, as a closure that runs without the GIL can return one, which keeps
+/// its result small.
+impl<T> ResultExt<T> for Result<T, Box<SparkError>> {
+    fn to_pyerr(self) -> PyResult<T> {
+        self.map_err(|e| spark_error_to_py_exception(*e))
+    }
+}

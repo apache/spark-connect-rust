@@ -62,6 +62,12 @@ impl RuntimeConf {
         Ok(results.into_iter().next().flatten())
     }
 
+    /// Get the values of several configuration keys in one request, in the order of `keys`,
+    /// with `None` for a key that does not exist on the server.
+    pub fn get_many(&self, keys: &[&str]) -> Result<Vec<Option<String>>> {
+        block_on(self.client.get_configs(keys))
+    }
+
     /// Get a configuration value, returning `default` when the key is unset — instead of
     /// erroring as `get` does for an unknown key. Uses the server's `GetWithDefault`
     /// operation, mirroring `RuntimeConfig.get(key, default)`.

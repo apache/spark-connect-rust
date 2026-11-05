@@ -33,6 +33,7 @@ mod errors;
 mod eval_type;
 mod functions;
 mod group;
+mod infer;
 mod ml;
 mod observation;
 mod pipelines;
