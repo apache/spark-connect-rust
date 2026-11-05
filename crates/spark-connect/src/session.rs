@@ -1350,20 +1350,49 @@ mod tests {
                 Value::String("7".into()),
                 Value::Binary(vec![7]),
             ] {
-                let rows = vec![Row::new(vec!["n".into()], vec![invalid])];
-                let schema = DataType::Struct {
-                    fields: vec![struct_field("n", target.clone())],
-                };
-                assert!(rows_to_arrow_ipc(&rows, &schema)
-                    .unwrap_err()
-                    .to_string()
-                    .contains("Type mismatch in row data"));
+                for (value, data_type) in [
+                    (invalid.clone(), target.clone()),
+                    (
+                        Value::List(vec![invalid.clone()]),
+                        DataType::Array {
+                            element_type: Box::new(target.clone()),
+                            contains_null: true,
+                        },
+                    ),
+                    (
+                        Value::Map(vec![(Value::String("k".into()), invalid.clone())]),
+                        DataType::Map {
+                            key_type: Box::new(text_type()),
+                            value_type: Box::new(target.clone()),
+                            value_contains_null: true,
+                        },
+                    ),
+                    (
+                        Value::Struct(Row::new(vec!["n".into()], vec![invalid.clone()]).into()),
+                        DataType::Struct {
+                            fields: vec![struct_field("n", target.clone())],
+                        },
+                    ),
+                ] {
+                    let rows = vec![Row::new(vec!["n".into()], vec![value])];
+                    let schema = DataType::Struct {
+                        fields: vec![struct_field("n", data_type)],
+                    };
+                    assert!(rows_to_arrow_ipc(&rows, &schema)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("Type mismatch in row data"));
+                }
             }
         }
     }
 
     #[test]
-    fn nested_struct_coercion_preserves_first_name_position_and_numeric_types() {
+    fn nested_struct_ipc_preserves_first_name_position_and_numeric_types() {
+        use arrow::array::{
+            Array, Int16Array, Int64Array, Int8Array, ListArray, MapArray, StringArray, StructArray,
+        };
+
         let source = Value::Struct(
             Row::with_shared_fields(
                 vec!["dup", "dup", "other", "nested", "items", "map"]
@@ -1412,36 +1441,101 @@ mod tests {
                 struct_field("missing", DataType::Integer),
             ],
         };
-        let actual = coerce_value(Some(&source), &target);
-        let expected = Value::Struct(
+        let rows = [
+            Row::new(vec!["payload".into()], vec![source]),
+            Row::new(vec!["payload".into()], vec![Value::Null]),
             Row::new(
-                vec![
-                    "dup",
-                    "positional",
-                    "dup",
-                    "nested",
-                    "items",
-                    "map",
-                    "missing",
-                ]
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-                vec![
-                    Value::Byte(1),
-                    Value::Short(999),
-                    Value::Long(257),
-                    Value::Struct(Row::new(vec!["n".to_string()], vec![Value::Byte(44)]).into()),
-                    Value::List(vec![Value::Short(1), Value::Null]),
-                    Value::Map(vec![(Value::String("k".to_string()), Value::Short(2))]),
-                    Value::Null,
-                ],
-            )
-            .into(),
+                vec!["payload".into()],
+                vec![Value::Struct(Row::new(vec![], vec![]).into())],
+            ),
+        ];
+        let schema = DataType::Struct {
+            fields: vec![struct_field("payload", target)],
+        };
+        // Read the actual IPC with Arrow rather than the client's decoder, so
+        // symmetric encoding/decoding errors cannot hide a coercion regression.
+        let bytes = rows_to_arrow_ipc(&rows, &schema).unwrap();
+        let mut reader = StreamReader::try_new(Cursor::new(bytes), None).unwrap();
+        let batch = reader.next().unwrap().unwrap();
+        assert!(reader.next().is_none());
+        let actual = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        assert_eq!(actual.len(), 3);
+        assert!(!actual.is_null(0));
+        assert!(actual.is_null(1));
+        assert!(!actual.is_null(2));
+        assert_eq!(
+            actual
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int8Array>()
+                .unwrap(),
+            &Int8Array::from(vec![Some(1), None, None]),
         );
-        assert_eq!(actual, expected);
-        assert_eq!(coerce_value(Some(&Value::Null), &target), Value::Null);
-        assert_eq!(coerce_value(None, &target), Value::Null);
+        assert_eq!(
+            actual
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int16Array>()
+                .unwrap(),
+            &Int16Array::from(vec![Some(999), None, None]),
+        );
+        assert_eq!(
+            actual
+                .column(2)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap(),
+            &Int64Array::from(vec![Some(257), None, None]),
+        );
+        let nested = actual
+            .column(3)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        assert_eq!(nested.null_count(), 2);
+        assert_eq!(
+            nested
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int8Array>()
+                .unwrap(),
+            &Int8Array::from(vec![Some(44), None, None]),
+        );
+        let items = actual
+            .column(4)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        assert_eq!(items.null_count(), 2);
+        assert_eq!(items.value_offsets(), &[0, 2, 2, 2]);
+        assert_eq!(
+            items
+                .values()
+                .as_any()
+                .downcast_ref::<Int16Array>()
+                .unwrap(),
+            &Int16Array::from(vec![Some(1), None]),
+        );
+        let map = actual
+            .column(5)
+            .as_any()
+            .downcast_ref::<MapArray>()
+            .unwrap();
+        assert_eq!(map.null_count(), 2);
+        assert_eq!(map.value_offsets(), &[0, 1, 1, 1]);
+        assert_eq!(
+            map.keys().as_any().downcast_ref::<StringArray>().unwrap(),
+            &StringArray::from(vec!["k"]),
+        );
+        assert_eq!(
+            map.values().as_any().downcast_ref::<Int16Array>().unwrap(),
+            &Int16Array::from(vec![Some(2)]),
+        );
+        assert_eq!(actual.column(6).null_count(), 3);
     }
 
     #[test]
