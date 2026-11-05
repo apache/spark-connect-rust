@@ -152,6 +152,30 @@ impl PyDataType {
         }
     }
 
+    /// As PySpark's `DataType.__eq__`: equal to a data type of its class, or of a subclass of
+    /// it, with the same attributes, and `!=` otherwise. Data types do not order.
+    fn __richcmp__<'py>(
+        slf: &Bound<'py, Self>,
+        other: &Bound<'py, PyAny>,
+        op: pyo3::basic::CompareOp,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        use pyo3::basic::CompareOp;
+        let py = slf.py();
+        if !matches!(op, CompareOp::Eq | CompareOp::Ne) {
+            return Ok(py.NotImplemented().into_bound(py));
+        }
+        let equal = other.is_instance(&slf.get_type())? && same_attributes(slf.as_any(), other)?;
+        Ok((equal == matches!(op, CompareOp::Eq))
+            .into_pyobject(py)?
+            .to_owned()
+            .into_any())
+    }
+
+    /// As PySpark's `DataType.__hash__`: the hash of its string.
+    fn __hash__(slf: &Bound<'_, Self>) -> PyResult<isize> {
+        slf.str()?.hash()
+    }
+
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
@@ -1585,6 +1609,20 @@ impl PyStructField {
         } else {
             false
         }
+    }
+    /// As PySpark's `DataType.__hash__`, which a `StructField` has: the hash of its string.
+    fn __hash__(slf: &Bound<'_, Self>) -> PyResult<isize> {
+        slf.str()?.hash()
+    }
+}
+
+/// Whether two data types have the same attributes, as PySpark compares their `__dict__`:
+/// for the types of this module, their Spark data types, and for pure-Python subclasses, such
+/// as a `UserDefinedType`, their `__dict__`.
+fn same_attributes(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<bool> {
+    match (a.getattr("__dict__"), b.getattr("__dict__")) {
+        (Ok(a), Ok(b)) => a.eq(b),
+        _ => Ok(py_to_data_type(a)? == py_to_data_type(b)?),
     }
 }
 

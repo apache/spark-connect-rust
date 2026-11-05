@@ -177,3 +177,13 @@ def test_collect_reads_a_result_across_stream_ends(session):
     n = 300_000
     assert len(session.range(n).collect()) == n
     assert session.range(n).toArrow().num_rows == n
+
+
+def test_schemas_from_the_server_compare_as_pyspark(session):
+    df = session.range(1).selectExpr("id", "CAST(id AS STRING) AS s")
+    assert df.schema == StructType([
+        StructField("id", LongType(), False),
+        StructField("s", StringType(), False),
+    ])
+    assert df.schema.fields[1].dataType == StringType()
+    assert df.schema["id"].dataType != IntegerType()

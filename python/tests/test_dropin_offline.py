@@ -428,6 +428,49 @@ def test_structtype_add_reflected_in_the_base_data_type():
     assert str(st) == str(built) == "struct<a:bigint,b:bigint>"
 
 
+@pytest.mark.parametrize("make_a, make_b, equal", [
+    (lambda: T.IntegerType(), lambda: T.IntegerType(), True),
+    (lambda: T.IntegerType(), lambda: T.LongType(), False),
+    (lambda: T.DecimalType(10, 2), lambda: T.DecimalType(10, 2), True),
+    (lambda: T.DecimalType(10, 2), lambda: T.DecimalType(10, 3), False),
+    (lambda: T.StringType(), lambda: T.StringType("UTF8_LCASE"), False),
+    (lambda: T.ArrayType(T.IntegerType()), lambda: T.ArrayType(T.IntegerType()), True),
+    (lambda: T.ArrayType(T.IntegerType()), lambda: T.ArrayType(T.IntegerType(), False), False),
+    (lambda: T.MapType(T.StringType(), T.LongType()),
+     lambda: T.MapType(T.StringType(), T.LongType()), True),
+    (lambda: T.StructField("a", T.IntegerType()), lambda: T.StructField("a", T.IntegerType()), True),
+    (lambda: T.StructField("a", T.IntegerType()),
+     lambda: T.StructField("a", T.IntegerType(), True, {"k": 1}), False),
+    (lambda: T.StructType([T.StructField("a", T.IntegerType())]),
+     lambda: T.StructType().add("a", T.IntegerType()), True),
+    (lambda: T.StructType([T.StructField("a", T.IntegerType())]),
+     lambda: T.StructType([T.StructField("b", T.IntegerType())]), False),
+    (lambda: T.DayTimeIntervalType(), lambda: T.DayTimeIntervalType(0, 3), True),
+    (lambda: T.DayTimeIntervalType(), lambda: T.DayTimeIntervalType(0, 1), False),
+])
+def test_data_types_compare_and_hash_as_pyspark(make_a, make_b, equal):
+    a, b = make_a(), make_b()
+    assert (a == b) is equal and (b == a) is equal
+    assert (a != b) is (not equal)
+    if equal:
+        assert hash(a) == hash(b)
+        assert len({a, b}) == 1
+
+
+def test_data_types_compare_with_other_objects_and_their_copies_as_pyspark():
+    import pickle
+
+    schema = T.StructType([
+        T.StructField("a", T.ArrayType(T.MapType(T.StringType(), T.DecimalType(10, 2)))),
+        T.StructField("b", T.StructType([T.StructField("c", T.DateType(), False)])),
+    ])
+    assert pickle.loads(pickle.dumps(schema)) == schema
+    assert {schema: 1}[pickle.loads(pickle.dumps(schema))] == 1
+    assert T.IntegerType() != 1 and not (T.IntegerType() == "int")
+    with pytest.raises(TypeError):
+        T.IntegerType() < T.LongType()
+
+
 def test_datatype_object_model():
     # json / jsonValue / typeName / simpleString / needConversion match official pyspark.
     assert T.IntegerType().typeName() == "integer"
