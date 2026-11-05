@@ -1491,7 +1491,7 @@ impl DataFrame {
     /// Print the schema of this DataFrame.
     pub fn print_schema(&self) -> Result<()> {
         let schema = self.schema()?;
-        print!("{}", schema.tree_string()?);
+        println!("{}", schema.tree_string()?);
         Ok(())
     }
 
