@@ -2240,6 +2240,21 @@ if mode in ("public_alias", "converter_alias", "captured_alias"):
             current = importlib.import_module("pyspark.sql.pandas.types")
             assert current is not converter
             assert importer.to_arrow_schema.__globals__ is vars(converter)
+elif mode == "atomic_alias":
+    scope, replacement_name = argument.split(":")
+    replacement = None if replacement_name == "none" else native.DateType
+    if scope == "public_before":
+        sys.modules.pop("pyspark.sql._arrow_input", None)
+        T.AtomicType = replacement
+    elif scope == "public_after":
+        importlib.import_module("pyspark.sql._arrow_input")
+        T.AtomicType = replacement
+    else:
+        importer = importlib.import_module("pyspark.sql._arrow_input")
+        if replacement_name == "missing":
+            del importer.AtomicType
+        else:
+            importer.AtomicType = replacement
 elif mode == "importer_alias":
     importer = importlib.import_module("pyspark.sql._arrow_input")
     importer.StructType = None if argument == "none" else native.DateType
@@ -2282,6 +2297,16 @@ def test_date_rebound_importer_schema_alias_keeps_native_row_path(replacement):
     _date_alias_guard_process("importer_alias", replacement)
 
 
+@pytest.mark.parametrize("scope", ["public_before", "public_after", "importer"])
+@pytest.mark.parametrize("replacement", ["none", "date"])
+def test_date_rebound_atomic_alias_keeps_native_row_path(scope, replacement):
+    _date_alias_guard_process("atomic_alias", f"{scope}:{replacement}")
+
+
+def test_date_deleted_importer_atomic_alias_keeps_native_row_path():
+    _date_alias_guard_process("atomic_alias", "importer:missing")
+
+
 @pytest.mark.parametrize("name", ["from_arrow_schema", "to_arrow_schema"])
 def test_date_present_invalid_importer_function_keeps_native_row_path(name):
     _date_alias_guard_process("importer_function", name)
@@ -2310,6 +2335,7 @@ def test_date_warm_importer_without_global_converter_aliases(protocol, monkeypat
         # Exercise the local-import shape on this branch's pinned dependency.
         substitute = types.ModuleType(importer.__name__)
         substitute.StructType = T.StructType
+        substitute.AtomicType = T.AtomicType
         substitute.prepare_table = local_imports
         monkeypatch.setitem(sys.modules, importer.__name__, substitute)
 
