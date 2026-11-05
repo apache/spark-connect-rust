@@ -371,7 +371,7 @@ impl SparkSession {
         DataFrame::new(
             self.clone(),
             LogicalPlan::LocalRelation {
-                schema,
+                schema: Some(schema),
                 data: Some(data),
             },
         )
