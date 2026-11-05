@@ -4419,31 +4419,39 @@ def test_connect_registry_sends_auto_cdc_define_flow(mock_connect):
     assert 10 not in details and 11 not in details and 12 not in details
 
 
-# Exact built-in string conversion guards.
+# Exact built-in string conversion guards. A Row made in Python keeps its values as they
+# are, as PySpark's does, so these check the conversion that createDataFrame makes.
 
 
 @pytest.mark.parametrize("text", [
     "", "1.25", "-42", "NaN", "a\x00b", "é雪😀", "e\u0301", "\uffff",
 ])
-def test_exact_string_roundtrip(text):
-    actual = Row(value=text).value
-    assert type(actual) is str
-    assert actual == text
+def test_exact_string_converts_as_text(text):
+    from pyspark.errors import PySparkRuntimeError
+
+    # A string, even when it reads as a number: it shares a column with a string, not with
+    # an integer.
+    assert _local_create_dataframe([Row(value=text), Row(value="y")]).isLocal()
+    with pytest.raises(PySparkRuntimeError):
+        _local_create_dataframe([Row(value=text), Row(value=5)])
 
 
 @pytest.mark.parametrize("text", ["\ud800", "\udfff", "a\ud800b"])
 def test_exact_string_surrogate_error_preserves_generic_fallback(text):
     with pytest.raises(TypeError):
-        Row(value=text)
+        _local_create_dataframe([Row(value=text)])
 
 
 def test_exact_string_subclass_uses_generic_conversion():
     # Pin existing subclass behavior; treating subclasses as text is a separate
     # behavior change.
+    from pyspark.errors import PySparkRuntimeError
+
     class IndexString(str):
         def __index__(self):
             return 17
 
-    actual = Row(value=IndexString("x")).value
-    assert type(actual) is int
-    assert actual == 17
+    # Converted through __index__, it shares a column with an integer, not with a string.
+    assert _local_create_dataframe([Row(value=IndexString("x")), Row(value=5)]).isLocal()
+    with pytest.raises(PySparkRuntimeError):
+        _local_create_dataframe([Row(value=IndexString("x")), Row(value="y")])
