@@ -23,23 +23,22 @@ Mirrors pyspark.sql.connect.udf and pyspark.sql.functions.udf/pandas_udf.
 import sys
 from typing import Callable, Optional, Any
 
-from pyspark.sql.types import DataType, StringType, _parse_datatype_json_string
+from pyspark.sql.types import DataType, StringType
 from pyspark.serializers import CloudPickleSerializer
 
 
 def _as_concrete_datatype(returnType: Any) -> DataType:
     """Return a concrete, picklable pyspark ``DataType``.
 
-    A DDL string (e.g. ``"double"``, ``"a int, b string"``) is parsed via the
-    Rust DDL parser and rebuilt into a concrete type through
-    ``_parse_datatype_json_string``. This matters because the cloudpickled UDF
+    A DDL string (e.g. ``"double"``, ``"a int, b string"``) is parsed into its
+    concrete type with ``DataType.fromDDL``. This matters because the cloudpickled UDF
     command must carry a real ``DataType`` (not a DDL string): the pandas/Arrow
     worker pairs each result column with its spark type to build the Arrow batch,
     so a bare string breaks it ("not enough values to unpack"). Mirrors how the
     reference Connect client pickles the *parsed* output type.
     """
     if isinstance(returnType, str):
-        return _parse_datatype_json_string(DataType.fromDDL(returnType).json())
+        return DataType.fromDDL(returnType)
     return returnType
 
 
