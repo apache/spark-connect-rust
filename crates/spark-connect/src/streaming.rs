@@ -375,7 +375,10 @@ impl DataStreamWriter {
     /// Internal method to build and execute the write stream command.
     fn _start_internal(self) -> Result<StreamingQuery> {
         let mut write_op = proto::WriteStreamOperationStart::default();
-        write_op.input = Some(self.plan.to_proto());
+        write_op.input = Some(crate::plan::relation_with_ids(
+            &self.plan,
+            self.session.plan_ids(),
+        ));
 
         if let Some(fmt) = &self.format {
             write_op.format = fmt.clone();

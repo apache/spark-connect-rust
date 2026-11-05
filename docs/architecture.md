@@ -110,6 +110,18 @@ last response it saw, so long results survive transient disconnects. Like the
 reference client, it releases each response it has read, and the whole execution
 once the result is complete, so the server does not keep them.
 
+Each plan node gets its plan ID once, the first time it is sent, and keeps it, as
+in the reference client. Re-executing a DataFrame therefore sends the same
+relation, and a DataFrame built on another keeps that input's plan IDs, so the
+server's per-session plan cache (`spark.connect.session.planCache.*`) can reuse
+the plans it already resolved instead of resolving them again. As with the
+reference client, a re-executed DataFrame can then use its earlier resolution.
+A DataFrame from `spark.read.parquet(path)`, for example, keeps the file listing
+it resolved: once the files under `path` are overwritten, running it again fails
+with `FAILED_READ_FILE.FILE_NOT_EXIST`, while a new `spark.read.parquet(path)`
+reads the new files. Setting `spark.connect.session.planCache.enabled` to `false`
+turns the cache off, on the server or for a session with `spark.conf.set`.
+
 ### Python Arrow table handoff
 
 `toArrow()` collects decoded batches and uses arrow-rs's `IntoPyArrow` for one

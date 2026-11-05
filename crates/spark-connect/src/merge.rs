@@ -108,7 +108,7 @@ impl MergeIntoWriter {
     pub fn merge(self) -> Result<()> {
         let mut cmd = proto::MergeIntoTableCommand::default();
         cmd.target_table_name = self.target_table;
-        cmd.source_table_plan = Some(build_input_relation(&self.source_plan, &self.session)?);
+        cmd.source_table_plan = Some(build_input_relation(&self.source_plan, &self.session));
         cmd.merge_condition = Some(self.condition.to_proto());
         cmd.match_actions = self.matched_actions;
         cmd.not_matched_actions = self.not_matched_actions;
