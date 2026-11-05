@@ -53,21 +53,34 @@ def get_jira_client():
     )
 
 
+# spark-connect-rust ships on its own connect-rust-x.y.z version line, so that its JIRAs
+# appear in its release notes rather than in core Spark's.
+CONNECT_RUST_VERSION = re.compile(r"connect-rust-(\d+)\.(\d+)\.(\d+)")
+
+
 def detect_affected_version(asf_jira):
-    """Return the latest unreleased x.y.z version, or exit."""
-    versions = asf_jira.project_versions("SPARK")
-    versions = [
-        x
-        for x in versions
-        if not x.raw["released"] and not x.raw["archived"] and re.match(r"\d+\.\d+\.\d+", x.name)
-    ]
-    versions = sorted(versions, key=lambda x: x.name, reverse=True)
+    """Return the newest unreleased connect-rust-x.y.z version, or exit."""
+    versions = []
+    for x in asf_jira.project_versions("SPARK"):
+        match = CONNECT_RUST_VERSION.fullmatch(x.name)
+        if match and not x.raw["released"] and not x.raw["archived"]:
+            versions.append((tuple(int(n) for n in match.groups()), x.name))
     if not versions:
         fail(
-            "Cannot detect affected version. "
+            "Cannot detect an unreleased connect-rust-x.y.z version. "
             "Please create the ticket manually at %s" % JIRA_API_BASE
         )
-    return versions[0].name
+    return max(versions)[1]
+
+
+def find_release_umbrella(asf_jira, version):
+    """Return the key of the release umbrella Epic of `version`, or None unless exactly one."""
+    summary = "spark-connect-rust %s release" % version
+    issues = asf_jira.search_issues(
+        'project = SPARK AND issuetype = Epic AND summary ~ "\\"%s\\""' % summary
+    )
+    keys = [i.key for i in issues if i.fields.summary == summary]
+    return keys[0] if len(keys) == 1 else None
 
 
 def list_components(asf_jira):
@@ -81,14 +94,19 @@ def list_components(asf_jira):
 def create_jira_issue(
     asf_jira, title, component, parent=None, issue_type=None, version=None, description=""
 ):
-    """Create a JIRA issue and return the issue key (e.g. SPARK-12345)."""
-    affected_version = version if version else detect_affected_version(asf_jira)
+    """Create a JIRA issue and return the issue key (e.g. SPARK-12345).
+
+    Affects and Fix Version/s are both `version`, by default the newest unreleased
+    connect-rust-x.y.z version. Issues other than subtasks are linked as "is part of" that
+    version's release umbrella Epic, when there is exactly one.
+    """
+    version = version if version else detect_affected_version(asf_jira)
 
     issue_dict = {
         "project": {"key": "SPARK"},
         "summary": title,
         "description": description or "",
-        "versions": [{"name": affected_version}],
+        "versions": [{"name": version}],
         "components": [{"name": component}],
     }
 
@@ -100,6 +118,24 @@ def create_jira_issue(
 
     try:
         new_issue = asf_jira.create_issue(fields=issue_dict)
-        return new_issue.key
+        new_issue.update(fields={"fixVersions": [{"name": version}]})
     except Exception as e:
         fail("Failed to create JIRA issue: %s" % e)
+
+    if not parent:
+        umbrella = find_release_umbrella(asf_jira, version)
+        if umbrella:
+            incorporates = next(
+                t.name for t in asf_jira.issue_link_types() if t.outward == "incorporates"
+            )
+            # The umbrella incorporates the new issue, which "is part of" the umbrella.
+            asf_jira.create_issue_link(
+                incorporates, inwardIssue=umbrella, outwardIssue=new_issue.key
+            )
+        else:
+            print(
+                "No single release umbrella Epic for %s; link %s to it by hand."
+                % (version, new_issue.key),
+                file=sys.stderr,
+            )
+    return new_issue.key
