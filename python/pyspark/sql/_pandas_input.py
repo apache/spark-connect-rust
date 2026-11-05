@@ -296,7 +296,7 @@ def timestamp_columns(frame, schema):
     except ImportError:
         return None
     from pyspark._pyspark import (
-        BooleanType, ByteType, ShortType, IntegerType, LongType, FloatType,
+        AtomicType, BooleanType, ByteType, ShortType, IntegerType, LongType, FloatType,
         DoubleType, DecimalType, StringType, BinaryType, DateType, TimestampType,
         StructField, StructType as NativeStructType,
     )
@@ -312,8 +312,13 @@ def timestamp_columns(frame, schema):
     if sys.modules.get("pyspark.sql.types") is not sql_types:
         return None
     importer = sys.modules.get("pyspark.sql._arrow_input")
-    if importer is not None and getattr(importer, "StructType", None) is not NativeStructType:
+    if vars(sql_types).get("AtomicType") is not AtomicType:
         return None
+    if importer is not None:
+        if getattr(importer, "StructType", None) is not NativeStructType:
+            return None
+        if vars(importer).get("AtomicType") is not AtomicType:
+            return None
     converter = sys.modules.get("pyspark.sql.pandas.types")
     namespaces = [vars(sql_types)]
     if converter is not None:

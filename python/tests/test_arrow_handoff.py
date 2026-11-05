@@ -1969,6 +1969,21 @@ elif mode in ("public_alias", "converter_alias", "captured_alias"):
         if mode == "captured_alias":
             sys.modules.pop("pyspark.sql.pandas.types")
             assert importlib.import_module("pyspark.sql.pandas.types") is not converter
+elif mode == "atomic_alias":
+    scope, replacement_name = argument.split(":")
+    replacement = None if replacement_name == "none" else native.LongType
+    if scope == "public_before":
+        sys.modules.pop("pyspark.sql._arrow_input", None)
+        T.AtomicType = replacement
+    elif scope == "public_after":
+        importlib.import_module("pyspark.sql._arrow_input")
+        T.AtomicType = replacement
+    else:
+        importer = importlib.import_module("pyspark.sql._arrow_input")
+        if replacement_name == "missing":
+            del importer.AtomicType
+        else:
+            importer.AtomicType = replacement
 elif mode == "importer_alias":
     import pyspark.sql._arrow_input as importer
     importer.StructType = None
@@ -2017,6 +2032,16 @@ def test_timestamp_rebound_importer_schema_alias_keeps_row_path():
     _timestamp_guard_process("importer_alias", "none")
 
 
+@pytest.mark.parametrize("scope", ["public_before", "public_after", "importer"])
+@pytest.mark.parametrize("replacement", ["none", "long"])
+def test_timestamp_rebound_atomic_alias_keeps_row_path(scope, replacement):
+    _timestamp_guard_process("atomic_alias", f"{scope}:{replacement}")
+
+
+def test_timestamp_deleted_importer_atomic_alias_keeps_row_path():
+    _timestamp_guard_process("atomic_alias", "importer:missing")
+
+
 def test_timestamp_warm_local_converter_imports_keep_columnar_route(protocol, monkeypatch):
     import types
     import sys
@@ -2027,6 +2052,7 @@ def test_timestamp_warm_local_converter_imports_keep_columnar_route(protocol, mo
     original = importer.prepare_table
     substitute = types.ModuleType(importer.__name__)
     substitute.StructType = T.StructType
+    substitute.AtomicType = T.AtomicType
 
     def prepare_table(table, schema, *configs):
         from pyspark.sql.pandas.types import to_arrow_schema
