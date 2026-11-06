@@ -309,8 +309,10 @@ class UserDefinedFunction:
 
         # A UDF argument is ColumnOrName: a bare string is a COLUMN NAME (like PySpark),
         # not a string literal. Coerce str -> col(str) before handing to the Rust layer
-        # (whose to_column would otherwise treat a str as a literal).
+        # (whose to_column would otherwise treat a str as a literal). As PySpark's, each
+        # keyword argument is a NamedArgumentExpression, after the positional ones.
         cols = [col(a) if isinstance(a, str) else a for a in args]
+        named = [(k, col(v) if isinstance(v, str) else v) for k, v in kwargs.items()]
 
         # As PySpark's PythonUDF, the command is the pickled (func, returnType) for the
         # server-side Python worker, and pyfunc_make_udf builds the proto output type.
@@ -323,6 +325,7 @@ class UserDefinedFunction:
             "%d.%d" % sys.version_info[:2],
             *cols,
             deterministic=self.deterministic,
+            named_args=named,
         )
 
     # Verbatim from PySpark Connect (pyspark.sql.connect.udf.UserDefinedFunction).

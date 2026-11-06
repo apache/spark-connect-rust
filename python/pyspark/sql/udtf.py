@@ -114,10 +114,15 @@ class UserDefinedTableFunction:
         # worker command contains only the handler class, unlike scalar UDFs.
         self.command = CloudPickleSerializer().dumps(func)
 
-    def __call__(self, *args: Any) -> Any:
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
         from pyspark import _pyspark
         from pyspark.sql import SparkSession
+        from pyspark.sql.functions import col
 
+        # As PySpark's: an argument is ColumnOrName, so a bare string is a column name, and
+        # each keyword argument is a NamedArgumentExpression, after the positional ones.
+        cols = [col(a) if isinstance(a, str) else a for a in args]
+        named = [(k, col(v) if isinstance(v, str) else v) for k, v in kwargs.items()]
         return _pyspark.functions.pyfunc_make_udtf(
             SparkSession.active(),
             self.name,
@@ -125,8 +130,9 @@ class UserDefinedTableFunction:
             self.evalType,
             self.command,
             self.python_ver,
-            *args,
+            *cols,
             deterministic=self.deterministic,
+            named_args=named,
         )
 
     def asDeterministic(self) -> "UserDefinedTableFunction":
