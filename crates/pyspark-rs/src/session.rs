@@ -50,12 +50,22 @@ impl PySparkSessionBuilder {
     }
 
     /// Set the remote Spark Connect server URL. Returns the builder (chainable).
-    /// Mirrors `SparkSession.Builder.remote(location="sc://localhost")`.
-    #[pyo3(signature = (location="sc://localhost"))]
-    fn remote(&self, location: &str) -> PySparkSessionBuilder {
+    /// Mirrors `SparkSession.Builder.remote(url)`, and the Connect session builder's
+    /// `remote(location="sc://localhost")`: the URL is `url` or the keyword `location`.
+    #[pyo3(signature = (url=None, *, location=None))]
+    fn remote(&self, url: Option<&str>, location: Option<&str>) -> PyResult<PySparkSessionBuilder> {
+        let url = match (url, location) {
+            (Some(_), Some(_)) => {
+                return Err(pyo3::exceptions::PyTypeError::new_err(
+                    "remote() got multiple values for the URL: give url or location",
+                ))
+            }
+            (Some(url), None) | (None, Some(url)) => url,
+            (None, None) => "sc://localhost",
+        };
         let mut b = self.clone();
-        b.remote_url = Some(location.to_string());
-        b
+        b.remote_url = Some(url.to_string());
+        Ok(b)
     }
 
     /// Set a config option, or several via `map`. Mirrors
