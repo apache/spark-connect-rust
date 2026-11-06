@@ -1067,6 +1067,63 @@ pub(crate) fn convert(obj: &Bound<'_, PyAny>, dt: &DataType, nullable: bool) -> 
                 )))
             }
         }
+        // As PySpark's converters of these types: the value and metadata of a VariantVal, and
+        // the srid and WKB of a Geometry or a Geography, the structs of their Arrow types.
+        DataType::Variant => match obj.cast::<PyVariantVal>() {
+            Ok(variant) => {
+                let variant = variant.borrow();
+                Ok(Value::Variant {
+                    value: variant.value.clone(),
+                    metadata: variant.metadata.clone(),
+                })
+            }
+            Err(_) => Err(raise_pyspark(
+                py,
+                "PySparkValueError",
+                "MALFORMED_VARIANT",
+                &[],
+            )),
+        },
+        DataType::Geometry { .. } => match obj.cast::<PyGeometry>() {
+            Ok(geometry) => {
+                let geometry = geometry.borrow();
+                Ok(spatial_value(geometry.srid, &geometry.wkb))
+            }
+            Err(_) => Err(raise_pyspark(
+                py,
+                "PySparkValueError",
+                "MALFORMED_GEOMETRY",
+                &[],
+            )),
+        },
+        DataType::Geography { .. } => match obj.cast::<PyGeography>() {
+            Ok(geography) => {
+                let geography = geography.borrow();
+                Ok(spatial_value(geography.srid, &geography.wkb))
+            }
+            Err(_) => Err(raise_pyspark(
+                py,
+                "PySparkValueError",
+                "MALFORMED_GEOGRAPHY",
+                &[],
+            )),
+        },
+        // As PySpark's converter of a user-defined type: the value serialized by the UDT, and
+        // converted as its SQL type.
+        DataType::Udt {
+            sql_type: Some(sql_type),
+            python_class,
+            serialized_python_class,
+            ..
+        } => {
+            let udt = udt_of(
+                obj,
+                python_class.as_deref(),
+                serialized_python_class.as_deref(),
+            )?;
+            let serialized = udt.call_method1(intern!(py, "serialize"), (obj,))?;
+            convert(&serialized, sql_type, nullable)
+        }
         _ => Err(unsupported(obj)?),
     }
 }
@@ -1079,6 +1136,68 @@ pub(crate) fn time_nanos(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
         + field(intern!(py, "minute"))? * 60
         + field(intern!(py, "second"))?;
     Ok(seconds * 1_000_000_000 + field(intern!(py, "microsecond"))? * 1_000)
+}
+
+/// The value of a GEOMETRY or a GEOGRAPHY, as their `toInternal`: its srid and WKB.
+fn spatial_value(srid: i32, wkb: &[u8]) -> Value {
+    Value::Struct(
+        spark_connect::row::Row::new(
+            vec!["srid".to_string(), "wkb".to_string()],
+            vec![Value::Integer(srid), Value::Binary(wkb.to_vec())],
+        )
+        .into(),
+    )
+}
+
+/// The user-defined type of a column whose class is `python_class`, to serialize `obj`: that of
+/// the value, as PySpark infers a UDT by `__UDT__`, when it is of the class; else an instance
+/// of the class, which the type sends cloudpickled for a class of `__main__`.
+fn udt_of<'py>(
+    obj: &Bound<'py, PyAny>,
+    python_class: Option<&str>,
+    serialized_python_class: Option<&str>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let py = obj.py();
+    let name_of = |class: &Bound<'py, PyAny>| -> PyResult<String> {
+        let module: String = class.getattr(intern!(py, "__module__"))?.extract()?;
+        let name: String = class.getattr(intern!(py, "__name__"))?.extract()?;
+        Ok(format!("{module}.{name}"))
+    };
+    if let Ok(udt) = obj.getattr(intern!(py, "__UDT__")) {
+        let class = udt.get_type();
+        let module_name: String = udt.call_method0(intern!(py, "module"))?.extract()?;
+        let name: String = class.getattr(intern!(py, "__name__"))?.extract()?;
+        let matches = python_class.is_none_or(|python_class| {
+            python_class == format!("{module_name}.{name}")
+                || name_of(class.as_any()).is_ok_and(|n| n == python_class)
+        });
+        if matches {
+            return Ok(udt);
+        }
+    }
+    let class = match (serialized_python_class, python_class) {
+        (Some(serialized), _) => {
+            let pickled = py
+                .import(intern!(py, "base64"))?
+                .call_method1(intern!(py, "b64decode"), (serialized,))?;
+            py.import(intern!(py, "pyspark.serializers"))?
+                .getattr(intern!(py, "CloudPickleSerializer"))?
+                .call0()?
+                .call_method1(intern!(py, "loads"), (pickled,))?
+        }
+        (None, Some(python_class)) => {
+            let (module, name) = python_class.rsplit_once('.').ok_or_else(|| {
+                PyValueError::new_err(format!("invalid UDT class {python_class}"))
+            })?;
+            py.import(module)?.getattr(name)?
+        }
+        (None, None) => {
+            return Err(PyValueError::new_err(
+                "a user-defined type without its Python class cannot serialize values",
+            ))
+        }
+    };
+    class.call0()
 }
 
 /// A value of a day-time interval column, as PyArrow converts one to `duration[us]`: a

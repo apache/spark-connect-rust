@@ -753,6 +753,31 @@ def test_apply_in_pandas_with_state_runs_as_pyspark(session, tmp_path):
         session.conf.unset("spark.sql.shuffle.partitions")
 
 
+def test_variant_spatial_and_user_defined_values_round_trip_as_pyspark(session):
+    # As PySpark's: createDataFrame sends a VariantVal, a Geometry, a Geography and a value of
+    # a user-defined type, and collects them as they are.
+    from pyspark.sql.types import Geography, Geometry
+    from pyspark.testing.objects import ExamplePoint
+
+    wkb = bytes.fromhex("0101000000000000000000F03F0000000000000040")
+    variant = session.sql("""SELECT parse_json('{"a": 1}') AS v""").first()[0]
+    df = session.createDataFrame([
+        (variant, Geometry.fromWKB(wkb, 4326), Geography.fromWKB(wkb, 4326), ExamplePoint(1.0, 2.0))
+    ])
+    assert df.schema.simpleString() == (
+        "struct<_1:variant,_2:geometry(4326),_3:geography(4326),_4:udt>"
+    )
+    row = df.first()
+    assert row[0].toJson() == '{"a":1}'
+    assert row[1] == Geometry.fromWKB(wkb, 4326) and row[2] == Geography.fromWKB(wkb, 4326)
+    assert row[3] == ExamplePoint(1.0, 2.0)
+    # A collected GEOMETRY is a Geometry.
+    geometry = session.sql(
+        "SELECT ST_GeomFromWKB(X'0101000000000000000000F03F0000000000000040') AS g"
+    ).first()[0]
+    assert geometry == Geometry.fromWKB(wkb, 0)
+
+
 def test_create_dataframe_types_pandas_columns_as_pyspark(session):
     from decimal import Decimal
 

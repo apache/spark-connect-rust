@@ -1565,6 +1565,78 @@ def test_udtf_analyze_result_family():
     assert issubclass(SkipRestOfInputTableException, Exception)
 
 
+def test_variant_spatial_and_user_defined_values_are_sent_as_pyspark(mock_connect):
+    # As PySpark's LocalDataToArrowConversion: a VariantVal is the struct of its value and
+    # metadata, a Geometry or a Geography that of its srid and WKB, whose metadata tags the
+    # struct as of its type, and a value of a user-defined type is serialized by the UDT and
+    # sent as its SQL type; a value of another type for these is malformed.
+    import pyarrow as pa
+    from pyspark.errors import PySparkValueError
+    from pyspark.testing.objects import ExamplePoint
+
+    spark, service = mock_connect
+    wkb = bytes.fromhex("0101000000000000000000F03F0000000000000040")
+    variant = T.VariantVal(b"\x0c\x01", b"\x01\x00\x00")
+
+    def local_relation(df):
+        df.toArrow()
+        request = parse_message(service.execute_requests[-1])
+        relation = parse_message(parse_message(request[3][0])[1][0])
+        while 18 in relation:  # Relation.to_df -> ToDF.input.
+            relation = parse_message(parse_message(relation[18][0])[1][0])
+        # Relation.local_relation=11 -> LocalRelation.data=1, schema=2.
+        local = parse_message(relation[11][0])
+        table = pa.ipc.open_stream(local[1][0]).read_all()
+        return table, [field["type"] for field in json.loads(local[2][0])["fields"]]
+
+    table, types = local_relation(spark.createDataFrame([
+        (variant, T.Geometry.fromWKB(wkb, 4326), T.Geography.fromWKB(wkb, 4326),
+         ExamplePoint(1.0, 2.0)),
+        (None, None, None, None),
+    ]))
+    assert types[:3] == [
+        T.VariantType().jsonValue(), T.GeometryType(4326).jsonValue(),
+        T.GeographyType(4326).jsonValue(),
+    ]
+    assert types[3]["type"] == "udt" and types[3]["sqlType"]["type"] == "array"
+    variant_type, geometry_type, geography_type, udt_type = table.schema.types
+    assert variant_type.field("metadata").metadata == {b"variant": b"true"}
+    assert geometry_type.field("wkb").metadata == {b"geometry": b"true", b"srid": b"4326"}
+    assert geography_type.field("wkb").metadata == {b"geography": b"true", b"srid": b"4326"}
+    assert geometry_type.field("srid").type == pa.int32()
+    assert pa.types.is_list(udt_type) and udt_type.value_type == pa.float64()
+    assert table.to_pylist() == [
+        {"_1": {"value": b"\x0c\x01", "metadata": b"\x01\x00\x00"},
+         "_2": {"srid": 4326, "wkb": wkb}, "_3": {"srid": 4326, "wkb": wkb}, "_4": [1.0, 2.0]},
+        {"_1": None, "_2": None, "_3": None, "_4": None},
+    ]
+    for ddl, condition in (("v variant", "MALFORMED_VARIANT"),
+                           ("g geometry(4326)", "MALFORMED_GEOMETRY"),
+                           ("g geography(4326)", "MALFORMED_GEOGRAPHY")):
+        with pytest.raises(PySparkValueError) as error:
+            spark.createDataFrame([("x",)], ddl)
+        assert error.value.getCondition() == condition
+    # The attributes of PySpark's spatial values.
+    geometry = T.Geometry.fromWKB(wkb, 4326)
+    assert (geometry.srid, geometry.wkb) == (4326, wkb)
+
+
+def test_collected_spatial_values_are_their_objects_as_pyspark():
+    # As PySpark's ArrowTableToRowsConversion, a collected GEOMETRY or GEOGRAPHY is the
+    # Geometry or Geography of its WKB and srid.
+    from pyspark.sql.types import _udt_field_converters
+
+    wkb = b"\x01\x01"
+    schema = T.StructType([
+        T.StructField("g", T.GeometryType(4326)),
+        T.StructField("gs", T.ArrayType(T.GeographyType(4326))),
+    ])
+    g, gs = _udt_field_converters(schema)
+    assert g(Row(srid=4326, wkb=wkb)) == T.Geometry.fromWKB(wkb, 4326)
+    assert gs([Row(srid=4326, wkb=wkb), None]) == [T.Geography.fromWKB(wkb, 4326), None]
+    assert g(None) is None
+
+
 def test_variant_and_geo_values():
     from pyspark.sql.types import VariantVal, Geometry, Geography
     v = VariantVal.parseJson('{"a": 1, "b": [2, 3]}')

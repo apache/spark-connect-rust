@@ -2793,7 +2793,7 @@ fn udt_field_converters(
     py: Python<'_>,
     schema: Option<&spark_connect::types::DataType>,
 ) -> PyResult<Option<FieldConverters>> {
-    let Some(schema) = schema.filter(|schema| crate::types::has_udt(schema)) else {
+    let Some(schema) = schema.filter(|schema| crate::types::has_converted_values(schema)) else {
         return Ok(None);
     };
     let schema = crate::types::data_type_to_py(py, schema)?;

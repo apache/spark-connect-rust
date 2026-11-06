@@ -2632,6 +2632,25 @@ pub(crate) fn has_udt(data_type: &DataType) -> bool {
     }
 }
 
+/// Whether the collected values of `data_type` need the converters of
+/// `pyspark.sql.types._udt_field_converters`: of a user-defined type, which deserializes them,
+/// or of a GEOMETRY or a GEOGRAPHY, which makes their Python objects.
+pub(crate) fn has_converted_values(data_type: &DataType) -> bool {
+    match data_type {
+        DataType::Udt { .. } | DataType::Geometry { .. } | DataType::Geography { .. } => true,
+        DataType::Array { element_type, .. } => has_converted_values(element_type),
+        DataType::Map {
+            key_type,
+            value_type,
+            ..
+        } => has_converted_values(key_type) || has_converted_values(value_type),
+        DataType::Struct { fields } => fields
+            .iter()
+            .any(|field| has_converted_values(&field.data_type)),
+        _ => false,
+    }
+}
+
 /// The `simpleString()` of `data_type` as PySpark's: of the Python class of each of its
 /// user-defined types, such as `vector` of a `VectorUDT`, which the Rust core does not know.
 pub(crate) fn simple_string_with_udts(py: Python<'_>, data_type: &DataType) -> PyResult<String> {
