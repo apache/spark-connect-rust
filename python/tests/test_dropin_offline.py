@@ -6066,6 +6066,22 @@ def test_pandas_conversion_and_its_imports_are_pyspark_modules():
     assert inspect.isgeneratorfunction(pyspark.util._load_from_socket.__wrapped__)
 
 
+def test_to_local_iterator_executes_with_its_first_row_as_pyspark(mock_connect):
+    # As PySpark's generator: the execution starts with the first row, which raises its
+    # error, and the iteration then ends.
+    from pyspark.errors import PySparkException
+
+    spark, service = mock_connect
+    service.execute_failure = "plan rejected"
+    rows = spark.range(3).toLocalIterator()
+    assert service.execute_calls == 0
+    with pytest.raises(PySparkException, match="plan rejected"):
+        next(rows)
+    assert service.execute_calls == 1
+    assert list(rows) == []
+    assert service.execute_calls == 1
+
+
 def test_execute_plan_error_carries_operation_id(mock_connect):
     from pyspark.errors import PySparkException
 
