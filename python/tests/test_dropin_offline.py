@@ -7734,6 +7734,65 @@ def test_writer_v2_setters_mutate_and_return_self(offline_spark):
     assert w.clusterBy("id") is w
 
 
+def test_dataframe_methods_raise_the_argument_errors_of_pyspark():
+    # As PySpark's DataFrame methods, which check their arguments on the client.
+    from pyspark.errors import PySparkTypeError, PySparkValueError
+
+    df = _offline_session().range(1)
+
+    def not_expected(arg_name, expected_type, arg_type):
+        return (PySparkTypeError, "NOT_EXPECTED_TYPE",
+                {"arg_name": arg_name, "expected_type": expected_type, "arg_type": arg_type})
+
+    def not_positive(value):
+        return (PySparkValueError, "VALUE_NOT_POSITIVE",
+                {"arg_name": "numPartitions", "arg_value": value})
+
+    allowed_hint_types = "str, float, int, Column, list[str], list[float], list[int]"
+    for call, (error_type, condition, parameters) in (
+        (lambda: df.select(1), not_expected("cols", "Column or str", "int")),
+        (lambda: df.select(["id", 1.5]), not_expected("cols", "Column or str", "float")),
+        (lambda: df.toDF(1), not_expected("cols", "list[str]", "int")),
+        (lambda: df.withColumn("a", 1), not_expected("col", "Column", "int")),
+        (lambda: df.withColumns([("a", 1)]), not_expected("colsMap", "dict", "list")),
+        (lambda: df.withColumnsRenamed([("id", "a")]), not_expected("colsMap", "dict", "list")),
+        (lambda: df.hint(1), not_expected("name", "str", "int")),
+        (lambda: df.hint("x", {"a": 1}),
+         (PySparkTypeError, "INVALID_ITEM_FOR_CONTAINER",
+          {"arg_name": "parameters", "allowed_types": allowed_hint_types, "item_type": "dict"})),
+        (lambda: df.hint("x", [None, 1]),
+         (PySparkTypeError, "INVALID_ITEM_FOR_CONTAINER",
+          {"arg_name": "parameters", "allowed_types": allowed_hint_types,
+           "item_type": "NoneType"})),
+        (lambda: df.hint("x", [1], [2, None]),
+         (PySparkTypeError, "INVALID_ITEM_FOR_CONTAINER",
+          {"arg_name": "parameters", "allowed_types": allowed_hint_types,
+           "item_type": "list[int]"})),
+        (lambda: df.dropDuplicates("id"), not_expected("subset", "list or tuple", "str")),
+        (lambda: df.drop_duplicates(["id", 1]), not_expected("subset", "str", "int")),
+        (lambda: df.dropDuplicatesWithinWatermark("id"),
+         not_expected("subset", "list or tuple", "str")),
+        (lambda: df.repartition(0), not_positive("0")),
+        (lambda: df.repartition(1.5), not_expected("numPartitions", "Column or str", "float")),
+        (lambda: df.repartition("id", 2), not_expected("cols", "Column or str", "int")),
+        (lambda: df.repartitionByRange(-1, "id"), not_positive("-1")),
+        (lambda: df.repartitionByRange(2), (PySparkValueError, "CANNOT_BE_EMPTY",
+                                            {"item": "cols"})),
+        (lambda: df.repartitionByRange(1.5, "id"),
+         not_expected("numPartitions", "Column, int or str", "float")),
+        (lambda: df.coalesce(0), not_positive("0")),
+        (lambda: df.repartitionById(True, "id"), not_expected("numPartitions", "int", "bool")),
+        (lambda: df.repartitionById(0, "id"), not_positive("0")),
+    ):
+        with pytest.raises(error_type) as error:
+            call()
+        assert error.value.getCondition() == condition
+        assert error.value.getMessageParameters() == parameters
+    for call in (lambda: df.withColumns(), lambda: df.withColumns({"a": 1})):
+        with pytest.raises(AssertionError):
+            call()
+
+
 def test_stream_writer_setters_mutate_and_return_self(offline_spark):
     w = offline_spark.readStream.format("rate").load().writeStream
     assert w.outputMode("append") is w

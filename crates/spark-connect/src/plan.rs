@@ -177,7 +177,8 @@ pub enum LogicalPlan {
     Hint {
         input: Arc<LogicalPlan>,
         name: String,
-        parameters: Vec<String>,
+        /// The parameters, literal expressions or columns, as PySpark's `lit` of them.
+        parameters: Vec<Expression>,
     },
     /// Unpivot: `df.unpivot(...)`.
     Unpivot {
@@ -1020,19 +1021,8 @@ impl LogicalPlan {
                 let mut hint = proto::Hint::default();
                 hint.input = Some(Box::new(relation_of(input, plan_ids)));
                 hint.name = name.clone();
-                // Hint parameters are literal Expressions (e.g. `REPARTITION 10`).
-                // An integer-looking parameter becomes an Integer (int32) literal -
-                // matching reference pyspark's `lit(int)` - otherwise a String literal.
-                // (A Long literal is rejected as a partitionNum by e.g. the REBALANCE
-                // hint, which expects an integral int.)
-                for p in parameters {
-                    let lit = if let Ok(n) = p.parse::<i32>() {
-                        crate::expression::LiteralExpression::int(n)
-                    } else {
-                        crate::expression::LiteralExpression::string(p.clone())
-                    };
-                    hint.parameters.push(lit.to_proto());
-                }
+                hint.parameters
+                    .extend(parameters.iter().map(|p| p.to_proto()));
                 relation.rel_type = Some(proto::relation::RelType::Hint(Box::new(hint)));
             }
 
@@ -1879,7 +1869,10 @@ pub fn to_schema(input: impl Into<Arc<LogicalPlan>>, schema: DataType) -> Logica
     }
 }
 
-/// Create a Hint plan.
+/// Create a Hint plan, of parameters given as strings: an integer-looking parameter is an
+/// Integer (int32) literal, matching PySpark's `lit(int)`, otherwise a String literal. (A
+/// Long literal is rejected as a partitionNum by e.g. the REBALANCE hint, which expects an
+/// integral int.)
 pub fn hint(
     input: impl Into<Arc<LogicalPlan>>,
     name: impl Into<String>,
@@ -1888,8 +1881,17 @@ pub fn hint(
     LogicalPlan::Hint {
         input: input.into(),
         name: name.into(),
-        parameters,
+        parameters: parameters.iter().map(|p| hint_parameter(p)).collect(),
     }
+}
+
+/// The literal of a hint parameter given as a string: an Integer for an integer-looking one,
+/// otherwise the String.
+pub(crate) fn hint_parameter(parameter: &str) -> Expression {
+    Expression::literal(match parameter.parse::<i32>() {
+        Ok(n) => LiteralExpression::int(n),
+        Err(_) => LiteralExpression::string(parameter),
+    })
 }
 
 /// Create an Unpivot plan.
@@ -2106,11 +2108,11 @@ mod argfix_tests {
 
     #[test]
     fn hint_carries_parameters() {
-        let p = LogicalPlan::Hint {
-            input: Arc::new(base()),
-            name: "REPARTITION".to_string(),
-            parameters: vec!["10".to_string(), "name".to_string()],
-        };
+        let p = hint(
+            base(),
+            "REPARTITION",
+            vec!["10".to_string(), "name".to_string()],
+        );
         match rel_type(p) {
             proto::relation::RelType::Hint(h) => {
                 assert_eq!(h.parameters.len(), 2, "parameters must be forwarded");

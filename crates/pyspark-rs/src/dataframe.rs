@@ -161,6 +161,65 @@ impl PyDataFrame {
     }
 }
 
+/// PySpark's `NOT_EXPECTED_TYPE` error of the argument `name`, `value`, which should be of
+/// the type `expected`.
+fn not_expected_type(value: &Bound<'_, PyAny>, name: &str, expected: &str) -> PyErr {
+    let type_name = value
+        .get_type()
+        .name()
+        .map(|name| name.to_string())
+        .unwrap_or_default();
+    crate::column::raise_pyspark(
+        value.py(),
+        "PySparkTypeError",
+        "NOT_EXPECTED_TYPE",
+        &[
+            ("expected_type", expected),
+            ("arg_name", name),
+            ("arg_type", &type_name),
+        ],
+    )
+}
+
+/// PySpark's `VALUE_NOT_POSITIVE` error of `numPartitions`, unless it is positive.
+fn positive_partitions(py: Python<'_>, num_partitions: i64) -> PyResult<i32> {
+    if num_partitions > 0 {
+        return Ok(i32::try_from(num_partitions)?);
+    }
+    Err(crate::column::raise_pyspark(
+        py,
+        "PySparkValueError",
+        "VALUE_NOT_POSITIVE",
+        &[
+            ("arg_name", "numPartitions"),
+            ("arg_value", &num_partitions.to_string()),
+        ],
+    ))
+}
+
+/// The `subset` of `dropDuplicates` and `dropDuplicatesWithinWatermark`, as PySpark's: None,
+/// or a list or tuple of column names.
+fn deduplicate_subset(subset: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Vec<String>>> {
+    let Some(subset) = subset else {
+        return Ok(None);
+    };
+    if !(subset.is_instance_of::<PyList>() || subset.is_instance_of::<PyTuple>()) {
+        return Err(not_expected_type(subset, "subset", "list or tuple"));
+    }
+    subset
+        .try_iter()?
+        .map(|column| {
+            let column = column?;
+            if column.is_instance_of::<pyo3::types::PyString>() {
+                column.extract()
+            } else {
+                Err(not_expected_type(&column, "subset", "str"))
+            }
+        })
+        .collect::<PyResult<Vec<String>>>()
+        .map(Some)
+}
+
 /// Helper to convert arguments to a vector of Columns.
 pub(crate) fn to_column_list(
     mut _args: Vec<Bound<'_, PyAny>>,
@@ -185,9 +244,8 @@ pub(crate) fn to_column_list(
             if let Ok(name) = arg.extract::<String>() {
                 cols.push(spark_connect::functions::col(&name));
             } else {
-                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                    "Expected Column or column name (str)",
-                ));
+                // As PySpark's `_to_cols`.
+                return Err(not_expected_type(&arg, "cols", "Column or str"));
             }
         }
     }
@@ -298,9 +356,14 @@ impl PyDataFrame {
         ))
     }
 
-    /// Add or replace a column.
-    fn withColumn(&self, colName: &str, col: &PyColumn) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.with_column(colName, col.column.clone()))
+    /// Add or replace a column, of a Column, as PySpark's `DataFrame.withColumn`.
+    fn withColumn(&self, colName: &str, col: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let Ok(column) = col.extract::<PyRef<'_, PyColumn>>() else {
+            return Err(not_expected_type(col, "col", "Column"));
+        };
+        Ok(PyDataFrame::new(
+            self.dataframe.with_column(colName, column.column.clone()),
+        ))
     }
 
     /// Rename a column.
@@ -308,16 +371,22 @@ impl PyDataFrame {
         PyDataFrame::new(self.dataframe.with_column_renamed(existing, new))
     }
 
-    /// Add or replace multiple columns from a {name: Column} mapping.
+    /// Add or replace multiple columns from a {name: Column} mapping, as PySpark's
+    /// `DataFrame.withColumns`, which asserts that it is given one, of Columns.
     #[pyo3(name = "withColumns", signature = (*colsMap))]
-    fn with_columns(&self, colsMap: Vec<Bound<'_, PyDict>>) -> PyResult<PyDataFrame> {
-        let mut pairs = Vec::new();
-        for d in &colsMap {
-            for (k, v) in d.iter() {
-                let name: String = k.extract()?;
-                let pycol = v.extract::<PyRef<PyColumn>>()?;
-                pairs.push((name, pycol.column.clone()));
-            }
+    fn with_columns(&self, colsMap: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        let [cols_map] = colsMap.as_slice() else {
+            return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+        };
+        let Ok(cols_map) = cols_map.cast::<PyDict>() else {
+            return Err(not_expected_type(cols_map, "colsMap", "dict"));
+        };
+        let mut pairs = Vec::with_capacity(cols_map.len());
+        for (name, column) in cols_map.iter() {
+            let Ok(column) = column.extract::<PyRef<'_, PyColumn>>() else {
+                return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+            };
+            pairs.push((name.extract::<String>()?, column.column.clone()));
         }
         Ok(PyDataFrame::new(self.dataframe.with_columns(pairs)))
     }
@@ -327,12 +396,68 @@ impl PyDataFrame {
     /// accept any value and stringify it; the core parses a numeric string back into a
     /// long literal, matching reference semantics.
     #[pyo3(signature = (name, *parameters))]
-    fn hint(&self, name: &str, parameters: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
-        let params: Vec<String> = parameters
-            .iter()
-            .map(|p| Ok(p.str()?.to_string()))
-            .collect::<PyResult<_>>()?;
-        Ok(PyDataFrame::new(self.dataframe.hint(name, params)))
+    fn hint(
+        &self,
+        py: Python<'_>,
+        name: &Bound<'_, PyAny>,
+        parameters: Vec<Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        use pyo3::types::{PyFloat, PyString};
+        // As PySpark's: a single list is the parameters, each a str, a float, an int, a
+        // Column or a list of str, float or int, sent as `lit` of it.
+        let parameters = match parameters.as_slice() {
+            [only] if only.is_instance_of::<PyList>() => {
+                only.try_iter()?.collect::<PyResult<Vec<_>>>()?
+            }
+            _ => parameters,
+        };
+        if !name.is_instance_of::<PyString>() {
+            return Err(not_expected_type(name, "name", "str"));
+        }
+        let primitive = |p: &Bound<'_, PyAny>| {
+            p.is_instance_of::<PyString>()
+                || p.is_instance_of::<PyFloat>()
+                || p.is_instance_of::<PyInt>()
+        };
+        let invalid = |item_type: &str| {
+            crate::column::raise_pyspark(
+                py,
+                "PySparkTypeError",
+                "INVALID_ITEM_FOR_CONTAINER",
+                &[
+                    ("arg_name", "parameters"),
+                    (
+                        "allowed_types",
+                        "str, float, int, Column, list[str], list[float], list[int]",
+                    ),
+                    ("item_type", item_type),
+                ],
+            )
+        };
+        let type_name =
+            |p: &Bound<'_, PyAny>| -> PyResult<String> { Ok(p.get_type().name()?.to_string()) };
+        let mut expressions = Vec::with_capacity(parameters.len());
+        for p in &parameters {
+            if p.is_instance_of::<PyList>() {
+                let items: Vec<Bound<'_, PyAny>> = p.try_iter()?.collect::<PyResult<_>>()?;
+                if !items.iter().all(primitive) {
+                    // As PySpark's, which names the type of the first item.
+                    let first = items
+                        .first()
+                        .map(type_name)
+                        .transpose()?
+                        .unwrap_or_default();
+                    return Err(invalid(&format!("list[{first}]")));
+                }
+            } else if !(primitive(p) || p.extract::<PyRef<'_, PyColumn>>().is_ok()) {
+                return Err(invalid(&type_name(p)?));
+            }
+            expressions.push(crate::functions::to_column(p)?.expression().clone());
+        }
+        let name: String = name.extract()?;
+        Ok(PyDataFrame::new(
+            self.dataframe.hint_expressions(&name, expressions),
+        ))
     }
 
     /// Drop columns.
@@ -359,11 +484,12 @@ impl PyDataFrame {
 
     /// Remove duplicate rows, optionally on specific columns.
     #[pyo3(signature = (subset=None))]
-    fn dropDuplicates(&self, _py: Python<'_>, subset: Option<Vec<String>>) -> PyDataFrame {
+    fn dropDuplicates(&self, subset: Option<&Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        let subset = deduplicate_subset(subset)?;
         let col_refs: Option<Vec<&str>> = subset
             .as_ref()
             .map(|names| names.iter().map(|s| s.as_str()).collect());
-        PyDataFrame::new(self.dataframe.drop_duplicates(col_refs))
+        Ok(PyDataFrame::new(self.dataframe.drop_duplicates(col_refs)))
     }
 
     /// Sort rows. `ascending` (a bool or list of bools, via kwargs) mirrors reference
@@ -482,13 +608,45 @@ impl PyDataFrame {
     #[allow(non_snake_case)]
     fn repartitionByRange(
         &self,
-        numPartitions: i32,
+        py: Python<'_>,
+        numPartitions: Bound<'_, PyAny>,
         cols: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let columns = to_column_list(cols)?;
-        let exprs: Vec<_> = columns.iter().map(|c| c.expression().clone()).collect();
+        // As PySpark's: a positive partition count and columns, or columns alone, each sorted
+        // ascending unless it is a sort order.
+        let (num_partitions, cols) = if numPartitions.is_instance_of::<PyInt>() {
+            let n = positive_partitions(py, numPartitions.extract()?)?;
+            if cols.is_empty() {
+                return Err(crate::column::raise_pyspark(
+                    py,
+                    "PySparkValueError",
+                    "CANNOT_BE_EMPTY",
+                    &[("item", "cols")],
+                ));
+            }
+            (n, cols)
+        } else if numPartitions.is_instance_of::<pyo3::types::PyString>()
+            || numPartitions.extract::<PyRef<'_, PyColumn>>().is_ok()
+        {
+            let mut all = vec![numPartitions];
+            all.extend(cols);
+            (0, all)
+        } else {
+            return Err(not_expected_type(
+                &numPartitions,
+                "numPartitions",
+                "Column, int or str",
+            ));
+        };
+        let exprs: Vec<_> = to_column_list(cols)?
+            .into_iter()
+            .map(|c| match c.expression().node() {
+                spark_connect::expression::ExpressionNode::SortOrder(_) => c.expression().clone(),
+                _ => c.asc().expression().clone(),
+            })
+            .collect();
         Ok(PyDataFrame::new(
-            self.dataframe.repartition_by_range(numPartitions, exprs),
+            self.dataframe.repartition_by_range(num_partitions, exprs),
         ))
     }
 
@@ -498,14 +656,17 @@ impl PyDataFrame {
     #[allow(non_snake_case)]
     fn repartitionById(
         &self,
-        numPartitions: i32,
+        py: Python<'_>,
+        numPartitions: &Bound<'_, PyAny>,
         partitionIdCol: &Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
-        if numPartitions <= 0 {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "numPartitions must be positive, got {numPartitions}"
-            )));
+        // As PySpark's: an int that is not a bool, and positive.
+        if !numPartitions.is_instance_of::<PyInt>()
+            || numPartitions.is_instance_of::<pyo3::types::PyBool>()
+        {
+            return Err(not_expected_type(numPartitions, "numPartitions", "int"));
         }
+        let numPartitions = positive_partitions(py, numPartitions.extract()?)?;
         // A `ColumnOrName`, as in pyspark: a string is a column name, not a literal.
         let col = if let Ok(c) = partitionIdCol.extract::<Bound<'_, PyColumn>>() {
             c.borrow().column.clone()
@@ -578,9 +739,10 @@ impl PyDataFrame {
         numPartitions: Bound<'_, PyAny>,
         cols: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        // First arg is an int -> a partition count; otherwise it's a partition column
-        // (str/Column) and the count defaults to the server's (passed as 0 = unset).
-        if let Ok(n) = numPartitions.extract::<i32>() {
+        // As PySpark's: a positive partition count, or a partition column (str/Column), at
+        // the server's count (passed as 0 = unset).
+        if numPartitions.is_instance_of::<PyInt>() {
+            let n = positive_partitions(py, numPartitions.extract()?)?;
             if cols.is_empty() {
                 return Ok(PyDataFrame::new(self.dataframe.repartition(n)));
             }
@@ -588,34 +750,49 @@ impl PyDataFrame {
                 .iter()
                 .map(|c| c.expression().clone())
                 .collect();
-            Ok(PyDataFrame::new(
+            return Ok(PyDataFrame::new(
                 self.dataframe.repartition_by_expressions(n, exprs),
-            ))
-        } else {
-            // Column-first form: the first arg is itself a partition column.
-            let mut all = vec![numPartitions];
-            all.extend(cols);
-            let _ = py;
-            let exprs: Vec<_> = to_column_list(all)?
-                .iter()
-                .map(|c| c.expression().clone())
-                .collect();
-            Ok(PyDataFrame::new(
-                self.dataframe.repartition_by_expressions(0, exprs),
-            ))
+            ));
         }
+        if !(numPartitions.is_instance_of::<pyo3::types::PyString>()
+            || numPartitions.extract::<PyRef<'_, PyColumn>>().is_ok())
+        {
+            return Err(not_expected_type(
+                &numPartitions,
+                "numPartitions",
+                "Column or str",
+            ));
+        }
+        let mut all = vec![numPartitions];
+        all.extend(cols);
+        let exprs: Vec<_> = to_column_list(all)?
+            .iter()
+            .map(|c| c.expression().clone())
+            .collect();
+        Ok(PyDataFrame::new(
+            self.dataframe.repartition_by_expressions(0, exprs),
+        ))
     }
 
     /// Coalesce.
-    fn coalesce(&self, numPartitions: i32) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.coalesce(numPartitions))
+    fn coalesce(&self, py: Python<'_>, numPartitions: i64) -> PyResult<PyDataFrame> {
+        let num_partitions = positive_partitions(py, numPartitions)?;
+        Ok(PyDataFrame::new(self.dataframe.coalesce(num_partitions)))
     }
 
     /// Convert to DataFrame with new column names.
     #[pyo3(signature = (*cols))]
-    fn toDF(&self, _py: Python<'_>, cols: Vec<String>) -> PyDataFrame {
-        let name_refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
-        PyDataFrame::new(self.dataframe.to_df(name_refs))
+    fn toDF(&self, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        // As PySpark's, of strings.
+        let mut names = Vec::with_capacity(cols.len());
+        for col in &cols {
+            if !col.is_instance_of::<pyo3::types::PyString>() {
+                return Err(not_expected_type(col, "cols", "list[str]"));
+            }
+            names.push(col.extract::<String>()?);
+        }
+        let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        Ok(PyDataFrame::new(self.dataframe.to_df(name_refs)))
     }
 
     /// Alias this DataFrame.
@@ -668,11 +845,17 @@ impl PyDataFrame {
 
     /// Drop duplicates within the event-time watermark.
     #[pyo3(name = "dropDuplicatesWithinWatermark", signature = (subset=None))]
-    fn drop_duplicates_within_watermark(&self, subset: Option<Vec<String>>) -> PyDataFrame {
+    fn drop_duplicates_within_watermark(
+        &self,
+        subset: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let subset = deduplicate_subset(subset)?;
         let refs: Option<Vec<&str>> = subset
             .as_ref()
             .map(|names| names.iter().map(|s| s.as_str()).collect());
-        PyDataFrame::new(self.dataframe.drop_duplicates_within_watermark(refs))
+        Ok(PyDataFrame::new(
+            self.dataframe.drop_duplicates_within_watermark(refs),
+        ))
     }
 
     /// `toJSON()` returns an RDD in classic PySpark; Spark Connect has no RDD, so
@@ -720,14 +903,18 @@ impl PyDataFrame {
 
     /// Rename multiple columns from an {old: new} mapping.
     #[pyo3(name = "withColumnsRenamed")]
-    fn with_columns_renamed(
-        &self,
-        colsMap: std::collections::HashMap<String, String>,
-    ) -> PyDataFrame {
-        PyDataFrame::new(
-            self.dataframe
-                .with_columns_renamed(colsMap.into_iter().collect()),
-        )
+    fn with_columns_renamed(&self, colsMap: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        // As PySpark's, of a dict, whose renames it sends in order.
+        let Ok(cols_map) = colsMap.cast::<PyDict>() else {
+            return Err(not_expected_type(colsMap, "colsMap", "dict"));
+        };
+        let mut renames = Vec::with_capacity(cols_map.len());
+        for (existing, new) in cols_map.iter() {
+            renames.push((existing.extract::<String>()?, new.extract::<String>()?));
+        }
+        Ok(PyDataFrame::new(
+            self.dataframe.with_columns_renamed(renames),
+        ))
     }
 
     /// The columns of this DataFrame whose names match a regex, as a Column. Mirrors
@@ -1111,11 +1298,8 @@ impl PyDataFrame {
 
     /// Deprecated alias for dropDuplicates.
     #[pyo3(name = "drop_duplicates", signature = (subset=None))]
-    fn drop_duplicates(&self, subset: Option<Vec<String>>) -> PyDataFrame {
-        let refs: Option<Vec<&str>> = subset
-            .as_ref()
-            .map(|s| s.iter().map(|x| x.as_str()).collect());
-        PyDataFrame::new(self.dataframe.drop_duplicates(refs))
+    fn drop_duplicates(&self, subset: Option<&Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        self.dropDuplicates(subset)
     }
 
     /// Alias for groupBy.

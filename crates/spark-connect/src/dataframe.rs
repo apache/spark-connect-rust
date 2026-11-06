@@ -631,10 +631,20 @@ impl DataFrame {
         name: &str,
         parameters: impl IntoIterator<Item = S>,
     ) -> DataFrame {
+        let parameters = parameters
+            .into_iter()
+            .map(|p| crate::plan::hint_parameter(&p.into()))
+            .collect();
+        self.hint_expressions(name, parameters)
+    }
+
+    /// Specify a hint of parameters given as expressions, mirroring `pyspark.sql.DataFrame.hint`,
+    /// which sends `lit` of each parameter: a literal, or a Column.
+    pub fn hint_expressions(&self, name: &str, parameters: Vec<Expression>) -> DataFrame {
         let plan = LogicalPlan::Hint {
             input: Arc::clone(&self.plan),
             name: name.to_string(),
-            parameters: parameters.into_iter().map(Into::into).collect(),
+            parameters,
         };
         self.with_cached_schema(plan)
     }
