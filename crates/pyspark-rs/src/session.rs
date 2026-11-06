@@ -1146,9 +1146,10 @@ impl PySparkSession {
         self.session.clear_tags()
     }
 
-    // Mirrors reference `SparkSession.addArtifacts(*path, pyfile=False, archive=False,
-    // file=False)`. The pyfile/archive/file flags are accepted for signature parity;
-    // artifact classification is handled by the Rust transport / server.
+    /// Add local files, or `file:` URIs, as artifacts of the session, as PySpark's
+    /// `addArtifacts(*path, pyfile=False, archive=False, file=False)`: each path is named by
+    /// the flags and its extension, and the errors for a path that is not supported are
+    /// PySpark's (see `spark_connect_core::artifact::parse_artifact`).
     #[pyo3(name = "addArtifacts", signature = (*path, pyfile=false, archive=false, file=false))]
     fn add_artifacts(
         &self,
@@ -1158,11 +1159,53 @@ impl PySparkSession {
         archive: bool,
         file: bool,
     ) -> PyResult<()> {
-        let _ = (pyfile, archive, file);
+        use spark_connect_core::artifact::{parse_artifact, UnsupportedArtifact};
+
+        if [pyfile, archive, file].iter().filter(|flag| **flag).count() > 1 {
+            return Err(crate::column::raise_pyspark(
+                py,
+                "PySparkValueError",
+                "INVALID_MULTIPLE_ARGUMENT_CONDITIONS",
+                &[
+                    ("arg_names", "'pyfile', 'archive' and/or 'file'"),
+                    ("condition", "True together"),
+                ],
+            ));
+        }
+        for p in &path {
+            if let Err(unsupported) = parse_artifact(p, pyfile, archive, file) {
+                return Err(match unsupported {
+                    UnsupportedArtifact::Format(local) => crate::column::raise_pyspark(
+                        py,
+                        "PySparkRuntimeError",
+                        "UNSUPPORTED_OPERATION",
+                        &[("operation", &format!("{local} file format"))],
+                    ),
+                    UnsupportedArtifact::Scheme(scheme) => crate::column::raise_pyspark(
+                        py,
+                        "PySparkRuntimeError",
+                        "UNSUPPORTED_OPERATION",
+                        &[("operation", &format!("{scheme} scheme"))],
+                    ),
+                    UnsupportedArtifact::HashInArchivePath => crate::column::raise_pyspark(
+                        py,
+                        "PySparkValueError",
+                        "VALUE_ALLOWED",
+                        &[("arg_name", "artifact path"), ("disallowed_value", "#")],
+                    ),
+                });
+            }
+        }
         let refs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
-        py.detach(|| self.session.add_artifacts(&refs)).to_pyerr()
+        py.detach(|| {
+            self.session
+                .add_artifacts_with(&refs, pyfile, archive, file)
+                .map_err(Box::new)
+        })
+        .to_pyerr()
     }
 
+    /// `addArtifact` is `addArtifacts`, as in PySpark.
     #[pyo3(name = "addArtifact", signature = (*path, pyfile=false, archive=false, file=false))]
     fn add_artifact(
         &self,
@@ -1172,11 +1215,7 @@ impl PySparkSession {
         archive: bool,
         file: bool,
     ) -> PyResult<()> {
-        // pyfile/archive/file are accepted for PySpark signature parity; artifact
-        // classification is handled by the Rust transport / server.
-        let _ = (pyfile, archive, file);
-        let refs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
-        py.detach(|| self.session.add_artifacts(&refs)).to_pyerr()
+        self.add_artifacts(py, path, pyfile, archive, file)
     }
 
     #[pyo3(name = "newSession")]

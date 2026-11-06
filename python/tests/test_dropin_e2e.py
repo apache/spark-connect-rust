@@ -241,6 +241,38 @@ def test_create_dataframe_from_arrow_table(session, schema, expected):
     assert _rows(df) == ARROW_TABLE_ROWS
 
 
+def test_add_artifacts_reach_udfs_as_pyspark(session, tmp_path):
+    import uuid
+    import zipfile
+
+    tag = uuid.uuid4().hex[:8]
+    module, note, bundle = f"mod_{tag}", f"note_{tag}.txt", f"bundle_{tag}.zip"
+    (tmp_path / f"{module}.py").write_text("def f():\n    return 'from the module'\n")
+    (tmp_path / note).write_text("file content")
+    with zipfile.ZipFile(tmp_path / bundle, "w") as archive:
+        archive.writestr("inner.txt", "inside")
+    session.addArtifacts(str(tmp_path / f"{module}.py"), pyfile=True)
+    session.addArtifacts(str(tmp_path / note), file=True)
+    session.addArtifacts(str(tmp_path / bundle) + f"#alias_{tag}", archive=True)
+
+    @F.udf("string")
+    def read(_):
+        import importlib
+        import os
+
+        imported = importlib.import_module(module)
+        # The directory of the session's files, which holds the module. Not SparkFiles: a
+        # worker started with SPARK_SKIP_CONNECT_COMPAT_TESTS, as in CI, does not set it up.
+        root = os.path.dirname(imported.__file__)
+        return "|".join([
+            imported.f(),
+            open(os.path.join(root, note)).read(),
+            open(os.path.join(root, f"alias_{tag}", "inner.txt")).read(),
+        ])
+
+    assert session.range(1).select(read("id")).first()[0] == "from the module|file content|inside"
+
+
 def test_create_dataframe_from_empty_arrow_table(session):
     empty = pa.table({"a": pa.array([], pa.int64()), "b": pa.array([], pa.string())})
     df = session.createDataFrame(empty, "a long, b string")

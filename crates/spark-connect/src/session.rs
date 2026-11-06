@@ -569,18 +569,43 @@ impl SparkSession {
         block_on(self.client.interrupt_operation(operation_id))
     }
 
-    /// Add local files as artifacts to the session (e.g. `.py`, `.jar`, `.zip`).
-    ///
-    /// Mirrors `pyspark.sql.SparkSession.addArtifacts(*path)`.
+    /// Add local files, or `file:` URIs, as artifacts of the session, mirroring
+    /// `pyspark.sql.SparkSession.addArtifacts(*path)`: a `.jar` is added to the classpath and
+    /// a `.class` to the classes; any other file is not supported without a flag of
+    /// [`add_artifacts_with`](Self::add_artifacts_with).
     pub fn add_artifacts(&self, paths: &[&str]) -> Result<()> {
-        block_on(self.client.add_artifacts(paths, false, false, true))
+        self.add_artifacts_with(paths, false, false, false)
+    }
+
+    /// Add local files as artifacts of the session, mirroring
+    /// `pyspark.sql.SparkSession.addArtifacts(*path, pyfile, archive, file)`:
+    /// - `pyfile`: a `.py`, `.egg`, `.zip` or `.jar` is importable by Python UDFs;
+    /// - `archive`: a `.zip`, `.jar`, `.tar.gz`, `.tgz` or `.tar` is extracted, into the
+    ///   directory that a `#<name>` fragment of its path names;
+    /// - `file`: any file is added to the files of the session.
+    ///
+    /// At most one of the flags may be true.
+    pub fn add_artifacts_with(
+        &self,
+        paths: &[&str],
+        pyfile: bool,
+        archive: bool,
+        file: bool,
+    ) -> Result<()> {
+        if [pyfile, archive, file].iter().filter(|flag| **flag).count() > 1 {
+            return Err(SparkError::connect_msg(
+                "[INVALID_MULTIPLE_ARGUMENT_CONDITIONS] ['pyfile', 'archive' and/or 'file'] \
+                 cannot be True together.",
+            ));
+        }
+        block_on(self.client.add_artifacts(paths, pyfile, archive, file))
     }
 
     /// Add a single local file as an artifact to the session.
     ///
     /// Mirrors `pyspark.sql.SparkSession.addArtifact(path)`.
     pub fn add_artifact(&self, path: &str) -> Result<()> {
-        block_on(self.client.add_artifacts(&[path], false, false, true))
+        self.add_artifacts(&[path])
     }
 
     /// Copy a local file to the driver's filesystem at `dest_path`.

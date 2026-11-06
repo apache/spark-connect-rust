@@ -812,54 +812,17 @@ impl SparkConnectClient {
     pub async fn add_artifacts(
         &self,
         paths: &[&str],
-        _pyfile: bool,
-        _archive: bool,
-        _file: bool,
+        pyfile: bool,
+        archive: bool,
+        file: bool,
     ) -> Result<()> {
-        // Build list of named artifacts from file paths
+        // Each path is named as PySpark's ArtifactManager names it, by the flags and its file
+        // extension (see `parse_artifact`).
         let mut artifacts = Vec::new();
         for path in paths {
-            // Extract just the filename as the artifact name
-            let path_obj = std::path::Path::new(path);
-            let file_name = path_obj
-                .file_name()
-                .and_then(|n| n.to_str())
-                .ok_or_else(|| {
-                    SparkError::connect_msg(format!("Invalid artifact path: {}", path))
-                })?;
-
-            // Determine artifact prefix based on file extension
-            let artifact_name = if _pyfile
-                && (file_name.ends_with(".py")
-                    || file_name.ends_with(".zip")
-                    || file_name.ends_with(".egg")
-                    || file_name.ends_with(".jar"))
-            {
-                format!("pyfiles/{}", file_name)
-            } else if _archive
-                && (file_name.ends_with(".zip")
-                    || file_name.ends_with(".jar")
-                    || file_name.ends_with(".tar.gz")
-                    || file_name.ends_with(".tgz")
-                    || file_name.ends_with(".tar"))
-            {
-                format!("archives/{}", file_name)
-            } else if _file {
-                format!("files/{}", file_name)
-            } else if file_name.ends_with(".jar") {
-                format!("jars/{}", file_name)
-            } else {
-                return Err(SparkError::connect_msg(format!(
-                    "Unsupported artifact type: {}",
-                    path
-                )));
-            };
-
-            // Create artifact from file
-            artifacts.push(NamedArtifact::new(
-                artifact_name,
-                Box::new(FileArtifact::new(path)),
-            ));
+            let (name, local) = crate::artifact::parse_artifact(path, pyfile, archive, file)
+                .map_err(|e| SparkError::connect_msg(e.to_string()))?;
+            artifacts.push(NamedArtifact::new(name, Box::new(FileArtifact::new(local))));
         }
 
         if artifacts.is_empty() {
