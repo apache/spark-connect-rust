@@ -72,8 +72,11 @@ fn pyfunc_make_udf(
 /// - name/return_type/eval_type/command_bytes/python_ver: as for `make_udf`
 ///   (eval_type ∈ {300 SQL_TABLE_UDF, 301 SQL_ARROW_TABLE_UDF, 302 SQL_ARROW_UDTF})
 /// - *args: Column arguments
+/// - deterministic: whether the UDTF is deterministic, which a PySpark UDTF is not unless
+///   `asDeterministic()` makes it so
 #[pyfunction]
-#[pyo3(signature = (session, name, return_type, eval_type, command_bytes, python_ver, *args))]
+#[pyo3(signature = (session, name, return_type, eval_type, command_bytes, python_ver, *args, deterministic=false))]
+#[allow(clippy::too_many_arguments)]
 fn pyfunc_make_udtf(
     session: PyRef<'_, PySparkSession>,
     name: String,
@@ -82,6 +85,7 @@ fn pyfunc_make_udtf(
     command_bytes: Vec<u8>,
     python_ver: String,
     args: Vec<Bound<'_, PyAny>>,
+    deterministic: bool,
 ) -> PyResult<PyDataFrame> {
     let mut col_args = Vec::new();
     for arg in args {
@@ -107,7 +111,7 @@ fn pyfunc_make_udtf(
         eval_type,
         command_bytes,
         python_ver,
-        true, // deterministic by default
+        deterministic,
     );
     Ok(PyDataFrame::new(df))
 }
