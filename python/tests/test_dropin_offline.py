@@ -5850,6 +5850,8 @@ def config(raw, context):
         'spark.sql.session.localRelationChunkSizeRows': '10000',
         'spark.sql.session.localRelationChunkSizeBytes': str(16 << 20),
         'spark.sql.session.localRelationBatchOfChunksSizeBytes': str(64 << 20),
+        # As the default of a server.
+        'spark.sql.execution.pandas.convertToArrowArraySafely': 'true',
     }
     operation = request.operation
     if operation.HasField('get'):
@@ -6006,15 +6008,22 @@ def test_decimal_scientific_local_input_overflow(decimal_ipc_session, text):
     ("1.5E-7", 18, 7, "0.0000002"),
     ("-1.5E-7", 18, 7, "-0.0000002"),
     ("1E-8", 18, 7, "0.0000000"),
+    ("0.00000015", 18, 7, "0.0000002"),
+    ("1.235", 10, 2, "1.24"),
     ("1E+2", 2, 0, None),
     ("-1E+2", 2, 0, None),
-    ("1E+3", 10, -2, None),
+    ("100000000000", 18, 7, None),
+    ("1E+1000000000", 38, 0, None),
 ])
-def test_decimal_scientific_rescaling_follows_source_path(
+def test_decimal_rescaling_follows_pyspark(
     decimal_ipc_session, kind, text, precision, scale, local_expected
 ):
+    # As PySpark 4.3.0: local rows are quantized half-even to the scale, and fail beyond
+    # the precision, in the Decimal conversion; a pandas column fails its Arrow conversion
+    # for any value that does not fit exactly, in either notation, rather than losing digits.
     from decimal import Decimal
     import pyarrow as pa
+    from pyspark.errors import PySparkValueError
 
     spark, payload = decimal_ipc_session
     data = [(Decimal(text),)]
@@ -6023,8 +6032,6 @@ def test_decimal_scientific_rescaling_follows_source_path(
         data = pd.DataFrame({"v": [Decimal(text)]}, dtype=object)
     schema = T.StructType([T.StructField("v", T.DecimalType(precision, scale))])
     if kind == "tuples" and local_expected is not None:
-        # Current local conversion quantizes half-even before the core parser.
-        # This parser-only change must preserve that upstream behavior.
         spark.createDataFrame(data, schema).collect()
         actual = pa.ipc.open_stream(payload.read_bytes()).read_all()
         expected = pa.table({"v": pa.array([Decimal(local_expected)],
@@ -6033,10 +6040,18 @@ def test_decimal_scientific_rescaling_follows_source_path(
         assert actual.schema == expected.schema
         assert actual.equals(expected)
         return
-    # Pandas retains generic conversion and this parser's exact-rescaling guard.
-    # Local precision/negative-scale failures originate in Decimal conversion.
-    with pytest.raises(ArithmeticError if kind == "tuples" else RuntimeError):
-        spark.createDataFrame(data, schema)
+    if kind == "tuples":
+        with pytest.raises(ArithmeticError):
+            spark.createDataFrame(data, schema)
+    else:
+        with pytest.raises(PySparkValueError) as error:
+            spark.createDataFrame(data, schema)
+        assert str(error.value) == (
+            "Exception thrown when converting pandas.Series (object) with name 'v' to Arrow "
+            f"Array (decimal128({precision}, {scale})). It can be caused by overflows or other "
+            "unsafe conversions warned by Arrow. Arrow safe type check can be disabled by using "
+            "SQL config `spark.sql.execution.pandas.convertToArrowArraySafely`."
+        )
     assert not payload.exists()
 
 

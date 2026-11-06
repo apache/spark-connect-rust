@@ -1,7 +1,7 @@
 //! PyO3 wrapper for Spark Connect sessions.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyString};
+use pyo3::types::{PyDict, PyList};
 use spark_connect::row::{Row, StructValue, Value};
 use spark_connect::session::SparkSession;
 use spark_connect::types::{DataType, StructField};
@@ -666,6 +666,47 @@ impl PySparkSession {
                 fields
             }
         };
+        // As PySpark's Arrow conversion of a pandas column: a Decimal that does not fit the
+        // precision and scale of its field exactly fails, rather than losing digits.
+        for (i, field) in fields.iter().enumerate() {
+            let DataType::Decimal { precision, scale } = field.data_type else {
+                continue;
+            };
+            let fits = |value: &Value| match value {
+                Value::Decimal { value, .. } => {
+                    spark_connect::session::decimal_str_to_unscaled(value, precision, scale).is_ok()
+                }
+                _ => true,
+            };
+            if !rows.iter().filter_map(|row| row.get(i)).all(fits) {
+                let mut message = format!(
+                    "Exception thrown when converting pandas.Series ({}) with name '{}' to Arrow \
+                     Array (decimal128({precision}, {scale})).",
+                    dtypes.get(i).map_or("object", String::as_str),
+                    labels.get(i).unwrap_or(&field.name),
+                );
+                // Read only to raise, as the conf changes the message, not the failure.
+                let safecheck = py
+                    .detach(|| {
+                        self.session
+                            .conf()
+                            .get("spark.sql.execution.pandas.convertToArrowArraySafely")
+                    })
+                    .map_or(true, |value| value.is_none_or(|value| value == "true"));
+                if safecheck {
+                    message.push_str(
+                        " It can be caused by overflows or other unsafe conversions warned by \
+                         Arrow. Arrow safe type check can be disabled by using SQL config \
+                         `spark.sql.execution.pandas.convertToArrowArraySafely`.",
+                    );
+                }
+                return Err(PyErr::from_value(
+                    py.import("pyspark.errors")?
+                        .getattr("PySparkValueError")?
+                        .call1((message,))?,
+                ));
+            }
+        }
         let schema = DataType::Struct { fields };
         let df = py
             .detach(|| {
@@ -2006,10 +2047,10 @@ fn decimal_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Option<Value>> {
     if !obj.is_instance(&decimal_cls)? {
         return Ok(None);
     }
-    // Without an exponent, as `1E+2` is written, which the Arrow encoder parses.
-    let dec_str: String = PyString::new(py, "{:f}")
-        .call_method1("format", (obj,))?
-        .extract()?;
+    // As written, in scientific notation for `1E+2` or `1.5E-7`: the Arrow encoder parses
+    // either notation, in work bounded by the length of the text, which a fixed-point form
+    // of `1E+1000000000` would not be.
+    let dec_str: String = obj.str()?.extract()?;
     let as_tuple = obj.call_method0("as_tuple")?;
     let mut scale: Option<i32> = None;
     if let Ok(exp_obj) = as_tuple.get_item(2) {

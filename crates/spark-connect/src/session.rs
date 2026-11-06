@@ -1443,99 +1443,85 @@ fn values_to_arrow(values: &[&Value], dt: &DataType) -> Result<Arc<dyn arrow::ar
     }
 }
 
-/// Convert a fixed-point or scientific decimal string to an unscaled `i128`.
-/// Scientific inputs must fit the declared precision and nonnegative scale exactly.
-/// Fixed-point inputs retain their existing truncation and scale behavior.
-/// Work and storage are bounded by the input length, never by its exponent.
-fn decimal_str_to_unscaled(s: &str, precision: i32, scale: i32) -> Result<i128> {
-    let invalid = || SparkError::connect_msg(format!("invalid or overflowing decimal '{s}'"));
-    let s = s.trim();
-    let (negative, s) = match s.strip_prefix('-') {
-        Some(rest) => (true, rest),
-        None => (false, s.strip_prefix('+').unwrap_or(s)),
-    };
-    let scientific = s.contains(['e', 'E']);
-    if scientific && (!(1..=38).contains(&precision) || scale < 0) {
-        return Err(invalid());
+/// Converts a decimal string, in fixed-point (`-1.50`) or scientific (`1.5E-7`) notation, to
+/// its unscaled `i128` at `scale` (`-1.50` at scale 2 is -150). The value must fit
+/// `decimal(precision, scale)` exactly, as Arrow requires of the Decimals of PySpark's pandas
+/// conversion: a nonzero digit beyond the scale, or a value beyond the precision, is an error
+/// rather than truncated. The work is bounded by the length of the string, never by its
+/// exponent, so `1E+1000000000` fails at once.
+pub fn decimal_str_to_unscaled(s: &str, precision: i32, scale: i32) -> Result<i128> {
+    if !(1..=38).contains(&precision) || !(0..=precision).contains(&scale) {
+        return Err(SparkError::connect_msg(format!(
+            "unsupported decimal type decimal({precision},{scale})"
+        )));
     }
-    let (coefficient, exponent) = match s.split_once(['e', 'E']) {
+    let invalid = || SparkError::connect_msg(format!("invalid decimal '{s}'"));
+    let inexact = || {
+        SparkError::connect_msg(format!(
+            "decimal '{s}' does not fit decimal({precision},{scale}) exactly"
+        ))
+    };
+    let text = s.trim();
+    let (negative, unsigned) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text.strip_prefix('+').unwrap_or(text)),
+    };
+    let (coefficient, exponent) = match unsigned.split_once(['e', 'E']) {
         Some((coefficient, exponent)) => {
             (coefficient, exponent.parse::<i64>().map_err(|_| invalid())?)
         }
-        None => (s, 0),
+        None => (unsigned, 0),
     };
-    let mut fractional = 0_usize;
     let mut point = false;
-    let mut digit_count = 0_usize;
-    let mut significant = 0_usize;
+    let mut fractional = 0_i128;
+    let mut digits = 0_usize;
     for byte in coefficient.bytes() {
         match byte {
             b'.' if !point => point = true,
             b'0'..=b'9' => {
-                digit_count += 1;
+                digits += 1;
                 if point {
                     fractional += 1;
-                }
-                if significant != 0 || byte != b'0' {
-                    significant += 1;
                 }
             }
             _ => return Err(invalid()),
         }
     }
-    if digit_count == 0 {
+    if digits == 0 {
         return Err(invalid());
     }
-    if significant == 0 {
-        return Ok(0);
-    }
-    // i128 arithmetic also handles i64::MIN/MAX exponents without overflowing.
-    // Preserve the existing treatment of negative declared scales as zero.
-    let shift = i128::from(scale.max(0)) + i128::from(exponent) - fractional as i128;
-    let output_digits = significant as i128 + shift;
-    if output_digits <= 0 {
-        return if scientific { Err(invalid()) } else { Ok(0) };
-    }
-    if output_digits > 39 {
-        return Err(invalid());
-    }
-    let keep = (significant as i128).min(output_digits) as usize;
-    if scientific
-        && coefficient
-            .bytes()
-            .filter(|b| *b != b'.')
-            .skip_while(|b| *b == b'0')
-            .skip(keep)
-            .any(|b| b != b'0')
-    {
-        return Err(invalid());
-    }
-    let mut value = 0_i128;
-    for digit in coefficient
+    // The digits from the first nonzero one: the value is them times 10^(exponent -
+    // fractional), and the unscaled value them times 10^shift.
+    let significant: Vec<u8> = coefficient
         .bytes()
         .filter(|b| *b != b'.')
         .skip_while(|b| *b == b'0')
-        .take(keep)
-    {
-        let digit = i128::from(digit - b'0');
-        value = value.checked_mul(10).ok_or_else(invalid)?;
-        value = if negative {
-            value.checked_sub(digit)
-        } else {
-            value.checked_add(digit)
-        }
-        .ok_or_else(invalid)?;
+        .collect();
+    // i128 arithmetic, so that i64::MIN and i64::MAX exponents cannot overflow.
+    let shift = i128::from(scale) + i128::from(exponent) - fractional;
+    let dropped = if shift < 0 {
+        (-shift).min(significant.len() as i128) as usize
+    } else {
+        0
+    };
+    let (kept, lost) = significant.split_at(significant.len() - dropped);
+    if lost.iter().any(|b| *b != b'0') {
+        return Err(inexact());
     }
+    if kept.is_empty() {
+        return Ok(0);
+    }
+    if kept.len() as i128 + shift.max(0) > i128::from(precision) {
+        return Err(inexact());
+    }
+    // At most 38 digits: no overflow.
+    let mut value = kept
+        .iter()
+        .fold(0_i128, |value, digit| value * 10 + i128::from(digit - b'0'));
     for _ in 0..shift.max(0) {
-        value = value.checked_mul(10).ok_or_else(invalid)?;
+        value *= 10;
     }
-    if scientific {
-        let limit = 10_i128.pow(precision as u32);
-        if value <= -limit || value >= limit {
-            return Err(invalid());
-        }
-    }
-    Ok(value)
+    Ok(if negative { -value } else { value })
 }
 
 #[cfg(test)]
@@ -1549,55 +1535,80 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
-    fn decimal_scientific_notation_scaling() {
-        for (text, scale, expected) in [
-            ("1E+3", 7, 10_000_000_000),
-            ("1E-7", 7, 1),
-            ("-1E-7", 7, -1),
-            ("+1.25e+2", 2, 12_500),
-            ("-1.25E-2", 4, -125),
-            ("0001.2500e+2", 2, 12_500),
-            ("0E+999999999", 7, 0),
-            ("-0E-999999999", 7, 0),
-            ("123.45", 2, 12_345),
-            ("-123.456", 2, -12_345),
-            (".00100E+3", 2, 100),
-            ("  +1.e2  ", 0, 100),
+    fn decimal_strings_convert_in_fixed_point_and_scientific_notation() {
+        for (text, precision, scale, expected) in [
+            ("1E+3", 18, 7, 10_000_000_000),
+            ("1E-7", 18, 7, 1),
+            ("-1E-7", 18, 7, -1),
+            ("+1.25e+2", 38, 2, 12_500),
+            ("-1.25E-2", 38, 4, -125),
+            ("0001.2500e+2", 38, 2, 12_500),
+            ("0E+999999999", 18, 7, 0),
+            ("-0E-999999999", 18, 7, 0),
+            ("123.45", 38, 2, 12_345),
+            ("-123.450", 38, 2, -12_345),
+            (".00100E+3", 38, 2, 100),
+            ("  +1.e2  ", 38, 0, 100),
+            // Trailing zeros beyond the scale lose nothing.
+            ("1.2300E+0", 3, 2, 123),
+            ("1.2300", 3, 2, 123),
+            ("9.9E+1", 2, 0, 99),
+            ("99999999999.9999999", 18, 7, 999_999_999_999_999_999),
+            ("-99999999999.9999999", 18, 7, -999_999_999_999_999_999),
+            ("1E-38", 38, 38, 1),
+            // A long coefficient may still fit once it is scaled.
+            ("100000000000000000000000000000000000000000E-41", 38, 0, 1),
         ] {
             assert_eq!(
-                decimal_str_to_unscaled(text, 38, scale).unwrap(),
+                decimal_str_to_unscaled(text, precision, scale).unwrap(),
                 expected,
                 "{text}"
             );
         }
+        let max = "9".repeat(38);
+        assert_eq!(
+            decimal_str_to_unscaled(&max, 38, 0).unwrap(),
+            max.parse::<i128>().unwrap()
+        );
+        assert_eq!(
+            decimal_str_to_unscaled(&format!("-{max}"), 38, 0).unwrap(),
+            -max.parse::<i128>().unwrap()
+        );
     }
 
     #[test]
-    fn decimal_scientific_notation_bounds_and_invalid_inputs() {
-        assert_eq!(
-            decimal_str_to_unscaled(&i128::MAX.to_string(), 38, 0).unwrap(),
-            i128::MAX
-        );
-        assert_eq!(
-            decimal_str_to_unscaled(&i128::MIN.to_string(), 38, 0).unwrap(),
-            i128::MIN
-        );
-        // Scaling is applied before parsing, so a long coefficient may still fit.
-        assert_eq!(
-            decimal_str_to_unscaled("100000000000000000000000000000000000000000E-41", 38, 0)
-                .unwrap(),
-            1
-        );
+    fn decimal_strings_that_do_not_fit_exactly_are_errors() {
+        for (text, precision, scale) in [
+            // A nonzero digit beyond the scale, in either notation: PySpark's Arrow
+            // conversion of a pandas column fails rather than dropping it.
+            ("1.5E-7", 18, 7),
+            ("-1.5E-7", 18, 7),
+            ("1E-8", 18, 7),
+            ("0.00000015", 18, 7),
+            ("1.235", 10, 2),
+            ("1E-9223372036854775808", 18, 7),
+            // Beyond the precision.
+            ("123456E-3", 9, 7),
+            ("1E+2", 2, 0),
+            ("-1E+2", 2, 0),
+            ("100", 2, 0),
+            ("100000000000", 18, 7),
+            ("1E+38", 38, 0),
+            ("1E+999999999", 38, 0),
+            ("1E+9223372036854775807", 38, 0),
+            ("170141183460469231731687303715884105727", 38, 0),
+        ] {
+            let error = decimal_str_to_unscaled(text, precision, scale).unwrap_err();
+            assert!(
+                error.to_string().contains("does not fit"),
+                "{text}: {error}"
+            );
+        }
         for text in [
-            "1E+999999999",
-            "1E+9223372036854775807",
-            "1E+9223372036854775808",
-            "170141183460469231731687303715884105728",
-            "-170141183460469231731687303715884105729",
-            "1.70141183460469231731687303715884105728E38",
             "",
             ".",
             "-",
+            "+",
             "1E",
             "E3",
             "1E1E1",
@@ -1606,36 +1617,19 @@ mod tests {
             "NaN",
             "Infinity",
             "1E 3",
+            "1_000",
+            "1E+9223372036854775808",
         ] {
-            assert!(decimal_str_to_unscaled(text, 38, 0).is_err(), "{text}");
-        }
-        assert!(decimal_str_to_unscaled("1", 38, i32::MAX).is_err());
-    }
-
-    #[test]
-    fn scientific_decimals_reject_inexact_or_unsupported_schema_values() {
-        for (text, precision, scale) in [
-            ("1.5E-7", 18, 7),
-            ("-1.5E-7", 18, 7),
-            ("1E-8", 18, 7),
-            ("1E-9223372036854775808", 18, 7),
-            ("123456E-3", 10, 2),
-            ("1E+2", 2, 0),
-            ("-1E+2", 2, 0),
-            ("1E+3", 10, -2),
-            ("0E+3", 10, -2),
-        ] {
+            let error = decimal_str_to_unscaled(text, 38, 0).unwrap_err();
             assert!(
-                decimal_str_to_unscaled(text, precision, scale).is_err(),
-                "{text}"
+                error.to_string().contains("invalid decimal"),
+                "{text}: {error}"
             );
         }
-        assert_eq!(decimal_str_to_unscaled("1.2300E+0", 3, 2).unwrap(), 123);
-        assert_eq!(decimal_str_to_unscaled("9.9E+1", 2, 0).unwrap(), 99);
-        // Characterize the existing fixed-point policies, outside this fix's scope.
-        assert_eq!(decimal_str_to_unscaled("1.235", 10, 2).unwrap(), 123);
-        assert_eq!(decimal_str_to_unscaled("100", 2, 0).unwrap(), 100);
-        assert_eq!(decimal_str_to_unscaled("1000", 10, -2).unwrap(), 1000);
+        // Spark has no such decimal types.
+        for (precision, scale) in [(0, 0), (39, 0), (10, -2), (10, 11), (38, i32::MAX)] {
+            assert!(decimal_str_to_unscaled("1", precision, scale).is_err());
+        }
     }
 
     #[test]
