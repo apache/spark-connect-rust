@@ -135,3 +135,48 @@ fn common_inline_udtf_to_proto_with_and_without_return_type() {
     };
     assert!(no_rt.to_proto().rel_type.is_some());
 }
+
+#[test]
+fn common_inline_udtf_preserves_return_schema() {
+    use spark_connect_proto::{common_inline_user_defined_table_function, relation};
+
+    // DDL must survive unchanged, including malformed/scalar DDL: Connect
+    // delegates parsing and validation to the server. Struct schemas stay typed.
+    for return_type in [
+        Some(DataType::Unparsed {
+            data_type_string: "value ARRAY<STRUCT<x: INT>>".to_string(),
+        }),
+        Some(DataType::Unparsed {
+            data_type_string: "invalid DDL !!!".to_string(),
+        }),
+        Some(DataType::Unparsed {
+            data_type_string: "INT".to_string(),
+        }),
+        Some(DataType::from_ddl("value BIGINT").unwrap()),
+        None,
+    ] {
+        let expected = return_type.as_ref().map(DataType::to_proto);
+        let plan = LogicalPlan::CommonInlineUdtf {
+            function_name: "echo".to_string(),
+            deterministic: false,
+            arguments: vec![col_expr("x")],
+            return_type,
+            eval_type: 300,
+            command: vec![1, 2, 3],
+            python_ver: "3.12".to_string(),
+        };
+        let Some(relation::RelType::CommonInlineUserDefinedTableFunction(call)) =
+            plan.to_proto().rel_type
+        else {
+            panic!("expected an inline UDTF relation");
+        };
+        let Some(common_inline_user_defined_table_function::Function::PythonUdtf(function)) =
+            call.function
+        else {
+            panic!("expected a Python UDTF");
+        };
+        assert_eq!(function.return_type, expected);
+        assert_eq!(function.eval_type, 300);
+        assert_eq!(function.command.as_ref(), &[1, 2, 3]);
+    }
+}
