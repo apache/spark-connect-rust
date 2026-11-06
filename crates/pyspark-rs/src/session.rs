@@ -710,10 +710,23 @@ impl PySparkSession {
                 references.push((df.dataframe.clone(), name));
             }
         }
-        let df = slf
-            .borrow()
-            .session
-            .sql_with_references(&query, pos, named, references)
+        let session = slf.borrow().session.clone();
+        // Within a pipeline flow function, the statement is not run here: the server analyzes
+        // its relation in the pipeline once the flow is defined, as PySpark's server returns
+        // the relation without running it within a `PipelineAnalysisContext`.
+        if crate::pipelines::in_flow_function() {
+            return Ok(PyDataFrame::new(
+                session.sql_without_running(&query, pos, named, references),
+            ));
+        }
+        // The statement runs to completion at once, so other Python threads go on meanwhile,
+        // to interrupt it for one.
+        let df = py
+            .detach(|| {
+                session
+                    .sql_with_references(&query, pos, named, references)
+                    .map_err(Box::new)
+            })
             .to_pyerr()?;
         Ok(PyDataFrame::new(df))
     }

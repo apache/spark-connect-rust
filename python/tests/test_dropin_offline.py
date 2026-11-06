@@ -4725,6 +4725,53 @@ def _unparsed_identifiers(expressions):
     ]
 
 
+def test_connect_registry_defines_a_flow_of_spark_sql_without_running_it(mock_connect):
+    from pyspark import pipelines as dp
+    from pyspark.pipelines.graph_element_registry import graph_element_registration_context
+    from pyspark.pipelines.spark_connect_graph_element_registry import (
+        SparkConnectGraphElementRegistry,
+    )
+
+    spark, service = mock_connect
+    with graph_element_registration_context(SparkConnectGraphElementRegistry(spark, "g")):
+        @dp.materialized_view
+        def mv():
+            return spark.sql("SELECT * FROM raw")
+
+    # As PySpark, whose server returns the relation of spark.sql() within a flow function
+    # without running the statement: no SqlCommand (Command.sql_command=5) is sent, and the
+    # flow's relation is the query (DefineFlow.relation_flow_details=7, relation=1;
+    # Relation.sql=10, SQL.query=1).
+    commands = [parse_message(parse_message(parse_message(r)[3][0])[2][0])
+                for r in service.execute_requests]
+    assert not any(5 in command for command in commands)
+    flow = _sent_define_flow(service.execute_requests[-1])
+    relation = parse_message(parse_message(flow[7][0])[1][0])
+    assert parse_message(relation[10][0])[1] == [b"SELECT * FROM raw"]
+    # Outside of a flow function, the statement runs at once again.
+    spark.sql("SET a=b")
+    assert 5 in parse_message(parse_message(parse_message(service.execute_requests[-1])[3][0])[2][0])
+
+
+def test_sql_runs_a_statement_without_holding_the_gil(mock_connect):
+    spark, service = mock_connect
+    service.block_execute = True
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        statement = pool.submit(lambda: spark.sql("SET a=b"))
+        try:
+            for _ in range(500):
+                if service.execute_calls:
+                    break
+                time.sleep(0.01)
+            else:
+                raise AssertionError("The statement never reached the server")
+            # This thread runs while the statement waits for the server.
+            assert not statement.done()
+        finally:
+            service.release_response()
+        statement.result(timeout=10)
+
+
 def test_connect_registry_sends_auto_cdc_define_flow(mock_connect):
     from pyspark import pipelines as dp
     from pyspark.pipelines.graph_element_registry import graph_element_registration_context

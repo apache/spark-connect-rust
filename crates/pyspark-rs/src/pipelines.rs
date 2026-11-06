@@ -32,6 +32,30 @@ fn scl(file: Option<String>, line: Option<i32>) -> Option<proto::SourceCodeLocat
     })
 }
 
+thread_local! {
+    /// How many pipeline flow functions this thread is in, during which `spark.sql()` builds
+    /// its relation without running it.
+    static FLOW_FUNCTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether this thread is in a pipeline flow function.
+pub(crate) fn in_flow_function() -> bool {
+    FLOW_FUNCTIONS.with(|depth| depth.get() > 0)
+}
+
+/// Enter a pipeline flow function, as PySpark does with a `PipelineAnalysisContext`, within
+/// which its server returns the relation of `spark.sql()` without running the statement.
+#[pyfunction]
+pub fn pipeline_enter_flow_function() {
+    FLOW_FUNCTIONS.with(|depth| depth.set(depth.get() + 1));
+}
+
+/// Leave a pipeline flow function.
+#[pyfunction]
+pub fn pipeline_exit_flow_function() {
+    FLOW_FUNCTIONS.with(|depth| depth.set(depth.get().saturating_sub(1)));
+}
+
 /// `PipelineCommand.CreateDataflowGraph` → the new graph id.
 #[pyfunction]
 #[pyo3(signature = (session, default_catalog=None, default_database=None, sql_conf=None))]

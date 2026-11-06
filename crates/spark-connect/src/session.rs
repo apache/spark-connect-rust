@@ -281,6 +281,11 @@ impl SparkSession {
     /// `SparkSession.sql(query, args, **kwargs)` with DataFrames in `kwargs`: each
     /// `(DataFrame, name)` is sent along with the query, as a reference that the server
     /// resolves `name` in the query to.
+    ///
+    /// The server creates each name as a temporary view while it runs the statement, and
+    /// drops it after, also at each later action on a query's DataFrame. A name must not be
+    /// that of a temporary view to keep, which the statement would replace and drop;
+    /// PySpark's `sql()` names its DataFrames `_pyspark_connect_temp_view_<uuid>` for this.
     pub fn sql_with_references(
         &self,
         query: &str,
@@ -288,27 +293,7 @@ impl SparkSession {
         named_args: std::collections::HashMap<String, crate::expression::Expression>,
         references: Vec<(DataFrame, String)>,
     ) -> Result<DataFrame> {
-        let sql = Arc::new(LogicalPlan::Sql {
-            query: query.to_string(),
-            pos_args,
-            named_args,
-        });
-        let plan = if references.is_empty() {
-            sql
-        } else {
-            Arc::new(LogicalPlan::WithRelations {
-                root: sql,
-                references: references
-                    .into_iter()
-                    .map(|(df, alias)| {
-                        Arc::new(LogicalPlan::SubqueryAlias {
-                            input: df.plan,
-                            alias,
-                        })
-                    })
-                    .collect(),
-            })
-        };
+        let plan = Self::sql_plan(query, pos_args, named_args, references);
         // As pyspark, run the statement as a command now. The server executes a command and
         // returns a relation of its result; for a query it returns the query's relation, which
         // then runs at an action.
@@ -339,6 +324,51 @@ impl SparkSession {
                 None => Arc::unwrap_or_clone(plan),
             },
         ))
+    }
+
+    /// The relation of a SQL statement with its parameters and references.
+    fn sql_plan(
+        query: &str,
+        pos_args: Vec<crate::expression::Expression>,
+        named_args: std::collections::HashMap<String, crate::expression::Expression>,
+        references: Vec<(DataFrame, String)>,
+    ) -> Arc<LogicalPlan> {
+        let sql = Arc::new(LogicalPlan::Sql {
+            query: query.to_string(),
+            pos_args,
+            named_args,
+        });
+        if references.is_empty() {
+            return sql;
+        }
+        Arc::new(LogicalPlan::WithRelations {
+            root: sql,
+            references: references
+                .into_iter()
+                .map(|(df, alias)| {
+                    Arc::new(LogicalPlan::SubqueryAlias {
+                        input: df.plan,
+                        alias,
+                    })
+                })
+                .collect(),
+        })
+    }
+
+    /// Internal: the DataFrame of a SQL statement that is not run until an action, for a
+    /// statement within a pipeline flow function, whose relation the server analyzes in the
+    /// pipeline instead (PySpark's server returns the relation without running it there).
+    /// Not a stable API.
+    #[doc(hidden)]
+    pub fn sql_without_running(
+        &self,
+        query: &str,
+        pos_args: Vec<crate::expression::Expression>,
+        named_args: std::collections::HashMap<String, crate::expression::Expression>,
+        references: Vec<(DataFrame, String)>,
+    ) -> DataFrame {
+        let plan = Self::sql_plan(query, pos_args, named_args, references);
+        DataFrame::new(self.clone(), Arc::unwrap_or_clone(plan))
     }
 
     /// Create a DataFrame from a collection of Rows and a schema.
