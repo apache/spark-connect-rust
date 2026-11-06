@@ -643,8 +643,9 @@ def test_streaming_query_manager_wrapper_has_listener_api():
 def test_udf_construction_and_call():
     from pyspark.sql import functions as F
     from pyspark.sql.udf import UserDefinedFunction
-    u = UserDefinedFunction(lambda x: x + 1, T.IntegerType(), 100, "plus1")
-    assert u.name == "plus1"
+    # As PySpark's: (func, returnType, name, evalType, deterministic).
+    u = UserDefinedFunction(lambda x: x + 1, T.IntegerType(), "plus1", 100)
+    assert u._name == "plus1" and u._wrapped().__name__ == "plus1"
     assert type(u(F.col("id"))).__name__ == "Column"
 
 
@@ -710,6 +711,64 @@ def test_show_checks_its_arguments_as_pyspark():
         df.show(foo=1)
     with pytest.raises(TypeError, match=r"^DataFrame\._show_string\(\) got multiple values for argument 'n'$"):
         df._show_string(1, n=2)
+
+
+def test_udfs_are_created_as_pyspark(mock_connect):
+    # As PySpark's _create_py_udf: udf() without useArrow makes an Arrow-optimized UDF
+    # (SQL_ARROW_BATCHED_UDF) when the active session enables
+    # spark.sql.execution.pythonUDF.arrow.enabled, as the server does by default, and infers
+    # the eval type of a function with type hints; and it returns the function wrapper of
+    # the UDF.
+    import pandas as pd
+    import pyarrow as pa
+
+    from pyspark.sql import functions as F
+    from pyspark.sql.udf import UserDefinedFunction
+
+    spark, service = mock_connect
+    arrow_conf = "spark.sql.execution.pythonUDF.arrow.enabled"
+
+    def plus_one(x):
+        """Adds one."""
+        return x + 1
+
+    def pandas_plus_one(s: pd.Series) -> pd.Series:
+        return s + 1
+
+    def arrow_plus_one(a: pa.Array) -> pa.Array:
+        return a
+
+    def sent(fn):
+        # ExecutePlanRequest.plan=3, Plan.root=1, Relation.project=3, Project.expressions=3;
+        # Expression.common_inline_user_defined_function=15; CommonInlineUserDefinedFunction.
+        # function_name=1, python_udf=4; PythonUDF.eval_type=2.
+        spark.range(1).select(fn("id")).collect()
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        expression = parse_message(parse_message(parse_message(plan)[3][0])[3][0])
+        udf = parse_message(expression[15][0])
+        return udf[1][0].decode(), parse_message(udf[4][0])[2][0]
+
+    wrapper = F.udf(plus_one, "int")
+    assert wrapper.__name__ == "plus_one" and wrapper.__doc__ == "Adds one."
+    assert wrapper.__module__ == plus_one.__module__ and wrapper.func is plus_one
+    assert isinstance(wrapper._unwrapped, UserDefinedFunction)
+    assert wrapper.returnType == T.IntegerType() and wrapper.deterministic is True
+    assert wrapper.evalType == 101
+    assert sent(wrapper) == ("plus_one", 101)
+    assert sent(F.udf(returnType="int", useArrow=False)(plus_one)) == ("plus_one", 100)
+    assert sent(F.udf(pandas_plus_one, "long")) == ("pandas_plus_one", 200)
+    assert sent(F.udf(arrow_plus_one, "long")) == ("arrow_plus_one", 250)
+    # With useArrow, the type hints are not used.
+    assert F.udf(pandas_plus_one, "long", useArrow=True).evalType == 101
+
+    service.confs = {arrow_conf: "false"}
+    try:
+        assert sent(F.udf("int")(plus_one)) == ("plus_one", 100)
+        assert F.udf(plus_one, "int", useArrow=True).evalType == 101
+    finally:
+        service.confs = {}
+    # Only udf() without useArrow reads the configuration.
+    assert service.read_confs == [arrow_conf] * 4
 
 
 def test_udtfs_are_created_as_pyspark(mock_connect):
@@ -1208,9 +1267,12 @@ def test_udf_udtf_determinism_and_extras():
     from pyspark.sql.udf import udf, UserDefinedFunction
     from pyspark.sql.udtf import udtf
 
+    # As PySpark's, asNondeterministic() of the function wrapper of a UDF marks the UDF
+    # nondeterministic, in place, and returns a wrapper of it.
     u = udf(lambda x: x, T.IntegerType())
     nd = u.asNondeterministic()
-    assert isinstance(nd, UserDefinedFunction) and nd.deterministic is False
+    assert isinstance(nd._unwrapped, UserDefinedFunction) and nd.deterministic is False
+    assert nd._unwrapped is u._unwrapped and u._unwrapped.deterministic is False
     assert u.returnType is not None
 
     @udtf(returnType="a int")
@@ -1449,6 +1511,10 @@ class T2:
         yield (n,)
 
 assert T2.evalType == 300
+# As PySpark's udf() without a session, a regular UDF.
+from pyspark.sql.functions import udf
+from pyspark.sql.types import IntegerType
+assert udf(lambda x: x, IntegerType()).evalType == 100
 for call in (SparkSession.active, lambda: T2(1)):
     try:
         call()
@@ -1633,9 +1699,9 @@ def test_udf_defaults_and_registration():
     stub = _StubSession()
     reg = UDFRegistration(stub)
     r = reg.register("f", lambda x: x + 1, T.IntegerType())
-    assert r.name == "f"
+    assert r.__name__ == "f"
     r2 = reg.register("g", lambda x: x)  # returnType default
-    assert r2.name == "g"
+    assert r2.__name__ == "g"
     # both were sent to the server with cloudpickled command bytes
     assert [c[0] for c in stub.calls] == ["f", "g"]
     assert all(c[2] for c in stub.calls)
@@ -3722,15 +3788,16 @@ def test_udf_and_pandas_udf_decorator_forms():
     from pyspark.sql.types import IntegerType
     from pyspark.sql.udf import UserDefinedFunction
 
+    # As PySpark's, the function wrapper of the UDF.
     @udf(IntegerType())
     def inc(x):
         return x + 1
-    assert isinstance(inc, UserDefinedFunction)
+    assert isinstance(inc._unwrapped, UserDefinedFunction) and inc.__name__ == "inc"
 
     @pandas_udf("long")
     def p(s):
         return s + 1
-    assert isinstance(p, UserDefinedFunction)
+    assert isinstance(p._unwrapped, UserDefinedFunction) and p.__name__ == "p"
 
 
 def test_udf_return_type_normalized_to_concrete_datatype():
@@ -3743,9 +3810,8 @@ def test_udf_return_type_normalized_to_concrete_datatype():
     @pandas_udf("double")
     def f(s):
         return s
+    # The command is the cloudpickle of (func, returnType), so it carries this type.
     assert isinstance(f.returnType, DoubleType), type(f.returnType)
-    # command is cloudpickle of (func, returnType) -> must not carry a bare str.
-    assert isinstance(f.command, (bytes, bytearray))
     pickle.dumps(f.returnType)  # concrete types pickle
 
 
