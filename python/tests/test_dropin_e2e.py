@@ -429,6 +429,29 @@ def test_collect_reads_a_result_across_stream_ends(session):
     assert session.range(n).toArrow().num_rows == n
 
 
+def test_timedelta_is_a_day_time_interval_as_pyspark(session):
+    import datetime
+
+    import pyarrow as pa
+
+    values = [datetime.timedelta(days=1, seconds=2, microseconds=3),
+              datetime.timedelta(seconds=-1, microseconds=5)]
+    df = session.range(1).select(*[F.lit(v).alias(f"t{i}") for i, v in enumerate(values)])
+    assert df.dtypes == [("t0", "interval day to second"), ("t1", "interval day to second")]
+    assert tuple(df.first()) == tuple(values)
+    df = session.createDataFrame([(v,) for v in values] + [(None,)], ["t"])
+    assert df.dtypes == [("t", "interval day to second")]
+    assert [r.t for r in df.collect()] == values + [None]
+    # As PyArrow's conversion to duration[us]: an int, or a float truncated, is microseconds.
+    df = session.createDataFrame([(5,), (1.5,)], "d interval day to second")
+    assert [r.d for r in df.collect()] == [
+        datetime.timedelta(microseconds=5), datetime.timedelta(microseconds=1)]
+    with pytest.raises(pa.ArrowTypeError, match="Expected integer, got bool"):
+        session.createDataFrame([(True,)], "d interval day to second")
+    with pytest.raises(pa.ArrowTypeError, match="object of type <class 'str'> cannot be converted to int"):
+        session.createDataFrame([("x",)], "d interval day to second")
+
+
 def test_server_errors_carry_their_condition_and_details(session):
     from pyspark.errors import AnalysisException, ArithmeticException, ParseException
     from pyspark.errors.exceptions.connect import SparkConnectGrpcException, SQLQueryContext

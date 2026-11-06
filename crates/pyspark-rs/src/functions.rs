@@ -277,6 +277,11 @@ fn scalar_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<LiteralExpression>>
             let micros = crate::session::datetime_to_micros(obj)?;
             return Ok(Some(LiteralExpression::Timestamp(micros)));
         }
+        // datetime.timedelta -> DayTimeIntervalType, as PySpark's literal of one.
+        if obj.is_instance(&dt_mod.getattr("timedelta")?)? {
+            let micros = crate::infer::timedelta_micros(obj)?;
+            return Ok(Some(LiteralExpression::DayTimeInterval(micros)));
+        }
         let date_cls = dt_mod.getattr("date")?;
         if obj.is_instance(&date_cls)? {
             let ordinal: i64 = obj.call_method0("toordinal")?.extract()?;
