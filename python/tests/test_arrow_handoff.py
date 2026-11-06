@@ -1881,7 +1881,9 @@ def test_date_columns_preserve_every_ipc_cell(protocol, monkeypatch, cached, ver
     overrides = {"spark.sql.session.localRelationCacheThreshold": "1" if cached else "999999999"}
     with _arrow_input_service(protocol, **overrides) as (spark, state):
         df = spark.createDataFrame(frame, schema, verifySchema=verify)
+        assert not df.isLocal()
         df.toArrow()
+        assert state["column_names"] == schema.names
         table = state["input_tables"][0]
         assert table.num_rows == len(dates)
         assert table.schema.names == schema.names
@@ -2421,6 +2423,7 @@ def _assert_date_columns_guard_payload(state, schema, expected, *, row_path):
     from pyspark.sql.pandas.types import from_arrow_metadata
 
     assert len(state["input_tables"]) == 1
+    assert state["column_names"] == schema.names
     table = state["input_tables"][0]
     assert table.num_rows == 10000
     assert table.column_names == ["renamed.`day", "nullable", "all_null"]

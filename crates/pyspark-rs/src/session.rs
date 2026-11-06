@@ -788,6 +788,24 @@ impl PySparkSession {
                     _ => frame,
                 });
             }
+            let table = py
+                .import("pyspark.sql._pandas_input")?
+                .getattr("prepare_date_table")?
+                .call1((data, schema))?;
+            if !table.is_none() {
+                let frame =
+                    crate::pyarrow_import::create_dataframe(py, &self.session, &table, schema)?;
+                return Ok(match &spec {
+                    Spec::Struct(fields) if !fields.is_empty() && table.len()? > 0 => {
+                        PyDataFrame::new(
+                            frame
+                                .dataframe
+                                .to_df(fields.iter().map(|field| field.name.as_str()).collect()),
+                        )
+                    }
+                    _ => frame,
+                });
+            }
             return self.create_from_pandas(py, data, spec);
         }
         self.create_from_local(py, data, spec)
