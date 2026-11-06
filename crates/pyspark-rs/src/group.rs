@@ -9,6 +9,25 @@ use crate::dataframe::{
 };
 use crate::errors::ResultExt;
 
+/// As PySpark's `_check_same_session` of the DataFrames of grouped data: `SESSION_NOT_SAME`
+/// unless `other` is of the session of `this`.
+fn check_same_session(
+    py: Python<'_>,
+    this: &RustGroupedData,
+    other: &RustGroupedData,
+) -> PyResult<()> {
+    if this.spark_session().session_id() == other.spark_session().session_id() {
+        Ok(())
+    } else {
+        Err(crate::column::raise_pyspark(
+            py,
+            "SessionNotSameException",
+            "SESSION_NOT_SAME",
+            &[],
+        ))
+    }
+}
+
 /// Python wrapper for Spark GroupedData.
 #[pyclass(name = "GroupedData", module = "pyspark.sql.group")]
 pub struct PyGroupedData {
@@ -212,10 +231,11 @@ impl PyGroupedData {
 
     /// `GroupedData.cogroup`.
     #[pyo3(name = "cogroup")]
-    fn cogroup(&self, other: &PyGroupedData) -> PyCoGroupedData {
-        PyCoGroupedData {
+    fn cogroup(&self, py: Python<'_>, other: &PyGroupedData) -> PyResult<PyCoGroupedData> {
+        check_same_session(py, &self.grouped_data, &other.grouped_data)?;
+        Ok(PyCoGroupedData {
             inner: self.grouped_data.cogroup(&other.grouped_data),
-        }
+        })
     }
 
     /// `GroupedData.applyInPandasWithState` (stateful streaming).
@@ -269,6 +289,9 @@ impl PyGroupedData {
         initialState: Option<PyRef<'_, PyGroupedData>>,
         eventTimeColumnName: &str,
     ) -> PyResult<PyDataFrame> {
+        if let Some(state) = &initialState {
+            check_same_session(py, &self.grouped_data, &state.grouped_data)?;
+        }
         let (func, et) = twus_func(
             py,
             &statefulProcessor,
@@ -316,6 +339,9 @@ impl PyGroupedData {
         initialState: Option<PyRef<'_, PyGroupedData>>,
         eventTimeColumnName: &str,
     ) -> PyResult<PyDataFrame> {
+        if let Some(state) = &initialState {
+            check_same_session(py, &self.grouped_data, &state.grouped_data)?;
+        }
         let (func, et) = twus_func(
             py,
             &statefulProcessor,

@@ -1101,6 +1101,20 @@ def test_sample_sort_group_by_drop_and_select_expr_as_pyspark(session):
     assert df.sample(0.5, 42).collect() == df.sample(fraction=0.5, seed=42).collect()
 
 
+
+def test_dataframes_of_other_sessions_are_not_taken_as_pyspark(session):
+    # As PySpark's, a DataFrame of another session, whose temporary views this session would
+    # not find, is not taken: SESSION_NOT_SAME.
+    from pyspark.errors import SessionNotSameException
+
+    other = session.newSession()
+    other.range(3).createOrReplaceTempView("view_of_another_session")
+    theirs = other.table("view_of_another_session")
+    for call in (lambda: session.range(3).join(theirs, "id"),
+                 lambda: session.range(3).union(theirs)):
+        with pytest.raises(SessionNotSameException):
+            call()
+
 def test_column_attributes_select_struct_fields_and_slices_substrings(session):
     df = session.sql("SELECT named_struct('x', 1, 'y', named_struct('z', 'q')) AS s, 'abcdef' AS t")
     out = df.select(df.s.x, df.s.y.z, F.col("s").x.alias("x2"), df.t[2:3], F.col("t")[F.lit(1):F.lit(2)])
