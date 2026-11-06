@@ -136,13 +136,9 @@ impl Expression {
                 Some(t) => t.clone(),
                 None => "*".to_string(),
             },
+            // As `ColumnAlias.__repr__`: the names joined by commas.
             ExpressionNode::Alias(alias) => {
-                let name = if alias.names.len() == 1 {
-                    alias.names[0].clone()
-                } else {
-                    format!("({})", alias.names.join(", "))
-                };
-                format!("{} AS {}", alias.child.render(), name)
+                format!("{} AS {}", alias.child.render(), alias.names.join(","))
             }
             ExpressionNode::Cast(cast) => {
                 let type_str = match &cast.target {
@@ -605,6 +601,19 @@ impl Alias {
         Self {
             child,
             names: vec![name.into()],
+            metadata: None,
+        }
+    }
+
+    /// An alias of several names, or of none, as the reference client's `ColumnAlias`
+    /// takes them: a generator's columns are named in order.
+    pub fn with_names<S: Into<String>>(
+        child: Expression,
+        names: impl IntoIterator<Item = S>,
+    ) -> Self {
+        Self {
+            child,
+            names: names.into_iter().map(Into::into).collect(),
             metadata: None,
         }
     }
@@ -1416,7 +1425,12 @@ mod tests {
             metadata: None,
         };
         let expr: Expression = ExpressionNode::Alias(Box::new(alias)).into();
-        assert_eq!(expr.render(), "x AS (a, b)");
+        // As `ColumnAlias.__repr__`: the names joined by commas.
+        assert_eq!(expr.render(), "x AS a,b");
+        let none: Expression =
+            ExpressionNode::Alias(Box::new(Alias::with_names(col("x"), Vec::<String>::new())))
+                .into();
+        assert_eq!(none.render(), "x AS ");
     }
 
     #[test]
