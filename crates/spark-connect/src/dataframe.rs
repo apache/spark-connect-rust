@@ -775,10 +775,22 @@ impl DataFrame {
     /// returning the raw `RecordBatch`es without converting to Rows. This is the
     /// foundation for `to_datafusion()` and `to_polars()` conversions.
     pub fn collect_record_batches(&self) -> Result<Vec<arrow::record_batch::RecordBatch>> {
+        self.collect_record_batches_with_schema()
+            .map(|(batches, _)| batches)
+    }
+
+    /// Collect all data as Arrow RecordBatches, with the schema of the result if the server
+    /// sends it (`ExecutePlanResponse.schema`), as the reference client's `to_pandas` reads
+    /// it: unlike the Arrow schema, it has the Spark types of the columns, such as their
+    /// user-defined types.
+    pub fn collect_record_batches_with_schema(
+        &self,
+    ) -> Result<(Vec<arrow::record_batch::RecordBatch>, Option<DataType>)> {
         let request = self.build_execute_request()?;
         let mut stream = block_on(self.session.client().execute_plan_reattachable(request))?;
 
         let mut batches = vec![];
+        let mut schema = None;
         let mut info = ExecutionInfo::default();
         loop {
             let resp = block_on(stream.message())?;
@@ -786,6 +798,9 @@ impl DataFrame {
                 break;
             };
             capture_execution(&mut resp, &mut info, &self.session);
+            if let Some(data_type) = resp.schema.take() {
+                schema = Some(DataType::from_proto(&data_type)?);
+            }
             if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =
                 resp.response_type
             {
@@ -795,7 +810,7 @@ impl DataFrame {
         }
         self.record_execution(info);
 
-        Ok(batches)
+        Ok((batches, schema))
     }
 
     /// Get the count of rows.

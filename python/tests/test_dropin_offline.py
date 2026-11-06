@@ -5644,6 +5644,20 @@ def test_execution_info_unsupported_literal_raises_on_flows(mock_connect):
         info.flows
 
 
+def test_pandas_conversion_and_its_imports_are_pyspark_modules():
+    # Vendored from PySpark: toPandas converts with pyspark.sql.pandas.conversion, which
+    # imports the classic error conversion and the gateway's socket helpers, as PySpark does.
+    import inspect
+
+    import pyspark.errors.exceptions.captured as captured
+    import pyspark.traceback_utils  # noqa: F401
+    import pyspark.util
+    from pyspark.sql.pandas.conversion import _convert_arrow_table_to_pandas
+
+    assert callable(_convert_arrow_table_to_pandas) and callable(captured.convert_exception)
+    assert inspect.isgeneratorfunction(pyspark.util._load_from_socket.__wrapped__)
+
+
 def test_execute_plan_error_carries_operation_id(mock_connect):
     from pyspark.errors import PySparkException
 

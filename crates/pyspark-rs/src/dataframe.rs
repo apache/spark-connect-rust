@@ -50,6 +50,53 @@ pub struct PyDataFrame {
 }
 
 impl PyDataFrame {
+    /// The pandas DataFrame of the result, as `SparkConnectClient.to_pandas` makes it: the
+    /// settings of the conversion first, in one request; then the Arrow result with the schema
+    /// that the server sends, which `pyspark.sql.connect.client._to_pandas` converts.
+    fn to_pandas(
+        &self,
+        py: Python<'_>,
+        struct_handling_mode: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let settings = py
+            .detach(|| {
+                self.dataframe.spark_session().conf().get_many(&[
+                    "spark.sql.session.timeZone",
+                    "spark.sql.execution.pandas.structHandlingMode",
+                    "spark.sql.execution.arrow.pyspark.selfDestruct.enabled",
+                ])
+            })
+            .to_pyerr()?;
+        let (batches, schema) = py
+            .detach(|| self.dataframe.collect_record_batches_with_schema())
+            .to_pyerr()?;
+        let table = crate::pyarrow_export::record_batches_to_pyarrow(py, batches)?;
+        let schema = match &schema {
+            Some(schema) => crate::types::data_type_to_py(py, schema)?,
+            None => py.None(),
+        };
+        let (metrics, observed) = match self.dataframe.execution_info() {
+            Ok(info) => execution_metrics(py, &info)?,
+            Err(_) => (
+                pyo3::types::PyList::empty(py),
+                pyo3::types::PyList::empty(py),
+            ),
+        };
+        let kwargs = pyo3::types::PyDict::new(py);
+        kwargs.set_item("timezone", &settings[0])?;
+        match struct_handling_mode {
+            Some(mode) => kwargs.set_item("struct_handling_mode", mode.str()?)?,
+            None => kwargs.set_item("struct_handling_mode", &settings[1])?,
+        }
+        kwargs.set_item("self_destruct", &settings[2])?;
+        let pdf = py.import("pyspark.sql.connect.client")?.call_method(
+            "_to_pandas",
+            (table, schema, metrics, observed),
+            Some(&kwargs),
+        )?;
+        Ok(pdf.unbind())
+    }
+
     /// The table of `show` and `_show_string`, for the arguments of `function`.
     fn show_table(
         &self,
@@ -1271,24 +1318,27 @@ impl PyDataFrame {
 
     /// Collect the DataFrame into a pandas DataFrame.
     ///
-    /// Mirrors `pyspark.sql.DataFrame.toPandas()`: decodes the result via Arrow
-    /// (`toArrow`) and converts the `pyarrow.Table` with `to_pandas()`.
+    /// Mirrors `pyspark.sql.DataFrame.toPandas()`, as `SparkConnectClient.to_pandas` converts
+    /// the Arrow result: each column by its Spark type, in the session time zone.
     fn toPandas(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let table = self.to_arrow(py)?;
-        let df = table.bind(py).call_method0("to_pandas")?;
-        Ok(df.unbind())
+        self.to_pandas(py, None)
     }
 
     /// Internal Arrow-based pandas conversion used by pandas-on-Spark
-    /// (`pyspark.sql.connect.dataframe.DataFrame._to_pandas`). Accepts and ignores
-    /// keyword options such as `pandasStructHandlingMode`; delegates to `toPandas`.
-    #[pyo3(signature = (**_kwargs))]
+    /// (`pyspark.sql.connect.dataframe.DataFrame._to_pandas`): `toPandas`, with
+    /// `pandasStructHandlingMode` overriding `spark.sql.execution.pandas.structHandlingMode`,
+    /// as in `SparkConnectClient.to_pandas`.
+    #[pyo3(signature = (**kwargs))]
     fn _to_pandas(
         &self,
         py: Python<'_>,
-        _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+        kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        self.toPandas(py)
+        let mode = match kwargs {
+            Some(kwargs) => kwargs.get_item("pandasStructHandlingMode")?,
+            None => None,
+        };
+        self.to_pandas(py, mode)
     }
 
     /// Get the count of rows.
@@ -1334,32 +1384,7 @@ impl PyDataFrame {
             return Ok(py.None());
         };
         let metrics_mod = py.import("pyspark.sql.metrics")?;
-        let plan_metrics_cls = metrics_mod.getattr("PlanMetrics")?;
-        let metric_value_cls = metrics_mod.getattr("MetricValue")?;
-        // Mirrors SparkConnectClient._build_metrics.
-        let plan_metrics = pyo3::types::PyList::empty(py);
-        if let Some(m) = &info.metrics {
-            for x in &m.metrics {
-                let values = pyo3::types::PyList::empty(py);
-                for (k, v) in &x.execution_metrics {
-                    values.append(metric_value_cls.call1((k, v.value, &v.metric_type))?)?;
-                }
-                plan_metrics
-                    .append(plan_metrics_cls.call1((&x.name, x.plan_id, x.parent, values))?)?;
-            }
-        }
-        let observed_cls = py
-            .import("pyspark.sql.connect.client")?
-            .getattr("PlanObservedMetrics")?;
-        let observed = pyo3::types::PyList::empty(py);
-        for o in &info.observed_metrics {
-            let values = o
-                .values
-                .iter()
-                .map(|l| literal_to_py(py, l, None))
-                .collect::<PyResult<Vec<_>>>()?;
-            observed.append(observed_cls.call1((&o.name, values, o.keys.clone()))?)?;
-        }
+        let (plan_metrics, observed) = execution_metrics(py, &info)?;
         let ei = metrics_mod.getattr("ExecutionInfo")?.call1((
             plan_metrics,
             observed,
@@ -2785,6 +2810,43 @@ impl PyLocalRowIterator {
             }
         }
     }
+}
+
+/// The metrics and observed metrics of an execution, as the lists of `PlanMetrics` and
+/// `PlanObservedMetrics` that `SparkConnectClient._build_metrics` makes.
+fn execution_metrics<'py>(
+    py: Python<'py>,
+    info: &spark_connect::session::ExecutionInfo,
+) -> PyResult<(
+    Bound<'py, pyo3::types::PyList>,
+    Bound<'py, pyo3::types::PyList>,
+)> {
+    let metrics_mod = py.import("pyspark.sql.metrics")?;
+    let plan_metrics_cls = metrics_mod.getattr("PlanMetrics")?;
+    let metric_value_cls = metrics_mod.getattr("MetricValue")?;
+    let plan_metrics = pyo3::types::PyList::empty(py);
+    if let Some(m) = &info.metrics {
+        for x in &m.metrics {
+            let values = pyo3::types::PyList::empty(py);
+            for (k, v) in &x.execution_metrics {
+                values.append(metric_value_cls.call1((k, v.value, &v.metric_type))?)?;
+            }
+            plan_metrics.append(plan_metrics_cls.call1((&x.name, x.plan_id, x.parent, values))?)?;
+        }
+    }
+    let observed_cls = py
+        .import("pyspark.sql.connect.client")?
+        .getattr("PlanObservedMetrics")?;
+    let observed = pyo3::types::PyList::empty(py);
+    for o in &info.observed_metrics {
+        let values = o
+            .values
+            .iter()
+            .map(|l| literal_to_py(py, l, None))
+            .collect::<PyResult<Vec<_>>>()?;
+        observed.append(observed_cls.call1((&o.name, values, o.keys.clone()))?)?;
+    }
+    Ok((plan_metrics, observed))
 }
 
 /// Convert an observed-metric literal to a Python value. Mirrors
