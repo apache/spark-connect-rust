@@ -4639,6 +4639,36 @@ def test_grpc_status_codes():
     assert _status_code(99) is StatusCode.UNKNOWN
 
 
+def _sent_udf_command(request):
+    """The pickled command of the function in a captured ExecutePlanRequest: plan=3 ->
+    root=1 -> map_partitions=28 (func=2), group_map=31 (func=3) or co_group_map=32
+    (func=5) -> python_udf=4 -> command=3."""
+    root = parse_message(parse_message(parse_message(request)[3][0])[1][0])
+    for relation, func in ((28, 2), (31, 3), (32, 5)):
+        if relation in root:
+            udf = parse_message(parse_message(root[relation][0])[func][0])
+            return parse_message(udf[4][0])[3][0]
+    raise AssertionError(f"no map function in the relation fields {sorted(root)}")
+
+
+@pytest.mark.parametrize("build", [
+    lambda df: df.mapInPandas(lambda frames: frames, "id long"),
+    lambda df: df.mapInArrow(lambda batches: batches, "id long"),
+    lambda df: df.groupBy("id").applyInPandas(lambda pdf: pdf, "id long"),
+    lambda df: df.groupBy("id").applyInArrow(lambda table: table, "id long"),
+    lambda df: df.groupBy("id").cogroup(df.groupBy("id")).applyInPandas(lambda a, b: a, "id long"),
+    lambda df: df.groupBy("id").cogroup(df.groupBy("id")).applyInArrow(lambda a, b: a, "id long"),
+])
+def test_map_functions_pickle_a_ddl_schema_as_its_type(mock_connect, build):
+    import pickle
+
+    spark, service = mock_connect
+    build(spark.range(3)).collect()
+    # The worker reads the pickled type as a DataType, so a DDL string is pickled parsed.
+    _, return_type = pickle.loads(_sent_udf_command(service.execute_requests[-1]))
+    assert return_type == T.StructType([T.StructField("id", T.LongType())])
+
+
 def _sent_define_flow(request):
     """The DefineFlow in a captured ExecutePlanRequest: plan=3 -> command=2 ->
     pipeline_command=19 -> define_flow=3."""
