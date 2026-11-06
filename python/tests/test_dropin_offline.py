@@ -6979,6 +6979,52 @@ def test_to_local_iterator_executes_with_its_first_row_as_pyspark(mock_connect):
     assert service.execute_calls == 1
 
 
+def test_foreach_and_foreach_partition_send_python_functions_as_pyspark(mock_connect):
+    # As PySpark Connect's: foreach selects a struct of the columns of each row with a UDF of
+    # no result that calls f with the row, and foreachPartition runs a mapInArrow function of
+    # no result that calls f with an iterator of the rows of each partition. They run on the
+    # server, so this calls the functions that are sent.
+    import pyarrow as pa
+
+    from pyspark import cloudpickle
+
+    spark, service = mock_connect
+    df = spark.range(1)
+
+    def relation():
+        # ExecutePlanRequest.plan=3, Plan.root=1.
+        return parse_message(parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0])
+
+    def raising(row):
+        raise ValueError(row)
+
+    df.foreach(raising)
+    # Relation.project=3, Project.expressions=3; Expression.common_inline_user_defined_function
+    # =15; CommonInlineUserDefinedFunction.function_name=1, python_udf=4; PythonUDF.command=3.
+    udf = parse_message(parse_message(parse_message(relation()[3][0])[3][0])[15][0])
+    assert udf[1][0].decode() == "foreach_func"
+    func, return_type = cloudpickle.loads(parse_message(udf[4][0])[3][0])
+    assert return_type == T.StructType()
+    with pytest.raises(ValueError) as error:
+        func(Row(id=1))
+    assert error.value.args == (Row(id=1),)
+
+    def consuming(rows):
+        raise ValueError(list(rows))
+
+    df.foreachPartition(consuming)
+    # Relation.map_partitions=28, MapPartitions.func=2; PythonUDF.eval_type=2, of
+    # SQL_MAP_ARROW_ITER_UDF.
+    udf = parse_message(parse_message(relation()[28][0])[2][0])
+    assert parse_message(udf[4][0])[2][0] == 207
+    func, return_type = cloudpickle.loads(parse_message(udf[4][0])[3][0])
+    assert return_type == T.StructType()
+    with pytest.raises(ValueError) as error:
+        func(iter([pa.RecordBatch.from_pydict({"id": [1, 2]})]))
+    assert error.value.args == ([Row(id=1), Row(id=2)],)
+    assert "spark.sql.execution.pyspark.binaryAsBytes" in service.read_confs
+
+
 def test_execute_plan_error_carries_operation_id(mock_connect):
     from pyspark.errors import PySparkException
 
