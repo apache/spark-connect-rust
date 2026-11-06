@@ -887,6 +887,32 @@ def test_ml_vector_functions_as_pyspark(session):
     assert tuple(row.first()) == ([1.5, 2.0], [1.5, 2.0])
 
 
+def test_collected_values_of_user_defined_types_are_deserialized_as_pyspark(session):
+    # As official PySpark 4.3.0: a collected value of a UDT is its deserialized object, and
+    # dtypes names the UDT by its simpleString(), in every way that rows are collected.
+    from pyspark.ml.functions import array_to_vector
+    from pyspark.ml.linalg import DenseVector
+
+    df = session.sql(
+        "SELECT array(1.5D, 2.0D) AS a, 1 AS k UNION ALL SELECT array(3.0D), 2"
+    ).select(F.when(F.col("k") == 1, array_to_vector("a")).alias("vec"), "k").orderBy("k")
+    vector = DenseVector([1.5, 2.0])
+    rows = [Row(vec=vector, k=1), Row(vec=None, k=2)]
+    assert df.dtypes == [("vec", "vector"), ("k", "int")]
+    assert df.collect() == rows and df.first() == rows[0] and df.head() == rows[0]
+    assert df.take(1) == rows[:1] and df.head(1) == rows[:1] and df.tail(1) == rows[1:]
+    assert list(df.toLocalIterator()) == rows and list(df.toLocalIterator(True)) == rows
+    assert type(df.first().vec) is DenseVector
+    nested = df.limit(1).select(
+        F.array("vec", "vec").alias("arr"),
+        F.struct("vec", F.lit(1).alias("n")).alias("st"),
+        F.create_map(F.lit("x"), "vec").alias("m"),
+    )
+    assert nested.dtypes == [
+        ("arr", "array<vector>"), ("st", "struct<vec:vector,n:int>"), ("m", "map<string,vector>")]
+    assert nested.first() == Row(arr=[vector, vector], st=Row(vec=vector, n=1), m={"x": vector})
+
+
 def test_create_dataframe_merges_the_types_of_every_row_as_pyspark(session):
     import array
     import decimal

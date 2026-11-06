@@ -10,7 +10,7 @@ use crate::column::PyColumn;
 use crate::errors::ResultExt;
 use crate::functions::to_column;
 use crate::group::PyGroupedData;
-use crate::row::{value_to_py, PyRow};
+use crate::row::{value_to_py, FieldConverters, PyRow};
 use crate::streaming::PyDataStreamWriter;
 use crate::types::PyDataType;
 
@@ -1234,8 +1234,10 @@ impl PyDataFrame {
     /// Collect all rows into memory.
     fn collect(&self, py: Python<'_>) -> PyResult<Vec<PyRow>> {
         // Release the GIL across the blocking RPC so other Python threads run.
-        let rows = py.detach(|| self.dataframe.collect()).to_pyerr()?;
-        Ok(rows.into_iter().map(PyRow::new).collect())
+        let (rows, schema) = py
+            .detach(|| self.dataframe.collect_with_schema())
+            .to_pyerr()?;
+        rows_to_py(py, rows, schema.as_ref())
     }
 
     /// Return an iterator over rows without materializing the entire result in memory.
@@ -1404,8 +1406,10 @@ impl PyDataFrame {
 
     /// Get the first row.
     fn first(&self, py: Python<'_>) -> PyResult<Option<PyRow>> {
-        let row = py.detach(|| self.dataframe.first()).to_pyerr()?;
-        Ok(row.map(PyRow::new))
+        let (row, schema) = py
+            .detach(|| self.dataframe.first_with_schema())
+            .to_pyerr()?;
+        Ok(rows_to_py(py, row.into_iter().collect(), schema.as_ref())?.pop())
     }
 
     /// Alias for first.
@@ -1414,25 +1418,23 @@ impl PyDataFrame {
         use pyo3::IntoPyObjectExt;
         match n {
             // head() -> the first Row (or None), matching reference pyspark.
-            None => {
-                let row = py.detach(|| self.dataframe.first()).to_pyerr()?;
-                row.map(PyRow::new).into_py_any(py)
-            }
+            None => self.first(py)?.into_py_any(py),
             // head(n) -> a list of the first n Rows.
             Some(k) => {
-                let rows = py.detach(|| self.dataframe.limit(k).collect()).to_pyerr()?;
-                rows.into_iter()
-                    .map(PyRow::new)
-                    .collect::<Vec<_>>()
-                    .into_py_any(py)
+                let (rows, schema) = py
+                    .detach(|| self.dataframe.limit(k).collect_with_schema())
+                    .to_pyerr()?;
+                rows_to_py(py, rows, schema.as_ref())?.into_py_any(py)
             }
         }
     }
 
     /// Get the first n rows.
     fn take(&self, py: Python<'_>, num: usize) -> PyResult<Vec<PyRow>> {
-        let rows = py.detach(|| self.dataframe.take(num)).to_pyerr()?;
-        Ok(rows.into_iter().map(PyRow::new).collect())
+        let (rows, schema) = py
+            .detach(|| self.dataframe.take_with_schema(num))
+            .to_pyerr()?;
+        rows_to_py(py, rows, schema.as_ref())
     }
 
     /// Column names (a property, mirroring `DataFrame.columns`).
@@ -1443,10 +1445,10 @@ impl PyDataFrame {
 
     /// Get the last `num` rows as a list of Rows (eager, like pyspark `tail`).
     fn tail(&self, py: Python<'_>, num: i32) -> PyResult<Vec<PyRow>> {
-        let rows = py
-            .detach(|| self.dataframe.tail(num).collect())
+        let (rows, schema) = py
+            .detach(|| self.dataframe.tail(num).collect_with_schema())
             .to_pyerr()?;
-        Ok(rows.into_iter().map(PyRow::new).collect())
+        rows_to_py(py, rows, schema.as_ref())
     }
 
     /// Sample a fraction of rows. Mirrors `DataFrame.sample(withReplacement=None,
@@ -1525,10 +1527,15 @@ impl PyDataFrame {
         else {
             unreachable!("schema() validates struct responses")
         };
-        Ok(fields
+        // As PySpark, a user-defined type is named by its simpleString(), such as `vector`,
+        // which only its Python class knows.
+        fields
             .into_iter()
-            .map(|field| (field.name, field.data_type.simple_string()))
-            .collect())
+            .map(|field| {
+                let name = crate::types::simple_string_with_udts(py, &field.data_type)?;
+                Ok((field.name, name))
+            })
+            .collect()
     }
 
     /// Additional set operation: unionAll (alias for union).
@@ -2750,17 +2757,57 @@ fn build_side_effect_udf(
     ))
 }
 
+/// The converters of the fields of a result of `schema` that deserialize its values of
+/// user-defined types, as PySpark does when it collects them
+/// (`pyspark.sql.types._udt_field_converters`); None without a user-defined type.
+fn udt_field_converters(
+    py: Python<'_>,
+    schema: Option<&spark_connect::types::DataType>,
+) -> PyResult<Option<FieldConverters>> {
+    let Some(schema) = schema.filter(|schema| crate::types::has_udt(schema)) else {
+        return Ok(None);
+    };
+    let schema = crate::types::data_type_to_py(py, schema)?;
+    let converters = py
+        .import("pyspark.sql.types")?
+        .call_method1("_udt_field_converters", (schema,))?;
+    if converters.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(std::sync::Arc::new(converters.extract()?)))
+}
+
+/// The collected `rows` of a result of `schema`, whose values of user-defined types are
+/// deserialized when first read.
+fn rows_to_py(
+    py: Python<'_>,
+    rows: Vec<spark_connect::row::Row>,
+    schema: Option<&spark_connect::types::DataType>,
+) -> PyResult<Vec<PyRow>> {
+    let converters = udt_field_converters(py, schema)?;
+    Ok(rows
+        .into_iter()
+        .map(|row| PyRow::with_converters(row, converters.clone()))
+        .collect())
+}
+
 /// Python wrapper for LocalRowIterator yielding Row objects lazily.
 ///
 /// Implements `__iter__` and `__next__` to make it a proper Python iterator.
 #[pyclass(name = "LocalRowIterator", module = "pyspark.sql.dataframe")]
 pub struct PyLocalRowIterator {
     iterator: LocalRowIterator,
+    /// The converters of the fields of user-defined types of the rows, once the schema of the
+    /// result is known: with the first row.
+    converters: Option<Option<FieldConverters>>,
 }
 
 impl PyLocalRowIterator {
     pub fn new(iterator: LocalRowIterator) -> Self {
-        PyLocalRowIterator { iterator }
+        PyLocalRowIterator {
+            iterator,
+            converters: None,
+        }
     }
 }
 
@@ -2774,15 +2821,19 @@ impl PyLocalRowIterator {
     /// Fetch the next row from the iterator.
     ///
     /// Releases the GIL during the blocking fetch to allow other threads to run.
-    fn __next__(&mut self, py: Python<'_>) -> Option<PyRow> {
-        loop {
-            // Release the GIL while fetching from the Rust iterator (which may block on network I/O).
-            let next_result = py.detach(|| self.iterator.next());
-            match next_result {
-                Some(Ok(row)) => return Some(PyRow::new(row)),
-                Some(Err(_e)) => return None, // On error, stop iterating
-                None => return None,
+    fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<PyRow>> {
+        // Release the GIL while fetching from the Rust iterator (which may block on network I/O).
+        match py.detach(|| self.iterator.next()) {
+            Some(Ok(row)) => {
+                if self.converters.is_none() {
+                    let schema = self.iterator.schema();
+                    self.converters = Some(udt_field_converters(py, schema.as_ref())?);
+                }
+                let converters = self.converters.clone().flatten();
+                Ok(Some(PyRow::with_converters(row, converters)))
             }
+            Some(Err(_e)) => Ok(None), // On error, stop iterating
+            None => Ok(None),
         }
     }
 }
