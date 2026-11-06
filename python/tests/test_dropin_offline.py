@@ -558,6 +558,25 @@ def test_pandas_udf():
     assert callable(p) or p is not None
 
 
+def test_add_artifacts_raises_for_paths_that_pyspark_does_not_upload(tmp_path):
+    from pyspark.errors import PySparkRuntimeError, PySparkValueError
+
+    spark = _offline_session()
+    note = tmp_path / "note.txt"
+    note.write_text("x")
+    # Raised before any upload, as in PySpark.
+    for path, operation in [(str(note), f"{note} file format"), ("s3://b/x.jar", "s3 scheme")]:
+        with pytest.raises(PySparkRuntimeError) as error:
+            spark.addArtifacts(path)
+        assert error.value.getCondition() == "UNSUPPORTED_OPERATION"
+        assert error.value.getMessageParameters() == {"operation": operation}
+    with pytest.raises(PySparkValueError) as error:
+        spark.addArtifacts(str(note), pyfile=True, file=True)
+    assert error.value.getCondition() == "INVALID_MULTIPLE_ARGUMENT_CONDITIONS"
+    assert error.value.getMessageParameters() == {
+        "arg_names": "'pyfile', 'archive' and/or 'file'", "condition": "True together"}
+
+
 def test_dropin_module_imports():
     # The thin re-export shims import cleanly.
     import pyspark.sql.dataframe  # noqa: F401
