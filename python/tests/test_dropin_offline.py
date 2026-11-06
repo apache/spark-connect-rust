@@ -771,6 +771,50 @@ def test_udfs_are_created_as_pyspark(mock_connect):
     assert service.read_confs == [arrow_conf] * 4
 
 
+def test_udf_and_udtf_calls_pass_named_arguments_as_pyspark(mock_connect):
+    # As PySpark's UserDefinedFunction and UserDefinedTableFunction: each keyword argument
+    # of a call is a NamedArgumentExpression, after the positional arguments, and a bare
+    # string is a column name.
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+
+    @F.udf("int")
+    def plus(a, b):
+        return a + 10 * b
+
+    assert repr(plus(a=F.lit(1), b=F.col("x"))) == "Column<'plus(a => 1, b => x)'>"
+    called = plus(F.lit(1), b="x")
+    assert repr(called) == "Column<'plus(1, b => x)'>"
+
+    def arguments(function):
+        # Expression.literal=1, unresolved_attribute=2 (unparsed_identifier=1),
+        # named_argument_expression=17 (key=1, value=2).
+        first, second = (parse_message(a) for a in function[3])
+        named = parse_message(second[17][0])
+        return first, named[1][0].decode(), parse_message(named[2][0])
+
+    # ExecutePlanRequest.plan=3, Plan.root=1, Relation.project=3, Project.expressions=3;
+    # Expression.common_inline_user_defined_function=15, whose arguments=3.
+    spark.range(1).select(called).collect()
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+    expression = parse_message(parse_message(parse_message(plan)[3][0])[3][0])
+    first, key, value = arguments(parse_message(expression[15][0]))
+    assert set(first) == {1} and key == "b"
+    assert parse_message(value[2][0])[1] == [b"x"]
+
+    @F.udtf(returnType="a int, b int")
+    class Two:
+        def eval(self, a, b):
+            yield a, b
+
+    # Relation.common_inline_user_defined_table_function=38, whose arguments=3.
+    Two("x", b=F.lit(2)).collect()
+    relation = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+    first, key, value = arguments(parse_message(parse_message(relation)[38][0]))
+    assert parse_message(first[2][0])[1] == [b"x"] and key == "b" and set(value) == {1}
+
+
 def test_udtfs_are_created_as_pyspark(mock_connect):
     # As PySpark's _create_py_udtf and _create_pyarrow_udtf: a UDTF is not deterministic
     # unless asDeterministic() marks it so, in place; arrow_udtf() makes a PyArrow-native

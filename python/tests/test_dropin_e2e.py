@@ -66,6 +66,36 @@ def test_to_local_iterator_raises_the_error_of_the_execution_as_pyspark(session,
     assert list(rows) == []
 
 
+def test_udf_and_udtf_calls_take_named_arguments_as_pyspark(session):
+    # As PySpark's: the keyword arguments of a UDF or UDTF call are its named arguments, and
+    # a bare string is a column name.
+    import pandas as pd
+
+    @F.udf("int")
+    def plus(a, b):
+        return a + 10 * b
+
+    @F.pandas_udf("long")
+    def pandas_plus(a: pd.Series, b: pd.Series) -> pd.Series:
+        return a + 10 * b
+
+    df = session.range(1)
+    for fn in (plus, pandas_plus):
+        assert df.select(fn(b=F.lit(2), a=F.lit(1)).alias("r")).collect() == [Row(r=21)]
+        assert df.select(fn(F.lit(1), b=F.lit(2)).alias("r")).collect() == [Row(r=21)]
+
+    @F.udtf(returnType="a int, b int")
+    class Two:
+        def eval(self, a, b):
+            yield a, b
+
+    assert Two(b=F.lit(2), a=F.lit(1)).collect() == [Row(a=1, b=2)]
+    assert Two(F.lit(1), b=F.lit(2)).collect() == [Row(a=1, b=2)]
+    with pytest.raises(AnalysisException) as error:
+        Two("x", F.lit(2)).collect()
+    assert error.value.getCondition() == "UNRESOLVED_COLUMN.WITHOUT_SUGGESTION"
+
+
 def test_conf_get_with_a_none_default(session):
     key = "spark.connect.rust.test.unset"
     assert session.conf.get(key, None) is None

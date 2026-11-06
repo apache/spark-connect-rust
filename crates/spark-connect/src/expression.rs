@@ -90,6 +90,29 @@ pub enum ExpressionNode {
     UnresolvedNamedLambdaVariable(UnresolvedNamedLambdaVariable),
     /// `pyspark.sql.connect.expressions.CommonInlineUserDefinedFunction` - a UDF expression.
     CommonInlineUserDefinedFunction(Box<CommonInlineUserDefinedFunctionExpression>),
+    /// `pyspark.sql.connect.expressions.NamedArgumentExpression` - a named argument of a
+    /// function call, such as `a => 1` of a Python UDF called with `a=lit(1)`.
+    NamedArgument(Box<NamedArgument>),
+}
+
+/// A named argument of a function call. Mirrors
+/// `pyspark.sql.connect.expressions.NamedArgumentExpression`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NamedArgument {
+    /// The name of the argument.
+    pub key: String,
+    /// The value of the argument.
+    pub value: Expression,
+}
+
+impl NamedArgument {
+    /// The named argument `key => value`.
+    pub fn new(key: impl Into<String>, value: Expression) -> Self {
+        NamedArgument {
+            key: key.into(),
+            value,
+        }
+    }
 }
 
 impl Expression {
@@ -194,6 +217,8 @@ impl Expression {
                 let args: Vec<String> = udf.arguments.iter().map(Expression::render).collect();
                 format!("{}({})", udf.function_name, args.join(", "))
             }
+            // As `NamedArgumentExpression.__repr__`.
+            ExpressionNode::NamedArgument(arg) => format!("{} => {}", arg.key, arg.value.render()),
         }
     }
 
@@ -258,6 +283,15 @@ impl Expression {
                 );
                 expr
             }
+            ExpressionNode::NamedArgument(arg) => proto::Expression {
+                expr_type: Some(proto::expression::ExprType::NamedArgumentExpression(
+                    Box::new(proto::NamedArgumentExpression {
+                        key: arg.key.clone(),
+                        value: Some(Box::new(arg.value.to_proto())),
+                    }),
+                )),
+                ..Default::default()
+            },
         }
     }
 }
@@ -1750,6 +1784,22 @@ mod tests {
             ],
         );
         assert_eq!(or_func.render(), "or(True, False)");
+    }
+
+    #[test]
+    fn named_argument_renders_and_serializes_as_pyspark() {
+        // As NamedArgumentExpression: `key => value`, sent as a named_argument_expression.
+        let value = Expression::column("x");
+        let arg: Expression =
+            ExpressionNode::NamedArgument(Box::new(NamedArgument::new("b", value.clone()))).into();
+        assert_eq!(arg.render(), "b => x");
+        let Some(proto::expression::ExprType::NamedArgumentExpression(named)) =
+            arg.to_proto().expr_type
+        else {
+            panic!("expected a NamedArgumentExpression");
+        };
+        assert_eq!(named.key, "b");
+        assert_eq!(named.value.map(|v| *v), Some(value.to_proto()));
     }
 
     #[test]
