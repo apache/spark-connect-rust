@@ -97,6 +97,15 @@ pub enum LogicalPlan {
     },
     /// Tail: `df.tail(n)` - returns last n rows.
     Tail { input: Arc<LogicalPlan>, limit: i32 },
+    /// ShowString: the table of `df.show(...)`, which the server formats as one string:
+    /// `num_rows` rows, values truncated to `truncate` characters (0 for none), vertical
+    /// with a line per value.
+    ShowString {
+        input: Arc<LogicalPlan>,
+        num_rows: i32,
+        truncate: i32,
+        vertical: bool,
+    },
     /// Deduplicate: `df.distinct()` or `df.dropDuplicates()`.
     Deduplicate {
         input: Arc<LogicalPlan>,
@@ -342,7 +351,7 @@ pub enum LogicalPlan {
         is_barrier: bool,
     },
     /// GroupMap: `GroupedData.applyInPandas` / `applyInArrow`, and the stateful
-    /// variants `applyInPandasWithState` / `transformWithState[InPandas]`.
+    /// `transformWithState[InPandas]`.
     GroupMap {
         input: Arc<LogicalPlan>,
         grouping_expressions: Vec<Expression>,
@@ -356,6 +365,17 @@ pub enum LogicalPlan {
         timeout_conf: Option<String>,
         state_schema: Option<DataType>,
         transform_with_state_info: Option<TransformWithStateInfo>,
+    },
+    /// ApplyInPandasWithState: `GroupedData.applyInPandasWithState`. The schemas are sent
+    /// as JSON.
+    ApplyInPandasWithState {
+        input: Arc<LogicalPlan>,
+        grouping_expressions: Vec<Expression>,
+        func: CommonInlineUserDefinedFunctionExpression,
+        output_schema: DataType,
+        state_schema: DataType,
+        output_mode: String,
+        timeout_conf: String,
     },
     /// CoGroupMap: `GroupedData.cogroup(...).applyInPandas` / `applyInArrow`.
     CoGroupMap {
@@ -693,6 +713,21 @@ impl LogicalPlan {
                 tail.input = Some(Box::new(relation_of(input, plan_ids)));
                 tail.limit = *limit;
                 relation.rel_type = Some(proto::relation::RelType::Tail(Box::new(tail)));
+            }
+
+            LogicalPlan::ShowString {
+                input,
+                num_rows,
+                truncate,
+                vertical,
+            } => {
+                let show = proto::ShowString {
+                    input: Some(Box::new(relation_of(input, plan_ids))),
+                    num_rows: *num_rows,
+                    truncate: *truncate,
+                    vertical: *vertical,
+                };
+                relation.rel_type = Some(proto::relation::RelType::ShowString(Box::new(show)));
             }
 
             LogicalPlan::Deduplicate {
@@ -1356,6 +1391,31 @@ impl LogicalPlan {
                             output_schema: t.output_schema.as_ref().map(|d| d.to_proto()),
                         });
                 relation.rel_type = Some(proto::relation::RelType::GroupMap(Box::new(gm)));
+            }
+            LogicalPlan::ApplyInPandasWithState {
+                input,
+                grouping_expressions,
+                func,
+                output_schema,
+                state_schema,
+                output_mode,
+                timeout_conf,
+            } => {
+                let apply = proto::ApplyInPandasWithState {
+                    input: Some(Box::new(relation_of(input, plan_ids))),
+                    grouping_expressions: grouping_expressions
+                        .iter()
+                        .map(|e| e.to_proto())
+                        .collect(),
+                    func: Some(func.to_proto()),
+                    output_schema: output_schema.json(),
+                    state_schema: state_schema.json(),
+                    output_mode: output_mode.clone(),
+                    timeout_conf: timeout_conf.clone(),
+                };
+                relation.rel_type = Some(proto::relation::RelType::ApplyInPandasWithState(
+                    Box::new(apply),
+                ));
             }
             LogicalPlan::CoGroupMap {
                 input,

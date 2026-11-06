@@ -1030,9 +1030,17 @@ fn artifact_and_tag_surface() {
     // A larger file to exercise the multi-chunk path (well over one gRPC chunk).
     std::fs::write(&f2, vec![b'x'; 512 * 1024]).unwrap();
 
-    s.add_artifact(f1.to_str().unwrap()).expect("add_artifact");
-    s.add_artifacts(&[f1.to_str().unwrap(), f2.to_str().unwrap()])
-        .expect("add_artifacts");
+    // As PySpark, a file that is neither a jar nor a class needs the `file` flag.
+    assert!(s.add_artifact(f1.to_str().unwrap()).is_err());
+    s.add_artifacts_with(&[f1.to_str().unwrap()], false, false, true)
+        .expect("add_artifact");
+    s.add_artifacts_with(
+        &[f1.to_str().unwrap(), f2.to_str().unwrap()],
+        false,
+        false,
+        true,
+    )
+    .expect("add_artifacts");
     // copyFromLocalToFs: exercises the client-side named-artifact upload
     // (forward_to_fs/...). A single-node server rejects a *local* destination, but the
     // client upload code we're covering runs before that, so tolerate the server error.
