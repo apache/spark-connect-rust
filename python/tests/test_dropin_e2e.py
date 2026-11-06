@@ -460,6 +460,13 @@ def test_collected_rows_behave_as_pyspark_rows(session):
     assert repr(pickle.loads(pickle.dumps(duplicate))) == "Row(a=1, a=2)"
 
 
+def test_column_attributes_select_struct_fields_and_slices_substrings(session):
+    df = session.sql("SELECT named_struct('x', 1, 'y', named_struct('z', 'q')) AS s, 'abcdef' AS t")
+    out = df.select(df.s.x, df.s.y.z, F.col("s").x.alias("x2"), df.t[2:3], F.col("t")[F.lit(1):F.lit(2)])
+    assert out.columns == ["s.x", "s.y.z", "x2", "substr(t, 2, 3)", "substr(t, 1, 2)"]
+    assert tuple(out.first()) == (1, "q", 1, "bcd", "ab")
+
+
 def test_sql_runs_statements_eagerly(session):
     # sql() sends the statement at once: a command takes effect without an action, and the
     # DataFrame of its result is the local relation the server returned.
