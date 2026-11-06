@@ -170,6 +170,28 @@ def test_arrow_udtf_takes_and_returns_arrow_data_as_pyspark(session):
     assert PlusOne(F.lit(1)).collect() == [Row(x=2, kind="Int32Array")]
 
 
+def test_udfs_are_arrow_optimized_or_of_their_type_hints_as_pyspark(session):
+    # As PySpark's udf(): Arrow-optimized as the server enables by default, so Arrow
+    # converts a result to the return type; and a function with pandas type hints is a
+    # pandas UDF.
+    import pandas as pd
+
+    df = session.range(2)
+    assert df.select(F.udf(lambda x: str(x), "int")("id").alias("r")).collect() == [
+        Row(r=0), Row(r=1)
+    ]
+    assert df.select(F.udf(lambda x: 1.5, "int")("id").alias("r")).collect() == [
+        Row(r=1), Row(r=1)
+    ]
+
+    def plus_one(s: pd.Series) -> pd.Series:
+        return s + 1
+
+    hinted = F.udf(plus_one, "long")
+    assert hinted.evalType == 200
+    assert df.select(hinted("id").alias("r")).collect() == [Row(r=1), Row(r=2)]
+
+
 def test_map_functions_take_a_ddl_schema(session):
     df = session.createDataFrame([(1, 1.0), (1, 2.0), (2, 3.0)], ["k", "v"])
     schema = "k long, v double"

@@ -164,7 +164,10 @@ def serve(connection):
         error_details = b""
         fetched_error_ids = []
         confs = {}
-        default_confs = {"spark.sql.execution.pythonUDTF.arrow.enabled": "true"}
+        default_confs = {
+            "spark.sql.execution.pythonUDF.arrow.enabled": "true",
+            "spark.sql.execution.pythonUDTF.arrow.enabled": "true",
+        }
         read_confs = []
 
         def execute(self, request, context):
