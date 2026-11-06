@@ -397,6 +397,44 @@ def test_server_errors_carry_their_condition_and_details(session):
     assert "\n\nJVM stacktrace:\norg.apache.spark.SparkArithmeticException" in str(e)
 
 
+def test_apply_in_pandas_with_state_runs_as_pyspark(session, tmp_path):
+    import pandas as pd
+
+    def count(key, frames, state):
+        total = sum(len(frame) for frame in frames)
+        state.update((total,))
+        yield pd.DataFrame({"k": [key[0]], "c": [total]})
+
+    output = StructType([StructField("k", LongType()), StructField("c", LongType())])
+    state = StructType([StructField("c", LongType())])
+    df = session.createDataFrame([(1,), (1,), (2,)], "k long")
+    # The server takes the function in a streaming query only, as with PySpark.
+    with pytest.raises(Exception, match="applyInPandasWithState is unsupported in batch query"):
+        df.groupBy("k").applyInPandasWithState(count, output, state, "append", "NoTimeout").collect()
+
+    # A state store per shuffle partition; the default 200 take half a minute.
+    session.conf.set("spark.sql.shuffle.partitions", "2")
+    try:
+        source = str(tmp_path / "source")
+        df.write.parquet(source)
+        query = (
+            session.readStream.schema("k long").parquet(source).groupBy("k")
+            .applyInPandasWithState(count, output, state, "update", "NoTimeout")
+            .writeStream.format("memory").queryName("apply_in_pandas_with_state")
+            .outputMode("update").option("checkpointLocation", str(tmp_path / "checkpoint"))
+            .trigger(availableNow=True).start()
+        )
+        try:
+            query.awaitTermination(120)
+            assert query.exception() is None
+            rows = session.table("apply_in_pandas_with_state").collect()
+            assert sorted(tuple(r) for r in rows) == [(1, 2), (2, 1)]
+        finally:
+            query.stop()
+    finally:
+        session.conf.unset("spark.sql.shuffle.partitions")
+
+
 def test_collected_rows_behave_as_pyspark_rows(session):
     import pickle
 
