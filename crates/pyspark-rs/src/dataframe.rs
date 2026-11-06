@@ -734,18 +734,21 @@ impl PyDataFrame {
         PyColumn::new(self.dataframe.col_regex(colName))
     }
 
-    /// Basic statistics for the given columns (count/mean/stddev/min/max).
+    /// Basic statistics for the given columns (count/mean/stddev/min/max), of column names or
+    /// a list of them, as PySpark's `DataFrame.describe`.
     #[pyo3(signature = (*cols))]
-    fn describe(&self, _py: Python<'_>, cols: Vec<String>) -> PyDataFrame {
+    fn describe(&self, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        let cols = crate::stat_arguments::describe_columns(&cols)?;
         let refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
-        PyDataFrame::new(self.dataframe.describe(refs))
+        Ok(PyDataFrame::new(self.dataframe.describe(refs)))
     }
 
-    /// Summary statistics (percentiles etc.).
+    /// Summary statistics (percentiles etc.), of strings, as PySpark's `DataFrame.summary`.
     #[pyo3(signature = (*statistics))]
-    fn summary(&self, _py: Python<'_>, statistics: Vec<String>) -> PyDataFrame {
+    fn summary(&self, statistics: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        let statistics = crate::stat_arguments::summary_statistics(&statistics)?;
         let refs: Vec<&str> = statistics.iter().map(|s| s.as_str()).collect();
-        PyDataFrame::new(self.dataframe.summary(refs))
+        Ok(PyDataFrame::new(self.dataframe.summary(refs)))
     }
 
     /// Persist with the default MEMORY_AND_DISK storage level.
@@ -833,37 +836,29 @@ impl PyDataFrame {
             .to_pyerr()
     }
 
-    /// Drop rows containing nulls.
-    #[pyo3(signature = (how="any", thresh=None, subset=None))]
-    fn dropna(&self, how: &str, thresh: Option<i32>, subset: Option<Vec<String>>) -> PyDataFrame {
-        let owned = subset;
-        let refs = owned
-            .as_ref()
-            .map(|v| v.iter().map(|s| s.as_str()).collect());
-        PyDataFrame::new(self.dataframe.dropna(Some(how), thresh, refs))
+    /// Drop rows containing nulls, as PySpark's `DataFrame.dropna`.
+    #[pyo3(
+        signature = (how=None, thresh=None, subset=None),
+        text_signature = "($self, how='any', thresh=None, subset=None)"
+    )]
+    fn dropna(
+        &self,
+        how: Option<&Bound<'_, PyAny>>,
+        thresh: Option<&Bound<'_, PyAny>>,
+        subset: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        crate::stat_arguments::dropna(&self.dataframe, how, thresh, subset)
     }
 
-    /// Fill null values. `value` may be a scalar (optionally over `subset`) or a
-    /// {column: value} mapping, mirroring `pyspark.sql.DataFrame.fillna`.
+    /// Fill null values, as PySpark's `DataFrame.fillna`: `value` is a scalar, over
+    /// `subset`, or a {column: value} mapping.
     #[pyo3(signature = (value, subset=None))]
     fn fillna(
         &self,
         value: &Bound<'_, PyAny>,
         subset: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        if let Ok(d) = value.cast::<PyDict>() {
-            let mut pairs = Vec::with_capacity(d.len());
-            for (k, v) in d.iter() {
-                pairs.push((k.extract::<String>()?, crate::session::py_to_value(&v)?));
-            }
-            return Ok(PyDataFrame::new(self.dataframe.fillna_map(pairs)));
-        }
-        let val = crate::session::py_to_value(value)?;
-        let owned = to_subset(subset)?;
-        let refs: Option<Vec<&str>> = owned
-            .as_ref()
-            .map(|v| v.iter().map(|s| s.as_str()).collect());
-        Ok(PyDataFrame::new(self.dataframe.fillna_value(val, refs)))
+        crate::stat_arguments::fillna(&self.dataframe, value, subset)
     }
 
     /// Statistical functions (`df.stat`).
@@ -875,42 +870,37 @@ impl PyDataFrame {
 
     /// `df.crosstab(col1, col2)` - pyspark exposes it on DataFrame as well as
     /// `df.stat.crosstab`.
-    fn crosstab(&self, col1: &str, col2: &str) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.stat().crosstab(col1, col2))
+    fn crosstab(&self, col1: &Bound<'_, PyAny>, col2: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        crate::stat_arguments::crosstab(&self.dataframe.stat(), col1, col2)
     }
 
-    /// `df.freqItems(cols, support=0.01)` (also on df.stat).
-    #[pyo3(name = "freqItems", signature = (cols, support=0.01))]
-    fn freq_items(&self, cols: Vec<String>, support: f64) -> PyDataFrame {
-        let refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
-        PyDataFrame::new(self.dataframe.stat().freq_items(refs, support))
+    /// `df.freqItems(cols, support=None)` (also on df.stat).
+    #[pyo3(name = "freqItems", signature = (cols, support=None))]
+    fn freq_items(
+        &self,
+        cols: &Bound<'_, PyAny>,
+        support: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        crate::stat_arguments::freq_items(&self.dataframe.stat(), cols, support)
     }
 
-    /// `df.approxQuantile(col, probabilities, relativeError)` -> list[float]
-    /// (also on df.stat). The server returns one row whose column is the
-    /// array(-of-arrays) of quantiles; for a single column we return the inner list.
+    /// `df.approxQuantile(col, probabilities, relativeError)` (also on df.stat): the
+    /// quantiles of a column, or a list of them of each of a list or tuple of columns.
     #[pyo3(name = "approxQuantile")]
     fn approx_quantile(
         &self,
         py: Python<'_>,
-        col: &str,
-        probabilities: Vec<f64>,
-        relativeError: f64,
-    ) -> PyResult<Vec<f64>> {
-        use spark_connect::row::Value;
-        let df = self
-            .dataframe
-            .stat()
-            .approx_quantile(vec![col], probabilities, relativeError);
-        let rows = py.detach(|| df.collect()).to_pyerr()?;
-        let quantiles = match rows.first().and_then(|r| r.get(0)) {
-            Some(Value::List(outer)) => match outer.first() {
-                Some(Value::List(inner)) => inner.iter().filter_map(|v| v.as_f64()).collect(),
-                _ => outer.iter().filter_map(|v| v.as_f64()).collect(),
-            },
-            _ => Vec::new(),
-        };
-        Ok(quantiles)
+        col: &Bound<'_, PyAny>,
+        probabilities: &Bound<'_, PyAny>,
+        relativeError: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        crate::stat_arguments::approx_quantile(
+            py,
+            &self.dataframe.stat(),
+            col,
+            probabilities,
+            relativeError,
+        )
     }
 
     /// Observe named metrics on the stream/df. `observation` is an Observation
@@ -986,18 +976,26 @@ impl PyDataFrame {
         ))
     }
 
-    /// Pearson correlation (or `method`) between two columns.
+    /// Pearson correlation between two columns; PySpark's `method` is only "pearson".
     #[pyo3(signature = (col1, col2, method=None))]
-    #[allow(unused_variables)]
-    fn corr(&self, py: Python<'_>, col1: &str, col2: &str, method: Option<&str>) -> PyResult<f64> {
-        py.detach(|| self.dataframe.stat().corr(col1, col2))
-            .to_pyerr()
+    fn corr(
+        &self,
+        py: Python<'_>,
+        col1: &Bound<'_, PyAny>,
+        col2: &Bound<'_, PyAny>,
+        method: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<f64> {
+        crate::stat_arguments::corr(py, &self.dataframe.stat(), col1, col2, method)
     }
 
     /// Sample covariance between two columns.
-    fn cov(&self, py: Python<'_>, col1: &str, col2: &str) -> PyResult<f64> {
-        py.detach(|| self.dataframe.stat().cov(col1, col2))
-            .to_pyerr()
+    fn cov(
+        &self,
+        py: Python<'_>,
+        col1: &Bound<'_, PyAny>,
+        col2: &Bound<'_, PyAny>,
+    ) -> PyResult<f64> {
+        crate::stat_arguments::cov(py, &self.dataframe.stat(), col1, col2)
     }
 
     /// Stratified sample without replacement per key.
@@ -1584,7 +1582,6 @@ impl PyDataFrame {
     #[getter]
     fn na(&self) -> PyDataFrameNaFunctions {
         PyDataFrameNaFunctions {
-            inner: self.dataframe.na(),
             df: self.dataframe.clone(),
         }
     }
@@ -1774,47 +1771,34 @@ impl PyDataFrame {
 /// Python wrapper for `DataFrameNaFunctions` (`df.na`).
 #[pyclass(name = "DataFrameNaFunctions", module = "pyspark.sql.dataframe")]
 pub struct PyDataFrameNaFunctions {
-    inner: spark_connect::group::NaFunctions,
     df: spark_connect::dataframe::DataFrame,
 }
 
 #[pymethods]
 impl PyDataFrameNaFunctions {
-    #[pyo3(signature = (how=None, thresh=None, subset=None))]
+    /// Drop rows containing nulls, as PySpark's `DataFrameNaFunctions.drop`, which is
+    /// `DataFrame.dropna`.
+    #[pyo3(
+        signature = (how=None, thresh=None, subset=None),
+        text_signature = "($self, how='any', thresh=None, subset=None)"
+    )]
     fn drop(
         &self,
-        how: Option<String>,
-        thresh: Option<i32>,
-        subset: Option<Vec<String>>,
-    ) -> PyDataFrame {
-        let subset_refs: Option<Vec<&str>> = subset
-            .as_ref()
-            .map(|v| v.iter().map(String::as_str).collect());
-        PyDataFrame::new(self.inner.drop(how.as_deref(), thresh, subset_refs))
+        how: Option<&Bound<'_, PyAny>>,
+        thresh: Option<&Bound<'_, PyAny>>,
+        subset: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        crate::stat_arguments::dropna(&self.df, how, thresh, subset)
     }
 
-    /// Fill nulls; `value` may be a scalar (float / int / str / bool, optionally over
-    /// `subset`) or a {column: value} mapping. Alias of `DataFrame.fillna`. PySpark fills
-    /// only columns whose type matches the value's type (server-side).
+    /// Fill nulls, as PySpark's `DataFrameNaFunctions.fill`, which is `DataFrame.fillna`.
     #[pyo3(signature = (value, subset=None))]
     fn fill(
         &self,
         value: &Bound<'_, PyAny>,
         subset: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        if let Ok(d) = value.cast::<PyDict>() {
-            let mut pairs = Vec::with_capacity(d.len());
-            for (k, v) in d.iter() {
-                pairs.push((k.extract::<String>()?, crate::session::py_to_value(&v)?));
-            }
-            return Ok(PyDataFrame::new(self.df.fillna_map(pairs)));
-        }
-        let val = crate::session::py_to_value(value)?;
-        let owned = to_subset(subset)?;
-        let refs: Option<Vec<&str>> = owned
-            .as_ref()
-            .map(|v| v.iter().map(|s| s.as_str()).collect());
-        Ok(PyDataFrame::new(self.df.fillna_value(val, refs)))
+        crate::stat_arguments::fillna(&self.df, value, subset)
     }
 
     /// Replace values, as PySpark's `DataFrameNaFunctions.replace`, which is
@@ -1827,21 +1811,6 @@ impl PyDataFrameNaFunctions {
         subset: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         replace_values(&self.df, to_replace, value, subset)
-    }
-}
-
-/// Coerce a `subset` argument (a str column name, a list of names, or None) to
-/// an owned Vec<String>, mirroring reference pyspark which accepts either.
-fn to_subset(subset: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Vec<String>>> {
-    match subset {
-        None => Ok(None),
-        Some(s) => {
-            if let Ok(name) = s.extract::<String>() {
-                Ok(Some(vec![name]))
-            } else {
-                Ok(Some(s.extract::<Vec<String>>()?))
-            }
-        }
     }
 }
 

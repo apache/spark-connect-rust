@@ -4,7 +4,6 @@ use pyo3::prelude::*;
 use spark_connect::group::StatFunctions;
 
 use crate::dataframe::PyDataFrame;
-use crate::errors::ResultExt;
 
 /// Python wrapper for DataFrame statistical functions.
 #[pyclass(name = "DataFrameStatFunctions", module = "pyspark.sql.dataframe")]
@@ -20,41 +19,46 @@ impl PyStatFunctions {
 
 #[pymethods]
 impl PyStatFunctions {
-    /// Pearson correlation between two numeric columns.
+    /// Pearson correlation between two numeric columns, as PySpark's, whose `method` is only
+    /// "pearson".
     ///
-    /// `corr`/`cov` execute a plan (server round-trip via `scalar()`), so release
+    /// `corr`/`cov` execute a plan (server round-trip via `scalar()`), so they release
     /// the GIL across the call - otherwise a Python thread is blocked for the whole
-    /// RPC. (`crosstab`/`freq_items`/`approx_quantile` return lazy DataFrames and do
-    /// no I/O here, so they need no detach.)
-    /// Pearson correlation. `method` is accepted for signature parity with reference
-    /// pyspark, which currently supports only "pearson".
+    /// RPC.
     #[pyo3(signature = (col1, col2, method=None))]
-    fn corr(&self, py: Python<'_>, col1: &str, col2: &str, method: Option<&str>) -> PyResult<f64> {
-        if let Some(m) = method {
-            if m != "pearson" {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Currently only the calculation of the Pearson Correlation coefficient is supported, got {m}"
-                )));
-            }
-        }
-        py.detach(|| self.stat.corr(col1, col2)).to_pyerr()
+    fn corr(
+        &self,
+        py: Python<'_>,
+        col1: &Bound<'_, PyAny>,
+        col2: &Bound<'_, PyAny>,
+        method: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<f64> {
+        crate::stat_arguments::corr(py, &self.stat, col1, col2, method)
     }
 
     /// Sample covariance between two numeric columns.
-    fn cov(&self, py: Python<'_>, col1: &str, col2: &str) -> PyResult<f64> {
-        py.detach(|| self.stat.cov(col1, col2)).to_pyerr()
+    fn cov(
+        &self,
+        py: Python<'_>,
+        col1: &Bound<'_, PyAny>,
+        col2: &Bound<'_, PyAny>,
+    ) -> PyResult<f64> {
+        crate::stat_arguments::cov(py, &self.stat, col1, col2)
     }
 
     /// Contingency table (cross-tabulation) of two columns.
-    fn crosstab(&self, col1: &str, col2: &str) -> PyDataFrame {
-        PyDataFrame::new(self.stat.crosstab(col1, col2))
+    fn crosstab(&self, col1: &Bound<'_, PyAny>, col2: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        crate::stat_arguments::crosstab(&self.stat, col1, col2)
     }
 
     /// Frequent items for the given columns.
-    #[pyo3(name = "freqItems", signature = (cols, support=0.01))]
-    fn freq_items(&self, cols: Vec<String>, support: f64) -> PyDataFrame {
-        let refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
-        PyDataFrame::new(self.stat.freq_items(refs, support))
+    #[pyo3(name = "freqItems", signature = (cols, support=None))]
+    fn freq_items(
+        &self,
+        cols: &Bound<'_, PyAny>,
+        support: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        crate::stat_arguments::freq_items(&self.stat, cols, support)
     }
 
     /// Stratified sample without replacement. Mirrors `DataFrameStatFunctions.sampleBy(
@@ -70,36 +74,17 @@ impl PyStatFunctions {
         Ok(PyDataFrame::new(self.stat.sample_by(col, fractions, seed)))
     }
 
-    /// Approximate quantiles of a column at the given probabilities.
-    ///
-    /// Mirrors reference `DataFrameStatFunctions.approxQuantile(col, probabilities,
-    /// relativeError)`, which returns a `list[float]` (the quantiles) - not a
-    /// DataFrame. The server returns a single row whose one column is the
-    /// `array<double>` of quantiles; collect it (releasing the GIL for the RPC) and
-    /// return that list.
+    /// Approximate quantiles of a column, or of each of a list or tuple of columns, at the
+    /// given probabilities, as PySpark's `DataFrameStatFunctions.approxQuantile`.
     #[pyo3(name = "approxQuantile")]
     fn approx_quantile(
         &self,
         py: Python<'_>,
-        col: &str,
-        probabilities: Vec<f64>,
-        relativeError: f64,
-    ) -> PyResult<Vec<f64>> {
-        use spark_connect::row::Value;
-        let df = self
-            .stat
-            .approx_quantile(vec![col], probabilities, relativeError);
-        let rows = py.detach(|| df.collect()).to_pyerr()?;
-        // The server returns a single row, col 0 = array-of-arrays (one inner array of
-        // quantiles per input column); for a single column we return that inner array.
-        let quantiles = match rows.first().and_then(|r| r.get(0)) {
-            Some(Value::List(outer)) => match outer.first() {
-                Some(Value::List(inner)) => inner.iter().filter_map(|v| v.as_f64()).collect(),
-                _ => outer.iter().filter_map(|v| v.as_f64()).collect(),
-            },
-            _ => Vec::new(),
-        };
-        Ok(quantiles)
+        col: &Bound<'_, PyAny>,
+        probabilities: &Bound<'_, PyAny>,
+        relativeError: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        crate::stat_arguments::approx_quantile(py, &self.stat, col, probabilities, relativeError)
     }
 }
 
