@@ -557,6 +557,23 @@ def test_column_attributes_select_struct_fields_and_slices_substrings(session):
     assert tuple(out.first()) == (1, "q", 1, "bcd", "ab")
 
 
+def test_collected_rows_keep_their_values_as_pyspark(session):
+    import pickle
+
+    # A row holds the same values for as long as it lives, as a tuple does, so it equals
+    # itself with a NaN or a VARIANT value, and keeps its hash.
+    row = session.sql("SELECT double('NaN') x, 1 y").first()
+    assert row == row and hash(row) == hash(row)
+    assert row[0] is row[0] and row.x is row[0]
+    variant = session.sql("""SELECT parse_json('{"a": 1}') v""").first()
+    assert variant == variant and hash(variant) == hash(variant)
+    nested = session.sql("SELECT named_struct('a', double('NaN')) s").first()
+    assert nested == nested and nested.s is nested.s
+    # Rows of VARIANT values pickle, as in PySpark.
+    rows = pickle.loads(pickle.dumps(session.sql("SELECT parse_json('1') v, 2 n").collect()))
+    assert (rows[0].v.toJson(), rows[0].n) == ("1", 2)
+
+
 def test_sql_runs_statements_eagerly(session):
     # sql() sends the statement at once: a command takes effect without an action, and the
     # DataFrame of its result is the local relation the server returned.
