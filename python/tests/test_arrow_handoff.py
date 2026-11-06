@@ -424,7 +424,8 @@ def _arrow_input_service(
     }
     config.update(overrides)
     state = {"cache": {}, "uploads": 0, "relations": [], "message_sizes": [],
-             "config_requests": [], "upload_contexts": [], "status_contexts": []}
+             "config": config, "config_requests": [], "input_tables": [],
+             "upload_contexts": [], "status_contexts": []}
     server_id = "00000000-0000-0000-0000-000000000001"
 
     def attribution(request, context):
@@ -444,10 +445,13 @@ def _arrow_input_service(
     def configure(raw, context):
         request = protocol("ConfigRequest").FromString(raw)
         operation = request.operation.WhichOneof("op_type")
-        keys = getattr(request.operation, operation).keys
-        state["config_requests"].append((operation, list(keys)))
+        keys = list(getattr(request.operation, operation).keys)
+        state["config_requests"].append((operation, keys))
+        if error := state.pop("config_error", None):
+            context.abort(error, "configuration read failed")
+        # Deliberately reverse responses and omit missing keys to test key mapping.
         return protocol("ConfigResponse", session_id=request.session_id,
-                        pairs=[dict(key=k, value=config[k]) for k in keys
+                        pairs=[dict(key=k, value=config[k]) for k in reversed(keys)
                                if config.get(k) is not None]
                         ).SerializeToString()
 
@@ -525,6 +529,7 @@ def _arrow_input_service(
             )
         rows, first, last = 0, None, None
         state["arrow_schemas"], state["batch_rows"] = [], []
+        input_batches = []
         for payload in payloads:
             reader = pa.ipc.open_stream(payload)
             state["arrow_schemas"].append(reader.schema)
@@ -532,11 +537,14 @@ def _arrow_input_service(
             state["batch_rows"].append(stream_rows)
             for batch in reader:
                 stream_rows.append(batch.num_rows)
+                input_batches.append(batch)
                 rows += batch.num_rows
                 if batch.num_rows:
                     if first is None:
                         first = batch.column(0)[0].as_py()
                     last = batch.column(0)[-1].as_py()
+        state["input_tables"].append(pa.Table.from_batches(
+            input_batches, schema=state["arrow_schemas"][0]))
         state["result"] = (rows, first, last)
         result = pa.table({"rows": [rows]})
         sink = pa.BufferOutputStream()
@@ -868,6 +876,126 @@ def test_arrow_input_duplicate_chunks_preserve_multiplicity(protocol, batch_byte
         assert not cached.HasField("schemaHash")
         assert len(state["cache"]) == 1
         assert state["result"] == (20, 1, 1)
+
+
+_NORMALIZATION_KEYS = [
+    "spark.sql.timestampType",
+    "spark.sql.session.timeZone",
+    "spark.sql.execution.arrow.useLargeVarTypes",
+]
+_UPLOAD_KEYS = [
+    "spark.sql.session.localRelationCacheThreshold",
+    "spark.sql.session.localRelationSizeLimit",
+    "spark.sql.session.localRelationChunkSizeRows",
+    "spark.sql.session.localRelationChunkSizeBytes",
+    "spark.sql.session.localRelationBatchOfChunksSizeBytes",
+]
+
+
+@pytest.mark.parametrize("timestamp_type", ["TIMESTAMP_LTZ", "TIMESTAMP_NTZ"])
+@pytest.mark.parametrize("zone", ["UTC", "America/Los_Angeles"])
+@pytest.mark.parametrize("large", ["false", "true"])
+def test_arrow_input_batched_normalization_configs(protocol, timestamp_type, zone, large):
+    from zoneinfo import ZoneInfo
+
+    value = datetime(2024, 1, 15, 12, 34, 56, 123456)
+    table = pa.table({"t": [value, None], "s": ["hello", None], "b": [b"xyz", None]})
+    with _arrow_input_service(protocol, **dict(zip(
+        _NORMALIZATION_KEYS, [timestamp_type, zone, large]
+    ))) as (spark, state):
+        frame = spark.createDataFrame(table)
+        assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+        frame.collect()
+        expected_time = (value if timestamp_type == "TIMESTAMP_NTZ" else
+                         value.replace(tzinfo=ZoneInfo(zone)).astimezone(timezone.utc))
+        expected = pa.table({
+            "t": pa.array([expected_time, None], type=pa.timestamp(
+                "us", tz=None if timestamp_type == "TIMESTAMP_NTZ" else "UTC")),
+            "s": pa.array(["hello", None], type=pa.large_string() if large == "true"
+                          else pa.string()),
+            "b": pa.array([b"xyz", None], type=pa.large_binary() if large == "true"
+                          else pa.binary()),
+        })
+        actual = state["input_tables"][0]
+        assert actual.schema == expected.schema
+        assert actual.to_pydict() == expected.to_pydict()
+        # Inferred input keeps its types in Arrow; names are applied via toDF.
+        assert not state["relations"][0].local_relation.HasField("schema")
+
+
+@pytest.mark.parametrize("missing", _NORMALIZATION_KEYS)
+@pytest.mark.parametrize("present_null", [False, True])
+def test_arrow_input_missing_normalization_config(protocol, missing, present_null):
+    with _arrow_input_service(protocol) as (spark, state):
+        if present_null:
+            state["config"][missing] = None
+        else:
+            del state["config"][missing]
+        # The current Arrow settings snapshot requires every server setting.
+        with pytest.raises(Exception, match="SQL_CONF_NOT_FOUND"):
+            spark.createDataFrame(pa.table({"x": [1, None], "s": ["hello", None]}))
+        assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+        assert state["uploads"] == 0
+        assert state["input_tables"] == []
+
+
+def test_arrow_input_normalization_config_failure_then_fresh_read(protocol):
+    with _arrow_input_service(protocol) as (spark, state):
+        state["config_error"] = grpc.StatusCode.INVALID_ARGUMENT
+        table = pa.table({"x": [1]})
+        with pytest.raises(Exception, match="configuration read failed"):
+            spark.createDataFrame(table)
+        assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+        assert state["uploads"] == 0
+        spark.createDataFrame(table).collect()
+        assert state["config_requests"] == [
+            ("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS),
+            ("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+        assert state["input_tables"][0].to_pydict() == {"x": [1]}
+
+
+def test_arrow_input_normalization_config_transient_retry(protocol):
+    with _arrow_input_service(protocol) as (spark, state):
+        state["config_error"] = grpc.StatusCode.UNAVAILABLE
+        spark.createDataFrame(pa.table({"x": [1]})).collect()
+        assert state["config_requests"] == [
+            ("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS),
+            ("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+        assert state["input_tables"][0].to_pydict() == {"x": [1]}
+
+
+def test_arrow_input_normalization_configs_are_fresh(protocol):
+    value = datetime(2024, 1, 15, 12)
+    table = pa.table({"t": [value], "s": ["hello"]})
+    with _arrow_input_service(protocol) as (spark, state):
+        spark.createDataFrame(table).collect()
+        state["config"].update(dict(zip(_NORMALIZATION_KEYS, [
+            "TIMESTAMP_NTZ", "America/Los_Angeles", "true"])))
+        spark.createDataFrame(table).collect()
+        state["config"].update(dict(zip(_NORMALIZATION_KEYS, [
+            "TIMESTAMP_LTZ", "America/Los_Angeles", "false"])))
+        spark.createDataFrame(table).collect()
+        assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)] * 3
+        tables = state["input_tables"]
+        assert [t.column("t")[0].as_py() for t in tables] == [
+            value.replace(tzinfo=timezone.utc), value,
+            datetime(2024, 1, 15, 20, tzinfo=timezone.utc)]
+        assert [t.schema.field("s").type for t in tables] == [
+            pa.string(), pa.large_string(), pa.string()]
+        assert all(not relation.local_relation.HasField("schema")
+                   for relation in state["relations"])
+
+
+def test_arrow_input_empty_skips_all_configs(protocol):
+    from pyspark.sql.types import LongType, StructField, StructType
+
+    with _arrow_input_service(protocol) as (spark, state):
+        table = pa.table({"x": pa.array([], type=pa.int64())})
+        spark.createDataFrame(table, StructType([StructField("x", LongType())]))
+        with pytest.raises(Exception, match="CANNOT_INFER_EMPTY_SCHEMA"):
+            spark.createDataFrame(table)
+        assert state["config_requests"] == []
+        assert state["uploads"] == 0
 
 
 @pytest.mark.parametrize("data", [[[1]], pd.DataFrame({"id": [1]})])
