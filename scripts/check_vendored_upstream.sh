@@ -146,6 +146,9 @@ VENDORED_FILES=(
   # ExecutionInfo / PlanMetrics / MetricValue (DataFrame.executionInfo).
   "sql/metrics.py"
 
+  # SQL: streaming. TwsTester runs a StatefulProcessor locally - pure upstream.
+  "sql/streaming/tws_tester.py"
+
   # Streaming (excluding adapted context, dstream, util)
   "streaming/__init__.py"
   "streaming/kinesis.py"
