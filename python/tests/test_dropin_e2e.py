@@ -696,6 +696,35 @@ def test_sql_formats_the_query_with_keyword_arguments_as_pyspark(session):
         assert [tuple(r) for r in run().collect()] == rows
 
 
+def test_show_prints_the_table_of_the_server_as_pyspark(session):
+    import contextlib
+    import io
+
+    df = session.sql("SELECT id, repeat('x', 25) AS s FROM range(2)")
+
+    def shown(**kwargs):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):  # Python's print, as PySpark's show.
+            df.show(**kwargs)
+        return out.getvalue()
+
+    assert shown() == (
+        "+---+--------------------+\n"
+        "| id|                   s|\n"
+        "+---+--------------------+\n"
+        "|  0|xxxxxxxxxxxxxxxxx...|\n"
+        "|  1|xxxxxxxxxxxxxxxxx...|\n"
+        "+---+--------------------+\n\n")
+    assert shown(n=1, truncate=5) == (
+        "+---+-----+\n| id|    s|\n+---+-----+\n|  0|xx...|\n+---+-----+\nonly showing top 1 row\n")
+    assert shown(truncate=False).splitlines()[3] == "|0  |" + "x" * 25 + "|"
+    assert shown(n=1, vertical=True) == (
+        "-RECORD 0-------------------\n"
+        " id  | 0                    \n"
+        " s   | xxxxxxxxxxxxxxxxx... \n"
+        "only showing top 1 row\n")
+
+
 def test_sql_keyword_arguments_are_not_parameters_as_pyspark(session):
     with pytest.raises(AnalysisException) as error:
         session.sql("SELECT :p AS v", p=5).collect()

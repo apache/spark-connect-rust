@@ -830,12 +830,32 @@ impl DataFrame {
         }
     }
 
-    /// Show the first n rows.
-    pub fn show(&self, n: usize) -> Result<()> {
-        let limited = self.limit(n as i32).collect()?;
-        for row in limited {
-            println!("{}", row);
+    /// The table that `show` prints, as the server formats it: the first `n` rows, values
+    /// truncated to `truncate` characters (0 for none), vertical with a line per value.
+    /// Mirrors `DataFrame._show_string`, which sends a `ShowString` relation.
+    pub fn show_string(&self, n: i32, truncate: i32, vertical: bool) -> Result<String> {
+        let shown = DataFrame::new(
+            self.session.clone(),
+            LogicalPlan::ShowString {
+                input: Arc::clone(&self.plan),
+                num_rows: n,
+                truncate,
+                vertical,
+            },
+        );
+        match shown.collect()?.first().map(|row| row.values()) {
+            Some([Value::String(table)]) => Ok(table.clone()),
+            _ => Err(SparkError::connect_msg(
+                "ShowString returned no table of one string",
+            )),
         }
+    }
+
+    /// Print the first `n` rows as the server formats them, with values truncated to 20
+    /// characters. Mirrors `DataFrame.show(n)`.
+    pub fn show(&self, n: usize) -> Result<()> {
+        let n = i32::try_from(n).unwrap_or(i32::MAX);
+        println!("{}", self.show_string(n, 20, false)?);
         Ok(())
     }
 
