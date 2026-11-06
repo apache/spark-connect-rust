@@ -41,8 +41,8 @@ _ref_functions = None
 _ref_builtin = None
 if _args.pyspark_src:
     sys.path.insert(0, _args.pyspark_src)
-    import pyspark.sql.functions as _ref_functions  # noqa: E402
     import pyspark.sql.connect.functions.builtin as _ref_builtin  # noqa: E402
+    import pyspark.sql.functions as _ref_functions  # noqa: E402
 
 # Read the spark-connect functions file
 functions_rs = Path("crates/spark-connect/src/functions.rs").read_text()
@@ -497,9 +497,7 @@ _wrapper_names += re.findall(r"^def ([A-Za-z][A-Za-z0-9_]*)\(", _existing, re.M)
 _wrapper_names = sorted(set(_wrapper_names) | _UPSTREAM_EXTRA)
 if not _existing:
     # First-time generation: fall back to the Rust-parsed function set.
-    _wrapper_names = sorted(
-        {n for n in functions if n not in skip_functions} | _UPSTREAM_EXTRA
-    )
+    _wrapper_names = sorted({n for n in functions if n not in skip_functions} | _UPSTREAM_EXTRA)
 
 _upstream = _upstream_eligible(_wrapper_names)
 _missing = sorted(_UPSTREAM_EXTRA - _upstream)
