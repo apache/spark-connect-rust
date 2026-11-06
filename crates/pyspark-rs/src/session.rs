@@ -814,6 +814,28 @@ impl PySparkSession {
         if is_loaded_instance(py, data, "pandas", "DataFrame")? {
             return self.create_from_pandas(py, data, spec);
         }
+        // Preserve schema parsing, ignored-argument warnings, and pandas/Arrow routing.
+        // Only a native StructType opts into this explicit integer optimization;
+        // DDL, inferred schemas and unsupported values keep schema-driven conversion.
+        if schema.is_some_and(|s| s.extract::<PyRef<crate::types::PyStructType>>().is_ok()) {
+            if let Spec::Struct(fields) = &spec {
+                if let Ok(data) = data.cast::<PyList>() {
+                    if let Some(columns) = exact_long_tuple_columns(data, fields) {
+                        let schema = DataType::Struct {
+                            fields: fields.clone(),
+                        };
+                        let df = py
+                            .detach(|| {
+                                self.session
+                                    .create_dataframe_from_columns(columns, schema)
+                                    .map_err(Box::new)
+                            })
+                            .to_pyerr()?;
+                        return Ok(PyDataFrame::new(df));
+                    }
+                }
+            }
+        }
         self.create_from_local(py, data, spec)
     }
 
@@ -1432,6 +1454,60 @@ fn value_to_datatype(v: &Value) -> DataType {
         Value::Variant { .. } => DataType::Variant,
         Value::Null => utf8(),
     }
+}
+
+/// Build columns only for exact tuples of exact signed integers and None.
+/// Unsupported containers, values, overflow, widths and non-nullable nulls use
+/// schema-driven local conversion, preserving its validation and error ordering.
+#[inline(never)]
+fn exact_long_tuple_columns(
+    data: &Bound<'_, PyList>,
+    fields: &[StructField],
+) -> Option<Vec<arrow::array::ArrayRef>> {
+    use arrow::array::Int64Builder;
+    use pyo3::types::{PyInt, PyTuple};
+    use std::sync::Arc;
+
+    if data.cast_exact::<PyList>().is_err()
+        || data.is_empty()
+        || fields.is_empty()
+        || fields.iter().any(|field| field.data_type != DataType::Long)
+    {
+        return None;
+    }
+    let mut builders: Vec<_> = fields
+        .iter()
+        .map(|_| Int64Builder::with_capacity(data.len()))
+        .collect();
+    for item in data.iter() {
+        let Ok(tuple) = item.cast_exact::<PyTuple>() else {
+            return None;
+        };
+        if tuple.len() != builders.len() {
+            return None;
+        }
+        for ((value, builder), field) in tuple.iter().zip(&mut builders).zip(fields) {
+            if value.is_none() {
+                if !field.nullable {
+                    return None;
+                }
+                builder.append_null();
+            } else if let Ok(integer) = value.cast_exact::<PyInt>() {
+                let Ok(integer) = integer.extract::<i64>() else {
+                    return None;
+                };
+                builder.append_value(integer);
+            } else {
+                return None;
+            }
+        }
+    }
+    Some(
+        builders
+            .iter_mut()
+            .map(|builder| Arc::new(builder.finish()) as arrow::array::ArrayRef)
+            .collect(),
+    )
 }
 
 /// Convert a Python value to a Rust Value.

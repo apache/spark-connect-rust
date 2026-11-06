@@ -394,6 +394,25 @@ impl SparkSession {
         Ok(DataFrame::new(self.clone(), plan))
     }
 
+    /// Create an inline local relation from columns with the same encoding as local rows.
+    ///
+    /// Unlike imported Arrow input, this path does not read server configuration or
+    /// upload artifacts. Callers must supply one column per struct field.
+    pub fn create_dataframe_from_columns(
+        &self,
+        columns: Vec<arrow::array::ArrayRef>,
+        schema: DataType,
+    ) -> Result<DataFrame> {
+        let arrow_schema = arrow::datatypes::Schema::new(schema_to_arrow_fields(&schema)?);
+        let row_count = columns.first().map_or(0, |column| column.len());
+        let data = Some(columns_to_arrow_ipc(columns, arrow_schema, row_count)?);
+        let plan = LogicalPlan::LocalRelation {
+            schema: Some(schema),
+            data,
+        };
+        Ok(DataFrame::new(self.clone(), plan))
+    }
+
     /// Create a local DataFrame from Arrow batches without materializing rows.
     ///
     /// `schema` optionally supplies the Spark schema applied by the server. With
@@ -795,8 +814,6 @@ fn row_width_mismatch(row_index: usize, actual: usize, expected: usize) -> Spark
 /// Used by createDataFrame to package local data.
 fn rows_to_arrow_ipc(rows: &[Row], schema: &DataType) -> Result<Vec<u8>> {
     use arrow::datatypes::Schema as ArrowSchema;
-    use arrow::ipc::writer::StreamWriter;
-    use arrow::record_batch::RecordBatch;
 
     if rows.is_empty() {
         return Ok(vec![]);
@@ -828,8 +845,19 @@ fn rows_to_arrow_ipc(rows: &[Row], schema: &DataType) -> Result<Vec<u8>> {
         columns.push(values_to_arrow(&column, &field.data_type)?);
     }
 
-    // Create RecordBatch, with the number of rows, which a batch without columns needs.
-    let options = arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(rows.len()));
+    columns_to_arrow_ipc(columns, arrow_schema, rows.len())
+}
+
+fn columns_to_arrow_ipc(
+    columns: Vec<arrow::array::ArrayRef>,
+    arrow_schema: arrow::datatypes::Schema,
+    row_count: usize,
+) -> Result<Vec<u8>> {
+    use arrow::ipc::writer::StreamWriter;
+    use arrow::record_batch::RecordBatch;
+
+    // Preserve the row count even for a batch without columns.
+    let options = arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(row_count));
     let batch = RecordBatch::try_new_with_options(Arc::new(arrow_schema), columns, &options)
         .map_err(|e| SparkError::connect_msg(format!("Failed to create Arrow batch: {}", e)))?;
 
