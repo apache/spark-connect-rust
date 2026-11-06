@@ -882,6 +882,30 @@ def test_map_functions_send_the_names_of_their_functions_as_pyspark(mock_connect
     assert sent_name(stateful, 34, 3) == "with_state"
 
 
+def test_map_functions_send_their_resource_profile_as_pyspark(mock_connect):
+    # As PySpark's, mapInPandas and mapInArrow send the id of their resource profile, which
+    # `profile.id` creates on the server, so that their stage runs with its resources.
+    from pyspark.resource import ResourceProfileBuilder, TaskResourceRequests
+
+    spark, service = mock_connect
+    profile = ResourceProfileBuilder().require(TaskResourceRequests().cpus(1)).build
+    profile._id = 7  # As if the server had created it.
+
+    def sent_map_partitions(dataframe):
+        # ExecutePlanRequest.plan=3, Plan.root=1, Relation.map_partitions=28.
+        dataframe.collect()
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        return parse_message(parse_message(plan)[28][0])
+
+    df = spark.range(1)
+    # MapPartitions.profile_id=4.
+    for mapped in (df.mapInPandas(lambda it: it, "id long", profile=profile),
+                   df.mapInArrow(lambda it: it, "id long", True, profile)):
+        assert sent_map_partitions(mapped)[4] == [7]
+    assert 4 not in sent_map_partitions(df.mapInPandas(lambda it: it, "id long"))
+    assert 4 not in sent_map_partitions(df.mapInArrow(lambda it: it, "id long", profile=None))
+
+
 def test_udf_and_udtf_calls_pass_named_arguments_as_pyspark(mock_connect):
     # As PySpark's UserDefinedFunction and UserDefinedTableFunction: each keyword argument
     # of a call is a NamedArgumentExpression, after the positional arguments, and a bare

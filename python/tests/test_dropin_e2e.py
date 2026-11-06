@@ -285,6 +285,26 @@ def test_map_functions_take_a_ddl_schema(session):
         assert sorted(tuple(r) for r in result.collect()) == [(1, 1.0), (1, 2.0), (2, 3.0)]
 
 
+def test_map_functions_run_in_the_stage_of_their_resource_profile(session):
+    # As PySpark's, mapInPandas and mapInArrow send their resource profile, which the server
+    # creates: a server that does not support it, as one in local mode, rejects it, and
+    # otherwise the stage runs with the profile, of the id that the server gave it.
+    from pyspark.errors import PySparkException
+    from pyspark.resource import ResourceProfileBuilder, TaskResourceRequests
+
+    for name in ("mapInPandas", "mapInArrow"):
+        profile = ResourceProfileBuilder().require(TaskResourceRequests().cpus(1)).build
+        try:
+            mapped = getattr(session.range(3), name)(lambda it: it, "id long", profile=profile)
+            rows = mapped.collect()
+        except PySparkException as error:
+            assert "ResourceProfiles are only supported" in str(error)
+        else:
+            assert sorted(r.id for r in rows) == [0, 1, 2]
+            assert isinstance(profile._id, int)
+    assert session.range(3).mapInPandas(lambda it: it, "id long", profile=None).count() == 3
+
+
 def test_transform_with_state_in_pandas_takes_a_ddl_output_type(session, tmp_path):
     import pandas as pd
     from pyspark.sql.streaming.stateful_processor import StatefulProcessor

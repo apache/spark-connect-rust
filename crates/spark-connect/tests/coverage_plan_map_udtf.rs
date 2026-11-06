@@ -41,6 +41,7 @@ fn map_partitions_to_proto() {
         input: Arc::new(base()),
         func: udf(),
         is_barrier: true,
+        profile_id: None,
     };
     assert!(p.to_proto().rel_type.is_some());
 }
