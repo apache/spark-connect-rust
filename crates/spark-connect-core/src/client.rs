@@ -407,12 +407,20 @@ impl SparkConnectClient {
                 let mut stub = self.stub.clone();
                 async move { stub.execute_plan(req).await.map(Response::into_inner) }
             })
-            .await
-            .map_err(|e| e.with_operation_id(iter.operation_id()))?;
+            .await;
+        let stream = match stream {
+            Ok(stream) => stream,
+            Err(error) => {
+                // As the reference iterator releases an execution that fails at once, such
+                // as for an analysis error, so the server does not keep it until its
+                // detached timeout.
+                self.spawn_release(self.execution_metadata(), iter.release_all_request());
+                return Err(error.with_operation_id(iter.operation_id()));
+            }
+        };
         let retry_policy = self.retry_policy.clone();
         Ok(ReattachableResponseStream {
             client: self.clone(),
-            retry_state: RetryPolicyState::new(retry_policy.clone()),
             retry_policy,
             iter,
             stream,
@@ -1013,7 +1021,6 @@ pub struct ReattachableResponseStream {
     /// The client that started the execution, whose stub, headers and session it uses.
     client: SparkConnectClient,
     retry_policy: RetryPolicy,
-    retry_state: RetryPolicyState,
     iter: ExecutePlanResponseReattachableIterator,
     stream: Streaming<ExecutePlanResponse>,
     done: bool,
@@ -1021,19 +1028,19 @@ pub struct ReattachableResponseStream {
     released: bool,
 }
 
-impl ReattachableResponseStream {
-    /// The gRPC metadata of every request about this execution.
-    fn metadata_map(&self) -> MetadataMap {
+impl SparkConnectClient {
+    /// The gRPC metadata of every request about an execution.
+    fn execution_metadata(&self) -> MetadataMap {
         let mut metadata = MetadataMap::new();
-        if let Ok(v) = MetadataValue::from_str(&self.client.user_agent) {
+        if let Ok(v) = MetadataValue::from_str(&self.user_agent) {
             let _ = metadata.insert("user-agent", v);
         }
-        if let Some(user_id) = &self.client.user_id {
+        if let Some(user_id) = &self.user_id {
             if let Ok(v) = MetadataValue::from_str(user_id) {
                 let _ = metadata.insert("user_id", v);
             }
         }
-        for (k, v) in &self.client.metadata {
+        for (k, v) in &self.metadata {
             if let Ok(v) = MetadataValue::from_str(v) {
                 if let Ok(key) = tonic::metadata::MetadataKey::from_bytes(k.as_bytes()) {
                     let _ = metadata.insert(key, v);
@@ -1041,6 +1048,52 @@ impl ReattachableResponseStream {
             }
         }
         metadata
+    }
+
+    /// Sends `request` in the background, so that reading is not delayed, retrying under the
+    /// client's retry policy. Like the reference client, a failure is only logged: the server
+    /// removes an execution that is never released once it has been detached for
+    /// `spark.connect.execute.manager.detachedTimeout`.
+    fn spawn_release(&self, metadata: MetadataMap, request: ReleaseExecuteRequest) {
+        let mut stub = self.stub.clone();
+        let policy = self.retry_policy.clone();
+        let release = async move {
+            let mut state = RetryPolicyState::new(policy.clone());
+            loop {
+                let mut req = Request::new(request.clone());
+                *req.metadata_mut() = metadata.clone();
+                match stub.release_execute(req).await {
+                    Ok(_) => return,
+                    Err(status) => {
+                        if policy.can_retry(&status) {
+                            if let Some(w) = state.next_attempt(None) {
+                                tokio::time::sleep(Duration::from_millis(w)).await;
+                                continue;
+                            }
+                        }
+                        tracing::warn!(
+                            "ReleaseExecute of operation {} failed: {}",
+                            request.operation_id,
+                            status
+                        );
+                        return;
+                    }
+                }
+            }
+        };
+        // A stream is read inside a runtime, but it can be dropped outside of any, for
+        // example after the `block_on` that read it.
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => drop(handle.spawn(release)),
+            Err(_) => drop(crate::runtime::get_runtime().spawn(release)),
+        }
+    }
+}
+
+impl ReattachableResponseStream {
+    /// The gRPC metadata of every request about this execution.
+    fn metadata_map(&self) -> MetadataMap {
+        self.client.execution_metadata()
     }
 
     fn attach_metadata<T>(&self, req: &mut Request<T>) {
@@ -1053,6 +1106,9 @@ impl ReattachableResponseStream {
         if self.done {
             return Ok(None);
         }
+        // As the reference iterator's `_has_next` retries with a `Retrying` of its own, the
+        // reattaches of each response have the attempts and the elapsed time of the policy.
+        let mut retry_state = RetryPolicyState::new(self.retry_policy.clone());
         loop {
             match self.stream.message().await {
                 Ok(Some(resp)) => {
@@ -1068,21 +1124,22 @@ impl ReattachableResponseStream {
                 // The server completes a reattachable stream before `ResultComplete` on
                 // purpose, after `senderMaxStreamDuration` or `senderMaxStreamSize`: the rest
                 // of the result is read by reattaching.
-                Ok(None) => self.reattach().await?,
+                Ok(None) => self.reattach(&mut retry_state).await?,
                 Err(status) => {
                     // Only reattach a still-running execution on a retriable drop.
                     if self.iter.is_completed().await || !self.retry_policy.can_retry(&status) {
                         let error = self.client.error_from_status(status).await;
                         return Err(self.fail(error));
                     }
-                    self.reattach().await?;
+                    self.reattach(&mut retry_state).await?;
                 }
             }
         }
     }
 
-    /// Resumes the execution from the last response read, retrying transient failures.
-    async fn reattach(&mut self) -> Result<()> {
+    /// Resumes the execution from the last response read, retrying transient failures under
+    /// `retry_state`.
+    async fn reattach(&mut self, retry_state: &mut RetryPolicyState) -> Result<()> {
         loop {
             let mut req = Request::new(self.iter.create_reattach_request().await);
             self.attach_metadata(&mut req);
@@ -1093,7 +1150,7 @@ impl ReattachableResponseStream {
                 }
                 Err(e) => {
                     if self.retry_policy.can_retry(&e) {
-                        if let Some(w) = self.retry_state.next_attempt(None) {
+                        if let Some(w) = retry_state.next_attempt(None) {
                             tokio::time::sleep(Duration::from_millis(w)).await;
                             continue;
                         }
@@ -1129,44 +1186,10 @@ impl ReattachableResponseStream {
         }
     }
 
-    /// Sends `request` in the background, so that reading is not delayed, retrying under the
-    /// client's retry policy. Like the reference client, a failure is only logged: the server
-    /// removes an execution that is never released once it has been detached for
-    /// `spark.connect.execute.manager.detachedTimeout`.
+    /// Sends `request` in the background, as [`SparkConnectClient::spawn_release`] does.
     fn spawn_release(&self, request: ReleaseExecuteRequest) {
-        let mut stub = self.client.stub.clone();
-        let metadata = self.metadata_map();
-        let policy = self.retry_policy.clone();
-        let release = async move {
-            let mut state = RetryPolicyState::new(policy.clone());
-            loop {
-                let mut req = Request::new(request.clone());
-                *req.metadata_mut() = metadata.clone();
-                match stub.release_execute(req).await {
-                    Ok(_) => return,
-                    Err(status) => {
-                        if policy.can_retry(&status) {
-                            if let Some(w) = state.next_attempt(None) {
-                                tokio::time::sleep(Duration::from_millis(w)).await;
-                                continue;
-                            }
-                        }
-                        tracing::warn!(
-                            "ReleaseExecute of operation {} failed: {}",
-                            request.operation_id,
-                            status
-                        );
-                        return;
-                    }
-                }
-            }
-        };
-        // A stream is read inside a runtime, but it can be dropped outside of any, for
-        // example after the `block_on` that read it.
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => drop(handle.spawn(release)),
-            Err(_) => drop(crate::runtime::get_runtime().spawn(release)),
-        }
+        self.client
+            .spawn_release(self.client.execution_metadata(), request);
     }
 }
 
