@@ -518,7 +518,12 @@ async fn detached_stream_reattaches_before_releasing_the_execution() {
         );
         assert_eq!(reattach.last_response_id.as_deref(), Some("first"));
         assert!(
-            fixture.state.all_releases().is_empty(),
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                fixture.wait_for(|s| !s.all_releases().is_empty())
+            )
+            .await
+            .is_err(),
             "released before reattachment completed"
         );
         fixture.state.reattach_gate.notify_one();
