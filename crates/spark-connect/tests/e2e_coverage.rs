@@ -492,7 +492,10 @@ fn streaming_surface() {
         .format("rate")
         .option("rowsPerSecond", "1")
         .load(None);
-    assert!(sdf.is_streaming());
+    assert!(sdf.is_streaming().unwrap());
+    // As PySpark's, which asks the server: a DataFrame of a stream is streaming too.
+    assert!(sdf.select([col("value")]).is_streaming().unwrap());
+    assert!(!s.range(1).unwrap().is_streaming().unwrap());
     let mut opts = Map::new();
     opts.insert("rowsPerSecond".to_string(), "1".to_string());
     assert!(s
@@ -500,13 +503,17 @@ fn streaming_surface() {
         .format("rate")
         .options(opts)
         .load(None)
-        .is_streaming());
+        .is_streaming()
+        .unwrap());
+    // The rate source takes no schema, which the server reports when it analyzes the plan,
+    // as for PySpark.
     assert!(s
         .read_stream()
         .format("rate")
         .schema("timestamp timestamp, value long")
         .load(None)
-        .is_streaming());
+        .is_streaming()
+        .is_err());
 
     // Start a query and exercise the full StreamingQuery read surface.
     let q = sdf
@@ -550,15 +557,27 @@ fn streaming_surface() {
         .cluster_by(vec!["value"])
         .output_mode("complete");
 
-    // Streaming file-source readers + name(): all build lazy streaming plans
-    // (no execution until start), so is_streaming() is a client-side check.
+    // Streaming file-source readers + name(): all build lazy streaming plans (no execution
+    // until start), which the server analyzes for is_streaming(), of directories that exist.
     let schema = "value long";
+    for dir in [
+        "/tmp/cov_s_json",
+        "/tmp/cov_s_pq",
+        "/tmp/cov_s_orc",
+        "/tmp/cov_s_csv",
+        "/tmp/cov_s_txt",
+    ] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    // A named source needs spark.sql.streaming.queryEvolution.enableSourceEvolution, which the
+    // server reports when it analyzes the plan, as for PySpark.
     assert!(s
         .read_stream()
         .name("rate")
         .format("rate")
         .load(None)
-        .is_streaming());
+        .is_streaming()
+        .is_err());
     for df in [
         s.read_stream().schema(schema).json("/tmp/cov_s_json"),
         s.read_stream().schema(schema).parquet("/tmp/cov_s_pq"),
@@ -571,7 +590,7 @@ fn streaming_surface() {
             .schema("value string")
             .text("/tmp/cov_s_txt"),
     ] {
-        assert!(df.is_streaming());
+        assert!(df.is_streaming().unwrap());
     }
 
     // process_all_available drains a rate stream feeding a memory sink, then stop.
@@ -681,7 +700,7 @@ fn dataframe_more_surface() {
         .unwrap();
     let _ = df.to_df(vec!["a", "b", "c"]).collect().unwrap();
     let _ = df.sample(0.5, Some(1)).count().unwrap();
-    let _ = df.col_regex("`.*`").collect().unwrap();
+    let _ = df.select(vec![df.col_regex("`.*`")]).collect().unwrap();
 
     // cache / persist / unpersist round-trip.
     let cached = df.cache().unwrap();
@@ -1030,9 +1049,17 @@ fn artifact_and_tag_surface() {
     // A larger file to exercise the multi-chunk path (well over one gRPC chunk).
     std::fs::write(&f2, vec![b'x'; 512 * 1024]).unwrap();
 
-    s.add_artifact(f1.to_str().unwrap()).expect("add_artifact");
-    s.add_artifacts(&[f1.to_str().unwrap(), f2.to_str().unwrap()])
-        .expect("add_artifacts");
+    // As PySpark, a file that is neither a jar nor a class needs the `file` flag.
+    assert!(s.add_artifact(f1.to_str().unwrap()).is_err());
+    s.add_artifacts_with(&[f1.to_str().unwrap()], false, false, true)
+        .expect("add_artifact");
+    s.add_artifacts_with(
+        &[f1.to_str().unwrap(), f2.to_str().unwrap()],
+        false,
+        false,
+        true,
+    )
+    .expect("add_artifacts");
     // copyFromLocalToFs: exercises the client-side named-artifact upload
     // (forward_to_fs/...). A single-node server rejects a *local* destination, but the
     // client upload code we're covering runs before that, so tolerate the server error.
@@ -1060,8 +1087,7 @@ fn ml_estimators_and_transformers() {
         return;
     }
     use spark_connect::ml::{
-        Estimator, LogisticRegression, MaxAbsScaler, StandardScaler, StringIndexer, Transformer,
-        VectorAssembler,
+        Estimator, MaxAbsScaler, StandardScaler, StringIndexer, Transformer, VectorAssembler,
     };
 
     let s = session();
@@ -1077,11 +1103,9 @@ fn ml_estimators_and_transformers() {
         )
         .expect("ml sample");
 
-    // Each operator below exercises the CLIENT-side ML code in ml.rs - building the
-    // MlOperator/MlRelation params and the fit/transform requests - which runs before
-    // the RPC. The actual ML computation is server-side (connect-ML support varies by
-    // build), so we tolerate a server rejection rather than asserting the result: the
-    // coverage target is our request-construction code, not Spark's ML engine.
+    // This smoke test covers request construction and tolerates server rejection.
+    // LogisticRegression has separate tests below that assert successful training
+    // and learned predictions.
 
     // Transformer.transform builds a fetch of the transform relation.
     let mut va = VectorAssembler::new()
@@ -1089,7 +1113,7 @@ fn ml_estimators_and_transformers() {
         .set_output_col("assembled");
     let _ = va.transform(&df).and_then(|d| d.count());
 
-    // Estimator.fit builds+sends the fit request; Model.transform builds a transform.
+    // These estimator wrappers construct models locally; transform builds a relation.
     let mut ss = StandardScaler::new()
         .set_input_col("features")
         .set_output_col("scaled");
@@ -1106,14 +1130,6 @@ fn ml_estimators_and_transformers() {
         .set_input_col("s")
         .set_output_col("s_idx");
     if let Ok(mut m) = si.fit(&df) {
-        let _ = m.transform(&df).and_then(|d| d.count());
-    }
-    let mut lr = LogisticRegression::new()
-        .set_feature_col("features")
-        .set_label_col("label")
-        .set_prediction_col("prediction")
-        .set_max_iter(5);
-    if let Ok(mut m) = lr.fit(&df) {
         let _ = m.transform(&df).and_then(|d| d.count());
     }
 
@@ -1140,10 +1156,72 @@ fn ml_estimators_and_transformers() {
         .set_metric_name("areaUnderROC");
     let _ = bin_eval.evaluate(&eval_df);
 
-    // Pipeline estimator builds+fits (stages carried as params); tolerate server ML.
+    // Pipeline carries stage names as params; this smoke test tolerates rejection.
     let mut pipeline = Pipeline::new().set_stages(vec!["scaler", "lr"]);
     if let Ok(mut m) = pipeline.fit(&df) {
         let _ = m.transform(&df).and_then(|d| d.count());
+    }
+}
+
+#[test]
+fn collected_small_integer_rows_accept_floating_schemas() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::row::Value;
+    use spark_connect::types::{DataType, StructField};
+
+    let s = session();
+    for (sql_type, min, max) in [("TINYINT", -128, 127), ("SMALLINT", -32768, 32767)] {
+        let rows = s.sql(&format!(
+            "SELECT CAST(n AS {sql_type}) AS n FROM VALUES ({min}), (-1), (0), ({max}), (NULL) AS t(n)"
+        )).unwrap().collect().unwrap();
+        for row in &rows {
+            assert!(
+                matches!(
+                    (sql_type, row.get(0)),
+                    ("TINYINT", Some(Value::Byte(_)))
+                        | ("SMALLINT", Some(Value::Short(_)))
+                        | (_, Some(Value::Null))
+                ),
+                "unexpected {sql_type} source row: {row:?}"
+            );
+        }
+        for target in [DataType::Float, DataType::Double] {
+            let schema = DataType::Struct {
+                fields: vec![StructField {
+                    name: "n".into(),
+                    data_type: target.clone(),
+                    nullable: true,
+                    metadata: Default::default(),
+                }],
+            };
+            let actual = s
+                .create_dataframe(rows.clone(), schema)
+                .unwrap()
+                .collect()
+                .unwrap();
+            let mut actual: Vec<_> = actual
+                .iter()
+                .map(|row| match (&target, row.get(0).unwrap()) {
+                    (DataType::Float, Value::Float(n)) => Some(*n as f64),
+                    (DataType::Double, Value::Double(n)) => Some(*n),
+                    (_, Value::Null) => None,
+                    other => panic!("unexpected floating result: {other:?}"),
+                })
+                .collect();
+            actual.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            assert_eq!(
+                actual,
+                vec![
+                    None,
+                    Some(min as f64),
+                    Some(-1.0),
+                    Some(0.0),
+                    Some(max as f64)
+                ]
+            );
+        }
     }
 }
 
@@ -1342,4 +1420,142 @@ fn udf_builders_client_side() {
     // DataFrame mapInPandas / mapInArrow (barrier off/on).
     let _ = df.map_in_pandas(udf(), false);
     let _ = df.map_in_arrow(udf(), true);
+}
+
+/// Learning must depend on the labels, and each prediction must use its own fitted model.
+#[test]
+fn logistic_regression_fits_and_predicts_with_cached_models() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::expression::Expression;
+    use spark_connect::ml::{Estimator, LogisticRegression};
+    use spark_connect::{Column, DataFrame};
+
+    let s = session();
+    let as_features = |df: DataFrame| {
+        df.with_column(
+            "input",
+            Column::new(Expression::function(
+                "array_to_vector",
+                vec![col("xs").expression().clone()],
+            )),
+        )
+    };
+    let training = as_features(s.sql(
+        "SELECT array(CAST(x AS DOUBLE)) AS xs,          CAST(CASE WHEN x > 0 THEN 1 ELSE 0 END AS DOUBLE) AS target          FROM VALUES (-4), (-3), (-2), (-1), (1), (2), (3), (4) AS t(x)",
+    ).unwrap());
+    let held_out = as_features(s.sql(
+        "SELECT id, array(CAST(x AS DOUBLE)) AS xs          FROM VALUES (0, -3.5), (1, -1.5), (2, 1.5), (3, 3.5) AS t(id, x)",
+    ).unwrap());
+    let mut estimator = LogisticRegression::new()
+        .set_feature_col("input")
+        .set_label_col("target")
+        .set_prediction_col("pred")
+        .set_max_iter(30);
+    let mut first = estimator.fit(&training).expect("train first model");
+    let flipped = training.with_column("target", lit(1) - col("target"));
+    let mut second = estimator.fit(&flipped).expect("train opposite labels");
+    let first_operator = first.build_ml_relation(&held_out).ml_type.unwrap();
+    let second_operator = second.build_ml_relation(&held_out).ml_type.unwrap();
+    let model_ref = |kind: spark_connect_proto::ml_relation::MlType| {
+        let spark_connect_proto::ml_relation::MlType::Transform(t) = kind else {
+            panic!("expected transform");
+        };
+        let Some(spark_connect_proto::ml_relation::transform::Operator::ObjRef(r)) = t.operator
+        else {
+            panic!("prediction must use the fitted model object reference");
+        };
+        r.id
+    };
+    assert_ne!(model_ref(first_operator), model_ref(second_operator));
+    let predictions = |df: DataFrame| {
+        df.select([col("id"), col("pred")])
+            .order_by(vec![col("id").asc().expression().clone()])
+            .collect()
+            .unwrap()
+            .into_iter()
+            .map(|row| row.get(1).unwrap().as_f64().unwrap())
+            .collect::<Vec<_>>()
+    };
+    let mut cloned = first.clone_box();
+    let pending = first.transform(&held_out).unwrap();
+    drop(first);
+    assert_eq!(predictions(pending), vec![0.0, 0.0, 1.0, 1.0]);
+    assert_eq!(
+        predictions(cloned.transform(&held_out).unwrap()),
+        vec![0.0, 0.0, 1.0, 1.0]
+    );
+    assert_eq!(
+        predictions(second.transform(&held_out).unwrap()),
+        vec![1.0, 1.0, 0.0, 0.0]
+    );
+    let other = s.new_session();
+    assert!(second.transform(&other.range(1).unwrap()).is_err());
+    s.stop().unwrap();
+}
+
+#[test]
+fn logistic_regression_fit_propagates_server_errors() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::ml::{Estimator, LogisticRegression};
+    let s = session();
+    // Missing training columns must fail during fitting, before prediction is attempted.
+    let error = LogisticRegression::new().fit(&s.range(3).unwrap());
+    assert!(
+        error.is_err(),
+        "fit must validate and train the supplied dataset"
+    );
+    s.stop().unwrap();
+}
+
+#[test]
+fn logistic_regression_default_columns_support_multiclass_training() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::expression::Expression;
+    use spark_connect::ml::{Estimator, LogisticRegression};
+    use spark_connect::{Column, DataFrame};
+
+    let s = session();
+    let vectorize = |df: DataFrame| {
+        df.with_column(
+            "features",
+            Column::new(Expression::function(
+                "array_to_vector",
+                vec![col("xs").expression().clone()],
+            )),
+        )
+    };
+    let training = vectorize(
+        s.sql(
+            "SELECT array(CAST(x AS DOUBLE)) AS xs, \
+         CAST(CASE WHEN x < -2 THEN 0 WHEN x > 2 THEN 2 ELSE 1 END AS DOUBLE) AS label \
+         FROM VALUES (-5), (-4), (-3), (-1), (0), (1), (3), (4), (5) AS t(x)",
+        )
+        .unwrap(),
+    );
+    let held_out = vectorize(
+        s.sql(
+            "SELECT x, array(CAST(x AS DOUBLE)) AS xs \
+         FROM VALUES (-4.5), (0.25), (4.5) AS t(x)",
+        )
+        .unwrap(),
+    );
+    let mut model = LogisticRegression::new().fit(&training).unwrap();
+    let predictions = model
+        .transform(&held_out)
+        .unwrap()
+        .order_by(vec![col("x").asc().expression().clone()])
+        .select([col("prediction")])
+        .collect()
+        .unwrap()
+        .into_iter()
+        .map(|row| row.get(0).unwrap().as_f64().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(predictions, vec![0.0, 1.0, 2.0]);
+    s.stop().unwrap();
 }

@@ -402,9 +402,22 @@ impl SparkError {
         let message = status.message().to_string();
         let code = status.code() as i32;
         let details = status.details().to_vec();
-        let mut err = match parse_error_info(&details) {
-            Some(info) => Self::from_error_info(info, message),
-            None => Self::connect_msg(format!("[{}] {}", status.code(), message)),
+        let mut err = if status.code() == tonic::Code::DeadlineExceeded {
+            // As `SparkConnectClient._handle_rpc_error`, which raises this for a call past its
+            // per-RPC deadline before it reads the error of the status.
+            Self::connect_msg(format!(
+                "[{}] {}: RPC deadline exceeded. The client applies per-RPC timeouts to \
+                 prevent silent hangs on broken connections. Deadlines can be configured via \
+                 the rpc_deadlines parameter of SparkConnectClient. To disable all deadlines: \
+                 SparkConnectClient(url, rpc_deadlines=RpcDeadlines.disabled()).",
+                status.code(),
+                message
+            ))
+        } else {
+            match parse_error_info(&details) {
+                Some(info) => Self::from_error_info(info, message),
+                None => Self::connect_msg(format!("[{}] {}", status.code(), message)),
+            }
         };
         // Preserve the raw status so the PyO3 layer can rebuild the exact pyspark exception.
         err.grpc_code = Some(code);
@@ -1675,6 +1688,32 @@ mod tests {
         );
         assert_eq!(err.kind, SparkErrorKind::Analysis);
         assert_eq!(err.get_condition(), Some("ANALYSIS_ERROR".to_string()));
+    }
+
+    #[test]
+    fn deadline_exceeded_is_raised_as_pyspark_does() {
+        // As `_handle_rpc_error`: a call past its per-RPC deadline, whatever the details of
+        // its status, is the SparkConnectGrpcException of the deadline.
+        let status = Status::with_details(
+            tonic::Code::DeadlineExceeded,
+            "Deadline Exceeded",
+            bytes::Bytes::from_static(b"not an error info"),
+        );
+        let err = SparkError::from_grpc_status(status);
+        assert_eq!(err.kind, SparkErrorKind::Connect);
+        assert_eq!(err.grpc_code, Some(tonic::Code::DeadlineExceeded as i32));
+        assert!(err.server.is_none());
+        assert!(
+            err.message.starts_with(
+                "[Deadline expired before operation could complete] Deadline Exceeded: RPC \
+                 deadline exceeded. The client applies per-RPC timeouts"
+            ),
+            "{}",
+            err.message
+        );
+        assert!(err
+            .message
+            .ends_with("SparkConnectClient(url, rpc_deadlines=RpcDeadlines.disabled())."));
     }
 
     #[test]

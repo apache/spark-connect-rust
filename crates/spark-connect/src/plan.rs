@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 
 use crate::column::Column;
-use crate::expression::{Expression, ExpressionNode};
+use crate::expression::{Expression, ExpressionNode, LiteralExpression};
 use crate::types::DataType;
 use crate::udf::CommonInlineUserDefinedFunctionExpression;
 
@@ -97,6 +97,15 @@ pub enum LogicalPlan {
     },
     /// Tail: `df.tail(n)` - returns last n rows.
     Tail { input: Arc<LogicalPlan>, limit: i32 },
+    /// ShowString: the table of `df.show(...)`, which the server formats as one string:
+    /// `num_rows` rows, values truncated to `truncate` characters (0 for none), vertical
+    /// with a line per value.
+    ShowString {
+        input: Arc<LogicalPlan>,
+        num_rows: i32,
+        truncate: i32,
+        vertical: bool,
+    },
     /// Deduplicate: `df.distinct()` or `df.dropDuplicates()`.
     Deduplicate {
         input: Arc<LogicalPlan>,
@@ -153,6 +162,8 @@ pub enum LogicalPlan {
     Drop {
         input: Arc<LogicalPlan>,
         columns: Vec<String>,
+        /// The columns to drop as expressions, as PySpark's `Drop` of Columns sends them.
+        expressions: Vec<Expression>,
     },
     /// ToDF: `df.toDF(*column_names)`.
     ToDF {
@@ -168,7 +179,8 @@ pub enum LogicalPlan {
     Hint {
         input: Arc<LogicalPlan>,
         name: String,
-        parameters: Vec<String>,
+        /// The parameters, literal expressions or columns, as PySpark's `lit` of them.
+        parameters: Vec<Expression>,
     },
     /// Unpivot: `df.unpivot(...)`.
     Unpivot {
@@ -197,10 +209,11 @@ pub enum LogicalPlan {
         min_non_null: Option<i32>,
         columns: Vec<String>,
     },
-    /// NAReplace: `df.replace(to_replace, value, subset)`.
+    /// NAReplace: `df.replace(to_replace, value, subset)`, each replacement a literal and
+    /// the literal that replaces it.
     NAReplace {
         input: Arc<LogicalPlan>,
-        replacements: Vec<(String, String)>,
+        replacements: Vec<(LiteralExpression, LiteralExpression)>,
         columns: Vec<String>,
     },
     /// Describe: `df.describe(cols...)`.
@@ -303,7 +316,7 @@ pub enum LogicalPlan {
     /// StatSampleBy: `df.stat.sampleBy(col, fractions, seed)`.
     StatSampleBy {
         input: Arc<LogicalPlan>,
-        col: String,
+        col: Expression,
         fractions: Vec<(Expression, f64)>,
         seed: Option<i64>,
     },
@@ -335,14 +348,16 @@ pub enum LogicalPlan {
         input: Arc<LogicalPlan>,
         index_columns: Vec<Expression>,
     },
-    /// MapPartitions: `DataFrame.mapInPandas` / `mapInArrow` (also backs foreach).
+    /// MapPartitions: `DataFrame.mapInPandas` / `mapInArrow` (also backs foreach), of the id
+    /// of the resource profile of its stage, if any.
     MapPartitions {
         input: Arc<LogicalPlan>,
         func: CommonInlineUserDefinedFunctionExpression,
         is_barrier: bool,
+        profile_id: Option<i32>,
     },
     /// GroupMap: `GroupedData.applyInPandas` / `applyInArrow`, and the stateful
-    /// variants `applyInPandasWithState` / `transformWithState[InPandas]`.
+    /// `transformWithState[InPandas]`.
     GroupMap {
         input: Arc<LogicalPlan>,
         grouping_expressions: Vec<Expression>,
@@ -356,6 +371,17 @@ pub enum LogicalPlan {
         timeout_conf: Option<String>,
         state_schema: Option<DataType>,
         transform_with_state_info: Option<TransformWithStateInfo>,
+    },
+    /// ApplyInPandasWithState: `GroupedData.applyInPandasWithState`. The schemas are sent
+    /// as JSON.
+    ApplyInPandasWithState {
+        input: Arc<LogicalPlan>,
+        grouping_expressions: Vec<Expression>,
+        func: CommonInlineUserDefinedFunctionExpression,
+        output_schema: DataType,
+        state_schema: DataType,
+        output_mode: String,
+        timeout_conf: String,
     },
     /// CoGroupMap: `GroupedData.cogroup(...).applyInPandas` / `applyInArrow`.
     CoGroupMap {
@@ -452,7 +478,18 @@ impl PlanIds {
 
     /// The plan ID of `node`, assigned the first time it is serialized.
     pub(crate) fn id_of(&self, node: &Arc<LogicalPlan>) -> i64 {
-        let key = Arc::as_ptr(node) as usize;
+        self.id_of_key(node, Arc::as_ptr(node) as usize)
+    }
+
+    /// The plan ID of the relation of `node` within the `WithRelations` that sends it with the
+    /// plans of its subqueries, as PySpark's `_root_plan_id`: `id_of(node)` is that of the
+    /// `WithRelations`, as PySpark's `_plan_id`. A node is aligned, so its address with the
+    /// low bit set is the key of no other node.
+    pub(crate) fn root_id_of(&self, node: &Arc<LogicalPlan>) -> i64 {
+        self.id_of_key(node, Arc::as_ptr(node) as usize | 1)
+    }
+
+    fn id_of_key(&self, node: &Arc<LogicalPlan>, key: usize) -> i64 {
         let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
         // The entry's `Weak` keeps its allocation from being freed, so a live node at this
         // address is the node the entry was made for.
@@ -483,17 +520,100 @@ pub(crate) fn relation_with_ids(node: &Arc<LogicalPlan>, ids: &PlanIds) -> proto
 
 /// Serialize a child node, with its stable plan ID when `ids` is given.
 fn relation_of(node: &Arc<LogicalPlan>, ids: Option<&PlanIds>) -> proto::Relation {
-    let mut relation = node.to_proto_with(ids);
-    if let Some(ids) = ids {
-        relation.common.get_or_insert_with(Default::default).plan_id = Some(ids.id_of(node));
+    relation_with_references(node, Some(node), ids)
+}
+
+thread_local! {
+    /// For each relation being serialized, innermost last, the plans that the subquery
+    /// expressions of its own expressions refer to.
+    static SUBQUERY_REFERENCES: std::cell::RefCell<Vec<Vec<Arc<LogicalPlan>>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Record that a subquery expression being serialized refers to `plan`, which the relation
+/// that contains the expression sends in its `WithRelations`.
+pub(crate) fn refer_to(plan: &Arc<LogicalPlan>) {
+    SUBQUERY_REFERENCES.with(|frames| {
+        if let Some(frame) = frames.borrow_mut().last_mut() {
+            frame.push(Arc::clone(plan));
+        }
+    });
+}
+
+/// The relation of `node`, and the plans that the subqueries of its own expressions refer
+/// to; its children collect those of theirs as they are serialized.
+fn relation_and_references(
+    node: &LogicalPlan,
+    ids: Option<&PlanIds>,
+) -> (proto::Relation, Vec<Arc<LogicalPlan>>) {
+    struct Frame;
+    impl Drop for Frame {
+        fn drop(&mut self) {
+            SUBQUERY_REFERENCES.with(|frames| {
+                frames.borrow_mut().pop();
+            });
+        }
     }
-    relation
+    SUBQUERY_REFERENCES.with(|frames| frames.borrow_mut().push(Vec::new()));
+    let _frame = Frame;
+    let relation = node.to_proto_with(ids);
+    let references = SUBQUERY_REFERENCES.with(|frames| {
+        frames
+            .borrow_mut()
+            .last_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
+    });
+    (relation, references)
+}
+
+/// The relation of `node`, with the stable plan ID of `shared` when `ids` is given. As
+/// PySpark's `LogicalPlan._with_relations`, a node whose expressions have subqueries is sent
+/// in a `WithRelations` with the plans that they refer to:
+///
+/// ```text
+/// with_relations [plan ID of the node]
+///     root: the relation of the node [its root plan ID]
+///     references: the relation of each plan [its plan ID]
+/// ```
+fn relation_with_references(
+    node: &LogicalPlan,
+    shared: Option<&Arc<LogicalPlan>>,
+    ids: Option<&PlanIds>,
+) -> proto::Relation {
+    let (mut relation, references) = relation_and_references(node, ids);
+    let plan_ids = ids.zip(shared);
+    if references.is_empty() {
+        if let Some((ids, shared)) = plan_ids {
+            relation.common.get_or_insert_with(Default::default).plan_id = Some(ids.id_of(shared));
+        }
+        return relation;
+    }
+    if let Some((ids, shared)) = plan_ids {
+        relation.common.get_or_insert_with(Default::default).plan_id = Some(ids.root_id_of(shared));
+    }
+    let with_relations = proto::WithRelations {
+        root: Some(Box::new(relation)),
+        references: references
+            .iter()
+            .map(|reference| relation_of(reference, ids))
+            .collect(),
+    };
+    proto::Relation {
+        common: Some(proto::RelationCommon {
+            plan_id: plan_ids.map(|(ids, shared)| ids.id_of(shared)),
+            ..Default::default()
+        }),
+        rel_type: Some(proto::relation::RelType::WithRelations(Box::new(
+            with_relations,
+        ))),
+    }
 }
 
 impl LogicalPlan {
     /// Convert this logical plan to a `spark.connect.Relation` protobuf, without plan IDs.
     pub fn to_proto(&self) -> proto::Relation {
-        self.to_proto_with(None)
+        relation_with_references(self, None, None)
     }
 
     fn to_proto_with(&self, plan_ids: Option<&PlanIds>) -> proto::Relation {
@@ -695,6 +815,21 @@ impl LogicalPlan {
                 relation.rel_type = Some(proto::relation::RelType::Tail(Box::new(tail)));
             }
 
+            LogicalPlan::ShowString {
+                input,
+                num_rows,
+                truncate,
+                vertical,
+            } => {
+                let show = proto::ShowString {
+                    input: Some(Box::new(relation_of(input, plan_ids))),
+                    num_rows: *num_rows,
+                    truncate: *truncate,
+                    vertical: *vertical,
+                };
+                relation.rel_type = Some(proto::relation::RelType::ShowString(Box::new(show)));
+            }
+
             LogicalPlan::Deduplicate {
                 input,
                 all_columns_as_keys,
@@ -858,9 +993,15 @@ impl LogicalPlan {
                     Some(proto::relation::RelType::WithColumnsRenamed(Box::new(wcr)));
             }
 
-            LogicalPlan::Drop { input, columns } => {
+            LogicalPlan::Drop {
+                input,
+                columns,
+                expressions,
+            } => {
                 let mut drop = proto::Drop::default();
                 drop.input = Some(Box::new(relation_of(input, plan_ids)));
+                drop.columns
+                    .extend(expressions.iter().map(|e| e.to_proto()));
                 drop.column_names.extend(columns.clone());
                 relation.rel_type = Some(proto::relation::RelType::Drop(Box::new(drop)));
             }
@@ -890,19 +1031,8 @@ impl LogicalPlan {
                 let mut hint = proto::Hint::default();
                 hint.input = Some(Box::new(relation_of(input, plan_ids)));
                 hint.name = name.clone();
-                // Hint parameters are literal Expressions (e.g. `REPARTITION 10`).
-                // An integer-looking parameter becomes an Integer (int32) literal -
-                // matching reference pyspark's `lit(int)` - otherwise a String literal.
-                // (A Long literal is rejected as a partitionNum by e.g. the REBALANCE
-                // hint, which expects an integral int.)
-                for p in parameters {
-                    let lit = if let Ok(n) = p.parse::<i32>() {
-                        crate::expression::LiteralExpression::int(n)
-                    } else {
-                        crate::expression::LiteralExpression::string(p.clone())
-                    };
-                    hint.parameters.push(lit.to_proto());
-                }
+                hint.parameters
+                    .extend(parameters.iter().map(|p| p.to_proto()));
                 relation.rel_type = Some(proto::relation::RelType::Hint(Box::new(hint)));
             }
 
@@ -987,13 +1117,12 @@ impl LogicalPlan {
                 let mut na_replace = proto::NaReplace::default();
                 na_replace.input = Some(Box::new(relation_of(input, plan_ids)));
                 for (old_val, new_val) in replacements.iter() {
-                    let mut replace = proto::na_replace::Replacement::default();
-                    // A numeric-looking value becomes a Double literal; otherwise a
-                    // String literal. Both sides are always set (never left None, which
-                    // previously made string replacements a silent no-op).
-                    replace.old_value = Some(str_to_proto_literal(old_val));
-                    replace.new_value = Some(str_to_proto_literal(new_val));
-                    na_replace.replacements.push(replace);
+                    na_replace
+                        .replacements
+                        .push(proto::na_replace::Replacement {
+                            old_value: Some(old_val.to_literal_proto()),
+                            new_value: Some(new_val.to_literal_proto()),
+                        });
                 }
                 na_replace.cols.extend(columns.clone());
                 relation.rel_type = Some(proto::relation::RelType::Replace(Box::new(na_replace)));
@@ -1232,25 +1361,17 @@ impl LogicalPlan {
             } => {
                 let mut stat = proto::StatSampleBy::default();
                 stat.input = Some(Box::new(relation_of(input, plan_ids)));
-                // col field expects an Expression; create one from the column name
-                let mut col_expr = proto::Expression::default();
-                col_expr.expr_type = Some(proto::expression::ExprType::UnresolvedAttribute(
-                    proto::expression::UnresolvedAttribute {
-                        unparsed_identifier: col.clone(),
-                        plan_id: None,
-                        is_metadata_column: None,
-                    },
-                ));
-                stat.col = Some(col_expr);
-                for (expr, _frac) in fractions {
-                    // fractions expect Expression.Literal type; create Fraction proto
-                    let mut fraction = proto::stat_sample_by::Fraction::default();
-                    let expr_proto = expr.to_proto();
-                    // Extract the Literal from the Expression proto
-                    if let Some(proto::expression::ExprType::Literal(lit)) = expr_proto.expr_type {
-                        fraction.stratum = Some(lit);
-                    }
-                    stat.fractions.push(fraction);
+                stat.col = Some(col.to_proto());
+                // As PySpark's: each stratum, a literal, with its fraction.
+                for (expr, fraction) in fractions {
+                    let stratum = match expr.to_proto().expr_type {
+                        Some(proto::expression::ExprType::Literal(lit)) => Some(lit),
+                        _ => None,
+                    };
+                    stat.fractions.push(proto::stat_sample_by::Fraction {
+                        stratum,
+                        fraction: *fraction,
+                    });
                 }
                 if let Some(s) = seed {
                     stat.seed = Some(*s);
@@ -1308,11 +1429,13 @@ impl LogicalPlan {
                 input,
                 func,
                 is_barrier,
+                profile_id,
             } => {
                 let mut mp = proto::MapPartitions::default();
                 mp.input = Some(Box::new(relation_of(input, plan_ids)));
                 mp.func = Some(func.to_proto());
                 mp.is_barrier = Some(*is_barrier);
+                mp.profile_id = *profile_id;
                 relation.rel_type = Some(proto::relation::RelType::MapPartitions(Box::new(mp)));
             }
             LogicalPlan::GroupMap {
@@ -1356,6 +1479,31 @@ impl LogicalPlan {
                             output_schema: t.output_schema.as_ref().map(|d| d.to_proto()),
                         });
                 relation.rel_type = Some(proto::relation::RelType::GroupMap(Box::new(gm)));
+            }
+            LogicalPlan::ApplyInPandasWithState {
+                input,
+                grouping_expressions,
+                func,
+                output_schema,
+                state_schema,
+                output_mode,
+                timeout_conf,
+            } => {
+                let apply = proto::ApplyInPandasWithState {
+                    input: Some(Box::new(relation_of(input, plan_ids))),
+                    grouping_expressions: grouping_expressions
+                        .iter()
+                        .map(|e| e.to_proto())
+                        .collect(),
+                    func: Some(func.to_proto()),
+                    output_schema: output_schema.json(),
+                    state_schema: state_schema.json(),
+                    output_mode: output_mode.clone(),
+                    timeout_conf: timeout_conf.clone(),
+                };
+                relation.rel_type = Some(proto::relation::RelType::ApplyInPandasWithState(
+                    Box::new(apply),
+                ));
             }
             LogicalPlan::CoGroupMap {
                 input,
@@ -1404,19 +1552,14 @@ impl LogicalPlan {
                 command,
                 python_ver,
             } => {
-                let mut udtf = proto::PythonUdtf::default();
-                if let Some(rt) = return_type {
-                    udtf.return_type = Some(rt.to_proto());
-                }
-                udtf.eval_type = *eval_type;
-                udtf.command = bytes::Bytes::copy_from_slice(command);
-                udtf.python_ver = python_ver.clone();
-                let mut f = proto::CommonInlineUserDefinedTableFunction::default();
-                f.function_name = function_name.clone();
-                f.deterministic = *deterministic;
-                f.arguments = arguments.iter().map(|a| a.to_proto()).collect();
-                f.function = Some(
-                    proto::common_inline_user_defined_table_function::Function::PythonUdtf(udtf),
+                let f = common_inline_udtf(
+                    function_name,
+                    *deterministic,
+                    arguments,
+                    return_type.as_ref(),
+                    *eval_type,
+                    command,
+                    python_ver,
                 );
                 relation.rel_type =
                     Some(proto::relation::RelType::CommonInlineUserDefinedTableFunction(f));
@@ -1424,6 +1567,34 @@ impl LogicalPlan {
         }
 
         relation
+    }
+}
+
+/// The `CommonInlineUserDefinedTableFunction` of a Python UDTF: of a call with `arguments`,
+/// or of its registration without any. Mirrors PySpark's `CommonInlineUserDefinedTableFunction`
+/// of a `PythonUDTF`.
+pub(crate) fn common_inline_udtf(
+    function_name: &str,
+    deterministic: bool,
+    arguments: &[Expression],
+    return_type: Option<&DataType>,
+    eval_type: i32,
+    command: &[u8],
+    python_ver: &str,
+) -> proto::CommonInlineUserDefinedTableFunction {
+    let udtf = proto::PythonUdtf {
+        return_type: return_type.map(DataType::to_proto),
+        eval_type,
+        command: bytes::Bytes::copy_from_slice(command),
+        python_ver: python_ver.to_string(),
+    };
+    proto::CommonInlineUserDefinedTableFunction {
+        function_name: function_name.to_string(),
+        deterministic,
+        arguments: arguments.iter().map(Expression::to_proto).collect(),
+        function: Some(
+            proto::common_inline_user_defined_table_function::Function::PythonUdtf(udtf),
+        ),
     }
 }
 
@@ -1691,6 +1862,7 @@ pub fn drop(input: impl Into<Arc<LogicalPlan>>, columns: Vec<String>) -> Logical
     LogicalPlan::Drop {
         input: input.into(),
         columns,
+        expressions: Vec::new(),
     }
 }
 
@@ -1710,7 +1882,10 @@ pub fn to_schema(input: impl Into<Arc<LogicalPlan>>, schema: DataType) -> Logica
     }
 }
 
-/// Create a Hint plan.
+/// Create a Hint plan, of parameters given as strings: an integer-looking parameter is an
+/// Integer (int32) literal, matching PySpark's `lit(int)`, otherwise a String literal. (A
+/// Long literal is rejected as a partitionNum by e.g. the REBALANCE hint, which expects an
+/// integral int.)
 pub fn hint(
     input: impl Into<Arc<LogicalPlan>>,
     name: impl Into<String>,
@@ -1719,8 +1894,17 @@ pub fn hint(
     LogicalPlan::Hint {
         input: input.into(),
         name: name.into(),
-        parameters,
+        parameters: parameters.iter().map(|p| hint_parameter(p)).collect(),
     }
+}
+
+/// The literal of a hint parameter given as a string: an Integer for an integer-looking one,
+/// otherwise the String.
+pub(crate) fn hint_parameter(parameter: &str) -> Expression {
+    Expression::literal(match parameter.parse::<i32>() {
+        Ok(n) => LiteralExpression::int(n),
+        Err(_) => LiteralExpression::string(parameter),
+    })
 }
 
 /// Create an Unpivot plan.
@@ -1792,17 +1976,13 @@ fn value_to_proto_literal(v: &crate::row::Value) -> proto::expression::Literal {
     lit
 }
 
-/// Build a proto `Literal` from a string: a numeric-looking string becomes a
-/// Double literal, otherwise a String literal (used by NAReplace so string
-/// replacements are not silently dropped).
-fn str_to_proto_literal(s: &str) -> proto::expression::Literal {
-    use proto::expression::literal::LiteralType;
-    let mut lit = proto::expression::Literal::default();
-    lit.literal_type = Some(match s.parse::<f64>() {
-        Ok(v) => LiteralType::Double(v),
-        Err(_) => LiteralType::String(s.to_string()),
-    });
-    lit
+/// The literal of a replacement given as a string: a double for a numeric-looking string,
+/// otherwise the string (used by the NAReplace of strings).
+pub(crate) fn numeric_or_string_literal(s: &str) -> LiteralExpression {
+    match s.parse::<f64>() {
+        Ok(v) => LiteralExpression::double(v),
+        Err(_) => LiteralExpression::string(s),
+    }
 }
 
 /// Create a NADrop plan.
@@ -1820,7 +2000,8 @@ pub fn na_drop(
     }
 }
 
-/// Create a NAReplace plan.
+/// Create a NAReplace plan, of replacements given as strings: a numeric-looking string is a
+/// double, otherwise a string.
 pub fn na_replace(
     input: impl Into<Arc<LogicalPlan>>,
     replacements: Vec<(String, String)>,
@@ -1828,7 +2009,15 @@ pub fn na_replace(
 ) -> LogicalPlan {
     LogicalPlan::NAReplace {
         input: input.into(),
-        replacements,
+        replacements: replacements
+            .iter()
+            .map(|(old, new)| {
+                (
+                    numeric_or_string_literal(old),
+                    numeric_or_string_literal(new),
+                )
+            })
+            .collect(),
         columns,
     }
 }
@@ -1932,11 +2121,11 @@ mod argfix_tests {
 
     #[test]
     fn hint_carries_parameters() {
-        let p = LogicalPlan::Hint {
-            input: Arc::new(base()),
-            name: "REPARTITION".to_string(),
-            parameters: vec!["10".to_string(), "name".to_string()],
-        };
+        let p = hint(
+            base(),
+            "REPARTITION",
+            vec!["10".to_string(), "name".to_string()],
+        );
         match rel_type(p) {
             proto::relation::RelType::Hint(h) => {
                 assert_eq!(h.parameters.len(), 2, "parameters must be forwarded");
@@ -1953,12 +2142,60 @@ mod argfix_tests {
     }
 
     #[test]
-    fn replace_sets_string_literals() {
+    fn replace_sets_the_literals_of_their_types() {
+        // As PySpark's: a bool, a double, a string, or a null replacement, as a literal of its
+        // type.
         let p = LogicalPlan::NAReplace {
             input: Arc::new(base()),
-            replacements: vec![("foo".to_string(), "bar".to_string())],
-            columns: vec![],
+            replacements: vec![
+                (
+                    LiteralExpression::boolean(true),
+                    LiteralExpression::boolean(false),
+                ),
+                (
+                    LiteralExpression::double(1.0),
+                    LiteralExpression::null(DataType::Null),
+                ),
+                (
+                    LiteralExpression::string("1"),
+                    LiteralExpression::string("a"),
+                ),
+            ],
+            columns: vec!["b".to_string()],
         };
+        match rel_type(p) {
+            proto::relation::RelType::Replace(r) => {
+                let literals: Vec<(LiteralType, LiteralType)> = r
+                    .replacements
+                    .iter()
+                    .map(|repl| {
+                        let literal_type = |lit: &Option<proto::expression::Literal>| {
+                            lit.clone().unwrap().literal_type.unwrap()
+                        };
+                        (literal_type(&repl.old_value), literal_type(&repl.new_value))
+                    })
+                    .collect();
+                assert!(matches!(
+                    &literals[0],
+                    (LiteralType::Boolean(true), LiteralType::Boolean(false))
+                ));
+                assert!(matches!(
+                    &literals[1],
+                    (LiteralType::Double(v), LiteralType::Null(_)) if *v == 1.0
+                ));
+                assert!(matches!(
+                    &literals[2],
+                    (LiteralType::String(old), LiteralType::String(new)) if old == "1" && new == "a"
+                ));
+                assert_eq!(r.cols, vec!["b".to_string()]);
+            }
+            _ => panic!("expected Replace"),
+        }
+    }
+
+    #[test]
+    fn replace_sets_string_literals() {
+        let p = na_replace(base(), vec![("foo".to_string(), "bar".to_string())], vec![]);
         match rel_type(p) {
             proto::relation::RelType::Replace(r) => {
                 let repl = &r.replacements[0];
@@ -2069,5 +2306,46 @@ mod with_relations_tests {
         assert_eq!(distinct.len(), 4, "{all:?}");
         // The DataFrame keeps its own plan ID as a reference.
         assert_eq!(id(input), Some(ids.id_of(&df)));
+    }
+}
+
+#[cfg(test)]
+mod inline_udtf_tests {
+    use super::*;
+
+    /// As PySpark's `CommonInlineUserDefinedTableFunction` of a `PythonUDTF`: that of a
+    /// registration has no arguments, and keeps a DDL return type unparsed.
+    #[test]
+    fn registration_udtf_carries_the_handler_without_arguments() {
+        let ddl = DataType::Unparsed {
+            data_type_string: "x int".to_string(),
+        };
+        let f = common_inline_udtf(
+            "count_udtf",
+            false,
+            &[],
+            Some(&ddl),
+            302,
+            b"pickled",
+            "3.11",
+        );
+        assert_eq!(f.function_name, "count_udtf");
+        assert!(!f.deterministic && f.arguments.is_empty());
+        let Some(proto::common_inline_user_defined_table_function::Function::PythonUdtf(udtf)) =
+            f.function
+        else {
+            panic!("expected a PythonUDTF");
+        };
+        assert_eq!(udtf.return_type, Some(ddl.to_proto()));
+        assert_eq!(udtf.eval_type, 302);
+        assert_eq!(udtf.command.as_ref(), b"pickled");
+        assert_eq!(udtf.python_ver, "3.11");
+        let dynamic = common_inline_udtf("dynamic", true, &[], None, 300, b"", "3.11");
+        let Some(proto::common_inline_user_defined_table_function::Function::PythonUdtf(udtf)) =
+            dynamic.function
+        else {
+            panic!("expected a PythonUDTF");
+        };
+        assert_eq!(udtf.return_type, None);
     }
 }

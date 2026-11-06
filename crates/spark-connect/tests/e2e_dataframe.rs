@@ -100,18 +100,21 @@ fn dataframe_metadata_json_semantics() {
     assert!(json
         .iter()
         .all(|j| j.starts_with('{') && j.contains("id") && j.contains("name")));
-    // exists / scalar
-    assert!(df.exists().unwrap());
+    // exists / scalar: the EXISTS and scalar subqueries of a DataFrame, as PySpark's.
     let one = s.sql("SELECT 42 AS v").unwrap();
-    assert_eq!(
-        one.scalar().unwrap(),
-        Some(spark_connect::row::Value::Integer(42))
-    );
+    let row = &s
+        .range(1)
+        .unwrap()
+        .select(vec![df.exists(), one.scalar()])
+        .collect()
+        .unwrap()[0];
+    assert_eq!(row.get(0), Some(&spark_connect::row::Value::Bool(true)));
+    assert_eq!(row.get(1), Some(&spark_connect::row::Value::Integer(42)));
     // semantics (server-backed AnalyzePlan): two identical plans are equal
     assert!(df.same_semantics(&df4(&s)).unwrap());
     let _ = df.semantic_hash().unwrap();
     // flags
-    assert!(!df.is_streaming());
+    assert!(!df.is_streaming().unwrap());
     let _ = df.is_local();
     // input_files (a sql df reads no files -> empty, but the call path runs)
     let _ = df.input_files().unwrap();
@@ -130,4 +133,183 @@ fn dataframe_metadata_json_semantics() {
     // random_split returns the requested number of frames
     let parts = df.random_split(vec![0.5, 0.5], Some(1));
     assert_eq!(parts.len(), 2);
+}
+
+#[test]
+fn day_time_interval_input_roundtrips() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::row::{Row, Value};
+    use spark_connect::types::{DataType, StructField};
+
+    fn field(name: &str, data_type: DataType) -> StructField {
+        StructField {
+            name: name.into(),
+            data_type,
+            nullable: true,
+            metadata: Default::default(),
+        }
+    }
+    let s = session();
+    let interval = DataType::DayTimeInterval {
+        start_field: 0,
+        end_field: 3,
+    };
+    let schema = DataType::Struct {
+        fields: vec![
+            field("interval", interval.clone()),
+            field(
+                "items",
+                DataType::Array {
+                    element_type: Box::new(interval.clone()),
+                    contains_null: true,
+                },
+            ),
+            field(
+                "nested",
+                DataType::Struct {
+                    fields: vec![field("leaf", interval.clone())],
+                },
+            ),
+            field(
+                "mapping",
+                DataType::Map {
+                    key_type: Box::new(DataType::String {
+                        collation: "UTF8_BINARY".into(),
+                    }),
+                    value_type: Box::new(interval),
+                    value_contains_null: true,
+                },
+            ),
+        ],
+    };
+    let names = vec![
+        "interval".into(),
+        "items".into(),
+        "nested".into(),
+        "mapping".into(),
+    ];
+    let mut rows = vec![Row::new(names.clone(), vec![Value::Null; 4])];
+    for micros in [
+        i64::MIN,
+        i64::MIN + 1,
+        -172_800_000_001,
+        -1,
+        0,
+        1,
+        i64::MAX - 1,
+        i64::MAX,
+    ] {
+        let value = Value::DayTimeInterval(micros);
+        rows.push(Row::new(
+            names.clone(),
+            vec![
+                value.clone(),
+                Value::List(vec![Value::Null, value.clone()]),
+                Value::Struct(Row::new(vec!["leaf".into()], vec![value.clone()]).into()),
+                Value::Map(vec![
+                    (Value::String("k".into()), value),
+                    (Value::String("null".into()), Value::Null),
+                ]),
+            ],
+        ));
+    }
+    let df = s.create_dataframe(rows.clone(), schema.clone()).unwrap();
+    let collected = df.collect().unwrap();
+    assert_eq!(collected, rows);
+    assert_eq!(
+        s.create_dataframe(collected, schema)
+            .unwrap()
+            .collect()
+            .unwrap(),
+        rows
+    );
+
+    let sql = s
+        .sql("SELECT INTERVAL '-2 00:00:00.000001' DAY TO SECOND AS interval")
+        .unwrap();
+    let collected = sql.collect().unwrap();
+    assert_eq!(
+        collected[0].get(0),
+        Some(&Value::DayTimeInterval(-172_800_000_001))
+    );
+    assert_eq!(
+        s.create_dataframe(collected.clone(), sql.schema().unwrap())
+            .unwrap()
+            .collect()
+            .unwrap(),
+        collected
+    );
+}
+
+/// The rows of `df`, as (i32, i32) pairs, sorted.
+fn int_pairs(df: &DataFrame) -> Vec<(i32, i32)> {
+    use spark_connect::row::Value;
+    let mut pairs: Vec<(i32, i32)> = df
+        .collect()
+        .unwrap()
+        .iter()
+        .map(|row| match (row.get(0), row.get(1)) {
+            (Some(Value::Integer(a)), Some(Value::Integer(b))) => (*a, *b),
+            other => panic!("unexpected row {other:?}"),
+        })
+        .collect();
+    pairs.sort();
+    pairs
+}
+
+#[test]
+fn subqueries_return_the_rows_of_pyspark() {
+    // As PySpark's DataFrame.scalar(), DataFrame.exists() and Column.isin(df): scalar,
+    // correlated EXISTS and IN subqueries, also nested and in other operators.
+    if !should_run() {
+        return;
+    }
+    let s = session();
+    let t1 = s
+        .sql("SELECT * FROM VALUES (1, 2), (3, 4) AS t1(a, b)")
+        .unwrap()
+        .alias("t1");
+    let t2 = s
+        .sql("SELECT * FROM VALUES (1, 5), (5, 6), (3, 7) AS t2(a, c)")
+        .unwrap()
+        .alias("t2");
+
+    let largest = t2.select(vec![f::max(col("c"))]).scalar();
+    let with_largest = t1.select(vec![col("a"), largest.clone().alias("m")]);
+    assert_eq!(int_pairs(&with_largest), vec![(1, 7), (3, 7)]);
+    // A DataFrame with a subquery is the base, and the subquery, of others.
+    assert_eq!(
+        int_pairs(&with_largest.filter(col("m").gt(col("a")))),
+        vec![(1, 7), (3, 7)]
+    );
+    assert_eq!(
+        int_pairs(&t2.filter(col("a").isin_subquery(&with_largest.select(vec![col("a")])))),
+        vec![(1, 5), (3, 7)]
+    );
+
+    let correlated = t2.filter(col("t2.a").eq(col("t1.a")));
+    let largest_of_a = correlated.select(vec![f::max(col("c"))]).scalar();
+    assert_eq!(
+        int_pairs(&t1.select(vec![col("a"), largest_of_a.alias("m")])),
+        vec![(1, 5), (3, 7)]
+    );
+    assert_eq!(
+        int_pairs(&t1.filter(correlated.exists())),
+        vec![(1, 2), (3, 4)]
+    );
+    assert_eq!(int_pairs(&t1.filter(correlated.exists().not())), vec![]);
+
+    let smallest = t2.select(vec![f::min(col("c"))]).scalar();
+    let above_smallest = t2.filter(col("c").gt(smallest)).select(vec![col("a")]);
+    assert_eq!(
+        int_pairs(&t1.filter(col("a").isin_subquery(&above_smallest))),
+        vec![(3, 4)]
+    );
+    let pairs = s.sql("SELECT 1 AS x, 2 AS y").unwrap();
+    assert_eq!(
+        int_pairs(&t1.filter(f::r#struct(vec![col("a"), col("b")]).isin_subquery(&pairs))),
+        vec![(1, 2)]
+    );
 }

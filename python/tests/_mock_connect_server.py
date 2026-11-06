@@ -98,9 +98,13 @@ def serve(connection):
         calls = 0
         execute_calls = 0
         data_type = struct_schema()
+        # AnalyzePlan returns `explain_string` for an Explain request, else `data_type`.
+        explain_string = "== Physical Plan ==\n*(1) Range (0, 1, step=1, splits=1)\n"
         failure = None
         block_response = False
         response_gate = Event()
+        # With `block_execute` set, ExecutePlan waits for the gate too, as AnalyzePlan does.
+        block_execute = False
 
         # Each AnalyzePlanRequest, recorded.
         analyze_requests = []
@@ -113,6 +117,7 @@ def serve(connection):
             self.failure = None
             self.block_response = False
             self.response_gate.clear()
+            self.block_execute = False
             self.analyze_requests = []
             self.execute_requests = []
             self.execute_payload = b""
@@ -122,10 +127,16 @@ def serve(connection):
             self.fetched_error_ids = []
             self.confs = {}
             self.read_confs = []
+            self.set_confs = []
 
         def analyze(self, request, context):
             self.calls += 1
             self.analyze_requests.append(request)
+            # base.proto: AnalyzePlanRequest.is_streaming=8; AnalyzePlanResponse.is_streaming=6,
+            # IsStreaming.is_streaming=1, of `streaming`, which a test sets.
+            if 8 in parse_message(request):
+                streaming = getattr(self, "streaming", False)
+                return message_field(6, varint_field(1, 1) if streaming else b"")
             if self.block_response and not self.response_gate.wait(5):
                 context.abort(
                     grpc.StatusCode.DEADLINE_EXCEEDED,
@@ -139,12 +150,17 @@ def serve(connection):
                 return message_field(2, b"")
             if self.failure == "invalid-type":
                 return message_field(2, message_field(1, b""))
+            # base.proto: AnalyzePlanRequest.explain=5; AnalyzePlanResponse.explain=3,
+            # Explain.explain_string=1.
+            if 5 in parse_message(request):
+                return message_field(3, message_field(1, self.explain_string))
             # base.proto: AnalyzePlanResponse.schema=2, Schema.schema=1.
             return message_field(2, message_field(1, self.data_type))
 
         # ExecutePlan records each request and streams one response carrying
         # `execute_payload` (raw ExecutePlanResponse fields), then ResultComplete; with
-        # `execute_failure` set it aborts instead. Responses echo the request's
+        # `execute_failure` set it aborts instead, with INVALID_ARGUMENT and that message, or
+        # with the status code name and message of a tuple. Responses echo the request's
         # operation id, as the server does.
         execute_requests = []
         execute_payload = b""
@@ -154,18 +170,36 @@ def serve(connection):
         # ErrorInfo of `reason` and `metadata` in grpc-status-details-bin.
         execute_error = None
         # FetchErrorDetails returns `error_details` (raw FetchErrorDetailsResponse fields) and
-        # records the error id asked for. Config Get returns the values in `confs`, and fails
-        # for a key without one, as the server does for an unset config; it records the keys.
+        # records the error id asked for. Config Get returns the values in `confs`, or else
+        # those of `default_confs`, the defaults of SQL configs of the server, and fails for a
+        # key without one, as the server does for an unset config; it records the keys, as
+        # does GetWithDefault, which returns the values in `confs` or else the defaults that
+        # it is given. Config Set records the pairs and the silent flag of each request.
         error_details = b""
         fetched_error_ids = []
         confs = {}
+        default_confs = {
+            "spark.sql.execution.pythonUDF.arrow.enabled": "true",
+            "spark.sql.execution.pythonUDTF.arrow.enabled": "true",
+        }
         read_confs = []
+        set_confs = []
 
         def execute(self, request, context):
             self.execute_calls += 1
             self.execute_requests.append(request)
+            if self.block_execute and not self.response_gate.wait(5):
+                context.abort(
+                    grpc.StatusCode.DEADLINE_EXCEEDED,
+                    "Python thread could not run while the statement ran",
+                )
             if self.execute_failure:
-                context.abort(grpc.StatusCode.INVALID_ARGUMENT, self.execute_failure)
+                code, message = (
+                    self.execute_failure
+                    if isinstance(self.execute_failure, tuple)
+                    else ("INVALID_ARGUMENT", self.execute_failure)
+                )
+                context.abort(getattr(grpc.StatusCode, code), message)
             if self.execute_error:
                 message, reason, metadata = self.execute_error
                 # google.rpc: Status.code=1, message=2, details=3; Any.type_url=1, value=2;
@@ -201,15 +235,38 @@ def serve(connection):
             # ConfigResponse.session_id=1, pairs=2, KeyValue.key=1, value=2.
             request = parse_message(request)
             operation = parse_message(request[3][0])
+            if 1 in operation:
+                # Operation.set=1: Set.pairs=1 (KeyValue.key=1, value=2), silent=2.
+                set_request = parse_message(operation[1][0])
+                pairs = []
+                for pair in set_request.get(1, []):
+                    pair = parse_message(pair)
+                    pairs.append((pair[1][0].decode(), pair[2][0].decode()))
+                self.set_confs.append((pairs, set_request.get(2, [None])[0]))
+                return message_field(1, request[1][0])
+            if 3 in operation:
+                # Operation.get_with_default=3: GetWithDefault.pairs=1 (KeyValue.key=1,
+                # value=2), the default of each key that `confs` does not have.
+                pairs = []
+                for pair in parse_message(operation[3][0]).get(1, []):
+                    pair = parse_message(pair)
+                    key = pair[1][0].decode()
+                    self.read_confs.append(key)
+                    value = self.confs.get(key, pair.get(2, [b""])[0].decode())
+                    pairs.append(message_field(2, message_field(1, key) + message_field(2, value)))
+                return message_field(1, request[1][0]) + b"".join(pairs)
             if 2 not in operation:
-                context.abort(grpc.StatusCode.UNIMPLEMENTED, "only Get is served")
+                context.abort(
+                    grpc.StatusCode.UNIMPLEMENTED, "only Get, GetWithDefault and Set are served"
+                )
             keys = [key.decode() for key in parse_message(operation[2][0]).get(1, [])]
             self.read_confs.extend(keys)
-            if any(key not in self.confs for key in keys):
+            confs = {**self.default_confs, **self.confs}
+            if any(key not in confs for key in keys):
                 context.abort(grpc.StatusCode.INTERNAL, "[SQL_CONF_NOT_FOUND]")
             # The response names the session, as the server's does.
             return message_field(1, request[1][0]) + b"".join(
-                message_field(2, message_field(1, key) + message_field(2, self.confs[key]))
+                message_field(2, message_field(1, key) + message_field(2, confs[key]))
                 for key in keys
             )
 
@@ -289,9 +346,12 @@ def mock_connect_session():
     spark = None
     try:
         assert parent.poll(20), "Mock server did not start"
-        port = parent.recv()
-        spark = SparkSession.builder.remote(f"sc://127.0.0.1:{port}").getOrCreate()
-        yield spark, RemoteService(parent)
+        remote = f"sc://127.0.0.1:{parent.recv()}"
+        spark = SparkSession.builder.remote(remote).getOrCreate()
+        service = RemoteService(parent)
+        # The URL of the server, for more sessions of it.
+        object.__setattr__(service, "remote", remote)
+        yield spark, service
     finally:
         try:
             if spark is not None:

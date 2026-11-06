@@ -297,8 +297,9 @@ fn build(name: &str) -> Option<LogicalPlan> {
         }
         "select_star" => {
             let range = plan::range(0, 10, 1);
-            let star_col =
-                spark_connect::column::Column::new(ExpressionNode::UnresolvedStar(None).into());
+            let star_col = spark_connect::column::Column::new(
+                ExpressionNode::UnresolvedStar(None, None).into(),
+            );
             plan::project(range, vec![star_col])
         }
         "select_alias" => {
@@ -393,7 +394,7 @@ fn build(name: &str) -> Option<LogicalPlan> {
                 .clone();
             let agg_count = spark_connect::column::Column::new(Expression::function(
                 "count",
-                vec![ExpressionNode::UnresolvedStar(None).into()],
+                vec![ExpressionNode::UnresolvedStar(None, None).into()],
             ))
             .alias("c")
             .expression()
@@ -604,7 +605,7 @@ fn build(name: &str) -> Option<LogicalPlan> {
         "col_regex" => {
             let range = plan::range(0, 10, 1);
             let regex_col = spark_connect::column::Column::new(
-                ExpressionNode::UnresolvedRegex("`id`".to_string()).into(),
+                ExpressionNode::UnresolvedRegex("`id`".to_string(), None).into(),
             );
             plan::project(range, vec![regex_col])
         }

@@ -299,3 +299,199 @@ ________________________________________________________________________________
             "spark_version": spark_version,
         }
     )
+
+
+# Verbatim from PySpark: the local socket helpers of the JVM gateway. Spark Connect does not
+# use them, but the modules of PySpark that the client vendors, such as
+# pyspark.sql.pandas.conversion, import them.
+import io  # noqa: E402
+import socket  # noqa: E402
+from typing import Union  # noqa: E402
+
+from pyspark.errors import PySparkRuntimeError  # noqa: E402
+from pyspark.serializers import UTF8Deserializer  # noqa: E402
+
+
+def _create_local_socket(sock_info: "JavaArray") -> Tuple["io.BufferedRWPair", "socket.socket"]:
+    """
+    Create a local socket that can be used to load deserialized data from the JVM
+
+    Parameters
+    ----------
+    sock_info : tuple
+        Tuple containing port number and authentication secret for a local socket.
+
+    Returns
+    -------
+    sockfile file descriptor of the local socket
+    """
+    sockfile: "io.BufferedRWPair"
+    sock: "socket.socket"
+    conn_info: int = sock_info[0]
+    auth_secret: str = sock_info[1]
+    sockfile, sock = local_connect_and_auth(conn_info, auth_secret)
+    # The RDD materialization time is unpredictable, if we set a timeout for socket reading
+    # operation, it will very possibly fail. See SPARK-18281.
+    sock.settimeout(None)
+    return sockfile, sock
+
+
+@contextmanager
+def _load_from_socket(sock_info: "JavaArray", serializer: "Serializer") -> Iterator[Any]:
+    """
+    Connect to a local socket described by sock_info and use the given serializer to yield data
+
+    Parameters
+    ----------
+    sock_info : tuple
+        Tuple containing port number and authentication secret for a local socket.
+    serializer : class:`Serializer`
+        The PySpark serializer to use
+
+    Returns
+    -------
+    result of meth:`Serializer.load_stream`,
+    usually a generator that yields deserialized data
+    """
+    try:
+        sockfile, sock = _create_local_socket(sock_info)
+        yield serializer.load_stream(sockfile)
+    finally:
+        sockfile.close()
+        sock.close()
+
+
+def _local_iterator_from_socket(sock_info: "JavaArray", serializer: "Serializer") -> Iterator[Any]:
+    class PyLocalIterable:
+        """Create a synchronous local iterable over a socket"""
+
+        def __init__(self, _sock_info: "JavaArray", _serializer: "Serializer"):
+            port: int
+            auth_secret: str
+            self.jsocket_auth_server: "JavaObject"
+            port, auth_secret, self.jsocket_auth_server = _sock_info
+            self._sockfile, self._sock = _create_local_socket((port, auth_secret))
+            self._serializer = _serializer
+            self._read_iter: Iterator[Any] = iter([])  # Initialize as empty iterator
+            self._read_status = 1
+
+        def __iter__(self) -> Iterator[Any]:
+            while self._read_status == 1:
+                # Request next partition data from Java
+                write_int(1, self._sockfile)
+                self._sockfile.flush()
+
+                # If response is 1 then there is a partition to read, if 0 then fully consumed
+                self._read_status = read_int(self._sockfile)
+                if self._read_status == 1:
+                    # Load the partition data as a stream and read each item
+                    self._read_iter = self._serializer.load_stream(self._sockfile)
+                    for item in self._read_iter:
+                        yield item
+
+                # An error occurred, join serving thread and raise any exceptions from the JVM
+                elif self._read_status == -1:
+                    self.jsocket_auth_server.getResult()
+
+        def __del__(self) -> None:
+            # If local iterator is not fully consumed,
+            if self._read_status == 1:
+                try:
+                    # Finish consuming partition data stream
+                    for _ in self._read_iter:
+                        pass
+                    # Tell Java to stop sending data and close connection
+                    write_int(0, self._sockfile)
+                    self._sockfile.flush()
+                except Exception:
+                    # Ignore any errors, socket is automatically closed when garbage-collected
+                    pass
+            self._sockfile.close()
+            self._sock.close()
+
+    return iter(PyLocalIterable(sock_info, serializer))
+
+
+def local_connect_and_auth(
+    conn_info: Optional[Union[str, int]], auth_secret: Optional[str]
+) -> Tuple:
+    """
+    Connect to local host, authenticate with it, and return a (sockfile,sock) for that connection.
+    Handles IPV4 & IPV6, does some error handling.
+
+    Parameters
+    ----------
+    port : str or int, optional
+    auth_secret : str, optional
+
+    Returns
+    -------
+    tuple
+        with (sockfile, sock)
+    """
+    is_unix_domain_socket = isinstance(conn_info, str) and auth_secret is None
+    if is_unix_domain_socket:
+        sock_path = conn_info
+        assert isinstance(sock_path, str)
+        sock = None
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(int(os.environ.get("SPARK_AUTH_SOCKET_TIMEOUT", 15)))
+            sock.connect(sock_path)
+            sockfile = sock.makefile("rwb", int(os.environ.get("SPARK_BUFFER_SIZE", 65536)))
+            return (sockfile, sock)
+        except socket.error as e:
+            if sock is not None:
+                sock.close()
+            raise PySparkRuntimeError(
+                errorClass="CANNOT_OPEN_SOCKET",
+                messageParameters={
+                    "errors": "tried to connect to %s, but an error occurred: %s"
+                    % (sock_path, str(e)),
+                },
+            )
+
+    sock = None
+    errors = []
+    # Support for both IPv4 and IPv6.
+    addr = "127.0.0.1"
+    if os.environ.get("SPARK_PREFER_IPV6", "false").lower() == "true":
+        addr = "::1"
+    for res in socket.getaddrinfo(addr, conn_info, socket.AF_UNSPEC, socket.SOCK_STREAM):
+        af, socktype, proto, _, sa = res
+        try:
+            sock = socket.socket(af, socktype, proto)
+            sock.settimeout(int(os.environ.get("SPARK_AUTH_SOCKET_TIMEOUT", 15)))
+            sock.connect(sa)
+            sockfile = sock.makefile("rwb", int(os.environ.get("SPARK_BUFFER_SIZE", 65536)))
+            assert isinstance(auth_secret, str)
+            _do_server_auth(sockfile, auth_secret)
+            return (sockfile, sock)
+        except socket.error as e:
+            emsg = str(e)
+            errors.append("tried to connect to %s, but an error occurred: %s" % (sa, emsg))
+            if sock is not None:
+                sock.close()
+                sock = None
+    raise PySparkRuntimeError(
+        errorClass="CANNOT_OPEN_SOCKET",
+        messageParameters={
+            "errors": str(errors),
+        },
+    )
+
+
+def _do_server_auth(conn: "io.IOBase", auth_secret: str) -> None:
+    """
+    Performs the authentication protocol defined by the SocketAuthHelper class on the given
+    file-like object 'conn'.
+    """
+    write_with_length(auth_secret.encode("utf-8"), conn)
+    conn.flush()
+    reply = UTF8Deserializer().loads(conn)
+    if reply != "ok":
+        conn.close()
+        raise PySparkRuntimeError(
+            errorClass="UNEXPECTED_RESPONSE_FROM_SERVER",
+            messageParameters={},
+        )
