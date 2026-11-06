@@ -492,7 +492,10 @@ fn streaming_surface() {
         .format("rate")
         .option("rowsPerSecond", "1")
         .load(None);
-    assert!(sdf.is_streaming());
+    assert!(sdf.is_streaming().unwrap());
+    // As PySpark's, which asks the server: a DataFrame of a stream is streaming too.
+    assert!(sdf.select([col("value")]).is_streaming().unwrap());
+    assert!(!s.range(1).unwrap().is_streaming().unwrap());
     let mut opts = Map::new();
     opts.insert("rowsPerSecond".to_string(), "1".to_string());
     assert!(s
@@ -500,13 +503,17 @@ fn streaming_surface() {
         .format("rate")
         .options(opts)
         .load(None)
-        .is_streaming());
+        .is_streaming()
+        .unwrap());
+    // The rate source takes no schema, which the server reports when it analyzes the plan,
+    // as for PySpark.
     assert!(s
         .read_stream()
         .format("rate")
         .schema("timestamp timestamp, value long")
         .load(None)
-        .is_streaming());
+        .is_streaming()
+        .is_err());
 
     // Start a query and exercise the full StreamingQuery read surface.
     let q = sdf
@@ -550,15 +557,27 @@ fn streaming_surface() {
         .cluster_by(vec!["value"])
         .output_mode("complete");
 
-    // Streaming file-source readers + name(): all build lazy streaming plans
-    // (no execution until start), so is_streaming() is a client-side check.
+    // Streaming file-source readers + name(): all build lazy streaming plans (no execution
+    // until start), which the server analyzes for is_streaming(), of directories that exist.
     let schema = "value long";
+    for dir in [
+        "/tmp/cov_s_json",
+        "/tmp/cov_s_pq",
+        "/tmp/cov_s_orc",
+        "/tmp/cov_s_csv",
+        "/tmp/cov_s_txt",
+    ] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    // A named source needs spark.sql.streaming.queryEvolution.enableSourceEvolution, which the
+    // server reports when it analyzes the plan, as for PySpark.
     assert!(s
         .read_stream()
         .name("rate")
         .format("rate")
         .load(None)
-        .is_streaming());
+        .is_streaming()
+        .is_err());
     for df in [
         s.read_stream().schema(schema).json("/tmp/cov_s_json"),
         s.read_stream().schema(schema).parquet("/tmp/cov_s_pq"),
@@ -571,7 +590,7 @@ fn streaming_surface() {
             .schema("value string")
             .text("/tmp/cov_s_txt"),
     ] {
-        assert!(df.is_streaming());
+        assert!(df.is_streaming().unwrap());
     }
 
     // process_all_available drains a rate stream feeding a memory sink, then stop.

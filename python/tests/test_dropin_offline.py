@@ -3648,6 +3648,20 @@ def test_struct_field_equality():
     assert f1 != f3
 
 
+def test_is_streaming_asks_the_server_as_pyspark(mock_connect):
+    # As PySpark's: isStreaming is the server's answer to an IsStreaming request of the plan.
+    spark, service = mock_connect
+    df = spark.range(1).select("id")
+    try:
+        assert df.isStreaming is False
+        service.streaming = True
+        assert df.isStreaming is True
+    finally:
+        service.streaming = False
+    # base.proto: AnalyzePlanRequest.is_streaming=8.
+    assert sum(8 in parse_message(request) for request in service.analyze_requests) == 2
+
+
 def test_struct_type_field_access():
     """Test accessing StructType fields by index and name."""
     st = T.StructType([
