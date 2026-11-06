@@ -8,7 +8,6 @@ use spark_connect::udf::{eval_type, CommonInlineUserDefinedFunctionExpression, P
 
 use crate::column::PyColumn;
 use crate::errors::ResultExt;
-use crate::functions::to_column;
 use crate::group::PyGroupedData;
 use crate::row::{FieldConverters, PyRow};
 use crate::streaming::PyDataStreamWriter;
@@ -979,17 +978,13 @@ impl PyDataFrame {
     #[pyo3(name = "sampleBy", signature = (col, fractions, seed=None))]
     fn sample_by(
         &self,
-        col: &str,
-        fractions: &Bound<'_, PyDict>,
+        col: &Bound<'_, PyAny>,
+        fractions: &Bound<'_, PyAny>,
         seed: Option<i64>,
     ) -> PyResult<PyDataFrame> {
-        let mut fr = Vec::with_capacity(fractions.len());
-        for (k, v) in fractions.iter() {
-            let key = to_column(&k)?.expression().clone();
-            fr.push((key, v.extract::<f64>()?));
-        }
+        let (col, fractions) = crate::stat::sample_by_arguments(col, fractions)?;
         Ok(PyDataFrame::new(
-            self.dataframe.stat().sample_by(col, fr, seed),
+            self.dataframe.stat().sample_by(col, fractions, seed),
         ))
     }
 

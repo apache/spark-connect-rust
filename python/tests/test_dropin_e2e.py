@@ -1048,6 +1048,18 @@ def test_to_pandas_converts_the_columns_as_pyspark(session):
         session.conf.unset("spark.sql.session.timeZone")
 
 
+def test_sample_by_samples_the_fractions_of_the_strata_as_pyspark(session):
+    # As PySpark's sampleBy: each stratum by its fraction, of a column name or a Column.
+    df = session.createDataFrame([(1, "a"), (2, "b"), (3, "a")], "id int, k string")
+    fractions = {"a": 1.0, "b": 0.0}
+    for sampled in (
+        df.sampleBy("k", fractions, seed=1),
+        df.sampleBy(F.col("k"), fractions, seed=1),
+        df.stat.sampleBy("k", fractions, seed=1),
+    ):
+        assert sorted(r.id for r in sampled.collect()) == [1, 3]
+
+
 def test_window_order_by_a_column_sorts_nulls_first_as_pyspark(session):
     from pyspark.sql import Window
 

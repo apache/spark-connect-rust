@@ -446,13 +446,13 @@ impl StatFunctions {
     /// Sample by values in a column.
     pub fn sample_by(
         &self,
-        col: &str,
+        col: impl Into<Column>,
         fractions: Vec<(Expression, f64)>,
         seed: Option<i64>,
     ) -> DataFrame {
         let plan = LogicalPlan::StatSampleBy {
             input: Arc::clone(&self.dataframe.plan),
-            col: col.to_string(),
+            col: col.into().expression().clone(),
             fractions,
             seed,
         };
@@ -823,7 +823,7 @@ mod tests {
                 fractions,
                 ..
             } => {
-                assert_eq!(col, "category");
+                assert_eq!(*col, Expression::column("category"));
                 assert_eq!(*seed, Some(42));
                 assert_eq!(fractions.len(), 2);
             }
