@@ -6397,6 +6397,53 @@ def _offline_session():
     return SparkSession.builder.remote("sc://localhost:1").getOrCreate()
 
 
+def test_explain_checks_its_arguments_and_prints_with_print_as_pyspark(mock_connect):
+    # As PySpark's DataFrame._explain_string, which checks its arguments and the mode, and
+    # explain, which prints its plan with Python's print.
+    import contextlib
+    import io
+
+    from pyspark.errors import PySparkTypeError, PySparkValueError
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    df = spark.range(1)
+    not_bool_or_str = {
+        "expected_type": "bool or str",
+        "arg_name": "extended (optional) and mode (optional)",
+        "arg_type": "<class 'int'>",
+    }
+    for call, error_type, condition, parameters in (
+        (lambda: df.explain(True, "simple"), PySparkValueError, "CANNOT_SET_TOGETHER",
+         {"arg_list": "extended and mode"}),
+        (lambda: df._explain_string(1), PySparkTypeError, "NOT_EXPECTED_TYPE", not_bool_or_str),
+        (lambda: df.explain(mode=1), PySparkTypeError, "NOT_EXPECTED_TYPE", not_bool_or_str),
+        (lambda: df.explain(mode="FORMATTED"), PySparkValueError, "VALUE_NOT_ALLOWED",
+         {"arg_name": "explain_mode",
+          "allowed_values": "['simple', 'extended', 'codegen', 'cost', 'formatted']"}),
+        # An error of a PySpark error class that the client raises carries its error class
+        # and message parameters.
+        (lambda: spark.tvf.json_tuple(F.lit("{}")), PySparkValueError, "CANNOT_BE_EMPTY",
+         {"item": "field"}),
+    ):
+        with pytest.raises(error_type) as error:
+            call()
+        assert error.value.getCondition() == condition
+        assert error.value.getMessageParameters() == parameters
+
+    plan = service.explain_string
+    assert df._explain_string(mode="cost") == plan
+    printed = io.StringIO()
+    with contextlib.redirect_stdout(printed):
+        assert df.explain(True) is None
+    assert printed.getvalue() == plan + "\n"
+    # base.proto: AnalyzePlanRequest.explain=5, Explain.explain_mode=2, of EXPLAIN_MODE_COST=4
+    # and EXPLAIN_MODE_EXTENDED=2.
+    modes = [parse_message(parse_message(request)[5][0])[2][0]
+             for request in service.analyze_requests[-2:]]
+    assert modes == [4, 2]
+
+
 def test_session_context_manager_stops_session():
     spark = _offline_session()
     with spark as s:

@@ -176,9 +176,13 @@ pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
         // Get the exception class from the module
         match errors_module.getattr(class_name) {
             Ok(exc_class) => {
-                // Try to instantiate the exception class by calling it with the message
-                // This creates a PyObject exception instance
-                match exc_class.call1((msg.clone(),)) {
+                // Instantiate the exception class: of the error class and message parameters
+                // of an error of a PySpark error class, otherwise of the message.
+                let created = match classed_exception(&exc_class, &err) {
+                    Some(exc_instance) => Ok(exc_instance),
+                    None => exc_class.call1((msg.clone(),)),
+                };
+                match created {
                     Ok(exc_instance) => {
                         // Mirror the reference client, which stamps `_operation_id` on
                         // errors raised for an ExecutePlan (read via `operation_id`).
@@ -201,6 +205,26 @@ pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
             }
         }
     })
+}
+
+/// The exception of `exc_class` for an error of a PySpark error class that the client raised,
+/// as PySpark raises it: of the error class and the message parameters, from which the
+/// exception renders its message, so that `getCondition` and `getMessageParameters` return
+/// them. None for an error without an error class, or of one that PySpark does not know.
+fn classed_exception<'py>(
+    exc_class: &Bound<'py, PyAny>,
+    err: &SparkError,
+) -> Option<Bound<'py, PyAny>> {
+    let error_class = err.get_condition()?;
+    let py = exc_class.py();
+    let parameters = PyDict::new(py);
+    for (key, value) in err.get_message_parameters().unwrap_or_default() {
+        parameters.set_item(key, value).ok()?;
+    }
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("errorClass", error_class).ok()?;
+    kwargs.set_item("messageParameters", parameters).ok()?;
+    exc_class.call((), Some(&kwargs)).ok()
 }
 
 /// Helper to convert Result<T, SparkError> to PyResult<T>.

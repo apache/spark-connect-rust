@@ -1233,39 +1233,57 @@ impl DataFrame {
         self.explain_mode("simple")
     }
 
-    /// Print the execution plan in a specific mode. Mirrors the `mode` argument of
-    /// `pyspark.sql.DataFrame.explain`: one of "simple", "extended", "codegen",
-    /// "cost", "formatted" (case-insensitive).
+    /// Print the execution plan in an explain mode, [`DataFrame::explain_string`].
     pub fn explain_mode(&self, mode: &str) -> Result<()> {
+        println!("{}", self.explain_string(mode)?);
+        Ok(())
+    }
+
+    /// The execution plan in an explain mode, mirroring `pyspark.sql.DataFrame._explain_string`
+    /// of a mode, which PySpark Connect's client checks: one of "simple", "extended",
+    /// "codegen", "cost" and "formatted", else a `VALUE_NOT_ALLOWED` error.
+    pub fn explain_string(&self, mode: &str) -> Result<String> {
         use proto::analyze_plan_request::explain::ExplainMode;
-        let explain_mode = match mode.to_lowercase().as_str() {
+        let explain_mode = match mode {
             "simple" => ExplainMode::Simple,
             "extended" => ExplainMode::Extended,
             "codegen" => ExplainMode::Codegen,
             "cost" => ExplainMode::Cost,
             "formatted" => ExplainMode::Formatted,
-            other => {
+            _ => {
                 return Err(SparkError::value(
-                    "UNSUPPORTED_EXPLAIN_MODE",
-                    &[("mode", other)],
+                    "VALUE_NOT_ALLOWED",
+                    &[
+                        ("arg_name", "explain_mode"),
+                        (
+                            "allowed_values",
+                            "['simple', 'extended', 'codegen', 'cost', 'formatted']",
+                        ),
+                    ],
                 ))
             }
         };
-        let relation = self.relation();
-        let mut plan = proto::Plan::default();
-        plan.op_type = Some(proto::plan::OpType::Root(relation));
-        let mut ex = proto::analyze_plan_request::Explain::default();
-        ex.plan = Some(plan);
-        ex.explain_mode = explain_mode as i32;
-        let mut request = proto::AnalyzePlanRequest::default();
-        request.session_id = self.session.client().session_id().to_string();
-        request.user_context = Some(proto::UserContext::default());
-        request.analyze = Some(proto::analyze_plan_request::Analyze::Explain(ex));
+        let plan = proto::Plan {
+            op_type: Some(proto::plan::OpType::Root(self.relation())),
+        };
+        let request = proto::AnalyzePlanRequest {
+            session_id: self.session.client().session_id().to_string(),
+            user_context: Some(proto::UserContext::default()),
+            analyze: Some(proto::analyze_plan_request::Analyze::Explain(
+                proto::analyze_plan_request::Explain {
+                    plan: Some(plan),
+                    explain_mode: explain_mode as i32,
+                },
+            )),
+            ..Default::default()
+        };
         let response = block_on(self.session.client().analyze_plan(request))?;
-        if let Some(proto::analyze_plan_response::Result::Explain(e)) = response.result {
-            println!("{}", e.explain_string);
+        match response.result {
+            Some(proto::analyze_plan_response::Result::Explain(e)) => Ok(e.explain_string),
+            _ => Err(SparkError::connect_msg(
+                "AnalyzePlan response did not contain an explain result",
+            )),
         }
-        Ok(())
     }
 
     /// Add a watermark to this DataFrame for event-time based windows.
@@ -3579,6 +3597,23 @@ mod plan_construction_tests {
             other => panic!("expected the returned SQL relation, got {other:?}"),
         }
         assert_eq!(relation.common.and_then(|common| common.plan_id), Some(1));
+    }
+
+    #[test]
+    fn explain_string_takes_the_explain_modes_of_pyspark() {
+        // As PySpark Connect's client, which checks the mode before it asks the server.
+        let spark = session();
+        let df = spark.range(1).unwrap();
+        for mode in ["FORMATTED", "bogus", ""] {
+            let err = df.explain_string(mode).unwrap_err();
+            assert_eq!(err.get_condition().as_deref(), Some("VALUE_NOT_ALLOWED"));
+            let parameters = err.get_message_parameters().unwrap();
+            assert_eq!(parameters["arg_name"], "explain_mode");
+            assert_eq!(
+                parameters["allowed_values"],
+                "['simple', 'extended', 'codegen', 'cost', 'formatted']"
+            );
+        }
     }
 
     #[test]

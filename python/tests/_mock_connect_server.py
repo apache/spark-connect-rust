@@ -98,6 +98,8 @@ def serve(connection):
         calls = 0
         execute_calls = 0
         data_type = struct_schema()
+        # AnalyzePlan returns `explain_string` for an Explain request, else `data_type`.
+        explain_string = "== Physical Plan ==\n*(1) Range (0, 1, step=1, splits=1)\n"
         failure = None
         block_response = False
         response_gate = Event()
@@ -143,6 +145,10 @@ def serve(connection):
                 return message_field(2, b"")
             if self.failure == "invalid-type":
                 return message_field(2, message_field(1, b""))
+            # base.proto: AnalyzePlanRequest.explain=5; AnalyzePlanResponse.explain=3,
+            # Explain.explain_string=1.
+            if 5 in parse_message(request):
+                return message_field(3, message_field(1, self.explain_string))
             # base.proto: AnalyzePlanResponse.schema=2, Schema.schema=1.
             return message_field(2, message_field(1, self.data_type))
 
