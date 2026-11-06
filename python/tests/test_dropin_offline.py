@@ -5014,9 +5014,10 @@ def test_exact_date_nested_unrelated_values(mock_connect):
 
 
 def test_exact_date_named_impostor_rejected():
+    pd = pytest.importorskip("pandas")
     impostor = type("date", (), {"toordinal": lambda self: 719163})
     with pytest.raises(TypeError, match="unsupported value type"):
-        _local_create_dataframe([(impostor(),)])
+        _local_create_dataframe(pd.DataFrame({"value": [impostor()]}, dtype=object))
 
 
 def _exact_date_fields(data):
