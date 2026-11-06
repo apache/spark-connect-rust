@@ -19,7 +19,7 @@
 Canonical home of the ``PandasUDFType`` / ``ArrowUDFType`` enums (mirroring reference
 pyspark); ``pyspark.sql.functions`` re-exports them from here.
 """
-from pyspark.sql.functions import pandas_udf  # noqa: F401
+from pyspark.util import PythonEvalType  # noqa: F401  (pyspark.sql.pandas.typehints reads it here)
 
 
 class PandasUDFType:
@@ -43,4 +43,8 @@ class ArrowUDFType:
     GROUPED_AGG_ITER = 254
 
 
-__all__ = ["pandas_udf", "PandasUDFType", "ArrowUDFType"]
+# After the enums: importing this module first imports pyspark.sql.functions, whose
+# re-export of the enums then finds them already defined here.
+from pyspark.sql.functions import arrow_udf, pandas_udf  # noqa: E402,F401
+
+__all__ = ["arrow_udf", "pandas_udf", "PandasUDFType", "ArrowUDFType"]

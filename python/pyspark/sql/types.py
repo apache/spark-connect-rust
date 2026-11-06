@@ -347,6 +347,22 @@ def _drop_metadata(d):
         return MapType(_drop_metadata(d.keyType), _drop_metadata(d.valueType), d.valueContainsNull)
     return d
 
+def _has_type(dt, dts):
+    """Return whether there are specified types (mirrors pyspark.sql.types._has_type)."""
+    if isinstance(dt, dts):
+        return True
+    elif isinstance(dt, StructType):
+        return any(_has_type(f.dataType, dts) for f in dt.fields)
+    elif isinstance(dt, ArrayType):
+        return _has_type(dt.elementType, dts)
+    elif isinstance(dt, MapType):
+        return _has_type(dt.keyType, dts) or _has_type(dt.valueType, dts)
+    elif isinstance(dt, UserDefinedType):
+        return _has_type(dt.sqlType(), dts)
+    else:
+        return False
+
+
 def _create_row(fields, values):
     """A Row of ``values`` named by ``fields``, as in PySpark, whose pickled rows call it."""
     row = Row(*values)
