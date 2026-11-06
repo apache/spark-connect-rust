@@ -435,6 +435,30 @@ def test_apply_in_pandas_with_state_runs_as_pyspark(session, tmp_path):
         session.conf.unset("spark.sql.shuffle.partitions")
 
 
+def test_create_dataframe_types_pandas_columns_as_pyspark(session):
+    from decimal import Decimal
+
+    pd = pytest.importorskip("pandas")
+    np = pytest.importorskip("numpy")
+    cases = [
+        # A column without values takes the type of its dtype.
+        ({"id": [1, 2], "s": [np.nan, np.nan]}, "struct<id:bigint,s:double>", [(1, None), (2, None)]),
+        ({"id": [1, 2], "s": [None, None]}, "struct<id:bigint,s:void>", [(1, None), (2, None)]),
+        ({"id": [1, 2], "t": pd.to_datetime([None, None])}, "struct<id:bigint,t:timestamp>",
+         [(1, None), (2, None)]),
+        # A column of Decimals takes the precision and scale of all its values.
+        ({"d": [Decimal("1.5"), Decimal("2.25")]}, "struct<d:decimal(3,2)>",
+         [(Decimal("1.50"),), (Decimal("2.25"),)]),
+        ({"d": [Decimal("1E+2"), Decimal("0.001")]}, "struct<d:decimal(6,3)>",
+         [(Decimal("100.000"),), (Decimal("0.001"),)]),
+        ({"d": [Decimal("1.5"), None]}, "struct<d:decimal(2,1)>", [(Decimal("1.5"),), (None,)]),
+    ]
+    for data, schema, rows in cases:
+        df = session.createDataFrame(pd.DataFrame(data))
+        assert df.schema.simpleString() == schema, data
+        assert [tuple(r) for r in df.collect()] == rows, data
+
+
 def test_collected_rows_behave_as_pyspark_rows(session):
     import pickle
 
