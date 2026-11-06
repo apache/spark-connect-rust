@@ -10,7 +10,7 @@ use crate::column::PyColumn;
 use crate::errors::ResultExt;
 use crate::functions::to_column;
 use crate::group::PyGroupedData;
-use crate::row::{value_to_py, FieldConverters, PyRow};
+use crate::row::{FieldConverters, PyRow};
 use crate::streaming::PyDataStreamWriter;
 use crate::types::PyDataType;
 
@@ -1115,17 +1115,14 @@ impl PyDataFrame {
         ))
     }
 
-    /// Whether the (scalar-subquery) DataFrame would return at least one row.
-    fn exists(&self, py: Python<'_>) -> PyResult<bool> {
-        py.detach(|| self.dataframe.exists()).to_pyerr()
+    /// The EXISTS subquery of this DataFrame, as a Column. Mirrors `DataFrame.exists()`.
+    fn exists(&self) -> PyColumn {
+        PyColumn::new(self.dataframe.exists())
     }
 
-    /// Return the single scalar value produced by this (scalar-subquery) DataFrame.
-    fn scalar(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        match py.detach(|| self.dataframe.scalar()).to_pyerr()? {
-            Some(v) => Ok(value_to_py(py, &v)?.unbind()),
-            None => Ok(py.None()),
-        }
+    /// The scalar subquery of this DataFrame, as a Column. Mirrors `DataFrame.scalar()`.
+    fn scalar(&self) -> PyColumn {
+        PyColumn::new(self.dataframe.scalar())
     }
 
     /// Return a `TableArg` wrapping this DataFrame, for use as a table-valued function

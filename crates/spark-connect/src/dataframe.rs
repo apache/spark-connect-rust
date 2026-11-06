@@ -1909,19 +1909,38 @@ impl DataFrame {
         Self::new_with_schema(self.session.clone(), plan, Some(schema))
     }
 
-    /// Check if the DataFrame exists (is not empty).
-    pub fn exists(&self) -> Result<bool> {
-        self.limit(1).count().map(|c| c > 0)
+    /// A subquery of `subquery_type` of this DataFrame's plan, which refers to the plan by
+    /// its plan ID in the session.
+    pub(crate) fn subquery(
+        &self,
+        subquery_type: crate::expression::SubqueryType,
+    ) -> crate::expression::SubqueryExpression {
+        crate::expression::SubqueryExpression::new(
+            Arc::clone(&self.plan),
+            self.session.plan_ids().id_of(&self.plan),
+            subquery_type,
+        )
     }
 
-    /// Get a scalar value from a single-row, single-column result.
-    pub fn scalar(&self) -> Result<Option<Value>> {
+    /// The scalar subquery of this DataFrame, which returns one row of one column, as a
+    /// Column of that value. Mirrors `DataFrame.scalar()`. A column of the outer query is
+    /// referred to as `col(...).outer()`.
+    pub fn scalar(&self) -> Column {
+        let subquery = self.subquery(crate::expression::SubqueryType::Scalar);
+        Column::new(ExpressionNode::Subquery(Box::new(subquery)).into())
+    }
+
+    /// The EXISTS subquery of this DataFrame, as a Column of whether it returns a row.
+    /// Mirrors `DataFrame.exists()`.
+    pub fn exists(&self) -> Column {
+        let subquery = self.subquery(crate::expression::SubqueryType::Exists);
+        Column::new(ExpressionNode::Subquery(Box::new(subquery)).into())
+    }
+
+    /// The first value of the first row, if any.
+    pub(crate) fn first_value(&self) -> Result<Option<Value>> {
         let rows = self.limit(1).collect()?;
-        if rows.is_empty() {
-            return Ok(None);
-        }
-        let row = &rows[0];
-        Ok(row.get(0).cloned())
+        Ok(rows.first().and_then(|row| row.get(0).cloned()))
     }
 
     /// Transpose the DataFrame: swap rows and columns (server-side `Transpose`
@@ -4433,5 +4452,155 @@ mod arrow_value_tests {
     fn micros_to_time_string_branches() {
         assert_eq!(micros_to_time_string(0), "00:00:00");
         assert!(micros_to_time_string(1).contains('.'));
+    }
+}
+
+#[cfg(test)]
+mod subquery_tests {
+    use super::*;
+    use crate::column::col;
+    use crate::functions::max;
+    use crate::session::SparkSession;
+    use proto::relation::RelType;
+
+    fn session() -> SparkSession {
+        SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .expect("failed to build session")
+    }
+
+    fn plan_id(relation: &proto::Relation) -> Option<i64> {
+        relation.common.as_ref().and_then(|common| common.plan_id)
+    }
+
+    /// The root and the references of a `WithRelations`.
+    fn with_relations(relation: &proto::Relation) -> (&proto::Relation, &[proto::Relation]) {
+        let Some(RelType::WithRelations(with)) = &relation.rel_type else {
+            panic!("expected WithRelations: {relation:?}");
+        };
+        (with.root.as_deref().expect("root"), &with.references)
+    }
+
+    fn subquery(expr: &proto::Expression) -> &proto::SubqueryExpression {
+        let Some(proto::expression::ExprType::SubqueryExpression(subquery)) = &expr.expr_type
+        else {
+            panic!("expected a SubqueryExpression: {expr:?}");
+        };
+        subquery
+    }
+
+    /// As PySpark's `_with_relations`: a relation with subqueries is a `WithRelations` of
+    /// its own plan ID, whose root has another, and whose references are the plans of the
+    /// subqueries, with the plan IDs that the subqueries refer to.
+    #[test]
+    fn subqueries_are_sent_with_the_plans_that_they_refer_to() {
+        let spark = session();
+        let inner = spark.range(3).unwrap().select(vec![max(col("id"))]);
+        let df = spark
+            .range(2)
+            .unwrap()
+            .select(vec![col("id"), inner.scalar().alias("m")]);
+
+        let relation = df.relation();
+        let (root, references) = with_relations(&relation);
+        assert_eq!(plan_id(&relation), Some(spark.plan_ids().id_of(&df.plan)));
+        assert!(plan_id(root).is_some() && plan_id(root) != plan_id(&relation));
+        let Some(RelType::Project(project)) = &root.rel_type else {
+            panic!("expected Project: {root:?}");
+        };
+        let Some(proto::expression::ExprType::Alias(alias)) = &project.expressions[1].expr_type
+        else {
+            panic!("expected an alias");
+        };
+        let scalar = subquery(alias.expr.as_deref().unwrap());
+        assert_eq!(
+            scalar.subquery_type,
+            proto::subquery_expression::SubqueryType::Scalar as i32
+        );
+        assert_eq!(references.len(), 1);
+        assert_eq!(plan_id(&references[0]), Some(scalar.plan_id));
+        assert_eq!(references[0], inner.relation());
+        // The plan IDs are stable, as PySpark's.
+        assert_eq!(df.relation(), relation);
+        // Without plan IDs, the relation is sent the same way.
+        let Some(RelType::WithRelations(with)) = df.plan.to_proto().rel_type else {
+            panic!("expected WithRelations");
+        };
+        assert_eq!(with.references.len(), 1);
+        // A plan without subqueries is sent as it is.
+        assert!(matches!(
+            inner.relation().rel_type,
+            Some(RelType::Project(_))
+        ));
+    }
+
+    /// The relations below a relation with subqueries, and the plans that they refer to,
+    /// send their own subqueries in their own `WithRelations`.
+    #[test]
+    fn nested_subqueries_are_sent_in_their_own_relations() {
+        let spark = session();
+        let t1 = spark.range(4).unwrap();
+        let t2 = spark.range(2).unwrap();
+        let smallest = t2.select(vec![crate::functions::min(col("id"))]);
+        let filtered = t2.filter(col("id").gt(smallest.scalar()));
+        let df = t1
+            .filter(col("id").isin_subquery(&filtered))
+            .filter(t2.exists());
+
+        let relation = df.relation();
+        let (root, references) = with_relations(&relation);
+        let Some(RelType::Filter(outer)) = &root.rel_type else {
+            panic!("expected Filter: {root:?}");
+        };
+        let exists = subquery(outer.condition.as_ref().unwrap());
+        assert_eq!(references.len(), 1);
+        assert_eq!(plan_id(&references[0]), Some(exists.plan_id));
+
+        // The inner filter, with the IN subquery of the filtered plan, which in turn has the
+        // scalar subquery of the smallest.
+        let (inner_root, inner_references) = with_relations(outer.input.as_deref().unwrap());
+        let Some(RelType::Filter(inner)) = &inner_root.rel_type else {
+            panic!("expected Filter: {inner_root:?}");
+        };
+        let in_subquery = subquery(inner.condition.as_ref().unwrap());
+        assert_eq!(
+            in_subquery.subquery_type,
+            proto::subquery_expression::SubqueryType::In as i32
+        );
+        assert_eq!(
+            in_subquery.in_subquery_values,
+            vec![col("id").expression().to_proto()]
+        );
+        assert_eq!(inner_references.len(), 1);
+        assert_eq!(plan_id(&inner_references[0]), Some(in_subquery.plan_id));
+        let (filtered_root, filtered_references) = with_relations(&inner_references[0]);
+        assert!(matches!(filtered_root.rel_type, Some(RelType::Filter(_))));
+        assert_eq!(
+            filtered_references,
+            std::slice::from_ref(&smallest.relation())
+        );
+    }
+
+    /// As PySpark's `Column.isin(df)`, the values of an IN subquery of a struct are its
+    /// fields; and the subqueries render as PySpark's, with the plan ID of their plan.
+    #[test]
+    fn in_subqueries_of_structs_compare_their_fields() {
+        let spark = session();
+        let df = spark.range(1).unwrap();
+        let id = spark.plan_ids().id_of(&df.plan);
+        let fields = crate::functions::r#struct(vec![col("a"), col("b")]).isin_subquery(&df);
+        assert_eq!(
+            fields.expression().render(),
+            format!("SubqueryExpression(plan=<plan {id}>, type=in, values=[a, b])")
+        );
+        assert_eq!(
+            df.scalar().expression().render(),
+            format!("SubqueryExpression(plan=<plan {id}>, type=scalar)")
+        );
+        assert_eq!(
+            df.exists().expression().render(),
+            format!("SubqueryExpression(plan=<plan {id}>, type=exists)")
+        );
     }
 }

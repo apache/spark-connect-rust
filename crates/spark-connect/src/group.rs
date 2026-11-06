@@ -421,7 +421,10 @@ impl StatFunctions {
             col2: col2.to_string(),
         };
         let df = DataFrame::new(self.dataframe.session.clone(), plan);
-        Ok(df.scalar()?.and_then(|v| v.as_f64()).unwrap_or(f64::NAN))
+        Ok(df
+            .first_value()?
+            .and_then(|v| v.as_f64())
+            .unwrap_or(f64::NAN))
     }
 
     /// Compute covariance between two columns.
@@ -434,7 +437,10 @@ impl StatFunctions {
             col2: col2.to_string(),
         };
         let df = DataFrame::new(self.dataframe.session.clone(), plan);
-        Ok(df.scalar()?.and_then(|v| v.as_f64()).unwrap_or(f64::NAN))
+        Ok(df
+            .first_value()?
+            .and_then(|v| v.as_f64())
+            .unwrap_or(f64::NAN))
     }
 
     /// Sample by values in a column.

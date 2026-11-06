@@ -886,6 +886,67 @@ def test_udf_and_udtf_calls_pass_named_arguments_as_pyspark(mock_connect):
     assert parse_message(first[2][0])[1] == [b"x"] and key == "b" and set(value) == {1}
 
 
+def test_subqueries_are_sent_with_the_plans_they_refer_to_as_pyspark(mock_connect):
+    # As PySpark's DataFrame.scalar(), DataFrame.exists() and Column.isin(df): Columns of
+    # SubqueryExpressions of the plan of the DataFrame, sent in a WithRelations of the plans
+    # that they refer to; and asTable() is a table argument that a UDTF call takes.
+    from pyspark.sql import Column, functions as F
+
+    spark, service = mock_connect
+
+    def relation():
+        # ExecutePlanRequest.plan=3, Plan.root=1.
+        return parse_message(parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0])
+
+    def plan_id(rel):
+        # Relation.common=1, RelationCommon.plan_id=2.
+        return parse_message(rel[1][0])[2][0]
+
+    def with_relations(rel):
+        # Relation.with_relations=41: root=1, references=2.
+        with_rel = parse_message(rel[41][0])
+        return parse_message(with_rel[1][0]), [parse_message(r) for r in with_rel[2]]
+
+    def subquery(expression):
+        # Expression.alias=6 (expr=1); .subquery_expression=21: plan_id=1, subquery_type=2,
+        # table_arg_options=3, in_subquery_values=4.
+        expression = parse_message(expression)
+        if 6 in expression:
+            expression = parse_message(parse_message(expression[6][0])[1][0])
+        return parse_message(expression[21][0])
+
+    inner = spark.range(3)
+    scalar = inner.scalar()
+    assert isinstance(scalar, Column) and isinstance(inner.exists(), Column)
+    assert "type=scalar" in repr(scalar) and "type=exists" in repr(inner.exists())
+    spark.range(1).select(
+        scalar.alias("s"), inner.exists().alias("e"), F.col("id").isin(inner).alias("i")
+    ).collect()
+    rel = relation()
+    root, references = with_relations(rel)
+    assert plan_id(root) != plan_id(rel)
+    # Relation.project=3, Project.expressions=3.
+    subqueries = [subquery(e) for e in parse_message(root[3][0])[3]]
+    assert [s[2][0] for s in subqueries] == [1, 2, 4]  # SCALAR, EXISTS, IN
+    assert {s[1][0] for s in subqueries} == {plan_id(r) for r in references}
+    assert len(references) == 3 and all(3 not in s for s in subqueries)
+    assert parse_message(subqueries[2][4][0])[2]  # IN of unresolved_attribute "id"
+
+    @F.udtf(returnType="id bigint")
+    class Rows:
+        def eval(self, row):
+            yield row["id"],
+
+    table = spark.range(2).asTable().partitionBy("id").orderBy(F.col("id").desc())
+    Rows(table).collect()
+    root, references = with_relations(relation())
+    # Relation.common_inline_user_defined_table_function=38, its arguments=3.
+    argument = subquery(parse_message(root[38][0])[3][0])
+    assert argument[2] == [3] and argument[1][0] == plan_id(references[0])  # TABLE_ARG
+    options = parse_message(argument[3][0])
+    assert len(options[1]) == 1 and len(options[2]) == 1 and 3 not in options
+
+
 def test_udtfs_are_created_as_pyspark(mock_connect):
     # As PySpark's _create_py_udtf and _create_pyarrow_udtf: a UDTF is not deterministic
     # unless asDeterministic() marks it so, in place; arrow_udtf() makes a PyArrow-native

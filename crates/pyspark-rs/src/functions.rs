@@ -44,7 +44,7 @@ fn pyfunc_make_udf(
     let return_data_type = crate::types::py_to_data_type(return_type)?;
 
     // The positional arguments, then the named ones, as PySpark's UDF call.
-    let arg_exprs: Vec<Expression> = udf_arguments(args, named_args)?
+    let arg_exprs: Vec<Expression> = udf_arguments(args, named_args, false)?
         .into_iter()
         .map(|c| c.expression().clone())
         .collect();
@@ -63,17 +63,27 @@ fn pyfunc_make_udf(
 
 /// The arguments of a UDF or UDTF call: the positional ones, then a `NamedArgumentExpression`
 /// of each keyword argument, as PySpark's `UserDefinedFunction` and `UserDefinedTableFunction`
-/// build them.
+/// build them. As PySpark's, a UDTF call also takes a `TableArg`, which passes the rows of
+/// its DataFrame.
 fn udf_arguments(
     args: Vec<Bound<'_, PyAny>>,
     named_args: Vec<(String, Bound<'_, PyAny>)>,
+    table_args: bool,
 ) -> PyResult<Vec<Column>> {
+    let argument = |arg: &Bound<'_, PyAny>| -> PyResult<Column> {
+        if table_args {
+            if let Ok(table_arg) = arg.extract::<PyRef<'_, crate::tablearg::PyTableArg>>() {
+                return Ok(table_arg.inner.to_column());
+            }
+        }
+        to_column(arg)
+    };
     let mut columns = Vec::with_capacity(args.len() + named_args.len());
     for arg in args {
-        columns.push(to_column(&arg)?);
+        columns.push(argument(&arg)?);
     }
     for (key, value) in named_args {
-        let value = to_column(&value)?.expression().clone();
+        let value = argument(&value)?.expression().clone();
         columns.push(Column::new(
             ExpressionNode::NamedArgument(Box::new(NamedArgument::new(key, value))).into(),
         ));
@@ -106,7 +116,7 @@ fn pyfunc_make_udtf(
     deterministic: bool,
     named_args: Vec<(String, Bound<'_, PyAny>)>,
 ) -> PyResult<PyDataFrame> {
-    let col_args = udf_arguments(args, named_args)?;
+    let col_args = udf_arguments(args, named_args, true)?;
     // Connect leaves DDL parsing and validation to the server. In particular,
     // do not use py_to_data_type's eager DDL parser for string return types.
     let rt = return_type
