@@ -835,6 +835,42 @@ impl PySparkSession {
                     _ => frame,
                 });
             }
+            let helper = py.import("pyspark.sql._pandas_input")?;
+            let columns = helper.getattr("timestamp_columns")?.call1((data, schema))?;
+            if !columns.is_none() {
+                // Only a naive column needs the session time zone; aware columns carry theirs.
+                let aware = helper
+                    .getattr("timestamp_columns_are_aware")?
+                    .call1((&columns,))?
+                    .is_truthy()?;
+                let timezone = if aware {
+                    None
+                } else {
+                    py.detach(|| {
+                        self.session
+                            .conf()
+                            .get("spark.sql.session.timeZone")
+                            .to_pyerr()
+                    })?
+                };
+                let table = helper
+                    .getattr("prepare_timestamp_table")?
+                    .call1((columns, schema, timezone))?;
+                if !table.is_none() {
+                    let frame =
+                        crate::pyarrow_import::create_dataframe(py, &self.session, &table, schema)?;
+                    return Ok(match &spec {
+                        Spec::Struct(fields) if !fields.is_empty() && table.len()? > 0 => {
+                            PyDataFrame::new(
+                                frame.dataframe.to_df(
+                                    fields.iter().map(|field| field.name.as_str()).collect(),
+                                ),
+                            )
+                        }
+                        _ => frame,
+                    });
+                }
+            }
             let ipc = py
                 .import("pyspark.sql._pandas_input")?
                 .getattr("prepare_float64_input")?
@@ -1114,11 +1150,17 @@ impl PySparkSession {
             .map(PySparkSession::new)
     }
 
-    /// The active session; errors if none. Mirrors `SparkSession.active`.
+    /// The active session; errors if none. Mirrors `SparkSession.active`, which raises
+    /// `NO_ACTIVE_OR_DEFAULT_SESSION`.
     #[staticmethod]
-    fn active() -> PyResult<PySparkSession> {
+    fn active(py: Python<'_>) -> PyResult<PySparkSession> {
         Self::get_active_session().ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err("No active SparkSession found")
+            crate::column::raise_pyspark(
+                py,
+                "PySparkRuntimeError",
+                "NO_ACTIVE_OR_DEFAULT_SESSION",
+                &[],
+            )
         })
     }
 
@@ -1599,6 +1641,14 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
             .map(|item| py_to_value(&item))
             .collect::<PyResult<Vec<_>>>()?;
         return Ok(Value::List(items));
+    }
+
+    // Exact dates cannot implement numeric protocols or override toordinal. Skip
+    // the generic Decimal/numeric probes; subclasses (including datetime) must
+    // retain the fallback ordering below. PyDate also supports abi3 wheels.
+    if let Ok(date) = obj.cast_exact::<pyo3::types::PyDate>() {
+        let ordinal: i64 = date.call_method0("toordinal")?.extract()?;
+        return Ok(Value::Date((ordinal - 719163i64) as i32));
     }
 
     // Check for bool (before int because bool is a subclass of int in Python)
