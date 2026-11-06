@@ -139,6 +139,8 @@ VENDORED_FILES=(
   "sql/pandas/typehints.py"
   "sql/pandas/types.py"
   "sql/pandas/utils.py"
+  # pandas_udf and arrow_udf, which create the UDF with pyspark.sql.connect.udf._create_udf.
+  "sql/pandas/functions.py"
 
   # SQL: core utilities
   "sql/variant_utils.py"

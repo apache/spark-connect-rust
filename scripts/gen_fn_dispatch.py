@@ -149,6 +149,14 @@ skip_functions = {
     # count_distinct(col, *cols) and countDistinct: a distinct count of all the columns.
     "count_distinct",
     "countDistinct",
+    # when (a CASE WHEN), and the deprecated partition transforms, which call those of
+    # pyspark.sql.functions.partitioning: written in functions.py as PySpark Connect's.
+    "when",
+    "years",
+    "months",
+    "days",
+    "hours",
+    "bucket",
 }
 
 # Categorize functions by their parameter types

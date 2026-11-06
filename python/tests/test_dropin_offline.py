@@ -424,7 +424,8 @@ def test_functions_udtf_and_arrow_decorators():
     # functions.arrow_udf builds an Arrow scalar UDF.
     au = F.arrow_udf(lambda x: x, IntegerType())
     assert callable(au)
-    aui = F.arrow_udf(lambda x: x, IntegerType(), functionType="scalar_iter")
+    # As in PySpark, the function type is a value of ArrowUDFType.
+    aui = F.arrow_udf(lambda x: x, IntegerType(), functionType=F.ArrowUDFType.SCALAR_ITER)
     assert callable(aui)
 
 
@@ -471,7 +472,9 @@ def test_functions_exports_fresh_process():
             part = importlib.import_module("pyspark.sql.functions.partitioning")
             assert part is F.partitioning is sys.modules[part.__name__]
             assert part.__all__ == ["years", "months", "days", "hours", "bucket"]
-            assert all(getattr(part, name) is getattr(F, name) for name in part.__all__)
+            # As in PySpark, distinct from those of pyspark.sql.functions, which are deprecated
+            # and call them.
+            assert all(getattr(part, name) is not getattr(F, name) for name in part.__all__)
             assert F.random is F.rand
             assert F.column is not F.col
             assert list(inspect.signature(F.first).parameters) == ["col", "ignorenulls"]
@@ -1262,9 +1265,106 @@ def test_udf_nondeterministic_and_evaltypes():
     # useArrow path selects the arrow eval type.
     a = udf(lambda x: x, T.IntegerType(), useArrow=True)
     assert callable(a)
-    # pandas_udf with an explicit functionType.
-    p = pandas_udf(lambda s: s, T.IntegerType(), functionType="scalar")
+    # pandas_udf with an explicit functionType, a value of PandasUDFType as in PySpark.
+    from pyspark.sql.functions import PandasUDFType
+
+    p = pandas_udf(lambda s: s, T.IntegerType(), functionType=PandasUDFType.SCALAR)
     assert p is not None
+
+
+class _EvalHandler:
+    def eval(self, x):
+        yield (x,)
+
+
+class _AnalyzeHandler:
+    def eval(self, x):
+        yield (x,)
+
+    @staticmethod
+    def analyze(x):
+        pass
+
+
+_NOT_A_COLUMN = {"expected_type": "Column", "arg_name": "condition"}
+
+
+@pytest.mark.parametrize("call,error,condition,parameters", [
+    (lambda F: F.when("a", 1), "PySparkTypeError", "NOT_EXPECTED_TYPE",
+     {**_NOT_A_COLUMN, "arg_type": "str"}),
+    (lambda F: F.when(True, 1), "PySparkTypeError", "NOT_EXPECTED_TYPE",
+     {**_NOT_A_COLUMN, "arg_type": "bool"}),
+    (lambda F: F.when(F.col("a") > 1, 1).when("b", 2), "PySparkTypeError", "NOT_EXPECTED_TYPE",
+     {**_NOT_A_COLUMN, "arg_type": "str"}),
+    (lambda F: F.col("a").when(F.col("b") > 1, 1), "PySparkTypeError", "INVALID_WHEN_USAGE", {}),
+    (lambda F: F.when(F.col("a") > 1, 1).otherwise(0).when(F.col("b") > 1, 2),
+     "PySparkTypeError", "INVALID_WHEN_USAGE", {}),
+    (lambda F: F.partitioning.bucket("n", "c"), "PySparkTypeError", "NOT_EXPECTED_TYPE",
+     {"expected_type": "Column or int", "arg_name": "numBuckets", "arg_type": "str"}),
+    (lambda F: F.partitioning.months(3), "PySparkTypeError", "NOT_EXPECTED_TYPE",
+     {"expected_type": "Column or str", "arg_name": "col", "arg_type": "int"}),
+    (lambda F: F.pandas_udf(), "PySparkTypeError", "CANNOT_BE_NONE", {"arg_name": "returnType"}),
+    (lambda F: F.pandas_udf(lambda s: s), "PySparkTypeError", "CANNOT_BE_NONE",
+     {"arg_name": "returnType"}),
+    (lambda F: F.pandas_udf(lambda s: s, "long", 3), "PySparkTypeError", "INVALID_PANDAS_UDF_TYPE",
+     {"arg_name": "functionType", "arg_type": "3"}),
+    (lambda F: F.arrow_udf(), "PySparkTypeError", "CANNOT_BE_NONE", {"arg_name": "returnType"}),
+    (lambda F: F.arrow_udf("long", 3), "PySparkTypeError", "INVALID_PANDAS_UDF_TYPE",
+     {"arg_name": "functionType", "arg_type": "3"}),
+    (lambda F: F.udtf(3, returnType="x int"), "PySparkTypeError", "INVALID_UDTF_HANDLER_TYPE",
+     {"type": "int"}),
+    (lambda F: F.arrow_udtf(3), "PySparkTypeError", "INVALID_UDTF_HANDLER_TYPE", {"type": "int"}),
+    (lambda F: F.udtf(type("T", (), {}), returnType="x int"), "PySparkAttributeError",
+     "INVALID_UDTF_NO_EVAL", {"name": "T"}),
+    (lambda F: F.udtf(_EvalHandler), "PySparkAttributeError", "INVALID_UDTF_RETURN_TYPE",
+     {"name": "_EvalHandler"}),
+    (lambda F: F.udtf(_AnalyzeHandler, returnType="x int"), "PySparkAttributeError",
+     "INVALID_UDTF_BOTH_RETURN_TYPE_AND_ANALYZE", {"name": "_AnalyzeHandler"}),
+    (lambda F: F.arrow_udtf(_AnalyzeHandler), "PySparkAttributeError",
+     "INVALID_ARROW_UDTF_WITH_ANALYZE", {"name": "_AnalyzeHandler"}),
+])
+def test_functions_check_their_arguments_as_pyspark(call, error, condition, parameters):
+    # Before any request, with PySpark's errors; the cases agree with official PySpark 4.3.0.
+    from pyspark.errors import PySparkException
+    from pyspark.sql import functions as F
+
+    with pytest.raises(PySparkException) as raised:
+        call(F)
+    assert type(raised.value).__name__ == error
+    assert raised.value.getCondition() == condition
+    assert raised.value.getMessageParameters() == parameters
+
+
+def test_when_and_otherwise_build_one_case_when_as_pyspark():
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+
+    branches = F.when(F.col("a") > 1, 1).when(F.col("b") > 1, F.col("b"))
+    assert repr(branches) == "Column<'CASE WHEN >(a, 1) THEN 1 WHEN >(b, 1) THEN b END'>"
+    assert repr(branches.otherwise(0)) == (
+        "Column<'CASE WHEN >(a, 1) THEN 1 WHEN >(b, 1) THEN b ELSE 0 END'>")
+    # As PySpark's Column.otherwise, with a message rather than a condition.
+    with pytest.raises(PySparkTypeError, match=r"^otherwise\(\) can only be applied on a Column"):
+        F.col("a").otherwise(0)
+    with pytest.raises(PySparkTypeError, match=r"^otherwise\(\) can only be applied once"):
+        branches.otherwise(0).otherwise(2)
+
+
+def test_partition_transforms_are_those_of_pyspark_and_the_others_deprecated():
+    import warnings
+
+    import pyspark.sql.functions.partitioning as P
+    from pyspark.sql import functions as F
+
+    with pytest.warns(FutureWarning, match="use partitioning.years instead"):
+        assert repr(F.years("c")) == "Column<'years(c)'>"
+    with pytest.warns(FutureWarning, match="use partitioning.bucket instead"):
+        assert repr(F.bucket(2, "c")) == "Column<'bucket(2, c)'>"
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert repr(P.days("c")) == "Column<'days(c)'>"
+        assert repr(F.partitioning.bucket(F.lit(2), "c")) == "Column<'bucket(2, c)'>"
+    assert P.bucket is F.partitioning.bucket
 
 
 def test_udtf_construction():
@@ -1446,11 +1546,22 @@ def test_udf_defaults_and_registration():
     # returnType defaults to StringType
     u = udf(lambda x: x)
     assert callable(u)
-    p = pandas_udf(lambda s: s)  # default returnType
-    assert p is not None
-    # pandas_udf grouped_map/other functionType branches
-    for ft in ["scalar", "grouped_map", "grouped_agg"]:
-        assert pandas_udf(lambda s: s, T.IntegerType(), functionType=ft) is not None
+    # As in PySpark, a pandas UDF takes no default return type, and a grouped map one a
+    # struct type.
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql.functions import PandasUDFType
+
+    with pytest.raises(PySparkTypeError, match="CANNOT_BE_NONE"):
+        pandas_udf(lambda s: s)
+    struct = T.StructType([T.StructField("a", T.IntegerType())])
+    for ft, rt in [
+        (PandasUDFType.SCALAR, T.IntegerType()),
+        (PandasUDFType.GROUPED_MAP, struct),
+        (PandasUDFType.GROUPED_AGG, T.IntegerType()),
+    ]:
+        assert pandas_udf(lambda s: s, rt, functionType=ft).evalType == ft
+    with pytest.raises(PySparkTypeError, match="INVALID_RETURN_TYPE_FOR_PANDAS_UDF"):
+        pandas_udf(lambda s: s, T.IntegerType(), functionType=PandasUDFType.GROUPED_MAP)
     # UDFRegistration.register wires to the session's _registerPythonUdf (so the name
     # resolves in SQL) and returns the UDF.
     from pyspark.sql.udf import UDFRegistration
@@ -2885,7 +2996,9 @@ def test_pandas_udf_grouped_agg():
     from pyspark.sql.types import IntegerType
 
     # Create pandas_udf without decorator to avoid execution issues
-    p = pandas_udf(lambda s: s, IntegerType(), functionType="grouped_agg")
+    from pyspark.sql.functions import PandasUDFType
+
+    p = pandas_udf(lambda s: s, IntegerType(), functionType=PandasUDFType.GROUPED_AGG)
     assert callable(p)
 
 
@@ -2899,7 +3012,9 @@ def test_arrow_udf_types():
     assert callable(u1)
 
     # Scalar iter UDF
-    u2 = arrow_udf(lambda x: x, IntegerType(), functionType="scalar_iter")
+    from pyspark.sql.functions import ArrowUDFType
+
+    u2 = arrow_udf(lambda x: x, IntegerType(), functionType=ArrowUDFType.SCALAR_ITER)
     assert callable(u2)
 
 
