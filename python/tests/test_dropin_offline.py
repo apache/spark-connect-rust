@@ -1876,6 +1876,33 @@ def test_functions_pad_functions():
     assert type(F.rpad(str_col, 10, " ")).__name__ == "Column"
 
 
+@pytest.mark.parametrize("build,expected", [
+    # As Column.alias(*alias, **kwargs) of PySpark: every name, metadata for one name only.
+    (lambda c: c.alias("x"), "a AS x"),
+    (lambda c: c.alias("x", "y"), "a AS x,y"),
+    (lambda c: c.name("x", "y"), "a AS x,y"),
+    (lambda c: c.alias(), "a AS "),
+    (lambda c: c.alias("x", metadata={"k": 1, "n": [1, 2], "s": "v"}), "a AS x"),
+    (lambda c: c.alias("x", "y", metadata=None), "a AS x,y"),
+])
+def test_column_alias_takes_every_name_as_pyspark(build, expected):
+    from pyspark.sql import functions as F
+
+    assert repr(build(F.col("a"))) == f"Column<'{expected}'>"
+
+
+def test_column_alias_errors_as_pyspark():
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql import functions as F
+
+    with pytest.raises(PySparkValueError) as error:
+        F.col("a").alias("x", "y", metadata={"k": 1})
+    assert error.value.getCondition() == "ONLY_ALLOWED_FOR_SINGLE_COLUMN"
+    assert error.value.getMessageParameters() == {"arg_name": "metadata"}
+    with pytest.raises(AssertionError, match=r"^Unexpected kwargs where passed: \{'foo': 1\}$"):
+        F.col("a").alias("x", foo=1)
+
+
 def test_functions_instr():
     """Test instr function."""
     from pyspark.sql import functions as F

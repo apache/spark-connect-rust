@@ -3,6 +3,7 @@
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use spark_connect::column::Column;
+use spark_connect::expression::{Alias, ExpressionNode};
 
 use crate::functions::to_column;
 
@@ -63,37 +64,70 @@ fn py_obj_to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
 
 #[pymethods]
 impl PyColumn {
-    /// Alias the column, optionally attaching column metadata (a dict), mirroring
-    /// `Column.alias(name, metadata=...)`.
+    /// Alias the column with each given name, optionally attaching column metadata (a
+    /// dict). Mirrors `Column.alias(*alias, **kwargs)`, which names a generator's columns in
+    /// order, takes metadata for a single name only, and sends it as `json.dumps(metadata)`.
     #[pyo3(signature = (*alias, **kwargs))]
-    fn alias(&self, alias: Vec<String>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyColumn> {
-        // Mirrors Column.alias(*alias, **kwargs): the common single-name form aliases the
-        // column; `metadata` (a dict) may be passed via kwargs. Extra names beyond the first
-        // (multi-output aliasing) are not applied here.
-        let metadata: Option<std::collections::HashMap<String, String>> = match kwargs {
-            Some(kw) => match kw.get_item("metadata")? {
-                Some(v) if !v.is_none() => Some(v.extract()?),
-                _ => None,
-            },
-            None => None,
-        };
-        let name = match alias.first() {
-            Some(n) => n.clone(),
-            None => return Ok(PyColumn::new(self.column.clone())),
-        };
-        Ok(match metadata {
-            None => PyColumn::new(self.column.clone().alias(&name)),
-            Some(m) => {
-                let md: std::collections::BTreeMap<String, String> = m.into_iter().collect();
-                PyColumn::new(self.column.clone().alias_with_metadata(&name, md))
+    fn alias(
+        &self,
+        py: Python<'_>,
+        alias: Vec<String>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyColumn> {
+        let mut metadata = None;
+        if let Some(kwargs) = kwargs {
+            let rest = kwargs.copy()?;
+            if let Some(value) = rest.get_item("metadata")? {
+                rest.del_item("metadata")?;
+                if !value.is_none() {
+                    metadata = Some(value);
+                }
             }
-        })
+            if !rest.is_empty() {
+                return Err(pyo3::exceptions::PyAssertionError::new_err(format!(
+                    "Unexpected kwargs where passed: {}",
+                    rest.repr()?
+                )));
+            }
+        }
+        if alias.len() > 1 && metadata.is_some() {
+            return Err(raise_pyspark(
+                py,
+                "PySparkValueError",
+                "ONLY_ALLOWED_FOR_SINGLE_COLUMN",
+                &[("arg_name", "metadata")],
+            ));
+        }
+        let single = alias.len() == 1;
+        let mut node = Alias::with_names(self.column.expression().clone(), alias);
+        if let Some(metadata) = metadata {
+            if single {
+                let json = py.import("json")?.call_method1("dumps", (metadata,))?;
+                node = node.with_metadata(json.extract()?);
+            } else if metadata.is_truthy()? {
+                // The reference client raises this when it builds the plan of the alias.
+                return Err(raise_pyspark(
+                    py,
+                    "PySparkValueError",
+                    "CANNOT_PROVIDE_METADATA",
+                    &[],
+                ));
+            }
+        }
+        Ok(PyColumn::new(Column::new(
+            ExpressionNode::Alias(Box::new(node)).into(),
+        )))
     }
 
     /// Alias for `alias` (pyspark `Column.name`).
     #[pyo3(signature = (*alias, **kwargs))]
-    fn name(&self, alias: Vec<String>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyColumn> {
-        self.alias(alias, kwargs)
+    fn name(
+        &self,
+        py: Python<'_>,
+        alias: Vec<String>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyColumn> {
+        self.alias(py, alias, kwargs)
     }
 
     /// Apply a transformation function to this column. Mirrors `Column.transform(f)`,

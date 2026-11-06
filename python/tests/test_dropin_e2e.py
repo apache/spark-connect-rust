@@ -613,6 +613,14 @@ def test_sql_keyword_arguments_are_not_parameters_as_pyspark(session):
     assert error.value.getCondition() == "UNBOUND_SQL_PARAMETER"
 
 
+def test_column_alias_names_every_column_and_keeps_its_metadata(session):
+    df = session.sql("SELECT map('k1', 1) AS m").select(F.explode("m").alias("k", "v"))
+    assert df.columns == ["k", "v"]
+    assert [tuple(r) for r in df.collect()] == [("k1", 1)]
+    df = session.range(1).select(F.col("id").alias("x", metadata={"k": 1, "n": [1, 2], "s": "v"}))
+    assert df.schema.fields[0].metadata == {"k": 1, "n": [1, 2], "s": "v"}
+
+
 def test_maps_keep_their_entries_in_order_with_keys_of_their_type(session):
     row = session.range(1).selectExpr(
         "map(2, 'b', 1, 'a') AS ints",
