@@ -1,7 +1,7 @@
 //! PyO3 wrapper for spark_connect::dataframe::DataFrame.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyTuple};
+use pyo3::types::{PyDict, PyInt, PyList, PyTuple};
 use spark_connect::dataframe::{DataFrame, LocalRowIterator};
 use spark_connect::plan::JoinType;
 use spark_connect::udf::{eval_type, CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
@@ -1577,9 +1577,41 @@ impl PyDataFrame {
         }
     }
 
-    /// Column access by name (`df["col"]`).
-    fn __getitem__(&self, item: &str) -> PyColumn {
-        PyColumn::new(spark_connect::functions::col(item))
+    /// As PySpark's `DataFrame.__getitem__`: a column by name (`df["col"]`) or position
+    /// (`df[0]`), the rows that match a Column (`df[df.a > 1]`, as `filter`), or the
+    /// projection of a list or tuple of columns (`df[["a", "b"]]`, as `select`).
+    fn __getitem__(&self, py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        use pyo3::IntoPyObjectExt;
+
+        let name = if let Ok(name) = item.cast::<pyo3::types::PyString>() {
+            name.extract::<String>()?
+        } else if item.is_instance_of::<PyColumn>() {
+            return self.filter(item)?.into_py_any(py);
+        } else if item.is_instance_of::<PyList>() || item.is_instance_of::<PyTuple>() {
+            let cols = item.try_iter()?.collect::<PyResult<Vec<_>>>()?;
+            return self.select(py, cols)?.into_py_any(py);
+        } else if item.is_instance_of::<PyInt>() {
+            let columns = self.columns(py)?;
+            // Use Python list indexing for negative indices, bools (an int
+            // subclass), and IndexError even for integers larger than isize.
+            PyList::new(py, columns)?
+                .as_any()
+                .get_item(item)?
+                .extract::<String>()?
+        } else {
+            let arg_type = item.get_type().name()?.to_string();
+            return Err(crate::column::raise_pyspark(
+                py,
+                "PySparkTypeError",
+                "NOT_EXPECTED_TYPE",
+                &[
+                    ("expected_type", "Column, int, list, str or tuple"),
+                    ("arg_name", "item"),
+                    ("arg_type", &arg_type),
+                ],
+            ));
+        };
+        PyColumn::new(spark_connect::functions::col(&name)).into_py_any(py)
     }
 
     /// Private column accessor used by pandas-on-Spark (`sdf._col(name)`); mirrors the

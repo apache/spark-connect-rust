@@ -667,6 +667,22 @@ def test_collected_rows_keep_their_values_as_pyspark(session):
     assert (rows[0].v.toJson(), rows[0].n) == ("1", 2)
 
 
+def test_getitem_indexes_filters_and_selects_as_pyspark(session):
+    from pyspark.errors import PySparkTypeError
+
+    df = session.createDataFrame([(1, "a"), (2, "b"), (3, "c")], ["id", "s"])
+    assert df.select(df[0], df[-1], df[True]).columns == ["id", "s", "s"]
+    assert df[df["id"] > 1].collect() == [Row(id=2, s="b"), Row(id=3, s="c")]
+    assert df[["s"]].collect() == [Row(s="a"), Row(s="b"), Row(s="c")]
+    assert df[("s", "id")].columns == ["s", "id"]
+    assert df[[["id"]]].columns == ["id"]
+    with pytest.raises(IndexError):
+        df[2]
+    with pytest.raises(PySparkTypeError) as error:
+        df[1.5]
+    assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+
+
 def test_sql_runs_statements_eagerly(session):
     # sql() sends the statement at once: a command takes effect without an action, and the
     # DataFrame of its result is the local relation the server returned.
