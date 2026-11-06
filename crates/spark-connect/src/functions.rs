@@ -3618,6 +3618,14 @@ pub fn counter_diff(value: Column) -> Column {
     func("counter_diff", vec![value.expression().clone()])
 }
 
+/// Mirrors `pyspark.sql.functions.counter_diff(value, startTime)`.
+pub fn counter_diff_with_start_time(value: Column, start_time: Column) -> Column {
+    func(
+        "counter_diff",
+        vec![value.expression().clone(), start_time.expression().clone()],
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.current_path`.
 pub fn current_path() -> Column {
     func("current_path", vec![])
@@ -3633,6 +3641,18 @@ pub fn hmac(key: Column, message: Column) -> Column {
     func(
         "hmac",
         vec![key.expression().clone(), message.expression().clone()],
+    )
+}
+
+/// Mirrors `pyspark.sql.functions.hmac(key, message, algorithm)`.
+pub fn hmac_with_algorithm(key: Column, message: Column, algorithm: Column) -> Column {
+    func(
+        "hmac",
+        vec![
+            key.expression().clone(),
+            message.expression().clone(),
+            algorithm.expression().clone(),
+        ],
     )
 }
 
@@ -4127,6 +4147,24 @@ pub fn try_variant_set(v: Column, path: Column, value: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.try_variant_set(v, path, value, create_if_missing)`.
+pub fn try_variant_set_with_create_if_missing(
+    v: Column,
+    path: Column,
+    value: Column,
+    create_if_missing: Column,
+) -> Column {
+    func(
+        "try_variant_set",
+        vec![
+            v.expression().clone(),
+            path.expression().clone(),
+            value.expression().clone(),
+            create_if_missing.expression().clone(),
+        ],
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.unix_nanos`.
 pub fn unix_nanos(col: Column) -> Column {
     func("unix_nanos", vec![col.expression().clone()])
@@ -4185,6 +4223,24 @@ pub fn variant_set(v: Column, path: Column, value: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.variant_set(v, path, value, create_if_missing)`.
+pub fn variant_set_with_create_if_missing(
+    v: Column,
+    path: Column,
+    value: Column,
+    create_if_missing: Column,
+) -> Column {
+    func(
+        "variant_set",
+        vec![
+            v.expression().clone(),
+            path.expression().clone(),
+            value.expression().clone(),
+            create_if_missing.expression().clone(),
+        ],
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.vector_avg`.
 pub fn vector_avg(col: Column) -> Column {
     func("vector_avg", vec![col.expression().clone()])
@@ -4219,9 +4275,25 @@ pub fn vector_norm(vector: Column) -> Column {
     func("vector_norm", vec![vector.expression().clone()])
 }
 
+/// Mirrors `pyspark.sql.functions.vector_norm(vector, degree)`.
+pub fn vector_norm_with_degree(vector: Column, degree: Column) -> Column {
+    func(
+        "vector_norm",
+        vec![vector.expression().clone(), degree.expression().clone()],
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.vector_normalize`.
 pub fn vector_normalize(vector: Column) -> Column {
     func("vector_normalize", vec![vector.expression().clone()])
+}
+
+/// Mirrors `pyspark.sql.functions.vector_normalize(vector, degree)`.
+pub fn vector_normalize_with_degree(vector: Column, degree: Column) -> Column {
+    func(
+        "vector_normalize",
+        vec![vector.expression().clone(), degree.expression().clone()],
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.vector_sum`.
