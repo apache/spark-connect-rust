@@ -842,6 +842,46 @@ def test_udfs_are_created_as_pyspark(mock_connect):
     assert service.read_confs == [arrow_conf] * 4
 
 
+def test_map_functions_send_the_names_of_their_functions_as_pyspark(mock_connect):
+    # As PySpark's UserDefinedFunction: the UDF of a map or apply function has the name of the
+    # function, or that of the class of a callable object, which the server shows in the plan.
+    spark, service = mock_connect
+    df = spark.range(1)
+    grouped = df.groupBy("id")
+
+    def sent_name(dataframe, relation_field, func_field):
+        # ExecutePlanRequest.plan=3, Plan.root=1; CommonInlineUserDefinedFunction.function_name
+        # =1.
+        dataframe.collect()
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        relation = parse_message(parse_message(plan)[relation_field][0])
+        return parse_message(relation[func_field][0])[1][0].decode()
+
+    def pandas_func(iterator):
+        yield from iterator
+
+    class ArrowFunc:
+        def __call__(self, iterator):
+            yield from iterator
+
+    def with_state(key, pdfs, state):
+        yield from pdfs
+
+    # Relation.map_partitions=28 (MapPartitions.func=2), group_map=31 (GroupMap.func=3),
+    # co_group_map=32 (CoGroupMap.func=5), apply_in_pandas_with_state=34 (its func=3).
+    assert sent_name(df.mapInPandas(pandas_func, "id long"), 28, 2) == "pandas_func"
+    assert sent_name(df.mapInArrow(ArrowFunc(), "id long"), 28, 2) == "ArrowFunc"
+    assert sent_name(grouped.applyInPandas(lambda pdf: pdf, "id long"), 31, 3) == "<lambda>"
+    assert sent_name(grouped.applyInArrow(lambda table: table, "id long"), 31, 3) == "<lambda>"
+    cogrouped = grouped.cogroup(grouped)
+    assert sent_name(cogrouped.applyInPandas(lambda a, b: a, "id long"), 32, 5) == "<lambda>"
+    assert sent_name(cogrouped.applyInArrow(lambda a, b: a, "id long"), 32, 5) == "<lambda>"
+    stateful = grouped.applyInPandasWithState(
+        with_state, "id long", "c long", "append", "NoTimeout"
+    )
+    assert sent_name(stateful, 34, 3) == "with_state"
+
+
 def test_udf_and_udtf_calls_pass_named_arguments_as_pyspark(mock_connect):
     # As PySpark's UserDefinedFunction and UserDefinedTableFunction: each keyword argument
     # of a call is a NamedArgumentExpression, after the positional arguments, and a bare
