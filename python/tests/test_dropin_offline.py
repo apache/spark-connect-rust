@@ -5262,11 +5262,35 @@ def _exact_date_capture_server(connection):
         context.abort(grpc.StatusCode.INVALID_ARGUMENT, "captured date input")
         yield b""  # Make this a streaming handler.
 
+    # Explicit DateType pandas input of 10,000 rows or more goes through the Arrow
+    # importer, which reads these settings first; keep its relation inline.
+    confs = {
+        "spark.sql.timestampType": "TIMESTAMP_LTZ",
+        "spark.sql.session.timeZone": "UTC",
+        "spark.sql.execution.arrow.useLargeVarTypes": "false",
+        "spark.sql.session.localRelationCacheThreshold": str(1 << 60),
+        "spark.sql.session.localRelationSizeLimit": str(1 << 60),
+        "spark.sql.session.localRelationChunkSizeRows": str(1 << 30),
+        "spark.sql.session.localRelationChunkSizeBytes": str(1 << 40),
+        "spark.sql.session.localRelationBatchOfChunksSizeBytes": str(1 << 40),
+    }
+
+    def _exact_date_config(request, context):
+        # ConfigRequest.session_id=1, operation=3, Operation.get=2, Get.keys=1;
+        # ConfigResponse.session_id=1, pairs=2, KeyValue.key=1, value=2.
+        request = parse_message(request)
+        keys = [key.decode() for key in
+                parse_message(parse_message(request[3][0])[2][0]).get(1, [])]
+        return message_field(1, request[1][0]) + b"".join(
+            message_field(2, message_field(1, key) + message_field(2, confs[key]))
+            for key in keys)
+
     with ThreadPoolExecutor(max_workers=2) as executor:
         server = grpc.server(executor)
         server.add_generic_rpc_handlers((grpc.method_handlers_generic_handler(
             "spark.connect.SparkConnectService", {
                 "ExecutePlan": grpc.unary_stream_rpc_method_handler(_exact_date_execute),
+                "Config": grpc.unary_unary_rpc_method_handler(_exact_date_config),
             }),))
         port = server.add_insecure_port("127.0.0.1:0")
         server.start()

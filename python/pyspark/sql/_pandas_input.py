@@ -629,3 +629,143 @@ def prepare_string_input(frame, schema):
            for array in arrays):
         return None
     return _pandas_string_ipc(arrays, schema)
+
+
+def prepare_date_table(frame, schema):
+    """Accept only explicit date columns whose cells are exact dates or None.
+
+    Inspect every object before Arrow conversion: date subclasses can override
+    conversion hooks, and pandas treats several other objects as missing values.
+    Those cases must keep the existing row conversion and its error ordering.
+    """
+    from datetime import date
+    import sys
+
+    import numpy as np
+    import pandas as pd
+    from pandas.core import frame as frame_module, generic as generic_module
+    from pandas.core.frame import DataFrame
+    from pandas.core.series import Series
+    from types import FunctionType, GetSetDescriptorType, WrapperDescriptorType
+
+    from pyspark._pyspark import (
+        AtomicType, BooleanType, ByteType, ShortType, IntegerType, LongType, FloatType,
+        DoubleType, DecimalType, StringType, BinaryType, DateType, StructField,
+        StructType as NativeStructType,
+    )
+    from pyspark.sql import types as sql_types
+
+    # Keep smaller frames on the row path to avoid the importer's config RPC overhead.
+    if (pd.DataFrame is not DataFrame or type(frame) is not DataFrame
+            or type(schema) is not NativeStructType
+            or len(frame) < 10000
+            or any(name in vars(frame) for name in ("astype", "notna", "where"))):
+        return None
+    if not _has_canonical_columns(frame.columns):
+        return None
+    # The row path calls these normalization methods. Custom class or instance
+    # hooks must retain those calls and the values they produce before Arrow RPCs.
+    for name, module, qualname in (
+        ("astype", generic_module, "NDFrame.astype"),
+        ("notna", frame_module, "DataFrame.notna"),
+        ("where", generic_module, "NDFrame.where"),
+    ):
+        method = getattr(DataFrame, name)
+        if (type(method) is not FunctionType or method.__name__ != name
+                or method.__qualname__ != qualname or method.__module__ != module.__name__
+                or method.__globals__ is not vars(module)):
+            return None
+    if (DataFrame.astype is not generic_module.NDFrame.astype
+            or DataFrame.where is not generic_module.NDFrame.where):
+        return None
+    # Earlier converter branches must not recognize a date as another type.
+    # Check loaded converters and globals captured by older importer functions.
+    if sys.modules.get("pyspark.sql.types") is not sql_types:
+        return None
+    importer = sys.modules.get("pyspark.sql._arrow_input")
+    if vars(sql_types).get("AtomicType") is not AtomicType:
+        return None
+    if importer is not None:
+        if getattr(importer, "StructType", None) is not NativeStructType:
+            return None
+        if vars(importer).get("AtomicType") is not AtomicType:
+            return None
+    converter = sys.modules.get("pyspark.sql.pandas.types")
+    namespaces = [vars(sql_types)]
+    if converter is not None:
+        namespaces.append(vars(converter))
+    if importer is not None:
+        for name in ("from_arrow_schema", "to_arrow_schema"):
+            # Newer importers resolve these functions locally in prepare_table.
+            if name not in vars(importer):
+                continue
+            namespace = getattr(getattr(importer, name, None), "__globals__", None)
+            if type(namespace) is not dict:
+                return None
+            namespaces.append(namespace)
+    for name, cls in (
+        ("BooleanType", BooleanType), ("ByteType", ByteType), ("ShortType", ShortType),
+        ("IntegerType", IntegerType), ("LongType", LongType), ("FloatType", FloatType),
+        ("DoubleType", DoubleType), ("DecimalType", DecimalType), ("StringType", StringType),
+        ("BinaryType", BinaryType), ("DateType", DateType), ("StructField", StructField),
+        ("StructType", NativeStructType),
+    ):
+        if any(namespace.get(name) is not cls for namespace in namespaces):
+            return None
+    # The row path reads native fields directly. Class attributes are mutable,
+    # so customized Python schema access must not select a different Arrow path.
+    for name, cls in (("DateType", DateType), ("StructField", StructField),
+                      ("StructType", NativeStructType)):
+        if (getattr(sql_types, name, None) is not cls
+                or cls.__getattribute__ is not object.__getattribute__
+                or any("__class__" in vars(base) for base in cls.__mro__ if base is not object)):
+            return None
+    for cls, names, descriptor_type in (
+        (NativeStructType, ("fields", "names"), GetSetDescriptorType),
+        (NativeStructType, ("__iter__",), WrapperDescriptorType),
+        (StructField, ("name", "dataType", "nullable", "metadata"), GetSetDescriptorType),
+    ):
+        for name in names:
+            descriptor = vars(cls).get(name)
+            if (type(descriptor) is not descriptor_type
+                    or descriptor.__objclass__ is not cls or descriptor.__name__ != name):
+                return None
+    width = len(frame.columns)
+    if not width or len(schema.fields) != width or not frame.columns.is_unique:
+        return None
+    if not all(type(name) is str and "\x00" not in name for name in frame.columns):
+        return None
+    if not all(
+        type(field) is StructField and type(field.dataType) is DateType
+        and type(field.name) is str and "\x00" not in field.name
+        for field in schema.fields
+    ) or len(set(schema.names)) != width:
+        return None
+    if not all(type(dtype) is type(np.dtype("object")) and dtype == np.dtype("object")
+               for dtype in frame.dtypes):
+        return None
+    # A custom ExtensionArray can report an object dtype while its Arrow hook
+    # emits different cells. Trust only pandas' concrete NumPy backing array.
+    try:
+        from pandas.core.arrays.numpy_ import NumpyExtensionArray
+    except ImportError:
+        try:
+            from pandas.core.arrays.numpy_ import PandasArray as NumpyExtensionArray
+        except ImportError:
+            return None
+    columns = [frame.iloc[:, i] for i in range(width)]
+    for column, field in zip(columns, schema.fields):
+        if type(column) is not Series or type(column.array) is not NumpyExtensionArray:
+            return None
+        # Arrow rejects nulls in non-nullable fields; let the row path retain
+        # its existing behavior for that input instead.
+        if not all(type(value) is date or (value is None and field.nullable)
+                   for value in column.to_numpy(copy=False)):
+            return None
+
+    import pyarrow as pa
+
+    return pa.Table.from_arrays(
+        [pa.array(column, type=pa.date32(), from_pandas=False) for column in columns],
+        names=schema.names,
+    )
