@@ -824,6 +824,27 @@ def test_maps_keep_their_entries_in_order_with_keys_of_their_type(session):
     assert list(df.first()[0].items()) == [(2, "b"), (1, "a")]
 
 
+def test_decimal_literals_are_of_the_types_of_pyspark(session):
+    # The types of official PySpark 4.3.0: at least the precision 10 of DecimalType().
+    from decimal import Decimal
+
+    df = session.range(1).select(
+        F.lit(Decimal("1.5")).alias("a"),
+        F.lit(Decimal(0)).alias("b"),
+        F.lit(Decimal("123456789012.5")).alias("c"),
+        F.lit(Decimal("-0.001")).alias("d"),
+        (F.lit(Decimal("1.5")) * F.lit(Decimal("2.25"))).alias("product"),
+    )
+    assert df.dtypes == [
+        ("a", "decimal(10,1)"), ("b", "decimal(10,0)"), ("c", "decimal(13,1)"),
+        ("d", "decimal(10,3)"), ("product", "decimal(21,3)"),
+    ]
+    assert tuple(df.first()) == (
+        Decimal("1.5"), Decimal("0"), Decimal("123456789012.5"), Decimal("-0.001"),
+        Decimal("3.375"),
+    )
+
+
 def test_ml_vector_functions_as_pyspark(session):
     from pyspark.ml.functions import array_to_vector, vector_to_array
 
