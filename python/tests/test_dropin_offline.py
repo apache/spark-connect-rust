@@ -3577,6 +3577,46 @@ def test_create_dataframe_warns_of_the_arguments_that_connect_ignores():
         _local_create_dataframe([(1,)], None, None, True)
 
 
+def test_create_dataframe_converts_numpy_scalars_as_pyarrow():
+    import re
+
+    np = pytest.importorskip("numpy")
+    # As PySpark, where PyArrow takes a NumPy scalar as the Python value that it stands for:
+    # an integer, a float (truncated for an integer type) and a bool (also for an integer).
+    assert _local_create_dataframe(
+        [(np.int64(1), np.float32(0.5), np.bool_(True), np.float32(1.5), np.bool_(True))],
+        "a bigint, b double, c boolean, d bigint, e bigint").isLocal()
+    for value, schema, message in [
+        (np.bool_(True), "a double",
+         r"Could not convert \S+ with type numpy\.bool_?: tried to convert to double"),
+        (np.int64(1), "a boolean",
+         r"Could not convert \S+ with type numpy\.int64: tried to convert to boolean"),
+        (np.int32(300), "a tinyint", re.escape("Value 300 too large to fit in C integer type")),
+        # An integer that a float type cannot hold exactly.
+        (2**53 + 1, "a double", re.escape(
+            "Integer value 9007199254740993 is outside of the range exactly representable by "
+            "a IEEE 754 double precision value")),
+        (2**24 + 1, "a float", re.escape(
+            "Integer value 16777217 is outside of the range exactly representable by "
+            "a IEEE 754 single precision value")),
+    ]:
+        with pytest.raises(ValueError, match=message):
+            _local_create_dataframe([(value,)], schema)
+
+
+def test_create_dataframe_raises_recursion_error_for_a_value_that_contains_itself():
+    class Node:
+        def __init__(self):
+            self.parent = self
+
+    cyclic = []
+    cyclic.append(cyclic)
+    # As PySpark, rather than overflowing the stack.
+    for value in [Node(), cyclic]:
+        with pytest.raises(RecursionError):
+            _local_create_dataframe([(value,)])
+
+
 # --------------------------------------------------------------------------- schema cache
 
 

@@ -594,6 +594,14 @@ def test_create_dataframe_raises_merge_errors_as_pyspark(session):
         assert error.value.getMessageParameters() == parameters, data
 
 
+def test_create_dataframe_converts_numpy_scalars_as_pyspark(session):
+    np = pytest.importorskip("numpy")
+    df = session.createDataFrame(
+        [(np.int64(1), np.float32(0.5), np.bool_(True), np.float32(1.5))],
+        "a bigint, b double, c boolean, d bigint")
+    assert [tuple(r) for r in df.collect()] == [(1, 0.5, True, 1)]
+
+
 def test_create_dataframe_infers_by_the_session_configurations_as_pyspark(session):
     naive = datetime(2020, 1, 2, 3, 4, 5)
     cases = [
