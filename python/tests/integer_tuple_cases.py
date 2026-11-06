@@ -172,11 +172,12 @@ class IntegerTupleTests(unittest.TestCase):
         self.assertIsNone(self.capture([], schema))
         self.assertEqual(self.capture([(None,), (None,)], schema).column(0).to_pylist(),
                          [None, None])
-        from pyspark.errors import PySparkValueError
-        # Keep the current parser's empty-schema error rather than entering the fast path.
-        with self.assertRaises(PySparkValueError) as caught:
-            self.spark.createDataFrame([], T.StructType([]))
-        self.assertEqual(caught.exception.getCondition(), "CANNOT_INFER_EMPTY_SCHEMA")
+        # Empty and zero-column input retain current local-input semantics.
+        empty_schema = T.StructType([])
+        self.assertIsNone(self.capture([], empty_schema))
+        zero_columns = self.capture([(), (), ()], empty_schema)
+        self.assertEqual(zero_columns.num_columns, 0)
+        self.assertEqual(zero_columns.num_rows, 3)
 
     def test_mixed_containers_and_subclasses_fall_back(self):
         class IntSubclass(int):
@@ -210,6 +211,14 @@ class IntegerTupleTests(unittest.TestCase):
             table = pa.ipc.open_stream(self.captured[-1][1][0]).read_all()
             self.assertEqual(table.column(0).to_pylist(), [1, 2])
 
+    def test_float_coercion_and_ignored_arguments_use_current_local_behavior(self):
+        schema = T.StructType([T.StructField("v", T.LongType())])
+        table = self.capture([(1.9,), (-2.9,)], schema)
+        self.assertEqual(table.column(0).to_pylist(), [1, -2])
+        for name in ("samplingRatio", "verifySchema"):
+            with self.subTest(name=name), self.assertWarnsRegex(UserWarning, f"'{name}' is ignored"):
+                self.spark.createDataFrame([(1,)], schema, **{name: True})
+
     def test_existing_errors_and_row_indices(self):
         schema = T.StructType([T.StructField("v", T.LongType())])
         from pyspark.errors import PySparkValueError
@@ -219,14 +228,25 @@ class IntegerTupleTests(unittest.TestCase):
             self.assertEqual(caught.exception.getCondition(), "AXIS_LENGTH_MISMATCH")
             self.assertEqual(caught.exception.getMessageParameters(),
                              {"expected_length": "1", "actual_length": width})
-        # These must keep the generic converter's errors, rather than casting bool
-        # to integer, truncating overflow, or silently accepting non-nullable nulls.
-        for data in ([(1,), (True,)], [(1,), (1 << 63,)], [(1,), (-(1 << 63)-1,)]):
-            with self.subTest(data=data), self.assertRaisesRegex(RuntimeError, "Type mismatch in row data"):
-                self.spark.createDataFrame(data, schema)
+        # Fallback uses current schema-driven conversion, which rejects bool,
+        # reports integer overflow, and enforces nullability before IPC creation.
+        with self.assertRaisesRegex(TypeError, "Expected integer, got bool"):
+            self.spark.createDataFrame([(1,), (True,)], schema)
+        for value in (1 << 63, -(1 << 63)-1):
+            with self.subTest(value=value), self.assertRaises(OverflowError):
+                self.spark.createDataFrame([(1,), (value,)], schema)
         required = T.StructType([T.StructField("v", T.LongType(), False)])
-        with self.assertRaisesRegex(RuntimeError, "non-nullable"):
+        with self.assertRaisesRegex(PySparkValueError, "must not be None"):
             self.spark.createDataFrame([(1,), (None,)], required)
+        # Every row's width is checked before cells are converted. A speculative
+        # integer scan must defer these failures to the ordinary local path.
+        for data, selected_schema in (([(True,), ()], schema),
+                                      ([(None,), ()], required)):
+            with self.subTest(data=data), self.assertRaises(PySparkValueError) as caught:
+                self.spark.createDataFrame(data, selected_schema)
+            self.assertEqual(caught.exception.getCondition(), "AXIS_LENGTH_MISMATCH")
+            self.assertEqual(caught.exception.getMessageParameters(),
+                             {"expected_length": "1", "actual_length": "0"})
         self.assertEqual(self.captured, [])
         self.assertEqual(self.config_calls, 0)
 
