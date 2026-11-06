@@ -5636,6 +5636,20 @@ def mock_connect(_shared_mock_connect):
     spark.stop()
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _debugging_read_without_a_session():
+    # PySpark's is_debugging_enabled reads spark.python.sql.dataFrameDebugging.enabled of the
+    # active session at the first expression of a Column method, and keeps it for the
+    # interpreter. It is read without a session, before any test, so that a test whose session
+    # has no server, such as one of _offline_session(), does not wait to read it, whatever
+    # the tests that run. The tests of origins run in their own interpreters.
+    from pyspark.errors.utils import is_debugging_enabled
+    from pyspark.sql import SparkSession
+
+    assert SparkSession.getActiveSession() is None
+    is_debugging_enabled()
+
+
 @pytest.fixture(autouse=True)
 def _no_session_left_active():
     # Each test starts without an active session, as a new interpreter does. What reads the
@@ -6548,6 +6562,60 @@ def test_window_and_lambda_reprs_as_pyspark():
     assert re.fullmatch(
         r"Column<'transform\(a, LambdaFunction\(\+\(x_(\d+), 1\), x_\1\)\)'>",
         repr(F.transform("a", lambda x: x + 1)))
+
+
+def test_expressions_carry_their_origins_as_pyspark():
+    # As PySpark's _with_origin: col() and the Column methods give the expressions that they
+    # build the origin of their name and their call site in user code, as the python_origin of
+    # their common fields, unless spark.python.sql.dataFrameDebugging.enabled, which PySpark
+    # reads once, is false. In new interpreters, whose first column of a session reads it.
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    pytest.importorskip("grpc")
+    code = """
+import sys
+sys.path.insert(0, sys.argv[1])
+from _mock_connect_server import mock_connect_session, parse_message
+from pyspark.sql import functions as F
+
+def origins(expression):
+    # Expression.common=18 -> ExpressionCommon.origin=1 -> Origin.python_origin=1:
+    # fragment=1, call_site=2; .unresolved_function=3, whose arguments=2.
+    expression = parse_message(expression)
+    found = []
+    if 18 in expression:
+        origin = parse_message(parse_message(parse_message(expression[18][0])[1][0])[1][0])
+        found.append((origin[1][0].decode(), origin[2][0].decode()))
+    if 3 in expression:
+        for argument in parse_message(expression[3][0]).get(2, []):
+            found += origins(argument)
+    return found
+
+if __name__ == "__main__":
+    with mock_connect_session() as (spark, service):
+        service.confs = dict(arg.split("=") for arg in sys.argv[2:])
+        column = F.col("a") + 1
+        spark.range(1).select(column).collect()
+        # ExecutePlanRequest.plan=3, Plan.root=1, Relation.project=3, Project.expressions=3.
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        project = parse_message(parse_message(plan)[3][0])
+        print(origins(project[3][0]))
+"""
+    tests = str(Path(__file__).resolve().parent)
+
+    def run(*confs):
+        result = subprocess.run(
+            [sys.executable, "-c", code, tests, *confs], check=True, capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip().splitlines()[-1]
+
+    assert run() == (
+        "[('__add__', '<string>:23'), ('col', '<string>:23'), ('__add__', '<string>:23')]"
+    )
+    assert run("spark.python.sql.dataFrameDebugging.enabled=false") == "[]"
 
 
 @pytest.mark.parametrize("column,expected", [

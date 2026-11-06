@@ -24,9 +24,13 @@ pub fn next_lambda_var_index() -> u32 {
 /// Cloning a handle shares its node rather than copying the expression subtree.
 /// Build common expressions with [`Expression::literal`], [`Expression::column`],
 /// and [`Expression::function`], or use [`Expression::new`] for other node types.
-/// Inspect expressions with [`Expression::node`].
+/// Inspect expressions with [`Expression::node`]. An expression keeps the origin in user code
+/// of its construction, if any, as PySpark's does (see [`crate::origin`]).
 #[derive(Clone)]
-pub struct Expression(Arc<ExpressionNode>);
+pub struct Expression {
+    node: Arc<ExpressionNode>,
+    origin: Option<Arc<crate::origin::Origin>>,
+}
 
 impl std::fmt::Debug for Expression {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -287,9 +291,18 @@ impl NamedArgument {
 }
 
 impl Expression {
-    /// Allocate an immutable expression node.
+    /// Allocate an immutable expression node, of the current origin, as PySpark's
+    /// `Expression.__init__` takes it.
     pub fn new(node: ExpressionNode) -> Self {
-        Self(Arc::new(node))
+        Self {
+            node: Arc::new(node),
+            origin: crate::origin::current(),
+        }
+    }
+
+    /// The origin in user code of this expression, if any.
+    pub fn origin(&self) -> Option<&crate::origin::Origin> {
+        self.origin.as_deref()
     }
 
     /// Create a literal expression.
@@ -311,7 +324,7 @@ impl Expression {
 
     /// Borrow this expression's node without exposing mutable shared state.
     pub fn node(&self) -> &ExpressionNode {
-        self.0.as_ref()
+        self.node.as_ref()
     }
 
     /// Render this expression to a human-readable string, mirroring the
@@ -394,8 +407,24 @@ impl Expression {
         }
     }
 
-    /// Converts the expression to a Spark Connect protobuf expression.
+    /// Converts the expression to a Spark Connect protobuf expression, with its origin, as
+    /// PySpark's `Expression._create_proto_expression` sends it.
     pub fn to_proto(&self) -> proto::Expression {
+        let mut expr = self.node_to_proto();
+        if let Some(origin) = &self.origin {
+            expr.common = Some(proto::ExpressionCommon {
+                origin: Some(proto::Origin {
+                    function: Some(proto::origin::Function::PythonOrigin(proto::PythonOrigin {
+                        fragment: origin.fragment.clone(),
+                        call_site: origin.call_site.clone(),
+                    })),
+                }),
+            });
+        }
+        expr
+    }
+
+    fn node_to_proto(&self) -> proto::Expression {
         match self.node() {
             ExpressionNode::Literal(lit) => lit.to_proto(),
             ExpressionNode::ColumnReference(col_ref) => col_ref.to_proto(),

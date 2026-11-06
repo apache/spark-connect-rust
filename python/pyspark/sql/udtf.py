@@ -117,12 +117,12 @@ class UserDefinedTableFunction:
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         from pyspark import _pyspark
         from pyspark.sql import SparkSession
-        from pyspark.sql.functions import col
 
-        # As PySpark's: an argument is ColumnOrName, so a bare string is a column name, and
-        # each keyword argument is a NamedArgumentExpression, after the positional ones.
-        cols = [col(a) if isinstance(a, str) else a for a in args]
-        named = [(k, col(v) if isinstance(v, str) else v) for k, v in kwargs.items()]
+        # As PySpark's: an argument is ColumnOrName, so a bare string is a column name, of
+        # which pyfunc_make_udtf makes a ColumnReference, and each keyword argument is a
+        # NamedArgumentExpression, after the positional ones.
+        cols = list(args)
+        named = list(kwargs.items())
         return _pyspark.functions.pyfunc_make_udtf(
             SparkSession.active(),
             self.name,
