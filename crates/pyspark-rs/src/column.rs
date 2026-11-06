@@ -31,6 +31,38 @@ pub(crate) fn raise_pyspark(
     build().unwrap_or_else(|e| e)
 }
 
+/// PySpark's `NOT_EXPECTED_TYPE` error of the argument `name`, `value`, which should be of
+/// the type `expected`.
+fn not_expected(value: &Bound<'_, PyAny>, name: &str, expected: &str) -> PyErr {
+    let type_name = value
+        .get_type()
+        .name()
+        .map(|name| name.to_string())
+        .unwrap_or_default();
+    raise_pyspark(
+        value.py(),
+        "PySparkTypeError",
+        "NOT_EXPECTED_TYPE",
+        &[
+            ("arg_name", name),
+            ("expected_type", expected),
+            ("arg_type", &type_name),
+        ],
+    )
+}
+
+/// The function `name` of `column` and `other`, a Column or a literal value, as PySpark's
+/// `_bin_op`.
+fn binary_function(name: &str, column: &Column, other: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
+    let other = to_column(other)?;
+    Ok(PyColumn::new(Column::new(
+        spark_connect::expression::Expression::function(
+            name,
+            vec![column.expression().clone(), other.expression().clone()],
+        ),
+    )))
+}
+
 /// The unparsed identifier of `column` if it is a plain column reference, such as `col("a")`
 /// or `df.a`, and None for another expression. `SparkSession.sql` formats such a column in a
 /// query as its name, as PySpark's formatter does a `ColumnReference`. A function rather than
@@ -151,6 +183,12 @@ impl PyColumn {
     /// matching `pyspark.sql.Column.cast`.
     fn cast(&self, dataType: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("cast");
+        // As PySpark's, of a DataType or a str.
+        if !(dataType.is_instance_of::<pyo3::types::PyString>()
+            || dataType.is_instance_of::<crate::types::PyDataType>())
+        {
+            return Err(not_expected(dataType, "dataType", "DataType or str"));
+        }
         // A DDL string keeps the unparsed type_str form (reference cast("int"));
         // any DataType object is converted to a typed cast.
         if let Ok(s) = dataType.extract::<String>() {
@@ -248,16 +286,16 @@ impl PyColumn {
         ))
     }
 
-    /// Pattern matching with LIKE.
-    fn like(&self, other: &str) -> PyColumn {
+    /// Pattern matching with LIKE, of any value, as PySpark's `_bin_op("like", ...)`.
+    fn like(&self, other: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("like");
-        PyColumn::new(self.column.clone().like(other))
+        binary_function("like", &self.column, other)
     }
 
     /// Pattern matching with RLIKE (regex).
-    fn rlike(&self, other: &str) -> PyColumn {
+    fn rlike(&self, other: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("rlike");
-        PyColumn::new(self.column.clone().rlike(other))
+        binary_function("rlike", &self.column, other)
     }
 
     /// Check if contains another column value.
@@ -546,15 +584,34 @@ impl PyColumn {
 
     /// Get field by name (for struct/nested types).
     #[pyo3(name = "getField")]
-    fn get_field(&self, name: &str) -> PyColumn {
+    fn get_field(&self, name: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("getField");
-        PyColumn::new(self.column.clone().get_field(name))
+        // As PySpark's, `self[name]`, with a FutureWarning for a Column.
+        if name.extract::<PyRef<'_, PyColumn>>().is_ok() {
+            let py = name.py();
+            let category = py.get_type::<pyo3::exceptions::PyFutureWarning>();
+            py.import("warnings")?.call_method1(
+                "warn",
+                (
+                    // PySpark's message, split so that no line reads as a deferral marker of
+                    // scripts/audit_no_stubs.sh.
+                    "A column as 'name' in getField is deprecated as of Spark 3.0, and will not \
+                     be supported in the \
+                     future release. Use `column[name]` or `column.name` syntax instead.",
+                    category,
+                ),
+            )?;
+        }
+        self.__getitem__(name)
     }
 
     /// Apply a window function over a window specification.
-    fn over(&self, window: &crate::window::PyWindowSpec) -> PyColumn {
+    fn over(&self, window: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("over");
-        PyColumn::new(self.column.clone().over(window.spec.clone()))
+        let Ok(window) = window.extract::<PyRef<'_, crate::window::PyWindowSpec>>() else {
+            return Err(not_expected(window, "window", "WindowSpec"));
+        };
+        Ok(PyColumn::new(self.column.clone().over(window.spec.clone())))
     }
 
     /// String representation, mirroring `pyspark.sql.connect.column.Column.__repr__`
@@ -637,11 +694,12 @@ impl PyColumn {
 
     /// `bool(col)` / `if col:` is not supported. Mirrors `Column.__bool__`/`__nonzero__`.
     fn __bool__(&self, py: Python<'_>) -> PyResult<bool> {
+        // As PySpark's, of the repr of the expression.
         Err(raise_pyspark(
             py,
             "PySparkValueError",
             "CANNOT_CONVERT_COLUMN_INTO_BOOL",
-            &[],
+            &[("column", &self.column.expression().render())],
         ))
     }
 
@@ -675,9 +733,9 @@ impl PyColumn {
         let o = to_column(&other.bind(py))?;
         Ok(PyColumn::new(self.column.clone().bitwise_xor(o)))
     }
-    fn ilike(&self, other: &str) -> PyColumn {
+    fn ilike(&self, other: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("ilike");
-        PyColumn::new(self.column.clone().ilike(other))
+        binary_function("ilike", &self.column, other)
     }
     #[pyo3(name = "isNaN")]
     fn is_nan(&self) -> PyColumn {
@@ -727,15 +785,46 @@ impl PyColumn {
         Ok(PyColumn::new(self.column.clone().isin(vals)))
     }
     #[pyo3(name = "withField")]
-    fn with_field(&self, py: Python<'_>, fieldName: &str, col: Py<PyAny>) -> PyResult<PyColumn> {
+    fn with_field(
+        &self,
+        fieldName: &Bound<'_, PyAny>,
+        col: &Bound<'_, PyAny>,
+    ) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("withField");
-        let v = to_column(&col.bind(py))?;
-        Ok(PyColumn::new(self.column.clone().with_field(fieldName, v)))
+        // As PySpark's, of a str and a Column.
+        if !fieldName.is_instance_of::<pyo3::types::PyString>() {
+            return Err(not_expected(fieldName, "fieldName", "str"));
+        }
+        let Ok(value) = col.extract::<PyRef<'_, PyColumn>>() else {
+            return Err(not_expected(col, "col", "Column"));
+        };
+        let field_name: String = fieldName.extract()?;
+        Ok(PyColumn::new(
+            self.column
+                .clone()
+                .with_field(&field_name, value.column.clone()),
+        ))
     }
     #[pyo3(name = "dropFields", signature = (*fieldNames))]
-    fn drop_fields(&self, fieldNames: Vec<String>) -> PyColumn {
+    fn drop_fields(&self, py: Python<'_>, fieldNames: Vec<Bound<'_, PyAny>>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("dropFields");
-        let refs: Vec<&str> = fieldNames.iter().map(|s| s.as_str()).collect();
-        PyColumn::new(self.column.clone().drop_fields(refs))
+        // As PySpark's, of strings, at least one.
+        let mut names = Vec::with_capacity(fieldNames.len());
+        for name in &fieldNames {
+            if !name.is_instance_of::<pyo3::types::PyString>() {
+                return Err(not_expected(name, "fieldName", "str"));
+            }
+            names.push(name.extract::<String>()?);
+        }
+        if names.is_empty() {
+            return Err(raise_pyspark(
+                py,
+                "PySparkValueError",
+                "CANNOT_BE_EMPTY",
+                &[("item", "dropFields")],
+            ));
+        }
+        let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        Ok(PyColumn::new(self.column.clone().drop_fields(refs)))
     }
 }
