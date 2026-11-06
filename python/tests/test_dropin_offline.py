@@ -5049,7 +5049,8 @@ def test_decimal_scale_input_ipc(decimal_scale_ipc_session, kind, schema_mode, t
     spark, payload = decimal_scale_ipc_session
     values = [None if text is None else Decimal(text) for text in texts]
     name = "_1" if schema_mode == "inferred" and kind == "tuples" else "v"
-    scale = 9 if schema_mode == "explicit" else -values[0].as_tuple().exponent
+    scale = (9 if schema_mode == "explicit" else
+             18 if kind == "tuples" else -values[0].as_tuple().exponent)
     precision = 18 if schema_mode == "explicit" else 38
     schema = None
     if schema_mode == "names":
@@ -5060,7 +5061,8 @@ def test_decimal_scale_input_ipc(decimal_scale_ipc_session, kind, schema_mode, t
     if kind == "pandas":
         pd = pytest.importorskip("pandas")
         data = pd.DataFrame({name: values})
-    # String conversion must not round or consult arithmetic traps/precision.
+    # Generic pandas string conversion ignores arithmetic traps/precision;
+    # local inference independently uses its canonical DecimalType(38, 18).
     with localcontext() as context:
         context.prec = 2
         context.rounding = ROUND_UP
@@ -5086,6 +5088,8 @@ def test_decimal_scale_subclass_hooks(decimal_scale_ipc_session, hook):
     from decimal import Decimal
     import pyarrow as pa
 
+    pd = pytest.importorskip("pandas")
+
     calls = []
 
     class CustomDecimal(Decimal):
@@ -5103,13 +5107,16 @@ def test_decimal_scale_subclass_hooks(decimal_scale_ipc_session, hook):
             return result._replace(exponent=-5) if hook in ("tuple", "both") else result
 
     spark, payload = decimal_scale_ipc_session
+    # Subclasses reach py_to_value through pandas; local infer.convert now
+    # intentionally has schema-driven quantization rather than these probes.
+    data = pd.DataFrame({"v": [CustomDecimal("1.20"), None]}, dtype=object)
     if hook.endswith("error"):
         with pytest.raises(LookupError, match="decimal .* hook"):
-            spark.createDataFrame([(CustomDecimal("1.20"),)], ["v"])
+            spark.createDataFrame(data, ["v"])
         assert calls == (["str"] if hook == "str_error" else ["str", "tuple"])
         assert not payload.exists()
         return
-    spark.createDataFrame([(CustomDecimal("1.20"),), (None,)], ["v"]).collect()
+    spark.createDataFrame(data, ["v"]).collect()
     assert calls == ["str", "tuple"]
     scale = 5 if hook in ("tuple", "both") else 2
     value = Decimal("2.30") if hook in ("str", "both") else Decimal("1.20")
@@ -5125,12 +5132,18 @@ def test_decimal_scale_subclass_hooks(decimal_scale_ipc_session, hook):
 def test_decimal_scale_existing_errors(decimal_scale_ipc_session, text, capitals):
     from decimal import Decimal, localcontext
 
+    pd = pytest.importorskip("pandas")
     spark, payload = decimal_scale_ipc_session
-    # Non-finite Decimal inputs retain the existing core-parser errors.
+    data = pd.DataFrame({"v": [Decimal(text)]}, dtype=object)
+    # Retain non-finite values through the supported pandas normalization hook
+    # to exercise generic Decimal conversion and the core parser, rather than
+    # local infer.convert (which maps Decimal NaN to a nullable null).
+    data.notna = lambda: pd.DataFrame({"v": [True]})
+    # Non-finite generic inputs retain the existing core-parser errors.
     with localcontext() as context:
         context.capitals = capitals
         with pytest.raises(RuntimeError) as error:
-            spark.createDataFrame([(Decimal(text),)], ["v"])
+            spark.createDataFrame(data, ["v"])
     # Both parser versions reject non-finite values, with distinct exact messages.
     assert str(error.value) in {
         f"invalid decimal '{text.lstrip('+-')}': invalid digit found in string",
@@ -5145,12 +5158,14 @@ def test_decimal_scale_scientific_compatibility(decimal_scale_ipc_session, text,
     from decimal import Decimal, localcontext
     import pyarrow as pa
 
+    pd = pytest.importorskip("pandas")
     spark, payload = decimal_scale_ipc_session
     value = Decimal(text)
+    data = pd.DataFrame({"v": [value, None]}, dtype=object)
     with localcontext() as context:
         context.capitals = capitals
         try:
-            frame = spark.createDataFrame([(value,), (None,)], ["v"])
+            frame = spark.createDataFrame(data, ["v"])
         except RuntimeError as error:
             # The original core parser rejects scientific notation. Its separate
             # parser fix may accept it; accepted values must retain exact scale.
@@ -5175,9 +5190,10 @@ def test_decimal_scale_avoids_coefficient_tuple(decimal_scale_ipc_session):
     import cProfile
     from decimal import Decimal
 
+    pd = pytest.importorskip("pandas")
     spark, _ = decimal_scale_ipc_session
     tuple_constructor = type(Decimal("1.20").as_tuple()).__new__.__code__
-    values = [(Decimal("123.4500"),), (Decimal("-2.3000"),), (None,)]
+    values = pd.DataFrame({"v": [Decimal("123.4500"), Decimal("-2.3000"), None]}, dtype=object)
     profile = cProfile.Profile()
     profile.enable()
     try:
