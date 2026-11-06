@@ -378,6 +378,77 @@ def test_session_builder_chaining_offline():
     assert type(b2).__name__ == "SparkSessionBuilder"
 
 
+def test_sessions_are_got_or_created_as_pyspark():
+    # As PySpark's builder: getOrCreate() returns the active session of the thread, or else
+    # the default session, whatever the URL, and creates one when there is neither, of the
+    # URL of remote() or else of SPARK_REMOTE; create() makes a new one, which is the default
+    # and the active session only when they are not set; and stop() unsets them. In a new
+    # interpreter, which has no default session.
+    import subprocess
+    import sys
+
+    subprocess.run([sys.executable, "-c", """
+import os
+import threading
+
+from pyspark.errors import PySparkRuntimeError
+from pyspark.sql import SparkSession
+
+def condition(call):
+    try:
+        call()
+    except PySparkRuntimeError as error:
+        return error.getCondition()
+    raise AssertionError("no error")
+
+os.environ.pop("SPARK_REMOTE", None)
+assert condition(SparkSession.builder.getOrCreate) == "CONNECT_URL_NOT_SET"
+assert condition(SparkSession.active) == "NO_ACTIVE_OR_DEFAULT_SESSION"
+
+first = SparkSession.builder.remote("sc://localhost:1").getOrCreate()
+assert SparkSession.builder.remote("sc://localhost:2").getOrCreate() is first
+assert SparkSession.getActiveSession() is first and SparkSession.active() is first
+
+seen = {}
+def other_thread():
+    seen["active"] = SparkSession.getActiveSession()
+    seen["default"] = SparkSession.active()
+    seen["got"] = SparkSession.builder.remote("sc://localhost:1").getOrCreate()
+thread = threading.Thread(target=other_thread)
+thread.start()
+thread.join()
+assert seen == {"active": None, "default": first, "got": first}, seen
+
+created = SparkSession.builder.remote("sc://localhost:1").create()
+assert created is not first and SparkSession.getActiveSession() is first
+
+first.stop()
+assert SparkSession.getActiveSession() is None
+assert condition(SparkSession.active) == "NO_ACTIVE_OR_DEFAULT_SESSION"
+os.environ["SPARK_REMOTE"] = "sc://localhost:1"
+again = SparkSession.builder.getOrCreate()
+assert again is not first and again is not created
+assert SparkSession.getActiveSession() is again and SparkSession.active() is again
+"""], check=True)
+
+
+def test_builder_options_are_set_on_the_session_as_pyspark(mock_connect):
+    # As PySpark's _apply_options: the options of the builder, but spark.remote and
+    # spark.master, are set on the session that getOrCreate() returns, also an existing one,
+    # in one request whose failures are ignored.
+    from pyspark.sql import SparkSession
+
+    spark, service = mock_connect
+    builder = SparkSession.builder.remote("sc://localhost:1").master("local[4]")
+    builder = builder.appName("app").config("spark.sql.shuffle.partitions", 3)
+    assert builder.getOrCreate() is spark
+    assert service.set_confs == [
+        ([("spark.app.name", "app"), ("spark.sql.shuffle.partitions", "3")], 1)
+    ]
+    assert SparkSession.builder.remote("sc://localhost:1").getOrCreate() is spark
+    assert len(service.set_confs) == 1
+
+
 def test_session_builder_class_constructor():
     from pyspark.sql import SparkSession
     b = SparkSession.Builder()

@@ -701,6 +701,37 @@ impl SparkConnectClient {
         Ok(())
     }
 
+    /// Set configuration values in one request, ignoring the failures to set them when
+    /// `silent`. Mirrors `pyspark.sql.connect.conf.RuntimeConf._set_all`, with which the
+    /// session builder applies its options.
+    pub async fn set_configs(&self, pairs: &[(String, String)], silent: bool) -> Result<()> {
+        let set = spark_connect_proto::config_request::Set {
+            pairs: pairs
+                .iter()
+                .map(|(key, value)| spark_connect_proto::KeyValue {
+                    key: key.clone(),
+                    value: Some(value.clone()),
+                })
+                .collect(),
+            silent: Some(silent),
+        };
+        let request = ConfigRequest {
+            session_id: self.session_id.clone(),
+            user_context: Some(UserContext {
+                user_id: self.user_id.clone().unwrap_or_default(),
+                ..Default::default()
+            }),
+            operation: Some(spark_connect_proto::config_request::Operation {
+                op_type: Some(spark_connect_proto::config_request::operation::OpType::Set(
+                    set,
+                )),
+            }),
+            ..Default::default()
+        };
+        let _ = self.config(request).await?;
+        Ok(())
+    }
+
     /// Get configuration values with default fallbacks.
     ///
     /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.get_config_with_defaults`.

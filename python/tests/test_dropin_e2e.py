@@ -74,6 +74,25 @@ def test_conf_get_with_a_none_default(session):
         session.conf.get(key)
 
 
+def test_get_or_create_returns_the_session_with_the_options_as_pyspark(session):
+    # As PySpark's builder: getOrCreate() returns the active session, and sets the options
+    # of the builder on it; one that fails, of a static configuration, is ignored.
+    key = "spark.sql.shuffle.partitions"
+    previous = session.conf.get(key)
+    try:
+        got = (
+            SparkSession.builder.remote(os.environ["SPARK_REMOTE"])
+            .config(key, "5")
+            .config("spark.sql.warehouse.dir", "/not/set")
+            .getOrCreate()
+        )
+        assert got is session
+        assert session.conf.get(key) == "5"
+        assert session.conf.get("spark.sql.warehouse.dir") != "/not/set"
+    finally:
+        session.conf.set(key, previous)
+
+
 def test_repr_shows_the_rows_with_eager_evaluation_as_pyspark(session):
     df = session.range(3)
     assert repr(df) == "DataFrame[id: bigint]"
