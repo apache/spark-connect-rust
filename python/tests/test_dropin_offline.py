@@ -3875,8 +3875,9 @@ def test_create_dataframe_raises_recursion_error_for_a_value_that_contains_itsel
             _local_create_dataframe([(value,)])
 
 
-# Native numeric conversion happens when createDataFrame consumes Python rows;
-# constructing a Row itself now preserves Python objects as PySpark does.
+# py_to_value converts the cells of object-dtype pandas input, as well as the values of
+# fillna, pivot and Row conversion; local rows go through infer.convert instead, so the
+# "local" source is a control for values that the exact-number fast path must not change.
 def _native_number_input_table(mock_connect, data, schema=None, *, source="local"):
     import pyarrow as pa
 
@@ -3916,6 +3917,9 @@ def test_local_input_native_number_values_and_types(mock_connect, value):
 
 
 def test_pandas_input_overflow_preserves_generic_conversion_behavior(mock_connect):
+    # This checks only that the exact-int fast path leaves integers outside the int64 range
+    # to the generic path. That path converts them to a double, which is a known difference
+    # from PySpark: it raises OverflowError ("Python int too large to convert to C long").
     pd = pytest.importorskip("pandas")
     for value in (2**63, -(2**63) - 1):
         actual = _native_number_input_table(
