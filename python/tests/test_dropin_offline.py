@@ -4845,6 +4845,34 @@ def test_execute_plan_error_carries_operation_id(mock_connect):
     assert error.value.operation_id == _request_operation_id(service.execute_requests[-1])
 
 
+@pytest.mark.parametrize("code", [
+    "INVALID_ARGUMENT", "PERMISSION_DENIED", "UNAUTHENTICATED", "RESOURCE_EXHAUSTED", "INTERNAL",
+])
+def test_grpc_errors_without_details_are_spark_connect_grpc_exceptions(mock_connect, code):
+    # A gRPC error that carries no error of the server, as of a proxy, is a
+    # SparkConnectGrpcException of its status code, as PySpark's _handle_rpc_error raises it.
+    # The cases agree with official PySpark 4.3.0.
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException, StatusCode
+
+    spark, service = mock_connect
+    service.execute_failure = (code, "denied by the proxy")
+    with pytest.raises(SparkConnectGrpcException, match="denied by the proxy") as error:
+        spark.range(1).collect()
+    assert error.value.getGrpcStatusCode() == getattr(StatusCode, code)
+    assert error.value.getCondition() is None
+    assert error.value.operation_id == _request_operation_id(service.execute_requests[-1])
+
+
+def test_analyze_errors_without_details_are_spark_connect_grpc_exceptions(mock_connect):
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException, StatusCode
+
+    spark, service = mock_connect
+    service.failure = "rpc"  # INVALID_ARGUMENT "schema unavailable", of AnalyzePlan.
+    with pytest.raises(SparkConnectGrpcException, match="schema unavailable") as error:
+        spark.range(1).schema
+    assert error.value.getGrpcStatusCode() == StatusCode.INVALID_ARGUMENT
+
+
 def _error_info(classes, **metadata):
     """ErrorInfo metadata as the server sends it, with the exception classes, the most
     specific first."""
