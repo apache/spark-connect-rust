@@ -79,13 +79,13 @@ impl DataFrameReader {
         let paths = path.map(|p| vec![p.to_string()]);
         let plan = LogicalPlan::Read {
             read_type: ReadType::DataSource {
-                format: self.format.clone(),
+                format: self.format,
                 schema: if self.schema.is_empty() {
                     None
                 } else {
-                    Some(self.schema.clone())
+                    Some(self.schema)
                 },
-                options: self.options.clone(),
+                options: self.options,
                 paths: paths.unwrap_or_default(),
                 predicates: vec![],
                 source_name: None,
@@ -99,7 +99,7 @@ impl DataFrameReader {
     pub fn changes(self, table_name: &str) -> DataFrame {
         let plan = LogicalPlan::RelationChanges {
             table_name: table_name.to_string(),
-            options: self.options.clone(),
+            options: self.options,
             is_streaming: None,
         };
         DataFrame::new(self.session, plan)
@@ -110,7 +110,7 @@ impl DataFrameReader {
         let plan = LogicalPlan::Read {
             read_type: ReadType::NamedTable {
                 table_name: table_name.to_string(),
-                options: self.options.clone(),
+                options: self.options,
             },
             is_streaming: false,
         };
@@ -118,135 +118,33 @@ impl DataFrameReader {
     }
 
     /// Read JSON data.
-    pub fn json(mut self, path: &str) -> DataFrame {
-        self.format = Some("json".to_string());
-        let paths = vec![path.to_string()];
-        let plan = LogicalPlan::Read {
-            read_type: ReadType::DataSource {
-                format: self.format.clone(),
-                schema: if self.schema.is_empty() {
-                    None
-                } else {
-                    Some(self.schema.clone())
-                },
-                options: self.options.clone(),
-                paths,
-                predicates: vec![],
-                source_name: None,
-            },
-            is_streaming: false,
-        };
-        DataFrame::new(self.session, plan)
+    pub fn json(self, path: &str) -> DataFrame {
+        self.format("json").load(Some(path))
     }
 
     /// Read Parquet data.
-    pub fn parquet(mut self, path: &str) -> DataFrame {
-        self.format = Some("parquet".to_string());
-        let paths = vec![path.to_string()];
-        let plan = LogicalPlan::Read {
-            read_type: ReadType::DataSource {
-                format: self.format.clone(),
-                schema: if self.schema.is_empty() {
-                    None
-                } else {
-                    Some(self.schema.clone())
-                },
-                options: self.options.clone(),
-                paths,
-                predicates: vec![],
-                source_name: None,
-            },
-            is_streaming: false,
-        };
-        DataFrame::new(self.session, plan)
+    pub fn parquet(self, path: &str) -> DataFrame {
+        self.format("parquet").load(Some(path))
     }
 
     /// Read CSV data.
-    pub fn csv(mut self, path: &str) -> DataFrame {
-        self.format = Some("csv".to_string());
-        let paths = vec![path.to_string()];
-        let plan = LogicalPlan::Read {
-            read_type: ReadType::DataSource {
-                format: self.format.clone(),
-                schema: if self.schema.is_empty() {
-                    None
-                } else {
-                    Some(self.schema.clone())
-                },
-                options: self.options.clone(),
-                paths,
-                predicates: vec![],
-                source_name: None,
-            },
-            is_streaming: false,
-        };
-        DataFrame::new(self.session, plan)
+    pub fn csv(self, path: &str) -> DataFrame {
+        self.format("csv").load(Some(path))
     }
 
     /// Read ORC data.
-    pub fn orc(mut self, path: &str) -> DataFrame {
-        self.format = Some("orc".to_string());
-        let paths = vec![path.to_string()];
-        let plan = LogicalPlan::Read {
-            read_type: ReadType::DataSource {
-                format: self.format.clone(),
-                schema: if self.schema.is_empty() {
-                    None
-                } else {
-                    Some(self.schema.clone())
-                },
-                options: self.options.clone(),
-                paths,
-                predicates: vec![],
-                source_name: None,
-            },
-            is_streaming: false,
-        };
-        DataFrame::new(self.session, plan)
+    pub fn orc(self, path: &str) -> DataFrame {
+        self.format("orc").load(Some(path))
     }
 
     /// Read text data.
-    pub fn text(mut self, path: &str) -> DataFrame {
-        self.format = Some("text".to_string());
-        let paths = vec![path.to_string()];
-        let plan = LogicalPlan::Read {
-            read_type: ReadType::DataSource {
-                format: self.format.clone(),
-                schema: if self.schema.is_empty() {
-                    None
-                } else {
-                    Some(self.schema.clone())
-                },
-                options: self.options.clone(),
-                paths,
-                predicates: vec![],
-                source_name: None,
-            },
-            is_streaming: false,
-        };
-        DataFrame::new(self.session, plan)
+    pub fn text(self, path: &str) -> DataFrame {
+        self.format("text").load(Some(path))
     }
 
     /// Read XML file(s). Mirrors `DataFrameReader.xml`.
-    pub fn xml(mut self, path: &str) -> DataFrame {
-        self.format = Some("xml".to_string());
-        let paths = vec![path.to_string()];
-        let plan = LogicalPlan::Read {
-            read_type: ReadType::DataSource {
-                format: self.format.clone(),
-                schema: if self.schema.is_empty() {
-                    None
-                } else {
-                    Some(self.schema.clone())
-                },
-                options: self.options.clone(),
-                paths,
-                predicates: vec![],
-                source_name: None,
-            },
-            is_streaming: false,
-        };
-        DataFrame::new(self.session, plan)
+    pub fn xml(self, path: &str) -> DataFrame {
+        self.format("xml").load(Some(path))
     }
 
     /// Read from JDBC data source.
@@ -258,13 +156,13 @@ impl DataFrameReader {
 
         let plan = LogicalPlan::Read {
             read_type: ReadType::DataSource {
-                format: self.format.clone(),
+                format: self.format,
                 schema: if self.schema.is_empty() {
                     None
                 } else {
-                    Some(self.schema.clone())
+                    Some(self.schema)
                 },
-                options: self.options.clone(),
+                options: self.options,
                 paths: vec![],
                 predicates: predicates.unwrap_or_default(),
                 source_name: None,
