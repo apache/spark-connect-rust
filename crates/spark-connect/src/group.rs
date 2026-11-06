@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use spark_connect_core::error::Result;
+use spark_connect_core::error::{Result, SparkError, SparkErrorKind};
 
 use crate::column::Column;
 use crate::dataframe::DataFrame;
@@ -299,16 +299,61 @@ impl GroupedData {
         DataFrame::new(self.dataframe.session.clone(), plan)
     }
 
-    /// Count rows in each group.
+    /// Count rows in each group, in a column `count`, mirroring `GroupedData.count`, which
+    /// aggregates `count(lit(1)).alias("count")`.
     pub fn count(&self) -> DataFrame {
         use crate::functions;
         let count_expr = functions::count(Column::new(Expression::literal(
             crate::expression::LiteralExpression::int(1),
         )))
+        .alias("count")
         .expression()
         .clone();
 
         self.agg(vec![count_expr])
+    }
+
+    /// Aggregate the numeric `columns` by `function` ("min", "max", "avg" or "sum") in each
+    /// group, mirroring `GroupedData._numeric_agg` of `min`, `max`, `avg`, `mean` and `sum`:
+    /// every numeric column of the DataFrame without columns, and `NOT_NUMERIC_COLUMNS` for a
+    /// column that is not a numeric one of its schema.
+    pub fn numeric_agg(&self, function: &str, columns: Vec<&str>) -> Result<DataFrame> {
+        let schema = self.dataframe.schema()?;
+        let names: Vec<String> = if columns.is_empty() {
+            match &schema {
+                DataType::Struct { fields } => fields
+                    .iter()
+                    .filter(|field| is_numeric(&field.data_type))
+                    .map(|field| field.name.clone())
+                    .collect(),
+                _ => Vec::new(),
+            }
+        } else {
+            let mut invalid = Vec::new();
+            for column in &columns {
+                if !verify_numeric_col_name(column, &schema)? {
+                    invalid.push(crate::expression::python_str_repr(column));
+                }
+            }
+            if !invalid.is_empty() {
+                return Err(SparkError::classed(
+                    SparkErrorKind::TypeError,
+                    "NOT_NUMERIC_COLUMNS",
+                    &[("invalid_columns", &format!("[{}]", invalid.join(", ")))],
+                ));
+            }
+            columns.iter().map(|column| column.to_string()).collect()
+        };
+        let expressions = names
+            .iter()
+            .map(|name| {
+                Expression::function(
+                    function,
+                    vec![crate::column::col(name).expression().clone()],
+                )
+            })
+            .collect();
+        Ok(self.agg(expressions))
     }
 
     /// Sum values in each group.
@@ -358,6 +403,98 @@ impl GroupedData {
     /// Mean (alias for avg).
     pub fn mean(&self, columns: Vec<&str>) -> DataFrame {
         self.avg(columns)
+    }
+}
+
+/// Whether `data_type` is a `NumericType` of PySpark.
+fn is_numeric(data_type: &DataType) -> bool {
+    matches!(
+        data_type,
+        DataType::Byte
+            | DataType::Short
+            | DataType::Integer
+            | DataType::Long
+            | DataType::Float
+            | DataType::Double
+            | DataType::Decimal { .. }
+    )
+}
+
+/// The parts of an attribute name, as PySpark's `parse_attr_name`: split by dots, of
+/// backtick-quoted parts too; None for a name that it does not parse.
+fn parse_attr_name(name: &str) -> Option<Vec<String>> {
+    let chars: Vec<char> = name.chars().collect();
+    let n = chars.len();
+    let (mut parts, mut part, mut in_backtick, mut i) = (Vec::new(), String::new(), false, 0);
+    while i < n {
+        let c = chars[i];
+        if in_backtick {
+            if c == '`' {
+                if i + 1 < n && chars[i + 1] == '`' {
+                    part.push('`');
+                    i += 1;
+                } else {
+                    in_backtick = false;
+                    if i + 1 < n && chars[i + 1] != '.' {
+                        return None;
+                    }
+                }
+            } else {
+                part.push(c);
+            }
+        } else if c == '`' {
+            if !part.is_empty() {
+                return None;
+            }
+            in_backtick = true;
+        } else if c == '.' {
+            // As Python's `name[i - 1]`, the last character for the first.
+            let previous = chars[(i + n - 1) % n];
+            if previous == '.' || i == n - 1 {
+                return None;
+            }
+            parts.push(std::mem::take(&mut part));
+        } else {
+            part.push(c);
+        }
+        i += 1;
+    }
+    if in_backtick {
+        return None;
+    }
+    parts.push(part);
+    Some(parts)
+}
+
+/// Whether `name` is of a numeric column of `schema`, as PySpark's
+/// `verify_numeric_col_name`: by its parts, of the fields of structs and of the structs of
+/// arrays. As PySpark's, the name of a struct is an `IndexError`.
+fn verify_numeric_col_name(name: &str, schema: &DataType) -> Result<bool> {
+    fn verify(parts: &[String], data_type: &DataType) -> Result<bool> {
+        if parts.is_empty() && is_numeric(data_type) {
+            return Ok(true);
+        }
+        let fields = match data_type {
+            DataType::Struct { fields } => fields,
+            DataType::Array { element_type, .. } => match element_type.as_ref() {
+                DataType::Struct { fields } => fields,
+                _ => return Ok(false),
+            },
+            _ => return Ok(false),
+        };
+        let Some((part, rest)) = parts.split_first() else {
+            let mut err = SparkError::value_msg("list index out of range");
+            err.kind = SparkErrorKind::IndexError;
+            return Err(err);
+        };
+        match fields.iter().find(|field| field.name == *part) {
+            Some(field) => verify(rest, &field.data_type),
+            None => Ok(false),
+        }
+    }
+    match parse_attr_name(name) {
+        Some(parts) if !parts.is_empty() => verify(&parts, schema),
+        _ => Ok(false),
     }
 }
 
@@ -565,6 +702,72 @@ mod tests {
             .remote("sc://localhost:15002")
             .get_or_create()
             .expect("failed to build session")
+    }
+
+    #[test]
+    fn numeric_column_names_are_verified_as_pyspark() {
+        use crate::types::StructField;
+        let field = |name: &str, data_type: DataType| StructField {
+            name: name.to_string(),
+            data_type,
+            nullable: true,
+            metadata: Default::default(),
+        };
+        let schema = DataType::Struct {
+            fields: vec![
+                field("x", DataType::Integer),
+                field(
+                    "k",
+                    DataType::String {
+                        collation: "UTF8_BINARY".to_string(),
+                    },
+                ),
+                field(
+                    "st",
+                    DataType::Struct {
+                        fields: vec![field("a", DataType::Double)],
+                    },
+                ),
+                field(
+                    "arr",
+                    DataType::Array {
+                        element_type: Box::new(DataType::Struct {
+                            fields: vec![field("c", DataType::Long)],
+                        }),
+                        contains_null: true,
+                    },
+                ),
+            ],
+        };
+        // As PySpark's parse_attr_name of these.
+        assert_eq!(
+            parse_attr_name("a.`b.c`.`d``e`").unwrap(),
+            vec!["a", "b.c", "d`e"]
+        );
+        assert_eq!(parse_attr_name(".a").unwrap(), vec!["", "a"]);
+        assert_eq!(parse_attr_name("`a.b`").unwrap(), vec!["a.b"]);
+        for unparsed in ["a..b", "a.", "`a`b", "a`b`", "`a", "a.`b.c`.``d``"] {
+            assert_eq!(parse_attr_name(unparsed), None, "{unparsed}");
+        }
+        for (name, numeric) in [
+            ("x", true),
+            ("k", false),
+            ("st.a", true),
+            ("`st`.`a`", true),
+            ("arr.c", true),
+            ("nope", false),
+            ("st..a", false),
+        ] {
+            assert_eq!(
+                verify_numeric_col_name(name, &schema).unwrap(),
+                numeric,
+                "{name}"
+            );
+        }
+        // As PySpark's, of which a struct is an IndexError.
+        let err = verify_numeric_col_name("st", &schema).unwrap_err();
+        assert_eq!(err.kind, SparkErrorKind::IndexError);
+        assert_eq!(err.message(), "list index out of range");
     }
 
     #[test]

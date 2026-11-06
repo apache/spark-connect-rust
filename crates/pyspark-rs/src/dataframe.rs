@@ -1264,9 +1264,39 @@ impl PyDataFrame {
     ///
     /// Mirrors `pyspark.sql.DataFrame.agg(*exprs)`.
     #[pyo3(signature = (*exprs))]
-    fn agg(&self, _py: Python<'_>, exprs: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
-        let columns = to_column_list(exprs)?;
-        let expressions = columns.iter().map(|c| c.expression().clone()).collect();
+    fn agg(&self, py: Python<'_>, exprs: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        if exprs.is_empty() {
+            return Err(crate::column::raise_pyspark(
+                py,
+                "PySparkValueError",
+                "CANNOT_BE_EMPTY",
+                &[("item", "exprs")],
+            ));
+        }
+        // As PySpark's: a dict of column names and functions, the aggregation of each, as of
+        // `groupBy().agg`, else Columns, which it asserts.
+        if let [only] = exprs.as_slice() {
+            if let Ok(dict) = only.cast::<PyDict>() {
+                let mut expressions = Vec::with_capacity(dict.len());
+                for (column, function) in dict.iter() {
+                    let column = spark_connect::functions::col(&column.extract::<String>()?);
+                    expressions.push(spark_connect::expression::Expression::function(
+                        function.extract::<String>()?,
+                        vec![column.expression().clone()],
+                    ));
+                }
+                return Ok(PyDataFrame::new(self.dataframe.agg(expressions)));
+            }
+        }
+        let mut expressions = Vec::with_capacity(exprs.len());
+        for expr in &exprs {
+            let Ok(column) = expr.extract::<PyRef<'_, PyColumn>>() else {
+                return Err(pyo3::exceptions::PyAssertionError::new_err(
+                    "all exprs should be Expression",
+                ));
+            };
+            expressions.push(column.column.expression().clone());
+        }
         Ok(PyDataFrame::new(self.dataframe.agg(expressions)))
     }
 
