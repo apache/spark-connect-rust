@@ -150,8 +150,14 @@ impl PyDataType {
     /// (e.g. a user's `UserDefinedType`). The sentinel `inner` is never consulted for
     /// such subclasses — they override the object-model methods in Python, and
     /// `py_to_data_type` special-cases `UserDefinedType` before reading `inner`.
+    /// As `object.__new__` of PySpark's pure-Python `DataType`: the arguments are those of the
+    /// `__init__` of a subclass, such as a `UserDefinedType` of parameters.
     #[new]
-    fn __new__() -> Self {
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn __new__(
+        _args: &Bound<'_, pyo3::types::PyTuple>,
+        _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> Self {
         PyDataType {
             inner: DataType::Null,
         }

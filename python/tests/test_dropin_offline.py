@@ -871,6 +871,51 @@ class _DayPointUDT(T.UserDefinedType):
         return tuple(datum)
 
 
+class _ScaledPointUDT(_DayPointUDT):
+    def __init__(self, scale=1.0):
+        self.scale = scale
+
+
+def test_user_defined_types_pickle_as_python_objects_as_pyspark():
+    # As PySpark's UDT, a Python object: a UDT of parameters is made with them, and pickles
+    # as its class and its state, which cloudpickle sends by value for a class of __main__.
+    # In a new interpreter, whose __main__ defines the class, so that this one does not.
+    import copy
+    import pickle
+    import subprocess
+    import sys
+
+    from pyspark.serializers import CloudPickleSerializer
+
+    udt = _ScaledPointUDT(3.0)
+    for copied in (pickle.loads(pickle.dumps(udt)), copy.deepcopy(udt)):
+        assert type(copied) is _ScaledPointUDT and copied.scale == 3.0
+    assert pickle.loads(pickle.dumps(_DayPointUDT())).__dict__ == {}
+
+    pickled = subprocess.run([sys.executable, "-c", """
+import sys
+from pyspark.serializers import CloudPickleSerializer
+from pyspark.sql.types import ArrayType, DoubleType, UserDefinedType
+
+class MainPointUDT(UserDefinedType):
+    def __init__(self, scale):
+        self.scale = scale
+
+    @classmethod
+    def sqlType(cls):
+        return ArrayType(DoubleType())
+
+    @classmethod
+    def module(cls):
+        return "__main__"
+
+sys.stdout.buffer.write(CloudPickleSerializer().dumps(MainPointUDT(2.5)))
+"""], check=True, capture_output=True).stdout
+    main_udt = CloudPickleSerializer().loads(pickled)
+    assert type(main_udt).__name__ == "MainPointUDT" and main_udt.scale == 2.5
+    assert main_udt.sqlType() == T.ArrayType(T.DoubleType())
+
+
 def test_collected_values_of_user_defined_types_are_deserialized_as_pyspark():
     # The converters that the client applies to collected rows: the values of user-defined
     # types, in arrays, maps and structs too, are deserialized by their UDTs, as PySpark's

@@ -966,6 +966,54 @@ def test_ml_vector_functions_as_pyspark(session):
     assert tuple(row.first()) == ([1.5, 2.0], [1.5, 2.0])
 
 
+def test_udfs_return_user_defined_types_of_main_as_pyspark():
+    # As PySpark's: a UDT that __main__ defines, of parameters, is a UDF return type, as
+    # cloudpickle sends its class by value and its state to the worker. In a new
+    # interpreter, whose __main__ defines the classes.
+    import subprocess
+    import sys
+
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("SPARK_REMOTE is required for live-server tests")
+    subprocess.run([sys.executable, "-c", """
+import sys
+from pyspark.sql import Row, SparkSession, functions as F
+from pyspark.sql.types import ArrayType, DoubleType, UserDefinedType
+
+class Point:
+    def __init__(self, x, y):
+        self.x, self.y = x, y
+
+    def __eq__(self, other):
+        return isinstance(other, Point) and (self.x, self.y) == (other.x, other.y)
+
+class PointUDT(UserDefinedType):
+    def __init__(self, scale=1.0):
+        self.scale = scale
+
+    @classmethod
+    def sqlType(cls):
+        return ArrayType(DoubleType(), False)
+
+    @classmethod
+    def module(cls):
+        return "__main__"
+
+    def serialize(self, obj):
+        return [obj.x * self.scale, obj.y * self.scale]
+
+    def deserialize(self, datum):
+        return Point(datum[0], datum[1])
+
+Point.__UDT__ = PointUDT()
+spark = SparkSession.builder.remote(sys.argv[1]).getOrCreate()
+df = spark.range(2).select(F.udf(lambda i: Point(i, i + 1), PointUDT(10.0))("id").alias("p"))
+assert df.collect() == [Row(p=Point(0.0, 10.0)), Row(p=Point(10.0, 20.0))]
+assert df.select(F.to_json(F.struct("p"))).collect()[1][0] == '{"p":[10.0,20.0]}'
+""", remote], check=True)
+
+
 def test_collected_values_of_user_defined_types_are_deserialized_as_pyspark(session):
     # As official PySpark 4.3.0: a collected value of a UDT is its deserialized object, and
     # dtypes names the UDT by its simpleString(), in every way that rows are collected.

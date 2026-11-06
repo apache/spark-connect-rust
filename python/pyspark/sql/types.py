@@ -120,6 +120,15 @@ class UserDefinedType(DataType):
     def typeName(cls) -> str:
         return cls.__name__.lower()
 
+    def __reduce__(self):
+        # As PySpark's UDT, a Python object, which pickles as its class and its state:
+        # cloudpickle sends a class of __main__ by value, and the state keeps the parameters
+        # of the instance. DataType.__reduce__ would send its JSON, which names the class by
+        # its module and rebuilds the instance without arguments.
+        import copyreg
+
+        return copyreg.__newobj__, (type(self),), self.__dict__ or None
+
     @classmethod
     def sqlType(cls) -> "DataType":
         """Underlying SQL storage type for this UDT."""
