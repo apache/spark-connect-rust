@@ -536,6 +536,14 @@ def test_maps_keep_their_entries_in_order_with_keys_of_their_type(session):
     assert list(df.first()[0].items()) == [(2, "b"), (1, "a")]
 
 
+def test_ml_vector_functions_as_pyspark(session):
+    from pyspark.ml.functions import array_to_vector, vector_to_array
+
+    df = session.sql("SELECT array(1.5D, 2.0D) AS a").select(array_to_vector("a").alias("vec"))
+    row = df.select(vector_to_array("vec").alias("d"), vector_to_array("vec", "float32").alias("f"))
+    assert tuple(row.first()) == ([1.5, 2.0], [1.5, 2.0])
+
+
 def test_create_dataframe_merges_the_types_of_every_row_as_pyspark(session):
     import array
     import decimal
