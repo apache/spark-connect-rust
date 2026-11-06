@@ -865,6 +865,38 @@ impl LogisticRegression {
     pub fn max_iter(&self) -> i64 {
         self.max_iter
     }
+
+    fn model_from_info(
+        &self,
+        info: proto::ml_command_result::MlOperatorInfo,
+        session_id: &str,
+    ) -> spark_connect_core::error::Result<LogisticRegressionModel> {
+        let model_ref = match info.r#type {
+            Some(proto::ml_command_result::ml_operator_info::Type::ObjRef(reference))
+                if !reference.id.is_empty() =>
+            {
+                reference
+            }
+            _ => {
+                return Err(spark_connect_core::error::SparkError::connect_msg(
+                    "LogisticRegression.fit: server returned no model object reference",
+                ))
+            }
+        };
+        Ok(LogisticRegressionModel {
+            operator: MlOperator::with_uid(
+                "org.apache.spark.ml.classification.LogisticRegressionModel",
+                info.uid.as_deref().unwrap_or(&self.operator.uid),
+                OperatorType::Model,
+            ),
+            params: self.params.clone(),
+            feature_col: self.feature_col.clone(),
+            label_col: self.label_col.clone(),
+            prediction_col: self.prediction_col.clone(),
+            model_ref,
+            session_id: session_id.to_string(),
+        })
+    }
 }
 
 impl Default for LogisticRegression {
@@ -890,23 +922,42 @@ impl Estimator for LogisticRegression {
         &mut self.params
     }
 
-    fn fit_impl(&mut self, _df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
-        let model = LogisticRegressionModel {
-            operator: MlOperator::with_uid(
-                &self.operator.name,
-                &self.operator.uid,
-                OperatorType::Model,
-            ),
-            params: self.params.clone(),
-            feature_col: self.feature_col.clone(),
-            label_col: self.label_col.clone(),
-            prediction_col: self.prediction_col.clone(),
+    fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
+        let command = proto::MlCommand {
+            command: Some(proto::ml_command::Command::Fit(proto::ml_command::Fit {
+                estimator: Some(self.operator.to_proto()),
+                params: Some(self.params.to_proto()),
+                dataset: Some(df.relation()),
+            })),
         };
-        Ok(Box::new(model))
+        let responses = crate::dataframe::execute_command_collect(
+            &df.session,
+            proto::command::CommandType::MlCommand(command),
+        )?;
+        for response in responses {
+            if let Some(proto::execute_plan_response::ResponseType::MlCommandResult(result)) =
+                response.response_type
+            {
+                if let Some(proto::ml_command_result::ResultType::OperatorInfo(info)) =
+                    result.result_type
+                {
+                    return Ok(Box::new(
+                        self.model_from_info(info, df.session.session_id())?,
+                    ));
+                }
+            }
+        }
+        Err(spark_connect_core::error::SparkError::connect_msg(
+            "LogisticRegression.fit: server returned no fitted model",
+        ))
     }
 }
 
-/// LogisticRegressionModel: fitted model from LogisticRegression.
+/// A LogisticRegression model fitted and cached by the Spark Connect server.
+///
+/// Obtain this model through [`Estimator::fit`]. Its cached object reference is
+/// distinct from its operator UID and belongs to the session used for fitting.
+/// The server keeps the cached model for that session's lifetime.
 #[derive(Debug, Clone)]
 pub struct LogisticRegressionModel {
     pub operator: MlOperator,
@@ -914,6 +965,8 @@ pub struct LogisticRegressionModel {
     pub feature_col: String,
     pub label_col: String,
     pub prediction_col: String,
+    model_ref: proto::ObjectRef,
+    session_id: String,
 }
 
 impl Transformer for LogisticRegressionModel {
@@ -933,15 +986,39 @@ impl Transformer for LogisticRegressionModel {
         &mut self.params
     }
 
+    fn build_ml_relation(&self, input: &DataFrame) -> proto::MlRelation {
+        proto::MlRelation {
+            ml_type: Some(proto::ml_relation::MlType::Transform(Box::new(
+                proto::ml_relation::Transform {
+                    operator: Some(proto::ml_relation::transform::Operator::ObjRef(
+                        self.model_ref.clone(),
+                    )),
+                    input: Some(Box::new(input.relation())),
+                    params: Some(self.params.to_proto()),
+                },
+            ))),
+            ..Default::default()
+        }
+    }
+
     fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
-        let ml_relation = self.build_ml_relation(df);
-        let mut relation = proto::Relation::default();
-        relation.common = Some(proto::RelationCommon::default());
-        relation.rel_type = Some(proto::relation::RelType::MlRelation(Box::new(ml_relation)));
-        let plan = LogicalPlan::MlTransform {
-            ml_relation: relation,
+        if df.session.session_id() != self.session_id {
+            return Err(spark_connect_core::error::SparkError::value_msg(
+                "A fitted LogisticRegression model must transform data from its fitting session",
+            ));
+        }
+        let relation = proto::Relation {
+            rel_type: Some(proto::relation::RelType::MlRelation(Box::new(
+                self.build_ml_relation(df),
+            ))),
+            ..Default::default()
         };
-        Ok(DataFrame::new(df.session.clone(), plan))
+        Ok(DataFrame::new(
+            df.session.clone(),
+            LogicalPlan::MlTransform {
+                ml_relation: relation,
+            },
+        ))
     }
 }
 
@@ -1773,11 +1850,11 @@ mod tests {
     }
 
     #[test]
-    fn all_estimators_fit_and_models_transform() {
+    fn offline_estimators_fit_and_models_transform() {
         let s = offline_session();
         let df = s.range(3).unwrap();
         // Each estimator fits locally and its model transform builds a plan; this
-        // exercises fit_impl + transform_impl + clone_box for every model type.
+        // exercises the offline model wrappers. LogisticRegression is tested against a server.
         let mut mas = MaxAbsScaler::new().set_input_col("f").set_output_col("o");
         assert_eq!(mas.input_col(), "f");
         let mut m = mas.fit(&df).unwrap();
@@ -1793,19 +1870,6 @@ mod tests {
         let _ = m.transform(&df).unwrap();
         let _ = m.clone_box();
 
-        let mut lr = LogisticRegression::new()
-            .set_feature_col("features")
-            .set_label_col("label")
-            .set_prediction_col("pred")
-            .set_max_iter(7);
-        assert_eq!(lr.feature_col(), "features");
-        assert_eq!(lr.label_col(), "label");
-        assert_eq!(lr.prediction_col(), "pred");
-        assert_eq!(lr.max_iter(), 7);
-        let mut m = lr.fit(&df).unwrap();
-        let _ = m.transform(&df).unwrap();
-        let _ = m.clone_box();
-
         let mut pipe = Pipeline::new().set_stages(vec!["a", "b"]);
         assert_eq!(pipe.stages().len(), 2);
         let mut m = pipe.fit(&df).unwrap();
@@ -1818,5 +1882,83 @@ mod tests {
             .set_output_col("v");
         assert_eq!(va.input_cols().len(), 2);
         let _ = va.transform(&df).unwrap();
+    }
+
+    fn fitted_logistic_regression(session_id: &str) -> LogisticRegressionModel {
+        let estimator = LogisticRegression::new().set_prediction_col("pred");
+        estimator
+            .model_from_info(
+                proto::ml_command_result::MlOperatorInfo {
+                    r#type: Some(proto::ml_command_result::ml_operator_info::Type::ObjRef(
+                        proto::ObjectRef {
+                            id: "cached-model-id".to_string(),
+                        },
+                    )),
+                    uid: Some("operator-uid".to_string()),
+                    ..Default::default()
+                },
+                session_id,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn logistic_regression_transform_uses_the_fitted_object_reference() {
+        let session = offline_session();
+        let mut model = fitted_logistic_regression(session.session_id());
+        assert_eq!(model.operator.uid, "operator-uid");
+        assert_eq!(model.operator.op_type, OperatorType::Model);
+        let data = session.range(3).unwrap();
+        let transformed = model.transform(&data).unwrap();
+        let relation = transformed.relation();
+        let Some(proto::relation::RelType::MlRelation(ml)) = relation.rel_type else {
+            panic!("expected an ML relation");
+        };
+        let Some(proto::ml_relation::MlType::Transform(transform)) = ml.ml_type else {
+            panic!("expected a model transform");
+        };
+        assert_eq!(
+            transform.operator,
+            Some(proto::ml_relation::transform::Operator::ObjRef(
+                proto::ObjectRef {
+                    id: "cached-model-id".to_string()
+                },
+            ))
+        );
+        assert!(transform
+            .params
+            .unwrap()
+            .params
+            .contains_key("predictionCol"));
+        assert_eq!(*transform.input.unwrap(), data.relation());
+        let _ = model.clone_box();
+    }
+
+    #[test]
+    fn logistic_regression_fit_requires_a_nonempty_model_reference() {
+        let estimator = LogisticRegression::new();
+        for kind in [
+            None,
+            Some(proto::ml_command_result::ml_operator_info::Type::Name(
+                "operator".to_string(),
+            )),
+            Some(proto::ml_command_result::ml_operator_info::Type::ObjRef(
+                proto::ObjectRef::default(),
+            )),
+        ] {
+            let info = proto::ml_command_result::MlOperatorInfo {
+                r#type: kind,
+                ..Default::default()
+            };
+            assert!(estimator.model_from_info(info, "session").is_err());
+        }
+    }
+
+    #[test]
+    fn logistic_regression_rejects_a_different_session() {
+        let session = offline_session();
+        let mut model = fitted_logistic_regression(session.session_id());
+        let other = session.new_session();
+        assert!(model.transform(&other.range(3).unwrap()).is_err());
     }
 }

@@ -37,6 +37,20 @@ impl PyStorageLevel {
     }
 }
 
+/// The proto of a pyspark `StorageLevel`, of its flags, as PySpark's `storage_level_to_proto`
+/// reads them: of `DataFrame.persist`, `localCheckpoint` and `Catalog.cacheTable`.
+pub(crate) fn storage_level_proto(
+    level: &Bound<'_, PyAny>,
+) -> PyResult<spark_connect_proto::StorageLevel> {
+    Ok(spark_connect_proto::StorageLevel {
+        use_disk: level.getattr("useDisk")?.extract()?,
+        use_memory: level.getattr("useMemory")?.extract()?,
+        use_off_heap: level.getattr("useOffHeap")?.extract()?,
+        deserialized: level.getattr("deserialized")?.extract()?,
+        replication: level.getattr("replication")?.extract()?,
+    })
+}
+
 #[pymethods]
 impl PyStorageLevel {
     #[new]

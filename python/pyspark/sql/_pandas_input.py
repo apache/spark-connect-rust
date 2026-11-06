@@ -181,8 +181,8 @@ def prepare_int64_table(frame, schema):
                or type(dtype) is Int64Dtype
                for dtype in dtypes):
         return None
-    # The importer's configuration RPCs outweigh row conversion for small NumPy
-    # frames. Nullable extension columns still use Arrow for reliable null typing.
+    # The importer's configuration RPC outweighs row conversion for small NumPy frames.
+    # Nullable Int64 frames use Arrow at any size, which keeps their null masks.
     if len(frame) < 1000 and not any(type(dtype) is Int64Dtype for dtype in dtypes):
         return None
 
@@ -254,6 +254,8 @@ def prepare_int64_table(frame, schema):
             type(name) is str and "\x00" not in name for name in schema
         ):
             return None
+        # As PySpark Connect, the Arrow table keeps the pandas names, and the list is
+        # applied with toDF.
 
     columns = [frame.iloc[:, i] for i in range(width)]
     for i, (column, dtype) in enumerate(zip(columns, dtypes)):
@@ -276,15 +278,267 @@ def prepare_int64_table(frame, schema):
     )
 
 
+def timestamp_columns(frame, schema):
+    """Select only explicit, microsecond-aligned datetime64 timestamp columns.
+
+    Inference (including TimestampNTZ preferences), object/mixed columns, other
+    units and submicrosecond truncation retain the row path. Check the integer
+    buffers separately so NaT's sentinel never participates in alignment tests.
+    """
+    import sys
+    from types import GetSetDescriptorType, WrapperDescriptorType
+
+    import numpy as np
+    import pandas as pd
+    try:
+        from pandas.core.arrays.datetimes import DatetimeArray
+        from pandas.core.dtypes.dtypes import DatetimeTZDtype
+        from pandas.core.frame import DataFrame
+        from pandas.core.series import Series
+    except ImportError:
+        return None
+    from pyspark._pyspark import (
+        AtomicType, BooleanType, ByteType, ShortType, IntegerType, LongType, FloatType,
+        DoubleType, DecimalType, StringType, BinaryType, DateType, TimestampType,
+        StructField, StructType as NativeStructType,
+    )
+    from pyspark.sql import types as sql_types
+
+    if (pd.DataFrame is not DataFrame or type(frame) is not DataFrame
+            or type(schema) is not NativeStructType or not len(frame)):
+        return None
+    if not _has_canonical_columns(frame.columns):
+        return None
+    # Native row conversion reads the native schema directly. The Arrow importer
+    # also consults Python descriptors and public or captured converter aliases.
+    if sys.modules.get("pyspark.sql.types") is not sql_types:
+        return None
+    importer = sys.modules.get("pyspark.sql._arrow_input")
+    if vars(sql_types).get("AtomicType") is not AtomicType:
+        return None
+    if importer is not None:
+        if getattr(importer, "StructType", None) is not NativeStructType:
+            return None
+        if vars(importer).get("AtomicType") is not AtomicType:
+            return None
+    converter = sys.modules.get("pyspark.sql.pandas.types")
+    namespaces = [vars(sql_types)]
+    if converter is not None:
+        namespaces.append(vars(converter))
+    if importer is not None:
+        for name in ("from_arrow_schema", "to_arrow_schema",
+                     "_check_arrow_table_timestamps_localize"):
+            # Newer importers resolve converters locally within prepare_table.
+            if name not in vars(importer):
+                continue
+            namespace = getattr(getattr(importer, name, None), "__globals__", None)
+            if type(namespace) is not dict:
+                return None
+            namespaces.append(namespace)
+    for name, cls in (
+        ("BooleanType", BooleanType), ("ByteType", ByteType), ("ShortType", ShortType),
+        ("IntegerType", IntegerType), ("LongType", LongType), ("FloatType", FloatType),
+        ("DoubleType", DoubleType), ("DecimalType", DecimalType), ("StringType", StringType),
+        ("BinaryType", BinaryType), ("DateType", DateType), ("TimestampType", TimestampType),
+        ("StructField", StructField), ("StructType", NativeStructType),
+    ):
+        if any(namespace.get(name) is not cls for namespace in namespaces):
+            return None
+    for cls in (TimestampType, StructField, NativeStructType):
+        if (cls.__getattribute__ is not object.__getattribute__
+                or any("__class__" in vars(base) for base in cls.__mro__ if base is not object)):
+            return None
+    for cls, names, descriptor_type in (
+        (NativeStructType, ("fields", "names"), GetSetDescriptorType),
+        (NativeStructType, ("__iter__",), WrapperDescriptorType),
+        (StructField, ("name", "dataType", "nullable", "metadata"), GetSetDescriptorType),
+    ):
+        for name in names:
+            descriptor = vars(cls).get(name)
+            if (type(descriptor) is not descriptor_type
+                    or descriptor.__objclass__ is not cls or descriptor.__name__ != name):
+                return None
+
+    width = len(frame.columns)
+    fields = schema.fields
+    if not width or len(fields) != width or not frame.columns.is_unique:
+        return None
+    if not all(type(name) is str and "\x00" not in name for name in frame.columns):
+        return None
+    if not all(type(field) is StructField and type(field.dataType) is TimestampType
+               and type(field.name) is str and "\x00" not in field.name for field in fields):
+        return None
+    if len(set(schema.names)) != width:
+        return None
+    columns = []
+    datetime_dtype = type(np.dtype("datetime64[ns]"))
+    for i, dtype in enumerate(frame.dtypes):
+        if type(dtype) is DatetimeTZDtype:
+            unit = dtype.unit
+        elif type(dtype) is datetime_dtype and dtype.kind == "M":
+            unit = np.datetime_data(dtype)[0]
+        else:
+            return None
+        if unit not in ("ns", "us"):
+            return None
+        column = frame.iloc[:, i]
+        if type(column) is not Series or type(column.array) is not DatetimeArray:
+            return None
+        # Preserve the row path's local null error before any timezone Config RPC.
+        if not fields[i].nullable and column.hasnans:
+            return None
+        if unit == "ns" and np.any(column.array.asi8[column.notna()] % 1000):
+            return None
+        columns.append(column)
+    return columns
+
+
+def timestamp_columns_are_aware(columns):
+    """Whether every column carries its time zone, so the session's is not needed."""
+    from pandas.core.dtypes.dtypes import DatetimeTZDtype
+
+    return all(type(column.dtype) is DatetimeTZDtype for column in columns)
+
+
+def prepare_timestamp_table(columns, schema, timezone):
+    """Preserve instants without row materialization or a host-zone conversion.
+
+    Aware columns carry their own timezone. Naive columns are deliberately
+    restricted to UTC host/session pairs: the existing row path uses the host
+    zone, unlike Python Connect's session-zone conversion (and DST fold policy).
+    """
+    import os
+    import time
+    import pyarrow as pa
+
+    if not timestamp_columns_are_aware(columns):
+        if (timezone != "UTC" or os.environ.get("TZ") != "UTC"
+                or time.tzname != ("UTC", "UTC")):
+            return None
+    return pa.Table.from_arrays(
+        [pa.array(column, type=pa.timestamp("us", tz="UTC"), from_pandas=True)
+         for column in columns],
+        names=schema.names,
+    )
+
+
+def prepare_float64_table(frame, schema):
+    """Keep explicit native double columns columnar without changing pandas nulls."""
+    import numpy as np
+    import pandas as pd
+    from pandas.core import frame as frame_module, generic as generic_module
+    from pandas.core.frame import DataFrame
+    from pandas.core.series import Series
+    from types import FunctionType, GetSetDescriptorType, WrapperDescriptorType
+
+    from pyspark import _pyspark as native
+    from pyspark.sql import types as sql_types
+
+    # First-use Arrow imports outweigh the conversion saving for smaller frames.
+    # Keep those on the existing row path.
+    if (pd.DataFrame is not DataFrame or type(frame) is not DataFrame
+            or type(schema) is not native.StructType or len(frame) < 100000
+            or any(name in vars(frame) for name in ("astype", "notna"))):
+        return None
+    if not _has_canonical_columns(frame.columns):
+        return None
+    # Class or instance conversion hooks must retain the row path's calls.
+    for name, module in (("astype", generic_module), ("notna", frame_module),
+                         ("where", generic_module)):
+        method = getattr(DataFrame, name)
+        if (type(method) is not FunctionType or method.__name__ != name
+                or method.__module__ != module.__name__ or method.__globals__ is not vars(module)):
+            return None
+    if (DataFrame.astype is not generic_module.NDFrame.astype
+            or DataFrame.where is not generic_module.NDFrame.where):
+        return None
+    width = len(frame.columns)
+    if not width or not frame.columns.is_unique or not all(
+        type(name) is str and "\x00" not in name for name in frame.columns
+    ):
+        return None
+    double_dtype = np.dtype("float64")
+    if not all(type(dtype) is type(double_dtype) and dtype == double_dtype
+               for dtype in frame.dtypes):
+        return None
+    # A custom ExtensionArray can advertise the literal NumPy dtype while its
+    # Arrow hook emits other values. Accept only pandas' concrete NumPy storage.
+    try:
+        from pandas.core.arrays.numpy_ import NumpyExtensionArray
+    except ImportError:
+        try:
+            from pandas.core.arrays.numpy_ import PandasArray as NumpyExtensionArray
+        except ImportError:
+            return None
+    columns = [frame.iloc[:, i] for i in range(width)]
+    if any(type(column) is not Series or type(column.array) is not NumpyExtensionArray
+           for column in columns):
+        return None
+    # Native row conversion reads Rust fields, bypassing mutable Python accessors.
+    for name in ("DoubleType", "StructField", "StructType"):
+        cls = getattr(native, name)
+        if (getattr(sql_types, name, None) is not cls
+                or cls.__getattribute__ is not object.__getattribute__
+                or any("__class__" in vars(base) for base in cls.__mro__ if base is not object)):
+            return None
+    for cls, names, descriptor_type in (
+        (native.StructType, ("fields", "names"), GetSetDescriptorType),
+        (native.StructType, ("__iter__",), WrapperDescriptorType),
+        (native.StructField, ("name", "dataType", "nullable", "metadata"), GetSetDescriptorType),
+    ):
+        for name in names:
+            descriptor = vars(cls).get(name)
+            if (type(descriptor) is not descriptor_type
+                    or descriptor.__objclass__ is not cls or descriptor.__name__ != name):
+                return None
+    fields = schema.fields
+    if len(fields) != width or not all(
+        type(field) is native.StructField and type(field.dataType) is native.DoubleType
+        and type(field.name) is str and "\x00" not in field.name for field in fields
+    ) or len(set(schema.names)) != width:
+        return None
+
+    # Use the same pandas missing-value semantics as the row path, including the
+    # legacy use_inf_as_na option. Infinities and signed zero otherwise stay intact.
+    valid = frame.notna()
+    if any(not field.nullable and not valid.iloc[:, i].all()
+           for i, field in enumerate(fields)):
+        return None
+
+    import pyarrow as pa
+
+    return pa.Table.from_arrays(
+        [pa.array(column, type=pa.float64(),
+                  mask=~valid.iloc[:, i], from_pandas=False)
+         for i, column in enumerate(columns)],
+        # Match the row serializer's physical fields. The complete Spark
+        # metadata remains in the explicit logical schema, not Arrow metadata.
+        schema=pa.schema([pa.field(field.name, pa.float64(), nullable=field.nullable)
+                          for field in fields]),
+    )
+
+
+def prepare_float64_input(frame, schema):
+    """Serialize supported double columns with the existing row transport policy."""
+    table = prepare_float64_table(frame, schema)
+    if table is None:
+        return None
+
+    import pyarrow as pa
+
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    return sink.getvalue().to_pybytes()
+
+
 def prepare_string_input(frame, schema):
-    """Prepare inline IPC for eligible object or Arrow-backed string columns.
+    """Prepare inline IPC for explicit columns of exact strings or None.
 
     Inspect every object before Arrow conversion: str subclasses can override
     conversion hooks, and pandas treats several other objects as missing values.
     Those cases must keep the existing row conversion and its error ordering.
     """
-    import sys
-
     import numpy as np
     import pandas as pd
     from pandas.core import frame as frame_module, generic as generic_module
@@ -292,10 +546,7 @@ def prepare_string_input(frame, schema):
     from pandas.core.series import Series
     from types import FunctionType, GetSetDescriptorType, MethodDescriptorType, WrapperDescriptorType
 
-    from pyspark._pyspark import (
-        BooleanType, ByteType, ShortType, IntegerType, LongType, FloatType,
-        DoubleType, DecimalType, StringType, StructField, StructType as NativeStructType,
-    )
+    from pyspark._pyspark import StringType, StructField, StructType as NativeStructType
     from pyspark.sql import types as sql_types
 
     # Keep small frames on the established row path.
@@ -314,23 +565,6 @@ def prepare_string_input(frame, schema):
     if (DataFrame.astype is not generic_module.NDFrame.astype
             or DataFrame.where is not generic_module.NDFrame.where):
         return None
-    # Earlier converter branches must not recognize a string as another type.
-    # Check a loaded converter too: it keeps its own imported type aliases.
-    if sys.modules.get("pyspark.sql.types") is not sql_types:
-        return None
-    importer = sys.modules.get("pyspark.sql._arrow_input")
-    if importer is not None and getattr(importer, "StructType", None) is not NativeStructType:
-        return None
-    converter = sys.modules.get("pyspark.sql.pandas.types")
-    for name, cls in (
-        ("BooleanType", BooleanType), ("ByteType", ByteType), ("ShortType", ShortType),
-        ("IntegerType", IntegerType), ("LongType", LongType), ("FloatType", FloatType),
-        ("DoubleType", DoubleType), ("DecimalType", DecimalType), ("StringType", StringType),
-        ("StructField", StructField), ("StructType", NativeStructType),
-    ):
-        if (getattr(sql_types, name, None) is not cls
-                or converter is not None and getattr(converter, name, None) is not cls):
-            return None
     # The row path reads native fields directly. Class attributes are mutable,
     # so customized Python schema access must not select a different Arrow path.
     for name, cls in (("StringType", StringType), ("StructField", StructField),
@@ -364,10 +598,9 @@ def prepare_string_input(frame, schema):
         for field in schema.fields
     ) or len(set(schema.names)) != width:
         return None
-    dtypes = frame.dtypes
     if not all(type(dtype) is type(np.dtype("object")) and dtype == np.dtype("object")
-               for dtype in dtypes):
-        return _prepare_arrow_string_input(frame, schema, dtypes)
+               for dtype in frame.dtypes):
+        return None
     # A custom ExtensionArray may report a genuine NumPy dtype while its
     # Arrow hook emits different values from to_numpy(). Trust only pandas'
     # concrete NumPy backing array, including its name in older pandas releases.
@@ -398,219 +631,141 @@ def prepare_string_input(frame, schema):
     return _pandas_string_ipc(arrays, schema)
 
 
+def prepare_date_table(frame, schema):
+    """Accept only explicit date columns whose cells are exact dates or None.
 
-def _prepare_arrow_string_input(frame, schema, dtypes):
-    """Encode canonical Arrow string storage after the common String guards.
-
-    Bypass neither pandas conversion hooks nor its missing-value policy. Inspect
-    concrete storage directly only when the hooks used by row normalization are
-    ordinary pandas implementations. Other extension arrays keep the row path.
+    Inspect every object before Arrow conversion: date subclasses can override
+    conversion hooks, and pandas treats several other objects as missing values.
+    Those cases must keep the existing row conversion and its error ordering.
     """
-    from types import FunctionType
+    from datetime import date
+    import sys
 
     import numpy as np
     import pandas as pd
-    try:
-        import pyarrow as pa
-        from pyarrow import lib as arrow_lib
-        from pandas.core.arrays import base as base_module
-        from pandas.core.arrays import string_ as string_module
-        from pandas.core.arrays import string_arrow as string_arrow_module
-        from pandas.core.arrays.arrow import array as arrow_module
-        from pandas.core import frame as frame_module, series as series_module
-        from pandas.core.dtypes import base as dtype_module
-        from pandas.core.internals import blocks as blocks_module, managers as managers_module
-        from pandas._libs import internals as native_internals, missing as missing_module
-    except ImportError:
-        return None
+    from pandas.core import frame as frame_module, generic as generic_module
+    from pandas.core.frame import DataFrame
+    from pandas.core.series import Series
+    from types import FunctionType, GetSetDescriptorType, WrapperDescriptorType
 
-    StringDtype = string_module.StringDtype
-    ArrowStringArray = string_arrow_module.ArrowStringArray
-    ArrowExtensionArray = arrow_module.ArrowExtensionArray
-    ExtensionArray = base_module.ExtensionArray
-    Series = series_module.Series
-    if (pd.StringDtype is not StringDtype or pd.Series is not Series
-            or pd.NA is not missing_module.NA
-            or pa.ChunkedArray is not arrow_lib.ChunkedArray
-            or pa.StringArray is not arrow_lib.StringArray
-            or pa.LargeStringArray is not arrow_lib.LargeStringArray
-            or not all(type(dtype) is StringDtype for dtype in dtypes)):
-        return None
+    from pyspark._pyspark import (
+        AtomicType, BooleanType, ByteType, ShortType, IntegerType, LongType, FloatType,
+        DoubleType, DecimalType, StringType, BinaryType, DateType, StructField,
+        StructType as NativeStructType,
+    )
+    from pyspark.sql import types as sql_types
 
-    def ordinary(method, name, module):
-        return (type(method) is FunctionType and method.__name__ == name
-                and method.__module__ == module.__name__
-                and method.__globals__ is vars(module))
-
-    def property_hook(cls, name, module):
-        descriptor = getattr(cls, name, None)
-        return (type(descriptor) is property and descriptor.fset is None
-                and descriptor.fdel is None
-                and ordinary(descriptor.fget, name, module))
-
-    # astype(object) delegates through ExtensionArray.astype, __array__ and
-    # to_numpy. Nullable conversion also uses isna, _hasna and __getitem__.
-    hooks = {
-        "astype": (ArrowStringArray, string_arrow_module),
-        "__array__": (ArrowExtensionArray, arrow_module),
-        "to_numpy": (ArrowExtensionArray, arrow_module),
-        "isna": (ArrowExtensionArray, arrow_module),
-        "fillna": (ArrowExtensionArray, arrow_module),
-        "__getitem__": (ArrowExtensionArray, arrow_module),
-    }
-    if (any(name in vars(frame) for name in ("isna",))
-            or not ordinary(frame_module.DataFrame.isna, "isna", frame_module)
-            or not ordinary(ExtensionArray.astype, "astype", base_module)
-            or not property_hook(Series, "array", series_module)
-            or Series.__getattribute__ is not object.__getattribute__):
+    # Keep smaller frames on the row path to avoid the importer's config RPC overhead.
+    if (pd.DataFrame is not DataFrame or type(frame) is not DataFrame
+            or type(schema) is not NativeStructType
+            or len(frame) < 10000
+            or any(name in vars(frame) for name in ("astype", "notna", "where"))):
         return None
-    for name, module in (("name", string_module), ("na_value", string_module),
-                         ("type", string_module), ("kind", dtype_module)):
-        if not property_hook(StringDtype, name, module):
-            return None
-    # pandas 2 stores storage as a plain instance value; pandas 3 uses a property.
-    storage_descriptor = vars(StringDtype).get("storage")
-    if storage_descriptor is not None and not property_hook(StringDtype, "storage", string_module):
+    if not _has_canonical_columns(frame.columns):
         return None
-    for name, module in (("__eq__", string_module), ("__ne__", dtype_module),
-                         ("__from_arrow__", string_module)):
-        if not ordinary(getattr(StringDtype, name, None), name, module):
-            return None
-    if (StringDtype.__getattribute__ is not object.__getattribute__
-            or StringDtype.__setattr__ is not object.__setattr__
-            or StringDtype.__new__ is not object.__new__
-            or not ordinary(StringDtype.__init__, "__init__", string_module)
-            or string_arrow_module.StringDtype is not StringDtype
-            or arrow_module.StringDtype is not StringDtype):
-        return None
-    dtype_hooks = ("name", "na_value", "type", "kind", "__eq__", "__ne__", "__from_arrow__")
-    for dtype in dtypes:
-        state = vars(dtype)
-        if any(name in state for name in dtype_hooks):
-            return None
-        for name in ("_na_value", "_storage"):
-            if any(name in vars(base) for base in StringDtype.__mro__):
-                return None
-        storage = state.get("_storage") if storage_descriptor is not None else state.get("storage")
-        missing = state.get("_na_value")
-        if (type(storage) is not str or storage != "pyarrow"
-                or not (missing is pd.NA or type(missing) is float and np.isnan(missing))):
-            return None
-
-    if (pd.arrays.ArrowStringArray is not ArrowStringArray
-            or ArrowStringArray.__name__ != "ArrowStringArray"
-            or ArrowStringArray.__qualname__ != "ArrowStringArray"
-            or ArrowStringArray.__module__ not in (string_arrow_module.__name__, "pandas.arrays")):
-        return None
-    numpy_strings = vars(string_arrow_module).get("ArrowStringArrayNumpySemantics")
-    if numpy_strings is not None and (
-        not isinstance(numpy_strings, type)
-        or numpy_strings.__name__ != "ArrowStringArrayNumpySemantics"
-        or numpy_strings.__qualname__ != "ArrowStringArrayNumpySemantics"
-        or numpy_strings.__module__ != string_arrow_module.__name__
-        or numpy_strings.__bases__ != (ArrowStringArray,)
+    # The row path calls these normalization methods. Custom class or instance
+    # hooks must retain those calls and the values they produce before Arrow RPCs.
+    for name, module, qualname in (
+        ("astype", generic_module, "NDFrame.astype"),
+        ("notna", frame_module, "DataFrame.notna"),
+        ("where", generic_module, "NDFrame.where"),
     ):
-        return None
-    classes = (ArrowStringArray, numpy_strings)
-    # Read authenticated manager storage without constructing a Series: iloc
-    # calls len(backing) before the concrete array type can be checked. A custom
-    # extension subclass must reach row normalization before running that hook.
-    manager = vars(frame).get("_mgr")
-    BlockManager, ExtensionBlock = managers_module.BlockManager, blocks_module.ExtensionBlock
-    if (type(BlockManager) is not type
-            or BlockManager.__name__ != "BlockManager"
-            or BlockManager.__qualname__ != "BlockManager"
-            or BlockManager.__module__ != managers_module.__name__
-            or BlockManager.__bases__ != (native_internals.BlockManager, managers_module.BaseBlockManager)
-            or type(ExtensionBlock) is not type
-            or ExtensionBlock.__name__ != "ExtensionBlock"
-            or ExtensionBlock.__qualname__ != "ExtensionBlock"
-            or ExtensionBlock.__module__ != blocks_module.__name__
-            or ExtensionBlock.__bases__ != (blocks_module.EABackedBlock,)
-            or any("_mgr" in vars(base) for base in type(frame).__mro__)
-            or type(manager) is not BlockManager
-            or BlockManager.__getattribute__ is not object.__getattribute__
-            or not ordinary(BlockManager.iget_values, "iget_values", managers_module)
-            or not ordinary(ExtensionBlock.iget, "iget", blocks_module)
-            or not property_hook(BlockManager, "blknos", managers_module)
-            or not property_hook(BlockManager, "blklocs", managers_module)
-            or BlockManager.blocks is not native_internals.BlockManager.blocks
-            or ExtensionBlock.values is not native_internals.Block.values
-            or BlockManager._rebuild_blknos_and_blklocs is not
-               native_internals.BlockManager._rebuild_blknos_and_blklocs
-            or any(name in vars(manager) for name in
-                   ("iget_values", "blknos", "blklocs", "_rebuild_blknos_and_blklocs"))):
-        return None
-    if (ExtensionBlock.__getattribute__ is not object.__getattribute__
-            or any(type(block) is not ExtensionBlock or "iget" in vars(block)
-                   for block in manager.blocks)):
-        return None
-    # The canonical properties can expose customized cached index arrays.
-    # Decline subclasses before iget_values can invoke their indexing hooks.
-    for cache in (manager.blknos, manager.blklocs):
-        if (type(cache) is not np.ndarray or cache.ndim != 1
-                or cache.dtype != np.dtype("intp") or len(cache) != len(schema.fields)):
+        method = getattr(DataFrame, name)
+        if (type(method) is not FunctionType or method.__name__ != name
+                or method.__qualname__ != qualname or method.__module__ != module.__name__
+                or method.__globals__ is not vars(module)):
             return None
-    arrays = []
-    for i, field in enumerate(schema.fields):
-        array = manager.iget_values(i)
-        cls = type(array)
-        if (not any(cls is candidate for candidate in classes)
+    if (DataFrame.astype is not generic_module.NDFrame.astype
+            or DataFrame.where is not generic_module.NDFrame.where):
+        return None
+    # Earlier converter branches must not recognize a date as another type.
+    # Check loaded converters and globals captured by older importer functions.
+    if sys.modules.get("pyspark.sql.types") is not sql_types:
+        return None
+    importer = sys.modules.get("pyspark.sql._arrow_input")
+    if vars(sql_types).get("AtomicType") is not AtomicType:
+        return None
+    if importer is not None:
+        if getattr(importer, "StructType", None) is not NativeStructType:
+            return None
+        if vars(importer).get("AtomicType") is not AtomicType:
+            return None
+    converter = sys.modules.get("pyspark.sql.pandas.types")
+    namespaces = [vars(sql_types)]
+    if converter is not None:
+        namespaces.append(vars(converter))
+    if importer is not None:
+        for name in ("from_arrow_schema", "to_arrow_schema"):
+            # Newer importers resolve these functions locally in prepare_table.
+            if name not in vars(importer):
+                continue
+            namespace = getattr(getattr(importer, name, None), "__globals__", None)
+            if type(namespace) is not dict:
+                return None
+            namespaces.append(namespace)
+    for name, cls in (
+        ("BooleanType", BooleanType), ("ByteType", ByteType), ("ShortType", ShortType),
+        ("IntegerType", IntegerType), ("LongType", LongType), ("FloatType", FloatType),
+        ("DoubleType", DoubleType), ("DecimalType", DecimalType), ("StringType", StringType),
+        ("BinaryType", BinaryType), ("DateType", DateType), ("StructField", StructField),
+        ("StructType", NativeStructType),
+    ):
+        if any(namespace.get(name) is not cls for namespace in namespaces):
+            return None
+    # The row path reads native fields directly. Class attributes are mutable,
+    # so customized Python schema access must not select a different Arrow path.
+    for name, cls in (("DateType", DateType), ("StructField", StructField),
+                      ("StructType", NativeStructType)):
+        if (getattr(sql_types, name, None) is not cls
                 or cls.__getattribute__ is not object.__getattribute__
-                or cls.__setattr__ is not object.__setattr__
-                or cls.__new__ is not object.__new__
                 or any("__class__" in vars(base) for base in cls.__mro__ if base is not object)):
             return None
-        state = vars(array)
-        if any(name in state for name in (*hooks, "dtype", "_hasna", "__len__",
-                                         "_from_pyarrow_array", "__init__")):
-            return None
-        for name, (owner, module) in hooks.items():
-            method = getattr(cls, name, None)
-            if method is not getattr(owner, name, None) or not ordinary(method, name, module):
+    for cls, names, descriptor_type in (
+        (NativeStructType, ("fields", "names"), GetSetDescriptorType),
+        (NativeStructType, ("__iter__",), WrapperDescriptorType),
+        (StructField, ("name", "dataType", "nullable", "metadata"), GetSetDescriptorType),
+    ):
+        for name in names:
+            descriptor = vars(cls).get(name)
+            if (type(descriptor) is not descriptor_type
+                    or descriptor.__objclass__ is not cls or descriptor.__name__ != name):
                 return None
-        if (not property_hook(cls, "dtype", string_arrow_module)
-                or not property_hook(cls, "_hasna", arrow_module)
-                or not ordinary(cls.__init__, "__init__", string_arrow_module)
-                or not ordinary(ArrowExtensionArray.__init__, "__init__", arrow_module)):
-            return None
-        length_owner = ArrowStringArray if "__len__" in vars(ArrowStringArray) else ArrowExtensionArray
-        length_module = string_arrow_module if length_owner is ArrowStringArray else arrow_module
-        if not ordinary(getattr(cls, "__len__", None), "__len__", length_module):
-            return None
-        has_factory = any("_from_pyarrow_array" in vars(base) for base in cls.__mro__)
-        if storage_descriptor is not None and not has_factory:
-            return None
-        if has_factory:
-            factory = getattr(cls, "_from_pyarrow_array", None)
-            if not ordinary(factory, "_from_pyarrow_array", string_arrow_module):
-                return None
-        # Never invoke a descriptor installed over either private backing field.
-        if any(name in vars(base) for base in cls.__mro__ for name in ("_pa_array", "_dtype")):
-            return None
-        backing, dtype = state.get("_pa_array"), state.get("_dtype")
-        if (type(backing) is not arrow_lib.ChunkedArray or dtype is not dtypes.iloc[i]
-                or len(backing) != len(frame)
-                or backing.type not in (pa.string(), pa.large_string())
-                or any(type(chunk) not in (arrow_lib.StringArray, arrow_lib.LargeStringArray)
-                       for chunk in backing.chunks)):
-            return None
+    width = len(frame.columns)
+    if not width or len(schema.fields) != width or not frame.columns.is_unique:
+        return None
+    if not all(type(name) is str and "\x00" not in name for name in frame.columns):
+        return None
+    if not all(
+        type(field) is StructField and type(field.dataType) is DateType
+        and type(field.name) is str and "\x00" not in field.name
+        for field in schema.fields
+    ) or len(set(schema.names)) != width:
+        return None
+    if not all(type(dtype) is type(np.dtype("object")) and dtype == np.dtype("object")
+               for dtype in frame.dtypes):
+        return None
+    # A custom ExtensionArray can report an object dtype while its Arrow hook
+    # emits different cells. Trust only pandas' concrete NumPy backing array.
+    try:
+        from pandas.core.arrays.numpy_ import NumpyExtensionArray
+    except ImportError:
         try:
-            # Full validation rejects malformed offsets and UTF-8 before either
-            # casting or IPC can bypass the row path's decoding error/order.
-            backing.validate(full=True)
-            if not field.nullable and backing.null_count:
-                return None
-            arrays.append(backing.cast(pa.string(), safe=True))
-        except (pa.ArrowException, OverflowError):
+            from pandas.core.arrays.numpy_ import PandasArray as NumpyExtensionArray
+        except ImportError:
+            return None
+    columns = [frame.iloc[:, i] for i in range(width)]
+    for column, field in zip(columns, schema.fields):
+        if type(column) is not Series or type(column.array) is not NumpyExtensionArray:
+            return None
+        # Arrow rejects nulls in non-nullable fields; let the row path retain
+        # its existing behavior for that input instead.
+        if not all(type(value) is date or (value is None and field.nullable)
+                   for value in column.to_numpy(copy=False)):
             return None
 
-    fields = [pa.field(field.name, pa.string(), nullable=field.nullable)
-              for field in schema.fields]
-    table = pa.Table.from_arrays(arrays, schema=pa.schema(fields))
-    sink = pa.BufferOutputStream()
-    with pa.ipc.new_stream(sink, table.schema) as writer:
-        writer.write_table(table)
-    # Keep the existing inline LocalRelation bridge: the public Table importer
-    # consults configuration and can upload artifacts before returning a plan.
-    return sink.getvalue().to_pybytes()
+    import pyarrow as pa
+
+    return pa.Table.from_arrays(
+        [pa.array(column, type=pa.date32(), from_pandas=False) for column in columns],
+        names=schema.names,
+    )

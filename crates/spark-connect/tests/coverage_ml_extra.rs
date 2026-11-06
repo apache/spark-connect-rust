@@ -9,10 +9,9 @@
 
 use spark_connect::ml::{
     BinaryClassificationEvaluator, CrossValidator, Estimator, Evaluator, LogisticRegression,
-    LogisticRegressionModel, MaxAbsScaler, MaxAbsScalerModel, MlOperator, Model,
-    MulticlassClassificationEvaluator, OperatorType, Params, Pipeline, PipelineModel,
-    RegressionEvaluator, StandardScaler, StringIndexer, StringIndexerModel, Transformer,
-    VectorAssembler,
+    MaxAbsScaler, MaxAbsScalerModel, MlOperator, Model, MulticlassClassificationEvaluator,
+    OperatorType, Params, Pipeline, PipelineModel, RegressionEvaluator, StandardScaler,
+    StringIndexer, StringIndexerModel, Transformer, VectorAssembler,
 };
 
 #[test]
@@ -152,19 +151,6 @@ fn transformer_and_model_accessors() {
         params: Params::new(),
         input_col: "a".to_string(),
         output_col: "b".to_string(),
-    };
-    let _ = m.operator();
-    let _ = m.operator_mut();
-    let _ = m.params();
-    let _ = m.params_mut();
-    let _ = m.clone_box();
-
-    let mut m = LogisticRegressionModel {
-        operator: MlOperator::new("lr", OperatorType::Model),
-        params: Params::new(),
-        feature_col: "f".to_string(),
-        label_col: "l".to_string(),
-        prediction_col: "p".to_string(),
     };
     let _ = m.operator();
     let _ = m.operator_mut();

@@ -13,10 +13,9 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use prost::Message;
 
 use spark_connect::ml::{
-    BinaryClassificationEvaluator, Estimator, Evaluator, LogisticRegression,
-    LogisticRegressionModel, MaxAbsScaler, MaxAbsScalerModel, MlOperator, OperatorType, Params,
-    Pipeline, PipelineModel, RegressionEvaluator, StringIndexer, StringIndexerModel, Transformer,
-    VectorAssembler,
+    BinaryClassificationEvaluator, Estimator, Evaluator, LogisticRegression, MaxAbsScaler,
+    MaxAbsScalerModel, MlOperator, OperatorType, Params, Pipeline, PipelineModel,
+    RegressionEvaluator, StringIndexer, StringIndexerModel, Transformer, VectorAssembler,
 };
 use spark_connect_proto as proto;
 
@@ -159,22 +158,6 @@ fn test_logistic_regression_operator_name() {
         "org.apache.spark.ml.classification.LogisticRegression"
     );
     assert_eq!(op.op_type, OperatorType::Estimator);
-}
-
-#[test]
-fn test_logistic_regression_model_operator_type() {
-    let model = LogisticRegressionModel {
-        operator: MlOperator::new(
-            "org.apache.spark.ml.classification.LogisticRegression",
-            OperatorType::Model,
-        ),
-        params: Params::new(),
-        feature_col: "features".to_string(),
-        label_col: "label".to_string(),
-        prediction_col: "prediction".to_string(),
-    };
-    let op = model.operator();
-    assert_eq!(op.op_type, OperatorType::Model);
 }
 
 #[test]

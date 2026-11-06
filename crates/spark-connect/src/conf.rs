@@ -43,6 +43,12 @@ impl RuntimeConf {
         block_on(self.client.set_config(key, value))
     }
 
+    /// Set several configuration values in one request, ignoring the failures to set them,
+    /// such as of static configurations, when `silent`. Mirrors `RuntimeConf._set_all`.
+    pub fn set_all(&self, pairs: &[(String, String)], silent: bool) -> Result<()> {
+        block_on(self.client.set_configs(pairs, silent))
+    }
+
     /// Get a configuration value by key.
     ///
     /// Returns `Ok(None)` if the key does not exist on the server.

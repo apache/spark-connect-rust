@@ -4,9 +4,10 @@ use pyo3::prelude::*;
 use spark_connect::group::{CoGroupedData as RustCoGroupedData, GroupedData as RustGroupedData};
 use spark_connect::udf::eval_type;
 
-use crate::dataframe::{build_map_udf, PyDataFrame};
+use crate::dataframe::{
+    build_map_udf, infer_group_map_eval_type, validate_map_function, PyDataFrame,
+};
 use crate::errors::ResultExt;
-use crate::functions::to_column;
 
 /// Python wrapper for Spark GroupedData.
 #[pyclass(name = "GroupedData", module = "pyspark.sql.group")]
@@ -20,12 +21,43 @@ impl PyGroupedData {
     }
 }
 
+impl PyGroupedData {
+    /// `sum`, `avg`, `mean`, `min` and `max`, as PySpark's `_numeric_agg`: of column names,
+    /// which it asserts, every numeric column without any, and `NOT_NUMERIC_COLUMNS` for a
+    /// column that is not numeric.
+    fn numeric_agg(
+        &self,
+        py: Python<'_>,
+        function: &str,
+        cols: Vec<Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let mut names = Vec::with_capacity(cols.len());
+        for col in &cols {
+            if !col.is_instance_of::<pyo3::types::PyString>() {
+                return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+            }
+            names.push(col.extract::<String>()?);
+        }
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let grouped = &self.grouped_data;
+        py.detach(|| grouped.numeric_agg(function, refs).map_err(Box::new))
+            .to_pyerr()
+            .map(PyDataFrame::new)
+    }
+}
+
 #[pymethods]
 impl PyGroupedData {
     /// Aggregate with expressions (accepts Column objects), or the dict form
     /// `agg({"col": "aggfunc"})` (PySpark parity), e.g. `agg({"age": "max"})`.
     #[pyo3(signature = (*exprs))]
     fn agg(&self, _py: Python<'_>, exprs: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        // As PySpark's, which asserts that it has expressions.
+        if exprs.is_empty() {
+            return Err(pyo3::exceptions::PyAssertionError::new_err(
+                "exprs should not be empty",
+            ));
+        }
         // Dict form: {column_name: aggregate_function_name} -> func(col(name)) per entry.
         if exprs.len() == 1 {
             if let Ok(dict) = exprs[0].cast::<pyo3::types::PyDict>() {
@@ -33,6 +65,8 @@ impl PyGroupedData {
                 for (k, v) in dict.iter() {
                     let col_name: String = k.extract()?;
                     let func_name: String = v.extract()?;
+                    // As PySpark's `agg` of a dict, by `col`, of its origin.
+                    let _origin = crate::origin::with_origin("col");
                     let c = spark_connect::functions::col(&col_name);
                     // Build func(col) as an unresolved function resolved server-side, so
                     // aggregate names (max/min/sum/avg/count/...) all work regardless of
@@ -47,10 +81,15 @@ impl PyGroupedData {
                 return Ok(PyDataFrame::new(df));
             }
         }
+        // As PySpark's, which asserts that the expressions are Columns.
         let mut agg_exprs = vec![];
         for col in exprs {
-            let rust_col = to_column(&col)?;
-            agg_exprs.push(rust_col.expression().clone());
+            let Ok(col) = col.extract::<PyRef<'_, crate::column::PyColumn>>() else {
+                return Err(pyo3::exceptions::PyAssertionError::new_err(
+                    "all exprs should be Column",
+                ));
+            };
+            agg_exprs.push(col.column.expression().clone());
         }
         let df = self.grouped_data.agg(agg_exprs);
         Ok(PyDataFrame::new(df))
@@ -85,62 +124,32 @@ impl PyGroupedData {
 
     /// Sum values in each group.
     #[pyo3(signature = (*cols))]
-    fn sum(&self, _py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
-        let col_names: Vec<String> = cols
-            .iter()
-            .map(|c| c.extract::<String>())
-            .collect::<PyResult<Vec<_>>>()?;
-        let col_refs: Vec<&str> = col_names.iter().map(|s| s.as_str()).collect();
-        let df = self.grouped_data.sum(col_refs);
-        Ok(PyDataFrame::new(df))
+    fn sum(&self, py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        self.numeric_agg(py, "sum", cols)
     }
 
     /// Average values in each group.
     #[pyo3(signature = (*cols))]
-    fn avg(&self, _py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
-        let col_names: Vec<String> = cols
-            .iter()
-            .map(|c| c.extract::<String>())
-            .collect::<PyResult<Vec<_>>>()?;
-        let col_refs: Vec<&str> = col_names.iter().map(|s| s.as_str()).collect();
-        let df = self.grouped_data.avg(col_refs);
-        Ok(PyDataFrame::new(df))
+    fn avg(&self, py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        self.numeric_agg(py, "avg", cols)
     }
 
     /// Minimum values in each group.
     #[pyo3(signature = (*cols))]
-    fn min(&self, _py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
-        let col_names: Vec<String> = cols
-            .iter()
-            .map(|c| c.extract::<String>())
-            .collect::<PyResult<Vec<_>>>()?;
-        let col_refs: Vec<&str> = col_names.iter().map(|s| s.as_str()).collect();
-        let df = self.grouped_data.min(col_refs);
-        Ok(PyDataFrame::new(df))
+    fn min(&self, py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        self.numeric_agg(py, "min", cols)
     }
 
     /// Maximum values in each group.
     #[pyo3(signature = (*cols))]
-    fn max(&self, _py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
-        let col_names: Vec<String> = cols
-            .iter()
-            .map(|c| c.extract::<String>())
-            .collect::<PyResult<Vec<_>>>()?;
-        let col_refs: Vec<&str> = col_names.iter().map(|s| s.as_str()).collect();
-        let df = self.grouped_data.max(col_refs);
-        Ok(PyDataFrame::new(df))
+    fn max(&self, py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        self.numeric_agg(py, "max", cols)
     }
 
     /// Mean (alias for avg).
     #[pyo3(signature = (*cols))]
-    fn mean(&self, _py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
-        let col_names: Vec<String> = cols
-            .iter()
-            .map(|c| c.extract::<String>())
-            .collect::<PyResult<Vec<_>>>()?;
-        let col_refs: Vec<&str> = col_names.iter().map(|s| s.as_str()).collect();
-        let df = self.grouped_data.mean(col_refs);
-        Ok(PyDataFrame::new(df))
+    fn mean(&self, py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        self.numeric_agg(py, "avg", cols)
     }
 
     /// `GroupedData.applyInPandas`.
@@ -151,15 +160,17 @@ impl PyGroupedData {
         func: Bound<'_, PyAny>,
         schema: Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
-        let cols = py.detach(|| self.grouped_data.input_columns()).to_pyerr()?;
-        let udf = build_map_udf(
+        let eval_type_id = infer_group_map_eval_type(
             py,
-            "applyInPandas",
             &func,
-            &schema,
+            "infer_group_pandas_eval_type_from_func",
+            "Cannot infer the eval type from type hints.",
             eval_type::SQL_GROUPED_MAP_PANDAS_UDF,
-            &cols,
         )?;
+        validate_map_function(py, &func, eval_type_id)?;
+        let cols = py.detach(|| self.grouped_data.input_columns()).to_pyerr()?;
+        let session = self.grouped_data.spark_session();
+        let udf = build_map_udf(py, &session, &func, &schema, eval_type_id, &cols)?;
         Ok(PyDataFrame::new(self.grouped_data.apply_in_pandas(udf)))
     }
 
@@ -184,15 +195,18 @@ impl PyGroupedData {
         func: Bound<'_, PyAny>,
         schema: Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
-        let cols = py.detach(|| self.grouped_data.input_columns()).to_pyerr()?;
-        let udf = build_map_udf(
+        // The reference client's warning, with its trailing space.
+        let eval_type_id = infer_group_map_eval_type(
             py,
-            "applyInArrow",
             &func,
-            &schema,
+            "infer_group_arrow_eval_type_from_func",
+            "Cannot infer the eval type from type hints. ",
             eval_type::SQL_GROUPED_MAP_ARROW_UDF,
-            &cols,
         )?;
+        validate_map_function(py, &func, eval_type_id)?;
+        let cols = py.detach(|| self.grouped_data.input_columns()).to_pyerr()?;
+        let session = self.grouped_data.spark_session();
+        let udf = build_map_udf(py, &session, &func, &schema, eval_type_id, &cols)?;
         Ok(PyDataFrame::new(self.grouped_data.apply_in_arrow(udf)))
     }
 
@@ -216,16 +230,18 @@ impl PyGroupedData {
         outputMode: &str,
         timeoutConf: &str,
     ) -> PyResult<PyDataFrame> {
+        validate_map_function(py, &func, eval_type::SQL_GROUPED_MAP_PANDAS_UDF_WITH_STATE)?;
         let cols = py.detach(|| self.grouped_data.input_columns()).to_pyerr()?;
+        let session = self.grouped_data.spark_session();
         let udf = build_map_udf(
             py,
-            "applyInPandasWithState",
+            &session,
             &func,
             &outputStructType,
             eval_type::SQL_GROUPED_MAP_PANDAS_UDF_WITH_STATE,
             &cols,
         )?;
-        let state_schema = crate::dataframe::resolve_datatype(&stateStructType)?;
+        let state_schema = crate::dataframe::resolve_datatype(py, &session, &stateStructType)?;
         Ok(PyDataFrame::new(
             self.grouped_data.apply_in_pandas_with_state(
                 udf,
@@ -261,15 +277,17 @@ impl PyGroupedData {
             true,
         )?;
         let cols = py.detach(|| self.grouped_data.input_columns()).to_pyerr()?;
-        let udf = build_map_udf(
-            py,
-            "transformWithStateInPandas",
-            &func,
-            &outputStructType,
-            et,
-            &cols,
-        )?;
-        let out = crate::types::py_to_data_type(&outputStructType)?;
+        let session = self.grouped_data.spark_session();
+        let udf = build_map_udf(py, &session, &func, &outputStructType, et, &cols)?;
+        // As PySpark's, which sends a DDL string as an `UnparsedDataType`, for the server to
+        // parse.
+        let out = if outputStructType.is_instance_of::<pyo3::types::PyString>() {
+            spark_connect::types::DataType::Unparsed {
+                data_type_string: outputStructType.extract()?,
+            }
+        } else {
+            crate::types::py_to_data_type(&outputStructType)?
+        };
         let etc = (!eventTimeColumnName.is_empty()).then_some(eventTimeColumnName);
         Ok(PyDataFrame::new(
             self.grouped_data.transform_with_state_in_pandas(
@@ -306,14 +324,8 @@ impl PyGroupedData {
             false,
         )?;
         let cols = py.detach(|| self.grouped_data.input_columns()).to_pyerr()?;
-        let udf = build_map_udf(
-            py,
-            "transformWithState",
-            &func,
-            &outputStructType,
-            et,
-            &cols,
-        )?;
+        let session = self.grouped_data.spark_session();
+        let udf = build_map_udf(py, &session, &func, &outputStructType, et, &cols)?;
         let etc = (!eventTimeColumnName.is_empty()).then_some(eventTimeColumnName);
         Ok(PyDataFrame::new(self.grouped_data.transform_with_state(
             udf,
@@ -376,10 +388,11 @@ impl PyCoGroupedData {
         func: Bound<'_, PyAny>,
         schema: Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
+        validate_map_function(py, &func, eval_type::SQL_COGROUPED_MAP_PANDAS_UDF)?;
         let cols = py.detach(|| self.inner.input_columns()).to_pyerr()?;
         let udf = build_map_udf(
             py,
-            "applyInPandas",
+            &self.inner.spark_session(),
             &func,
             &schema,
             eval_type::SQL_COGROUPED_MAP_PANDAS_UDF,
@@ -396,10 +409,11 @@ impl PyCoGroupedData {
         func: Bound<'_, PyAny>,
         schema: Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
+        validate_map_function(py, &func, eval_type::SQL_COGROUPED_MAP_ARROW_UDF)?;
         let cols = py.detach(|| self.inner.input_columns()).to_pyerr()?;
         let udf = build_map_udf(
             py,
-            "applyInArrow",
+            &self.inner.spark_session(),
             &func,
             &schema,
             eval_type::SQL_COGROUPED_MAP_ARROW_UDF,

@@ -79,9 +79,12 @@ flowchart LR
 When you call an action such as `count()` or `show()`, the lazily-built plan is
 serialized and sent to the server; results stream back as Arrow batches.
 
-Day-time intervals are returned as Python `datetime.timedelta` values, including
-nested values and nulls. Creating DataFrames from `timedelta` inputs or collected
-interval rows is not yet supported; see [SPARK-60659](https://issues.apache.org/jira/browse/SPARK-60659).
+Day-time intervals use signed 64-bit microseconds in Rust (`Value::DayTimeInterval`)
+and Python `datetime.timedelta` values. `createDataFrame` supports inferred and
+explicit interval schemas, including nested structs, lists, maps, and nulls.
+Collected rows can be passed back with their schema. As in PySpark, an `int` or a
+`float` for an interval field is taken as microseconds, and a value outside the signed
+64-bit microsecond range is an error.
 
 ```mermaid
 sequenceDiagram
@@ -145,13 +148,17 @@ Empty tables require an explicit schema, matching PySpark Connect.
 Pandas inputs with only NumPy `int64` or pandas nullable `Int64` columns also
 use this importer, preserving integer precision and null masks without Python
 rows. Small frames (fewer than 1,000 rows) with only NumPy columns retain the
-row path to avoid configuration RPC overhead. Nullable `Int64` columns always
-use Arrow so schema inference does not depend on the first value being non-null.
+row path to avoid the configuration RPC of the importer; nullable `Int64` columns
+use Arrow at any size.
 This initial path accepts inferred schemas, complete string column names,
 and explicit `StructType` schemas whose fields are all `LongType`. Other dtypes,
 DDL/atomic schemas, schema conversions, NUL names, and duplicate/non-string input names
 retain the existing row conversion path. `verifySchema` remains ignored for
 pandas Arrow input, matching Spark Connect.
+Pandas frames of at least 100,000 rows whose columns are all NumPy `float64`,
+with an explicit `StructType` of `DoubleType` fields, are encoded to Arrow IPC
+from their columns, with pandas' missing values as nulls, and sent inline as the
+row path sends them, without the importer's configuration RPC.
 Inputs at or above `spark.sql.session.localRelationCacheThreshold` are serialized
 into independent IPC streams and uploaded as session-scoped cache artifacts.
 The plan carries `ChunkedCachedLocalRelation` hashes instead of embedding the

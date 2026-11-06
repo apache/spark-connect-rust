@@ -44,6 +44,26 @@ pub struct WindowSpec {
 }
 
 impl WindowSpec {
+    /// As `WindowSpec.__repr__` of PySpark Connect, such as
+    /// `WindowSpec(PartitionBy(g), OrderBy(o ASC NULLS FIRST), WindowFrame(ROW_FRAME, -1, 1))`.
+    pub fn repr(&self) -> String {
+        let boundary = |bound: &FrameBound| match bound {
+            FrameBound::UnboundedPreceding => crate::expression::FrameBoundary::UnboundedPreceding,
+            FrameBound::Preceding(n) => crate::expression::FrameBoundary::Preceding(*n),
+            FrameBound::CurrentRow => crate::expression::FrameBoundary::CurrentRow,
+            FrameBound::Following(n) => crate::expression::FrameBoundary::Following(*n),
+            FrameBound::UnboundedFollowing => crate::expression::FrameBoundary::UnboundedFollowing,
+        };
+        let frame = self.frame_spec.as_ref().map(|(frame_type, lower, upper)| {
+            let frame_type = match frame_type {
+                FrameType::Row => 1u32,
+                FrameType::Range => 2u32,
+            };
+            (frame_type, boundary(lower), boundary(upper))
+        });
+        crate::expression::window_spec_repr(&self.partition_spec, &self.order_spec, frame.as_ref())
+    }
+
     /// Create a new empty WindowSpec.
     pub fn new() -> Self {
         Self {
