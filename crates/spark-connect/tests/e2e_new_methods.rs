@@ -69,6 +69,14 @@ fn checkpoints_and_input_files_local() {
 
     let lc = df.local_checkpoint().expect("local_checkpoint");
     assert_eq!(lc.collect().expect("collect lc").len(), 10);
+    // A local checkpoint that is not eager, kept on disk, as localCheckpoint(False, DISK_ONLY).
+    use spark_connect::storage::StorageLevelExt;
+    let lazy = df
+        .local_checkpoint_with(false, Some(spark_connect_proto::StorageLevel::disk_only()))
+        .expect("local_checkpoint_with");
+    assert_eq!(lazy.count().expect("count lazy"), 10);
+    // A reliable checkpoint needs a checkpoint directory, which this server has none of.
+    assert!(df.checkpoint_with(false).is_err());
 
     // inputFiles on a computed relation is empty; is_local is false for a range.
     assert!(df.input_files().expect("input_files").is_empty());
@@ -142,14 +150,20 @@ fn exists_scalar_transpose_dedup_astable() {
     }
     let spark = session();
 
-    // scalar()/exists() on a single-value subquery-shaped DataFrame.
+    // scalar()/exists() are the subqueries of a DataFrame, as PySpark's.
     let one = spark.sql("SELECT 1 AS x").expect("sql one");
-    assert!(one.exists().expect("exists"));
-    let _v = spark
-        .sql("SELECT 42 AS x")
-        .expect("sql")
-        .scalar()
-        .expect("scalar");
+    let answer = spark.sql("SELECT 42 AS x").expect("sql");
+    let rows = spark
+        .range(1)
+        .expect("range")
+        .select(vec![one.exists().alias("e"), answer.scalar().alias("v")])
+        .collect()
+        .expect("subqueries");
+    assert_eq!(rows[0].get(0), Some(&spark_connect::row::Value::Bool(true)));
+    assert_eq!(
+        rows[0].get(1),
+        Some(&spark_connect::row::Value::Integer(42))
+    );
 
     // dropDuplicates on a subset.
     let df = numeric(&spark);

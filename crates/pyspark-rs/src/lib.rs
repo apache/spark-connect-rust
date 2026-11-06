@@ -36,6 +36,8 @@ mod group;
 mod infer;
 mod ml;
 mod observation;
+mod origin;
+mod pandas_input;
 mod pipelines;
 mod profiler;
 mod pyarrow_export;
@@ -45,6 +47,7 @@ mod resource;
 mod row;
 mod session;
 mod stat;
+mod stat_arguments;
 mod storagelevel;
 mod streaming;
 mod tablearg;
@@ -130,6 +133,8 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(types::parse_datatype_json, m)?)?;
     m.add_function(wrap_pyfunction!(column::column_reference_name, m)?)?;
 
+    m.add_function(wrap_pyfunction!(pandas_input::_pandas_string_ipc, m)?)?;
+
     // Spark Declarative Pipelines (SDP) command execution
     m.add_class::<pipelines::PyPipelineRunStream>()?;
     m.add_function(wrap_pyfunction!(
@@ -138,6 +143,11 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(pipelines::pipeline_define_output, m)?)?;
     m.add_function(wrap_pyfunction!(pipelines::pipeline_define_flow, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        pipelines::pipeline_enter_flow_function,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(pipelines::pipeline_exit_flow_function, m)?)?;
     m.add_function(wrap_pyfunction!(
         pipelines::pipeline_define_auto_cdc_flow,
         m

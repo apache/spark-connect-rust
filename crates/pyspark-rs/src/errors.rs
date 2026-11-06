@@ -126,6 +126,23 @@ fn server_error_to_py<'py>(
     )
 }
 
+/// The exception for a gRPC error that carries no error of the server, such as an
+/// `UNAVAILABLE` of an unreachable server or a `PERMISSION_DENIED` of a proxy, as the
+/// reference client's `_handle_rpc_error` raises it: a `SparkConnectGrpcException` of the
+/// status code.
+fn grpc_error_to_py<'py>(py: Python<'py>, message: &str, code: i32) -> PyResult<Bound<'py, PyAny>> {
+    let connect = py.import("pyspark.errors.exceptions.connect")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("message", message)?;
+    kwargs.set_item(
+        "grpc_status_code",
+        connect.call_method1("_status_code", (code,))?,
+    )?;
+    connect
+        .getattr("SparkConnectGrpcException")?
+        .call((), Some(&kwargs))
+}
+
 /// Maps a SparkError to a Python exception, attempting to raise the correct typed
 /// exception based on the error kind. Falls back to PyRuntimeError if import fails.
 pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
@@ -135,14 +152,17 @@ pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
 
     // Try to acquire the GIL and import the exception class from pyspark.errors
     Python::attach(|py| {
-        if let Some(server) = &err.server {
-            // Should the connect classes not import, fall back to the class by kind below.
-            if let Ok(exc_instance) = server_error_to_py(py, &err, server) {
-                if let Some(op) = &operation_id {
-                    let _ = exc_instance.setattr("_operation_id", op);
-                }
-                return PyErr::from_value(exc_instance);
+        // Should the connect classes not import, fall back to the class by kind below.
+        let connect_error = match (&err.server, err.grpc_code) {
+            (Some(server), _) => server_error_to_py(py, &err, server).ok(),
+            (None, Some(code)) => grpc_error_to_py(py, &msg, code).ok(),
+            (None, None) => None,
+        };
+        if let Some(exc_instance) = connect_error {
+            if let Some(op) = &operation_id {
+                let _ = exc_instance.setattr("_operation_id", op);
             }
+            return PyErr::from_value(exc_instance);
         }
         // First, verify and get the exception class from pyspark.errors
         let errors_module = match py.import("pyspark.errors") {
@@ -156,9 +176,13 @@ pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
         // Get the exception class from the module
         match errors_module.getattr(class_name) {
             Ok(exc_class) => {
-                // Try to instantiate the exception class by calling it with the message
-                // This creates a PyObject exception instance
-                match exc_class.call1((msg.clone(),)) {
+                // Instantiate the exception class: of the error class and message parameters
+                // of an error of a PySpark error class, otherwise of the message.
+                let created = match classed_exception(&exc_class, &err) {
+                    Some(exc_instance) => Ok(exc_instance),
+                    None => exc_class.call1((msg.clone(),)),
+                };
+                match created {
                     Ok(exc_instance) => {
                         // Mirror the reference client, which stamps `_operation_id` on
                         // errors raised for an ExecutePlan (read via `operation_id`).
@@ -181,6 +205,26 @@ pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
             }
         }
     })
+}
+
+/// The exception of `exc_class` for an error of a PySpark error class that the client raised,
+/// as PySpark raises it: of the error class and the message parameters, from which the
+/// exception renders its message, so that `getCondition` and `getMessageParameters` return
+/// them. None for an error without an error class, or of one that PySpark does not know.
+fn classed_exception<'py>(
+    exc_class: &Bound<'py, PyAny>,
+    err: &SparkError,
+) -> Option<Bound<'py, PyAny>> {
+    let error_class = err.get_condition()?;
+    let py = exc_class.py();
+    let parameters = PyDict::new(py);
+    for (key, value) in err.get_message_parameters().unwrap_or_default() {
+        parameters.set_item(key, value).ok()?;
+    }
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("errorClass", error_class).ok()?;
+    kwargs.set_item("messageParameters", parameters).ok()?;
+    exc_class.call((), Some(&kwargs)).ok()
 }
 
 /// Helper to convert Result<T, SparkError> to PyResult<T>.

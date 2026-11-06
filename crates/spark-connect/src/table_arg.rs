@@ -2,57 +2,55 @@
 //!
 //! Provides table argument support for table-valued functions with partitioning and ordering.
 
-use std::sync::Arc;
-
 use crate::column::Column;
 use crate::dataframe::DataFrame;
-use crate::expression::{Expression, ExpressionNode, SortOrder};
+use crate::expression::{ExpressionNode, SubqueryExpression, SubqueryType};
+#[cfg(test)]
 use crate::plan::LogicalPlan;
-use spark_connect_core::error::{Result, SparkError};
-use spark_connect_proto as proto;
+use spark_connect_core::error::{Result, SparkError, SparkErrorKind};
+
+/// The `IllegalArgumentException` of `message`, as PySpark's `TableArg` raises for a
+/// partitioning or ordering in the wrong order.
+fn illegal_argument(message: &str) -> SparkError {
+    let mut error = SparkError::value_msg(message);
+    error.kind = SparkErrorKind::IllegalArgument;
+    error
+}
 
 /// Represents a table argument for a table-valued function.
 ///
-/// Supports partitioning, ordering, and single-partition modes.
-/// Mirrors `pyspark.sql.connect.table_arg.TableArg`.
-#[allow(dead_code)]
+/// Supports partitioning, ordering, and single-partition modes. Mirrors
+/// `pyspark.sql.connect.table_arg.TableArg`: a `SubqueryExpression` of type `TABLE_ARG` of the
+/// plan of the DataFrame, which a UDTF call takes as an argument.
 #[derive(Clone)]
 pub struct TableArg {
-    /// The underlying DataFrame/plan
-    plan: Arc<LogicalPlan>,
-    /// Partition expressions
-    partition_spec: Vec<Expression>,
-    /// Order expressions
-    order_spec: Vec<Expression>,
-    /// Whether to use a single partition
-    with_single_partition: bool,
+    /// The subquery of the plan, with its partition and order specs.
+    subquery: SubqueryExpression,
 }
 
 impl TableArg {
     /// Create a new TableArg from a DataFrame.
     pub fn new(df: DataFrame) -> Self {
         TableArg {
-            plan: df.plan,
-            partition_spec: Vec::new(),
-            order_spec: Vec::new(),
-            with_single_partition: false,
+            subquery: df.subquery(SubqueryType::TableArg),
         }
     }
 
-    /// Create a new TableArg from a LogicalPlan.
-    #[allow(dead_code)]
-    pub(crate) fn from_plan(plan: LogicalPlan) -> Self {
+    /// Create a new TableArg of a LogicalPlan whose plan ID is `plan_id`.
+    #[cfg(test)]
+    pub(crate) fn from_plan(plan: LogicalPlan, plan_id: i64) -> Self {
         TableArg {
-            plan: Arc::new(plan),
-            partition_spec: Vec::new(),
-            order_spec: Vec::new(),
-            with_single_partition: false,
+            subquery: SubqueryExpression::new(
+                std::sync::Arc::new(plan),
+                plan_id,
+                SubqueryType::TableArg,
+            ),
         }
     }
 
     /// Check if partitioning has been applied.
     fn is_partitioned(&self) -> bool {
-        !self.partition_spec.is_empty() || self.with_single_partition
+        !self.subquery.partition_spec.is_empty() || self.is_single_partition()
     }
 
     /// Add partitioning to this table argument.
@@ -72,14 +70,16 @@ impl TableArg {
         cols: impl IntoIterator<Item = C>,
     ) -> Result<Self> {
         if self.is_partitioned() {
-            return Err(SparkError::value(
-                "ILLEGAL_ARGUMENT",
-                &[("msg", "Cannot call partitionBy() after partitionBy() or withSinglePartition() has been called.")],
+            return Err(illegal_argument(
+                "Cannot call partitionBy() after partitionBy() or withSinglePartition() has \
+                 been called.",
             ));
         }
 
         for col in cols {
-            self.partition_spec.push(col.into().expression().clone());
+            self.subquery
+                .partition_spec
+                .push(col.into().expression().clone());
         }
 
         Ok(self)
@@ -102,17 +102,15 @@ impl TableArg {
     /// ```
     pub fn order_by<C: Into<Column>>(mut self, cols: impl IntoIterator<Item = C>) -> Result<Self> {
         if !self.is_partitioned() {
-            return Err(SparkError::value(
-                "ILLEGAL_ARGUMENT",
-                &[(
-                    "msg",
-                    "Please call partitionBy() or withSinglePartition() before orderBy().",
-                )],
+            return Err(illegal_argument(
+                "Please call partitionBy() or withSinglePartition() before orderBy().",
             ));
         }
 
         for col in cols {
-            self.order_spec.push(col.into().expression().clone());
+            self.subquery
+                .order_spec
+                .push(col.into().expression().clone());
         }
 
         Ok(self)
@@ -128,87 +126,37 @@ impl TableArg {
     /// ```
     pub fn with_single_partition(mut self) -> Result<Self> {
         if self.is_partitioned() {
-            return Err(SparkError::value(
-                "ILLEGAL_ARGUMENT",
-                &[("msg", "Cannot call withSinglePartition() after partitionBy() or withSinglePartition() has been called.")],
+            return Err(illegal_argument(
+                "Cannot call withSinglePartition() after partitionBy() or withSinglePartition() \
+                 has been called.",
             ));
         }
 
-        self.with_single_partition = true;
+        self.subquery.with_single_partition = Some(true);
         Ok(self)
     }
 
     /// Get the underlying plan.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn plan(&self) -> &LogicalPlan {
-        &self.plan
-    }
-
-    /// Get partition specification.
-    #[allow(dead_code)]
-    pub(crate) fn partition_spec(&self) -> &[Expression] {
-        &self.partition_spec
-    }
-
-    /// Get order specification.
-    #[allow(dead_code)]
-    pub(crate) fn order_spec(&self) -> &[Expression] {
-        &self.order_spec
+        &self.subquery.plan
     }
 
     /// Check if single partition mode is enabled.
-    #[allow(dead_code)]
     pub(crate) fn is_single_partition(&self) -> bool {
-        self.with_single_partition
+        self.subquery.with_single_partition == Some(true)
     }
 
-    /// Serialize this table argument to a proto `Expression` - a
-    /// `SubqueryExpression` of type `TABLE_ARG` carrying the partition/order
-    /// specs and single-partition flag.
-    ///
-    /// Mirrors `SubqueryExpression.to_plan` in the reference PySpark client:
-    /// `plan_id` is the plan-id assigned to the underlying subquery relation,
-    /// each partition expression is emitted as-is, each order expression is
-    /// emitted as a `SortOrder` (an explicit sort direction is preserved;
-    /// otherwise it defaults to ascending, nulls-first), and
-    /// `with_single_partition` is only set when true (left unset otherwise, as
-    /// the reference leaves it `None`).
-    #[allow(dead_code)]
-    pub(crate) fn to_proto(&self, plan_id: i64) -> proto::Expression {
-        let mut options = proto::subquery_expression::TableArgOptions::default();
+    /// This table argument as a Column, the argument of a UDTF call that passes the rows of
+    /// the DataFrame. As the `_subquery_expr` of a PySpark `TableArg`.
+    pub fn to_column(&self) -> Column {
+        Column::new(ExpressionNode::Subquery(Box::new(self.subquery.clone())).into())
+    }
+}
 
-        options.partition_spec = self.partition_spec.iter().map(|e| e.to_proto()).collect();
-
-        options.order_spec = self
-            .order_spec
-            .iter()
-            .map(|e| {
-                // Preserve an explicit SortOrder; otherwise default to ascending,
-                // nulls-first (matching the reference's `_sort_col`).
-                let wrapped = match e.node() {
-                    ExpressionNode::SortOrder(_) => e.to_proto(),
-                    _ => SortOrder::asc_nulls_first(e.clone()).to_proto(),
-                };
-                match wrapped.expr_type {
-                    Some(proto::expression::ExprType::SortOrder(s)) => *s,
-                    // SortOrder::to_proto always yields a SortOrder expr_type.
-                    _ => unreachable!("expected a SortOrder expression"),
-                }
-            })
-            .collect();
-
-        if self.with_single_partition {
-            options.with_single_partition = Some(true);
-        }
-
-        let mut subquery = proto::SubqueryExpression::default();
-        subquery.plan_id = plan_id;
-        subquery.subquery_type = proto::subquery_expression::SubqueryType::TableArg as i32;
-        subquery.table_arg_options = Some(options);
-
-        let mut expr = proto::Expression::default();
-        expr.expr_type = Some(proto::expression::ExprType::SubqueryExpression(subquery));
-        expr
+impl From<TableArg> for Column {
+    fn from(table_arg: TableArg) -> Column {
+        table_arg.to_column()
     }
 }
 
@@ -216,6 +164,8 @@ impl TableArg {
 mod tests {
     use super::*;
     use crate::column::col;
+    use crate::expression::Expression;
+    use spark_connect_proto as proto;
 
     fn base_plan() -> LogicalPlan {
         LogicalPlan::Range {
@@ -227,7 +177,21 @@ mod tests {
     }
 
     fn arg() -> TableArg {
-        TableArg::from_plan(base_plan())
+        TableArg::from_plan(base_plan(), 7)
+    }
+
+    fn spec(t: &TableArg) -> (&[Expression], &[Expression]) {
+        (&t.subquery.partition_spec, &t.subquery.order_spec)
+    }
+
+    /// The `SubqueryExpression` of the table argument.
+    fn subquery_proto(t: &TableArg) -> proto::SubqueryExpression {
+        let Some(proto::expression::ExprType::SubqueryExpression(subquery)) =
+            t.to_column().expression().to_proto().expr_type
+        else {
+            panic!("expected a SubqueryExpression");
+        };
+        subquery
     }
 
     #[test]
@@ -235,16 +199,20 @@ mod tests {
         let t = arg();
         assert!(!t.is_partitioned());
         assert!(!t.is_single_partition());
-        assert!(t.partition_spec().is_empty());
-        assert!(t.order_spec().is_empty());
+        assert!(spec(&t).0.is_empty());
+        assert!(spec(&t).1.is_empty());
         assert!(matches!(t.plan(), LogicalPlan::Range { .. }));
+        // As PySpark, which sets no options for a table argument without any.
+        let subquery = subquery_proto(&t);
+        assert_eq!(subquery.plan_id, 7);
+        assert_eq!(subquery.table_arg_options, None);
     }
 
     #[test]
     fn partition_by_records_expressions_and_marks_partitioned() {
         let t = arg().partition_by(vec![col("a"), col("b")]).unwrap();
         assert!(t.is_partitioned());
-        assert_eq!(t.partition_spec().len(), 2);
+        assert_eq!(spec(&t).0.len(), 2);
     }
 
     #[test]
@@ -261,7 +229,7 @@ mod tests {
             .unwrap()
             .order_by(vec![col("b"), col("c")])
             .unwrap();
-        assert_eq!(t.order_spec().len(), 2);
+        assert_eq!(spec(&t).1.len(), 2);
     }
 
     #[test]
@@ -271,18 +239,18 @@ mod tests {
             .unwrap()
             .order_by(vec![col("b")])
             .unwrap();
-        assert_eq!(t.order_spec().len(), 1);
+        assert_eq!(spec(&t).1.len(), 1);
     }
 
-    /// Assert a `Result<TableArg>` is an `ILLEGAL_ARGUMENT` error. (Written as a
-    /// helper because `unwrap_err` would require `TableArg: Debug`.)
+    /// Assert a `Result<TableArg>` is an `IllegalArgumentException`, as PySpark raises.
+    /// (Written as a helper because `unwrap_err` would require `TableArg: Debug`.)
     fn assert_illegal(r: Result<TableArg>) {
         match r {
-            Ok(_) => panic!("expected an ILLEGAL_ARGUMENT error, got Ok"),
-            Err(e) => assert!(
-                format!("{e:?}").contains("ILLEGAL_ARGUMENT"),
-                "unexpected error: {e:?}"
-            ),
+            Ok(_) => panic!("expected an IllegalArgumentException, got Ok"),
+            Err(e) => {
+                assert_eq!(e.kind, SparkErrorKind::IllegalArgument, "{e:?}");
+                assert!(e.message.contains("() "), "unexpected error: {e:?}");
+            }
         }
     }
 
@@ -311,18 +279,12 @@ mod tests {
 
     #[test]
     fn to_proto_emits_table_arg_subquery_with_specs() {
-        use proto::expression::ExprType;
-
         let t = arg()
             .partition_by(vec![col("a")])
             .unwrap()
             .order_by(vec![col("b")])
             .unwrap();
-        let expr = t.to_proto(7);
-
-        let Some(ExprType::SubqueryExpression(subq)) = expr.expr_type else {
-            panic!("expected a SubqueryExpression");
-        };
+        let subq = subquery_proto(&t);
         assert_eq!(subq.plan_id, 7);
         assert_eq!(
             subq.subquery_type,
@@ -336,6 +298,11 @@ mod tests {
         assert_eq!(opts.order_spec[0].null_ordering, 1);
         // partitionBy path leaves the single-partition flag unset (None).
         assert_eq!(opts.with_single_partition, None);
+        assert_eq!(
+            t.to_column().expression().render(),
+            "SubqueryExpression(plan=<plan 7>, type=table_arg, partition_spec=[a], \
+             order_spec=[b])"
+        );
     }
 
     #[test]
@@ -345,11 +312,7 @@ mod tests {
             .unwrap()
             .order_by(vec![col("b").desc_nulls_last()])
             .unwrap();
-        let expr = t.to_proto(3);
-
-        let Some(proto::expression::ExprType::SubqueryExpression(subq)) = expr.expr_type else {
-            panic!("expected a SubqueryExpression");
-        };
+        let subq = subquery_proto(&t);
         let opts = subq.table_arg_options.expect("table_arg_options");
         assert_eq!(opts.with_single_partition, Some(true));
         assert!(opts.partition_spec.is_empty());

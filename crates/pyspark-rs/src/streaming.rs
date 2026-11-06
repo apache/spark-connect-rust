@@ -640,35 +640,82 @@ impl PyDataStreamWriter {
         Ok(slf)
     }
 
-    /// `DataStreamWriter.trigger(...)`: mirrors the reference keyword API — exactly one
-    /// of `processingTime` / `once` / `availableNow` / `continuous` is given.
+    /// `DataStreamWriter.trigger(...)`, as PySpark's: exactly one of `processingTime`, `once`,
+    /// `continuous`, `availableNow` and `realTime`, else `ONLY_ALLOW_SINGLE_TRIGGER`; an
+    /// interval or duration is a non-empty string, which is stripped, else
+    /// `VALUE_NOT_NON_EMPTY_STR`, and `once` and `availableNow` are True, else
+    /// `VALUE_NOT_ALLOWED`.
     #[pyo3(signature = (*, processingTime=None, once=None, continuous=None, availableNow=None, realTime=None))]
     fn trigger<'py>(
         mut slf: PyRefMut<'py, Self>,
-        processingTime: Option<&str>,
-        once: Option<bool>,
-        continuous: Option<&str>,
-        availableNow: Option<bool>,
-        realTime: Option<&str>,
+        processingTime: Option<Bound<'py, PyAny>>,
+        once: Option<Bound<'py, PyAny>>,
+        continuous: Option<Bound<'py, PyAny>>,
+        availableNow: Option<Bound<'py, PyAny>>,
+        realTime: Option<Bound<'py, PyAny>>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        let trigger = if let Some(interval) = processingTime {
-            Trigger::ProcessingTime(interval.to_string())
-        } else if once == Some(true) {
+        use crate::column::raise_pyspark;
+        let py = slf.py();
+        let given = [
+            &processingTime,
+            &once,
+            &continuous,
+            &availableNow,
+            &realTime,
+        ]
+        .iter()
+        .filter(|value| value.is_some())
+        .count();
+        if given != 1 {
+            return Err(raise_pyspark(
+                py,
+                "PySparkValueError",
+                "ONLY_ALLOW_SINGLE_TRIGGER",
+                &[],
+            ));
+        }
+        let interval = |value: &Bound<'py, PyAny>, name: &str| -> PyResult<String> {
+            let text = match value.cast::<pyo3::types::PyString>() {
+                Ok(text) => text.to_cow()?.trim().to_string(),
+                Err(_) => String::new(),
+            };
+            if text.is_empty() {
+                return Err(raise_pyspark(
+                    py,
+                    "PySparkValueError",
+                    "VALUE_NOT_NON_EMPTY_STR",
+                    &[("arg_name", name), ("arg_value", &value.str()?.to_string())],
+                ));
+            }
+            Ok(text)
+        };
+        // As PySpark's `once is not True`.
+        let true_flag = |value: &Bound<'py, PyAny>, name: &str| -> PyResult<()> {
+            if value.is(pyo3::types::PyBool::new(py, true)) {
+                Ok(())
+            } else {
+                Err(raise_pyspark(
+                    py,
+                    "PySparkValueError",
+                    "VALUE_NOT_ALLOWED",
+                    &[("arg_name", name), ("allowed_values", "[True]")],
+                ))
+            }
+        };
+        let trigger = if let Some(value) = &processingTime {
+            Trigger::ProcessingTime(interval(value, "processingTime")?)
+        } else if let Some(value) = &once {
+            true_flag(value, "once")?;
             Trigger::Once
-        } else if let Some(interval) = continuous {
-            Trigger::Continuous(interval.to_string())
-        } else if availableNow == Some(true) {
-            Trigger::AvailableNow
-        } else if realTime.is_some() {
-            // `realTime` is accepted for signature parity with reference pyspark; the
-            // connect core's Trigger enum does not yet model a real-time trigger.
-            return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-                "the realTime trigger is not yet supported by this client",
-            ));
+        } else if let Some(value) = &continuous {
+            Trigger::Continuous(interval(value, "continuous")?)
+        } else if let Some(value) = &realTime {
+            Trigger::RealTime(interval(value, "realTime")?)
         } else {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "trigger() requires exactly one of processingTime, once, continuous, availableNow, realTime",
-            ));
+            if let Some(value) = &availableNow {
+                true_flag(value, "availableNow")?;
+            }
+            Trigger::AvailableNow
         };
         slf.inner = slf.inner.clone().trigger(trigger);
         Ok(slf)
@@ -897,10 +944,13 @@ impl PyStreamingQuery {
         self.inner.process_all_available().to_pyerr()
     }
 
-    // Mirrors reference `StreamingQuery.explain(extended=False)` - the arg is optional.
+    /// Print the plan of the query with Python's `print`, as PySpark's
+    /// `StreamingQuery.explain(extended=False)`.
     #[pyo3(signature = (extended=false))]
-    fn explain(&self, extended: bool) -> PyResult<String> {
-        self.inner.explain(extended).to_pyerr()
+    fn explain(&self, py: Python<'_>, extended: bool) -> PyResult<()> {
+        let plan = py.detach(|| self.inner.explain(extended)).to_pyerr()?;
+        py.import("builtins")?.call_method1("print", (plan,))?;
+        Ok(())
     }
 
     fn exception(&self) -> PyResult<Option<PyStreamingQueryException>> {

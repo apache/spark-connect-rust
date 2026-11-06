@@ -8,8 +8,8 @@ use pyo3::types::PyBytes;
 /// `pyspark.sql.types.VariantVal`.
 #[pyclass(name = "VariantVal", module = "pyspark.sql.types")]
 pub struct PyVariantVal {
-    value: Vec<u8>,
-    metadata: Vec<u8>,
+    pub(crate) value: Vec<u8>,
+    pub(crate) metadata: Vec<u8>,
 }
 
 impl PyVariantVal {
@@ -24,6 +24,22 @@ impl PyVariantVal {
     #[new]
     fn new(value: Vec<u8>, metadata: Vec<u8>) -> Self {
         PyVariantVal { value, metadata }
+    }
+    /// Pickled as `VariantVal(value, metadata)`, which PySpark's own class also takes.
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, pyo3::types::PyTuple>> {
+        let py = slf.py();
+        let this = slf.borrow();
+        let args = (
+            PyBytes::new(py, &this.value),
+            PyBytes::new(py, &this.metadata),
+        );
+        pyo3::types::PyTuple::new(
+            py,
+            [
+                slf.get_type().into_any(),
+                args.into_pyobject(py)?.into_any(),
+            ],
+        )
     }
     #[getter]
     fn value<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
@@ -72,8 +88,8 @@ impl PyVariantVal {
 /// A Geography value (WKB bytes + SRID). Mirrors `pyspark.sql.types.Geography`.
 #[pyclass(name = "Geography", module = "pyspark.sql.types")]
 pub struct PyGeography {
-    wkb: Vec<u8>,
-    srid: i32,
+    pub(crate) wkb: Vec<u8>,
+    pub(crate) srid: i32,
 }
 #[pymethods]
 impl PyGeography {
@@ -85,6 +101,16 @@ impl PyGeography {
         self.srid
     }
     fn getBytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, &self.wkb)
+    }
+    /// The spatial reference identifier, as PySpark's attribute.
+    #[getter]
+    fn srid(&self) -> i32 {
+        self.srid
+    }
+    /// The well-known binary, as PySpark's attribute.
+    #[getter]
+    fn wkb<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
         PyBytes::new(py, &self.wkb)
     }
     #[classmethod]
@@ -106,8 +132,8 @@ impl PyGeography {
 /// A Geometry value (WKB bytes + SRID). Mirrors `pyspark.sql.types.Geometry`.
 #[pyclass(name = "Geometry", module = "pyspark.sql.types")]
 pub struct PyGeometry {
-    wkb: Vec<u8>,
-    srid: i32,
+    pub(crate) wkb: Vec<u8>,
+    pub(crate) srid: i32,
 }
 #[pymethods]
 impl PyGeometry {
@@ -119,6 +145,16 @@ impl PyGeometry {
         self.srid
     }
     fn getBytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, &self.wkb)
+    }
+    /// The spatial reference identifier, as PySpark's attribute.
+    #[getter]
+    fn srid(&self) -> i32 {
+        self.srid
+    }
+    /// The well-known binary, as PySpark's attribute.
+    #[getter]
+    fn wkb<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
         PyBytes::new(py, &self.wkb)
     }
     #[classmethod]

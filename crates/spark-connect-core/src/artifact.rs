@@ -94,6 +94,34 @@ impl NamedArtifact {
     }
 }
 
+/// Checks the response of an artifact upload: every artifact passed its CRC check and, for
+/// a cache upload, every artifact of `expected_cache_names` was acknowledged.
+pub(crate) fn check_artifact_upload(
+    response: spark_connect_proto::AddArtifactsResponse,
+    expected_cache_names: Option<&std::collections::HashSet<String>>,
+) -> Result<()> {
+    let mut received = std::collections::HashSet::new();
+    for summary in response.artifacts {
+        if !summary.is_crc_successful {
+            return Err(SparkError::connect_msg(format!(
+                "CRC check failed for artifact: {}",
+                summary.name
+            )));
+        }
+        if expected_cache_names.is_some() {
+            received.insert(summary.name);
+        }
+    }
+    if let Some(expected) = expected_cache_names {
+        if !expected.is_subset(&received) {
+            return Err(SparkError::connect_msg(
+                "Missing cache artifact upload acknowledgement",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Frame cached in-memory artifacts as they are consumed by the upload stream.
 /// Payload slices share the original allocation instead of copying each chunk.
 /// The allocation is freed when its last slice is dropped, not chunk by chunk.
@@ -305,8 +333,212 @@ fn build_chunked_artifact_requests(
     Ok(requests)
 }
 
+/// A path of `addArtifacts` that PySpark's `ArtifactManager` does not upload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnsupportedArtifact {
+    /// A file of a format that is not uploaded with the flags given, by its local path.
+    Format(String),
+    /// A URI of a scheme other than `file`.
+    Scheme(String),
+    /// The local path of an archive with a fragment has a `#`, which the fragment would
+    /// be taken from.
+    HashInArchivePath,
+}
+
+impl std::fmt::Display for UnsupportedArtifact {
+    /// The message of PySpark's error for the path.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UnsupportedArtifact::Format(path) => {
+                write!(
+                    f,
+                    "[UNSUPPORTED_OPERATION] {path} file format is not supported."
+                )
+            }
+            UnsupportedArtifact::Scheme(scheme) => {
+                write!(
+                    f,
+                    "[UNSUPPORTED_OPERATION] {scheme} scheme is not supported."
+                )
+            }
+            UnsupportedArtifact::HashInArchivePath => write!(
+                f,
+                "[VALUE_ALLOWED] Value for `artifact path` does not allow #."
+            ),
+        }
+    }
+}
+
+/// `%XX` escapes decoded, as `url2pathname` does on POSIX.
+fn unquote(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(high), Some(low)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push((high * 16 + low) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The name that a path of `addArtifacts` is uploaded as, and the local file to upload, as
+/// PySpark's `ArtifactManager._parse_artifacts` parses a local path or a `file:` URI:
+///
+/// - With `pyfile`, a `.py`, `.egg`, `.zip` or `.jar` is `pyfiles/<name>`.
+/// - With `archive`, a `.zip`, `.jar`, `.tar.gz`, `.tgz` or `.tar` is `archives/<name>`, or
+///   `archives/<name>#<fragment>` for a path with a fragment, which names the directory
+///   that the archive is extracted to.
+/// - With `file`, any file is `files/<name>`.
+/// - Otherwise a `.class` is `classes/<name>`, a `.jar` is `jars/<name>`, and any other file
+///   is not supported.
+pub fn parse_artifact(
+    path_or_uri: &str,
+    pyfile: bool,
+    archive: bool,
+    file: bool,
+) -> std::result::Result<(String, std::path::PathBuf), UnsupportedArtifact> {
+    // As `urlparse`: a scheme of a letter and then letters, digits, `+`, `-` or `.` before
+    // `:`, a netloc after `//`, and the fragment after `#` and the query after `?`.
+    let (scheme, rest) = match path_or_uri.find(':') {
+        Some(i)
+            if path_or_uri[..i].starts_with(|c: char| c.is_ascii_alphabetic())
+                && path_or_uri[..i]
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c)) =>
+        {
+            (path_or_uri[..i].to_ascii_lowercase(), &path_or_uri[i + 1..])
+        }
+        _ => (String::new(), path_or_uri),
+    };
+    let rest = match rest.strip_prefix("//") {
+        Some(after) => &after[after.find(['/', '?', '#']).unwrap_or(after.len())..],
+        None => rest,
+    };
+    let (rest, fragment) = rest.split_once('#').unwrap_or((rest, ""));
+    let path = rest.split_once('?').map_or(rest, |(path, _)| path);
+    let local = match scheme.as_str() {
+        "" => {
+            let path = std::path::PathBuf::from(unquote(path));
+            if path.is_absolute() {
+                path
+            } else {
+                std::env::current_dir().unwrap_or_default().join(path)
+            }
+        }
+        "file" => std::path::PathBuf::from(unquote(path)),
+        _ => return Err(UnsupportedArtifact::Scheme(scheme)),
+    };
+    let local_path = local.to_string_lossy().into_owned();
+    let name = local
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ends = |suffixes: &[&str]| suffixes.iter().any(|suffix| name.ends_with(suffix));
+    let artifact = if pyfile && ends(&[".py", ".egg", ".zip", ".jar"]) {
+        format!("pyfiles/{name}")
+    } else if archive && ends(&[".zip", ".jar", ".tar.gz", ".tgz", ".tar"]) {
+        if fragment.is_empty() {
+            format!("archives/{name}")
+        } else if local_path.contains('#') {
+            return Err(UnsupportedArtifact::HashInArchivePath);
+        } else {
+            format!("archives/{name}#{fragment}")
+        }
+    } else if file {
+        format!("files/{name}")
+    } else if ends(&[".class"]) {
+        format!("classes/{name}")
+    } else if ends(&[".jar"]) {
+        format!("jars/{name}")
+    } else {
+        return Err(UnsupportedArtifact::Format(local_path));
+    };
+    Ok((artifact, local))
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{parse_artifact, UnsupportedArtifact};
+
+    #[test]
+    fn artifacts_are_named_as_pyspark_parses_their_paths() {
+        use UnsupportedArtifact::*;
+        let named = |name: &str| Ok(name.to_string());
+        let cases = [
+            ("/d/a.jar", (false, false, false), named("jars/a.jar")),
+            (
+                "/d/A.class",
+                (false, false, false),
+                named("classes/A.class"),
+            ),
+            ("/d/m.py", (true, false, false), named("pyfiles/m.py")),
+            ("/d/m.zip", (true, false, false), named("pyfiles/m.zip")),
+            (
+                "/d/b.tar.gz",
+                (false, true, false),
+                named("archives/b.tar.gz"),
+            ),
+            // The fragment of an archive names the directory that it is extracted to.
+            (
+                "/d/b.zip#alias",
+                (false, true, false),
+                named("archives/b.zip#alias"),
+            ),
+            ("/d/n.txt", (false, false, true), named("files/n.txt")),
+            // Another path drops its fragment, and its query, as `urlparse` takes them.
+            ("/d/a.jar#x", (false, false, false), named("jars/a.jar")),
+            (
+                "file:/d/a.jar?q=1",
+                (false, false, false),
+                named("jars/a.jar"),
+            ),
+            (
+                "file:///d/a%20b.jar",
+                (false, false, false),
+                named("jars/a b.jar"),
+            ),
+            (
+                "/d/m.py",
+                (false, false, false),
+                Err(Format("/d/m.py".to_string())),
+            ),
+            (
+                "/d/m.py",
+                (false, true, false),
+                Err(Format("/d/m.py".to_string())),
+            ),
+            (
+                "s3://bucket/a.jar",
+                (false, false, false),
+                Err(Scheme("s3".to_string())),
+            ),
+            (
+                "/d/b%23c.zip#alias",
+                (false, true, false),
+                Err(HashInArchivePath),
+            ),
+        ];
+        for (path, (pyfile, archive, file), expected) in cases {
+            let parsed = parse_artifact(path, pyfile, archive, file).map(|(name, _)| name);
+            assert_eq!(parsed, expected, "{path}");
+        }
+    }
+
+    #[test]
+    fn a_relative_artifact_path_is_in_the_current_directory() {
+        let (name, local) = parse_artifact("a.jar", false, false, false).unwrap();
+        assert_eq!(name, "jars/a.jar");
+        assert_eq!(local, std::env::current_dir().unwrap().join("a.jar"));
+    }
+
     use super::*;
 
     #[test]
