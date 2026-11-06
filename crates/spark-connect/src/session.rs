@@ -964,7 +964,8 @@ fn datatype_to_arrow(dt: &DataType) -> Result<arrow::datatypes::DataType> {
             A::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()))
         }
         DataType::TimestampNtzNanos { .. } => A::Timestamp(TimeUnit::Nanosecond, None),
-        DataType::Time { .. } => A::Time64(TimeUnit::Microsecond),
+        // As PySpark's `to_arrow_type` of TimeType.
+        DataType::Time { .. } => A::Time64(TimeUnit::Nanosecond),
         // As Spark's Arrow conversion of DayTimeIntervalType.
         DataType::DayTimeInterval { .. } => A::Duration(TimeUnit::Microsecond),
         DataType::Decimal { precision, scale } => A::Decimal128(*precision as u8, *scale as i8),
@@ -1109,6 +1110,8 @@ fn values_to_arrow(values: &[&Value], dt: &DataType) -> Result<Arc<dyn arrow::ar
             Ok(Arc::new(BinaryArray::from(vals?)))
         }
         DataType::Date => prim!(Date32Array, Value::Date),
+        // As PySpark's `to_arrow_type`: nanoseconds since midnight, as `TimeType.toInternal`.
+        DataType::Time { .. } => prim!(Time64NanosecondArray, Value::Time),
         DataType::DayTimeInterval { .. } => prim!(DurationMicrosecondArray, Value::DayTimeInterval),
         DataType::Timestamp | DataType::TimestampNtz => {
             let vals: Result<Vec<Option<i64>>> = values
@@ -2199,6 +2202,32 @@ mod tests {
             4,
             BinaryArray,
             vec![Some(&[0_u8, 255, 1][..]), None, Some(&[][..])]
+        );
+    }
+
+    #[test]
+    fn input_ipc_sends_times_as_nanoseconds_as_pyspark() {
+        // As PySpark's `to_arrow_type` of TimeType: time64[ns] of the nanoseconds since
+        // midnight, whatever the precision.
+        use arrow::array::Time64NanosecondArray;
+        use arrow::datatypes::{DataType as A, TimeUnit};
+        let schema = schema(vec![DataType::Time { precision: 3 }]);
+        let rows = vec![
+            row(vec![Value::Time(3_723_456_789_000)]),
+            row(vec![Value::Null]),
+        ];
+        let batch = read_batch(&rows, &schema);
+        assert_eq!(
+            batch.schema().field(0).data_type(),
+            &A::Time64(TimeUnit::Nanosecond)
+        );
+        assert_eq!(
+            batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Time64NanosecondArray>()
+                .unwrap(),
+            &Time64NanosecondArray::from(vec![Some(3_723_456_789_000), None])
         );
     }
 

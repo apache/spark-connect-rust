@@ -634,6 +634,30 @@ def test_collect_reads_a_result_across_stream_ends(session):
     assert session.range(n).toArrow().num_rows == n
 
 
+def test_time_values_round_trip_as_pyspark(session):
+    # As PySpark's: TIME values are sent, and collected, as datetime.time, when the session
+    # enables the TIME type.
+    import datetime
+
+    t = datetime.time(1, 2, 3, 456789)
+    session.conf.set("spark.sql.timeType.enabled", "true")
+    try:
+        assert session.createDataFrame([(t,)]).collect() == [Row(_1=t)]
+        assert session.createDataFrame([(t,)], "t time").collect() == [Row(t=t)]
+        assert session.range(1).select(F.lit(t).alias("t")).collect() == [Row(t=t)]
+        assert session.sql("SELECT TIME'12:34:56.789' AS t").collect() == [
+            Row(t=datetime.time(12, 34, 56, 789000))
+        ]
+        # Without it, the server does not support the type, as for PySpark. It is set to
+        # false, as the server enables it by default when SPARK_TESTING is set.
+        session.conf.set("spark.sql.timeType.enabled", "false")
+        with pytest.raises(AnalysisException) as error:
+            session.createDataFrame([(t,)], "t time").collect()
+        assert error.value.getCondition() == "UNSUPPORTED_TIME_TYPE"
+    finally:
+        session.conf.unset("spark.sql.timeType.enabled")
+
+
 def test_timedelta_is_a_day_time_interval_as_pyspark(session):
     import datetime
 

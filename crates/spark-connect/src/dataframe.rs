@@ -2478,19 +2478,15 @@ impl<'a> ArrowValueLayout<'a> {
                 scale: Some(arr.scale() as i32),
             }),
             ArrowValueDecoder::FixedSizeBinary(arr) => Ok(Value::Binary(arr.value(index).to_vec())),
-            // TimeType has no dedicated Value variant, so render as an ISO time string.
-            ArrowValueDecoder::Time64Microsecond(arr) => {
-                Ok(Value::String(micros_to_time_string(arr.value(index))))
+            // A TIME, in nanoseconds since midnight, as PySpark's `TimeType.fromInternal` reads.
+            ArrowValueDecoder::Time64Microsecond(arr) => Ok(Value::Time(arr.value(index) * 1_000)),
+            ArrowValueDecoder::Time64Nanosecond(arr) => Ok(Value::Time(arr.value(index))),
+            ArrowValueDecoder::Time32Millisecond(arr) => {
+                Ok(Value::Time(arr.value(index) as i64 * 1_000_000))
             }
-            ArrowValueDecoder::Time64Nanosecond(arr) => Ok(Value::String(micros_to_time_string(
-                arr.value(index) / 1_000,
-            ))),
-            ArrowValueDecoder::Time32Millisecond(arr) => Ok(Value::String(micros_to_time_string(
-                arr.value(index) as i64 * 1_000,
-            ))),
-            ArrowValueDecoder::Time32Second(arr) => Ok(Value::String(micros_to_time_string(
-                arr.value(index) as i64 * 1_000_000,
-            ))),
+            ArrowValueDecoder::Time32Second(arr) => {
+                Ok(Value::Time(arr.value(index) as i64 * 1_000_000_000))
+            }
             // Intervals likewise have no dedicated Value variant, so render as strings.
             ArrowValueDecoder::IntervalYearMonth(arr) => {
                 let months = arr.value(index);
@@ -3125,18 +3121,6 @@ mod nested_decode_tests {
                 .into()
             )
         );
-    }
-}
-
-/// Render microseconds-since-midnight as an ISO time string `HH:MM:SS[.ffffff]`.
-fn micros_to_time_string(micros: i64) -> String {
-    let total_secs = micros.div_euclid(1_000_000);
-    let us = micros.rem_euclid(1_000_000);
-    let (h, m, s) = (total_secs / 3600, (total_secs % 3600) / 60, total_secs % 60);
-    if us == 0 {
-        format!("{h:02}:{m:02}:{s:02}")
-    } else {
-        format!("{h:02}:{m:02}:{s:02}.{us:06}")
     }
 }
 
@@ -4187,11 +4171,11 @@ mod arrow_value_tests {
             ),
             (
                 Arc::new(Time64NanosecondArray::from(vec![1_234_567])),
-                Value::String("00:00:00.001234".into()),
+                Value::Time(1_234_567),
             ),
             (
                 Arc::new(Time32MillisecondArray::from(vec![1])),
-                Value::String("00:00:00.001000".into()),
+                Value::Time(1_000_000),
             ),
         ];
         for (array, expected) in cases {
@@ -4341,23 +4325,24 @@ mod arrow_value_tests {
     }
 
     #[test]
-    fn time_types_render_as_string() {
-        assert!(matches!(
+    fn time_types_decode_as_nanoseconds_since_midnight() {
+        // As PySpark's internal value of TimeType, whatever the unit of the Arrow time.
+        assert_eq!(
             arrow_value_at(&Time64MicrosecondArray::from(vec![1i64]), 0).unwrap(),
-            Value::String(_)
-        ));
-        assert!(matches!(
-            arrow_value_at(&Time64NanosecondArray::from(vec![1000i64]), 0).unwrap(),
-            Value::String(_)
-        ));
-        assert!(matches!(
+            Value::Time(1_000)
+        );
+        assert_eq!(
+            arrow_value_at(&Time64NanosecondArray::from(vec![1001i64]), 0).unwrap(),
+            Value::Time(1_001)
+        );
+        assert_eq!(
             arrow_value_at(&Time32MillisecondArray::from(vec![1i32]), 0).unwrap(),
-            Value::String(_)
-        ));
-        assert!(matches!(
+            Value::Time(1_000_000)
+        );
+        assert_eq!(
             arrow_value_at(&Time32SecondArray::from(vec![1i32]), 0).unwrap(),
-            Value::String(_)
-        ));
+            Value::Time(1_000_000_000)
+        );
     }
 
     #[test]
@@ -4443,12 +4428,6 @@ mod arrow_value_tests {
         assert_eq!(i128_to_decimal_string(12345, 2), "123.45");
         assert_eq!(i128_to_decimal_string(5, 4), "0.0005");
         assert_eq!(i128_to_decimal_string(-5, 4), "-0.0005");
-    }
-
-    #[test]
-    fn micros_to_time_string_branches() {
-        assert_eq!(micros_to_time_string(0), "00:00:00");
-        assert!(micros_to_time_string(1).contains('.'));
     }
 }
 

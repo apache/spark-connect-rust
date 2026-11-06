@@ -305,6 +305,14 @@ fn scalar_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<LiteralExpression>>
             let micros = crate::session::datetime_to_micros(obj)?;
             return Ok(Some(LiteralExpression::Timestamp(micros)));
         }
+        // datetime.time -> TimeType(), as PySpark's literal of one: its nanoseconds since
+        // midnight, of the default precision.
+        if obj.is_instance(&dt_mod.getattr("time")?)? {
+            return Ok(Some(LiteralExpression::Time {
+                nano: crate::infer::time_nanos(obj)?,
+                precision: 6,
+            }));
+        }
         // datetime.timedelta -> DayTimeIntervalType, as PySpark's literal of one.
         if obj.is_instance(&dt_mod.getattr("timedelta")?)? {
             let micros = crate::infer::timedelta_micros(obj)?;

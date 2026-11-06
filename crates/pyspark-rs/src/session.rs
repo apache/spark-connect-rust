@@ -1668,6 +1668,8 @@ fn value_to_datatype(v: &Value) -> DataType {
         Value::Binary(_) => DataType::Binary,
         Value::Date(_) => DataType::Date,
         Value::Timestamp(_) => DataType::Timestamp,
+        // As PySpark infers TimeType() of a datetime.time.
+        Value::Time(_) => DataType::Time { precision: 6 },
         Value::DayTimeInterval(_) => DataType::DayTimeInterval {
             start_field: 0,
             end_field: 3,
@@ -1908,6 +1910,15 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
                 // to a pure datetime first so createDataFrame() and lit() encode identically.
                 let micros = datetime_to_micros(obj)?;
                 return Ok(Value::Timestamp(micros));
+            }
+        }
+    }
+
+    // datetime.time -> nanoseconds since midnight, as TimeType.toInternal.
+    if let Some(dt_mod) = &datetime_mod {
+        if let Ok(time_cls) = dt_mod.getattr("time") {
+            if obj.is_instance(&time_cls)? {
+                return Ok(Value::Time(crate::infer::time_nanos(obj)?));
             }
         }
     }
