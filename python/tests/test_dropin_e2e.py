@@ -141,6 +141,35 @@ def test_repr_shows_the_rows_with_eager_evaluation_as_pyspark(session):
     assert repr(df) == "DataFrame[id: bigint]"
 
 
+def test_replace_and_unpivot_take_their_arguments_as_pyspark(session):
+    # As PySpark's: replace sends each value as a literal of its type, and None as a null, over
+    # a subset of a column name or a list or tuple of them. unpivot and melt take a column or a
+    # column name, or a list or tuple of them.
+    df = session.createDataFrame(
+        [(1, "a", 1.5, True, "1"), (2, "b", None, False, "2")],
+        "id int, k string, v double, b boolean, s string",
+    )
+
+    def rows(*changes):
+        base = [dict(id=1, k="a", v=1.5, b=True, s="1"), dict(id=2, k="b", v=None, b=False, s="2")]
+        return [Row(**{**row, **change}) for row, change in zip(base, changes)]
+
+    assert df.replace("a", None, "k").collect() == rows({"k": None}, {})
+    # A string replaces in the string columns, and a number in the numeric ones.
+    assert df.replace("1", "one").collect() == rows({"s": "one"}, {})
+    assert df.replace(1, 10, ("id",)).collect() == rows({"id": 10}, {})
+    assert df.replace([1.5, 2], [9.5, 20]).collect() == rows({"v": 9.5}, {"id": 20})
+    assert df.replace(True, False).collect() == rows({"b": False}, {})
+    assert df.na.replace({"a": "x", "b": "y"}, subset="k").collect() == rows({"k": "x"}, {"k": "y"})
+
+    wide = session.createDataFrame([(1, 11, 12)], "id int, x int, y int")
+    expected = [Row(id=1, var="x", val=11), Row(id=1, var="y", val=12)]
+    assert wide.unpivot("id", ["x", "y"], "var", "val").collect() == expected
+    assert wide.unpivot(F.col("id"), ("x", F.col("y")), "var", "val").collect() == expected
+    assert wide.melt(["id"], None, "var", "val").collect() == expected
+    assert wide.melt("id", "x", "var", "val").collect() == expected[:1]
+
+
 def test_instr_and_regexp_replace_apply_their_optional_arguments(session):
     # Column b holds "c", so the literal "b" and the column b find different positions.
     df = session.createDataFrame([("abcabc", "c", "a", "z")], ["s", "b", "p", "r"])

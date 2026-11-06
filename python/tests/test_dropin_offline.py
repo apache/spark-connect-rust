@@ -2751,6 +2751,54 @@ def test_functions_substring():
     assert type(F.substr(str_col, F.lit(1), F.lit(5))).__name__ == "Column"
 
 
+def test_replace_and_unpivot_check_their_arguments_as_pyspark():
+    # As PySpark's DataFrame.replace and unpivot, which check their arguments on the client.
+    import warnings
+
+    from pyspark.errors import PySparkTypeError, PySparkValueError
+
+    df = _offline_session().range(1)
+    for call, error_type, condition, parameters in (
+        (lambda: df.replace("a"), PySparkTypeError, "ARGUMENT_REQUIRED",
+         {"arg_name": "value", "condition": "`to_replace` is dict"}),
+        (lambda: df.na.replace([1]), PySparkTypeError, "ARGUMENT_REQUIRED",
+         {"arg_name": "value", "condition": "`to_replace` is dict"}),
+        (lambda: df.replace({1, 2}, 3), PySparkTypeError, "NOT_EXPECTED_TYPE",
+         {"expected_type": "bool, dict, float, int, str or tuple", "arg_name": "to_replace",
+          "arg_type": "set"}),
+        (lambda: df.replace(1, {2: 3}), PySparkTypeError, "NOT_EXPECTED_TYPE",
+         {"expected_type": "bool, float, int, list, None, str or tuple", "arg_name": "value",
+          "arg_type": "dict"}),
+        (lambda: df.replace([1, 2], [3]), PySparkValueError, "LENGTH_SHOULD_BE_THE_SAME",
+         {"arg1": "to_replace", "arg2": "value", "arg1_length": "2", "arg2_length": "1"}),
+        (lambda: df.replace("a", "b", 1), PySparkTypeError, "NOT_EXPECTED_TYPE",
+         {"arg_name": "subset", "expected_type": "list, str or tuple", "arg_type": "int"}),
+        (lambda: df.replace({1: "a"}), PySparkValueError, "MIXED_TYPE_REPLACEMENT", {}),
+        (lambda: df.na.replace([1, "a"], "b"), PySparkValueError, "MIXED_TYPE_REPLACEMENT", {}),
+        (lambda: df.unpivot(1, "id", "var", "val"), PySparkTypeError, "NOT_EXPECTED_TYPE",
+         {"expected_type": "Column or str", "arg_name": "col", "arg_type": "int"}),
+        (lambda: df.melt(["id"], [1], "var", "val"), PySparkTypeError, "NOT_EXPECTED_TYPE",
+         {"expected_type": "Column or str", "arg_name": "col", "arg_type": "int"}),
+    ):
+        with pytest.raises(error_type) as error:
+            call()
+        assert error.value.getCondition() == condition
+        assert error.value.getMessageParameters() == parameters
+    with pytest.raises(AssertionError, match="ids must not be None"):
+        df.unpivot(None, "id", "var", "val")
+    # All four arguments of unpivot, and of melt, which is the same function, are required.
+    for unpivot in (df.unpivot, df.melt):
+        with pytest.raises(TypeError):
+            unpivot("id", "id")
+    # The value of a dict to_replace is ignored, with a warning.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        df.replace({"a": "b"}, "c")
+    assert [str(w.message) for w in caught] == [
+        "to_replace is a dict and value is not None. value will be ignored."
+    ]
+
+
 def test_functions_replace():
     """Test replace function."""
     from pyspark.sql import functions as F

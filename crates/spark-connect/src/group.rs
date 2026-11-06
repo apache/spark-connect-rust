@@ -496,6 +496,19 @@ impl NaFunctions {
     ) -> DataFrame {
         self.dataframe.replace(to_replace, subset)
     }
+
+    /// Replace values given as literals. Mirrors `DataFrameNaFunctions.replace`, as
+    /// [`DataFrame::replace_literals`].
+    pub fn replace_literals(
+        &self,
+        replacements: Vec<(
+            crate::expression::LiteralExpression,
+            crate::expression::LiteralExpression,
+        )>,
+        subset: Option<Vec<&str>>,
+    ) -> DataFrame {
+        self.dataframe.replace_literals(replacements, subset)
+    }
 }
 
 /// A pair of cogrouped [`GroupedData`], mirroring `pyspark.sql.PandasCogroupedOps`.

@@ -1463,10 +1463,35 @@ impl DataFrame {
         DataFrame::new(self.session.clone(), plan)
     }
 
-    /// Replace values.
+    /// Replace values, each given as a string: a numeric-looking string is a double, otherwise
+    /// a string. [`DataFrame::replace_literals`] takes the values as literals.
     pub fn replace(
         &self,
         to_replace: Vec<(String, String)>,
+        subset: Option<Vec<&str>>,
+    ) -> DataFrame {
+        let replacements = to_replace
+            .iter()
+            .map(|(old, new)| {
+                (
+                    crate::plan::numeric_or_string_literal(old),
+                    crate::plan::numeric_or_string_literal(new),
+                )
+            })
+            .collect();
+        self.replace_literals(replacements, subset)
+    }
+
+    /// Replace values, mirroring `pyspark.sql.DataFrame.replace`: each pair is a literal and
+    /// the literal that replaces it, which may be a null, in the columns of `subset`, or else
+    /// in every column of the literal's type. The server replaces a boolean, a double or a
+    /// string.
+    pub fn replace_literals(
+        &self,
+        replacements: Vec<(
+            crate::expression::LiteralExpression,
+            crate::expression::LiteralExpression,
+        )>,
         subset: Option<Vec<&str>>,
     ) -> DataFrame {
         let columns = subset
@@ -1474,7 +1499,7 @@ impl DataFrame {
             .unwrap_or_default();
         let plan = LogicalPlan::NAReplace {
             input: Arc::clone(&self.plan),
-            replacements: to_replace,
+            replacements,
             columns,
         };
         DataFrame::new(self.session.clone(), plan)
@@ -3798,6 +3823,49 @@ mod plan_construction_tests {
                 }
                 _ => panic!("expected Sample plan"),
             }
+        }
+    }
+
+    #[test]
+    fn replace_literals_plan() {
+        use crate::expression::LiteralExpression;
+        let spark = session();
+        let df = spark.range(3).unwrap();
+        let replacements = vec![(
+            LiteralExpression::string("a"),
+            LiteralExpression::null(DataType::Null),
+        )];
+        for result in [
+            df.replace_literals(replacements.clone(), Some(vec!["k"])),
+            df.na()
+                .replace_literals(replacements.clone(), Some(vec!["k"])),
+        ] {
+            match result.plan.as_ref() {
+                LogicalPlan::NAReplace {
+                    replacements: planned,
+                    columns,
+                    ..
+                } => {
+                    assert_eq!(planned, &replacements);
+                    assert_eq!(columns, &vec!["k".to_string()]);
+                }
+                _ => panic!("expected NAReplace plan"),
+            }
+        }
+        // A string replacement that parses as a number is a double, as before.
+        match df
+            .replace(vec![("1".to_string(), "a".to_string())], None)
+            .plan
+            .as_ref()
+        {
+            LogicalPlan::NAReplace { replacements, .. } => assert_eq!(
+                replacements,
+                &vec![(
+                    LiteralExpression::double(1.0),
+                    LiteralExpression::string("a")
+                )]
+            ),
+            _ => panic!("expected NAReplace plan"),
         }
     }
 
