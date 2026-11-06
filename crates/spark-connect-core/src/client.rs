@@ -1360,7 +1360,8 @@ mod tests {
             });
             ready.await.unwrap();
 
-            // A blocking task can be aborted while queued, before it starts.
+            // Explicit abort models runtime shutdown cancelling queued hashing work;
+            // production hashing does not abort its handle.
             let task = tokio::task::spawn_blocking(|| ());
             task.abort();
             // Release the blocking worker before assertions to avoid hanging shutdown.
