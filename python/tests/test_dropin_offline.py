@@ -5206,6 +5206,11 @@ def test_decimal_scale_avoids_coefficient_tuple(decimal_scale_ipc_session):
 # SPARK-60704: construction-local Decimal resolution. Capture the original
 # LocalRelation schema as well as every IPC cell, independently of the echo result.
 _DECIMAL_LOOKUP_IPC_SERVER = _DECIMAL_SCALE_IPC_SERVER.replace(
+    "    relation = request.plan.root\n",
+    "    Path(sys.argv[2] + '.request').write_bytes(raw)\n"
+    "    relation = request.plan.root\n",
+    1,
+).replace(
     "Path(sys.argv[2]).write_bytes(payload)",
     "Path(sys.argv[2]).write_bytes(payload)\n"
     "    Path(sys.argv[2] + '.schema').write_text(relation.local_relation.schema)",
@@ -5302,7 +5307,9 @@ def test_decimal_lookup_input_cells(decimal_lookup_ipc_session, kind, mode, all_
               (Decimal("-0.0000"), None), (None, Decimal("0.000000"))]
     if all_null:
         values = [(None, None)] * 3
-    names = ["_1", "_2"] if mode == "inferred" and kind != "pandas" else ["a", "b"]
+    # Frames constructed from row containers have RangeIndex labels; current
+    # pandas conversion stringifies them, rather than assigning local-row names.
+    names = ["0", "1"] if mode == "inferred" and kind != "pandas" else ["a", "b"]
     scales = [9, 9] if mode == "explicit" else [4, 6]
     metadata = {"description": "decimal lookup", "nested": {"x": [1, True]}}
     schema = None
@@ -5328,6 +5335,13 @@ def test_decimal_lookup_input_cells(decimal_lookup_ipc_session, kind, mode, all_
         assert not payload.exists(), "construction must remain local"
         frame.collect()
     _decimal_lookup_assert_cells(payload, values, names, scales)
+    # Assert the observable names on the original outer plan as well as the
+    # complete IPC fields/cells; the mock service returns the inner Arrow table.
+    request = parse_message(payload.with_suffix(".arrow.request").read_bytes())
+    root = parse_message(parse_message(request[3][0])[1][0])
+    assert 18 in root, "nonempty pandas input must retain its toDF naming plan"
+    rename = parse_message(root[18][0])
+    assert [name.decode("utf-8") for name in rename[2]] == names
     if mode == "explicit":
         assert schema.json() == before
         captured = json.loads(payload.with_suffix(".arrow.schema").read_text())
