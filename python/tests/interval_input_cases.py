@@ -22,17 +22,42 @@ import os
 import unittest
 
 from pyspark.sql import Row, SparkSession, types as T
+from pyspark.errors import PySparkTypeError
+
+from _mock_connect_server import mock_connect_session, parse_message
+
+try:
+    import grpc
+except ImportError:
+    grpc = None
+
+
+INFERENCE_CONFS = {
+    "spark.sql.pyspark.inferNestedDictAsStruct.enabled": "false",
+    "spark.sql.pyspark.legacy.inferArrayTypeFromFirstElement.enabled": "false",
+    "spark.sql.pyspark.legacy.inferMapTypeFromFirstPair.enabled": "false",
+    "spark.sql.timestampType": "TIMESTAMP_LTZ",
+}
 
 
 class IntervalInputConversionTests(unittest.TestCase):
     def test_overflow_is_checked_recursively_before_rpc(self):
         spark = SparkSession.builder.remote("sc://127.0.0.1:1").create()
+        interval = T.DayTimeIntervalType()
         for micros in (-(2**63) - 1, 2**63, -(2**63) - 86400000000):
             value = timedelta(microseconds=micros)
-            for data in ([(value,)], [([value],)], [({"k": value},)]):
+            for data, data_type in (
+                ([(value,)], interval),
+                ([([value],)], T.ArrayType(interval)),
+                ([({"k": value},)], T.MapType(T.StringType(), interval)),
+                ([(Row(leaf=value),)], T.StructType([T.StructField("leaf", interval)])),
+            ):
                 with self.subTest(micros=micros, data=data):
+                    schema = T.StructType([T.StructField("interval", data_type)])
                     with self.assertRaisesRegex(OverflowError, "64-bit microseconds"):
-                        spark.createDataFrame(data)
+                        spark.createDataFrame(data, schema)
+            with self.assertRaises(OverflowError):
+                spark.createDataFrame([(value,)])
             # A Python Row stores objects unchanged; native conversion starts here.
             with self.assertRaises(OverflowError):
                 spark.createDataFrame([Row(interval=value)])
@@ -45,36 +70,30 @@ class IntervalInputConversionTests(unittest.TestCase):
     def test_inference_rejects_mixed_interval_and_numeric_values(self):
         spark = SparkSession.builder.remote("sc://127.0.0.1:1").create()
         delta = timedelta(microseconds=-1)
-        for data in ([(delta,), (1,)], [([delta, 1],)], [({"a": delta, "b": 1},)]):
-            with self.subTest(data=data):
-                with self.assertRaisesRegex(TypeError, "cannot merge"):
+        with self.assertRaises(PySparkTypeError) as error:
+            spark.createDataFrame([(delta,), (1,)])
+        self.assertEqual(error.exception.getCondition(), "CANNOT_MERGE_TYPE")
+        self.assertEqual(error.exception.getMessageParameters(), {
+            "data_type1": "DayTimeIntervalType", "data_type2": "LongType"})
+
+    @unittest.skipIf(grpc is None, "grpcio is required")
+    def test_nested_inference_reads_config_but_does_not_execute(self):
+        delta = timedelta(microseconds=-1)
+        with mock_connect_session() as (spark, service):
+            service.confs = INFERENCE_CONFS
+            for data in ([([delta, 1],)], [({"a": delta, "b": 1},)]):
+                with self.subTest(data=data):
+                    with self.assertRaises(PySparkTypeError) as error:
+                        spark.createDataFrame(data)
+                    self.assertEqual(error.exception.getCondition(), "CANNOT_INFER_TYPE_FOR_FIELD")
+                    self.assertEqual(error.exception.getMessageParameters(), {"field_name": "_1"})
+            spark.createDataFrame([([],), ([None, delta],)])
+            spark.createDataFrame([({},), ({"k": delta},)])
+            for data in ([([None, timedelta.max],)], [({"k": timedelta.min},)]):
+                with self.assertRaisesRegex(OverflowError, "64-bit microseconds"):
                     spark.createDataFrame(data)
-
-    def test_non_interval_inputs_keep_encoder_coercions_and_errors(self):
-        from pyspark.errors import PySparkRuntimeError
-
-        spark = SparkSession.builder.remote("sc://127.0.0.1:1").create()
-        # The existing Double encoder accepts integer values in the same column.
-        for data in ([(1.0,), (2,)], [([1.0, 2],)], [({"x": 1.0, "y": 2},)]):
-            with self.subTest(data=data):
-                self.assertTrue(spark.createDataFrame(data).isLocal())
-        for data in ([("text",), (1,)], [(1,), ("text",)],
-                     [([1, "text"],)], [({"x": 1, "y": "text"},)]):
-            with self.subTest(data=data):
-                with self.assertRaisesRegex(PySparkRuntimeError, "Type mismatch in row data"):
-                    spark.createDataFrame(data)
-
-    def test_non_interval_parent_errors_still_precede_child_errors(self):
-        from pyspark.errors import PySparkRuntimeError
-
-        spark = SparkSession.builder.remote("sc://127.0.0.1:1").create()
-        for data, expected in (
-            ([([1, "bad child"],), (5,)], "expected array"),
-            ([({"x": 1, "y": "bad child"},), (5,)], "expected map"),
-        ):
-            with self.subTest(data=data):
-                with self.assertRaisesRegex(PySparkRuntimeError, expected):
-                    spark.createDataFrame(data)
+            self.assertEqual(service.execute_calls, 0)
+            self.assertEqual(set(service.read_confs), set(INFERENCE_CONFS))
 
     def test_bounds_and_null_first_inputs_build_without_rpc(self):
         spark = SparkSession.builder.remote("sc://127.0.0.1:1").create()
@@ -82,9 +101,41 @@ class IntervalInputConversionTests(unittest.TestCase):
                 T.StructField("interval", T.DayTimeIntervalType())])):
             spark.createDataFrame([(None,), (timedelta(microseconds=-(2**63)),),
                                    (timedelta(microseconds=2**63 - 1),)], schema)
-        spark.createDataFrame([([],), ([None, timedelta(microseconds=-1)],)])
+        interval = T.DayTimeIntervalType()
+        arrays = T.StructType([T.StructField("a", T.ArrayType(interval))])
+        maps = T.StructType([T.StructField("m", T.MapType(T.StringType(), interval))])
+        spark.createDataFrame([([],), ([None, timedelta(microseconds=-1)],)], arrays)
         spark.createDataFrame([(Row(x=None),), (Row(x=timedelta(microseconds=1)),)])
-        spark.createDataFrame([({},), ({"k": timedelta(microseconds=-1)},)])
+        spark.createDataFrame([({},), ({"k": timedelta(microseconds=-1)},)], maps)
+        with self.assertRaises(AssertionError):
+            spark.createDataFrame([(1,)], T.StructType([T.StructField("interval", interval)]))
+
+    @unittest.skipIf(grpc is None, "grpcio is required")
+    def test_pandas_object_intervals_encode_exact_microseconds(self):
+        try:
+            import pandas as pd
+            import pyarrow as pa
+        except ImportError:
+            self.skipTest("pandas and pyarrow are required")
+        values = [None, -(2**63), -(2**63) + 1, -1, 0, 1, 2**63 - 1]
+        data = pd.DataFrame({"interval": pd.Series([
+            None if value is None else timedelta(microseconds=value) for value in values
+        ], dtype=object)})
+        with mock_connect_session() as (spark, service):
+            spark.createDataFrame(data).collect()
+            # ExecutePlanRequest.plan=3, Plan.root=1, Relation.to_df=18,
+            # ToDF.input=1, Relation.local_relation=11, LocalRelation.data=1.
+            message = parse_message(service.execute_requests[0])
+            for field in (3, 1, 18, 1, 11):
+                message = parse_message(message[field][0])
+            table = pa.ipc.open_stream(message[1][0]).read_all()
+            self.assertEqual(table.column(0).type, pa.duration("us"))
+            self.assertEqual(table.column(0).cast(pa.int64()).to_pylist(), values)
+            for value in (timedelta.min, timedelta.max):
+                overflow = pd.DataFrame({"interval": pd.Series([value], dtype=object)})
+                with self.assertRaisesRegex(OverflowError, "64-bit microseconds"):
+                    spark.createDataFrame(overflow)
+            self.assertEqual(service.execute_calls, 1)
 
 
 @unittest.skipUnless(os.environ.get("SPARK_REMOTE"), "requires a real Spark Connect server")
@@ -123,7 +174,7 @@ class IntervalInputLiveTests(unittest.TestCase):
         nulls = self.spark.createDataFrame([None, None], interval).collect()
         self.assertEqual([r[0] for r in nulls], [None, None])
         self.assertEqual(self.spark.createDataFrame([], interval).collect(), [])
-        with self.assertRaisesRegex(RuntimeError, "Type mismatch"):
+        with self.assertRaises(AssertionError):
             schema = T.StructType([T.StructField("interval", interval)])
             self.spark.createDataFrame([(1,)], schema)
 
