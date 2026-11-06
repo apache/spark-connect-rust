@@ -423,9 +423,12 @@ def _arrow_input_service(
         "spark.sql.session.localRelationBatchOfChunksSizeBytes": str(1024**3),
     }
     config.update(overrides)
+    # The tests may queue status codes in `status_failures` and `upload_failures`: each
+    # ArtifactStatus or AddArtifacts call fails with the next one, while any is left.
     state = {"cache": {}, "uploads": 0, "relations": [], "message_sizes": [],
              "config": config, "config_requests": [], "input_tables": [],
-             "upload_contexts": [], "status_contexts": []}
+             "upload_contexts": [], "status_contexts": [],
+             "status_failures": [], "upload_failures": [], "upload_attempts": 0}
     server_id = "00000000-0000-0000-0000-000000000001"
 
     def attribution(request, context):
@@ -458,11 +461,16 @@ def _arrow_input_service(
     def statuses(raw, context):
         request = protocol("ArtifactStatusesRequest").FromString(raw)
         state["status_contexts"].append(attribution(request, context))
+        if state["status_failures"]:
+            context.abort(state["status_failures"].pop(0), "artifact status unavailable")
         return protocol("ArtifactStatusesResponse", session_id=request.session_id,
                         statuses={name: dict(exists=name in state["cache"])
                                   for name in request.names}).SerializeToString()
 
     def upload(requests, context):
+        state["upload_attempts"] += 1
+        if state["upload_failures"]:
+            context.abort(state["upload_failures"].pop(0), "artifact upload unavailable")
         summaries = []
         name, expected, buffer = None, 0, bytearray()
         session_id = None
@@ -672,7 +680,8 @@ def test_file_upload_attribution_on_every_frame(
         )
         assert state["cache"][artifact_names[0]] == small.read_bytes()
         assert state["cache"][artifact_names[1]] == large.read_bytes()
-        assert state["uploads"] == (1 if upload == "file" else 2)
+        # One upload per path, as PySpark's add_artifacts makes one.
+        assert state["uploads"] == 2
         assert not state["status_contexts"]
         _assert_artifact_contexts(
             state["upload_contexts"],
@@ -680,6 +689,51 @@ def test_file_upload_attribution_on_every_frame(
             user_id=user_id or "",
             user_agent=user_agent or "_SPARK_CONNECT_PYTHON",
         )
+
+
+def test_cached_arrow_upload_retries_a_transient_failure_from_the_status_check(protocol):
+    # As SparkConnectClient.cache_artifacts, the status check and the upload are one attempt
+    # under the retry policy: a transient failure of either is retried from the status check.
+    table = pa.table({"id": range(10_000)})
+    with _arrow_input_service(protocol, **{
+        "spark.sql.session.localRelationCacheThreshold": "0",
+    }) as (spark, state):
+        state["status_failures"].append(grpc.StatusCode.UNAVAILABLE)
+        state["upload_failures"].append(grpc.StatusCode.UNAVAILABLE)
+        df = spark.createDataFrame(table)
+        assert not state["status_failures"] and not state["upload_failures"]
+        assert state["upload_attempts"] == state["uploads"] + 1
+        # The failed status check, the one before the failed upload, and the one before the
+        # upload; the server then reads the cached data: its rows, first and last values.
+        assert len(state["status_contexts"]) == 3
+        df.toArrow()
+        assert state["result"] == (10_000, 0, 9_999)
+
+
+def test_cached_arrow_upload_does_not_retry_another_failure(protocol):
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+
+    table = pa.table({"id": range(10_000)})
+    with _arrow_input_service(protocol, **{
+        "spark.sql.session.localRelationCacheThreshold": "0",
+    }) as (spark, state):
+        state["upload_failures"].append(grpc.StatusCode.PERMISSION_DENIED)
+        with pytest.raises(SparkConnectGrpcException, match="artifact upload unavailable"):
+            spark.createDataFrame(table)
+        assert state["upload_attempts"] == 1 and state["uploads"] == 0
+
+
+def test_artifact_upload_retries_a_transient_failure_of_each_path(protocol, tmp_path):
+    # As SparkConnectClient.add_artifacts, each path is uploaded in an attempt of its own.
+    first, second = tmp_path / "first.txt", tmp_path / "second.txt"
+    first.write_bytes(b"first artifact")
+    second.write_bytes(b"second artifact")
+    with _arrow_input_service(protocol, allow_file_artifacts=True) as (spark, state):
+        state["upload_failures"].append(grpc.StatusCode.UNAVAILABLE)
+        spark.addArtifacts(str(first), str(second), file=True)
+        assert state["cache"]["files/first.txt"] == b"first artifact"
+        assert state["cache"]["files/second.txt"] == b"second artifact"
+        assert (state["upload_attempts"], state["uploads"]) == (3, 2)
 
 
 @pytest.mark.parametrize("cached", [False, True], ids=["inline", "cached"])
