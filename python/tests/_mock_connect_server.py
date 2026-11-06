@@ -161,8 +161,9 @@ def serve(connection):
         # FetchErrorDetails returns `error_details` (raw FetchErrorDetailsResponse fields) and
         # records the error id asked for. Config Get returns the values in `confs`, or else
         # those of `default_confs`, the defaults of SQL configs of the server, and fails for a
-        # key without one, as the server does for an unset config; it records the keys. Config
-        # Set records the pairs and the silent flag of each request.
+        # key without one, as the server does for an unset config; it records the keys, as
+        # does GetWithDefault, which returns the values in `confs` or else the defaults that
+        # it is given. Config Set records the pairs and the silent flag of each request.
         error_details = b""
         fetched_error_ids = []
         confs = {}
@@ -232,8 +233,21 @@ def serve(connection):
                     pairs.append((pair[1][0].decode(), pair[2][0].decode()))
                 self.set_confs.append((pairs, set_request.get(2, [None])[0]))
                 return message_field(1, request[1][0])
+            if 3 in operation:
+                # Operation.get_with_default=3: GetWithDefault.pairs=1 (KeyValue.key=1,
+                # value=2), the default of each key that `confs` does not have.
+                pairs = []
+                for pair in parse_message(operation[3][0]).get(1, []):
+                    pair = parse_message(pair)
+                    key = pair[1][0].decode()
+                    self.read_confs.append(key)
+                    value = self.confs.get(key, pair.get(2, [b""])[0].decode())
+                    pairs.append(message_field(2, message_field(1, key) + message_field(2, value)))
+                return message_field(1, request[1][0]) + b"".join(pairs)
             if 2 not in operation:
-                context.abort(grpc.StatusCode.UNIMPLEMENTED, "only Get and Set are served")
+                context.abort(
+                    grpc.StatusCode.UNIMPLEMENTED, "only Get, GetWithDefault and Set are served"
+                )
             keys = [key.decode() for key in parse_message(operation[2][0]).get(1, [])]
             self.read_confs.extend(keys)
             confs = {**self.default_confs, **self.confs}

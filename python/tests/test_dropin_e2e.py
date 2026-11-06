@@ -407,6 +407,40 @@ def test_add_artifacts_reach_udfs_as_pyspark(session, tmp_path):
     assert session.range(1).select(read("id")).first()[0] == "from the module|file content|inside"
 
 
+def test_foreach_foreach_partition_and_to_json_as_pyspark(session):
+    # As PySpark Connect's: foreach calls f with each row, and foreachPartition with an
+    # iterator of the rows of each partition, on the server; toJSON is a DataFrame of each row
+    # as a JSON object string.
+    import re
+
+    from pyspark.errors import PythonException
+
+    df = session.createDataFrame(
+        [(1, "a", b"x"), (2, None, None)], "id int, name string, bin binary"
+    )
+
+    def each(row):
+        raise ValueError(f"row:{row!r}")
+
+    with pytest.raises(PythonException, match=re.escape("row:Row(id=1, name='a', bin=b'x')")):
+        df.where("id = 1").foreach(each)
+
+    def partition(rows):
+        raise ValueError(f"rows:{list(rows)!r}")
+
+    with pytest.raises(
+        PythonException,
+        match=re.escape("rows:[Row(id=1, name='a', bin=b'x'), Row(id=2, name=None, bin=None)]"),
+    ):
+        df.coalesce(1).foreachPartition(partition)
+    assert df.foreach(lambda row: None) is None
+    assert df.foreachPartition(lambda rows: None) is None
+
+    json = df.toJSON()
+    assert json.columns == ["value"]
+    assert json.collect() == [Row(value='{"id":1,"name":"a","bin":"eA=="}'), Row(value='{"id":2}')]
+
+
 def test_execution_info_is_that_of_each_dataframe_as_pyspark(session):
     a = session.range(3)
     assert a.executionInfo is None

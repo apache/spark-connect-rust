@@ -676,14 +676,11 @@ impl PyDataFrame {
         PyDataFrame::new(self.dataframe.drop_duplicates_within_watermark(refs))
     }
 
-    /// `toJSON()` returns an RDD in classic PySpark; Spark Connect has no RDD, so
-    /// the official Connect client raises NotImplementedError - we match that exactly.
-    /// (Use `df.select(to_json(struct("*")))` for a JSON-string DataFrame.)
+    /// `DataFrame.toJSON`, as PySpark Connect's: a DataFrame of each row as a JSON object
+    /// string, in a column `value`.
     #[pyo3(name = "toJSON")]
-    fn to_json(&self) -> PyResult<()> {
-        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-            "toJSON() is not supported for Spark Connect (it returns an RDD)",
-        ))
+    fn to_json(&self) -> PyDataFrame {
+        PyDataFrame::new(self.dataframe.to_json_dataframe())
     }
 
     /// Whether this DataFrame is semantically equal to `other`.
@@ -1736,18 +1733,24 @@ impl PyDataFrame {
         Ok(PyDataFrame::new(self.dataframe.map_in_arrow(udf, barrier)))
     }
 
-    /// `DataFrame.foreach` — run a function per row for side effects.
-    #[pyo3(name = "foreach")]
-    fn foreach(&self, py: Python<'_>, f: Bound<'_, PyAny>) -> PyResult<()> {
-        let udf = build_side_effect_udf(py, "foreach", &f)?;
-        self.dataframe.foreach(udf).to_pyerr()
+    /// `DataFrame.foreach`, as PySpark Connect's: a UDF over a struct of the columns of each
+    /// row calls `f` with the row. The UDF is Python, as it runs on the server
+    /// (`pyspark.sql._foreach`).
+    fn foreach(slf: &Bound<'_, Self>, f: &Bound<'_, PyAny>) -> PyResult<()> {
+        slf.py()
+            .import("pyspark.sql._foreach")?
+            .call_method1("foreach", (slf, f))?;
+        Ok(())
     }
 
-    /// `DataFrame.foreachPartition` — run a function per partition for side effects.
+    /// `DataFrame.foreachPartition`, as PySpark Connect's: a `mapInArrow` function calls `f`
+    /// with an iterator of the rows of each partition.
     #[pyo3(name = "foreachPartition")]
-    fn foreach_partition(&self, py: Python<'_>, f: Bound<'_, PyAny>) -> PyResult<()> {
-        let udf = build_side_effect_udf(py, "foreachPartition", &f)?;
-        self.dataframe.foreach_partition(udf).to_pyerr()
+    fn foreach_partition(slf: &Bound<'_, Self>, f: &Bound<'_, PyAny>) -> PyResult<()> {
+        slf.py()
+            .import("pyspark.sql._foreach")?
+            .call_method1("foreachPartition", (slf, f))?;
+        Ok(())
     }
 
     /// `DataFrame.nearestByJoin`.
@@ -2758,27 +2761,6 @@ pub(crate) fn build_map_udf(
         name.to_string(),
         true,
         arguments,
-        payload,
-    ))
-}
-
-/// Build a side-effect UDF (foreach / foreachPartition): no output schema.
-fn build_side_effect_udf(
-    py: Python<'_>,
-    name: &str,
-    func: &Bound<'_, PyAny>,
-) -> PyResult<CommonInlineUserDefinedFunctionExpression> {
-    let command = py_cloudpickle(py, func)?;
-    let payload = PythonUDFPayload::new(
-        spark_connect::types::DataType::Struct { fields: vec![] },
-        eval_type::SQL_MAP_ARROW_ITER_UDF,
-        command,
-        py_version(py),
-    );
-    Ok(CommonInlineUserDefinedFunctionExpression::new(
-        name.to_string(),
-        true,
-        vec![],
         payload,
     ))
 }

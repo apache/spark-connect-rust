@@ -1709,19 +1709,18 @@ impl DataFrame {
         }
     }
 
-    /// Convert each row to a JSON object string, mirroring `DataFrame.toJSON()`.
-    ///
-    /// Reference pyspark produces `{"col":val,...}` per row by applying the server's
-    /// `to_json(struct(*))`, not a client-side row rendering (which previously emitted
-    /// Rust list syntax like `[1, a]`). Build that projection and collect the strings.
+    /// Each row as a JSON object string, in a column `value`, mirroring
+    /// `pyspark.sql.DataFrame.toJSON` of PySpark Connect, which selects
+    /// `to_json(struct(col("*"))).alias("value")`.
+    pub fn to_json_dataframe(&self) -> DataFrame {
+        use crate::functions::{col, r#struct, to_json};
+        self.select([to_json(r#struct([col("*")])).alias("value")])
+    }
+
+    /// Collect each row as a JSON object string, the rows of
+    /// [`DataFrame::to_json_dataframe`].
     pub fn to_json(&self) -> Result<Vec<String>> {
-        let cols: Vec<Column> = self
-            .columns()?
-            .iter()
-            .map(|c| crate::column::col(c))
-            .collect();
-        let json_col = crate::functions::to_json(crate::functions::r#struct(cols));
-        let rows = self.select(vec![json_col]).collect()?;
+        let rows = self.to_json_dataframe().collect()?;
         Ok(rows
             .iter()
             .map(|r| {
@@ -3759,6 +3758,24 @@ mod plan_construction_tests {
         assert_eq!(plan_ids_of(&one.range(2).unwrap().relation()), vec![2]);
         // The plans of one session do not advance the numbering of another.
         assert_eq!(plan_ids_of(&two.range(1).unwrap().relation()), vec![1]);
+    }
+
+    #[test]
+    fn to_json_dataframe_selects_the_json_of_a_struct_of_every_column() {
+        let spark = session();
+        let df = spark.range(3).unwrap().to_json_dataframe();
+        match df.plan.as_ref() {
+            LogicalPlan::Project { columns, .. } => {
+                let rendered: Vec<String> =
+                    columns.iter().map(|c| c.expression().render()).collect();
+                // As PySpark Connect's repr of the column.
+                assert_eq!(
+                    rendered,
+                    vec!["to_json(struct(unresolvedstar())) AS value".to_string()]
+                );
+            }
+            _ => panic!("expected Project plan"),
+        }
     }
 
     #[test]
