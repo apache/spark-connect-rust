@@ -2061,6 +2061,7 @@ impl PyDataFrame {
         let cols = py.detach(|| self.dataframe.columns()).to_pyerr()?;
         let udf = build_map_udf(
             py,
+            &self.dataframe.spark_session(),
             &func,
             &schema,
             eval_type::SQL_MAP_PANDAS_ITER_UDF,
@@ -2086,7 +2087,14 @@ impl PyDataFrame {
     ) -> PyResult<PyDataFrame> {
         validate_map_function(py, &func, eval_type::SQL_MAP_ARROW_ITER_UDF)?;
         let cols = py.detach(|| self.dataframe.columns()).to_pyerr()?;
-        let udf = build_map_udf(py, &func, &schema, eval_type::SQL_MAP_ARROW_ITER_UDF, &cols)?;
+        let udf = build_map_udf(
+            py,
+            &self.dataframe.spark_session(),
+            &func,
+            &schema,
+            eval_type::SQL_MAP_ARROW_ITER_UDF,
+            &cols,
+        )?;
         let profile_id = profile_id_of(profile.as_ref())?;
         Ok(PyDataFrame::new(
             self.dataframe
@@ -3181,15 +3189,18 @@ fn bind_arguments<'py, const N: usize>(
     }))
 }
 
-/// Resolve a Python schema argument (a `DataType` wrapper or a DDL string) into a Rust DataType.
+/// Resolve a Python schema argument (a `DataType` wrapper or a DDL string) into a Rust
+/// DataType: a DDL string as the server of `session` parses it, as PySpark's `_parse_ddl`.
 pub(crate) fn resolve_datatype(
+    py: Python<'_>,
+    session: &spark_connect::session::SparkSession,
     schema: &Bound<'_, PyAny>,
 ) -> PyResult<spark_connect::types::DataType> {
     if let Ok(dt) = schema.extract::<PyRef<PyDataType>>() {
         return Ok(dt.inner.clone());
     }
-    if let Ok(s) = schema.extract::<String>() {
-        return spark_connect::types::DataType::from_ddl(&s).to_pyerr();
+    if schema.is_instance_of::<pyo3::types::PyString>() {
+        return crate::types::schema_data_type(py, session, schema);
     }
     Err(pyo3::exceptions::PyTypeError::new_err(
         "schema must be a DataType or a DDL string",
@@ -3259,13 +3270,14 @@ fn udf_name(func: &Bound<'_, PyAny>) -> PyResult<String> {
 /// carry the resolved schema as the output type (mirrors the scalar UDF command layout).
 pub(crate) fn build_map_udf(
     py: Python<'_>,
+    session: &spark_connect::session::SparkSession,
     func: &Bound<'_, PyAny>,
     schema: &Bound<'_, PyAny>,
     eval_type_id: i32,
     input_cols: &[String],
 ) -> PyResult<CommonInlineUserDefinedFunctionExpression> {
     let name = udf_name(func)?;
-    let return_type = resolve_datatype(schema)?;
+    let return_type = resolve_datatype(py, session, schema)?;
     // The worker reads the pickled type as a `DataType`, so a DDL string is pickled as the
     // type it parses to, as the reference client pickles the type of `_parse_ddl`.
     let pickled_type = if schema.is_instance_of::<pyo3::types::PyString>() {

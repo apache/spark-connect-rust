@@ -120,6 +120,11 @@ impl GroupedData {
         self.dataframe.columns()
     }
 
+    /// The session of the grouped DataFrame.
+    pub fn spark_session(&self) -> crate::session::SparkSession {
+        self.dataframe.spark_session()
+    }
+
     /// Grouping-key expressions for this grouped data.
     fn grouping_expressions(&self) -> Vec<Expression> {
         self.group_cols
@@ -666,6 +671,11 @@ impl CoGroupedData {
         let mut cols = self.left.input_columns()?;
         cols.extend(self.right.input_columns()?);
         Ok(cols)
+    }
+
+    /// The session of the cogrouped DataFrames.
+    pub fn spark_session(&self) -> crate::session::SparkSession {
+        self.left.spark_session()
     }
 
     /// Apply a pandas UDF to each cogroup (`cogroup(...).applyInPandas`).

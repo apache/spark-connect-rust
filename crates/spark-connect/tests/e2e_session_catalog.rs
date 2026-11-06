@@ -292,3 +292,33 @@ fn sql_resolves_the_dataframes_that_the_query_names() {
     assert_eq!(shown.collect().expect("collect").len(), 2);
     let _ = spark.stop();
 }
+
+/// `parse_ddl` parses a DDL string on the server, as PySpark Connect's `_parse_ddl`: of a
+/// schema or a type, with the NOT NULL and COMMENT of fields, and the server's errors.
+#[test]
+fn parse_ddl_parses_on_the_server() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::types::DataType;
+    let spark = session();
+    let parsed = spark
+        .parse_ddl("a INT NOT NULL COMMENT 'c', b STRUCT<x: DOUBLE>")
+        .expect("parse");
+    let DataType::Struct { fields } = parsed else {
+        panic!("expected a struct, got {parsed:?}");
+    };
+    assert_eq!(
+        fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+        vec!["a", "b"]
+    );
+    assert!(!fields[0].nullable);
+    assert_eq!(
+        fields[0].metadata.get("comment"),
+        Some(&serde_json::Value::String("c".to_string()))
+    );
+    assert_eq!(spark.parse_ddl("bigint").expect("parse"), DataType::Long);
+    let error = spark.parse_ddl("a INT,").expect_err("a syntax error");
+    assert_eq!(error.error_class, "PARSE_SYNTAX_ERROR");
+    let _ = spark.stop();
+}
