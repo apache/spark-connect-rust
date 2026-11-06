@@ -1051,8 +1051,34 @@ pub(crate) fn convert(obj: &Bound<'_, PyAny>, dt: &DataType, nullable: bool) -> 
             let ordinal: i64 = obj.call_method0(intern!(py, "toordinal"))?.extract()?;
             Ok(Value::Date((ordinal - 719_163) as i32))
         }
+        // As PyArrow's `time64[ns]`, to which PySpark passes the value as it is: a time, and
+        // the nanoseconds of an int, or of a float, truncated.
+        DataType::Time { .. } => {
+            if obj.is_instance(TIME.import(py, "datetime", "time")?.as_any())? {
+                Ok(Value::Time(time_nanos(obj)?))
+            } else if obj.is_instance_of::<PyInt>() {
+                Ok(Value::Time(obj.extract()?))
+            } else if obj.is_instance_of::<PyFloat>() {
+                Ok(Value::Time(obj.extract::<f64>()? as i64))
+            } else {
+                Err(PyTypeError::new_err(format!(
+                    "object of type {} cannot be converted to int",
+                    obj.get_type().repr()?
+                )))
+            }
+        }
         _ => Err(unsupported(obj)?),
     }
+}
+
+/// The nanoseconds since midnight of a `datetime.time`, as PySpark's `TimeType.toInternal`.
+pub(crate) fn time_nanos(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
+    let py = obj.py();
+    let field = |name: &Bound<'_, PyString>| -> PyResult<i64> { obj.getattr(name)?.extract() };
+    let seconds = field(intern!(py, "hour"))? * 3600
+        + field(intern!(py, "minute"))? * 60
+        + field(intern!(py, "second"))?;
+    Ok(seconds * 1_000_000_000 + field(intern!(py, "microsecond"))? * 1_000)
 }
 
 /// A value of a day-time interval column, as PyArrow converts one to `duration[us]`: a

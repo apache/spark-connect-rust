@@ -211,6 +211,21 @@ pub fn value_to_py<'py>(py: Python<'py>, v: &Value) -> PyResult<Bound<'py, PyAny
                 .call_method1("fromtimestamp", (seconds,))?
                 .into_any()
         }
+        Value::Time(nanos) => {
+            // As PySpark's `TimeType.fromInternal`: a datetime.time of the microseconds.
+            let (hours, remainder) = (
+                nanos.div_euclid(3_600_000_000_000),
+                nanos.rem_euclid(3_600_000_000_000),
+            );
+            let (minutes, remainder) = (remainder / 60_000_000_000, remainder % 60_000_000_000);
+            let (seconds, remainder) = (remainder / 1_000_000_000, remainder % 1_000_000_000);
+            py.import("datetime")?.getattr("time")?.call1((
+                hours,
+                minutes,
+                seconds,
+                remainder / 1_000,
+            ))?
+        }
         Value::DayTimeInterval(micros) => {
             // Normalize using integer arithmetic: neither floats nor an intermediate
             // nanosecond duration can preserve the full signed i64 microsecond range.

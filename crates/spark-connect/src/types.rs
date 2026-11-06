@@ -1198,6 +1198,8 @@ fn parse_json_type_string(s: &str) -> Result<DataType> {
         "date" => Ok(DataType::Date),
         "timestamp" => Ok(DataType::Timestamp),
         "timestamp_ntz" => Ok(DataType::TimestampNtz),
+        // A bare `time`, as `TimeType().typeName()` names it, is the default time(6).
+        "time" => Ok(DataType::Time { precision: 6 }),
         "interval" | "calendarinterval" => Ok(DataType::CalendarInterval),
         "variant" => Ok(DataType::Variant),
         // A bare `decimal`, as `DecimalType().typeName()` names it, is the default decimal(10,0).
@@ -1741,6 +1743,8 @@ fn parse_single_type(input: &str) -> Result<DataType> {
         "date" => Ok(DataType::Date),
         "timestamp" => Ok(DataType::Timestamp),
         "timestamp_ntz" => Ok(DataType::TimestampNtz),
+        // As Spark's `TIME`, of the default precision.
+        "time" => Ok(DataType::Time { precision: 6 }),
         "interval" => Ok(DataType::CalendarInterval),
         "variant" => Ok(DataType::Variant),
         _ => {
@@ -2574,9 +2578,17 @@ mod tests {
             DataType::Varchar { length: 100 }
         );
 
-        // Test time
+        // Test time; a bare time is of the default precision, as Spark's TIME.
         assert_eq!(
             DataType::from_ddl("time(6)").unwrap(),
+            DataType::Time { precision: 6 }
+        );
+        assert_eq!(
+            DataType::from_ddl("time").unwrap(),
+            DataType::Time { precision: 6 }
+        );
+        assert_eq!(
+            DataType::from_json_str("\"time\"").unwrap(),
             DataType::Time { precision: 6 }
         );
     }

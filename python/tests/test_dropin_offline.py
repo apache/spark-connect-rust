@@ -815,6 +815,58 @@ def test_udtfs_are_created_as_pyspark(mock_connect):
     assert service.read_confs == [arrow_conf, arrow_conf]
 
 
+def test_time_values_are_sent_as_pyspark(mock_connect):
+    # As PySpark: a datetime.time is of TimeType(), and createDataFrame sends it as PyArrow's
+    # time64[ns] of the value, which takes the nanoseconds of an int too, and lit() of it is
+    # a time literal of its nanoseconds since midnight.
+    import datetime
+
+    import pyarrow as pa
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    t = datetime.time(1, 2, 3, 456789)
+    nanos = 3_723_456_789_000
+
+    def local_relation(df):
+        df.toArrow()
+        request = parse_message(service.execute_requests[-1])
+        relation = parse_message(parse_message(request[3][0])[1][0])
+        while 18 in relation:  # Relation.to_df -> ToDF.input.
+            relation = parse_message(parse_message(relation[18][0])[1][0])
+        # Relation.local_relation=11 -> LocalRelation.data=1, schema=2.
+        local = parse_message(relation[11][0])
+        table = pa.ipc.open_stream(local[1][0]).read_all()
+        return table, [field["type"] for field in json.loads(local[2][0])["fields"]]
+
+    for schema in (None, "t time"):
+        table, types = local_relation(spark.createDataFrame([(t,), (None,)], schema))
+        assert types == ["time(6)"]
+        assert table.schema.field(0).type == pa.time64("ns")
+        assert table.column(0).cast(pa.int64()).to_pylist() == [nanos, None]
+    table, _ = local_relation(spark.createDataFrame([(5,)], "t time"))
+    assert table.column(0).cast(pa.int64()).to_pylist() == [5]
+    with pytest.raises(TypeError, match="cannot be converted to int"):
+        spark.createDataFrame([("01:02:03",)], "t time")
+
+    literal = F.lit(t)
+    assert repr(literal) == "Column<'01:02:03.456789'>"
+    spark.range(1).select(literal).collect()
+    # ... Project.expressions=3; Expression.literal=1, Literal.time=26 (nano=1, precision=2).
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+    expression = parse_message(parse_message(parse_message(plan)[3][0])[3][0])
+    assert parse_message(parse_message(expression[1][0])[26][0]) == {1: [nanos], 2: [6]}
+
+
+def test_time_types_parse_as_pyspark():
+    # As PySpark's: a bare time is TimeType(), of the default precision 6, in a DDL string and
+    # in the JSON of a type.
+    assert T.DataType.fromDDL("t time") == T.StructType([T.StructField("t", T.TimeType(6))])
+    assert T.DataType.fromDDL("t time(3)") == T.StructType([T.StructField("t", T.TimeType(3))])
+    assert T._parse_datatype_json_string('"time"') == T.TimeType(6)
+    assert T._parse_datatype_json_string('"time(0)"') == T.TimeType(0)
+
+
 def test_decimal_literal_is_of_the_default_decimal_type_as_pyspark(mock_connect):
     # As PySpark's LiteralExpression of a Decimal, of DecimalType(): precision 10 and scale
     # 0, which the server widens to those of the value, wherever the literal is.
