@@ -35,6 +35,8 @@ impl PyGroupedData {
                 for (k, v) in dict.iter() {
                     let col_name: String = k.extract()?;
                     let func_name: String = v.extract()?;
+                    // As PySpark's `agg` of a dict, by `col`, of its origin.
+                    let _origin = crate::origin::with_origin("col");
                     let c = spark_connect::functions::col(&col_name);
                     // Build func(col) as an unresolved function resolved server-side, so
                     // aggregate names (max/min/sum/avg/count/...) all work regardless of

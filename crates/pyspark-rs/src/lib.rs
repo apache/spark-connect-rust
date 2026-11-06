@@ -36,6 +36,7 @@ mod group;
 mod infer;
 mod ml;
 mod observation;
+mod origin;
 mod pandas_input;
 mod pipelines;
 mod profiler;

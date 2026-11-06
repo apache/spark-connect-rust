@@ -783,6 +783,51 @@ def test_timedelta_is_a_day_time_interval_as_pyspark(session):
         session.createDataFrame([("x",)], "d interval day to second")
 
 
+def test_errors_carry_the_dataframe_query_contexts_of_pyspark(session):
+    # As PySpark's: an error in an expression that col() or a Column method built reports its
+    # DataFrameQueryContext, of the function and of its call site in this file.
+    import inspect
+
+    from pyspark.errors import ArithmeticException, QueryContextType
+
+    def contexts(df):
+        with pytest.raises((AnalysisException, ArithmeticException)) as error:
+            df.collect()
+        return [
+            (c.contextType(), c.fragment(), c.callSite().rsplit("/", 1)[-1])
+            for c in error.value.getQueryContext()
+        ]
+
+    here = f"{os.path.basename(__file__)}:{{}}"
+    line = inspect.currentframe().f_lineno
+    assert contexts(session.range(1).select("no_such_col")) == [
+        (QueryContextType.DataFrame, "col", here.format(line + 1))
+    ]
+    assert contexts(session.range(1).select(F.col("nope") + 1)) == [
+        (QueryContextType.DataFrame, "col", here.format(line + 4))
+    ]
+    session.conf.set("spark.sql.ansi.enabled", "true")
+    assert contexts(session.range(1).select(F.lit(1) / F.lit(0))) == [
+        (QueryContextType.DataFrame, "__truediv__", here.format(line + 8))
+    ]
+    session.conf.unset("spark.sql.ansi.enabled")
+    # repartitionById makes a column of a name with col(), while a UDF call refers to a
+    # column by its name without an origin.
+    assert contexts(session.range(1).repartitionById(2, "nope")) == [
+        (QueryContextType.DataFrame, "col", here.format(line + 14))
+    ]
+    udf = F.udf(lambda x: x, "long")
+    assert contexts(session.range(1).select(udf("nope"), udf(x="nope2"))) == []
+    # sampleBy takes a column of a name with col(), as PySpark's F._to_col.
+    assert contexts(session.range(1).sampleBy("nope", {0: 1.0})) == [
+        (QueryContextType.DataFrame, "col", here.format(line + 20))
+    ]
+    # unpivot takes its columns of names with col(), as PySpark's F._to_col.
+    assert contexts(session.range(1).unpivot("nope", ["id"], "v", "w")) == [
+        (QueryContextType.DataFrame, "col", here.format(line + 24))
+    ]
+
+
 def test_server_errors_carry_their_condition_and_details(session):
     from pyspark.errors import AnalysisException, ArithmeticException, ParseException
     from pyspark.errors.exceptions.connect import SparkConnectGrpcException, SQLQueryContext

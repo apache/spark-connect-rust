@@ -76,6 +76,11 @@ fn udf_arguments(
                 return Ok(table_arg.inner.to_column());
             }
         }
+        // As PySpark's `to_expr` of a UDF call: a column name is a ColumnReference of it,
+        // without the origin of `col`.
+        if arg.is_instance_of::<pyo3::types::PyString>() {
+            return Ok(Column::new(Expression::column(arg.extract::<String>()?)));
+        }
         to_column(arg)
     };
     let mut columns = Vec::with_capacity(args.len() + named_args.len());
@@ -350,6 +355,8 @@ fn scalar_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<LiteralExpression>>
 
 #[pyfunction]
 fn pyfunc_col(name: &str) -> PyColumn {
+    // As PySpark's `col`, of `_with_origin`.
+    let _origin = crate::origin::with_origin("col");
     PyColumn::new(spark_funcs::col(name))
 }
 
