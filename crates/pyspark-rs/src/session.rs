@@ -1061,6 +1061,45 @@ impl PySparkSession {
             .to_pyerr()
     }
 
+    /// Register a Python UDTF by name so SQL calls it (used by `UDTFRegistration.register`).
+    /// Mirrors the reference `client.register_udtf`: the `CommonInlineUserDefinedTableFunction`
+    /// of a `PythonUDTF` (cloudpickled handler class, return type and eval type) with NO
+    /// arguments, sent as the `register_table_function` command. As for a UDTF call, a DDL
+    /// return type is left to the server to parse.
+    #[pyo3(name = "_registerPythonUdtf", signature = (name, return_type, eval_type, command, python_ver, deterministic=false))]
+    // SparkError is large, as the core crate allows for its API.
+    #[allow(clippy::too_many_arguments, clippy::result_large_err)]
+    fn register_python_udtf_py(
+        &self,
+        py: Python<'_>,
+        name: &str,
+        return_type: Option<&Bound<'_, PyAny>>,
+        eval_type: i32,
+        command: Vec<u8>,
+        python_ver: String,
+        deterministic: bool,
+    ) -> PyResult<()> {
+        let return_type = return_type
+            .map(|value| match value.extract::<String>() {
+                Ok(ddl) => Ok(DataType::Unparsed {
+                    data_type_string: ddl,
+                }),
+                Err(_) => crate::types::py_to_data_type(value),
+            })
+            .transpose()?;
+        py.detach(|| {
+            self.session.register_table_function(
+                name,
+                return_type.as_ref(),
+                eval_type,
+                &command,
+                &python_ver,
+                deterministic,
+            )
+        })
+        .to_pyerr()
+    }
+
     #[pyo3(name = "sessionId")]
     fn session_id_camel(&self) -> String {
         self.session.session_id().to_string()
@@ -1104,14 +1143,14 @@ impl PySparkSession {
         py.get_type::<PyHook>().unbind()
     }
 
-    /// UDTF registration accessor, mirroring `SparkSession.udtf.register(name, cls)`.
-    /// Returns a registration object whose `register` cloudpickles the Python UDTF
-    /// class and returns a bound, name-registered table function.
+    /// UDTF registration accessor, mirroring `SparkSession.udtf`: the `UDTFRegistration`
+    /// of this session, whose `register(name, f)` registers the UDTF `f` as `name`.
     #[getter]
-    fn udtf<'a>(&self, py: Python<'a>) -> PyResult<Bound<'a, PyAny>> {
-        py.import("pyspark.sql.udtf")?
+    fn udtf<'a>(slf: &Bound<'a, Self>) -> PyResult<Bound<'a, PyAny>> {
+        slf.py()
+            .import("pyspark.sql.udtf")?
             .getattr("UDTFRegistration")?
-            .call0()
+            .call1((slf,))
     }
 
     /// The active session for this process, or None. Mirrors `SparkSession.getActiveSession`.

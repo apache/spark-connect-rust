@@ -1475,7 +1475,7 @@ def test_partition_transforms_are_those_of_pyspark_and_the_others_deprecated():
 
 
 def test_udtf_construction():
-    from pyspark.sql.udtf import udtf, UserDefinedTableFunction, UDTFRegistration
+    from pyspark.sql.udtf import udtf, UserDefinedTableFunction
 
     @udtf(returnType="a int")
     class Echo:
@@ -1485,13 +1485,48 @@ def test_udtf_construction():
 
     assert isinstance(Echo, UserDefinedTableFunction)
     assert Echo.name == "Echo"
-    reg = UDTFRegistration()
-    # register a plain class -> wraps it
-    r = reg.register("echo", Echo.func, returnType="a int")
-    assert r.name == "echo"
-    # register an existing UserDefinedTableFunction -> renames in place
-    r2 = reg.register("echo2", Echo)
-    assert r2.name == "echo2" and r2 is Echo
+
+
+def test_udtf_register_sends_the_udtf_as_pyspark(mock_connect):
+    # As PySpark's UDTFRegistration.register: a register_table_function command of the
+    # CommonInlineUserDefinedTableFunction of the UDTF, under the name and without
+    # arguments, which returns the UDTF as it is; for a UDTF of udtf() or arrow_udtf() only.
+    from pyspark.errors import PySparkTypeError
+    from pyspark.serializers import CloudPickleSerializer
+    from pyspark.sql import functions as F
+    from pyspark.sql.udtf import UDTFRegistration, UserDefinedTableFunction
+
+    spark, service = mock_connect
+
+    class Echo:
+        def eval(self, n):
+            yield (n,)
+
+    udtf = F.udtf(Echo, returnType="a int", useArrow=False).asDeterministic()
+    assert isinstance(spark.udtf, UDTFRegistration) and spark.udtf.sparkSession is spark
+    assert spark.udtf.register("echo", udtf) is udtf and udtf.name == "Echo"
+    # ExecutePlanRequest.plan=3, Plan.command=2, Command.register_table_function=10;
+    # CommonInlineUserDefinedTableFunction.function_name=1, deterministic=2, arguments=3,
+    # python_udtf=4; PythonUDTF.return_type=1, eval_type=2, command=3, python_ver=4.
+    command = parse_message(parse_message(service.execute_requests[-1])[3][0])[2][0]
+    function = parse_message(parse_message(command)[10][0])
+    assert function[1] == [b"echo"] and function[2] == [1] and 3 not in function
+    python_udtf = parse_message(function[4][0])
+    # DataType.unparsed=24, whose data_type_string=1.
+    return_type = parse_message(python_udtf[1][0])
+    assert parse_message(return_type[24][0])[1] == [b"a int"]
+    assert python_udtf[2] == [300] and python_udtf[4] == [udtf.python_ver.encode()]
+    assert CloudPickleSerializer().loads(python_udtf[3][0]).__name__ == "Echo"
+
+    calls = service.execute_calls
+    with pytest.raises(PySparkTypeError) as error:
+        spark.udtf.register("echo", Echo)
+    assert error.value.getCondition() == "CANNOT_REGISTER_UDTF"
+    scalar = UserDefinedTableFunction(Echo, "a int", evalType=100)
+    with pytest.raises(PySparkTypeError) as error:
+        spark.udtf.register("echo", scalar)
+    assert error.value.getCondition() == "INVALID_UDTF_EVAL_TYPE"
+    assert service.execute_calls == calls
 
 
 def test_udtf_call_without_session_raises():
