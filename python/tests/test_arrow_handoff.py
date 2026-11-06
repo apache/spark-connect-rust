@@ -1752,7 +1752,10 @@ def test_pandas_timestamp_ipc_preserves_every_microsecond(protocol, monkeypatch,
 
     monkeypatch.setattr(pd.DataFrame, "astype", no_rows)
     with _arrow_input_service(protocol, capture_tables=True, **{"spark.sql.session.timeZone": zone}) as (spark, state):
-        spark.createDataFrame(frame, schema).toArrow()
+        result = spark.createDataFrame(frame, schema)
+        assert not result.isLocal()
+        result.toArrow()
+        assert state["column_names"] == schema.names
         table = pa.concat_tables(state["tables"])
         for column in table.columns:
             assert column.type == pa.timestamp("us", tz="UTC")
@@ -1774,7 +1777,10 @@ def test_pandas_naive_timestamp_utc_ipc(protocol, monkeypatch):
     schema = T.StructType([T.StructField("a", T.TimestampType())])
     monkeypatch.setattr(pd.DataFrame, "astype", lambda *a, **k: pytest.fail("row conversion"))
     with _arrow_input_service(protocol, capture_tables=True) as (spark, state):
-        spark.createDataFrame(frame, schema).toArrow()
+        result = spark.createDataFrame(frame, schema)
+        assert not result.isLocal()
+        result.toArrow()
+        assert state["column_names"] == schema.names
         assert state["tables"][0].column(0).cast(pa.int64()).to_pylist() == [
             -1, None, 1577836800123456]
 
@@ -2090,6 +2096,7 @@ def _assert_timestamp_columns_row_input(state, values, schema):
     assert not state["config_requests"]
     assert not state["uploads"]
     assert len(state["input_tables"]) == 1
+    assert state["column_names"] == schema.names
     table = state["input_tables"][0]
     assert table.num_rows == 10000
     assert table.schema.equals(
