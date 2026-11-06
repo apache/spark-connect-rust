@@ -2986,6 +2986,45 @@ def test_functions_substring():
     assert type(F.substr(str_col, F.lit(1), F.lit(5))).__name__ == "Column"
 
 
+def test_pivot_pivots_only_a_group_by_and_checks_its_arguments_as_pyspark():
+    # As PySpark's GroupedData.pivot: only the grouping of groupBy pivots, which it checks
+    # first, and then the column is a str and the values a list of bools, floats, ints and
+    # strs.
+    from pyspark.errors import PySparkNotImplementedError, PySparkTypeError
+    from pyspark.sql import functions as F
+
+    df = _offline_session().range(1)
+    for grouped, operation in [
+        (df.rollup("id"), "PIVOT after ROLLUP"),
+        (df.cube("id"), "PIVOT after CUBE"),
+        (df.groupingSets([["id"]], "id"), "PIVOT after GROUPING_SETS"),
+        (df.groupBy("id").pivot("id"), "Repeated PIVOT operation"),
+    ]:
+        with pytest.raises(PySparkNotImplementedError) as e:
+            grouped.pivot(1)
+        assert e.value.getCondition() == "UNSUPPORTED_OPERATION"
+        assert e.value.getMessageParameters() == {"operation": operation}
+    grouped = df.groupBy("id")
+    for args, arg_name, expected_type, arg_type in [
+        ((1,), "pivot_col", "str", "int"),
+        ((F.col("id"),), "pivot_col", "str", "Column"),
+        (("id", "a"), "values", "list", "str"),
+        (("id", ("a",)), "values", "list", "tuple"),
+        (("id", [F.lit(1)]), "value", "bool, float, int or str", "Column"),
+        (("id", [None]), "value", "bool, float, int or str", "NoneType"),
+    ]:
+        with pytest.raises(PySparkTypeError) as e:
+            grouped.pivot(*args)
+        assert e.value.getCondition() == "NOT_EXPECTED_TYPE"
+        assert e.value.getMessageParameters() == {
+            "arg_name": arg_name,
+            "expected_type": expected_type,
+            "arg_type": arg_type,
+        }
+    for values in [None, [], [True, 1.5, 2, "a"]]:
+        grouped.pivot("id", values)
+
+
 def test_replace_and_unpivot_check_their_arguments_as_pyspark():
     # As PySpark's DataFrame.replace and unpivot, which check their arguments on the client.
     import warnings

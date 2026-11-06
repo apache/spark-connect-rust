@@ -101,25 +101,49 @@ impl PyGroupedData {
         Ok(PyDataFrame::new(df))
     }
 
-    /// Pivot on a column; `values=None` auto-discovers the distinct pivot values.
+    /// Pivot on a column; `values=None` auto-discovers the distinct pivot values. As PySpark's,
+    /// only the grouping of `groupBy` pivots, else `UNSUPPORTED_OPERATION`, and then the column
+    /// is a str and the values a list of bools, floats, ints and strs, else `NOT_EXPECTED_TYPE`.
     #[pyo3(signature = (pivot_col, values=None))]
     fn pivot(
         &self,
-        pivot_col: &str,
-        values: Option<Vec<Bound<'_, PyAny>>>,
+        pivot_col: &Bound<'_, PyAny>,
+        values: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyGroupedData> {
-        let pcol = spark_connect::functions::col(pivot_col);
+        use crate::stat_arguments::not_expected_type;
+        use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyString};
+        self.grouped_data.check_pivot().to_pyerr()?;
+        let Ok(name) = pivot_col.cast::<PyString>() else {
+            return Err(not_expected_type(pivot_col, "pivot_col", "str"));
+        };
         let vals = match values {
             None => None,
-            Some(vs) => {
-                let mut out = Vec::with_capacity(vs.len());
-                for v in &vs {
-                    out.push(crate::session::py_to_value(v)?);
+            Some(values) => {
+                let Ok(values) = values.cast::<PyList>() else {
+                    return Err(not_expected_type(values, "values", "list"));
+                };
+                let mut out = Vec::with_capacity(values.len());
+                for value in values.iter() {
+                    if !(value.is_instance_of::<PyBool>()
+                        || value.is_instance_of::<PyFloat>()
+                        || value.is_instance_of::<PyInt>()
+                        || value.is_instance_of::<PyString>())
+                    {
+                        return Err(not_expected_type(
+                            &value,
+                            "value",
+                            "bool, float, int or str",
+                        ));
+                    }
+                    out.push(crate::session::py_to_value(&value)?);
                 }
                 Some(out)
             }
         };
-        Ok(PyGroupedData::new(self.grouped_data.pivot(pcol, vals)))
+        let pcol = spark_connect::functions::col(&name.to_cow()?);
+        Ok(PyGroupedData::new(
+            self.grouped_data.pivot(pcol, vals).to_pyerr()?,
+        ))
     }
 
     /// Sum values in each group.
