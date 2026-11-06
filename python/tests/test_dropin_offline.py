@@ -1702,6 +1702,48 @@ def test_avro_protobuf_partitioning_submodules():
         assert hasattr(F.partitioning, n)
 
 
+def test_java_functions_are_registered_of_their_return_types_as_pyspark(mock_connect):
+    # As PySpark's spark.udf, whose sparkSession is the session, and whose registerJavaFunction
+    # sends a DDL string as an unparsed data type, which the server parses, and a DataType as
+    # itself, in a JavaUDF that is not deterministic.
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql.types import IntegerType
+
+    spark, service = mock_connect
+    assert spark.udf.sparkSession is spark
+
+    def registered():
+        # ExecutePlanRequest.plan=3, Plan.command=2, Command.register_function=1;
+        # CommonInlineUserDefinedFunction.function_name=1, deterministic=2, java_udf=6.
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+        function = parse_message(parse_message(plan[2][0])[1][0])
+        return function, parse_message(function[6][0])
+
+    spark.udf.registerJavaFunction("f", "com.example.F", "int")
+    function, udf = registered()
+    assert function[1] == [b"f"]
+    assert function.get(2, [0]) == [0]
+    # JavaUDF.class_name=1, output_type=2, aggregate=3; DataType.unparsed=24 of
+    # Unparsed.data_type_string=1, and DataType.integer=6.
+    assert udf[1] == [b"com.example.F"]
+    assert parse_message(parse_message(udf[2][0])[24][0]) == {1: [b"int"]}
+    spark.udf.registerJavaFunction("g", "com.example.G", IntegerType())
+    _, udf = registered()
+    assert list(parse_message(udf[2][0])) == [6]
+    spark.udf.registerJavaFunction("h", "com.example.H")
+    _, udf = registered()
+    assert 2 not in udf and udf.get(3, [0]) == [0]
+    spark.udf.registerJavaUDAF("i", "com.example.I")
+    _, udf = registered()
+    assert 2 not in udf and udf[3] == [1]
+    calls = len(service.execute_requests)
+    with pytest.raises(PySparkValueError) as e:
+        spark.udf.registerJavaFunction("j", "com.example.J", 1)
+    assert e.value.getCondition() == "UNSUPPORTED_OPERATION"
+    assert e.value.getMessageParameters() == {"operation": "data type 1"}
+    assert len(service.execute_requests) == calls
+
+
 def test_udf_registration_has_java_methods():
     # The UDFRegistration class (what spark.udf returns) exposes the Java methods.
     from pyspark.sql.udf import UDFRegistration

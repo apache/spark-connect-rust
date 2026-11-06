@@ -499,10 +499,9 @@ impl SparkSession {
 
     /// Register a Java UDF/UDAF by class name, mirroring the reference
     /// `client.register_java(name, javaClassName, return_type, aggregate)` used by
-    /// `UDFRegistration.registerJavaFunction` / `registerJavaUDAF`: builds a
-    /// `CommonInlineUserDefinedFunction` carrying a `JavaUDF` and sends it as the
-    /// `RegisterFunction` command. `return_type_ddl` is only used for non-aggregate
-    /// functions (matching the reference, which omits the output type when aggregate).
+    /// `UDFRegistration.registerJavaFunction` / `registerJavaUDAF`. `return_type_ddl`, a DDL
+    /// string, is sent unparsed, for the server to parse, as PySpark sends a string: see
+    /// [`SparkSession::register_java_function_with`].
     pub fn register_java_function(
         &self,
         name: &str,
@@ -510,16 +509,35 @@ impl SparkSession {
         return_type_ddl: Option<&str>,
         aggregate: bool,
     ) -> Result<()> {
+        let return_type = return_type_ddl.map(|ddl| DataType::Unparsed {
+            data_type_string: ddl.to_string(),
+        });
+        self.register_java_function_with(name, java_class_name, return_type, aggregate)
+    }
+
+    /// Register a Java UDF/UDAF by class name, of the return type `return_type`, as PySpark's
+    /// `UDFRegistration.registerJavaFunction` / `registerJavaUDAF`: the
+    /// `CommonInlineUserDefinedFunction` of a `JavaUDF`, which is not deterministic, sent as the
+    /// `RegisterFunction` command. `aggregate` is only used without a return type (matching
+    /// the reference, which omits it for a function of an output type).
+    pub fn register_java_function_with(
+        &self,
+        name: &str,
+        java_class_name: &str,
+        return_type: Option<DataType>,
+        aggregate: bool,
+    ) -> Result<()> {
         let mut java_udf = proto::JavaUdf::default();
         java_udf.class_name = java_class_name.to_string();
-        if let Some(ddl) = return_type_ddl {
-            java_udf.output_type = Some(crate::types::DataType::from_ddl(ddl)?.to_proto());
+        if let Some(return_type) = return_type {
+            java_udf.output_type = Some(return_type.to_proto());
         } else {
             java_udf.aggregate = aggregate;
         }
         let mut fun = proto::CommonInlineUserDefinedFunction::default();
         fun.function_name = name.to_string();
-        fun.deterministic = true;
+        // As PySpark's CommonInlineUserDefinedFunction, which is not deterministic by default.
+        fun.deterministic = false;
         fun.function =
             Some(proto::common_inline_user_defined_function::Function::JavaUdf(java_udf));
         crate::dataframe::execute_command_collect(

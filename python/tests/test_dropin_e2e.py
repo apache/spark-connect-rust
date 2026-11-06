@@ -248,6 +248,20 @@ def test_arrow_udtf_takes_and_returns_arrow_data_as_pyspark(session):
     assert PlusOne(F.lit(1)).collect() == [Row(x=2, kind="Int32Array")]
 
 
+def test_java_functions_are_registered_of_their_return_types_as_pyspark(session):
+    # As PySpark's: spark.udf.sparkSession is the session, and registerJavaFunction sends a
+    # DDL string for the server to parse, so an invalid one is its PARSE_SYNTAX_ERROR.
+    from pyspark.errors import ParseException
+
+    assert session.udf.sparkSession is session
+    with pytest.raises(ParseException) as e:
+        session.udf.registerJavaFunction("java_f", "com.example.NoSuchFunction", "nonsense")
+    assert e.value.getCondition() == "PARSE_SYNTAX_ERROR"
+    with pytest.raises(PySparkValueError) as e:
+        session.udf.registerJavaFunction("java_f", "com.example.NoSuchFunction", 1)
+    assert e.value.getCondition() == "UNSUPPORTED_OPERATION"
+
+
 def test_udfs_are_arrow_optimized_or_of_their_type_hints_as_pyspark(session):
     # As PySpark's udf(): Arrow-optimized as the server enables by default, so Arrow
     # converts a result to the return type; and a function with pandas type hints is a
