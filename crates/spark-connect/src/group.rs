@@ -163,7 +163,8 @@ impl GroupedData {
     ///
     /// `func` (built on the Python side with eval type
     /// `SQL_GROUPED_MAP_PANDAS_UDF_WITH_STATE` and carrying the output schema as its
-    /// return type) is combined with the state schema, output mode, and timeout.
+    /// return type) is combined with the state schema, output mode, and timeout in an
+    /// `ApplyInPandasWithState` relation, as the reference client builds it.
     pub fn apply_in_pandas_with_state(
         &self,
         func: CommonInlineUserDefinedFunctionExpression,
@@ -171,18 +172,14 @@ impl GroupedData {
         output_mode: &str,
         timeout_conf: &str,
     ) -> DataFrame {
-        let plan = LogicalPlan::GroupMap {
+        let plan = LogicalPlan::ApplyInPandasWithState {
             input: Arc::clone(&self.dataframe.plan),
             grouping_expressions: self.grouping_expressions(),
+            output_schema: func.python_udf.output_type.clone(),
             func,
-            sorting_expressions: vec![],
-            initial_input: None,
-            initial_grouping_expressions: vec![],
-            is_map_groups_with_state: Some(false),
-            output_mode: Some(output_mode.to_string()),
-            timeout_conf: Some(timeout_conf.to_string()),
-            state_schema: Some(state_schema),
-            transform_with_state_info: None,
+            state_schema,
+            output_mode: output_mode.to_string(),
+            timeout_conf: timeout_conf.to_string(),
         };
         DataFrame::new(self.dataframe.session.clone(), plan)
     }
@@ -610,6 +607,44 @@ mod tests {
         ] {
             assert_eq!(result.schema().unwrap(), schema);
         }
+    }
+
+    #[test]
+    fn apply_in_pandas_with_state_builds_its_relation() {
+        use crate::udf::{eval_type, PythonUDFPayload};
+        use spark_connect_proto::relation::RelType;
+
+        let spark = session();
+        let grouped = spark
+            .range(10)
+            .unwrap()
+            .group_by(vec![crate::column::col("id")]);
+        let output = DataType::from_ddl("id long, c long").unwrap();
+        let state = DataType::from_ddl("c long").unwrap();
+        let udf = CommonInlineUserDefinedFunctionExpression::new(
+            "count".to_string(),
+            true,
+            vec![],
+            PythonUDFPayload::new(
+                output.clone(),
+                eval_type::SQL_GROUPED_MAP_PANDAS_UDF_WITH_STATE,
+                vec![],
+                "3.12".to_string(),
+            ),
+        );
+        let result = grouped.apply_in_pandas_with_state(udf, state.clone(), "update", "NoTimeout");
+        // The relation of the reference client, which the server takes for this function,
+        // not a GroupMap, which it rejects.
+        let Some(RelType::ApplyInPandasWithState(apply)) = result.plan.to_proto().rel_type else {
+            panic!("expected an ApplyInPandasWithState relation");
+        };
+        assert_eq!(apply.output_schema, output.json());
+        assert_eq!(apply.state_schema, state.json());
+        assert_eq!(apply.output_mode, "update");
+        assert_eq!(apply.timeout_conf, "NoTimeout");
+        assert_eq!(apply.grouping_expressions.len(), 1);
+        assert!(apply.input.is_some());
+        assert_eq!(apply.func.unwrap().function_name, "count");
     }
 
     #[test]
