@@ -3500,6 +3500,15 @@ def test_session_hook_is_present_and_passthrough():
     assert hook.on_execute_plan(sentinel) is sentinel
 
 
+def test_ml_vector_functions_build_their_columns_as_pyspark():
+    from pyspark.ml.functions import array_to_vector, vector_to_array
+
+    # Through pyspark.ml.connect.functions, as in PySpark Connect.
+    assert repr(vector_to_array("v")) == "Column<'vector_to_array(v, float64)'>"
+    assert repr(vector_to_array("v", "float32")) == "Column<'vector_to_array(v, float32)'>"
+    assert repr(array_to_vector("a")) == "Column<'array_to_vector(a)'>"
+
+
 def test_ml_connect_base_classes_and_functions():
     from pyspark.ml.connect import Estimator, Transformer, Evaluator, Model, PipelineModel
 

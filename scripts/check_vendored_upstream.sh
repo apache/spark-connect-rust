@@ -90,6 +90,9 @@ VENDORED_FILES=(
   "ml/functions.py"
   # ML connect base ABCs (Estimator/Transformer/Evaluator/Model) - pure upstream.
   "ml/connect/base.py"
+  # vector_to_array/array_to_vector of pyspark.ml.functions build their columns here, through
+  # pyspark.sql.connect.functions.builtin - pure upstream.
+  "ml/connect/functions.py"
 
   # ML: param (param API is unmodified)
   "ml/param/__init__.py"
