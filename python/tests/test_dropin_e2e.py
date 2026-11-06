@@ -1335,6 +1335,37 @@ def test_window_order_by_a_column_sorts_nulls_first_as_pyspark(session):
         assert [(r.o, r.rn) for r in rows] == expected
 
 
+def test_create_dataframe_takes_the_ddl_of_spark_as_pyspark(session):
+    # As PySpark Connect's, which parses a DDL schema on the server: nested structs, arrays and
+    # maps of them, backtick-quoted names, and NOT NULL and COMMENT clauses.
+    schema = (
+        "st struct<a:int,b:double>, arr array<struct<c:int>>, m map<string,struct<x:int>>, "
+        "`a b` int NOT NULL COMMENT 'c'"
+    )
+    df = session.createDataFrame([((1, 2.0), [(3,)], {"k": (4,)}, 5)], schema)
+    assert df.schema.simpleString() == (
+        "struct<st:struct<a:int,b:double>,arr:array<struct<c:int>>,"
+        "m:map<string,struct<x:int>>,a b:int>"
+    )
+    assert df.collect() == [
+        Row(st=Row(a=1, b=2.0), arr=[Row(c=3)], m={"k": Row(x=4)}, **{"a b": 5})
+    ]
+    # Collations, which the server names, and the errors of the server's parser.
+    collated = session.createDataFrame([("x",)], "s STRING COLLATE UTF8_LCASE")
+    assert collated.schema.simpleString() == "struct<s:string collate UTF8_LCASE>"
+    from pyspark.errors import ParseException
+
+    for ddl, condition in [("a INT,", "PARSE_SYNTAX_ERROR"), ("a BOGUS", "UNSUPPORTED_DATATYPE")]:
+        with pytest.raises(ParseException) as error:
+            session.createDataFrame([], ddl)
+        assert error.value.getCondition() == condition
+    # As do the map functions, of their schemas.
+    mapped = session.range(2).mapInPandas(lambda it: it, "id long NOT NULL COMMENT 'k'")
+    assert [(f.name, f.nullable, f.metadata) for f in mapped.schema.fields] == [
+        ("id", False, {"comment": "k"})]
+    assert mapped.collect() == [Row(id=0), Row(id=1)]
+
+
 def test_functions_send_their_optional_arguments_as_pyspark(session):
     # The values of official PySpark 4.3.0; each optional argument used to be dropped.
     df = session.sql(

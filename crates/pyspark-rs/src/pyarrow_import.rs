@@ -36,7 +36,7 @@ pub(crate) fn create_dataframe(
     let schema = match schema {
         Some(s) if s.extract::<String>().is_ok() => Some(crate::types::data_type_to_py(
             py,
-            &crate::types::py_to_data_type(s)?,
+            &crate::types::schema_data_type(py, session, s)?,
         )?),
         Some(s) => Some(s.clone().unbind()),
         None => None,

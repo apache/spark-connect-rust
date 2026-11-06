@@ -20,6 +20,8 @@ from threading import Barrier
 import pytest
 
 from _mock_connect_server import (
+    ddl_json,
+    ddl_parse_response,
     message_field,
     mock_connect_session,
     parse_message,
@@ -4892,7 +4894,11 @@ def test_timedelta_values_convert_as_pyspark():
 
 
 def _local_create_dataframe(*args):
-    # The local relation and its toDF are built without a server.
+    # The local relation and its toDF are built without a server; a DDL schema, which PySpark
+    # asks the server to parse, is parsed as the server would.
+    args = list(args)
+    if len(args) > 1 and isinstance(args[1], str) and ddl_json(args[1]) is not None:
+        args[1] = T._parse_datatype_json_string(json.dumps(ddl_json(args[1])))
     return _offline_session().createDataFrame(*args)
 
 
@@ -5429,6 +5435,16 @@ def _container_input_fields(data):
     return result
 
 
+def _ddl_parse(request, context):
+    # As the server, of the DDL schemas that the client asks it to parse (`_parse_ddl`).
+    import grpc
+
+    response = ddl_parse_response(request)
+    if response is None:
+        context.abort(grpc.StatusCode.UNIMPLEMENTED, "Method not found!")
+    return response
+
+
 def _container_input_capture_server(connection):
     from concurrent.futures import ThreadPoolExecutor
     import grpc
@@ -5452,6 +5468,7 @@ def _container_input_capture_server(connection):
         server.add_generic_rpc_handlers((grpc.method_handlers_generic_handler(
             "spark.connect.SparkConnectService", {
                 "ExecutePlan": grpc.unary_stream_rpc_method_handler(execute),
+                "AnalyzePlan": grpc.unary_unary_rpc_method_handler(_ddl_parse),
             }),))
         port = server.add_insecure_port("127.0.0.1:0")
         server.start()
@@ -5744,6 +5761,7 @@ def _exact_date_capture_server(connection):
             "spark.connect.SparkConnectService", {
                 "ExecutePlan": grpc.unary_stream_rpc_method_handler(_exact_date_execute),
                 "Config": grpc.unary_unary_rpc_method_handler(_exact_date_config),
+                "AnalyzePlan": grpc.unary_unary_rpc_method_handler(_ddl_parse),
             }),))
         port = server.add_insecure_port("127.0.0.1:0")
         server.start()
@@ -6622,6 +6640,43 @@ def test_completion_matches_python_connect(completion_analyzed, names):
     for name in names:
         assert isinstance(df[name], Column)
     assert df.schema.fieldNames() == names
+
+
+def test_ddl_schemas_are_parsed_on_the_server_as_pyspark(mock_connect):
+    # As PySpark Connect's `_parse_ddl`, which asks the server to parse a DDL schema, of
+    # createDataFrame and of the map functions; a type is sent as it is.
+    spark, service = mock_connect
+
+    def ddl_requests():
+        # base.proto: AnalyzePlanRequest.ddl_parse=11, DDLParse.ddl_string=1.
+        return [parse_message(parse_message(request)[11][0])[1][0].decode()
+                for request in service.analyze_requests if 11 in parse_message(request)]
+
+    def sent_local_schema():
+        # The LocalRelation of the type that the server parsed: AnalyzePlanRequest.schema=4 ->
+        # plan=1 -> root=1 -> (Relation.to_df=18 -> input=1 ->) local_relation=11 -> schema=2.
+        relation = parse_message(parse_message(parse_message(
+            parse_message(service.analyze_requests[-1])[4][0])[1][0])[1][0])
+        while 18 in relation:
+            relation = parse_message(parse_message(relation[18][0])[1][0])
+        return T._parse_datatype_json_string(parse_message(relation[11][0])[2][0].decode())
+
+    spark.createDataFrame([], "id long").columns
+    assert sent_local_schema().simpleString() == "struct<id:bigint>"
+    nested = "id struct<a:int,b:double> NOT NULL"
+    spark.createDataFrame([], nested).columns
+    assert sent_local_schema() == T.StructType([T.StructField("id", T.StructType([
+        T.StructField("a", T.IntegerType()), T.StructField("b", T.DoubleType())]), False)])
+    assert ddl_requests() == ["id long", nested]
+    df = spark.range(1)
+    df.mapInPandas(lambda it: it, "id long NOT NULL")
+    df.mapInArrow(lambda it: it, "id long COMMENT 'c'")
+    df.groupBy("id").applyInPandas(lambda pdf: pdf, "`id` long")
+    df.groupBy("id").cogroup(df.groupBy("id")).applyInArrow(lambda l, r: l, "id: long")
+    assert ddl_requests()[2:] == [
+        "id long NOT NULL", "id long COMMENT 'c'", "`id` long", "id: long"]
+    df.mapInPandas(lambda it: it, T.StructType([T.StructField("id", T.LongType())]))
+    assert len(ddl_requests()) == 6
 
 
 def test_completion_lists_are_independent(completion_analyzed):

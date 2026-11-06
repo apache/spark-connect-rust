@@ -260,6 +260,30 @@ impl SparkSession {
         Ok(DataFrame::new(self.clone(), plan))
     }
 
+    /// Parse a DDL string on the server, mirroring PySpark Connect's `_parse_ddl`: the
+    /// `DDLParse` of an `AnalyzePlanRequest`, of a schema or a type, as Spark parses it.
+    pub fn parse_ddl(&self, ddl: &str) -> Result<DataType> {
+        let request = proto::AnalyzePlanRequest {
+            session_id: self.client().session_id().to_string(),
+            user_context: Some(proto::UserContext::default()),
+            analyze: Some(proto::analyze_plan_request::Analyze::DdlParse(
+                proto::analyze_plan_request::DdlParse {
+                    ddl_string: ddl.to_string(),
+                },
+            )),
+            ..Default::default()
+        };
+        let response = block_on(self.client().analyze_plan(request))?;
+        match response.result {
+            Some(proto::analyze_plan_response::Result::DdlParse(r)) => {
+                DataType::from_proto(&r.parsed.unwrap_or_default())
+            }
+            _ => Err(SparkError::connect_msg(
+                "AnalyzePlan response did not contain a DDL parse result",
+            )),
+        }
+    }
+
     /// Execute a SQL statement and return a DataFrame.
     ///
     /// Mirrors `pyspark.sql.SparkSession.sql(sqlQuery)`: the statement is sent at once, so a

@@ -16,7 +16,9 @@
 #
 """Small, separately hosted Spark Connect service for transport-level tests."""
 
+import json
 import multiprocessing
+import re
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from threading import Event
@@ -75,6 +77,153 @@ def parse_message(data):
             raise ValueError(f"unsupported wire type {wire}")
         fields.setdefault(field, []).append(value)
     return fields
+
+
+# The JSON names of the atomic types of DDL names, and the DataType kinds (types.proto) of the
+# JSON names.
+_ATOMIC_JSON = {
+    "void": "void", "null": "void", "binary": "binary", "boolean": "boolean",
+    "bool": "boolean", "byte": "byte", "tinyint": "byte", "short": "short",
+    "smallint": "short", "int": "integer", "integer": "integer", "long": "long",
+    "bigint": "long", "float": "float", "real": "float", "double": "double",
+    "string": "string", "date": "date", "timestamp": "timestamp", "timestamp_ltz": "timestamp",
+    "timestamp_ntz": "timestamp_ntz", "variant": "variant",
+}
+_PROTO_KINDS = {
+    "void": 1, "binary": 2, "boolean": 3, "byte": 4, "short": 5, "integer": 6, "long": 7,
+    "float": 8, "double": 9, "string": 11, "date": 14, "timestamp": 15, "timestamp_ntz": 16,
+    "variant": 25,
+}
+_DAY_TIME = ["day", "hour", "minute", "second"]
+_YEAR_MONTH = ["year", "month"]
+_DDL_FIELD = re.compile(
+    r"\s*(?P<name>`[^`]+`|\w+)(?:\s*:\s*|\s+)(?P<type>.+?)(?P<not_null>\s+not\s+null)?"
+    r"(?:\s+comment\s+'(?P<comment>[^']*)')?\s*", re.IGNORECASE | re.DOTALL)
+
+
+def _top_level_split(text):
+    parts, depth, start = [], 0, 0
+    for i, char in enumerate(text):
+        depth += {"<": 1, ">": -1, "(": 1, ")": -1}.get(char, 0)
+        if char == "," and depth == 0:
+            parts.append(text[start:i])
+            start = i + 1
+    return parts + [text[start:]]
+
+
+def ddl_json(text):
+    """The JSON value of the type of a DDL string, as Spark's DDL parser parses those of the
+    tests: atomic types, decimal(p, s), time(p), intervals, arrays, maps and structs, and
+    schemas of `name type` and `name: type` fields, of NOT NULL and COMMENT. None for any
+    other DDL."""
+    text = text.strip()
+    lower = text.lower()
+    if lower in _ATOMIC_JSON:
+        return _ATOMIC_JSON[lower]
+    match = re.fullmatch(
+        r"(?:decimal|dec|numeric)\s*(?:\(\s*(\d+)\s*(?:,\s*(\d+)\s*)?\))?", lower)
+    if match:
+        return f"decimal({int(match[1] or 10)},{int(match[2] or 0)})"
+    match = re.fullmatch(r"time\s*(?:\(\s*(\d+)\s*\))?", lower)
+    if match:
+        return f"time({int(match[1] or 6)})"
+    match = re.fullmatch(r"(geometry|geography)\s*\(\s*(\d+)\s*\)", lower)
+    if match:
+        crs = "OGC:CRS84" if match[2] == "4326" else f"SRID:{match[2]}"
+        return f"geometry({crs})" if match[1] == "geometry" else f"geography({crs}, SPHERICAL)"
+    match = re.fullmatch(r"interval\s+(\w+)(?:\s+to\s+(\w+))?", lower)
+    if match:
+        start, end = match[1], match[2] or match[1]
+        for units in (_DAY_TIME, _YEAR_MONTH):
+            if start in units and end in units and units.index(start) <= units.index(end):
+                return f"interval {start}" + ("" if start == end else f" to {end}")
+        return None
+    if lower.startswith("array<") and lower.endswith(">"):
+        element = ddl_json(text[6:-1])
+        return element and {"type": "array", "elementType": element, "containsNull": True}
+    if lower.startswith("map<") and lower.endswith(">"):
+        types = [ddl_json(part) for part in _top_level_split(text[4:-1])]
+        if len(types) != 2 or None in types:
+            return None
+        return {"type": "map", "keyType": types[0], "valueType": types[1],
+                "valueContainsNull": True}
+    if lower.startswith("struct<") and lower.endswith(">"):
+        text = text[7:-1]
+        if not text.strip():
+            return {"type": "struct", "fields": []}
+    fields = []
+    for part in _top_level_split(text):
+        match = _DDL_FIELD.fullmatch(part)
+        data_type = match and ddl_json(match["type"])
+        if not data_type:
+            return None
+        metadata = {} if match["comment"] is None else {"comment": match["comment"]}
+        fields.append({"name": match["name"].strip("`"), "type": data_type,
+                       "nullable": not match["not_null"], "metadata": metadata})
+    return {"type": "struct", "fields": fields}
+
+
+def data_type_proto(value):
+    """The DataType (types.proto) of the JSON value of a type."""
+    if isinstance(value, dict):
+        # Array: element_type=1, contains_null=2; Map: key_type=1, value_type=2,
+        # value_contains_null=3; Struct.fields=1, StructField: name=1, data_type=2,
+        # nullable=3, metadata=4.
+        if value["type"] == "array":
+            return message_field(20, message_field(1, data_type_proto(value["elementType"]))
+                                 + varint_field(2, int(value["containsNull"])))
+        if value["type"] == "map":
+            return message_field(22, message_field(1, data_type_proto(value["keyType"]))
+                                 + message_field(2, data_type_proto(value["valueType"]))
+                                 + varint_field(3, int(value["valueContainsNull"])))
+        fields = b""
+        for field in value["fields"]:
+            encoded = message_field(1, field["name"]) + message_field(
+                2, data_type_proto(field["type"]))
+            if field["nullable"]:
+                encoded += varint_field(3, 1)
+            if field["metadata"]:
+                encoded += message_field(4, json.dumps(field["metadata"]))
+            fields += message_field(1, encoded)
+        return message_field(21, fields)
+    if value in _PROTO_KINDS:
+        return message_field(_PROTO_KINDS[value], b"")
+    # Decimal: scale=1, precision=2; Time: precision=1; DayTimeInterval=19 and
+    # YearMonthInterval=18: start_field=1, end_field=2.
+    match = re.fullmatch(r"decimal\((\d+),(\d+)\)", value)
+    if match:
+        return message_field(10, varint_field(1, int(match[2])) + varint_field(2, int(match[1])))
+    match = re.fullmatch(r"time\((\d+)\)", value)
+    if match:
+        return message_field(28, varint_field(1, int(match[1])))
+    # Geometry=26 and Geography=27: srid=1.
+    match = re.fullmatch(r"(geometry|geography)\((?:OGC:CRS84|SRID:(\d+))(?:, \w+)?\)", value)
+    if match:
+        return message_field(26 if match[1] == "geometry" else 27,
+                             varint_field(1, int(match[2] or 4326)))
+    match = re.fullmatch(r"interval (\w+)(?: to (\w+))?", value)
+    units = _DAY_TIME if match[1] in _DAY_TIME else _YEAR_MONTH
+    start, end = units.index(match[1]), units.index(match[2] or match[1])
+    return message_field(19 if units is _DAY_TIME else 18,
+                         varint_field(1, start) + varint_field(2, end))
+
+
+def ddl_parse_response(request):
+    """The AnalyzePlanResponse of an AnalyzePlanRequest of a DDLParse, as the server parses the
+    DDL strings of the tests, or None for another request: AnalyzePlanRequest.ddl_parse=11 ->
+    DDLParse.ddl_string=1; AnalyzePlanResponse.ddl_parse=9 -> DDLParse.parsed=1."""
+    message = parse_message(request)
+    if 11 not in message:
+        return None
+    parsed = ddl_data_type(parse_message(message[11][0])[1][0].decode())
+    return message_field(9, message_field(1, parsed or b""))
+
+
+def ddl_data_type(text):
+    """The DataType of a DDL string, as the server's DDLParse parses those of the tests (see
+    `ddl_json`); None for any other DDL."""
+    value = ddl_json(text)
+    return None if value is None else data_type_proto(value)
 
 
 def struct_schema(name="id"):
@@ -144,6 +293,13 @@ def serve(connection):
                 )
             if self.failure == "rpc":
                 context.abort(grpc.StatusCode.INVALID_ARGUMENT, "schema unavailable")
+            # base.proto: AnalyzePlanRequest.ddl_parse=11 -> DDLParse.ddl_string=1;
+            # AnalyzePlanResponse.ddl_parse=9 -> DDLParse.parsed=1: the type of the DDL, as the
+            # server parses it, or `data_type` for one that `ddl_data_type` does not parse.
+            if 11 in parse_message(request):
+                ddl = parse_message(parse_message(request)[11][0])[1][0].decode()
+                parsed = ddl_data_type(ddl) or self.data_type
+                return message_field(9, message_field(1, parsed))
             if self.failure == "no-result":
                 return b""
             if self.failure == "missing-schema":
