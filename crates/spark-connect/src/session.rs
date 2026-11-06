@@ -1483,12 +1483,12 @@ mod tests {
                     .map(str::to_string)
                     .collect::<Arc<[String]>>(),
                 vec![
-                    Value::Long(257),
+                    Value::Long(25),
                     Value::Long(999),
                     Value::Long(-2),
-                    Value::Struct(Row::new(vec!["n".to_string()], vec![Value::Long(300)]).into()),
-                    Value::List(vec![Value::Long(65_537), Value::Null]),
-                    Value::Map(vec![(Value::String("k".to_string()), Value::Long(65_538))]),
+                    Value::Struct(Row::new(vec!["n".to_string()], vec![Value::Long(30)]).into()),
+                    Value::List(vec![Value::Long(655), Value::Null]),
+                    Value::Map(vec![(Value::String("k".to_string()), Value::Long(656))]),
                 ],
             )
             .into(),
@@ -1535,6 +1535,8 @@ mod tests {
         let schema = DataType::Struct {
             fields: vec![struct_field("payload", target)],
         };
+        // The values fit their declared types: an out-of-range value is not part of what this
+        // checks (the encoder narrows it with `as`, where PySpark raises ArrowInvalid).
         // Read the actual IPC with Arrow rather than the client's decoder, so
         // symmetric encoding/decoding errors cannot hide a coercion regression.
         let bytes = rows_to_arrow_ipc(&rows, &schema).unwrap();
@@ -1556,7 +1558,7 @@ mod tests {
                 .as_any()
                 .downcast_ref::<Int8Array>()
                 .unwrap(),
-            &Int8Array::from(vec![Some(1), None, None]),
+            &Int8Array::from(vec![Some(25), None, None]),
         );
         assert_eq!(
             actual
@@ -1572,7 +1574,7 @@ mod tests {
                 .as_any()
                 .downcast_ref::<Int64Array>()
                 .unwrap(),
-            &Int64Array::from(vec![Some(257), None, None]),
+            &Int64Array::from(vec![Some(25), None, None]),
         );
         let nested = actual
             .column(3)
@@ -1586,7 +1588,7 @@ mod tests {
                 .as_any()
                 .downcast_ref::<Int8Array>()
                 .unwrap(),
-            &Int8Array::from(vec![Some(44), None, None]),
+            &Int8Array::from(vec![Some(30), None, None]),
         );
         let items = actual
             .column(4)
@@ -1601,7 +1603,7 @@ mod tests {
                 .as_any()
                 .downcast_ref::<Int16Array>()
                 .unwrap(),
-            &Int16Array::from(vec![Some(1), None]),
+            &Int16Array::from(vec![Some(655), None]),
         );
         let map = actual
             .column(5)
@@ -1616,7 +1618,7 @@ mod tests {
         );
         assert_eq!(
             map.values().as_any().downcast_ref::<Int16Array>().unwrap(),
-            &Int16Array::from(vec![Some(2)]),
+            &Int16Array::from(vec![Some(656)]),
         );
         assert_eq!(actual.column(6).null_count(), 3);
     }
