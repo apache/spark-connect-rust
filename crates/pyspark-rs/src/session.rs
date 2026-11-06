@@ -778,7 +778,11 @@ impl PySparkSession {
                             fields: fields.clone(),
                         };
                         let df = py
-                            .detach(|| self.session.create_dataframe_from_columns(columns, schema))
+                            .detach(|| {
+                                self.session
+                                    .create_dataframe_from_columns(columns, schema)
+                                    .map_err(Box::new)
+                            })
                             .to_pyerr()?;
                         return Ok(PyDataFrame::new(df));
                     }
