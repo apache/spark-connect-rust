@@ -142,6 +142,16 @@ timestamp conversion helpers normalize the table, then arrow-rs imports its
 those batches to IPC for the local relation sent to Spark. No Python rows are
 materialized; casts, buffer alignment, and IPC serialization may still copy.
 Empty tables require an explicit schema, matching PySpark Connect.
+Pandas inputs with only NumPy `int64` or pandas nullable `Int64` columns also
+use this importer, preserving integer precision and null masks without Python
+rows. Small frames (fewer than 1,000 rows) with only NumPy columns retain the
+row path to avoid the configuration RPC of the importer; nullable `Int64` columns
+use Arrow at any size.
+This initial path accepts inferred schemas, complete string column names,
+and explicit `StructType` schemas whose fields are all `LongType`. Other dtypes,
+DDL/atomic schemas, schema conversions, NUL names, and duplicate/non-string input names
+retain the existing row conversion path. `verifySchema` remains ignored for
+pandas Arrow input, matching Spark Connect.
 Inputs at or above `spark.sql.session.localRelationCacheThreshold` are serialized
 into independent IPC streams and uploaded as session-scoped cache artifacts.
 The plan carries `ChunkedCachedLocalRelation` hashes instead of embedding the
