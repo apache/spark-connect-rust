@@ -4437,6 +4437,66 @@ def test_instr_regexp_replace_optional_args():
 
 
 @pytest.mark.parametrize("column,expected", [
+    # As PySpark Connect's Expression reprs: an operator renders as a function.
+    (lambda F: F.col("a") + 1, "+(a, 1)"),
+    (lambda F: 1 - F.col("a"), "-(1, a)"),
+    (lambda F: (F.col("a") + 1) * (F.col("b") - 2), "*(+(a, 1), -(b, 2))"),
+    (lambda F: -F.col("a"), "negative(a)"),
+    (lambda F: ~F.col("a"), "not(a)"),
+    (lambda F: F.col("a") != 1, "not(==(a, 1))"),
+    (lambda F: F.col("a") & F.col("b"), "and(a, b)"),
+    (lambda F: F.col("a").between(1, 2), "and(>=(a, 1), <=(a, 2))"),
+    (lambda F: F.when(F.col("a") > 1, 1).otherwise(0), "CASE WHEN >(a, 1) THEN 1 ELSE 0 END"),
+    (lambda F: F.countDistinct("a"), "count(distinct a)"),
+    (lambda F: F.col("a").cast("int"), "CAST(a AS INT)"),
+    (lambda F: F.col("a").cast("struct<x:int,y:string>"), "CAST(a AS STRUCT<X:INT,Y:STRING>)"),
+    (lambda F: F.col("a").try_cast("int"), "TRY_CAST(a AS INT)"),
+    (lambda F: F.col("*"), "unresolvedstar()"),
+    (lambda F: F.count("*"), "count(unresolvedstar())"),
+    (lambda F: F.col("t.*"), "unresolvedstar(t.*)"),
+    (lambda F: F.col("a")[0], "a['0']"),
+    (lambda F: F.col("a")["k"], "a['k']"),
+    # Literals, as LiteralExpression.__repr__ shows their Python values.
+    (lambda F: F.lit(True), "True"),
+    (lambda F: F.lit(None), "NULL"),
+    (lambda F: F.lit(1.5), "1.5"),
+    (lambda F: F.lit(1e20), "1e+20"),
+    (lambda F: F.lit(1e-07), "1e-07"),
+    (lambda F: F.lit(float("nan")), "nan"),
+    (lambda F: F.lit(b"a'b"), 'b"a\'b"'),
+    (lambda F: F.lit(bytes([0, 9, 92, 200])), "b'\\x00\\t\\\\\\xc8'"),
+    (lambda F: F.lit(__import__("datetime").date(1999, 12, 31)), "1999-12-31"),
+    # A naive datetime is a local time, rendered in the local time zone again.
+    (lambda F: F.lit(__import__("datetime").datetime(2020, 1, 2, 3, 4, 5, 6)),
+     "2020-01-02 03:04:05.000006"),
+    (lambda F: F.lit(__import__("decimal").Decimal("-1.50")), "-1.50"),
+])
+def test_column_reprs_as_pyspark(column, expected):
+    from pyspark.sql import functions as F
+
+    assert repr(column(F)) == f"Column<'{expected}'>"
+
+
+def test_window_and_lambda_reprs_as_pyspark():
+    import re
+
+    from pyspark.sql import Window
+    from pyspark.sql import functions as F
+
+    spec = Window.partitionBy("g").orderBy(F.col("o").desc()).rowsBetween(-1, 1)
+    assert repr(spec) == "WindowSpec(PartitionBy(g), OrderBy(o DESC NULLS LAST), WindowFrame(ROW_FRAME, -1, 1))"
+    window = F.sum("a").over(
+        Window.orderBy(F.col("o").asc()).rangeBetween(Window.unboundedPreceding, Window.currentRow))
+    assert repr(window) == (
+        "Column<'WindowExpression(sum(a), (WindowSpec(OrderBy(o ASC NULLS FIRST), "
+        "WindowFrame(RANGE_FRAME, -9223372036854775808, 0))))'>")
+    # A lambda variable is named by a counter, as in PySpark.
+    assert re.fullmatch(
+        r"Column<'transform\(a, LambdaFunction\(\+\(x_(\d+), 1\), x_\1\)\)'>",
+        repr(F.transform("a", lambda x: x + 1)))
+
+
+@pytest.mark.parametrize("column,expected", [
     # instr and regexp_replace are plain functions, as other functions are.
     (lambda F: F.instr("s", "b"), "instr(s, b)"),
     (lambda F: F.instr("s", "b", 2), "instr(s, b, 2)"),

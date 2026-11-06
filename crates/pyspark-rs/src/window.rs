@@ -136,8 +136,9 @@ impl PyWindowSpec {
         Ok(PyWindowSpec::new(new_spec))
     }
 
+    /// As `WindowSpec.__repr__` of PySpark Connect.
     fn __repr__(&self) -> String {
-        "WindowSpec()".to_string()
+        self.spec.repr()
     }
 }
 
