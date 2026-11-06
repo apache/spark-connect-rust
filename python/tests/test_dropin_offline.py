@@ -5495,6 +5495,7 @@ def test_map_functions_reject_what_is_not_callable_as_pyspark(mock_connect, buil
 # The mock runs in a separate process and needs no Spark server.
 from concurrent.futures import ThreadPoolExecutor as version_cache_ThreadPoolExecutor
 import multiprocessing as version_cache_multiprocessing
+from threading import Event as version_cache_Event
 
 from pyspark.sql import SparkSession as version_cache_SparkSession
 
@@ -5514,7 +5515,7 @@ def version_cache_message(field, value):
     return version_cache_varint(field * 8 + 2) + version_cache_varint(len(value)) + value
 
 
-def version_cache_serve(connection):
+def version_cache_serve(connection, request_started, response_waiting, response_gate):
     import grpc
 
     class Service:
@@ -5522,9 +5523,22 @@ def version_cache_serve(connection):
         releases = 0
         failure = None
         version = "4.3.0"
+        block_response = False
 
         def analyze(self, request, context):
             self.calls += 1
+            if self.block_response:
+                response_waiting.set()
+                request_started.set()
+                try:
+                    released = response_gate.wait(10)
+                finally:
+                    response_waiting.clear()
+                if not released:
+                    context.abort(
+                        grpc.StatusCode.DEADLINE_EXCEEDED,
+                        "Python thread could not release the version response gate",
+                    )
             if self.failure == "rpc":
                 context.abort(grpc.StatusCode.INVALID_ARGUMENT, "version unavailable")
             if self.failure == "no-result":
@@ -5558,12 +5572,16 @@ def version_cache_serve(connection):
                     setattr(service, command[1], command[2])
                     connection.send(None)
         finally:
-            server.stop(0).wait()
+            response_gate.set()
+            server.stop(0).wait(5)
 
 
 class version_cache_RemoteService:
-    def __init__(self, connection):
+    def __init__(self, connection, request_started, response_waiting, response_gate):
         object.__setattr__(self, "connection", connection)
+        object.__setattr__(self, "request_started", request_started)
+        object.__setattr__(self, "response_waiting", response_waiting)
+        object.__setattr__(self, "response_gate", response_gate)
 
     def __getattr__(self, name):
         self.connection.send(("get", name))
@@ -5575,20 +5593,38 @@ class version_cache_RemoteService:
         assert self.connection.poll(10), "Mock server did not respond"
         self.connection.recv()
 
+    def wait_for_request(self):
+        return self.request_started.wait(5)
+
+    def response_is_waiting(self):
+        return self.response_waiting.is_set()
+
+    def release_response(self):
+        self.response_gate.set()
+
 
 @pytest.fixture
 def version_cache_session():
     pytest.importorskip("grpc")
     context = version_cache_multiprocessing.get_context("spawn")
     parent, child = context.Pipe()
-    process = context.Process(target=version_cache_serve, args=(child,))
+    request_started = context.Event()
+    response_waiting = context.Event()
+    response_gate = context.Event()
+    process = context.Process(
+        target=version_cache_serve,
+        args=(child, request_started, response_waiting, response_gate),
+    )
     process.start()
     try:
         assert parent.poll(20), "Mock server did not start"
         port = parent.recv()
         spark = version_cache_SparkSession.builder.remote(f"sc://127.0.0.1:{port}").getOrCreate()
-        yield spark, version_cache_RemoteService(parent)
+        yield spark, version_cache_RemoteService(
+            parent, request_started, response_waiting, response_gate,
+        )
     finally:
+        response_gate.set()
         if process.is_alive():
             parent.send(("stop",))
         process.join(10)
@@ -5650,8 +5686,49 @@ def test_version_cache_success_remains_cached_after_stop(version_cache_session):
 
 def test_version_cache_concurrent_first_lookup(version_cache_session):
     spark, service = version_cache_session
-    with version_cache_ThreadPoolExecutor(max_workers=8) as executor:
+    workers = 8
+    start = Barrier(workers + 1)
+    attempted = [version_cache_Event() for _ in range(workers)]
+    service.block_response = True
+
+    def read_version(index):
+        start.wait(timeout=10)
+        attempted[index].set()
+        return spark.version
+
+    with version_cache_ThreadPoolExecutor(max_workers=workers) as executor:
+        pending = [executor.submit(read_version, index) for index in range(workers)]
+        try:
+            start.wait(timeout=10)
+            for attempt in attempted:
+                assert attempt.wait(5), "Worker did not attempt a version lookup"
+            assert service.wait_for_request(), "Version request never reached the server"
+            assert service.response_is_waiting(), "Version response gate timed out"
+            # The barrier synchronizes Python call attempts; the held response
+            # keeps the cache cold while those callers compete for the lookup.
+            assert not any(future.done() for future in pending)
+            assert service.calls == 1
+        finally:
+            service.release_response()
+        assert [future.result(timeout=10) for future in pending] == ["4.3.0"] * workers
         assert list(executor.map(lambda _: spark.version, range(24))) == ["4.3.0"] * 24
+    assert service.calls == 1
+
+
+def test_version_cache_releases_gil_while_response_is_pending(version_cache_session):
+    spark, service = version_cache_session
+    service.block_response = True
+    with version_cache_ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(lambda: spark.version)
+        try:
+            assert service.wait_for_request(), "Version request never reached the server"
+            # This Python thread must run before the mock's bounded wait ends.
+            # The live flag distinguishes that from resuming after a GIL stall.
+            assert service.response_is_waiting(), "Python could not run during the version RPC"
+            assert not pending.done()
+        finally:
+            service.release_response()
+        assert pending.result(timeout=10) == "4.3.0"
     assert service.calls == 1
 
 

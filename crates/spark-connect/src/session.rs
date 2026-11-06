@@ -521,7 +521,11 @@ impl SparkSession {
     /// Python Connect's cached property. New sessions resolve independently.
     pub fn version(&self) -> Result<String> {
         // Serialize the first lookup across clones; errors leave the cache empty.
-        let mut cached = self.server_version.lock().unwrap();
+        // A panicking lookup cannot leave a partially initialized String behind.
+        let mut cached = self
+            .server_version
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(version) = cached.as_ref() {
             return Ok(version.clone());
         }
@@ -1526,6 +1530,27 @@ mod tests {
             assert!(other.server_version.lock().unwrap().is_none());
         }
         spark.stopped.store(true, Ordering::SeqCst);
+        assert_eq!(handle.version().unwrap(), "4.3.0");
+    }
+
+    #[test]
+    fn version_cache_recovers_after_lookup_panics() {
+        let spark = session();
+        let handle = spark.clone();
+        // Like other synchronous RPC helpers, version() cannot run inside Tokio.
+        // That caller's panic must not permanently break this session's cache.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            block_on(async { spark.version() })
+        }));
+        assert!(result.is_err());
+        assert!(spark.server_version.is_poisoned());
+        let mut cached = spark
+            .server_version
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(cached.is_none());
+        *cached = Some("4.3.0".into());
+        drop(cached);
         assert_eq!(handle.version().unwrap(), "4.3.0");
     }
 
