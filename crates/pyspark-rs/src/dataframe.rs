@@ -50,6 +50,66 @@ pub struct PyDataFrame {
 }
 
 impl PyDataFrame {
+    /// The table of `show` and `_show_string`, for the arguments of `function`.
+    fn show_table(
+        &self,
+        py: Python<'_>,
+        function: &str,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<String> {
+        let [n, truncate, vertical] = bind_arguments(
+            function,
+            args,
+            kwargs,
+            ["n", "truncate", "vertical"],
+            [
+                20i32.into_pyobject(py)?.into_any(),
+                pyo3::types::PyBool::new(py, true).to_owned().into_any(),
+                pyo3::types::PyBool::new(py, false).to_owned().into_any(),
+            ],
+        )?;
+        let not_expected = |expected: &str, name: &str, value: &Bound<'_, PyAny>| -> PyErr {
+            let type_name = value
+                .get_type()
+                .name()
+                .map(|name| name.to_string())
+                .unwrap_or_default();
+            crate::column::raise_pyspark(
+                py,
+                "PySparkTypeError",
+                "NOT_EXPECTED_TYPE",
+                &[
+                    ("expected_type", expected),
+                    ("arg_name", name),
+                    ("arg_type", &type_name),
+                ],
+            )
+        };
+        if n.is_instance_of::<pyo3::types::PyBool>() || !n.is_instance_of::<pyo3::types::PyInt>() {
+            return Err(not_expected("int", "n", &n));
+        }
+        if !vertical.is_instance_of::<pyo3::types::PyBool>() {
+            return Err(not_expected("bool", "vertical", &vertical));
+        }
+        let truncate =
+            if truncate.is_instance_of::<pyo3::types::PyBool>() && truncate.is_truthy()? {
+                20
+            } else {
+                // As `int(truncate)`, whose ValueError is PySpark's NOT_EXPECTED_TYPE.
+                match py.import("builtins")?.getattr("int")?.call1((&truncate,)) {
+                    Ok(value) => value.extract::<i32>()?,
+                    Err(err) if err.is_instance_of::<pyo3::exceptions::PyValueError>(py) => {
+                        return Err(not_expected("bool", "truncate", &truncate));
+                    }
+                    Err(err) => return Err(err),
+                }
+            };
+        let (n, vertical) = (n.extract::<i32>()?, vertical.extract::<bool>()?);
+        py.detach(|| self.dataframe.show_string(n, truncate, vertical))
+            .to_pyerr()
+    }
+
     pub fn new(dataframe: DataFrame) -> Self {
         PyDataFrame { dataframe }
     }
@@ -1221,13 +1281,32 @@ impl PyDataFrame {
         py.detach(|| self.dataframe.count()).to_pyerr()
     }
 
-    /// Show the first n rows.
-    #[pyo3(signature = (n=20, truncate=true, vertical=false))]
-    fn show(&self, py: Python<'_>, n: usize, truncate: bool, vertical: bool) -> PyResult<()> {
-        // truncate/vertical are accepted for PySpark signature parity; the Rust core
-        // currently renders with its default formatting.
-        let _ = (truncate, vertical);
-        py.detach(|| self.dataframe.show(n)).to_pyerr()
+    /// Print the first `n` rows as the server formats them. Mirrors `DataFrame.show`, which
+    /// prints the table of `_show_string` with Python's `print`.
+    #[pyo3(signature = (*args, **kwargs), text_signature = "($self, n=20, truncate=True, vertical=False)")]
+    fn show(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let table = self.show_table(py, "DataFrame.show", args, kwargs)?;
+        py.import("builtins")?.call_method1("print", (table,))?;
+        Ok(())
+    }
+
+    /// The table that `show` prints: the first `n` rows (20 by default), values truncated
+    /// to 20 characters for `truncate=True`, to `int(truncate)` otherwise (0 for none), and
+    /// vertical with a line per value. Mirrors `DataFrame._show_string`, with its errors,
+    /// for any value given, None included.
+    #[pyo3(name = "_show_string", signature = (*args, **kwargs), text_signature = "($self, n=20, truncate=True, vertical=False)")]
+    fn show_string(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<String> {
+        self.show_table(py, "DataFrame._show_string", args, kwargs)
     }
 
     /// Execution info from the most recent action, as a `pyspark.sql.metrics.ExecutionInfo`
@@ -1513,6 +1592,7 @@ impl PyDataFrame {
         barrier: bool,
         profile: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
+        validate_map_function(py, &func, eval_type::SQL_MAP_PANDAS_ITER_UDF)?;
         let cols = py.detach(|| self.dataframe.columns()).to_pyerr()?;
         let udf = build_map_udf(
             py,
@@ -1537,6 +1617,7 @@ impl PyDataFrame {
         barrier: bool,
         profile: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
+        validate_map_function(py, &func, eval_type::SQL_MAP_ARROW_ITER_UDF)?;
         let cols = py.detach(|| self.dataframe.columns()).to_pyerr()?;
         let udf = build_map_udf(
             py,
@@ -2438,6 +2519,51 @@ pub(crate) fn py_version(py: Python<'_>) -> String {
     .unwrap_or_else(|| "3.11".to_string())
 }
 
+/// The arguments of a call, bound to `names` positionally and by keyword as Python binds a
+/// signature of those names with `defaults`, raising Python's `TypeError`s of `function`
+/// for too many, repeated or unexpected arguments. For a method that tells a value of None
+/// from an argument not given.
+fn bind_arguments<'py, const N: usize>(
+    function: &str,
+    args: &Bound<'py, PyTuple>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+    names: [&str; N],
+    defaults: [Bound<'py, PyAny>; N],
+) -> PyResult<[Bound<'py, PyAny>; N]> {
+    if args.len() > N {
+        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "{function}() takes from 1 to {} positional arguments but {} were given",
+            N + 1,
+            args.len() + 1
+        )));
+    }
+    let mut values: [Option<Bound<'py, PyAny>>; N] = std::array::from_fn(|_| None);
+    for (i, value) in args.iter().enumerate() {
+        values[i] = Some(value);
+    }
+    if let Some(kwargs) = kwargs {
+        for (key, value) in kwargs.iter() {
+            let key: String = key.extract()?;
+            let Some(i) = names.iter().position(|name| *name == key) else {
+                return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                    "{function}() got an unexpected keyword argument '{key}'"
+                )));
+            };
+            if values[i].is_some() {
+                return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                    "{function}() got multiple values for argument '{key}'"
+                )));
+            }
+            values[i] = Some(value);
+        }
+    }
+    let mut defaults = defaults.into_iter();
+    Ok(values.map(|value| {
+        let default = defaults.next().expect("a default per name");
+        value.unwrap_or(default)
+    }))
+}
+
 /// Resolve a Python schema argument (a `DataType` wrapper or a DDL string) into a Rust DataType.
 pub(crate) fn resolve_datatype(
     schema: &Bound<'_, PyAny>,
@@ -2453,6 +2579,46 @@ pub(crate) fn resolve_datatype(
     ))
 }
 
+/// Validate the function of a map UDF for its eval type with
+/// `pyspark.sql.pandas.functions._validate_vectorized_udf`, as the reference client does
+/// before it builds the UDF.
+pub(crate) fn validate_map_function(
+    py: Python<'_>,
+    func: &Bound<'_, PyAny>,
+    eval_type_id: i32,
+) -> PyResult<()> {
+    py.import("pyspark.sql.pandas.functions")?
+        .call_method1("_validate_vectorized_udf", (func, eval_type_id))?;
+    Ok(())
+}
+
+/// The eval type of a grouped map function from its type hints, by `infer` of
+/// `pyspark.sql.pandas.typehints` (the iterator forms, for example), as the reference
+/// client infers it. `default` is used when the hints give none, and when they cannot be
+/// read, after the reference client's `warning`.
+pub(crate) fn infer_group_map_eval_type(
+    py: Python<'_>,
+    func: &Bound<'_, PyAny>,
+    infer: &str,
+    warning: &str,
+    default: i32,
+) -> PyResult<i32> {
+    match py
+        .import("pyspark.sql.pandas.typehints")?
+        .call_method1(infer, (func,))
+    {
+        Ok(inferred) if inferred.is_none() => Ok(default),
+        Ok(inferred) => inferred.extract(),
+        Err(err) if err.is_instance_of::<pyo3::exceptions::PyException>(py) => {
+            let category = py.get_type::<pyo3::exceptions::PyUserWarning>();
+            py.import("warnings")?
+                .call_method1("warn", (warning, category))?;
+            Ok(default)
+        }
+        Err(err) => Err(err),
+    }
+}
+
 /// Build a map/group UDF expression: cloudpickle `(func, schema)` as the command and
 /// carry the resolved schema as the output type (mirrors the scalar UDF command layout).
 pub(crate) fn build_map_udf(
@@ -2464,7 +2630,14 @@ pub(crate) fn build_map_udf(
     input_cols: &[String],
 ) -> PyResult<CommonInlineUserDefinedFunctionExpression> {
     let return_type = resolve_datatype(schema)?;
-    let tup = PyTuple::new(py, [func.clone(), schema.clone()])?;
+    // The worker reads the pickled type as a `DataType`, so a DDL string is pickled as the
+    // type it parses to, as the reference client pickles the type of `_parse_ddl`.
+    let pickled_type = if schema.is_instance_of::<pyo3::types::PyString>() {
+        crate::types::data_type_to_py(py, &return_type)?.into_bound(py)
+    } else {
+        schema.clone()
+    };
+    let tup = PyTuple::new(py, [func.clone(), pickled_type])?;
     let command = py_cloudpickle(py, tup.as_any())?;
     let payload = PythonUDFPayload::new(return_type, eval_type_id, command, py_version(py));
     // The worker reconstructs the input pandas/Arrow DataFrame from the UDF's argument

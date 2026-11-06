@@ -281,6 +281,11 @@ impl SparkSession {
     /// `SparkSession.sql(query, args, **kwargs)` with DataFrames in `kwargs`: each
     /// `(DataFrame, name)` is sent along with the query, as a reference that the server
     /// resolves `name` in the query to.
+    ///
+    /// The server creates each name as a temporary view while it runs the statement, and
+    /// drops it after, also at each later action on a query's DataFrame. A name must not be
+    /// that of a temporary view to keep, which the statement would replace and drop;
+    /// PySpark's `sql()` names its DataFrames `_pyspark_connect_temp_view_<uuid>` for this.
     pub fn sql_with_references(
         &self,
         query: &str,
@@ -288,27 +293,7 @@ impl SparkSession {
         named_args: std::collections::HashMap<String, crate::expression::Expression>,
         references: Vec<(DataFrame, String)>,
     ) -> Result<DataFrame> {
-        let sql = Arc::new(LogicalPlan::Sql {
-            query: query.to_string(),
-            pos_args,
-            named_args,
-        });
-        let plan = if references.is_empty() {
-            sql
-        } else {
-            Arc::new(LogicalPlan::WithRelations {
-                root: sql,
-                references: references
-                    .into_iter()
-                    .map(|(df, alias)| {
-                        Arc::new(LogicalPlan::SubqueryAlias {
-                            input: df.plan,
-                            alias,
-                        })
-                    })
-                    .collect(),
-            })
-        };
+        let plan = Self::sql_plan(query, pos_args, named_args, references);
         // As pyspark, run the statement as a command now. The server executes a command and
         // returns a relation of its result; for a query it returns the query's relation, which
         // then runs at an action.
@@ -339,6 +324,51 @@ impl SparkSession {
                 None => Arc::unwrap_or_clone(plan),
             },
         ))
+    }
+
+    /// The relation of a SQL statement with its parameters and references.
+    fn sql_plan(
+        query: &str,
+        pos_args: Vec<crate::expression::Expression>,
+        named_args: std::collections::HashMap<String, crate::expression::Expression>,
+        references: Vec<(DataFrame, String)>,
+    ) -> Arc<LogicalPlan> {
+        let sql = Arc::new(LogicalPlan::Sql {
+            query: query.to_string(),
+            pos_args,
+            named_args,
+        });
+        if references.is_empty() {
+            return sql;
+        }
+        Arc::new(LogicalPlan::WithRelations {
+            root: sql,
+            references: references
+                .into_iter()
+                .map(|(df, alias)| {
+                    Arc::new(LogicalPlan::SubqueryAlias {
+                        input: df.plan,
+                        alias,
+                    })
+                })
+                .collect(),
+        })
+    }
+
+    /// Internal: the DataFrame of a SQL statement that is not run until an action, for a
+    /// statement within a pipeline flow function, whose relation the server analyzes in the
+    /// pipeline instead (PySpark's server returns the relation without running it there).
+    /// Not a stable API.
+    #[doc(hidden)]
+    pub fn sql_without_running(
+        &self,
+        query: &str,
+        pos_args: Vec<crate::expression::Expression>,
+        named_args: std::collections::HashMap<String, crate::expression::Expression>,
+        references: Vec<(DataFrame, String)>,
+    ) -> DataFrame {
+        let plan = Self::sql_plan(query, pos_args, named_args, references);
+        DataFrame::new(self.clone(), Arc::unwrap_or_clone(plan))
     }
 
     /// Create a DataFrame from a collection of Rows and a schema.
@@ -539,18 +569,43 @@ impl SparkSession {
         block_on(self.client.interrupt_operation(operation_id))
     }
 
-    /// Add local files as artifacts to the session (e.g. `.py`, `.jar`, `.zip`).
-    ///
-    /// Mirrors `pyspark.sql.SparkSession.addArtifacts(*path)`.
+    /// Add local files, or `file:` URIs, as artifacts of the session, mirroring
+    /// `pyspark.sql.SparkSession.addArtifacts(*path)`: a `.jar` is added to the classpath and
+    /// a `.class` to the classes; any other file is not supported without a flag of
+    /// [`add_artifacts_with`](Self::add_artifacts_with).
     pub fn add_artifacts(&self, paths: &[&str]) -> Result<()> {
-        block_on(self.client.add_artifacts(paths, false, false, true))
+        self.add_artifacts_with(paths, false, false, false)
+    }
+
+    /// Add local files as artifacts of the session, mirroring
+    /// `pyspark.sql.SparkSession.addArtifacts(*path, pyfile, archive, file)`:
+    /// - `pyfile`: a `.py`, `.egg`, `.zip` or `.jar` is importable by Python UDFs;
+    /// - `archive`: a `.zip`, `.jar`, `.tar.gz`, `.tgz` or `.tar` is extracted, into the
+    ///   directory that a `#<name>` fragment of its path names;
+    /// - `file`: any file is added to the files of the session.
+    ///
+    /// At most one of the flags may be true.
+    pub fn add_artifacts_with(
+        &self,
+        paths: &[&str],
+        pyfile: bool,
+        archive: bool,
+        file: bool,
+    ) -> Result<()> {
+        if [pyfile, archive, file].iter().filter(|flag| **flag).count() > 1 {
+            return Err(SparkError::connect_msg(
+                "[INVALID_MULTIPLE_ARGUMENT_CONDITIONS] ['pyfile', 'archive' and/or 'file'] \
+                 cannot be True together.",
+            ));
+        }
+        block_on(self.client.add_artifacts(paths, pyfile, archive, file))
     }
 
     /// Add a single local file as an artifact to the session.
     ///
     /// Mirrors `pyspark.sql.SparkSession.addArtifact(path)`.
     pub fn add_artifact(&self, path: &str) -> Result<()> {
-        block_on(self.client.add_artifacts(&[path], false, false, true))
+        self.add_artifacts(&[path])
     }
 
     /// Copy a local file to the driver's filesystem at `dest_path`.
@@ -819,6 +874,8 @@ fn datatype_to_arrow(dt: &DataType) -> Result<arrow::datatypes::DataType> {
         }
         DataType::TimestampNtzNanos { .. } => A::Timestamp(TimeUnit::Nanosecond, None),
         DataType::Time { .. } => A::Time64(TimeUnit::Microsecond),
+        // As Spark's Arrow conversion of DayTimeIntervalType.
+        DataType::DayTimeInterval { .. } => A::Duration(TimeUnit::Microsecond),
         DataType::Decimal { precision, scale } => A::Decimal128(*precision as u8, *scale as i8),
         DataType::Array {
             element_type,
@@ -958,6 +1015,7 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
             Ok(Arc::new(BinaryArray::from(vals?)))
         }
         DataType::Date => prim!(Date32Array, Value::Date),
+        DataType::DayTimeInterval { .. } => prim!(DurationMicrosecondArray, Value::DayTimeInterval),
         DataType::Timestamp | DataType::TimestampNtz => {
             let vals: Result<Vec<Option<i64>>> = values
                 .iter()
@@ -1136,6 +1194,9 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
                     Value::Map(m) => {
                         valid.append(true);
                         for (k, val) in m {
+                            if matches!(k, Value::Null) {
+                                return Err(SparkError::connect_msg("A map key cannot be null"));
+                            }
                             keys.push(k.clone());
                             vals.push(val.clone());
                         }
@@ -1155,19 +1216,22 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
                 ),
             ]
             .into();
-            let entries = StructArray::new(entry_fields.clone(), vec![key_arr, val_arr], None);
+            let entries = StructArray::try_new(entry_fields.clone(), vec![key_arr, val_arr], None)
+                .map_err(|e| SparkError::connect_msg(format!("map build: {e}")))?;
             let entries_field = Arc::new(Field::new(
                 "entries",
                 arrow::datatypes::DataType::Struct(entry_fields),
                 false,
             ));
-            Ok(Arc::new(MapArray::new(
+            MapArray::try_new(
                 entries_field,
                 OffsetBuffer::new(offsets.into()),
                 entries,
                 Some(NullBuffer::new(valid.finish())),
                 false,
-            )))
+            )
+            .map(|array| Arc::new(array) as Arc<dyn Array>)
+            .map_err(|e| SparkError::connect_msg(format!("map build: {e}")))
         }
         other => Err(SparkError::connect_msg(format!(
             "Unsupported type for Arrow createDataFrame conversion: {other:?}"
@@ -1546,6 +1610,30 @@ mod tests {
     }
 
     #[test]
+    fn input_ipc_writes_day_time_intervals_as_microsecond_durations() {
+        // As Spark's Arrow conversion of DayTimeIntervalType.
+        let interval = DataType::DayTimeInterval {
+            start_field: 0,
+            end_field: 3,
+        };
+        let rows = vec![
+            row(vec![Value::DayTimeInterval(86_402_000_003)]),
+            row(vec![Value::Null]),
+            row(vec![Value::DayTimeInterval(-999_995)]),
+        ];
+        let batch = read_batch(&rows, &schema(vec![interval]));
+        let column = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::DurationMicrosecondArray>()
+            .unwrap();
+        assert_eq!(
+            column.iter().collect::<Vec<_>>(),
+            vec![Some(86_402_000_003), None, Some(-999_995)]
+        );
+    }
+
+    #[test]
     fn input_ipc_preserves_scalar_coercion_and_nulls() {
         let schema = schema(vec![
             DataType::Integer,
@@ -1770,6 +1858,18 @@ mod tests {
             let error = rows_to_arrow_ipc(&rows, &schema).unwrap_err().to_string();
             assert!(error.contains(message), "{error}");
         }
+    }
+
+    #[test]
+    fn a_null_map_key_is_an_error() {
+        let map = DataType::Map {
+            key_type: Box::new(DataType::Long),
+            value_type: Box::new(DataType::Long),
+            value_contains_null: true,
+        };
+        let value = Value::Map(vec![(Value::Null, Value::Long(1))]);
+        let error = values_to_arrow(&[value], &map).unwrap_err().to_string();
+        assert!(error.contains("A map key cannot be null"), "{error}");
     }
 
     #[test]

@@ -443,7 +443,7 @@ For every method matching a pyspark name:
     on-Spark's `spark_column_equals` decides column identity by comparing repr strings (it does
     `repr(left).replace(backtick, "") == repr(right)...`); a generic `"Column()"` makes every column
     look equal and collapses frames to `(n, 0)`. `Expression::render()` mirrors the pyspark-connect
-    expression `__repr__` (infix binary ops, `AS`, `CAST`, star, ...). `pyspark.sql.connect.column`
+    expression `__repr__` (operators as functions, `+(a, 1)`, `AS`, `CAST`, `unresolvedstar()`, ...). `pyspark.sql.connect.column`
     re-exports the Rust `Column`, so its `isinstance(x, ConnectColumn)` checks already pass.
   - **Internal pandas functions dispatch by NAME, not by client reimplementation.**
     `pyspark.sql.internal.InternalFunction` (`distributed_sequence_id`, `pandas_product`,

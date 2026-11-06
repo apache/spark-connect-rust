@@ -168,6 +168,27 @@ pub fn to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
         ))));
     }
 
+    // A list, or a one-dimensional NumPy array, is an array, as PySpark's functions take a
+    // value with `lit`: `pyspark.sql.functions.lit` builds it. Another NumPy array is not a
+    // literal value; NumPy would convert one of a single element to a scalar below.
+    let ndarray = numpy_ndarray_ndim(obj)?;
+    if obj.is_instance_of::<pyo3::types::PyList>() || ndarray == Some(1) {
+        let column = obj
+            .py()
+            .import("pyspark.sql.functions")?
+            .getattr("lit")?
+            .call1((obj,))?;
+        return Ok(column.extract::<PyRef<'_, PyColumn>>()?.column.clone());
+    }
+    if ndarray.is_some() {
+        return Err(crate::column::raise_pyspark(
+            obj.py(),
+            "PySparkTypeError",
+            "UNSUPPORTED_DATA_TYPE",
+            &[("data_type", "ndarray")],
+        ));
+    }
+
     // Non-primitive scalars must be checked BEFORE int/float: Decimal defines
     // __float__/__int__, and a pandas Timestamp (a datetime subclass) defines __int__
     // (nanoseconds), so an early int/float extract would silently mis-encode them.
@@ -205,14 +226,31 @@ pub fn to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
         ))));
     }
 
+    // As PySpark's literal conversion for a value of another type.
     let type_name = obj
         .get_type()
         .name()
         .map(|n| n.to_string())
         .unwrap_or_else(|_| "<unknown>".to_string());
-    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
-        "Expected Column or scalar (int, float, str, bool, bytes, datetime, date, Decimal, None); got {type_name}"
-    )))
+    Err(crate::column::raise_pyspark(
+        obj.py(),
+        "PySparkTypeError",
+        "UNSUPPORTED_DATA_TYPE",
+        &[("data_type", &type_name)],
+    ))
+}
+
+/// The number of dimensions of `obj` if it is a `numpy.ndarray`. NumPy is looked up in
+/// `sys.modules`, as an array exists only when it is imported, so this does not import it.
+fn numpy_ndarray_ndim(obj: &Bound<'_, PyAny>) -> PyResult<Option<usize>> {
+    let py = obj.py();
+    let modules = py.import("sys")?.getattr("modules")?;
+    match modules.cast::<pyo3::types::PyDict>()?.get_item("numpy")? {
+        Some(numpy) if !numpy.is_none() && obj.is_instance(&numpy.getattr("ndarray")?)? => {
+            Ok(Some(obj.getattr("ndim")?.extract()?))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// Build a literal for the non-primitive scalar Python types (`datetime`, `date`,
@@ -249,6 +287,11 @@ fn scalar_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<LiteralExpression>>
             // Timestamp's .timestamp() treats a naive value as UTC; normalize it first).
             let micros = crate::session::datetime_to_micros(obj)?;
             return Ok(Some(LiteralExpression::Timestamp(micros)));
+        }
+        // datetime.timedelta -> DayTimeIntervalType, as PySpark's literal of one.
+        if obj.is_instance(&dt_mod.getattr("timedelta")?)? {
+            let micros = crate::infer::timedelta_micros(obj)?;
+            return Ok(Some(LiteralExpression::DayTimeInterval(micros)));
         }
         let date_cls = dt_mod.getattr("date")?;
         if obj.is_instance(&date_cls)? {

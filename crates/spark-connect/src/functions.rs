@@ -2238,6 +2238,38 @@ pub fn instr(col1: Column, col2: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.instr(str, substr, start)`: searches from the
+/// 1-based position `start`.
+pub fn instr_with_start(col1: Column, col2: Column, start: Column) -> Column {
+    func(
+        "instr",
+        vec![
+            col1.expression().clone(),
+            col2.expression().clone(),
+            start.expression().clone(),
+        ],
+    )
+}
+
+/// Mirrors `pyspark.sql.functions.instr(str, substr, start, occurrence)`: the
+/// position of the `occurrence`-th match, searching from the 1-based position `start`.
+pub fn instr_with_start_and_occurrence(
+    col1: Column,
+    col2: Column,
+    start: Column,
+    occurrence: Column,
+) -> Column {
+    func(
+        "instr",
+        vec![
+            col1.expression().clone(),
+            col2.expression().clone(),
+            start.expression().clone(),
+            occurrence.expression().clone(),
+        ],
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.json_tuple`.
 pub fn json_tuple<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
     let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
@@ -3022,6 +3054,25 @@ pub fn regexp_replace(col1: Column, col2: Column, col3: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.regexp_replace(string, pattern, replacement,
+/// position)`: replaces the matches from the 1-based position `position`.
+pub fn regexp_replace_with_position(
+    col1: Column,
+    col2: Column,
+    col3: Column,
+    position: Column,
+) -> Column {
+    func(
+        "regexp_replace",
+        vec![
+            col1.expression().clone(),
+            col2.expression().clone(),
+            col3.expression().clone(),
+            position.expression().clone(),
+        ],
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.rpad`.
 pub fn rpad(col1: Column, col2: Column, col3: Column) -> Column {
     func(
@@ -3567,6 +3618,14 @@ pub fn counter_diff(value: Column) -> Column {
     func("counter_diff", vec![value.expression().clone()])
 }
 
+/// Mirrors `pyspark.sql.functions.counter_diff(value, startTime)`.
+pub fn counter_diff_with_start_time(value: Column, start_time: Column) -> Column {
+    func(
+        "counter_diff",
+        vec![value.expression().clone(), start_time.expression().clone()],
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.current_path`.
 pub fn current_path() -> Column {
     func("current_path", vec![])
@@ -3582,6 +3641,18 @@ pub fn hmac(key: Column, message: Column) -> Column {
     func(
         "hmac",
         vec![key.expression().clone(), message.expression().clone()],
+    )
+}
+
+/// Mirrors `pyspark.sql.functions.hmac(key, message, algorithm)`.
+pub fn hmac_with_algorithm(key: Column, message: Column, algorithm: Column) -> Column {
+    func(
+        "hmac",
+        vec![
+            key.expression().clone(),
+            message.expression().clone(),
+            algorithm.expression().clone(),
+        ],
     )
 }
 
@@ -4076,6 +4147,24 @@ pub fn try_variant_set(v: Column, path: Column, value: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.try_variant_set(v, path, value, create_if_missing)`.
+pub fn try_variant_set_with_create_if_missing(
+    v: Column,
+    path: Column,
+    value: Column,
+    create_if_missing: Column,
+) -> Column {
+    func(
+        "try_variant_set",
+        vec![
+            v.expression().clone(),
+            path.expression().clone(),
+            value.expression().clone(),
+            create_if_missing.expression().clone(),
+        ],
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.unix_nanos`.
 pub fn unix_nanos(col: Column) -> Column {
     func("unix_nanos", vec![col.expression().clone()])
@@ -4134,6 +4223,24 @@ pub fn variant_set(v: Column, path: Column, value: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.variant_set(v, path, value, create_if_missing)`.
+pub fn variant_set_with_create_if_missing(
+    v: Column,
+    path: Column,
+    value: Column,
+    create_if_missing: Column,
+) -> Column {
+    func(
+        "variant_set",
+        vec![
+            v.expression().clone(),
+            path.expression().clone(),
+            value.expression().clone(),
+            create_if_missing.expression().clone(),
+        ],
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.vector_avg`.
 pub fn vector_avg(col: Column) -> Column {
     func("vector_avg", vec![col.expression().clone()])
@@ -4168,9 +4275,25 @@ pub fn vector_norm(vector: Column) -> Column {
     func("vector_norm", vec![vector.expression().clone()])
 }
 
+/// Mirrors `pyspark.sql.functions.vector_norm(vector, degree)`.
+pub fn vector_norm_with_degree(vector: Column, degree: Column) -> Column {
+    func(
+        "vector_norm",
+        vec![vector.expression().clone(), degree.expression().clone()],
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.vector_normalize`.
 pub fn vector_normalize(vector: Column) -> Column {
     func("vector_normalize", vec![vector.expression().clone()])
+}
+
+/// Mirrors `pyspark.sql.functions.vector_normalize(vector, degree)`.
+pub fn vector_normalize_with_degree(vector: Column, degree: Column) -> Column {
+    func(
+        "vector_normalize",
+        vec![vector.expression().clone(), degree.expression().clone()],
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.vector_sum`.
@@ -4542,6 +4665,56 @@ mod tests {
 
         let map_res = create_map(vec![c1, c2, c3]);
         let _ = map_res.to_proto();
+    }
+
+    #[test]
+    fn test_instr_and_regexp_replace_optional_args() {
+        // Each form is a plain function call, as `_invoke_function_over_columns` builds.
+        use spark_connect_proto::expression::ExprType;
+        let unresolved = |c: Column| match c.to_proto().expr_type {
+            Some(ExprType::UnresolvedFunction(f)) => (f.function_name, f.arguments.len()),
+            other => panic!("expected an UnresolvedFunction, got {other:?}"),
+        };
+        let s = || col("s");
+        assert_eq!(
+            unresolved(instr(s(), Column::new(lit_str("b")))),
+            ("instr".to_string(), 2)
+        );
+        assert_eq!(
+            unresolved(instr_with_start(
+                s(),
+                Column::new(lit_str("b")),
+                Column::new(lit_int(2))
+            )),
+            ("instr".to_string(), 3)
+        );
+        let four = instr_with_start_and_occurrence(
+            s(),
+            Column::new(lit_str("b")),
+            Column::new(lit_int(1)),
+            Column::new(lit_int(2)),
+        );
+        assert_eq!(four.expression().render(), "instr(s, b, 1, 2)");
+        assert_eq!(unresolved(four), ("instr".to_string(), 4));
+        assert_eq!(
+            unresolved(regexp_replace(
+                s(),
+                Column::new(lit_str("a")),
+                Column::new(lit_str("b"))
+            )),
+            ("regexp_replace".to_string(), 3)
+        );
+        let positioned = regexp_replace_with_position(
+            s(),
+            Column::new(lit_str("a")),
+            Column::new(lit_str("b")),
+            Column::new(lit_int(2)),
+        );
+        assert_eq!(
+            positioned.expression().render(),
+            "regexp_replace(s, a, b, 2)"
+        );
+        assert_eq!(unresolved(positioned), ("regexp_replace".to_string(), 4));
     }
 
     #[test]

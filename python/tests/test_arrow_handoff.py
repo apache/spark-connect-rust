@@ -464,7 +464,8 @@ def _arrow_input_service(
         session_id = None
 
         def save(name, data):
-            if not (allow_file_artifacts and name.startswith(("files/", "forward_to_fs/"))):
+            named = ("files/", "forward_to_fs/", "jars/", "classes/", "pyfiles/", "archives/")
+            if not (allow_file_artifacts and name.startswith(named)):
                 assert name == "cache/" + hashlib.sha256(data).hexdigest()
             assert name not in state["cache"], "cached artifacts should not be uploaded again"
             state["cache"][name] = bytes(data)
@@ -649,7 +650,7 @@ def test_file_upload_attribution_on_every_frame(
         protocol, user_id=user_id, user_agent=user_agent, allow_file_artifacts=True
     ) as (spark, state):
         if upload == "file":
-            spark.addArtifacts(str(small), str(large))
+            spark.addArtifacts(str(small), str(large), file=True)
             artifact_names = ["files/small.txt", "files/large.txt"]
         else:
             destinations = ["/wire/small.txt", "/wire/large.txt"]
@@ -889,3 +890,21 @@ def test_non_arrow_input_does_not_import_pyarrow(protocol, monkeypatch, data):
         spark.createDataFrame(data)
         assert imported == []
         assert state["config_requests"] == []
+
+
+def test_add_artifacts_names_each_artifact_as_pyspark(protocol, tmp_path):
+    for name in ["a.jar", "A.class", "m.py", "b.zip", "n.txt"]:
+        (tmp_path / name).write_bytes(name.encode())
+    with _arrow_input_service(protocol, allow_file_artifacts=True) as (spark, state):
+        # As PySpark's ArtifactManager names them, by the flags and the file extension.
+        spark.addArtifacts(str(tmp_path / "a.jar"), str(tmp_path / "A.class"))
+        spark.addArtifacts(str(tmp_path / "m.py"), pyfile=True)
+        spark.addArtifacts(str(tmp_path / "b.zip") + "#alias", archive=True)
+        spark.addArtifact(str(tmp_path / "n.txt"), file=True)
+        assert state["cache"] == {
+            "jars/a.jar": b"a.jar",
+            "classes/A.class": b"A.class",
+            "pyfiles/m.py": b"m.py",
+            "archives/b.zip#alias": b"b.zip",
+            "files/n.txt": b"n.txt",
+        }
