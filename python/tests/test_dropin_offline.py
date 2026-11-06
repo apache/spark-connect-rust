@@ -4913,8 +4913,12 @@ from pyspark.sql import Row as _exact_date_Row
 def _exact_date_converted_value(mock_connect, value):
     import pyarrow as pa
 
+    pd = pytest.importorskip("pandas")
     spark, service = mock_connect
-    spark.createDataFrame([(value,)]).toArrow()
+    # py_to_value remains the generic pandas converter. Local rows now use
+    # infer.convert, which intentionally has different subclass/type semantics.
+    data = pd.DataFrame({"value": [value]}, dtype=object)
+    spark.createDataFrame(data).toArrow()
     request = parse_message(service.execute_requests[-1])
     relation = parse_message(parse_message(request[3][0])[1][0])
     local = parse_message(relation[11][0])
@@ -4993,9 +4997,10 @@ def test_exact_date_nested_unrelated_values(mock_connect):
 
 
 def test_exact_date_named_impostor_rejected():
+    pd = pytest.importorskip("pandas")
     impostor = type("date", (), {"toordinal": lambda self: 719163})
     with pytest.raises(TypeError, match="unsupported value type"):
-        _local_create_dataframe([(impostor(),)])
+        _local_create_dataframe(pd.DataFrame({"value": [impostor()]}, dtype=object))
 
 
 def _exact_date_fields(data):
