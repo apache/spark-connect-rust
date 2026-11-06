@@ -5186,6 +5186,12 @@ def container_input_capture_input():
 
         def capture(data, schema):
             import pyarrow as pa
+            pd = pytest.importorskip("pandas")
+            # The optimized converter remains the pandas/generic path. Local
+            # rows use infer.convert, with deliberately different container
+            # eligibility and numeric-protocol semantics.
+            if not isinstance(data, pd.DataFrame):
+                data = pd.DataFrame(data, dtype=object)
             df = spark.createDataFrame(data, schema=schema)
             with pytest.raises(Exception, match="captured container input"):
                 df.collect()
@@ -5205,7 +5211,7 @@ def container_input_capture_input():
         child.close()
 
 
-@pytest.mark.parametrize("source", ["tuples", "pandas"])
+@pytest.mark.parametrize("source", ["pandas_from_rows", "pandas"])
 @pytest.mark.parametrize("schema_kind", ["inferred", "names", "explicit", "ddl"])
 @pytest.mark.parametrize("container", [list, tuple])
 def test_container_input_array_input_ipc(container_input_capture_input, source, schema_kind, container):
