@@ -475,10 +475,10 @@ impl PySparkSession {
                 (None, Some(names))
             }
         };
-        let row_names: Vec<String> = match (&given, &names) {
+        let row_names: std::sync::Arc<[String]> = match (&given, &names) {
             (Some(fields), _) => fields.iter().map(|f| f.name.clone()).collect(),
-            (None, Some(names)) => names.clone(),
-            (None, None) => Vec::new(),
+            (None, Some(names)) => names.clone().into(),
+            (None, None) => Vec::new().into(),
         };
         let mut rows: Vec<Row> = Vec::with_capacity(data.len());
         for row in data.iter() {
@@ -494,7 +494,7 @@ impl PySparkSession {
                     values.len(),
                 ));
             }
-            rows.push(Row::new(row_names.clone(), values));
+            rows.push(StructValue::new(row_names.clone(), values).into());
         }
         // A given struct wins; otherwise each field takes the type of its first non-null
         // value (empty input has a struct schema, checked above).

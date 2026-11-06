@@ -202,8 +202,12 @@ class InputNameTests(unittest.TestCase):
             self.capture(self.spark.createDataFrame(pd.DataFrame([[1]], columns=[7]), ["override"])),
             (["override"], [[1]]),
         )
-        with self.assertRaisesRegex(TypeError, "unsupported value type.*object"):
+        from pyspark.errors import PySparkTypeError
+
+        with self.assertRaises(PySparkTypeError) as error:
             self.spark.createDataFrame([(object(),)], ["x", "y"])
+        self.assertEqual(error.exception.getCondition(), "CANNOT_INFER_TYPE_FOR_FIELD")
+        self.assertEqual(error.exception.getMessageParameters(), {"field_name": "x"})
 
 
 if __name__ == "__main__":
