@@ -4913,12 +4913,33 @@ from pyspark.sql import Row as _exact_date_Row
 def _exact_date_converted_value(mock_connect, value):
     import pyarrow as pa
 
+    pd = pytest.importorskip("pandas")
     spark, service = mock_connect
-    spark.createDataFrame([(value,)]).toArrow()
-    request = parse_message(service.execute_requests[-1])
+    # py_to_value remains the generic pandas converter. Local rows now use
+    # infer.convert, which intentionally has different subclass/type semantics.
+    data = pd.DataFrame({"value": [value]}, dtype=object)
+    before = len(service.execute_requests)
+    spark.createDataFrame(data).toArrow()
+    requests = service.execute_requests
+    assert len(requests) == before + 1
+    request = parse_message(requests[-1])
     relation = parse_message(parse_message(request[3][0])[1][0])
+    renames = []
+    while 18 in relation:  # Relation.to_df -> ToDF.input; column_names=2.
+        rename = parse_message(relation[18][0])
+        renames.append([name.decode() for name in rename.get(2, [])])
+        relation = parse_message(rename[1][0])
     local = parse_message(relation[11][0])
-    return pa.ipc.open_stream(local[1][0]).read_all().column(0)[0].as_py()
+    table = pa.ipc.open_stream(local[1][0]).read_all()
+    table.validate(full=True)
+    assert (table.num_rows, table.num_columns) == (1, 1)
+    assert table.column_names == ["value"]
+    assert [field["name"] for field in json.loads(local[2][0])["fields"]] == table.column_names
+    for names in renames:
+        assert len(names) == table.num_columns
+    # The outermost toDF supplies observable names without rewriting raw IPC.
+    assert (renames[0] if renames else table.column_names) == ["value"]
+    return table.column(0)[0].as_py()
 
 
 @pytest.mark.parametrize("value", [
