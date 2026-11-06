@@ -7,6 +7,7 @@ use pyo3::types::PyDict;
 use spark_connect::readwriter::DataFrameReader;
 
 use crate::dataframe::PyDataFrame;
+use crate::errors::ResultExt;
 
 /// Python wrapper for the batch DataFrameReader.
 ///
@@ -44,6 +45,133 @@ impl PyDataFrameReader {
     /// reader unchanged.
     fn commit(&mut self, r: &DataFrameReader, format: &str) {
         self.inner = r.clone().format(format);
+    }
+
+    /// The DataFrame of `r`, this reader with the options of a call of `json`, `csv` or `xml`
+    /// of `path`, as PySpark's: a DataFrame of strings, which it parses as `parse_format`,
+    /// keeping the schema and the options on this reader but not the format, or else a path
+    /// or a list of them, which it loads as `format`. `csv`, unlike the others, passes any
+    /// other `path` to `load`, which asserts it.
+    fn read_or_parse(
+        &mut self,
+        r: DataFrameReader,
+        format: &str,
+        parse_format: spark_connect::plan::ParseFormat,
+        path: &Bound<'_, PyAny>,
+    ) -> PyResult<PyDataFrame> {
+        if let Ok(df) = path.extract::<PyRef<'_, PyDataFrame>>() {
+            let parsed = r
+                .clone()
+                .parse(parse_format, &df.dataframe)
+                .map(PyDataFrame::new)
+                .to_pyerr()?;
+            self.inner = r;
+            return Ok(parsed);
+        }
+        if path.is_instance_of::<pyo3::types::PyString>()
+            || path.is_instance_of::<pyo3::types::PyList>()
+            || parse_format == spark_connect::plan::ParseFormat::Csv
+        {
+            let paths = paths_of(path)?;
+            self.commit(&r, format);
+            return Ok(PyDataFrame::new(r.format(format).load_paths(paths)));
+        }
+        Err(not_expected_type(path, "path", "str, list, or DataFrame"))
+    }
+}
+
+/// The paths of `path`, a path or a list of them, as PySpark's `load` takes them: anything
+/// else fails its assertion.
+fn paths_of(path: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
+    if path.is_instance_of::<pyo3::types::PyString>() {
+        return Ok(vec![path.extract()?]);
+    }
+    if !path.is_instance_of::<pyo3::types::PyList>() {
+        return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+    }
+    path_list(&path.try_iter()?.collect::<PyResult<Vec<_>>>()?)
+}
+
+/// The paths of `paths`, strings, as PySpark's `load` asserts them.
+fn path_list(paths: &[Bound<'_, PyAny>]) -> PyResult<Vec<String>> {
+    paths
+        .iter()
+        .map(|path| {
+            if path.is_instance_of::<pyo3::types::PyString>() {
+                path.extract()
+            } else {
+                Err(pyo3::exceptions::PyAssertionError::new_err(()))
+            }
+        })
+        .collect()
+}
+
+/// PySpark's `NOT_EXPECTED_TYPE` error of the argument `name`, `value`, which should be of
+/// the type `expected`.
+fn not_expected_type(value: &Bound<'_, PyAny>, name: &str, expected: &str) -> PyErr {
+    let type_name = value
+        .get_type()
+        .name()
+        .map(|name| name.to_string())
+        .unwrap_or_default();
+    crate::column::raise_pyspark(
+        value.py(),
+        "PySparkTypeError",
+        "NOT_EXPECTED_TYPE",
+        &[
+            ("arg_name", name),
+            ("expected_type", expected),
+            ("arg_type", &type_name),
+        ],
+    )
+}
+
+/// The columns of `df.write.bucketBy(numBuckets, col, *cols)` and `sortBy(col, *cols)`, as
+/// PySpark's: column names, or a list or tuple of them alone.
+pub(crate) fn writer_columns(
+    col: &Bound<'_, PyAny>,
+    cols: &[Bound<'_, PyAny>],
+) -> PyResult<Vec<String>> {
+    let sequence =
+        col.is_instance_of::<pyo3::types::PyList>() || col.is_instance_of::<pyo3::types::PyTuple>();
+    let (col, cols) = if sequence {
+        if !cols.is_empty() {
+            let type_name = col.get_type().name()?.to_string();
+            return Err(crate::column::raise_pyspark(
+                col.py(),
+                "PySparkValueError",
+                "CANNOT_SET_TOGETHER",
+                &[("arg_list", &format!("`col` of type {type_name} and `cols`"))],
+            ));
+        }
+        // An empty list or tuple raises an IndexError, as PySpark's `col[0]`.
+        let first = col.get_item(0)?;
+        let rest: Vec<Bound<'_, PyAny>> = col.try_iter()?.skip(1).collect::<PyResult<_>>()?;
+        (first, rest)
+    } else {
+        (col.clone(), cols.to_vec())
+    };
+    if let Some(other) = cols
+        .iter()
+        .find(|c| !c.is_instance_of::<pyo3::types::PyString>())
+    {
+        return Err(not_expected_type(other, "cols", "list[str]"));
+    }
+    if !col.is_instance_of::<pyo3::types::PyString>() {
+        return Err(not_expected_type(&col, "col", "list[str]"));
+    }
+    std::iter::once(&col)
+        .chain(cols.iter())
+        .map(|c| c.extract())
+        .collect()
+}
+
+/// The number of buckets of `df.write.bucketBy`, an int, as PySpark's.
+pub(crate) fn bucket_count(num_buckets: &Bound<'_, PyAny>) -> PyResult<i32> {
+    if num_buckets.is_instance_of::<pyo3::types::PyInt>() {
+        num_buckets.extract()
+    } else {
+        Err(not_expected_type(num_buckets, "numBuckets", "int"))
     }
 }
 
@@ -168,7 +296,7 @@ impl PyDataFrameReader {
     #[pyo3(signature = (path=None, format=None, schema=None, **options))]
     fn load(
         &mut self,
-        path: Option<&str>,
+        path: Option<&Bound<'_, PyAny>>,
         format: Option<&str>,
         schema: Option<&Bound<'_, PyAny>>,
         options: Option<&Bound<'_, PyDict>>,
@@ -180,9 +308,10 @@ impl PyDataFrameReader {
         if let Some(s) = schema {
             r = apply_reader_schema(r, s)?;
         }
+        let paths = path.map(paths_of).transpose()?.unwrap_or_default();
         // PySpark's one-shot load sets format/schema/options on the reader itself.
         self.inner = r.clone();
-        Ok(PyDataFrame::new(r.load(path)))
+        Ok(PyDataFrame::new(r.load_paths(paths)))
     }
 
     /// Read a table by name.
@@ -202,7 +331,7 @@ impl PyDataFrameReader {
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn json(
         &mut self,
-        path: &str,
+        path: &Bound<'_, PyAny>,
         schema: Option<&Bound<'_, PyAny>>,
         primitivesAsString: Option<&Bound<'_, PyAny>>,
         prefersDecimal: Option<&Bound<'_, PyAny>>,
@@ -261,27 +390,21 @@ impl PyDataFrameReader {
         r = set_opt(r, "modifiedAfter", modifiedAfter)?;
         r = set_opt(r, "allowNonNumericNumbers", allowNonNumericNumbers)?;
         r = set_opt(r, "useUnsafeRow", useUnsafeRow)?;
-        self.commit(&r, "json");
-        Ok(PyDataFrame::new(r.json(path)))
+        self.read_or_parse(r, "json", spark_connect::plan::ParseFormat::Json, path)
     }
 
     /// Read Parquet file(s).
     #[pyo3(signature = (*paths, **options))]
     fn parquet(
         &mut self,
-        paths: Vec<String>,
+        paths: Vec<Bound<'_, PyAny>>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
-        // Reference `parquet(*paths)` accepts multiple paths; the connect core reader
-        // currently loads a single path, so we support exactly one here.
-        if paths.len() != 1 {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "parquet() currently supports exactly one path",
-            ));
-        }
+        // As PySpark's `parquet(*paths)`, of every path.
         let r = self.with_opts(options)?;
+        let paths = path_list(&paths)?;
         self.commit(&r, "parquet");
-        Ok(PyDataFrame::new(r.parquet(&paths[0])))
+        Ok(PyDataFrame::new(r.format("parquet").load_paths(paths)))
     }
 
     /// Read CSV file(s) - full pyspark signature; each named option is
@@ -290,7 +413,7 @@ impl PyDataFrameReader {
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn csv(
         &mut self,
-        path: &str,
+        path: &Bound<'_, PyAny>,
         schema: Option<&Bound<'_, PyAny>>,
         sep: Option<&Bound<'_, PyAny>>,
         encoding: Option<&Bound<'_, PyAny>>,
@@ -365,8 +488,7 @@ impl PyDataFrameReader {
         r = set_opt(r, "modifiedBefore", modifiedBefore)?;
         r = set_opt(r, "modifiedAfter", modifiedAfter)?;
         r = set_opt(r, "unescapedQuoteHandling", unescapedQuoteHandling)?;
-        self.commit(&r, "csv");
-        Ok(PyDataFrame::new(r.csv(path)))
+        self.read_or_parse(r, "csv", spark_connect::plan::ParseFormat::Csv, path)
     }
 
     /// Read ORC file(s) - full pyspark signature; each named option is
@@ -375,7 +497,7 @@ impl PyDataFrameReader {
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn orc(
         &mut self,
-        path: &str,
+        path: &Bound<'_, PyAny>,
         mergeSchema: Option<&Bound<'_, PyAny>>,
         pathGlobFilter: Option<&Bound<'_, PyAny>>,
         recursiveFileLookup: Option<&Bound<'_, PyAny>>,
@@ -388,8 +510,9 @@ impl PyDataFrameReader {
         r = set_opt(r, "recursiveFileLookup", recursiveFileLookup)?;
         r = set_opt(r, "modifiedBefore", modifiedBefore)?;
         r = set_opt(r, "modifiedAfter", modifiedAfter)?;
+        let paths = paths_of(path)?;
         self.commit(&r, "orc");
-        Ok(PyDataFrame::new(r.orc(path)))
+        Ok(PyDataFrame::new(r.format("orc").load_paths(paths)))
     }
 
     /// Read TEXT file(s) - full pyspark signature; each named option is
@@ -398,7 +521,7 @@ impl PyDataFrameReader {
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn text(
         &mut self,
-        paths: &str,
+        paths: &Bound<'_, PyAny>,
         wholetext: Option<&Bound<'_, PyAny>>,
         lineSep: Option<&Bound<'_, PyAny>>,
         pathGlobFilter: Option<&Bound<'_, PyAny>>,
@@ -413,8 +536,9 @@ impl PyDataFrameReader {
         r = set_opt(r, "recursiveFileLookup", recursiveFileLookup)?;
         r = set_opt(r, "modifiedBefore", modifiedBefore)?;
         r = set_opt(r, "modifiedAfter", modifiedAfter)?;
+        let paths = paths_of(paths)?;
         self.commit(&r, "text");
-        Ok(PyDataFrame::new(r.text(paths)))
+        Ok(PyDataFrame::new(r.format("text").load_paths(paths)))
     }
 
     /// Read XML file(s) - full pyspark signature; each named option is
@@ -423,7 +547,7 @@ impl PyDataFrameReader {
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn xml(
         &mut self,
-        path: &str,
+        path: &Bound<'_, PyAny>,
         rowTag: Option<&Bound<'_, PyAny>>,
         schema: Option<&Bound<'_, PyAny>>,
         excludeAttribute: Option<&Bound<'_, PyAny>>,
@@ -466,8 +590,7 @@ impl PyDataFrameReader {
         r = set_opt(r, "multiLine", multiLine)?;
         r = set_opt(r, "samplingRatio", samplingRatio)?;
         r = set_opt(r, "locale", locale)?;
-        self.commit(&r, "xml");
-        Ok(PyDataFrame::new(r.xml(path)))
+        self.read_or_parse(r, "xml", spark_connect::plan::ParseFormat::Xml, path)
     }
 
     /// Read from a JDBC source. Mirrors `DataFrameReader.jdbc(url, table,

@@ -2654,8 +2654,14 @@ fn apply_write_common(
 
 #[pymethods]
 impl PyDataFrameWriter {
-    fn mode<'py>(mut slf: PyRefMut<'py, Self>, saveMode: &str) -> PyResult<PyRefMut<'py, Self>> {
-        slf.inner = slf.inner.clone().mode(saveMode);
+    /// The save mode, as PySpark's: `None` keeps the default, "error".
+    fn mode<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        saveMode: Option<&str>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        if let Some(save_mode) = saveMode {
+            slf.inner = slf.inner.clone().mode(save_mode);
+        }
         Ok(slf)
     }
 
@@ -2710,33 +2716,45 @@ impl PyDataFrameWriter {
     #[pyo3(name = "bucketBy", signature = (numBuckets, col, *cols))]
     fn bucket_by<'py>(
         mut slf: PyRefMut<'py, Self>,
-        numBuckets: i32,
-        col: String,
-        cols: Vec<String>,
+        numBuckets: &Bound<'_, PyAny>,
+        col: &Bound<'_, PyAny>,
+        cols: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        let mut all = vec![col];
-        all.extend(cols);
-        slf.inner = slf.inner.clone().bucket_by(numBuckets, all);
+        let num_buckets = crate::readwriter::bucket_count(numBuckets)?;
+        let columns = crate::readwriter::writer_columns(col, &cols)?;
+        slf.inner = slf.inner.clone().bucket_by(num_buckets, columns);
         Ok(slf)
     }
 
     #[pyo3(name = "sortBy", signature = (col, *cols))]
     fn sort_by<'py>(
         mut slf: PyRefMut<'py, Self>,
-        col: String,
-        cols: Vec<String>,
+        col: &Bound<'_, PyAny>,
+        cols: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        let mut all = vec![col];
-        all.extend(cols);
-        slf.inner = slf.inner.clone().sort_by(all);
+        let columns = crate::readwriter::writer_columns(col, &cols)?;
+        slf.inner = slf.inner.clone().sort_by(columns);
         Ok(slf)
     }
 
+    /// The clustering columns, as PySpark's: column names, or a list or tuple of them, at
+    /// least one.
     #[pyo3(name = "clusterBy", signature = (*cols))]
     fn cluster_by<'py>(
         mut slf: PyRefMut<'py, Self>,
-        cols: Vec<String>,
+        cols: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<PyRefMut<'py, Self>> {
+        let cols: Vec<String> = match cols.as_slice() {
+            [only] if only.is_instance_of::<PyList>() || only.is_instance_of::<PyTuple>() => {
+                only.extract()?
+            }
+            _ => cols.iter().map(|c| c.extract()).collect::<PyResult<_>>()?,
+        };
+        if cols.is_empty() {
+            return Err(pyo3::exceptions::PyAssertionError::new_err(
+                "clusterBy needs one or more clustering columns.",
+            ));
+        }
         slf.inner = slf.inner.clone().cluster_by(cols);
         Ok(slf)
     }
