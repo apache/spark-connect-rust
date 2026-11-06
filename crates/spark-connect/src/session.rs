@@ -1920,7 +1920,10 @@ mod tests {
     #[test]
     fn struct_values_without_fields_keep_their_length() {
         let empty = Value::Struct(Row::empty().into());
-        let array = values_to_arrow(&[&empty, &Value::Null], &DataType::Struct { fields: vec![] });
+        let array = values_to_arrow(
+            &[&empty, &Value::Null],
+            &DataType::Struct { fields: vec![] },
+        );
         let array = array.unwrap();
         assert_eq!(array.len(), 2);
         assert!(array.is_valid(0));
