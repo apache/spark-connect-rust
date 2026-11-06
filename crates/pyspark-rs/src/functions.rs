@@ -9,7 +9,6 @@ use spark_connect::udf::{CommonInlineUserDefinedFunctionExpression, PythonUDFPay
 use crate::column::PyColumn;
 use crate::dataframe::PyDataFrame;
 use crate::session::PySparkSession;
-use crate::types::PyDataType;
 
 // Include the auto-generated dispatch function
 mod dispatch {
@@ -78,7 +77,7 @@ fn pyfunc_make_udf(
 fn pyfunc_make_udtf(
     session: PyRef<'_, PySparkSession>,
     name: String,
-    return_type: Option<PyRef<'_, PyDataType>>,
+    return_type: Option<&Bound<'_, PyAny>>,
     eval_type: i32,
     command_bytes: Vec<u8>,
     python_ver: String,
@@ -88,7 +87,19 @@ fn pyfunc_make_udtf(
     for arg in args {
         col_args.push(to_column(&arg)?);
     }
-    let rt = return_type.map(|d| d.inner.clone());
+    // Connect leaves DDL parsing and validation to the server. In particular,
+    // do not use py_to_data_type's eager DDL parser for string return types.
+    let rt = return_type
+        .map(|value| {
+            if let Ok(ddl) = value.extract::<String>() {
+                Ok(spark_connect::types::DataType::Unparsed {
+                    data_type_string: ddl,
+                })
+            } else {
+                crate::types::py_to_data_type(value)
+            }
+        })
+        .transpose()?;
     let df = session.session.tvf().udtf(
         &name,
         col_args,

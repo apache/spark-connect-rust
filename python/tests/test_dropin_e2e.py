@@ -107,6 +107,26 @@ def test_map_in_arrow_and_pandas_with_a_struct_type_built_with_add(session, sche
     assert [tuple(r) for r in rows] == [(0, 0), (1, 2), (2, 4)]
 
 
+def test_udtf_takes_a_ddl_or_struct_return_type_as_pyspark(session):
+    from pyspark.errors.exceptions.connect import ParseException
+
+    class Echo:
+        def eval(self, value):
+            yield (value,)
+            yield (value + 1,)
+
+    struct = StructType([StructField("value", LongType())])
+    for return_type in ["value BIGINT", "value: bigint", struct]:
+        for fn in (F.udtf(Echo, returnType=return_type), F.udtf(returnType=return_type)(Echo)):
+            assert fn(F.lit(1)).collect() == [Row(value=1), Row(value=2)]
+
+    # The server parses the DDL, so an invalid one fails when the query runs.
+    df = F.udtf(Echo, returnType="invalid DDL !!!")(F.lit(1))
+    with pytest.raises(ParseException) as error:
+        df.collect()
+    assert error.value.getCondition() == "PARSE_SYNTAX_ERROR"
+
+
 def test_map_functions_take_a_ddl_schema(session):
     df = session.createDataFrame([(1, 1.0), (1, 2.0), (2, 3.0)], ["k", "v"])
     schema = "k long, v double"

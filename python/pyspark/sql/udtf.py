@@ -59,8 +59,9 @@ class UserDefinedTableFunction:
         )
         self.deterministic = deterministic
         self.python_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
-        # Cloudpickle the handler class + declared return type for the worker.
-        self.command = CloudPickleSerializer().dumps((func, returnType))
+        # Connect sends the schema separately in PythonUDTF.return_type. The
+        # worker command contains only the handler class, unlike scalar UDFs.
+        self.command = CloudPickleSerializer().dumps(func)
 
     def _active_session(self):
         from pyspark.sql import SparkSession

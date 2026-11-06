@@ -1138,6 +1138,118 @@ def test_udtf_call_without_session_raises():
         T2(1)
 
 
+def test_udtf_return_type_connect_validation_and_command():
+    # A Connect DDL string (including invalid DDL) is validated by the server,
+    # not when decorating the class or constructing the DataFrame. Isolate the
+    # active session so the other offline tests still start without a session.
+    import subprocess
+    import sys
+
+    subprocess.run([sys.executable, "-c", """
+from pyspark.sql import SparkSession, DataFrame, functions as F, types as T
+from pyspark.serializers import CloudPickleSerializer
+
+spark = SparkSession.builder.remote("sc://localhost:15002").getOrCreate()
+class Echo:
+    def eval(self, value):
+        yield (value,)
+
+schema = T.StructType([T.StructField("value", T.LongType())])
+for return_type in ["value BIGINT", "STRUCT<value: BIGINT>",
+                    "value ARRAY<STRUCT<x: INT>>", "invalid DDL !!!", "INT", schema]:
+    for decorate in [False, True]:
+        fn = (F.udtf(returnType=return_type)(Echo) if decorate else
+              F.udtf(Echo, returnType=return_type))
+        assert isinstance(fn(F.lit(1)), DataFrame)
+        handler = CloudPickleSerializer().loads(fn.command)
+        assert isinstance(handler, type)
+        assert list(handler().eval(7)) == [(7,)]
+        assert fn.returnType == return_type
+
+# Dynamic schemas omit return_type and leave analysis to the Python handler.
+class Dynamic(Echo):
+    @staticmethod
+    def analyze(value):
+        pass
+assert isinstance(F.udtf(Dynamic)(F.lit(1)), DataFrame)
+"""], check=True)
+
+
+def test_udtf_python_binding_preserves_wire_schema_and_command():
+    # Exercise the Python -> PyO3 -> protobuf seam against the recording mock,
+    # including DDL that the client must send without parsing. Keep the active
+    # session isolated, as in the construction-only test above.
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    pytest.importorskip("grpc")
+    subprocess.run([sys.executable, "-c", """
+import json
+import sys
+sys.path.insert(0, sys.argv[1])
+from _mock_connect_server import mock_connect_session, parse_message
+from pyspark.sql import functions as F, types as T
+from pyspark.sql.udtf import AnalyzeResult
+from pyspark.serializers import CloudPickleSerializer
+
+class Echo:
+    def eval(self, value):
+        yield (value,)
+
+class Dynamic(Echo):
+    @staticmethod
+    def analyze(value):
+        return AnalyzeResult(T.StructType([T.StructField("value", T.LongType())]))
+
+schema = T.StructType([T.StructField("value", T.LongType(), False, {"comment": "kept"})])
+with mock_connect_session() as (spark, service):
+    for return_type in ["value BIGINT", "STRUCT<value: BIGINT>",
+                        "value ARRAY<STRUCT<x: INT>>", "  `v à` BIGINT  ",
+                        "", "invalid DDL !!!", "INT", schema, None]:
+        for decorate in [False, True]:
+            handler = Dynamic if return_type is None else Echo
+            fn = (F.udtf(returnType=return_type)(handler) if decorate else
+                  F.udtf(handler, returnType=return_type))
+            calls = service.calls
+            df = fn(F.lit(1))
+            assert service.calls == calls
+            assert df.columns == ["id"]
+            assert service.calls == calls + 1
+
+            # AnalyzePlanRequest.schema=4 -> plan=1 -> root=1 -> inline_udtf=38.
+            call = parse_message(service.analyze_requests[-1])
+            for field in (4, 1, 1, 38):
+                call = parse_message(call[field][0])
+            assert call[1] == [handler.__name__.encode()]
+            # CommonInlineUserDefinedTableFunction.python_udtf=4.
+            udtf = parse_message(call[4][0])
+            if return_type is None:
+                assert 1 not in udtf
+            else:
+                sent_type = parse_message(udtf[1][0])
+                if isinstance(return_type, str):
+                    assert set(sent_type) == {24}  # DataType.unparsed
+                    unparsed = parse_message(sent_type[24][0])
+                    assert unparsed.get(1, [b""])[0].decode() == return_type
+                else:
+                    assert set(sent_type) == {21}  # DataType.struct
+                    fields = parse_message(sent_type[21][0])[1]
+                    assert len(fields) == 1
+                    field = parse_message(fields[0])
+                    assert field[1] == [b"value"]
+                    assert parse_message(field[2][0]) == {7: [b""]}  # LongType
+                    assert field.get(3, [0]) == [0]  # nullable=False
+                    assert json.loads(field[4][0]) == {"comment": "kept"}
+            assert udtf[2] == [300]
+            command_handler = CloudPickleSerializer().loads(udtf[3][0])
+            assert isinstance(command_handler, type)
+            assert command_handler.__name__ == handler.__name__
+            assert list(command_handler().eval(7)) == [(7,)]
+            assert udtf[4] == [fn.python_ver.encode()]
+""", str(Path(__file__).resolve().parent)], check=True)
+
+
 def test_spark_conf_stub():
     from pyspark import SparkConf
     c = SparkConf().set("a", "1").setAll({"b": "2", "c": "3"})
