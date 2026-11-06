@@ -1,7 +1,7 @@
 //! PyO3 wrapper for Spark Connect sessions.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyDict, PyList, PyString};
 use spark_connect::row::{Row, StructValue, Value};
 use spark_connect::session::SparkSession;
 use spark_connect::types::{DataType, StructField};
@@ -50,12 +50,22 @@ impl PySparkSessionBuilder {
     }
 
     /// Set the remote Spark Connect server URL. Returns the builder (chainable).
-    /// Mirrors `SparkSession.Builder.remote(location="sc://localhost")`.
-    #[pyo3(signature = (location="sc://localhost"))]
-    fn remote(&self, location: &str) -> PySparkSessionBuilder {
+    /// Mirrors `SparkSession.Builder.remote(url)`, and the Connect session builder's
+    /// `remote(location="sc://localhost")`: the URL is `url` or the keyword `location`.
+    #[pyo3(signature = (url=None, *, location=None))]
+    fn remote(&self, url: Option<&str>, location: Option<&str>) -> PyResult<PySparkSessionBuilder> {
+        let url = match (url, location) {
+            (Some(_), Some(_)) => {
+                return Err(pyo3::exceptions::PyTypeError::new_err(
+                    "remote() got multiple values for the URL: give url or location",
+                ))
+            }
+            (Some(url), None) | (None, Some(url)) => url,
+            (None, None) => "sc://localhost",
+        };
         let mut b = self.clone();
-        b.remote_url = Some(location.to_string());
-        b
+        b.remote_url = Some(url.to_string());
+        Ok(b)
     }
 
     /// Set a config option, or several via `map`. Mirrors
@@ -434,6 +444,11 @@ impl PySparkSession {
         for label in data.getattr("columns")?.try_iter()? {
             columns.push(label?.str()?.extract::<String>()?);
         }
+        // The dtype of each column, which types a column without values, as Arrow does.
+        let mut dtypes = Vec::new();
+        for dtype in data.getattr("dtypes")?.try_iter()? {
+            dtypes.push(dtype?.str()?.extract::<String>()?);
+        }
         // df.astype(object).where(df.notna(), None).values.tolist() -> rows with None for NA.
         let notna = data.call_method0("notna")?;
         let obj = data.call_method1("astype", ("object",))?;
@@ -445,6 +460,8 @@ impl PySparkSession {
             crate::column::raise_pyspark(py, "PySparkValueError", "CANNOT_INFER_EMPTY_SCHEMA", &[])
         };
         // The given fields, and the names that toDF applies, which empty data does not get.
+        // The labels, which errors of a column name, as PySpark names its pandas.Series.
+        let labels = columns.clone();
         let (given, names) = match spec {
             Spec::Atomic(atomic) if !empty => {
                 // pyspark reports str() of the parsed type, which is its repr.
@@ -475,10 +492,10 @@ impl PySparkSession {
                 (None, Some(names))
             }
         };
-        let row_names: Vec<String> = match (&given, &names) {
+        let row_names: std::sync::Arc<[String]> = match (&given, &names) {
             (Some(fields), _) => fields.iter().map(|f| f.name.clone()).collect(),
-            (None, Some(names)) => names.clone(),
-            (None, None) => Vec::new(),
+            (None, Some(names)) => names.clone().into(),
+            (None, None) => Vec::new().into(),
         };
         let mut rows: Vec<Row> = Vec::with_capacity(data.len());
         for row in data.iter() {
@@ -494,30 +511,47 @@ impl PySparkSession {
                     values.len(),
                 ));
             }
-            rows.push(Row::new(row_names.clone(), values));
+            rows.push(StructValue::new(row_names.clone(), values).into());
         }
         // A given struct wins; otherwise each field takes the type of its first non-null
-        // value (empty input has a struct schema, checked above).
+        // value (empty input has a struct schema, checked above), but for these, which are
+        // typed as Arrow types a pandas column, as PySpark does: a column of Decimals takes
+        // the precision and scale of all its values, and a column without values the type of
+        // its dtype.
         let fields = match given {
             Some(fields) => fields,
             None => {
                 let mut fields: Vec<StructField> = Vec::with_capacity(row_names.len());
                 for (i, name) in row_names.iter().enumerate() {
-                    let Some(value) = rows
+                    // As PySpark, whose Arrow conversion of the column fails for a null map key.
+                    if rows
                         .iter()
                         .filter_map(|row| row.get(i))
-                        .find(|value| !matches!(value, Value::Null))
-                    else {
-                        return Err(crate::column::raise_pyspark(
-                            py,
-                            "PySparkValueError",
-                            "CANNOT_DETERMINE_TYPE",
-                            &[],
+                        .any(has_null_map_key)
+                    {
+                        return Err(PyErr::from_value(
+                            py.import("pyspark.errors")?
+                                .getattr("PySparkTypeError")?
+                                .call1((format!(
+                                    "Exception thrown when converting pandas.Series ({}) with name \
+                                     '{}' to Arrow Array (None).",
+                                    dtypes.get(i).map_or("object", String::as_str),
+                                    labels.get(i).unwrap_or(name),
+                                ),))?,
                         ));
+                    }
+                    let first = rows
+                        .iter()
+                        .filter_map(|row| row.get(i))
+                        .find(|value| !matches!(value, Value::Null));
+                    let data_type = match first {
+                        Some(Value::Decimal { .. }) => pandas_decimal_type(&data, i)?,
+                        Some(value) => value_to_datatype(value),
+                        None => pandas_dtype_type(dtypes.get(i).map_or("object", String::as_str)),
                     };
                     fields.push(StructField {
                         name: name.clone(),
-                        data_type: value_to_datatype(value),
+                        data_type,
                         nullable: true,
                         metadata: Default::default(),
                     });
@@ -710,10 +744,23 @@ impl PySparkSession {
                 references.push((df.dataframe.clone(), name));
             }
         }
-        let df = slf
-            .borrow()
-            .session
-            .sql_with_references(&query, pos, named, references)
+        let session = slf.borrow().session.clone();
+        // Within a pipeline flow function, the statement is not run here: the server analyzes
+        // its relation in the pipeline once the flow is defined, as PySpark's server returns
+        // the relation without running it within a `PipelineAnalysisContext`.
+        if crate::pipelines::in_flow_function() {
+            return Ok(PyDataFrame::new(
+                session.sql_without_running(&query, pos, named, references),
+            ));
+        }
+        // The statement runs to completion at once, so other Python threads go on meanwhile,
+        // to interrupt it for one.
+        let df = py
+            .detach(|| {
+                session
+                    .sql_with_references(&query, pos, named, references)
+                    .map_err(Box::new)
+            })
             .to_pyerr()?;
         Ok(PyDataFrame::new(df))
     }
@@ -766,6 +813,28 @@ impl PySparkSession {
         let spec = schema_spec(py, schema)?;
         if is_loaded_instance(py, data, "pandas", "DataFrame")? {
             return self.create_from_pandas(py, data, spec);
+        }
+        // Preserve schema parsing, ignored-argument warnings, and pandas/Arrow routing.
+        // Only a native StructType opts into this explicit integer optimization;
+        // DDL, inferred schemas and unsupported values keep schema-driven conversion.
+        if schema.is_some_and(|s| s.extract::<PyRef<crate::types::PyStructType>>().is_ok()) {
+            if let Spec::Struct(fields) = &spec {
+                if let Ok(data) = data.cast::<PyList>() {
+                    if let Some(columns) = exact_long_tuple_columns(data, fields) {
+                        let schema = DataType::Struct {
+                            fields: fields.clone(),
+                        };
+                        let df = py
+                            .detach(|| {
+                                self.session
+                                    .create_dataframe_from_columns(columns, schema)
+                                    .map_err(Box::new)
+                            })
+                            .to_pyerr()?;
+                        return Ok(PyDataFrame::new(df));
+                    }
+                }
+            }
         }
         self.create_from_local(py, data, spec)
     }
@@ -1133,9 +1202,10 @@ impl PySparkSession {
         self.session.clear_tags()
     }
 
-    // Mirrors reference `SparkSession.addArtifacts(*path, pyfile=False, archive=False,
-    // file=False)`. The pyfile/archive/file flags are accepted for signature parity;
-    // artifact classification is handled by the Rust transport / server.
+    /// Add local files, or `file:` URIs, as artifacts of the session, as PySpark's
+    /// `addArtifacts(*path, pyfile=False, archive=False, file=False)`: each path is named by
+    /// the flags and its extension, and the errors for a path that is not supported are
+    /// PySpark's (see `spark_connect_core::artifact::parse_artifact`).
     #[pyo3(name = "addArtifacts", signature = (*path, pyfile=false, archive=false, file=false))]
     fn add_artifacts(
         &self,
@@ -1145,11 +1215,53 @@ impl PySparkSession {
         archive: bool,
         file: bool,
     ) -> PyResult<()> {
-        let _ = (pyfile, archive, file);
+        use spark_connect_core::artifact::{parse_artifact, UnsupportedArtifact};
+
+        if [pyfile, archive, file].iter().filter(|flag| **flag).count() > 1 {
+            return Err(crate::column::raise_pyspark(
+                py,
+                "PySparkValueError",
+                "INVALID_MULTIPLE_ARGUMENT_CONDITIONS",
+                &[
+                    ("arg_names", "'pyfile', 'archive' and/or 'file'"),
+                    ("condition", "True together"),
+                ],
+            ));
+        }
+        for p in &path {
+            if let Err(unsupported) = parse_artifact(p, pyfile, archive, file) {
+                return Err(match unsupported {
+                    UnsupportedArtifact::Format(local) => crate::column::raise_pyspark(
+                        py,
+                        "PySparkRuntimeError",
+                        "UNSUPPORTED_OPERATION",
+                        &[("operation", &format!("{local} file format"))],
+                    ),
+                    UnsupportedArtifact::Scheme(scheme) => crate::column::raise_pyspark(
+                        py,
+                        "PySparkRuntimeError",
+                        "UNSUPPORTED_OPERATION",
+                        &[("operation", &format!("{scheme} scheme"))],
+                    ),
+                    UnsupportedArtifact::HashInArchivePath => crate::column::raise_pyspark(
+                        py,
+                        "PySparkValueError",
+                        "VALUE_ALLOWED",
+                        &[("arg_name", "artifact path"), ("disallowed_value", "#")],
+                    ),
+                });
+            }
+        }
         let refs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
-        py.detach(|| self.session.add_artifacts(&refs)).to_pyerr()
+        py.detach(|| {
+            self.session
+                .add_artifacts_with(&refs, pyfile, archive, file)
+                .map_err(Box::new)
+        })
+        .to_pyerr()
     }
 
+    /// `addArtifact` is `addArtifacts`, as in PySpark.
     #[pyo3(name = "addArtifact", signature = (*path, pyfile=false, archive=false, file=false))]
     fn add_artifact(
         &self,
@@ -1159,11 +1271,7 @@ impl PySparkSession {
         archive: bool,
         file: bool,
     ) -> PyResult<()> {
-        // pyfile/archive/file are accepted for PySpark signature parity; artifact
-        // classification is handled by the Rust transport / server.
-        let _ = (pyfile, archive, file);
-        let refs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
-        py.detach(|| self.session.add_artifacts(&refs)).to_pyerr()
+        self.add_artifacts(py, path, pyfile, archive, file)
     }
 
     #[pyo3(name = "newSession")]
@@ -1199,6 +1307,78 @@ impl PyConnectClientStub {
 
     /// No-op: the Rust transport has no client-side ML cache to clear.
     fn _cleanup_ml_cache(&self) {}
+}
+
+/// Whether `value` has a map with a null key, at any depth.
+fn has_null_map_key(value: &Value) -> bool {
+    match value {
+        Value::Map(entries) => entries
+            .iter()
+            .any(|(key, value)| matches!(key, Value::Null) || has_null_map_key(value)),
+        Value::List(items) => items.iter().any(has_null_map_key),
+        Value::Struct(row) => row.values().iter().any(has_null_map_key),
+        _ => false,
+    }
+}
+
+/// The type of a pandas column without values, by its dtype, as Arrow types it
+/// (`pa.Schema.from_pandas`): `void` for an object column of None, as for one of another
+/// dtype that Spark has no type for.
+fn pandas_dtype_type(dtype: &str) -> DataType {
+    match dtype {
+        "float64" | "Float64" => DataType::Double,
+        "float32" | "Float32" => DataType::Float,
+        "int64" | "Int64" => DataType::Long,
+        "int32" | "Int32" => DataType::Integer,
+        "int16" | "Int16" => DataType::Short,
+        "int8" | "Int8" => DataType::Byte,
+        "bool" | "boolean" => DataType::Boolean,
+        "string" | "str" => crate::infer::string_type(),
+        dtype if dtype.starts_with("datetime64") => DataType::Timestamp,
+        dtype if dtype.starts_with("timedelta64") => DataType::DayTimeInterval {
+            start_field: 0,
+            end_field: 3,
+        },
+        _ => DataType::Null,
+    }
+}
+
+/// The decimal type of column `i` of pandas rows, as Arrow infers it from all its Decimals:
+/// the most integer digits and the largest scale of the values.
+fn pandas_decimal_type(rows: &Bound<'_, PyList>, i: usize) -> PyResult<DataType> {
+    let (mut integer_digits, mut scale) = (0i64, 0i64);
+    for row in rows.iter() {
+        let value = row.get_item(i)?;
+        if value.is_none() {
+            continue;
+        }
+        let parts = value.call_method0("as_tuple")?;
+        let digits = parts.getattr("digits")?.len()? as i64;
+        // NaN and infinities have no exponent of digits, which Arrow cannot type either.
+        let Ok(exponent) = parts.getattr("exponent")?.extract::<i64>() else {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Decimal {} has no precision to type a column by",
+                value.str()?
+            )));
+        };
+        let (precision, value_scale) = if exponent < 0 {
+            (digits.max(-exponent), -exponent)
+        } else {
+            (digits + exponent, 0)
+        };
+        integer_digits = integer_digits.max(precision - value_scale);
+        scale = scale.max(value_scale);
+    }
+    let precision = integer_digits + scale;
+    if precision > 38 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Decimal precision {precision} is out of the range of DecimalType, up to 38"
+        )));
+    }
+    Ok(DataType::Decimal {
+        precision: precision.max(1) as i32,
+        scale: scale as i32,
+    })
 }
 
 /// Infer the Spark `DataType` for a `createDataFrame` column from its (first) value.
@@ -1276,6 +1456,60 @@ fn value_to_datatype(v: &Value) -> DataType {
     }
 }
 
+/// Build columns only for exact tuples of exact signed integers and None.
+/// Unsupported containers, values, overflow, widths and non-nullable nulls use
+/// schema-driven local conversion, preserving its validation and error ordering.
+#[inline(never)]
+fn exact_long_tuple_columns(
+    data: &Bound<'_, PyList>,
+    fields: &[StructField],
+) -> Option<Vec<arrow::array::ArrayRef>> {
+    use arrow::array::Int64Builder;
+    use pyo3::types::{PyInt, PyTuple};
+    use std::sync::Arc;
+
+    if data.cast_exact::<PyList>().is_err()
+        || data.is_empty()
+        || fields.is_empty()
+        || fields.iter().any(|field| field.data_type != DataType::Long)
+    {
+        return None;
+    }
+    let mut builders: Vec<_> = fields
+        .iter()
+        .map(|_| Int64Builder::with_capacity(data.len()))
+        .collect();
+    for item in data.iter() {
+        let Ok(tuple) = item.cast_exact::<PyTuple>() else {
+            return None;
+        };
+        if tuple.len() != builders.len() {
+            return None;
+        }
+        for ((value, builder), field) in tuple.iter().zip(&mut builders).zip(fields) {
+            if value.is_none() {
+                if !field.nullable {
+                    return None;
+                }
+                builder.append_null();
+            } else if let Ok(integer) = value.cast_exact::<PyInt>() {
+                let Ok(integer) = integer.extract::<i64>() else {
+                    return None;
+                };
+                builder.append_value(integer);
+            } else {
+                return None;
+            }
+        }
+    }
+    Some(
+        builders
+            .iter_mut()
+            .map(|builder| Arc::new(builder.finish()) as arrow::array::ArrayRef)
+            .collect(),
+    )
+}
+
 /// Convert a Python value to a Rust Value.
 pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     // Check for None
@@ -1289,6 +1523,17 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
         if let Ok(s) = s.extract::<String>() {
             return Ok(Value::String(s));
         }
+    }
+
+    // Exact built-in numbers need neither bool coercion nor Decimal detection.
+    // Keep subclasses and overflowing ints on the existing generic path.
+    if let Ok(i) = obj.cast_exact::<pyo3::types::PyInt>() {
+        if let Ok(i) = i.extract::<i64>() {
+            return Ok(Value::Long(i));
+        }
+    }
+    if let Ok(f) = obj.cast_exact::<pyo3::types::PyFloat>() {
+        return Ok(Value::Double(f.value()));
     }
 
     // Check for bool (before int because bool is a subclass of int in Python)
@@ -1374,6 +1619,15 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
         }
     }
 
+    // datetime.timedelta -> a day-time interval, as DayTimeIntervalType.toInternal.
+    if let Some(dt_mod) = &datetime_mod {
+        if let Ok(timedelta_cls) = dt_mod.getattr("timedelta") {
+            if obj.is_instance(&timedelta_cls)? {
+                return Ok(Value::DayTimeInterval(crate::infer::timedelta_micros(obj)?));
+            }
+        }
+    }
+
     // Check for datetime.date (after datetime.datetime)
     if let Some(dt_mod) = &datetime_mod {
         if let Ok(date_cls) = dt_mod.getattr("date") {
@@ -1430,7 +1684,10 @@ fn decimal_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Option<Value>> {
     if !obj.is_instance(&decimal_cls)? {
         return Ok(None);
     }
-    let dec_str: String = obj.str()?.extract()?;
+    // Without an exponent, as `1E+2` is written, which the Arrow encoder parses.
+    let dec_str: String = PyString::new(py, "{:f}")
+        .call_method1("format", (obj,))?
+        .extract()?;
     let as_tuple = obj.call_method0("as_tuple")?;
     let mut scale: Option<i32> = None;
     if let Ok(exp_obj) = as_tuple.get_item(2) {

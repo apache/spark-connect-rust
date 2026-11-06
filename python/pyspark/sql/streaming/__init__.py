@@ -36,6 +36,11 @@ from pyspark.sql.streaming.datasource import (
     SupportsTriggerAvailableNow,
 )
 from pyspark.sql.streaming.listener import StreamingQueryListener
+from pyspark.sql.streaming.stateful_processor import (
+    StatefulProcessor,
+    StatefulProcessorHandle,
+)
+from pyspark.sql.streaming.tws_tester import TwsTester
 
 __all__ = [
     "StreamingQueryListener",
@@ -53,4 +58,7 @@ __all__ = [
     "ReadMaxFiles",
     "ReadMaxBytes",
     "SupportsTriggerAvailableNow",
+    "StatefulProcessor",
+    "StatefulProcessorHandle",
+    "TwsTester",
 ]
