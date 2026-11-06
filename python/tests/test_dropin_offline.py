@@ -3297,6 +3297,55 @@ def test_arrow_udf_type_enum_values():
     assert PandasUDFType.GROUPED_AGG_ITER == 217
 
 
+def test_udf_types_are_re_exported_whichever_module_is_imported_first():
+    # A new interpreter, as this one has imported pyspark.sql.functions already.
+    import subprocess
+    import sys
+
+    subprocess.run([sys.executable, "-c", """
+import pyspark.sql.pandas.functions as PF
+from pyspark.sql.functions import ArrowUDFType, PandasUDFType, arrow_udf, pandas_udf
+assert (PandasUDFType, ArrowUDFType) == (PF.PandasUDFType, PF.ArrowUDFType)
+assert (arrow_udf, pandas_udf) == (PF.arrow_udf, PF.pandas_udf)
+from pyspark.util import PythonEvalType
+assert PF.PythonEvalType is PythonEvalType
+"""], check=True)
+
+
+def test_has_type_looks_into_nested_and_user_defined_types():
+    from pyspark.sql.types import _has_type
+
+    nested = T.StructType([T.StructField("m", T.MapType(T.StringType(), T.ArrayType(T.NullType())))])
+    assert _has_type(nested, T.NullType)
+    assert _has_type(nested, (T.DecimalType, T.ArrayType))
+    assert not _has_type(nested, T.DecimalType)
+    # A user-defined type is looked into by its sqlType: an array of doubles.
+    assert _has_type(T.StructType([T.StructField("p", _PointUDT())]), T.DoubleType)
+
+
+def test_conversion_converts_local_rows_to_arrow_and_back():
+    import decimal
+
+    from pyspark.sql import Row
+    from pyspark.sql.conversion import ArrowTableToRowsConversion, LocalDataToArrowConversion
+
+    schema = T.StructType([
+        T.StructField("id", T.LongType()),
+        T.StructField("a", T.ArrayType(T.DoubleType())),
+        T.StructField("m", T.MapType(T.StringType(), T.LongType())),
+        T.StructField("st", T.StructType([T.StructField("x", T.LongType())])),
+        T.StructField("d", T.DecimalType(10, 2)),
+    ])
+    rows = [(1, [1.0, None], {"k": 1}, (5,), decimal.Decimal("1.25")), (2, None, None, None, None)]
+    table = LocalDataToArrowConversion.convert(rows, schema, use_large_var_types=False)
+    assert table.to_pylist()[0] == {
+        "id": 1, "a": [1.0, None], "m": [("k", 1)], "st": {"x": 5}, "d": decimal.Decimal("1.25")}
+    assert ArrowTableToRowsConversion.convert(table, schema, return_as_tuples=True) == [
+        (1, [1.0, None], {"k": 1}, Row(x=5), decimal.Decimal("1.25")),
+        (2, None, None, None, None),
+    ]
+
+
 def test_datatype_class_constants():
     assert (T.DayTimeIntervalType.DAY, T.DayTimeIntervalType.HOUR) == (0, 1)
     assert (T.DayTimeIntervalType.MINUTE, T.DayTimeIntervalType.SECOND) == (2, 3)

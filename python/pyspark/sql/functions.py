@@ -742,10 +742,7 @@ try:
     )
 except Exception:  # pragma: no cover
     pass
-try:
-    from pyspark.sql.pandas.functions import PandasUDFType, ArrowUDFType  # noqa: F401
-except Exception:  # pragma: no cover
-    pass
+from pyspark.sql.pandas.functions import PandasUDFType, ArrowUDFType  # noqa: E402,F401
 
 # Build __all__ with all function names
 __all__ = [
