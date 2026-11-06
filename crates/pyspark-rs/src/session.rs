@@ -779,9 +779,11 @@ impl PySparkSession {
                 // local relation already carries them. Empty input stays local.
                 return Ok(match &spec {
                     Spec::Struct(fields) if !fields.is_empty() && table.len()? > 0 => {
-                        PyDataFrame::new(frame.dataframe.to_df(
-                            fields.iter().map(|field| field.name.as_str()).collect(),
-                        ))
+                        PyDataFrame::new(
+                            frame
+                                .dataframe
+                                .to_df(fields.iter().map(|field| field.name.as_str()).collect()),
+                        )
                     }
                     _ => frame,
                 });
