@@ -1339,6 +1339,82 @@ mod tests {
     }
 
     #[test]
+    fn interval_input_ipc_is_exact_and_recursive() {
+        let interval = DataType::DayTimeInterval {
+            start_field: 0,
+            end_field: 3,
+        };
+        let nested = DataType::Struct {
+            fields: vec![
+                struct_field("leaf", interval.clone()),
+                struct_field(
+                    "items",
+                    DataType::Array {
+                        element_type: Box::new(interval.clone()),
+                        contains_null: true,
+                    },
+                ),
+                struct_field(
+                    "mapping",
+                    DataType::Map {
+                        key_type: Box::new(text_type()),
+                        value_type: Box::new(interval.clone()),
+                        value_contains_null: true,
+                    },
+                ),
+            ],
+        };
+        let schema = schema(vec![interval, nested]);
+        let mut rows = vec![row(vec![Value::Null, Value::Null])];
+        for micros in [
+            i64::MIN,
+            i64::MIN + 1,
+            -172_800_000_001,
+            -1,
+            0,
+            1,
+            i64::MAX - 1,
+            i64::MAX,
+        ] {
+            let value = Value::DayTimeInterval(micros);
+            rows.push(row(vec![
+                value.clone(),
+                Value::Struct(
+                    Row::new(
+                        vec!["leaf".into(), "items".into(), "mapping".into()],
+                        vec![
+                            value.clone(),
+                            Value::List(vec![Value::Null, value.clone()]),
+                            Value::Map(vec![
+                                (Value::String("k".into()), value),
+                                (Value::String("null".into()), Value::Null),
+                            ]),
+                        ],
+                    )
+                    .into(),
+                ),
+            ]));
+        }
+        let batch = read_batch(&rows, &schema);
+        assert_eq!(
+            batch.column(0).data_type(),
+            &arrow::datatypes::DataType::Duration(arrow::datatypes::TimeUnit::Microsecond)
+        );
+        let decoded =
+            crate::dataframe::decode_arrow_batch(&proto::execute_plan_response::ArrowBatch {
+                row_count: rows.len() as i64,
+                data: rows_to_arrow_ipc(&rows, &schema).unwrap().into(),
+                ..Default::default()
+            })
+            .unwrap();
+        for (actual, expected) in decoded.iter().zip(&rows) {
+            assert_eq!(actual.values(), expected.values());
+        }
+        // A duration schema must reject untyped integers rather than silently treating them as micros.
+        assert!(rows_to_arrow_ipc(&[row(vec![Value::Long(1), Value::Null])], &schema).is_err());
+    }
+
+    #[test]
     fn small_integer_rows_encode_as_floating_ipc() {
         use arrow::array::{Array, Float32Array, Float64Array, ListArray, MapArray, StructArray};
         use arrow::ipc::reader::StreamReader;
