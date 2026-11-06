@@ -9,7 +9,6 @@ use spark_connect::udf::{CommonInlineUserDefinedFunctionExpression, PythonUDFPay
 use crate::column::PyColumn;
 use crate::dataframe::PyDataFrame;
 use crate::session::PySparkSession;
-use crate::types::PyDataType;
 
 // Include the auto-generated dispatch function
 mod dispatch {
@@ -78,7 +77,7 @@ fn pyfunc_make_udf(
 fn pyfunc_make_udtf(
     session: PyRef<'_, PySparkSession>,
     name: String,
-    return_type: Option<PyRef<'_, PyDataType>>,
+    return_type: Option<&Bound<'_, PyAny>>,
     eval_type: i32,
     command_bytes: Vec<u8>,
     python_ver: String,
@@ -88,7 +87,19 @@ fn pyfunc_make_udtf(
     for arg in args {
         col_args.push(to_column(&arg)?);
     }
-    let rt = return_type.map(|d| d.inner.clone());
+    // Connect leaves DDL parsing and validation to the server. In particular,
+    // do not use py_to_data_type's eager DDL parser for string return types.
+    let rt = return_type
+        .map(|value| {
+            if let Ok(ddl) = value.extract::<String>() {
+                Ok(spark_connect::types::DataType::Unparsed {
+                    data_type_string: ddl,
+                })
+            } else {
+                crate::types::py_to_data_type(value)
+            }
+        })
+        .transpose()?;
     let df = session.session.tvf().udtf(
         &name,
         col_args,
@@ -250,19 +261,16 @@ fn scalar_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<LiteralExpression>>
     let py = obj.py();
 
     // decimal.Decimal -> Decimal literal (before int/float: Decimal has __float__/__int__).
+    // As PySpark's LiteralExpression of a Decimal, of DecimalType(): precision 10 and scale
+    // 0, which the server widens to those of the value, so lit(Decimal("1.5")) is a
+    // decimal(10,1).
     if let Ok(dec_mod) = py.import("decimal") {
         let decimal_cls = dec_mod.getattr("Decimal")?;
         if obj.is_instance(&decimal_cls)? {
-            let value: String = obj.str()?.extract()?;
-            let as_tuple = obj.call_method0("as_tuple")?;
-            let num_digits = as_tuple.get_item(1)?.len()? as i32;
-            let exp: i64 = as_tuple.get_item(2)?.extract().unwrap_or(0);
-            let scale = if exp < 0 { (-exp) as i32 } else { 0 };
-            let precision = num_digits.max(scale).max(1);
             return Ok(Some(LiteralExpression::Decimal {
-                value,
-                precision,
-                scale,
+                value: obj.str()?.extract()?,
+                precision: 10,
+                scale: 0,
             }));
         }
     }

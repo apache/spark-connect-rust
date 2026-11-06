@@ -32,6 +32,21 @@ from pyspark.sql import Row, SparkSession, types as T
 from day_time_interval_cases import DayTimeIntervalTests  # noqa: F401
 
 
+def test_create_dataframe_input_names_offline():
+    # Keep the fixture's active session out of this process's offline tests.
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    for dependency in ("grpc", "pandas", "pyarrow"):
+        pytest.importorskip(dependency)
+    result = subprocess.run(
+        [sys.executable, str(Path(__file__).with_name("input_name_cases.py"))],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 # --------------------------------------------------------------------------- types
 
 ATOMIC = [
@@ -515,46 +530,57 @@ def test_functions_keyword_and_dispatch_paths():
     assert repr(F._UNSET) == "<unset>"
 
 
-def test_dispatch_keeps_literal_string_args_literal():
-    # Guards _FN_COL_ARGS: a bare-str arg at a LITERAL position (e.g. a variant path)
-    # must reach the core UNCHANGED, not be resolved to a column via _to_col. If it were
-    # coerced, `variant_delete(v, "$.b")` would send an unresolved attribute col("$.b")
-    # and fail analysis on the server. Asserting only that a Column is built (as elsewhere)
-    # can't catch this, so we capture the exact positional args handed to the core: a
-    # value column is coerced away from str, while a literal path stays a str.
+def _sent_function_arguments(service):
+    """The arguments of the function that the last ExecutePlan selects: ("col", name) for a
+    column reference and ("lit", fields) for a literal."""
+    # ExecutePlanRequest.plan=3, Plan.root=1, Relation.project=3, Project.expressions=3,
+    # Expression.unresolved_function=3, UnresolvedFunction.arguments=2; an argument is an
+    # Expression.literal=1 or an .unresolved_attribute=2, of unparsed_identifier=1.
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+    expression = parse_message(parse_message(parse_message(plan)[3][0])[3][0])
+    arguments = []
+    for argument in parse_message(expression[3][0]).get(2, []):
+        argument = parse_message(argument)
+        if 2 in argument:
+            arguments.append(("col", parse_message(argument[2][0])[1][0].decode()))
+        else:
+            arguments.append(("lit", parse_message(argument[1][0])))
+    return arguments
+
+
+@pytest.mark.parametrize("call,expected", [
+    # Literal.string=13 and .boolean=3.
+    (lambda F: F.variant_get("v", "$.a", "int"),
+     [("col", "v"), ("lit", {13: [b"$.a"]}), ("lit", {13: [b"int"]})]),
+    (lambda F: F.try_variant_get("v", "$.a", "int"),
+     [("col", "v"), ("lit", {13: [b"$.a"]}), ("lit", {13: [b"int"]})]),
+    (lambda F: F.variant_delete("v", "$.a", "$.b"),
+     [("col", "v"), ("lit", {13: [b"$.a"]}), ("lit", {13: [b"$.b"]})]),
+    (lambda F: F.variant_insert("v", "$.b", "x"),
+     [("col", "v"), ("lit", {13: [b"$.b"]}), ("col", "x")]),
+    (lambda F: F.try_variant_insert("v", "$.b", "x"),
+     [("col", "v"), ("lit", {13: [b"$.b"]}), ("col", "x")]),
+    (lambda F: F.variant_set("v", "$.b", "x", True),
+     [("col", "v"), ("lit", {13: [b"$.b"]}), ("col", "x"), ("lit", {3: [1]})]),
+    (lambda F: F.try_variant_set("v", "$.b", "x", True),
+     [("col", "v"), ("lit", {13: [b"$.b"]}), ("col", "x"), ("lit", {3: [1]})]),
+    (lambda F: F.variant_array_append("v", "$", "x"),
+     [("col", "v"), ("lit", {13: [b"$"]}), ("col", "x")]),
+    (lambda F: F.try_variant_array_append("v", "$", "x"),
+     [("col", "v"), ("lit", {13: [b"$"]}), ("col", "x")]),
+    (lambda F: F.date_part("YEAR", "d"), [("col", "YEAR"), ("col", "d")]),
+    (lambda F: F.convert_timezone(None, "tz", "ts"), [("col", "tz"), ("col", "ts")]),
+])
+def test_function_arguments_are_columns_or_literals_as_pyspark(mock_connect, call, expected):
+    # A str is a literal where PySpark takes a str, as a variant path, and a column name
+    # where it takes a Column or a name, as date_part's field: a path sent as a column,
+    # such as variant_delete(v, "$.b"), would fail analysis on the server. The cases agree
+    # with official PySpark 4.3.0.
     from pyspark.sql import functions as F
 
-    captured = []
-
-    orig = F._call_function
-    F._call_function = lambda fname, *args: captured.append((fname, args)) or orig(fname, *args)
-    def is_col(x):
-        return type(x).__name__ == "Column"
-
-    try:
-        # (function call, positions that MUST stay raw literals — a str path or a bool
-        # flag — and positions that MUST be coerced to a column)
-        cases = [
-            (lambda: F.variant_get("v", "$.a", "int"), {1, 2}, {0}),
-            (lambda: F.try_variant_get("v", "$.a", "int"), {1, 2}, {0}),
-            (lambda: F.variant_delete("v", "$.a", "$.b"), {1, 2}, {0}),
-            (lambda: F.variant_insert("v", "$.b", "x"), {1}, {0, 2}),
-            (lambda: F.try_variant_insert("v", "$.b", "x"), {1}, {0, 2}),
-            (lambda: F.variant_set("v", "$.b", "x", True), {1, 3}, {0, 2}),
-            (lambda: F.try_variant_set("v", "$.b", "x", True), {1, 3}, {0, 2}),
-            (lambda: F.variant_array_append("v", "$", "x"), {1}, {0, 2}),
-            (lambda: F.try_variant_array_append("v", "$", "x"), {1}, {0, 2}),
-        ]
-        for call, literal_pos, col_pos in cases:
-            captured.clear()
-            call()
-            fname, args = captured[-1]
-            for i in literal_pos:
-                assert not is_col(args[i]), f"{fname} arg[{i}] should stay a raw literal, got a Column"
-            for i in col_pos:
-                assert is_col(args[i]), f"{fname} arg[{i}] should be coerced to a Column, got {type(args[i]).__name__}"
-    finally:
-        F._call_function = orig
+    spark, service = mock_connect
+    spark.range(1).select(call(F)).collect()
+    assert _sent_function_arguments(service) == expected
 
 
 def test_column_alias_metadata_offline():
@@ -666,6 +692,33 @@ def test_show_checks_its_arguments_as_pyspark():
         df.show(foo=1)
     with pytest.raises(TypeError, match=r"^DataFrame\._show_string\(\) got multiple values for argument 'n'$"):
         df._show_string(1, n=2)
+
+
+def test_decimal_literal_is_of_the_default_decimal_type_as_pyspark(mock_connect):
+    # As PySpark's LiteralExpression of a Decimal, of DecimalType(): precision 10 and scale
+    # 0, which the server widens to those of the value, wherever the literal is.
+    from decimal import Decimal
+
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    spark.range(1).select(
+        F.lit(Decimal("1.5")), F.col("id") == Decimal("-0.001"), F.lit(Decimal("12345678901.25"))
+    ).collect()
+    # ExecutePlanRequest.plan=3, Plan.root=1, Relation.project=3, Project.expressions=3;
+    # Expression.literal=1, Literal.decimal=12 (value=1, precision=2, scale=3);
+    # .unresolved_function=3, UnresolvedFunction.arguments=2.
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+    expressions = parse_message(parse_message(plan)[3][0])[3]
+
+    def decimal(literal):
+        return parse_message(parse_message(literal)[12][0])
+
+    first, compared, wide = (parse_message(e) for e in expressions)
+    compared = parse_message(parse_message(compared[3][0])[2][1])
+    assert decimal(first[1][0]) == {1: [b"1.5"], 2: [10], 3: [0]}
+    assert decimal(compared[1][0]) == {1: [b"-0.001"], 2: [10], 3: [0]}
+    assert decimal(wide[1][0]) == {1: [b"12345678901.25"], 2: [10], 3: [0]}
 
 
 def test_dropin_module_imports():
@@ -1181,6 +1234,118 @@ def test_udtf_call_without_session_raises():
 
     with pytest.raises(RuntimeError):
         T2(1)
+
+
+def test_udtf_return_type_connect_validation_and_command():
+    # A Connect DDL string (including invalid DDL) is validated by the server,
+    # not when decorating the class or constructing the DataFrame. Isolate the
+    # active session so the other offline tests still start without a session.
+    import subprocess
+    import sys
+
+    subprocess.run([sys.executable, "-c", """
+from pyspark.sql import SparkSession, DataFrame, functions as F, types as T
+from pyspark.serializers import CloudPickleSerializer
+
+spark = SparkSession.builder.remote("sc://localhost:15002").getOrCreate()
+class Echo:
+    def eval(self, value):
+        yield (value,)
+
+schema = T.StructType([T.StructField("value", T.LongType())])
+for return_type in ["value BIGINT", "STRUCT<value: BIGINT>",
+                    "value ARRAY<STRUCT<x: INT>>", "invalid DDL !!!", "INT", schema]:
+    for decorate in [False, True]:
+        fn = (F.udtf(returnType=return_type)(Echo) if decorate else
+              F.udtf(Echo, returnType=return_type))
+        assert isinstance(fn(F.lit(1)), DataFrame)
+        handler = CloudPickleSerializer().loads(fn.command)
+        assert isinstance(handler, type)
+        assert list(handler().eval(7)) == [(7,)]
+        assert fn.returnType == return_type
+
+# Dynamic schemas omit return_type and leave analysis to the Python handler.
+class Dynamic(Echo):
+    @staticmethod
+    def analyze(value):
+        pass
+assert isinstance(F.udtf(Dynamic)(F.lit(1)), DataFrame)
+"""], check=True)
+
+
+def test_udtf_python_binding_preserves_wire_schema_and_command():
+    # Exercise the Python -> PyO3 -> protobuf seam against the recording mock,
+    # including DDL that the client must send without parsing. Keep the active
+    # session isolated, as in the construction-only test above.
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    pytest.importorskip("grpc")
+    subprocess.run([sys.executable, "-c", """
+import json
+import sys
+sys.path.insert(0, sys.argv[1])
+from _mock_connect_server import mock_connect_session, parse_message
+from pyspark.sql import functions as F, types as T
+from pyspark.sql.udtf import AnalyzeResult
+from pyspark.serializers import CloudPickleSerializer
+
+class Echo:
+    def eval(self, value):
+        yield (value,)
+
+class Dynamic(Echo):
+    @staticmethod
+    def analyze(value):
+        return AnalyzeResult(T.StructType([T.StructField("value", T.LongType())]))
+
+schema = T.StructType([T.StructField("value", T.LongType(), False, {"comment": "kept"})])
+with mock_connect_session() as (spark, service):
+    for return_type in ["value BIGINT", "STRUCT<value: BIGINT>",
+                        "value ARRAY<STRUCT<x: INT>>", "  `v à` BIGINT  ",
+                        "", "invalid DDL !!!", "INT", schema, None]:
+        for decorate in [False, True]:
+            handler = Dynamic if return_type is None else Echo
+            fn = (F.udtf(returnType=return_type)(handler) if decorate else
+                  F.udtf(handler, returnType=return_type))
+            calls = service.calls
+            df = fn(F.lit(1))
+            assert service.calls == calls
+            assert df.columns == ["id"]
+            assert service.calls == calls + 1
+
+            # AnalyzePlanRequest.schema=4 -> plan=1 -> root=1 -> inline_udtf=38.
+            call = parse_message(service.analyze_requests[-1])
+            for field in (4, 1, 1, 38):
+                call = parse_message(call[field][0])
+            assert call[1] == [handler.__name__.encode()]
+            # CommonInlineUserDefinedTableFunction.python_udtf=4.
+            udtf = parse_message(call[4][0])
+            if return_type is None:
+                assert 1 not in udtf
+            else:
+                sent_type = parse_message(udtf[1][0])
+                if isinstance(return_type, str):
+                    assert set(sent_type) == {24}  # DataType.unparsed
+                    unparsed = parse_message(sent_type[24][0])
+                    assert unparsed.get(1, [b""])[0].decode() == return_type
+                else:
+                    assert set(sent_type) == {21}  # DataType.struct
+                    fields = parse_message(sent_type[21][0])[1]
+                    assert len(fields) == 1
+                    field = parse_message(fields[0])
+                    assert field[1] == [b"value"]
+                    assert parse_message(field[2][0]) == {7: [b""]}  # LongType
+                    assert field.get(3, [0]) == [0]  # nullable=False
+                    assert json.loads(field[4][0]) == {"comment": "kept"}
+            assert udtf[2] == [300]
+            command_handler = CloudPickleSerializer().loads(udtf[3][0])
+            assert isinstance(command_handler, type)
+            assert command_handler.__name__ == handler.__name__
+            assert list(command_handler().eval(7)) == [(7,)]
+            assert udtf[4] == [fn.python_ver.encode()]
+""", str(Path(__file__).resolve().parent)], check=True)
 
 
 def test_spark_conf_stub():
@@ -1938,7 +2103,8 @@ def test_functions_substring():
 
     str_col = F.col("str")
     assert type(F.substring(str_col, 1, 5)).__name__ == "Column"
-    assert type(F.substr(str_col, 1, 5)).__name__ == "Column"
+    # As in PySpark, substr takes the position and length as Columns (or names).
+    assert type(F.substr(str_col, F.lit(1), F.lit(5))).__name__ == "Column"
 
 
 def test_functions_replace():
@@ -2814,8 +2980,8 @@ def test_functions_stack():
     """Test stack function for row construction."""
     from pyspark.sql import functions as F
 
-    # stack creates rows from arguments
-    result = F.stack(2, F.col("a"), F.col("b"))
+    # stack creates rows from arguments; as in PySpark, the count is a Column too.
+    result = F.stack(F.lit(2), F.col("a"), F.col("b"))
     assert type(result).__name__ == "Column"
 
 
@@ -4534,30 +4700,86 @@ def test_timestamp_nanos_types_roundtrip_and_pickle():
     assert pickle.loads(pickle.dumps(nested)).simpleString() == "struct<a:array<timestamp_ltz(9)>>"
 
 
-def test_instr_regexp_replace_optional_args():
+@pytest.mark.parametrize("call,expected", [
+    # Optional arguments are sent when given, as PySpark Connect's functions send them, and
+    # strings are column names where PySpark takes a Column or a name.
+    (lambda F: F.to_date("d", "dd/MM/yyyy"), 'to_date(d, dd/MM/yyyy)'),
+    (lambda F: F.to_timestamp("d", "yyyy-MM-dd"), 'to_timestamp(d, yyyy-MM-dd)'),
+    (lambda F: F.log(2.0, "x"), 'log(2.0, x)'),
+    (lambda F: F.log("x"), 'ln(x)'),
+    (lambda F: F.sort_array("a", asc=False), 'sort_array(a, False)'),
+    (lambda F: F.split("s", ",", 2), 'split(s, ,, 2)'),
+    (lambda F: F.substr("s", F.lit(1), F.lit(2)), 'substr(s, 1, 2)'),
+    (lambda F: F.like("p", F.lit("a!_c"), F.lit("!")), 'like(p, a!_c, !)'),
+    (lambda F: F.unix_timestamp("t"), 'unix_timestamp(t, yyyy-MM-dd HH:mm:ss)'),
+    (lambda F: F.unix_timestamp(), 'unix_timestamp()'),
+    (lambda F: F.months_between("a", "b", roundOff=False), 'months_between(a, b, False)'),
+    (lambda F: F.first("v", ignorenulls=True), 'first(v, True)'),
+    (lambda F: F.last("v", True), 'last(v, True)'),
+    (lambda F: F.aes_encrypt("i", "k", F.lit("ECB")), 'aes_encrypt(i, k, ECB, DEFAULT, , )'),
+    (lambda F: F.rand(7), 'rand(7)'),
+    (lambda F: F.randn(seed=7), 'randn(7)'),
+    (lambda F: F.shuffle("a", 7), 'shuffle(a, 7)'),
+    (lambda F: F.count_distinct("a", "b"), 'count(distinct a, b)'),
+    (lambda F: F.countDistinct("a", "b"), 'count(distinct a, b)'),
+    (lambda F: F.listagg_distinct("a", ","), 'listagg(distinct a, ,)'),
+    (lambda F: F.string_agg("a", ","), 'string_agg(a, ,)'),
+    (lambda F: F.any_value("a", True), 'any_value(a, True)'),
+    (lambda F: F.max_by("a", "b", 2), 'max_by(a, b, 2)'),
+    (lambda F: F.hll_sketch_agg("a", 10), 'hll_sketch_agg(a, 10)'),
+    (lambda F: F.approx_percentile("c", 0.5, 100), 'approx_percentile(c, 0.5, 100)'),
+    (lambda F: F.locate("b", "s", 3), 'locate(b, s, 3)'),
+    (lambda F: F.window("t", "1 hour", "30 minutes"), 'window(t, 1 hour, 30 minutes)'),
+    (lambda F: F.instr("s", "a", occurrence=2), 'instr(s, a, 1, 2)'),
+    (lambda F: F.regexp_replace("s", "a", "b", 4), 'regexp_replace(s, a, b, 4)'),
+    (lambda F: F.instr("s", "a"), 'instr(s, a)'),
+    (lambda F: F.instr("s", "a", 3), 'instr(s, a, 3)'),
+    (lambda F: F.regexp_replace("s", "a", "b"), 'regexp_replace(s, a, b)'),
+    (lambda F: F.regexp_replace("s", "a", "b", position=None), 'regexp_replace(s, a, b)'),
+    (lambda F: F.date_part(F.lit("YEAR"), "d"), 'date_part(YEAR, d)'),
+    # An explicit None is what PySpark makes of it: no argument, a NULL or the default.
+    (lambda F: F.round("c", None), 'round(c)'),
+    (lambda F: F.bround("c", None), 'bround(c)'),
+    (lambda F: F.first("c", None), 'first(c, NULL)'),
+    (lambda F: F.lag("c"), 'lag(c, 1)'),
+    (lambda F: F.lag("c", 2, None), 'lag(c, 2)'),
+    (lambda F: F.lead("c", offset=None), 'lead(c, NULL)'),
+    (lambda F: F.trim("c", None), 'trim(c)'),
+    (lambda F: F.approx_percentile("c", 0.5, None), 'approx_percentile(c, 0.5, NULL)'),
+    (lambda F: F.from_unixtime("c", None), 'from_unixtime(c, NULL)'),
+    (lambda F: F.sort_array("c", None), 'sort_array(c, NULL)'),
+    (lambda F: F.nth_value("c", 2, None), 'nth_value(c, 2)'),
+    (lambda F: F.tuple_union_double("a", "b"), 'tuple_union_double(a, b, 12, sum)'),
+    (lambda F: F.variant_strip_nulls("v", None), 'variant_strip_nulls(v, NULL)'),
+    (lambda F: F.instr("s", "a", None, None), 'instr(s, a)'),
+    (lambda F: F.array_join("a", ",", None), 'array_join(a, ,)'),
+])
+def test_function_arguments_as_pyspark(call, expected):
+    # The cases agree with official PySpark 4.3.0.
     from pyspark.sql import functions as F
 
-    captured = []
-    orig = F._call_function
-    F._call_function = lambda fname, *args: captured.append((fname, args)) or orig(fname, *args)
-    try:
-        F.instr("s", "a")
-        assert captured[-1][1][1:] == ("a",)
-        # occurrence without start searches from position 1 (pyspark 4.3.0).
-        F.instr("s", "a", occurrence=2)
-        assert captured[-1][1][1:] == ("a", 1, 2)
-        F.instr("s", "a", start=None, occurrence=None)
-        assert len(captured[-1][1]) == 2
-        F.instr("s", "a", 3)
-        assert captured[-1][1][1:] == ("a", 3)
-        F.regexp_replace("s", "a", "b")
-        assert len(captured[-1][1]) == 3
-        F.regexp_replace("s", "a", "b", position=None)
-        assert len(captured[-1][1]) == 3
-        F.regexp_replace("s", "a", "b", 4)
-        assert captured[-1][1][1:] == ("a", "b", 4)
-    finally:
-        F._call_function = orig
+    assert repr(call(F)) == f"Column<'{expected}'>"
+
+
+@pytest.mark.parametrize("call,error,condition,parameters", [
+    (lambda F: F.split("s", ",", None), 'PySparkTypeError', 'NOT_EXPECTED_TYPE', {'expected_type': 'Column or str', 'arg_name': 'col', 'arg_type': 'NoneType'}),
+    (lambda F: F.overlay("a", "b", "c", None), 'PySparkTypeError', 'NOT_EXPECTED_TYPE', {'expected_type': 'Column or str', 'arg_name': 'col', 'arg_type': 'NoneType'}),
+    (lambda F: F.percentile("a", 0.5, None), 'PySparkTypeError', 'NOT_EXPECTED_TYPE', {'expected_type': 'Column or int', 'arg_name': 'frequency', 'arg_type': 'NoneType'}),
+    (lambda F: F.substr("s", 1, 5), 'PySparkTypeError', 'NOT_EXPECTED_TYPE', {'expected_type': 'Column or str', 'arg_name': 'col', 'arg_type': 'int'}),
+    (lambda F: F.stack(2, "a", "b"), 'PySparkTypeError', 'NOT_EXPECTED_TYPE', {'expected_type': 'Column or str', 'arg_name': 'col', 'arg_type': 'int'}),
+    (lambda F: F.sha2("c", 100), 'PySparkValueError', 'VALUE_NOT_ALLOWED', {'arg_name': 'numBits', 'allowed_values': '[0, 224, 256, 384, 512]'}),
+])
+def test_function_arguments_raise_as_pyspark(call, error, condition, parameters):
+    # Before any request, with PySpark Connect's errors; the cases agree with official
+    # PySpark 4.3.0.
+    from pyspark.errors import PySparkTypeError, PySparkValueError
+    from pyspark.sql import functions as F
+
+    with pytest.raises((PySparkTypeError, PySparkValueError)) as raised:
+        call(F)
+    assert type(raised.value).__name__ == error
+    assert raised.value.getCondition() == condition
+    assert raised.value.getMessageParameters() == parameters
 
 
 @pytest.mark.parametrize("column,expected", [
@@ -5677,6 +5899,267 @@ def test_map_functions_reject_what_is_not_callable_as_pyspark(mock_connect, buil
         with pytest.raises(TypeError, match="^unsupported callable$"):
             build(spark.range(3))
     assert service.calls == 0
+
+
+# Session version cache regressions, selected by the existing offline CI suite.
+# The mock runs in a separate process and needs no Spark server.
+from concurrent.futures import ThreadPoolExecutor as version_cache_ThreadPoolExecutor
+import multiprocessing as version_cache_multiprocessing
+from threading import Event as version_cache_Event
+
+from pyspark.sql import SparkSession as version_cache_SparkSession
+
+
+def version_cache_varint(value):
+    result = bytearray()
+    while value > 127:
+        result.append((value & 127) | 128)
+        value >>= 7
+    result.append(value)
+    return bytes(result)
+
+
+def version_cache_message(field, value):
+    if isinstance(value, str):
+        value = value.encode()
+    return version_cache_varint(field * 8 + 2) + version_cache_varint(len(value)) + value
+
+
+def version_cache_serve(connection, request_started, response_waiting, response_gate):
+    import grpc
+
+    class Service:
+        calls = 0
+        releases = 0
+        failure = None
+        version = "4.3.0"
+        block_response = False
+
+        def analyze(self, request, context):
+            self.calls += 1
+            if self.block_response:
+                response_waiting.set()
+                request_started.set()
+                try:
+                    released = response_gate.wait(10)
+                finally:
+                    response_waiting.clear()
+                if not released:
+                    context.abort(
+                        grpc.StatusCode.DEADLINE_EXCEEDED,
+                        "Python thread could not release the version response gate",
+                    )
+            if self.failure == "rpc":
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT, "version unavailable")
+            if self.failure == "no-result":
+                return b""
+            # AnalyzePlanResponse.spark_version=8, SparkVersion.version=1.
+            return version_cache_message(8, version_cache_message(1, self.version))
+
+        def release(self, request, context):
+            self.releases += 1
+            return b""
+
+    service = Service()
+    with version_cache_ThreadPoolExecutor(max_workers=4) as executor:
+        server = grpc.server(executor)
+        server.add_generic_rpc_handlers((grpc.method_handlers_generic_handler(
+            "spark.connect.SparkConnectService", {
+                "AnalyzePlan": grpc.unary_unary_rpc_method_handler(service.analyze),
+                "ReleaseSession": grpc.unary_unary_rpc_method_handler(service.release),
+            }),))
+        port = server.add_insecure_port("127.0.0.1:0")
+        server.start()
+        connection.send(port)
+        try:
+            while True:
+                command = connection.recv()
+                if command[0] == "stop":
+                    break
+                if command[0] == "get":
+                    connection.send(getattr(service, command[1]))
+                elif command[0] == "set":
+                    setattr(service, command[1], command[2])
+                    connection.send(None)
+        finally:
+            response_gate.set()
+            server.stop(0).wait(5)
+
+
+class version_cache_RemoteService:
+    def __init__(self, connection, request_started, response_waiting, response_gate):
+        object.__setattr__(self, "connection", connection)
+        object.__setattr__(self, "request_started", request_started)
+        object.__setattr__(self, "response_waiting", response_waiting)
+        object.__setattr__(self, "response_gate", response_gate)
+
+    def __getattr__(self, name):
+        self.connection.send(("get", name))
+        assert self.connection.poll(10), "Mock server did not respond"
+        return self.connection.recv()
+
+    def __setattr__(self, name, value):
+        self.connection.send(("set", name, value))
+        assert self.connection.poll(10), "Mock server did not respond"
+        self.connection.recv()
+
+    def wait_for_request(self):
+        return self.request_started.wait(5)
+
+    def response_is_waiting(self):
+        return self.response_waiting.is_set()
+
+    def release_response(self):
+        self.response_gate.set()
+
+
+@pytest.fixture
+def version_cache_session():
+    pytest.importorskip("grpc")
+    context = version_cache_multiprocessing.get_context("spawn")
+    parent, child = context.Pipe()
+    request_started = context.Event()
+    response_waiting = context.Event()
+    response_gate = context.Event()
+    process = context.Process(
+        target=version_cache_serve,
+        args=(child, request_started, response_waiting, response_gate),
+    )
+    process.start()
+    try:
+        assert parent.poll(20), "Mock server did not start"
+        port = parent.recv()
+        spark = version_cache_SparkSession.builder.remote(f"sc://127.0.0.1:{port}").getOrCreate()
+        yield spark, version_cache_RemoteService(
+            parent, request_started, response_waiting, response_gate,
+        )
+    finally:
+        response_gate.set()
+        if process.is_alive():
+            parent.send(("stop",))
+        process.join(10)
+        if process.is_alive():
+            process.terminate()
+            process.join(10)
+        parent.close()
+        child.close()
+
+
+@pytest.mark.parametrize("version", ["4.3.0", ""])
+def test_version_cache_success_is_cached(version_cache_session, version):
+    spark, service = version_cache_session
+    service.version = version
+    assert service.calls == 0
+    for _ in range(10):
+        assert spark.version == version
+    assert service.calls == 1
+    service.version = "changed"
+    assert spark.version == version
+    assert service.calls == 1
+
+
+@pytest.mark.parametrize("failure", ["rpc", "no-result"])
+def test_version_cache_failed_lookup_can_retry(version_cache_session, failure):
+    spark, service = version_cache_session
+    service.failure = failure
+    with pytest.raises(Exception):
+        _ = spark.version
+    assert service.calls == 1
+    service.failure = None
+    assert spark.version == "4.3.0"
+    assert spark.version == "4.3.0"
+    assert service.calls == 2
+
+
+def test_version_cache_new_sessions_have_independent_caches(version_cache_session):
+    spark, service = version_cache_session
+    assert spark.version == "4.3.0"
+    service.version = "other"
+    for other in [spark.newSession(), spark.cloneSession()]:
+        assert other.session_id != spark.session_id
+        assert other.version == "other"
+        assert other.version == "other"
+    assert service.calls == 3
+    assert spark.version == "4.3.0"
+
+
+def test_version_cache_success_remains_cached_after_stop(version_cache_session):
+    spark, service = version_cache_session
+    assert spark.version == "4.3.0"
+    spark.stop()
+    assert spark.is_stopped
+    assert service.releases == 1
+    service.failure = "rpc"
+    assert spark.version == "4.3.0"
+    assert service.calls == 1
+
+
+def test_version_cache_concurrent_first_lookup(version_cache_session):
+    spark, service = version_cache_session
+    workers = 8
+    start = Barrier(workers + 1)
+    attempted = [version_cache_Event() for _ in range(workers)]
+    service.block_response = True
+
+    def read_version(index):
+        start.wait(timeout=10)
+        attempted[index].set()
+        return spark.version
+
+    with version_cache_ThreadPoolExecutor(max_workers=workers) as executor:
+        pending = [executor.submit(read_version, index) for index in range(workers)]
+        try:
+            start.wait(timeout=10)
+            for attempt in attempted:
+                assert attempt.wait(5), "Worker did not attempt a version lookup"
+            assert service.wait_for_request(), "Version request never reached the server"
+            assert service.response_is_waiting(), "Version response gate timed out"
+            # The barrier synchronizes Python call attempts; the held response
+            # keeps the cache cold while those callers compete for the lookup.
+            assert not any(future.done() for future in pending)
+            assert service.calls == 1
+        finally:
+            service.release_response()
+        assert [future.result(timeout=10) for future in pending] == ["4.3.0"] * workers
+        assert list(executor.map(lambda _: spark.version, range(24))) == ["4.3.0"] * 24
+    assert service.calls == 1
+
+
+def test_version_cache_releases_gil_while_response_is_pending(version_cache_session):
+    spark, service = version_cache_session
+    service.block_response = True
+    with version_cache_ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(lambda: spark.version)
+        try:
+            assert service.wait_for_request(), "Version request never reached the server"
+            # This Python thread must run before the mock's bounded wait ends.
+            # The live flag distinguishes that from resuming after a GIL stall.
+            assert service.response_is_waiting(), "Python could not run during the version RPC"
+            assert not pending.done()
+        finally:
+            service.release_response()
+        assert pending.result(timeout=10) == "4.3.0"
+    assert service.calls == 1
+
+
+def test_version_cache_active_session_handle_shares_cache(version_cache_session):
+    spark, service = version_cache_session
+    active = version_cache_SparkSession.getActiveSession()
+    assert active.session_id == spark.session_id
+    assert active.version == "4.3.0"
+    service.version = "changed"
+    assert spark.version == "4.3.0"
+    assert service.calls == 1
+
+
+def test_version_cache_stop_before_first_lookup_keeps_rpc_behavior(version_cache_session):
+    spark, service = version_cache_session
+    spark.stop()
+    assert service.calls == 0
+    service.failure = "rpc"
+    with pytest.raises(Exception):
+        _ = spark.version
+    assert service.calls == 1
 
 
 # --------------------------------------------------------------------------- printSchema

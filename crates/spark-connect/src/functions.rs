@@ -828,6 +828,14 @@ pub fn count_distinct(col1: Column) -> Column {
     func_distinct("count", vec![col1.expression().clone()])
 }
 
+/// Mirrors `pyspark.sql.functions.count_distinct(col, *cols)`: the number of distinct
+/// combinations of the columns.
+pub fn count_distinct_columns(col1: Column, cols: impl IntoIterator<Item = Column>) -> Column {
+    let mut args = vec![col1.expression().clone()];
+    args.extend(cols.into_iter().map(|c| c.expression().clone()));
+    func_distinct("count", args)
+}
+
 /// Mirrors `pyspark.sql.functions.count_if`.
 pub fn count_if(col1: Column) -> Column {
     func("count_if", vec![col1.expression().clone()])
@@ -1118,6 +1126,14 @@ pub fn listagg(col1: Column) -> Column {
 /// Mirrors `pyspark.sql.functions.listagg_distinct`.
 pub fn listagg_distinct(col1: Column) -> Column {
     func_distinct("listagg", vec![col1.expression().clone()])
+}
+
+/// Mirrors `pyspark.sql.functions.listagg_distinct(col, delimiter)`.
+pub fn listagg_distinct_with_delimiter(col1: Column, delimiter: Column) -> Column {
+    func_distinct(
+        "listagg",
+        vec![col1.expression().clone(), delimiter.expression().clone()],
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.ln`.
@@ -1516,6 +1532,14 @@ pub fn string_agg(col1: Column) -> Column {
 /// Mirrors `pyspark.sql.functions.string_agg_distinct`.
 pub fn string_agg_distinct(col1: Column) -> Column {
     func_distinct("string_agg", vec![col1.expression().clone()])
+}
+
+/// Mirrors `pyspark.sql.functions.string_agg_distinct(col, delimiter)`.
+pub fn string_agg_distinct_with_delimiter(col1: Column, delimiter: Column) -> Column {
+    func_distinct(
+        "string_agg",
+        vec![col1.expression().clone(), delimiter.expression().clone()],
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.sum`.
@@ -4715,6 +4739,34 @@ mod tests {
             "regexp_replace(s, a, b, 2)"
         );
         assert_eq!(unresolved(positioned), ("regexp_replace".to_string(), 4));
+    }
+
+    #[test]
+    fn test_distinct_aggregates_take_their_columns_and_delimiter() {
+        // A distinct function call of every column, and of the delimiter when given, as
+        // PySpark's count_distinct(col, *cols) and listagg_distinct(col, delimiter) build.
+        use spark_connect_proto::expression::ExprType;
+        let distinct = |c: Column| match c.to_proto().expr_type {
+            Some(ExprType::UnresolvedFunction(f)) => {
+                (f.function_name, f.arguments.len(), f.is_distinct)
+            }
+            other => panic!("expected an UnresolvedFunction, got {other:?}"),
+        };
+        let counted = count_distinct_columns(col("a"), [col("b"), col("c")]);
+        assert_eq!(counted.expression().render(), "count(distinct a, b, c)");
+        assert_eq!(distinct(counted), ("count".to_string(), 3, true));
+        assert_eq!(
+            distinct(count_distinct_columns(col("a"), [])),
+            distinct(count_distinct(col("a")))
+        );
+        let delimiter = || Column::new(lit_str(","));
+        let listed = listagg_distinct_with_delimiter(col("a"), delimiter());
+        assert_eq!(listed.expression().render(), "listagg(distinct a, ,)");
+        assert_eq!(distinct(listed), ("listagg".to_string(), 2, true));
+        assert_eq!(
+            distinct(string_agg_distinct_with_delimiter(col("a"), delimiter())),
+            ("string_agg".to_string(), 2, true)
+        );
     }
 
     #[test]
