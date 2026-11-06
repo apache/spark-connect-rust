@@ -6820,6 +6820,45 @@ def test_window_and_lambda_reprs_as_pyspark():
         repr(F.transform("a", lambda x: x + 1)))
 
 
+def test_window_frames_and_columns_are_checked_as_pyspark():
+    # As PySpark's: a start of -sys.maxsize or less is unbounded preceding and an end of
+    # sys.maxsize or more unbounded following; a row frame raises VALUE_NOT_BETWEEN for a
+    # boundary out of the range of an int, as a start of Window.unboundedFollowing; and the
+    # columns are Columns or column names, else NOT_EXPECTED_TYPE of `col`.
+    import sys
+
+    from pyspark.errors import PySparkTypeError, PySparkValueError
+    from pyspark.sql import Window
+
+    o = Window.orderBy("id")
+    assert repr(o.rowsBetween(-sys.maxsize, sys.maxsize)) == (
+        "WindowSpec(OrderBy(id ASC NULLS FIRST), "
+        "WindowFrame(ROW_FRAME, -9223372036854775808, 9223372036854775807))")
+    assert repr(Window.rangeBetween(-2 ** 70, 2 ** 70)) == (
+        "WindowSpec(WindowFrame(RANGE_FRAME, -9223372036854775808, 9223372036854775807))")
+    assert repr(o.rangeBetween(-(1 << 40), 0)) == (
+        "WindowSpec(OrderBy(id ASC NULLS FIRST), WindowFrame(RANGE_FRAME, -1099511627776, 0))")
+    for start, end, name in ((-(1 << 31) - 1, 0, "start"), (0, 1 << 31, "end"),
+                             (Window.unboundedFollowing, 0, "start"),
+                             (0, Window.unboundedPreceding, "end")):
+        with pytest.raises(PySparkValueError) as error:
+            o.rowsBetween(start, end)
+        assert error.value.getCondition() == "VALUE_NOT_BETWEEN"
+        assert error.value.getMessageParameters() == {
+            "arg_name": name, "min": "-2147483648", "max": "2147483647"}
+    with pytest.raises(AssertionError):
+        o.rowsBetween(1.5, 2)
+    for call, arg_type in ((lambda: Window.partitionBy(1), "int"),
+                           (lambda: Window.partitionBy(("id",)), "tuple"),
+                           (lambda: Window.orderBy(1), "int"),
+                           (lambda: o.orderBy(1.5), "float")):
+        with pytest.raises(PySparkTypeError) as error:
+            call()
+        assert error.value.getMessageParameters() == {
+            "expected_type": "Column or str", "arg_name": "col", "arg_type": arg_type}
+    assert repr(Window.partitionBy(["a", "b"])) == "WindowSpec(PartitionBy(a, b))"
+
+
 def test_expressions_carry_their_origins_as_pyspark():
     # As PySpark's _with_origin: col() and the Column methods give the expressions that they
     # build the origin of their name and their call site in user code, as the python_origin of
