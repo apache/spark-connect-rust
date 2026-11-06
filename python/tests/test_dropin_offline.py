@@ -6854,6 +6854,33 @@ def test_function_calls_render_as_pyspark(column, expected):
     assert repr(column(F)) == f"Column<'{expected}'>"
 
 
+def test_count_and_sum_distinct_take_their_arguments_as_pyspark():
+    # As PySpark Connect's: a Column or a column name, else NOT_EXPECTED_TYPE; count of a star
+    # Column counts the rows, as count(1), and sumDistinct warns that it is deprecated.
+    import warnings
+
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+
+    df = _offline_session().range(1)
+    assert repr(F.count(F.col("*"))) == "Column<'count(1)'>"
+    assert repr(F.count(df["*"])) == "Column<'count(1)'>"
+    assert repr(F.count(F.col("a.*"))) == "Column<'count(1)'>"
+    assert repr(F.count("a")) == repr(F.count(F.col("a"))) == "Column<'count(a)'>"
+    # A name is the column of it: count("*") is the count of a star, as in PySpark.
+    assert repr(F.count("*")) == "Column<'count(unresolvedstar())'>"
+    assert repr(F.sum_distinct("a")) == "Column<'sum(distinct a)'>"
+    for call in (lambda: F.count(1), lambda: F.sum_distinct(1), lambda: F.sum_distinct(None)):
+        with pytest.raises(PySparkTypeError) as error:
+            call()
+        assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+        assert error.value.getMessageParameters()["expected_type"] == "Column or str"
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        assert repr(F.sumDistinct("a")) == "Column<'sum(distinct a)'>"
+    assert [str(w.message) for w in record] == ["Deprecated in 3.4, use sum_distinct instead."]
+
+
 @pytest.mark.parametrize("build,expected", [
     # As PySpark's lit: a list is the array of the literals of its elements.
     (lambda F: F.lit([1, 2]), "array(1, 2)"),
