@@ -62,6 +62,24 @@ def test_conf_get_with_a_none_default(session):
         session.conf.get(key)
 
 
+def test_repr_shows_the_rows_with_eager_evaluation_as_pyspark(session):
+    df = session.range(3)
+    assert repr(df) == "DataFrame[id: bigint]"
+    keys = ["spark.sql.repl.eagerEval.enabled", "spark.sql.repl.eagerEval.maxNumRows",
+            "spark.sql.repl.eagerEval.truncate"]
+    try:
+        session.conf.set(keys[0], "true")
+        session.conf.set(keys[1], "2")
+        assert repr(df) == "+---+\n| id|\n+---+\n|  0|\n|  1|\n+---+\nonly showing top 2 rows"
+        session.conf.set(keys[2], "3")
+        assert repr(session.createDataFrame([("abcdef",)], "s string")) == (
+            "+---+\n|  s|\n+---+\n|abc|\n+---+\n")
+    finally:
+        for key in keys:
+            session.conf.unset(key)
+    assert repr(df) == "DataFrame[id: bigint]"
+
+
 def test_instr_and_regexp_replace_apply_their_optional_arguments(session):
     # Column b holds "c", so the literal "b" and the column b find different positions.
     df = session.createDataFrame([("abcabc", "c", "a", "z")], ["s", "b", "p", "r"])

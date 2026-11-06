@@ -5274,6 +5274,232 @@ def test_create_auto_cdc_flow_scd2_track_history():
     assert flow.spark_conf == {"k": "v"}
 
 
+# ---------------------------------------------------------------- DataFrame repr
+
+def _repr_varint(value):
+    result = bytearray()
+    while value > 127:
+        result.append((value & 127) | 128)
+        value >>= 7
+    result.append(value)
+    return bytes(result)
+
+
+def _repr_message(field, value):
+    if isinstance(value, str):
+        value = value.encode()
+    return _repr_varint(field * 8 + 2) + _repr_varint(len(value)) + value
+
+
+def _repr_field(name, data_type):
+    return (_repr_message(1, name) + _repr_message(2, data_type) + b"\x18\x01"
+            + _repr_message(4, '{"note":"original"}'))
+
+
+def _repr_serve(connection):
+    import grpc
+    from concurrent.futures import ThreadPoolExecutor
+
+    # A separate process can serve schema RPCs while repr holds the client GIL.
+    class Service:
+        calls = 0
+        data_type = _repr_struct(("id", _repr_message(7, b"")))
+        failure = None
+        execute_calls = 0
+        configs = {"spark.sql.repl.eagerEval.enabled": "false",
+                   "spark.sql.repl.eagerEval.maxNumRows": "20",
+                   "spark.sql.repl.eagerEval.truncate": "20"}
+        config_keys = []
+
+        def execute(self, request, context):
+            self.execute_calls += 1
+            context.abort(grpc.StatusCode.UNIMPLEMENTED, "repr must not execute rows")
+
+        def config(self, request, context):
+            # ConfigRequest.session_id=1, operation=3, Operation.get=2, Get.keys=1;
+            # ConfigResponse.session_id=1, pairs=2, KeyValue.key=1, value=2.
+            request = parse_message(request)
+            keys = [key.decode() for key in
+                    parse_message(parse_message(request[3][0])[2][0]).get(1, [])]
+            self.config_keys = self.config_keys + [keys]
+            return _repr_message(1, request[1][0]) + b"".join(
+                _repr_message(2, _repr_message(1, key) + _repr_message(2, self.configs[key]))
+                for key in keys)
+
+        def analyze(self, request, context):
+            self.calls += 1
+            if self.failure == "rpc":
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT, "schema unavailable")
+            if self.failure == "no-result":
+                return b""
+            if self.failure == "missing-schema":
+                return _repr_message(2, b"")
+            if self.failure == "invalid-type":
+                return _repr_message(2, _repr_message(1, b""))
+            # base.proto: AnalyzePlanResponse.schema=2, Schema.schema=1.
+            return _repr_message(2, _repr_message(1, self.data_type))
+
+    service = Service()
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        server = grpc.server(executor)
+        handler = grpc.unary_unary_rpc_method_handler(service.analyze)
+        server.add_generic_rpc_handlers((grpc.method_handlers_generic_handler(
+            "spark.connect.SparkConnectService", {"AnalyzePlan": handler,
+                "ExecutePlan": grpc.unary_stream_rpc_method_handler(service.execute),
+                "Config": grpc.unary_unary_rpc_method_handler(service.config)}),))
+        port = server.add_insecure_port("127.0.0.1:0")
+        server.start()
+        connection.send(port)
+        try:
+            while True:
+                command = connection.recv()
+                if command[0] == "stop":
+                    break
+                if command[0] == "get":
+                    connection.send(getattr(service, command[1]))
+                elif command[0] == "set":
+                    setattr(service, command[1], command[2])
+                    connection.send(None)
+        finally:
+            server.stop(0).wait()
+
+
+class _ReprRemoteService:
+    def __init__(self, connection):
+        object.__setattr__(self, "connection", connection)
+
+    def __getattr__(self, name):
+        self.connection.send(("get", name))
+        assert self.connection.poll(10), "Mock server did not respond"
+        return self.connection.recv()
+
+    def __setattr__(self, name, value):
+        self.connection.send(("set", name, value))
+        assert self.connection.poll(10), "Mock server did not respond"
+        self.connection.recv()
+
+
+@pytest.fixture
+def repr_analyzed():
+    import multiprocessing
+    from pyspark.sql import SparkSession
+
+    pytest.importorskip("grpc")
+    context = multiprocessing.get_context("spawn")
+    parent, child = context.Pipe()
+    process = context.Process(target=_repr_serve, args=(child,))
+    process.start()
+    try:
+        assert parent.poll(20), "Mock server did not start"
+        port = parent.recv()
+        spark = SparkSession.builder.remote(f"sc://127.0.0.1:{port}").getOrCreate()
+        yield spark, _ReprRemoteService(parent)
+    finally:
+        if process.is_alive():
+            parent.send(("stop",))
+        process.join(10)
+        if process.is_alive():
+            process.terminate()
+            process.join(10)
+        parent.close()
+        child.close()
+
+
+def _repr_struct(*fields):
+    return _repr_message(21, b"".join(_repr_message(1, _repr_field(name, dtype)) for name, dtype in fields))
+
+
+@pytest.mark.parametrize("schema, expected", [
+    (_repr_struct(), "DataFrame[]"),
+    (_repr_struct(("id", _repr_message(7, b""))), "DataFrame[id: bigint]"),
+    (_repr_struct(("a.b", _repr_message(6, b"")), ("with space", _repr_message(11, b"")),
+             ("a.b", _repr_message(9, b"")), ("雪`[]", _repr_message(3, b""))),
+     "DataFrame[a.b: int, with space: string, a.b: double, 雪`[]: boolean]"),
+    (_repr_struct(("nested", _repr_struct(("inner", _repr_message(7, b"")),
+                               ("text", _repr_message(11, b""))))),
+     "DataFrame[nested: struct<inner:bigint,text:string>]"),
+    (_repr_struct(("items", _repr_message(20, _repr_message(1, _repr_message(6, b"")) + b"\x10\x01")),
+             ("lookup", _repr_message(22, _repr_message(1, _repr_message(11, b""))
+                                 + _repr_message(2, _repr_message(7, b"")) + b"\x18\x01")),
+             ("amount", _repr_message(10, b"\x08\x02\x10\x0a"))),
+     "DataFrame[items: array<int>, lookup: map<string,bigint>, amount: decimal(10,2)]"),
+    (_repr_struct(("missing", _repr_message(1, b"")), ("raw", _repr_message(2, b"")),
+             ("day", _repr_message(14, b"")), ("ts", _repr_message(15, b"")),
+             ("local", _repr_message(16, b"")),
+             ("label", _repr_message(11, _repr_message(2, "UNICODE")))),
+     "DataFrame[missing: void, raw: binary, day: date, ts: timestamp, "
+     "local: timestamp_ntz, label: string collate UNICODE]"),
+])
+def test_repr_formats_schema_without_executing_rows(repr_analyzed, schema, expected):
+    spark, service = repr_analyzed
+    service.data_type = schema
+    df = spark.range(10)
+    assert service.calls == 0
+    assert repr(df) == expected
+    assert service.calls == 1
+    assert service.execute_calls == 0
+    assert service.config_keys == [_REPR_EAGER_EVAL_KEYS]
+
+
+@pytest.mark.parametrize("failure, message", [
+    ("rpc", "schema unavailable"),
+    ("no-result", "no schema in response"),
+    ("missing-schema", "Schema is missing"),
+    ("invalid-type", "DataType kind not set"),
+])
+def test_repr_propagates_schema_errors_and_can_retry(repr_analyzed, failure, message):
+    spark, service = repr_analyzed
+    df = spark.range(10)
+    service.failure = failure
+    with pytest.raises(Exception, match=message):
+        repr(df)
+    assert service.calls == 1
+    service.failure = None
+    assert repr(df) == "DataFrame[id: bigint]"
+    assert service.calls == 2
+    assert service.execute_calls == 0
+
+
+_REPR_EAGER_EVAL_KEYS = ["spark.sql.repl.eagerEval.enabled",
+                         "spark.sql.repl.eagerEval.maxNumRows",
+                         "spark.sql.repl.eagerEval.truncate"]
+
+
+def test_repr_executes_the_show_string_with_eager_evaluation(repr_analyzed):
+    # As PySpark: with eager evaluation, repr is the table of _show_string, so it executes
+    # the DataFrame (which this mock refuses), rather than formatting the schema.
+    spark, service = repr_analyzed
+    service.configs = {"spark.sql.repl.eagerEval.enabled": "true",
+                       "spark.sql.repl.eagerEval.maxNumRows": "2",
+                       "spark.sql.repl.eagerEval.truncate": "3"}
+    with pytest.raises(Exception, match="repr must not execute rows"):
+        repr(spark.range(10))
+    assert service.execute_calls == 1
+    assert service.calls == 0
+    assert service.config_keys == [_REPR_EAGER_EVAL_KEYS]
+
+
+def test_repr_rejects_non_struct_schema(repr_analyzed):
+    spark, service = repr_analyzed
+    service.data_type = _repr_message(7, b"")
+    with pytest.raises(Exception, match="Schema is not a struct type"):
+        repr(spark.range(10))
+    assert service.execute_calls == 0
+
+
+def test_repr_handles_wide_schema_and_independent_dataframe(repr_analyzed):
+    spark, service = repr_analyzed
+    service.data_type = _repr_struct(*[(f"c{i}", _repr_message(7, b"")) for i in range(256)])
+    df = spark.range(10)
+    assert repr(df) == "DataFrame[" + ", ".join(f"c{i}: bigint" for i in range(256)) + "]"
+    # A new independent DataFrame resolves updated server metadata even when
+    # another change caches the original DataFrame's schema.
+    service.data_type = _repr_struct(("renamed", _repr_message(11, b"")))
+    assert repr(spark.range(10)) == "DataFrame[renamed: string]"
+    assert service.calls == 2
+    assert service.execute_calls == 0
+
+
 # --------------------------------------------------------------------------- ExecutePlan (mock)
 
 
