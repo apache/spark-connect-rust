@@ -51,6 +51,21 @@ pub struct LocalRowIterator {
     source: RowSource,
     /// Set once the batch source is exhausted or has errored.
     done: bool,
+    /// The schema of the result that the server sends before the rows
+    /// (`ExecutePlanResponse.schema`), once received.
+    schema: SchemaSlot,
+}
+
+/// The schema of a result as the server sends it, shared with a prefetch task.
+type SchemaSlot = Arc<Mutex<Option<DataType>>>;
+
+/// Keeps the schema of `resp`, if it has one, in `slot`.
+fn keep_schema(resp: &mut proto::ExecutePlanResponse, slot: &SchemaSlot) -> Result<()> {
+    if let Some(data_type) = resp.schema.take() {
+        let schema = DataType::from_proto(&data_type)?;
+        *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(schema);
+    }
+    Ok(())
 }
 
 /// The source of successive Arrow batches for a [`LocalRowIterator`].
@@ -78,9 +93,10 @@ impl LocalRowIterator {
         stream: ReattachableResponseStream,
         prefetch_partitions: bool,
     ) -> Self {
+        let schema = SchemaSlot::default();
         let source = if prefetch_partitions {
             RowSource::Prefetch {
-                rx: spawn_prefetch(session, stream),
+                rx: spawn_prefetch(session, stream, Arc::clone(&schema)),
             }
         } else {
             RowSource::OnDemand {
@@ -94,7 +110,18 @@ impl LocalRowIterator {
             current_rows: vec![].into_iter(),
             source,
             done: false,
+            schema,
         }
+    }
+
+    /// The schema of the result, as the server sends it before the rows, once received: so
+    /// after the first row. Unlike the Arrow schema of the rows, it has the user-defined
+    /// types of the columns.
+    pub fn schema(&self) -> Option<DataType> {
+        self.schema
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// Fetch the next batch of rows, or `None` once the source is exhausted.
@@ -112,6 +139,9 @@ impl LocalRowIterator {
                 match block_on(stream.message()) {
                     Ok(Some(mut resp)) => {
                         capture_execution(&mut resp, execution_info, session);
+                        if let Err(e) = keep_schema(&mut resp, &self.schema) {
+                            return Some(Err(e));
+                        }
                         if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =
                             resp.response_type
                         {
@@ -173,6 +203,7 @@ impl Iterator for LocalRowIterator {
 fn spawn_prefetch(
     session: SparkSession,
     mut stream: ReattachableResponseStream,
+    schema: SchemaSlot,
 ) -> tokio::sync::mpsc::Receiver<Result<Vec<Row>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<Row>>>(1);
     get_runtime().spawn(async move {
@@ -181,6 +212,10 @@ fn spawn_prefetch(
             match stream.message().await {
                 Ok(Some(mut resp)) => {
                     capture_execution(&mut resp, &mut execution_info, &session);
+                    if let Err(e) = keep_schema(&mut resp, &schema) {
+                        let _ = tx.send(Err(e)).await;
+                        break;
+                    }
                     if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =
                         resp.response_type
                     {
@@ -714,10 +749,18 @@ impl DataFrame {
 
     /// Collect all rows into memory.
     pub fn collect(&self) -> Result<Vec<Row>> {
+        self.collect_with_schema().map(|(rows, _)| rows)
+    }
+
+    /// Collect all rows into memory, with the schema of the result if the server sends it
+    /// (`ExecutePlanResponse.schema`), as the reference client's `_to_table` returns it.
+    /// Unlike the Arrow schema of the rows, it has the user-defined types of the columns.
+    pub fn collect_with_schema(&self) -> Result<(Vec<Row>, Option<DataType>)> {
         let request = self.build_execute_request()?;
         let mut stream = block_on(self.session.client().execute_plan_reattachable(request))?;
 
         let mut rows = vec![];
+        let mut schema = None;
         let mut info = ExecutionInfo::default();
         loop {
             let resp = block_on(stream.message())?;
@@ -725,6 +768,9 @@ impl DataFrame {
                 break;
             };
             capture_execution(&mut resp, &mut info, &self.session);
+            if let Some(data_type) = resp.schema.take() {
+                schema = Some(DataType::from_proto(&data_type)?);
+            }
             if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =
                 resp.response_type
             {
@@ -734,7 +780,7 @@ impl DataFrame {
         }
         self.record_execution(info);
 
-        Ok(rows)
+        Ok((rows, schema))
     }
 
     /// Return an iterator that lazily streams rows from the server.
@@ -914,6 +960,12 @@ impl DataFrame {
         self.limit(1).collect().map(|rows| rows.into_iter().next())
     }
 
+    /// The first row, with the schema of the result, as [`DataFrame::collect_with_schema`].
+    pub fn first_with_schema(&self) -> Result<(Option<Row>, Option<DataType>)> {
+        let (rows, schema) = self.limit(1).collect_with_schema()?;
+        Ok((rows.into_iter().next(), schema))
+    }
+
     /// Alias for first().
     pub fn head(&self) -> Result<Option<Row>> {
         self.first()
@@ -922,6 +974,12 @@ impl DataFrame {
     /// Get the first n rows.
     pub fn take(&self, n: usize) -> Result<Vec<Row>> {
         self.limit(n as i32).collect()
+    }
+
+    /// The first `n` rows, with the schema of the result, as
+    /// [`DataFrame::collect_with_schema`].
+    pub fn take_with_schema(&self, n: usize) -> Result<(Vec<Row>, Option<DataType>)> {
+        self.limit(n as i32).collect_with_schema()
     }
 
     /// Check if the DataFrame is empty.

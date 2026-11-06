@@ -661,6 +661,60 @@ def test_decimal_literal_is_of_the_default_decimal_type_as_pyspark(mock_connect)
     assert decimal(wide[1][0]) == {1: [b"12345678901.25"], 2: [10], 3: [0]}
 
 
+def test_user_defined_types_are_named_by_their_classes_as_pyspark():
+    # As PySpark's simpleString(): a user-defined type in an array, map or struct is named
+    # by its class, as VectorUDT's `vector`, and `udt` by default.
+    from pyspark.ml.linalg import VectorUDT
+
+    point = _DayPointUDT()
+    assert T.ArrayType(VectorUDT()).simpleString() == "array<vector>"
+    assert T.MapType(T.StringType(), point).simpleString() == "map<string,udt>"
+    struct = T.StructType([T.StructField("v", VectorUDT()), T.StructField("p", point)])
+    assert struct.simpleString() == "struct<v:vector,p:udt>"
+    assert struct.fields[0].simpleString() == "v:vector"
+
+
+class _DayPointUDT(T.UserDefinedType):
+    @classmethod
+    def sqlType(cls):
+        return T.ArrayType(T.DoubleType())
+
+    @classmethod
+    def module(cls):
+        return __name__
+
+    def serialize(self, obj):
+        return obj
+
+    def deserialize(self, datum):
+        return tuple(datum)
+
+
+def test_collected_values_of_user_defined_types_are_deserialized_as_pyspark():
+    # The converters that the client applies to collected rows: the values of user-defined
+    # types, in arrays, maps and structs too, are deserialized by their UDTs, as PySpark's
+    # ArrowTableToRowsConversion does; fields of other types need none.
+    from pyspark.ml.linalg import DenseVector, VectorUDT
+    from pyspark.sql.types import _udt_field_converters
+
+    vector = Row(type=1, size=None, indices=None, values=[1.5, 2.0])
+    schema = T.StructType([
+        T.StructField("v", VectorUDT()),
+        T.StructField("k", T.IntegerType()),
+        T.StructField("arr", T.ArrayType(VectorUDT())),
+        T.StructField("m", T.MapType(T.StringType(), _DayPointUDT())),
+        T.StructField("st", T.StructType([T.StructField("v", VectorUDT())])),
+    ])
+    v, k, arr, m, st = _udt_field_converters(schema)
+    assert v(vector) == DenseVector([1.5, 2.0]) and v(None) is None
+    assert k is None
+    assert arr([vector, None]) == [DenseVector([1.5, 2.0]), None]
+    assert m({"x": [1.0, 2.0]}) == {"x": (1.0, 2.0)}
+    converted = st(Row(v=vector))
+    assert converted == Row(v=DenseVector([1.5, 2.0])) and converted.v == DenseVector([1.5, 2.0])
+    assert _udt_field_converters(T.StructType([T.StructField("k", T.LongType())])) is None
+
+
 def test_dropin_module_imports():
     # The thin re-export shims import cleanly.
     import pyspark.sql.dataframe  # noqa: F401

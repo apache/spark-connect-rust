@@ -20,6 +20,11 @@ pub struct PyRow {
     named: bool,
 }
 
+/// The Python functions that turn the values of the fields of collected rows whose types have
+/// user-defined types into what PySpark gives for them, by deserializing those values; None
+/// for the other fields.
+pub(crate) type FieldConverters = std::sync::Arc<Vec<Option<Py<PyAny>>>>;
+
 enum RowData {
     /// A row that the server returned, whose Spark values become Python values when first
     /// read, and stay those objects, as a PySpark row is a tuple of them: so the row equals
@@ -27,6 +32,8 @@ enum RowData {
     Spark {
         row: Row,
         values: PyOnceLock<Py<PyTuple>>,
+        /// The converters of its fields, when one has a user-defined type.
+        converters: Option<FieldConverters>,
     },
     /// A row made in Python, which holds its Python values as they are, as PySpark's does.
     Python {
@@ -37,10 +44,17 @@ enum RowData {
 
 impl PyRow {
     pub fn new(row: Row) -> Self {
+        Self::with_converters(row, None)
+    }
+
+    /// A row that the server returned, whose values of user-defined types `converters`
+    /// deserializes when they are first read.
+    pub(crate) fn with_converters(row: Row, converters: Option<FieldConverters>) -> Self {
         PyRow {
             data: RowData::Spark {
                 row,
                 values: PyOnceLock::new(),
+                converters,
             },
             named: true,
         }
@@ -67,12 +81,29 @@ impl PyRow {
     /// The values, as the tuple that a PySpark row is.
     fn values<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         match &self.data {
-            RowData::Spark { row, values } => {
+            RowData::Spark {
+                row,
+                values,
+                converters,
+            } => {
                 let values = values.get_or_try_init(py, || -> PyResult<Py<PyTuple>> {
+                    let convert = |i: usize| {
+                        converters
+                            .as_ref()
+                            .and_then(|c| c.get(i))
+                            .and_then(Option::as_ref)
+                    };
                     let values = row
                         .values()
                         .iter()
-                        .map(|v| value_to_py(py, v))
+                        .enumerate()
+                        .map(|(i, v)| {
+                            let value = value_to_py(py, v)?;
+                            match convert(i) {
+                                Some(converter) => converter.bind(py).call1((value,)),
+                                None => Ok(value),
+                            }
+                        })
                         .collect::<PyResult<Vec<_>>>()?;
                     Ok(PyTuple::new(py, values)?.unbind())
                 })?;

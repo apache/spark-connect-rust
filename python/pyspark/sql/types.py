@@ -392,3 +392,50 @@ def _create_row(fields, values):
     row = Row(*values)
     row.__fields__ = fields
     return row
+
+
+def _udt_converter(dataType):
+    """The function that turns a collected value of ``dataType`` into what PySpark gives for it,
+    deserializing the values of its user-defined types as PySpark's
+    ``ArrowTableToRowsConversion`` does, or None for a type without a user-defined type."""
+    if isinstance(dataType, UserDefinedType):
+        inner = _udt_converter(dataType.sqlType())
+
+        def convert_udt(value):
+            if value is None:
+                return None
+            return dataType.deserialize(value if inner is None else inner(value))
+
+        return convert_udt
+    if isinstance(dataType, ArrayType):
+        element = _udt_converter(dataType.elementType)
+        if element is None:
+            return None
+        return lambda value: None if value is None else [element(v) for v in value]
+    if isinstance(dataType, MapType):
+        key, val = _udt_converter(dataType.keyType), _udt_converter(dataType.valueType)
+        if key is None and val is None:
+            return None
+        key = key or (lambda v: v)
+        val = val or (lambda v: v)
+        return lambda value: None if value is None else {key(k): val(v) for k, v in value.items()}
+    if isinstance(dataType, StructType):
+        fields = _udt_field_converters(dataType)
+        if fields is None:
+            return None
+        row = Row(*dataType.names)
+
+        def convert_struct(value):
+            if value is None:
+                return None
+            return row(*[v if f is None else f(v) for f, v in zip(fields, value)])
+
+        return convert_struct
+    return None
+
+
+def _udt_field_converters(schema):
+    """The converters of the fields of ``schema`` (see ``_udt_converter``), or None when no
+    field has a user-defined type. The client applies them to the rows that it collects."""
+    converters = [_udt_converter(field.dataType) for field in schema.fields]
+    return None if all(c is None for c in converters) else converters
