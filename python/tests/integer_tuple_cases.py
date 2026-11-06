@@ -167,6 +167,25 @@ class IntegerTupleTests(unittest.TestCase):
                     self.assertEqual(table.schema, expected.schema)
                     self.assertTrue(table.equals(expected))
 
+    def test_direct_columns_equal_the_schema_driven_conversion(self):
+        # A subclass of tuple keeps a row on the schema-driven conversion, so the same data
+        # in exact tuples (the direct columns) and in that subclass (the conversion of local
+        # rows) must send the same Arrow IPC bytes.
+        class TupleSubclass(tuple):
+            pass
+        for width, nullable in ((1, True), (3, False), (32, True)):
+            schema = T.StructType([T.StructField(f"c{j}", T.LongType(), nullable,
+                                                 {"index": j}) for j in range(width)])
+            data = [tuple(None if nullable and (i + j) % 4 == 0 else
+                          (-(1 << 63) if i == 0 else (1 << 63) - 1 if i == 1 else i - j)
+                          for j in range(width)) for i in range(50)]
+            with self.subTest(width=width, nullable=nullable):
+                self.capture(data, schema)
+                direct = self.captured[-1][1][0]
+                self.capture([TupleSubclass(row) for row in data], schema)
+                converted = self.captured[-1][1][0]
+                self.assertEqual(direct, converted)
+
     def test_empty_and_all_null(self):
         schema = T.StructType([T.StructField("v", T.LongType())])
         self.assertIsNone(self.capture([], schema))
