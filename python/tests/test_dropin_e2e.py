@@ -774,6 +774,36 @@ def test_window_order_by_a_column_sorts_nulls_first_as_pyspark(session):
         assert [(r.o, r.rn) for r in rows] == expected
 
 
+def test_functions_send_their_optional_arguments_as_pyspark(session):
+    # The values of official PySpark 4.3.0; each optional argument used to be dropped.
+    df = session.sql(
+        "SELECT '02/01/2024' AS d, 8.0D AS x, array(2, 1, 3) AS a, 'a,b,c' AS s, "
+        "'a_c' AS p, 1700000000L AS t, 2.5D AS h")
+    row = df.select(
+        F.to_date("d", "dd/MM/yyyy").alias("date"),
+        F.log(2.0, "x").alias("log2"),
+        F.sort_array("a", asc=False).alias("descending"),
+        F.split("s", ",", 2).alias("split"),
+        F.substr("s", F.lit(1), F.lit(2)).alias("substr"),
+        F.like("p", F.lit("a!_c"), F.lit("!")).alias("like"),
+        F.unix_timestamp(F.timestamp_seconds("t")).alias("seconds"),
+        F.months_between(F.lit("2024-03-31"), F.lit("2024-02-28"), roundOff=False).alias("months"),
+        # An explicit None is no scale, as in PySpark, rather than a NULL one.
+        F.bround("h", None).alias("bround"),
+    ).first()
+    assert row.date == date(2024, 1, 2)
+    assert row.log2 == 3.0
+    assert row.descending == [3, 2, 1]
+    assert row.split == ["a", "b,c"]
+    assert row.substr == "a,"
+    assert row.like is True
+    assert row.seconds == 1700000000
+    assert row.months == 1.096774193548387
+    assert row.bround == 2.0
+    nulls = session.sql("SELECT * FROM VALUES (1, NULL), (1, 5) AS t(g, v)")
+    assert nulls.groupBy("g").agg(F.first("v", ignorenulls=True)).first()[1] == 5
+
+
 def test_maps_keep_their_entries_in_order_with_keys_of_their_type(session):
     row = session.range(1).selectExpr(
         "map(2, 'b', 1, 'a') AS ints",
