@@ -4831,6 +4831,26 @@ def _sent_read_schema(request):
     return message[2][0].decode()
 
 
+def test_apply_in_pandas_with_state_sends_its_relation_as_pyspark(mock_connect):
+    import json
+
+    spark, service = mock_connect
+    output = T.StructType([T.StructField("id", T.LongType()), T.StructField("c", T.LongType())])
+    state = T.StructType([T.StructField("c", T.LongType())])
+    spark.range(3).groupBy("id").applyInPandasWithState(
+        lambda key, frames, s: frames, output, state, "update", "NoTimeout").collect()
+    # plan=3 -> root=1 -> apply_in_pandas_with_state=34: func=3, output_schema=4,
+    # state_schema=5, output_mode=6, timeout_conf=7.
+    root = parse_message(parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0])
+    assert 34 in root, sorted(root)
+    apply = parse_message(root[34][0])
+    assert json.loads(apply[4][0]) == output.jsonValue()
+    assert json.loads(apply[5][0]) == state.jsonValue()
+    assert (apply[6][0], apply[7][0]) == (b"update", b"NoTimeout")
+    # CommonInlineUserDefinedFunction.python_udf=4 -> PythonUDF.eval_type=2.
+    assert parse_message(parse_message(apply[3][0])[4][0])[2][0] == 208
+
+
 @pytest.mark.parametrize("read", [
     lambda spark, schema: spark.read.schema(schema).csv("unused.csv"),
     lambda spark, schema: spark.read.csv("unused.csv", schema=schema),
