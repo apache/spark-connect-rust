@@ -54,6 +54,14 @@ impl Column {
         }
     }
 
+    /// `Column.alias(*alias)` of several names, such as the key and the value of a map's
+    /// `explode`. Mirrors Scala's `Column.as(aliases: Seq[String])`.
+    pub fn aliases<S: Into<String>>(self, names: impl IntoIterator<Item = S>) -> Column {
+        Column {
+            expr: ExpressionNode::Alias(Box::new(Alias::with_names(self.expr, names))).into(),
+        }
+    }
+
     /// Mirrors `pyspark.sql.column.Column.name` (alias for `alias`).
     pub fn name(self, name: &str) -> Column {
         self.alias(name)
@@ -655,6 +663,19 @@ pub fn when(condition: Column, value: Column) -> Column {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aliases_name_every_column_of_a_generator() {
+        let column = crate::functions::explode(col("m")).aliases(["k", "v"]);
+        assert_eq!(column.expression().render(), "explode(m) AS k,v");
+        match column.to_proto().expr_type {
+            Some(spark_connect_proto::expression::ExprType::Alias(alias)) => {
+                assert_eq!(alias.name, vec!["k".to_string(), "v".to_string()]);
+                assert_eq!(alias.metadata, None);
+            }
+            other => panic!("expected an alias, got {other:?}"),
+        }
+    }
 
     #[test]
     fn test_col_creation() {

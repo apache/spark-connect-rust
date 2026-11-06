@@ -457,35 +457,18 @@ impl DataStreamWriter {
             write_op.foreach_writer = Some(foreach_func);
         }
 
-        // Build the plan with the WriteStreamOperationStart command
-        let mut plan = proto::Plan::default();
-        let mut cmd = proto::Command::default();
-        cmd.command_type = Some(proto::command::CommandType::WriteStreamOperationStart(
-            write_op,
-        ));
-        plan.op_type = Some(proto::plan::OpType::Command(cmd));
-
-        // Create ExecutePlanRequest
-        let request = proto::ExecutePlanRequest {
-            session_id: self.session.client().session_id().to_string(),
-            user_context: Some(proto::UserContext::default()),
-            plan: Some(plan),
-            ..Default::default()
-        };
-
-        // Execute the plan and read the WriteStreamOperationStartResult, which carries
-        // the server-assigned query id / run id / name.
-        let mut response_stream = block_on(self.session.client().execute_plan(request))?;
+        // Run the WriteStreamOperationStart command, as other commands are, on the
+        // reattachable path with the session's tags, so that an error carries the operation
+        // id of the request, as in PySpark. Its WriteStreamOperationStartResult carries the
+        // server-assigned query id / run id / name.
+        let responses = crate::dataframe::execute_command_collect(
+            &self.session,
+            proto::command::CommandType::WriteStreamOperationStart(write_op),
+        )?;
         let mut query_id = String::new();
         let mut run_id = String::new();
         let mut name = self.query_name.clone();
-        let client = self.session.client();
-        while let Some(resp) = block_on(async {
-            match response_stream.message().await {
-                Ok(resp) => Ok(resp),
-                Err(status) => Err(client.error_from_status(status).await),
-            }
-        })? {
+        for resp in responses {
             if let Some(
                 proto::execute_plan_response::ResponseType::WriteStreamOperationStartResult(res),
             ) = resp.response_type
