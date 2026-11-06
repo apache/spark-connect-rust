@@ -125,6 +125,10 @@ def serve(connection):
             self.execute_error = None
             self.error_details = b""
             self.fetched_error_ids = []
+            # The warnings of each Set and Unset, as ConfigResponse.warnings=3, and the keys
+            # of each Unset.
+            self.config_warnings = []
+            self.unset_confs = []
             self.confs = {}
             self.read_confs = []
             self.set_confs = []
@@ -225,6 +229,10 @@ def serve(connection):
             yield header + message_field(13, "r1") + self.execute_payload
             yield header + message_field(13, "r2") + message_field(14, b"")
 
+        def warnings_fields(self):
+            # ConfigResponse.warnings=3, of `config_warnings`.
+            return b"".join(message_field(3, warning) for warning in self.config_warnings)
+
         def fetch_error_details(self, request, context):
             # FetchErrorDetailsRequest.error_id=3.
             self.fetched_error_ids.append(parse_message(request)[3][0].decode())
@@ -241,9 +249,17 @@ def serve(connection):
                 pairs = []
                 for pair in set_request.get(1, []):
                     pair = parse_message(pair)
-                    pairs.append((pair[1][0].decode(), pair[2][0].decode()))
+                    # A KeyValue of no value=2, as PySpark sends None, is recorded as None.
+                    value = pair.get(2, [None])[0]
+                    value = None if value is None else value.decode()
+                    pairs.append((pair[1][0].decode(), value))
                 self.set_confs.append((pairs, set_request.get(2, [None])[0]))
-                return message_field(1, request[1][0])
+                return message_field(1, request[1][0]) + self.warnings_fields()
+            if 6 in operation:
+                # Operation.unset=6: Unset.keys=1.
+                keys = parse_message(operation[6][0]).get(1, [])
+                self.unset_confs.append([key.decode() for key in keys])
+                return message_field(1, request[1][0]) + self.warnings_fields()
             if 3 in operation:
                 # Operation.get_with_default=3: GetWithDefault.pairs=1 (KeyValue.key=1,
                 # value=2), the default of each key that `confs` does not have.
@@ -257,7 +273,8 @@ def serve(connection):
                 return message_field(1, request[1][0]) + b"".join(pairs)
             if 2 not in operation:
                 context.abort(
-                    grpc.StatusCode.UNIMPLEMENTED, "only Get, GetWithDefault and Set are served"
+                    grpc.StatusCode.UNIMPLEMENTED,
+                    "only Get, GetWithDefault, Set and Unset are served",
                 )
             keys = [key.decode() for key in parse_message(operation[2][0]).get(1, [])]
             self.read_confs.extend(keys)

@@ -261,7 +261,11 @@ impl PySparkSessionBuilder {
             return Ok(());
         }
         let conf = session.conf();
-        py.detach(|| conf.set_all(&options, true)).to_pyerr()
+        let warnings = py
+            .detach(|| conf.set_all(&options, true).map_err(Box::new))
+            .to_pyerr()?;
+        // As PySpark's `_set_all`, which warns each warning of the server.
+        crate::conf::warn_all(py, &warnings)
     }
 }
 
