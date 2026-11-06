@@ -31,6 +31,7 @@ from pyspark.sql import Row, SparkSession, types as T
 # Collected here so the existing offline CI suite exercises real Arrow results.
 from day_time_interval_cases import DayTimeIntervalTests  # noqa: F401
 
+
 def test_create_dataframe_input_names_offline():
     # Keep the fixture's active session out of this process's offline tests.
     import subprocess
