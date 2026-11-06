@@ -437,6 +437,7 @@ def _arrow_input_service(
     *,
     upload_error=None,
     config_error=False,
+    capture_tables=False,
     user_id=None,
     user_agent=None,
     allow_file_artifacts=False,
@@ -460,7 +461,7 @@ def _arrow_input_service(
     # The tests may queue status codes in `status_failures` and `upload_failures`: each
     # ArtifactStatus or AddArtifacts call fails with the next one, while any is left.
     state = {"cache": {}, "uploads": 0, "relations": [], "message_sizes": [],
-             "config": config, "config_requests": [], "input_tables": [],
+             "config": config, "config_requests": [], "input_tables": [], "tables": [],
              "upload_contexts": [], "status_contexts": [],
              "status_failures": [], "upload_failures": [], "upload_attempts": 0}
     server_id = "00000000-0000-0000-0000-000000000001"
@@ -575,6 +576,8 @@ def _arrow_input_service(
         state["arrow_schemas"], state["batch_rows"] = [], []
         input_batches = []
         for payload in payloads:
+            if capture_tables:
+                state["tables"].append(pa.ipc.open_stream(payload).read_all())
             reader = pa.ipc.open_stream(payload)
             state["arrow_schemas"].append(reader.schema)
             stream_rows = []
@@ -1953,3 +1956,621 @@ def test_integer_rebound_index_data_keeps_native_read_order(
                  "metadata": metadata}
             ],
         }
+
+
+@pytest.mark.parametrize("zone", ["UTC", "America/Los_Angeles", "Asia/Kathmandu"])
+@pytest.mark.parametrize("unit", ["ns", "us"])
+def test_pandas_timestamp_ipc_preserves_every_microsecond(protocol, monkeypatch, zone, unit):
+    import json
+    from pyspark.sql import types as T
+
+    monkeypatch.setenv("TZ", "America/New_York")
+    # Include both sides of DST transitions, both fall-back folds, pre-epoch,
+    # ns-range boundaries, and NaT. Inspect the full emitted IPC, not a plan flag.
+    micros = [-9223372036854775, -1, 0, 1, 1583661599999999, 1583661600000000,
+              1604219400000000, 1604223000000000, 9223372036854775, None]
+    values = pd.to_datetime(pd.Series(micros, dtype="Int64"), unit="us", utc=True).dt.tz_convert("America/Los_Angeles")
+    frame = pd.DataFrame({"a": pd.Series(values).dt.as_unit(unit),
+                          "b": pd.Series(values).dt.as_unit(unit)})
+    schema = T.StructType([T.StructField("renamed_a", T.TimestampType(), True, {"source": "test"}),
+                           T.StructField("b", T.TimestampType())])
+
+    def no_rows(*args, **kwargs):
+        raise AssertionError("supported timestamps must not materialize Python rows")
+
+    monkeypatch.setattr(pd.DataFrame, "astype", no_rows)
+    with _arrow_input_service(protocol, capture_tables=True, **{"spark.sql.session.timeZone": zone}) as (spark, state):
+        result = spark.createDataFrame(frame, schema)
+        # Aware columns carry their zone: only the importer's settings are read.
+        assert len(state["config_requests"]) == 1
+        assert not result.isLocal()
+        result.toArrow()
+        assert state["column_names"] == schema.names
+        table = pa.concat_tables(state["tables"])
+        for column in table.columns:
+            assert column.type == pa.timestamp("us", tz="UTC")
+            assert column.cast(pa.int64()).to_pylist() == micros
+        assert table.column_names == ["renamed_a", "b"]
+        relation = state["relations"][0].local_relation
+        actual = json.loads(relation.schema)
+        assert [field["type"] for field in actual["fields"]] == ["timestamp", "timestamp"]
+        assert actual["fields"][0]["metadata"] == {"source": "test"}
+
+
+def test_pandas_naive_timestamp_utc_ipc(protocol, monkeypatch):
+    from pyspark.sql import types as T
+    import time
+    monkeypatch.setenv("TZ", "UTC")
+    monkeypatch.setattr(time, "tzname", ("UTC", "UTC"))
+    frame = pd.DataFrame({"a": pd.to_datetime(["1969-12-31 23:59:59.999999", None,
+                                               "2020-01-01 00:00:00.123456"])})
+    schema = T.StructType([T.StructField("a", T.TimestampType())])
+    monkeypatch.setattr(pd.DataFrame, "astype", lambda *a, **k: pytest.fail("row conversion"))
+    with _arrow_input_service(protocol, capture_tables=True) as (spark, state):
+        result = spark.createDataFrame(frame, schema)
+        # A naive column reads the session time zone, then the importer its settings.
+        assert state["config_requests"][0] == ("get", ["spark.sql.session.timeZone"])
+        assert len(state["config_requests"]) == 2
+        assert not result.isLocal()
+        result.toArrow()
+        assert state["column_names"] == schema.names
+        assert state["tables"][0].column(0).cast(pa.int64()).to_pylist() == [
+            -1, None, 1577836800123456]
+
+
+@pytest.mark.parametrize("dtype", ["datetime64[ns]", "datetime64[us]", "datetime64[ms]",
+                                    "datetime64[s]", "object"])
+def test_pandas_timestamp_eligibility(dtype):
+    from pyspark.sql import types as T
+    from pyspark.sql._pandas_input import timestamp_columns
+    frame = pd.DataFrame({"a": pd.Series([datetime(2020, 1, 1), None], dtype=dtype)})
+    schema = T.StructType([T.StructField("a", T.TimestampType())])
+    assert (timestamp_columns(frame, schema) is not None) == (dtype in (
+        "datetime64[ns]", "datetime64[us]"))
+    for unsupported in (None, ["a"], "a timestamp",
+                        T.StructType([T.StructField("a", T.TimestampNTZType())]),
+                        T.StructType([T.StructField("a", T.LongType())])):
+        assert timestamp_columns(frame, unsupported) is None
+
+
+def test_pandas_timestamp_precision_and_timezone_fallback(monkeypatch):
+    from pyspark.sql import types as T
+    from pyspark.sql._pandas_input import timestamp_columns, prepare_timestamp_table
+    schema = T.StructType([T.StructField("a", T.TimestampType())])
+    for nanos in (-1, 1, 1001):
+        frame = pd.DataFrame({"a": pd.to_datetime([nanos, None], unit="ns")})
+        assert timestamp_columns(frame, schema) is None
+    frame = pd.DataFrame({"a": pd.to_datetime([0, None], unit="ns")})
+    columns = timestamp_columns(frame, schema)
+    monkeypatch.setenv("TZ", "UTC")
+    assert prepare_timestamp_table(columns, schema, "America/Los_Angeles") is None
+    monkeypatch.setenv("TZ", "America/Los_Angeles")
+    assert prepare_timestamp_table(columns, schema, "UTC") is None
+    monkeypatch.delenv("TZ")
+    assert prepare_timestamp_table(columns, schema, "UTC") is None
+
+
+@pytest.mark.parametrize("has_null", [False, True])
+def test_pandas_timestamp_non_nullable_schema(protocol, has_null):
+    from pyspark.sql import types as T
+    values = [pd.Timestamp("2020-01-01", tz="UTC"),
+              pd.NaT if has_null else pd.Timestamp("2020-01-02", tz="UTC")]
+    frame = pd.DataFrame({"a": values})
+    schema = T.StructType([T.StructField("a", T.TimestampType(), False)])
+    with _arrow_input_service(protocol, capture_tables=True) as (spark, state):
+        if has_null:
+            with pytest.raises(RuntimeError, match="null"):
+                spark.createDataFrame(frame, schema)
+            assert not state["relations"]
+        else:
+            spark.createDataFrame(frame, schema).toArrow()
+            assert not state["tables"][0].schema.field(0).nullable
+
+
+def test_pandas_timestamp_mixed_and_arrow_dtypes_fallback():
+    from pyspark.sql import types as T
+    from pyspark.sql._pandas_input import timestamp_columns
+    schema = T.StructType([T.StructField("a", T.TimestampType())])
+    frame = pd.DataFrame({"a": pd.Series([datetime(2020, 1, 1)],
+                                         dtype=pd.ArrowDtype(pa.timestamp("us")))})
+    assert timestamp_columns(frame, schema) is None
+    frame = pd.DataFrame({"a": pd.to_datetime([0], unit="us"), "b": [1]})
+    schema.add("b", T.LongType())
+    assert timestamp_columns(frame, schema) is None
+
+
+@pytest.mark.parametrize("config_error", [False, True])
+@pytest.mark.parametrize("verify", [False, True])
+def test_timestamp_nonnullable_nat_keeps_local_error_before_config(protocol, config_error, verify):
+    from pyspark.sql import types as T
+    from pyspark.sql._pandas_input import timestamp_columns
+
+    frame = pd.DataFrame({"a": pd.to_datetime([0, None], utc=True)})
+    schema = T.StructType([T.StructField("renamed", T.TimestampType(), False)])
+    assert timestamp_columns(frame, schema) is None
+    with _arrow_input_service(protocol, capture_tables=True, config_error=config_error) as (spark, state):
+        with pytest.raises(RuntimeError, match="null"):
+            spark.createDataFrame(frame, schema, verifySchema=verify)
+        assert state["config_requests"] == []
+        assert state["relations"] == []
+        assert state["uploads"] == 0
+
+
+@pytest.mark.parametrize("custom", ["dtype", "array"])
+def test_timestamp_custom_datetime_array_keeps_row_values(protocol, custom):
+    from pandas.core.arrays.datetimes import DatetimeArray
+    from pandas.core.dtypes.dtypes import DatetimeTZDtype
+    from pyspark.sql import types as T
+    from pyspark.sql._pandas_input import timestamp_columns
+
+    arrow_calls = []
+
+    class CustomDtype(DatetimeTZDtype):
+        pass
+
+    class CustomArray(DatetimeArray):
+        @property
+        def dtype(self):
+            return CustomDtype(unit="ns", tz="UTC") if custom == "dtype" else super().dtype
+
+        def __arrow_array__(self, type=None):
+            arrow_calls.append("arrow")
+            return pa.array([-7000000] * len(self), type=pa.int64()).cast(type)
+
+    ordinary = pd.to_datetime([0, 1000000, None, -1000000], unit="ns", utc=True).array
+    array = CustomArray._simple_new(ordinary._ndarray, dtype=ordinary.dtype)
+    frame = pd.DataFrame({"a": pd.Series(array, copy=False)})
+    assert type(frame["a"].array) is CustomArray
+    schema = T.StructType([T.StructField("a", T.TimestampType(), True, {"source": "custom"})])
+    assert timestamp_columns(frame, schema) is None
+    with _arrow_input_service(protocol, capture_tables=True) as (spark, state):
+        spark.createDataFrame(frame, schema).toArrow()
+        assert state["config_requests"] == []
+        table = pa.concat_tables(state["tables"])
+        assert table.column(0).cast(pa.int64()).to_pylist() == [0, 1000, None, -1000]
+        logical = __import__("json").loads(state["relations"][0].local_relation.schema)
+        assert logical["fields"][0]["metadata"] == {"source": "custom"}
+    assert arrow_calls == []
+
+
+def test_timestamp_rebound_dataframe_and_duplicate_names_keep_fallback(monkeypatch):
+    from pyspark.sql import types as T
+    from pyspark.sql._pandas_input import timestamp_columns
+
+    class CustomFrame(pd.DataFrame):
+        pass
+
+    frame = CustomFrame({"a": pd.to_datetime([0], utc=True)})
+    schema = T.StructType([T.StructField("a", T.TimestampType())])
+    monkeypatch.setattr(pd, "DataFrame", CustomFrame)
+    assert timestamp_columns(frame, schema) is None
+    from pandas.core.frame import DataFrame
+    frame = DataFrame({"a": pd.to_datetime([0], utc=True), "b": pd.to_datetime([1], utc=True)})
+    monkeypatch.setattr(pd, "DataFrame", DataFrame)
+    schema.add("a", T.TimestampType())
+    assert timestamp_columns(frame, schema) is None
+
+
+def _timestamp_guard_process(mode, argument, before_import=False):
+    import subprocess
+    import sys
+
+    if mode == "captured_alias":
+        import pyspark.sql._arrow_input as importer
+        if not hasattr(importer, "to_arrow_schema"):
+            pytest.skip("this importer resolves converters locally")
+    script = r'''
+import importlib
+import importlib.util
+import json
+import sys
+import tempfile
+from pathlib import Path
+import pandas as pd
+from pyspark.sql import types as T
+from pyspark import _pyspark as native
+spec = importlib.util.spec_from_file_location("timestamp_guard_capture", sys.argv[4])
+capture = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = capture
+spec.loader.exec_module(capture)
+frame = pd.DataFrame({"a": pd.to_datetime([0, 1000000, None, -1000000], unit="ns", utc=True)})
+schema = T.StructType([T.StructField("renamed", T.TimestampType(), True, {"source": "native"})])
+mode, argument, before_import = sys.argv[1:4]
+if before_import == "True":
+    sys.modules.pop("pyspark.sql._pandas_input", None)
+if mode == "descriptor":
+    class_name, attribute = argument.split(":")
+    cls = getattr(native, class_name)
+    if attribute == "alias":
+        setattr(T, class_name, object)
+    elif attribute == "__getattribute__":
+        setattr(cls, attribute, lambda self, name: object.__getattribute__(self, name))
+    elif attribute == "__class__":
+        setattr(cls, "__getattribute__", lambda self, name: (
+            object if name == "__class__" else object.__getattribute__(self, name)))
+    elif attribute == "__iter__":
+        setattr(cls, attribute, lambda self: iter([T.StructField("changed", T.BooleanType())]))
+    else:
+        value = {"names": ["changed"], "fields": [], "name": "changed",
+                 "dataType": T.BooleanType(), "nullable": False,
+                 "metadata": {"changed": True}}[attribute]
+        setattr(cls, attribute, property(lambda self: value))
+elif mode in ("public_alias", "converter_alias", "captured_alias"):
+    replacement = native.BooleanType if argument == "TimestampType" else native.TimestampType
+    if mode == "public_alias":
+        sys.modules.pop("pyspark.sql.pandas.types", None)
+        setattr(T, argument, replacement)
+    else:
+        converter = importlib.import_module("pyspark.sql.pandas.types")
+        if mode == "captured_alias":
+            importer = importlib.import_module("pyspark.sql._arrow_input")
+        setattr(converter, argument, replacement)
+        if mode == "captured_alias":
+            sys.modules.pop("pyspark.sql.pandas.types")
+            assert importlib.import_module("pyspark.sql.pandas.types") is not converter
+elif mode == "atomic_alias":
+    scope, replacement_name = argument.split(":")
+    replacement = None if replacement_name == "none" else native.LongType
+    if scope == "public_before":
+        sys.modules.pop("pyspark.sql._arrow_input", None)
+        T.AtomicType = replacement
+    elif scope == "public_after":
+        importlib.import_module("pyspark.sql._arrow_input")
+        T.AtomicType = replacement
+    else:
+        importer = importlib.import_module("pyspark.sql._arrow_input")
+        if replacement_name == "missing":
+            del importer.AtomicType
+        else:
+            importer.AtomicType = replacement
+elif mode == "importer_alias":
+    import pyspark.sql._arrow_input as importer
+    importer.StructType = None
+else:
+    raise AssertionError(mode)
+class Factory:
+    def mktemp(self, name):
+        return Path(tempfile.mkdtemp(prefix=name))
+with capture._arrow_input_service(capture.protocol.__wrapped__(Factory()), capture_tables=True) as (spark, state):
+    spark.createDataFrame(frame, schema).toArrow()
+    assert state["config_requests"] == [], state["config_requests"]
+    table = capture.pa.concat_tables(state["tables"])
+    assert table.column_names == ["renamed"]
+    assert table.column(0).cast(capture.pa.int64()).to_pylist() == [0, 1000, None, -1000]
+    logical = json.loads(state["relations"][0].local_relation.schema)
+    assert logical["fields"][0]["metadata"] == {"source": "native"}
+'''
+    result = subprocess.run([sys.executable, "-c", script, mode, argument,
+                             str(before_import), __file__],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("class_name,attribute", [
+    ("StructType", "fields"), ("StructType", "names"), ("StructType", "__iter__"),
+    ("StructField", "name"), ("StructField", "dataType"), ("StructField", "nullable"),
+    ("StructField", "metadata"), ("StructType", "__getattribute__"),
+    ("StructField", "__getattribute__"), ("TimestampType", "__getattribute__"),
+    ("StructType", "__class__"), ("StructField", "__class__"), ("TimestampType", "__class__"),
+    ("StructType", "alias"), ("StructField", "alias"), ("TimestampType", "alias"),
+])
+@pytest.mark.parametrize("before_import", [False, True])
+def test_timestamp_custom_schema_descriptors_keep_row_path(class_name, attribute, before_import):
+    _timestamp_guard_process("descriptor", f"{class_name}:{attribute}", before_import)
+
+
+@pytest.mark.parametrize("class_name", ["BooleanType", "ByteType", "ShortType", "IntegerType",
+                                        "LongType", "FloatType", "DoubleType", "DecimalType",
+                                        "StringType", "BinaryType", "DateType", "TimestampType"])
+@pytest.mark.parametrize("mode", ["public_alias", "converter_alias", "captured_alias"])
+def test_timestamp_rebound_converter_aliases_keep_row_path(class_name, mode):
+    _timestamp_guard_process(mode, class_name)
+
+
+def test_timestamp_rebound_importer_schema_alias_keeps_row_path():
+    _timestamp_guard_process("importer_alias", "none")
+
+
+@pytest.mark.parametrize("scope", ["public_before", "public_after", "importer"])
+@pytest.mark.parametrize("replacement", ["none", "long"])
+def test_timestamp_rebound_atomic_alias_keeps_row_path(scope, replacement):
+    _timestamp_guard_process("atomic_alias", f"{scope}:{replacement}")
+
+
+def test_timestamp_deleted_importer_atomic_alias_keeps_row_path():
+    _timestamp_guard_process("atomic_alias", "importer:missing")
+
+
+def test_timestamp_warm_local_converter_imports_keep_columnar_route(protocol, monkeypatch):
+    import types
+    import sys
+    import pyspark.sql._arrow_input as importer
+    from pyspark.sql import types as T
+    from pyspark.sql._pandas_input import timestamp_columns
+
+    original = importer.prepare_table
+    substitute = types.ModuleType(importer.__name__)
+    substitute.StructType = T.StructType
+    substitute.AtomicType = T.AtomicType
+
+    def prepare_table(table, schema, *configs):
+        from pyspark.sql.pandas.types import to_arrow_schema
+        assert to_arrow_schema(schema, timezone="UTC").names == table.column_names
+        return original(table, schema, *configs)
+
+    substitute.prepare_table = prepare_table
+    frame = pd.DataFrame({"a": pd.to_datetime([0, 1000000, None], unit="ns", utc=True)})
+    schema = T.StructType([T.StructField("renamed", T.TimestampType())])
+    with _arrow_input_service(protocol, capture_tables=True) as (spark, state):
+        spark.createDataFrame(pa.table({"warm": [1]})).toArrow()
+        monkeypatch.setitem(sys.modules, importer.__name__, substitute)
+        assert timestamp_columns(frame, schema) is not None
+        monkeypatch.setattr(pd.DataFrame, "astype", lambda *a, **k: pytest.fail("row conversion"))
+        spark.createDataFrame(frame, schema).toArrow()
+        table = state["tables"][-1]
+        assert table.column_names == ["renamed"]
+        assert table.column(0).cast(pa.int64()).to_pylist() == [0, 1000, None]
+
+
+def _timestamp_columns_fixture(unit):
+    values = [-2000000, -1000000, 0, 1000000, None] * 2000
+    frame = pd.DataFrame({
+        "original": pd.to_datetime(pd.Series(values, dtype="Int64"), unit="us", utc=True).dt.as_unit(unit)
+    })
+    schema = T.StructType([
+        T.StructField("renamed", T.TimestampType(), True, {"source": "columns", "id": 3})
+    ])
+    return values, frame, schema
+
+
+def _assert_timestamp_columns_row_input(state, values, schema):
+    import json
+
+    assert not state["config_requests"]
+    assert not state["uploads"]
+    assert len(state["input_tables"]) == 1
+    assert state["column_names"] == schema.names
+    table = state["input_tables"][0]
+    assert table.num_rows == 10000
+    assert table.schema.equals(
+        pa.schema([pa.field("renamed", pa.timestamp("us", tz="UTC"), nullable=True)]),
+        check_metadata=True,
+    )
+    assert table.column(0).cast(pa.int64()).to_pylist() == values
+    assert table.column(0).is_null().to_pylist() == [value is None for value in values]
+    assert json.loads(state["relations"][0].local_relation.schema) == json.loads(schema.json())
+
+
+@pytest.mark.parametrize("unit", ["ns", "us"])
+@pytest.mark.parametrize("location", [
+    "subclass", "class", "owner", "backing_subclass_item", "backing_class_iter",
+    "backing_class_getitem", "backing_instance_box",
+])
+@pytest.mark.parametrize("behavior", ["raise", "mutate"])
+def test_timestamp_columns_iterator_hooks_keep_native_order(
+    protocol, monkeypatch, unit, location, behavior
+):
+    from pandas.core.base import IndexOpsMixin
+
+    values, frame, schema = _timestamp_columns_fixture(unit)
+    original_iter = pd.Index.__iter__
+    original_notna, original_astype = frame.notna, frame.astype
+    calls = []
+    invoked = False
+
+    class ColumnsError(RuntimeError):
+        pass
+
+    def notna(*args, **kwargs):
+        calls.append("notna")
+        return original_notna(*args, **kwargs)
+
+    def astype(*args, **kwargs):
+        calls.append("astype")
+        return original_astype(*args, **kwargs)
+
+    def before_hook():
+        nonlocal invoked
+        if invoked:
+            return
+        invoked = True
+        calls.append("columns iterator")
+        if behavior == "raise":
+            raise ColumnsError("timestamp columns hook precedes pandas normalization")
+        # Install spies only when native iteration reaches the columns hook.
+        # Before eligibility, normalization methods are the canonical methods.
+        monkeypatch.setitem(vars(frame), "notna", notna)
+        monkeypatch.setitem(vars(frame), "astype", astype)
+        frame.iat[0, 0] = pd.Timestamp(7000000, unit="us", tz="UTC")
+        frame.iat[-1, 0] = pd.NaT
+
+    def iterate(index):
+        if index is columns:
+            before_hook()
+        return original_iter(index)
+
+    if location == "subclass":
+        class Columns(pd.Index):
+            pass
+        monkeypatch.setattr(Columns, "__iter__", iterate)
+        labels = pd.Index(["original"], dtype=object)
+        frame.columns = Columns._simple_new(labels._values, name=None)
+        assert type(frame.columns) is Columns
+    elif location == "backing_subclass_item":
+        # IndexOpsMixin iteration calls ndarray.item, rather than ndarray.__iter__.
+        class Names(np.ndarray):
+            def item(self, *args):
+                before_hook()
+                return super().item(*args)
+        backing = np.asarray(["original"], dtype=object).view(Names)
+        frame.columns = pd.Index._simple_new(backing, name=None)
+        assert type(frame.columns._values) is Names
+    elif location.startswith("backing_"):
+        frame.columns = pd.Index(pd.array(["original"], dtype=pd.StringDtype(storage="python")))
+        backing = frame.columns._values
+        if location == "backing_class_iter":
+            original = type(backing).__iter__
+
+            def backing_iter(array):
+                if array is backing:
+                    before_hook()
+                return original(array)
+
+            monkeypatch.setattr(type(backing), "__iter__", backing_iter)
+        elif location == "backing_class_getitem":
+            original = type(backing).__getitem__
+
+            def backing_getitem(array, key):
+                if array is backing:
+                    before_hook()
+                return original(array, key)
+
+            monkeypatch.setattr(type(backing), "__getitem__", backing_getitem)
+        else:
+            original = backing._box_func
+
+            def box(value):
+                before_hook()
+                return original(value)
+
+            monkeypatch.setitem(vars(backing), "_box_func", box)
+    else:
+        monkeypatch.setattr(pd.Index if location == "class" else IndexOpsMixin,
+                            "__iter__", iterate)
+    columns = frame.columns
+
+    with _arrow_input_service(protocol) as (spark, state):
+        if behavior == "raise":
+            with pytest.raises(ColumnsError,
+                               match="timestamp columns hook precedes pandas normalization"):
+                spark.createDataFrame(frame, schema)
+            assert calls == ["columns iterator"]
+            assert not state["config_requests"]
+            assert not state["uploads"]
+            assert not state["relations"]
+            assert not state["input_tables"]
+        else:
+            spark.createDataFrame(frame, schema).toArrow()
+            expected = values.copy()
+            expected[0], expected[-1] = 7000000, None
+            _assert_timestamp_columns_row_input(state, expected, schema)
+            assert calls == ["columns iterator", "notna", "astype"]
+
+
+@pytest.mark.parametrize("unit", ["ns", "us"])
+def test_timestamp_rebound_index_values_keeps_native_error(protocol, monkeypatch, unit):
+    _, frame, schema = _timestamp_columns_fixture(unit)
+    columns, original = frame.columns, pd.Index._values.fget
+    calls = []
+
+    def values(index):
+        if index is columns:
+            calls.append("_values")
+            raise RuntimeError("columns backing hook precedes timestamp normalization")
+        return original(index)
+
+    monkeypatch.setattr(pd.Index, "_values", property(values))
+    with _arrow_input_service(protocol) as (spark, state):
+        with pytest.raises(RuntimeError, match="columns backing hook precedes timestamp normalization"):
+            spark.createDataFrame(frame, schema)
+        assert calls == ["_values"]
+        assert not state["config_requests"]
+        assert not state["uploads"]
+        assert not state["relations"]
+
+
+@pytest.mark.parametrize("unit", ["ns", "us"])
+def test_timestamp_rebound_index_data_keeps_native_read_order(protocol, monkeypatch, unit):
+    values, frame, schema = _timestamp_columns_fixture(unit)
+    columns, backing = frame.columns, vars(frame.columns)["_data"]
+    original_notna, original_astype = frame.notna, frame.astype
+    calls, normalizing = [], False
+    allowed_reads = None
+
+    class ColumnsDataError(RuntimeError):
+        pass
+
+    def notna(*args, **kwargs):
+        nonlocal normalizing
+        normalizing = True
+        calls.append("notna")
+        return original_notna(*args, **kwargs)
+
+    def astype(*args, **kwargs):
+        calls.append("astype")
+        return original_astype(*args, **kwargs)
+
+    def data(index):
+        if index is columns:
+            if not normalizing:
+                calls.append("_data")
+                if allowed_reads is not None and calls.count("_data") > allowed_reads:
+                    raise ColumnsDataError("eligibility added a columns storage read")
+                monkeypatch.setitem(vars(frame), "notna", notna)
+                monkeypatch.setitem(vars(frame), "astype", astype)
+            return backing
+        return vars(index)["_data"]
+
+    def set_data(index, value):
+        vars(index)["_data"] = value
+
+    monkeypatch.setattr(pd.Index, "_data", property(data, set_data), raising=False)
+    import pyspark.sql._pandas_input as helper
+
+    # Measure current native fallback dispatch without either eligibility probe.
+    with monkeypatch.context() as baseline:
+        baseline.setattr(helper, "prepare_int64_table", lambda *_: None)
+        baseline.setattr(helper, "timestamp_columns", lambda *_: None)
+        with _arrow_input_service(protocol) as (spark, state):
+            spark.createDataFrame(frame, schema).toArrow()
+            _assert_timestamp_columns_row_input(state, values, schema)
+            control_table = state["input_tables"][0]
+    baseline_calls = calls.copy()
+    allowed_reads = baseline_calls.count("_data")
+    assert allowed_reads > 0 and "notna" in baseline_calls
+    calls.clear()
+    normalizing = False
+    # Restore ordinary methods before candidate eligibility; the storage hook
+    # installs observers only when the native columns iterator starts.
+    monkeypatch.delitem(vars(frame), "notna")
+    monkeypatch.delitem(vars(frame), "astype")
+    with _arrow_input_service(protocol) as (spark, state):
+        spark.createDataFrame(frame, schema).toArrow()
+        # The rebound storage declines the Arrow path without reading the columns more
+        # than the row path does. pandas caches some of these reads, so a later row
+        # conversion of the same frame can read them fewer times than the first.
+        assert "notna" in calls
+        assert calls.count("_data") <= allowed_reads
+        _assert_timestamp_columns_row_input(state, values, schema)
+        assert state["input_tables"][0].equals(control_table, check_metadata=True)
+
+
+@pytest.mark.parametrize("unit", ["ns", "us"])
+@pytest.mark.parametrize("storage", ["object", "default", "python", "pyarrow", "python_nan", "pyarrow_nan"])
+def test_timestamp_canonical_columns_storage_stays_columnar(protocol, monkeypatch, unit, storage):
+    from pyspark.sql.pandas.types import to_arrow_schema
+    import json
+
+    values, frame, schema = _timestamp_columns_fixture(unit)
+    if storage == "object":
+        frame.columns = pd.Index(["original"], dtype=object)
+    elif storage != "default":
+        kind = storage.removesuffix("_nan")
+        dtype = (pd.StringDtype(storage=kind, na_value=np.nan)
+                 if storage.endswith("_nan") else pd.StringDtype(storage=kind))
+        frame.columns = pd.Index(pd.array(["original"], dtype=dtype))
+
+    def no_rows(*args, **kwargs):
+        raise AssertionError("canonical timestamp labels must retain columnar construction")
+
+    monkeypatch.setattr(pd.DataFrame, "astype", no_rows)
+    with _arrow_input_service(protocol) as (spark, state):
+        spark.createDataFrame(frame, schema).toArrow()
+        assert state["config_requests"]
+        assert len(state["input_tables"]) == 1
+        table = state["input_tables"][0]
+        assert table.num_rows == 10000
+        assert table.column(0).cast(pa.int64()).to_pylist() == values
+        assert table.column(0).is_null().to_pylist() == [value is None for value in values]
+        assert table.schema.equals(to_arrow_schema(schema, timezone="UTC"), check_metadata=True)
+        assert json.loads(state["relations"][0].local_relation.schema) == json.loads(schema.json())

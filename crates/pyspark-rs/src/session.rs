@@ -835,6 +835,42 @@ impl PySparkSession {
                     _ => frame,
                 });
             }
+            let helper = py.import("pyspark.sql._pandas_input")?;
+            let columns = helper.getattr("timestamp_columns")?.call1((data, schema))?;
+            if !columns.is_none() {
+                // Only a naive column needs the session time zone; aware columns carry theirs.
+                let aware = helper
+                    .getattr("timestamp_columns_are_aware")?
+                    .call1((&columns,))?
+                    .is_truthy()?;
+                let timezone = if aware {
+                    None
+                } else {
+                    py.detach(|| {
+                        self.session
+                            .conf()
+                            .get("spark.sql.session.timeZone")
+                            .to_pyerr()
+                    })?
+                };
+                let table = helper
+                    .getattr("prepare_timestamp_table")?
+                    .call1((columns, schema, timezone))?;
+                if !table.is_none() {
+                    let frame =
+                        crate::pyarrow_import::create_dataframe(py, &self.session, &table, schema)?;
+                    return Ok(match &spec {
+                        Spec::Struct(fields) if !fields.is_empty() && table.len()? > 0 => {
+                            PyDataFrame::new(
+                                frame.dataframe.to_df(
+                                    fields.iter().map(|field| field.name.as_str()).collect(),
+                                ),
+                            )
+                        }
+                        _ => frame,
+                    });
+                }
+            }
             return self.create_from_pandas(py, data, spec);
         }
         // Preserve schema parsing, ignored-argument warnings, and pandas/Arrow routing.
