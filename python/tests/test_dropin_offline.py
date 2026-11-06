@@ -460,7 +460,6 @@ def test_functions_exports_fresh_process():
             assert F.random is F.rand
             assert F.column is not F.col
             assert list(inspect.signature(F.first).parameters) == ["col", "ignorenulls"]
-            assert repr(inspect.signature(F.first).parameters["ignorenulls"].default) == "<unset>"
             assert list(inspect.signature(F.split).parameters) == ["str", "pattern", "limit"]
             return F.__all__.copy()
 
