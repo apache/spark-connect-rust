@@ -89,6 +89,7 @@ def _assert_inline(state, schema, expected):
     assert state["config_requests"] == []
     assert state["uploads"] == 0
     assert state["cache"] == {}
+    assert state["column_names"] == schema.names
     assert len(state["relations"]) == 1
     relation = state["relations"][0]
     assert relation.HasField("local_relation")
@@ -155,7 +156,9 @@ def test_arrow_string_preserve_every_cell_and_inline_schema(
         "spark.sql.session.localRelationChunkSizeRows": "997",
         "spark.sql.execution.arrow.useLargeVarTypes": "true",
     }) as (spark, state):
-        spark.createDataFrame(frame, schema, verifySchema=verify).toArrow()
+        result = spark.createDataFrame(frame, schema, verifySchema=verify)
+        assert not result.isLocal()
+        result.toArrow()
         _assert_inline(state, schema, expected)
 
 
@@ -374,7 +377,9 @@ def test_arrow_string_public_cached_index_subclass_matches_native_row_control(
             if row_control:
                 control.setattr(pandas_input, "prepare_string_input", lambda *args: None)
             with _arrow_input_service(protocol, config_error=True) as (spark, state):
-                spark.createDataFrame(frame, schema).toArrow()
+                result = spark.createDataFrame(frame, schema)
+                assert not result.isLocal()
+                result.toArrow()
                 _assert_inline(state, schema, [values])
                 tables.append(state["input_tables"][0])
         assert calls == []
@@ -723,7 +728,9 @@ def test_arrow_string_public_hooks_match_native_row_control(
                     assert state["uploads"] == 0
                     assert state["relations"] == []
                 else:
-                    spark.createDataFrame(frame, schema).toArrow()
+                    result = spark.createDataFrame(frame, schema)
+                    assert not result.isLocal()
+                    result.toArrow()
                     _assert_inline(state, schema, [expected])
                     tables.append(state["input_tables"][0])
         assert calls == [target]
