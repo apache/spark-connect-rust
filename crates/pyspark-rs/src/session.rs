@@ -1383,7 +1383,7 @@ fn pandas_decimal_type(rows: &Bound<'_, PyList>, i: usize) -> PyResult<DataType>
 
 /// Infer the Spark `DataType` for a `createDataFrame` column from its (first) value.
 /// Nested collections are inferred recursively; nulls and empty collections use
-/// String as a fallback.
+/// String as a fallback. Interval input conversion is tracked in SPARK-60659.
 fn value_to_datatype(v: &Value) -> DataType {
     let utf8 = || DataType::String {
         collation: "UTF8_BINARY".to_string(),
@@ -1602,16 +1602,9 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
         return Ok(Value::Map(map));
     }
 
-    // Pandas and other generic callers use the same exact interval conversion as local rows.
+    // Check for datetime.datetime (before datetime.date, since datetime is a subclass of date)
     let py = obj.py();
     let datetime_mod = py.import("datetime").ok();
-    if let Some(dt_mod) = &datetime_mod {
-        if obj.is_instance(&dt_mod.getattr("timedelta")?)? {
-            return Ok(Value::DayTimeInterval(crate::infer::delta_micros(obj)?));
-        }
-    }
-
-    // Check for datetime.datetime (before datetime.date, since datetime is a subclass of date)
     if let Some(dt_mod) = &datetime_mod {
         if let Ok(datetime_cls) = dt_mod.getattr("datetime") {
             if obj.is_instance(&datetime_cls)? {

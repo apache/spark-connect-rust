@@ -835,14 +835,12 @@ fn exact_float(obj: &Bound<'_, PyAny>, dt: &DataType) -> PyResult<f64> {
 }
 
 /// Microseconds of a `timedelta`, exactly.
-pub(crate) fn delta_micros(delta: &Bound<'_, PyAny>) -> PyResult<i64> {
+fn delta_micros(delta: &Bound<'_, PyAny>) -> PyResult<i64> {
     let py = delta.py();
-    let days: i128 = delta.getattr(intern!(py, "days"))?.extract()?;
-    let seconds: i128 = delta.getattr(intern!(py, "seconds"))?.extract()?;
-    let micros: i128 = delta.getattr(intern!(py, "microseconds"))?.extract()?;
-    i64::try_from(days * 86_400_000_000 + seconds * 1_000_000 + micros).map_err(|_| {
-        PyOverflowError::new_err("day-time interval exceeds signed 64-bit microseconds")
-    })
+    let days: i64 = delta.getattr(intern!(py, "days"))?.extract()?;
+    let seconds: i64 = delta.getattr(intern!(py, "seconds"))?.extract()?;
+    let micros: i64 = delta.getattr(intern!(py, "microseconds"))?.extract()?;
+    Ok(days * 86_400_000_000 + seconds * 1_000_000 + micros)
 }
 
 /// Microseconds since the epoch of the instant of a datetime, which PySpark takes with
@@ -929,12 +927,6 @@ pub(crate) fn convert(obj: &Bound<'_, PyAny>, dt: &DataType, nullable: bool) -> 
             } else {
                 Err(assertion())
             }
-        }
-        DataType::DayTimeInterval { .. } => {
-            if !obj.is_instance(TIMEDELTA.import(py, "datetime", "timedelta")?.as_any())? {
-                return Err(assertion());
-            }
-            Ok(Value::DayTimeInterval(delta_micros(obj)?))
         }
         DataType::Timestamp | DataType::TimestampLtzNanos { .. } => {
             if !obj.is_instance(DATETIME.import(py, "datetime", "datetime")?.as_any())? {

@@ -82,8 +82,9 @@ serialized and sent to the server; results stream back as Arrow batches.
 Day-time intervals use signed 64-bit microseconds in Rust (`Value::DayTimeInterval`)
 and Python `datetime.timedelta` values. `createDataFrame` supports inferred and
 explicit interval schemas, including nested structs, lists, maps, and nulls.
-Collected rows can be passed back with their schema. Python inputs outside the
-signed 64-bit microsecond range raise `OverflowError` without rounding.
+Collected rows can be passed back with their schema. As in PySpark, an `int` or a
+`float` for an interval field is taken as microseconds, and a value outside the signed
+64-bit microsecond range is an error.
 
 ```mermaid
 sequenceDiagram
