@@ -7,7 +7,7 @@
 use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 
-use pyo3::exceptions::{PyAssertionError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyAssertionError, PyOverflowError, PyTypeError, PyValueError};
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
@@ -1042,6 +1042,7 @@ pub(crate) fn convert(obj: &Bound<'_, PyAny>, dt: &DataType, nullable: bool) -> 
                 _ => Value::Double(value),
             })
         }
+        DataType::DayTimeInterval { .. } => Ok(Value::DayTimeInterval(duration_micros(obj)?)),
         DataType::Date => {
             // PyArrow takes a date, or the date of a datetime.
             if !obj.is_instance(DATE.import(py, "datetime", "date")?.as_any())? {
@@ -1052,6 +1053,80 @@ pub(crate) fn convert(obj: &Bound<'_, PyAny>, dt: &DataType, nullable: bool) -> 
         }
         _ => Err(unsupported(obj)?),
     }
+}
+
+/// A value of a day-time interval column, as PyArrow converts one to `duration[us]`: a
+/// timedelta to its microseconds, as `DayTimeIntervalType.toInternal`, and an int, or a
+/// float truncated, as microseconds. Another value raises PyArrow's error.
+fn duration_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
+    let py = obj.py();
+    if obj.is_instance(TIMEDELTA.import(py, "datetime", "timedelta")?.as_any())? {
+        return timedelta_micros(obj);
+    }
+    let pyarrow_error = |class: &str, message: String| -> PyResult<PyErr> {
+        let error = py
+            .import(intern!(py, "pyarrow"))?
+            .getattr(class)?
+            .call1((message,))?;
+        Ok(PyErr::from_value(error))
+    };
+    if obj.is_instance_of::<PyBool>() {
+        return Err(pyarrow_error(
+            "ArrowTypeError",
+            "Expected integer, got bool".into(),
+        )?);
+    }
+    if numpy_scalar(obj)?.is_some() {
+        let arrow_type = py.import(intern!(py, "pyarrow"))?.call_method1(
+            intern!(py, "from_numpy_dtype"),
+            (obj.getattr(intern!(py, "dtype"))?,),
+        )?;
+        return Err(pyarrow_error(
+            "ArrowNotImplementedError",
+            format!("Expected np.timedelta64 but got: {}", arrow_type.str()?),
+        )?);
+    }
+    let too_large = || PyOverflowError::new_err("Python int too large to convert to C long");
+    if obj.is_instance_of::<PyInt>() {
+        return obj.extract::<i64>().map_err(|_| too_large());
+    }
+    if let Ok(value) = obj.cast::<PyFloat>() {
+        let value = value.value();
+        if value.is_nan() {
+            return Err(PyValueError::new_err("cannot convert float NaN to integer"));
+        }
+        if value.is_infinite() {
+            return Err(PyOverflowError::new_err(
+                "cannot convert float infinity to integer",
+            ));
+        }
+        let truncated = value.trunc();
+        if !(-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&truncated) {
+            return Err(too_large());
+        }
+        return Ok(truncated as i64);
+    }
+    Err(pyarrow_error(
+        "ArrowTypeError",
+        format!(
+            "object of type {} cannot be converted to int",
+            obj.get_type().repr()?
+        ),
+    )?)
+}
+
+/// The microseconds of a `datetime.timedelta`, as `DayTimeIntervalType.toInternal`:/// The microseconds of a `datetime.timedelta`, as `DayTimeIntervalType.toInternal`:
+/// `((days * 86400) + seconds) * 1_000_000 + microseconds`.
+pub(crate) fn timedelta_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
+    let py = obj.py();
+    let days: i64 = obj.getattr(intern!(py, "days"))?.extract()?;
+    let seconds: i64 = obj.getattr(intern!(py, "seconds"))?.extract()?;
+    let micros: i64 = obj.getattr(intern!(py, "microseconds"))?.extract()?;
+    days.checked_mul(86_400)
+        .and_then(|s| s.checked_add(seconds))
+        .and_then(|s| s.checked_mul(1_000_000))
+        .and_then(|us| us.checked_add(micros))
+        .ok_or_else(|| PyOverflowError::new_err("Python int too large to convert to C long"))
 }
 
 /// An integral value, as PyArrow converts one: an int in range, or a float truncated.

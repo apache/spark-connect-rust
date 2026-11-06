@@ -3625,6 +3625,29 @@ def test_create_dataframe_types_pandas_columns_as_arrow():
         _local_create_dataframe(pd.DataFrame({"m": [{None: 1}]}))
 
 
+def test_timedelta_values_convert_as_pyspark():
+    import datetime
+    import re
+
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.sql import functions as F
+
+    # A day-time interval, rather than UNSUPPORTED_DATA_TYPE (the live suite checks values).
+    one = datetime.timedelta(days=1, seconds=2, microseconds=3)
+    F.lit(one)
+    _local_create_dataframe([(one,), (None,)])
+    _local_create_dataframe([(5,), (1.5,)], "d interval day to second")
+    # Other values raise as PyArrow's conversion to duration[us] does.
+    for value, error, message in (
+        (True, pa.ArrowTypeError, "Expected integer, got bool"),
+        ("x", pa.ArrowTypeError, "object of type <class 'str'> cannot be converted to int"),
+        (float("nan"), ValueError, "cannot convert float NaN to integer"),
+        (2**63, OverflowError, "Python int too large to convert to C long"),
+    ):
+        with pytest.raises(error, match="^" + re.escape(message) + "$"):
+            _local_create_dataframe([(value,)], "d interval day to second")
+
+
 def _local_create_dataframe(*args):
     # The local relation and its toDF are built without a server.
     return _offline_session().createDataFrame(*args)
