@@ -114,7 +114,7 @@ fn dataframe_metadata_json_semantics() {
     assert!(df.same_semantics(&df4(&s)).unwrap());
     let _ = df.semantic_hash().unwrap();
     // flags
-    assert!(!df.is_streaming());
+    assert!(!df.is_streaming().unwrap());
     let _ = df.is_local();
     // input_files (a sql df reads no files -> empty, but the call path runs)
     let _ = df.input_files().unwrap();

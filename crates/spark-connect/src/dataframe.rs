@@ -1875,16 +1875,28 @@ impl DataFrame {
         }
     }
 
-    /// Check if this DataFrame is streaming.
-    pub fn is_streaming(&self) -> bool {
-        // Check if the plan has streaming-related operations
-        matches!(
-            self.plan.as_ref(),
-            LogicalPlan::Read {
-                is_streaming: true,
-                ..
-            }
-        )
+    /// Whether this DataFrame is streaming, mirroring `pyspark.sql.DataFrame.isStreaming`,
+    /// which asks the server: whether a source of its plan continuously returns data.
+    pub fn is_streaming(&self) -> Result<bool> {
+        let request = proto::AnalyzePlanRequest {
+            session_id: self.session.client().session_id().to_string(),
+            user_context: Some(proto::UserContext::default()),
+            analyze: Some(proto::analyze_plan_request::Analyze::IsStreaming(
+                proto::analyze_plan_request::IsStreaming {
+                    plan: Some(proto::Plan {
+                        op_type: Some(proto::plan::OpType::Root(self.relation())),
+                    }),
+                },
+            )),
+            ..Default::default()
+        };
+        let response = block_on(self.session.client().analyze_plan(request))?;
+        match response.result {
+            Some(proto::analyze_plan_response::Result::IsStreaming(r)) => Ok(r.is_streaming),
+            _ => Err(SparkError::connect_msg(
+                "AnalyzePlan response did not contain an isStreaming result",
+            )),
+        }
     }
 
     /// Collect the DataFrame and serialize it to Arrow IPC (file format) bytes.

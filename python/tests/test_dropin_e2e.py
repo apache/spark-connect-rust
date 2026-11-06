@@ -1375,6 +1375,20 @@ def test_create_dataframe_merges_the_types_of_every_row_as_pyspark(session):
         assert [tuple(r) for r in df.collect()] == [(text,), ("5",)]
 
 
+def test_dataframes_of_a_stream_are_streaming_as_pyspark(session):
+    # As PySpark's, which asks the server: a DataFrame with a streaming source is streaming.
+    stream = session.readStream.format("rate").load()
+    for df in (
+        stream,
+        stream.select("value"),
+        stream.where("value > 1"),
+        stream.union(stream),
+        session.range(1).join(stream.select(F.col("value").alias("id")), "id"),
+    ):
+        assert df.isStreaming is True
+    assert session.range(1).isStreaming is False
+
+
 def test_create_dataframe_raises_merge_errors_as_pyspark(session):
     from pyspark.errors import PySparkException
 

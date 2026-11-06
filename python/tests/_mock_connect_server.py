@@ -132,6 +132,11 @@ def serve(connection):
         def analyze(self, request, context):
             self.calls += 1
             self.analyze_requests.append(request)
+            # base.proto: AnalyzePlanRequest.is_streaming=8; AnalyzePlanResponse.is_streaming=6,
+            # IsStreaming.is_streaming=1, of `streaming`, which a test sets.
+            if 8 in parse_message(request):
+                streaming = getattr(self, "streaming", False)
+                return message_field(6, varint_field(1, 1) if streaming else b"")
             if self.block_response and not self.response_gate.wait(5):
                 context.abort(
                     grpc.StatusCode.DEADLINE_EXCEEDED,

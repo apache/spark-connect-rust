@@ -1080,8 +1080,9 @@ impl PyDataFrame {
     /// Whether this DataFrame contains one or more sources that continuously return data.
     #[pyo3(name = "isStreaming")]
     #[getter]
-    fn is_streaming(&self) -> bool {
-        self.dataframe.is_streaming()
+    fn is_streaming(&self, py: Python<'_>) -> PyResult<bool> {
+        py.detach(|| self.dataframe.is_streaming().map_err(Box::new))
+            .to_pyerr()
     }
 
     /// The storage level currently in use for this DataFrame.
