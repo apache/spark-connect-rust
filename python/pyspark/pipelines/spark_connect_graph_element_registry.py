@@ -41,6 +41,8 @@ from pyspark.sql.types import StructType
 from pyspark._pyspark import (
     pipeline_define_output as _define_output,
     pipeline_define_flow as _define_flow,
+    pipeline_enter_flow_function as _enter_flow_function,
+    pipeline_exit_flow_function as _exit_flow_function,
     pipeline_define_auto_cdc_flow as _define_auto_cdc_flow,
     pipeline_define_sql_graph_elements as _define_sql_graph_elements,
 )
@@ -148,11 +150,15 @@ class SparkConnectGraphElementRegistry(GraphElementRegistry):
             )
 
     def register_flow(self, flow: Flow) -> None:
-        # flow.func() builds the query DataFrame lazily (no server round-trip), so unlike
-        # the reference client there is no client-side analysis to scope with a
-        # PipelineAnalysisContext; the DefineFlow proto carries the graph id + flow name,
-        # which is what the server uses to analyze the relation.
-        df = flow.func()
+        # PySpark runs flow.func() within a PipelineAnalysisContext, in which its server
+        # returns the relation of spark.sql() without running the statement. Here spark.sql()
+        # within the flow function builds its relation without running it, and the server
+        # analyzes the relation in the pipeline once the DefineFlow defines the flow.
+        _enter_flow_function()
+        try:
+            df = flow.func()
+        finally:
+            _exit_flow_function()
         scl_file, scl_line = _scl(flow.source_code_location)
         _define_flow(
             self._spark,

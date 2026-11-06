@@ -347,6 +347,46 @@ def _drop_metadata(d):
         return MapType(_drop_metadata(d.keyType), _drop_metadata(d.valueType), d.valueContainsNull)
     return d
 
+def _has_type(dt, dts):
+    """Return whether there are specified types (mirrors pyspark.sql.types._has_type)."""
+    if isinstance(dt, dts):
+        return True
+    elif isinstance(dt, StructType):
+        return any(_has_type(f.dataType, dts) for f in dt.fields)
+    elif isinstance(dt, ArrayType):
+        return _has_type(dt.elementType, dts)
+    elif isinstance(dt, MapType):
+        return _has_type(dt.keyType, dts) or _has_type(dt.valueType, dts)
+    elif isinstance(dt, UserDefinedType):
+        return _has_type(dt.sqlType(), dts)
+    else:
+        return False
+
+
+def _from_numpy_type(nt):
+    """Convert NumPy type to Spark data type."""
+    import numpy as np
+
+    if nt == np.dtype("bool"):
+        return BooleanType()
+    elif nt == np.dtype("int8"):
+        return ByteType()
+    elif nt == np.dtype("int16"):
+        return ShortType()
+    elif nt == np.dtype("int32"):
+        return IntegerType()
+    elif nt == np.dtype("int64"):
+        return LongType()
+    elif nt == np.dtype("float32"):
+        return FloatType()
+    elif nt == np.dtype("float64"):
+        return DoubleType()
+    elif nt.type == np.dtype("str"):
+        return StringType()
+
+    return None
+
+
 def _create_row(fields, values):
     """A Row of ``values`` named by ``fields``, as in PySpark, whose pickled rows call it."""
     row = Row(*values)
