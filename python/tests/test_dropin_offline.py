@@ -289,7 +289,7 @@ def test_datatype_eq_and_hash_match_pyspark():
     assert type(T.LongType()).__eq__ is not object.__eq__
 
 
-def test_datatype_eq_across_construction_paths():
+def test_datatype_eq_across_construction_paths(mock_connect):
     import json
 
     st = T.StructType([T.StructField("a", T.IntegerType())])
@@ -1130,7 +1130,7 @@ def test_time_values_are_sent_as_pyspark(mock_connect):
     assert parse_message(parse_message(expression[1][0])[26][0]) == {1: [nanos], 2: [6]}
 
 
-def test_time_types_parse_as_pyspark():
+def test_time_types_parse_as_pyspark(mock_connect):
     # As PySpark's: a bare time is TimeType(), of the default precision 6, in a DDL string and
     # in the JSON of a type.
     assert T.DataType.fromDDL("t time") == T.StructType([T.StructField("t", T.TimeType(6))])
@@ -1431,7 +1431,7 @@ def test_user_defined_type_repr_is_its_class_name():
      "StructType([StructField('b', StringType(), True), StructField('a', IntegerType(), True)])"),
     ("int", T.IntegerType, "IntegerType()"),
 ])
-def test_datatype_from_ddl_returns_the_concrete_type(ddl, cls, expected):
+def test_datatype_from_ddl_returns_the_concrete_type(ddl, cls, expected, mock_connect):
     parsed = T.DataType.fromDDL(ddl)
     assert repr(parsed) == expected
     assert isinstance(parsed, cls)
@@ -1439,7 +1439,7 @@ def test_datatype_from_ddl_returns_the_concrete_type(ddl, cls, expected):
     assert repr(T.LongType.fromDDL(ddl)) == expected
 
 
-def test_datatype_object_model():
+def test_datatype_object_model(mock_connect):
     # json / jsonValue / typeName / simpleString / needConversion match official pyspark.
     assert T.IntegerType().typeName() == "integer"
     assert T.IntegerType().simpleString() == "int"
@@ -4463,7 +4463,7 @@ def test_udf_string_arg_is_column_name_not_literal():
     assert repr(c) == repr(u(col("id")))
 
 
-def test_udf_and_pandas_udf_decorator_forms():
+def test_udf_and_pandas_udf_decorator_forms(mock_connect):
     # @udf(returnType) / @pandas_udf(returnType) return a decorator that wraps a function.
     from pyspark.sql.functions import udf, pandas_udf
     from pyspark.sql.types import IntegerType
@@ -4481,7 +4481,7 @@ def test_udf_and_pandas_udf_decorator_forms():
     assert isinstance(p._unwrapped, UserDefinedFunction) and p.__name__ == "p"
 
 
-def test_udf_return_type_normalized_to_concrete_datatype():
+def test_udf_return_type_normalized_to_concrete_datatype(mock_connect):
     # A DDL-string returnType must become a concrete, picklable DataType so the
     # cloudpickled command carries a real type (the pandas/Arrow worker needs it).
     import pickle
@@ -4496,7 +4496,7 @@ def test_udf_return_type_normalized_to_concrete_datatype():
     pickle.dumps(f.returnType)  # concrete types pickle
 
 
-def test_pandas_udf_eval_type_inferred_from_type_hints():
+def test_pandas_udf_eval_type_inferred_from_type_hints(mock_connect):
     # @pandas_udf("type") infers eval type from the function's pandas type hints:
     # Series->Series = scalar(200), Iterator->Iterator = scalar_iter(204),
     # Series->scalar = grouped_agg(202).

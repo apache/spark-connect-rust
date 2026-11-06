@@ -1348,6 +1348,15 @@ impl PySparkSession {
         active_session(py)
     }
 
+    /// The type of the DDL string `ddl`, as the server parses it, as PySpark Connect's
+    /// `SparkSession._parse_ddl`, of a `DDLParse` of an `AnalyzePlanRequest`.
+    fn _parse_ddl(&self, py: Python<'_>, ddl: &str) -> PyResult<Py<PyAny>> {
+        let data_type = py
+            .detach(|| self.session.parse_ddl(ddl).map_err(Box::new))
+            .to_pyerr()?;
+        crate::types::data_type_to_py(py, &data_type)
+    }
+
     /// The active session of this thread, or else the default session; errors if neither.
     /// Mirrors `SparkSession.active`, which raises `NO_ACTIVE_OR_DEFAULT_SESSION`.
     #[staticmethod]
