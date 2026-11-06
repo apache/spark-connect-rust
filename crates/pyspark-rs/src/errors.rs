@@ -126,6 +126,23 @@ fn server_error_to_py<'py>(
     )
 }
 
+/// The exception for a gRPC error that carries no error of the server, such as an
+/// `UNAVAILABLE` of an unreachable server or a `PERMISSION_DENIED` of a proxy, as the
+/// reference client's `_handle_rpc_error` raises it: a `SparkConnectGrpcException` of the
+/// status code.
+fn grpc_error_to_py<'py>(py: Python<'py>, message: &str, code: i32) -> PyResult<Bound<'py, PyAny>> {
+    let connect = py.import("pyspark.errors.exceptions.connect")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("message", message)?;
+    kwargs.set_item(
+        "grpc_status_code",
+        connect.call_method1("_status_code", (code,))?,
+    )?;
+    connect
+        .getattr("SparkConnectGrpcException")?
+        .call((), Some(&kwargs))
+}
+
 /// Maps a SparkError to a Python exception, attempting to raise the correct typed
 /// exception based on the error kind. Falls back to PyRuntimeError if import fails.
 pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
@@ -135,14 +152,17 @@ pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
 
     // Try to acquire the GIL and import the exception class from pyspark.errors
     Python::attach(|py| {
-        if let Some(server) = &err.server {
-            // Should the connect classes not import, fall back to the class by kind below.
-            if let Ok(exc_instance) = server_error_to_py(py, &err, server) {
-                if let Some(op) = &operation_id {
-                    let _ = exc_instance.setattr("_operation_id", op);
-                }
-                return PyErr::from_value(exc_instance);
+        // Should the connect classes not import, fall back to the class by kind below.
+        let connect_error = match (&err.server, err.grpc_code) {
+            (Some(server), _) => server_error_to_py(py, &err, server).ok(),
+            (None, Some(code)) => grpc_error_to_py(py, &msg, code).ok(),
+            (None, None) => None,
+        };
+        if let Some(exc_instance) = connect_error {
+            if let Some(op) = &operation_id {
+                let _ = exc_instance.setattr("_operation_id", op);
             }
+            return PyErr::from_value(exc_instance);
         }
         // First, verify and get the exception class from pyspark.errors
         let errors_module = match py.import("pyspark.errors") {
