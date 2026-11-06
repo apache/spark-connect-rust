@@ -66,12 +66,61 @@ def test_to_local_iterator_raises_the_error_of_the_execution_as_pyspark(session,
     assert list(rows) == []
 
 
+def test_udf_and_udtf_calls_take_named_arguments_as_pyspark(session):
+    # As PySpark's: the keyword arguments of a UDF or UDTF call are its named arguments, and
+    # a bare string is a column name.
+    import pandas as pd
+
+    @F.udf("int")
+    def plus(a, b):
+        return a + 10 * b
+
+    @F.pandas_udf("long")
+    def pandas_plus(a: pd.Series, b: pd.Series) -> pd.Series:
+        return a + 10 * b
+
+    df = session.range(1)
+    for fn in (plus, pandas_plus):
+        assert df.select(fn(b=F.lit(2), a=F.lit(1)).alias("r")).collect() == [Row(r=21)]
+        assert df.select(fn(F.lit(1), b=F.lit(2)).alias("r")).collect() == [Row(r=21)]
+
+    @F.udtf(returnType="a int, b int")
+    class Two:
+        def eval(self, a, b):
+            yield a, b
+
+    assert Two(b=F.lit(2), a=F.lit(1)).collect() == [Row(a=1, b=2)]
+    assert Two(F.lit(1), b=F.lit(2)).collect() == [Row(a=1, b=2)]
+    with pytest.raises(AnalysisException) as error:
+        Two("x", F.lit(2)).collect()
+    assert error.value.getCondition() == "UNRESOLVED_COLUMN.WITHOUT_SUGGESTION"
+
+
 def test_conf_get_with_a_none_default(session):
     key = "spark.connect.rust.test.unset"
     assert session.conf.get(key, None) is None
     assert session.conf.get(key, "x") == "x"
     with pytest.raises(Exception, match="SQL_CONF_NOT_FOUND"):
         session.conf.get(key)
+
+
+def test_get_or_create_returns_the_session_with_the_options_as_pyspark(session):
+    # As PySpark's builder: getOrCreate() returns the active session, and sets the options
+    # of the builder on it; one that fails, of a static configuration, is ignored.
+    key = "spark.sql.shuffle.partitions"
+    previous = session.conf.get(key)
+    try:
+        got = (
+            SparkSession.builder.remote(os.environ["SPARK_REMOTE"])
+            .config(key, "5")
+            .config("spark.sql.warehouse.dir", "/not/set")
+            .getOrCreate()
+        )
+        assert got is session
+        assert session.conf.get(key) == "5"
+        assert session.conf.get("spark.sql.warehouse.dir") != "/not/set"
+    finally:
+        session.conf.set(key, previous)
 
 
 def test_repr_shows_the_rows_with_eager_evaluation_as_pyspark(session):
@@ -168,6 +217,28 @@ def test_arrow_udtf_takes_and_returns_arrow_data_as_pyspark(session):
             yield pa.table({"x": pc.add(x, 1), "kind": pa.array([type(x).__name__] * len(x))})
 
     assert PlusOne(F.lit(1)).collect() == [Row(x=2, kind="Int32Array")]
+
+
+def test_udfs_are_arrow_optimized_or_of_their_type_hints_as_pyspark(session):
+    # As PySpark's udf(): Arrow-optimized as the server enables by default, so Arrow
+    # converts a result to the return type; and a function with pandas type hints is a
+    # pandas UDF.
+    import pandas as pd
+
+    df = session.range(2)
+    assert df.select(F.udf(lambda x: str(x), "int")("id").alias("r")).collect() == [
+        Row(r=0), Row(r=1)
+    ]
+    assert df.select(F.udf(lambda x: 1.5, "int")("id").alias("r")).collect() == [
+        Row(r=1), Row(r=1)
+    ]
+
+    def plus_one(s: pd.Series) -> pd.Series:
+        return s + 1
+
+    hinted = F.udf(plus_one, "long")
+    assert hinted.evalType == 200
+    assert df.select(hinted("id").alias("r")).collect() == [Row(r=1), Row(r=2)]
 
 
 def test_map_functions_take_a_ddl_schema(session):
@@ -358,6 +429,27 @@ def test_execution_info_is_that_of_each_dataframe_as_pyspark(session):
         assert df.executionInfo.operation_id != a.executionInfo.operation_id
 
 
+def test_registered_udtfs_are_called_from_sql_as_pyspark(session):
+    # As PySpark's spark.udtf.register: the server knows the UDTF by its name.
+    @F.udtf(returnType="x int")
+    class Count:
+        def eval(self, n):
+            for i in range(n):
+                yield (i,)
+
+    @F.arrow_udtf(returnType=StructType([StructField("y", LongType())]))
+    class Doubled:
+        def eval(self, x):
+            import pyarrow.compute as pc
+
+            yield pa.table({"y": pc.multiply(x, 2)})
+
+    assert session.udtf.register("count_udtf", Count) is Count
+    assert session.sql("SELECT * FROM count_udtf(2)").collect() == [Row(x=0), Row(x=1)]
+    session.udtf.register("doubled_udtf", Doubled)
+    assert session.sql("SELECT * FROM doubled_udtf(21L)").collect() == [Row(y=42)]
+
+
 def test_catalog_and_stream_start_errors_carry_their_operation_id(session):
     for run in (
         lambda: session.catalog.setCurrentDatabase("no_such_database_60960"),
@@ -515,6 +607,24 @@ def test_grouped_map_functions_take_iterators_by_their_type_hints(session):
         (grouped.applyInArrow(keyed_batches, schema), [(1, 1.0), (1, 2.0), (2, 3.0)]),
     ):
         assert sorted(tuple(r) for r in result.collect()) == expected
+
+
+def test_dataframe_columns_resolve_against_their_dataframe_as_pyspark(session):
+    # As PySpark Connect's: df[name] and df.name refer to the columns of their DataFrame by its
+    # plan ID, so a join selects the columns of each side, and an ambiguous self-join of a
+    # derived DataFrame raises PySpark's error.
+    left = session.createDataFrame([(1, "a"), (2, "b")], "id int, v string")
+    right = session.createDataFrame([(1, "x"), (3, "y")], "id int, w string")
+    joined = left.join(right, left["id"] == right["id"])
+    assert joined.select(left["id"], right["w"]).collect() == [Row(id=1, w="x")]
+    assert joined.select(left.v, right.w).collect() == [Row(v="a", w="x")]
+    assert joined.select(right["*"]).collect() == [Row(id=1, w="x")]
+    assert joined.select(left.colRegex("`v`")).collect() == [Row(v="a")]
+    base = session.range(3)
+    derived = base.withColumn("x", F.col("id") * 2)
+    with pytest.raises(AnalysisException) as error:
+        base.join(derived, base["id"] == derived["id"]).select(base["id"]).collect()
+    assert error.value.getCondition() == "AMBIGUOUS_COLUMN_REFERENCE"
 
 
 def test_collect_reads_a_result_across_stream_ends(session):
@@ -942,6 +1052,54 @@ def test_ml_vector_functions_as_pyspark(session):
     df = session.sql("SELECT array(1.5D, 2.0D) AS a").select(array_to_vector("a").alias("vec"))
     row = df.select(vector_to_array("vec").alias("d"), vector_to_array("vec", "float32").alias("f"))
     assert tuple(row.first()) == ([1.5, 2.0], [1.5, 2.0])
+
+
+def test_udfs_return_user_defined_types_of_main_as_pyspark():
+    # As PySpark's: a UDT that __main__ defines, of parameters, is a UDF return type, as
+    # cloudpickle sends its class by value and its state to the worker. In a new
+    # interpreter, whose __main__ defines the classes.
+    import subprocess
+    import sys
+
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("SPARK_REMOTE is required for live-server tests")
+    subprocess.run([sys.executable, "-c", """
+import sys
+from pyspark.sql import Row, SparkSession, functions as F
+from pyspark.sql.types import ArrayType, DoubleType, UserDefinedType
+
+class Point:
+    def __init__(self, x, y):
+        self.x, self.y = x, y
+
+    def __eq__(self, other):
+        return isinstance(other, Point) and (self.x, self.y) == (other.x, other.y)
+
+class PointUDT(UserDefinedType):
+    def __init__(self, scale=1.0):
+        self.scale = scale
+
+    @classmethod
+    def sqlType(cls):
+        return ArrayType(DoubleType(), False)
+
+    @classmethod
+    def module(cls):
+        return "__main__"
+
+    def serialize(self, obj):
+        return [obj.x * self.scale, obj.y * self.scale]
+
+    def deserialize(self, datum):
+        return Point(datum[0], datum[1])
+
+Point.__UDT__ = PointUDT()
+spark = SparkSession.builder.remote(sys.argv[1]).getOrCreate()
+df = spark.range(2).select(F.udf(lambda i: Point(i, i + 1), PointUDT(10.0))("id").alias("p"))
+assert df.collect() == [Row(p=Point(0.0, 10.0)), Row(p=Point(10.0, 20.0))]
+assert df.select(F.to_json(F.struct("p"))).collect()[1][0] == '{"p":[10.0,20.0]}'
+""", remote], check=True)
 
 
 def test_collected_values_of_user_defined_types_are_deserialized_as_pyspark(session):

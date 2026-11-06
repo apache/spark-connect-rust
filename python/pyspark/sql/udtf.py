@@ -114,10 +114,15 @@ class UserDefinedTableFunction:
         # worker command contains only the handler class, unlike scalar UDFs.
         self.command = CloudPickleSerializer().dumps(func)
 
-    def __call__(self, *args: Any) -> Any:
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
         from pyspark import _pyspark
         from pyspark.sql import SparkSession
+        from pyspark.sql.functions import col
 
+        # As PySpark's: an argument is ColumnOrName, so a bare string is a column name, and
+        # each keyword argument is a NamedArgumentExpression, after the positional ones.
+        cols = [col(a) if isinstance(a, str) else a for a in args]
+        named = [(k, col(v) if isinstance(v, str) else v) for k, v in kwargs.items()]
         return _pyspark.functions.pyfunc_make_udtf(
             SparkSession.active(),
             self.name,
@@ -125,8 +130,9 @@ class UserDefinedTableFunction:
             self.evalType,
             self.command,
             self.python_ver,
-            *args,
+            *cols,
             deterministic=self.deterministic,
+            named_args=named,
         )
 
     def asDeterministic(self) -> "UserDefinedTableFunction":
@@ -218,10 +224,41 @@ def arrow_udtf(
 
 
 class UDTFRegistration:
-    """Registration accessor mirroring ``SparkSession.udtf``."""
+    """
+    Wrapper for user-defined table function registration, as ``spark.udtf``. Mirrors
+    ``pyspark.sql.connect.udtf.UDTFRegistration``.
 
-    def register(self, name: str, f: Any, returnType: Optional[Any] = None):
-        if isinstance(f, UserDefinedTableFunction):
-            f.name = name
-            return f
-        return UserDefinedTableFunction(f, returnType=returnType, name=name)
+    .. versionadded:: 3.5.0
+    """
+
+    def __init__(self, sparkSession: Any):
+        self.sparkSession = sparkSession
+
+    def register(
+        self,
+        name: str,
+        f: "UserDefinedTableFunction",
+    ) -> "UserDefinedTableFunction":
+        """Register the UDTF ``f`` as ``name`` on the server, so that SQL calls it, and return
+        ``f``. As PySpark's, ``f`` is a UDTF of ``udtf()`` or ``arrow_udtf()``."""
+        if not isinstance(f, UserDefinedTableFunction):
+            raise PySparkTypeError(
+                errorClass="CANNOT_REGISTER_UDTF",
+                messageParameters={
+                    "name": name,
+                },
+            )
+
+        if f.evalType not in [SQL_TABLE_UDF, SQL_ARROW_TABLE_UDF, SQL_ARROW_UDTF]:
+            raise PySparkTypeError(
+                errorClass="INVALID_UDTF_EVAL_TYPE",
+                messageParameters={
+                    "name": name,
+                    "eval_type": "SQL_TABLE_UDF, SQL_ARROW_TABLE_UDF, SQL_ARROW_UDTF",
+                },
+            )
+
+        self.sparkSession._registerPythonUdtf(
+            name, f.returnType, f.evalType, f.command, f.python_ver, f.deterministic
+        )
+        return f

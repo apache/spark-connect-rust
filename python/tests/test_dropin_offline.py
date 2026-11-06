@@ -378,6 +378,77 @@ def test_session_builder_chaining_offline():
     assert type(b2).__name__ == "SparkSessionBuilder"
 
 
+def test_sessions_are_got_or_created_as_pyspark():
+    # As PySpark's builder: getOrCreate() returns the active session of the thread, or else
+    # the default session, whatever the URL, and creates one when there is neither, of the
+    # URL of remote() or else of SPARK_REMOTE; create() makes a new one, which is the default
+    # and the active session only when they are not set; and stop() unsets them. In a new
+    # interpreter, which has no default session.
+    import subprocess
+    import sys
+
+    subprocess.run([sys.executable, "-c", """
+import os
+import threading
+
+from pyspark.errors import PySparkRuntimeError
+from pyspark.sql import SparkSession
+
+def condition(call):
+    try:
+        call()
+    except PySparkRuntimeError as error:
+        return error.getCondition()
+    raise AssertionError("no error")
+
+os.environ.pop("SPARK_REMOTE", None)
+assert condition(SparkSession.builder.getOrCreate) == "CONNECT_URL_NOT_SET"
+assert condition(SparkSession.active) == "NO_ACTIVE_OR_DEFAULT_SESSION"
+
+first = SparkSession.builder.remote("sc://localhost:1").getOrCreate()
+assert SparkSession.builder.remote("sc://localhost:2").getOrCreate() is first
+assert SparkSession.getActiveSession() is first and SparkSession.active() is first
+
+seen = {}
+def other_thread():
+    seen["active"] = SparkSession.getActiveSession()
+    seen["default"] = SparkSession.active()
+    seen["got"] = SparkSession.builder.remote("sc://localhost:1").getOrCreate()
+thread = threading.Thread(target=other_thread)
+thread.start()
+thread.join()
+assert seen == {"active": None, "default": first, "got": first}, seen
+
+created = SparkSession.builder.remote("sc://localhost:1").create()
+assert created is not first and SparkSession.getActiveSession() is first
+
+first.stop()
+assert SparkSession.getActiveSession() is None
+assert condition(SparkSession.active) == "NO_ACTIVE_OR_DEFAULT_SESSION"
+os.environ["SPARK_REMOTE"] = "sc://localhost:1"
+again = SparkSession.builder.getOrCreate()
+assert again is not first and again is not created
+assert SparkSession.getActiveSession() is again and SparkSession.active() is again
+"""], check=True)
+
+
+def test_builder_options_are_set_on_the_session_as_pyspark(mock_connect):
+    # As PySpark's _apply_options: the options of the builder, but spark.remote and
+    # spark.master, are set on the session that getOrCreate() returns, also an existing one,
+    # in one request whose failures are ignored.
+    from pyspark.sql import SparkSession
+
+    spark, service = mock_connect
+    builder = SparkSession.builder.remote("sc://localhost:1").master("local[4]")
+    builder = builder.appName("app").config("spark.sql.shuffle.partitions", 3)
+    assert builder.getOrCreate() is spark
+    assert service.set_confs == [
+        ([("spark.app.name", "app"), ("spark.sql.shuffle.partitions", "3")], 1)
+    ]
+    assert SparkSession.builder.remote("sc://localhost:1").getOrCreate() is spark
+    assert len(service.set_confs) == 1
+
+
 def test_session_builder_class_constructor():
     from pyspark.sql import SparkSession
     b = SparkSession.Builder()
@@ -643,8 +714,9 @@ def test_streaming_query_manager_wrapper_has_listener_api():
 def test_udf_construction_and_call():
     from pyspark.sql import functions as F
     from pyspark.sql.udf import UserDefinedFunction
-    u = UserDefinedFunction(lambda x: x + 1, T.IntegerType(), 100, "plus1")
-    assert u.name == "plus1"
+    # As PySpark's: (func, returnType, name, evalType, deterministic).
+    u = UserDefinedFunction(lambda x: x + 1, T.IntegerType(), "plus1", 100)
+    assert u._name == "plus1" and u._wrapped().__name__ == "plus1"
     assert type(u(F.col("id"))).__name__ == "Column"
 
 
@@ -710,6 +782,108 @@ def test_show_checks_its_arguments_as_pyspark():
         df.show(foo=1)
     with pytest.raises(TypeError, match=r"^DataFrame\._show_string\(\) got multiple values for argument 'n'$"):
         df._show_string(1, n=2)
+
+
+def test_udfs_are_created_as_pyspark(mock_connect):
+    # As PySpark's _create_py_udf: udf() without useArrow makes an Arrow-optimized UDF
+    # (SQL_ARROW_BATCHED_UDF) when the active session enables
+    # spark.sql.execution.pythonUDF.arrow.enabled, as the server does by default, and infers
+    # the eval type of a function with type hints; and it returns the function wrapper of
+    # the UDF.
+    import pandas as pd
+    import pyarrow as pa
+
+    from pyspark.sql import functions as F
+    from pyspark.sql.udf import UserDefinedFunction
+
+    spark, service = mock_connect
+    arrow_conf = "spark.sql.execution.pythonUDF.arrow.enabled"
+
+    def plus_one(x):
+        """Adds one."""
+        return x + 1
+
+    def pandas_plus_one(s: pd.Series) -> pd.Series:
+        return s + 1
+
+    def arrow_plus_one(a: pa.Array) -> pa.Array:
+        return a
+
+    def sent(fn):
+        # ExecutePlanRequest.plan=3, Plan.root=1, Relation.project=3, Project.expressions=3;
+        # Expression.common_inline_user_defined_function=15; CommonInlineUserDefinedFunction.
+        # function_name=1, python_udf=4; PythonUDF.eval_type=2.
+        spark.range(1).select(fn("id")).collect()
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        expression = parse_message(parse_message(parse_message(plan)[3][0])[3][0])
+        udf = parse_message(expression[15][0])
+        return udf[1][0].decode(), parse_message(udf[4][0])[2][0]
+
+    wrapper = F.udf(plus_one, "int")
+    assert wrapper.__name__ == "plus_one" and wrapper.__doc__ == "Adds one."
+    assert wrapper.__module__ == plus_one.__module__ and wrapper.func is plus_one
+    assert isinstance(wrapper._unwrapped, UserDefinedFunction)
+    assert wrapper.returnType == T.IntegerType() and wrapper.deterministic is True
+    assert wrapper.evalType == 101
+    assert sent(wrapper) == ("plus_one", 101)
+    assert sent(F.udf(returnType="int", useArrow=False)(plus_one)) == ("plus_one", 100)
+    assert sent(F.udf(pandas_plus_one, "long")) == ("pandas_plus_one", 200)
+    assert sent(F.udf(arrow_plus_one, "long")) == ("arrow_plus_one", 250)
+    # With useArrow, the type hints are not used.
+    assert F.udf(pandas_plus_one, "long", useArrow=True).evalType == 101
+
+    service.confs = {arrow_conf: "false"}
+    try:
+        assert sent(F.udf("int")(plus_one)) == ("plus_one", 100)
+        assert F.udf(plus_one, "int", useArrow=True).evalType == 101
+    finally:
+        service.confs = {}
+    # Only udf() without useArrow reads the configuration.
+    assert service.read_confs == [arrow_conf] * 4
+
+
+def test_udf_and_udtf_calls_pass_named_arguments_as_pyspark(mock_connect):
+    # As PySpark's UserDefinedFunction and UserDefinedTableFunction: each keyword argument
+    # of a call is a NamedArgumentExpression, after the positional arguments, and a bare
+    # string is a column name.
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+
+    @F.udf("int")
+    def plus(a, b):
+        return a + 10 * b
+
+    assert repr(plus(a=F.lit(1), b=F.col("x"))) == "Column<'plus(a => 1, b => x)'>"
+    called = plus(F.lit(1), b="x")
+    assert repr(called) == "Column<'plus(1, b => x)'>"
+
+    def arguments(function):
+        # Expression.literal=1, unresolved_attribute=2 (unparsed_identifier=1),
+        # named_argument_expression=17 (key=1, value=2).
+        first, second = (parse_message(a) for a in function[3])
+        named = parse_message(second[17][0])
+        return first, named[1][0].decode(), parse_message(named[2][0])
+
+    # ExecutePlanRequest.plan=3, Plan.root=1, Relation.project=3, Project.expressions=3;
+    # Expression.common_inline_user_defined_function=15, whose arguments=3.
+    spark.range(1).select(called).collect()
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+    expression = parse_message(parse_message(parse_message(plan)[3][0])[3][0])
+    first, key, value = arguments(parse_message(expression[15][0]))
+    assert set(first) == {1} and key == "b"
+    assert parse_message(value[2][0])[1] == [b"x"]
+
+    @F.udtf(returnType="a int, b int")
+    class Two:
+        def eval(self, a, b):
+            yield a, b
+
+    # Relation.common_inline_user_defined_table_function=38, whose arguments=3.
+    Two("x", b=F.lit(2)).collect()
+    relation = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+    first, key, value = arguments(parse_message(parse_message(relation)[38][0]))
+    assert parse_message(first[2][0])[1] == [b"x"] and key == "b" and set(value) == {1}
 
 
 def test_udtfs_are_created_as_pyspark(mock_connect):
@@ -810,6 +984,51 @@ class _DayPointUDT(T.UserDefinedType):
 
     def deserialize(self, datum):
         return tuple(datum)
+
+
+class _ScaledPointUDT(_DayPointUDT):
+    def __init__(self, scale=1.0):
+        self.scale = scale
+
+
+def test_user_defined_types_pickle_as_python_objects_as_pyspark():
+    # As PySpark's UDT, a Python object: a UDT of parameters is made with them, and pickles
+    # as its class and its state, which cloudpickle sends by value for a class of __main__.
+    # In a new interpreter, whose __main__ defines the class, so that this one does not.
+    import copy
+    import pickle
+    import subprocess
+    import sys
+
+    from pyspark.serializers import CloudPickleSerializer
+
+    udt = _ScaledPointUDT(3.0)
+    for copied in (pickle.loads(pickle.dumps(udt)), copy.deepcopy(udt)):
+        assert type(copied) is _ScaledPointUDT and copied.scale == 3.0
+    assert pickle.loads(pickle.dumps(_DayPointUDT())).__dict__ == {}
+
+    pickled = subprocess.run([sys.executable, "-c", """
+import sys
+from pyspark.serializers import CloudPickleSerializer
+from pyspark.sql.types import ArrayType, DoubleType, UserDefinedType
+
+class MainPointUDT(UserDefinedType):
+    def __init__(self, scale):
+        self.scale = scale
+
+    @classmethod
+    def sqlType(cls):
+        return ArrayType(DoubleType())
+
+    @classmethod
+    def module(cls):
+        return "__main__"
+
+sys.stdout.buffer.write(CloudPickleSerializer().dumps(MainPointUDT(2.5)))
+"""], check=True, capture_output=True).stdout
+    main_udt = CloudPickleSerializer().loads(pickled)
+    assert type(main_udt).__name__ == "MainPointUDT" and main_udt.scale == 2.5
+    assert main_udt.sqlType() == T.ArrayType(T.DoubleType())
 
 
 def test_collected_values_of_user_defined_types_are_deserialized_as_pyspark():
@@ -1170,6 +1389,38 @@ def test_broadcast_type_check():
         F.broadcast("not a dataframe")
 
 
+def test_dataframe_columns_refer_to_it_by_its_plan_id_as_pyspark(mock_connect):
+    # As PySpark Connect's df[name], df.name, df["*"] and colRegex: the columns of a DataFrame
+    # refer to it by the plan ID that its relation is sent with, and colRegex is a Column.
+    from pyspark.sql import Column
+
+    spark, service = mock_connect
+    left, right = spark.range(2), spark.range(3)
+    assert isinstance(left.colRegex("`i.*`"), Column)
+    left.join(right, left["id"] == right.id).select(
+        left.id, right["*"], left.colRegex("`i.*`"), left["id"]
+    ).collect()
+    # ExecutePlanRequest.plan=3, Plan.root=1, Relation.project=3: input=1, expressions=3;
+    # Relation.join=5: left=1, right=2; Relation.common=1, RelationCommon.plan_id=2.
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+    project = parse_message(parse_message(plan)[3][0])
+    join = parse_message(parse_message(project[1][0])[5][0])
+
+    def plan_id(relation):
+        return parse_message(parse_message(relation)[1][0])[2][0]
+
+    left_id, right_id = plan_id(join[1][0]), plan_id(join[2][0])
+    assert left_id != right_id
+    # Expression.unresolved_attribute=2 (plan_id=2), unresolved_star=5 (plan_id=2),
+    # unresolved_regex=8 (plan_id=2).
+    ids = []
+    for expression in project[3]:
+        expression = parse_message(expression)
+        (field,) = set(expression) & {2, 5, 8}
+        ids.append(parse_message(expression[field][0])[2][0])
+    assert ids == [left_id, right_id, left_id, left_id]
+
+
 def test_row_count_and_index():
     from pyspark.sql import Row
     r = Row(a=1, b=2, c=1)
@@ -1208,9 +1459,12 @@ def test_udf_udtf_determinism_and_extras():
     from pyspark.sql.udf import udf, UserDefinedFunction
     from pyspark.sql.udtf import udtf
 
+    # As PySpark's, asNondeterministic() of the function wrapper of a UDF marks the UDF
+    # nondeterministic, in place, and returns a wrapper of it.
     u = udf(lambda x: x, T.IntegerType())
     nd = u.asNondeterministic()
-    assert isinstance(nd, UserDefinedFunction) and nd.deterministic is False
+    assert isinstance(nd._unwrapped, UserDefinedFunction) and nd.deterministic is False
+    assert nd._unwrapped is u._unwrapped and u._unwrapped.deterministic is False
     assert u.returnType is not None
 
     @udtf(returnType="a int")
@@ -1413,7 +1667,7 @@ def test_partition_transforms_are_those_of_pyspark_and_the_others_deprecated():
 
 
 def test_udtf_construction():
-    from pyspark.sql.udtf import udtf, UserDefinedTableFunction, UDTFRegistration
+    from pyspark.sql.udtf import udtf, UserDefinedTableFunction
 
     @udtf(returnType="a int")
     class Echo:
@@ -1423,13 +1677,48 @@ def test_udtf_construction():
 
     assert isinstance(Echo, UserDefinedTableFunction)
     assert Echo.name == "Echo"
-    reg = UDTFRegistration()
-    # register a plain class -> wraps it
-    r = reg.register("echo", Echo.func, returnType="a int")
-    assert r.name == "echo"
-    # register an existing UserDefinedTableFunction -> renames in place
-    r2 = reg.register("echo2", Echo)
-    assert r2.name == "echo2" and r2 is Echo
+
+
+def test_udtf_register_sends_the_udtf_as_pyspark(mock_connect):
+    # As PySpark's UDTFRegistration.register: a register_table_function command of the
+    # CommonInlineUserDefinedTableFunction of the UDTF, under the name and without
+    # arguments, which returns the UDTF as it is; for a UDTF of udtf() or arrow_udtf() only.
+    from pyspark.errors import PySparkTypeError
+    from pyspark.serializers import CloudPickleSerializer
+    from pyspark.sql import functions as F
+    from pyspark.sql.udtf import UDTFRegistration, UserDefinedTableFunction
+
+    spark, service = mock_connect
+
+    class Echo:
+        def eval(self, n):
+            yield (n,)
+
+    udtf = F.udtf(Echo, returnType="a int", useArrow=False).asDeterministic()
+    assert isinstance(spark.udtf, UDTFRegistration) and spark.udtf.sparkSession is spark
+    assert spark.udtf.register("echo", udtf) is udtf and udtf.name == "Echo"
+    # ExecutePlanRequest.plan=3, Plan.command=2, Command.register_table_function=10;
+    # CommonInlineUserDefinedTableFunction.function_name=1, deterministic=2, arguments=3,
+    # python_udtf=4; PythonUDTF.return_type=1, eval_type=2, command=3, python_ver=4.
+    command = parse_message(parse_message(service.execute_requests[-1])[3][0])[2][0]
+    function = parse_message(parse_message(command)[10][0])
+    assert function[1] == [b"echo"] and function[2] == [1] and 3 not in function
+    python_udtf = parse_message(function[4][0])
+    # DataType.unparsed=24, whose data_type_string=1.
+    return_type = parse_message(python_udtf[1][0])
+    assert parse_message(return_type[24][0])[1] == [b"a int"]
+    assert python_udtf[2] == [300] and python_udtf[4] == [udtf.python_ver.encode()]
+    assert CloudPickleSerializer().loads(python_udtf[3][0]).__name__ == "Echo"
+
+    calls = service.execute_calls
+    with pytest.raises(PySparkTypeError) as error:
+        spark.udtf.register("echo", Echo)
+    assert error.value.getCondition() == "CANNOT_REGISTER_UDTF"
+    scalar = UserDefinedTableFunction(Echo, "a int", evalType=100)
+    with pytest.raises(PySparkTypeError) as error:
+        spark.udtf.register("echo", scalar)
+    assert error.value.getCondition() == "INVALID_UDTF_EVAL_TYPE"
+    assert service.execute_calls == calls
 
 
 def test_udtf_call_without_session_raises():
@@ -1449,6 +1738,10 @@ class T2:
         yield (n,)
 
 assert T2.evalType == 300
+# As PySpark's udf() without a session, a regular UDF.
+from pyspark.sql.functions import udf
+from pyspark.sql.types import IntegerType
+assert udf(lambda x: x, IntegerType()).evalType == 100
 for call in (SparkSession.active, lambda: T2(1)):
     try:
         call()
@@ -1633,9 +1926,9 @@ def test_udf_defaults_and_registration():
     stub = _StubSession()
     reg = UDFRegistration(stub)
     r = reg.register("f", lambda x: x + 1, T.IntegerType())
-    assert r.name == "f"
+    assert r.__name__ == "f"
     r2 = reg.register("g", lambda x: x)  # returnType default
-    assert r2.name == "g"
+    assert r2.__name__ == "g"
     # both were sent to the server with cloudpickled command bytes
     assert [c[0] for c in stub.calls] == ["f", "g"]
     assert all(c[2] for c in stub.calls)
@@ -3722,15 +4015,16 @@ def test_udf_and_pandas_udf_decorator_forms():
     from pyspark.sql.types import IntegerType
     from pyspark.sql.udf import UserDefinedFunction
 
+    # As PySpark's, the function wrapper of the UDF.
     @udf(IntegerType())
     def inc(x):
         return x + 1
-    assert isinstance(inc, UserDefinedFunction)
+    assert isinstance(inc._unwrapped, UserDefinedFunction) and inc.__name__ == "inc"
 
     @pandas_udf("long")
     def p(s):
         return s + 1
-    assert isinstance(p, UserDefinedFunction)
+    assert isinstance(p._unwrapped, UserDefinedFunction) and p.__name__ == "p"
 
 
 def test_udf_return_type_normalized_to_concrete_datatype():
@@ -3743,9 +4037,8 @@ def test_udf_return_type_normalized_to_concrete_datatype():
     @pandas_udf("double")
     def f(s):
         return s
+    # The command is the cloudpickle of (func, returnType), so it carries this type.
     assert isinstance(f.returnType, DoubleType), type(f.returnType)
-    # command is cloudpickle of (func, returnType) -> must not carry a bare str.
-    assert isinstance(f.command, (bytes, bytearray))
     pickle.dumps(f.returnType)  # concrete types pickle
 
 

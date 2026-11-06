@@ -1464,19 +1464,14 @@ impl LogicalPlan {
                 command,
                 python_ver,
             } => {
-                let mut udtf = proto::PythonUdtf::default();
-                if let Some(rt) = return_type {
-                    udtf.return_type = Some(rt.to_proto());
-                }
-                udtf.eval_type = *eval_type;
-                udtf.command = bytes::Bytes::copy_from_slice(command);
-                udtf.python_ver = python_ver.clone();
-                let mut f = proto::CommonInlineUserDefinedTableFunction::default();
-                f.function_name = function_name.clone();
-                f.deterministic = *deterministic;
-                f.arguments = arguments.iter().map(|a| a.to_proto()).collect();
-                f.function = Some(
-                    proto::common_inline_user_defined_table_function::Function::PythonUdtf(udtf),
+                let f = common_inline_udtf(
+                    function_name,
+                    *deterministic,
+                    arguments,
+                    return_type.as_ref(),
+                    *eval_type,
+                    command,
+                    python_ver,
                 );
                 relation.rel_type =
                     Some(proto::relation::RelType::CommonInlineUserDefinedTableFunction(f));
@@ -1484,6 +1479,34 @@ impl LogicalPlan {
         }
 
         relation
+    }
+}
+
+/// The `CommonInlineUserDefinedTableFunction` of a Python UDTF: of a call with `arguments`,
+/// or of its registration without any. Mirrors PySpark's `CommonInlineUserDefinedTableFunction`
+/// of a `PythonUDTF`.
+pub(crate) fn common_inline_udtf(
+    function_name: &str,
+    deterministic: bool,
+    arguments: &[Expression],
+    return_type: Option<&DataType>,
+    eval_type: i32,
+    command: &[u8],
+    python_ver: &str,
+) -> proto::CommonInlineUserDefinedTableFunction {
+    let udtf = proto::PythonUdtf {
+        return_type: return_type.map(DataType::to_proto),
+        eval_type,
+        command: bytes::Bytes::copy_from_slice(command),
+        python_ver: python_ver.to_string(),
+    };
+    proto::CommonInlineUserDefinedTableFunction {
+        function_name: function_name.to_string(),
+        deterministic,
+        arguments: arguments.iter().map(Expression::to_proto).collect(),
+        function: Some(
+            proto::common_inline_user_defined_table_function::Function::PythonUdtf(udtf),
+        ),
     }
 }
 
@@ -2129,5 +2152,46 @@ mod with_relations_tests {
         assert_eq!(distinct.len(), 4, "{all:?}");
         // The DataFrame keeps its own plan ID as a reference.
         assert_eq!(id(input), Some(ids.id_of(&df)));
+    }
+}
+
+#[cfg(test)]
+mod inline_udtf_tests {
+    use super::*;
+
+    /// As PySpark's `CommonInlineUserDefinedTableFunction` of a `PythonUDTF`: that of a
+    /// registration has no arguments, and keeps a DDL return type unparsed.
+    #[test]
+    fn registration_udtf_carries_the_handler_without_arguments() {
+        let ddl = DataType::Unparsed {
+            data_type_string: "x int".to_string(),
+        };
+        let f = common_inline_udtf(
+            "count_udtf",
+            false,
+            &[],
+            Some(&ddl),
+            302,
+            b"pickled",
+            "3.11",
+        );
+        assert_eq!(f.function_name, "count_udtf");
+        assert!(!f.deterministic && f.arguments.is_empty());
+        let Some(proto::common_inline_user_defined_table_function::Function::PythonUdtf(udtf)) =
+            f.function
+        else {
+            panic!("expected a PythonUDTF");
+        };
+        assert_eq!(udtf.return_type, Some(ddl.to_proto()));
+        assert_eq!(udtf.eval_type, 302);
+        assert_eq!(udtf.command.as_ref(), b"pickled");
+        assert_eq!(udtf.python_ver, "3.11");
+        let dynamic = common_inline_udtf("dynamic", true, &[], None, 300, b"", "3.11");
+        let Some(proto::common_inline_user_defined_table_function::Function::PythonUdtf(udtf)) =
+            dynamic.function
+        else {
+            panic!("expected a PythonUDTF");
+        };
+        assert_eq!(udtf.return_type, None);
     }
 }

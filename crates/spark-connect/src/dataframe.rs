@@ -1500,23 +1500,39 @@ impl DataFrame {
         DataFrame::new(self.session.clone(), plan)
     }
 
-    /// Select columns by regex pattern.
-    pub fn col_regex(&self, col_name: &str) -> DataFrame {
-        let plan = LogicalPlan::ColRegex {
-            input: Arc::clone(&self.plan),
-            col_name: col_name.to_string(),
-        };
-        DataFrame::new(self.session.clone(), plan)
+    /// The plan ID of this DataFrame's plan in its session, by which its columns refer to it.
+    fn plan_id(&self) -> i64 {
+        self.session.plan_ids().id_of(&self.plan)
     }
 
-    /// Select a metadata column by name. Mirrors `pyspark.sql.DataFrame.metadataColumn`.
-    pub fn metadata_column(&self, name: &str) -> Column {
+    /// The column `name` of this DataFrame. It refers to this DataFrame by its plan ID, so that
+    /// the server resolves it against this DataFrame's plan, as in a join of DataFrames of the
+    /// same column names. Mirrors `df[name]`, `df.name` and `DataFrame._col` of PySpark Connect.
+    pub fn col(&self, name: &str) -> Column {
+        let reference = crate::expression::ColumnReference::new(name).with_plan_id(self.plan_id());
+        Column::new(ExpressionNode::ColumnReference(reference).into())
+    }
+
+    /// The star of the columns of this DataFrame, as `df["*"]` of PySpark Connect.
+    pub fn star(&self) -> Column {
+        Column::new(ExpressionNode::UnresolvedStar(None, Some(self.plan_id())).into())
+    }
+
+    /// The columns of this DataFrame whose names match the regex `col_name`, in backticks, as
+    /// a Column. Mirrors `DataFrame.colRegex`.
+    pub fn col_regex(&self, col_name: &str) -> Column {
         Column::new(
-            ExpressionNode::ColumnReference(
-                crate::expression::ColumnReference::new(name).metadata(),
-            )
-            .into(),
+            ExpressionNode::UnresolvedRegex(col_name.to_string(), Some(self.plan_id())).into(),
         )
+    }
+
+    /// The metadata column `name` of this DataFrame, which refers to it by its plan ID.
+    /// Mirrors `pyspark.sql.DataFrame.metadataColumn`.
+    pub fn metadata_column(&self, name: &str) -> Column {
+        let reference = crate::expression::ColumnReference::new(name)
+            .with_plan_id(self.plan_id())
+            .metadata();
+        Column::new(ExpressionNode::ColumnReference(reference).into())
     }
 
     /// Group by with rollup.
@@ -1891,7 +1907,7 @@ impl DataFrame {
     /// `DataFrame.zipWithIndex(indexColName="index")`:
     /// `self.select(col("*"), distributed_sequence_id().alias(indexColName))`.
     pub fn zip_with_index(&self, index_col_name: &str) -> DataFrame {
-        let star = Column::new(ExpressionNode::UnresolvedStar(None).into());
+        let star = Column::new(ExpressionNode::UnresolvedStar(None, None).into());
         let seq = Column::new(Expression::function("distributed_sequence_id", vec![]))
             .alias(index_col_name);
         self.select(vec![star, seq])
@@ -3841,7 +3857,7 @@ mod plan_construction_tests {
         ser(&df.alias("t"));
         ser(&df.sample(0.5, Some(1)));
         ser(&df.select_expr(vec!["id + 1"]));
-        ser(&df.col_regex("id"));
+        ser(&df.select(vec![df.col_regex("`id`")]));
         ser(&df.describe(vec!["id"]));
         ser(&df.summary(vec!["count"]));
         ser(&df.as_table("t2"));
@@ -4433,5 +4449,73 @@ mod arrow_value_tests {
     fn micros_to_time_string_branches() {
         assert_eq!(micros_to_time_string(0), "00:00:00");
         assert!(micros_to_time_string(1).contains('.'));
+    }
+}
+
+#[cfg(test)]
+mod plan_id_column_tests {
+    use super::*;
+    use crate::session::SparkSession;
+    use proto::relation::RelType;
+
+    fn session() -> SparkSession {
+        SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .expect("failed to build session")
+    }
+
+    /// As PySpark Connect's `df[name]`, `df["*"]`, `colRegex` and `metadataColumn`: the columns
+    /// of a DataFrame refer to it by the plan ID that its relation is sent with.
+    #[test]
+    fn columns_refer_to_their_dataframe_by_its_plan_id() {
+        use proto::expression::ExprType;
+
+        let spark = session();
+        let left = spark.range(2).unwrap();
+        let right = spark.range(3).unwrap();
+        let joined = left
+            .join(
+                &right,
+                Some(left.col("id").eq(right.col("id"))),
+                JoinType::Inner,
+            )
+            .select(vec![left.col("id"), right.star(), left.col_regex("`i.*`")]);
+        let relation = joined.relation();
+        let Some(RelType::Project(project)) = &relation.rel_type else {
+            panic!("expected Project: {relation:?}");
+        };
+        let Some(RelType::Join(join)) = &project.input.as_deref().unwrap().rel_type else {
+            panic!("expected Join");
+        };
+        let plan_id = |r: &proto::Relation| r.common.as_ref().and_then(|c| c.plan_id);
+        let (left_id, right_id) = (
+            plan_id(join.left.as_deref().unwrap()),
+            plan_id(join.right.as_deref().unwrap()),
+        );
+        assert!(left_id.is_some() && left_id != right_id);
+        let ids: Vec<Option<i64>> = project
+            .expressions
+            .iter()
+            .map(|e| match &e.expr_type {
+                Some(ExprType::UnresolvedAttribute(a)) => a.plan_id,
+                Some(ExprType::UnresolvedStar(s)) => s.plan_id,
+                Some(ExprType::UnresolvedRegex(r)) => r.plan_id,
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(ids, vec![left_id, right_id, left_id]);
+        let Some(ExprType::UnresolvedAttribute(metadata)) = left
+            .metadata_column("_metadata")
+            .expression()
+            .to_proto()
+            .expr_type
+        else {
+            panic!("expected an attribute");
+        };
+        assert_eq!(
+            (metadata.plan_id, metadata.is_metadata_column),
+            (left_id, Some(true))
+        );
     }
 }

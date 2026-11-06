@@ -2,7 +2,7 @@
 
 use pyo3::prelude::*;
 use spark_connect::column::Column;
-use spark_connect::expression::{Expression, ExpressionNode, LiteralExpression};
+use spark_connect::expression::{Expression, ExpressionNode, LiteralExpression, NamedArgument};
 use spark_connect::functions as spark_funcs;
 use spark_connect::udf::{CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
 
@@ -26,8 +26,10 @@ mod dispatch {
 /// - command_bytes: bytes - cloudpickled command (usually (func, output_type))
 /// - python_ver: str - Python version (e.g., "3.9")
 /// - *args: Column - argument columns
+/// - named_args: (str, Column) pairs - the keyword arguments, in order
 #[pyfunction]
-#[pyo3(signature = (name, return_type, eval_type, command_bytes, python_ver, *args, deterministic=true))]
+#[pyo3(signature = (name, return_type, eval_type, command_bytes, python_ver, *args, deterministic=true, named_args=Vec::new()))]
+#[allow(clippy::too_many_arguments)]
 fn pyfunc_make_udf(
     name: String,
     return_type: &Bound<'_, PyAny>,
@@ -36,18 +38,13 @@ fn pyfunc_make_udf(
     python_ver: String,
     args: Vec<Bound<'_, PyAny>>,
     deterministic: bool,
+    named_args: Vec<(String, Bound<'_, PyAny>)>,
 ) -> PyResult<PyColumn> {
     // Accept any DataType object (our type classes / DataType) or a DDL string.
     let return_data_type = crate::types::py_to_data_type(return_type)?;
 
-    // Convert all arguments to Columns
-    let mut col_args = Vec::new();
-    for arg in args {
-        col_args.push(to_column(&arg)?);
-    }
-
-    // Convert argument columns to expressions
-    let arg_exprs: Vec<Expression> = col_args
+    // The positional arguments, then the named ones, as PySpark's UDF call.
+    let arg_exprs: Vec<Expression> = udf_arguments(args, named_args)?
         .into_iter()
         .map(|c| c.expression().clone())
         .collect();
@@ -64,6 +61,26 @@ fn pyfunc_make_udf(
     )))
 }
 
+/// The arguments of a UDF or UDTF call: the positional ones, then a `NamedArgumentExpression`
+/// of each keyword argument, as PySpark's `UserDefinedFunction` and `UserDefinedTableFunction`
+/// build them.
+fn udf_arguments(
+    args: Vec<Bound<'_, PyAny>>,
+    named_args: Vec<(String, Bound<'_, PyAny>)>,
+) -> PyResult<Vec<Column>> {
+    let mut columns = Vec::with_capacity(args.len() + named_args.len());
+    for arg in args {
+        columns.push(to_column(&arg)?);
+    }
+    for (key, value) in named_args {
+        let value = to_column(&value)?.expression().clone();
+        columns.push(Column::new(
+            ExpressionNode::NamedArgument(Box::new(NamedArgument::new(key, value))).into(),
+        ));
+    }
+    Ok(columns)
+}
+
 /// PyO3 wrapper for building a Python UDTF (table function) call.
 /// Called from Python as `make_udtf`; mirrors `make_udf` but yields a DataFrame
 /// (a `CommonInlineUserDefinedTableFunction` relation) via the session's TVF.
@@ -74,8 +91,9 @@ fn pyfunc_make_udf(
 /// - *args: Column arguments
 /// - deterministic: whether the UDTF is deterministic, which a PySpark UDTF is not unless
 ///   `asDeterministic()` makes it so
+/// - named_args: (str, Column) pairs - the keyword arguments, in order
 #[pyfunction]
-#[pyo3(signature = (session, name, return_type, eval_type, command_bytes, python_ver, *args, deterministic=false))]
+#[pyo3(signature = (session, name, return_type, eval_type, command_bytes, python_ver, *args, deterministic=false, named_args=Vec::new()))]
 #[allow(clippy::too_many_arguments)]
 fn pyfunc_make_udtf(
     session: PyRef<'_, PySparkSession>,
@@ -86,11 +104,9 @@ fn pyfunc_make_udtf(
     python_ver: String,
     args: Vec<Bound<'_, PyAny>>,
     deterministic: bool,
+    named_args: Vec<(String, Bound<'_, PyAny>)>,
 ) -> PyResult<PyDataFrame> {
-    let mut col_args = Vec::new();
-    for arg in args {
-        col_args.push(to_column(&arg)?);
-    }
+    let col_args = udf_arguments(args, named_args)?;
     // Connect leaves DDL parsing and validation to the server. In particular,
     // do not use py_to_data_type's eager DDL parser for string return types.
     let rt = return_type

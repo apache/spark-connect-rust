@@ -59,8 +59,9 @@ pub enum ExpressionNode {
     /// `pyspark.sql.connect.expressions.UnresolvedFunction` - a function call.
     UnresolvedFunction(UnresolvedFunction),
     /// `pyspark.sql.connect.expressions.UnresolvedStar` - a star expression (`*`).
-    /// Carries an optional target ending in `.*` (e.g. `df.*` from `col("df.*")`).
-    UnresolvedStar(Option<String>),
+    /// Carries an optional target ending in `.*` (e.g. `df.*` from `col("df.*")`), and the plan
+    /// ID of the DataFrame of `df["*"]`, whose columns it is.
+    UnresolvedStar(Option<String>, Option<i64>),
     /// `pyspark.sql.connect.expressions.ColumnAlias` / `Alias` - an aliased expression.
     Alias(Box<Alias>),
     /// `pyspark.sql.connect.expressions.CastExpression` - a cast expression.
@@ -68,8 +69,9 @@ pub enum ExpressionNode {
     /// `spark.connect.Expression.DirectShufflePartitionID` - wraps a child expression
     /// that evaluates to a partition id (used by `DataFrame.repartitionById`).
     DirectShufflePartitionId(Expression),
-    /// `pyspark.sql.connect.expressions.UnresolvedRegex` - a regex column reference.
-    UnresolvedRegex(String),
+    /// `pyspark.sql.connect.expressions.UnresolvedRegex` - a regex column reference, of the
+    /// columns of the DataFrame of the plan ID of `df.colRegex(...)`.
+    UnresolvedRegex(String, Option<i64>),
     /// `pyspark.sql.connect.expressions.SortOrder` - a sort order expression.
     SortOrder(Box<SortOrder>),
     /// `pyspark.sql.connect.expressions.CaseWhen` - a CASE WHEN expression.
@@ -90,6 +92,29 @@ pub enum ExpressionNode {
     UnresolvedNamedLambdaVariable(UnresolvedNamedLambdaVariable),
     /// `pyspark.sql.connect.expressions.CommonInlineUserDefinedFunction` - a UDF expression.
     CommonInlineUserDefinedFunction(Box<CommonInlineUserDefinedFunctionExpression>),
+    /// `pyspark.sql.connect.expressions.NamedArgumentExpression` - a named argument of a
+    /// function call, such as `a => 1` of a Python UDF called with `a=lit(1)`.
+    NamedArgument(Box<NamedArgument>),
+}
+
+/// A named argument of a function call. Mirrors
+/// `pyspark.sql.connect.expressions.NamedArgumentExpression`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NamedArgument {
+    /// The name of the argument.
+    pub key: String,
+    /// The value of the argument.
+    pub value: Expression,
+}
+
+impl NamedArgument {
+    /// The named argument `key => value`.
+    pub fn new(key: impl Into<String>, value: Expression) -> Self {
+        NamedArgument {
+            key: key.into(),
+            value,
+        }
+    }
 }
 
 impl Expression {
@@ -132,7 +157,7 @@ impl Expression {
             ExpressionNode::Literal(lit) => lit.render(),
             ExpressionNode::ColumnReference(col_ref) => col_ref.name.clone(),
             ExpressionNode::UnresolvedFunction(func) => func.render(),
-            ExpressionNode::UnresolvedStar(target) => match target {
+            ExpressionNode::UnresolvedStar(target, _) => match target {
                 Some(t) => format!("unresolvedstar({t})"),
                 None => "unresolvedstar()".to_string(),
             },
@@ -157,7 +182,7 @@ impl Expression {
             ExpressionNode::DirectShufflePartitionId(child) => {
                 format!("DirectShufflePartitionID(child={})", child.render())
             }
-            ExpressionNode::UnresolvedRegex(col_name) => format!("UnresolvedRegex({col_name})"),
+            ExpressionNode::UnresolvedRegex(col_name, _) => format!("UnresolvedRegex({col_name})"),
             ExpressionNode::SortOrder(sort) => sort.render(),
             ExpressionNode::CaseWhen(case_when) => case_when.render(),
             ExpressionNode::UnresolvedExtractValue(ev) => {
@@ -194,6 +219,8 @@ impl Expression {
                 let args: Vec<String> = udf.arguments.iter().map(Expression::render).collect();
                 format!("{}({})", udf.function_name, args.join(", "))
             }
+            // As `NamedArgumentExpression.__repr__`.
+            ExpressionNode::NamedArgument(arg) => format!("{} => {}", arg.key, arg.value.render()),
         }
     }
 
@@ -203,16 +230,15 @@ impl Expression {
             ExpressionNode::Literal(lit) => lit.to_proto(),
             ExpressionNode::ColumnReference(col_ref) => col_ref.to_proto(),
             ExpressionNode::UnresolvedFunction(func) => func.to_proto(),
-            ExpressionNode::UnresolvedStar(target) => {
-                let mut expr = proto::Expression::default();
-                expr.expr_type = Some(proto::expression::ExprType::UnresolvedStar(
+            ExpressionNode::UnresolvedStar(target, plan_id) => proto::Expression {
+                expr_type: Some(proto::expression::ExprType::UnresolvedStar(
                     proto::expression::UnresolvedStar {
                         unparsed_target: target.clone(),
-                        plan_id: None,
+                        plan_id: *plan_id,
                     },
-                ));
-                expr
-            }
+                )),
+                ..Default::default()
+            },
             ExpressionNode::Alias(alias) => alias.to_proto(),
             ExpressionNode::Cast(cast) => cast.to_proto(),
             ExpressionNode::DirectShufflePartitionId(child) => {
@@ -224,16 +250,15 @@ impl Expression {
                 ));
                 expr
             }
-            ExpressionNode::UnresolvedRegex(col_name) => {
-                let mut expr = proto::Expression::default();
-                expr.expr_type = Some(proto::expression::ExprType::UnresolvedRegex(
+            ExpressionNode::UnresolvedRegex(col_name, plan_id) => proto::Expression {
+                expr_type: Some(proto::expression::ExprType::UnresolvedRegex(
                     proto::expression::UnresolvedRegex {
                         col_name: col_name.clone(),
-                        plan_id: None,
+                        plan_id: *plan_id,
                     },
-                ));
-                expr
-            }
+                )),
+                ..Default::default()
+            },
             ExpressionNode::SortOrder(sort) => sort.to_proto(),
             ExpressionNode::CaseWhen(case_when) => case_when.to_proto(),
             ExpressionNode::UnresolvedExtractValue(ev) => ev.to_proto(),
@@ -258,6 +283,15 @@ impl Expression {
                 );
                 expr
             }
+            ExpressionNode::NamedArgument(arg) => proto::Expression {
+                expr_type: Some(proto::expression::ExprType::NamedArgumentExpression(
+                    Box::new(proto::NamedArgumentExpression {
+                        key: arg.key.clone(),
+                        value: Some(Box::new(arg.value.to_proto())),
+                    }),
+                )),
+                ..Default::default()
+            },
         }
     }
 }
@@ -1315,7 +1349,7 @@ mod tests {
             "CAST(x AS INT)"
         );
         assert_eq!(
-            Expression::from(ExpressionNode::UnresolvedStar(None)).render(),
+            Expression::from(ExpressionNode::UnresolvedStar(None, None)).render(),
             "unresolvedstar()"
         );
 
@@ -1497,13 +1531,14 @@ mod tests {
 
     #[test]
     fn test_expression_render_unresolved_star_with_target() {
-        let expr: Expression = ExpressionNode::UnresolvedStar(Some("table.*".to_string())).into();
+        let expr: Expression =
+            ExpressionNode::UnresolvedStar(Some("table.*".to_string()), None).into();
         assert_eq!(expr.render(), "unresolvedstar(table.*)");
     }
 
     #[test]
     fn test_expression_render_unresolved_regex() {
-        let expr: Expression = ExpressionNode::UnresolvedRegex("`col_.*`".to_string()).into();
+        let expr: Expression = ExpressionNode::UnresolvedRegex("`col_.*`".to_string(), None).into();
         assert_eq!(expr.render(), "UnresolvedRegex(`col_.*`)");
     }
 
@@ -1753,6 +1788,22 @@ mod tests {
     }
 
     #[test]
+    fn named_argument_renders_and_serializes_as_pyspark() {
+        // As NamedArgumentExpression: `key => value`, sent as a named_argument_expression.
+        let value = Expression::column("x");
+        let arg: Expression =
+            ExpressionNode::NamedArgument(Box::new(NamedArgument::new("b", value.clone()))).into();
+        assert_eq!(arg.render(), "b => x");
+        let Some(proto::expression::ExprType::NamedArgumentExpression(named)) =
+            arg.to_proto().expr_type
+        else {
+            panic!("expected a NamedArgumentExpression");
+        };
+        assert_eq!(named.key, "b");
+        assert_eq!(named.value.map(|v| *v), Some(value.to_proto()));
+    }
+
+    #[test]
     fn test_column_reference_with_plan_id() {
         let mut col_ref = ColumnReference::new("x");
         col_ref = col_ref.with_plan_id(123);
@@ -1894,7 +1945,7 @@ mod tests {
 
     #[test]
     fn test_to_proto_unresolved_star_none() {
-        let expr: Expression = ExpressionNode::UnresolvedStar(None).into();
+        let expr: Expression = ExpressionNode::UnresolvedStar(None, None).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::UnresolvedStar(star)) = proto.expr_type {
@@ -1906,7 +1957,8 @@ mod tests {
 
     #[test]
     fn test_to_proto_unresolved_star_with_target() {
-        let expr: Expression = ExpressionNode::UnresolvedStar(Some("table.*".to_string())).into();
+        let expr: Expression =
+            ExpressionNode::UnresolvedStar(Some("table.*".to_string()), None).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::UnresolvedStar(star)) = proto.expr_type {
@@ -1918,7 +1970,7 @@ mod tests {
 
     #[test]
     fn test_to_proto_unresolved_regex() {
-        let expr: Expression = ExpressionNode::UnresolvedRegex("`col_.*`".to_string()).into();
+        let expr: Expression = ExpressionNode::UnresolvedRegex("`col_.*`".to_string(), None).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::UnresolvedRegex(regex)) = proto.expr_type {

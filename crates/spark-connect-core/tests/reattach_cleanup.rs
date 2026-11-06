@@ -27,7 +27,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures::{stream, Stream, StreamExt};
-use spark_connect_core::{ChannelBuilder, RetryPolicy, SparkConnectClient};
+use spark_connect_core::{ChannelBuilder, RetryPolicy, RpcDeadlines, SparkConnectClient};
 use spark_connect_proto::execute_plan_response::{ResponseType, ResultComplete};
 use spark_connect_proto::release_execute_request::Release;
 use spark_connect_proto::{
@@ -84,9 +84,18 @@ struct State {
     release_gate: Notify,
     reattach_gate: Notify,
     changed: Notify,
+    /// The `grpc-timeout` of each ExecutePlan and ReattachExecute call, in order.
+    timeouts: Mutex<Vec<(&'static str, Option<String>)>>,
 }
 
 impl State {
+    fn record_timeout(&self, call: &'static str, metadata: &MetadataMap) {
+        let timeout = metadata
+            .get("grpc-timeout")
+            .map(|value| value.to_str().unwrap().to_string());
+        self.timeouts.lock().unwrap().push((call, timeout));
+    }
+
     fn all_releases(&self) -> Vec<CapturedRelease> {
         self.releases
             .lock()
@@ -118,6 +127,7 @@ impl Fixture {
             release_gate: Notify::new(),
             reattach_gate: Notify::new(),
             changed: Notify::new(),
+            timeouts: Mutex::new(Vec::new()),
         });
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -275,7 +285,8 @@ impl ServerStreamingService<ExecutePlanRequest> for Execute {
     type ResponseStream = Responses;
     type Future = BoxFuture<Response<Responses>, Status>;
 
-    fn call(&mut self, _: Request<ExecutePlanRequest>) -> Self::Future {
+    fn call(&mut self, request: Request<ExecutePlanRequest>) -> Self::Future {
+        self.0.record_timeout("ExecutePlan", request.metadata());
         if let Scenario::Reject = self.0.scenario {
             return Box::pin(async { Err(Status::invalid_argument("plan sentinel")) });
         }
@@ -307,6 +318,7 @@ impl ServerStreamingService<ReattachExecuteRequest> for Reattach {
 
     fn call(&mut self, request: Request<ReattachExecuteRequest>) -> Self::Future {
         let state = self.0.clone();
+        state.record_timeout("ReattachExecute", request.metadata());
         state.reattaches.lock().unwrap().push(request.into_inner());
         state.changed.notify_waiters();
         Box::pin(async move {
@@ -595,4 +607,108 @@ async fn each_response_retries_its_reattaches_afresh() {
     assert_eq!(ids, ["first", "second", "third", "complete"]);
     assert_eq!(fixture.state.reattaches.lock().unwrap().len(), 6);
     fixture.assert_release_all_count(1).await;
+}
+
+/// The deadlines of PySpark, but of `stream` for the streams of an execution.
+fn stream_deadlines(stream: Duration) -> RpcDeadlines {
+    RpcDeadlines {
+        reattachable_execute_plan: Some(stream),
+        reattach_execute: Some(stream),
+        ..RpcDeadlines::default()
+    }
+}
+
+#[tokio::test]
+async fn execution_streams_carry_their_deadlines_and_reattach_past_them() {
+    // As the reference iterator: the stream of a reattachable ExecutePlan, and that of each
+    // ReattachExecute, has its per-RPC deadline, after which the execution goes on on the
+    // server, so the iteration reattaches to resume its results.
+    let mut fixture = Fixture::start(Scenario::Open).await;
+    fixture
+        .client
+        .set_rpc_deadlines(stream_deadlines(Duration::from_millis(200)));
+    {
+        let mut script = fixture.state.reattach_script.lock().unwrap();
+        // A stream that stalls too, then the rest of the result.
+        script.push_back(Ok(vec![response("second", false)]));
+        script.push_back(Ok(vec![response("complete", true)]));
+    }
+    let mut stream = bounded(fixture.client.execute_plan_reattachable(execute_request()))
+        .await
+        .unwrap();
+    let mut ids = Vec::new();
+    while let Some(response) = bounded(stream.message()).await.unwrap() {
+        ids.push(response.response_id);
+    }
+    assert_eq!(ids, ["first", "second", "complete"]);
+    let reattaches = fixture.state.reattaches.lock().unwrap().clone();
+    let resumed: Vec<_> = reattaches
+        .iter()
+        .map(|r| r.last_response_id.clone())
+        .collect();
+    assert_eq!(
+        resumed,
+        [Some("first".to_string()), Some("second".to_string())]
+    );
+    let timeouts = fixture.state.timeouts.lock().unwrap().clone();
+    assert_eq!(timeouts.len(), 3);
+    assert!(
+        timeouts.iter().all(|(_, timeout)| timeout.is_some()),
+        "{timeouts:?}"
+    );
+    fixture.assert_release_all_count(1).await;
+}
+
+#[tokio::test]
+async fn reattaches_past_deadlines_are_bounded_as_the_reference_retries() {
+    // The reattaches after deadlines of a response are bounded by the elapsed time of the
+    // reference `RetryException`s: past it, the deadline is the error, as PySpark raises.
+    let mut fixture = Fixture::start(Scenario::Open).await;
+    fixture
+        .client
+        .set_rpc_deadlines(stream_deadlines(Duration::from_millis(100)));
+    fixture.client.set_retry_policy(RetryPolicy {
+        max_retries: Some(2),
+        initial_backoff_ms: 1,
+        max_backoff_ms: Some(2),
+        max_retry_exception_elapsed_time_ms: Some(0),
+        ..RetryPolicy::default()
+    });
+    let mut stream = bounded(fixture.client.execute_plan_reattachable(execute_request()))
+        .await
+        .unwrap();
+    assert_eq!(
+        bounded(stream.message())
+            .await
+            .unwrap()
+            .unwrap()
+            .response_id,
+        "first"
+    );
+    let error = bounded(stream.message()).await.unwrap_err();
+    assert!(error.message.contains("RPC deadline exceeded"), "{error:?}");
+    assert_eq!(error.grpc_code, Some(Code::DeadlineExceeded as i32));
+    assert!(fixture.state.reattaches.lock().unwrap().is_empty());
+    fixture.assert_release_all_count(1).await;
+}
+
+#[tokio::test]
+async fn disabled_deadlines_send_no_timeout() {
+    // As `RpcDeadlines.disabled()`: the calls have no deadline.
+    let mut fixture = Fixture::start(Scenario::Complete).await;
+    fixture.client.set_rpc_deadlines(RpcDeadlines::disabled());
+    let mut stream = bounded(fixture.client.execute_plan_reattachable(execute_request()))
+        .await
+        .unwrap();
+    while bounded(stream.message()).await.unwrap().is_some() {}
+    let timeouts = fixture.state.timeouts.lock().unwrap().clone();
+    assert_eq!(timeouts, [("ExecutePlan", None)]);
+    assert_eq!(
+        RpcDeadlines::default().analyze_plan,
+        Some(Duration::from_secs(3600))
+    );
+    assert_eq!(
+        RpcDeadlines::default().config,
+        Some(Duration::from_secs(600))
+    );
 }

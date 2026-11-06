@@ -125,6 +125,7 @@ def serve(connection):
             self.fetched_error_ids = []
             self.confs = {}
             self.read_confs = []
+            self.set_confs = []
 
         def analyze(self, request, context):
             self.calls += 1
@@ -160,12 +161,17 @@ def serve(connection):
         # FetchErrorDetails returns `error_details` (raw FetchErrorDetailsResponse fields) and
         # records the error id asked for. Config Get returns the values in `confs`, or else
         # those of `default_confs`, the defaults of SQL configs of the server, and fails for a
-        # key without one, as the server does for an unset config; it records the keys.
+        # key without one, as the server does for an unset config; it records the keys. Config
+        # Set records the pairs and the silent flag of each request.
         error_details = b""
         fetched_error_ids = []
         confs = {}
-        default_confs = {"spark.sql.execution.pythonUDTF.arrow.enabled": "true"}
+        default_confs = {
+            "spark.sql.execution.pythonUDF.arrow.enabled": "true",
+            "spark.sql.execution.pythonUDTF.arrow.enabled": "true",
+        }
         read_confs = []
+        set_confs = []
 
         def execute(self, request, context):
             self.execute_calls += 1
@@ -217,8 +223,17 @@ def serve(connection):
             # ConfigResponse.session_id=1, pairs=2, KeyValue.key=1, value=2.
             request = parse_message(request)
             operation = parse_message(request[3][0])
+            if 1 in operation:
+                # Operation.set=1: Set.pairs=1 (KeyValue.key=1, value=2), silent=2.
+                set_request = parse_message(operation[1][0])
+                pairs = []
+                for pair in set_request.get(1, []):
+                    pair = parse_message(pair)
+                    pairs.append((pair[1][0].decode(), pair[2][0].decode()))
+                self.set_confs.append((pairs, set_request.get(2, [None])[0]))
+                return message_field(1, request[1][0])
             if 2 not in operation:
-                context.abort(grpc.StatusCode.UNIMPLEMENTED, "only Get is served")
+                context.abort(grpc.StatusCode.UNIMPLEMENTED, "only Get and Set are served")
             keys = [key.decode() for key in parse_message(operation[2][0]).get(1, [])]
             self.read_confs.extend(keys)
             confs = {**self.default_confs, **self.confs}
