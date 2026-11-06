@@ -661,7 +661,7 @@ fn session_extras_surface() {
     assert_eq!(s.empty_data_frame().unwrap().count().unwrap(), 0);
     let ns = s.new_session();
     assert_eq!(ns.range(2).unwrap().count().unwrap(), 2);
-    let cs = s.clone_session();
+    let cs = s.clone_session().unwrap();
     assert_eq!(cs.range(2).unwrap().count().unwrap(), 2);
     // Run something so there is execution info to read.
     let _ = s.range(1).unwrap().collect().unwrap();
