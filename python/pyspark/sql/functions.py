@@ -510,6 +510,38 @@ for name in dir(_gen_module):
 # generated single-arg wrapper cannot express (offset/default, variadic field names).
 # Defined AFTER the generated import so they take precedence. Field/offset/default are
 # literals; only the first arg is a column (PySpark ColumnOrName).
+# Functions whose optional arguments PySpark sends only when given (None is not given), and
+# variant_set, whose create_if_missing it always sends.
+def hmac(key, message, algorithm=None):
+    """hmac(key, message, algorithm=None): the HMAC of message with key, by algorithm."""
+    return _dispatch("hmac", [key, message] if algorithm is None else [key, message, algorithm])
+
+
+def variant_set(v, path, value, create_if_missing=True):
+    """variant_set(v, path, value, create_if_missing=True): v with value set at path."""
+    return _dispatch("variant_set", [v, path, value, create_if_missing])
+
+
+def try_variant_set(v, path, value, create_if_missing=True):
+    """try_variant_set(v, path, value, create_if_missing=True): variant_set, or null on error."""
+    return _dispatch("try_variant_set", [v, path, value, create_if_missing])
+
+
+def vector_norm(vector, degree=None):
+    """vector_norm(vector, degree=None): the norm of vector, of degree (2.0 by default)."""
+    return _dispatch("vector_norm", [vector] if degree is None else [vector, degree])
+
+
+def vector_normalize(vector, degree=None):
+    """vector_normalize(vector, degree=None): vector divided by its norm of degree."""
+    return _dispatch("vector_normalize", [vector] if degree is None else [vector, degree])
+
+
+def counter_diff(value, startTime=None):
+    """counter_diff(value, startTime=None): the differences of a counter over a window."""
+    return _dispatch("counter_diff", [value] if startTime is None else [value, startTime])
+
+
 def lag(col, offset=1, default=None):
     """lag(col, offset=1, default=None): value offset rows before the current row."""
     return _wrap(_call_function("lag", _to_col(col), _pyfunc_lit(offset), _pyfunc_lit(default)))

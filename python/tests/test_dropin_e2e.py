@@ -507,3 +507,21 @@ def test_create_dataframe_infers_by_the_session_configurations_as_pyspark(sessio
                 assert [tuple(r) for r in df.collect()] == rows, (key, data)
         finally:
             session.conf.unset(key)
+
+
+def test_functions_apply_their_optional_arguments_as_pyspark(session):
+    df = session.sql(
+        "SELECT 'key' AS k, 'msg' AS m, parse_json('{\"a\": 1}') AS v, "
+        "array(3.0F, 4.0F) AS vec, 1.0F AS one")
+    row = df.select(
+        F.hex(F.hmac("k", "m", F.lit("SHA-1"))).alias("sha1"),
+        F.to_json(F.variant_set("v", "$.b", F.lit(2), False)).alias("kept"),
+        F.to_json(F.try_variant_set("v", "$.b", F.lit(2))).alias("set"),
+        F.vector_norm("vec", F.col("one")).alias("l1"),
+        F.vector_normalize("vec", F.col("one")).alias("normalized"),
+    ).first()
+    assert row.sha1 == "102900B72B7BF1031EEC76B4804B66052376896B"
+    assert row.kept == '{"a":1}'
+    assert row.set == '{"a":1,"b":2}'
+    assert row.l1 == 7.0
+    assert row.normalized == pytest.approx([3 / 7, 4 / 7])

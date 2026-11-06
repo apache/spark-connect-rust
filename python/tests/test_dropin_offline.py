@@ -5107,3 +5107,23 @@ def test_sql_keyword_argument_errors_as_pyspark():
         spark.sql("SELECT ? AS v", args=(1,))
     assert error.value.getCondition() == "INVALID_TYPE"
     assert error.value.getMessageParameters() == {"arg_name": "args", "arg_type": "tuple"}
+
+
+# --------------------------------------------------------------------------- optional args
+
+
+@pytest.mark.parametrize("column,expected", [
+    # The optional arguments of these functions are sent when given, and None is not given,
+    # as PySpark does.
+    (lambda F: F.hmac("k", "m", "a"), "hmac(k, m, a)"),
+    (lambda F: F.hmac("k", "m", None), "hmac(k, m)"),
+    (lambda F: F.vector_norm("v", "d"), "vector_norm(v, d)"),
+    (lambda F: F.vector_norm("v", None), "vector_norm(v)"),
+    (lambda F: F.vector_normalize("v", degree="d"), "vector_normalize(v, d)"),
+    (lambda F: F.counter_diff("x", "t"), "counter_diff(x, t)"),
+    (lambda F: F.counter_diff("x", startTime=None), "counter_diff(x)"),
+])
+def test_functions_send_their_optional_arguments_as_pyspark(column, expected):
+    from pyspark.sql import functions as F
+
+    assert repr(column(F)) == f"Column<'{expected}'>"
