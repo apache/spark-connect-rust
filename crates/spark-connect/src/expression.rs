@@ -568,6 +568,14 @@ impl LiteralExpression {
         expr
     }
 
+    /// The literal as a proto `Literal`, as `to_proto` sets it in its `Expression`.
+    pub fn to_literal_proto(&self) -> proto::expression::Literal {
+        match self.to_proto().expr_type {
+            Some(proto::expression::ExprType::Literal(literal)) => literal,
+            _ => proto::expression::Literal::default(),
+        }
+    }
+
     /// Render the literal value, mirroring `LiteralExpression.__repr__`: the Python value,
     /// as `f"{value}"` shows it, and a date, time, timestamp or day-time interval in the
     /// formats that it gives them.

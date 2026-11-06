@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 
 use crate::column::Column;
-use crate::expression::{Expression, ExpressionNode};
+use crate::expression::{Expression, ExpressionNode, LiteralExpression};
 use crate::types::DataType;
 use crate::udf::CommonInlineUserDefinedFunctionExpression;
 
@@ -206,10 +206,11 @@ pub enum LogicalPlan {
         min_non_null: Option<i32>,
         columns: Vec<String>,
     },
-    /// NAReplace: `df.replace(to_replace, value, subset)`.
+    /// NAReplace: `df.replace(to_replace, value, subset)`, each replacement a literal and
+    /// the literal that replaces it.
     NAReplace {
         input: Arc<LogicalPlan>,
-        replacements: Vec<(String, String)>,
+        replacements: Vec<(LiteralExpression, LiteralExpression)>,
         columns: Vec<String>,
     },
     /// Describe: `df.describe(cols...)`.
@@ -1116,13 +1117,12 @@ impl LogicalPlan {
                 let mut na_replace = proto::NaReplace::default();
                 na_replace.input = Some(Box::new(relation_of(input, plan_ids)));
                 for (old_val, new_val) in replacements.iter() {
-                    let mut replace = proto::na_replace::Replacement::default();
-                    // A numeric-looking value becomes a Double literal; otherwise a
-                    // String literal. Both sides are always set (never left None, which
-                    // previously made string replacements a silent no-op).
-                    replace.old_value = Some(str_to_proto_literal(old_val));
-                    replace.new_value = Some(str_to_proto_literal(new_val));
-                    na_replace.replacements.push(replace);
+                    na_replace
+                        .replacements
+                        .push(proto::na_replace::Replacement {
+                            old_value: Some(old_val.to_literal_proto()),
+                            new_value: Some(new_val.to_literal_proto()),
+                        });
                 }
                 na_replace.cols.extend(columns.clone());
                 relation.rel_type = Some(proto::relation::RelType::Replace(Box::new(na_replace)));
@@ -1961,17 +1961,13 @@ fn value_to_proto_literal(v: &crate::row::Value) -> proto::expression::Literal {
     lit
 }
 
-/// Build a proto `Literal` from a string: a numeric-looking string becomes a
-/// Double literal, otherwise a String literal (used by NAReplace so string
-/// replacements are not silently dropped).
-fn str_to_proto_literal(s: &str) -> proto::expression::Literal {
-    use proto::expression::literal::LiteralType;
-    let mut lit = proto::expression::Literal::default();
-    lit.literal_type = Some(match s.parse::<f64>() {
-        Ok(v) => LiteralType::Double(v),
-        Err(_) => LiteralType::String(s.to_string()),
-    });
-    lit
+/// The literal of a replacement given as a string: a double for a numeric-looking string,
+/// otherwise the string (used by the NAReplace of strings).
+pub(crate) fn numeric_or_string_literal(s: &str) -> LiteralExpression {
+    match s.parse::<f64>() {
+        Ok(v) => LiteralExpression::double(v),
+        Err(_) => LiteralExpression::string(s),
+    }
 }
 
 /// Create a NADrop plan.
@@ -1989,7 +1985,8 @@ pub fn na_drop(
     }
 }
 
-/// Create a NAReplace plan.
+/// Create a NAReplace plan, of replacements given as strings: a numeric-looking string is a
+/// double, otherwise a string.
 pub fn na_replace(
     input: impl Into<Arc<LogicalPlan>>,
     replacements: Vec<(String, String)>,
@@ -1997,7 +1994,15 @@ pub fn na_replace(
 ) -> LogicalPlan {
     LogicalPlan::NAReplace {
         input: input.into(),
-        replacements,
+        replacements: replacements
+            .iter()
+            .map(|(old, new)| {
+                (
+                    numeric_or_string_literal(old),
+                    numeric_or_string_literal(new),
+                )
+            })
+            .collect(),
         columns,
     }
 }
@@ -2122,12 +2127,60 @@ mod argfix_tests {
     }
 
     #[test]
-    fn replace_sets_string_literals() {
+    fn replace_sets_the_literals_of_their_types() {
+        // As PySpark's: a bool, a double, a string, or a null replacement, as a literal of its
+        // type.
         let p = LogicalPlan::NAReplace {
             input: Arc::new(base()),
-            replacements: vec![("foo".to_string(), "bar".to_string())],
-            columns: vec![],
+            replacements: vec![
+                (
+                    LiteralExpression::boolean(true),
+                    LiteralExpression::boolean(false),
+                ),
+                (
+                    LiteralExpression::double(1.0),
+                    LiteralExpression::null(DataType::Null),
+                ),
+                (
+                    LiteralExpression::string("1"),
+                    LiteralExpression::string("a"),
+                ),
+            ],
+            columns: vec!["b".to_string()],
         };
+        match rel_type(p) {
+            proto::relation::RelType::Replace(r) => {
+                let literals: Vec<(LiteralType, LiteralType)> = r
+                    .replacements
+                    .iter()
+                    .map(|repl| {
+                        let literal_type = |lit: &Option<proto::expression::Literal>| {
+                            lit.clone().unwrap().literal_type.unwrap()
+                        };
+                        (literal_type(&repl.old_value), literal_type(&repl.new_value))
+                    })
+                    .collect();
+                assert!(matches!(
+                    &literals[0],
+                    (LiteralType::Boolean(true), LiteralType::Boolean(false))
+                ));
+                assert!(matches!(
+                    &literals[1],
+                    (LiteralType::Double(v), LiteralType::Null(_)) if *v == 1.0
+                ));
+                assert!(matches!(
+                    &literals[2],
+                    (LiteralType::String(old), LiteralType::String(new)) if old == "1" && new == "a"
+                ));
+                assert_eq!(r.cols, vec!["b".to_string()]);
+            }
+            _ => panic!("expected Replace"),
+        }
+    }
+
+    #[test]
+    fn replace_sets_string_literals() {
+        let p = na_replace(base(), vec![("foo".to_string(), "bar".to_string())], vec![]);
         match rel_type(p) {
             proto::relation::RelType::Replace(r) => {
                 let repl = &r.replacements[0];

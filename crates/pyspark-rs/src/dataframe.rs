@@ -988,37 +988,16 @@ impl PyDataFrame {
         ))
     }
 
-    /// Replace values. `to_replace` may be a {old: new} dict, or a value/list with `value`.
-    #[pyo3(signature = (to_replace, value=None, subset=None))]
+    /// Replace values, as PySpark's `DataFrame.replace`: `to_replace` is a {old: new} dict, or
+    /// a value or a list or tuple of them with `value`, a value or a list or tuple of them.
+    #[pyo3(signature = (to_replace, value=ReplaceValue::Omitted, subset=None))]
     fn replace(
         &self,
         to_replace: &Bound<'_, PyAny>,
-        value: Option<&Bound<'_, PyAny>>,
-        subset: Option<Vec<String>>,
+        value: ReplaceValue,
+        subset: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let mut pairs: Vec<(String, String)> = Vec::new();
-        if let Ok(d) = to_replace.cast::<PyDict>() {
-            for (k, v) in d.iter() {
-                pairs.push((k.str()?.to_string(), v.str()?.to_string()));
-            }
-        } else if let (Ok(olds), Some(val)) = (to_replace.extract::<Vec<Bound<'_, PyAny>>>(), value)
-        {
-            if let Ok(news) = val.extract::<Vec<Bound<'_, PyAny>>>() {
-                for (o, n) in olds.iter().zip(news.iter()) {
-                    pairs.push((o.str()?.to_string(), n.str()?.to_string()));
-                }
-            } else {
-                for o in olds {
-                    pairs.push((o.str()?.to_string(), val.str()?.to_string()));
-                }
-            }
-        } else if let Some(val) = value {
-            pairs.push((to_replace.str()?.to_string(), val.str()?.to_string()));
-        }
-        let subset_refs: Option<Vec<&str>> = subset
-            .as_ref()
-            .map(|s| s.iter().map(|x| x.as_str()).collect());
-        Ok(PyDataFrame::new(self.dataframe.replace(pairs, subset_refs)))
+        replace_values(&self.dataframe, to_replace, value, subset)
     }
 
     /// Reconcile to a target schema (StructType or DDL string).
@@ -1164,48 +1143,42 @@ impl PyDataFrame {
         Ok(func.call(tuple, kwargs)?.unbind())
     }
 
-    /// Unpivot (wide-to-long). `values=None` unpivots all non-id columns.
-    #[pyo3(signature = (ids, values=None, variableColumnName="variable", valueColumnName="value"))]
+    /// Unpivot (wide-to-long), as PySpark's `DataFrame.unpivot`: `ids` and `values` are each a
+    /// column or a column name, or a list or tuple of them, and `values=None` unpivots all
+    /// non-id columns.
+    #[pyo3(signature = (ids, values, variableColumnName, valueColumnName))]
     fn unpivot(
         &self,
-        ids: Vec<String>,
-        values: Option<Vec<String>>,
+        ids: &Bound<'_, PyAny>,
+        values: Option<&Bound<'_, PyAny>>,
         variableColumnName: &str,
         valueColumnName: &str,
-    ) -> PyDataFrame {
-        let id_refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
-        let owned = values;
-        let val_refs = owned
-            .as_ref()
-            .map(|v| v.iter().map(|s| s.as_str()).collect());
-        PyDataFrame::new(self.dataframe.melt(
-            id_refs,
-            val_refs,
+    ) -> PyResult<PyDataFrame> {
+        if ids.is_none() {
+            return Err(pyo3::exceptions::PyAssertionError::new_err(
+                "ids must not be None",
+            ));
+        }
+        let ids = unpivot_columns(ids)?;
+        let values = values.map(unpivot_columns).transpose()?;
+        Ok(PyDataFrame::new(self.dataframe.unpivot(
+            ids,
+            values,
             variableColumnName,
             valueColumnName,
-        ))
+        )))
     }
 
-    /// Alias for unpivot.
-    #[pyo3(signature = (ids, values=None, variableColumnName="variable", valueColumnName="value"))]
+    /// The same function as `unpivot`, as PySpark's `DataFrame.melt`.
+    #[pyo3(signature = (ids, values, variableColumnName, valueColumnName))]
     fn melt(
         &self,
-        ids: Vec<String>,
-        values: Option<Vec<String>>,
+        ids: &Bound<'_, PyAny>,
+        values: Option<&Bound<'_, PyAny>>,
         variableColumnName: &str,
         valueColumnName: &str,
-    ) -> PyDataFrame {
-        let id_refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
-        let owned = values;
-        let val_refs = owned
-            .as_ref()
-            .map(|v| v.iter().map(|s| s.as_str()).collect());
-        PyDataFrame::new(self.dataframe.melt(
-            id_refs,
-            val_refs,
-            variableColumnName,
-            valueColumnName,
-        ))
+    ) -> PyResult<PyDataFrame> {
+        self.unpivot(ids, values, variableColumnName, valueColumnName)
     }
 
     /// Persist the DataFrame. A storage-level argument is accepted for API parity;
@@ -1819,22 +1792,16 @@ impl PyDataFrameNaFunctions {
         Ok(PyDataFrame::new(self.df.fillna_value(val, refs)))
     }
 
-    /// Replace values, mirroring `DataFrameNaFunctions.replace`:
-    /// `replace([old...], [new...], subset)`, `replace({old: new}, subset)`, or
-    /// `replace(old, new, subset)`.
-    #[pyo3(signature = (to_replace, value=None, subset=None))]
+    /// Replace values, as PySpark's `DataFrameNaFunctions.replace`, which is
+    /// `DataFrame.replace`.
+    #[pyo3(signature = (to_replace, value=ReplaceValue::Omitted, subset=None))]
     fn replace(
         &self,
         to_replace: &Bound<'_, PyAny>,
-        value: Option<&Bound<'_, PyAny>>,
+        value: ReplaceValue,
         subset: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let pairs = build_replacement_pairs(to_replace, value)?;
-        let owned = to_subset(subset)?;
-        let subset_refs: Option<Vec<&str>> = owned
-            .as_ref()
-            .map(|v| v.iter().map(String::as_str).collect());
-        Ok(PyDataFrame::new(self.inner.replace(pairs, subset_refs)))
+        replace_values(&self.df, to_replace, value, subset)
     }
 }
 
@@ -1853,44 +1820,223 @@ fn to_subset(subset: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Vec<String>>>
     }
 }
 
-/// Build (old, new) string replacement pairs from the reference `replace` forms.
-fn build_replacement_pairs(
+/// The `value` argument of `DataFrame.replace`, where PySpark tells an omitted value apart
+/// from None: `replace(to_replace)` requires a dict `to_replace`, while
+/// `replace(to_replace, None)` replaces with nulls.
+pub enum ReplaceValue {
+    Omitted,
+    Given(Py<PyAny>),
+}
+
+impl<'a, 'py> FromPyObject<'a, 'py> for ReplaceValue {
+    type Error = PyErr;
+
+    fn extract(obj: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        Ok(ReplaceValue::Given(obj.to_owned().unbind()))
+    }
+}
+
+/// `df.replace(to_replace, value, subset)`, checked and built as PySpark's
+/// `DataFrame.replace`: each value of `to_replace` (a {old: new} dict, or a value or a list or
+/// tuple of them) is replaced by `value` (a value or a list or tuple of them, or None), all
+/// bools, numbers or strings, sent as literals with an int as a float, in the columns of
+/// `subset` (a column name, or a list or tuple of them).
+fn replace_values(
+    dataframe: &DataFrame,
     to_replace: &Bound<'_, PyAny>,
-    value: Option<&Bound<'_, PyAny>>,
-) -> PyResult<Vec<(String, String)>> {
-    use pyo3::exceptions::PyValueError;
-    use pyo3::types::{PyDict, PyList};
-    if let Ok(d) = to_replace.cast::<PyDict>() {
-        let mut pairs = Vec::with_capacity(d.len());
-        for (k, v) in d.iter() {
-            pairs.push((k.str()?.to_string(), v.str()?.to_string()));
+    value: ReplaceValue,
+    subset: Option<&Bound<'_, PyAny>>,
+) -> PyResult<PyDataFrame> {
+    use pyo3::types::{PyBool, PyFloat, PyString};
+    use spark_connect::expression::LiteralExpression;
+
+    let py = to_replace.py();
+    let raise = |class_name: &str, error_class: &str, params: &[(&str, &str)]| {
+        crate::column::raise_pyspark(py, class_name, error_class, params)
+    };
+    let type_name = |v: &Bound<'_, PyAny>| -> String {
+        v.get_type()
+            .name()
+            .map(|name| name.to_string())
+            .unwrap_or_default()
+    };
+    let is_sequence =
+        |v: &Bound<'_, PyAny>| v.is_instance_of::<PyList>() || v.is_instance_of::<PyTuple>();
+    // A bool, a float, an int or a str: a bool is an int.
+    let is_scalar = |v: &Bound<'_, PyAny>| {
+        v.is_instance_of::<PyFloat>()
+            || v.is_instance_of::<PyInt>()
+            || v.is_instance_of::<PyString>()
+    };
+    let is_dict = to_replace.is_instance_of::<PyDict>();
+    let value = match value {
+        ReplaceValue::Given(value) => value.into_bound(py),
+        ReplaceValue::Omitted if is_dict => py.None().into_bound(py),
+        ReplaceValue::Omitted => {
+            return Err(raise(
+                "PySparkTypeError",
+                "ARGUMENT_REQUIRED",
+                &[("arg_name", "value"), ("condition", "`to_replace` is dict")],
+            ))
         }
-        return Ok(pairs);
+    };
+
+    if !(is_scalar(to_replace) || is_sequence(to_replace) || is_dict) {
+        return Err(raise(
+            "PySparkTypeError",
+            "NOT_EXPECTED_TYPE",
+            &[
+                ("expected_type", "bool, dict, float, int, str or tuple"),
+                ("arg_name", "to_replace"),
+                ("arg_type", &type_name(to_replace)),
+            ],
+        ));
     }
-    if let Ok(olds) = to_replace.cast::<PyList>() {
-        let val = value.ok_or_else(|| {
-            PyValueError::new_err("replace with a list to_replace requires a value list")
-        })?;
-        let news = val
-            .cast::<PyList>()
-            .map_err(|_| PyValueError::new_err("value must be a list when to_replace is a list"))?;
-        if olds.len() != news.len() {
-            return Err(PyValueError::new_err(
-                "to_replace and value lists must be the same length",
-            ));
-        }
-        let mut pairs = Vec::with_capacity(olds.len());
-        for (a, b) in olds.iter().zip(news.iter()) {
-            pairs.push((a.str()?.to_string(), b.str()?.to_string()));
-        }
-        return Ok(pairs);
+    if !(is_scalar(&value) || is_sequence(&value) || value.is_none() || is_dict) {
+        return Err(raise(
+            "PySparkTypeError",
+            "NOT_EXPECTED_TYPE",
+            &[
+                (
+                    "expected_type",
+                    "bool, float, int, list, None, str or tuple",
+                ),
+                ("arg_name", "value"),
+                ("arg_type", &type_name(&value)),
+            ],
+        ));
     }
-    let val =
-        value.ok_or_else(|| PyValueError::new_err("replace with a scalar requires a value"))?;
-    Ok(vec![(
-        to_replace.str()?.to_string(),
-        val.str()?.to_string(),
-    )])
+    if is_sequence(to_replace) && is_sequence(&value) && to_replace.len()? != value.len()? {
+        return Err(raise(
+            "PySparkValueError",
+            "LENGTH_SHOULD_BE_THE_SAME",
+            &[
+                ("arg1", "to_replace"),
+                ("arg2", "value"),
+                ("arg1_length", &to_replace.len()?.to_string()),
+                ("arg2_length", &value.len()?.to_string()),
+            ],
+        ));
+    }
+    let subset: Option<Vec<String>> = match subset {
+        None => None,
+        Some(subset) if subset.is_instance_of::<PyString>() => Some(vec![subset.extract()?]),
+        Some(subset) if is_sequence(subset) => Some(subset.extract()?),
+        Some(subset) => {
+            return Err(raise(
+                "PySparkTypeError",
+                "NOT_EXPECTED_TYPE",
+                &[
+                    ("arg_name", "subset"),
+                    ("expected_type", "list, str or tuple"),
+                    ("arg_type", &type_name(subset)),
+                ],
+            ))
+        }
+    };
+
+    // The replacements as a dict, as PySpark builds it, so that equal values are one key.
+    let replacements = if is_dict {
+        if !value.is_none() {
+            py.import("warnings")?.call_method1(
+                "warn",
+                ("to_replace is a dict and value is not None. value will be ignored.",),
+            )?;
+        }
+        to_replace.cast::<PyDict>()?.clone()
+    } else {
+        let olds: Vec<Bound<'_, PyAny>> = if is_scalar(to_replace) {
+            vec![to_replace.clone()]
+        } else {
+            to_replace.try_iter()?.collect::<PyResult<_>>()?
+        };
+        let news: Vec<Bound<'_, PyAny>> = if is_scalar(&value) || value.is_none() {
+            vec![value.clone(); olds.len()]
+        } else {
+            value.try_iter()?.collect::<PyResult<_>>()?
+        };
+        let replacements = PyDict::new(py);
+        for (old, new) in olds.iter().zip(news.iter()) {
+            replacements.set_item(old, new)?;
+        }
+        replacements
+    };
+
+    // All of the values to replace, and all of their replacements but None, are bools,
+    // numbers or strings.
+    let olds: Vec<Bound<'_, PyAny>> = replacements.keys().iter().collect();
+    let news: Vec<Bound<'_, PyAny>> = replacements
+        .values()
+        .iter()
+        .filter(|new| !new.is_none())
+        .collect();
+    let all_of = |is_type: &dyn Fn(&Bound<'_, PyAny>) -> bool| {
+        olds.iter().all(is_type) && news.iter().all(is_type)
+    };
+    if !(all_of(&|v| v.is_instance_of::<PyBool>())
+        || all_of(&|v| v.is_instance_of::<PyString>())
+        || all_of(&|v| v.is_instance_of::<PyFloat>() || v.is_instance_of::<PyInt>()))
+    {
+        return Err(raise("PySparkValueError", "MIXED_TYPE_REPLACEMENT", &[]));
+    }
+
+    let literal = |v: &Bound<'_, PyAny>| -> PyResult<LiteralExpression> {
+        Ok(if v.is_none() {
+            LiteralExpression::null(spark_connect::types::DataType::Null)
+        } else if v.is_instance_of::<PyBool>() {
+            LiteralExpression::boolean(v.extract()?)
+        } else if v.is_instance_of::<PyString>() {
+            LiteralExpression::string(v.extract::<String>()?)
+        } else {
+            // As `float(v)`, for an int as well.
+            LiteralExpression::double(v.extract()?)
+        })
+    };
+    let replacements = replacements
+        .iter()
+        .map(|(old, new)| Ok((literal(&old)?, literal(&new)?)))
+        .collect::<PyResult<Vec<_>>>()?;
+    let subset: Option<Vec<&str>> = subset
+        .as_ref()
+        .map(|subset| subset.iter().map(String::as_str).collect());
+    Ok(PyDataFrame::new(
+        dataframe.replace_literals(replacements, subset),
+    ))
+}
+
+/// The columns of the `ids` or `values` of `df.unpivot`, as PySpark's: a list or tuple of
+/// columns or column names, or one of them.
+fn unpivot_columns(cols: &Bound<'_, PyAny>) -> PyResult<Vec<spark_connect::column::Column>> {
+    if cols.is_instance_of::<PyList>() || cols.is_instance_of::<PyTuple>() {
+        cols.try_iter()?.map(|col| column_or_name(&col?)).collect()
+    } else {
+        Ok(vec![column_or_name(cols)?])
+    }
+}
+
+/// A column, or a column by its name, as PySpark's `_to_col`.
+fn column_or_name(col: &Bound<'_, PyAny>) -> PyResult<spark_connect::column::Column> {
+    if let Ok(column) = col.extract::<PyRef<'_, PyColumn>>() {
+        return Ok(column.column.clone());
+    }
+    if col.is_instance_of::<pyo3::types::PyString>() {
+        return Ok(spark_connect::functions::col(&col.extract::<String>()?));
+    }
+    let type_name = col
+        .get_type()
+        .name()
+        .map(|name| name.to_string())
+        .unwrap_or_default();
+    Err(crate::column::raise_pyspark(
+        col.py(),
+        "PySparkTypeError",
+        "NOT_EXPECTED_TYPE",
+        &[
+            ("expected_type", "Column or str"),
+            ("arg_name", "col"),
+            ("arg_type", &type_name),
+        ],
+    ))
 }
 
 /// Python wrapper for `MergeIntoWriter` (`df.mergeInto(...)`).
