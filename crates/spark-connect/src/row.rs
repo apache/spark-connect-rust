@@ -33,6 +33,8 @@ pub enum Value {
     Date(i32),
     /// Timestamp (microseconds since epoch)
     Timestamp(i64),
+    /// TIME, in nanoseconds since midnight, as PySpark's internal value of `TimeType`.
+    Time(i64),
     /// Spark day-time interval, in signed microseconds. The full i64 range is
     /// representable by Python's datetime.timedelta without nanosecond conversion.
     /// Display uses raw microseconds, like Date and Timestamp use their raw units.
@@ -72,6 +74,7 @@ impl fmt::Debug for Value {
             Self::Binary(v) => f.debug_tuple("Binary").field(v).finish(),
             Self::Date(v) => f.debug_tuple("Date").field(v).finish(),
             Self::Timestamp(v) => f.debug_tuple("Timestamp").field(v).finish(),
+            Self::Time(v) => f.debug_tuple("Time").field(v).finish(),
             Self::DayTimeInterval(v) => f.debug_tuple("DayTimeInterval").field(v).finish(),
             Self::Decimal {
                 value,
@@ -174,6 +177,7 @@ impl fmt::Display for Value {
             Value::Binary(b) => write!(f, "{:?}", b),
             Value::Date(d) => write!(f, "{}", d),
             Value::Timestamp(t) => write!(f, "{}", t),
+            Value::Time(t) => write!(f, "{}", t),
             Value::DayTimeInterval(t) => write!(f, "{}", t),
             Value::Decimal {
                 value,

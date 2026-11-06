@@ -252,7 +252,7 @@ fn sources_and_accessors_execute() {
     let _ = df.head().unwrap();
     let _ = df.take(2).unwrap();
     let _ = df.to_json().unwrap();
-    let _ = df.select(vec![col("id")]).limit(1).scalar();
+    let _ = df.select(vec![df.select(vec![col("id")]).limit(1).scalar()]);
     let _ = df.semantic_hash();
     let _ = df.same_semantics(&df);
     let _ = df.to_local_iterator(false);

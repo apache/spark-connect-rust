@@ -13,18 +13,10 @@ if _functions is None:
 _pyfunc_col = _functions.pyfunc_col
 _pyfunc_lit = _functions.pyfunc_lit
 _pyfunc_expr = _functions.pyfunc_expr
-_pyfunc_sum = _functions.pyfunc_sum
 _pyfunc_count = _functions.pyfunc_count
-_pyfunc_avg = _functions.pyfunc_avg
-_pyfunc_max = _functions.pyfunc_max
-_pyfunc_min = _functions.pyfunc_min
 _pyfunc_when = _functions.pyfunc_when
 _call_function = _functions.pyfunc_call_function
 # Mixed function bindings
-_pyfunc_sha2 = _functions.pyfunc_sha2
-_pyfunc_variant_strip_nulls = _functions.pyfunc_variant_strip_nulls
-_pyfunc_window = _functions.pyfunc_window
-_pyfunc_window_with_slide_and_start = _functions.pyfunc_window_with_slide_and_start
 _pyfunc_from_avro = _functions.pyfunc_from_avro
 _pyfunc_from_avro_with_options = _functions.pyfunc_from_avro_with_options
 _pyfunc_to_avro_with_schema = _functions.pyfunc_to_avro_with_schema
@@ -239,10 +231,10 @@ _FN_COL_ARGS = {
 class _UnsetType:
     """Sentinel for optional generated-function args that were not supplied.
 
-    Generated wrappers carry PySpark's real parameter names (so keyword calls work),
-    but default every optional parameter to ``_UNSET`` and forward only the args the
-    caller actually passed. This reproduces the historical ``*args`` dispatch exactly
-    (same columns forwarded, in the same order) while accepting keyword arguments.
+    The generated wrappers that dispatch to the Rust core (those without a PySpark Connect
+    implementation to generate from) carry PySpark's real parameter names, so keyword
+    calls work, but default every optional parameter to ``_UNSET`` and forward only the
+    args the caller actually passed.
     """
 
     _instance = None
@@ -313,7 +305,8 @@ def _dict_to_options_column(options_dict):
     return options_dict
 
 # Import UDF / UDTF functions
-from pyspark.sql.udf import udf, pandas_udf, arrow_udf
+from pyspark.sql.udf import udf
+from pyspark.sql.pandas.functions import arrow_udf, pandas_udf
 from pyspark.sql.udtf import (
     udtf,
     arrow_udtf,
@@ -331,78 +324,70 @@ def col(col):
 
 
 def lit(col):
-    """Creates a Column of literal value."""
+    """Creates a Column of literal value.
+
+    Mirrors pyspark.sql.connect.functions.lit: a list is the array of the literals of its
+    elements, and a one-dimensional NumPy array that array cast to the array type of its
+    dtype.
+    """
+    if isinstance(col, _pyspark.Column):
+        return col
+    if isinstance(col, list):
+        if any(isinstance(c, _pyspark.Column) for c in col):
+            from pyspark.errors import PySparkValueError
+
+            raise PySparkValueError(
+                errorClass="COLUMN_IN_LIST", messageParameters={"func_name": "lit"}
+            )
+        return array(*[lit(c) for c in col])
+    import sys
+
+    # An ndarray exists only when NumPy is imported, so this does not import it.
+    np = sys.modules.get("numpy")
+    if np is not None and isinstance(col, np.ndarray) and col.ndim == 1:
+        from pyspark.errors import PySparkTypeError
+        from pyspark.sql.types import ArrayType, _from_numpy_type
+
+        dt = _from_numpy_type(col.dtype)
+        if dt is None:
+            raise PySparkTypeError(
+                errorClass="UNSUPPORTED_NUMPY_ARRAY_SCALAR",
+                messageParameters={"dtype": col.dtype.name},
+            )
+        return array(*[lit(c) for c in col]).cast(ArrayType(dt))
     return _pyfunc_lit(col)
 
 
 def expr(str):
     """Parses the expression string into the column that it represents."""
     return _pyfunc_expr(str)
-sum = _col_wrapper(_pyfunc_sum)
 count = _col_wrapper(_pyfunc_count)
-avg = _col_wrapper(_pyfunc_avg)
-max = _col_wrapper(_pyfunc_max)
-min = _col_wrapper(_pyfunc_min)
-when = _pyfunc_when
+
+
+def when(condition, value):
+    """when(condition, value): a CASE WHEN of one branch.
+
+    Mirrors pyspark.sql.connect.functions.when: the condition is a Column, and the value a
+    Column or the literal of a value.
+    """
+    if not isinstance(condition, _pyspark.Column):
+        from pyspark.errors import PySparkTypeError
+
+        raise PySparkTypeError(
+            errorClass="NOT_EXPECTED_TYPE",
+            messageParameters={
+                "expected_type": "Column",
+                "arg_name": "condition",
+                "arg_type": type(condition).__name__,
+            },
+        )
+    from pyspark.sql.utils import enum_to_value
+
+    value = enum_to_value(value)
+    return _pyfunc_when(condition, value if isinstance(value, _pyspark.Column) else lit(value))
+
 
 # Mixed/special functions - explicit wrappers for non-generic dispatch
-def sha2(col, numBits):
-    """Returns the hex string result of SHA2 digest of the given data.
-
-    Args:
-        col: column to hash
-        numBits: either 256 or 512
-    """
-    return _pyfunc_sha2(_to_col(col), numBits)
-
-
-def variant_strip_nulls(v, include_arrays=True):
-    """Recursively removes variant-null object fields and array elements.
-
-    Args:
-        v: a variant column
-        include_arrays: also strip nulls inside arrays (default True)
-    """
-    return _pyfunc_variant_strip_nulls(_to_col(v), include_arrays)
-
-
-def variant_delete(v, *paths):
-    """Deletes the value(s) at the given path(s) from a variant column.
-
-    Args:
-        v: a variant column
-        *paths: one or more path expressions (Column or str)
-    """
-    if len(paths) == 0:
-        from pyspark.errors import PySparkValueError
-
-        raise PySparkValueError(
-            errorClass="CANNOT_BE_EMPTY",
-            messageParameters={"item": "paths"},
-        )
-    _a = [v]
-    _a.extend(paths)
-    return _dispatch("variant_delete", _a)
-
-def window(timeColumn, windowDuration, slideDuration=None, startTime=None):
-    """Buckets rows into one or more time windows specified by the given parameters.
-
-    Args:
-        timeColumn: the column containing timestamps
-        windowDuration: a string specifying the width of the window, e.g. '10 minutes'
-        slideDuration: optional, the slide interval. Defaults to ``windowDuration``
-            (a tumbling window) when only ``startTime`` is given.
-        startTime: optional, the offset of the first window, e.g. '15 minutes'.
-            Defaults to '0 second'.
-    """
-    if slideDuration is None and startTime is None:
-        return _pyfunc_window(_to_col(timeColumn), windowDuration)
-    slide = slideDuration if slideDuration is not None else windowDuration
-    start = startTime if startTime is not None else "0 second"
-    return _pyfunc_window_with_slide_and_start(
-        _to_col(timeColumn), windowDuration, slide, start
-    )
-
 def from_avro(data, json_format_schema):
     """Deserialize Avro data into a column.
 
@@ -490,64 +475,62 @@ import importlib.util
 spec = importlib.util.spec_from_file_location("functions_generated",
                                                os.path.join(os.path.dirname(__file__), "functions_generated.py"))
 _gen_module = importlib.util.module_from_spec(spec)
-# Inject our helper functions into the generated module's namespace before loading
+# Inject our helper functions into the generated module's namespace before loading. The
+# functions generated from their PySpark Connect implementations call lit, column and
+# _invoke_function (an UnresolvedFunction of the name and arguments), as PySpark Connect's
+# do; the module defines PySpark Connect's _to_col and the other helpers itself.
 _gen_module._create_wrapper = _create_wrapper
 _gen_module._dispatch = _dispatch
 _gen_module._UNSET = _UNSET
 _gen_module._wrap = _wrap
 _gen_module._unwrap = _unwrap
-_gen_module._to_col = _to_col
 _gen_module._call_function = _call_function
+_gen_module.lit = lit
+_gen_module.column = _pyfunc_col
+_gen_module._invoke_function = _functions.pyfunc_invoke_function
 spec.loader.exec_module(_gen_module)
 
 # Import all generated functions into this module
-for name in dir(_gen_module):
-    if not name.startswith('_'):
-        globals()[name] = getattr(_gen_module, name)
+for name in _gen_module.__all__:
+    globals()[name] = getattr(_gen_module, name)
+
+# PySpark Connect's _to_col, which raises PySparkTypeError NOT_EXPECTED_TYPE for an
+# argument that is neither a Column nor a column name.
+_column_or_name = _gen_module._to_col
 
 
-# Overrides for functions whose Python signature carries extra literal args that the
-# generated single-arg wrapper cannot express (offset/default, variadic field names).
-# Defined AFTER the generated import so they take precedence. Field/offset/default are
-# literals; only the first arg is a column (PySpark ColumnOrName).
-def lag(col, offset=1, default=None):
-    """lag(col, offset=1, default=None): value offset rows before the current row."""
-    return _wrap(_call_function("lag", _to_col(col), _pyfunc_lit(offset), _pyfunc_lit(default)))
+def count_distinct(col, *cols):
+    """count_distinct(col, *cols): the number of distinct combinations of the columns.
 
-
-def lead(col, offset=1, default=None):
-    """lead(col, offset=1, default=None): value offset rows after the current row."""
-    return _wrap(_call_function("lead", _to_col(col), _pyfunc_lit(offset), _pyfunc_lit(default)))
-
-
-def instr(str, substr, start=None, occurrence=None):
-    """instr(str, substr, start=None, occurrence=None): 1-based position of substr.
-
-    Mirrors pyspark.sql.connect.functions.instr: ``occurrence`` without ``start``
-    searches from position 1.
+    Mirrors pyspark.sql.connect.functions.count_distinct.
     """
-    # Non-column args stay raw; the core turns them into literals (as `lit` would).
-    args = [str, substr]
-    if start is not None or occurrence is not None:
-        args.append(start if start is not None else 1)
-    if occurrence is not None:
-        args.append(occurrence)
-    return _dispatch("instr", args)
+    return _dispatch("count_distinct", [_column_or_name(c) for c in [col, *cols]])
 
 
-def regexp_replace(string, pattern, replacement, position=None):
-    """regexp_replace(string, pattern, replacement, position=None)."""
-    args = [string, pattern, replacement]
-    if position is not None:
-        args.append(position)
-    return _dispatch("regexp_replace", args)
+def countDistinct(col, *cols):
+    """countDistinct(col, *cols): an alias of count_distinct."""
+    return count_distinct(col, *cols)
 
 
-def json_tuple(col, *fields):
-    """json_tuple(col, *fields): extract the given JSON fields (literal names) as columns."""
-    if not fields:
-        raise ValueError("json_tuple() takes at least one field name")
-    return _wrap(_call_function("json_tuple", _to_col(col), *[_pyfunc_lit(f) for f in fields]))
+def listagg_distinct(col, delimiter=None):
+    """listagg_distinct(col, delimiter=None): the distinct values of col, concatenated.
+
+    Mirrors pyspark.sql.connect.functions.listagg_distinct: the delimiter is sent when
+    given.
+    """
+    args = [col] if delimiter is None else [col, lit(delimiter)]
+    return _dispatch("listagg_distinct", [_column_or_name(c) for c in args])
+
+
+def string_agg_distinct(col, delimiter=None):
+    """string_agg_distinct(col, delimiter=None): the distinct values of col, concatenated.
+
+    Mirrors pyspark.sql.connect.functions.string_agg_distinct: the delimiter is sent when
+    given.
+    """
+    args = [col] if delimiter is None else [col, lit(delimiter)]
+    return _dispatch("string_agg_distinct", [_column_or_name(c) for c in args])
+
 
 # ---------------------------------------------------------------------------
 # Higher-order functions.
@@ -618,6 +601,9 @@ def _invoke_higher_order_function(name, cols, funs):
     return _invoke_function(name, *_cols, *_funs)
 
 
+_gen_module._invoke_higher_order_function = _invoke_higher_order_function
+
+
 def transform(col, f):
     return _invoke_higher_order_function("transform", [col], [f])
 
@@ -666,12 +652,6 @@ def map_zip_with(col1, col2, f):
     return _invoke_higher_order_function("map_zip_with", [col1, col2], [f])
 
 
-# Misc functions mirroring pyspark.sql.connect.functions.
-
-def cume_dist():
-    return _invoke_function("cume_dist")
-
-
 # ``random`` is an alias for ``rand`` (matches pyspark.sql.functions).
 random = rand
 
@@ -684,12 +664,12 @@ def column(col):
 
 def call_udf(udfName, *cols):
     # Mirrors _invoke_function(udfName, *cols): an UnresolvedFunction call.
-    return _invoke_function(udfName, *[_to_col(c) for c in cols])
+    return _invoke_function(udfName, *[_column_or_name(c) for c in cols])
 
 
 def call_function(funcName, *cols):
     # Mirrors ConnectColumn(CallFunction(funcName, expressions)).
-    return _call_named_function(funcName, *[_to_col(c) for c in cols])
+    return _call_named_function(funcName, *[_column_or_name(c) for c in cols])
 
 
 def broadcast(df):
@@ -709,21 +689,86 @@ def broadcast(df):
 
 # Expose the `partitioning` submodule (bucket/days/hours/months/years) at
 # ``pyspark.sql.functions.partitioning``. Since this module is a plain module (not a
-# package), register a synthetic submodule holding the flat partition-transform
-# functions so both ``import pyspark.sql.functions.partitioning`` and
-# ``F.partitioning.bucket`` work, mirroring reference pyspark.
+# package), register a synthetic submodule holding the partition transforms, as PySpark
+# Connect's, so both ``import pyspark.sql.functions.partitioning`` and
+# ``F.partitioning.bucket`` work. The functions of the same names here are deprecated, as
+# in PySpark: they warn and call those of the submodule.
 import sys as _sys
 import types as _types
+import warnings as _warnings
+
+
+def _partition_transforms():
+    _over_columns = _gen_module._invoke_function_over_columns
+
+    def years(col):
+        return _over_columns("years", col)
+
+    def months(col):
+        return _over_columns("months", col)
+
+    def days(col):
+        return _over_columns("days", col)
+
+    def hours(col):
+        return _over_columns("hours", col)
+
+    def bucket(numBuckets, col):
+        if isinstance(numBuckets, int):
+            _numBuckets = lit(numBuckets)
+        elif isinstance(numBuckets, _pyspark.Column):
+            _numBuckets = numBuckets
+        else:
+            from pyspark.errors import PySparkTypeError
+
+            raise PySparkTypeError(
+                errorClass="NOT_EXPECTED_TYPE",
+                messageParameters={
+                    "expected_type": "Column or int",
+                    "arg_name": "numBuckets",
+                    "arg_type": type(numBuckets).__name__,
+                },
+            )
+        return _invoke_function("bucket", _numBuckets, _column_or_name(col))
+
+    return years, months, days, hours, bucket
+
 
 partitioning = _types.ModuleType("pyspark.sql.functions.partitioning")
 partitioning.__doc__ = "Partition transform functions (bucket/days/hours/months/years)."
-for _pname in ("years", "months", "days", "hours", "bucket"):
-    _obj = globals().get(_pname)
-    if _obj is not None:
-        setattr(partitioning, _pname, _obj)
-partitioning.__all__ = [
-    _n for _n in ("years", "months", "days", "hours", "bucket") if hasattr(partitioning, _n)
-]
+for _transform in _partition_transforms():
+    _transform.__module__ = partitioning.__name__
+    _transform.__qualname__ = _transform.__name__
+    setattr(partitioning, _transform.__name__, _transform)
+del _transform
+partitioning.__all__ = ["years", "months", "days", "hours", "bucket"]
+
+
+def years(col):
+    _warnings.warn("Deprecated in 4.0.0, use partitioning.years instead.", FutureWarning)
+    return partitioning.years(col)
+
+
+def months(col):
+    _warnings.warn("Deprecated in 4.0.0, use partitioning.months instead.", FutureWarning)
+    return partitioning.months(col)
+
+
+def days(col):
+    _warnings.warn("Deprecated in 4.0.0, use partitioning.days instead.", FutureWarning)
+    return partitioning.days(col)
+
+
+def hours(col):
+    _warnings.warn("Deprecated in 4.0.0, use partitioning.hours instead.", FutureWarning)
+    return partitioning.hours(col)
+
+
+def bucket(numBuckets, col):
+    _warnings.warn("Deprecated in 4.0.0, use partitioning.bucket instead.", FutureWarning)
+    return partitioning.bucket(numBuckets, col)
+
+
 _sys.modules["pyspark.sql.functions.partitioning"] = partitioning
 
 # Public classes/enums that pyspark.sql.functions re-exports (so `from
@@ -742,10 +787,7 @@ try:
     )
 except Exception:  # pragma: no cover
     pass
-try:
-    from pyspark.sql.pandas.functions import PandasUDFType, ArrowUDFType  # noqa: F401
-except Exception:  # pragma: no cover
-    pass
+from pyspark.sql.pandas.functions import PandasUDFType, ArrowUDFType  # noqa: E402,F401
 
 # Build __all__ with all function names
 __all__ = [
@@ -764,12 +806,17 @@ __all__ = [
 
 # Add all other function names (dynamically)
 import inspect
-for name, obj in list(globals().items()):
+_export_globals = list(globals().items())
+_exported_names = set(__all__)
+for name, obj in _export_globals:
     if (callable(obj) and
         not name.startswith('_') and
-        name not in __all__ and
+        name not in _exported_names and
         name not in ['inspect', 'importlib', '_gen_module', 'spec', 'os']):
         __all__.append(name)
+        _exported_names.add(name)
+# Leave no loop variables behind, as PySpark has no `functions.name` or `functions.obj`.
+del _export_globals, _exported_names, name, obj
 
 # Expose the `builtin` submodule at ``pyspark.sql.functions.builtin``. Upstream v4.2.0 splits
 # functions into a package whose ``builtin`` submodule holds the actual functions and whose
