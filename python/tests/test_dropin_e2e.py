@@ -560,12 +560,14 @@ def test_time_values_round_trip_as_pyspark(session):
         assert session.sql("SELECT TIME'12:34:56.789' AS t").collect() == [
             Row(t=datetime.time(12, 34, 56, 789000))
         ]
+        # Without it, the server does not support the type, as for PySpark. It is set to
+        # false, as the server enables it by default when SPARK_TESTING is set.
+        session.conf.set("spark.sql.timeType.enabled", "false")
+        with pytest.raises(AnalysisException) as error:
+            session.createDataFrame([(t,)], "t time").collect()
+        assert error.value.getCondition() == "UNSUPPORTED_TIME_TYPE"
     finally:
         session.conf.unset("spark.sql.timeType.enabled")
-    # Without it, the server does not support the type, as for PySpark.
-    with pytest.raises(AnalysisException) as error:
-        session.createDataFrame([(t,)], "t time").collect()
-    assert error.value.getCondition() == "UNSUPPORTED_TIME_TYPE"
 
 
 def test_timedelta_is_a_day_time_interval_as_pyspark(session):
