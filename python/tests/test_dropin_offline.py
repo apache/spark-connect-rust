@@ -5079,26 +5079,40 @@ def test_decimal_scientific_local_input_overflow(decimal_ipc_session, text):
 
 
 @pytest.mark.parametrize("kind", ["tuples", "pandas"])
-@pytest.mark.parametrize("text, precision, scale", [
-    ("1.5E-7", 18, 7),
-    ("-1.5E-7", 18, 7),
-    ("1E-8", 18, 7),
-    ("1E+2", 2, 0),
-    ("-1E+2", 2, 0),
-    ("1E+3", 10, -2),
+@pytest.mark.parametrize("text, precision, scale, local_expected", [
+    ("1.5E-7", 18, 7, "0.0000002"),
+    ("-1.5E-7", 18, 7, "-0.0000002"),
+    ("1E-8", 18, 7, "0.0000000"),
+    ("1E+2", 2, 0, None),
+    ("-1E+2", 2, 0, None),
+    ("1E+3", 10, -2, None),
 ])
-def test_decimal_scientific_rejects_unsupported_rescaling(decimal_ipc_session, kind, text, precision, scale):
+def test_decimal_scientific_rescaling_follows_source_path(
+    decimal_ipc_session, kind, text, precision, scale, local_expected
+):
     from decimal import Decimal
+    import pyarrow as pa
 
     spark, payload = decimal_ipc_session
     data = [(Decimal(text),)]
     if kind == "pandas":
         pd = pytest.importorskip("pandas")
-        data = pd.DataFrame({"v": [Decimal(text)]})
+        data = pd.DataFrame({"v": [Decimal(text)]}, dtype=object)
     schema = T.StructType([T.StructField("v", T.DecimalType(precision, scale))])
-    # Scientific inputs used to fail. Accept only exact values in this fix;
-    # tuple half-even rounding and negative scales need a separate policy change.
-    with pytest.raises(RuntimeError):
+    if kind == "tuples" and local_expected is not None:
+        # Current local conversion quantizes half-even before the core parser.
+        # This parser-only change must preserve that upstream behavior.
+        spark.createDataFrame(data, schema).collect()
+        actual = pa.ipc.open_stream(payload.read_bytes()).read_all()
+        expected = pa.table({"v": pa.array([Decimal(local_expected)],
+                                           type=pa.decimal128(precision, scale))})
+        actual.validate(full=True)
+        assert actual.schema == expected.schema
+        assert actual.equals(expected)
+        return
+    # Pandas retains generic conversion and this parser's exact-rescaling guard.
+    # Local precision/negative-scale failures originate in Decimal conversion.
+    with pytest.raises(ArithmeticError if kind == "tuples" else RuntimeError):
         spark.createDataFrame(data, schema)
     assert not payload.exists()
 
