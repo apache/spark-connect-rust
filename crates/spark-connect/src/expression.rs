@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use spark_connect_proto as proto;
 
+use crate::plan::LogicalPlan;
 use crate::types::DataType;
 use crate::udf::CommonInlineUserDefinedFunctionExpression;
 
@@ -95,6 +96,174 @@ pub enum ExpressionNode {
     /// `pyspark.sql.connect.expressions.NamedArgumentExpression` - a named argument of a
     /// function call, such as `a => 1` of a Python UDF called with `a=lit(1)`.
     NamedArgument(Box<NamedArgument>),
+    /// `pyspark.sql.connect.expressions.SubqueryExpression` - a scalar, EXISTS or IN
+    /// subquery of a DataFrame, or a table argument of a table-valued function.
+    Subquery(Box<SubqueryExpression>),
+}
+
+/// The type of a [`SubqueryExpression`]. Mirrors the `subquery_type` of
+/// `pyspark.sql.connect.expressions.SubqueryExpression`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubqueryType {
+    /// A scalar subquery, of `DataFrame.scalar()`.
+    Scalar,
+    /// An EXISTS subquery, of `DataFrame.exists()`.
+    Exists,
+    /// A table argument, of `DataFrame.asTable()`.
+    TableArg,
+    /// An IN subquery, of `Column.isin(df)`.
+    In,
+}
+
+impl SubqueryType {
+    fn name(self) -> &'static str {
+        match self {
+            SubqueryType::Scalar => "scalar",
+            SubqueryType::Exists => "exists",
+            SubqueryType::TableArg => "table_arg",
+            SubqueryType::In => "in",
+        }
+    }
+}
+
+/// A subquery of the plan of a DataFrame. Mirrors
+/// `pyspark.sql.connect.expressions.SubqueryExpression`: it refers to the plan by its plan
+/// ID, and the relation that contains it sends the plan in a `WithRelations`, as PySpark's
+/// `LogicalPlan._with_relations` does.
+#[derive(Debug, Clone)]
+pub struct SubqueryExpression {
+    /// The plan of the subquery.
+    pub(crate) plan: Arc<LogicalPlan>,
+    /// The plan ID of `plan` in the session of its DataFrame.
+    pub(crate) plan_id: i64,
+    /// The type of the subquery.
+    pub subquery_type: SubqueryType,
+    /// The partitioning of a table argument.
+    pub partition_spec: Vec<Expression>,
+    /// The ordering of a table argument, within its partitions.
+    pub order_spec: Vec<Expression>,
+    /// Whether a table argument is a single partition, when set.
+    pub with_single_partition: Option<bool>,
+    /// The values of an IN subquery.
+    pub in_subquery_values: Vec<Expression>,
+}
+
+impl PartialEq for SubqueryExpression {
+    fn eq(&self, other: &Self) -> bool {
+        // Plans have no equality: the subqueries of the same plan are equal.
+        Arc::ptr_eq(&self.plan, &other.plan)
+            && self.plan_id == other.plan_id
+            && self.subquery_type == other.subquery_type
+            && self.partition_spec == other.partition_spec
+            && self.order_spec == other.order_spec
+            && self.with_single_partition == other.with_single_partition
+            && self.in_subquery_values == other.in_subquery_values
+    }
+}
+
+impl SubqueryExpression {
+    /// A subquery of `subquery_type` of `plan`, whose plan ID is `plan_id`.
+    pub(crate) fn new(plan: Arc<LogicalPlan>, plan_id: i64, subquery_type: SubqueryType) -> Self {
+        SubqueryExpression {
+            plan,
+            plan_id,
+            subquery_type,
+            partition_spec: Vec::new(),
+            order_spec: Vec::new(),
+            with_single_partition: None,
+            in_subquery_values: Vec::new(),
+        }
+    }
+
+    /// As `SubqueryExpression.__repr__`, but with the plan ID of the plan, which PySpark
+    /// shows as the address of its plan object.
+    fn render(&self) -> String {
+        let mut parts = vec![
+            format!("plan=<plan {}>", self.plan_id),
+            format!("type={}", self.subquery_type.name()),
+        ];
+        let list = |exprs: &[Expression]| {
+            let rendered: Vec<String> = exprs.iter().map(Expression::render).collect();
+            format!("[{}]", rendered.join(", "))
+        };
+        match self.subquery_type {
+            SubqueryType::TableArg => {
+                if !self.partition_spec.is_empty() {
+                    parts.push(format!("partition_spec={}", list(&self.partition_spec)));
+                }
+                if !self.order_spec.is_empty() {
+                    parts.push(format!("order_spec={}", list(&self.order_spec)));
+                }
+                if let Some(single) = self.with_single_partition {
+                    let single = if single { "True" } else { "False" };
+                    parts.push(format!("with_single_partition={single}"));
+                }
+            }
+            SubqueryType::In => parts.push(format!("values={}", list(&self.in_subquery_values))),
+            SubqueryType::Scalar | SubqueryType::Exists => {}
+        }
+        format!("SubqueryExpression({})", parts.join(", "))
+    }
+
+    /// As `SubqueryExpression.to_plan`. The relation being serialized sends `plan` in its
+    /// `WithRelations`.
+    fn to_proto(&self) -> proto::Expression {
+        use proto::subquery_expression::SubqueryType as ProtoType;
+
+        crate::plan::refer_to(&self.plan);
+        let subquery_type = match self.subquery_type {
+            SubqueryType::Scalar => ProtoType::Scalar,
+            SubqueryType::Exists => ProtoType::Exists,
+            SubqueryType::TableArg => ProtoType::TableArg,
+            SubqueryType::In => ProtoType::In,
+        } as i32;
+        // As PySpark, which sets the options of a table argument only when one is given.
+        let table_arg_options = (self.subquery_type == SubqueryType::TableArg
+            && (!self.partition_spec.is_empty()
+                || !self.order_spec.is_empty()
+                || self.with_single_partition.is_some()))
+        .then(|| proto::subquery_expression::TableArgOptions {
+            partition_spec: self
+                .partition_spec
+                .iter()
+                .map(Expression::to_proto)
+                .collect(),
+            order_spec: self.order_spec.iter().map(sort_order_proto).collect(),
+            with_single_partition: self.with_single_partition,
+        });
+        let in_subquery_values = match self.subquery_type {
+            SubqueryType::In => self
+                .in_subquery_values
+                .iter()
+                .map(Expression::to_proto)
+                .collect(),
+            _ => Vec::new(),
+        };
+        let subquery = proto::SubqueryExpression {
+            plan_id: self.plan_id,
+            subquery_type,
+            table_arg_options,
+            in_subquery_values,
+        };
+        proto::Expression {
+            expr_type: Some(proto::expression::ExprType::SubqueryExpression(subquery)),
+            ..Default::default()
+        }
+    }
+}
+
+/// The sort order of an ordering expression of a table argument: an explicit sort order
+/// as it is, and another expression ascending, nulls first, as PySpark's `_sort_col`.
+fn sort_order_proto(expr: &Expression) -> proto::expression::SortOrder {
+    let wrapped = match expr.node() {
+        ExpressionNode::SortOrder(_) => expr.to_proto(),
+        _ => SortOrder::asc_nulls_first(expr.clone()).to_proto(),
+    };
+    match wrapped.expr_type {
+        Some(proto::expression::ExprType::SortOrder(sort)) => *sort,
+        // SortOrder::to_proto always yields a SortOrder expr_type.
+        _ => unreachable!("expected a SortOrder expression"),
+    }
 }
 
 /// A named argument of a function call. Mirrors
@@ -221,6 +390,7 @@ impl Expression {
             }
             // As `NamedArgumentExpression.__repr__`.
             ExpressionNode::NamedArgument(arg) => format!("{} => {}", arg.key, arg.value.render()),
+            ExpressionNode::Subquery(subquery) => subquery.render(),
         }
     }
 
@@ -292,6 +462,7 @@ impl Expression {
                 )),
                 ..Default::default()
             },
+            ExpressionNode::Subquery(subquery) => subquery.to_proto(),
         }
     }
 }

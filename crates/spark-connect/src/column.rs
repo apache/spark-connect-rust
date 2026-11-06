@@ -231,6 +231,23 @@ impl Column {
         }
     }
 
+    /// The IN subquery of whether this column is in the rows of `df`, of one column; of a
+    /// `struct(...)` of columns, whether they are in the rows of `df` of as many columns.
+    /// Mirrors `Column.isin(df)`.
+    pub fn isin_subquery(self, df: &crate::dataframe::DataFrame) -> Column {
+        let values = match self.expr.node() {
+            ExpressionNode::UnresolvedFunction(function) if function.name == "struct" => {
+                function.args.clone()
+            }
+            _ => vec![self.expr],
+        };
+        let mut subquery = df.subquery(crate::expression::SubqueryType::In);
+        subquery.in_subquery_values = values;
+        Column {
+            expr: ExpressionNode::Subquery(Box::new(subquery)).into(),
+        }
+    }
+
     /// Mirrors `pyspark.sql.column.Column.withField`: add or replace a field in
     /// a struct-typed column.
     pub fn with_field(self, field_name: &str, value: Column) -> Column {

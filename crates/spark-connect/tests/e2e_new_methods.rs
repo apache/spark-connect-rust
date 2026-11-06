@@ -142,14 +142,20 @@ fn exists_scalar_transpose_dedup_astable() {
     }
     let spark = session();
 
-    // scalar()/exists() on a single-value subquery-shaped DataFrame.
+    // scalar()/exists() are the subqueries of a DataFrame, as PySpark's.
     let one = spark.sql("SELECT 1 AS x").expect("sql one");
-    assert!(one.exists().expect("exists"));
-    let _v = spark
-        .sql("SELECT 42 AS x")
-        .expect("sql")
-        .scalar()
-        .expect("scalar");
+    let answer = spark.sql("SELECT 42 AS x").expect("sql");
+    let rows = spark
+        .range(1)
+        .expect("range")
+        .select(vec![one.exists().alias("e"), answer.scalar().alias("v")])
+        .collect()
+        .expect("subqueries");
+    assert_eq!(rows[0].get(0), Some(&spark_connect::row::Value::Bool(true)));
+    assert_eq!(
+        rows[0].get(1),
+        Some(&spark_connect::row::Value::Integer(42))
+    );
 
     // dropDuplicates on a subset.
     let df = numeric(&spark);

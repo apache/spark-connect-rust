@@ -100,13 +100,16 @@ fn dataframe_metadata_json_semantics() {
     assert!(json
         .iter()
         .all(|j| j.starts_with('{') && j.contains("id") && j.contains("name")));
-    // exists / scalar
-    assert!(df.exists().unwrap());
+    // exists / scalar: the EXISTS and scalar subqueries of a DataFrame, as PySpark's.
     let one = s.sql("SELECT 42 AS v").unwrap();
-    assert_eq!(
-        one.scalar().unwrap(),
-        Some(spark_connect::row::Value::Integer(42))
-    );
+    let row = &s
+        .range(1)
+        .unwrap()
+        .select(vec![df.exists(), one.scalar()])
+        .collect()
+        .unwrap()[0];
+    assert_eq!(row.get(0), Some(&spark_connect::row::Value::Bool(true)));
+    assert_eq!(row.get(1), Some(&spark_connect::row::Value::Integer(42)));
     // semantics (server-backed AnalyzePlan): two identical plans are equal
     assert!(df.same_semantics(&df4(&s)).unwrap());
     let _ = df.semantic_hash().unwrap();
@@ -237,5 +240,76 @@ fn day_time_interval_input_roundtrips() {
             .collect()
             .unwrap(),
         collected
+    );
+}
+
+/// The rows of `df`, as (i32, i32) pairs, sorted.
+fn int_pairs(df: &DataFrame) -> Vec<(i32, i32)> {
+    use spark_connect::row::Value;
+    let mut pairs: Vec<(i32, i32)> = df
+        .collect()
+        .unwrap()
+        .iter()
+        .map(|row| match (row.get(0), row.get(1)) {
+            (Some(Value::Integer(a)), Some(Value::Integer(b))) => (*a, *b),
+            other => panic!("unexpected row {other:?}"),
+        })
+        .collect();
+    pairs.sort();
+    pairs
+}
+
+#[test]
+fn subqueries_return_the_rows_of_pyspark() {
+    // As PySpark's DataFrame.scalar(), DataFrame.exists() and Column.isin(df): scalar,
+    // correlated EXISTS and IN subqueries, also nested and in other operators.
+    if !should_run() {
+        return;
+    }
+    let s = session();
+    let t1 = s
+        .sql("SELECT * FROM VALUES (1, 2), (3, 4) AS t1(a, b)")
+        .unwrap()
+        .alias("t1");
+    let t2 = s
+        .sql("SELECT * FROM VALUES (1, 5), (5, 6), (3, 7) AS t2(a, c)")
+        .unwrap()
+        .alias("t2");
+
+    let largest = t2.select(vec![f::max(col("c"))]).scalar();
+    let with_largest = t1.select(vec![col("a"), largest.clone().alias("m")]);
+    assert_eq!(int_pairs(&with_largest), vec![(1, 7), (3, 7)]);
+    // A DataFrame with a subquery is the base, and the subquery, of others.
+    assert_eq!(
+        int_pairs(&with_largest.filter(col("m").gt(col("a")))),
+        vec![(1, 7), (3, 7)]
+    );
+    assert_eq!(
+        int_pairs(&t2.filter(col("a").isin_subquery(&with_largest.select(vec![col("a")])))),
+        vec![(1, 5), (3, 7)]
+    );
+
+    let correlated = t2.filter(col("t2.a").eq(col("t1.a")));
+    let largest_of_a = correlated.select(vec![f::max(col("c"))]).scalar();
+    assert_eq!(
+        int_pairs(&t1.select(vec![col("a"), largest_of_a.alias("m")])),
+        vec![(1, 5), (3, 7)]
+    );
+    assert_eq!(
+        int_pairs(&t1.filter(correlated.exists())),
+        vec![(1, 2), (3, 4)]
+    );
+    assert_eq!(int_pairs(&t1.filter(correlated.exists().not())), vec![]);
+
+    let smallest = t2.select(vec![f::min(col("c"))]).scalar();
+    let above_smallest = t2.filter(col("c").gt(smallest)).select(vec![col("a")]);
+    assert_eq!(
+        int_pairs(&t1.filter(col("a").isin_subquery(&above_smallest))),
+        vec![(3, 4)]
+    );
+    let pairs = s.sql("SELECT 1 AS x, 2 AS y").unwrap();
+    assert_eq!(
+        int_pairs(&t1.filter(f::r#struct(vec![col("a"), col("b")]).isin_subquery(&pairs))),
+        vec![(1, 2)]
     );
 }

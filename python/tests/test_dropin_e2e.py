@@ -575,6 +575,45 @@ def test_reader_schema_keeps_field_metadata(session, tmp_path, ddl):
     assert stream.schema.fields[0].metadata == {"comment": "the key"}
 
 
+def test_subqueries_and_table_arguments_return_the_rows_of_pyspark(session):
+    # As PySpark's DataFrame.scalar(), DataFrame.exists(), Column.isin(df) and asTable():
+    # scalar, correlated and IN subqueries, and the rows of a DataFrame as a UDTF argument.
+    from pyspark.errors import IllegalArgumentException
+
+    t1 = session.createDataFrame([(1, 2), (3, 4)], "a int, b int").alias("t1")
+    t2 = session.createDataFrame([(1, 5), (5, 6), (3, 7)], "a int, c int").alias("t2")
+    largest = t2.select(F.max("c")).scalar()
+    assert sorted(t1.select("a", largest.alias("m")).collect()) == [Row(a=1, m=7), Row(a=3, m=7)]
+    correlated = t2.where(F.col("t2.a") == F.col("t1.a").outer())
+    assert sorted(t1.select("a", correlated.select(F.max("c")).scalar().alias("m")).collect()) == [
+        Row(a=1, m=5), Row(a=3, m=7)
+    ]
+    assert t1.where(~correlated.exists()).collect() == []
+    above = t2.where(F.col("c") > t2.select(F.min("c")).scalar()).select("a")
+    assert t1.where(F.col("a").isin(above)).collect() == [Row(a=3, b=4)]
+    pairs = session.createDataFrame([(1, 2)], "x int, y int")
+    assert t1.where(F.struct("a", "b").isin(pairs)).collect() == [Row(a=1, b=2)]
+
+    @F.udtf(returnType="id bigint, n int")
+    class Numbered:
+        def __init__(self):
+            self.n = 0
+
+        def eval(self, row):
+            self.n += 1
+            yield row["id"], self.n
+
+    table = session.range(4).asTable().withSinglePartition().orderBy(F.col("id").desc())
+    assert sorted(Numbered(table).collect()) == [
+        Row(id=0, n=4), Row(id=1, n=3), Row(id=2, n=2), Row(id=3, n=1)
+    ]
+    assert sorted(Numbered(row=session.range(2).asTable()).collect()) == [
+        Row(id=0, n=1), Row(id=1, n=1)
+    ]
+    with pytest.raises(IllegalArgumentException, match="before orderBy"):
+        session.range(1).asTable().orderBy("id")
+
+
 def test_grouped_map_functions_take_iterators_by_their_type_hints(session):
     from typing import Iterator, Tuple
 

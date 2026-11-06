@@ -472,7 +472,18 @@ impl PlanIds {
 
     /// The plan ID of `node`, assigned the first time it is serialized.
     pub(crate) fn id_of(&self, node: &Arc<LogicalPlan>) -> i64 {
-        let key = Arc::as_ptr(node) as usize;
+        self.id_of_key(node, Arc::as_ptr(node) as usize)
+    }
+
+    /// The plan ID of the relation of `node` within the `WithRelations` that sends it with the
+    /// plans of its subqueries, as PySpark's `_root_plan_id`: `id_of(node)` is that of the
+    /// `WithRelations`, as PySpark's `_plan_id`. A node is aligned, so its address with the
+    /// low bit set is the key of no other node.
+    pub(crate) fn root_id_of(&self, node: &Arc<LogicalPlan>) -> i64 {
+        self.id_of_key(node, Arc::as_ptr(node) as usize | 1)
+    }
+
+    fn id_of_key(&self, node: &Arc<LogicalPlan>, key: usize) -> i64 {
         let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
         // The entry's `Weak` keeps its allocation from being freed, so a live node at this
         // address is the node the entry was made for.
@@ -503,17 +514,100 @@ pub(crate) fn relation_with_ids(node: &Arc<LogicalPlan>, ids: &PlanIds) -> proto
 
 /// Serialize a child node, with its stable plan ID when `ids` is given.
 fn relation_of(node: &Arc<LogicalPlan>, ids: Option<&PlanIds>) -> proto::Relation {
-    let mut relation = node.to_proto_with(ids);
-    if let Some(ids) = ids {
-        relation.common.get_or_insert_with(Default::default).plan_id = Some(ids.id_of(node));
+    relation_with_references(node, Some(node), ids)
+}
+
+thread_local! {
+    /// For each relation being serialized, innermost last, the plans that the subquery
+    /// expressions of its own expressions refer to.
+    static SUBQUERY_REFERENCES: std::cell::RefCell<Vec<Vec<Arc<LogicalPlan>>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Record that a subquery expression being serialized refers to `plan`, which the relation
+/// that contains the expression sends in its `WithRelations`.
+pub(crate) fn refer_to(plan: &Arc<LogicalPlan>) {
+    SUBQUERY_REFERENCES.with(|frames| {
+        if let Some(frame) = frames.borrow_mut().last_mut() {
+            frame.push(Arc::clone(plan));
+        }
+    });
+}
+
+/// The relation of `node`, and the plans that the subqueries of its own expressions refer
+/// to; its children collect those of theirs as they are serialized.
+fn relation_and_references(
+    node: &LogicalPlan,
+    ids: Option<&PlanIds>,
+) -> (proto::Relation, Vec<Arc<LogicalPlan>>) {
+    struct Frame;
+    impl Drop for Frame {
+        fn drop(&mut self) {
+            SUBQUERY_REFERENCES.with(|frames| {
+                frames.borrow_mut().pop();
+            });
+        }
     }
-    relation
+    SUBQUERY_REFERENCES.with(|frames| frames.borrow_mut().push(Vec::new()));
+    let _frame = Frame;
+    let relation = node.to_proto_with(ids);
+    let references = SUBQUERY_REFERENCES.with(|frames| {
+        frames
+            .borrow_mut()
+            .last_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
+    });
+    (relation, references)
+}
+
+/// The relation of `node`, with the stable plan ID of `shared` when `ids` is given. As
+/// PySpark's `LogicalPlan._with_relations`, a node whose expressions have subqueries is sent
+/// in a `WithRelations` with the plans that they refer to:
+///
+/// ```text
+/// with_relations [plan ID of the node]
+///     root: the relation of the node [its root plan ID]
+///     references: the relation of each plan [its plan ID]
+/// ```
+fn relation_with_references(
+    node: &LogicalPlan,
+    shared: Option<&Arc<LogicalPlan>>,
+    ids: Option<&PlanIds>,
+) -> proto::Relation {
+    let (mut relation, references) = relation_and_references(node, ids);
+    let plan_ids = ids.zip(shared);
+    if references.is_empty() {
+        if let Some((ids, shared)) = plan_ids {
+            relation.common.get_or_insert_with(Default::default).plan_id = Some(ids.id_of(shared));
+        }
+        return relation;
+    }
+    if let Some((ids, shared)) = plan_ids {
+        relation.common.get_or_insert_with(Default::default).plan_id = Some(ids.root_id_of(shared));
+    }
+    let with_relations = proto::WithRelations {
+        root: Some(Box::new(relation)),
+        references: references
+            .iter()
+            .map(|reference| relation_of(reference, ids))
+            .collect(),
+    };
+    proto::Relation {
+        common: Some(proto::RelationCommon {
+            plan_id: plan_ids.map(|(ids, shared)| ids.id_of(shared)),
+            ..Default::default()
+        }),
+        rel_type: Some(proto::relation::RelType::WithRelations(Box::new(
+            with_relations,
+        ))),
+    }
 }
 
 impl LogicalPlan {
     /// Convert this logical plan to a `spark.connect.Relation` protobuf, without plan IDs.
     pub fn to_proto(&self) -> proto::Relation {
-        self.to_proto_with(None)
+        relation_with_references(self, None, None)
     }
 
     fn to_proto_with(&self, plan_ids: Option<&PlanIds>) -> proto::Relation {

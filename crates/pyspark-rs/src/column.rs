@@ -631,6 +631,17 @@ impl PyColumn {
     }
     #[pyo3(signature = (*cols))]
     fn isin(&self, py: Python<'_>, cols: Vec<Py<PyAny>>) -> PyResult<PyColumn> {
+        // As pyspark's, a single DataFrame makes an IN subquery of it.
+        if let [only] = cols.as_slice() {
+            if let Ok(df) = only
+                .bind(py)
+                .extract::<PyRef<'_, crate::dataframe::PyDataFrame>>()
+            {
+                return Ok(PyColumn::new(
+                    self.column.clone().isin_subquery(&df.dataframe),
+                ));
+            }
+        }
         // pyspark's Column.isin unpacks a single list/tuple/set argument:
         // col.isin([1, 2]) == col.isin(1, 2). pandas-on-Spark's Series.isin relies on
         // this (it passes a single list of lit(..) columns).
