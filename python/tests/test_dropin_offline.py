@@ -5232,6 +5232,140 @@ def test_exact_string_subclass_uses_generic_conversion():
             "data_type1": "StructType", "data_type2": data_type}
 
 
+# --------------------------------------------------------------------------- map functions
+
+
+def _group_map_functions():
+    from typing import Iterator, Tuple
+
+    import numpy as np
+    import pandas as pd
+    import pyarrow as pa
+
+    def pandas_iter(batches: Iterator[pd.DataFrame]) -> Iterator[pd.DataFrame]:
+        yield from batches
+
+    def pandas_iter_key(
+        key: Tuple[np.int64], batches: Iterator[pd.DataFrame]
+    ) -> Iterator[pd.DataFrame]:
+        yield from batches
+
+    def pandas_frame(frame: pd.DataFrame) -> pd.DataFrame:
+        return frame
+
+    def arrow_iter(batches: Iterator[pa.RecordBatch]) -> Iterator[pa.RecordBatch]:
+        yield from batches
+
+    def arrow_iter_key(
+        key: Tuple[pa.Scalar, ...], batches: Iterator[pa.RecordBatch]
+    ) -> Iterator[pa.RecordBatch]:
+        yield from batches
+
+    def arrow_table(table: pa.Table) -> pa.Table:
+        return table
+
+    def plain(data):
+        return data
+
+    return {f.__name__: f for f in (
+        pandas_iter, pandas_iter_key, pandas_frame, arrow_iter, arrow_iter_key, arrow_table, plain)}
+
+
+def _sent_group_map_eval_type(request):
+    """The eval type of the function in a captured ExecutePlanRequest: plan=3 -> root=1 ->
+    group_map=31 -> func=3 -> python_udf=4 -> eval_type=2."""
+    root = parse_message(parse_message(parse_message(request)[3][0])[1][0])
+    udf = parse_message(parse_message(root[31][0])[3][0])
+    return parse_message(udf[4][0])[2][0]
+
+
+_ID_SCHEMA = T.StructType([T.StructField("id", T.LongType())])
+
+
+@pytest.mark.parametrize("method,name,eval_type", [
+    # SQL_GROUPED_MAP_PANDAS_ITER_UDF and SQL_GROUPED_MAP_PANDAS_UDF.
+    ("applyInPandas", "pandas_iter", 216),
+    ("applyInPandas", "pandas_iter_key", 216),
+    ("applyInPandas", "pandas_frame", 201),
+    ("applyInPandas", "plain", 201),
+    # SQL_GROUPED_MAP_ARROW_ITER_UDF and SQL_GROUPED_MAP_ARROW_UDF.
+    ("applyInArrow", "arrow_iter", 215),
+    ("applyInArrow", "arrow_iter_key", 215),
+    ("applyInArrow", "arrow_table", 209),
+    ("applyInArrow", "plain", 209),
+])
+def test_grouped_map_functions_infer_their_eval_type_as_pyspark(mock_connect, method, name, eval_type):
+    spark, service = mock_connect
+    grouped = spark.range(3).groupBy("id")
+    getattr(grouped, method)(_group_map_functions()[name], _ID_SCHEMA).collect()
+    assert _sent_group_map_eval_type(service.execute_requests[-1]) == eval_type
+
+
+@pytest.mark.parametrize("method,warning,eval_type", [
+    ("applyInPandas", "Cannot infer the eval type from type hints.", 201),
+    # PySpark 4.3.0 warns too, then raises UnboundLocalError, as its eval type is unbound;
+    # here the function keeps the default eval type, as for applyInPandas.
+    ("applyInArrow", "Cannot infer the eval type from type hints. ", 209),
+])
+def test_grouped_map_functions_warn_when_their_type_hints_cannot_be_inferred(
+    mock_connect, method, warning, eval_type
+):
+    import warnings
+
+    def partial(key, data: object) -> object:
+        return data
+
+    spark, service = mock_connect
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        getattr(spark.range(3).groupBy("id"), method)(partial, _ID_SCHEMA).collect()
+    assert [str(w.message) for w in caught if w.category is UserWarning] == [warning]
+    assert _sent_group_map_eval_type(service.execute_requests[-1]) == eval_type
+
+
+@pytest.mark.parametrize("build,detail", [
+    (lambda df: df.groupBy("id").applyInPandas(lambda a, b, c: a, _ID_SCHEMA),
+     "pandas_udfs with function type GROUPED_MAP or the function in groupby.applyInPandas "
+     "must take either one argument (data) or two arguments (key, data)."),
+    (lambda df: df.groupBy("id").applyInArrow(lambda a, b, c: a, _ID_SCHEMA),
+     "the function in groupby.applyInArrow must take either one argument (data) or two "
+     "arguments (key, data)."),
+    (lambda df: df.groupBy("id").cogroup(df.groupBy("id")).applyInPandas(lambda a: a, _ID_SCHEMA),
+     "the function in cogroup.applyInPandas must take either two arguments (left, right) or "
+     "three arguments (key, left, right)."),
+    (lambda df: df.groupBy("id").cogroup(df.groupBy("id")).applyInArrow(lambda a: a, _ID_SCHEMA),
+     "the function in cogroup.applyInArrow must take either two arguments (left, right) or "
+     "three arguments (key, left, right)."),
+])
+def test_map_functions_validate_their_arguments_as_pyspark(mock_connect, build, detail):
+    from pyspark.errors import PySparkValueError
+
+    spark, service = mock_connect
+    with pytest.raises(PySparkValueError) as error:
+        build(spark.range(3))
+    assert error.value.getCondition() == "INVALID_PANDAS_UDF"
+    assert error.value.getMessageParameters() == {"detail": detail}
+    # Validated before the input columns are analyzed, as in PySpark.
+    assert service.calls == 0
+
+
+@pytest.mark.parametrize("build", [
+    lambda df: df.mapInPandas(1, _ID_SCHEMA),
+    lambda df: df.mapInArrow(1, _ID_SCHEMA),
+    lambda df: df.groupBy("id").applyInPandas(1, _ID_SCHEMA),
+    lambda df: df.groupBy("id").applyInPandasWithState(1, _ID_SCHEMA, _ID_SCHEMA, "append", "NoTimeout"),
+])
+def test_map_functions_reject_what_is_not_callable_as_pyspark(mock_connect, build):
+    import warnings
+
+    spark, service = mock_connect
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(TypeError, match="^unsupported callable$"):
+            build(spark.range(3))
+    assert service.calls == 0
+
+
 # --------------------------------------------------------------------------- printSchema
 
 
