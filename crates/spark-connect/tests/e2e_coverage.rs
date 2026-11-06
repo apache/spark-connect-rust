@@ -681,7 +681,7 @@ fn dataframe_more_surface() {
         .unwrap();
     let _ = df.to_df(vec!["a", "b", "c"]).collect().unwrap();
     let _ = df.sample(0.5, Some(1)).count().unwrap();
-    let _ = df.col_regex("`.*`").collect().unwrap();
+    let _ = df.select(vec![df.col_regex("`.*`")]).collect().unwrap();
 
     // cache / persist / unpersist round-trip.
     let cached = df.cache().unwrap();
