@@ -1896,6 +1896,8 @@ def test_pandas_timestamp_ipc_preserves_every_microsecond(protocol, monkeypatch,
     monkeypatch.setattr(pd.DataFrame, "astype", no_rows)
     with _arrow_input_service(protocol, capture_tables=True, **{"spark.sql.session.timeZone": zone}) as (spark, state):
         result = spark.createDataFrame(frame, schema)
+        # Aware columns carry their zone: only the importer's settings are read.
+        assert len(state["config_requests"]) == 1
         assert not result.isLocal()
         result.toArrow()
         assert state["column_names"] == schema.names
@@ -1921,6 +1923,9 @@ def test_pandas_naive_timestamp_utc_ipc(protocol, monkeypatch):
     monkeypatch.setattr(pd.DataFrame, "astype", lambda *a, **k: pytest.fail("row conversion"))
     with _arrow_input_service(protocol, capture_tables=True) as (spark, state):
         result = spark.createDataFrame(frame, schema)
+        # A naive column reads the session time zone, then the importer its settings.
+        assert state["config_requests"][0] == ("get", ["spark.sql.session.timeZone"])
+        assert len(state["config_requests"]) == 2
         assert not result.isLocal()
         result.toArrow()
         assert state["column_names"] == schema.names
