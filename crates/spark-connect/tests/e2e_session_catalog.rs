@@ -186,3 +186,109 @@ fn session_progress_handlers() {
     spark.remove_progress_handler(id);
     spark.clear_progress_handlers();
 }
+
+/// A server error carries its kind, condition, parameters, SQL state, stack trace and query
+/// contexts, as the reference client reads them.
+#[test]
+fn server_errors_carry_their_condition_and_details() {
+    use spark_connect::SparkErrorKind;
+    if !should_run() {
+        return;
+    }
+    let spark = session();
+    // Raised at `sql()`, or at the action where `sql()` does not run the statement.
+    let err = match spark.sql("SELEC 1") {
+        Ok(df) => df.collect().expect_err("a syntax error"),
+        Err(err) => err,
+    };
+    assert_eq!(err.kind, SparkErrorKind::Parse);
+    assert_eq!(err.get_condition().as_deref(), Some("PARSE_SYNTAX_ERROR"));
+    assert_eq!(err.get_sql_state().as_deref(), Some("42601"));
+    assert_eq!(err.params.get("error").map(String::as_str), Some("'SELEC'"));
+    // The server's message, which names the condition once.
+    assert_eq!(err.to_string().matches("[PARSE_SYNTAX_ERROR]").count(), 1);
+    assert!(err
+        .get_stacktrace()
+        .unwrap()
+        .starts_with("org.apache.spark.sql.catalyst.parser.ParseException"));
+    // spark.sql.connect.serverStacktrace.enabled is true by default.
+    assert!(err.server.as_ref().unwrap().display_stacktrace);
+
+    let err = spark
+        .sql("SELECT 1/0")
+        .expect("a query")
+        .collect()
+        .expect_err("a division by zero");
+    assert_eq!(err.kind, SparkErrorKind::Arithmetic);
+    assert_eq!(err.get_condition().as_deref(), Some("DIVIDE_BY_ZERO"));
+    let contexts = err.get_query_context();
+    assert_eq!(contexts.len(), 1);
+    assert_eq!(contexts[0].fragment(), "1/0");
+}
+
+/// As pyspark, `sql()` sends the statement at once: a command takes effect without an
+/// action, its result is the local relation the server returned, and a statement that
+/// does not parse fails at `sql()`.
+#[test]
+fn sql_runs_statements_eagerly() {
+    if !should_run() {
+        return;
+    }
+    // A session of its own, so that the view and the setting stay local to this test.
+    let spark = session().new_session();
+    spark
+        .sql("CREATE OR REPLACE TEMP VIEW eager_sql_v AS SELECT 1 AS x")
+        .expect("create view");
+    let rows = spark.table("eager_sql_v").unwrap().collect().unwrap();
+    assert_eq!(rows.len(), 1);
+    spark
+        .sql("SET spark.sql.shuffle.partitions=7")
+        .expect("set");
+    assert_eq!(
+        spark.conf().get("spark.sql.shuffle.partitions").unwrap(),
+        Some("7".to_string())
+    );
+    let databases = spark.sql("SHOW DATABASES").expect("show databases");
+    assert!(databases.is_local());
+    assert!(!databases.collect().unwrap().is_empty());
+    let query = spark.sql("SELECT 1 AS x").expect("query");
+    assert!(!query.is_local());
+    assert_eq!(query.collect().unwrap().len(), 1);
+    assert!(spark.sql("SELEC 1").is_err());
+    let _ = spark.stop();
+}
+
+/// As pyspark's `sql()` with DataFrames as keyword arguments: each DataFrame is sent with
+/// the statement as a reference, which the server resolves the name in the query to, also
+/// when the query names it twice, and a command can read one too.
+#[test]
+fn sql_resolves_the_dataframes_that_the_query_names() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::row::Value;
+    use std::collections::HashMap;
+
+    let spark = session().new_session();
+    let ids = spark.range(3).expect("range");
+    let df = spark
+        .sql_with_references(
+            "SELECT count(*) AS n FROM refs_ids a JOIN refs_ids b USING (id)",
+            Vec::new(),
+            HashMap::new(),
+            vec![(ids.clone(), "refs_ids".to_string())],
+        )
+        .expect("query");
+    let rows = df.collect().expect("collect");
+    assert_eq!(rows[0].get(0), Some(&Value::Long(3)));
+    let shown = spark
+        .sql_with_references(
+            "SELECT * FROM refs_ids WHERE id > 0",
+            Vec::new(),
+            HashMap::new(),
+            vec![(ids, "refs_ids".to_string())],
+        )
+        .expect("filter");
+    assert_eq!(shown.collect().expect("collect").len(), 2);
+    let _ = spark.stop();
+}

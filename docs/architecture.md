@@ -36,7 +36,7 @@ flowchart TD
         ARROW["Arrow result decode"]
     end
 
-    SERVER["Spark Connect server (Spark 4.2+, :15002)"]
+    SERVER["Spark Connect server (Spark 4.3+, :15002)"]
     OUT["Rows / Arrow - optionally DataFusion or Polars (Rust); pandas (Python)"]
 
     PY --> SKIN --> EXT --> API
@@ -79,6 +79,13 @@ flowchart LR
 When you call an action such as `count()` or `show()`, the lazily-built plan is
 serialized and sent to the server; results stream back as Arrow batches.
 
+Day-time intervals use signed 64-bit microseconds in Rust (`Value::DayTimeInterval`)
+and Python `datetime.timedelta` values. `createDataFrame` supports inferred and
+explicit interval schemas, including nested structs, lists, maps, and nulls.
+Collected rows can be passed back with their schema. As in PySpark, an `int` or a
+`float` for an interval field is taken as microseconds, and a value outside the signed
+64-bit microsecond range is an error.
+
 ```mermaid
 sequenceDiagram
     participant App as Your code (Rust or pyspark)
@@ -98,9 +105,30 @@ sequenceDiagram
 ```
 
 Transformations are **lazy** - they only build up the plan. Only an *action*
-triggers `ExecutePlan`. If the response stream breaks mid-flight, the core's
-reattachable-execute iterator resumes from the last response it saw, so long
-results survive transient disconnects.
+triggers `ExecutePlan`. If the response stream breaks mid-flight, or the server
+ends it before the result is complete (as it does after
+`spark.connect.execute.reattachable.senderMaxStreamDuration` or
+`senderMaxStreamSize`), the core's reattachable-execute iterator resumes from the
+last response it saw, so long results survive transient disconnects. Like the
+reference client, it releases each response it has read, and the whole execution
+once the result is complete, so the server does not keep them.
+
+`spark.sql()` is the exception, as in the reference client: it sends the
+statement at once. A command such as `CREATE VIEW` or `SET` takes effect there,
+and its DataFrame holds the result the server returned; a statement that does not
+parse or resolve fails there. A query's DataFrame still runs at an action.
+
+Each plan node gets its plan ID once, the first time it is sent, and keeps it, as
+in the reference client. Re-executing a DataFrame therefore sends the same
+relation, and a DataFrame built on another keeps that input's plan IDs, so the
+server's per-session plan cache (`spark.connect.session.planCache.*`) can reuse
+the plans it already resolved instead of resolving them again. As with the
+reference client, a re-executed DataFrame can then use its earlier resolution.
+A DataFrame from `spark.read.parquet(path)`, for example, keeps the file listing
+it resolved: once the files under `path` are overwritten, running it again fails
+with `FAILED_READ_FILE.FILE_NOT_EXIST`, while a new `spark.read.parquet(path)`
+reads the new files. Setting `spark.connect.session.planCache.enabled` to `false`
+turns the cache off, on the server or for a session with `spark.conf.set`.
 
 ### Python Arrow table handoff
 
@@ -110,6 +138,35 @@ network decoding, sliced validity bitmaps, and pandas conversion may still copy.
 Batch schema consistency is validated before export. Field names or timezones
 containing NUL use IPC over the collected batches, without another RPC. Empty
 batch vectors retain the empty-schema behavior.
+
+`createDataFrame(pyarrow_table)` uses the reverse boundary: Spark's schema and
+timestamp conversion helpers normalize the table, then arrow-rs imports its
+`RecordBatchReader` through the C Stream interface. The Rust core serializes
+those batches to IPC for the local relation sent to Spark. No Python rows are
+materialized; casts, buffer alignment, and IPC serialization may still copy.
+Empty tables require an explicit schema, matching PySpark Connect.
+Pandas inputs with only NumPy `int64` or pandas nullable `Int64` columns also
+use this importer, preserving integer precision and null masks without Python
+rows. Small frames (fewer than 1,000 rows) with only NumPy columns retain the
+row path to avoid the configuration RPC of the importer; nullable `Int64` columns
+use Arrow at any size.
+This initial path accepts inferred schemas, complete string column names,
+and explicit `StructType` schemas whose fields are all `LongType`. Other dtypes,
+DDL/atomic schemas, schema conversions, NUL names, and duplicate/non-string input names
+retain the existing row conversion path. `verifySchema` remains ignored for
+pandas Arrow input, matching Spark Connect.
+Pandas frames of at least 100,000 rows whose columns are all NumPy `float64`,
+with an explicit `StructType` of `DoubleType` fields, are encoded to Arrow IPC
+from their columns, with pandas' missing values as nulls, and sent inline as the
+row path sends them, without the importer's configuration RPC.
+Inputs at or above `spark.sql.session.localRelationCacheThreshold` are serialized
+into independent IPC streams and uploaded as session-scoped cache artifacts.
+The plan carries `ChunkedCachedLocalRelation` hashes instead of embedding the
+entire payload. Spark infers omitted schemas from the Arrow streams; explicit
+schemas travel in the local relation or a separate schema artifact.
+Chunk sizes, upload batch sizes, and the total relation size
+limit follow the server's local-relation settings; artifact RPC messages use
+32 KiB pieces, with SHA-256 deduplication and CRC checks.
 
 ## Two front-ends, one core
 

@@ -21,6 +21,7 @@ use crate::udf::PythonUDFPayload;
 /// DataStreamReader for reading streaming data from various sources.
 ///
 /// Mirrors `pyspark.sql.connect.streaming.DataStreamReader`.
+#[derive(Clone)]
 pub struct DataStreamReader {
     session: SparkSession,
     format: Option<String>,
@@ -69,6 +70,21 @@ impl DataStreamReader {
     pub fn name(mut self, source_name: &str) -> Self {
         self.source_name = Some(source_name.to_string());
         self
+    }
+
+    /// The configured source format, if any.
+    pub fn get_format(&self) -> Option<&str> {
+        self.format.as_deref()
+    }
+
+    /// The configured schema (a DDL/JSON string; empty when unset).
+    pub fn get_schema(&self) -> &str {
+        &self.schema
+    }
+
+    /// The configured read options.
+    pub fn get_options(&self) -> &HashMap<String, String> {
+        &self.options
     }
 
     /// Load streaming data from the specified path(s).
@@ -237,11 +253,29 @@ pub enum Trigger {
     AvailableNow,
     /// Continuous processing with checkpoint interval.
     Continuous(String),
+    /// Real-time processing, of batches of the duration (e.g., "5 seconds"), as PySpark's
+    /// `trigger(realTime=...)`.
+    RealTime(String),
+}
+
+impl Trigger {
+    /// The trigger of a `WriteStreamOperationStart`.
+    pub(crate) fn to_proto(&self) -> proto::write_stream_operation_start::Trigger {
+        use proto::write_stream_operation_start::Trigger as Proto;
+        match self {
+            Trigger::ProcessingTime(interval) => Proto::ProcessingTimeInterval(interval.clone()),
+            Trigger::Once => Proto::Once(true),
+            Trigger::AvailableNow => Proto::AvailableNow(true),
+            Trigger::Continuous(interval) => Proto::ContinuousCheckpointInterval(interval.clone()),
+            Trigger::RealTime(duration) => Proto::RealTimeBatchDuration(duration.clone()),
+        }
+    }
 }
 
 /// DataStreamWriter for writing streaming data to various sinks.
 ///
 /// Mirrors `pyspark.sql.connect.streaming.DataStreamWriter`.
+#[derive(Clone)]
 pub struct DataStreamWriter {
     session: SparkSession,
     plan: Arc<LogicalPlan>,
@@ -358,7 +392,10 @@ impl DataStreamWriter {
     /// Internal method to build and execute the write stream command.
     fn _start_internal(self) -> Result<StreamingQuery> {
         let mut write_op = proto::WriteStreamOperationStart::default();
-        write_op.input = Some(self.plan.to_proto());
+        write_op.input = Some(crate::plan::relation_with_ids(
+            &self.plan,
+            self.session.plan_ids(),
+        ));
 
         if let Some(fmt) = &self.format {
             write_op.format = fmt.clone();
@@ -376,33 +413,7 @@ impl DataStreamWriter {
             write_op.query_name = name.clone();
         }
 
-        if let Some(trigger) = &self.trigger {
-            match trigger {
-                Trigger::ProcessingTime(interval) => {
-                    write_op.trigger = Some(
-                        proto::write_stream_operation_start::Trigger::ProcessingTimeInterval(
-                            interval.clone(),
-                        ),
-                    );
-                }
-                Trigger::Once => {
-                    write_op.trigger =
-                        Some(proto::write_stream_operation_start::Trigger::Once(true));
-                }
-                Trigger::AvailableNow => {
-                    write_op.trigger = Some(
-                        proto::write_stream_operation_start::Trigger::AvailableNow(true),
-                    );
-                }
-                Trigger::Continuous(interval) => {
-                    write_op.trigger = Some(
-                        proto::write_stream_operation_start::Trigger::ContinuousCheckpointInterval(
-                            interval.clone(),
-                        ),
-                    );
-                }
-            }
-        }
+        write_op.trigger = self.trigger.as_ref().map(Trigger::to_proto);
 
         if let Some(path) = &self.path {
             // A memory/console/foreach sink has no path; only set the destination for a
@@ -437,31 +448,18 @@ impl DataStreamWriter {
             write_op.foreach_writer = Some(foreach_func);
         }
 
-        // Build the plan with the WriteStreamOperationStart command
-        let mut plan = proto::Plan::default();
-        let mut cmd = proto::Command::default();
-        cmd.command_type = Some(proto::command::CommandType::WriteStreamOperationStart(
-            write_op,
-        ));
-        plan.op_type = Some(proto::plan::OpType::Command(cmd));
-
-        // Create ExecutePlanRequest
-        let request = proto::ExecutePlanRequest {
-            session_id: self.session.client().session_id().to_string(),
-            user_context: Some(proto::UserContext::default()),
-            plan: Some(plan),
-            ..Default::default()
-        };
-
-        // Execute the plan and read the WriteStreamOperationStartResult, which carries
-        // the server-assigned query id / run id / name.
-        let mut response_stream = block_on(self.session.client().execute_plan(request))?;
+        // Run the WriteStreamOperationStart command, as other commands are, on the
+        // reattachable path with the session's tags, so that an error carries the operation
+        // id of the request, as in PySpark. Its WriteStreamOperationStartResult carries the
+        // server-assigned query id / run id / name.
+        let responses = crate::dataframe::execute_command_collect(
+            &self.session,
+            proto::command::CommandType::WriteStreamOperationStart(write_op),
+        )?;
         let mut query_id = String::new();
         let mut run_id = String::new();
         let mut name = self.query_name.clone();
-        while let Some(resp) =
-            block_on(response_stream.message()).map_err(SparkError::from_grpc_status)?
-        {
+        for resp in responses {
             if let Some(
                 proto::execute_plan_response::ResponseType::WriteStreamOperationStartResult(res),
             ) = resp.response_type
@@ -1287,6 +1285,31 @@ mod tests {
         let trigger = Trigger::Continuous("1 minute".to_string());
         let writer = writer.trigger(trigger);
         assert!(writer.trigger.is_some());
+    }
+
+    #[test]
+    fn triggers_are_sent_as_pyspark_sends_them() {
+        use proto::write_stream_operation_start::Trigger as Proto;
+        let cases = [
+            (
+                Trigger::ProcessingTime("1 second".to_string()),
+                Proto::ProcessingTimeInterval("1 second".to_string()),
+            ),
+            (Trigger::Once, Proto::Once(true)),
+            (Trigger::AvailableNow, Proto::AvailableNow(true)),
+            (
+                Trigger::Continuous("1 minute".to_string()),
+                Proto::ContinuousCheckpointInterval("1 minute".to_string()),
+            ),
+            // The real_time_batch_duration of PySpark's `trigger(realTime=...)`.
+            (
+                Trigger::RealTime("5 seconds".to_string()),
+                Proto::RealTimeBatchDuration("5 seconds".to_string()),
+            ),
+        ];
+        for (trigger, sent) in cases {
+            assert_eq!(trigger.to_proto(), sent);
+        }
     }
 
     #[test]

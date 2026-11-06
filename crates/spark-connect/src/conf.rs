@@ -43,6 +43,12 @@ impl RuntimeConf {
         block_on(self.client.set_config(key, value))
     }
 
+    /// Set several configuration values in one request, ignoring the failures to set them,
+    /// such as of static configurations, when `silent`. Mirrors `RuntimeConf._set_all`.
+    pub fn set_all(&self, pairs: &[(String, String)], silent: bool) -> Result<()> {
+        block_on(self.client.set_configs(pairs, silent))
+    }
+
     /// Get a configuration value by key.
     ///
     /// Returns `Ok(None)` if the key does not exist on the server.
@@ -60,6 +66,12 @@ impl RuntimeConf {
     pub fn get(&self, key: &str) -> Result<Option<String>> {
         let results = block_on(self.client.get_configs(&[key]))?;
         Ok(results.into_iter().next().flatten())
+    }
+
+    /// Get the values of several configuration keys in one request, in the order of `keys`,
+    /// with `None` for a key that does not exist on the server.
+    pub fn get_many(&self, keys: &[&str]) -> Result<Vec<Option<String>>> {
+        block_on(self.client.get_configs(keys))
     }
 
     /// Get a configuration value, returning `default` when the key is unset — instead of

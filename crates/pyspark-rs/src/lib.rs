@@ -33,16 +33,21 @@ mod errors;
 mod eval_type;
 mod functions;
 mod group;
+mod infer;
 mod ml;
 mod observation;
+mod origin;
+mod pandas_input;
 mod pipelines;
 mod profiler;
 mod pyarrow_export;
+mod pyarrow_import;
 mod readwriter;
 mod resource;
 mod row;
 mod session;
 mod stat;
+mod stat_arguments;
 mod storagelevel;
 mod streaming;
 mod tablearg;
@@ -72,7 +77,7 @@ use resource::{
     PyExecutorResourceRequests, PyResourceProfile, PyResourceProfileBuilder, PyTaskResourceRequests,
 };
 use row::PyRow;
-use session::{PySparkSession, PySparkSessionBuilder};
+use session::{PyHook, PySparkSession, PySparkSessionBuilder};
 use stat::PyStatFunctions;
 use streaming::{
     PyDataStreamReader, PyDataStreamWriter, PyListenerEventStream, PyStreamingQuery,
@@ -84,14 +89,15 @@ use types::{
     PyDayTimeIntervalType, PyDecimalType, PyDoubleType, PyFloatType, PyFractionalType,
     PyGeographyType, PyGeometryType, PyIntegerType, PyIntegralType, PyLongType, PyMapType,
     PyNullType, PyNumericType, PyShortType, PySpatialType, PyStringType, PyStructField,
-    PyStructType, PyTimeType, PyTimestampNTZType, PyTimestampType, PyVarcharType, PyVariantType,
-    PyYearMonthIntervalType,
+    PyStructType, PyTimeType, PyTimestampLTZNanosType, PyTimestampNTZNanosType, PyTimestampNTZType,
+    PyTimestampType, PyVarcharType, PyVariantType, PyYearMonthIntervalType,
 };
 use window::{PyFrameBound, PyWindow, PyWindowSpec};
 
 #[pymodule(gil_used = false)]
 fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySparkSession>()?;
+    m.add_class::<PyHook>()?;
     m.add_class::<session::PyConnectClientStub>()?;
     m.add_class::<PySparkSessionBuilder>()?;
     m.add_class::<PyDataFrame>()?;
@@ -123,6 +129,12 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyStatFunctions>()?;
     m.add_class::<storagelevel::PyStorageLevel>()?;
 
+    // The core DataType JSON grammar, which `pyspark.sql.types` parses type JSON with.
+    m.add_function(wrap_pyfunction!(types::parse_datatype_json, m)?)?;
+    m.add_function(wrap_pyfunction!(column::column_reference_name, m)?)?;
+
+    m.add_function(wrap_pyfunction!(pandas_input::_pandas_string_ipc, m)?)?;
+
     // Spark Declarative Pipelines (SDP) command execution
     m.add_class::<pipelines::PyPipelineRunStream>()?;
     m.add_function(wrap_pyfunction!(
@@ -131,6 +143,11 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(pipelines::pipeline_define_output, m)?)?;
     m.add_function(wrap_pyfunction!(pipelines::pipeline_define_flow, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        pipelines::pipeline_enter_flow_function,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(pipelines::pipeline_exit_flow_function, m)?)?;
     m.add_function(wrap_pyfunction!(
         pipelines::pipeline_define_auto_cdc_flow,
         m
@@ -188,6 +205,8 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDateType>()?;
     m.add_class::<PyTimestampType>()?;
     m.add_class::<PyTimestampNTZType>()?;
+    m.add_class::<PyTimestampNTZNanosType>()?;
+    m.add_class::<PyTimestampLTZNanosType>()?;
     m.add_class::<PyArrayType>()?;
     m.add_class::<PyMapType>()?;
     m.add_class::<PyStructField>()?;

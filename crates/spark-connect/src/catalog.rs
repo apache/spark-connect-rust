@@ -1029,23 +1029,17 @@ impl Catalog {
 
     fn execute_catalog(&self, catalog: &proto::Catalog) -> Result<Vec<Row>> {
         let request = self.build_execute_catalog_request(catalog)?;
-        let mut stream = block_on(self.session.client().execute_plan(request))?;
-
+        // On the reattachable path, as PySpark's client runs a catalog operation, so that an
+        // error carries the operation id of the request.
+        let mut stream = block_on(self.session.client().execute_plan_reattachable(request))?;
         let mut rows = vec![];
-
-        loop {
-            let resp = block_on(stream.message()).map_err(SparkError::from_grpc_status)?;
-            let Some(resp) = resp else {
-                break;
-            };
+        while let Some(resp) = block_on(stream.message())? {
             if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =
                 resp.response_type
             {
-                let batch_rows = decode_arrow_batch(&batch)?;
-                rows.extend(batch_rows);
+                rows.extend(decode_arrow_batch(&batch)?);
             }
         }
-
         Ok(rows)
     }
 

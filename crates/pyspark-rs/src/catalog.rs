@@ -355,16 +355,9 @@ impl PyCatalog {
     /// `None` leaves it unset so the server default applies.
     #[pyo3(signature = (tableName, storageLevel=None))]
     fn cacheTable(&self, tableName: &str, storageLevel: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
-        let level = match storageLevel {
-            Some(obj) => Some(spark_connect_proto::StorageLevel {
-                use_disk: obj.getattr("useDisk")?.extract()?,
-                use_memory: obj.getattr("useMemory")?.extract()?,
-                use_off_heap: obj.getattr("useOffHeap")?.extract()?,
-                deserialized: obj.getattr("deserialized")?.extract()?,
-                replication: obj.getattr("replication")?.extract()?,
-            }),
-            None => None,
-        };
+        let level = storageLevel
+            .map(crate::storagelevel::storage_level_proto)
+            .transpose()?;
         self.catalog
             .cache_table_with_storage_level(tableName, level)
             .to_pyerr()

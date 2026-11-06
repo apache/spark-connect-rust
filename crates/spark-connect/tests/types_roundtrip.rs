@@ -31,6 +31,8 @@ fn all_scalar_variants() -> Vec<DataType> {
         DataType::Timestamp,
         DataType::TimestampNtz,
         DataType::Time { precision: 6 },
+        DataType::TimestampNtzNanos { precision: 9 },
+        DataType::TimestampLtzNanos { precision: 7 },
         DataType::CalendarInterval,
         DataType::YearMonthInterval {
             start_field: 0,
@@ -106,15 +108,7 @@ fn proto_roundtrip_all_variants() {
 
 #[test]
 fn json_roundtrip_all_variants() {
-    // Geometry/Geography JSON is intentionally excluded: their json encoding is
-    // lossy today (emits a fixed CRS token rather than the numeric srid), so it does
-    // not round-trip. Their proto encoding round-trips and is covered above.
-    let is_geo = |d: &DataType| matches!(d, DataType::Geometry { .. } | DataType::Geography { .. });
-    for dt in all_scalar_variants()
-        .into_iter()
-        .chain(nested_variants())
-        .filter(|d| !is_geo(d))
-    {
+    for dt in all_scalar_variants().into_iter().chain(nested_variants()) {
         let value = dt.json_value();
         let s = dt.json();
         assert!(!s.is_empty());
@@ -307,4 +301,72 @@ fn from_ddl_full_grammar() {
     // Malformed input must error, not panic.
     assert!(DataType::from_ddl("array<").is_err());
     assert!(DataType::from_ddl("struct<a:>").is_err());
+}
+
+#[test]
+fn timestamp_nanos_types() {
+    use spark_connect_proto::data_type::{Kind, TimestampLtzNanos, TimestampNtzNanos};
+
+    let ntz = DataType::TimestampNtzNanos { precision: 8 };
+    let ltz = DataType::TimestampLtzNanos { precision: 9 };
+    // Names mirror Scala TimestampNTZNanosType / TimestampLTZNanosType.typeName.
+    assert_eq!(ntz.simple_string(), "timestamp_ntz(8)");
+    assert_eq!(ntz.type_name(), "timestamp_ntz(8)");
+    assert_eq!(ltz.json(), "\"timestamp_ltz(9)\"");
+    assert!(ntz.need_conversion());
+    assert_eq!(
+        DataType::from_json_str("\"timestamp_ntz(8)\"").unwrap(),
+        ntz
+    );
+    assert_eq!(DataType::from_ddl("timestamp_ltz(9)").unwrap(), ltz);
+    // Precision outside 7..=9 is rejected.
+    assert!(DataType::from_json_str("\"timestamp_ntz(6)\"").is_err());
+
+    // Proto kinds map to the nanos variants (not TIME / micros TIMESTAMP), and an
+    // omitted precision defaults to 9 per types.proto.
+    let mut p = spark_connect_proto::DataType::default();
+    p.kind = Some(Kind::TimestampNtzNanos(TimestampNtzNanos::default()));
+    assert_eq!(
+        DataType::from_proto(&p).unwrap(),
+        DataType::TimestampNtzNanos { precision: 9 }
+    );
+    p.kind = Some(Kind::TimestampLtzNanos(TimestampLtzNanos {
+        precision: Some(7),
+        ..Default::default()
+    }));
+    assert_eq!(
+        DataType::from_proto(&p).unwrap(),
+        DataType::TimestampLtzNanos { precision: 7 }
+    );
+}
+
+/// Spatial types name their SRID by its CRS in JSON, as PySpark does, and read it back.
+#[test]
+fn spatial_json_names_the_crs_as_pyspark() {
+    for (dt, json) in [
+        (DataType::Geometry { srid: 4326 }, "\"geometry(OGC:CRS84)\""),
+        (DataType::Geometry { srid: 3857 }, "\"geometry(EPSG:3857)\""),
+        (DataType::Geometry { srid: 0 }, "\"geometry(SRID:0)\""),
+        (DataType::Geometry { srid: -1 }, "\"geometry(SRID:ANY)\""),
+        (
+            DataType::Geography { srid: 4326 },
+            "\"geography(OGC:CRS84, SPHERICAL)\"",
+        ),
+        (
+            DataType::Geography { srid: -1 },
+            "\"geography(SRID:ANY, SPHERICAL)\"",
+        ),
+    ] {
+        assert_eq!(dt.json(), json);
+        assert_eq!(DataType::from_json(&dt.json_value()).unwrap(), dt);
+    }
+    // The DDL forms name the SRID itself.
+    assert_eq!(
+        DataType::from_ddl("geometry(3857)").unwrap(),
+        DataType::Geometry { srid: 3857 }
+    );
+    assert_eq!(
+        DataType::from_ddl("geography(any)").unwrap(),
+        DataType::Geography { srid: -1 }
+    );
 }

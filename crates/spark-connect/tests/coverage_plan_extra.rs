@@ -66,6 +66,7 @@ fn nafill_covers_all_value_literal_arms() {
         Value::String("s".to_string()),
         Value::Date(5),
         Value::Timestamp(6),
+        Value::DayTimeInterval(5),
         Value::Decimal {
             value: "1.23".to_string(),
             precision: Some(5),
@@ -131,17 +132,28 @@ fn read_datasource_to_proto() {
     assert!(p.to_proto().rel_type.is_some());
 }
 
-/// `StatSampleBy::to_proto`: builds the col expression, fraction literals, and seed.
+/// `StatSampleBy::to_proto`: builds the col expression, the strata with their fractions, as
+/// PySpark sends them, and seed.
 #[test]
 fn stat_sample_by_to_proto() {
     let p = LogicalPlan::StatSampleBy {
         input: Arc::new(base()),
-        col: "k".to_string(),
+        col: spark_connect::expression::Expression::column("k"),
         fractions: vec![
             (lit(0).expression().clone(), 0.1),
             (lit(1).expression().clone(), 0.9),
         ],
         seed: Some(7),
     };
-    assert!(p.to_proto().rel_type.is_some());
+    let Some(spark_connect_proto::relation::RelType::SampleBy(stat)) = p.to_proto().rel_type else {
+        panic!("expected StatSampleBy");
+    };
+    let fractions: Vec<f64> = stat.fractions.iter().map(|f| f.fraction).collect();
+    assert_eq!(fractions, [0.1, 0.9]);
+    assert!(stat.fractions.iter().all(|f| f.stratum.is_some()));
+    assert_eq!(
+        stat.col,
+        Some(spark_connect::column::col("k").expression().to_proto())
+    );
+    assert_eq!(stat.seed, Some(7));
 }

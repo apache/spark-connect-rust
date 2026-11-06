@@ -61,6 +61,7 @@ dependencies = [
  "arrow",
  "base64 0.21.7",
  "bytes",
+ "chrono",
  "datafusion",
  "futures",
  "polars",
@@ -83,17 +84,18 @@ dependencies = [
  "bytes",
  "crc32fast",
  "futures",
- "hyper-util",
  "prost",
  "prost-types",
  "regex",
+ "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
  "tokio",
  "tokio-stream",
  "tonic",
- "tower",
+ "tonic-prost",
  "tracing",
  "uuid",
 ]
@@ -3935,6 +3937,16 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
  "digest",
+ "sha2-asm",
+]
+
+[[package]]
+name = "sha2-asm"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b845214d6175804686b2bd482bcffe96651bb2d1200742b712003504a2dac1ab"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

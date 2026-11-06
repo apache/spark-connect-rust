@@ -39,6 +39,12 @@ def main():
     )
     parser.add_argument("-c", "--component", help="Component for the issue")
     parser.add_argument(
+        "-v",
+        "--version",
+        help="Unreleased connect-rust-x.y.z version for Affects and Fix Version/s, e.g. "
+        "for a maintenance line (default: the newest unreleased one)",
+    )
+    parser.add_argument(
         "-d",
         "--description",
         help="Description text for the issue.",
@@ -88,6 +94,7 @@ def main():
         args.component,
         parent=args.parent,
         issue_type=args.type,
+        version=args.version,
         description=description,
     )
     print(jira_id)

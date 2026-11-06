@@ -151,6 +151,40 @@ struct RpcErrorInfo {
     metadata: HashMap<String, String>,
 }
 
+/// What a server error carries besides its message, condition, parameters, SQL state, stack
+/// trace and query contexts, as PySpark Connect reads it from the error's `ErrorInfo` and, when
+/// the server keeps more, from `FetchErrorDetails`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServerErrorInfo {
+    /// The JVM class of the exception and then its superclasses (`classes`).
+    pub classes: Vec<String>,
+    /// `ErrorInfo.reason`.
+    pub reason: String,
+    /// The id that the server keeps the error's details under (`errorId`), if it keeps them.
+    pub error_id: Option<String>,
+    /// The names of the message parameters in the order that the server gave them, which the
+    /// reference client keeps.
+    pub parameter_order: Vec<String>,
+    /// Whether the message shows the server's stack trace, as
+    /// `spark.sql.connect.serverStacktrace.enabled` or `spark.sql.pyspark.jvmStacktrace.enabled`
+    /// decides.
+    pub display_stacktrace: bool,
+    /// The breaking change that the error comes from, if the server reports one.
+    pub breaking_change: Option<BreakingChangeInfo>,
+}
+
+/// A breaking change that an error comes from. Mirrors what
+/// `SparkConnectGrpcException.getBreakingChangeInfo()` returns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BreakingChangeInfo {
+    /// How to migrate.
+    pub migration_message: Vec<String>,
+    /// The config, as a key and a value, that restores the previous behavior.
+    pub mitigation_config: Option<(String, String)>,
+    /// Whether the change needs an audit.
+    pub needs_audit: bool,
+}
+
 /// A structured error carrying a PySpark error class and its message parameters.
 #[derive(Debug, Clone)]
 pub struct SparkError {
@@ -173,6 +207,12 @@ pub struct SparkError {
     /// Raw `grpc-status-details-bin` (a serialized `google.rpc.Status`), if present.
     /// Lets the PyO3 layer reconstruct the exact typed pyspark exception.
     pub grpc_details: Option<Vec<u8>>,
+    /// The ExecutePlan operation id the error was raised for, if known. Backs
+    /// `SparkConnectException.operation_id` (new in pyspark 4.3.0).
+    pub operation_id: Option<String>,
+    /// For an error that the server raised, what it sent about it besides the fields above.
+    /// Boxed, so that it does not make every `Result` larger.
+    pub server: Option<Box<ServerErrorInfo>>,
 }
 
 /// The PySpark exception hierarchy leaf we map to.
@@ -245,6 +285,8 @@ pub enum SparkErrorKind {
     InvalidPlanInput,
     /// ``pyspark.errors.exceptions.connect.PickleException``
     PickleException,
+    /// ``pyspark.errors.exceptions.connect.SparkException``
+    Spark,
 }
 
 impl SparkError {
@@ -265,6 +307,8 @@ impl SparkError {
             server_stacktrace: None,
             grpc_code: None,
             grpc_details: None,
+            operation_id: None,
+            server: None,
         }
     }
 
@@ -285,6 +329,8 @@ impl SparkError {
             server_stacktrace: None,
             grpc_code: None,
             grpc_details: None,
+            operation_id: None,
+            server: None,
         }
     }
 
@@ -303,6 +349,8 @@ impl SparkError {
             server_stacktrace: None,
             grpc_code: None,
             grpc_details: None,
+            operation_id: None,
+            server: None,
         }
     }
 
@@ -310,11 +358,12 @@ impl SparkError {
     ///
     /// If an error_class is set, looks up the message template in error-conditions.json,
     /// substitutes `<param_name>` placeholders with values from `params`, and returns
-    /// `[ERROR_CLASS] rendered_message`. Otherwise, returns the pre-set message.
+    /// `[ERROR_CLASS] rendered_message`. Otherwise, returns the pre-set message. The message
+    /// of an error that the server raised is the server's, which already names the condition.
     ///
     /// Mirrors `PySparkException.getMessage()` from `pyspark/errors/exceptions/base.py`.
     pub fn message(&self) -> String {
-        if self.error_class.is_empty() {
+        if self.error_class.is_empty() || self.server.is_some() {
             return self.message.clone();
         }
 
@@ -342,32 +391,31 @@ impl SparkError {
         }
     }
 
-    /// Convert a gRPC Status to a SparkError, extracting error class and parameters from metadata.
+    /// Convert a gRPC Status to a SparkError.
     ///
-    /// Mirrors `convert_exception` from `pyspark.errors.exceptions.connect`.
+    /// A status with an `ErrorInfo` is an error that the server raised. As
+    /// `pyspark.errors.exceptions.connect.convert_exception` does, its exception classes,
+    /// condition, message parameters, SQL state and stack trace are read from the
+    /// `ErrorInfo`, and its kind from the classes. [`SparkError::with_details`] completes it
+    /// with what `FetchErrorDetails` returns.
     pub fn from_grpc_status(status: Status) -> Self {
-        // Extract error metadata from trailer if present
         let message = status.message().to_string();
         let code = status.code() as i32;
-
-        // Try to parse details from the Status (details is a byte slice)
         let details = status.details().to_vec();
-        let mut err = if details.is_empty() {
-            Self::connect_msg(format!("[{}] {}", status.code(), message))
+        let mut err = if status.code() == tonic::Code::DeadlineExceeded {
+            // As `SparkConnectClient._handle_rpc_error`, which raises this for a call past its
+            // per-RPC deadline before it reads the error of the status.
+            Self::connect_msg(format!(
+                "[{}] {}: RPC deadline exceeded. The client applies per-RPC timeouts to \
+                 prevent silent hangs on broken connections. Deadlines can be configured via \
+                 the rpc_deadlines parameter of SparkConnectClient. To disable all deadlines: \
+                 SparkConnectClient(url, rpc_deadlines=RpcDeadlines.disabled()).",
+                status.code(),
+                message
+            ))
         } else {
-            // Decode grpc-status-details-bin as a google.rpc.Status with Any-packed ErrorInfo.
-            match parse_error_info_from_details(&details) {
-                Some((error_class, params, sql_state, server_stacktrace)) => Self {
-                    kind: classify_error_kind_with_classes(&error_class, &params),
-                    error_class,
-                    params,
-                    message,
-                    sql_state,
-                    contexts: Vec::new(),
-                    server_stacktrace,
-                    grpc_code: None,
-                    grpc_details: None,
-                },
+            match parse_error_info(&details) {
+                Some(info) => Self::from_error_info(info, message),
                 None => Self::connect_msg(format!("[{}] {}", status.code(), message)),
             }
         };
@@ -377,6 +425,126 @@ impl SparkError {
             err.grpc_details = Some(details);
         }
         err
+    }
+
+    /// An error that the server raised, from its `ErrorInfo`.
+    fn from_error_info(info: RpcErrorInfo, message: String) -> Self {
+        let mut metadata = info.metadata;
+        let classes = metadata
+            .get("classes")
+            .and_then(|classes| serde_json::from_str(classes).ok())
+            .unwrap_or_default();
+        let params = metadata
+            .get("messageParameters")
+            .and_then(|params| serde_json::from_str(params).ok())
+            .unwrap_or_default();
+        let parameter_order = metadata
+            .get("messageParameters")
+            .map(|params| parameter_names(params))
+            .unwrap_or_default();
+        let mut err = Self {
+            kind: SparkErrorKind::Unknown,
+            error_class: metadata.remove("errorClass").unwrap_or_default(),
+            params,
+            message,
+            sql_state: metadata.remove("sqlState"),
+            contexts: Vec::new(),
+            server_stacktrace: metadata.remove("stackTrace"),
+            grpc_code: None,
+            grpc_details: None,
+            operation_id: None,
+            server: Some(Box::new(ServerErrorInfo {
+                classes,
+                reason: info.reason,
+                error_id: metadata.remove("errorId"),
+                parameter_order,
+                ..Default::default()
+            })),
+        };
+        err.kind = err.server_kind();
+        err
+    }
+
+    /// Completes an error that the server raised, as
+    /// `pyspark.errors.exceptions.connect._convert_exception` does: with the error's details
+    /// as `FetchErrorDetails` returned them, if it did, and whether the message shows the
+    /// server's stack trace. Without the details, the message shows the stack trace only if
+    /// the `ErrorInfo` had one. Any other error is returned as is.
+    pub fn with_details(
+        mut self,
+        details: Option<spark_connect_proto::FetchErrorDetailsResponse>,
+        display_stacktrace: bool,
+    ) -> Self {
+        if self.server.is_none() {
+            return self;
+        }
+        let root = details.and_then(|details| {
+            let index = usize::try_from(details.root_error_idx?).ok()?;
+            (index < details.errors.len()).then_some((index, details.errors))
+        });
+        let display_stacktrace = match root {
+            Some((index, errors)) => {
+                let root = &errors[index];
+                self.message = root.message.clone();
+                self.server_stacktrace = Some(jvm_stacktrace(index, &errors));
+                let throwable = root.spark_throwable.clone().unwrap_or_default();
+                if self.error_class.is_empty() {
+                    if let Some(error_class) = throwable.error_class {
+                        self.error_class = error_class;
+                    }
+                }
+                self.params = throwable.message_parameters.into_iter().collect();
+                self.contexts = throwable
+                    .query_contexts
+                    .into_iter()
+                    .map(QueryContext::from)
+                    .collect();
+                if let Some(server) = self.server.as_mut() {
+                    server.breaking_change =
+                        throwable.breaking_change_info.map(BreakingChangeInfo::from);
+                }
+                display_stacktrace
+            }
+            None => {
+                display_stacktrace
+                    && self
+                        .server_stacktrace
+                        .as_deref()
+                        .is_some_and(|stacktrace| !stacktrace.is_empty())
+            }
+        };
+        if let Some(server) = self.server.as_mut() {
+            server.display_stacktrace = display_stacktrace;
+        }
+        self.kind = self.server_kind();
+        self
+    }
+
+    /// The kind of an error that the server raised, from its exception classes. As
+    /// `_convert_exception` picks the exception, the first class, from the most specific one,
+    /// that `EXCEPTION_CLASS_MAPPING` maps decides it, and an error with none is unknown.
+    fn server_kind(&self) -> SparkErrorKind {
+        let classes = self
+            .server
+            .as_ref()
+            .map(|server| server.classes.as_slice())
+            .unwrap_or_default();
+        if classes
+            .iter()
+            .any(|class| class == "org.apache.spark.api.python.PythonException")
+        {
+            return SparkErrorKind::Python;
+        }
+        classes
+            .iter()
+            .find_map(|class| exception_class_kind(class, &self.message))
+            .unwrap_or(SparkErrorKind::Unknown)
+    }
+
+    /// Attach the ExecutePlan operation id this error was raised for.
+    pub fn with_operation_id(mut self, operation_id: impl Into<String>) -> Self {
+        self.operation_id = Some(operation_id.into());
+        self
     }
 
     /// Get the error condition (error class).
@@ -465,123 +633,153 @@ pub type Result<T> = std::result::Result<T, SparkError>;
 // gRPC error detail parsing
 // ============================================================================
 
-/// Parse ErrorInfo from gRPC status details bytes.
-///
-/// Expects the details to be a protobuf-encoded google.rpc.Status containing
-/// Any-packed google.rpc.ErrorInfo messages. Returns (error_class, params, sql_state, stacktrace) if found.
-fn parse_error_info_from_details(
-    details: &[u8],
-) -> Option<(
-    String,
-    BTreeMap<String, String>,
-    Option<String>,
-    Option<String>,
-)> {
-    // Decode the outer google.rpc.Status from details
-    let rpc_status = RpcStatus::decode(details).ok()?;
-
-    // Look for an ErrorInfo in the details list
-    for any_detail in &rpc_status.details {
-        // google.rpc.ErrorInfo type URL
-        if any_detail.type_url == "type.googleapis.com/google.rpc.ErrorInfo" {
-            // Decode the Any.value as google.rpc.ErrorInfo
-            if let Ok(error_info) = RpcErrorInfo::decode(&any_detail.value[..]) {
-                // Extract errorClass and other metadata
-                let error_class = error_info
-                    .metadata
-                    .get("errorClass")
-                    .cloned()
-                    .unwrap_or_else(|| error_info.reason.clone());
-
-                let sql_state = error_info.metadata.get("sqlState").cloned();
-                let stacktrace = error_info.metadata.get("stackTrace").cloned();
-
-                // Convert HashMap to BTreeMap
-                let params: BTreeMap<String, String> = error_info
-                    .metadata
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-
-                // Return the parsed error info
-                return Some((error_class, params, sql_state, stacktrace));
-            }
-        }
+/// The `google.rpc.ErrorInfo` of a gRPC status, from its `grpc-status-details-bin`: the
+/// protobuf-encoded `google.rpc.Status` whose details hold Any-packed messages.
+fn parse_error_info(details: &[u8]) -> Option<RpcErrorInfo> {
+    if details.is_empty() {
+        return None;
     }
-
-    None
+    RpcStatus::decode(details)
+        .ok()?
+        .details
+        .into_iter()
+        .filter(|detail| detail.type_url == "type.googleapis.com/google.rpc.ErrorInfo")
+        .find_map(|detail| RpcErrorInfo::decode(&detail.value[..]).ok())
 }
 
-/// Classify a server error into a `SparkErrorKind`, preferring the JVM exception-class
-/// hierarchy (the `classes` metadata, e.g. `["org.apache.spark.sql.AnalysisException",…]`)
-/// over the error-condition name. Spark's analysis errors are named `UNRESOLVED_COLUMN`,
-/// `TABLE_OR_VIEW_NOT_FOUND`, … — none start with "ANALYSIS" — so classifying by the
-/// condition string alone mislabels them as generic runtime errors and breaks
-/// `except AnalysisException:`.
-fn classify_error_kind_with_classes(
-    error_class: &str,
-    params: &BTreeMap<String, String>,
-) -> SparkErrorKind {
-    if let Some(classes) = params.get("classes") {
-        // Most-specific first; the string holds the whole hierarchy.
-        let checks: &[(&str, SparkErrorKind)] = &[
-            ("AnalysisException", SparkErrorKind::Analysis),
-            ("ParseException", SparkErrorKind::Parse),
-            ("StreamingQueryException", SparkErrorKind::StreamingQuery),
-            ("SparkUpgradeException", SparkErrorKind::SparkUpgrade),
-            ("NumberFormatException", SparkErrorKind::NumberFormat),
-            (
-                "ArrayIndexOutOfBoundsException",
-                SparkErrorKind::ArrayIndexOutOfBounds,
-            ),
-            ("DateTimeException", SparkErrorKind::DateTime),
-            ("ArithmeticException", SparkErrorKind::Arithmetic),
-            (
-                "UnsupportedOperationException",
-                SparkErrorKind::UnsupportedOperation,
-            ),
-            ("IllegalArgumentException", SparkErrorKind::IllegalArgument),
-            ("NoSuchElementException", SparkErrorKind::SparkNoSuchElement),
-            ("PythonException", SparkErrorKind::Python),
-            ("SparkRuntimeException", SparkErrorKind::SparkRuntime),
-        ];
-        for (needle, kind) in checks {
-            if classes.contains(needle) {
-                return *kind;
+/// The names in a JSON object of message parameters, in their order. A JSON object that does
+/// not parse has none.
+fn parameter_names(json: &str) -> Vec<String> {
+    struct Names(Vec<String>);
+    impl<'de> serde::Deserialize<'de> for Names {
+        fn deserialize<D: serde::Deserializer<'de>>(
+            deserializer: D,
+        ) -> std::result::Result<Self, D::Error> {
+            struct NamesVisitor;
+            impl<'de> serde::de::Visitor<'de> for NamesVisitor {
+                type Value = Names;
+                fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    f.write_str("a JSON object")
+                }
+                fn visit_map<A: serde::de::MapAccess<'de>>(
+                    self,
+                    mut map: A,
+                ) -> std::result::Result<Names, A::Error> {
+                    let mut names = Vec::new();
+                    while let Some((name, _)) = map.next_entry::<String, serde::de::IgnoredAny>()? {
+                        names.push(name);
+                    }
+                    Ok(Names(names))
+                }
             }
+            deserializer.deserialize_map(NamesVisitor)
         }
     }
-    classify_error_kind(error_class)
+    serde_json::from_str::<Names>(json)
+        .map(|names| names.0)
+        .unwrap_or_default()
 }
 
-/// Classify error_class string into a SparkErrorKind.
-///
-/// Maps Spark error classes to the corresponding Python exception type.
-fn classify_error_kind(error_class: &str) -> SparkErrorKind {
-    if error_class.starts_with("ANALYSIS") {
-        SparkErrorKind::Analysis
-    } else if error_class.starts_with("PARSE") {
-        SparkErrorKind::Parse
-    } else if error_class.starts_with("ILLEGAL") {
-        SparkErrorKind::IllegalArgument
-    } else if error_class.starts_with("UNSUPPORTED") {
-        SparkErrorKind::UnsupportedOperation
-    } else if error_class.starts_with("ARITHMETIC") {
-        SparkErrorKind::Arithmetic
-    } else if error_class.contains("NOT_IMPLEMENTED") {
-        SparkErrorKind::NotImplementedError
-    } else if error_class.contains("RUNTIME") {
-        SparkErrorKind::RuntimeError
-    } else if error_class.contains("VALUE") {
-        SparkErrorKind::ValueError
-    } else {
-        match error_class {
-            "INVALID_CONNECT_URL" => SparkErrorKind::RuntimeError,
-            "SYNTAX_ERROR" => SparkErrorKind::Parse,
-            "INVALID_PLAN_INPUT" => SparkErrorKind::InvalidPlanInput,
-            "PICKLE_ERROR" => SparkErrorKind::PickleException,
-            "RESPONSE_ALREADY_RECEIVED" | "INVALID_HANDLE" => SparkErrorKind::ConnectGrpc,
-            _ => SparkErrorKind::RuntimeError, // Default fallback
+/// The kind of the exception that a JVM exception class maps to, as
+/// `pyspark.errors.exceptions.connect.EXCEPTION_CLASS_MAPPING` and
+/// `THIRD_PARTY_EXCEPTION_CLASS_MAPPING` map it, or `None` for a class that they do not map.
+fn exception_class_kind(class: &str, message: &str) -> Option<SparkErrorKind> {
+    use SparkErrorKind::*;
+    Some(match class {
+        "org.apache.spark.sql.catalyst.parser.ParseException" => Parse,
+        "org.apache.spark.sql.AnalysisException" => Analysis,
+        "org.apache.spark.sql.streaming.StreamingQueryException" => StreamingQuery,
+        "org.apache.spark.sql.execution.QueryExecutionException" => QueryExecution,
+        "java.lang.NumberFormatException" => NumberFormat,
+        "java.lang.IllegalArgumentException" => IllegalArgument,
+        "java.lang.ArithmeticException" => Arithmetic,
+        "java.lang.UnsupportedOperationException" => UnsupportedOperation,
+        "java.lang.ArrayIndexOutOfBoundsException" => ArrayIndexOutOfBounds,
+        "java.time.DateTimeException" => DateTime,
+        "org.apache.spark.SparkRuntimeException" => SparkRuntime,
+        "org.apache.spark.SparkUpgradeException" => SparkUpgrade,
+        "org.apache.spark.api.python.PythonException" => Python,
+        "org.apache.spark.SparkNoSuchElementException" => SparkNoSuchElement,
+        // A SparkException from a failure to pickle on the server.
+        "org.apache.spark.SparkException" if message.contains("net.razorvine.pickle.PickleException") => {
+            PickleException
+        }
+        "org.apache.spark.SparkException" => Spark,
+        "org.apache.spark.sql.connect.common.InvalidPlanInput" => InvalidPlanInput,
+        "org.apache.spark.api.python.StreamingPythonRunner$StreamingPythonRunnerInitializationException" => {
+            StreamingPythonRunnerInitialization
+        }
+        _ => return None,
+    })
+}
+
+/// The JVM stack trace of the error at `index` in `FetchErrorDetails`' errors, with its
+/// causes. Mirrors `pyspark.errors.exceptions.connect._extract_jvm_stacktrace`.
+fn jvm_stacktrace(
+    index: usize,
+    errors: &[spark_connect_proto::fetch_error_details_response::Error],
+) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let mut next = Some(index);
+    // A cause is another error of the list; stop at a cycle.
+    let mut seen = std::collections::HashSet::new();
+    while let Some(error) = next.filter(|i| seen.insert(*i)).and_then(|i| errors.get(i)) {
+        let class = error
+            .error_type_hierarchy
+            .first()
+            .map(String::as_str)
+            .unwrap_or_default();
+        if lines.is_empty() {
+            lines.push(class.to_string());
+        } else {
+            lines.push(format!("Caused by: {}: {}", class, error.message));
+        }
+        for element in &error.stack_trace {
+            lines.push(format!(
+                "\tat {}.{}({}:{})",
+                element.declaring_class,
+                element.method_name,
+                element.file_name.as_deref().unwrap_or_default(),
+                element.line_number
+            ));
+        }
+        next = error.cause_idx.and_then(|i| usize::try_from(i).ok());
+    }
+    lines.join("\n")
+}
+
+impl From<spark_connect_proto::fetch_error_details_response::QueryContext> for QueryContext {
+    fn from(context: spark_connect_proto::fetch_error_details_response::QueryContext) -> Self {
+        use spark_connect_proto::fetch_error_details_response::query_context::ContextType;
+        let context_type = if context.context_type == ContextType::Dataframe as i32 {
+            QueryContextType::DataFrame
+        } else {
+            QueryContextType::SQL
+        };
+        QueryContext::new(
+            context_type,
+            context.object_type,
+            context.object_name,
+            context.start_index,
+            context.stop_index,
+            context.fragment,
+            context.call_site,
+            context.summary,
+        )
+    }
+}
+
+impl From<spark_connect_proto::fetch_error_details_response::BreakingChangeInfo>
+    for BreakingChangeInfo
+{
+    fn from(info: spark_connect_proto::fetch_error_details_response::BreakingChangeInfo) -> Self {
+        BreakingChangeInfo {
+            migration_message: info.migration_message,
+            mitigation_config: info
+                .mitigation_config
+                .map(|config| (config.key, config.value)),
+            // As in pyspark, a change that does not say needs an audit.
+            needs_audit: info.needs_audit.unwrap_or(true),
         }
     }
 }
@@ -736,6 +934,16 @@ fn parse_error_conditions_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_with_operation_id() {
+        let err = SparkError::connect_msg("boom");
+        assert_eq!(err.operation_id, None);
+        let err = err.with_operation_id("op-123");
+        assert_eq!(err.operation_id.as_deref(), Some("op-123"));
+        let from_status = SparkError::from_grpc_status(Status::internal("x"));
+        assert_eq!(from_status.operation_id, None);
+    }
 
     #[test]
     fn test_render_simple_message() {
@@ -941,81 +1149,344 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_parse_error_info_from_grpc_status() {
-        // Create a synthetic google.rpc.ErrorInfo
-        let mut error_metadata = HashMap::new();
-        error_metadata.insert("errorClass".to_string(), "ANALYSIS_ERROR".to_string());
-        error_metadata.insert("sqlState".to_string(), "42601".to_string());
-        error_metadata.insert(
-            "messageParameters".to_string(),
-            r#"{"message":"test error"}"#.to_string(),
-        );
-        error_metadata.insert(
-            "stackTrace".to_string(),
-            "at org.apache.spark.sql....".to_string(),
-        );
-
+    /// A gRPC status of an error that the server raised, with an `ErrorInfo` of `metadata`.
+    fn server_status(message: &str, metadata: &[(&str, &str)]) -> Status {
         let error_info = RpcErrorInfo {
-            reason: "ANALYSIS_ERROR".to_string(),
-            domain: "org.apache.spark.connect".to_string(),
-            metadata: error_metadata,
+            reason: "org.apache.spark.sql.catalyst.parser.ParseException".to_string(),
+            domain: "org.apache.spark".to_string(),
+            metadata: metadata
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
         };
-
-        // Pack into Any
-        let error_info_bytes = error_info.encode_to_vec();
-        let any = RpcAny {
-            type_url: "type.googleapis.com/google.rpc.ErrorInfo".to_string(),
-            value: error_info_bytes,
+        let status = RpcStatus {
+            code: tonic::Code::Internal as i32,
+            message: message.to_string(),
+            details: vec![RpcAny {
+                type_url: "type.googleapis.com/google.rpc.ErrorInfo".to_string(),
+                value: error_info.encode_to_vec(),
+            }],
         };
+        Status::with_details(
+            tonic::Code::Internal,
+            message,
+            bytes::Bytes::from(status.encode_to_vec()),
+        )
+    }
 
-        // Create outer Status
-        let rpc_status = RpcStatus {
-            code: 0,
-            message: "Analysis error".to_string(),
-            details: vec![any],
-        };
-
-        let status_bytes = rpc_status.encode_to_vec();
-
-        // Parse it back
-        let result = parse_error_info_from_details(&status_bytes);
-        assert!(result.is_some());
-
-        let (error_class, params, sql_state, stacktrace) = result.unwrap();
-        assert_eq!(error_class, "ANALYSIS_ERROR");
-        assert_eq!(sql_state, Some("42601".to_string()));
-        assert_eq!(stacktrace, Some("at org.apache.spark.sql....".to_string()));
-        assert!(params.contains_key("errorClass"));
+    fn classes(classes: &[&str]) -> String {
+        serde_json::to_string(classes).unwrap()
     }
 
     #[test]
-    fn test_classify_error_kind() {
+    fn a_server_error_reads_its_error_info() {
+        let message = "\n[PARSE_SYNTAX_ERROR] Syntax error at or near 'SELEC'. SQLSTATE: 42601";
+        let err = SparkError::from_grpc_status(server_status(
+            message,
+            &[
+                (
+                    "classes",
+                    &classes(&[
+                        "org.apache.spark.sql.catalyst.parser.ParseException",
+                        "org.apache.spark.sql.AnalysisException",
+                    ]),
+                ),
+                ("errorClass", "PARSE_SYNTAX_ERROR"),
+                ("sqlState", "42601"),
+                ("messageParameters", r#"{"error":"'SELEC'","hint":""}"#),
+                ("errorId", "error-1"),
+            ],
+        ));
+        // A ParseException is also an AnalysisException; the most specific class decides.
+        assert_eq!(err.kind, SparkErrorKind::Parse);
+        assert_eq!(err.get_condition().as_deref(), Some("PARSE_SYNTAX_ERROR"));
+        assert_eq!(err.get_sql_state().as_deref(), Some("42601"));
+        // The parameters are the message's, not the rest of the metadata.
+        let params: Vec<_> = err.params.iter().collect();
         assert_eq!(
-            classify_error_kind("ANALYSIS_ERROR"),
+            params,
+            [
+                (&"error".to_string(), &"'SELEC'".to_string()),
+                (&"hint".to_string(), &String::new())
+            ]
+        );
+        // The server's message already names the condition.
+        assert_eq!(err.message(), message);
+        assert_eq!(err.to_string(), message);
+        let server = err.server.as_ref().unwrap();
+        assert_eq!(
+            server.reason,
+            "org.apache.spark.sql.catalyst.parser.ParseException"
+        );
+        assert_eq!(server.error_id.as_deref(), Some("error-1"));
+        assert!(!server.display_stacktrace);
+        assert_eq!(err.grpc_code(), Some(tonic::Code::Internal as i32));
+        assert!(err.grpc_details().is_some());
+    }
+
+    #[test]
+    fn a_server_error_keeps_the_order_of_its_parameters() {
+        let err = SparkError::from_grpc_status(server_status(
+            "[INVALID_CONF_VALUE.TYPE_MISMATCH] ...",
+            &[(
+                "messageParameters",
+                r#"{"confName":"spark.sql.shuffle.partitions","confValue":"abc","confType":"int"}"#,
+            )],
+        ));
+        assert_eq!(
+            err.server.unwrap().parameter_order,
+            ["confName", "confValue", "confType"]
+        );
+        assert!(parameter_names("not json").is_empty());
+        assert!(parameter_names("[1, 2]").is_empty());
+    }
+
+    #[test]
+    fn the_first_class_that_maps_decides_the_kind_of_a_server_error() {
+        let kind = |message: &str, hierarchy: &[&str]| {
+            SparkError::from_grpc_status(server_status(
+                message,
+                &[("classes", &classes(hierarchy))],
+            ))
+            .kind
+        };
+        assert_eq!(
+            kind(
+                "x",
+                &[
+                    "org.apache.spark.sql.catalyst.ExtendedAnalysisException",
+                    "org.apache.spark.sql.AnalysisException",
+                    "java.lang.Exception",
+                ]
+            ),
             SparkErrorKind::Analysis
         );
-        assert_eq!(classify_error_kind("PARSE_ERROR"), SparkErrorKind::Parse);
         assert_eq!(
-            classify_error_kind("ILLEGAL_ARGUMENT"),
-            SparkErrorKind::IllegalArgument
+            kind(
+                "x",
+                &[
+                    "org.apache.spark.SparkNumberFormatException",
+                    "java.lang.NumberFormatException",
+                    "java.lang.IllegalArgumentException",
+                ]
+            ),
+            SparkErrorKind::NumberFormat
         );
         assert_eq!(
-            classify_error_kind("ARITHMETIC_ERROR"),
+            kind(
+                "x",
+                &[
+                    "org.apache.spark.SparkArithmeticException",
+                    "java.lang.ArithmeticException"
+                ]
+            ),
             SparkErrorKind::Arithmetic
         );
+        // A PythonException anywhere in the hierarchy decides it.
         assert_eq!(
-            classify_error_kind("UNSUPPORTED_OPERATION"),
-            SparkErrorKind::UnsupportedOperation
+            kind(
+                "x",
+                &[
+                    "org.apache.spark.SparkException",
+                    "org.apache.spark.api.python.PythonException"
+                ]
+            ),
+            SparkErrorKind::Python
         );
         assert_eq!(
-            classify_error_kind("INVALID_PLAN_INPUT"),
+            kind("x", &["org.apache.spark.SparkException"]),
+            SparkErrorKind::Spark
+        );
+        assert_eq!(
+            kind(
+                "net.razorvine.pickle.PickleException: expected zero arguments",
+                &["org.apache.spark.SparkException"]
+            ),
+            SparkErrorKind::PickleException
+        );
+        assert_eq!(
+            kind(
+                "x",
+                &["org.apache.spark.sql.connect.common.InvalidPlanInput"]
+            ),
             SparkErrorKind::InvalidPlanInput
         );
         assert_eq!(
-            classify_error_kind("RESPONSE_ALREADY_RECEIVED"),
-            SparkErrorKind::ConnectGrpc
+            kind("x", &["java.lang.IllegalStateException"]),
+            SparkErrorKind::Unknown
         );
+        assert_eq!(kind("x", &[]), SparkErrorKind::Unknown);
+    }
+
+    #[test]
+    fn details_complete_a_server_error() {
+        use spark_connect_proto::fetch_error_details_response::{
+            query_context::ContextType, BreakingChangeInfo as ProtoChange, Error, MitigationConfig,
+            QueryContext as ProtoContext, SparkThrowable, StackTraceElement,
+        };
+        use spark_connect_proto::FetchErrorDetailsResponse;
+        let element = |method: &str, file: Option<&str>, line| StackTraceElement {
+            declaring_class: "org.apache.spark.Expr".to_string(),
+            method_name: method.to_string(),
+            file_name: file.map(str::to_string),
+            line_number: line,
+        };
+        let details = FetchErrorDetailsResponse {
+            root_error_idx: Some(1),
+            errors: vec![
+                Error {
+                    error_type_hierarchy: vec!["java.lang.RuntimeException".to_string()],
+                    message: "the cause".to_string(),
+                    stack_trace: vec![element("cause", Some("Cause.scala"), 3)],
+                    ..Default::default()
+                },
+                Error {
+                    error_type_hierarchy: vec![
+                        "org.apache.spark.SparkArithmeticException".to_string(),
+                        "java.lang.ArithmeticException".to_string(),
+                    ],
+                    message: "[DIVIDE_BY_ZERO] Division by zero.".to_string(),
+                    stack_trace: vec![
+                        element("eval", Some("Expr.scala"), 12),
+                        element("native", None, -2),
+                    ],
+                    cause_idx: Some(0),
+                    spark_throwable: Some(SparkThrowable {
+                        error_class: Some("DIVIDE_BY_ZERO".to_string()),
+                        message_parameters: [("config".to_string(), "ansi".to_string())].into(),
+                        query_contexts: vec![ProtoContext {
+                            context_type: ContextType::Sql as i32,
+                            fragment: "1/0".to_string(),
+                            start_index: 7,
+                            stop_index: 9,
+                            ..Default::default()
+                        }],
+                        sql_state: Some("22012".to_string()),
+                        breaking_change_info: Some(ProtoChange {
+                            migration_message: vec!["Set the config.".to_string()],
+                            mitigation_config: Some(MitigationConfig {
+                                key: "spark.sql.ansi.enabled".to_string(),
+                                value: "false".to_string(),
+                            }),
+                            needs_audit: None,
+                        }),
+                    }),
+                },
+            ],
+            ..Default::default()
+        };
+        // The ErrorInfo has neither a condition nor a stack trace; the details have both.
+        let err = SparkError::from_grpc_status(server_status(
+            "[DIVIDE_BY_ZERO] Division by ze...",
+            &[
+                (
+                    "classes",
+                    &classes(&[
+                        "org.apache.spark.SparkArithmeticException",
+                        "java.lang.ArithmeticException",
+                    ]),
+                ),
+                ("errorId", "error-2"),
+            ],
+        ))
+        .with_details(Some(details), true);
+        assert_eq!(err.kind, SparkErrorKind::Arithmetic);
+        assert_eq!(err.message(), "[DIVIDE_BY_ZERO] Division by zero.");
+        assert_eq!(err.get_condition().as_deref(), Some("DIVIDE_BY_ZERO"));
+        assert_eq!(err.params.get("config").map(String::as_str), Some("ansi"));
+        assert_eq!(
+            err.get_stacktrace().as_deref(),
+            Some(
+                "org.apache.spark.SparkArithmeticException\n\
+                 \tat org.apache.spark.Expr.eval(Expr.scala:12)\n\
+                 \tat org.apache.spark.Expr.native(:-2)\n\
+                 Caused by: java.lang.RuntimeException: the cause\n\
+                 \tat org.apache.spark.Expr.cause(Cause.scala:3)"
+            )
+        );
+        let contexts = err.get_query_context();
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0].context_type(), QueryContextType::SQL);
+        assert_eq!(contexts[0].fragment(), "1/0");
+        assert_eq!(
+            (contexts[0].start_index(), contexts[0].stop_index()),
+            (7, 9)
+        );
+        let server = err.server.as_ref().unwrap();
+        assert!(server.display_stacktrace);
+        assert_eq!(
+            server.breaking_change,
+            Some(BreakingChangeInfo {
+                migration_message: vec!["Set the config.".to_string()],
+                mitigation_config: Some((
+                    "spark.sql.ansi.enabled".to_string(),
+                    "false".to_string()
+                )),
+                needs_audit: true,
+            })
+        );
+    }
+
+    #[test]
+    fn without_details_a_server_error_shows_a_stack_trace_only_if_it_has_one() {
+        let status = |metadata: &[(&str, &str)]| {
+            SparkError::from_grpc_status(server_status("[X] message", metadata))
+        };
+        let with_trace = status(&[("stackTrace", "org.apache.spark.X\n\tat ...")]);
+        let shown = with_trace.clone().with_details(None, true);
+        assert!(shown.server.as_ref().unwrap().display_stacktrace);
+        assert_eq!(shown.message(), "[X] message");
+        assert!(
+            !with_trace
+                .with_details(None, false)
+                .server
+                .unwrap()
+                .display_stacktrace
+        );
+        assert!(
+            !status(&[])
+                .with_details(None, true)
+                .server
+                .unwrap()
+                .display_stacktrace
+        );
+        // A root error index out of range is no details.
+        let out_of_range = spark_connect_proto::FetchErrorDetailsResponse {
+            root_error_idx: Some(3),
+            ..Default::default()
+        };
+        let err = status(&[]).with_details(Some(out_of_range), true);
+        assert_eq!(err.message(), "[X] message");
+        assert_eq!(err.get_stacktrace(), None);
+    }
+
+    #[test]
+    fn a_cause_cycle_ends_the_stack_trace() {
+        use spark_connect_proto::fetch_error_details_response::Error;
+        let error = |cause| Error {
+            error_type_hierarchy: vec!["java.lang.Exception".to_string()],
+            message: "loop".to_string(),
+            cause_idx: Some(cause),
+            ..Default::default()
+        };
+        assert_eq!(
+            jvm_stacktrace(0, &[error(1), error(0)]),
+            "java.lang.Exception\nCaused by: java.lang.Exception: loop"
+        );
+    }
+
+    #[test]
+    fn a_status_without_an_error_info_is_not_a_server_error() {
+        let err = SparkError::from_grpc_status(Status::unavailable("connection refused"));
+        assert!(err.server.is_none());
+        assert_eq!(err.kind, SparkErrorKind::Connect);
+        assert_eq!(err.grpc_code(), Some(tonic::Code::Unavailable as i32));
+        let message = err.message();
+        assert!(message.ends_with("connection refused"), "{message}");
+        // Details are only for a server error.
+        let unchanged = err.with_details(None, true);
+        assert!(unchanged.server.is_none());
+        assert_eq!(unchanged.message(), message);
     }
 
     #[test]
@@ -1217,6 +1688,32 @@ mod tests {
         );
         assert_eq!(err.kind, SparkErrorKind::Analysis);
         assert_eq!(err.get_condition(), Some("ANALYSIS_ERROR".to_string()));
+    }
+
+    #[test]
+    fn deadline_exceeded_is_raised_as_pyspark_does() {
+        // As `_handle_rpc_error`: a call past its per-RPC deadline, whatever the details of
+        // its status, is the SparkConnectGrpcException of the deadline.
+        let status = Status::with_details(
+            tonic::Code::DeadlineExceeded,
+            "Deadline Exceeded",
+            bytes::Bytes::from_static(b"not an error info"),
+        );
+        let err = SparkError::from_grpc_status(status);
+        assert_eq!(err.kind, SparkErrorKind::Connect);
+        assert_eq!(err.grpc_code, Some(tonic::Code::DeadlineExceeded as i32));
+        assert!(err.server.is_none());
+        assert!(
+            err.message.starts_with(
+                "[Deadline expired before operation could complete] Deadline Exceeded: RPC \
+                 deadline exceeded. The client applies per-RPC timeouts"
+            ),
+            "{}",
+            err.message
+        );
+        assert!(err
+            .message
+            .ends_with("SparkConnectClient(url, rpc_deadlines=RpcDeadlines.disabled())."));
     }
 
     #[test]

@@ -17,6 +17,8 @@ try:
         AnyTimeType, AnsiIntervalType, SpatialType,
         GeometryType, GeographyType,
         VariantVal, Geometry, Geography,
+        # Spark's nanosecond timestamp types (no PySpark 4.3.0 class; not in __all__).
+        TimestampNTZNanosType, TimestampLTZNanosType,
     )
     # Row lives in the Rust core; upstream code imports it from pyspark.sql.types too.
     from pyspark._pyspark import Row
@@ -73,7 +75,8 @@ except ImportError:  # pragma: no cover - defensive fallback when the extension 
 
     class DateType(DataType):
         """Date data type."""
-        pass
+
+        EPOCH_ORDINAL = 719163
 
     class TimestampType(DataType):
         """Timestamp data type."""
@@ -116,6 +119,15 @@ class UserDefinedType(DataType):
     @classmethod
     def typeName(cls) -> str:
         return cls.__name__.lower()
+
+    def __reduce__(self):
+        # As PySpark's UDT, a Python object, which pickles as its class and its state:
+        # cloudpickle sends a class of __main__ by value, and the state keeps the parameters
+        # of the instance. DataType.__reduce__ would send its JSON, which names the class by
+        # its module and rebuilds the instance without arguments.
+        import copyreg
+
+        return copyreg.__newobj__, (type(self),), self.__dict__ or None
 
     @classmethod
     def sqlType(cls) -> "DataType":
@@ -264,6 +276,11 @@ __all__ = [
     "YearMonthIntervalType",
     "DayTimeIntervalType",
     "VariantType",
+    "VariantVal",
+    "GeometryType",
+    "GeographyType",
+    "Geometry",
+    "Geography",
     "_drop_metadata",
     "_parse_datatype_json_string",
     "_parse_datatype_json_value",
@@ -281,46 +298,21 @@ def _parse_datatype_json_string(json_string):
 
 def _parse_datatype_json_value(v):
     """Recursively reconstruct a DataType from a parsed Spark-JSON value (a string for
-    atomic/parameterized types, or a dict for the nested struct/array/map forms)."""
-    import re as _re
+    atomic/parameterized types, or a dict for the nested struct/array/map forms).
+
+    The string forms (atomics, ``decimal(p,s)``, ``string collate X``, intervals,
+    ``geometry(<crs>)``, ``geography(<crs>, <alg>)``, ...) are parsed by the Rust core's
+    JSON grammar, so the drop-in keeps one grammar. The nested object forms recurse here,
+    because a ``udt`` leaf has to reconstruct its Python class."""
+    import json as _json
 
     if isinstance(v, str):
-        atomic = {
-            "void": NullType, "null": NullType, "boolean": BooleanType, "byte": ByteType,
-            "short": ShortType, "integer": IntegerType, "long": LongType, "float": FloatType,
-            "double": DoubleType, "string": StringType, "binary": BinaryType, "date": DateType,
-            "timestamp": TimestampType, "timestamp_ntz": TimestampNTZType, "variant": VariantType,
-        }
-        if v in atomic:
-            return atomic[v]()
-        m = _re.match(r"decimal\((\d+),\s*(\d+)\)$", v)
-        if m:
-            return DecimalType(int(m.group(1)), int(m.group(2)))
-        if v == "decimal":
-            return DecimalType()
-        m = _re.match(r"char\((\d+)\)$", v)
-        if m:
-            return CharType(int(m.group(1)))
-        m = _re.match(r"varchar\((\d+)\)$", v)
-        if m:
-            return VarcharType(int(m.group(1)))
-        m = _re.match(r"time\((\d+)\)$", v)
-        if m:
-            return TimeType(int(m.group(1)))
-        if v == "calendarinterval":
-            return CalendarIntervalType()
-        _ym = {"year": 0, "month": 1}
-        _dt = {"day": 0, "hour": 1, "minute": 2, "second": 3}
-        m = _re.match(r"interval (\w+)(?: to (\w+))?$", v)
-        if m:
-            start, end = m.group(1), m.group(2)
-            if start in _ym:
-                s = _ym[start]
-                return YearMonthIntervalType(s, _ym.get(end, s) if end else s)
-            if start in _dt:
-                s = _dt[start]
-                return DayTimeIntervalType(s, _dt.get(end, s) if end else s)
-        raise ValueError(f"cannot parse datatype json: {v!r}")
+        from pyspark._pyspark import parse_datatype_json
+
+        try:
+            return parse_datatype_json(_json.dumps(v))
+        except ValueError:
+            raise ValueError(f"cannot parse datatype json: {v!r}") from None
     elif isinstance(v, dict):
         t = v.get("type")
         if t == "struct":
@@ -364,14 +356,105 @@ def _drop_metadata(d):
         return MapType(_drop_metadata(d.keyType), _drop_metadata(d.valueType), d.valueContainsNull)
     return d
 
-def _create_row(fields, values):
-    """Build a Row with the given field names (mirrors pyspark.sql.types._create_row).
+def _has_type(dt, dts):
+    """Return whether there are specified types (mirrors pyspark.sql.types._has_type)."""
+    if isinstance(dt, dts):
+        return True
+    elif isinstance(dt, StructType):
+        return any(_has_type(f.dataType, dts) for f in dt.fields)
+    elif isinstance(dt, ArrayType):
+        return _has_type(dt.elementType, dts)
+    elif isinstance(dt, MapType):
+        return _has_type(dt.keyType, dts) or _has_type(dt.valueType, dts)
+    elif isinstance(dt, UserDefinedType):
+        return _has_type(dt.sqlType(), dts)
+    else:
+        return False
 
-    Upstream builds ``Row(*values)`` then sets ``__fields__``; our Rust ``Row`` carries its
-    field names from construction instead, so build it from the (name, value) pairs.
-    """
-    try:
-        names = list(fields.__fields__)  # `fields` may itself be a Row
-    except AttributeError:
-        names = list(fields)
-    return Row(**{name: value for name, value in zip(names, values)})
+
+def _from_numpy_type(nt):
+    """Convert NumPy type to Spark data type."""
+    import numpy as np
+
+    if nt == np.dtype("bool"):
+        return BooleanType()
+    elif nt == np.dtype("int8"):
+        return ByteType()
+    elif nt == np.dtype("int16"):
+        return ShortType()
+    elif nt == np.dtype("int32"):
+        return IntegerType()
+    elif nt == np.dtype("int64"):
+        return LongType()
+    elif nt == np.dtype("float32"):
+        return FloatType()
+    elif nt == np.dtype("float64"):
+        return DoubleType()
+    elif nt.type == np.dtype("str"):
+        return StringType()
+
+    return None
+
+
+def _create_row(fields, values):
+    """A Row of ``values`` named by ``fields``, as in PySpark, whose pickled rows call it."""
+    row = Row(*values)
+    row.__fields__ = fields
+    return row
+
+
+def _udt_converter(dataType):
+    """The function that turns a collected value of ``dataType`` into what PySpark gives for it,
+    deserializing the values of its user-defined types, and making the Geometry and Geography
+    of its spatial values, as PySpark's ``ArrowTableToRowsConversion`` does, or None for a type
+    without either."""
+    if isinstance(dataType, (GeometryType, GeographyType)):
+        spatial = Geometry if isinstance(dataType, GeometryType) else Geography
+
+        def convert_spatial(value):
+            if value is None:
+                return None
+            return spatial.fromWKB(value["wkb"], value["srid"])
+
+        return convert_spatial
+    if isinstance(dataType, UserDefinedType):
+        inner = _udt_converter(dataType.sqlType())
+
+        def convert_udt(value):
+            if value is None:
+                return None
+            return dataType.deserialize(value if inner is None else inner(value))
+
+        return convert_udt
+    if isinstance(dataType, ArrayType):
+        element = _udt_converter(dataType.elementType)
+        if element is None:
+            return None
+        return lambda value: None if value is None else [element(v) for v in value]
+    if isinstance(dataType, MapType):
+        key, val = _udt_converter(dataType.keyType), _udt_converter(dataType.valueType)
+        if key is None and val is None:
+            return None
+        key = key or (lambda v: v)
+        val = val or (lambda v: v)
+        return lambda value: None if value is None else {key(k): val(v) for k, v in value.items()}
+    if isinstance(dataType, StructType):
+        fields = _udt_field_converters(dataType)
+        if fields is None:
+            return None
+        row = Row(*dataType.names)
+
+        def convert_struct(value):
+            if value is None:
+                return None
+            return row(*[v if f is None else f(v) for f, v in zip(fields, value)])
+
+        return convert_struct
+    return None
+
+
+def _udt_field_converters(schema):
+    """The converters of the fields of ``schema`` (see ``_udt_converter``), or None when no
+    field has a user-defined type. The client applies them to the rows that it collects."""
+    converters = [_udt_converter(field.dataType) for field in schema.fields]
+    return None if all(c is None for c in converters) else converters

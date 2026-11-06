@@ -3,7 +3,6 @@
 //! A Row represents a single record: an ordered collection of (field_name, value) pairs.
 //! Values are accessed by index or by field name. Supports all Spark SQL value types.
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
@@ -34,6 +33,12 @@ pub enum Value {
     Date(i32),
     /// Timestamp (microseconds since epoch)
     Timestamp(i64),
+    /// TIME, in nanoseconds since midnight, as PySpark's internal value of `TimeType`.
+    Time(i64),
+    /// Spark day-time interval, in signed microseconds. The full i64 range is
+    /// representable by Python's datetime.timedelta without nanosecond conversion.
+    /// Display uses raw microseconds, like Date and Timestamp use their raw units.
+    DayTimeInterval(i64),
     /// Decimal (string value with optional precision and scale)
     Decimal {
         value: String,
@@ -42,8 +47,9 @@ pub enum Value {
     },
     /// Array of values
     List(Vec<Value>),
-    /// Map of key-value pairs
-    Map(BTreeMap<String, Value>),
+    /// Map entries, in their order, with keys and values of their own types, as PySpark
+    /// reads a map into a dict.
+    Map(Vec<(Value, Value)>),
     /// Struct (nested Row), with ordered names and values.
     /// Construct with `Value::Struct(Row::new(fields, values).into())`.
     Struct(StructValue),
@@ -68,6 +74,8 @@ impl fmt::Debug for Value {
             Self::Binary(v) => f.debug_tuple("Binary").field(v).finish(),
             Self::Date(v) => f.debug_tuple("Date").field(v).finish(),
             Self::Timestamp(v) => f.debug_tuple("Timestamp").field(v).finish(),
+            Self::Time(v) => f.debug_tuple("Time").field(v).finish(),
+            Self::DayTimeInterval(v) => f.debug_tuple("DayTimeInterval").field(v).finish(),
             Self::Decimal {
                 value,
                 precision,
@@ -169,6 +177,8 @@ impl fmt::Display for Value {
             Value::Binary(b) => write!(f, "{:?}", b),
             Value::Date(d) => write!(f, "{}", d),
             Value::Timestamp(t) => write!(f, "{}", t),
+            Value::Time(t) => write!(f, "{}", t),
+            Value::DayTimeInterval(t) => write!(f, "{}", t),
             Value::Decimal {
                 value,
                 precision,
@@ -744,12 +754,13 @@ mod tests {
         assert_eq!(Value::Binary(vec![1, 2]).to_string(), "[1, 2]");
         assert_eq!(Value::Date(19_000).to_string(), "19000");
         assert_eq!(Value::Timestamp(123).to_string(), "123");
+        assert_eq!(Value::DayTimeInterval(-1).to_string(), "-1");
+        assert_eq!(Value::DayTimeInterval(1).as_i64(), None);
         assert_eq!(
             Value::List(vec![Value::Integer(1), Value::Integer(2)]).to_string(),
             "[1, 2]"
         );
-        let mut m = std::collections::BTreeMap::new();
-        m.insert("k".to_string(), Value::Integer(9));
+        let m = vec![(Value::String("k".to_string()), Value::Integer(9))];
         assert_eq!(Value::Map(m).to_string(), "{k: 9}");
         assert_eq!(
             Value::Struct(Row::new(vec!["a".to_string()], vec![Value::Integer(1)]).into())

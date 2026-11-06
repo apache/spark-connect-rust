@@ -3,7 +3,7 @@
 //! Provides transformations and actions for working with distributed data.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use spark_connect_core::client::ReattachableResponseStream;
 use spark_connect_core::error::{Result, SparkError};
@@ -26,7 +26,18 @@ use crate::udf::CommonInlineUserDefinedFunctionExpression;
 pub struct DataFrame {
     pub(crate) session: SparkSession,
     pub(crate) plan: Arc<LogicalPlan>,
+    // Exact clones share this cache. Derived plans can snapshot an already
+    // resolved schema, but have their own cache for subsequent analysis.
+    // The resolved value is immutable, so propagation need not copy wide schemas.
+    schema_cache: Arc<Mutex<Option<Arc<DataType>>>>,
+    // The information of the last execution of this DataFrame, as PySpark's
+    // `DataFrame._execution_info`: exact clones share it, and a derived DataFrame, of
+    // another plan, has its own, which is empty until it executes.
+    execution: ExecutionSlot,
 }
+
+/// Where a DataFrame keeps the information of its last execution.
+pub(crate) type ExecutionSlot = Arc<Mutex<Option<ExecutionInfo>>>;
 
 /// Iterator over rows from a DataFrame, yielded lazily as the server streams results.
 ///
@@ -40,6 +51,21 @@ pub struct LocalRowIterator {
     source: RowSource,
     /// Set once the batch source is exhausted or has errored.
     done: bool,
+    /// The schema of the result that the server sends before the rows
+    /// (`ExecutePlanResponse.schema`), once received.
+    schema: SchemaSlot,
+}
+
+/// The schema of a result as the server sends it, shared with a prefetch task.
+type SchemaSlot = Arc<Mutex<Option<DataType>>>;
+
+/// Keeps the schema of `resp`, if it has one, in `slot`.
+fn keep_schema(resp: &mut proto::ExecutePlanResponse, slot: &SchemaSlot) -> Result<()> {
+    if let Some(data_type) = resp.schema.take() {
+        let schema = DataType::from_proto(&data_type)?;
+        *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(schema);
+    }
+    Ok(())
 }
 
 /// The source of successive Arrow batches for a [`LocalRowIterator`].
@@ -67,9 +93,10 @@ impl LocalRowIterator {
         stream: ReattachableResponseStream,
         prefetch_partitions: bool,
     ) -> Self {
+        let schema = SchemaSlot::default();
         let source = if prefetch_partitions {
             RowSource::Prefetch {
-                rx: spawn_prefetch(session, stream),
+                rx: spawn_prefetch(session, stream, Arc::clone(&schema)),
             }
         } else {
             RowSource::OnDemand {
@@ -83,7 +110,18 @@ impl LocalRowIterator {
             current_rows: vec![].into_iter(),
             source,
             done: false,
+            schema,
         }
+    }
+
+    /// The schema of the result, as the server sends it before the rows, once received: so
+    /// after the first row. Unlike the Arrow schema of the rows, it has the user-defined
+    /// types of the columns.
+    pub fn schema(&self) -> Option<DataType> {
+        self.schema
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// Fetch the next batch of rows, or `None` once the source is exhausted.
@@ -101,6 +139,9 @@ impl LocalRowIterator {
                 match block_on(stream.message()) {
                     Ok(Some(mut resp)) => {
                         capture_execution(&mut resp, execution_info, session);
+                        if let Err(e) = keep_schema(&mut resp, &self.schema) {
+                            return Some(Err(e));
+                        }
                         if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =
                             resp.response_type
                         {
@@ -162,6 +203,7 @@ impl Iterator for LocalRowIterator {
 fn spawn_prefetch(
     session: SparkSession,
     mut stream: ReattachableResponseStream,
+    schema: SchemaSlot,
 ) -> tokio::sync::mpsc::Receiver<Result<Vec<Row>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<Row>>>(1);
     get_runtime().spawn(async move {
@@ -170,6 +212,10 @@ fn spawn_prefetch(
             match stream.message().await {
                 Ok(Some(mut resp)) => {
                     capture_execution(&mut resp, &mut execution_info, &session);
+                    if let Err(e) = keep_schema(&mut resp, &schema) {
+                        let _ = tx.send(Err(e)).await;
+                        break;
+                    }
                     if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =
                         resp.response_type
                     {
@@ -203,10 +249,69 @@ fn spawn_prefetch(
 impl DataFrame {
     /// Create a new DataFrame.
     pub(crate) fn new(session: SparkSession, plan: LogicalPlan) -> Self {
+        Self::new_with_schema(session, plan, None)
+    }
+
+    /// Seed declared struct output schemas without analyzing the plan.
+    pub(crate) fn new_with_schema(
+        session: SparkSession,
+        plan: LogicalPlan,
+        schema: Option<DataType>,
+    ) -> Self {
+        Self::new_with_cached_schema(
+            session,
+            plan,
+            schema
+                .filter(|schema| matches!(schema, DataType::Struct { .. }))
+                .map(Arc::new),
+        )
+    }
+
+    fn new_with_cached_schema(
+        session: SparkSession,
+        plan: LogicalPlan,
+        schema: Option<Arc<DataType>>,
+    ) -> Self {
         DataFrame {
             session,
             plan: Arc::new(plan),
+            schema_cache: Arc::new(Mutex::new(schema)),
+            execution: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Keep `info`, the information of an execution of this DataFrame, and record it as
+    /// the session's most recent one.
+    pub(crate) fn record_execution(&self, info: ExecutionInfo) {
+        *self.execution.lock().unwrap() = Some(info.clone());
+        self.session.record_execution(info);
+    }
+
+    fn cached_schema(&self) -> Option<Arc<DataType>> {
+        // Propagation snapshots resolved metadata; it must not wait for an
+        // in-flight analysis. Python transformations can still hold the GIL.
+        self.schema_cache.try_lock().ok()?.clone()
+    }
+
+    /// Selected schema-preserving transformations snapshot the resolved schema,
+    /// mirroring Spark 4.2 `_cached_schema` propagation. Other plans resolve independently.
+    fn with_cached_schema(&self, plan: LogicalPlan) -> Self {
+        Self::new_with_cached_schema(self.session.clone(), plan, self.cached_schema())
+    }
+
+    /// Set operations propagate only exactly equal cached schemas from the same session.
+    fn with_merged_schema(&self, other: &DataFrame, plan: LogicalPlan) -> Self {
+        // A right-hand plan from another session is analyzed in our session;
+        // its previously resolved schema is not evidence about that resolution.
+        if self.session.client().session_id() != other.session.client().session_id() {
+            return Self::new(self.session.clone(), plan);
+        }
+        // Snapshot separately, including for self-unions; never lock both inputs.
+        let schema = match (self.cached_schema(), other.cached_schema()) {
+            (Some(left), Some(right)) if left == right => Some(left),
+            _ => None,
+        };
+        Self::new_with_cached_schema(self.session.clone(), plan, schema)
     }
 
     /// Get the underlying logical plan.
@@ -231,7 +336,7 @@ impl DataFrame {
             input: Arc::clone(&self.plan),
             condition,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_cached_schema(plan)
     }
 
     /// Alias for filter().
@@ -286,10 +391,16 @@ impl DataFrame {
 
     /// Drop columns.
     pub fn drop(&self, columns: Vec<&str>) -> DataFrame {
-        let col_names = columns.iter().map(|s| s.to_string()).collect();
+        self.drop_columns(Vec::new(), columns)
+    }
+
+    /// Drop `columns` and the columns of `column_names`, mirroring `pyspark.sql.DataFrame.drop`
+    /// of Columns and column names: a Column is sent as its expression, and a name as it is.
+    pub fn drop_columns(&self, columns: Vec<Column>, column_names: Vec<&str>) -> DataFrame {
         let plan = LogicalPlan::Drop {
             input: Arc::clone(&self.plan),
-            columns: col_names,
+            columns: column_names.iter().map(|s| s.to_string()).collect(),
+            expressions: columns.iter().map(|c| c.expression().clone()).collect(),
         };
         DataFrame::new(self.session.clone(), plan)
     }
@@ -300,7 +411,7 @@ impl DataFrame {
             input: Arc::clone(&self.plan),
             limit: n,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_cached_schema(plan)
     }
 
     /// Skip the first n rows.
@@ -329,7 +440,7 @@ impl DataFrame {
             column_names: vec![],
             within_watermark: false,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_cached_schema(plan)
     }
 
     /// Remove duplicate rows, optionally on specific columns.
@@ -345,7 +456,7 @@ impl DataFrame {
             column_names: cols,
             within_watermark: false,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_cached_schema(plan)
     }
 
     /// Sort rows.
@@ -355,7 +466,7 @@ impl DataFrame {
             order: columns,
             is_global: true,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_cached_schema(plan)
     }
 
     /// Alias for sort().
@@ -451,7 +562,7 @@ impl DataFrame {
             by_name: false,
             allow_missing_columns: false,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_merged_schema(other, plan)
     }
 
     /// Union by name.
@@ -471,7 +582,7 @@ impl DataFrame {
             by_name: true,
             allow_missing_columns,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_merged_schema(other, plan)
     }
 
     /// Intersect with another DataFrame.
@@ -484,7 +595,7 @@ impl DataFrame {
             by_name: false,
             allow_missing_columns: false,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_merged_schema(other, plan)
     }
 
     /// Subtract (except) another DataFrame.
@@ -497,7 +608,7 @@ impl DataFrame {
             by_name: false,
             allow_missing_columns: false,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_merged_schema(other, plan)
     }
 
     /// Repartition.
@@ -507,7 +618,7 @@ impl DataFrame {
             num_partitions,
             shuffle: true,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_cached_schema(plan)
     }
 
     /// Coalesce.
@@ -517,7 +628,7 @@ impl DataFrame {
             num_partitions,
             shuffle: false,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_cached_schema(plan)
     }
 
     /// Add a hint.
@@ -526,12 +637,22 @@ impl DataFrame {
         name: &str,
         parameters: impl IntoIterator<Item = S>,
     ) -> DataFrame {
+        let parameters = parameters
+            .into_iter()
+            .map(|p| crate::plan::hint_parameter(&p.into()))
+            .collect();
+        self.hint_expressions(name, parameters)
+    }
+
+    /// Specify a hint of parameters given as expressions, mirroring `pyspark.sql.DataFrame.hint`,
+    /// which sends `lit` of each parameter: a literal, or a Column.
+    pub fn hint_expressions(&self, name: &str, parameters: Vec<Expression>) -> DataFrame {
         let plan = LogicalPlan::Hint {
             input: Arc::clone(&self.plan),
             name: name.to_string(),
-            parameters: parameters.into_iter().map(Into::into).collect(),
+            parameters,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_cached_schema(plan)
     }
 
     /// Marks a DataFrame as eligible for broadcast join (smaller table).
@@ -556,7 +677,7 @@ impl DataFrame {
             input: Arc::clone(&self.plan),
             alias: alias.to_string(),
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_cached_schema(plan)
     }
 
     /// Map over each partition with a pandas UDF (`DataFrame.mapInPandas`).
@@ -568,7 +689,19 @@ impl DataFrame {
         func: CommonInlineUserDefinedFunctionExpression,
         is_barrier: bool,
     ) -> DataFrame {
-        self.map_partitions(func, is_barrier)
+        self.map_partitions(func, is_barrier, None)
+    }
+
+    /// Map over each partition with a pandas UDF in a stage of the resource profile of
+    /// `profile_id`, as `DataFrame.mapInPandas(func, schema, barrier, profile)` does with the
+    /// id of `profile`, which [`SparkSession::build_resource_profile`] registers.
+    pub fn map_in_pandas_with_profile(
+        &self,
+        func: CommonInlineUserDefinedFunctionExpression,
+        is_barrier: bool,
+        profile_id: Option<i32>,
+    ) -> DataFrame {
+        self.map_partitions(func, is_barrier, profile_id)
     }
 
     /// Map over each partition with an Arrow UDF (`DataFrame.mapInArrow`).
@@ -577,7 +710,18 @@ impl DataFrame {
         func: CommonInlineUserDefinedFunctionExpression,
         is_barrier: bool,
     ) -> DataFrame {
-        self.map_partitions(func, is_barrier)
+        self.map_partitions(func, is_barrier, None)
+    }
+
+    /// Map over each partition with an Arrow UDF in a stage of the resource profile of
+    /// `profile_id`, as `DataFrame.mapInArrow(func, schema, barrier, profile)` does.
+    pub fn map_in_arrow_with_profile(
+        &self,
+        func: CommonInlineUserDefinedFunctionExpression,
+        is_barrier: bool,
+        profile_id: Option<i32>,
+    ) -> DataFrame {
+        self.map_partitions(func, is_barrier, profile_id)
     }
 
     /// Build a `MapPartitions` relation from an already-constructed UDF.
@@ -585,27 +729,30 @@ impl DataFrame {
         &self,
         func: CommonInlineUserDefinedFunctionExpression,
         is_barrier: bool,
+        profile_id: Option<i32>,
     ) -> DataFrame {
+        let schema = func.python_udf.output_type.clone();
         let plan = LogicalPlan::MapPartitions {
             input: Arc::clone(&self.plan),
             func,
             is_barrier,
+            profile_id,
         };
-        DataFrame::new(self.session.clone(), plan)
+        Self::new_with_schema(self.session.clone(), plan, Some(schema))
     }
 
     /// Apply a function to each row for its side effects (`DataFrame.foreach`).
     ///
     /// Backed by an Arrow map partition; results are forced and discarded.
     pub fn foreach(&self, func: CommonInlineUserDefinedFunctionExpression) -> Result<()> {
-        let _ = self.map_partitions(func, false).collect()?;
+        let _ = self.map_partitions(func, false, None).collect()?;
         Ok(())
     }
 
     /// Apply a function to each partition for its side effects
     /// (`DataFrame.foreachPartition`).
     pub fn foreach_partition(&self, func: CommonInlineUserDefinedFunctionExpression) -> Result<()> {
-        let _ = self.map_partitions(func, false).collect()?;
+        let _ = self.map_partitions(func, false, None).collect()?;
         Ok(())
     }
 
@@ -629,7 +776,7 @@ impl DataFrame {
             with_replacement,
             seed,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_cached_schema(plan)
     }
 
     /// Group by columns for aggregation.
@@ -643,10 +790,18 @@ impl DataFrame {
 
     /// Collect all rows into memory.
     pub fn collect(&self) -> Result<Vec<Row>> {
+        self.collect_with_schema().map(|(rows, _)| rows)
+    }
+
+    /// Collect all rows into memory, with the schema of the result if the server sends it
+    /// (`ExecutePlanResponse.schema`), as the reference client's `_to_table` returns it.
+    /// Unlike the Arrow schema of the rows, it has the user-defined types of the columns.
+    pub fn collect_with_schema(&self) -> Result<(Vec<Row>, Option<DataType>)> {
         let request = self.build_execute_request()?;
         let mut stream = block_on(self.session.client().execute_plan_reattachable(request))?;
 
         let mut rows = vec![];
+        let mut schema = None;
         let mut info = ExecutionInfo::default();
         loop {
             let resp = block_on(stream.message())?;
@@ -654,6 +809,9 @@ impl DataFrame {
                 break;
             };
             capture_execution(&mut resp, &mut info, &self.session);
+            if let Some(data_type) = resp.schema.take() {
+                schema = Some(DataType::from_proto(&data_type)?);
+            }
             if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =
                 resp.response_type
             {
@@ -661,9 +819,9 @@ impl DataFrame {
                 rows.extend(batch_rows);
             }
         }
-        self.session.record_execution(info);
+        self.record_execution(info);
 
-        Ok(rows)
+        Ok((rows, schema))
     }
 
     /// Return an iterator that lazily streams rows from the server.
@@ -687,13 +845,13 @@ impl DataFrame {
         ))
     }
 
-    /// Execution metrics collected during the most recent action on this
-    /// DataFrame's session. Mirrors `pyspark.sql.DataFrame.executionInfo`.
-    ///
-    /// The metrics reflect the session's most recent execution; call this right
-    /// after an action (e.g. `collect`/`count`/`show`).
+    /// The information of the last execution of this DataFrame. Mirrors
+    /// `pyspark.sql.DataFrame.executionInfo`: set by `collect`, the Arrow and pandas
+    /// collects, the writes, the temp views and the checkpoints of this DataFrame, and empty
+    /// before one. An action that runs a derived DataFrame, such as `count` or `show`, sets
+    /// that one's, as in PySpark.
     pub fn execution_info(&self) -> Result<ExecutionInfo> {
-        self.session.last_execution_info().ok_or_else(|| {
+        self.execution.lock().unwrap().clone().ok_or_else(|| {
             SparkError::connect_msg("no execution info available; run an action first")
         })
     }
@@ -704,10 +862,22 @@ impl DataFrame {
     /// returning the raw `RecordBatch`es without converting to Rows. This is the
     /// foundation for `to_datafusion()` and `to_polars()` conversions.
     pub fn collect_record_batches(&self) -> Result<Vec<arrow::record_batch::RecordBatch>> {
+        self.collect_record_batches_with_schema()
+            .map(|(batches, _)| batches)
+    }
+
+    /// Collect all data as Arrow RecordBatches, with the schema of the result if the server
+    /// sends it (`ExecutePlanResponse.schema`), as the reference client's `to_pandas` reads
+    /// it: unlike the Arrow schema, it has the Spark types of the columns, such as their
+    /// user-defined types.
+    pub fn collect_record_batches_with_schema(
+        &self,
+    ) -> Result<(Vec<arrow::record_batch::RecordBatch>, Option<DataType>)> {
         let request = self.build_execute_request()?;
         let mut stream = block_on(self.session.client().execute_plan_reattachable(request))?;
 
         let mut batches = vec![];
+        let mut schema = None;
         let mut info = ExecutionInfo::default();
         loop {
             let resp = block_on(stream.message())?;
@@ -715,6 +885,9 @@ impl DataFrame {
                 break;
             };
             capture_execution(&mut resp, &mut info, &self.session);
+            if let Some(data_type) = resp.schema.take() {
+                schema = Some(DataType::from_proto(&data_type)?);
+            }
             if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =
                 resp.response_type
             {
@@ -722,9 +895,9 @@ impl DataFrame {
                 batches.extend(record_batches);
             }
         }
-        self.session.record_execution(info);
+        self.record_execution(info);
 
-        Ok(batches)
+        Ok((batches, schema))
     }
 
     /// Get the count of rows.
@@ -759,24 +932,78 @@ impl DataFrame {
         }
     }
 
-    /// Show the first n rows.
-    pub fn show(&self, n: usize) -> Result<()> {
-        let limited = self.limit(n as i32).collect()?;
-        for row in limited {
-            println!("{}", row);
+    /// The table that `show` prints, as the server formats it: the first `n` rows, values
+    /// truncated to `truncate` characters (0 for none), vertical with a line per value.
+    /// Mirrors `DataFrame._show_string`, which sends a `ShowString` relation.
+    pub fn show_string(&self, n: i32, truncate: i32, vertical: bool) -> Result<String> {
+        let shown = DataFrame::new(
+            self.session.clone(),
+            LogicalPlan::ShowString {
+                input: Arc::clone(&self.plan),
+                num_rows: n,
+                truncate,
+                vertical,
+            },
+        );
+        match shown.collect()?.first().map(|row| row.values()) {
+            Some([Value::String(table)]) => Ok(table.clone()),
+            _ => Err(SparkError::connect_msg(
+                "ShowString returned no table of one string",
+            )),
         }
+    }
+
+    /// Print the first `n` rows as the server formats them, with values truncated to 20
+    /// characters. Mirrors `DataFrame.show(n)`.
+    pub fn show(&self, n: usize) -> Result<()> {
+        let n = i32::try_from(n).unwrap_or(i32::MAX);
+        println!("{}", self.show_string(n, 20, false)?);
         Ok(())
     }
 
     /// Get the schema of this DataFrame.
+    ///
+    /// The first successful lookup is cached and shared with exact clones.
+    /// Concurrent lookups on the same DataFrame or its clones wait for a single
+    /// analysis RPC, so a stalled analysis blocks those metadata readers.
+    /// Changes to external table or view metadata do not invalidate this cache;
+    /// recreate the DataFrame from its source to resolve the schema again.
+    /// Each call returns an independent value, and failed lookups can be retried.
     pub fn schema(&self) -> Result<DataType> {
+        // Keep the lock during analysis so concurrent accesses issue only one
+        // successful RPC. Errors leave the cache empty and can be retried.
+        let mut cached = self
+            .schema_cache
+            .lock()
+            // Unlike the other cache locks, this guard spans a blocking RPC.
+            // Recover defensively from Rust callers that panic during analysis
+            // (for example, by calling the sync API inside a Tokio runtime).
+            // The slot contains only None or a complete schema, so it is safe.
+            .unwrap_or_else(|poisoned| {
+                self.schema_cache.clear_poison();
+                poisoned.into_inner()
+            });
+        if let Some(schema) = cached.clone() {
+            // Copy the schema after unlocking so propagation can snapshot it.
+            drop(cached);
+            return Ok(schema.as_ref().clone());
+        }
         let request = self.build_analyze_request()?;
         let response = block_on(self.session.client().analyze_plan(request))?;
 
         if let Some(proto::analyze_plan_response::Result::Schema(schema)) = response.result {
-            Ok(DataType::from_proto(&schema.schema.ok_or_else(|| {
-                SparkError::connect_msg("Schema is missing")
-            })?)?)
+            let schema = DataType::from_proto(
+                &schema
+                    .schema
+                    .ok_or_else(|| SparkError::connect_msg("Schema is missing"))?,
+            )?;
+            if !matches!(&schema, DataType::Struct { .. }) {
+                return Err(SparkError::connect_msg("Schema is not a struct type"));
+            }
+            let schema = Arc::new(schema);
+            *cached = Some(Arc::clone(&schema));
+            drop(cached);
+            Ok(schema.as_ref().clone())
         } else {
             Err(SparkError::connect_msg(
                 "Schema analyze failed: no schema in response",
@@ -789,6 +1016,12 @@ impl DataFrame {
         self.limit(1).collect().map(|rows| rows.into_iter().next())
     }
 
+    /// The first row, with the schema of the result, as [`DataFrame::collect_with_schema`].
+    pub fn first_with_schema(&self) -> Result<(Option<Row>, Option<DataType>)> {
+        let (rows, schema) = self.limit(1).collect_with_schema()?;
+        Ok((rows.into_iter().next(), schema))
+    }
+
     /// Alias for first().
     pub fn head(&self) -> Result<Option<Row>> {
         self.first()
@@ -799,6 +1032,12 @@ impl DataFrame {
         self.limit(n as i32).collect()
     }
 
+    /// The first `n` rows, with the schema of the result, as
+    /// [`DataFrame::collect_with_schema`].
+    pub fn take_with_schema(&self, n: usize) -> Result<(Vec<Row>, Option<DataType>)> {
+        self.limit(n as i32).collect_with_schema()
+    }
+
     /// Check if the DataFrame is empty.
     pub fn is_empty(&self) -> Result<bool> {
         self.limit(1).count().map(|c| c == 0)
@@ -806,18 +1045,21 @@ impl DataFrame {
 
     /// Get column names.
     pub fn columns(&self) -> Result<Vec<String>> {
-        let schema = self.schema()?;
-        match schema {
-            DataType::Struct { fields } => Ok(fields.iter().map(|f| f.name.clone()).collect()),
-            _ => Err(SparkError::connect_msg("Schema is not a struct type")),
-        }
+        let DataType::Struct { fields } = self.schema()? else {
+            unreachable!("schema() validates struct responses")
+        };
+        Ok(fields.into_iter().map(|field| field.name).collect())
+    }
+
+    /// This DataFrame's relation for a request. Its plan nodes keep the same plan IDs each
+    /// time, as in PySpark, so the server can reuse the plans it already resolved.
+    pub(crate) fn relation(&self) -> proto::Relation {
+        crate::plan::relation_with_ids(&self.plan, self.session.plan_ids())
     }
 
     /// Build an ExecutePlanRequest from the logical plan.
     fn build_execute_request(&self) -> Result<proto::ExecutePlanRequest> {
-        // Build proto from plan with plan_id assignment
-        let mut relation = self.plan.to_proto();
-        assign_plan_ids(&mut relation, &self.session)?;
+        let relation = self.relation();
 
         let mut request = proto::ExecutePlanRequest::default();
         request.session_id = self.session.client().session_id().to_string();
@@ -833,8 +1075,7 @@ impl DataFrame {
 
     /// Build an AnalyzePlanRequest from the logical plan.
     fn build_analyze_request(&self) -> Result<proto::AnalyzePlanRequest> {
-        let mut relation = self.plan.to_proto();
-        assign_plan_ids(&mut relation, &self.session)?;
+        let relation = self.relation();
 
         let mut plan = proto::Plan::default();
         plan.op_type = Some(proto::plan::OpType::Root(relation));
@@ -855,6 +1096,7 @@ impl DataFrame {
     /// Mirrors `pyspark.sql.DataFrame.write`.
     pub fn write(&self) -> crate::readwriter::DataFrameWriter {
         crate::readwriter::DataFrameWriter::new(self.session.clone(), Arc::clone(&self.plan))
+            .recording_into(Arc::clone(&self.execution))
     }
 
     /// Create a [`DataFrameWriterV2`](crate::readwriter::DataFrameWriterV2) for
@@ -867,6 +1109,7 @@ impl DataFrame {
             Arc::clone(&self.plan),
             table_name,
         )
+        .recording_into(Arc::clone(&self.execution))
     }
 
     /// Merge a set of updates, insertions, and deletions into a target table.
@@ -881,6 +1124,7 @@ impl DataFrame {
             table.to_string(),
             condition,
         )
+        .recording_into(Arc::clone(&self.execution))
     }
 
     /// Create a DataStreamWriter for writing this streaming DataFrame to various sinks.
@@ -899,14 +1143,6 @@ impl DataFrame {
             deserialized: true,
             replication: 1,
         }
-    }
-
-    /// Build this DataFrame's plan as a proto `Relation` with plan ids assigned
-    /// (the shape the `Persist`/`Unpersist`/`GetStorageLevel` analyze ops take).
-    fn analyze_relation(&self) -> Result<proto::Relation> {
-        let mut relation = self.plan.to_proto();
-        assign_plan_ids(&mut relation, &self.session)?;
-        Ok(relation)
     }
 
     fn analyze_request(
@@ -933,7 +1169,7 @@ impl DataFrame {
     /// Mirrors `pyspark.sql.DataFrame.persist(storageLevel)`.
     pub fn persist(&self, storage_level: proto::StorageLevel) -> Result<DataFrame> {
         let persist = proto::analyze_plan_request::Persist {
-            relation: Some(self.analyze_relation()?),
+            relation: Some(self.relation()),
             storage_level: Some(storage_level),
         };
         let request = self.analyze_request(proto::analyze_plan_request::Analyze::Persist(persist));
@@ -944,7 +1180,7 @@ impl DataFrame {
     /// Remove this DataFrame from cache. Mirrors `DataFrame.unpersist(blocking)`.
     pub fn unpersist(&self, blocking: bool) -> Result<DataFrame> {
         let unpersist = proto::analyze_plan_request::Unpersist {
-            relation: Some(self.analyze_relation()?),
+            relation: Some(self.relation()),
             blocking: Some(blocking),
         };
         let request =
@@ -955,26 +1191,50 @@ impl DataFrame {
 
     /// Checkpoint this DataFrame to disk.
     pub fn checkpoint(&self) -> Result<DataFrame> {
-        self.checkpoint_impl(false, true)
+        self.checkpoint_with(true)
+    }
+
+    /// Checkpoint this DataFrame, at once if `eager`, else when it is first used, mirroring
+    /// `DataFrame.checkpoint(eager)`.
+    pub fn checkpoint_with(&self, eager: bool) -> Result<DataFrame> {
+        self.checkpoint_impl(false, eager, None)
     }
 
     /// Create a local checkpoint of this DataFrame.
     pub fn local_checkpoint(&self) -> Result<DataFrame> {
-        self.checkpoint_impl(true, true)
+        self.local_checkpoint_with(true, None)
+    }
+
+    /// Create a local checkpoint of this DataFrame, at once if `eager`, kept at
+    /// `storage_level`, else at the server's default, mirroring
+    /// `DataFrame.localCheckpoint(eager, storageLevel)`.
+    pub fn local_checkpoint_with(
+        &self,
+        eager: bool,
+        storage_level: Option<proto::StorageLevel>,
+    ) -> Result<DataFrame> {
+        self.checkpoint_impl(true, eager, storage_level)
     }
 
     /// Execute a `CheckpointCommand` and return a DataFrame referencing the resulting
     /// cached remote relation. Mirrors `DataFrame.checkpoint`/`localCheckpoint`, which
     /// materialize server-side and return a handle to the checkpointed data.
-    fn checkpoint_impl(&self, local: bool, eager: bool) -> Result<DataFrame> {
+    fn checkpoint_impl(
+        &self,
+        local: bool,
+        eager: bool,
+        storage_level: Option<proto::StorageLevel>,
+    ) -> Result<DataFrame> {
         let mut cmd = proto::CheckpointCommand::default();
-        cmd.relation = Some(self.plan.to_proto());
+        cmd.relation = Some(self.relation());
         cmd.local = local;
         cmd.eager = eager;
-        let responses = execute_command_collect(
+        cmd.storage_level = storage_level;
+        let (responses, info) = execute_command_with_info(
             &self.session,
             proto::command::CommandType::CheckpointCommand(cmd),
         )?;
+        self.record_execution(info);
         for resp in &responses {
             if let Some(proto::execute_plan_response::ResponseType::CheckpointCommandResult(res)) =
                 &resp.response_type
@@ -1017,17 +1277,18 @@ impl DataFrame {
     /// Build + execute a real `CreateDataFrameViewCommand` (was previously a
     /// silent no-op that passed the query relation through and never created a view).
     fn create_view(&self, name: &str, replace: bool, global: bool) -> Result<()> {
-        let mut input = self.plan.to_proto();
-        assign_plan_ids(&mut input, &self.session)?;
+        let input = self.relation();
         let mut cmd = proto::CreateDataFrameViewCommand::default();
         cmd.input = Some(input);
         cmd.name = name.to_string();
         cmd.is_global = global;
         cmd.replace = replace;
-        execute_command(
+        let (_, info) = execute_command_with_info(
             &self.session,
             proto::command::CommandType::CreateDataframeView(cmd),
-        )
+        )?;
+        self.record_execution(info);
+        Ok(())
     }
 
     /// Print the execution plan to the console. Mirrors `pyspark.sql.DataFrame.explain`
@@ -1036,40 +1297,57 @@ impl DataFrame {
         self.explain_mode("simple")
     }
 
-    /// Print the execution plan in a specific mode. Mirrors the `mode` argument of
-    /// `pyspark.sql.DataFrame.explain`: one of "simple", "extended", "codegen",
-    /// "cost", "formatted" (case-insensitive).
+    /// Print the execution plan in an explain mode, [`DataFrame::explain_string`].
     pub fn explain_mode(&self, mode: &str) -> Result<()> {
+        println!("{}", self.explain_string(mode)?);
+        Ok(())
+    }
+
+    /// The execution plan in an explain mode, mirroring `pyspark.sql.DataFrame._explain_string`
+    /// of a mode, which PySpark Connect's client checks: one of "simple", "extended",
+    /// "codegen", "cost" and "formatted", else a `VALUE_NOT_ALLOWED` error.
+    pub fn explain_string(&self, mode: &str) -> Result<String> {
         use proto::analyze_plan_request::explain::ExplainMode;
-        let explain_mode = match mode.to_lowercase().as_str() {
+        let explain_mode = match mode {
             "simple" => ExplainMode::Simple,
             "extended" => ExplainMode::Extended,
             "codegen" => ExplainMode::Codegen,
             "cost" => ExplainMode::Cost,
             "formatted" => ExplainMode::Formatted,
-            other => {
+            _ => {
                 return Err(SparkError::value(
-                    "UNSUPPORTED_EXPLAIN_MODE",
-                    &[("mode", other)],
+                    "VALUE_NOT_ALLOWED",
+                    &[
+                        ("arg_name", "explain_mode"),
+                        (
+                            "allowed_values",
+                            "['simple', 'extended', 'codegen', 'cost', 'formatted']",
+                        ),
+                    ],
                 ))
             }
         };
-        let mut relation = self.plan.to_proto();
-        assign_plan_ids(&mut relation, &self.session)?;
-        let mut plan = proto::Plan::default();
-        plan.op_type = Some(proto::plan::OpType::Root(relation));
-        let mut ex = proto::analyze_plan_request::Explain::default();
-        ex.plan = Some(plan);
-        ex.explain_mode = explain_mode as i32;
-        let mut request = proto::AnalyzePlanRequest::default();
-        request.session_id = self.session.client().session_id().to_string();
-        request.user_context = Some(proto::UserContext::default());
-        request.analyze = Some(proto::analyze_plan_request::Analyze::Explain(ex));
+        let plan = proto::Plan {
+            op_type: Some(proto::plan::OpType::Root(self.relation())),
+        };
+        let request = proto::AnalyzePlanRequest {
+            session_id: self.session.client().session_id().to_string(),
+            user_context: Some(proto::UserContext::default()),
+            analyze: Some(proto::analyze_plan_request::Analyze::Explain(
+                proto::analyze_plan_request::Explain {
+                    plan: Some(plan),
+                    explain_mode: explain_mode as i32,
+                },
+            )),
+            ..Default::default()
+        };
         let response = block_on(self.session.client().analyze_plan(request))?;
-        if let Some(proto::analyze_plan_response::Result::Explain(e)) = response.result {
-            println!("{}", e.explain_string);
+        match response.result {
+            Some(proto::analyze_plan_response::Result::Explain(e)) => Ok(e.explain_string),
+            _ => Err(SparkError::connect_msg(
+                "AnalyzePlan response did not contain an explain result",
+            )),
         }
-        Ok(())
     }
 
     /// Add a watermark to this DataFrame for event-time based windows.
@@ -1089,7 +1367,7 @@ impl DataFrame {
             num_partitions: Some(num_partitions),
             partition_exprs: columns,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_cached_schema(plan)
     }
 
     /// Repartition into `num_partitions` by hashing the given column expressions.
@@ -1104,7 +1382,7 @@ impl DataFrame {
             num_partitions,
             expressions: columns,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_cached_schema(plan)
     }
 
     /// Alias for to_df().
@@ -1137,8 +1415,7 @@ impl DataFrame {
 
     /// Get the input files for this DataFrame. Mirrors `pyspark.sql.DataFrame.inputFiles`.
     pub fn input_files(&self) -> Result<Vec<String>> {
-        let mut relation = self.plan.to_proto();
-        assign_plan_ids(&mut relation, &self.session)?;
+        let relation = self.relation();
         let mut plan = proto::Plan::default();
         plan.op_type = Some(proto::plan::OpType::Root(relation));
         let mut inp = proto::analyze_plan_request::InputFiles::default();
@@ -1161,7 +1438,7 @@ impl DataFrame {
             name: name.to_string(),
             exprs,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_cached_schema(plan)
     }
 
     /// Get stat functions.
@@ -1268,10 +1545,35 @@ impl DataFrame {
         DataFrame::new(self.session.clone(), plan)
     }
 
-    /// Replace values.
+    /// Replace values, each given as a string: a numeric-looking string is a double, otherwise
+    /// a string. [`DataFrame::replace_literals`] takes the values as literals.
     pub fn replace(
         &self,
         to_replace: Vec<(String, String)>,
+        subset: Option<Vec<&str>>,
+    ) -> DataFrame {
+        let replacements = to_replace
+            .iter()
+            .map(|(old, new)| {
+                (
+                    crate::plan::numeric_or_string_literal(old),
+                    crate::plan::numeric_or_string_literal(new),
+                )
+            })
+            .collect();
+        self.replace_literals(replacements, subset)
+    }
+
+    /// Replace values, mirroring `pyspark.sql.DataFrame.replace`: each pair is a literal and
+    /// the literal that replaces it, which may be a null, in the columns of `subset`, or else
+    /// in every column of the literal's type. The server replaces a boolean, a double or a
+    /// string.
+    pub fn replace_literals(
+        &self,
+        replacements: Vec<(
+            crate::expression::LiteralExpression,
+            crate::expression::LiteralExpression,
+        )>,
         subset: Option<Vec<&str>>,
     ) -> DataFrame {
         let columns = subset
@@ -1279,7 +1581,7 @@ impl DataFrame {
             .unwrap_or_default();
         let plan = LogicalPlan::NAReplace {
             input: Arc::clone(&self.plan),
-            replacements: to_replace,
+            replacements,
             columns,
         };
         DataFrame::new(self.session.clone(), plan)
@@ -1305,23 +1607,39 @@ impl DataFrame {
         DataFrame::new(self.session.clone(), plan)
     }
 
-    /// Select columns by regex pattern.
-    pub fn col_regex(&self, col_name: &str) -> DataFrame {
-        let plan = LogicalPlan::ColRegex {
-            input: Arc::clone(&self.plan),
-            col_name: col_name.to_string(),
-        };
-        DataFrame::new(self.session.clone(), plan)
+    /// The plan ID of this DataFrame's plan in its session, by which its columns refer to it.
+    fn plan_id(&self) -> i64 {
+        self.session.plan_ids().id_of(&self.plan)
     }
 
-    /// Select a metadata column by name. Mirrors `pyspark.sql.DataFrame.metadataColumn`.
-    pub fn metadata_column(&self, name: &str) -> Column {
+    /// The column `name` of this DataFrame. It refers to this DataFrame by its plan ID, so that
+    /// the server resolves it against this DataFrame's plan, as in a join of DataFrames of the
+    /// same column names. Mirrors `df[name]`, `df.name` and `DataFrame._col` of PySpark Connect.
+    pub fn col(&self, name: &str) -> Column {
+        let reference = crate::expression::ColumnReference::new(name).with_plan_id(self.plan_id());
+        Column::new(ExpressionNode::ColumnReference(reference).into())
+    }
+
+    /// The star of the columns of this DataFrame, as `df["*"]` of PySpark Connect.
+    pub fn star(&self) -> Column {
+        Column::new(ExpressionNode::UnresolvedStar(None, Some(self.plan_id())).into())
+    }
+
+    /// The columns of this DataFrame whose names match the regex `col_name`, in backticks, as
+    /// a Column. Mirrors `DataFrame.colRegex`.
+    pub fn col_regex(&self, col_name: &str) -> Column {
         Column::new(
-            ExpressionNode::ColumnReference(
-                crate::expression::ColumnReference::new(name).metadata(),
-            )
-            .into(),
+            ExpressionNode::UnresolvedRegex(col_name.to_string(), Some(self.plan_id())).into(),
         )
+    }
+
+    /// The metadata column `name` of this DataFrame, which refers to it by its plan ID.
+    /// Mirrors `pyspark.sql.DataFrame.metadataColumn`.
+    pub fn metadata_column(&self, name: &str) -> Column {
+        let reference = crate::expression::ColumnReference::new(name)
+            .with_plan_id(self.plan_id())
+            .metadata();
+        Column::new(ExpressionNode::ColumnReference(reference).into())
     }
 
     /// Group by with rollup.
@@ -1356,7 +1674,7 @@ impl DataFrame {
             order: columns,
             is_global: false,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_cached_schema(plan)
     }
 
     /// Drop duplicates within a watermark.
@@ -1400,7 +1718,7 @@ impl DataFrame {
                 with_replacement: false,
                 seed,
             };
-            results.push(DataFrame::new(self.session.clone(), plan));
+            results.push(self.with_cached_schema(plan));
             cumulative = upper;
         }
 
@@ -1410,14 +1728,14 @@ impl DataFrame {
     /// Print the schema of this DataFrame.
     pub fn print_schema(&self) -> Result<()> {
         let schema = self.schema()?;
-        println!("{}", schema);
+        println!("{}", schema.tree_string()?);
         Ok(())
     }
 
     /// Get the storage level of this DataFrame. Mirrors `DataFrame.storageLevel`.
     pub fn storage_level(&self) -> Result<proto::StorageLevel> {
         let get = proto::analyze_plan_request::GetStorageLevel {
-            relation: Some(self.analyze_relation()?),
+            relation: Some(self.relation()),
         };
         let request =
             self.analyze_request(proto::analyze_plan_request::Analyze::GetStorageLevel(get));
@@ -1441,24 +1759,19 @@ impl DataFrame {
 
     /// Get dtypes (column names and types).
     pub fn dtypes(&self) -> Result<Vec<(String, String)>> {
-        let schema = self.schema()?;
-        match schema {
-            DataType::Struct { fields } => {
-                let dtypes = fields
-                    .iter()
-                    .map(|f| (f.name.clone(), f.data_type.to_string()))
-                    .collect();
-                Ok(dtypes)
-            }
-            _ => Err(SparkError::connect_msg("Schema is not a struct type")),
-        }
+        let DataType::Struct { fields } = self.schema()? else {
+            unreachable!("schema() validates struct responses")
+        };
+        Ok(fields
+            .into_iter()
+            .map(|field| (field.name, field.data_type.to_string()))
+            .collect())
     }
 
     /// Compute the server-side semantic hash of this DataFrame's logical plan,
     /// mirroring `DataFrame.semanticHash()` (an AnalyzePlan request).
     pub fn semantic_hash(&self) -> Result<i32> {
-        let mut relation = self.plan.to_proto();
-        assign_plan_ids(&mut relation, &self.session)?;
+        let relation = self.relation();
         let mut plan = proto::Plan::default();
         plan.op_type = Some(proto::plan::OpType::Root(relation));
         let mut request = proto::AnalyzePlanRequest::default();
@@ -1479,10 +1792,8 @@ impl DataFrame {
     /// Whether two DataFrames have the same semantics, mirroring
     /// `DataFrame.sameSemantics(other)` (a server-side AnalyzePlan comparison).
     pub fn same_semantics(&self, other: &DataFrame) -> Result<bool> {
-        let mut self_rel = self.plan.to_proto();
-        assign_plan_ids(&mut self_rel, &self.session)?;
-        let mut other_rel = other.plan.to_proto();
-        assign_plan_ids(&mut other_rel, &other.session)?;
+        let self_rel = self.relation();
+        let other_rel = other.relation();
         let mut target_plan = proto::Plan::default();
         target_plan.op_type = Some(proto::plan::OpType::Root(self_rel));
         let mut other_plan = proto::Plan::default();
@@ -1505,19 +1816,18 @@ impl DataFrame {
         }
     }
 
-    /// Convert each row to a JSON object string, mirroring `DataFrame.toJSON()`.
-    ///
-    /// Reference pyspark produces `{"col":val,...}` per row by applying the server's
-    /// `to_json(struct(*))`, not a client-side row rendering (which previously emitted
-    /// Rust list syntax like `[1, a]`). Build that projection and collect the strings.
+    /// Each row as a JSON object string, in a column `value`, mirroring
+    /// `pyspark.sql.DataFrame.toJSON` of PySpark Connect, which selects
+    /// `to_json(struct(col("*"))).alias("value")`.
+    pub fn to_json_dataframe(&self) -> DataFrame {
+        use crate::functions::{col, r#struct, to_json};
+        self.select([to_json(r#struct([col("*")])).alias("value")])
+    }
+
+    /// Collect each row as a JSON object string, the rows of
+    /// [`DataFrame::to_json_dataframe`].
     pub fn to_json(&self) -> Result<Vec<String>> {
-        let cols: Vec<Column> = self
-            .columns()?
-            .iter()
-            .map(|c| crate::column::col(c))
-            .collect();
-        let json_col = crate::functions::to_json(crate::functions::r#struct(cols));
-        let rows = self.select(vec![json_col]).collect()?;
+        let rows = self.to_json_dataframe().collect()?;
         Ok(rows
             .iter()
             .map(|r| {
@@ -1539,7 +1849,7 @@ impl DataFrame {
             by_name: false,
             allow_missing_columns: false,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_merged_schema(other, plan)
     }
 
     /// Except all rows.
@@ -1552,7 +1862,7 @@ impl DataFrame {
             by_name: false,
             allow_missing_columns: false,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_merged_schema(other, plan)
     }
 
     /// Intersect all rows.
@@ -1565,7 +1875,7 @@ impl DataFrame {
             by_name: false,
             allow_missing_columns: false,
         };
-        DataFrame::new(self.session.clone(), plan)
+        self.with_merged_schema(other, plan)
     }
 
     /// Unpivot columns (like melt).
@@ -1608,20 +1918,49 @@ impl DataFrame {
     }
 
     /// Check if this DataFrame is local (collected).
+    ///
+    /// Mirrors the server's `Dataset.isLocal`: only a local relation itself is local. The
+    /// server resolves `toDF`, which Arrow input with inferred or listed column names
+    /// applies, into a `Project`, which is not. The result of a command run by
+    /// `SparkSession::sql` is the local relation the server returned.
     pub fn is_local(&self) -> bool {
-        matches!(self.plan.as_ref(), LogicalPlan::LocalRelation { .. })
+        use proto::relation::RelType;
+        match self.plan.as_ref() {
+            LogicalPlan::LocalRelation { .. } | LogicalPlan::ChunkedCachedLocalRelation { .. } => {
+                true
+            }
+            LogicalPlan::CachedRelation { relation } => matches!(
+                relation.rel_type,
+                Some(RelType::LocalRelation(_))
+                    | Some(RelType::CachedLocalRelation(_))
+                    | Some(RelType::ChunkedCachedLocalRelation(_))
+            ),
+            _ => false,
+        }
     }
 
-    /// Check if this DataFrame is streaming.
-    pub fn is_streaming(&self) -> bool {
-        // Check if the plan has streaming-related operations
-        matches!(
-            self.plan.as_ref(),
-            LogicalPlan::Read {
-                is_streaming: true,
-                ..
-            }
-        )
+    /// Whether this DataFrame is streaming, mirroring `pyspark.sql.DataFrame.isStreaming`,
+    /// which asks the server: whether a source of its plan continuously returns data.
+    pub fn is_streaming(&self) -> Result<bool> {
+        let request = proto::AnalyzePlanRequest {
+            session_id: self.session.client().session_id().to_string(),
+            user_context: Some(proto::UserContext::default()),
+            analyze: Some(proto::analyze_plan_request::Analyze::IsStreaming(
+                proto::analyze_plan_request::IsStreaming {
+                    plan: Some(proto::Plan {
+                        op_type: Some(proto::plan::OpType::Root(self.relation())),
+                    }),
+                },
+            )),
+            ..Default::default()
+        };
+        let response = block_on(self.session.client().analyze_plan(request))?;
+        match response.result {
+            Some(proto::analyze_plan_response::Result::IsStreaming(r)) => Ok(r.is_streaming),
+            _ => Err(SparkError::connect_msg(
+                "AnalyzePlan response did not contain an isStreaming result",
+            )),
+        }
     }
 
     /// Collect the DataFrame and serialize it to Arrow IPC (file format) bytes.
@@ -1686,7 +2025,7 @@ impl DataFrame {
     /// `DataFrame.zipWithIndex(indexColName="index")`:
     /// `self.select(col("*"), distributed_sequence_id().alias(indexColName))`.
     pub fn zip_with_index(&self, index_col_name: &str) -> DataFrame {
-        let star = Column::new(ExpressionNode::UnresolvedStar(None).into());
+        let star = Column::new(ExpressionNode::UnresolvedStar(None, None).into());
         let seq = Column::new(Expression::function("distributed_sequence_id", vec![]))
             .alias(index_col_name);
         self.select(vec![star, seq])
@@ -1699,24 +2038,43 @@ impl DataFrame {
     pub fn to(&self, schema: DataType) -> DataFrame {
         let plan = LogicalPlan::ToSchema {
             input: Arc::clone(&self.plan),
-            schema,
+            schema: schema.clone(),
         };
-        DataFrame::new(self.session.clone(), plan)
+        Self::new_with_schema(self.session.clone(), plan, Some(schema))
     }
 
-    /// Check if the DataFrame exists (is not empty).
-    pub fn exists(&self) -> Result<bool> {
-        self.limit(1).count().map(|c| c > 0)
+    /// A subquery of `subquery_type` of this DataFrame's plan, which refers to the plan by
+    /// its plan ID in the session.
+    pub(crate) fn subquery(
+        &self,
+        subquery_type: crate::expression::SubqueryType,
+    ) -> crate::expression::SubqueryExpression {
+        crate::expression::SubqueryExpression::new(
+            Arc::clone(&self.plan),
+            self.session.plan_ids().id_of(&self.plan),
+            subquery_type,
+        )
     }
 
-    /// Get a scalar value from a single-row, single-column result.
-    pub fn scalar(&self) -> Result<Option<Value>> {
+    /// The scalar subquery of this DataFrame, which returns one row of one column, as a
+    /// Column of that value. Mirrors `DataFrame.scalar()`. A column of the outer query is
+    /// referred to as `col(...).outer()`.
+    pub fn scalar(&self) -> Column {
+        let subquery = self.subquery(crate::expression::SubqueryType::Scalar);
+        Column::new(ExpressionNode::Subquery(Box::new(subquery)).into())
+    }
+
+    /// The EXISTS subquery of this DataFrame, as a Column of whether it returns a row.
+    /// Mirrors `DataFrame.exists()`.
+    pub fn exists(&self) -> Column {
+        let subquery = self.subquery(crate::expression::SubqueryType::Exists);
+        Column::new(ExpressionNode::Subquery(Box::new(subquery)).into())
+    }
+
+    /// The first value of the first row, if any.
+    pub(crate) fn first_value(&self) -> Result<Option<Value>> {
         let rows = self.limit(1).collect()?;
-        if rows.is_empty() {
-            return Ok(None);
-        }
-        let row = &rows[0];
-        Ok(row.get(0).cloned())
+        Ok(rows.first().and_then(|row| row.get(0).cloned()))
     }
 
     /// Transpose the DataFrame: swap rows and columns (server-side `Transpose`
@@ -1746,10 +2104,7 @@ impl DataFrame {
             left: Arc::clone(&self.plan),
             right: Arc::clone(&other.plan),
         };
-        Ok(DataFrame {
-            plan: Arc::new(plan),
-            session: self.session.clone(),
-        })
+        Ok(DataFrame::new(self.session.clone(), plan))
     }
 
     /// Register this DataFrame as a temporary table (deprecated - use createTempView).
@@ -1769,12 +2124,10 @@ impl DataFrame {
 /// Shared by write operations (which embed a fully-formed input relation inside
 /// a `Command`) so they go through the same plan-id assignment as `collect()`.
 pub(crate) fn build_input_relation(
-    plan: &LogicalPlan,
+    plan: &Arc<LogicalPlan>,
     session: &SparkSession,
-) -> Result<proto::Relation> {
-    let mut relation = plan.to_proto();
-    assign_plan_ids(&mut relation, session)?;
-    Ok(relation)
+) -> proto::Relation {
+    crate::plan::relation_with_ids(plan, session.plan_ids())
 }
 
 /// Execute a `Command` against the server and drain the response stream.
@@ -1795,6 +2148,15 @@ pub(crate) fn execute_command_collect(
     session: &SparkSession,
     command_type: proto::command::CommandType,
 ) -> Result<Vec<proto::ExecutePlanResponse>> {
+    execute_command_with_info(session, command_type).map(|(responses, _)| responses)
+}
+
+/// Like `execute_command_collect`, and also returns the information of the execution, which
+/// it records as the session's most recent one, for a DataFrame that keeps its own.
+pub(crate) fn execute_command_with_info(
+    session: &SparkSession,
+    command_type: proto::command::CommandType,
+) -> Result<(Vec<proto::ExecutePlanResponse>, ExecutionInfo)> {
     let mut command = proto::Command::default();
     command.command_type = Some(command_type);
 
@@ -1816,8 +2178,8 @@ pub(crate) fn execute_command_collect(
         capture_execution(&mut resp, &mut info, session);
         responses.push(resp);
     }
-    session.record_execution(info);
-    Ok(responses)
+    session.record_execution(info.clone());
+    Ok((responses, info))
 }
 
 /// Pull execution metrics/observed-metrics off a response and fire progress
@@ -1828,6 +2190,9 @@ fn capture_execution(
     info: &mut ExecutionInfo,
     session: &SparkSession,
 ) {
+    if info.operation_id.is_none() && !resp.operation_id.is_empty() {
+        info.operation_id = Some(resp.operation_id.clone());
+    }
     if let Some(metrics) = resp.metrics.take() {
         info.metrics = Some(metrics);
     }
@@ -1842,214 +2207,6 @@ fn capture_execution(
     {
         session.notify_progress(progress);
     }
-}
-
-/// Assign unique plan_ids to all relations in a tree (post-order traversal).
-pub(crate) fn assign_plan_ids(
-    relation: &mut proto::Relation,
-    session: &SparkSession,
-) -> Result<()> {
-    if let Some(rel_type) = &mut relation.rel_type {
-        use proto::relation::RelType;
-        match rel_type {
-            RelType::Range(_) => {}
-            RelType::Sql(_) => {}
-            RelType::LocalRelation(_) => {}
-            RelType::CachedRemoteRelation(_) => {}
-            RelType::Project(proj) => {
-                if let Some(input) = &mut proj.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Filter(filter) => {
-                if let Some(input) = &mut filter.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Join(join) => {
-                if let Some(left) = &mut join.left {
-                    assign_plan_ids(left, session)?;
-                }
-                if let Some(right) = &mut join.right {
-                    assign_plan_ids(right, session)?;
-                }
-            }
-            RelType::SetOp(set_op) => {
-                if let Some(left) = &mut set_op.left_input {
-                    assign_plan_ids(left, session)?;
-                }
-                if let Some(right) = &mut set_op.right_input {
-                    assign_plan_ids(right, session)?;
-                }
-            }
-            RelType::Aggregate(agg) => {
-                if let Some(input) = &mut agg.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Sort(sort) => {
-                if let Some(input) = &mut sort.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Limit(limit) => {
-                if let Some(input) = &mut limit.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Offset(offset) => {
-                if let Some(input) = &mut offset.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Tail(tail) => {
-                if let Some(input) = &mut tail.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Deduplicate(dedup) => {
-                if let Some(input) = &mut dedup.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Repartition(repartition) => {
-                if let Some(input) = &mut repartition.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::RepartitionByExpression(repart_expr) => {
-                if let Some(input) = &mut repart_expr.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::WithColumns(with_cols) => {
-                if let Some(input) = &mut with_cols.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::WithColumnsRenamed(with_renamed) => {
-                if let Some(input) = &mut with_renamed.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Drop(drop) => {
-                if let Some(input) = &mut drop.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::ToDf(to_df) => {
-                if let Some(input) = &mut to_df.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::ToSchema(to_schema) => {
-                if let Some(input) = &mut to_schema.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Hint(hint) => {
-                if let Some(input) = &mut hint.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Unpivot(unpivot) => {
-                if let Some(input) = &mut unpivot.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Sample(sample) => {
-                if let Some(input) = &mut sample.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::FillNa(fill_na) => {
-                if let Some(input) = &mut fill_na.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::DropNa(drop_na) => {
-                if let Some(input) = &mut drop_na.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Replace(replace) => {
-                if let Some(input) = &mut replace.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Describe(describe) => {
-                if let Some(input) = &mut describe.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Summary(summary) => {
-                if let Some(input) = &mut summary.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::SubqueryAlias(sq_alias) => {
-                if let Some(input) = &mut sq_alias.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::CachedLocalRelation(_cached) => {
-                // CachedLocalRelation doesn't have nested plans, it's just a reference with a hash
-            }
-            RelType::WithWatermark(watermark) => {
-                if let Some(input) = &mut watermark.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Crosstab(stat) => {
-                if let Some(input) = &mut stat.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::FreqItems(stat) => {
-                if let Some(input) = &mut stat.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::ApproxQuantile(stat) => {
-                if let Some(input) = &mut stat.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Corr(stat) => {
-                if let Some(input) = &mut stat.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::Cov(stat) => {
-                if let Some(input) = &mut stat.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::SampleBy(stat) => {
-                if let Some(input) = &mut stat.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            RelType::CollectMetrics(metrics) => {
-                if let Some(input) = &mut metrics.input {
-                    assign_plan_ids(input, session)?;
-                }
-            }
-            _ => {
-                // Handle any other relation types that we haven't explicitly handled
-            }
-        }
-    }
-
-    // Assign plan_id to this relation
-    if relation.common.is_none() {
-        relation.common = Some(proto::RelationCommon::default());
-    }
-    if let Some(common) = &mut relation.common {
-        common.plan_id = Some(session.next_plan_id());
-    }
-
-    Ok(())
 }
 
 /// Decode an Arrow batch into rows.
@@ -2088,15 +2245,14 @@ pub(crate) fn decode_arrow_batch(
         let layouts = record_batch
             .columns()
             .iter()
-            .map(|column| ArrowValueLayout::new(column.data_type()))
+            .map(|column| ArrowValueLayout::new(column.as_ref()))
             .collect::<Vec<_>>();
 
         for row_idx in 0..num_rows {
             let mut values = Vec::with_capacity(record_batch.num_columns());
 
-            for (column, layout) in record_batch.columns().iter().zip(&layouts) {
-                let value = arrow_value_at_with_layout(column.as_ref(), row_idx, layout)?;
-                values.push(value);
+            for layout in &layouts {
+                values.push(layout.value_at(row_idx)?);
             }
 
             rows.push(Row::with_shared_fields(Arc::clone(&field_names), values));
@@ -2219,312 +2375,345 @@ fn record_batches_to_polars(
         .map_err(|e| SparkError::connect_msg(format!("Failed to create Polars DataFrame: {e}")))
 }
 
-/// Render a decoded map key ([`Value`]) as its natural scalar string, since
-/// `Value::Map` keys are `String`. Numeric/boolean keys use their value (`1`,
-/// `true`), decimals their preserved digits; non-scalar keys (rare) fall back to
-/// Debug. This must never use the enum's Debug form for scalars - a `map<int,…>`
-/// key has to be "1", not "Integer(1)".
-fn map_key_to_string(v: Value) -> String {
-    match v {
-        Value::String(s) => s,
-        Value::Bool(b) => b.to_string(),
-        Value::Byte(x) => x.to_string(),
-        Value::Short(x) => x.to_string(),
-        Value::Integer(x) => x.to_string(),
-        Value::Long(x) => x.to_string(),
-        Value::Float(x) => x.to_string(),
-        Value::Double(x) => x.to_string(),
-        Value::Date(d) => d.to_string(),
-        Value::Timestamp(t) => t.to_string(),
-        Value::Decimal { value, .. } => value,
-        other => format!("{other:?}"),
-    }
+/// A borrowed column decoder, resolved once per record batch. Returned Values
+/// own their contents; neither rows nor nested values retain the Arrow arrays.
+struct ArrowValueLayout<'a> {
+    array: &'a dyn arrow::array::Array,
+    decoder: ArrowValueDecoder<'a>,
 }
 
-/// Immutable decoding metadata prepared once for each column in a record batch.
-/// Container layouts follow their children so struct names are also shared inside
-/// lists and maps, without retaining the Arrow arrays after decoding.
-enum ArrowValueLayout {
-    Scalar,
-    List(Box<Self>),
+enum ArrowValueDecoder<'a> {
+    Null,
+    Boolean(&'a arrow::array::BooleanArray),
+    Int8(&'a arrow::array::Int8Array),
+    Int16(&'a arrow::array::Int16Array),
+    Int32(&'a arrow::array::Int32Array),
+    Int64(&'a arrow::array::Int64Array),
+    Float32(&'a arrow::array::Float32Array),
+    Float64(&'a arrow::array::Float64Array),
+    String(&'a arrow::array::StringArray),
+    Binary(&'a arrow::array::BinaryArray),
+    Date32(&'a arrow::array::Date32Array),
+    TimestampMicrosecond(&'a arrow::array::TimestampMicrosecondArray),
+    UInt8(&'a arrow::array::UInt8Array),
+    UInt16(&'a arrow::array::UInt16Array),
+    UInt32(&'a arrow::array::UInt32Array),
+    UInt64(&'a arrow::array::UInt64Array),
+    Decimal128(&'a arrow::array::Decimal128Array),
+    LargeString(&'a arrow::array::LargeStringArray),
+    LargeBinary(&'a arrow::array::LargeBinaryArray),
+    StringView(&'a arrow::array::StringViewArray),
+    BinaryView(&'a arrow::array::BinaryViewArray),
+    TimestampSecond(&'a arrow::array::TimestampSecondArray),
+    TimestampMillisecond(&'a arrow::array::TimestampMillisecondArray),
+    TimestampNanosecond(&'a arrow::array::TimestampNanosecondArray),
+    Date64(&'a arrow::array::Date64Array),
+    DurationMicrosecond(&'a arrow::array::DurationMicrosecondArray),
+    Decimal256(&'a arrow::array::Decimal256Array),
+    FixedSizeBinary(&'a arrow::array::FixedSizeBinaryArray),
+    Time64Microsecond(&'a arrow::array::Time64MicrosecondArray),
+    Time64Nanosecond(&'a arrow::array::Time64NanosecondArray),
+    Time32Millisecond(&'a arrow::array::Time32MillisecondArray),
+    Time32Second(&'a arrow::array::Time32SecondArray),
+    IntervalYearMonth(&'a arrow::array::IntervalYearMonthArray),
+    IntervalDayTime(&'a arrow::array::IntervalDayTimeArray),
+    IntervalMonthDayNano(&'a arrow::array::IntervalMonthDayNanoArray),
+    List {
+        array: &'a arrow::array::ListArray,
+        child: Box<ArrowValueLayout<'a>>,
+    },
     Struct {
         names: Arc<[String]>,
-        children: Vec<Self>,
-        is_variant: bool,
+        children: Vec<ArrowValueLayout<'a>>,
+        variant_fields: Option<(Option<usize>, Option<usize>)>,
     },
-    Map(Box<(Self, Self)>),
+    Map {
+        array: &'a arrow::array::MapArray,
+        children: Box<(ArrowValueLayout<'a>, ArrowValueLayout<'a>)>,
+    },
+    Unsupported,
 }
 
-impl ArrowValueLayout {
-    fn new(data_type: &arrow::datatypes::DataType) -> Self {
-        use arrow::datatypes::DataType;
-        match data_type {
-            DataType::List(field) => Self::List(Box::new(Self::new(field.data_type()))),
-            DataType::Struct(fields) => Self::Struct {
+impl<'a> ArrowValueLayout<'a> {
+    fn new(array: &'a dyn arrow::array::Array) -> Self {
+        use arrow::array::*;
+
+        // Resolution never fails: null parents and empty containers must not
+        // reject unsupported children that are never read.
+        let any = array.as_any();
+        let decoder = if any.is::<NullArray>() {
+            ArrowValueDecoder::Null
+        } else if let Some(array) = any.downcast_ref::<BooleanArray>() {
+            ArrowValueDecoder::Boolean(array)
+        } else if let Some(array) = any.downcast_ref::<Int8Array>() {
+            ArrowValueDecoder::Int8(array)
+        } else if let Some(array) = any.downcast_ref::<Int16Array>() {
+            ArrowValueDecoder::Int16(array)
+        } else if let Some(array) = any.downcast_ref::<Int32Array>() {
+            ArrowValueDecoder::Int32(array)
+        } else if let Some(array) = any.downcast_ref::<Int64Array>() {
+            ArrowValueDecoder::Int64(array)
+        } else if let Some(array) = any.downcast_ref::<Float32Array>() {
+            ArrowValueDecoder::Float32(array)
+        } else if let Some(array) = any.downcast_ref::<Float64Array>() {
+            ArrowValueDecoder::Float64(array)
+        } else if let Some(array) = any.downcast_ref::<StringArray>() {
+            ArrowValueDecoder::String(array)
+        } else if let Some(array) = any.downcast_ref::<BinaryArray>() {
+            ArrowValueDecoder::Binary(array)
+        } else if let Some(array) = any.downcast_ref::<Date32Array>() {
+            ArrowValueDecoder::Date32(array)
+        } else if let Some(array) = any.downcast_ref::<TimestampMicrosecondArray>() {
+            ArrowValueDecoder::TimestampMicrosecond(array)
+        } else if let Some(array) = any.downcast_ref::<UInt8Array>() {
+            ArrowValueDecoder::UInt8(array)
+        } else if let Some(array) = any.downcast_ref::<UInt16Array>() {
+            ArrowValueDecoder::UInt16(array)
+        } else if let Some(array) = any.downcast_ref::<UInt32Array>() {
+            ArrowValueDecoder::UInt32(array)
+        } else if let Some(array) = any.downcast_ref::<UInt64Array>() {
+            ArrowValueDecoder::UInt64(array)
+        } else if let Some(array) = any.downcast_ref::<Decimal128Array>() {
+            ArrowValueDecoder::Decimal128(array)
+        } else if let Some(array) = any.downcast_ref::<LargeStringArray>() {
+            ArrowValueDecoder::LargeString(array)
+        } else if let Some(array) = any.downcast_ref::<LargeBinaryArray>() {
+            ArrowValueDecoder::LargeBinary(array)
+        } else if let Some(array) = any.downcast_ref::<StringViewArray>() {
+            ArrowValueDecoder::StringView(array)
+        } else if let Some(array) = any.downcast_ref::<BinaryViewArray>() {
+            ArrowValueDecoder::BinaryView(array)
+        } else if let Some(array) = any.downcast_ref::<TimestampSecondArray>() {
+            ArrowValueDecoder::TimestampSecond(array)
+        } else if let Some(array) = any.downcast_ref::<TimestampMillisecondArray>() {
+            ArrowValueDecoder::TimestampMillisecond(array)
+        } else if let Some(array) = any.downcast_ref::<TimestampNanosecondArray>() {
+            ArrowValueDecoder::TimestampNanosecond(array)
+        } else if let Some(array) = any.downcast_ref::<Date64Array>() {
+            ArrowValueDecoder::Date64(array)
+        } else if let Some(array) = any.downcast_ref::<DurationMicrosecondArray>() {
+            ArrowValueDecoder::DurationMicrosecond(array)
+        } else if let Some(array) = any.downcast_ref::<Decimal256Array>() {
+            ArrowValueDecoder::Decimal256(array)
+        } else if let Some(array) = any.downcast_ref::<FixedSizeBinaryArray>() {
+            ArrowValueDecoder::FixedSizeBinary(array)
+        } else if let Some(array) = any.downcast_ref::<Time64MicrosecondArray>() {
+            ArrowValueDecoder::Time64Microsecond(array)
+        } else if let Some(array) = any.downcast_ref::<Time64NanosecondArray>() {
+            ArrowValueDecoder::Time64Nanosecond(array)
+        } else if let Some(array) = any.downcast_ref::<Time32MillisecondArray>() {
+            ArrowValueDecoder::Time32Millisecond(array)
+        } else if let Some(array) = any.downcast_ref::<Time32SecondArray>() {
+            ArrowValueDecoder::Time32Second(array)
+        } else if let Some(array) = any.downcast_ref::<IntervalYearMonthArray>() {
+            ArrowValueDecoder::IntervalYearMonth(array)
+        } else if let Some(array) = any.downcast_ref::<IntervalDayTimeArray>() {
+            ArrowValueDecoder::IntervalDayTime(array)
+        } else if let Some(array) = any.downcast_ref::<IntervalMonthDayNanoArray>() {
+            ArrowValueDecoder::IntervalMonthDayNano(array)
+        } else if let Some(array) = any.downcast_ref::<ListArray>() {
+            ArrowValueDecoder::List {
+                array,
+                child: Box::new(Self::new(array.values().as_ref())),
+            }
+        } else if let Some(array) = any.downcast_ref::<StructArray>() {
+            let fields = array.fields();
+            let is_variant = fields.iter().any(|field| {
+                field
+                    .metadata()
+                    .get("variant")
+                    .is_some_and(|value| value == "true")
+            });
+            ArrowValueDecoder::Struct {
                 names: fields.iter().map(|field| field.name().clone()).collect(),
-                children: fields
+                children: array
+                    .columns()
                     .iter()
-                    .map(|field| Self::new(field.data_type()))
+                    .map(|child| Self::new(child.as_ref()))
                     .collect(),
-                is_variant: fields.iter().any(|field| {
-                    field
-                        .metadata()
-                        .get("variant")
-                        .is_some_and(|value| value == "true")
+                variant_fields: is_variant.then(|| {
+                    (
+                        fields.iter().position(|field| field.name() == "value"),
+                        fields.iter().position(|field| field.name() == "metadata"),
+                    )
                 }),
-            },
-            DataType::Map(entries, _) => match entries.data_type() {
-                DataType::Struct(fields) => Self::Map(Box::new((
-                    Self::new(fields[0].data_type()),
-                    Self::new(fields[1].data_type()),
-                ))),
-                _ => unreachable!("Arrow map entries must be a struct"),
-            },
-            _ => Self::Scalar,
+            }
+        } else if let Some(array) = any.downcast_ref::<MapArray>() {
+            ArrowValueDecoder::Map {
+                array,
+                children: Box::new((
+                    Self::new(array.keys().as_ref()),
+                    Self::new(array.values().as_ref()),
+                )),
+            }
+        } else {
+            ArrowValueDecoder::Unsupported
+        };
+        Self { array, decoder }
+    }
+
+    fn value_at(&self, index: usize) -> Result<Value> {
+        if self.array.is_null(index) {
+            return Ok(Value::Null);
+        }
+        match &self.decoder {
+            // NullType may have no null buffer; every element is still Null.
+            ArrowValueDecoder::Null => Ok(Value::Null),
+            ArrowValueDecoder::Boolean(arr) => Ok(Value::Bool(arr.value(index))),
+            ArrowValueDecoder::Int8(arr) => Ok(Value::Byte(arr.value(index))),
+            ArrowValueDecoder::Int16(arr) => Ok(Value::Short(arr.value(index))),
+            ArrowValueDecoder::Int32(arr) => Ok(Value::Integer(arr.value(index))),
+            ArrowValueDecoder::Int64(arr) => Ok(Value::Long(arr.value(index))),
+            ArrowValueDecoder::Float32(arr) => Ok(Value::Float(arr.value(index))),
+            ArrowValueDecoder::Float64(arr) => Ok(Value::Double(arr.value(index))),
+            ArrowValueDecoder::String(arr) => Ok(Value::String(arr.value(index).to_string())),
+            ArrowValueDecoder::Binary(arr) => Ok(Value::Binary(arr.value(index).to_vec())),
+            ArrowValueDecoder::Date32(arr) => Ok(Value::Date(arr.value(index))),
+            ArrowValueDecoder::TimestampMicrosecond(arr) => Ok(Value::Timestamp(arr.value(index))),
+            ArrowValueDecoder::UInt8(arr) => Ok(Value::Short(arr.value(index) as i16)),
+            ArrowValueDecoder::UInt16(arr) => Ok(Value::Integer(arr.value(index) as i32)),
+            ArrowValueDecoder::UInt32(arr) => Ok(Value::Long(arr.value(index) as i64)),
+            ArrowValueDecoder::UInt64(arr) => {
+                let val = arr.value(index);
+                let i64_val = i64::try_from(val).map_err(|_| {
+                    SparkError::connect_msg(format!("UInt64 value {} exceeds i64 range", val))
+                })?;
+                Ok(Value::Long(i64_val))
+            }
+            // Decimal128 stays exact, preserving precision/scale rather than using lossy f64.
+            ArrowValueDecoder::Decimal128(arr) => {
+                let scale = arr.scale() as i32;
+                Ok(Value::Decimal {
+                    value: i128_to_decimal_string(arr.value(index), scale),
+                    precision: Some(arr.precision() as i32),
+                    scale: Some(scale),
+                })
+            }
+            ArrowValueDecoder::LargeString(arr) => Ok(Value::String(arr.value(index).to_string())),
+            ArrowValueDecoder::LargeBinary(arr) => Ok(Value::Binary(arr.value(index).to_vec())),
+            ArrowValueDecoder::StringView(arr) => Ok(Value::String(arr.value(index).to_string())),
+            ArrowValueDecoder::BinaryView(arr) => Ok(Value::Binary(arr.value(index).to_vec())),
+            ArrowValueDecoder::TimestampSecond(arr) => {
+                Ok(Value::Timestamp(arr.value(index) * 1_000_000))
+            }
+            ArrowValueDecoder::TimestampMillisecond(arr) => {
+                Ok(Value::Timestamp(arr.value(index) * 1_000))
+            }
+            ArrowValueDecoder::TimestampNanosecond(arr) => {
+                Ok(Value::Timestamp(arr.value(index) / 1_000))
+            }
+            ArrowValueDecoder::Date64(arr) => {
+                Ok(Value::Date((arr.value(index) / 86_400_000) as i32))
+            }
+            ArrowValueDecoder::DurationMicrosecond(arr) => {
+                Ok(Value::DayTimeInterval(arr.value(index)))
+            }
+            // Decimal256 also preserves exact digits; Arrow formats with the scale.
+            ArrowValueDecoder::Decimal256(arr) => Ok(Value::Decimal {
+                value: arr.value_as_string(index),
+                precision: Some(arr.precision() as i32),
+                scale: Some(arr.scale() as i32),
+            }),
+            ArrowValueDecoder::FixedSizeBinary(arr) => Ok(Value::Binary(arr.value(index).to_vec())),
+            // A TIME, in nanoseconds since midnight, as PySpark's `TimeType.fromInternal` reads.
+            ArrowValueDecoder::Time64Microsecond(arr) => Ok(Value::Time(arr.value(index) * 1_000)),
+            ArrowValueDecoder::Time64Nanosecond(arr) => Ok(Value::Time(arr.value(index))),
+            ArrowValueDecoder::Time32Millisecond(arr) => {
+                Ok(Value::Time(arr.value(index) as i64 * 1_000_000))
+            }
+            ArrowValueDecoder::Time32Second(arr) => {
+                Ok(Value::Time(arr.value(index) as i64 * 1_000_000_000))
+            }
+            // Intervals likewise have no dedicated Value variant, so render as strings.
+            ArrowValueDecoder::IntervalYearMonth(arr) => {
+                let months = arr.value(index);
+                Ok(Value::String(format!(
+                    "{}-{}",
+                    months / 12,
+                    (months % 12).abs()
+                )))
+            }
+            ArrowValueDecoder::IntervalDayTime(arr) => {
+                let v = arr.value(index);
+                Ok(Value::String(format!(
+                    "{} days {} ms",
+                    v.days, v.milliseconds
+                )))
+            }
+            ArrowValueDecoder::IntervalMonthDayNano(arr) => {
+                let v = arr.value(index);
+                Ok(Value::String(format!(
+                    "{} months {} days {} ns",
+                    v.months, v.days, v.nanoseconds
+                )))
+            }
+            ArrowValueDecoder::List { array, child } => {
+                // Sliced list/map arrays retain their original children. Their
+                // offsets already identify the correct absolute child range.
+                let offsets = array.value_offsets();
+                let start = offsets[index] as usize;
+                let end = offsets[index + 1] as usize;
+                let mut items = Vec::with_capacity(end - start);
+                for child_index in start..end {
+                    items.push(child.value_at(child_index)?);
+                }
+                Ok(Value::List(items))
+            }
+            ArrowValueDecoder::Struct {
+                names,
+                children,
+                variant_fields,
+            } => {
+                // VARIANT arrives as struct<value: binary, metadata: binary>, with
+                // {"variant": "true"} on the metadata field. Return raw-byte
+                // Value::Variant so it materializes as pyspark's VariantVal rather
+                // than a plain {value, metadata} struct/dict.
+                if let Some((value, metadata)) = variant_fields {
+                    let binary_field = |column: Option<usize>| -> Result<Vec<u8>> {
+                        match column {
+                            Some(column) => match children[column].value_at(index)? {
+                                Value::Binary(bytes) => Ok(bytes),
+                                Value::Null => Ok(vec![]),
+                                _ => Err(SparkError::connect_msg("variant field is not binary")),
+                            },
+                            None => Ok(vec![]),
+                        }
+                    };
+                    return Ok(Value::Variant {
+                        value: binary_field(*value)?,
+                        metadata: binary_field(*metadata)?,
+                    });
+                }
+                let mut values = Vec::with_capacity(children.len());
+                for child in children {
+                    values.push(child.value_at(index)?);
+                }
+                Ok(Value::Struct(StructValue::new(Arc::clone(names), values)))
+            }
+            ArrowValueDecoder::Map { array, children } => {
+                let offsets = array.value_offsets();
+                let start = offsets[index] as usize;
+                let end = offsets[index + 1] as usize;
+                let mut map = Vec::with_capacity(end - start);
+                for child_index in start..end {
+                    map.push((
+                        children.0.value_at(child_index)?,
+                        children.1.value_at(child_index)?,
+                    ));
+                }
+                Ok(Value::Map(map))
+            }
+            ArrowValueDecoder::Unsupported => Err(SparkError::connect_msg(format!(
+                "Unsupported Arrow type {:?} - cannot convert to Value",
+                self.array.data_type()
+            ))),
         }
     }
 }
 
 #[cfg(test)]
 fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> Result<Value> {
-    arrow_value_at_with_layout(array, index, &ArrowValueLayout::new(array.data_type()))
-}
-
-fn arrow_value_at_with_layout(
-    array: &dyn arrow::array::Array,
-    index: usize,
-    value_layout: &ArrowValueLayout,
-) -> Result<Value> {
-    use arrow::array::*;
-
-    if array.is_null(index) {
-        return Ok(Value::Null);
-    }
-
-    // A NullType column arrives as an all-null NullArray; every element is Null.
-    if array.as_any().downcast_ref::<NullArray>().is_some() {
-        return Ok(Value::Null);
-    }
-
-    // Try each array type
-    if let Some(arr) = array.as_any().downcast_ref::<BooleanArray>() {
-        return Ok(Value::Bool(arr.value(index)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Int8Array>() {
-        return Ok(Value::Byte(arr.value(index)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Int16Array>() {
-        return Ok(Value::Short(arr.value(index)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Int32Array>() {
-        return Ok(Value::Integer(arr.value(index)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Int64Array>() {
-        return Ok(Value::Long(arr.value(index)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Float32Array>() {
-        return Ok(Value::Float(arr.value(index)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Float64Array>() {
-        return Ok(Value::Double(arr.value(index)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<StringArray>() {
-        return Ok(Value::String(arr.value(index).to_string()));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<BinaryArray>() {
-        return Ok(Value::Binary(arr.value(index).to_vec()));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Date32Array>() {
-        return Ok(Value::Date(arr.value(index)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<TimestampMicrosecondArray>() {
-        return Ok(Value::Timestamp(arr.value(index)));
-    }
-    // Unsigned integers.
-    if let Some(arr) = array.as_any().downcast_ref::<UInt8Array>() {
-        return Ok(Value::Short(arr.value(index) as i16));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<UInt16Array>() {
-        return Ok(Value::Integer(arr.value(index) as i32));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<UInt32Array>() {
-        return Ok(Value::Long(arr.value(index) as i64));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<UInt64Array>() {
-        let val = arr.value(index);
-        let i64_val = i64::try_from(val).map_err(|_| {
-            SparkError::connect_msg(format!("UInt64 value {} exceeds i64 range", val))
-        })?;
-        return Ok(Value::Long(i64_val));
-    }
-    // Decimal128 -> Value::Decimal (exact, not lossy f64), preserving precision/scale.
-    if let Some(arr) = array.as_any().downcast_ref::<Decimal128Array>() {
-        let scale = arr.scale() as i32;
-        return Ok(Value::Decimal {
-            value: i128_to_decimal_string(arr.value(index), scale),
-            precision: Some(arr.precision() as i32),
-            scale: Some(scale),
-        });
-    }
-    // Large / view string & binary variants.
-    if let Some(arr) = array.as_any().downcast_ref::<LargeStringArray>() {
-        return Ok(Value::String(arr.value(index).to_string()));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<LargeBinaryArray>() {
-        return Ok(Value::Binary(arr.value(index).to_vec()));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<StringViewArray>() {
-        return Ok(Value::String(arr.value(index).to_string()));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<BinaryViewArray>() {
-        return Ok(Value::Binary(arr.value(index).to_vec()));
-    }
-    // Other timestamp units, normalized to microseconds.
-    if let Some(arr) = array.as_any().downcast_ref::<TimestampSecondArray>() {
-        return Ok(Value::Timestamp(arr.value(index) * 1_000_000));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<TimestampMillisecondArray>() {
-        return Ok(Value::Timestamp(arr.value(index) * 1_000));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<TimestampNanosecondArray>() {
-        return Ok(Value::Timestamp(arr.value(index) / 1_000));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Date64Array>() {
-        return Ok(Value::Date((arr.value(index) / 86_400_000) as i32));
-    }
-    // Nested: list, struct, map (recurse).
-    if let Some(arr) = array.as_any().downcast_ref::<ListArray>() {
-        let ArrowValueLayout::List(child_layout) = value_layout else {
-            unreachable!("layout is prepared from the array's data type");
-        };
-        let child = arr.value(index);
-        let mut items = Vec::with_capacity(child.len());
-        for i in 0..child.len() {
-            items.push(arrow_value_at_with_layout(child.as_ref(), i, child_layout)?);
-        }
-        return Ok(Value::List(items));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<StructArray>() {
-        let ArrowValueLayout::Struct {
-            names,
-            children,
-            is_variant,
-        } = value_layout
-        else {
-            unreachable!("layout is prepared from the array's data type");
-        };
-        // A VARIANT column arrives as struct<value: binary, metadata: binary> where the
-        // `metadata` field carries arrow metadata {"variant": "true"}. Recognize it and
-        // return a Value::Variant (raw bytes) so it materializes as a VariantVal (matching
-        // pyspark) rather than a plain {value, metadata} struct/dict.
-        if *is_variant {
-            let bin_field = |name: &str| -> Result<Vec<u8>> {
-                match arr.fields().iter().position(|field| field.name() == name) {
-                    Some(col_idx) => match arrow_value_at_with_layout(
-                        arr.column(col_idx).as_ref(),
-                        index,
-                        &children[col_idx],
-                    )? {
-                        Value::Binary(b) => Ok(b),
-                        Value::Null => Ok(vec![]),
-                        _ => Err(SparkError::connect_msg("variant field is not binary")),
-                    },
-                    None => Ok(vec![]),
-                }
-            };
-            return Ok(Value::Variant {
-                value: bin_field("value")?,
-                metadata: bin_field("metadata")?,
-            });
-        }
-        let mut values = Vec::with_capacity(children.len());
-        for (col, child_layout) in arr.columns().iter().zip(children) {
-            values.push(arrow_value_at_with_layout(
-                col.as_ref(),
-                index,
-                child_layout,
-            )?);
-        }
-        return Ok(Value::Struct(StructValue::new(Arc::clone(names), values)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<MapArray>() {
-        let ArrowValueLayout::Map(children) = value_layout else {
-            unreachable!("layout is prepared from the array's data type");
-        };
-        let entries = arr.value(index);
-        let keys = entries.column(0);
-        let vals = entries.column(1);
-        let mut map = std::collections::BTreeMap::new();
-        for i in 0..entries.len() {
-            // A map key stringifies to its natural scalar form (e.g. `1`, `true`,
-            // `1.5`), not the Rust enum's Debug output - a `map<int,string>` key must
-            // be "1", never "Integer(1)".
-            let k = map_key_to_string(arrow_value_at_with_layout(keys.as_ref(), i, &children.0)?);
-            map.insert(
-                k,
-                arrow_value_at_with_layout(vals.as_ref(), i, &children.1)?,
-            );
-        }
-        return Ok(Value::Map(map));
-    }
-    // Decimal256 -> exact string-preserving Decimal (Arrow formats with the scale).
-    if let Some(arr) = array.as_any().downcast_ref::<Decimal256Array>() {
-        return Ok(Value::Decimal {
-            value: arr.value_as_string(index),
-            precision: Some(arr.precision() as i32),
-            scale: Some(arr.scale() as i32),
-        });
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<FixedSizeBinaryArray>() {
-        return Ok(Value::Binary(arr.value(index).to_vec()));
-    }
-    // TimeType (no dedicated Value): render as an ISO time string, normalized to micros.
-    if let Some(arr) = array.as_any().downcast_ref::<Time64MicrosecondArray>() {
-        return Ok(Value::String(micros_to_time_string(arr.value(index))));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Time64NanosecondArray>() {
-        return Ok(Value::String(micros_to_time_string(
-            arr.value(index) / 1_000,
-        )));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Time32MillisecondArray>() {
-        return Ok(Value::String(micros_to_time_string(
-            arr.value(index) as i64 * 1_000,
-        )));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Time32SecondArray>() {
-        return Ok(Value::String(micros_to_time_string(
-            arr.value(index) as i64 * 1_000_000,
-        )));
-    }
-    // Interval types (no dedicated Value): render a compact string.
-    if let Some(arr) = array.as_any().downcast_ref::<IntervalYearMonthArray>() {
-        let months = arr.value(index);
-        return Ok(Value::String(format!(
-            "{}-{}",
-            months / 12,
-            (months % 12).abs()
-        )));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<IntervalDayTimeArray>() {
-        let v = arr.value(index);
-        return Ok(Value::String(format!(
-            "{} days {} ms",
-            v.days, v.milliseconds
-        )));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<IntervalMonthDayNanoArray>() {
-        let v = arr.value(index);
-        return Ok(Value::String(format!(
-            "{} months {} days {} ns",
-            v.months, v.days, v.nanoseconds
-        )));
-    }
-
-    Err(SparkError::connect_msg(format!(
-        "Unsupported Arrow type {:?} - cannot convert to Value",
-        array.data_type()
-    )))
+    ArrowValueLayout::new(array).value_at(index)
 }
 
 #[cfg(test)]
@@ -2536,7 +2725,11 @@ mod nested_decode_tests {
     use arrow::ipc::writer::StreamWriter;
     use arrow::record_batch::RecordBatch;
 
-    fn decode_batches(columns: Vec<(&str, ArrayRef)>, repeats: usize) -> Vec<Row> {
+    fn encoded_batches(
+        columns: Vec<(&str, ArrayRef)>,
+        repeats: usize,
+        empty_boundaries: bool,
+    ) -> proto::execute_plan_response::ArrowBatch {
         let schema = Arc::new(Schema::new(
             columns
                 .iter()
@@ -2551,16 +2744,29 @@ mod nested_decode_tests {
         let mut data = vec![];
         {
             let mut writer = StreamWriter::try_new(&mut data, &schema).unwrap();
+            if empty_boundaries {
+                writer
+                    .write(&RecordBatch::new_empty(schema.clone()))
+                    .unwrap();
+            }
             for _ in 0..repeats {
                 writer.write(&batch).unwrap();
             }
+            if empty_boundaries {
+                writer
+                    .write(&RecordBatch::new_empty(schema.clone()))
+                    .unwrap();
+            }
             writer.finish().unwrap();
         }
-        decode_arrow_batch(&proto::execute_plan_response::ArrowBatch {
+        proto::execute_plan_response::ArrowBatch {
             data: data.into(),
             ..Default::default()
-        })
-        .unwrap()
+        }
+    }
+
+    fn decode_batches(columns: Vec<(&str, ArrayRef)>, repeats: usize) -> Vec<Row> {
+        decode_arrow_batch(&encoded_batches(columns, repeats, false)).unwrap()
     }
 
     fn as_struct(value: &Value) -> &StructValue {
@@ -2568,6 +2774,230 @@ mod nested_decode_tests {
             panic!("expected struct, got {value:?}");
         };
         row
+    }
+
+    #[test]
+    fn mixed_nullable_slices_decode_across_empty_and_repeated_batches() {
+        let columns: Vec<(&str, ArrayRef)> = vec![
+            (
+                "dup",
+                Arc::new(Int64Array::from(vec![Some(-1), Some(7), None])),
+            ),
+            (
+                "dup",
+                Arc::new(StringArray::from(vec![Some("skip"), Some("é\0雪"), None])),
+            ),
+            (
+                "bool",
+                Arc::new(BooleanArray::from(vec![Some(true), Some(false), None])),
+            ),
+            (
+                "bytes",
+                Arc::new(BinaryArray::from(vec![
+                    Some(b"skip".as_ref()),
+                    Some(b"\0\xff".as_ref()),
+                    None,
+                ])),
+            ),
+            ("null", Arc::new(NullArray::new(3))),
+        ];
+        let batch = encoded_batches(
+            columns
+                .into_iter()
+                .map(|(name, array)| (name, array.slice(1, 2)))
+                .collect(),
+            2,
+            true,
+        );
+        let rows = decode_arrow_batch(&batch).unwrap();
+        assert_eq!(rows.len(), 4);
+        for batch in rows.chunks(2) {
+            assert_eq!(batch[0].fields(), &["dup", "dup", "bool", "bytes", "null"]);
+            assert_eq!(
+                batch[0].values(),
+                &[
+                    Value::Long(7),
+                    Value::String("é\0雪".into()),
+                    Value::Bool(false),
+                    Value::Binary(vec![0, 255]),
+                    Value::Null,
+                ]
+            );
+            assert_eq!(batch[1].values(), &vec![Value::Null; 5]);
+            assert_eq!(batch[0].get_by_name("dup"), Some(&Value::Long(7)));
+            assert!(std::ptr::eq(batch[0].fields(), batch[1].fields()));
+        }
+        // The IPC buffers and borrowed column layouts have already been dropped.
+        assert_eq!(rows[2].get(1), Some(&Value::String("é\0雪".into())));
+    }
+
+    #[test]
+    fn sliced_parents_decode_children_that_were_already_sliced() {
+        let leaf = StructArray::from(vec![(
+            Arc::new(Field::new("n", DataType::Int32, false)),
+            Arc::new(Int32Array::from(vec![-9, 10, 20, 30, 40, 50, 60])) as ArrayRef,
+        )]);
+        let entries = StructArray::from(vec![
+            (
+                Arc::new(Field::new("key", DataType::Utf8, false)),
+                Arc::new(StringArray::from(vec![
+                    "skip", "a", "b", "c", "d", "e", "f",
+                ])) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("value", leaf.data_type().clone(), true)),
+                Arc::new(leaf.clone()) as ArrayRef,
+            ),
+        ])
+        .slice(1, 6);
+        let child = leaf.slice(1, 6);
+        let offsets = OffsetBuffer::new(vec![0, 1, 3, 4, 6].into());
+        let list = ListArray::new(
+            Arc::new(Field::new("item", child.data_type().clone(), true)),
+            offsets.clone(),
+            Arc::new(child),
+            None,
+        )
+        .slice(1, 2);
+        let map = MapArray::new(
+            Arc::new(Field::new("entries", entries.data_type().clone(), false)),
+            offsets,
+            entries,
+            None,
+            false,
+        )
+        .slice(1, 2);
+        // Exercise the unserialized sliced arrays as well as the IPC path:
+        // serialization is allowed to normalize their physical child offsets.
+        let value = |n| Value::Struct(Row::new(vec!["n".into()], vec![Value::Integer(n)]).into());
+        let expected_lists = [
+            Value::List(vec![value(20), value(30)]),
+            Value::List(vec![value(40)]),
+        ];
+        let expected_maps = [
+            Value::Map(vec![
+                (Value::String("b".into()), value(20)),
+                (Value::String("c".into()), value(30)),
+            ]),
+            Value::Map(vec![(Value::String("d".into()), value(40))]),
+        ];
+        let list_layout = ArrowValueLayout::new(&list);
+        let map_layout = ArrowValueLayout::new(&map);
+        for i in 0..2 {
+            assert_eq!(list_layout.value_at(i).unwrap(), expected_lists[i]);
+            assert_eq!(map_layout.value_at(i).unwrap(), expected_maps[i]);
+        }
+        drop((list_layout, map_layout));
+        let rows = decode_batches(vec![("list", Arc::new(list)), ("map", Arc::new(map))], 1);
+        for i in 0..2 {
+            assert_eq!(
+                rows[i].values(),
+                &[expected_lists[i].clone(), expected_maps[i].clone()]
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_children_remain_lazy_under_nulls_empty_containers_and_variants() {
+        let null_duration = DurationSecondArray::from(vec![None]);
+        assert_eq!(arrow_value_at(&null_duration, 0).unwrap(), Value::Null);
+        let populated: ArrayRef = Arc::new(DurationSecondArray::from(vec![Some(7)]));
+        let list = ListArray::new(
+            Arc::new(Field::new("item", populated.data_type().clone(), true)),
+            OffsetBuffer::new(vec![0, 0].into()),
+            populated.clone(),
+            None,
+        );
+        assert_eq!(arrow_value_at(&list, 0).unwrap(), Value::List(vec![]));
+        let entries = StructArray::from(vec![
+            (
+                Arc::new(Field::new("key", DataType::Utf8, false)),
+                Arc::new(StringArray::from(vec!["a"])) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("value", populated.data_type().clone(), true)),
+                populated.clone(),
+            ),
+        ]);
+        let map = MapArray::new(
+            Arc::new(Field::new("entries", entries.data_type().clone(), false)),
+            OffsetBuffer::new(vec![0, 0].into()),
+            entries,
+            None,
+            false,
+        );
+        assert_eq!(
+            arrow_value_at(&map, 0).unwrap(),
+            Value::Map(Default::default())
+        );
+        let parent = StructArray::new(
+            vec![Arc::new(Field::new(
+                "unused",
+                populated.data_type().clone(),
+                true,
+            ))]
+            .into(),
+            vec![populated.clone()],
+            Some(NullBuffer::from(vec![false])),
+        );
+        assert_eq!(arrow_value_at(&parent, 0).unwrap(), Value::Null);
+        // Deliberately noncanonical: detection accepts a marker on any field,
+        // and the first matching "value" wins while an unsupported duplicate
+        // remains unread. The absent "metadata" field must still decode as empty.
+        let variant = StructArray::from(vec![
+            (
+                Arc::new(
+                    Field::new("value", DataType::Binary, false)
+                        .with_metadata([("variant".into(), "true".into())].into()),
+                ),
+                Arc::new(BinaryArray::from_iter_values([b"x".as_ref()])) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("value", populated.data_type().clone(), true)),
+                populated,
+            ),
+        ]);
+        assert_eq!(
+            arrow_value_at(&variant, 0).unwrap(),
+            Value::Variant {
+                value: vec![b'x'],
+                metadata: vec![]
+            }
+        );
+    }
+
+    #[test]
+    fn decoding_errors_keep_row_major_column_order() {
+        let first_column = encoded_batches(
+            vec![
+                ("u", Arc::new(UInt64Array::from(vec![u64::MAX]))),
+                (
+                    "duration",
+                    Arc::new(DurationSecondArray::from(vec![Some(1)])),
+                ),
+            ],
+            1,
+            false,
+        );
+        assert!(decode_arrow_batch(&first_column)
+            .unwrap_err()
+            .to_string()
+            .contains("UInt64 value 18446744073709551615 exceeds i64 range"));
+        let first_row = encoded_batches(
+            vec![
+                ("u", Arc::new(UInt64Array::from(vec![1, u64::MAX]))),
+                (
+                    "duration",
+                    Arc::new(DurationSecondArray::from(vec![Some(1), None])),
+                ),
+            ],
+            1,
+            false,
+        );
+        assert!(decode_arrow_batch(&first_row)
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported Arrow type Duration(Second) - cannot convert to Value"));
     }
 
     #[test]
@@ -2661,7 +3091,7 @@ mod nested_decode_tests {
                 let Value::Map(map) = value else {
                     panic!("expected map");
                 };
-                leaves.push(as_struct(map.values().next().unwrap()));
+                leaves.push(as_struct(&map[0].1));
             }
         }
         assert_eq!(leaves.len(), 4);
@@ -2726,13 +3156,10 @@ mod nested_decode_tests {
         );
         assert_eq!(
             rows[0].get(1),
-            Some(&Value::Map(
-                [
-                    ("k1".to_string(), value(1)),
-                    ("k2".to_string(), Value::Null)
-                ]
-                .into()
-            ))
+            Some(&Value::Map(vec![
+                (Value::String("k1".to_string()), value(1)),
+                (Value::String("k2".to_string()), Value::Null)
+            ]))
         );
         assert_eq!(rows[1].get(0), Some(&Value::List(vec![])));
         assert_eq!(rows[1].get(1), Some(&Value::Map(Default::default())));
@@ -2741,9 +3168,10 @@ mod nested_decode_tests {
         assert_eq!(rows[3].get(0), Some(&Value::List(vec![value(4), value(5)])));
         assert_eq!(
             rows[3].get(1),
-            Some(&Value::Map(
-                [("k4".to_string(), value(4)), ("k5".to_string(), value(5))].into()
-            ))
+            Some(&Value::Map(vec![
+                (Value::String("k4".to_string()), value(4)),
+                (Value::String("k5".to_string()), value(5))
+            ]))
         );
         let (Value::List(first), Value::List(last)) =
             (rows[0].get(0).unwrap(), rows[3].get(0).unwrap())
@@ -2760,8 +3188,8 @@ mod nested_decode_tests {
             panic!("expected maps");
         };
         assert!(std::ptr::eq(
-            as_struct(&first["k1"]).fields(),
-            as_struct(&last["k4"]).fields()
+            as_struct(&first[0].1).fields(),
+            as_struct(&last[0].1).fields()
         ));
     }
 
@@ -2833,22 +3261,172 @@ mod nested_decode_tests {
     }
 }
 
-/// Render microseconds-since-midnight as an ISO time string `HH:MM:SS[.ffffff]`.
-fn micros_to_time_string(micros: i64) -> String {
-    let total_secs = micros.div_euclid(1_000_000);
-    let us = micros.rem_euclid(1_000_000);
-    let (h, m, s) = (total_secs / 3600, (total_secs % 3600) / 60, total_secs % 60);
-    if us == 0 {
-        format!("{h:02}:{m:02}:{s:02}")
-    } else {
-        format!("{h:02}:{m:02}:{s:02}.{us:06}")
-    }
-}
-
 #[cfg(test)]
 mod cache_tests {
     use super::*;
     use prost::Message;
+
+    #[test]
+    fn schema_cache_shares_exact_clones_but_not_changed_plans_or_new_sources() {
+        let spark = SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .unwrap();
+        let df = spark.range(3).unwrap();
+        let cloned_before_analysis = df.clone();
+        let schema = DataType::Struct { fields: vec![] };
+        *df.schema_cache.lock().unwrap() = Some(Arc::new(schema.clone()));
+
+        // These accesses succeed without a server, including a clone created
+        // before the schema was populated.
+        assert_eq!(cloned_before_analysis.schema().unwrap(), schema);
+        assert_eq!(df.clone().schema().unwrap(), schema);
+        assert!(Arc::ptr_eq(
+            &df.schema_cache,
+            &cloned_before_analysis.schema_cache
+        ));
+        for derived in [
+            df.select(["id"]),
+            df.zip(&df).unwrap(),
+            spark.range(3).unwrap(),
+        ] {
+            assert!(!Arc::ptr_eq(&df.schema_cache, &derived.schema_cache));
+            assert!(derived.schema_cache.lock().unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn schema_propagation_snapshots_without_waiting_for_analysis() {
+        let spark = SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .unwrap();
+        let df = spark.range(3).unwrap();
+        let early_child = df.limit(1);
+        let schema = DataType::Struct { fields: vec![] };
+        *df.schema_cache.lock().unwrap() = Some(Arc::new(schema.clone()));
+        let warm_child = df.limit(1);
+        assert_eq!(warm_child.schema().unwrap(), schema);
+        assert!(!Arc::ptr_eq(&df.schema_cache, &warm_child.schema_cache));
+        assert!(early_child.cached_schema().is_none());
+
+        // Even when an input lock is held, constructing unary and binary plans
+        // must finish. Release it before joining so a regression fails boundedly.
+        let guard = df.schema_cache.lock().unwrap();
+        let input = df.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            tx.send((input.limit(1), input.union(&input))).unwrap();
+        });
+        let result = rx.recv_timeout(std::time::Duration::from_secs(5));
+        drop(guard);
+        worker.join().unwrap();
+        let (unary, binary) = result.expect("plan construction must not wait for schema analysis");
+        assert!(unary.cached_schema().is_none());
+        assert!(binary.cached_schema().is_none());
+    }
+
+    #[test]
+    fn schema_propagation_merges_only_exact_schemas_from_the_same_session() {
+        let spark = SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .unwrap();
+        let df = spark.range(3).unwrap();
+        let schema = serde_json::json!({
+            "type": "struct",
+            "fields": [{"name": "id", "type": "long", "nullable": true,
+                        "metadata": {"note": "original"}}]
+        });
+        let left = df.to(DataType::from_json(&schema).unwrap());
+        assert_eq!(left.union(&left).schema().unwrap(), left.schema().unwrap());
+        let mut changes = vec![];
+        for (key, value) in [
+            ("name", serde_json::json!("renamed")),
+            ("type", serde_json::json!("double")),
+            ("nullable", serde_json::json!(false)),
+            ("metadata", serde_json::json!({"note": "changed"})),
+        ] {
+            let mut changed = schema.clone();
+            changed["fields"][0][key] = value;
+            changes.push(DataType::from_json(&changed).unwrap());
+        }
+        for changed in changes {
+            assert!(left.union(&df.to(changed)).cached_schema().is_none());
+        }
+        assert!(left.union(&df).cached_schema().is_none());
+        let other_session = spark.new_session();
+        let other = other_session.range(3).unwrap().to(left.schema().unwrap());
+        assert!(left.union(&other).cached_schema().is_none());
+    }
+
+    #[test]
+    fn schema_propagation_seeds_only_struct_output_schemas() {
+        use crate::udf::PythonUDFPayload;
+
+        let spark = SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .unwrap();
+        let df = spark.range(3).unwrap();
+        let schema = DataType::Struct { fields: vec![] };
+        let udf = |output_type| {
+            CommonInlineUserDefinedFunctionExpression::new(
+                "map".to_string(),
+                true,
+                vec![],
+                PythonUDFPayload::new(output_type, 205, vec![], "3.12".to_string()),
+            )
+        };
+        for output in [
+            df.to(schema.clone()),
+            df.map_in_pandas(udf(schema.clone()), false),
+            df.map_in_arrow(udf(schema.clone()), false),
+        ] {
+            assert_eq!(output.schema().unwrap(), schema);
+        }
+        assert!(df.to(DataType::Long).cached_schema().is_none());
+        assert!(df
+            .map_in_arrow(udf(DataType::Long), false)
+            .cached_schema()
+            .is_none());
+    }
+
+    #[test]
+    fn schema_cache_recovers_after_analysis_panics() {
+        let spark = SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .unwrap();
+        let df = spark.range(3).unwrap();
+        let cloned = df.clone();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        // Calling the synchronous API inside a runtime panics during analysis.
+        // A clone must still attempt analysis afterward, rather than returning
+        // a permanent cache-poisoning error.
+        for frame in [&df, &cloned] {
+            let result = runtime.block_on(async {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| frame.schema()))
+            });
+            assert!(result.is_err());
+            // Poisoning proves the lock spans the analysis boundary without
+            // relying on thread scheduling to produce contended cache misses.
+            assert!(
+                frame.schema_cache.is_poisoned(),
+                "schema analysis must hold the shared cache lock"
+            );
+        }
+        let mut cached = df.schema_cache.lock().unwrap_err().into_inner();
+        assert!(cached.is_none());
+        let schema = DataType::Struct { fields: vec![] };
+        *cached = Some(Arc::new(schema.clone()));
+        drop(cached);
+        assert!(df.schema_cache.is_poisoned());
+        assert_eq!(df.schema().unwrap(), schema);
+        assert!(!df.schema_cache.is_poisoned());
+        assert_eq!(cloned.schema().unwrap(), schema);
+    }
 
     #[test]
     fn cache_default_is_memory_and_disk_deser() {
@@ -3045,11 +3623,97 @@ mod plan_construction_tests {
     use super::*;
     use crate::session::SparkSession;
 
+    #[test]
+    fn capture_execution_records_first_operation_id() {
+        let spark = session();
+        let mut info = ExecutionInfo::default();
+        let mut resp = proto::ExecutePlanResponse::default();
+        // An empty operation id (e.g. a synthetic response) is not recorded.
+        capture_execution(&mut resp, &mut info, &spark);
+        assert_eq!(info.operation_id, None);
+        resp.operation_id = "op-1".to_string();
+        capture_execution(&mut resp, &mut info, &spark);
+        resp.operation_id = "op-2".to_string();
+        capture_execution(&mut resp, &mut info, &spark);
+        assert_eq!(info.operation_id.as_deref(), Some("op-1"));
+    }
+
     fn session() -> SparkSession {
         SparkSession::builder()
             .remote("sc://localhost:15002")
             .get_or_create()
             .expect("failed to build session")
+    }
+
+    #[test]
+    fn is_local_only_for_a_local_relation_itself() {
+        let spark = session();
+        let local = spark.empty_data_frame().unwrap();
+        let cached = DataFrame::new(
+            spark.clone(),
+            LogicalPlan::ChunkedCachedLocalRelation {
+                data_hashes: vec!["hash".to_string()],
+                schema_hash: None,
+            },
+        );
+        assert!(local.is_local());
+        assert!(cached.is_local());
+        // As in PySpark, where the server resolves toDF into a Project.
+        assert!(!local.to_df(vec![]).is_local());
+        assert!(!cached.to_df(vec!["x"]).is_local());
+        assert!(!spark.range(1).unwrap().is_local());
+    }
+
+    #[test]
+    fn a_relation_the_server_returned_is_sent_back_with_its_own_plan_id() {
+        use proto::relation::RelType;
+        // A session of its own, whose plan IDs start at 1.
+        let spark = session().new_session();
+        let returned = |rel_type: RelType| {
+            let relation = proto::Relation {
+                common: Some(proto::RelationCommon {
+                    plan_id: Some(42),
+                    ..Default::default()
+                }),
+                rel_type: Some(rel_type),
+            };
+            DataFrame::new(
+                spark.clone(),
+                LogicalPlan::CachedRelation {
+                    relation: Box::new(relation),
+                },
+            )
+        };
+        // The result of a command is the local relation the server returned.
+        assert!(returned(RelType::LocalRelation(proto::LocalRelation::default())).is_local());
+        let query = returned(RelType::Sql(proto::Sql {
+            query: "SELECT 1".to_string(),
+            ..Default::default()
+        }));
+        assert!(!query.is_local());
+        let relation = build_input_relation(&query.plan, &spark);
+        match relation.rel_type {
+            Some(RelType::Sql(sql)) => assert_eq!(sql.query, "SELECT 1"),
+            other => panic!("expected the returned SQL relation, got {other:?}"),
+        }
+        assert_eq!(relation.common.and_then(|common| common.plan_id), Some(1));
+    }
+
+    #[test]
+    fn explain_string_takes_the_explain_modes_of_pyspark() {
+        // As PySpark Connect's client, which checks the mode before it asks the server.
+        let spark = session();
+        let df = spark.range(1).unwrap();
+        for mode in ["FORMATTED", "bogus", ""] {
+            let err = df.explain_string(mode).unwrap_err();
+            assert_eq!(err.get_condition().as_deref(), Some("VALUE_NOT_ALLOWED"));
+            let parameters = err.get_message_parameters().unwrap();
+            assert_eq!(parameters["arg_name"], "explain_mode");
+            assert_eq!(
+                parameters["allowed_values"],
+                "['simple', 'extended', 'codegen', 'cost', 'formatted']"
+            );
+        }
     }
 
     #[test]
@@ -3124,24 +3788,31 @@ mod plan_construction_tests {
         assert!(std::ptr::eq(source.plan(), cloned_table_arg.plan()));
     }
 
-    #[test]
-    fn shared_self_join_serializes_each_occurrence_with_distinct_ids() {
-        use crate::functions::col;
-        use crate::plan;
+    /// Plan IDs in pre-order, for the relation shapes these tests build.
+    fn plan_ids_of(relation: &proto::Relation) -> Vec<i64> {
         use proto::relation::RelType;
-
-        fn ids(relation: &proto::Relation, out: &mut Vec<i64>) {
+        fn walk(relation: &proto::Relation, out: &mut Vec<i64>) {
             out.push(relation.common.as_ref().unwrap().plan_id.unwrap());
             match relation.rel_type.as_ref().unwrap() {
                 RelType::Join(join) => {
-                    ids(join.left.as_ref().unwrap(), out);
-                    ids(join.right.as_ref().unwrap(), out);
+                    walk(join.left.as_ref().unwrap(), out);
+                    walk(join.right.as_ref().unwrap(), out);
                 }
-                RelType::Project(project) => ids(project.input.as_ref().unwrap(), out),
+                RelType::Project(project) => walk(project.input.as_ref().unwrap(), out),
+                RelType::Filter(filter) => walk(filter.input.as_ref().unwrap(), out),
                 RelType::Range(_) => {}
                 _ => panic!("unexpected relation"),
             }
         }
+        let mut out = Vec::new();
+        walk(relation, &mut out);
+        out
+    }
+
+    #[test]
+    fn shared_self_join_serializes_each_occurrence_with_the_same_ids() {
+        use crate::functions::col;
+        use crate::plan;
 
         let spark = session();
         let projected = spark.range(10).unwrap().select(vec![col("id")]);
@@ -3160,17 +3831,87 @@ mod plan_construction_tests {
         .to_proto();
         assert_eq!(joined.plan.to_proto(), expected);
 
-        let first = build_input_relation(joined.plan(), &spark).unwrap();
-        let second = build_input_relation(joined.plan(), &spark).unwrap();
-        let mut all_ids = Vec::new();
-        ids(&first, &mut all_ids);
-        ids(&second, &mut all_ids);
-        assert_eq!(all_ids.len(), 10);
-        all_ids.sort_unstable();
-        all_ids.dedup();
-        assert_eq!(all_ids.len(), 10);
-        // Assigning IDs mutates only the fresh protobuf, never the shared client plan.
+        // As in PySpark, a shared node has one plan ID wherever it occurs, and serializing
+        // the same plan again gives the same relation.
+        let first = build_input_relation(&joined.plan, &spark);
+        let second = build_input_relation(&joined.plan, &spark);
+        assert_eq!(first, second);
+        let ids = plan_ids_of(&first);
+        assert_eq!(ids.len(), 5);
+        assert_eq!(ids[1..3], ids[3..5]);
+        assert_ne!(ids[0], ids[1]);
+        assert_ne!(ids[1], ids[2]);
+        // Assigning IDs fills only the fresh protobuf, never the shared client plan.
         assert_eq!(joined.plan.to_proto(), expected);
+    }
+
+    #[test]
+    fn derived_dataframes_keep_the_plan_ids_of_their_inputs() {
+        use crate::column::lit;
+        use crate::functions::col;
+
+        let spark = session();
+        let base = spark.range(3).unwrap().select(vec![col("id")]);
+        let base_relation = base.relation();
+        let derived = base.filter(col("id").gt(lit(1)));
+        let derived_relation = derived.relation();
+        let Some(proto::relation::RelType::Filter(filter)) = &derived_relation.rel_type else {
+            panic!("expected filter");
+        };
+        assert_eq!(filter.input.as_deref(), Some(&base_relation));
+        assert_eq!(derived.relation(), derived_relation);
+        // Separately built plans, even equal ones, are distinct nodes with distinct IDs.
+        let other = spark.range(3).unwrap().select(vec![col("id")]);
+        assert_eq!(other.plan.to_proto(), base.plan.to_proto());
+        let (mine, theirs) = (plan_ids_of(&base_relation), plan_ids_of(&other.relation()));
+        assert!(mine.iter().all(|id| !theirs.contains(id)));
+    }
+
+    #[test]
+    fn plan_ids_of_dropped_nodes_are_pruned_and_never_reused() {
+        // A session of its own, so that other tests' plans do not change its entries.
+        let spark = session().new_session();
+        let kept = spark.range(1).unwrap();
+        let kept_ids = plan_ids_of(&kept.relation());
+        let mut seen: std::collections::HashSet<i64> = kept_ids.iter().copied().collect();
+        // Each plan is dropped at once, so pruning frees its allocation for a later plan to
+        // reuse. A new node must still never get the ID of a dropped one.
+        for end in 0..5000 {
+            for id in plan_ids_of(&spark.range(end).unwrap().relation()) {
+                assert!(seen.insert(id), "plan ID {id} was assigned twice");
+            }
+            // With one live node, pruning keeps the map at most MIN_PRUNE_AT entries.
+            assert!(spark.plan_ids().len() <= 1024, "{}", spark.plan_ids().len());
+        }
+        assert_eq!(plan_ids_of(&kept.relation()), kept_ids);
+    }
+
+    #[test]
+    fn a_new_session_numbers_its_own_plans() {
+        let spark = session();
+        let (one, two) = (spark.new_session(), spark.new_session());
+        assert_eq!(plan_ids_of(&one.range(1).unwrap().relation()), vec![1]);
+        assert_eq!(plan_ids_of(&one.range(2).unwrap().relation()), vec![2]);
+        // The plans of one session do not advance the numbering of another.
+        assert_eq!(plan_ids_of(&two.range(1).unwrap().relation()), vec![1]);
+    }
+
+    #[test]
+    fn to_json_dataframe_selects_the_json_of_a_struct_of_every_column() {
+        let spark = session();
+        let df = spark.range(3).unwrap().to_json_dataframe();
+        match df.plan.as_ref() {
+            LogicalPlan::Project { columns, .. } => {
+                let rendered: Vec<String> =
+                    columns.iter().map(|c| c.expression().render()).collect();
+                // As PySpark Connect's repr of the column.
+                assert_eq!(
+                    rendered,
+                    vec!["to_json(struct(unresolvedstar())) AS value".to_string()]
+                );
+            }
+            _ => panic!("expected Project plan"),
+        }
     }
 
     #[test]
@@ -3214,6 +3955,49 @@ mod plan_construction_tests {
     }
 
     #[test]
+    fn replace_literals_plan() {
+        use crate::expression::LiteralExpression;
+        let spark = session();
+        let df = spark.range(3).unwrap();
+        let replacements = vec![(
+            LiteralExpression::string("a"),
+            LiteralExpression::null(DataType::Null),
+        )];
+        for result in [
+            df.replace_literals(replacements.clone(), Some(vec!["k"])),
+            df.na()
+                .replace_literals(replacements.clone(), Some(vec!["k"])),
+        ] {
+            match result.plan.as_ref() {
+                LogicalPlan::NAReplace {
+                    replacements: planned,
+                    columns,
+                    ..
+                } => {
+                    assert_eq!(planned, &replacements);
+                    assert_eq!(columns, &vec!["k".to_string()]);
+                }
+                _ => panic!("expected NAReplace plan"),
+            }
+        }
+        // A string replacement that parses as a number is a double, as before.
+        match df
+            .replace(vec![("1".to_string(), "a".to_string())], None)
+            .plan
+            .as_ref()
+        {
+            LogicalPlan::NAReplace { replacements, .. } => assert_eq!(
+                replacements,
+                &vec![(
+                    LiteralExpression::double(1.0),
+                    LiteralExpression::string("a")
+                )]
+            ),
+            _ => panic!("expected NAReplace plan"),
+        }
+    }
+
+    #[test]
     fn replace_plan() {
         let spark = session();
         let df = spark.range(3).unwrap();
@@ -3240,7 +4024,7 @@ mod plan_construction_tests {
         let df2 = spark.range(5).unwrap();
         let e = || col("id").expression().clone();
         let ser = |d: &DataFrame| {
-            build_input_relation(d.plan(), &spark).expect("plan serializes to a relation");
+            build_input_relation(&d.plan, &spark);
         };
 
         ser(&df.select(vec![col("id")]));
@@ -3272,7 +4056,7 @@ mod plan_construction_tests {
         ser(&df.alias("t"));
         ser(&df.sample(0.5, Some(1)));
         ser(&df.select_expr(vec!["id + 1"]));
-        ser(&df.col_regex("id"));
+        ser(&df.select(vec![df.col_regex("`id`")]));
         ser(&df.describe(vec!["id"]));
         ser(&df.summary(vec!["count"]));
         ser(&df.as_table("t2"));
@@ -3306,7 +4090,7 @@ mod plan_construction_tests {
         use crate::streaming::Trigger;
         let spark = session();
         let ser = |d: &DataFrame| {
-            build_input_relation(d.plan(), &spark).expect("stream plan serializes");
+            build_input_relation(&d.plan, &spark);
         };
         ser(&spark
             .read_stream()
@@ -3411,7 +4195,7 @@ mod plan_construction_tests {
 
         let spark = session();
         let ser = |d: &DataFrame| {
-            build_input_relation(d.plan(), &spark).expect("exotic plan serializes");
+            build_input_relation(&d.plan, &spark);
         };
         let df = spark.range(5).unwrap();
         let df2 = spark.range(5).unwrap();
@@ -3448,6 +4232,39 @@ mod plan_construction_tests {
         );
         ser(&udtf_df);
     }
+
+    #[test]
+    fn map_functions_send_the_id_of_their_resource_profile() {
+        use crate::types::DataType;
+        use crate::udf::{CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
+        use spark_connect_proto::relation::RelType;
+
+        let spark = session();
+        let df = spark.range(5).unwrap();
+        let udf = || {
+            CommonInlineUserDefinedFunctionExpression::new(
+                "f".to_string(),
+                true,
+                vec![],
+                PythonUDFPayload::new(DataType::Integer, 205, vec![1], "3.11".to_string()),
+            )
+        };
+        let sent = |mapped: DataFrame| match mapped.relation().rel_type {
+            Some(RelType::MapPartitions(map)) => (map.profile_id, map.is_barrier),
+            other => panic!("expected MapPartitions, got {other:?}"),
+        };
+        // As PySpark's MapPartitions, of the id of the profile, if any.
+        assert_eq!(
+            sent(df.map_in_pandas_with_profile(udf(), true, Some(7))),
+            (Some(7), Some(true))
+        );
+        assert_eq!(
+            sent(df.map_in_arrow_with_profile(udf(), false, Some(8))),
+            (Some(8), Some(false))
+        );
+        assert_eq!(sent(df.map_in_pandas(udf(), false)), (None, Some(false)));
+        assert_eq!(sent(df.map_in_arrow(udf(), true)), (None, Some(true)));
+    }
 }
 
 /// Deterministic coverage of the private Arrow-array -> `Value` converter
@@ -3463,6 +4280,171 @@ mod arrow_value_tests {
         i256, DataType as ArrowDataType, Field, Int32Type, IntervalDayTime, IntervalMonthDayNano,
     };
     use std::sync::Arc;
+
+    #[test]
+    fn day_time_interval_microseconds_are_exact() {
+        let values = vec![
+            Some(i64::MIN),
+            Some(i64::MIN + 1),
+            Some(-172_800_000_001),
+            Some(-1),
+            Some(0),
+            Some(1),
+            Some(172_800_000_001),
+            Some(i64::MAX - 1),
+            Some(i64::MAX),
+            None,
+        ];
+        let array = DurationMicrosecondArray::from(values.clone());
+        for (i, value) in values.iter().enumerate() {
+            assert_eq!(
+                arrow_value_at(&array, i).unwrap(),
+                value.map(Value::DayTimeInterval).unwrap_or(Value::Null)
+            );
+        }
+        let sliced = array.slice(2, 5);
+        for i in 0..sliced.len() {
+            assert_eq!(
+                arrow_value_at(&sliced, i).unwrap(),
+                Value::DayTimeInterval(values[i + 2].unwrap())
+            );
+        }
+        let nulls = DurationMicrosecondArray::from(vec![None, None]);
+        assert_eq!(arrow_value_at(&nulls, 1).unwrap(), Value::Null);
+        for array in [
+            Arc::new(DurationSecondArray::from(vec![1])) as ArrayRef,
+            Arc::new(DurationMillisecondArray::from(vec![1])),
+            Arc::new(DurationNanosecondArray::from(vec![1])),
+        ] {
+            assert!(arrow_value_at(array.as_ref(), 0).is_err());
+        }
+    }
+
+    #[test]
+    fn day_time_interval_ipc_empty_and_multiple_batches() {
+        use arrow::datatypes::{Schema, TimeUnit};
+        use arrow::ipc::writer::StreamWriter;
+        use arrow::record_batch::RecordBatch;
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "interval",
+            ArrowDataType::Duration(TimeUnit::Microsecond),
+            true,
+        )]));
+        let mut data = Vec::new();
+        let mut writer = StreamWriter::try_new(&mut data, &schema).unwrap();
+        for values in [
+            vec![],
+            vec![Some(i64::MIN), None],
+            vec![],
+            vec![Some(i64::MAX)],
+        ] {
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![Arc::new(DurationMicrosecondArray::from(values))],
+            )
+            .unwrap();
+            writer.write(&batch).unwrap();
+        }
+        writer.finish().unwrap();
+        drop(writer);
+        let rows = decode_arrow_batch(&proto::execute_plan_response::ArrowBatch {
+            data: data.into(),
+            row_count: 3,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|r| r.get(0).unwrap().clone())
+                .collect::<Vec<_>>(),
+            vec![
+                Value::DayTimeInterval(i64::MIN),
+                Value::Null,
+                Value::DayTimeInterval(i64::MAX)
+            ]
+        );
+    }
+
+    #[test]
+    fn typed_scalar_layouts_preserve_exact_values_and_normalization() {
+        let decimal128 = Decimal128Array::from(vec![-12345i128])
+            .with_precision_and_scale(10, 2)
+            .unwrap();
+        let decimal256 = Decimal256Array::from(vec![i256::from_i128(-12345)])
+            .with_precision_and_scale(10, 2)
+            .unwrap();
+        let decimal = Value::Decimal {
+            value: "-123.45".into(),
+            precision: Some(10),
+            scale: Some(2),
+        };
+        let cases: Vec<(ArrayRef, Value)> = vec![
+            (
+                Arc::new(TimestampSecondArray::from(vec![-1])),
+                Value::Timestamp(-1_000_000),
+            ),
+            (
+                Arc::new(TimestampMillisecondArray::from(vec![-1])),
+                Value::Timestamp(-1_000),
+            ),
+            (
+                Arc::new(TimestampNanosecondArray::from(vec![-1999])),
+                Value::Timestamp(-1),
+            ),
+            (
+                Arc::new(Date64Array::from(vec![-86_400_001])),
+                Value::Date(-1),
+            ),
+            (
+                Arc::new(UInt32Array::from(vec![u32::MAX])),
+                Value::Long(u32::MAX as i64),
+            ),
+            (Arc::new(decimal128), decimal.clone()),
+            (Arc::new(decimal256), decimal),
+            (
+                Arc::new(LargeStringArray::from_iter_values(["é\0雪"])),
+                Value::String("é\0雪".into()),
+            ),
+            (
+                Arc::new(StringViewArray::from_iter_values(["é\0雪"])),
+                Value::String("é\0雪".into()),
+            ),
+            (
+                Arc::new(LargeBinaryArray::from_iter_values([b"\0\xff".as_ref()])),
+                Value::Binary(vec![0, 255]),
+            ),
+            (
+                Arc::new(BinaryViewArray::from_iter_values([b"\0\xff".as_ref()])),
+                Value::Binary(vec![0, 255]),
+            ),
+            (
+                Arc::new(Time64NanosecondArray::from(vec![1_234_567])),
+                Value::Time(1_234_567),
+            ),
+            (
+                Arc::new(Time32MillisecondArray::from(vec![1])),
+                Value::Time(1_000_000),
+            ),
+        ];
+        for (array, expected) in cases {
+            assert_eq!(
+                ArrowValueLayout::new(array.as_ref()).value_at(0).unwrap(),
+                expected
+            );
+        }
+        for value in [
+            -0.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::from_bits(0x7ff8_0000_0000_0001),
+        ] {
+            let array = Float64Array::from(vec![value]);
+            let Value::Double(decoded) = arrow_value_at(&array, 0).unwrap() else {
+                panic!("expected double")
+            };
+            assert_eq!(decoded.to_bits(), value.to_bits());
+        }
+    }
 
     #[test]
     fn primitives_and_signed_ints() {
@@ -3591,23 +4573,24 @@ mod arrow_value_tests {
     }
 
     #[test]
-    fn time_types_render_as_string() {
-        assert!(matches!(
+    fn time_types_decode_as_nanoseconds_since_midnight() {
+        // As PySpark's internal value of TimeType, whatever the unit of the Arrow time.
+        assert_eq!(
             arrow_value_at(&Time64MicrosecondArray::from(vec![1i64]), 0).unwrap(),
-            Value::String(_)
-        ));
-        assert!(matches!(
-            arrow_value_at(&Time64NanosecondArray::from(vec![1000i64]), 0).unwrap(),
-            Value::String(_)
-        ));
-        assert!(matches!(
+            Value::Time(1_000)
+        );
+        assert_eq!(
+            arrow_value_at(&Time64NanosecondArray::from(vec![1001i64]), 0).unwrap(),
+            Value::Time(1_001)
+        );
+        assert_eq!(
             arrow_value_at(&Time32MillisecondArray::from(vec![1i32]), 0).unwrap(),
-            Value::String(_)
-        ));
-        assert!(matches!(
+            Value::Time(1_000_000)
+        );
+        assert_eq!(
             arrow_value_at(&Time32SecondArray::from(vec![1i32]), 0).unwrap(),
-            Value::String(_)
-        ));
+            Value::Time(1_000_000_000)
+        );
     }
 
     #[test]
@@ -3654,33 +4637,37 @@ mod arrow_value_tests {
             arrow_value_at(&with_null, 0).unwrap(),
             Value::Null
         ));
-        // Duration has no dedicated Value arm -> the final unsupported-type Err.
+        // Only microsecond durations are supported (Spark's physical encoding).
         let dur = DurationSecondArray::from(vec![1i64]);
         assert!(arrow_value_at(&dur, 0).is_err());
     }
 
     #[test]
-    fn map_key_to_string_covers_scalar_arms() {
-        assert_eq!(map_key_to_string(Value::String("x".to_string())), "x");
-        assert_eq!(map_key_to_string(Value::Bool(true)), "true");
-        assert_eq!(map_key_to_string(Value::Byte(1)), "1");
-        assert_eq!(map_key_to_string(Value::Short(2)), "2");
-        assert_eq!(map_key_to_string(Value::Integer(3)), "3");
-        assert_eq!(map_key_to_string(Value::Long(4)), "4");
-        assert_eq!(map_key_to_string(Value::Float(1.5)), "1.5");
-        assert_eq!(map_key_to_string(Value::Double(2.5)), "2.5");
-        assert_eq!(map_key_to_string(Value::Date(5)), "5");
-        assert_eq!(map_key_to_string(Value::Timestamp(6)), "6");
-        assert_eq!(
-            map_key_to_string(Value::Decimal {
-                value: "7.5".to_string(),
-                precision: None,
-                scale: None,
-            }),
-            "7.5"
+    fn a_map_keeps_its_entries_in_order_with_keys_of_their_type() {
+        let entries = StructArray::from(vec![
+            (
+                Arc::new(Field::new("key", arrow::datatypes::DataType::Int32, false)),
+                Arc::new(Int32Array::from(vec![2, 1])) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("value", arrow::datatypes::DataType::Utf8, true)),
+                Arc::new(StringArray::from(vec!["b", "a"])) as ArrayRef,
+            ),
+        ]);
+        let map = MapArray::new(
+            Arc::new(Field::new("entries", entries.data_type().clone(), false)),
+            arrow::buffer::OffsetBuffer::new(vec![0, 2].into()),
+            entries,
+            None,
+            false,
         );
-        // Non-scalar key falls back to the Debug form.
-        let _ = map_key_to_string(Value::List(vec![]));
+        assert_eq!(
+            arrow_value_at(&map, 0).unwrap(),
+            Value::Map(vec![
+                (Value::Integer(2), Value::String("b".to_string())),
+                (Value::Integer(1), Value::String("a".to_string())),
+            ])
+        );
     }
 
     #[test]
@@ -3690,10 +4677,222 @@ mod arrow_value_tests {
         assert_eq!(i128_to_decimal_string(5, 4), "0.0005");
         assert_eq!(i128_to_decimal_string(-5, 4), "-0.0005");
     }
+}
 
+#[cfg(test)]
+mod plan_id_column_tests {
+    use super::*;
+    use crate::session::SparkSession;
+    use proto::relation::RelType;
+
+    fn session() -> SparkSession {
+        SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .expect("failed to build session")
+    }
+
+    /// As PySpark Connect's `df[name]`, `df["*"]`, `colRegex` and `metadataColumn`: the columns
+    /// of a DataFrame refer to it by the plan ID that its relation is sent with.
     #[test]
-    fn micros_to_time_string_branches() {
-        assert_eq!(micros_to_time_string(0), "00:00:00");
-        assert!(micros_to_time_string(1).contains('.'));
+    fn columns_refer_to_their_dataframe_by_its_plan_id() {
+        use proto::expression::ExprType;
+
+        let spark = session();
+        let left = spark.range(2).unwrap();
+        let right = spark.range(3).unwrap();
+        let joined = left
+            .join(
+                &right,
+                Some(left.col("id").eq(right.col("id"))),
+                JoinType::Inner,
+            )
+            .select(vec![left.col("id"), right.star(), left.col_regex("`i.*`")]);
+        let relation = joined.relation();
+        let Some(RelType::Project(project)) = &relation.rel_type else {
+            panic!("expected Project: {relation:?}");
+        };
+        let Some(RelType::Join(join)) = &project.input.as_deref().unwrap().rel_type else {
+            panic!("expected Join");
+        };
+        let plan_id = |r: &proto::Relation| r.common.as_ref().and_then(|c| c.plan_id);
+        let (left_id, right_id) = (
+            plan_id(join.left.as_deref().unwrap()),
+            plan_id(join.right.as_deref().unwrap()),
+        );
+        assert!(left_id.is_some() && left_id != right_id);
+        let ids: Vec<Option<i64>> = project
+            .expressions
+            .iter()
+            .map(|e| match &e.expr_type {
+                Some(ExprType::UnresolvedAttribute(a)) => a.plan_id,
+                Some(ExprType::UnresolvedStar(s)) => s.plan_id,
+                Some(ExprType::UnresolvedRegex(r)) => r.plan_id,
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(ids, vec![left_id, right_id, left_id]);
+        let Some(ExprType::UnresolvedAttribute(metadata)) = left
+            .metadata_column("_metadata")
+            .expression()
+            .to_proto()
+            .expr_type
+        else {
+            panic!("expected an attribute");
+        };
+        assert_eq!(
+            (metadata.plan_id, metadata.is_metadata_column),
+            (left_id, Some(true))
+        );
+    }
+}
+
+#[cfg(test)]
+mod subquery_tests {
+    use super::*;
+    use crate::column::col;
+    use crate::functions::max;
+    use crate::session::SparkSession;
+    use proto::relation::RelType;
+
+    fn session() -> SparkSession {
+        SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .expect("failed to build session")
+    }
+
+    fn plan_id(relation: &proto::Relation) -> Option<i64> {
+        relation.common.as_ref().and_then(|common| common.plan_id)
+    }
+
+    /// The root and the references of a `WithRelations`.
+    fn with_relations(relation: &proto::Relation) -> (&proto::Relation, &[proto::Relation]) {
+        let Some(RelType::WithRelations(with)) = &relation.rel_type else {
+            panic!("expected WithRelations: {relation:?}");
+        };
+        (with.root.as_deref().expect("root"), &with.references)
+    }
+
+    fn subquery(expr: &proto::Expression) -> &proto::SubqueryExpression {
+        let Some(proto::expression::ExprType::SubqueryExpression(subquery)) = &expr.expr_type
+        else {
+            panic!("expected a SubqueryExpression: {expr:?}");
+        };
+        subquery
+    }
+
+    /// As PySpark's `_with_relations`: a relation with subqueries is a `WithRelations` of
+    /// its own plan ID, whose root has another, and whose references are the plans of the
+    /// subqueries, with the plan IDs that the subqueries refer to.
+    #[test]
+    fn subqueries_are_sent_with_the_plans_that_they_refer_to() {
+        let spark = session();
+        let inner = spark.range(3).unwrap().select(vec![max(col("id"))]);
+        let df = spark
+            .range(2)
+            .unwrap()
+            .select(vec![col("id"), inner.scalar().alias("m")]);
+
+        let relation = df.relation();
+        let (root, references) = with_relations(&relation);
+        assert_eq!(plan_id(&relation), Some(spark.plan_ids().id_of(&df.plan)));
+        assert!(plan_id(root).is_some() && plan_id(root) != plan_id(&relation));
+        let Some(RelType::Project(project)) = &root.rel_type else {
+            panic!("expected Project: {root:?}");
+        };
+        let Some(proto::expression::ExprType::Alias(alias)) = &project.expressions[1].expr_type
+        else {
+            panic!("expected an alias");
+        };
+        let scalar = subquery(alias.expr.as_deref().unwrap());
+        assert_eq!(
+            scalar.subquery_type,
+            proto::subquery_expression::SubqueryType::Scalar as i32
+        );
+        assert_eq!(references.len(), 1);
+        assert_eq!(plan_id(&references[0]), Some(scalar.plan_id));
+        assert_eq!(references[0], inner.relation());
+        // The plan IDs are stable, as PySpark's.
+        assert_eq!(df.relation(), relation);
+        // Without plan IDs, the relation is sent the same way.
+        let Some(RelType::WithRelations(with)) = df.plan.to_proto().rel_type else {
+            panic!("expected WithRelations");
+        };
+        assert_eq!(with.references.len(), 1);
+        // A plan without subqueries is sent as it is.
+        assert!(matches!(
+            inner.relation().rel_type,
+            Some(RelType::Project(_))
+        ));
+    }
+
+    /// The relations below a relation with subqueries, and the plans that they refer to,
+    /// send their own subqueries in their own `WithRelations`.
+    #[test]
+    fn nested_subqueries_are_sent_in_their_own_relations() {
+        let spark = session();
+        let t1 = spark.range(4).unwrap();
+        let t2 = spark.range(2).unwrap();
+        let smallest = t2.select(vec![crate::functions::min(col("id"))]);
+        let filtered = t2.filter(col("id").gt(smallest.scalar()));
+        let df = t1
+            .filter(col("id").isin_subquery(&filtered))
+            .filter(t2.exists());
+
+        let relation = df.relation();
+        let (root, references) = with_relations(&relation);
+        let Some(RelType::Filter(outer)) = &root.rel_type else {
+            panic!("expected Filter: {root:?}");
+        };
+        let exists = subquery(outer.condition.as_ref().unwrap());
+        assert_eq!(references.len(), 1);
+        assert_eq!(plan_id(&references[0]), Some(exists.plan_id));
+
+        // The inner filter, with the IN subquery of the filtered plan, which in turn has the
+        // scalar subquery of the smallest.
+        let (inner_root, inner_references) = with_relations(outer.input.as_deref().unwrap());
+        let Some(RelType::Filter(inner)) = &inner_root.rel_type else {
+            panic!("expected Filter: {inner_root:?}");
+        };
+        let in_subquery = subquery(inner.condition.as_ref().unwrap());
+        assert_eq!(
+            in_subquery.subquery_type,
+            proto::subquery_expression::SubqueryType::In as i32
+        );
+        assert_eq!(
+            in_subquery.in_subquery_values,
+            vec![col("id").expression().to_proto()]
+        );
+        assert_eq!(inner_references.len(), 1);
+        assert_eq!(plan_id(&inner_references[0]), Some(in_subquery.plan_id));
+        let (filtered_root, filtered_references) = with_relations(&inner_references[0]);
+        assert!(matches!(filtered_root.rel_type, Some(RelType::Filter(_))));
+        assert_eq!(
+            filtered_references,
+            std::slice::from_ref(&smallest.relation())
+        );
+    }
+
+    /// As PySpark's `Column.isin(df)`, the values of an IN subquery of a struct are its
+    /// fields; and the subqueries render as PySpark's, with the plan ID of their plan.
+    #[test]
+    fn in_subqueries_of_structs_compare_their_fields() {
+        let spark = session();
+        let df = spark.range(1).unwrap();
+        let id = spark.plan_ids().id_of(&df.plan);
+        let fields = crate::functions::r#struct(vec![col("a"), col("b")]).isin_subquery(&df);
+        assert_eq!(
+            fields.expression().render(),
+            format!("SubqueryExpression(plan=<plan {id}>, type=in, values=[a, b])")
+        );
+        assert_eq!(
+            df.scalar().expression().render(),
+            format!("SubqueryExpression(plan=<plan {id}>, type=scalar)")
+        );
+        assert_eq!(
+            df.exists().expression().render(),
+            format!("SubqueryExpression(plan=<plan {id}>, type=exists)")
+        );
     }
 }

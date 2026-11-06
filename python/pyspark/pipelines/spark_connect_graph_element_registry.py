@@ -41,6 +41,8 @@ from pyspark.sql.types import StructType
 from pyspark._pyspark import (
     pipeline_define_output as _define_output,
     pipeline_define_flow as _define_flow,
+    pipeline_enter_flow_function as _enter_flow_function,
+    pipeline_exit_flow_function as _exit_flow_function,
     pipeline_define_auto_cdc_flow as _define_auto_cdc_flow,
     pipeline_define_sql_graph_elements as _define_sql_graph_elements,
 )
@@ -53,6 +55,8 @@ _OUTPUT_TYPE_SINK = 4
 
 # spark.connect.PipelineCommand.DefineFlow.SCDType enum values.
 _SCD_TYPE_1 = 1
+_SCD_TYPE_2 = 2
+_SCD_TYPE_BY_VALUE = {"1": _SCD_TYPE_1, "2": _SCD_TYPE_2}
 
 
 def _scl(loc: SourceCodeLocation):
@@ -146,11 +150,15 @@ class SparkConnectGraphElementRegistry(GraphElementRegistry):
             )
 
     def register_flow(self, flow: Flow) -> None:
-        # flow.func() builds the query DataFrame lazily (no server round-trip), so unlike
-        # the reference client there is no client-side analysis to scope with a
-        # PipelineAnalysisContext; the DefineFlow proto carries the graph id + flow name,
-        # which is what the server uses to analyze the relation.
-        df = flow.func()
+        # PySpark runs flow.func() within a PipelineAnalysisContext, in which its server
+        # returns the relation of spark.sql() without running the statement. Here spark.sql()
+        # within the flow function builds its relation without running it, and the server
+        # analyzes the relation in the pipeline once the DefineFlow defines the flow.
+        _enter_flow_function()
+        try:
+            df = flow.func()
+        finally:
+            _exit_flow_function()
         scl_file, scl_line = _scl(flow.source_code_location)
         _define_flow(
             self._spark,
@@ -165,7 +173,12 @@ class SparkConnectGraphElementRegistry(GraphElementRegistry):
 
     def register_auto_cdc_flow(self, flow: AutoCdcFlow) -> None:
         scl_file, scl_line = _scl(flow.source_code_location)
-        stored_as_scd_type = _SCD_TYPE_1 if flow.stored_as_scd_type is not None else 0
+        # SCDType enum value: 0 unspecified, else SCD_TYPE_1 / SCD_TYPE_2.
+        stored_as_scd_type = (
+            _SCD_TYPE_BY_VALUE[str(flow.stored_as_scd_type)]
+            if flow.stored_as_scd_type is not None
+            else 0
+        )
         _define_auto_cdc_flow(
             self._spark,
             self._dataflow_graph_id,
@@ -180,6 +193,13 @@ class SparkConnectGraphElementRegistry(GraphElementRegistry):
             stored_as_scd_type,
             scl_file,
             scl_line,
+            list(flow.track_history_column_list)
+            if flow.track_history_column_list is not None
+            else None,
+            list(flow.track_history_except_column_list)
+            if flow.track_history_except_column_list is not None
+            else None,
+            dict(flow.spark_conf) if flow.spark_conf else None,
         )
 
     def register_sql(self, sql_text: str, file_path: Path) -> None:

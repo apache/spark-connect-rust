@@ -10,7 +10,7 @@ use spark_connect_core::error::Result;
 use spark_connect_proto as proto;
 
 use crate::column::Column;
-use crate::dataframe::{build_input_relation, execute_command};
+use crate::dataframe::build_input_relation;
 use crate::plan::LogicalPlan;
 use crate::session::SparkSession;
 
@@ -38,6 +38,7 @@ fn merge_action(
 }
 
 /// Fluent builder for a MERGE INTO command. Create it via [`crate::dataframe::DataFrame::merge_into`].
+#[derive(Clone)]
 pub struct MergeIntoWriter {
     session: SparkSession,
     source_plan: Arc<LogicalPlan>,
@@ -47,6 +48,7 @@ pub struct MergeIntoWriter {
     matched_actions: Vec<proto::Expression>,
     not_matched_actions: Vec<proto::Expression>,
     not_matched_by_source_actions: Vec<proto::Expression>,
+    execution: Option<crate::dataframe::ExecutionSlot>,
 }
 
 impl MergeIntoWriter {
@@ -70,7 +72,24 @@ impl MergeIntoWriter {
             matched_actions: Vec::new(),
             not_matched_actions: Vec::new(),
             not_matched_by_source_actions: Vec::new(),
+            execution: None,
         }
+    }
+
+    /// Keep the information of this merge's execution as the last execution of its
+    /// DataFrame, as PySpark's MergeIntoWriter reports it.
+    pub(crate) fn recording_into(mut self, execution: crate::dataframe::ExecutionSlot) -> Self {
+        self.execution = Some(execution);
+        self
+    }
+
+    /// Run the command of the merge, keeping its execution as its DataFrame's last one.
+    fn run(&self, command_type: proto::command::CommandType) -> Result<()> {
+        let (_, info) = crate::dataframe::execute_command_with_info(&self.session, command_type)?;
+        if let Some(execution) = &self.execution {
+            *execution.lock().unwrap() = Some(info);
+        }
+        Ok(())
     }
 
     /// Begin a `WHEN MATCHED [AND condition]` clause.
@@ -104,19 +123,17 @@ impl MergeIntoWriter {
     }
 
     /// Execute the merge.
-    pub fn merge(self) -> Result<()> {
-        let mut cmd = proto::MergeIntoTableCommand::default();
-        cmd.target_table_name = self.target_table;
-        cmd.source_table_plan = Some(build_input_relation(&self.source_plan, &self.session)?);
-        cmd.merge_condition = Some(self.condition.to_proto());
-        cmd.match_actions = self.matched_actions;
-        cmd.not_matched_actions = self.not_matched_actions;
-        cmd.not_matched_by_source_actions = self.not_matched_by_source_actions;
-        cmd.with_schema_evolution = self.schema_evolution;
-        execute_command(
-            &self.session,
-            proto::command::CommandType::MergeIntoTableCommand(cmd),
-        )
+    pub fn merge(mut self) -> Result<()> {
+        let cmd = proto::MergeIntoTableCommand {
+            target_table_name: std::mem::take(&mut self.target_table),
+            source_table_plan: Some(build_input_relation(&self.source_plan, &self.session)),
+            merge_condition: Some(self.condition.to_proto()),
+            match_actions: std::mem::take(&mut self.matched_actions),
+            not_matched_actions: std::mem::take(&mut self.not_matched_actions),
+            not_matched_by_source_actions: std::mem::take(&mut self.not_matched_by_source_actions),
+            with_schema_evolution: self.schema_evolution,
+        };
+        self.run(proto::command::CommandType::MergeIntoTableCommand(cmd))
     }
 }
 

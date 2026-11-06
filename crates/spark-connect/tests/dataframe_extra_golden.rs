@@ -44,7 +44,7 @@ fn test_summary_golden() {
 #[test]
 #[ignore]
 fn test_col_regex_golden() {
-    // Test: df.selectExpr("id", "id as id2").col_regex("id.*")
+    // Test: df.selectExpr("id", "id as id2").select(col_regex("id.*"))
 }
 
 #[test]

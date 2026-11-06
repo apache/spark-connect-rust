@@ -9,13 +9,14 @@ use spark_connect_core::error::Result;
 use spark_connect_proto as proto;
 
 use crate::column::Column;
-use crate::dataframe::{build_input_relation, execute_command, DataFrame};
+use crate::dataframe::{build_input_relation, DataFrame};
 use crate::plan::LogicalPlan;
 use crate::session::SparkSession;
 
 /// DataFrameReader for reading data from various sources.
 ///
 /// Mirrors `pyspark.sql.connect.readwriter.DataFrameReader`.
+#[derive(Clone)]
 pub struct DataFrameReader {
     session: SparkSession,
     format: Option<String>,
@@ -58,18 +59,33 @@ impl DataFrameReader {
         self
     }
 
+    /// The configured source format, if any.
+    pub fn get_format(&self) -> Option<&str> {
+        self.format.as_deref()
+    }
+
+    /// The configured schema (a DDL/JSON string; empty when unset).
+    pub fn get_schema(&self) -> &str {
+        &self.schema
+    }
+
+    /// The configured read options.
+    pub fn get_options(&self) -> &HashMap<String, String> {
+        &self.options
+    }
+
     /// Load data from the specified path(s) with the configured format, schema, and options.
     pub fn load(self, path: Option<&str>) -> DataFrame {
         let paths = path.map(|p| vec![p.to_string()]);
         let plan = LogicalPlan::Read {
             read_type: ReadType::DataSource {
-                format: self.format.clone(),
+                format: self.format,
                 schema: if self.schema.is_empty() {
                     None
                 } else {
-                    Some(self.schema.clone())
+                    Some(self.schema)
                 },
-                options: self.options.clone(),
+                options: self.options,
                 paths: paths.unwrap_or_default(),
                 predicates: vec![],
                 source_name: None,
@@ -83,7 +99,7 @@ impl DataFrameReader {
     pub fn changes(self, table_name: &str) -> DataFrame {
         let plan = LogicalPlan::RelationChanges {
             table_name: table_name.to_string(),
-            options: self.options.clone(),
+            options: self.options,
             is_streaming: None,
         };
         DataFrame::new(self.session, plan)
@@ -94,7 +110,7 @@ impl DataFrameReader {
         let plan = LogicalPlan::Read {
             read_type: ReadType::NamedTable {
                 table_name: table_name.to_string(),
-                options: self.options.clone(),
+                options: self.options,
             },
             is_streaming: false,
         };
@@ -102,135 +118,33 @@ impl DataFrameReader {
     }
 
     /// Read JSON data.
-    pub fn json(mut self, path: &str) -> DataFrame {
-        self.format = Some("json".to_string());
-        let paths = vec![path.to_string()];
-        let plan = LogicalPlan::Read {
-            read_type: ReadType::DataSource {
-                format: self.format.clone(),
-                schema: if self.schema.is_empty() {
-                    None
-                } else {
-                    Some(self.schema.clone())
-                },
-                options: self.options.clone(),
-                paths,
-                predicates: vec![],
-                source_name: None,
-            },
-            is_streaming: false,
-        };
-        DataFrame::new(self.session, plan)
+    pub fn json(self, path: &str) -> DataFrame {
+        self.format("json").load(Some(path))
     }
 
     /// Read Parquet data.
-    pub fn parquet(mut self, path: &str) -> DataFrame {
-        self.format = Some("parquet".to_string());
-        let paths = vec![path.to_string()];
-        let plan = LogicalPlan::Read {
-            read_type: ReadType::DataSource {
-                format: self.format.clone(),
-                schema: if self.schema.is_empty() {
-                    None
-                } else {
-                    Some(self.schema.clone())
-                },
-                options: self.options.clone(),
-                paths,
-                predicates: vec![],
-                source_name: None,
-            },
-            is_streaming: false,
-        };
-        DataFrame::new(self.session, plan)
+    pub fn parquet(self, path: &str) -> DataFrame {
+        self.format("parquet").load(Some(path))
     }
 
     /// Read CSV data.
-    pub fn csv(mut self, path: &str) -> DataFrame {
-        self.format = Some("csv".to_string());
-        let paths = vec![path.to_string()];
-        let plan = LogicalPlan::Read {
-            read_type: ReadType::DataSource {
-                format: self.format.clone(),
-                schema: if self.schema.is_empty() {
-                    None
-                } else {
-                    Some(self.schema.clone())
-                },
-                options: self.options.clone(),
-                paths,
-                predicates: vec![],
-                source_name: None,
-            },
-            is_streaming: false,
-        };
-        DataFrame::new(self.session, plan)
+    pub fn csv(self, path: &str) -> DataFrame {
+        self.format("csv").load(Some(path))
     }
 
     /// Read ORC data.
-    pub fn orc(mut self, path: &str) -> DataFrame {
-        self.format = Some("orc".to_string());
-        let paths = vec![path.to_string()];
-        let plan = LogicalPlan::Read {
-            read_type: ReadType::DataSource {
-                format: self.format.clone(),
-                schema: if self.schema.is_empty() {
-                    None
-                } else {
-                    Some(self.schema.clone())
-                },
-                options: self.options.clone(),
-                paths,
-                predicates: vec![],
-                source_name: None,
-            },
-            is_streaming: false,
-        };
-        DataFrame::new(self.session, plan)
+    pub fn orc(self, path: &str) -> DataFrame {
+        self.format("orc").load(Some(path))
     }
 
     /// Read text data.
-    pub fn text(mut self, path: &str) -> DataFrame {
-        self.format = Some("text".to_string());
-        let paths = vec![path.to_string()];
-        let plan = LogicalPlan::Read {
-            read_type: ReadType::DataSource {
-                format: self.format.clone(),
-                schema: if self.schema.is_empty() {
-                    None
-                } else {
-                    Some(self.schema.clone())
-                },
-                options: self.options.clone(),
-                paths,
-                predicates: vec![],
-                source_name: None,
-            },
-            is_streaming: false,
-        };
-        DataFrame::new(self.session, plan)
+    pub fn text(self, path: &str) -> DataFrame {
+        self.format("text").load(Some(path))
     }
 
     /// Read XML file(s). Mirrors `DataFrameReader.xml`.
-    pub fn xml(mut self, path: &str) -> DataFrame {
-        self.format = Some("xml".to_string());
-        let paths = vec![path.to_string()];
-        let plan = LogicalPlan::Read {
-            read_type: ReadType::DataSource {
-                format: self.format.clone(),
-                schema: if self.schema.is_empty() {
-                    None
-                } else {
-                    Some(self.schema.clone())
-                },
-                options: self.options.clone(),
-                paths,
-                predicates: vec![],
-                source_name: None,
-            },
-            is_streaming: false,
-        };
-        DataFrame::new(self.session, plan)
+    pub fn xml(self, path: &str) -> DataFrame {
+        self.format("xml").load(Some(path))
     }
 
     /// Read from JDBC data source.
@@ -242,13 +156,13 @@ impl DataFrameReader {
 
         let plan = LogicalPlan::Read {
             read_type: ReadType::DataSource {
-                format: self.format.clone(),
+                format: self.format,
                 schema: if self.schema.is_empty() {
                     None
                 } else {
-                    Some(self.schema.clone())
+                    Some(self.schema)
                 },
-                options: self.options.clone(),
+                options: self.options,
                 paths: vec![],
                 predicates: predicates.unwrap_or_default(),
                 source_name: None,
@@ -330,6 +244,7 @@ impl TableSaveMethod {
 /// DataFrameWriter for writing DataFrames to various destinations.
 ///
 /// Mirrors `pyspark.sql.connect.readwriter.DataFrameWriter`.
+#[derive(Clone)]
 pub struct DataFrameWriter {
     session: SparkSession,
     input_plan: Arc<LogicalPlan>,
@@ -341,6 +256,7 @@ pub struct DataFrameWriter {
     bucket_cols: Vec<String>,
     sort_cols: Vec<String>,
     num_buckets: Option<i32>,
+    execution: Option<crate::dataframe::ExecutionSlot>,
 }
 
 impl DataFrameWriter {
@@ -362,7 +278,24 @@ impl DataFrameWriter {
             bucket_cols: vec![],
             sort_cols: vec![],
             num_buckets: None,
+            execution: None,
         }
+    }
+
+    /// Keep the information of this write's execution as the last execution of its
+    /// DataFrame, as PySpark's writers report it to theirs.
+    pub(crate) fn recording_into(mut self, execution: crate::dataframe::ExecutionSlot) -> Self {
+        self.execution = Some(execution);
+        self
+    }
+
+    /// Run the command of the write, keeping its execution as its DataFrame's last one.
+    fn run(&self, command_type: proto::command::CommandType) -> Result<()> {
+        let (_, info) = crate::dataframe::execute_command_with_info(&self.session, command_type)?;
+        if let Some(execution) = &self.execution {
+            *execution.lock().unwrap() = Some(info);
+        }
+        Ok(())
     }
 
     /// Cluster the output by the given columns (liquid clustering).
@@ -426,7 +359,7 @@ impl DataFrameWriter {
         save_type: Option<proto::write_operation::SaveType>,
     ) -> Result<proto::WriteOperation> {
         let mut op = proto::WriteOperation::default();
-        op.input = Some(build_input_relation(&self.input_plan, &self.session)?);
+        op.input = Some(build_input_relation(&self.input_plan, &self.session));
         op.source = self.format.clone();
         op.mode = self.mode.to_proto();
         op.sort_column_names = self.sort_cols.clone();
@@ -449,20 +382,14 @@ impl DataFrameWriter {
         table.save_method = method.to_proto();
         let op =
             self.build_write_operation(Some(proto::write_operation::SaveType::Table(table)))?;
-        execute_command(
-            &self.session,
-            proto::command::CommandType::WriteOperation(op),
-        )
+        self.run(proto::command::CommandType::WriteOperation(op))
     }
 
     /// Save the DataFrame to a file path (or to a path-less sink such as `noop`).
     pub fn save(self, path: Option<&str>) -> Result<()> {
         let save_type = path.map(|p| proto::write_operation::SaveType::Path(p.to_string()));
         let op = self.build_write_operation(save_type)?;
-        execute_command(
-            &self.session,
-            proto::command::CommandType::WriteOperation(op),
-        )
+        self.run(proto::command::CommandType::WriteOperation(op))
     }
 
     /// Save the DataFrame as a managed table.
@@ -515,6 +442,7 @@ impl DataFrameWriter {
 /// DataFrameWriterV2 for the v2 write API (`DataFrame.writeTo`).
 ///
 /// Mirrors `pyspark.sql.connect.readwriter.DataFrameWriterV2`.
+#[derive(Clone)]
 pub struct DataFrameWriterV2 {
     session: SparkSession,
     input_plan: Arc<LogicalPlan>,
@@ -524,6 +452,7 @@ pub struct DataFrameWriterV2 {
     table_properties: HashMap<String, String>,
     partition_cols: Vec<Column>,
     cluster_cols: Vec<String>,
+    execution: Option<crate::dataframe::ExecutionSlot>,
 }
 
 impl DataFrameWriterV2 {
@@ -547,7 +476,24 @@ impl DataFrameWriterV2 {
             table_properties: HashMap::new(),
             partition_cols: vec![],
             cluster_cols: vec![],
+            execution: None,
         }
+    }
+
+    /// Keep the information of this write's execution as the last execution of its
+    /// DataFrame, as PySpark's writers report it to theirs.
+    pub(crate) fn recording_into(mut self, execution: crate::dataframe::ExecutionSlot) -> Self {
+        self.execution = Some(execution);
+        self
+    }
+
+    /// Run the command of the write, keeping its execution as its DataFrame's last one.
+    fn run(&self, command_type: proto::command::CommandType) -> Result<()> {
+        let (_, info) = crate::dataframe::execute_command_with_info(&self.session, command_type)?;
+        if let Some(execution) = &self.execution {
+            *execution.lock().unwrap() = Some(info);
+        }
+        Ok(())
     }
 
     /// Cluster the output table by the given columns (liquid clustering).
@@ -594,7 +540,7 @@ impl DataFrameWriterV2 {
         overwrite_condition: Option<proto::Expression>,
     ) -> Result<proto::WriteOperationV2> {
         let mut op = proto::WriteOperationV2::default();
-        op.input = Some(build_input_relation(&self.input_plan, &self.session)?);
+        op.input = Some(build_input_relation(&self.input_plan, &self.session));
         op.table_name = self.table_name.clone();
         op.provider = self.provider.clone();
         op.partitioning_columns = self.partition_cols.iter().map(|c| c.to_proto()).collect();
@@ -608,10 +554,7 @@ impl DataFrameWriterV2 {
 
     fn execute(self, mode: proto::write_operation_v2::Mode) -> Result<()> {
         let op = self.build_operation(mode, None)?;
-        execute_command(
-            &self.session,
-            proto::command::CommandType::WriteOperationV2(op),
-        )
+        self.run(proto::command::CommandType::WriteOperationV2(op))
     }
 
     /// Create a new table from the DataFrame.
@@ -640,10 +583,7 @@ impl DataFrameWriterV2 {
             proto::write_operation_v2::Mode::Overwrite,
             Some(condition.to_proto()),
         )?;
-        execute_command(
-            &self.session,
-            proto::command::CommandType::WriteOperationV2(op),
-        )
+        self.run(proto::command::CommandType::WriteOperationV2(op))
     }
 
     /// Overwrite all partitions touched by the DataFrame (dynamic overwrite).

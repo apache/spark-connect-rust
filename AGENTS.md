@@ -74,8 +74,9 @@ the Rust and Python sides, no stubs, green CI.
   *Affects Version/s* and the *Fix Version/s* to a `connect-rust-x.y.z` version
   (e.g. `connect-rust-0.1.0`, `connect-rust-4.2.0`) — never a core Spark version.
   This keeps connect-rust work in its own release notes instead of leaking into
-  core Spark's. `dev/create_spark_jira.py` and `dev/merge_connect_rust_pr.py`
-  already follow this; keep it consistent when editing tickets by hand.
+  core Spark's. `dev/create_spark_jira.py` (both versions, default the newest
+  unreleased `connect-rust-x.y.z`, or `--version`) and `dev/merge_connect_rust_pr.py`
+  (fix version) already follow this; keep it consistent when editing tickets by hand.
 - **Release umbrella JIRA: one Epic per `connect-rust-x.y.z` release.** Each
   release is tracked by an umbrella Epic titled `spark-connect-rust
   connect-rust-x.y.z release` (e.g. `SPARK-59035` for `connect-rust-4.2.0`,
@@ -84,6 +85,7 @@ the Rust and Python sides, no stubs, green CI.
   release to it with an **`is part of` (Incorporates) issue link** — the umbrella
   `incorporates` the child, the child `is part of` the umbrella — **not** the
   Epic Link field. Use only that one mechanism so the two never drift apart.
+  `dev/create_spark_jira.py` adds this link for every issue it files except subtasks.
 
 ## 1. Environment setup
 
@@ -441,7 +443,7 @@ For every method matching a pyspark name:
     on-Spark's `spark_column_equals` decides column identity by comparing repr strings (it does
     `repr(left).replace(backtick, "") == repr(right)...`); a generic `"Column()"` makes every column
     look equal and collapses frames to `(n, 0)`. `Expression::render()` mirrors the pyspark-connect
-    expression `__repr__` (infix binary ops, `AS`, `CAST`, star, ...). `pyspark.sql.connect.column`
+    expression `__repr__` (operators as functions, `+(a, 1)`, `AS`, `CAST`, `unresolvedstar()`, ...). `pyspark.sql.connect.column`
     re-exports the Rust `Column`, so its `isinstance(x, ConnectColumn)` checks already pass.
   - **Internal pandas functions dispatch by NAME, not by client reimplementation.**
     `pyspark.sql.internal.InternalFunction` (`distributed_sequence_id`, `pandas_product`,

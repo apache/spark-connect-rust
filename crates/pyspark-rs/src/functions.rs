@@ -2,14 +2,13 @@
 
 use pyo3::prelude::*;
 use spark_connect::column::Column;
-use spark_connect::expression::{Expression, ExpressionNode, LiteralExpression};
+use spark_connect::expression::{Expression, ExpressionNode, LiteralExpression, NamedArgument};
 use spark_connect::functions as spark_funcs;
 use spark_connect::udf::{CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
 
 use crate::column::PyColumn;
 use crate::dataframe::PyDataFrame;
 use crate::session::PySparkSession;
-use crate::types::PyDataType;
 
 // Include the auto-generated dispatch function
 mod dispatch {
@@ -27,8 +26,10 @@ mod dispatch {
 /// - command_bytes: bytes - cloudpickled command (usually (func, output_type))
 /// - python_ver: str - Python version (e.g., "3.9")
 /// - *args: Column - argument columns
+/// - named_args: (str, Column) pairs - the keyword arguments, in order
 #[pyfunction]
-#[pyo3(signature = (name, return_type, eval_type, command_bytes, python_ver, *args, deterministic=true))]
+#[pyo3(signature = (name, return_type, eval_type, command_bytes, python_ver, *args, deterministic=true, named_args=Vec::new()))]
+#[allow(clippy::too_many_arguments)]
 fn pyfunc_make_udf(
     name: String,
     return_type: &Bound<'_, PyAny>,
@@ -37,18 +38,13 @@ fn pyfunc_make_udf(
     python_ver: String,
     args: Vec<Bound<'_, PyAny>>,
     deterministic: bool,
+    named_args: Vec<(String, Bound<'_, PyAny>)>,
 ) -> PyResult<PyColumn> {
     // Accept any DataType object (our type classes / DataType) or a DDL string.
     let return_data_type = crate::types::py_to_data_type(return_type)?;
 
-    // Convert all arguments to Columns
-    let mut col_args = Vec::new();
-    for arg in args {
-        col_args.push(to_column(&arg)?);
-    }
-
-    // Convert argument columns to expressions
-    let arg_exprs: Vec<Expression> = col_args
+    // The positional arguments, then the named ones, as PySpark's UDF call.
+    let arg_exprs: Vec<Expression> = udf_arguments(args, named_args, false)?
         .into_iter()
         .map(|c| c.expression().clone())
         .collect();
@@ -65,6 +61,41 @@ fn pyfunc_make_udf(
     )))
 }
 
+/// The arguments of a UDF or UDTF call: the positional ones, then a `NamedArgumentExpression`
+/// of each keyword argument, as PySpark's `UserDefinedFunction` and `UserDefinedTableFunction`
+/// build them. As PySpark's, a UDTF call also takes a `TableArg`, which passes the rows of
+/// its DataFrame.
+fn udf_arguments(
+    args: Vec<Bound<'_, PyAny>>,
+    named_args: Vec<(String, Bound<'_, PyAny>)>,
+    table_args: bool,
+) -> PyResult<Vec<Column>> {
+    let argument = |arg: &Bound<'_, PyAny>| -> PyResult<Column> {
+        if table_args {
+            if let Ok(table_arg) = arg.extract::<PyRef<'_, crate::tablearg::PyTableArg>>() {
+                return Ok(table_arg.inner.to_column());
+            }
+        }
+        // As PySpark's `to_expr` of a UDF call: a column name is a ColumnReference of it,
+        // without the origin of `col`.
+        if arg.is_instance_of::<pyo3::types::PyString>() {
+            return Ok(Column::new(Expression::column(arg.extract::<String>()?)));
+        }
+        to_column(arg)
+    };
+    let mut columns = Vec::with_capacity(args.len() + named_args.len());
+    for arg in args {
+        columns.push(argument(&arg)?);
+    }
+    for (key, value) in named_args {
+        let value = argument(&value)?.expression().clone();
+        columns.push(Column::new(
+            ExpressionNode::NamedArgument(Box::new(NamedArgument::new(key, value))).into(),
+        ));
+    }
+    Ok(columns)
+}
+
 /// PyO3 wrapper for building a Python UDTF (table function) call.
 /// Called from Python as `make_udtf`; mirrors `make_udf` but yields a DataFrame
 /// (a `CommonInlineUserDefinedTableFunction` relation) via the session's TVF.
@@ -73,22 +104,37 @@ fn pyfunc_make_udf(
 /// - name/return_type/eval_type/command_bytes/python_ver: as for `make_udf`
 ///   (eval_type ∈ {300 SQL_TABLE_UDF, 301 SQL_ARROW_TABLE_UDF, 302 SQL_ARROW_UDTF})
 /// - *args: Column arguments
+/// - deterministic: whether the UDTF is deterministic, which a PySpark UDTF is not unless
+///   `asDeterministic()` makes it so
+/// - named_args: (str, Column) pairs - the keyword arguments, in order
 #[pyfunction]
-#[pyo3(signature = (session, name, return_type, eval_type, command_bytes, python_ver, *args))]
+#[pyo3(signature = (session, name, return_type, eval_type, command_bytes, python_ver, *args, deterministic=false, named_args=Vec::new()))]
+#[allow(clippy::too_many_arguments)]
 fn pyfunc_make_udtf(
     session: PyRef<'_, PySparkSession>,
     name: String,
-    return_type: Option<PyRef<'_, PyDataType>>,
+    return_type: Option<&Bound<'_, PyAny>>,
     eval_type: i32,
     command_bytes: Vec<u8>,
     python_ver: String,
     args: Vec<Bound<'_, PyAny>>,
+    deterministic: bool,
+    named_args: Vec<(String, Bound<'_, PyAny>)>,
 ) -> PyResult<PyDataFrame> {
-    let mut col_args = Vec::new();
-    for arg in args {
-        col_args.push(to_column(&arg)?);
-    }
-    let rt = return_type.map(|d| d.inner.clone());
+    let col_args = udf_arguments(args, named_args, true)?;
+    // Connect leaves DDL parsing and validation to the server. In particular,
+    // do not use py_to_data_type's eager DDL parser for string return types.
+    let rt = return_type
+        .map(|value| {
+            if let Ok(ddl) = value.extract::<String>() {
+                Ok(spark_connect::types::DataType::Unparsed {
+                    data_type_string: ddl,
+                })
+            } else {
+                crate::types::py_to_data_type(value)
+            }
+        })
+        .transpose()?;
     let df = session.session.tvf().udtf(
         &name,
         col_args,
@@ -96,7 +142,7 @@ fn pyfunc_make_udtf(
         eval_type,
         command_bytes,
         python_ver,
-        true, // deterministic by default
+        deterministic,
     );
     Ok(PyDataFrame::new(df))
 }
@@ -120,6 +166,7 @@ pub fn register_functions(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<
     m.add_function(wrap_pyfunction!(pyfunc_call_named_function, m)?)?;
     m.add_function(wrap_pyfunction!(pyfunc_invoke_function, m)?)?;
     m.add_function(wrap_pyfunction!(pyfunc_sha2, m)?)?;
+    m.add_function(wrap_pyfunction!(pyfunc_variant_strip_nulls, m)?)?;
     m.add_function(wrap_pyfunction!(pyfunc_window, m)?)?;
     m.add_function(wrap_pyfunction!(pyfunc_window_with_slide_and_start, m)?)?;
     m.add_function(wrap_pyfunction!(pyfunc_from_avro, m)?)?;
@@ -154,6 +201,27 @@ pub fn to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
         return Ok(Column::new(Expression::literal(LiteralExpression::null(
             spark_connect::types::DataType::Null,
         ))));
+    }
+
+    // A list, or a one-dimensional NumPy array, is an array, as PySpark's functions take a
+    // value with `lit`: `pyspark.sql.functions.lit` builds it. Another NumPy array is not a
+    // literal value; NumPy would convert one of a single element to a scalar below.
+    let ndarray = numpy_ndarray_ndim(obj)?;
+    if obj.is_instance_of::<pyo3::types::PyList>() || ndarray == Some(1) {
+        let column = obj
+            .py()
+            .import("pyspark.sql.functions")?
+            .getattr("lit")?
+            .call1((obj,))?;
+        return Ok(column.extract::<PyRef<'_, PyColumn>>()?.column.clone());
+    }
+    if ndarray.is_some() {
+        return Err(crate::column::raise_pyspark(
+            obj.py(),
+            "PySparkTypeError",
+            "UNSUPPORTED_DATA_TYPE",
+            &[("data_type", "ndarray")],
+        ));
     }
 
     // Non-primitive scalars must be checked BEFORE int/float: Decimal defines
@@ -193,14 +261,31 @@ pub fn to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
         ))));
     }
 
+    // As PySpark's literal conversion for a value of another type.
     let type_name = obj
         .get_type()
         .name()
         .map(|n| n.to_string())
         .unwrap_or_else(|_| "<unknown>".to_string());
-    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
-        "Expected Column or scalar (int, float, str, bool, bytes, datetime, date, Decimal, None); got {type_name}"
-    )))
+    Err(crate::column::raise_pyspark(
+        obj.py(),
+        "PySparkTypeError",
+        "UNSUPPORTED_DATA_TYPE",
+        &[("data_type", &type_name)],
+    ))
+}
+
+/// The number of dimensions of `obj` if it is a `numpy.ndarray`. NumPy is looked up in
+/// `sys.modules`, as an array exists only when it is imported, so this does not import it.
+fn numpy_ndarray_ndim(obj: &Bound<'_, PyAny>) -> PyResult<Option<usize>> {
+    let py = obj.py();
+    let modules = py.import("sys")?.getattr("modules")?;
+    match modules.cast::<pyo3::types::PyDict>()?.get_item("numpy")? {
+        Some(numpy) if !numpy.is_none() && obj.is_instance(&numpy.getattr("ndarray")?)? => {
+            Ok(Some(obj.getattr("ndim")?.extract()?))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// Build a literal for the non-primitive scalar Python types (`datetime`, `date`,
@@ -211,19 +296,16 @@ fn scalar_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<LiteralExpression>>
     let py = obj.py();
 
     // decimal.Decimal -> Decimal literal (before int/float: Decimal has __float__/__int__).
+    // As PySpark's LiteralExpression of a Decimal, of DecimalType(): precision 10 and scale
+    // 0, which the server widens to those of the value, so lit(Decimal("1.5")) is a
+    // decimal(10,1).
     if let Ok(dec_mod) = py.import("decimal") {
         let decimal_cls = dec_mod.getattr("Decimal")?;
         if obj.is_instance(&decimal_cls)? {
-            let value: String = obj.str()?.extract()?;
-            let as_tuple = obj.call_method0("as_tuple")?;
-            let num_digits = as_tuple.get_item(1)?.len()? as i32;
-            let exp: i64 = as_tuple.get_item(2)?.extract().unwrap_or(0);
-            let scale = if exp < 0 { (-exp) as i32 } else { 0 };
-            let precision = num_digits.max(scale).max(1);
             return Ok(Some(LiteralExpression::Decimal {
-                value,
-                precision,
-                scale,
+                value: obj.str()?.extract()?,
+                precision: 10,
+                scale: 0,
             }));
         }
     }
@@ -237,6 +319,19 @@ fn scalar_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<LiteralExpression>>
             // Timestamp's .timestamp() treats a naive value as UTC; normalize it first).
             let micros = crate::session::datetime_to_micros(obj)?;
             return Ok(Some(LiteralExpression::Timestamp(micros)));
+        }
+        // datetime.time -> TimeType(), as PySpark's literal of one: its nanoseconds since
+        // midnight, of the default precision.
+        if obj.is_instance(&dt_mod.getattr("time")?)? {
+            return Ok(Some(LiteralExpression::Time {
+                nano: crate::infer::time_nanos(obj)?,
+                precision: 6,
+            }));
+        }
+        // datetime.timedelta -> DayTimeIntervalType, as PySpark's literal of one.
+        if obj.is_instance(&dt_mod.getattr("timedelta")?)? {
+            let micros = crate::infer::timedelta_micros(obj)?;
+            return Ok(Some(LiteralExpression::DayTimeInterval(micros)));
         }
         let date_cls = dt_mod.getattr("date")?;
         if obj.is_instance(&date_cls)? {
@@ -260,6 +355,8 @@ fn scalar_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<LiteralExpression>>
 
 #[pyfunction]
 fn pyfunc_col(name: &str) -> PyColumn {
+    // As PySpark's `col`, of `_with_origin`.
+    let _origin = crate::origin::with_origin("col");
     PyColumn::new(spark_funcs::col(name))
 }
 
@@ -400,6 +497,15 @@ fn pyfunc_invoke_function(name: String, args: Vec<Bound<'_, PyAny>>) -> PyResult
 #[pyfunction]
 fn pyfunc_sha2(col: &PyColumn, numbits: i32) -> PyColumn {
     PyColumn::new(spark_funcs::sha2(col.column.clone(), numbits))
+}
+
+/// Wrapper for variant_strip_nulls(v, include_arrays) - bool second arg.
+#[pyfunction]
+fn pyfunc_variant_strip_nulls(v: &PyColumn, include_arrays: bool) -> PyColumn {
+    PyColumn::new(spark_funcs::variant_strip_nulls(
+        v.column.clone(),
+        include_arrays,
+    ))
 }
 
 /// Wrapper for window(col, window_duration).

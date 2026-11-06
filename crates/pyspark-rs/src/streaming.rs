@@ -40,7 +40,6 @@ impl StreamingQueryListener for PyListenerAdapter {
     }
 }
 
-/// Python wrapper for DataStreamReader.
 /// Apply a named read option to a streaming reader when supplied (mirrors the batch
 /// `set_opt` in readwriter.rs): `None` leaves the option unset (not the string "None");
 /// booleans lowercase to "true"/"false" via `coerce_option_value`.
@@ -58,11 +57,10 @@ fn set_ropt(
     }
 }
 
-/// Apply a `schema` argument (a DDL string or a StructType) to a streaming reader,
-/// mirroring the batch `apply_reader_schema`.
+/// Apply a `schema` argument (a StructType or a DDL string) to a streaming reader, as the
+/// batch reader does.
 fn apply_stream_schema(r: DataStreamReader, v: &Bound<'_, PyAny>) -> PyResult<DataStreamReader> {
-    let dt = crate::types::py_to_data_type(v)?;
-    Ok(r.schema(dt.simple_string()))
+    Ok(r.schema(crate::readwriter::reader_schema(v)?))
 }
 
 /// Coerce a `partitionBy` argument (a single column name or a list of names) to a
@@ -74,55 +72,61 @@ fn extract_partition_cols(v: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
     v.extract::<Vec<String>>()
 }
 
+/// Python wrapper for DataStreamReader.
+///
+/// Like PySpark's reader, the setters change this object and return it, and the
+/// reader can be used again after a read: the core reader is a consuming builder, so
+/// the setters replace the wrapped value in place and the reads work on a clone.
 #[pyclass(name = "DataStreamReader", module = "pyspark.sql.streaming.readwriter")]
 pub struct PyDataStreamReader {
-    inner: Option<DataStreamReader>,
+    inner: DataStreamReader,
 }
 
 impl PyDataStreamReader {
     pub fn new(reader: DataStreamReader) -> Self {
-        PyDataStreamReader {
-            inner: Some(reader),
-        }
-    }
-
-    fn take(&mut self) -> PyResult<DataStreamReader> {
-        self.inner.take().ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("DataStreamReader already consumed")
-        })
+        PyDataStreamReader { inner: reader }
     }
 }
 
 #[pymethods]
 impl PyDataStreamReader {
-    fn format(&mut self, source: &str) -> PyResult<PyDataStreamReader> {
-        Ok(PyDataStreamReader {
-            inner: Some(self.take()?.format(source)),
-        })
+    fn format<'py>(mut slf: PyRefMut<'py, Self>, source: &str) -> PyResult<PyRefMut<'py, Self>> {
+        slf.inner = slf.inner.clone().format(source);
+        Ok(slf)
     }
 
-    fn schema(&mut self, schema: &str) -> PyResult<PyDataStreamReader> {
-        Ok(PyDataStreamReader {
-            inner: Some(self.take()?.schema(schema)),
-        })
+    /// Set the schema: a StructType or a DDL string, as in pyspark.
+    fn schema<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        schema: &Bound<'_, PyAny>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let schema = crate::readwriter::reader_schema(schema)?;
+        slf.inner = slf.inner.clone().schema(&schema);
+        Ok(slf)
     }
 
-    fn option(&mut self, key: &str, value: &Bound<'_, PyAny>) -> PyResult<PyDataStreamReader> {
+    fn option<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        key: &str,
+        value: &Bound<'_, PyAny>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
         // None -> option left unset; bools -> "true"/"false" (reference `to_str`).
         match crate::coerce_option_value(value)? {
-            Some(v) => Ok(PyDataStreamReader {
-                inner: Some(self.take()?.option(key, &v)),
-            }),
-            None => Ok(PyDataStreamReader {
-                inner: Some(self.take()?),
-            }),
+            Some(v) => {
+                slf.inner = slf.inner.clone().option(key, &v);
+                Ok(slf)
+            }
+            None => Ok(slf),
         }
     }
 
     // Mirrors reference `DataStreamReader.options(**options)`: keyword args; None values
     // skipped, booleans lowercased.
     #[pyo3(signature = (**options))]
-    fn options(&mut self, options: Option<&Bound<'_, PyDict>>) -> PyResult<PyDataStreamReader> {
+    fn options<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        options: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
         let mut opts = HashMap::new();
         if let Some(options) = options {
             for (k, v) in options.iter() {
@@ -131,9 +135,26 @@ impl PyDataStreamReader {
                 }
             }
         }
-        Ok(PyDataStreamReader {
-            inner: Some(self.take()?.options(opts)),
-        })
+        slf.inner = slf.inner.clone().options(opts);
+        Ok(slf)
+    }
+
+    /// The configured source format (PySpark Connect's `DataStreamReader._format`).
+    #[getter]
+    fn _format(&self) -> Option<String> {
+        self.inner.get_format().map(str::to_string)
+    }
+
+    /// The configured schema string, empty when unset (`DataStreamReader._schema`).
+    #[getter]
+    fn _schema(&self) -> String {
+        self.inner.get_schema().to_string()
+    }
+
+    /// The configured read options (`DataStreamReader._options`); a copy.
+    #[getter]
+    fn _options(&self) -> HashMap<String, String> {
+        self.inner.get_options().clone()
     }
 
     #[pyo3(signature = (path=None, format=None, schema=None, **options))]
@@ -144,7 +165,7 @@ impl PyDataStreamReader {
         schema: Option<&Bound<'_, PyAny>>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
-        let mut r = self.take()?;
+        let mut r = self.inner.clone();
         if let Some(fmt) = format {
             r = r.format(fmt);
         }
@@ -160,12 +181,14 @@ impl PyDataStreamReader {
             }
             r = r.options(opts);
         }
+        // PySpark's one-shot load sets format/schema/options on the reader itself.
+        self.inner = r.clone();
         Ok(PyDataFrame::new(r.load(path)))
     }
 
     /// Set the source name (for checkpoint stability). Mirrors `DataStreamReader.name`,
     /// which validates the name is a non-empty `[A-Za-z0-9_]+` string.
-    fn name(&mut self, source_name: &str) -> PyResult<PyDataStreamReader> {
+    fn name<'py>(mut slf: PyRefMut<'py, Self>, source_name: &str) -> PyResult<PyRefMut<'py, Self>> {
         if source_name.is_empty()
             || !source_name
                 .chars()
@@ -175,14 +198,13 @@ impl PyDataStreamReader {
                 "Invalid streaming source name: {source_name:?}; only ASCII letters, digits, and underscores are allowed"
             )));
         }
-        Ok(PyDataStreamReader {
-            inner: Some(self.take()?.name(source_name)),
-        })
+        slf.inner = slf.inner.clone().name(source_name);
+        Ok(slf)
     }
 
     /// Read the streaming CDC changes of a named table. Mirrors `DataStreamReader.changes`.
-    fn changes(&mut self, tableName: &str) -> PyResult<PyDataFrame> {
-        Ok(PyDataFrame::new(self.take()?.changes(tableName)))
+    fn changes(&self, tableName: &str) -> PyResult<PyDataFrame> {
+        Ok(PyDataFrame::new(self.inner.clone().changes(tableName)))
     }
 
     /// Load an XML streaming source. Mirrors `DataStreamReader.xml(...)`: set each named
@@ -212,7 +234,7 @@ impl PyDataStreamReader {
         samplingRatio: Option<&Bound<'_, PyAny>>,
         locale: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let mut r = self.take()?.format("xml");
+        let mut r = self.inner.clone().format("xml");
         r = set_ropt(r, "rowTag", rowTag)?;
         if let Some(v) = schema {
             r = apply_stream_schema(r, v)?;
@@ -234,11 +256,13 @@ impl PyDataStreamReader {
         r = set_ropt(r, "multiLine", multiLine)?;
         r = set_ropt(r, "samplingRatio", samplingRatio)?;
         r = set_ropt(r, "locale", locale)?;
+        // Like PySpark, the options and the xml format stay on the reader.
+        self.inner = r.clone();
         Ok(PyDataFrame::new(r.load(Some(path))))
     }
 
-    fn table(&mut self, tableName: &str) -> PyResult<PyDataFrame> {
-        let df = self.take()?.table(tableName);
+    fn table(&self, tableName: &str) -> PyResult<PyDataFrame> {
+        let df = self.inner.clone().table(tableName);
         Ok(PyDataFrame::new(df))
     }
 
@@ -270,7 +294,7 @@ impl PyDataStreamReader {
         allowNonNumericNumbers: Option<&Bound<'_, PyAny>>,
         useUnsafeRow: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let mut r = self.take()?;
+        let mut r = self.inner.clone();
         if let Some(v) = schema {
             r = apply_stream_schema(r, v)?;
         }
@@ -299,6 +323,8 @@ impl PyDataStreamReader {
         r = set_ropt(r, "recursiveFileLookup", recursiveFileLookup)?;
         r = set_ropt(r, "allowNonNumericNumbers", allowNonNumericNumbers)?;
         r = set_ropt(r, "useUnsafeRow", useUnsafeRow)?;
+        // Like PySpark, the options and the format stay on the reader.
+        self.inner = r.clone().format("json");
         Ok(PyDataFrame::new(r.json(path)))
     }
 
@@ -313,12 +339,14 @@ impl PyDataStreamReader {
         datetimeRebaseMode: Option<&Bound<'_, PyAny>>,
         int96RebaseMode: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let mut r = self.take()?;
+        let mut r = self.inner.clone();
         r = set_ropt(r, "mergeSchema", mergeSchema)?;
         r = set_ropt(r, "pathGlobFilter", pathGlobFilter)?;
         r = set_ropt(r, "recursiveFileLookup", recursiveFileLookup)?;
         r = set_ropt(r, "datetimeRebaseMode", datetimeRebaseMode)?;
         r = set_ropt(r, "int96RebaseMode", int96RebaseMode)?;
+        // Like PySpark, the options and the format stay on the reader.
+        self.inner = r.clone().format("parquet");
         Ok(PyDataFrame::new(r.parquet(path)))
     }
 
@@ -358,7 +386,7 @@ impl PyDataStreamReader {
         recursiveFileLookup: Option<&Bound<'_, PyAny>>,
         unescapedQuoteHandling: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let mut r = self.take()?;
+        let mut r = self.inner.clone();
         if let Some(v) = schema {
             r = apply_stream_schema(r, v)?;
         }
@@ -395,6 +423,8 @@ impl PyDataStreamReader {
         r = set_ropt(r, "pathGlobFilter", pathGlobFilter)?;
         r = set_ropt(r, "recursiveFileLookup", recursiveFileLookup)?;
         r = set_ropt(r, "unescapedQuoteHandling", unescapedQuoteHandling)?;
+        // Like PySpark, the options and the format stay on the reader.
+        self.inner = r.clone().format("csv");
         Ok(PyDataFrame::new(r.csv(path)))
     }
 
@@ -407,10 +437,12 @@ impl PyDataStreamReader {
         pathGlobFilter: Option<&Bound<'_, PyAny>>,
         recursiveFileLookup: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let mut r = self.take()?;
+        let mut r = self.inner.clone();
         r = set_ropt(r, "mergeSchema", mergeSchema)?;
         r = set_ropt(r, "pathGlobFilter", pathGlobFilter)?;
         r = set_ropt(r, "recursiveFileLookup", recursiveFileLookup)?;
+        // Like PySpark, the options and the format stay on the reader.
+        self.inner = r.clone().format("orc");
         Ok(PyDataFrame::new(r.orc(path)))
     }
 
@@ -424,11 +456,13 @@ impl PyDataStreamReader {
         pathGlobFilter: Option<&Bound<'_, PyAny>>,
         recursiveFileLookup: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let mut r = self.take()?;
+        let mut r = self.inner.clone();
         r = set_ropt(r, "wholetext", wholetext)?;
         r = set_ropt(r, "lineSep", lineSep)?;
         r = set_ropt(r, "pathGlobFilter", pathGlobFilter)?;
         r = set_ropt(r, "recursiveFileLookup", recursiveFileLookup)?;
+        // Like PySpark, the options and the format stay on the reader.
+        self.inner = r.clone().format("text");
         Ok(PyDataFrame::new(r.text(path)))
     }
 }
@@ -480,20 +514,12 @@ impl PyTrigger {
 /// Python wrapper for DataStreamWriter.
 #[pyclass(name = "DataStreamWriter", module = "pyspark.sql.streaming.readwriter")]
 pub struct PyDataStreamWriter {
-    inner: Option<DataStreamWriter>,
+    inner: DataStreamWriter,
 }
 
 impl PyDataStreamWriter {
     pub fn new(writer: DataStreamWriter) -> Self {
-        PyDataStreamWriter {
-            inner: Some(writer),
-        }
-    }
-
-    fn take(&mut self) -> PyResult<DataStreamWriter> {
-        self.inner.take().ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("DataStreamWriter already consumed")
-        })
+        PyDataStreamWriter { inner: writer }
     }
 
     /// Apply the one-shot writer options accepted by `start`/`toTable`
@@ -507,7 +533,7 @@ impl PyDataStreamWriter {
         query_name: Option<&str>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<DataStreamWriter> {
-        let mut w = self.take()?;
+        let mut w = self.inner.clone();
         if let Some(fmt) = format {
             w = w.format(fmt);
         }
@@ -531,40 +557,49 @@ impl PyDataStreamWriter {
             }
             w = w.options(opts);
         }
+        // PySpark's start/toTable set these on the writer itself before starting.
+        self.inner = w.clone();
         Ok(w)
     }
 }
 
 #[pymethods]
 impl PyDataStreamWriter {
-    fn outputMode(&mut self, outputMode: &str) -> PyResult<PyDataStreamWriter> {
-        Ok(PyDataStreamWriter {
-            inner: Some(self.take()?.output_mode(outputMode)),
-        })
+    fn outputMode<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        outputMode: &str,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        slf.inner = slf.inner.clone().output_mode(outputMode);
+        Ok(slf)
     }
 
-    fn format(&mut self, source: &str) -> PyResult<PyDataStreamWriter> {
-        Ok(PyDataStreamWriter {
-            inner: Some(self.take()?.format(source)),
-        })
+    fn format<'py>(mut slf: PyRefMut<'py, Self>, source: &str) -> PyResult<PyRefMut<'py, Self>> {
+        slf.inner = slf.inner.clone().format(source);
+        Ok(slf)
     }
 
-    fn option(&mut self, key: &str, value: &Bound<'_, PyAny>) -> PyResult<PyDataStreamWriter> {
+    fn option<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        key: &str,
+        value: &Bound<'_, PyAny>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
         // None -> option left unset; bools -> "true"/"false" (reference `to_str`).
         match crate::coerce_option_value(value)? {
-            Some(v) => Ok(PyDataStreamWriter {
-                inner: Some(self.take()?.option(key, &v)),
-            }),
-            None => Ok(PyDataStreamWriter {
-                inner: Some(self.take()?),
-            }),
+            Some(v) => {
+                slf.inner = slf.inner.clone().option(key, &v);
+                Ok(slf)
+            }
+            None => Ok(slf),
         }
     }
 
     // Mirrors reference `DataStreamWriter.options(**options)`: keyword args; None values
     // skipped, booleans lowercased.
     #[pyo3(signature = (**options))]
-    fn options(&mut self, options: Option<&Bound<'_, PyDict>>) -> PyResult<PyDataStreamWriter> {
+    fn options<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        options: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
         let mut opts = HashMap::new();
         if let Some(options) = options {
             for (k, v) in options.iter() {
@@ -573,66 +608,117 @@ impl PyDataStreamWriter {
                 }
             }
         }
-        Ok(PyDataStreamWriter {
-            inner: Some(self.take()?.options(opts)),
-        })
+        slf.inner = slf.inner.clone().options(opts);
+        Ok(slf)
     }
 
     #[pyo3(signature = (*cols))]
-    fn partitionBy(&mut self, cols: Vec<String>) -> PyResult<PyDataStreamWriter> {
+    fn partitionBy<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        cols: Vec<String>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
         let col_refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
-        Ok(PyDataStreamWriter {
-            inner: Some(self.take()?.partition_by(col_refs)),
-        })
+        slf.inner = slf.inner.clone().partition_by(col_refs);
+        Ok(slf)
     }
 
     #[pyo3(signature = (*cols))]
-    fn clusterBy(&mut self, cols: Vec<String>) -> PyResult<PyDataStreamWriter> {
+    fn clusterBy<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        cols: Vec<String>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
         let col_refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
-        Ok(PyDataStreamWriter {
-            inner: Some(self.take()?.cluster_by(col_refs)),
-        })
+        slf.inner = slf.inner.clone().cluster_by(col_refs);
+        Ok(slf)
     }
 
-    fn queryName(&mut self, queryName: &str) -> PyResult<PyDataStreamWriter> {
-        Ok(PyDataStreamWriter {
-            inner: Some(self.take()?.query_name(queryName)),
-        })
+    fn queryName<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        queryName: &str,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        slf.inner = slf.inner.clone().query_name(queryName);
+        Ok(slf)
     }
 
-    /// `DataStreamWriter.trigger(...)`: mirrors the reference keyword API — exactly one
-    /// of `processingTime` / `once` / `availableNow` / `continuous` is given.
+    /// `DataStreamWriter.trigger(...)`, as PySpark's: exactly one of `processingTime`, `once`,
+    /// `continuous`, `availableNow` and `realTime`, else `ONLY_ALLOW_SINGLE_TRIGGER`; an
+    /// interval or duration is a non-empty string, which is stripped, else
+    /// `VALUE_NOT_NON_EMPTY_STR`, and `once` and `availableNow` are True, else
+    /// `VALUE_NOT_ALLOWED`.
     #[pyo3(signature = (*, processingTime=None, once=None, continuous=None, availableNow=None, realTime=None))]
-    fn trigger(
-        &mut self,
-        processingTime: Option<&str>,
-        once: Option<bool>,
-        continuous: Option<&str>,
-        availableNow: Option<bool>,
-        realTime: Option<&str>,
-    ) -> PyResult<PyDataStreamWriter> {
-        let trigger = if let Some(interval) = processingTime {
-            Trigger::ProcessingTime(interval.to_string())
-        } else if once == Some(true) {
-            Trigger::Once
-        } else if let Some(interval) = continuous {
-            Trigger::Continuous(interval.to_string())
-        } else if availableNow == Some(true) {
-            Trigger::AvailableNow
-        } else if realTime.is_some() {
-            // `realTime` is accepted for signature parity with reference pyspark; the
-            // connect core's Trigger enum does not yet model a real-time trigger.
-            return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-                "the realTime trigger is not yet supported by this client",
+    fn trigger<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        processingTime: Option<Bound<'py, PyAny>>,
+        once: Option<Bound<'py, PyAny>>,
+        continuous: Option<Bound<'py, PyAny>>,
+        availableNow: Option<Bound<'py, PyAny>>,
+        realTime: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        use crate::column::raise_pyspark;
+        let py = slf.py();
+        let given = [
+            &processingTime,
+            &once,
+            &continuous,
+            &availableNow,
+            &realTime,
+        ]
+        .iter()
+        .filter(|value| value.is_some())
+        .count();
+        if given != 1 {
+            return Err(raise_pyspark(
+                py,
+                "PySparkValueError",
+                "ONLY_ALLOW_SINGLE_TRIGGER",
+                &[],
             ));
-        } else {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "trigger() requires exactly one of processingTime, once, continuous, availableNow, realTime",
-            ));
+        }
+        let interval = |value: &Bound<'py, PyAny>, name: &str| -> PyResult<String> {
+            let text = match value.cast::<pyo3::types::PyString>() {
+                Ok(text) => text.to_cow()?.trim().to_string(),
+                Err(_) => String::new(),
+            };
+            if text.is_empty() {
+                return Err(raise_pyspark(
+                    py,
+                    "PySparkValueError",
+                    "VALUE_NOT_NON_EMPTY_STR",
+                    &[("arg_name", name), ("arg_value", &value.str()?.to_string())],
+                ));
+            }
+            Ok(text)
         };
-        Ok(PyDataStreamWriter {
-            inner: Some(self.take()?.trigger(trigger)),
-        })
+        // As PySpark's `once is not True`.
+        let true_flag = |value: &Bound<'py, PyAny>, name: &str| -> PyResult<()> {
+            if value.is(pyo3::types::PyBool::new(py, true)) {
+                Ok(())
+            } else {
+                Err(raise_pyspark(
+                    py,
+                    "PySparkValueError",
+                    "VALUE_NOT_ALLOWED",
+                    &[("arg_name", name), ("allowed_values", "[True]")],
+                ))
+            }
+        };
+        let trigger = if let Some(value) = &processingTime {
+            Trigger::ProcessingTime(interval(value, "processingTime")?)
+        } else if let Some(value) = &once {
+            true_flag(value, "once")?;
+            Trigger::Once
+        } else if let Some(value) = &continuous {
+            Trigger::Continuous(interval(value, "continuous")?)
+        } else if let Some(value) = &realTime {
+            Trigger::RealTime(interval(value, "realTime")?)
+        } else {
+            if let Some(value) = &availableNow {
+                true_flag(value, "availableNow")?;
+            }
+            Trigger::AvailableNow
+        };
+        slf.inner = slf.inner.clone().trigger(trigger);
+        Ok(slf)
     }
 
     #[pyo3(signature = (path=None, format=None, outputMode=None, partitionBy=None, queryName=None, **options))]
@@ -672,11 +758,11 @@ impl PyDataStreamWriter {
     /// function (via the bundled `pyspark.cloudpickle`) and attach it as the
     /// foreach-batch sink. Pickling happens here so the Python skin can re-export this
     /// class directly rather than subclassing a (non-subclassable) PyO3 type.
-    fn foreachBatch(
-        &mut self,
+    fn foreachBatch<'py>(
+        mut slf: PyRefMut<'py, Self>,
         py: Python<'_>,
         func: &Bound<'_, PyAny>,
-    ) -> PyResult<PyDataStreamWriter> {
+    ) -> PyResult<PyRefMut<'py, Self>> {
         let command = crate::dataframe::py_cloudpickle(py, func)?;
         let payload = PythonUDFPayload::new(
             spark_connect::types::DataType::Struct { fields: vec![] },
@@ -684,16 +770,19 @@ impl PyDataStreamWriter {
             command,
             crate::dataframe::py_version(py),
         );
-        Ok(PyDataStreamWriter {
-            inner: Some(self.take()?.foreach_batch(payload)),
-        })
+        slf.inner = slf.inner.clone().foreach_batch(payload);
+        Ok(slf)
     }
 
     /// `DataStreamWriter.foreach(f)`: wrap the row handler as the reference client does
     /// — `(f, None, serializer, serializer)` with `AutoBatchedSerializer(CPickleSerializer())`
     /// — and cloudpickle it so the worker deserializes it against its own
     /// `pyspark.serializers`. Built here to avoid a Python subclass of the PyO3 class.
-    fn foreach(&mut self, py: Python<'_>, f: &Bound<'_, PyAny>) -> PyResult<PyDataStreamWriter> {
+    fn foreach<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        py: Python<'_>,
+        f: &Bound<'_, PyAny>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
         let serializers = py.import("pyspark.serializers")?;
         let cpickle = serializers.getattr("CPickleSerializer")?.call0()?;
         let serializer = serializers
@@ -717,9 +806,8 @@ impl PyDataStreamWriter {
             command,
             crate::dataframe::py_version(py),
         );
-        Ok(PyDataStreamWriter {
-            inner: Some(self.take()?.foreach(payload)),
-        })
+        slf.inner = slf.inner.clone().foreach(payload);
+        Ok(slf)
     }
 }
 
@@ -856,10 +944,13 @@ impl PyStreamingQuery {
         self.inner.process_all_available().to_pyerr()
     }
 
-    // Mirrors reference `StreamingQuery.explain(extended=False)` - the arg is optional.
+    /// Print the plan of the query with Python's `print`, as PySpark's
+    /// `StreamingQuery.explain(extended=False)`.
     #[pyo3(signature = (extended=false))]
-    fn explain(&self, extended: bool) -> PyResult<String> {
-        self.inner.explain(extended).to_pyerr()
+    fn explain(&self, py: Python<'_>, extended: bool) -> PyResult<()> {
+        let plan = py.detach(|| self.inner.explain(extended)).to_pyerr()?;
+        py.import("builtins")?.call_method1("print", (plan,))?;
+        Ok(())
     }
 
     fn exception(&self) -> PyResult<Option<PyStreamingQueryException>> {

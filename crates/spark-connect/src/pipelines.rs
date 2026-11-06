@@ -13,7 +13,7 @@ use spark_connect_core::error::{Result, SparkError};
 use spark_connect_core::runtime::block_on;
 use spark_connect_proto as proto;
 
-use crate::dataframe::{assign_plan_ids, execute_command_collect, DataFrame};
+use crate::dataframe::{execute_command_collect, DataFrame};
 use crate::session::SparkSession;
 use crate::types::DataType;
 
@@ -149,8 +149,7 @@ pub fn define_flow(
     sql_conf: HashMap<String, String>,
     source_code_location: Option<proto::SourceCodeLocation>,
 ) -> Result<()> {
-    let mut relation = relation_df.plan.to_proto();
-    assign_plan_ids(&mut relation, &relation_df.session)?;
+    let relation = relation_df.relation();
     let details =
         define_flow::Details::RelationFlowDetails(define_flow::WriteRelationFlowDetails {
             relation: Some(relation),
@@ -180,13 +179,14 @@ pub fn define_auto_cdc_flow(
     flow_name: &str,
     target_dataset_name: &str,
     details: define_flow::AutoCdcFlowDetails,
+    sql_conf: HashMap<String, String>,
     source_code_location: Option<proto::SourceCodeLocation>,
 ) -> Result<()> {
     let inner = DefineFlow {
         dataflow_graph_id: Some(dataflow_graph_id.to_string()),
         flow_name: Some(flow_name.to_string()),
         target_dataset_name: Some(target_dataset_name.to_string()),
-        sql_conf: HashMap::new(),
+        sql_conf,
         client_id: None,
         source_code_location,
         once: None,

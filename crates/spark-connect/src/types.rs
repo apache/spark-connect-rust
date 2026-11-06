@@ -4,7 +4,7 @@
 //! and the Spark Connect protobuf representation.
 
 use std::collections::BTreeMap;
-use std::fmt;
+use std::fmt::{self, Write};
 use std::hash::{Hash, Hasher};
 
 use spark_connect_core::error::{Result, SparkError};
@@ -50,6 +50,13 @@ pub enum DataType {
     TimestampNtz,
     /// `pyspark.sql.types.TimeType`
     Time { precision: i32 },
+    /// Spark's `TimestampNTZNanosType(precision)` (precision 7..=9): a timestamp
+    /// without time zone with nanosecond-capable fractional seconds. PySpark 4.3.0
+    /// has no Python class for it; this mirrors the server/proto type.
+    TimestampNtzNanos { precision: i32 },
+    /// Spark's `TimestampLTZNanosType(precision)` (precision 7..=9): a timestamp
+    /// with local time zone with nanosecond-capable fractional seconds.
+    TimestampLtzNanos { precision: i32 },
     /// `pyspark.sql.types.CalendarIntervalType`
     CalendarInterval,
     /// `pyspark.sql.types.YearMonthIntervalType`
@@ -86,6 +93,58 @@ pub enum DataType {
     /// `pyspark.sql.connect.types.UnparsedDataType` - a DDL type string left for
     /// the server to parse (round-trips through the `unparsed` proto).
     Unparsed { data_type_string: String },
+}
+
+/// Field-index constants for [`DataType::YearMonthInterval`], mirroring
+/// `pyspark.sql.types.YearMonthIntervalType`.
+pub struct YearMonthIntervalType;
+impl YearMonthIntervalType {
+    pub const YEAR: i32 = 0;
+    pub const MONTH: i32 = 1;
+}
+
+/// Field-index constants for [`DataType::DayTimeInterval`], mirroring
+/// `pyspark.sql.types.DayTimeIntervalType`.
+pub struct DayTimeIntervalType;
+impl DayTimeIntervalType {
+    pub const DAY: i32 = 0;
+    pub const HOUR: i32 = 1;
+    pub const MINUTE: i32 = 2;
+    pub const SECOND: i32 = 3;
+}
+
+/// Constants for [`DataType::Date`], mirroring `pyspark.sql.types.DateType`.
+pub struct DateType;
+impl DateType {
+    /// Number of days from 0001-01-01 to 1970-01-01.
+    pub const EPOCH_ORDINAL: i32 = 719163;
+}
+
+/// CRS/SRID constants shared by the spatial types, mirroring
+/// `pyspark.sql.types.SpatialType`.
+pub struct SpatialType;
+impl SpatialType {
+    pub const MIXED_CRS: &'static str = "SRID:ANY";
+    pub const MIXED_SRID: i32 = -1;
+}
+
+/// Constants for [`DataType::Geometry`], mirroring `pyspark.sql.types.GeometryType`.
+pub struct GeometryType;
+impl GeometryType {
+    pub const DEFAULT_CRS: &'static str = "OGC:CRS84";
+    pub const DEFAULT_SRID: i32 = 4326;
+    pub const MIXED_CRS: &'static str = "SRID:ANY";
+    pub const MIXED_SRID: i32 = -1;
+}
+
+/// Constants for [`DataType::Geography`], mirroring `pyspark.sql.types.GeographyType`.
+pub struct GeographyType;
+impl GeographyType {
+    pub const DEFAULT_ALG: &'static str = "SPHERICAL";
+    pub const DEFAULT_CRS: &'static str = "OGC:CRS84";
+    pub const DEFAULT_SRID: i32 = 4326;
+    pub const MIXED_CRS: &'static str = "SRID:ANY";
+    pub const MIXED_SRID: i32 = -1;
 }
 
 /// A field in a StructType, mirroring `pyspark.sql.types.StructField`.
@@ -139,6 +198,8 @@ impl DataType {
             DataType::Date
             | DataType::Timestamp
             | DataType::TimestampNtz
+            | DataType::TimestampNtzNanos { .. }
+            | DataType::TimestampLtzNanos { .. }
             | DataType::Time { .. }
             | DataType::DayTimeInterval { .. }
             | DataType::YearMonthInterval { .. }
@@ -177,6 +238,8 @@ impl DataType {
             DataType::Timestamp => "timestamp".to_string(),
             DataType::TimestampNtz => "timestamp_ntz".to_string(),
             DataType::Time { .. } => "time".to_string(),
+            DataType::TimestampNtzNanos { precision } => format!("timestamp_ntz({})", precision),
+            DataType::TimestampLtzNanos { precision } => format!("timestamp_ltz({})", precision),
             DataType::CalendarInterval => "interval".to_string(),
             DataType::YearMonthInterval { .. } => "interval".to_string(),
             DataType::DayTimeInterval { .. } => "interval".to_string(),
@@ -228,6 +291,8 @@ impl DataType {
             DataType::Timestamp => "timestamp".to_string(),
             DataType::TimestampNtz => "timestamp_ntz".to_string(),
             DataType::Time { precision } => format!("time({})", precision),
+            DataType::TimestampNtzNanos { precision } => format!("timestamp_ntz({})", precision),
+            DataType::TimestampLtzNanos { precision } => format!("timestamp_ltz({})", precision),
             DataType::CalendarInterval => "interval".to_string(),
             DataType::YearMonthInterval {
                 start_field,
@@ -318,6 +383,12 @@ impl DataType {
             DataType::Time { precision } => {
                 serde_json::json!(format!("time({})", precision))
             }
+            DataType::TimestampNtzNanos { precision } => {
+                serde_json::json!(format!("timestamp_ntz({})", precision))
+            }
+            DataType::TimestampLtzNanos { precision } => {
+                serde_json::json!(format!("timestamp_ltz({})", precision))
+            }
             DataType::CalendarInterval => serde_json::json!("interval"),
             DataType::YearMonthInterval {
                 start_field,
@@ -363,19 +434,13 @@ impl DataType {
             }
             DataType::Variant => serde_json::json!("variant"),
             DataType::Geometry { srid } => {
-                if *srid == -1 {
-                    serde_json::json!("geometry(SRID:ANY)")
-                } else {
-                    serde_json::json!(format!("geometry(OGC:CRS84)"))
-                }
+                serde_json::json!(format!("geometry({})", spatial_crs(*srid)))
             }
-            DataType::Geography { srid } => {
-                if *srid == -1 {
-                    serde_json::json!("geography(SRID:ANY, SPHERICAL)")
-                } else {
-                    serde_json::json!(format!("geography(OGC:CRS84, SPHERICAL)"))
-                }
-            }
+            DataType::Geography { srid } => serde_json::json!(format!(
+                "geography({}, {})",
+                spatial_crs(*srid),
+                GeographyType::DEFAULT_ALG
+            )),
             DataType::Udt {
                 type_str: _,
                 jvm_class,
@@ -513,6 +578,22 @@ impl DataType {
                 let mut time_type = spark_connect_proto::data_type::Time::default();
                 time_type.precision = Some(*precision);
                 proto.kind = Some(spark_connect_proto::data_type::Kind::Time(time_type));
+            }
+            DataType::TimestampNtzNanos { precision } => {
+                proto.kind = Some(spark_connect_proto::data_type::Kind::TimestampNtzNanos(
+                    spark_connect_proto::data_type::TimestampNtzNanos {
+                        precision: Some(*precision),
+                        ..Default::default()
+                    },
+                ));
+            }
+            DataType::TimestampLtzNanos { precision } => {
+                proto.kind = Some(spark_connect_proto::data_type::Kind::TimestampLtzNanos(
+                    spark_connect_proto::data_type::TimestampLtzNanos {
+                        precision: Some(*precision),
+                        ..Default::default()
+                    },
+                ));
             }
             DataType::CalendarInterval => {
                 proto.kind = Some(spark_connect_proto::data_type::Kind::CalendarInterval(
@@ -750,12 +831,16 @@ impl DataType {
             Some(spark_connect_proto::data_type::Kind::Unparsed(u)) => Ok(DataType::Unparsed {
                 data_type_string: u.data_type_string.clone(),
             }),
+            // Precision defaults to 9 when omitted (types.proto).
             Some(spark_connect_proto::data_type::Kind::TimestampNtzNanos(tn)) => {
-                let precision = tn.precision.unwrap_or(9);
-                Ok(DataType::Time { precision })
+                Ok(DataType::TimestampNtzNanos {
+                    precision: tn.precision.unwrap_or(9),
+                })
             }
-            Some(spark_connect_proto::data_type::Kind::TimestampLtzNanos(_)) => {
-                Ok(DataType::Timestamp)
+            Some(spark_connect_proto::data_type::Kind::TimestampLtzNanos(tl)) => {
+                Ok(DataType::TimestampLtzNanos {
+                    precision: tl.precision.unwrap_or(9),
+                })
             }
             None => Err(SparkError::connect_msg("DataType kind not set")),
         }
@@ -858,14 +943,19 @@ impl DataType {
         self.tree_string_with_depth(i32::MAX)
     }
 
-    /// Like [`DataType::tree_string`], but stops recursing into nested structs
-    /// once `max_depth` nesting levels have been printed (top-level fields are
-    /// depth 1). Mirrors `StructType.treeString(maxDepth)`.
+    /// Like [`DataType::tree_string`], but limits nesting through structs,
+    /// arrays, and maps to `max_depth` levels. Top-level fields are depth 1;
+    /// zero or negative values print the full tree.
+    /// Mirrors `StructType.treeString(maxDepth)`.
     pub fn tree_string_with_depth(&self, max_depth: i32) -> Result<String> {
         match self {
             DataType::Struct { .. } => {
                 let mut out = String::from("root\n");
-                self.append_tree(&mut out, " |", 1, max_depth);
+                self.append_tree(
+                    &mut out,
+                    " |",
+                    if max_depth > 0 { max_depth } else { i32::MAX },
+                );
                 Ok(out)
             }
             _ => Err(SparkError::value(
@@ -875,33 +965,85 @@ impl DataType {
         }
     }
 
-    fn append_tree(&self, out: &mut String, prefix: &str, depth: i32, max_depth: i32) {
-        if let DataType::Struct { fields } = self {
-            for f in fields {
-                // A nested struct is rendered as the bare type name ("struct") and its
-                // fields are shown by recursing below, so `max_depth` can truncate them.
-                // Using `simple_string()` here would inline the children (e.g.
-                // "struct<inner:int>"), leaking them past `max_depth`. Non-struct types
-                // have no depth-controlled children, so their simple string is used.
-                let is_struct = matches!(f.data_type, DataType::Struct { .. });
-                let type_repr = if is_struct {
-                    f.data_type.type_name()
-                } else {
-                    f.data_type.simple_string()
-                };
-                out.push_str(&format!(
-                    "{}-- {}: {} (nullable = {})\n",
-                    prefix, f.name, type_repr, f.nullable
-                ));
-                if is_struct && depth < max_depth {
-                    f.data_type.append_tree(
+    fn tree_type_name(&self) -> String {
+        match self {
+            DataType::Decimal { .. }
+            | DataType::Char { .. }
+            | DataType::Varchar { .. }
+            | DataType::Time { .. }
+            | DataType::YearMonthInterval { .. }
+            | DataType::DayTimeInterval { .. } => self.simple_string(),
+            DataType::Udt {
+                python_class: Some(python_class),
+                ..
+            } => python_class
+                .rsplit('.')
+                .next()
+                .filter(|class_name| !class_name.is_empty())
+                // UserDefinedType.typeName() preserves the entire class name,
+                // unlike DataType.typeName(), which strips the "Type" suffix.
+                .map(str::to_lowercase)
+                .unwrap_or_else(|| self.type_name()),
+            _ => self.type_name(),
+        }
+    }
+
+    fn append_tree(&self, out: &mut String, prefix: &str, remaining: i32) {
+        if remaining <= 0 {
+            return;
+        }
+        match self {
+            DataType::Struct { fields } => {
+                let child_prefix = format!("{prefix}    |");
+                for f in fields {
+                    out.push_str(prefix);
+                    out.push_str("-- ");
+                    push_escaped_name(out, &f.name);
+                    writeln!(
                         out,
-                        &format!("{}    |", prefix.trim_end_matches('|')),
-                        depth + 1,
-                        max_depth,
-                    );
+                        ": {} (nullable = {})",
+                        f.data_type.tree_type_name(),
+                        f.nullable
+                    )
+                    .expect("writing to a String cannot fail");
+                    f.data_type.append_tree(out, &child_prefix, remaining - 1);
                 }
             }
+            DataType::Array {
+                element_type,
+                contains_null,
+            } => {
+                let child_prefix = format!("{prefix}    |");
+                writeln!(
+                    out,
+                    "{}-- element: {} (containsNull = {})",
+                    prefix,
+                    element_type.tree_type_name(),
+                    contains_null
+                )
+                .expect("writing to a String cannot fail");
+                element_type.append_tree(out, &child_prefix, remaining - 1);
+            }
+            DataType::Map {
+                key_type,
+                value_type,
+                value_contains_null,
+            } => {
+                let child_prefix = format!("{prefix}    |");
+                writeln!(out, "{}-- key: {}", prefix, key_type.tree_type_name())
+                    .expect("writing to a String cannot fail");
+                key_type.append_tree(out, &child_prefix, remaining - 1);
+                writeln!(
+                    out,
+                    "{}-- value: {} (valueContainsNull = {})",
+                    prefix,
+                    value_type.tree_type_name(),
+                    value_contains_null
+                )
+                .expect("writing to a String cannot fail");
+                value_type.append_tree(out, &child_prefix, remaining - 1);
+            }
+            _ => {}
         }
     }
 
@@ -978,6 +1120,21 @@ impl DataType {
     }
 }
 
+fn push_escaped_name(out: &mut String, name: &str) {
+    for ch in name.chars() {
+        match ch {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\x0c' => out.push_str("\\f"),
+            '\x08' => out.push_str("\\b"),
+            '\x0b' => out.push_str("\\v"),
+            '\x07' => out.push_str("\\a"),
+            _ => out.push(ch),
+        }
+    }
+}
+
 impl fmt::Display for DataType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.simple_string())
@@ -1027,7 +1184,9 @@ fn parse_json_value(value: &serde_json::Value, _field_name: Option<&str>) -> Res
 
 fn parse_json_type_string(s: &str) -> Result<DataType> {
     match s {
-        "void" => Ok(DataType::Null),
+        // `null` and `calendarinterval` are lenient aliases that the drop-in's Python parser
+        // accepted before it delegated here.
+        "void" | "null" => Ok(DataType::Null),
         "boolean" => Ok(DataType::Boolean),
         "byte" => Ok(DataType::Byte),
         "short" => Ok(DataType::Short),
@@ -1039,12 +1198,22 @@ fn parse_json_type_string(s: &str) -> Result<DataType> {
         "date" => Ok(DataType::Date),
         "timestamp" => Ok(DataType::Timestamp),
         "timestamp_ntz" => Ok(DataType::TimestampNtz),
-        "interval" => Ok(DataType::CalendarInterval),
+        // A bare `time`, as `TimeType().typeName()` names it, is the default time(6).
+        "time" => Ok(DataType::Time { precision: 6 }),
+        "interval" | "calendarinterval" => Ok(DataType::CalendarInterval),
         "variant" => Ok(DataType::Variant),
+        // A bare `decimal`, as `DecimalType().typeName()` names it, is the default decimal(10,0).
+        "decimal" => Ok(DataType::Decimal {
+            precision: 10,
+            scale: 0,
+        }),
         s if s.starts_with("decimal(") => parse_decimal(s),
         s if s.starts_with("char(") => parse_char(s),
         s if s.starts_with("varchar(") => parse_varchar(s),
         s if s.starts_with("time(") => parse_time(s),
+        s if s.starts_with("timestamp_ntz(") || s.starts_with("timestamp_ltz(") => {
+            parse_timestamp_nanos(s)
+        }
         s if s.starts_with("interval") => parse_interval_string(s),
         s if s.starts_with("string collate") => {
             let collation = s.trim_start_matches("string collate").trim().to_string();
@@ -1055,8 +1224,9 @@ fn parse_json_type_string(s: &str) -> Result<DataType> {
         }),
         s if s.starts_with("geometry(") => parse_geometry(s),
         s if s.starts_with("geography(") => parse_geography(s),
-        s if s.starts_with("unparsed(") => Ok(DataType::Unparsed {
-            data_type_string: s.to_string(),
+        // The inverse of `json_value`, which writes `unparsed(<data_type_string>)`.
+        s if s.starts_with("unparsed(") && s.ends_with(')') => Ok(DataType::Unparsed {
+            data_type_string: s["unparsed(".len()..s.len() - 1].to_string(),
         }),
         _ => Err(SparkError::value(
             "INVALID_DATATYPE_STRING",
@@ -1261,6 +1431,36 @@ fn parse_time(s: &str) -> Result<DataType> {
     Ok(DataType::Time { precision })
 }
 
+/// Parses `timestamp_ntz(p)` / `timestamp_ltz(p)` (p in 7..=9), mirroring the
+/// `TIMESTAMP_{NTZ,LTZ}_NANOS_TYPE` patterns in Scala `DataType.nameToType`.
+fn parse_timestamp_nanos(s: &str) -> Result<DataType> {
+    let (ntz, rest) = if let Some(r) = s.strip_prefix("timestamp_ntz(") {
+        (true, r)
+    } else if let Some(r) = s.strip_prefix("timestamp_ltz(") {
+        (false, r)
+    } else {
+        return Err(SparkError::value(
+            "INVALID_DATATYPE_FORMAT",
+            &[("detail", "Invalid timestamp format")],
+        ));
+    };
+    let precision = rest
+        .strip_suffix(")")
+        .and_then(|p| p.trim().parse::<i32>().ok())
+        .filter(|p| (7..=9).contains(p))
+        .ok_or_else(|| {
+            SparkError::value(
+                "INVALID_DATATYPE_FORMAT",
+                &[("detail", "Invalid timestamp precision (expected 7..9)")],
+            )
+        })?;
+    Ok(if ntz {
+        DataType::TimestampNtzNanos { precision }
+    } else {
+        DataType::TimestampLtzNanos { precision }
+    })
+}
+
 fn parse_interval_string(s: &str) -> Result<DataType> {
     if s == "interval" {
         return Ok(DataType::CalendarInterval);
@@ -1332,16 +1532,12 @@ fn parse_geometry(s: &str) -> Result<DataType> {
             )
         })?;
 
-    let srid = if inner.to_lowercase() == "any" {
-        -1
-    } else {
-        inner.parse::<i32>().map_err(|_| {
-            SparkError::value(
-                "INVALID_DATATYPE_FORMAT",
-                &[("detail", "Invalid geometry srid")],
-            )
-        })?
-    };
+    let srid = spatial_srid(inner).ok_or_else(|| {
+        SparkError::value(
+            "INVALID_DATATYPE_FORMAT",
+            &[("detail", "Invalid geometry srid")],
+        )
+    })?;
 
     Ok(DataType::Geometry { srid })
 }
@@ -1357,23 +1553,49 @@ fn parse_geography(s: &str) -> Result<DataType> {
             )
         })?;
 
-    let srid = if inner.to_lowercase() == "any" {
-        -1
-    } else {
-        inner
-            .split(',')
-            .next()
-            .unwrap_or("4326")
-            .parse::<i32>()
-            .map_err(|_| {
-                SparkError::value(
-                    "INVALID_DATATYPE_FORMAT",
-                    &[("detail", "Invalid geography srid")],
-                )
-            })?
-    };
+    // The JSON form also names the algorithm, as in `OGC:CRS84, SPHERICAL`.
+    let crs = inner.split(',').next().unwrap_or_default();
+    let srid = spatial_srid(crs).ok_or_else(|| {
+        SparkError::value(
+            "INVALID_DATATYPE_FORMAT",
+            &[("detail", "Invalid geography srid")],
+        )
+    })?;
 
     Ok(DataType::Geography { srid })
+}
+
+/// The coordinate reference system that a spatial type's SRID is named by in its JSON, as
+/// PySpark's `geo_utils` names the SRIDs that it supports: `SRID:0`, `EPSG:3857` and
+/// `OGC:CRS84` for 4326, and `SRID:ANY` for a mixed SRID. Another SRID, which PySpark does not
+/// accept, is named `SRID:<srid>`.
+fn spatial_crs(srid: i32) -> String {
+    match srid {
+        SpatialType::MIXED_SRID => SpatialType::MIXED_CRS.to_string(),
+        3857 => "EPSG:3857".to_string(),
+        GeometryType::DEFAULT_SRID => GeometryType::DEFAULT_CRS.to_string(),
+        other => format!("SRID:{other}"),
+    }
+}
+
+/// The SRID of a spatial type's CRS, as [`spatial_crs`] names it, or of the SRID itself, as
+/// in a DDL string such as `geometry(4326)`, or `any`.
+fn spatial_srid(crs: &str) -> Option<i32> {
+    let crs = crs.trim();
+    if crs.eq_ignore_ascii_case("any") || crs.eq_ignore_ascii_case(SpatialType::MIXED_CRS) {
+        return Some(SpatialType::MIXED_SRID);
+    }
+    if crs.eq_ignore_ascii_case(GeometryType::DEFAULT_CRS) {
+        return Some(GeometryType::DEFAULT_SRID);
+    }
+    if crs.eq_ignore_ascii_case("EPSG:3857") {
+        return Some(3857);
+    }
+    let number = match crs.get(..5) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("SRID:") => &crs[5..],
+        _ => crs,
+    };
+    number.parse().ok()
 }
 
 /// Main DDL parser: parses DDL strings into DataType.
@@ -1521,6 +1743,8 @@ fn parse_single_type(input: &str) -> Result<DataType> {
         "date" => Ok(DataType::Date),
         "timestamp" => Ok(DataType::Timestamp),
         "timestamp_ntz" => Ok(DataType::TimestampNtz),
+        // As Spark's `TIME`, of the default precision.
+        "time" => Ok(DataType::Time { precision: 6 }),
         "interval" => Ok(DataType::CalendarInterval),
         "variant" => Ok(DataType::Variant),
         _ => {
@@ -1533,6 +1757,9 @@ fn parse_single_type(input: &str) -> Result<DataType> {
                 parse_varchar(&trimmed)
             } else if trimmed.starts_with("time(") {
                 parse_time(&trimmed)
+            } else if trimmed.starts_with("timestamp_ntz(") || trimmed.starts_with("timestamp_ltz(")
+            {
+                parse_timestamp_nanos(&trimmed)
             } else if trimmed.starts_with("interval") {
                 parse_interval_string(&trimmed)
             } else if trimmed.starts_with("string collate") {
@@ -2351,9 +2578,17 @@ mod tests {
             DataType::Varchar { length: 100 }
         );
 
-        // Test time
+        // Test time; a bare time is of the default precision, as Spark's TIME.
         assert_eq!(
             DataType::from_ddl("time(6)").unwrap(),
+            DataType::Time { precision: 6 }
+        );
+        assert_eq!(
+            DataType::from_ddl("time").unwrap(),
+            DataType::Time { precision: 6 }
+        );
+        assert_eq!(
+            DataType::from_json_str("\"time\"").unwrap(),
             DataType::Time { precision: 6 }
         );
     }
@@ -2920,6 +3155,28 @@ mod tests {
             }
             _ => panic!("Expected Decimal type"),
         }
+    }
+
+    #[test]
+    fn test_from_json_unparsed_roundtrip() {
+        let dt = DataType::Unparsed {
+            data_type_string: "int".to_string(),
+        };
+        assert_eq!(DataType::from_json(&dt.json_value()).unwrap(), dt);
+    }
+
+    #[test]
+    fn test_from_json_lenient_aliases() {
+        let parse = |s: &str| DataType::from_json(&serde_json::json!(s)).unwrap();
+        assert_eq!(
+            parse("decimal"),
+            DataType::Decimal {
+                precision: 10,
+                scale: 0
+            }
+        );
+        assert_eq!(parse("null"), DataType::Null);
+        assert_eq!(parse("calendarinterval"), DataType::CalendarInterval);
     }
 
     #[test]

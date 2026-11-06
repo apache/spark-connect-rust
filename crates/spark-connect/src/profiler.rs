@@ -14,7 +14,7 @@ use spark_connect_core::error::Result;
 use spark_connect_proto as proto;
 
 /// Format a protobuf Literal value as a string.
-fn format_literal(literal: &proto::expression::Literal) -> String {
+pub fn format_literal(literal: &proto::expression::Literal) -> String {
     use proto::expression::literal::LiteralType;
 
     match &literal.literal_type {

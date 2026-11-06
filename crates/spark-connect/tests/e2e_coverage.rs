@@ -492,7 +492,10 @@ fn streaming_surface() {
         .format("rate")
         .option("rowsPerSecond", "1")
         .load(None);
-    assert!(sdf.is_streaming());
+    assert!(sdf.is_streaming().unwrap());
+    // As PySpark's, which asks the server: a DataFrame of a stream is streaming too.
+    assert!(sdf.select([col("value")]).is_streaming().unwrap());
+    assert!(!s.range(1).unwrap().is_streaming().unwrap());
     let mut opts = Map::new();
     opts.insert("rowsPerSecond".to_string(), "1".to_string());
     assert!(s
@@ -500,13 +503,17 @@ fn streaming_surface() {
         .format("rate")
         .options(opts)
         .load(None)
-        .is_streaming());
+        .is_streaming()
+        .unwrap());
+    // The rate source takes no schema, which the server reports when it analyzes the plan,
+    // as for PySpark.
     assert!(s
         .read_stream()
         .format("rate")
         .schema("timestamp timestamp, value long")
         .load(None)
-        .is_streaming());
+        .is_streaming()
+        .is_err());
 
     // Start a query and exercise the full StreamingQuery read surface.
     let q = sdf
@@ -550,15 +557,27 @@ fn streaming_surface() {
         .cluster_by(vec!["value"])
         .output_mode("complete");
 
-    // Streaming file-source readers + name(): all build lazy streaming plans
-    // (no execution until start), so is_streaming() is a client-side check.
+    // Streaming file-source readers + name(): all build lazy streaming plans (no execution
+    // until start), which the server analyzes for is_streaming(), of directories that exist.
     let schema = "value long";
+    for dir in [
+        "/tmp/cov_s_json",
+        "/tmp/cov_s_pq",
+        "/tmp/cov_s_orc",
+        "/tmp/cov_s_csv",
+        "/tmp/cov_s_txt",
+    ] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    // A named source needs spark.sql.streaming.queryEvolution.enableSourceEvolution, which the
+    // server reports when it analyzes the plan, as for PySpark.
     assert!(s
         .read_stream()
         .name("rate")
         .format("rate")
         .load(None)
-        .is_streaming());
+        .is_streaming()
+        .is_err());
     for df in [
         s.read_stream().schema(schema).json("/tmp/cov_s_json"),
         s.read_stream().schema(schema).parquet("/tmp/cov_s_pq"),
@@ -571,7 +590,7 @@ fn streaming_surface() {
             .schema("value string")
             .text("/tmp/cov_s_txt"),
     ] {
-        assert!(df.is_streaming());
+        assert!(df.is_streaming().unwrap());
     }
 
     // process_all_available drains a rate stream feeding a memory sink, then stop.
@@ -681,7 +700,7 @@ fn dataframe_more_surface() {
         .unwrap();
     let _ = df.to_df(vec!["a", "b", "c"]).collect().unwrap();
     let _ = df.sample(0.5, Some(1)).count().unwrap();
-    let _ = df.col_regex("`.*`").collect().unwrap();
+    let _ = df.select(vec![df.col_regex("`.*`")]).collect().unwrap();
 
     // cache / persist / unpersist round-trip.
     let cached = df.cache().unwrap();
@@ -1030,9 +1049,17 @@ fn artifact_and_tag_surface() {
     // A larger file to exercise the multi-chunk path (well over one gRPC chunk).
     std::fs::write(&f2, vec![b'x'; 512 * 1024]).unwrap();
 
-    s.add_artifact(f1.to_str().unwrap()).expect("add_artifact");
-    s.add_artifacts(&[f1.to_str().unwrap(), f2.to_str().unwrap()])
-        .expect("add_artifacts");
+    // As PySpark, a file that is neither a jar nor a class needs the `file` flag.
+    assert!(s.add_artifact(f1.to_str().unwrap()).is_err());
+    s.add_artifacts_with(&[f1.to_str().unwrap()], false, false, true)
+        .expect("add_artifact");
+    s.add_artifacts_with(
+        &[f1.to_str().unwrap(), f2.to_str().unwrap()],
+        false,
+        false,
+        true,
+    )
+    .expect("add_artifacts");
     // copyFromLocalToFs: exercises the client-side named-artifact upload
     // (forward_to_fs/...). A single-node server rejects a *local* destination, but the
     // client upload code we're covering runs before that, so tolerate the server error.
@@ -1144,6 +1171,68 @@ fn ml_estimators_and_transformers() {
     let mut pipeline = Pipeline::new().set_stages(vec!["scaler", "lr"]);
     if let Ok(mut m) = pipeline.fit(&df) {
         let _ = m.transform(&df).and_then(|d| d.count());
+    }
+}
+
+#[test]
+fn collected_small_integer_rows_accept_floating_schemas() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::row::Value;
+    use spark_connect::types::{DataType, StructField};
+
+    let s = session();
+    for (sql_type, min, max) in [("TINYINT", -128, 127), ("SMALLINT", -32768, 32767)] {
+        let rows = s.sql(&format!(
+            "SELECT CAST(n AS {sql_type}) AS n FROM VALUES ({min}), (-1), (0), ({max}), (NULL) AS t(n)"
+        )).unwrap().collect().unwrap();
+        for row in &rows {
+            assert!(
+                matches!(
+                    (sql_type, row.get(0)),
+                    ("TINYINT", Some(Value::Byte(_)))
+                        | ("SMALLINT", Some(Value::Short(_)))
+                        | (_, Some(Value::Null))
+                ),
+                "unexpected {sql_type} source row: {row:?}"
+            );
+        }
+        for target in [DataType::Float, DataType::Double] {
+            let schema = DataType::Struct {
+                fields: vec![StructField {
+                    name: "n".into(),
+                    data_type: target.clone(),
+                    nullable: true,
+                    metadata: Default::default(),
+                }],
+            };
+            let actual = s
+                .create_dataframe(rows.clone(), schema)
+                .unwrap()
+                .collect()
+                .unwrap();
+            let mut actual: Vec<_> = actual
+                .iter()
+                .map(|row| match (&target, row.get(0).unwrap()) {
+                    (DataType::Float, Value::Float(n)) => Some(*n as f64),
+                    (DataType::Double, Value::Double(n)) => Some(*n),
+                    (_, Value::Null) => None,
+                    other => panic!("unexpected floating result: {other:?}"),
+                })
+                .collect();
+            actual.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            assert_eq!(
+                actual,
+                vec![
+                    None,
+                    Some(min as f64),
+                    Some(-1.0),
+                    Some(0.0),
+                    Some(max as f64)
+                ]
+            );
+        }
     }
 }
 

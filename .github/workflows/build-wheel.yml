@@ -1,0 +1,118 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+
+# Shared wheel recipe for releases and focused PR build checks. The workflow
+# comes from the caller's revision; source_repository/source_ref select only the
+# source checkout, so a release can still build older maintenance branches.
+name: Build wheel
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: GitHub-hosted runner label
+        required: true
+        type: string
+      target:
+        description: Rust or maturin wheel target
+        required: true
+        type: string
+      zig:
+        description: Use Zig for Linux cross-linking
+        default: false
+        type: boolean
+      timeout_minutes:
+        description: Maximum build duration in minutes
+        default: 360
+        type: number
+      artifact_retention_days:
+        description: Days to retain wheel artifacts (0 uses the repository default)
+        default: 0
+        type: number
+      source_repository:
+        description: Repository containing the wheel source
+        required: true
+        type: string
+      source_ref:
+        description: Pinned commit containing the wheel source
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.source_repository }}
+          ref: ${{ inputs.source_ref }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Add Rust target(s)
+        shell: bash
+        env:
+          WHEEL_TARGET: ${{ inputs.target }}
+        run: |
+          case "$WHEEL_TARGET" in
+            universal2-apple-darwin)
+              rustup target add x86_64-apple-darwin aarch64-apple-darwin ;;
+            *)
+              rustup target add "$WHEEL_TARGET" ;;
+          esac
+      - name: Install protoc
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux)   sudo apt-get update && sudo apt-get install -y protobuf-compiler ;;
+            macOS)   brew install protobuf ;;
+            Windows) choco install protoc -y ;;
+          esac
+      - name: Build abi3 wheel with maturin
+        # abi3-py39 produces one wheel per (platform, arch) valid for CPython 3.9+.
+        # --zig cross-links Linux wheels against glibc 2.17 (manylinux2014),
+        # including aarch64 builds from an x86_64 host.
+        shell: bash
+        env:
+          WHEEL_TARGET: ${{ inputs.target }}
+          WHEEL_USE_ZIG: ${{ inputs.zig }}
+        run: |
+          python -m pip install --upgrade maturin
+          args=(--release --out dist --target "$WHEEL_TARGET")
+          if [[ "$WHEEL_USE_ZIG" == "true" ]]; then
+            python -m pip install ziglang
+            args+=(--zig)
+          fi
+          maturin build "${args[@]}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ inputs.target }}
+          path: dist/*.whl
+          retention-days: ${{ inputs.artifact_retention_days }}
