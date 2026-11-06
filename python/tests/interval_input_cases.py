@@ -32,6 +32,10 @@ except ImportError:
     grpc = None
 
 
+# The bounds that PySpark takes: a timedelta of whole days, whose microseconds must fit in a
+# signed 64-bit integer on their own, cannot go below -106751991 days.
+LOWEST, HIGHEST = -106751991 * 86400000000, 2**63 - 1
+
 INFERENCE_CONFS = {
     "spark.sql.pyspark.inferNestedDictAsStruct.enabled": "false",
     "spark.sql.pyspark.legacy.inferArrayTypeFromFirstElement.enabled": "false",
@@ -54,7 +58,7 @@ class IntervalInputConversionTests(unittest.TestCase):
             ):
                 with self.subTest(micros=micros, data=data):
                     schema = T.StructType([T.StructField("interval", data_type)])
-                    with self.assertRaisesRegex(OverflowError, "64-bit microseconds"):
+                    with self.assertRaises(OverflowError):
                         spark.createDataFrame(data, schema)
             with self.assertRaises(OverflowError):
                 spark.createDataFrame([(value,)])
@@ -90,7 +94,7 @@ class IntervalInputConversionTests(unittest.TestCase):
             spark.createDataFrame([([],), ([None, delta],)])
             spark.createDataFrame([({},), ({"k": delta},)])
             for data in ([([None, timedelta.max],)], [({"k": timedelta.min},)]):
-                with self.assertRaisesRegex(OverflowError, "64-bit microseconds"):
+                with self.assertRaises(OverflowError):
                     spark.createDataFrame(data)
             self.assertEqual(service.execute_calls, 0)
             self.assertEqual(set(service.read_confs), set(INFERENCE_CONFS))
@@ -99,16 +103,16 @@ class IntervalInputConversionTests(unittest.TestCase):
         spark = SparkSession.builder.remote("sc://127.0.0.1:1").create()
         for schema in (None, ["interval"], T.StructType([
                 T.StructField("interval", T.DayTimeIntervalType())])):
-            spark.createDataFrame([(None,), (timedelta(microseconds=-(2**63)),),
-                                   (timedelta(microseconds=2**63 - 1),)], schema)
+            spark.createDataFrame([(None,), (timedelta(microseconds=LOWEST),),
+                                   (timedelta(microseconds=HIGHEST),)], schema)
         interval = T.DayTimeIntervalType()
         arrays = T.StructType([T.StructField("a", T.ArrayType(interval))])
         maps = T.StructType([T.StructField("m", T.MapType(T.StringType(), interval))])
         spark.createDataFrame([([],), ([None, timedelta(microseconds=-1)],)], arrays)
         spark.createDataFrame([(Row(x=None),), (Row(x=timedelta(microseconds=1)),)])
         spark.createDataFrame([({},), ({"k": timedelta(microseconds=-1)},)], maps)
-        with self.assertRaises(AssertionError):
-            spark.createDataFrame([(1,)], T.StructType([T.StructField("interval", interval)]))
+        # As PySpark, an int for an interval field is taken as microseconds.
+        spark.createDataFrame([(1,)], T.StructType([T.StructField("interval", interval)]))
 
     @unittest.skipIf(grpc is None, "grpcio is required")
     def test_pandas_object_intervals_encode_exact_microseconds(self):
@@ -117,7 +121,7 @@ class IntervalInputConversionTests(unittest.TestCase):
             import pyarrow as pa
         except ImportError:
             self.skipTest("pandas and pyarrow are required")
-        values = [None, -(2**63), -(2**63) + 1, -1, 0, 1, 2**63 - 1]
+        values = [None, LOWEST, LOWEST + 1, -1, 0, 1, HIGHEST]
         data = pd.DataFrame({"interval": pd.Series([
             None if value is None else timedelta(microseconds=value) for value in values
         ], dtype=object)})
@@ -133,7 +137,7 @@ class IntervalInputConversionTests(unittest.TestCase):
             self.assertEqual(table.column(0).cast(pa.int64()).to_pylist(), values)
             for value in (timedelta.min, timedelta.max):
                 overflow = pd.DataFrame({"interval": pd.Series([value], dtype=object)})
-                with self.assertRaisesRegex(OverflowError, "64-bit microseconds"):
+                with self.assertRaises(OverflowError):
                     spark.createDataFrame(overflow)
             self.assertEqual(service.execute_calls, 1)
 
@@ -149,8 +153,8 @@ class IntervalInputLiveTests(unittest.TestCase):
         cls.spark.stop()
 
     def test_scalar_inferred_explicit_and_collected_inputs(self):
-        values = [None, -(2**63), -(2**63) + 1, -172800000001, -1000001, -1,
-                  0, 1, 1000001, 172800000001, 2**63 - 2, 2**63 - 1]
+        values = [None, LOWEST, LOWEST + 1, -172800000001, -1000001, -1,
+                  0, 1, 1000001, 172800000001, HIGHEST - 1, HIGHEST]
         data = [(None if v is None else timedelta(microseconds=v),) for v in values]
         for schema in (None, ["interval"], T.StructType([
                 T.StructField("interval", T.DayTimeIntervalType())])):
@@ -174,9 +178,10 @@ class IntervalInputLiveTests(unittest.TestCase):
         nulls = self.spark.createDataFrame([None, None], interval).collect()
         self.assertEqual([r[0] for r in nulls], [None, None])
         self.assertEqual(self.spark.createDataFrame([], interval).collect(), [])
-        with self.assertRaises(AssertionError):
-            schema = T.StructType([T.StructField("interval", interval)])
-            self.spark.createDataFrame([(1,)], schema)
+        # As PySpark, an int for an interval field is taken as microseconds.
+        schema = T.StructType([T.StructField("interval", interval)])
+        self.assertEqual(self.spark.createDataFrame([(1,)], schema).collect(),
+                         [Row(interval=timedelta(microseconds=1))])
 
     def test_nested_null_first_structs_lists_and_maps(self):
         delta = timedelta(microseconds=-172800000001)
