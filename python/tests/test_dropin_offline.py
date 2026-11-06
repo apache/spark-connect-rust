@@ -3568,6 +3568,48 @@ def test_column_startswith_endswith():
     assert type(c.endswith("suffix")).__name__ == "Column"
 
 
+def test_column_methods_take_and_check_their_arguments_as_pyspark():
+    # As PySpark's Column: its bool raises CANNOT_CONVERT_COLUMN_INTO_BOOL of the column, like,
+    # rlike and ilike take any value and getField any name, and cast, withField, dropFields
+    # and over check their arguments.
+    import warnings
+
+    from pyspark.errors import PySparkTypeError, PySparkValueError
+    from pyspark.sql import functions as F
+
+    c = F.col("a")
+    for value, column in ((c, "a"), (c > 1, ">(a, 1)")):
+        with pytest.raises(PySparkValueError) as error:
+            bool(value)
+        assert error.value.getCondition() == "CANNOT_CONVERT_COLUMN_INTO_BOOL"
+        assert error.value.getMessageParameters() == {"column": column}
+    assert repr(c.like(1)) == "Column<'like(a, 1)'>"
+    assert repr(c.rlike(F.col("p"))) == "Column<'rlike(a, p)'>"
+    assert repr(c.ilike("x%")) == "Column<'ilike(a, x%)'>"
+    assert repr(c.getField(1)) == repr(c[1])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        c.getField(F.col("b"))
+    assert [w.category for w in caught] == [FutureWarning]
+
+    def not_expected(arg_name, expected_type, arg_type):
+        return (PySparkTypeError, "NOT_EXPECTED_TYPE",
+                {"arg_name": arg_name, "expected_type": expected_type, "arg_type": arg_type})
+
+    for call, (error_type, condition, parameters) in (
+        (lambda: c.cast(1), not_expected("dataType", "DataType or str", "int")),
+        (lambda: c.withField(1, F.lit(1)), not_expected("fieldName", "str", "int")),
+        (lambda: c.withField("x", 1), not_expected("col", "Column", "int")),
+        (lambda: c.dropFields("x", 1), not_expected("fieldName", "str", "int")),
+        (lambda: c.dropFields(), (PySparkValueError, "CANNOT_BE_EMPTY", {"item": "dropFields"})),
+        (lambda: c.over(1), not_expected("window", "WindowSpec", "int")),
+    ):
+        with pytest.raises(error_type) as error:
+            call()
+        assert error.value.getCondition() == condition
+        assert error.value.getMessageParameters() == parameters
+
+
 def test_column_contains():
     """Test Column.contains method."""
     from pyspark.sql import functions as F
