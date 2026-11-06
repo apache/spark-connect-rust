@@ -8256,6 +8256,56 @@ def test_stream_writer_setters_mutate_and_return_self(offline_spark):
     assert w.foreach(lambda row: None) is w
 
 
+@pytest.mark.parametrize("kwargs, condition, parameters", [
+    ({}, "ONLY_ALLOW_SINGLE_TRIGGER", {}),
+    ({"processingTime": "1 second", "once": True}, "ONLY_ALLOW_SINGLE_TRIGGER", {}),
+    ({"processingTime": "  "}, "VALUE_NOT_NON_EMPTY_STR",
+     {"arg_name": "processingTime", "arg_value": "  "}),
+    ({"continuous": 5}, "VALUE_NOT_NON_EMPTY_STR", {"arg_name": "continuous", "arg_value": "5"}),
+    ({"realTime": ""}, "VALUE_NOT_NON_EMPTY_STR", {"arg_name": "realTime", "arg_value": ""}),
+    ({"once": False}, "VALUE_NOT_ALLOWED", {"arg_name": "once", "allowed_values": "[True]"}),
+    ({"availableNow": 1}, "VALUE_NOT_ALLOWED",
+     {"arg_name": "availableNow", "allowed_values": "[True]"}),
+], ids=["none", "two", "empty", "not-a-string", "empty-real-time", "once-false",
+        "available-now-1"])
+def test_stream_writer_triggers_are_checked_as_pyspark(offline_spark, kwargs, condition,
+                                                        parameters):
+    from pyspark.errors import PySparkValueError
+
+    w = offline_spark.readStream.format("rate").load().writeStream
+    with pytest.raises(PySparkValueError) as error:
+        w.trigger(**kwargs)
+    assert error.value.getCondition() == condition
+    assert error.value.getMessageParameters() == parameters
+    # A trigger of None is not given, as in PySpark.
+    assert w.trigger(processingTime=None, once=True) is w
+
+
+def test_stream_writer_sends_its_trigger_as_pyspark(mock_connect):
+    # As PySpark's: the trigger of a WriteStreamOperationStart, an interval or duration
+    # stripped, of the real-time trigger too.
+    spark, service = mock_connect
+    # ExecutePlanResponse.write_stream_operation_start_result=8: query_id=1 (id=1, run_id=2).
+    service.execute_payload = message_field(
+        8, message_field(1, message_field(1, "q") + message_field(2, "r")))
+
+    def sent(**trigger):
+        spark.readStream.format("rate").load().writeStream.format("memory").queryName(
+            "q").trigger(**trigger).start()
+        # ExecutePlanRequest.plan=3 -> Plan.command=2 -> Command.write_stream_operation_start=6.
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+        start = parse_message(parse_message(plan[2][0])[6][0])
+        # WriteStreamOperationStart: processing_time_interval=5, available_now=6, once=7,
+        # continuous_checkpoint_interval=8, real_time_batch_duration=100.
+        return {field: start[field] for field in (5, 6, 7, 8, 100) if field in start}
+
+    assert sent(processingTime=" 1 second ") == {5: [b"1 second"]}
+    assert sent(once=True) == {7: [1]}
+    assert sent(availableNow=True) == {6: [1]}
+    assert sent(continuous="1 minute") == {8: [b"1 minute"]}
+    assert sent(realTime=" 5 seconds ") == {100: [b"5 seconds"]}
+
+
 def test_merge_into_writer_mutates_and_returns_self(offline_spark):
     # PySpark: withSchemaEvolution and every clause action change the writer and
     # return that same writer; a clause object can be used more than once.
