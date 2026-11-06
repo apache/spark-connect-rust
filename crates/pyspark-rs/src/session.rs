@@ -788,6 +788,31 @@ impl PySparkSession {
                     _ => frame,
                 });
             }
+            let ipc = py
+                .import("pyspark.sql._pandas_input")?
+                .getattr("prepare_string_input")?
+                .call1((data, schema))?;
+            if !ipc.is_none() {
+                let fields = match &spec {
+                    Spec::Struct(fields) => fields,
+                    _ => {
+                        return Err(pyo3::exceptions::PyValueError::new_err(
+                            "string input requires a struct schema",
+                        ));
+                    }
+                };
+                let schema = DataType::Struct {
+                    fields: fields.clone(),
+                };
+                let frame = self
+                    .session
+                    .create_dataframe_from_inline_arrow_ipc(ipc.extract()?, schema);
+                // Match pandas row input: explicit nonempty field names travel
+                // through toDF as well as the local relation's logical schema.
+                return Ok(PyDataFrame::new(
+                    frame.to_df(fields.iter().map(|field| field.name.as_str()).collect()),
+                ));
+            }
             return self.create_from_pandas(py, data, spec);
         }
         self.create_from_local(py, data, spec)

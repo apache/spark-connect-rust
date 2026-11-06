@@ -2054,7 +2054,10 @@ def test_string_columns_preserve_every_ipc_cell(protocol, monkeypatch, cached, v
         "spark.sql.session.localRelationChunkSizeRows": "997",
     }
     with _arrow_input_service(protocol, **overrides) as (spark, state):
-        spark.createDataFrame(frame, schema, verifySchema=verify).toArrow()
+        result = spark.createDataFrame(frame, schema, verifySchema=verify)
+        assert not result.isLocal()
+        result.toArrow()
+        assert state["column_names"] == schema.names
         table = state["input_tables"][0]
         assert table.num_rows == len(strings)
         assert table.schema.names == schema.names
@@ -2646,7 +2649,10 @@ def test_string_large_inline_input_keeps_row_transport_and_schema(protocol):
         "spark.sql.session.localRelationSizeLimit": "1",
         "spark.sql.execution.arrow.useLargeVarTypes": "true",
     }) as (spark, state):
-        spark.createDataFrame(frame, schema).toArrow()
+        result = spark.createDataFrame(frame, schema)
+        assert not result.isLocal()
+        result.toArrow()
+        assert state["column_names"] == schema.names
         assert state["config_requests"] == []
         assert state["uploads"] == 0
         table = state["input_tables"][0]

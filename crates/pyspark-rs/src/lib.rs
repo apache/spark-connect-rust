@@ -36,6 +36,7 @@ mod group;
 mod infer;
 mod ml;
 mod observation;
+mod pandas_input;
 mod pipelines;
 mod profiler;
 mod pyarrow_export;
@@ -129,6 +130,8 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // The core DataType JSON grammar, which `pyspark.sql.types` parses type JSON with.
     m.add_function(wrap_pyfunction!(types::parse_datatype_json, m)?)?;
     m.add_function(wrap_pyfunction!(column::column_reference_name, m)?)?;
+
+    m.add_function(wrap_pyfunction!(pandas_input::_pandas_string_ipc, m)?)?;
 
     // Spark Declarative Pipelines (SDP) command execution
     m.add_class::<pipelines::PyPipelineRunStream>()?;
