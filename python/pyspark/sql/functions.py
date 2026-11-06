@@ -305,7 +305,8 @@ def _dict_to_options_column(options_dict):
     return options_dict
 
 # Import UDF / UDTF functions
-from pyspark.sql.udf import udf, pandas_udf, arrow_udf
+from pyspark.sql.udf import udf
+from pyspark.sql.pandas.functions import arrow_udf, pandas_udf
 from pyspark.sql.udtf import (
     udtf,
     arrow_udtf,
@@ -361,7 +362,30 @@ def expr(str):
     """Parses the expression string into the column that it represents."""
     return _pyfunc_expr(str)
 count = _col_wrapper(_pyfunc_count)
-when = _pyfunc_when
+
+
+def when(condition, value):
+    """when(condition, value): a CASE WHEN of one branch.
+
+    Mirrors pyspark.sql.connect.functions.when: the condition is a Column, and the value a
+    Column or the literal of a value.
+    """
+    if not isinstance(condition, _pyspark.Column):
+        from pyspark.errors import PySparkTypeError
+
+        raise PySparkTypeError(
+            errorClass="NOT_EXPECTED_TYPE",
+            messageParameters={
+                "expected_type": "Column",
+                "arg_name": "condition",
+                "arg_type": type(condition).__name__,
+            },
+        )
+    from pyspark.sql.utils import enum_to_value
+
+    value = enum_to_value(value)
+    return _pyfunc_when(condition, value if isinstance(value, _pyspark.Column) else lit(value))
+
 
 # Mixed/special functions - explicit wrappers for non-generic dispatch
 def from_avro(data, json_format_schema):
@@ -665,21 +689,85 @@ def broadcast(df):
 
 # Expose the `partitioning` submodule (bucket/days/hours/months/years) at
 # ``pyspark.sql.functions.partitioning``. Since this module is a plain module (not a
-# package), register a synthetic submodule holding the flat partition-transform
-# functions so both ``import pyspark.sql.functions.partitioning`` and
-# ``F.partitioning.bucket`` work, mirroring reference pyspark.
+# package), register a synthetic submodule holding the partition transforms, as PySpark
+# Connect's, so both ``import pyspark.sql.functions.partitioning`` and
+# ``F.partitioning.bucket`` work. The functions of the same names here are deprecated, as
+# in PySpark: they warn and call those of the submodule.
 import sys as _sys
 import types as _types
+import warnings as _warnings
+
+
+def _partition_transforms():
+    _over_columns = _gen_module._invoke_function_over_columns
+
+    def years(col):
+        return _over_columns("years", col)
+
+    def months(col):
+        return _over_columns("months", col)
+
+    def days(col):
+        return _over_columns("days", col)
+
+    def hours(col):
+        return _over_columns("hours", col)
+
+    def bucket(numBuckets, col):
+        if isinstance(numBuckets, int):
+            _numBuckets = lit(numBuckets)
+        elif isinstance(numBuckets, _pyspark.Column):
+            _numBuckets = numBuckets
+        else:
+            from pyspark.errors import PySparkTypeError
+
+            raise PySparkTypeError(
+                errorClass="NOT_EXPECTED_TYPE",
+                messageParameters={
+                    "expected_type": "Column or int",
+                    "arg_name": "numBuckets",
+                    "arg_type": type(numBuckets).__name__,
+                },
+            )
+        return _invoke_function("bucket", _numBuckets, _column_or_name(col))
+
+    return years, months, days, hours, bucket
+
 
 partitioning = _types.ModuleType("pyspark.sql.functions.partitioning")
 partitioning.__doc__ = "Partition transform functions (bucket/days/hours/months/years)."
-for _pname in ("years", "months", "days", "hours", "bucket"):
-    _obj = globals().get(_pname)
-    if _obj is not None:
-        setattr(partitioning, _pname, _obj)
-partitioning.__all__ = [
-    _n for _n in ("years", "months", "days", "hours", "bucket") if hasattr(partitioning, _n)
-]
+for _transform in _partition_transforms():
+    _transform.__module__ = partitioning.__name__
+    _transform.__qualname__ = _transform.__name__
+    setattr(partitioning, _transform.__name__, _transform)
+partitioning.__all__ = ["years", "months", "days", "hours", "bucket"]
+
+
+def years(col):
+    _warnings.warn("Deprecated in 4.0.0, use partitioning.years instead.", FutureWarning)
+    return partitioning.years(col)
+
+
+def months(col):
+    _warnings.warn("Deprecated in 4.0.0, use partitioning.months instead.", FutureWarning)
+    return partitioning.months(col)
+
+
+def days(col):
+    _warnings.warn("Deprecated in 4.0.0, use partitioning.days instead.", FutureWarning)
+    return partitioning.days(col)
+
+
+def hours(col):
+    _warnings.warn("Deprecated in 4.0.0, use partitioning.hours instead.", FutureWarning)
+    return partitioning.hours(col)
+
+
+def bucket(numBuckets, col):
+    _warnings.warn("Deprecated in 4.0.0, use partitioning.bucket instead.", FutureWarning)
+    return partitioning.bucket(numBuckets, col)
+
+
 _sys.modules["pyspark.sql.functions.partitioning"] = partitioning
 
 # Public classes/enums that pyspark.sql.functions re-exports (so `from
