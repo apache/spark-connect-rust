@@ -331,6 +331,57 @@ def test_transform_with_state_in_pandas_takes_a_ddl_output_type(session, tmp_pat
             session.conf.unset(key)
 
 
+def test_transform_with_state_returns_the_rows_of_its_output_schema(session, tmp_path):
+    # As PySpark's, transformWithState sends its output schema, a DDL string or a
+    # StructType, which the server reads as the schema of the rows of the processor.
+    from pyspark.sql.streaming.stateful_processor import StatefulProcessor
+
+    class Counter(StatefulProcessor):
+        def init(self, handle):
+            pass
+
+        def handleInputRows(self, key, rows, timerValues):
+            yield Row(k=key[0], c=sum(1 for _ in rows))
+
+        def close(self):
+            pass
+
+    confs = {
+        "spark.sql.streaming.stateStore.providerClass":
+            "org.apache.spark.sql.execution.streaming.state.RocksDBStateStoreProvider",
+        # A state store per shuffle partition; the default 200 take half a minute.
+        "spark.sql.shuffle.partitions": "2",
+    }
+    for key, value in confs.items():
+        session.conf.set(key, value)
+    try:
+        source = str(tmp_path / "source")
+        session.createDataFrame([(1,), (1,), (2,)], "k long").write.parquet(source)
+        struct = StructType([StructField("k", LongType()), StructField("c", LongType())])
+        for name, schema in [("ddl", "k long, c long"), ("struct", struct)]:
+            counted = (
+                session.readStream.schema("k long").parquet(source).groupBy("k")
+                .transformWithState(Counter(), schema, "Update", "None")
+            )
+            assert counted.schema == struct
+            query = (
+                counted.writeStream.format("memory").queryName(f"tws_rows_{name}")
+                .outputMode("update")
+                .option("checkpointLocation", str(tmp_path / f"checkpoint_{name}"))
+                .trigger(availableNow=True).start()
+            )
+            try:
+                query.awaitTermination(120)
+                assert query.exception() is None
+                rows = session.table(f"tws_rows_{name}").collect()
+                assert sorted(tuple(r) for r in rows) == [(1, 2), (2, 1)]
+            finally:
+                query.stop()
+    finally:
+        for key in confs:
+            session.conf.unset(key)
+
+
 def _arrow_table():
     return pa.table(
         {

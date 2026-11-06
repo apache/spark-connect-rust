@@ -185,7 +185,8 @@ impl GroupedData {
     }
 
     /// `GroupedData.transformWithState` (row output). `func` is the cloudpickled
-    /// stateful processor (eval type in the 211-214 range).
+    /// stateful processor (eval type in the 211-214 range). Its return type is sent as the
+    /// output schema, which the server reads, as PySpark sends `outputStructType`.
     pub fn transform_with_state(
         &self,
         func: CommonInlineUserDefinedFunctionExpression,
@@ -194,13 +195,14 @@ impl GroupedData {
         event_time_column_name: Option<&str>,
         initial_state: Option<&GroupedData>,
     ) -> DataFrame {
+        let output_schema = func.python_udf.output_type.clone();
         self.transform_with_state_impl(
             func,
             output_mode,
             time_mode,
             event_time_column_name,
             initial_state,
-            None,
+            Some(output_schema),
         )
     }
 
@@ -867,6 +869,40 @@ mod tests {
         assert_eq!(apply.grouping_expressions.len(), 1);
         assert!(apply.input.is_some());
         assert_eq!(apply.func.unwrap().function_name, "count");
+    }
+
+    #[test]
+    fn transform_with_state_sends_its_output_schema() {
+        use crate::udf::{eval_type, PythonUDFPayload};
+        use spark_connect_proto::relation::RelType;
+
+        let spark = session();
+        let grouped = spark
+            .range(10)
+            .unwrap()
+            .group_by(vec![crate::column::col("id")]);
+        let output = DataType::from_ddl("id long, c long").unwrap();
+        let udf = CommonInlineUserDefinedFunctionExpression::new(
+            "count".to_string(),
+            true,
+            vec![],
+            PythonUDFPayload::new(
+                output.clone(),
+                eval_type::SQL_TRANSFORM_WITH_STATE_PYTHON_ROW_UDF,
+                vec![],
+                "3.12".to_string(),
+            ),
+        );
+        let result = grouped.transform_with_state(udf, "Update", "None", None, None);
+        // As PySpark's, the TransformWithStateInfo carries the output schema, which the
+        // server reads as the schema of the rows of the processor.
+        let Some(RelType::GroupMap(group_map)) = result.plan.to_proto().rel_type else {
+            panic!("expected a GroupMap relation");
+        };
+        let info = group_map.transform_with_state_info.unwrap();
+        assert_eq!(info.output_schema, Some(output.to_proto()));
+        assert_eq!(info.time_mode, "None");
+        assert_eq!(group_map.output_mode, Some("Update".to_string()));
     }
 
     #[test]
