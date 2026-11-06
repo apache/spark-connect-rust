@@ -356,6 +356,40 @@ def test_reader_schema_keeps_field_metadata(session, tmp_path, ddl):
     assert stream.schema.fields[0].metadata == {"comment": "the key"}
 
 
+def test_grouped_map_functions_take_iterators_by_their_type_hints(session):
+    from typing import Iterator, Tuple
+
+    import numpy as np
+    import pandas as pd
+
+    def scaled(batches: Iterator[pd.DataFrame]) -> Iterator[pd.DataFrame]:
+        for frame in batches:
+            yield frame.assign(v=frame.v * 10)
+
+    def shifted(key: Tuple[np.int64], batches: Iterator[pd.DataFrame]) -> Iterator[pd.DataFrame]:
+        for frame in batches:
+            yield frame.assign(v=frame.v + key[0])
+
+    def batches(it: Iterator[pa.RecordBatch]) -> Iterator[pa.RecordBatch]:
+        yield from it
+
+    def keyed_batches(
+        key: Tuple[pa.Scalar, ...], it: Iterator[pa.RecordBatch]
+    ) -> Iterator[pa.RecordBatch]:
+        yield from it
+
+    df = session.createDataFrame([(1, 1.0), (1, 2.0), (2, 3.0)], ["k", "v"])
+    schema = StructType([StructField("k", LongType()), StructField("v", DoubleType())])
+    grouped = df.groupBy("k")
+    for result, expected in (
+        (grouped.applyInPandas(scaled, schema), [(1, 10.0), (1, 20.0), (2, 30.0)]),
+        (grouped.applyInPandas(shifted, schema), [(1, 2.0), (1, 3.0), (2, 5.0)]),
+        (grouped.applyInArrow(batches, schema), [(1, 1.0), (1, 2.0), (2, 3.0)]),
+        (grouped.applyInArrow(keyed_batches, schema), [(1, 1.0), (1, 2.0), (2, 3.0)]),
+    ):
+        assert sorted(tuple(r) for r in result.collect()) == expected
+
+
 def test_collect_reads_a_result_across_stream_ends(session):
     # Takes several response streams when the server's senderMaxStreamSize is small.
     n = 300_000

@@ -1513,6 +1513,7 @@ impl PyDataFrame {
         barrier: bool,
         profile: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
+        validate_map_function(py, &func, eval_type::SQL_MAP_PANDAS_ITER_UDF)?;
         let cols = py.detach(|| self.dataframe.columns()).to_pyerr()?;
         let udf = build_map_udf(
             py,
@@ -1537,6 +1538,7 @@ impl PyDataFrame {
         barrier: bool,
         profile: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
+        validate_map_function(py, &func, eval_type::SQL_MAP_ARROW_ITER_UDF)?;
         let cols = py.detach(|| self.dataframe.columns()).to_pyerr()?;
         let udf = build_map_udf(
             py,
@@ -2451,6 +2453,46 @@ pub(crate) fn resolve_datatype(
     Err(pyo3::exceptions::PyTypeError::new_err(
         "schema must be a DataType or a DDL string",
     ))
+}
+
+/// Validate the function of a map UDF for its eval type with
+/// `pyspark.sql.pandas.functions._validate_vectorized_udf`, as the reference client does
+/// before it builds the UDF.
+pub(crate) fn validate_map_function(
+    py: Python<'_>,
+    func: &Bound<'_, PyAny>,
+    eval_type_id: i32,
+) -> PyResult<()> {
+    py.import("pyspark.sql.pandas.functions")?
+        .call_method1("_validate_vectorized_udf", (func, eval_type_id))?;
+    Ok(())
+}
+
+/// The eval type of a grouped map function from its type hints, by `infer` of
+/// `pyspark.sql.pandas.typehints` (the iterator forms, for example), as the reference
+/// client infers it. `default` is used when the hints give none, and when they cannot be
+/// read, after the reference client's `warning`.
+pub(crate) fn infer_group_map_eval_type(
+    py: Python<'_>,
+    func: &Bound<'_, PyAny>,
+    infer: &str,
+    warning: &str,
+    default: i32,
+) -> PyResult<i32> {
+    match py
+        .import("pyspark.sql.pandas.typehints")?
+        .call_method1(infer, (func,))
+    {
+        Ok(inferred) if inferred.is_none() => Ok(default),
+        Ok(inferred) => inferred.extract(),
+        Err(err) if err.is_instance_of::<pyo3::exceptions::PyException>(py) => {
+            let category = py.get_type::<pyo3::exceptions::PyUserWarning>();
+            py.import("warnings")?
+                .call_method1("warn", (warning, category))?;
+            Ok(default)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 /// Build a map/group UDF expression: cloudpickle `(func, schema)` as the command and
