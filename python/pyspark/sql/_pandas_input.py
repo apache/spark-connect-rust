@@ -353,31 +353,6 @@ def prepare_float64_table(frame, schema):
     ) or len(set(schema.names)) != width:
         return None
 
-    from pyspark.sql import _arrow_input
-    from pyspark.sql.pandas import types as pandas_types
-
-    for name in ("to_arrow_schema", "to_arrow_type", "to_arrow_metadata",
-                 "_check_arrow_table_timestamps_localize"):
-        converter = getattr(pandas_types, name)
-        if (type(converter) is not FunctionType or converter.__name__ != name
-                or converter.__module__ != pandas_types.__name__
-                or converter.__globals__ is not vars(pandas_types)):
-            return None
-    # Earlier converter branches can reinterpret DoubleType after alias rebinding.
-    for name in ("BooleanType", "ByteType", "ShortType", "IntegerType", "LongType",
-                 "FloatType", "DoubleType", "StructField", "StructType"):
-        cls = getattr(native, name)
-        if (getattr(sql_types, name, None) is not cls
-                or getattr(pandas_types, name, None) is not cls):
-            return None
-    if (_arrow_input.StructType is not native.StructType
-            or getattr(_arrow_input, "to_arrow_schema", pandas_types.to_arrow_schema)
-            is not pandas_types.to_arrow_schema
-            or getattr(_arrow_input, "_check_arrow_table_timestamps_localize",
-                       pandas_types._check_arrow_table_timestamps_localize)
-            is not pandas_types._check_arrow_table_timestamps_localize):
-        return None
-
     # Use the same pandas missing-value semantics as the row path, including the
     # legacy use_inf_as_na option. Infinities and signed zero otherwise stay intact.
     valid = frame.notna()

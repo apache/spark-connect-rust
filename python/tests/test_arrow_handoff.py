@@ -2338,19 +2338,6 @@ with capture._arrow_input_service(capture.protocol.__wrapped__(Factory())) as (s
 
 
 
-def test_float64_rebound_arrow_schema_alias_keeps_native_row_path(protocol, monkeypatch):
-    import pyspark.sql._arrow_input as helper
-
-    frame = pd.DataFrame({"x": np.arange(100000, dtype=np.float64)})
-    schema = T.StructType([T.StructField("x", T.DoubleType())])
-    monkeypatch.setattr(helper, "StructType", object)
-    with _arrow_input_service(protocol) as (spark, state):
-        spark.createDataFrame(frame, schema).toArrow()
-        assert state["config_requests"] == []
-        _assert_float64_ipc(state["input_tables"][0], [frame["x"].to_numpy()], schema)
-
-
-
 def test_float64_rebound_pandas_alias_keeps_subclass_fallback(monkeypatch):
     from pyspark.sql._pandas_input import prepare_float64_table
 
@@ -2486,30 +2473,6 @@ def test_float64_instance_conversion_hooks_keep_row_fallback(protocol, method):
 
 
 
-@pytest.mark.parametrize("module_name", ["converter", "arrow_input"])
-@pytest.mark.parametrize("attribute", ["to_arrow_schema", "_check_arrow_table_timestamps_localize"])
-def test_float64_rebound_converter_function_keeps_row_fallback(
-    protocol, monkeypatch, module_name, attribute
-):
-    import pyspark.sql._arrow_input as arrow_input
-    import pyspark.sql.pandas.types as converter
-
-    values = np.tile(np.array([np.nan, -0.0, np.inf, -np.inf, 1.5]), 20000)
-    frame = pd.DataFrame({"x": values})
-    schema = T.StructType([T.StructField("x", T.DoubleType())])
-
-    def customized(*args, **kwargs):
-        raise AssertionError("changed Arrow converter must keep float64 input on the row path")
-
-    monkeypatch.setattr({"converter": converter, "arrow_input": arrow_input}[module_name],
-                        attribute, customized, raising=False)
-    with _arrow_input_service(protocol) as (spark, state):
-        spark.createDataFrame(frame, schema).toArrow()
-        assert state["config_requests"] == []
-        _assert_float64_ipc(state["input_tables"][0], [values], schema)
-
-
-
 @pytest.mark.parametrize("method", ["astype", "notna", "where"])
 @pytest.mark.parametrize("before_import", [False, True])
 def test_float64_class_conversion_hooks_keep_row_fallback(
@@ -2564,27 +2527,6 @@ def test_float64_class_conversion_hooks_keep_row_fallback(
         assert calls == [method]
         assert state["config_requests"] == []
         _assert_float64_ipc(state["input_tables"][0], [expected], schema, missing=[missing])
-
-
-
-@pytest.mark.parametrize("attribute", ["to_arrow_type", "to_arrow_metadata"])
-def test_float64_custom_type_and_metadata_converters_keep_row_fallback(
-    protocol, monkeypatch, attribute
-):
-    import pyspark.sql.pandas.types as converter
-
-    values = np.tile(np.array([np.nan, -0.0, np.inf, -np.inf, 1.5]), 20000)
-    frame = pd.DataFrame({"x": values})
-    schema = T.StructType([T.StructField("x", T.DoubleType())])
-
-    def customized(*args, **kwargs):
-        raise AssertionError("changed type or metadata converter must retain the row path")
-
-    monkeypatch.setattr(converter, attribute, customized)
-    with _arrow_input_service(protocol) as (spark, state):
-        spark.createDataFrame(frame, schema).toArrow()
-        assert state["config_requests"] == []
-        _assert_float64_ipc(state["input_tables"][0], [values], schema)
 
 
 

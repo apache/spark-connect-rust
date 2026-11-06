@@ -155,6 +155,10 @@ and explicit `StructType` schemas whose fields are all `LongType`. Other dtypes,
 DDL/atomic schemas, schema conversions, NUL names, and duplicate/non-string input names
 retain the existing row conversion path. `verifySchema` remains ignored for
 pandas Arrow input, matching Spark Connect.
+Pandas frames of at least 100,000 rows whose columns are all NumPy `float64`,
+with an explicit `StructType` of `DoubleType` fields, are encoded to Arrow IPC
+from their columns, with pandas' missing values as nulls, and sent inline as the
+row path sends them, without the importer's configuration RPC.
 Inputs at or above `spark.sql.session.localRelationCacheThreshold` are serialized
 into independent IPC streams and uploaded as session-scoped cache artifacts.
 The plan carries `ChunkedCachedLocalRelation` hashes instead of embedding the
