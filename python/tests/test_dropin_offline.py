@@ -5118,6 +5118,43 @@ if __name__ == "__main__":
     assert result.stdout.strip().splitlines()[-1] == str(["col"] * 6)
 
 
+def test_grouping_sets_group_by_their_grouping_columns_as_pyspark(mock_connect):
+    # As PySpark's, groupingSets(groupingSets, *cols) groups by the sets with the grouping
+    # columns `cols`: Relation.aggregate=9, Aggregate.group_type=2 (GROUPING_SETS=5),
+    # grouping_expressions=3, grouping_sets=6 (GroupingSets.grouping_set=1).
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    df = spark.range(1)
+
+    def column_names(expressions):
+        # Expression.unresolved_attribute=2, UnresolvedAttribute.unparsed_identifier=1.
+        return [parse_message(parse_message(e)[2][0])[1][0].decode() for e in expressions]
+
+    def sent(grouped):
+        grouped.agg(F.count("*")).collect()
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        aggregate = parse_message(parse_message(plan)[9][0])
+        sets = [column_names(parse_message(s).get(1, [])) for s in aggregate.get(6, [])]
+        return aggregate[2], column_names(aggregate.get(3, [])), sets
+
+    assert sent(df.groupingSets([["id"], []], "id", F.col("x"))) == (
+        [5], ["id", "x"], [["id"], []])
+    # No grouping columns, and a set of one column given alone.
+    assert sent(df.groupingSets(["id", ("x", 1)])) == ([5], [], [["id"], ["x", "id"]])
+    for call, arg_name, arg_type in (
+        (lambda: df.groupingSets([["id"]], ["id"]), "cols", "list"),
+        (lambda: df.groupingSets([[["id"]]]), "groupingSets", "list"),
+        (lambda: df.groupingSets([1.5]), "groupingSets", "float"),
+    ):
+        with pytest.raises(PySparkTypeError) as error:
+            call()
+        assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+        assert error.value.getMessageParameters() == {
+            "expected_type": "Column, int or str", "arg_name": arg_name, "arg_type": arg_type}
+
+
 def test_create_dataframe_checks_every_row_against_the_merged_schema():
     from pyspark.errors import PySparkValueError
 

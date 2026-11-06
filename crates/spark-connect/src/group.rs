@@ -83,6 +83,17 @@ impl GroupedData {
                 }
             }
         }
+        Self::new_grouping_sets_of(dataframe, grouping_sets, group_cols)
+    }
+
+    /// Grouped data of the grouping sets `grouping_sets` and the grouping columns
+    /// `group_cols`, the columns of the result besides the aggregations, as PySpark's
+    /// `groupingSets(groupingSets, *cols)`.
+    pub(crate) fn new_grouping_sets_of(
+        dataframe: DataFrame,
+        grouping_sets: Vec<Vec<Column>>,
+        group_cols: Vec<Column>,
+    ) -> Self {
         GroupedData {
             dataframe,
             group_cols,
