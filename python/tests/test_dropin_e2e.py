@@ -609,6 +609,24 @@ def test_grouped_map_functions_take_iterators_by_their_type_hints(session):
         assert sorted(tuple(r) for r in result.collect()) == expected
 
 
+def test_dataframe_columns_resolve_against_their_dataframe_as_pyspark(session):
+    # As PySpark Connect's: df[name] and df.name refer to the columns of their DataFrame by its
+    # plan ID, so a join selects the columns of each side, and an ambiguous self-join of a
+    # derived DataFrame raises PySpark's error.
+    left = session.createDataFrame([(1, "a"), (2, "b")], "id int, v string")
+    right = session.createDataFrame([(1, "x"), (3, "y")], "id int, w string")
+    joined = left.join(right, left["id"] == right["id"])
+    assert joined.select(left["id"], right["w"]).collect() == [Row(id=1, w="x")]
+    assert joined.select(left.v, right.w).collect() == [Row(v="a", w="x")]
+    assert joined.select(right["*"]).collect() == [Row(id=1, w="x")]
+    assert joined.select(left.colRegex("`v`")).collect() == [Row(v="a")]
+    base = session.range(3)
+    derived = base.withColumn("x", F.col("id") * 2)
+    with pytest.raises(AnalysisException) as error:
+        base.join(derived, base["id"] == derived["id"]).select(base["id"]).collect()
+    assert error.value.getCondition() == "AMBIGUOUS_COLUMN_REFERENCE"
+
+
 def test_collect_reads_a_result_across_stream_ends(session):
     # Takes several response streams when the server's senderMaxStreamSize is small.
     n = 300_000

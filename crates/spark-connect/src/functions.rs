@@ -67,9 +67,9 @@ fn lit_binary(b: Vec<u8>) -> Expression {
 /// `select("*")`, `col("t.*")` resolve on the server), matching pyspark.
 pub fn col(name: &str) -> Column {
     if name == "*" {
-        Column::new(ExpressionNode::UnresolvedStar(None).into())
+        Column::new(ExpressionNode::UnresolvedStar(None, None).into())
     } else if let Some(prefix) = name.strip_suffix(".*") {
-        Column::new(ExpressionNode::UnresolvedStar(Some(format!("{prefix}.*"))).into())
+        Column::new(ExpressionNode::UnresolvedStar(Some(format!("{prefix}.*")), None).into())
     } else {
         Column::new(Expression::column(name))
     }
@@ -4649,13 +4649,13 @@ mod tests {
 
         let star = col("*");
         match star.expression().node() {
-            ExpressionNode::UnresolvedStar(None) => {}
+            ExpressionNode::UnresolvedStar(None, None) => {}
             _ => panic!("Expected UnresolvedStar(None)"),
         }
 
         let table_star = col("t.*");
         match table_star.expression().node() {
-            ExpressionNode::UnresolvedStar(Some(_)) => {}
+            ExpressionNode::UnresolvedStar(Some(_), None) => {}
             _ => panic!("Expected UnresolvedStar with prefix"),
         }
     }

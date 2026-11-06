@@ -1389,6 +1389,38 @@ def test_broadcast_type_check():
         F.broadcast("not a dataframe")
 
 
+def test_dataframe_columns_refer_to_it_by_its_plan_id_as_pyspark(mock_connect):
+    # As PySpark Connect's df[name], df.name, df["*"] and colRegex: the columns of a DataFrame
+    # refer to it by the plan ID that its relation is sent with, and colRegex is a Column.
+    from pyspark.sql import Column
+
+    spark, service = mock_connect
+    left, right = spark.range(2), spark.range(3)
+    assert isinstance(left.colRegex("`i.*`"), Column)
+    left.join(right, left["id"] == right.id).select(
+        left.id, right["*"], left.colRegex("`i.*`"), left["id"]
+    ).collect()
+    # ExecutePlanRequest.plan=3, Plan.root=1, Relation.project=3: input=1, expressions=3;
+    # Relation.join=5: left=1, right=2; Relation.common=1, RelationCommon.plan_id=2.
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+    project = parse_message(parse_message(plan)[3][0])
+    join = parse_message(parse_message(project[1][0])[5][0])
+
+    def plan_id(relation):
+        return parse_message(parse_message(relation)[1][0])[2][0]
+
+    left_id, right_id = plan_id(join[1][0]), plan_id(join[2][0])
+    assert left_id != right_id
+    # Expression.unresolved_attribute=2 (plan_id=2), unresolved_star=5 (plan_id=2),
+    # unresolved_regex=8 (plan_id=2).
+    ids = []
+    for expression in project[3]:
+        expression = parse_message(expression)
+        (field,) = set(expression) & {2, 5, 8}
+        ids.append(parse_message(expression[field][0])[2][0])
+    assert ids == [left_id, right_id, left_id, left_id]
+
+
 def test_row_count_and_index():
     from pyspark.sql import Row
     r = Row(a=1, b=2, c=1)

@@ -731,10 +731,11 @@ impl PyDataFrame {
         )
     }
 
-    /// Select columns whose names match a regex.
+    /// The columns of this DataFrame whose names match a regex, as a Column. Mirrors
+    /// `DataFrame.colRegex`.
     #[pyo3(name = "colRegex")]
-    fn col_regex(&self, colName: &str) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.col_regex(colName))
+    fn col_regex(&self, colName: &str) -> PyColumn {
+        PyColumn::new(self.dataframe.col_regex(colName))
     }
 
     /// Basic statistics for the given columns (count/mean/stddev/min/max).
@@ -1242,15 +1243,16 @@ impl PyDataFrame {
         Ok(PyDataFrame::new(df))
     }
 
-    /// Column access by attribute (`df.colname` -> Column), mirroring reference pyspark.
-    /// Names beginning with `_` raise AttributeError so normal attribute lookup works.
+    /// Column access by attribute (`df.colname` -> Column), mirroring reference pyspark: the
+    /// column of this DataFrame, by its plan ID. Names beginning with `_` raise
+    /// AttributeError so normal attribute lookup works.
     fn __getattr__(&self, name: &str) -> PyResult<PyColumn> {
         if name.starts_with('_') {
             return Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
                 name.to_string(),
             ));
         }
-        Ok(PyColumn::new(spark_connect::functions::col(name)))
+        Ok(PyColumn::new(self.dataframe.col(name)))
     }
 
     /// Class attributes and all column names, matching Python Connect.
@@ -1603,14 +1605,21 @@ impl PyDataFrame {
         }
     }
 
-    /// As PySpark's `DataFrame.__getitem__`: a column by name (`df["col"]`) or position
-    /// (`df[0]`), the rows that match a Column (`df[df.a > 1]`, as `filter`), or the
-    /// projection of a list or tuple of columns (`df[["a", "b"]]`, as `select`).
+    /// As PySpark's `DataFrame.__getitem__`: a column by name (`df["col"]`), of this DataFrame
+    /// by its plan ID, as its star of `df["*"]`, or by position (`df[0]`), the rows that match
+    /// a Column (`df[df.a > 1]`, as `filter`), or the projection of a list or tuple of columns
+    /// (`df[["a", "b"]]`, as `select`).
     fn __getitem__(&self, py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         use pyo3::IntoPyObjectExt;
 
         let name = if let Ok(name) = item.cast::<pyo3::types::PyString>() {
-            name.extract::<String>()?
+            let name = name.to_cow()?;
+            let column = if name == "*" {
+                self.dataframe.star()
+            } else {
+                self.dataframe.col(&name)
+            };
+            return PyColumn::new(column).into_py_any(py);
         } else if item.is_instance_of::<PyColumn>() {
             return self.filter(item)?.into_py_any(py);
         } else if item.is_instance_of::<PyList>() || item.is_instance_of::<PyTuple>() {
@@ -1641,9 +1650,10 @@ impl PyDataFrame {
     }
 
     /// Private column accessor used by pandas-on-Spark (`sdf._col(name)`); mirrors the
-    /// connect DataFrame's `_col`. Backtick-quoted names arrive from `scol_for`.
+    /// connect DataFrame's `_col`, the column of this DataFrame by its plan ID. Backtick-quoted
+    /// names arrive from `scol_for`.
     fn _col(&self, item: &str) -> PyColumn {
-        PyColumn::new(spark_connect::functions::col(item))
+        PyColumn::new(self.dataframe.col(item))
     }
 
     /// As PySpark's `DataFrame.__repr__`: the table of `_show_string` when the session's
