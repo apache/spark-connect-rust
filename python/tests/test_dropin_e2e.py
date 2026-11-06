@@ -1358,6 +1358,28 @@ def test_plans_name_the_udfs_of_map_functions_after_the_functions_as_pyspark(ses
     assert "FlatMapGroupsInPandas [id#" in out and "], my_grouped_func(" in out
 
 
+def test_range_and_table_valued_functions_take_their_arguments_as_pyspark(session):
+    # As PySpark's: range takes the int() of its arguments, and the table-valued functions
+    # take Columns or column names, so a str is a column, else NOT_EXPECTED_TYPE of col.
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+
+    assert [row.id for row in session.range("3").collect()] == [0, 1, 2]
+    assert [row.id for row in session.tvf.range(0, 6.5, 2.5, "2").collect()] == [0, 2, 4]
+    with pytest.raises(ValueError, match="invalid literal"):
+        session.range("x").collect()
+    with pytest.raises(ValueError, match="Value out of range"):
+        session.tvf.range(2**63).collect()
+    with pytest.raises(AnalysisException) as e:
+        session.tvf.json_tuple(F.lit('{"a": 1}'), "a").collect()
+    assert e.value.getCondition() == "UNRESOLVED_COLUMN.WITHOUT_SUGGESTION"
+    with pytest.raises(PySparkTypeError) as e:
+        session.tvf.explode([1, 2])
+    assert e.value.getCondition() == "NOT_EXPECTED_TYPE"
+    rows = session.tvf.json_tuple(F.lit('{"a": 1}'), F.lit("a")).collect()
+    assert [tuple(row) for row in rows] == [("1",)]
+
+
 def test_sql_runs_statements_eagerly(session):
     # sql() sends the statement at once: a command takes effect without an action, and the
     # DataFrame of its result is the local relation the server returned.

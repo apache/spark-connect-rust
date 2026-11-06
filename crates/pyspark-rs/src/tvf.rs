@@ -3,9 +3,9 @@
 use pyo3::prelude::*;
 use spark_connect::tvf::TableValuedFunction;
 
+use crate::dataframe::column_or_name;
 use crate::dataframe::PyDataFrame;
 use crate::errors::ResultExt;
-use crate::functions::to_column;
 
 /// Python wrapper for the table-valued-function namespace (`spark.tvf`).
 #[pyclass(name = "TableValuedFunction", module = "pyspark.sql.tvf")]
@@ -19,30 +19,40 @@ impl PyTableValuedFunction {
     }
 }
 
+/// The arguments of a table-valued function, as PySpark's `_fn` takes them: Columns or column
+/// names, as `F._to_col` does, else `NOT_EXPECTED_TYPE` of `col`.
 fn cols(items: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<spark_connect::column::Column>> {
-    items.iter().map(to_column).collect()
+    items.iter().map(column_or_name).collect()
 }
 
 #[pymethods]
 impl PyTableValuedFunction {
-    #[pyo3(signature = (start, end=None, step=1, numPartitions=None))]
+    /// Each argument is taken by its `int()`, as PySpark's `spark.tvf.range` takes them, which
+    /// is `spark.range`.
+    #[pyo3(signature = (start, end=None, step=crate::session::RangeStep::Omitted, numPartitions=None))]
     #[allow(non_snake_case)]
     fn range(
         &self,
         py: Python<'_>,
-        start: i64,
-        end: Option<i64>,
-        step: i64,
-        numPartitions: Option<i32>,
+        start: &Bound<'_, PyAny>,
+        end: Option<&Bound<'_, PyAny>>,
+        step: crate::session::RangeStep,
+        numPartitions: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
+        let (start, end, step, num_partitions) =
+            crate::session::range_arguments(start, end, step, numPartitions)?;
         let df = py
-            .detach(|| self.inner.range(start, end, step, numPartitions))
+            .detach(|| {
+                self.inner
+                    .range(start, Some(end), step, num_partitions)
+                    .map_err(Box::new)
+            })
             .to_pyerr()?;
         Ok(PyDataFrame::new(df))
     }
 
     fn explode(&self, py: Python<'_>, collection: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        let c = to_column(collection)?;
+        let c = column_or_name(collection)?;
         Ok(PyDataFrame::new(
             py.detach(|| self.inner.explode(&c)).to_pyerr()?,
         ))
@@ -54,14 +64,14 @@ impl PyTableValuedFunction {
         py: Python<'_>,
         collection: &Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
-        let c = to_column(collection)?;
+        let c = column_or_name(collection)?;
         Ok(PyDataFrame::new(
             py.detach(|| self.inner.explode_outer(&c)).to_pyerr()?,
         ))
     }
 
     fn inline(&self, py: Python<'_>, input: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        let c = to_column(input)?;
+        let c = column_or_name(input)?;
         Ok(PyDataFrame::new(
             py.detach(|| self.inner.inline(&c)).to_pyerr()?,
         ))
@@ -69,7 +79,7 @@ impl PyTableValuedFunction {
 
     #[pyo3(name = "inline_outer")]
     fn inline_outer(&self, py: Python<'_>, input: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        let c = to_column(input)?;
+        let c = column_or_name(input)?;
         Ok(PyDataFrame::new(
             py.detach(|| self.inner.inline_outer(&c)).to_pyerr()?,
         ))
@@ -82,7 +92,16 @@ impl PyTableValuedFunction {
         input: &Bound<'_, PyAny>,
         fields: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let inp = to_column(input)?;
+        // As PySpark's, which asks for fields before it takes the arguments.
+        if fields.is_empty() {
+            return Err(crate::column::raise_pyspark(
+                py,
+                "PySparkValueError",
+                "CANNOT_BE_EMPTY",
+                &[("item", "field")],
+            ));
+        }
+        let inp = column_or_name(input)?;
         let fs = cols(fields)?;
         Ok(PyDataFrame::new(
             py.detach(|| self.inner.json_tuple(&inp, fs)).to_pyerr()?,
@@ -90,7 +109,7 @@ impl PyTableValuedFunction {
     }
 
     fn posexplode(&self, py: Python<'_>, collection: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        let c = to_column(collection)?;
+        let c = column_or_name(collection)?;
         Ok(PyDataFrame::new(
             py.detach(|| self.inner.posexplode(&c)).to_pyerr()?,
         ))
@@ -102,7 +121,7 @@ impl PyTableValuedFunction {
         py: Python<'_>,
         collection: &Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
-        let c = to_column(collection)?;
+        let c = column_or_name(collection)?;
         Ok(PyDataFrame::new(
             py.detach(|| self.inner.posexplode_outer(&c)).to_pyerr()?,
         ))
@@ -115,7 +134,7 @@ impl PyTableValuedFunction {
         n: &Bound<'_, PyAny>,
         fields: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let nc = to_column(n)?;
+        let nc = column_or_name(n)?;
         let fs = cols(fields)?;
         Ok(PyDataFrame::new(
             py.detach(|| self.inner.stack(&nc, fs)).to_pyerr()?,
@@ -137,7 +156,7 @@ impl PyTableValuedFunction {
 
     #[pyo3(name = "variant_explode")]
     fn variant_explode(&self, py: Python<'_>, input: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        let c = to_column(input)?;
+        let c = column_or_name(input)?;
         Ok(PyDataFrame::new(
             py.detach(|| self.inner.variant_explode(&c)).to_pyerr()?,
         ))
@@ -149,7 +168,7 @@ impl PyTableValuedFunction {
         py: Python<'_>,
         input: &Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
-        let c = to_column(input)?;
+        let c = column_or_name(input)?;
         Ok(PyDataFrame::new(
             py.detach(|| self.inner.variant_explode_outer(&c))
                 .to_pyerr()?,

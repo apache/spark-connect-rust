@@ -3207,6 +3207,64 @@ def test_replace_and_unpivot_check_their_arguments_as_pyspark():
     ]
 
 
+def test_range_and_table_valued_functions_take_their_arguments_as_pyspark(mock_connect):
+    # As PySpark's: spark.range and spark.tvf.range take the int() of their arguments, and the
+    # table-valued functions of spark.tvf take Columns or column names, as F._to_col does.
+    import re
+
+    from pyspark.errors import PySparkTypeError, PySparkValueError
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+
+    def sent():
+        # ExecutePlanRequest.plan=3, Plan.root=1.
+        return parse_message(parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0])
+
+    def sent_range():
+        # Relation.range=15: Range.end=2, step=3, num_partitions=4.
+        fields = parse_message(sent()[15][0])
+        return {field: fields[field] for field in (2, 3, 4) if field in fields}
+
+    spark.range("3").collect()
+    assert sent_range() == {2: [3], 3: [1]}
+    spark.tvf.range(0, 6.5, 2.5, "2").collect()
+    assert sent_range() == {2: [6], 3: [2], 4: [2]}
+    for args, error, message in [
+        (("x",), ValueError, "invalid literal for int()"),
+        ((None,), TypeError, "int() argument must be"),
+        ((0, 5, None), TypeError, "int() argument must be"),
+        ((2**63,), ValueError, "Value out of range: 9223372036854775808"),
+        ((0, 3, 1, 2**31), ValueError, "Value out of range: 2147483648"),
+    ]:
+        for range_ in (spark.range, spark.tvf.range):
+            with pytest.raises(error, match=re.escape(message)):
+                range_(*args)
+    spark.tvf.json_tuple(F.lit('{"a": 1}'), "a").collect()
+    # Relation.unresolved_table_valued_function=43: arguments=2, of the column `a`, an
+    # Expression.unresolved_attribute=2 of UnresolvedAttribute.unparsed_identifier=1.
+    field = parse_message(parse_message(sent()[43][0])[2][1])
+    assert parse_message(field[2][0])[1] == [b"a"]
+    tvf = spark.tvf
+    for function, args, arg_type in [
+        (tvf.explode, ([1, 2],), "list"),
+        (tvf.inline, (1,), "int"),
+        (tvf.stack, (2, F.lit(1)), "int"),
+        (tvf.json_tuple, (F.lit("{}"), 1), "int"),
+    ]:
+        with pytest.raises(PySparkTypeError) as e:
+            function(*args)
+        assert e.value.getCondition() == "NOT_EXPECTED_TYPE"
+        assert e.value.getMessageParameters() == {
+            "arg_name": "col",
+            "expected_type": "Column or str",
+            "arg_type": arg_type,
+        }
+    with pytest.raises(PySparkValueError) as e:
+        tvf.json_tuple(1)
+    assert e.value.getCondition() == "CANNOT_BE_EMPTY"
+
+
 def test_functions_replace():
     """Test replace function."""
     from pyspark.sql import functions as F

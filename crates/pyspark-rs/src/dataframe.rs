@@ -2561,7 +2561,7 @@ fn unpivot_columns(cols: &Bound<'_, PyAny>) -> PyResult<Vec<spark_connect::colum
 }
 
 /// A column, or a column by its name, as PySpark's `_to_col`.
-fn column_or_name(col: &Bound<'_, PyAny>) -> PyResult<spark_connect::column::Column> {
+pub(crate) fn column_or_name(col: &Bound<'_, PyAny>) -> PyResult<spark_connect::column::Column> {
     if let Ok(column) = col.extract::<PyRef<'_, PyColumn>>() {
         return Ok(column.column.clone());
     }
