@@ -1079,18 +1079,25 @@ impl PyDataFrame {
     }
 
     /// Persist with the default MEMORY_AND_DISK storage level.
-    fn cache(&self, py: Python<'_>) -> PyResult<PyDataFrame> {
-        let df = py.detach(|| self.dataframe.cache()).to_pyerr()?;
-        Ok(PyDataFrame::new(df))
+    fn cache<'py>(slf: PyRef<'py, Self>, py: Python<'py>) -> PyResult<PyRef<'py, Self>> {
+        // As PySpark's, which returns the DataFrame itself.
+        let df = slf.dataframe.clone();
+        py.detach(|| df.cache().map_err(Box::new)).to_pyerr()?;
+        Ok(slf)
     }
 
     /// Mark the DataFrame as non-persistent.
     #[pyo3(signature = (blocking=false))]
-    fn unpersist(&self, py: Python<'_>, blocking: bool) -> PyResult<PyDataFrame> {
-        let df = py
-            .detach(|| self.dataframe.unpersist(blocking))
+    fn unpersist<'py>(
+        slf: PyRef<'py, Self>,
+        py: Python<'py>,
+        blocking: bool,
+    ) -> PyResult<PyRef<'py, Self>> {
+        // As PySpark's, which returns the DataFrame itself.
+        let df = slf.dataframe.clone();
+        py.detach(|| df.unpersist(blocking).map_err(Box::new))
             .to_pyerr()?;
-        Ok(PyDataFrame::new(df))
+        Ok(slf)
     }
 
     /// Print the plan with Python's `print`, as PySpark's `DataFrame.explain`, which prints
@@ -1540,18 +1547,21 @@ impl PyDataFrame {
     /// Persist the DataFrame at `storageLevel`, MEMORY_AND_DISK_DESER by default, as
     /// PySpark's `DataFrame.persist()`.
     #[pyo3(signature = (storageLevel=None))]
-    fn persist(
-        &self,
-        py: Python<'_>,
+    fn persist<'py>(
+        slf: PyRef<'py, Self>,
+        py: Python<'py>,
         storageLevel: Option<Bound<'_, PyAny>>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<PyRef<'py, Self>> {
         use spark_connect::storage::StorageLevelExt;
         let level = match storageLevel {
             Some(level) => crate::storagelevel::storage_level_proto(&level)?,
             None => spark_connect_proto::StorageLevel::memory_and_disk_deser(),
         };
-        let df = py.detach(|| self.dataframe.persist(level)).to_pyerr()?;
-        Ok(PyDataFrame::new(df))
+        // As PySpark's, which returns the DataFrame itself.
+        let df = slf.dataframe.clone();
+        py.detach(|| df.persist(level).map_err(Box::new))
+            .to_pyerr()?;
+        Ok(slf)
     }
 
     /// Column access by attribute (`df.colname` -> Column), mirroring reference pyspark: the
