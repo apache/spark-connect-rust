@@ -465,6 +465,12 @@ impl PyDataFrame {
     /// Alias for filter (reference pyspark name is `where`).
     #[pyo3(name = "where")]
     fn where_(&self, condition: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        // As PySpark's: a Column or a str, else NOT_EXPECTED_TYPE.
+        if !(condition.is_instance_of::<PyColumn>()
+            || condition.is_instance_of::<pyo3::types::PyString>())
+        {
+            return Err(not_expected_type(condition, "condition", "Column or str"));
+        }
         Ok(PyDataFrame::new(
             self.dataframe.filter(cond_column(condition)?),
         ))
@@ -728,9 +734,21 @@ impl PyDataFrame {
     /// column. Mirrors `DataFrame.transpose(indexColumn=None)`.
     #[pyo3(signature = (indexColumn=None))]
     #[allow(non_snake_case)]
-    fn transpose(&self, indexColumn: Option<PyRef<PyColumn>>) -> PyResult<PyDataFrame> {
-        let df = match indexColumn {
-            Some(c) => self.dataframe.transpose_with_index(c.column.clone()),
+    fn transpose(&self, indexColumn: Option<&Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        // As PySpark's `F._to_col`: a Column or a column name, else NOT_EXPECTED_TYPE of `col`.
+        let index = match indexColumn {
+            None => None,
+            Some(c) => Some(if let Ok(column) = c.extract::<PyRef<'_, PyColumn>>() {
+                column.column.clone()
+            } else if c.is_instance_of::<pyo3::types::PyString>() {
+                let _origin = crate::origin::with_origin("col");
+                spark_connect::functions::col(&c.extract::<String>()?)
+            } else {
+                return Err(not_expected_type(c, "col", "Column or str"));
+            }),
+        };
+        let df = match index {
+            Some(column) => self.dataframe.transpose_with_index(column),
             None => self.dataframe.transpose(),
         }
         .to_pyerr()?;
@@ -1057,8 +1075,14 @@ impl PyDataFrame {
     /// The columns of this DataFrame whose names match a regex, as a Column. Mirrors
     /// `DataFrame.colRegex`.
     #[pyo3(name = "colRegex")]
-    fn col_regex(&self, colName: &str) -> PyColumn {
-        PyColumn::new(self.dataframe.col_regex(colName))
+    fn col_regex(&self, colName: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
+        // As PySpark's: a str, else NOT_EXPECTED_TYPE.
+        if !colName.is_instance_of::<pyo3::types::PyString>() {
+            return Err(not_expected_type(colName, "colName", "str"));
+        }
+        Ok(PyColumn::new(
+            self.dataframe.col_regex(&colName.extract::<String>()?),
+        ))
     }
 
     /// Basic statistics for the given columns (count/mean/stddev/min/max), of column names or
@@ -2137,8 +2161,15 @@ impl PyDataFrame {
 
     /// `DataFrame.metadataColumn`.
     #[pyo3(name = "metadataColumn")]
-    fn metadata_column(&self, colName: &str) -> PyColumn {
-        PyColumn::new(self.dataframe.metadata_column(colName))
+    fn metadata_column(&self, colName: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
+        // As PySpark's: a str, else NOT_EXPECTED_TYPE.
+        if !colName.is_instance_of::<pyo3::types::PyString>() {
+            return Err(not_expected_type(colName, "colName", "str"));
+        }
+        Ok(PyColumn::new(
+            self.dataframe
+                .metadata_column(&colName.extract::<String>()?),
+        ))
     }
 }
 

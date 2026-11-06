@@ -1105,6 +1105,14 @@ def test_collected_rows_keep_their_values_as_pyspark(session):
     assert (rows[0].v.toJson(), rows[0].n) == ("1", 2)
 
 
+def test_transpose_takes_a_column_name_as_pyspark(session):
+    # As PySpark's transpose, of a Column or a column name as the index column.
+    df = session.createDataFrame([("a", 1, 2), ("b", 3, 4)], "k string, x int, y int")
+    by_name = df.transpose("k")
+    assert by_name.columns == ["key", "a", "b"]
+    assert by_name.collect() == df.transpose(F.col("k")).collect()
+
+
 def test_getitem_indexes_filters_and_selects_as_pyspark(session):
     from pyspark.errors import PySparkTypeError
 
