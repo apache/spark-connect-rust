@@ -838,12 +838,21 @@ impl PySparkSession {
             let helper = py.import("pyspark.sql._pandas_input")?;
             let columns = helper.getattr("timestamp_columns")?.call1((data, schema))?;
             if !columns.is_none() {
-                let timezone = py.detach(|| {
-                    self.session
-                        .conf()
-                        .get("spark.sql.session.timeZone")
-                        .to_pyerr()
-                })?;
+                // Only a naive column needs the session time zone; aware columns carry theirs.
+                let aware = helper
+                    .getattr("timestamp_columns_are_aware")?
+                    .call1((&columns,))?
+                    .is_truthy()?;
+                let timezone = if aware {
+                    None
+                } else {
+                    py.detach(|| {
+                        self.session
+                            .conf()
+                            .get("spark.sql.session.timeZone")
+                            .to_pyerr()
+                    })?
+                };
                 let table = helper
                     .getattr("prepare_timestamp_table")?
                     .call1((columns, schema, timezone))?;

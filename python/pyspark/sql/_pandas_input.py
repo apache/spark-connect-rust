@@ -393,6 +393,13 @@ def timestamp_columns(frame, schema):
     return columns
 
 
+def timestamp_columns_are_aware(columns):
+    """Whether every column carries its time zone, so the session's is not needed."""
+    from pandas.core.dtypes.dtypes import DatetimeTZDtype
+
+    return all(type(column.dtype) is DatetimeTZDtype for column in columns)
+
+
 def prepare_timestamp_table(columns, schema, timezone):
     """Preserve instants without row materialization or a host-zone conversion.
 
@@ -402,10 +409,9 @@ def prepare_timestamp_table(columns, schema, timezone):
     """
     import os
     import time
-    from pandas.core.dtypes.dtypes import DatetimeTZDtype
     import pyarrow as pa
 
-    if any(type(column.dtype) is not DatetimeTZDtype for column in columns):
+    if not timestamp_columns_are_aware(columns):
         if (timezone != "UTC" or os.environ.get("TZ") != "UTC"
                 or time.tzname != ("UTC", "UTC")):
             return None
