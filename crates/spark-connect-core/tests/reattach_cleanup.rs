@@ -59,6 +59,9 @@ enum Scenario {
     Error,
     Eof,
     Disconnect,
+    /// The ExecutePlan call fails itself, with a trailers-only response, as for an
+    /// analysis error.
+    Reject,
 }
 
 #[derive(Clone)]
@@ -71,6 +74,9 @@ struct State {
     scenario: Scenario,
     releases: Mutex<Vec<CapturedRelease>>,
     reattaches: Mutex<Vec<ReattachExecuteRequest>>,
+    /// What each ReattachExecute call does, in order: fail with a code, or stream responses.
+    /// When none is left, a call completes the result.
+    reattach_script: Mutex<VecDeque<Result<Vec<ExecutePlanResponse>, Code>>>,
     release_errors: Mutex<VecDeque<Code>>,
     release_finished: AtomicUsize,
     block_release: AtomicBool,
@@ -104,6 +110,7 @@ impl Fixture {
             scenario,
             releases: Mutex::new(Vec::new()),
             reattaches: Mutex::new(Vec::new()),
+            reattach_script: Mutex::new(VecDeque::new()),
             release_errors: Mutex::new(VecDeque::new()),
             release_finished: AtomicUsize::new(0),
             block_release: AtomicBool::new(false),
@@ -269,6 +276,9 @@ impl ServerStreamingService<ExecutePlanRequest> for Execute {
     type Future = BoxFuture<Response<Responses>, Status>;
 
     fn call(&mut self, _: Request<ExecutePlanRequest>) -> Self::Future {
+        if let Scenario::Reject = self.0.scenario {
+            return Box::pin(async { Err(Status::invalid_argument("plan sentinel")) });
+        }
         let responses: Responses = match self.0.scenario {
             Scenario::Complete => Box::pin(stream::iter([Ok(response("complete", true))])),
             Scenario::Error => Box::pin(stream::iter([Err(Status::invalid_argument(
@@ -282,6 +292,7 @@ impl ServerStreamingService<ExecutePlanRequest> for Execute {
                 Ok(response("first", false)),
                 Err(Status::unavailable("stream disconnected")),
             ])),
+            Scenario::Reject => unreachable!("rejected before streaming"),
         };
         Box::pin(async { Ok(Response::new(responses)) })
     }
@@ -302,7 +313,13 @@ impl ServerStreamingService<ReattachExecuteRequest> for Reattach {
             if state.block_reattach.load(Ordering::SeqCst) {
                 state.reattach_gate.notified().await;
             }
-            let responses: Responses = Box::pin(stream::iter([Ok(response("complete", true))]));
+            let scripted = state.reattach_script.lock().unwrap().pop_front();
+            let responses = match scripted {
+                Some(Err(code)) => return Err(Status::new(code, "reattach sentinel")),
+                Some(Ok(responses)) => responses,
+                None => vec![response("complete", true)],
+            };
+            let responses: Responses = Box::pin(stream::iter(responses.into_iter().map(Ok)));
             Ok(Response::new(responses))
         })
     }
@@ -536,4 +553,46 @@ async fn detached_stream_reattaches_before_releasing_the_execution() {
         drop(stream);
         fixture.assert_release_all_count(1).await;
     }
+}
+
+#[tokio::test]
+async fn initial_failure_releases_the_execution() {
+    // As the reference iterator releases an execution whose first ExecutePlan call fails,
+    // such as for an analysis error, rather than leave it until its detached timeout.
+    let fixture = Fixture::start(Scenario::Reject).await;
+    let result = bounded(fixture.client.execute_plan_reattachable(execute_request())).await;
+    let Err(error) = result else {
+        panic!("the rejected ExecutePlan returned a stream");
+    };
+    let error = error.to_string();
+    assert!(error.contains("plan sentinel"), "unexpected error: {error}");
+    fixture.assert_release_all_count(1).await;
+    assert_identity(&fixture.state.all_releases()[0]);
+}
+
+#[tokio::test]
+async fn each_response_retries_its_reattaches_afresh() {
+    // Each response read has the retries of the policy, as the reference iterator's
+    // `_has_next` makes a `Retrying` of its own: three reattaches that fail once each read
+    // the whole result, though the policy allows two retries.
+    let fixture = Fixture::start(Scenario::Eof).await;
+    {
+        let mut script = fixture.state.reattach_script.lock().unwrap();
+        for id in ["second", "third"] {
+            script.push_back(Err(Code::Unavailable));
+            script.push_back(Ok(vec![response(id, false)]));
+        }
+        script.push_back(Err(Code::Unavailable));
+        script.push_back(Ok(vec![response("complete", true)]));
+    }
+    let mut stream = bounded(fixture.client.execute_plan_reattachable(execute_request()))
+        .await
+        .unwrap();
+    let mut ids = Vec::new();
+    while let Some(response) = bounded(stream.message()).await.unwrap() {
+        ids.push(response.response_id);
+    }
+    assert_eq!(ids, ["first", "second", "third", "complete"]);
+    assert_eq!(fixture.state.reattaches.lock().unwrap().len(), 6);
+    fixture.assert_release_all_count(1).await;
 }
