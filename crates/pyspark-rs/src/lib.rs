@@ -142,6 +142,11 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pipelines::pipeline_define_output, m)?)?;
     m.add_function(wrap_pyfunction!(pipelines::pipeline_define_flow, m)?)?;
     m.add_function(wrap_pyfunction!(
+        pipelines::pipeline_enter_flow_function,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(pipelines::pipeline_exit_flow_function, m)?)?;
+    m.add_function(wrap_pyfunction!(
         pipelines::pipeline_define_auto_cdc_flow,
         m
     )?)?;

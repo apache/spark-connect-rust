@@ -14,7 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""UserDefinedFunction / UDFRegistration under the connect import path."""
-from pyspark.sql.udf import UDFRegistration, UserDefinedFunction
+"""UserDefinedFunction / UDFRegistration under the connect import path, and the
+``_create_udf`` with which ``pyspark.sql.pandas.functions`` creates pandas and Arrow UDFs, as
+in PySpark Connect."""
+from pyspark.sql.udf import UDFRegistration, UserDefinedFunction, _create_udf  # noqa: F401
 
 __all__ = ["UDFRegistration", "UserDefinedFunction"]

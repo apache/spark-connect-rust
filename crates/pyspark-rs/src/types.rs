@@ -212,8 +212,17 @@ impl PyDataType {
         Ok(format!("{}()", slf.get_type().name()?))
     }
 
-    fn simpleString(&self) -> String {
-        self.inner.simple_string()
+    /// As pyspark's `simpleString()`. An array, map or struct of a user-defined type names it
+    /// by the `simpleString()` of its Python class, such as `array<vector>`.
+    fn simpleString(&self, py: Python<'_>) -> PyResult<String> {
+        match &self.inner {
+            DataType::Array { .. } | DataType::Map { .. } | DataType::Struct { .. }
+                if has_udt(&self.inner) =>
+            {
+                simple_string_with_udts(py, &self.inner)
+            }
+            _ => Ok(self.inner.simple_string()),
+        }
     }
 
     // Equality/hashing are defined once here and inherited by every concrete type class
@@ -1168,8 +1177,11 @@ impl PyArrayType {
         ))
     }
     #[pyo3(name = "simpleString")]
-    fn simple_string(&self) -> String {
-        format!("array<{}>", self.element_type.simple_string())
+    fn simple_string(&self, py: Python<'_>) -> PyResult<String> {
+        Ok(format!(
+            "array<{}>",
+            simple_string_with_udts(py, &self.element_type)?
+        ))
     }
     #[pyo3(name = "typeName")]
     fn type_name(&self) -> &'static str {
@@ -1310,12 +1322,12 @@ impl PyMapType {
         ))
     }
     #[pyo3(name = "simpleString")]
-    fn simple_string(&self) -> String {
-        format!(
+    fn simple_string(&self, py: Python<'_>) -> PyResult<String> {
+        Ok(format!(
             "map<{},{}>",
-            self.key_type.simple_string(),
-            self.value_type.simple_string()
-        )
+            simple_string_with_udts(py, &self.key_type)?,
+            simple_string_with_udts(py, &self.value_type)?
+        ))
     }
     #[pyo3(name = "typeName")]
     fn type_name(&self) -> &'static str {
@@ -1362,8 +1374,12 @@ impl PyStructField {
     // itself (a StructField is not a DataType, so these do not go through
     // py_to_data_type). ---
     #[pyo3(name = "simpleString")]
-    fn __sf_simple_string(&self) -> String {
-        self.field.simple_string()
+    fn __sf_simple_string(&self, py: Python<'_>) -> PyResult<String> {
+        Ok(format!(
+            "{}:{}",
+            self.field.name,
+            simple_string_with_udts(py, &self.field.data_type)?
+        ))
     }
     #[pyo3(name = "typeName")]
     fn __sf_type_name(&self) -> PyResult<String> {
@@ -1745,11 +1761,13 @@ impl PyStructType {
     }
 
     #[pyo3(name = "simpleString")]
-    fn simple_string(&self) -> String {
-        DataType::Struct {
-            fields: self.fields.clone(),
-        }
-        .simple_string()
+    fn simple_string(&self, py: Python<'_>) -> PyResult<String> {
+        simple_string_with_udts(
+            py,
+            &DataType::Struct {
+                fields: self.fields.clone(),
+            },
+        )
     }
 
     /// `StructType.typeName()` == "struct".
@@ -2593,6 +2611,58 @@ pub fn parse_datatype_json(py: Python<'_>, json: &str) -> PyResult<Py<PyAny>> {
 /// `StructType`/`IntegerType`/... with the correct MRO — the inverse of
 /// [`py_to_data_type`]. Used by `df.schema`, `StructField.dataType`, and `StructType`
 /// field access so schema introspection yields the proper classes (not a bare `DataType`).
+/// Whether `data_type` has a user-defined type.
+pub(crate) fn has_udt(data_type: &DataType) -> bool {
+    match data_type {
+        DataType::Udt { .. } => true,
+        DataType::Array { element_type, .. } => has_udt(element_type),
+        DataType::Map {
+            key_type,
+            value_type,
+            ..
+        } => has_udt(key_type) || has_udt(value_type),
+        DataType::Struct { fields } => fields.iter().any(|field| has_udt(&field.data_type)),
+        _ => false,
+    }
+}
+
+/// The `simpleString()` of `data_type` as PySpark's: of the Python class of each of its
+/// user-defined types, such as `vector` of a `VectorUDT`, which the Rust core does not know.
+pub(crate) fn simple_string_with_udts(py: Python<'_>, data_type: &DataType) -> PyResult<String> {
+    Ok(match data_type {
+        DataType::Udt { .. } => data_type_to_py(py, data_type)?
+            .bind(py)
+            .call_method0("simpleString")?
+            .extract()?,
+        DataType::Array { element_type, .. } => {
+            format!("array<{}>", simple_string_with_udts(py, element_type)?)
+        }
+        DataType::Map {
+            key_type,
+            value_type,
+            ..
+        } => format!(
+            "map<{},{}>",
+            simple_string_with_udts(py, key_type)?,
+            simple_string_with_udts(py, value_type)?
+        ),
+        DataType::Struct { fields } => {
+            let fields = fields
+                .iter()
+                .map(|field| {
+                    Ok(format!(
+                        "{}:{}",
+                        field.name,
+                        simple_string_with_udts(py, &field.data_type)?
+                    ))
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            format!("struct<{}>", fields.join(","))
+        }
+        _ => data_type.simple_string(),
+    })
+}
+
 pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAny>> {
     macro_rules! obj {
         ($init:expr) => {

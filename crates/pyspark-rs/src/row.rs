@@ -3,6 +3,7 @@
 use pyo3::basic::CompareOp;
 use pyo3::exceptions::PyIndexError;
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBytes, PyDict, PyList, PySlice, PyString, PyTuple};
 use spark_connect::row::{Row, Value};
 
@@ -19,9 +20,21 @@ pub struct PyRow {
     named: bool,
 }
 
+/// The Python functions that turn the values of the fields of collected rows whose types have
+/// user-defined types into what PySpark gives for them, by deserializing those values; None
+/// for the other fields.
+pub(crate) type FieldConverters = std::sync::Arc<Vec<Option<Py<PyAny>>>>;
+
 enum RowData {
-    /// A row that the server returned, whose Spark values become Python values on access.
-    Spark(Row),
+    /// A row that the server returned, whose Spark values become Python values when first
+    /// read, and stay those objects, as a PySpark row is a tuple of them: so the row equals
+    /// itself, with a NaN or a VARIANT value, and keeps its hash.
+    Spark {
+        row: Row,
+        values: PyOnceLock<Py<PyTuple>>,
+        /// The converters of its fields, when one has a user-defined type.
+        converters: Option<FieldConverters>,
+    },
     /// A row made in Python, which holds its Python values as they are, as PySpark's does.
     Python {
         fields: Vec<String>,
@@ -31,8 +44,18 @@ enum RowData {
 
 impl PyRow {
     pub fn new(row: Row) -> Self {
+        Self::with_converters(row, None)
+    }
+
+    /// A row that the server returned, whose values of user-defined types `converters`
+    /// deserializes when they are first read.
+    pub(crate) fn with_converters(row: Row, converters: Option<FieldConverters>) -> Self {
         PyRow {
-            data: RowData::Spark(row),
+            data: RowData::Spark {
+                row,
+                values: PyOnceLock::new(),
+                converters,
+            },
             named: true,
         }
     }
@@ -50,7 +73,7 @@ impl PyRow {
 
     fn fields(&self) -> &[String] {
         match &self.data {
-            RowData::Spark(row) => row.fields(),
+            RowData::Spark { row, .. } => row.fields(),
             RowData::Python { fields, .. } => fields,
         }
     }
@@ -58,13 +81,33 @@ impl PyRow {
     /// The values, as the tuple that a PySpark row is.
     fn values<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         match &self.data {
-            RowData::Spark(row) => {
-                let values = row
-                    .values()
-                    .iter()
-                    .map(|v| value_to_py(py, v))
-                    .collect::<PyResult<Vec<_>>>()?;
-                PyTuple::new(py, values)
+            RowData::Spark {
+                row,
+                values,
+                converters,
+            } => {
+                let values = values.get_or_try_init(py, || -> PyResult<Py<PyTuple>> {
+                    let convert = |i: usize| {
+                        converters
+                            .as_ref()
+                            .and_then(|c| c.get(i))
+                            .and_then(Option::as_ref)
+                    };
+                    let values = row
+                        .values()
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| {
+                            let value = value_to_py(py, v)?;
+                            match convert(i) {
+                                Some(converter) => converter.bind(py).call1((value,)),
+                                None => Ok(value),
+                            }
+                        })
+                        .collect::<PyResult<Vec<_>>>()?;
+                    Ok(PyTuple::new(py, values)?.unbind())
+                })?;
+                Ok(values.bind(py).clone())
             }
             RowData::Python { values, .. } => Ok(values.bind(py).clone()),
         }
@@ -73,7 +116,7 @@ impl PyRow {
     /// The value of the field at `index`, which is in range.
     fn value<'py>(&self, py: Python<'py>, index: usize) -> PyResult<Bound<'py, PyAny>> {
         match &self.data {
-            RowData::Spark(row) => value_to_py(py, row.get_unchecked(index)),
+            RowData::Spark { .. } => self.values(py)?.get_item(index),
             RowData::Python { values, .. } => values.bind(py).get_item(index),
         }
     }
@@ -103,7 +146,7 @@ impl PyRow {
     /// row made in Python as it converts those of a tuple.
     pub(crate) fn to_row(&self, py: Python<'_>) -> PyResult<Row> {
         match &self.data {
-            RowData::Spark(row) => Ok(row.clone()),
+            RowData::Spark { row, .. } => Ok(row.clone()),
             RowData::Python { fields, values } => {
                 let values = values
                     .bind(py)
@@ -346,7 +389,7 @@ impl PyRow {
         names.truncate(fields.len());
         names.extend(fields[names.len()..].iter().cloned());
         match &mut self.data {
-            RowData::Spark(row) => *row = Row::new(names, row.values().to_vec()),
+            RowData::Spark { row, .. } => *row = Row::new(names, row.values().to_vec()),
             RowData::Python { fields, .. } => *fields = names,
         }
         self.named = true;
