@@ -843,6 +843,46 @@ def test_misc_functions():
     assert is_col(F.call_function("my_fn", "a"))
 
 
+def test_column_attributes_are_fields_and_slices_are_substrings_as_pyspark():
+    from pyspark.errors import PySparkAttributeError, PySparkTypeError, PySparkValueError
+    from pyspark.sql import functions as F
+
+    c = F.col("a")
+    # An attribute that a Column does not have is the field of that name.
+    assert repr(c.b) == repr(c["b"])
+    assert repr(c.b.c) == repr(c["b"]["c"])
+    assert repr(c._private) == repr(c["_private"])
+    assert callable(c.alias)
+    for name, condition in (("_jc", "JVM_ATTRIBUTE_NOT_SUPPORTED"), ("__x__", "ATTRIBUTE_NOT_SUPPORTED")):
+        with pytest.raises(PySparkAttributeError) as error:
+            getattr(c, name)
+        assert error.value.getCondition() == condition
+        assert error.value.getMessageParameters() == {"attr_name": name}
+    assert not hasattr(c, "__array__")
+    # A slice is substr(start, stop), whose arguments are of one type, a Column or an int.
+    assert repr(c[1:3]) == "Column<'substr(a, 1, 3)'>"
+    assert repr(c[F.lit(1):F.lit(2)]) == "Column<'substr(a, 1, 2)'>"
+    with pytest.raises(PySparkValueError) as error:
+        c[1:3:2]
+    assert error.value.getCondition() == "SLICE_WITH_STEP"
+    for args, condition, parameters in (
+        ((1, F.lit(2)), "NOT_SAME_TYPE", {
+            "arg_name1": "startPos", "arg_name2": "length", "arg_type1": "int",
+            "arg_type2": "Column"}),
+        ((None, 3), "NOT_SAME_TYPE", {
+            "arg_name1": "startPos", "arg_name2": "length", "arg_type1": "NoneType",
+            "arg_type2": "int"}),
+        (("x", "y"), "NOT_EXPECTED_TYPE", {
+            "expected_type": "Column or int", "arg_name": "startPos", "arg_type": "str"}),
+    ):
+        with pytest.raises(PySparkTypeError) as error:
+            c.substr(*args)
+        assert error.value.getCondition() == condition
+        assert error.value.getMessageParameters() == parameters
+    with pytest.raises(PySparkTypeError, match="NOT_SAME_TYPE"):
+        c[:3]
+
+
 def test_broadcast_type_check():
     from pyspark.sql import functions as F
     from pyspark.errors import PySparkTypeError

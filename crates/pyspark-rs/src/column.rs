@@ -160,8 +160,44 @@ impl PyColumn {
 
     /// Substring extraction (start and length as columns).
     fn substr(&self, startPos: &Bound<'_, PyAny>, length: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
-        let start_col = py_obj_to_column(startPos)?;
-        let length_col = py_obj_to_column(length)?;
+        // As PySpark: the arguments, as values of an Enum, must be of one type, a Column or
+        // an int.
+        let py = startPos.py();
+        let enum_to_value = py.import("pyspark.sql.utils")?.getattr("enum_to_value")?;
+        let start = enum_to_value.call1((startPos,))?;
+        let length = enum_to_value.call1((length,))?;
+        let type_name = |value: &Bound<'_, PyAny>| -> PyResult<String> {
+            Ok(value.get_type().name()?.to_string())
+        };
+        if !start.get_type().is(length.get_type()) {
+            let (start_type, length_type) = (type_name(&start)?, type_name(&length)?);
+            return Err(raise_pyspark(
+                py,
+                "PySparkTypeError",
+                "NOT_SAME_TYPE",
+                &[
+                    ("arg_name1", "startPos"),
+                    ("arg_name2", "length"),
+                    ("arg_type1", &start_type),
+                    ("arg_type2", &length_type),
+                ],
+            ));
+        }
+        if !(length.is_instance_of::<PyColumn>() || length.is_instance_of::<pyo3::types::PyInt>()) {
+            let length_type = type_name(&length)?;
+            return Err(raise_pyspark(
+                py,
+                "PySparkTypeError",
+                "NOT_EXPECTED_TYPE",
+                &[
+                    ("expected_type", "Column or int"),
+                    ("arg_name", "startPos"),
+                    ("arg_type", &length_type),
+                ],
+            ));
+        }
+        let start_col = py_obj_to_column(&start)?;
+        let length_col = py_obj_to_column(&length)?;
         Ok(PyColumn::new(
             self.column.clone().substr(start_col, length_col),
         ))
@@ -238,10 +274,45 @@ impl PyColumn {
         Ok(PyColumn::new(self.column.clone().otherwise(val_col)))
     }
 
-    /// Get item by key/index.
+    /// Get item by key/index, or a slice as `substr(start, stop)`. Mirrors
+    /// `Column.__getitem__`.
     fn __getitem__(&self, key: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
+        if key.is_instance_of::<pyo3::types::PySlice>() {
+            if !key.getattr("step")?.is_none() {
+                return Err(raise_pyspark(
+                    key.py(),
+                    "PySparkValueError",
+                    "SLICE_WITH_STEP",
+                    &[],
+                ));
+            }
+            return self.substr(&key.getattr("start")?, &key.getattr("stop")?);
+        }
         let key_col = py_obj_to_column(key)?;
         Ok(PyColumn::new(self.column.clone().get_item(key_col)))
+    }
+
+    /// An attribute that a Column does not have is the field of that name, as
+    /// `col["name"]`. Mirrors `Column.__getattr__`, which raises for `_jc` and for a name
+    /// that starts with `__`.
+    fn __getattr__(&self, py: Python<'_>, item: &str) -> PyResult<PyColumn> {
+        if item == "_jc" {
+            return Err(raise_pyspark(
+                py,
+                "PySparkAttributeError",
+                "JVM_ATTRIBUTE_NOT_SUPPORTED",
+                &[("attr_name", "_jc")],
+            ));
+        }
+        if item.starts_with("__") {
+            return Err(raise_pyspark(
+                py,
+                "PySparkAttributeError",
+                "ATTRIBUTE_NOT_SUPPORTED",
+                &[("attr_name", item)],
+            ));
+        }
+        self.__getitem__(pyo3::types::PyString::new(py, item).as_any())
     }
 
     /// Equality (==) - returns a Column condition
