@@ -578,6 +578,36 @@ def test_add_artifacts_raises_for_paths_that_pyspark_does_not_upload(tmp_path):
         "arg_names": "'pyfile', 'archive' and/or 'file'", "condition": "True together"}
 
 
+def test_show_checks_its_arguments_as_pyspark():
+    import inspect
+
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import DataFrame
+
+    assert str(inspect.signature(DataFrame.show)) == "(self, /, n=20, truncate=True, vertical=False)"
+    df = _offline_session().range(3)
+    # Raised before any request, as by DataFrame._show_string.
+    for kwargs, name, expected, arg_type in (
+        ({"n": True}, "n", "int", "bool"),
+        ({"n": "3"}, "n", "int", "str"),
+        ({"n": None}, "n", "int", "NoneType"),
+        ({"vertical": 1}, "vertical", "bool", "int"),
+        ({"vertical": None}, "vertical", "bool", "NoneType"),
+        ({"truncate": "x"}, "truncate", "bool", "str"),
+    ):
+        with pytest.raises(PySparkTypeError) as error:
+            df.show(**kwargs)
+        assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+        assert error.value.getMessageParameters() == {
+            "expected_type": expected, "arg_name": name, "arg_type": arg_type}
+    with pytest.raises(TypeError, match=r"^int\(\) argument must be"):
+        df.show(truncate=None)
+    with pytest.raises(TypeError, match=r"^DataFrame\.show\(\) got an unexpected keyword argument 'foo'$"):
+        df.show(foo=1)
+    with pytest.raises(TypeError, match=r"^DataFrame\._show_string\(\) got multiple values for argument 'n'$"):
+        df._show_string(1, n=2)
+
+
 def test_dropin_module_imports():
     # The thin re-export shims import cleanly.
     import pyspark.sql.dataframe  # noqa: F401
