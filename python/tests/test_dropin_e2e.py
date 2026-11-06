@@ -992,6 +992,24 @@ def test_collected_rows_behave_as_pyspark_rows(session):
     assert repr(pickle.loads(pickle.dumps(duplicate))) == "Row(a=1, a=2)"
 
 
+def test_sample_sort_group_by_drop_and_select_expr_as_pyspark(session):
+    # As PySpark's: sample takes a fraction and a seed positionally, sort and groupBy take the
+    # 1-based ordinals of columns, drop takes Columns, and selectExpr a list of expressions.
+    df = session.createDataFrame(
+        [(1, "b", 2.0), (2, "a", 1.0), (3, "c", 3.0)], "x int, k string, v double"
+    )
+    assert [r.k for r in df.sort(2).collect()] == ["a", "b", "c"]
+    assert [r.k for r in df.orderBy(-2).collect()] == ["c", "b", "a"]
+    one_partition = df.coalesce(1).sortWithinPartitions(3, ascending=False)
+    assert [r.v for r in one_partition.collect()] == [3.0, 2.0, 1.0]
+    grouped = df.groupBy(2).agg(F.max("x").alias("m")).orderBy("k").collect()
+    assert grouped == [Row(k="a", m=2), Row(k="b", m=1), Row(k="c", m=3)]
+    assert df.drop(df.x, "k").columns == ["v"]
+    assert df.drop(F.col("v")).columns == ["x", "k"]
+    assert df.selectExpr(["x", "k AS name"]).columns == ["x", "name"]
+    assert df.sample(0.5, 42).collect() == df.sample(fraction=0.5, seed=42).collect()
+
+
 def test_column_attributes_select_struct_fields_and_slices_substrings(session):
     df = session.sql("SELECT named_struct('x', 1, 'y', named_struct('z', 'q')) AS s, 'abcdef' AS t")
     out = df.select(df.s.x, df.s.y.z, F.col("s").x.alias("x2"), df.t[2:3], F.col("t")[F.lit(1):F.lit(2)])

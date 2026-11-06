@@ -391,10 +391,16 @@ impl DataFrame {
 
     /// Drop columns.
     pub fn drop(&self, columns: Vec<&str>) -> DataFrame {
-        let col_names = columns.iter().map(|s| s.to_string()).collect();
+        self.drop_columns(Vec::new(), columns)
+    }
+
+    /// Drop `columns` and the columns of `column_names`, mirroring `pyspark.sql.DataFrame.drop`
+    /// of Columns and column names: a Column is sent as its expression, and a name as it is.
+    pub fn drop_columns(&self, columns: Vec<Column>, column_names: Vec<&str>) -> DataFrame {
         let plan = LogicalPlan::Drop {
             input: Arc::clone(&self.plan),
-            columns: col_names,
+            columns: column_names.iter().map(|s| s.to_string()).collect(),
+            expressions: columns.iter().map(|c| c.expression().clone()).collect(),
         };
         DataFrame::new(self.session.clone(), plan)
     }

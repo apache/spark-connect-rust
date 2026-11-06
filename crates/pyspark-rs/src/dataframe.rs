@@ -159,6 +159,145 @@ impl PyDataFrame {
     pub fn new(dataframe: DataFrame) -> Self {
         PyDataFrame { dataframe }
     }
+
+    /// The column at the 0-based index `index`, as PySpark's `df[index]`: `col` of the name of
+    /// the column at that index of `columns`, of Python's list indexing, and of the origin of
+    /// `col`.
+    fn column_at(&self, py: Python<'_>, index: i64) -> PyResult<spark_connect::column::Column> {
+        let columns = self.columns(py)?;
+        let name: String = PyList::new(py, columns)?
+            .as_any()
+            .get_item(index)?
+            .extract()?;
+        let _origin = crate::origin::with_origin("col");
+        Ok(spark_connect::functions::col(&name))
+    }
+
+    /// The grouping columns of `groupBy`, `rollup`, `cube` and `groupingSets`, as PySpark's
+    /// `_to_cols` of ordinals: Columns, column names and the 1-based ordinals of columns, or
+    /// a list or tuple of them.
+    fn grouping_columns(
+        &self,
+        py: Python<'_>,
+        cols: Vec<Bound<'_, PyAny>>,
+        arg_name: &str,
+    ) -> PyResult<Vec<spark_connect::column::Column>> {
+        use pyo3::types::{PyBool, PyString};
+        unwrap_sequence(cols)?
+            .iter()
+            .map(|c| {
+                if let Ok(column) = c.extract::<PyRef<'_, PyColumn>>() {
+                    return Ok(column.column.clone());
+                }
+                if c.is_instance_of::<PyString>() {
+                    // As PySpark's `F._to_col`, by `col`, of its origin.
+                    let _origin = crate::origin::with_origin("col");
+                    return Ok(spark_connect::functions::col(&c.extract::<String>()?));
+                }
+                if c.is_instance_of::<PyInt>() && !c.is_instance_of::<PyBool>() {
+                    let ordinal: i64 = c.extract()?;
+                    if ordinal < 1 {
+                        return Err(crate::column::raise_pyspark(
+                            py,
+                            "PySparkIndexError",
+                            "INDEX_NOT_POSITIVE",
+                            &[("index", &ordinal.to_string())],
+                        ));
+                    }
+                    return self.column_at(py, ordinal - 1);
+                }
+                Err(not_expected_type(c, arg_name, "Column, int or str"))
+            })
+            .collect()
+    }
+
+    /// The sort orders of `sort`, `orderBy` and `sortWithinPartitions`, as PySpark's
+    /// `_preapare_cols_for_sort`: Columns, column names and the 1-based ordinals of columns,
+    /// descending for a negative one, or a list or tuple of them, each descending for a
+    /// false `ascending`, or for a false one of a list of them.
+    fn sort_columns(
+        &self,
+        py: Python<'_>,
+        cols: Vec<Bound<'_, PyAny>>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Vec<spark_connect::expression::Expression>> {
+        use pyo3::types::{PyBool, PyString};
+        if cols.is_empty() {
+            return Err(crate::column::raise_pyspark(
+                py,
+                "PySparkValueError",
+                "CANNOT_BE_EMPTY",
+                &[("item", "cols")],
+            ));
+        }
+        let mut columns = Vec::new();
+        for c in unwrap_sequence(cols)? {
+            let column = if c.is_instance_of::<PyInt>() && !c.is_instance_of::<PyBool>() {
+                let ordinal: i64 = c.extract()?;
+                match ordinal {
+                    0 => {
+                        return Err(crate::column::raise_pyspark(
+                            py,
+                            "PySparkIndexError",
+                            "ZERO_INDEX",
+                            &[],
+                        ))
+                    }
+                    ordinal if ordinal > 0 => self.column_at(py, ordinal - 1)?,
+                    ordinal => self.column_at(py, -ordinal - 1)?.desc(),
+                }
+            } else if let Ok(column) = c.extract::<PyRef<'_, PyColumn>>() {
+                column.column.clone()
+            } else if c.is_instance_of::<PyString>() {
+                // As PySpark's `F._to_col`, by `col`, of its origin.
+                let _origin = crate::origin::with_origin("col");
+                spark_connect::functions::col(&c.extract::<String>()?)
+            } else {
+                return Err(not_expected_type(&c, "col", "Column, int or str"));
+            };
+            columns.push(column);
+        }
+        let ascending = match kwargs {
+            Some(kwargs) => kwargs.get_item("ascending")?,
+            None => None,
+        };
+        if let Some(ascending) = ascending {
+            if ascending.is_instance_of::<PyInt>() {
+                if !ascending.is_truthy()? {
+                    columns = columns.into_iter().map(|c| c.desc()).collect();
+                }
+            } else if ascending.is_instance_of::<PyList>() {
+                // As PySpark's zip of them, which keeps a column for each flag.
+                let flags: Vec<bool> = ascending
+                    .try_iter()?
+                    .map(|flag| flag?.is_truthy())
+                    .collect::<PyResult<_>>()?;
+                columns = columns
+                    .into_iter()
+                    .zip(flags)
+                    .map(|(c, asc)| if asc { c } else { c.desc() })
+                    .collect();
+            } else {
+                return Err(not_expected_type(
+                    &ascending,
+                    "ascending",
+                    "Column, int or str",
+                ));
+            }
+        }
+        Ok(columns.iter().map(|c| c.expression().clone()).collect())
+    }
+}
+
+/// The arguments of a method of `*cols`, the elements of a single list or tuple of them, as
+/// PySpark takes them.
+fn unwrap_sequence(cols: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<Bound<'_, PyAny>>> {
+    match cols.as_slice() {
+        [only] if only.is_instance_of::<PyList>() || only.is_instance_of::<PyTuple>() => {
+            only.try_iter()?.collect()
+        }
+        _ => Ok(cols),
+    }
 }
 
 /// PySpark's `NOT_EXPECTED_TYPE` error of the argument `name`, `value`, which should be of
@@ -254,48 +393,6 @@ pub(crate) fn to_column_list(
     Ok(cols)
 }
 
-/// Build sort-order expressions for sort/orderBy/sortWithinPartitions, honoring an
-/// optional `ascending` kwarg (a bool applied to all columns, or a per-column list of
-/// bools/ints). Mirrors reference pyspark, which wraps each column with asc()/desc()
-/// when `ascending` is given; without it, columns are used as-is.
-fn sort_order_exprs(
-    columns: Vec<spark_connect::column::Column>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Vec<spark_connect::expression::Expression>> {
-    let ascending = match kwargs {
-        Some(kw) => kw.get_item("ascending")?,
-        None => None,
-    };
-    let Some(ascending) = ascending else {
-        return Ok(columns.iter().map(|c| c.expression().clone()).collect());
-    };
-    let flags: Vec<bool> = if let Ok(b) = ascending.extract::<bool>() {
-        vec![b; columns.len()]
-    } else if let Ok(i) = ascending.extract::<i64>() {
-        vec![i != 0; columns.len()]
-    } else if let Ok(list) = ascending.extract::<Vec<bool>>() {
-        list
-    } else if let Ok(list) = ascending.extract::<Vec<i64>>() {
-        list.into_iter().map(|i| i != 0).collect()
-    } else {
-        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-            "ascending must be a bool, an int, or a list of bools/ints",
-        ));
-    };
-    if flags.len() != columns.len() {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-            "the list length of ascending ({}) must equal the number of sort columns ({})",
-            flags.len(),
-            columns.len()
-        )));
-    }
-    Ok(columns
-        .into_iter()
-        .zip(flags)
-        .map(|(c, asc)| (if asc { c.asc() } else { c.desc() }).expression().clone())
-        .collect())
-}
-
 /// Map a pyspark `how` string to a JoinType (shared by join / lateralJoin).
 fn parse_join_type(how: &str) -> PyResult<JoinType> {
     Ok(match how.to_lowercase().as_str() {
@@ -333,14 +430,29 @@ impl PyDataFrame {
         Ok(PyDataFrame::new(self.dataframe.select(columns)))
     }
 
-    /// Select using SQL expressions.
+    /// Select using SQL expressions, as PySpark's `DataFrame.selectExpr`: strings, or lists of
+    /// them.
     #[pyo3(signature = (*expr))]
-    fn selectExpr(&self, _py: Python<'_>, expr: Vec<String>) -> PyDataFrame {
-        let columns: Vec<_> = expr
-            .iter()
-            .map(|e| spark_connect::functions::expr(e))
-            .collect();
-        PyDataFrame::new(self.dataframe.select(columns))
+    fn selectExpr(&self, expr: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        let expr = match expr.as_slice() {
+            [only] if only.is_instance_of::<PyList>() => {
+                only.try_iter()?.collect::<PyResult<Vec<_>>>()?
+            }
+            _ => expr,
+        };
+        let mut columns = Vec::new();
+        for element in &expr {
+            if element.is_instance_of::<pyo3::types::PyString>() {
+                columns.push(spark_connect::functions::expr(
+                    &element.extract::<String>()?,
+                ));
+            } else {
+                for e in element.try_iter()? {
+                    columns.push(spark_connect::functions::expr(&e?.extract::<String>()?));
+                }
+            }
+        }
+        Ok(PyDataFrame::new(self.dataframe.select(columns)))
     }
 
     /// Filter rows by a Column condition or a SQL-string condition.
@@ -462,11 +574,32 @@ impl PyDataFrame {
         ))
     }
 
-    /// Drop columns.
+    /// Drop columns, of Columns or column names, as PySpark's `DataFrame.drop`.
     #[pyo3(signature = (*cols))]
-    fn drop(&self, _py: Python<'_>, cols: Vec<String>) -> PyDataFrame {
-        let col_refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
-        PyDataFrame::new(self.dataframe.drop(col_refs))
+    fn drop(&self, py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        let (mut columns, mut names) = (Vec::new(), Vec::new());
+        for column in &cols {
+            if let Ok(column) = column.extract::<PyRef<'_, PyColumn>>() {
+                columns.push(column.column.clone());
+            } else if column.is_instance_of::<pyo3::types::PyString>() {
+                names.push(column.extract::<String>()?);
+            } else {
+                return Err(crate::column::raise_pyspark(
+                    py,
+                    "PySparkTypeError",
+                    "NOT_EXPECTED_TYPE",
+                    &[
+                        ("expected_type", "Column or str"),
+                        ("arg_name", "cols"),
+                        ("arg_type", "tuple"),
+                    ],
+                ));
+            }
+        }
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        Ok(PyDataFrame::new(
+            self.dataframe.drop_columns(columns, names),
+        ))
     }
 
     /// Limit the number of rows.
@@ -503,7 +636,7 @@ impl PyDataFrame {
         cols: Vec<Bound<'_, PyAny>>,
         kwargs: Option<Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
-        let exprs = sort_order_exprs(to_column_list(cols)?, kwargs.as_ref())?;
+        let exprs = self.sort_columns(_py, cols, kwargs.as_ref())?;
         Ok(PyDataFrame::new(self.dataframe.sort(exprs)))
     }
 
@@ -515,7 +648,7 @@ impl PyDataFrame {
         cols: Vec<Bound<'_, PyAny>>,
         kwargs: Option<Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
-        let exprs = sort_order_exprs(to_column_list(cols)?, kwargs.as_ref())?;
+        let exprs = self.sort_columns(_py, cols, kwargs.as_ref())?;
         Ok(PyDataFrame::new(self.dataframe.order_by(exprs)))
     }
 
@@ -806,24 +939,26 @@ impl PyDataFrame {
 
     /// Group by columns for aggregation.
     #[pyo3(signature = (*cols))]
-    fn groupBy(&self, _py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyGroupedData> {
-        let columns = to_column_list(cols)?;
+    fn groupBy(&self, py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyGroupedData> {
+        let columns = self.grouping_columns(py, cols, "cols")?;
         Ok(PyGroupedData::new(self.dataframe.group_by(columns)))
     }
 
     /// Rollup multi-dimensional aggregation.
     #[pyo3(signature = (*cols))]
-    fn rollup(&self, _py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyGroupedData> {
+    fn rollup(&self, py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyGroupedData> {
         Ok(PyGroupedData::new(
-            self.dataframe.rollup(to_column_list(cols)?),
+            self.dataframe
+                .rollup(self.grouping_columns(py, cols, "cols")?),
         ))
     }
 
     /// Cube multi-dimensional aggregation.
     #[pyo3(signature = (*cols))]
-    fn cube(&self, _py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyGroupedData> {
+    fn cube(&self, py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyGroupedData> {
         Ok(PyGroupedData::new(
-            self.dataframe.cube(to_column_list(cols)?),
+            self.dataframe
+                .cube(self.grouping_columns(py, cols, "cols")?),
         ))
     }
 
@@ -836,13 +971,14 @@ impl PyDataFrame {
     #[allow(unused_variables)]
     fn grouping_sets(
         &self,
+        py: Python<'_>,
         groupingSets: Vec<Vec<Bound<'_, PyAny>>>,
         cols: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<PyGroupedData> {
         let mut out: Vec<Vec<spark_connect::column::Column>> =
             Vec::with_capacity(groupingSets.len());
         for s in groupingSets {
-            out.push(to_column_list(s)?);
+            out.push(self.grouping_columns(py, s, "groupingSets")?);
         }
         Ok(PyGroupedData::new(self.dataframe.grouping_sets(out)))
     }
@@ -890,7 +1026,7 @@ impl PyDataFrame {
         cols: Vec<Bound<'_, PyAny>>,
         kwargs: Option<Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
-        let exprs = sort_order_exprs(to_column_list(cols)?, kwargs.as_ref())?;
+        let exprs = self.sort_columns(_py, cols, kwargs.as_ref())?;
         Ok(PyDataFrame::new(
             self.dataframe.sort_within_partitions(exprs),
         ))
@@ -1680,43 +1816,61 @@ impl PyDataFrame {
         rows_to_py(py, rows, schema.as_ref())
     }
 
-    /// Sample a fraction of rows. Mirrors `DataFrame.sample(withReplacement=None,
-    /// fraction=None, seed=None)` including the legacy positional form
-    /// `sample(fraction)` (where the first positional arg is the fraction).
+    /// Sample a fraction of rows, as PySpark's `DataFrame.sample(withReplacement=None,
+    /// fraction=None, seed=None)`, which takes `sample(fraction[, seed])` positionally as
+    /// well: a bool and a float, a float, or a float and the seed.
     #[pyo3(signature = (withReplacement=None, fraction=None, seed=None))]
     fn sample(
         &self,
+        py: Python<'_>,
         withReplacement: Option<&Bound<'_, PyAny>>,
-        fraction: Option<f64>,
-        seed: Option<i64>,
+        fraction: Option<&Bound<'_, PyAny>>,
+        seed: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        // Resolve the (withReplacement, fraction) overloads exactly like pyspark:
-        // if the first positional is a float and no fraction was given, it IS the
-        // fraction (legacy `sample(0.5)`); otherwise it's the bool withReplacement.
-        let (replace, frac) = match (withReplacement, fraction) {
-            (Some(w), None) => {
-                if let Ok(f) = w.extract::<f64>() {
-                    (false, f) // legacy sample(fraction)
-                } else {
-                    let b = w.extract::<bool>().map_err(|_| {
-                        PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                            "withReplacement must be a bool, or pass fraction as a float",
-                        )
-                    })?;
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                        "sample requires a fraction (got withReplacement={b} with no fraction)",
-                    )));
-                }
+        use pyo3::types::{PyBool, PyFloat};
+        let int = |value: &Bound<'_, PyAny>| -> PyResult<i64> {
+            py.import("builtins")?
+                .getattr("int")?
+                .call1((value,))?
+                .extract()
+        };
+        let (replace, frac, seed) = match (withReplacement, fraction) {
+            (Some(w), Some(f)) if w.is_instance_of::<PyBool>() && f.is_instance_of::<PyFloat>() => {
+                (w.extract()?, f.extract()?, seed.map(int).transpose()?)
             }
-            (Some(w), Some(f)) => {
-                let b = w.extract::<bool>().unwrap_or(false);
-                (b, f)
+            (None, Some(f)) if f.is_instance_of::<PyFloat>() => {
+                (false, f.extract()?, seed.map(int).transpose()?)
             }
-            (None, Some(f)) => (false, f),
-            (None, None) => {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "sample requires a fraction",
-                ))
+            // `sample(fraction[, seed])`: the fraction is the first argument, and the seed the
+            // second.
+            (Some(w), f) if w.is_instance_of::<PyFloat>() => {
+                (false, w.extract()?, f.map(int).transpose()?)
+            }
+            _ => {
+                let type_name = |value: Option<&Bound<'_, PyAny>>| -> PyResult<String> {
+                    Ok(match value {
+                        Some(value) => value.get_type().name()?.to_string(),
+                        None => "NoneType".to_string(),
+                    })
+                };
+                let arg_types = [withReplacement, fraction, seed]
+                    .into_iter()
+                    .map(type_name)
+                    .collect::<PyResult<Vec<_>>>()?
+                    .join(", ");
+                return Err(crate::column::raise_pyspark(
+                    py,
+                    "PySparkTypeError",
+                    "NOT_EXPECTED_TYPE",
+                    &[
+                        ("expected_type", "bool, float or int"),
+                        (
+                            "arg_name",
+                            "withReplacement (optional), fraction (required) and seed (optional)",
+                        ),
+                        ("arg_type", &arg_types),
+                    ],
+                ));
             }
         };
         Ok(PyDataFrame::new(
@@ -1853,6 +2007,8 @@ impl PyDataFrame {
                 ],
             ));
         };
+        // As PySpark's `F.col(self.columns[item])`, of the origin of `col`.
+        let _origin = crate::origin::with_origin("col");
         PyColumn::new(spark_connect::functions::col(&name)).into_py_any(py)
     }
 
