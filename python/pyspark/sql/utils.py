@@ -16,10 +16,16 @@
 #
 """Small subset of pyspark.sql.utils needed by the drop-in and vendored modules."""
 
+from enum import Enum
 from typing import Any, Union, TYPE_CHECKING, Sequence
 
 if TYPE_CHECKING:
     from pyspark.pandas._typing import IndexOpsLike, SeriesOrIndex
+
+
+def enum_to_value(value: Any) -> Any:
+    """Convert an Enum to its value if it is not None."""
+    return enum_to_value(value.value) if value is not None and isinstance(value, Enum) else value
 
 
 def is_remote() -> bool:

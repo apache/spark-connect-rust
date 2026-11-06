@@ -21,6 +21,8 @@ thiserror.workspace = true
 tokio.workspace = true
 futures.workspace = true
 serde_json = "1.0"
+# Local time for the reprs of timestamp literals, as Python's `datetime.fromtimestamp`.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 uuid.workspace = true
 
 # Optional: only pulled in by the `wasm-udf` feature.
