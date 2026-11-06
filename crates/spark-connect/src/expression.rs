@@ -1431,7 +1431,7 @@ fn python_bytes_repr(bytes: &[u8]) -> String {
 }
 
 /// Python's `repr` of a string, as a list shows its strings.
-fn python_str_repr(value: &str) -> String {
+pub(crate) fn python_str_repr(value: &str) -> String {
     let quote = python_quote(value.contains('\''), value.contains('"'));
     let mut out = String::new();
     out.push(quote);

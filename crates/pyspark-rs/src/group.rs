@@ -8,7 +8,6 @@ use crate::dataframe::{
     build_map_udf, infer_group_map_eval_type, validate_map_function, PyDataFrame,
 };
 use crate::errors::ResultExt;
-use crate::functions::to_column;
 
 /// Python wrapper for Spark GroupedData.
 #[pyclass(name = "GroupedData", module = "pyspark.sql.group")]
@@ -22,12 +21,43 @@ impl PyGroupedData {
     }
 }
 
+impl PyGroupedData {
+    /// `sum`, `avg`, `mean`, `min` and `max`, as PySpark's `_numeric_agg`: of column names,
+    /// which it asserts, every numeric column without any, and `NOT_NUMERIC_COLUMNS` for a
+    /// column that is not numeric.
+    fn numeric_agg(
+        &self,
+        py: Python<'_>,
+        function: &str,
+        cols: Vec<Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let mut names = Vec::with_capacity(cols.len());
+        for col in &cols {
+            if !col.is_instance_of::<pyo3::types::PyString>() {
+                return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+            }
+            names.push(col.extract::<String>()?);
+        }
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let grouped = &self.grouped_data;
+        py.detach(|| grouped.numeric_agg(function, refs).map_err(Box::new))
+            .to_pyerr()
+            .map(PyDataFrame::new)
+    }
+}
+
 #[pymethods]
 impl PyGroupedData {
     /// Aggregate with expressions (accepts Column objects), or the dict form
     /// `agg({"col": "aggfunc"})` (PySpark parity), e.g. `agg({"age": "max"})`.
     #[pyo3(signature = (*exprs))]
     fn agg(&self, _py: Python<'_>, exprs: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        // As PySpark's, which asserts that it has expressions.
+        if exprs.is_empty() {
+            return Err(pyo3::exceptions::PyAssertionError::new_err(
+                "exprs should not be empty",
+            ));
+        }
         // Dict form: {column_name: aggregate_function_name} -> func(col(name)) per entry.
         if exprs.len() == 1 {
             if let Ok(dict) = exprs[0].cast::<pyo3::types::PyDict>() {
@@ -51,10 +81,15 @@ impl PyGroupedData {
                 return Ok(PyDataFrame::new(df));
             }
         }
+        // As PySpark's, which asserts that the expressions are Columns.
         let mut agg_exprs = vec![];
         for col in exprs {
-            let rust_col = to_column(&col)?;
-            agg_exprs.push(rust_col.expression().clone());
+            let Ok(col) = col.extract::<PyRef<'_, crate::column::PyColumn>>() else {
+                return Err(pyo3::exceptions::PyAssertionError::new_err(
+                    "all exprs should be Column",
+                ));
+            };
+            agg_exprs.push(col.column.expression().clone());
         }
         let df = self.grouped_data.agg(agg_exprs);
         Ok(PyDataFrame::new(df))
@@ -89,62 +124,32 @@ impl PyGroupedData {
 
     /// Sum values in each group.
     #[pyo3(signature = (*cols))]
-    fn sum(&self, _py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
-        let col_names: Vec<String> = cols
-            .iter()
-            .map(|c| c.extract::<String>())
-            .collect::<PyResult<Vec<_>>>()?;
-        let col_refs: Vec<&str> = col_names.iter().map(|s| s.as_str()).collect();
-        let df = self.grouped_data.sum(col_refs);
-        Ok(PyDataFrame::new(df))
+    fn sum(&self, py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        self.numeric_agg(py, "sum", cols)
     }
 
     /// Average values in each group.
     #[pyo3(signature = (*cols))]
-    fn avg(&self, _py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
-        let col_names: Vec<String> = cols
-            .iter()
-            .map(|c| c.extract::<String>())
-            .collect::<PyResult<Vec<_>>>()?;
-        let col_refs: Vec<&str> = col_names.iter().map(|s| s.as_str()).collect();
-        let df = self.grouped_data.avg(col_refs);
-        Ok(PyDataFrame::new(df))
+    fn avg(&self, py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        self.numeric_agg(py, "avg", cols)
     }
 
     /// Minimum values in each group.
     #[pyo3(signature = (*cols))]
-    fn min(&self, _py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
-        let col_names: Vec<String> = cols
-            .iter()
-            .map(|c| c.extract::<String>())
-            .collect::<PyResult<Vec<_>>>()?;
-        let col_refs: Vec<&str> = col_names.iter().map(|s| s.as_str()).collect();
-        let df = self.grouped_data.min(col_refs);
-        Ok(PyDataFrame::new(df))
+    fn min(&self, py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        self.numeric_agg(py, "min", cols)
     }
 
     /// Maximum values in each group.
     #[pyo3(signature = (*cols))]
-    fn max(&self, _py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
-        let col_names: Vec<String> = cols
-            .iter()
-            .map(|c| c.extract::<String>())
-            .collect::<PyResult<Vec<_>>>()?;
-        let col_refs: Vec<&str> = col_names.iter().map(|s| s.as_str()).collect();
-        let df = self.grouped_data.max(col_refs);
-        Ok(PyDataFrame::new(df))
+    fn max(&self, py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        self.numeric_agg(py, "max", cols)
     }
 
     /// Mean (alias for avg).
     #[pyo3(signature = (*cols))]
-    fn mean(&self, _py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
-        let col_names: Vec<String> = cols
-            .iter()
-            .map(|c| c.extract::<String>())
-            .collect::<PyResult<Vec<_>>>()?;
-        let col_refs: Vec<&str> = col_names.iter().map(|s| s.as_str()).collect();
-        let df = self.grouped_data.mean(col_refs);
-        Ok(PyDataFrame::new(df))
+    fn mean(&self, py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        self.numeric_agg(py, "avg", cols)
     }
 
     /// `GroupedData.applyInPandas`.

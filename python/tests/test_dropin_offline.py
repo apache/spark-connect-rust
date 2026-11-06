@@ -5719,6 +5719,52 @@ def test_schema_cache_derived_and_new_plans_resolve_independently(mock_connect):
     assert df.columns == ["id"]
 
 
+def test_grouped_aggregations_as_pyspark(mock_connect):
+    # As PySpark's GroupedData: count is named count, sum, avg, mean, min and max aggregate
+    # every numeric column without columns, and the aggregations check their arguments.
+    from pyspark.errors import PySparkTypeError, PySparkValueError
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    df = spark.range(1)
+
+    def aggregations(dataframe):
+        # ExecutePlanRequest.plan=3, Plan.root=1, Relation.aggregate=9,
+        # Aggregate.aggregate_expressions=4.
+        dataframe.collect()
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        return parse_message(parse_message(plan)[9][0])[4]
+
+    # Expression.alias=6: Alias.expr=1, name=2; Expression.unresolved_function=3:
+    # UnresolvedFunction.function_name=1, arguments=2.
+    (count,) = aggregations(df.groupBy("id").count())
+    alias = parse_message(parse_message(count)[6][0])
+    assert alias[2] == [b"count"]
+    assert parse_message(parse_message(alias[1][0])[3][0])[1] == [b"count"]
+    for aggregate, function in ((lambda g: g.sum(), b"sum"), (lambda g: g.mean(), b"avg"),
+                                (lambda g: g.max("id"), b"max")):
+        (expression,) = aggregations(aggregate(df.groupBy("id")))
+        assert parse_message(parse_message(expression)[3][0])[1] == [function]
+    (expression,) = aggregations(df.agg({"id": "min"}))
+    assert parse_message(parse_message(expression)[3][0])[1] == [b"min"]
+
+    with pytest.raises(PySparkTypeError) as error:
+        df.groupBy("id").sum("nope")
+    assert error.value.getCondition() == "NOT_NUMERIC_COLUMNS"
+    assert error.value.getMessageParameters() == {"invalid_columns": "['nope']"}
+    with pytest.raises(PySparkValueError) as error:
+        df.agg()
+    assert error.value.getCondition() == "CANNOT_BE_EMPTY"
+    for call, message in ((lambda: df.groupBy("id").agg(), "exprs should not be empty"),
+                          (lambda: df.groupBy("id").agg("id"), "all exprs should be Column"),
+                          (lambda: df.agg("id"), "all exprs should be Expression"),
+                          (lambda: df.groupBy("id").sum(1), "")):
+        with pytest.raises(AssertionError) as error:
+            call()
+        assert str(error.value) == message
+    assert df.groupBy("id").agg(F.count("id")) is not None
+
+
 @pytest.mark.parametrize("transform", [
     pytest.param(lambda df: df.filter("id > 0"), id="filter"),
     pytest.param(lambda df: df.limit(2), id="limit"),

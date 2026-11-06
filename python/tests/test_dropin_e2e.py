@@ -538,6 +538,24 @@ def test_create_dataframe_from_empty_arrow_table(session):
 _Pair = namedtuple("_Pair", ["x", "y"])
 
 
+def test_grouped_aggregations_name_and_take_columns_as_pyspark(session):
+    # As PySpark's: count is named count, the numeric aggregations of no columns aggregate
+    # every numeric column, and df.agg takes a dict.
+    from pyspark.errors import PySparkTypeError
+
+    df = session.createDataFrame([(1, "b", 2.0), (2, "b", 3.0)], "x int, k string, v double")
+    grouped = df.groupBy("k")
+    assert grouped.count().columns == ["k", "count"]
+    assert grouped.count().orderBy("count").collect() == [Row(k="b", count=2)]
+    assert grouped.sum().collect() == [Row(k="b", **{"sum(x)": 3, "sum(v)": 5.0})]
+    assert grouped.min().columns == ["k", "min(x)", "min(v)"]
+    assert df.groupBy().count().collect() == [Row(count=2)]
+    assert df.agg({"x": "max"}).collect() == [Row(**{"max(x)": 2})]
+    with pytest.raises(PySparkTypeError) as error:
+        grouped.avg("k")
+    assert error.value.getMessageParameters() == {"invalid_columns": "['k']"}
+
+
 @pytest.mark.parametrize(
     "data, schema, columns, rows",
     [
