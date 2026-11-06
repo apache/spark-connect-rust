@@ -860,7 +860,8 @@ for name, obj in _export_globals:
         name not in ['inspect', 'importlib', '_gen_module', 'spec', 'os']):
         __all__.append(name)
         _exported_names.add(name)
-del _export_globals, _exported_names
+# Leave no loop variables behind, as PySpark has no `functions.name` or `functions.obj`.
+del _export_globals, _exported_names, name, obj
 
 # Expose the `builtin` submodule at ``pyspark.sql.functions.builtin``. Upstream v4.2.0 splits
 # functions into a package whose ``builtin`` submodule holds the actual functions and whose

@@ -410,8 +410,7 @@ def test_functions_exports_fresh_process():
         import inspect
         import sys
         from pyspark.sql import functions as F
-        assert F.name == "inspect"
-        assert F.obj is inspect
+        assert not hasattr(F, "name") and not hasattr(F, "obj")
 
         initial = ["col", "lit", "expr", "sum", "count", "avg", "max", "min",
                    "when", "udf", "pandas_udf"]
