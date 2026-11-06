@@ -273,6 +273,38 @@ def test_add_artifacts_reach_udfs_as_pyspark(session, tmp_path):
     assert session.range(1).select(read("id")).first()[0] == "from the module|file content|inside"
 
 
+def test_execution_info_is_that_of_each_dataframe_as_pyspark(session):
+    a = session.range(3)
+    assert a.executionInfo is None
+    a.collect()
+    assert a.executionInfo is not None
+    # Another DataFrame, and one that an action runs derived from it, have none.
+    b = session.range(5)
+    b.count()
+    b.first()
+    assert b.executionInfo is None and a.select("id").executionInfo is None
+    for run in (
+        lambda df: df.toArrow(),
+        lambda df: df.toPandas(),
+        lambda df: df.createOrReplaceTempView("execution_info_view"),
+        lambda df: df.write.mode("overwrite").format("noop").save(),
+    ):
+        df = session.range(2)
+        run(df)
+        assert df.executionInfo is not None
+        assert df.executionInfo.operation_id != a.executionInfo.operation_id
+
+
+def test_catalog_and_stream_start_errors_carry_their_operation_id(session):
+    for run in (
+        lambda: session.catalog.setCurrentDatabase("no_such_database_60960"),
+        lambda: session.readStream.format("rate").load().writeStream.format("no_such_sink_60960").start(),
+    ):
+        with pytest.raises(Exception) as error:
+            run()
+        assert isinstance(error.value.operation_id, str) and error.value.operation_id
+
+
 def test_create_dataframe_from_empty_arrow_table(session):
     empty = pa.table({"a": pa.array([], pa.int64()), "b": pa.array([], pa.string())})
     df = session.createDataFrame(empty, "a long, b string")

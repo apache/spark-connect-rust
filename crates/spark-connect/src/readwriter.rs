@@ -9,7 +9,7 @@ use spark_connect_core::error::Result;
 use spark_connect_proto as proto;
 
 use crate::column::Column;
-use crate::dataframe::{build_input_relation, execute_command, DataFrame};
+use crate::dataframe::{build_input_relation, DataFrame};
 use crate::plan::LogicalPlan;
 use crate::session::SparkSession;
 
@@ -358,6 +358,7 @@ pub struct DataFrameWriter {
     bucket_cols: Vec<String>,
     sort_cols: Vec<String>,
     num_buckets: Option<i32>,
+    execution: Option<crate::dataframe::ExecutionSlot>,
 }
 
 impl DataFrameWriter {
@@ -379,7 +380,24 @@ impl DataFrameWriter {
             bucket_cols: vec![],
             sort_cols: vec![],
             num_buckets: None,
+            execution: None,
         }
+    }
+
+    /// Keep the information of this write's execution as the last execution of its
+    /// DataFrame, as PySpark's writers report it to theirs.
+    pub(crate) fn recording_into(mut self, execution: crate::dataframe::ExecutionSlot) -> Self {
+        self.execution = Some(execution);
+        self
+    }
+
+    /// Run the command of the write, keeping its execution as its DataFrame's last one.
+    fn run(&self, command_type: proto::command::CommandType) -> Result<()> {
+        let (_, info) = crate::dataframe::execute_command_with_info(&self.session, command_type)?;
+        if let Some(execution) = &self.execution {
+            *execution.lock().unwrap() = Some(info);
+        }
+        Ok(())
     }
 
     /// Cluster the output by the given columns (liquid clustering).
@@ -466,20 +484,14 @@ impl DataFrameWriter {
         table.save_method = method.to_proto();
         let op =
             self.build_write_operation(Some(proto::write_operation::SaveType::Table(table)))?;
-        execute_command(
-            &self.session,
-            proto::command::CommandType::WriteOperation(op),
-        )
+        self.run(proto::command::CommandType::WriteOperation(op))
     }
 
     /// Save the DataFrame to a file path (or to a path-less sink such as `noop`).
     pub fn save(self, path: Option<&str>) -> Result<()> {
         let save_type = path.map(|p| proto::write_operation::SaveType::Path(p.to_string()));
         let op = self.build_write_operation(save_type)?;
-        execute_command(
-            &self.session,
-            proto::command::CommandType::WriteOperation(op),
-        )
+        self.run(proto::command::CommandType::WriteOperation(op))
     }
 
     /// Save the DataFrame as a managed table.
@@ -542,6 +554,7 @@ pub struct DataFrameWriterV2 {
     table_properties: HashMap<String, String>,
     partition_cols: Vec<Column>,
     cluster_cols: Vec<String>,
+    execution: Option<crate::dataframe::ExecutionSlot>,
 }
 
 impl DataFrameWriterV2 {
@@ -565,7 +578,24 @@ impl DataFrameWriterV2 {
             table_properties: HashMap::new(),
             partition_cols: vec![],
             cluster_cols: vec![],
+            execution: None,
         }
+    }
+
+    /// Keep the information of this write's execution as the last execution of its
+    /// DataFrame, as PySpark's writers report it to theirs.
+    pub(crate) fn recording_into(mut self, execution: crate::dataframe::ExecutionSlot) -> Self {
+        self.execution = Some(execution);
+        self
+    }
+
+    /// Run the command of the write, keeping its execution as its DataFrame's last one.
+    fn run(&self, command_type: proto::command::CommandType) -> Result<()> {
+        let (_, info) = crate::dataframe::execute_command_with_info(&self.session, command_type)?;
+        if let Some(execution) = &self.execution {
+            *execution.lock().unwrap() = Some(info);
+        }
+        Ok(())
     }
 
     /// Cluster the output table by the given columns (liquid clustering).
@@ -626,10 +656,7 @@ impl DataFrameWriterV2 {
 
     fn execute(self, mode: proto::write_operation_v2::Mode) -> Result<()> {
         let op = self.build_operation(mode, None)?;
-        execute_command(
-            &self.session,
-            proto::command::CommandType::WriteOperationV2(op),
-        )
+        self.run(proto::command::CommandType::WriteOperationV2(op))
     }
 
     /// Create a new table from the DataFrame.
@@ -658,10 +685,7 @@ impl DataFrameWriterV2 {
             proto::write_operation_v2::Mode::Overwrite,
             Some(condition.to_proto()),
         )?;
-        execute_command(
-            &self.session,
-            proto::command::CommandType::WriteOperationV2(op),
-        )
+        self.run(proto::command::CommandType::WriteOperationV2(op))
     }
 
     /// Overwrite all partitions touched by the DataFrame (dynamic overwrite).
