@@ -54,6 +54,18 @@ def session():
         session.stop()
 
 
+@pytest.mark.parametrize("prefetch", [False, True])
+def test_to_local_iterator_raises_the_error_of_the_execution_as_pyspark(session, prefetch):
+    # As official PySpark 4.3.0: the error of a query that fails while it is iterated is
+    # raised by the iteration, which then ends, rather than ending it as if complete.
+    df = session.sql("SELECT assert_true(id < 0) AS x FROM range(3)")
+    rows = df.toLocalIterator(prefetch)
+    with pytest.raises(Exception) as error:
+        next(rows)
+    assert error.value.getCondition() == "USER_RAISED_EXCEPTION"
+    assert list(rows) == []
+
+
 def test_conf_get_with_a_none_default(session):
     key = "spark.connect.rust.test.unset"
     assert session.conf.get(key, None) is None
