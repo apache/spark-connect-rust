@@ -897,10 +897,13 @@ impl PyStreamingQuery {
         self.inner.process_all_available().to_pyerr()
     }
 
-    // Mirrors reference `StreamingQuery.explain(extended=False)` - the arg is optional.
+    /// Print the plan of the query with Python's `print`, as PySpark's
+    /// `StreamingQuery.explain(extended=False)`.
     #[pyo3(signature = (extended=false))]
-    fn explain(&self, extended: bool) -> PyResult<String> {
-        self.inner.explain(extended).to_pyerr()
+    fn explain(&self, py: Python<'_>, extended: bool) -> PyResult<()> {
+        let plan = py.detach(|| self.inner.explain(extended)).to_pyerr()?;
+        py.import("builtins")?.call_method1("print", (plan,))?;
+        Ok(())
     }
 
     fn exception(&self) -> PyResult<Option<PyStreamingQueryException>> {

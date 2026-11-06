@@ -763,37 +763,66 @@ impl PyDataFrame {
         Ok(PyDataFrame::new(df))
     }
 
-    /// Print the plan. Mirrors `DataFrame.explain(extended=None, mode=None)`:
-    /// `extended` may be a bool or a mode string; `mode` is a mode string; setting
-    /// both is an error.
+    /// Print the plan with Python's `print`, as PySpark's `DataFrame.explain`, which prints
+    /// `_explain_string(extended, mode)`.
     #[pyo3(signature = (extended=None, mode=None))]
     fn explain(
         &self,
         py: Python<'_>,
         extended: Option<&Bound<'_, PyAny>>,
-        mode: Option<String>,
+        mode: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
-        let resolved: String = match (extended, mode.as_deref()) {
+        let plan = self.explain_string(py, extended, mode)?;
+        py.import("builtins")?.call_method1("print", (plan,))?;
+        Ok(())
+    }
+
+    /// The plan that `explain` prints, as PySpark's `DataFrame._explain_string`: `extended` is
+    /// a bool, for the "extended" or the "simple" mode, or a mode, and `mode` a mode, but not
+    /// both; the mode is "simple" without either.
+    #[pyo3(name = "_explain_string", signature = (extended=None, mode=None))]
+    fn explain_string(
+        &self,
+        py: Python<'_>,
+        extended: Option<&Bound<'_, PyAny>>,
+        mode: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<String> {
+        use pyo3::types::{PyBool, PyString};
+        let explain_mode: String = match (extended, mode) {
             (Some(_), Some(_)) => {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "extended and mode cannot be set together",
+                return Err(crate::column::raise_pyspark(
+                    py,
+                    "PySparkValueError",
+                    "CANNOT_SET_TOGETHER",
+                    &[("arg_list", "extended and mode")],
                 ))
             }
             (None, None) => "simple".to_string(),
-            (None, Some(m)) => m.to_string(),
-            (Some(e), None) => {
-                if let Ok(b) = e.extract::<bool>() {
-                    if b { "extended" } else { "simple" }.to_string()
-                } else if let Ok(s) = e.extract::<String>() {
-                    s
+            (Some(extended), None) if extended.is_instance_of::<PyBool>() => {
+                if extended.extract::<bool>()? {
+                    "extended"
                 } else {
-                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                        "extended must be a bool or a mode string",
-                    ));
+                    "simple"
                 }
+                .to_string()
+            }
+            (Some(arg), None) | (None, Some(arg)) if arg.is_instance_of::<PyString>() => {
+                arg.extract()?
+            }
+            (Some(arg), None) | (None, Some(arg)) => {
+                return Err(crate::column::raise_pyspark(
+                    py,
+                    "PySparkTypeError",
+                    "NOT_EXPECTED_TYPE",
+                    &[
+                        ("expected_type", "bool or str"),
+                        ("arg_name", "extended (optional) and mode (optional)"),
+                        ("arg_type", &arg.get_type().str()?.to_string()),
+                    ],
+                ))
             }
         };
-        py.detach(|| self.dataframe.explain_mode(&resolved))
+        py.detach(|| self.dataframe.explain_string(&explain_mode))
             .to_pyerr()
     }
 

@@ -1087,6 +1087,35 @@ def test_sql_keyword_arguments_are_not_parameters_as_pyspark(session):
     assert error.value.getCondition() == "UNBOUND_SQL_PARAMETER"
 
 
+def test_explain_prints_with_python_print_as_pyspark(session):
+    # As PySpark's: explain, and StreamingQuery.explain, print the plan with Python's print, to
+    # sys.stdout, which redirect_stdout captures, and return None.
+    import contextlib
+    import io
+
+    df = session.range(1)
+    printed = io.StringIO()
+    with contextlib.redirect_stdout(printed):
+        assert df.explain() is None
+        assert df.explain(mode="formatted") is None
+    assert printed.getvalue().startswith("== Physical Plan ==\n")
+    assert "\n(1) Range [codegen id : 1]\n" in printed.getvalue()
+    assert df._explain_string(True).startswith("== Parsed Logical Plan ==\n")
+
+    query = (
+        session.readStream.format("rate").load()
+        .writeStream.format("memory").queryName("explain_prints").start()
+    )
+    try:
+        query.processAllAvailable()
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            assert query.explain(True) is None
+        assert printed.getvalue().startswith("== Parsed Logical Plan ==\n")
+    finally:
+        query.stop()
+
+
 def test_column_alias_names_every_column_and_keeps_its_metadata(session):
     df = session.sql("SELECT map('k1', 1) AS m").select(F.explode("m").alias("k", "v"))
     assert df.columns == ["k", "v"]
