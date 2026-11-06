@@ -63,7 +63,6 @@ const ARTIFACT_HASH_INLINE_MAX_BLOBS: usize = 128;
 /// blocking hashing starts, the task retains the blob buffers until it finishes.
 async fn hash_artifact_blobs(blobs: Vec<Vec<u8>>) -> Result<(Vec<Vec<u8>>, Vec<String>)> {
     use sha2::{Digest, Sha256};
-    use std::fmt::Write;
 
     let hash_inline = blobs.len() <= ARTIFACT_HASH_INLINE_MAX_BLOBS
         && blobs
@@ -75,13 +74,7 @@ async fn hash_artifact_blobs(blobs: Vec<Vec<u8>>) -> Result<(Vec<Vec<u8>>, Vec<S
     let hash = move || {
         let hashes = blobs
             .iter()
-            .map(|blob| {
-                let mut hash = String::with_capacity(64);
-                for byte in Sha256::digest(blob) {
-                    write!(&mut hash, "{byte:02x}").expect("writing to a String cannot fail");
-                }
-                hash
-            })
+            .map(|blob| format!("{:x}", Sha256::digest(blob)))
             .collect();
         (blobs, hashes)
     };
@@ -95,6 +88,7 @@ async fn hash_artifact_blobs(blobs: Vec<Vec<u8>>) -> Result<(Vec<Vec<u8>>, Vec<S
 
 fn artifact_hashing_task_error(error: tokio::task::JoinError) -> SparkError {
     if error.is_panic() {
+        // Preserve inline hashing panic behavior when hashing is offloaded.
         std::panic::resume_unwind(error.into_panic());
     }
     SparkError::connect_msg(format!("Artifact hashing task failed: {error}"))
@@ -818,54 +812,17 @@ impl SparkConnectClient {
     pub async fn add_artifacts(
         &self,
         paths: &[&str],
-        _pyfile: bool,
-        _archive: bool,
-        _file: bool,
+        pyfile: bool,
+        archive: bool,
+        file: bool,
     ) -> Result<()> {
-        // Build list of named artifacts from file paths
+        // Each path is named as PySpark's ArtifactManager names it, by the flags and its file
+        // extension (see `parse_artifact`).
         let mut artifacts = Vec::new();
         for path in paths {
-            // Extract just the filename as the artifact name
-            let path_obj = std::path::Path::new(path);
-            let file_name = path_obj
-                .file_name()
-                .and_then(|n| n.to_str())
-                .ok_or_else(|| {
-                    SparkError::connect_msg(format!("Invalid artifact path: {}", path))
-                })?;
-
-            // Determine artifact prefix based on file extension
-            let artifact_name = if _pyfile
-                && (file_name.ends_with(".py")
-                    || file_name.ends_with(".zip")
-                    || file_name.ends_with(".egg")
-                    || file_name.ends_with(".jar"))
-            {
-                format!("pyfiles/{}", file_name)
-            } else if _archive
-                && (file_name.ends_with(".zip")
-                    || file_name.ends_with(".jar")
-                    || file_name.ends_with(".tar.gz")
-                    || file_name.ends_with(".tgz")
-                    || file_name.ends_with(".tar"))
-            {
-                format!("archives/{}", file_name)
-            } else if _file {
-                format!("files/{}", file_name)
-            } else if file_name.ends_with(".jar") {
-                format!("jars/{}", file_name)
-            } else {
-                return Err(SparkError::connect_msg(format!(
-                    "Unsupported artifact type: {}",
-                    path
-                )));
-            };
-
-            // Create artifact from file
-            artifacts.push(NamedArtifact::new(
-                artifact_name,
-                Box::new(FileArtifact::new(path)),
-            ));
+            let (name, local) = crate::artifact::parse_artifact(path, pyfile, archive, file)
+                .map_err(|e| SparkError::connect_msg(e.to_string()))?;
+            artifacts.push(NamedArtifact::new(name, Box::new(FileArtifact::new(local))));
         }
 
         if artifacts.is_empty() {
@@ -1266,8 +1223,13 @@ mod tests {
 
     #[test]
     fn test_small_artifact_hashing_stays_inline_and_preserves_buffers() {
-        let (pending, hashes) =
-            hash_with_busy_blocking_pool(vec![Vec::new(), b"abc".to_vec(), b"abc".to_vec()]);
+        // The last digest starts with a zero, which hex encoding must preserve.
+        let (pending, hashes) = hash_with_busy_blocking_pool(vec![
+            Vec::new(),
+            b"abc".to_vec(),
+            b"abc".to_vec(),
+            b"s".to_vec(),
+        ]);
         assert!(
             !pending,
             "small artifact batches must not wait for a blocking thread"
@@ -1278,6 +1240,7 @@ mod tests {
                 "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
                 "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
                 "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                "043a718774c572bd8a25adbeb1bfcd5c0256ae11cecf9f9c3f925d0e52beaf89",
             ]
         );
     }
@@ -1344,12 +1307,35 @@ mod tests {
         assert_eq!(panic.downcast_ref::<&str>(), Some(&"hashing panic"));
     }
 
-    #[tokio::test]
-    async fn test_artifact_hashing_reports_task_cancellation() {
-        let task = tokio::spawn(std::future::pending::<()>());
-        task.abort();
-        let error = artifact_hashing_task_error(task.await.unwrap_err());
-        assert!(error.to_string().contains("Artifact hashing task failed:"));
+    #[test]
+    fn test_artifact_hashing_task_error_reports_queued_task_cancellation() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let (release, wait) = std::sync::mpsc::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                started.send(()).unwrap();
+                let _ = wait.recv();
+            });
+            ready.await.unwrap();
+
+            // Explicit abort models runtime shutdown cancelling queued hashing work;
+            // production hashing does not abort its handle.
+            let task = tokio::task::spawn_blocking(|| ());
+            task.abort();
+            // Release the blocking worker before assertions to avoid hanging shutdown.
+            release.send(()).unwrap();
+            blocker.await.unwrap();
+
+            let cancelled = task.await.unwrap_err();
+            assert!(cancelled.is_cancelled());
+            let error = artifact_hashing_task_error(cancelled);
+            assert!(error.to_string().contains("Artifact hashing task failed:"));
+        });
     }
 
     #[tokio::test]
