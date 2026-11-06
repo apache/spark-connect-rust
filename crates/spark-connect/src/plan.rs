@@ -312,7 +312,7 @@ pub enum LogicalPlan {
     /// StatSampleBy: `df.stat.sampleBy(col, fractions, seed)`.
     StatSampleBy {
         input: Arc<LogicalPlan>,
-        col: String,
+        col: Expression,
         fractions: Vec<(Expression, f64)>,
         seed: Option<i64>,
     },
@@ -1361,25 +1361,17 @@ impl LogicalPlan {
             } => {
                 let mut stat = proto::StatSampleBy::default();
                 stat.input = Some(Box::new(relation_of(input, plan_ids)));
-                // col field expects an Expression; create one from the column name
-                let mut col_expr = proto::Expression::default();
-                col_expr.expr_type = Some(proto::expression::ExprType::UnresolvedAttribute(
-                    proto::expression::UnresolvedAttribute {
-                        unparsed_identifier: col.clone(),
-                        plan_id: None,
-                        is_metadata_column: None,
-                    },
-                ));
-                stat.col = Some(col_expr);
-                for (expr, _frac) in fractions {
-                    // fractions expect Expression.Literal type; create Fraction proto
-                    let mut fraction = proto::stat_sample_by::Fraction::default();
-                    let expr_proto = expr.to_proto();
-                    // Extract the Literal from the Expression proto
-                    if let Some(proto::expression::ExprType::Literal(lit)) = expr_proto.expr_type {
-                        fraction.stratum = Some(lit);
-                    }
-                    stat.fractions.push(fraction);
+                stat.col = Some(col.to_proto());
+                // As PySpark's: each stratum, a literal, with its fraction.
+                for (expr, fraction) in fractions {
+                    let stratum = match expr.to_proto().expr_type {
+                        Some(proto::expression::ExprType::Literal(lit)) => Some(lit),
+                        _ => None,
+                    };
+                    stat.fractions.push(proto::stat_sample_by::Fraction {
+                        stratum,
+                        fraction: *fraction,
+                    });
                 }
                 if let Some(s) = seed {
                     stat.seed = Some(*s);

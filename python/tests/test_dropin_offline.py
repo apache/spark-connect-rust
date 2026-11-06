@@ -2500,6 +2500,27 @@ def test_functions_null_and_misc():
     assert type(F.covar_samp(c, c)).__name__ == "Column"
 
 
+def test_sample_by_checks_its_arguments_as_pyspark():
+    # As PySpark's sampleBy: a column name or a Column, a dict of fractions, and strata of
+    # floats, ints and strings.
+    from pyspark.errors import PySparkTypeError
+
+    df = _offline_session().range(1)
+    for call, condition, parameters in (
+        (lambda: df.sampleBy(1, {"a": 1.0}), "NOT_EXPECTED_TYPE",
+         {"expected_type": "Column or str", "arg_name": "col", "arg_type": "int"}),
+        (lambda: df.stat.sampleBy("k", [0.5]), "NOT_EXPECTED_TYPE",
+         {"expected_type": "dict", "arg_name": "fractions", "arg_type": "list"}),
+        (lambda: df.sampleBy("k", {(1, 2): 1.0}), "DISALLOWED_TYPE_FOR_CONTAINER",
+         {"arg_name": "fractions", "arg_type": "dict", "allowed_types": "float, int, str",
+          "item_type": "tuple"}),
+    ):
+        with pytest.raises(PySparkTypeError) as error:
+            call()
+        assert error.value.getCondition() == condition
+        assert error.value.getMessageParameters() == parameters
+
+
 def test_functions_bitwise():
     """Test bitwise functions."""
     from pyspark.sql import functions as F

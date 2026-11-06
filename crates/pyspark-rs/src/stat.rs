@@ -62,16 +62,12 @@ impl PyStatFunctions {
     #[pyo3(name = "sampleBy", signature = (col, fractions, seed=None))]
     fn sample_by(
         &self,
-        col: &str,
-        fractions: &Bound<'_, pyo3::types::PyDict>,
+        col: &Bound<'_, PyAny>,
+        fractions: &Bound<'_, PyAny>,
         seed: Option<i64>,
     ) -> PyResult<PyDataFrame> {
-        let mut fr = Vec::with_capacity(fractions.len());
-        for (k, v) in fractions.iter() {
-            let key = crate::functions::to_column(&k)?.expression().clone();
-            fr.push((key, v.extract::<f64>()?));
-        }
-        Ok(PyDataFrame::new(self.stat.sample_by(col, fr, seed)))
+        let (col, fractions) = sample_by_arguments(col, fractions)?;
+        Ok(PyDataFrame::new(self.stat.sample_by(col, fractions, seed)))
     }
 
     /// Approximate quantiles of a column at the given probabilities.
@@ -105,4 +101,74 @@ impl PyStatFunctions {
         };
         Ok(quantiles)
     }
+}
+
+/// The column and the fractions of `sampleBy`, as PySpark Connect's `DataFrame.sampleBy` takes
+/// them: a column name or a Column, and a dict of the fraction of each stratum, a float, an
+/// int or a string.
+pub(crate) fn sample_by_arguments(
+    col: &Bound<'_, PyAny>,
+    fractions: &Bound<'_, PyAny>,
+) -> PyResult<(
+    spark_connect::column::Column,
+    Vec<(spark_connect::expression::Expression, f64)>,
+)> {
+    use crate::column::{raise_pyspark, PyColumn};
+    use pyo3::types::{PyDict, PyFloat, PyInt, PyString};
+
+    let py = col.py();
+    let type_name =
+        |obj: &Bound<'_, PyAny>| -> PyResult<String> { Ok(obj.get_type().name()?.to_string()) };
+    let col = if let Ok(name) = col.cast::<PyString>() {
+        spark_connect::functions::col(&name.to_cow()?)
+    } else if let Ok(column) = col.extract::<PyRef<'_, PyColumn>>() {
+        column.column.clone()
+    } else {
+        return Err(raise_pyspark(
+            py,
+            "PySparkTypeError",
+            "NOT_EXPECTED_TYPE",
+            &[
+                ("expected_type", "Column or str"),
+                ("arg_name", "col"),
+                ("arg_type", &type_name(col)?),
+            ],
+        ));
+    };
+    let Ok(fractions) = fractions.cast::<PyDict>() else {
+        return Err(raise_pyspark(
+            py,
+            "PySparkTypeError",
+            "NOT_EXPECTED_TYPE",
+            &[
+                ("expected_type", "dict"),
+                ("arg_name", "fractions"),
+                ("arg_type", &type_name(fractions)?),
+            ],
+        ));
+    };
+    let mut strata = Vec::with_capacity(fractions.len());
+    for (key, fraction) in fractions.iter() {
+        if !(key.is_instance_of::<PyFloat>()
+            || key.is_instance_of::<PyInt>()
+            || key.is_instance_of::<PyString>())
+        {
+            return Err(raise_pyspark(
+                py,
+                "PySparkTypeError",
+                "DISALLOWED_TYPE_FOR_CONTAINER",
+                &[
+                    ("arg_name", "fractions"),
+                    ("arg_type", "dict"),
+                    ("allowed_types", "float, int, str"),
+                    ("item_type", &type_name(&key)?),
+                ],
+            ));
+        }
+        let stratum = crate::functions::to_column(&key)?.expression().clone();
+        // As PySpark's float(v).
+        let fraction: f64 = py.get_type::<PyFloat>().call1((fraction,))?.extract()?;
+        strata.push((stratum, fraction));
+    }
+    Ok((col, strata))
 }
