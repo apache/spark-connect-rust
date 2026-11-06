@@ -1773,7 +1773,10 @@ def test_float64_columns_preserve_every_ipc_cell(protocol, monkeypatch, cached, 
     monkeypatch.setattr(pd.Series, "tolist", no_rows)
     overrides = {"spark.sql.session.localRelationCacheThreshold": "1" if cached else "999999999"}
     with _arrow_input_service(protocol, config_error=True, **overrides) as (spark, state):
-        spark.createDataFrame(frame, schema, verifySchema=verify).toArrow()
+        result = spark.createDataFrame(frame, schema, verifySchema=verify)
+        assert not result.isLocal()
+        result.toArrow()
+        assert state["column_names"] == schema.names
         _assert_float64_ipc(state["input_tables"][0], columns, schema)
         assert state["uploads"] == 0
         assert state["config_requests"] == []
@@ -1789,9 +1792,15 @@ def test_float64_columnar_ipc_matches_existing_row_conversion(protocol, monkeypa
     frame = pd.DataFrame({"original": values})
     schema = T.StructType([T.StructField("renamed", T.DoubleType(), True, {"source": "parity"})])
     with _arrow_input_service(protocol) as (spark, state):
-        spark.createDataFrame(frame, schema).toArrow()
+        result = spark.createDataFrame(frame, schema)
+        assert not result.isLocal()
+        result.toArrow()
+        assert state["column_names"] == schema.names
         monkeypatch.setattr(helper, "prepare_float64_table", lambda *args: None)
-        spark.createDataFrame(frame, schema).toArrow()
+        result = spark.createDataFrame(frame, schema)
+        assert not result.isLocal()
+        result.toArrow()
+        assert state["column_names"] == schema.names
         assert len(state["input_tables"]) == 2
         for table in state["input_tables"]:
             _assert_float64_ipc(table, [values], schema)
@@ -2446,6 +2455,7 @@ def _assert_float64_columns_guard_payload(state, schema, values):
 
     assert len(state["input_tables"]) == 1
     assert len(state["relations"]) == 1
+    assert state["column_names"] == schema.names
     _assert_float64_ipc(state["input_tables"][0], values, schema)
     assert json.loads(state["relations"][0].local_relation.schema) == json.loads(schema.json())
     assert state["config_requests"] == []
