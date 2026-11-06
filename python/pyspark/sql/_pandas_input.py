@@ -394,8 +394,6 @@ def prepare_string_input(frame, schema):
     conversion hooks, and pandas treats several other objects as missing values.
     Those cases must keep the existing row conversion and its error ordering.
     """
-    import sys
-
     import numpy as np
     import pandas as pd
     from pandas.core import frame as frame_module, generic as generic_module
@@ -403,10 +401,7 @@ def prepare_string_input(frame, schema):
     from pandas.core.series import Series
     from types import FunctionType, GetSetDescriptorType, MethodDescriptorType, WrapperDescriptorType
 
-    from pyspark._pyspark import (
-        BooleanType, ByteType, ShortType, IntegerType, LongType, FloatType,
-        DoubleType, DecimalType, StringType, StructField, StructType as NativeStructType,
-    )
+    from pyspark._pyspark import StringType, StructField, StructType as NativeStructType
     from pyspark.sql import types as sql_types
 
     # Keep small frames on the established row path.
@@ -425,23 +420,6 @@ def prepare_string_input(frame, schema):
     if (DataFrame.astype is not generic_module.NDFrame.astype
             or DataFrame.where is not generic_module.NDFrame.where):
         return None
-    # Earlier converter branches must not recognize a string as another type.
-    # Check a loaded converter too: it keeps its own imported type aliases.
-    if sys.modules.get("pyspark.sql.types") is not sql_types:
-        return None
-    importer = sys.modules.get("pyspark.sql._arrow_input")
-    if importer is not None and getattr(importer, "StructType", None) is not NativeStructType:
-        return None
-    converter = sys.modules.get("pyspark.sql.pandas.types")
-    for name, cls in (
-        ("BooleanType", BooleanType), ("ByteType", ByteType), ("ShortType", ShortType),
-        ("IntegerType", IntegerType), ("LongType", LongType), ("FloatType", FloatType),
-        ("DoubleType", DoubleType), ("DecimalType", DecimalType), ("StringType", StringType),
-        ("StructField", StructField), ("StructType", NativeStructType),
-    ):
-        if (getattr(sql_types, name, None) is not cls
-                or converter is not None and getattr(converter, name, None) is not cls):
-            return None
     # The row path reads native fields directly. Class attributes are mutable,
     # so customized Python schema access must not select a different Arrow path.
     for name, cls in (("StringType", StringType), ("StructField", StructField),

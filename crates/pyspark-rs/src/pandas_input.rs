@@ -56,24 +56,9 @@ pub(crate) fn _pandas_string_ipc<'py>(
             }
         }
     }
-    // A lone surrogate must fall back before allocating partial Arrow buffers.
-    // Drop each temporary UTF-8 bytes object immediately rather than retaining
-    // an additional full copy of every column. Keep the cheap type pass above
-    // so a late subclass does not pay for this UTF-8 traversal.
-    for (column, field) in columns.iter().zip(&schema.fields) {
-        for value in column.try_iter()? {
-            let value = value?;
-            if value.is_none() && field.nullable {
-                continue;
-            }
-            let Ok(value) = value.cast_exact::<PyString>() else {
-                return Ok(None);
-            };
-            if value.encode_utf8().is_err() {
-                return Ok(None);
-            }
-        }
-    }
+    // Encode each string once, while building. A lone surrogate cannot be encoded: it
+    // falls back to the row path, which drops the partial Arrow buffers. The type pass
+    // above keeps a late subclass from paying for the build.
     let mut arrays: Vec<ArrayRef> = Vec::with_capacity(columns.len());
     let mut fields = Vec::with_capacity(columns.len());
     for (column, field) in columns.iter().zip(&schema.fields) {
