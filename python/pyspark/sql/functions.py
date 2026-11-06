@@ -331,7 +331,37 @@ def col(col):
 
 
 def lit(col):
-    """Creates a Column of literal value."""
+    """Creates a Column of literal value.
+
+    Mirrors pyspark.sql.connect.functions.lit: a list is the array of the literals of its
+    elements, and a one-dimensional NumPy array that array cast to the array type of its
+    dtype.
+    """
+    if isinstance(col, _pyspark.Column):
+        return col
+    if isinstance(col, list):
+        if any(isinstance(c, _pyspark.Column) for c in col):
+            from pyspark.errors import PySparkValueError
+
+            raise PySparkValueError(
+                errorClass="COLUMN_IN_LIST", messageParameters={"func_name": "lit"}
+            )
+        return array(*[lit(c) for c in col])
+    import sys
+
+    # An ndarray exists only when NumPy is imported, so this does not import it.
+    np = sys.modules.get("numpy")
+    if np is not None and isinstance(col, np.ndarray) and col.ndim == 1:
+        from pyspark.errors import PySparkTypeError
+        from pyspark.sql.types import ArrayType, _from_numpy_type
+
+        dt = _from_numpy_type(col.dtype)
+        if dt is None:
+            raise PySparkTypeError(
+                errorClass="UNSUPPORTED_NUMPY_ARRAY_SCALAR",
+                messageParameters={"dtype": col.dtype.name},
+            )
+        return array(*[lit(c) for c in col]).cast(ArrayType(dt))
     return _pyfunc_lit(col)
 
 
@@ -540,6 +570,34 @@ def vector_normalize(vector, degree=None):
 def counter_diff(value, startTime=None):
     """counter_diff(value, startTime=None): the differences of a counter over a window."""
     return _dispatch("counter_diff", [value] if startTime is None else [value, startTime])
+
+
+def _columns_of(cols):
+    # As PySpark's array, create_map, map_concat and struct: a single list, set or tuple
+    # is the columns.
+    if len(cols) == 1 and isinstance(cols[0], (list, set, tuple)):
+        return list(cols[0])
+    return list(cols)
+
+
+def array(*cols):
+    """array(*cols): an array of the columns, or of a single list, set or tuple of them."""
+    return _dispatch("array", _columns_of(cols))
+
+
+def create_map(*cols):
+    """create_map(*cols): a map of the key and value columns, or of a single list of them."""
+    return _dispatch("create_map", _columns_of(cols))
+
+
+def map_concat(*cols):
+    """map_concat(*cols): the union of the maps, or of a single list, set or tuple of them."""
+    return _dispatch("map_concat", _columns_of(cols))
+
+
+def struct(*cols):
+    """struct(*cols): a struct of the columns, or of a single list, set or tuple of them."""
+    return _dispatch("struct", _columns_of(cols))
 
 
 def lag(col, offset=1, default=None):

@@ -573,6 +573,23 @@ def test_sql_runs_statements_eagerly(session):
     assert [tuple(r) for r in query.collect()] == [(1,)]
 
 
+def test_lists_and_numpy_arrays_are_arrays_as_pyspark(session):
+    np = pytest.importorskip("numpy")
+
+    df = session.range(1).select(
+        F.lit([1, 2]).alias("l"), F.lit(np.array([1, 2])).alias("n"),
+        F.lit(np.array([1.5], dtype=np.float32)).alias("f"), F.lit(np.array(["x"])).alias("s"),
+        F.array_contains(F.lit([[1], [2]]), [1]).alias("c"), F.array(["id", "id"]).alias("a"),
+        F.struct(["id"]).alias("t"), F.when(F.lit(True), [3]).alias("w"),
+    )
+    assert df.dtypes == [
+        ("l", "array<int>"), ("n", "array<bigint>"), ("f", "array<float>"), ("s", "array<string>"),
+        ("c", "boolean"), ("a", "array<bigint>"), ("t", "struct<id:bigint>"), ("w", "array<int>"),
+    ]
+    assert [tuple(r) for r in df.collect()] == [
+        ([1, 2], [1, 2], [1.5], ["x"], True, [0, 0], Row(id=0), [3])]
+
+
 def test_sql_fails_at_a_statement_that_does_not_parse(session):
     with pytest.raises(AnalysisException, match="PARSE_SYNTAX_ERROR"):
         session.sql("SELEC 1")

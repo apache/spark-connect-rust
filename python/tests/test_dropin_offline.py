@@ -4458,6 +4458,61 @@ def test_function_calls_render_as_pyspark(column, expected):
     assert repr(column(F)) == f"Column<'{expected}'>"
 
 
+@pytest.mark.parametrize("build,expected", [
+    # As PySpark's lit: a list is the array of the literals of its elements.
+    (lambda F: F.lit([1, 2]), "array(1, 2)"),
+    (lambda F: F.lit([[1], [2, 3]]), "array(array(1), array(2, 3))"),
+    (lambda F: F.lit([]), "array()"),
+    # Functions take a value with lit.
+    (lambda F: F.array_contains("a", [1]), "array_contains(a, array(1))"),
+    # array, create_map, map_concat and struct take a single list, set or tuple of columns.
+    (lambda F: F.array(["a", "b"]), "array(a, b)"),
+    (lambda F: F.array(("a", "b")), "array(a, b)"),
+    (lambda F: F.struct(["a", "b"]), "struct(a, b)"),
+    (lambda F: F.create_map([F.lit("k"), F.col("v")]), "map(k, v)"),
+    (lambda F: F.map_concat(["m1", "m2"]), "map_concat(m1, m2)"),
+])
+def test_lists_are_arrays_and_columns_as_pyspark(build, expected):
+    from pyspark.sql import functions as F
+
+    assert repr(build(F)) == f"Column<'{expected}'>"
+
+
+def test_lit_of_a_numpy_array_is_an_array_of_its_type_as_pyspark():
+    np = pytest.importorskip("numpy")
+    from pyspark.sql import functions as F
+
+    # The case of the type in the repr differs (SPARK-60948).
+    for value, expected in (
+        (np.array([1, 2]), "cast(array(1, 2) as array<bigint>)"),
+        (np.array([1.5], dtype=np.float32), "cast(array(1.5) as array<float>)"),
+        (np.array(["x"]), "cast(array(x) as array<string>)"),
+    ):
+        assert repr(F.lit(value)).lower() == f"column<'{expected}'>"
+
+
+def test_lit_errors_as_pyspark():
+    np = pytest.importorskip("numpy")
+    from pyspark.errors import PySparkTypeError, PySparkValueError
+    from pyspark.sql import functions as F
+
+    with pytest.raises(PySparkValueError) as error:
+        F.lit([F.col("a")])
+    assert error.value.getCondition() == "COLUMN_IN_LIST"
+    assert error.value.getMessageParameters() == {"func_name": "lit"}
+    for value, dtype in ((np.array([1], dtype=np.uint8), "uint8"), (np.array([1, "a"], dtype=object), "object")):
+        with pytest.raises(PySparkTypeError) as error:
+            F.lit(value)
+        assert error.value.getCondition() == "UNSUPPORTED_NUMPY_ARRAY_SCALAR"
+        assert error.value.getMessageParameters() == {"dtype": dtype}
+    # Rather than a scalar of an array of one element.
+    for value, name in (((1, 2), "tuple"), ({"a": 1}, "dict"), (object(), "object"), (np.array([[1]]), "ndarray")):
+        with pytest.raises(PySparkTypeError) as error:
+            F.lit(value)
+        assert error.value.getCondition() == "UNSUPPORTED_DATA_TYPE"
+        assert error.value.getMessageParameters() == {"data_type": name}
+
+
 def test_variant_delete_requires_paths():
     from pyspark.errors import PySparkValueError
     from pyspark.sql import functions as F
