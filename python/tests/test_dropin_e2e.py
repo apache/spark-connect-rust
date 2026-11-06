@@ -541,6 +541,26 @@ def test_foreach_foreach_partition_and_to_json_as_pyspark(session):
     assert json.collect() == [Row(value='{"id":1,"name":"a","bin":"eA=="}'), Row(value='{"id":2}')]
 
 
+def test_clone_session_copies_the_state_of_the_session_as_pyspark(session):
+    # As PySpark's: the clone has the configurations and the temporary views of the session,
+    # of an id of its own or of the one given, and changes to either do not show in the other.
+    import uuid
+
+    session.conf.set("spark.sql.shuffle.partitions", "7")
+    session.range(2).createOrReplaceTempView("cloned_view")
+    try:
+        clone = session.cloneSession()
+        assert clone.session_id != session.session_id
+        assert clone.conf.get("spark.sql.shuffle.partitions") == "7"
+        assert clone.table("cloned_view").count() == 2
+        clone.conf.set("spark.sql.shuffle.partitions", "9")
+        assert session.conf.get("spark.sql.shuffle.partitions") == "7"
+        new_id = str(uuid.uuid4())
+        assert session.cloneSession(new_id).session_id == new_id
+    finally:
+        session.conf.unset("spark.sql.shuffle.partitions")
+
+
 def test_execution_info_is_that_of_each_dataframe_as_pyspark(session):
     a = session.range(3)
     assert a.executionInfo is None

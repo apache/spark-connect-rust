@@ -12,10 +12,11 @@ use uuid::Uuid;
 
 use spark_connect_proto::spark_connect_service_client::SparkConnectServiceClient;
 use spark_connect_proto::{
-    AnalyzePlanRequest, AnalyzePlanResponse, ArtifactStatusesRequest, ConfigRequest,
-    ConfigResponse, ExecutePlanRequest, ExecutePlanResponse, FetchErrorDetailsRequest,
-    FetchErrorDetailsResponse, InterruptRequest, InterruptResponse, ReattachExecuteRequest,
-    ReleaseExecuteRequest, ReleaseExecuteResponse, ReleaseSessionRequest, UserContext,
+    AnalyzePlanRequest, AnalyzePlanResponse, ArtifactStatusesRequest, CloneSessionRequest,
+    ConfigRequest, ConfigResponse, ExecutePlanRequest, ExecutePlanResponse,
+    FetchErrorDetailsRequest, FetchErrorDetailsResponse, InterruptRequest, InterruptResponse,
+    ReattachExecuteRequest, ReleaseExecuteRequest, ReleaseExecuteResponse, ReleaseSessionRequest,
+    UserContext,
 };
 
 use crate::artifact::{
@@ -111,6 +112,7 @@ pub struct RpcDeadlines {
     pub release_session: Option<Duration>,
     pub artifact_status: Option<Duration>,
     pub fetch_error_details: Option<Duration>,
+    pub clone_session: Option<Duration>,
 }
 
 impl Default for RpcDeadlines {
@@ -127,6 +129,7 @@ impl Default for RpcDeadlines {
             release_session: minutes(10),
             artifact_status: minutes(10),
             fetch_error_details: minutes(10),
+            clone_session: minutes(10),
         }
     }
 }
@@ -144,6 +147,7 @@ impl RpcDeadlines {
             release_session: None,
             artifact_status: None,
             fetch_error_details: None,
+            clone_session: None,
         }
     }
 }
@@ -922,6 +926,46 @@ impl SparkConnectClient {
     /// Release this session and all its resources on the server.
     ///
     /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.release_session`.
+    /// Clone this client's session on the server, mirroring PySpark's
+    /// `SparkConnectClient.clone(new_session_id)`: a `CloneSession` RPC copies the server-side
+    /// state of the session, its SQL configurations, temporary views, registered functions
+    /// and catalog state, into a new session, of the id `new_session_id` if one is given. The
+    /// returned client, of the same channel, is of that session.
+    pub async fn clone_session(&self, new_session_id: Option<&str>) -> Result<Self> {
+        let request = CloneSessionRequest {
+            session_id: self.session_id.clone(),
+            user_context: Some(UserContext {
+                user_id: self.user_id.clone().unwrap_or_default(),
+                ..Default::default()
+            }),
+            client_type: Some(self.user_agent.clone()),
+            new_session_id: new_session_id.map(str::to_string),
+            ..Default::default()
+        };
+        let response = self
+            .with_retry(|| {
+                let mut req = with_deadline(
+                    Request::new(request.clone()),
+                    self.rpc_deadlines.clone_session,
+                );
+                self._attach_metadata(&mut req);
+                let mut stub = self.stub.clone();
+                async move { stub.clone_session(req).await.map(Response::into_inner) }
+            })
+            .await?;
+        if let Some(requested) = new_session_id {
+            if response.new_session_id != requested {
+                return Err(SparkError::connect_msg(format!(
+                    "Returned session ID '{}' does not match requested ID '{requested}'",
+                    response.new_session_id
+                )));
+            }
+        }
+        let mut cloned = self.with_new_session_id();
+        cloned.session_id = response.new_session_id;
+        Ok(cloned)
+    }
+
     pub async fn release_session(&self) -> Result<()> {
         let mut request = ReleaseSessionRequest::default();
         request.session_id = self.session_id.clone();

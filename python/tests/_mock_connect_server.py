@@ -277,6 +277,7 @@ def serve(connection):
             self.confs = {}
             self.read_confs = []
             self.set_confs = []
+            self.clone_requests = []
 
         def analyze(self, request, context):
             self.calls += 1
@@ -386,6 +387,19 @@ def serve(connection):
             self.fetched_error_ids.append(parse_message(request)[3][0].decode())
             return self.error_details
 
+        # CloneSession records the requests and answers with the new session id, the one
+        # requested or else `cloned_session_id`.
+        clone_requests = []
+        cloned_session_id = "00000000-0000-4000-8000-000000000002"
+
+        def clone_session(self, request, context):
+            self.clone_requests.append(request)
+            # CloneSessionRequest.session_id=1, new_session_id=4; CloneSessionResponse
+            # .session_id=1, new_session_id=3.
+            fields = parse_message(request)
+            new_id = fields.get(4, [self.cloned_session_id.encode()])[0]
+            return message_field(1, fields[1][0]) + message_field(3, new_id)
+
         def config(self, request, context):
             # ConfigRequest.session_id=1, operation=3, Operation.get=2, Get.keys=1;
             # ConfigResponse.session_id=1, pairs=2, KeyValue.key=1, value=2.
@@ -439,6 +453,7 @@ def serve(connection):
             "ReleaseExecute": grpc.unary_unary_rpc_method_handler(lambda request, context: b""),
             "FetchErrorDetails": grpc.unary_unary_rpc_method_handler(service.fetch_error_details),
             "Config": grpc.unary_unary_rpc_method_handler(service.config),
+            "CloneSession": grpc.unary_unary_rpc_method_handler(service.clone_session),
         }
         server.add_generic_rpc_handlers(
             (grpc.method_handlers_generic_handler("spark.connect.SparkConnectService", handlers),)

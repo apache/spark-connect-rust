@@ -1569,13 +1569,24 @@ impl PySparkSession {
         PySparkSession::new(self.session.new_session())
     }
 
-    // Reference: cloneSession(new_session_id=None). The optional id is accepted for
-    // signature parity; the Rust core assigns the cloned session's id itself and does not
-    // support overriding it. See PARITY_GAP_ANALYSIS.md.
+    /// Clone this session on the server, as PySpark's `cloneSession(new_session_id=None)`: a
+    /// session of a copy of the server-side state of this one, its SQL configurations,
+    /// temporary views, registered functions and catalog state, of the id `new_session_id`,
+    /// a UUID, if one is given.
     #[pyo3(name = "cloneSession", signature = (new_session_id=None))]
-    fn clone_session(&self, new_session_id: Option<String>) -> PySparkSession {
-        let _ = new_session_id;
-        PySparkSession::new(self.session.clone_session())
+    fn clone_session(
+        &self,
+        py: Python<'_>,
+        new_session_id: Option<String>,
+    ) -> PyResult<PySparkSession> {
+        let session = py
+            .detach(|| {
+                self.session
+                    .clone_session_with_id(new_session_id.as_deref())
+                    .map_err(Box::new)
+            })
+            .to_pyerr()?;
+        Ok(PySparkSession::new(session))
     }
 }
 

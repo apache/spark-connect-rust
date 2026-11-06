@@ -215,10 +215,22 @@ impl SparkSession {
         }
     }
 
-    /// Alias of [`SparkSession::new_session`]; mirrors the reference
-    /// `SparkSession.cloneSession`, which creates a new session on the same client.
-    pub fn clone_session(&self) -> SparkSession {
-        self.new_session()
+    /// Clone this session on the server, mirroring `SparkSession.cloneSession()`: the new
+    /// session has a copy of the server-side state of this one, its SQL configurations,
+    /// temporary views, registered functions and catalog state, and changes to either do not
+    /// show in the other.
+    pub fn clone_session(&self) -> Result<SparkSession> {
+        self.clone_session_with_id(None)
+    }
+
+    /// Clone this session on the server as [`SparkSession::clone_session`], into a session of
+    /// the id `new_session_id`, a UUID, if one is given, mirroring
+    /// `SparkSession.cloneSession(new_session_id)`.
+    pub fn clone_session_with_id(&self, new_session_id: Option<&str>) -> Result<SparkSession> {
+        let client = block_on(self.client.clone_session(new_session_id))?;
+        let mut session = self.new_session();
+        session.client = Arc::new(client);
+        Ok(session)
     }
 
     /// The stable plan IDs of the plan nodes this session serializes.
@@ -2124,7 +2136,7 @@ mod tests {
         *spark.server_version.lock().unwrap() = Some("4.3.0".into());
         assert_eq!(handle.version().unwrap(), "4.3.0");
         assert!(Arc::ptr_eq(&spark.server_version, &handle.server_version));
-        for other in [spark.new_session(), spark.clone_session(), session()] {
+        for other in [spark.new_session(), session()] {
             assert!(!Arc::ptr_eq(&spark.server_version, &other.server_version));
             assert!(other.server_version.lock().unwrap().is_none());
         }

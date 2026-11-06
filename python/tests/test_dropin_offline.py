@@ -8756,6 +8756,12 @@ def version_cache_serve(connection, request_started, response_waiting, response_
             self.releases += 1
             return b""
 
+        def clone(self, request, context):
+            # CloneSessionResponse.new_session_id=3, of a new session.
+            import uuid
+
+            return message_field(3, str(uuid.uuid4()))
+
     service = Service()
     with version_cache_ThreadPoolExecutor(max_workers=4) as executor:
         server = grpc.server(executor)
@@ -8763,6 +8769,7 @@ def version_cache_serve(connection, request_started, response_waiting, response_
             "spark.connect.SparkConnectService", {
                 "AnalyzePlan": grpc.unary_unary_rpc_method_handler(service.analyze),
                 "ReleaseSession": grpc.unary_unary_rpc_method_handler(service.release),
+                "CloneSession": grpc.unary_unary_rpc_method_handler(service.clone),
             }),))
         port = server.add_insecure_port("127.0.0.1:0")
         server.start()
@@ -8877,6 +8884,23 @@ def test_version_cache_new_sessions_have_independent_caches(version_cache_sessio
         assert other.version == "other"
     assert service.calls == 3
     assert spark.version == "4.3.0"
+
+
+def test_clone_session_clones_the_session_on_the_server_as_pyspark(mock_connect):
+    # As PySpark's cloneSession, a CloneSession of the session (CloneSessionRequest
+    # .session_id=1), of the new session id given (new_session_id=4), whose clone has the id of
+    # the response.
+    import uuid
+
+    spark, service = mock_connect
+    clone = spark.cloneSession()
+    request = parse_message(service.clone_requests[-1])
+    assert request[1] == [spark.session_id.encode()] and 4 not in request
+    assert clone.session_id == service.cloned_session_id != spark.session_id
+    new_id = str(uuid.uuid4())
+    assert spark.cloneSession(new_id).session_id == new_id
+    assert parse_message(service.clone_requests[-1])[4] == [new_id.encode()]
+    assert len(service.clone_requests) == 2
 
 
 def test_version_cache_success_remains_cached_after_stop(version_cache_session):
