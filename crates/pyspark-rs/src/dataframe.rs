@@ -2049,13 +2049,9 @@ impl PyDataFrame {
         Ok(format!("DataFrame[{fields}]"))
     }
 
-    /// `DataFrame.mapInPandas` — map an iterator of pandas DataFrames.
-    ///
-    /// `profile` (a ResourceProfile) is accepted for signature parity with reference
-    /// pyspark; the connect core does not yet attach a resource profile id to the
-    /// map-partitions plan, so a supplied profile is currently a no-op.
+    /// `DataFrame.mapInPandas` — map an iterator of pandas DataFrames, in a stage of the
+    /// resource profile `profile`, if any, as PySpark's.
     #[pyo3(name = "mapInPandas", signature = (func, schema, barrier = false, profile = None))]
-    #[allow(unused_variables)]
     fn map_in_pandas(
         &self,
         py: Python<'_>,
@@ -2073,13 +2069,16 @@ impl PyDataFrame {
             eval_type::SQL_MAP_PANDAS_ITER_UDF,
             &cols,
         )?;
-        Ok(PyDataFrame::new(self.dataframe.map_in_pandas(udf, barrier)))
+        let profile_id = profile_id_of(profile.as_ref())?;
+        Ok(PyDataFrame::new(
+            self.dataframe
+                .map_in_pandas_with_profile(udf, barrier, profile_id),
+        ))
     }
 
-    /// `DataFrame.mapInArrow` — map an iterator of Arrow batches. `profile` is accepted
-    /// for signature parity (see `mapInPandas`); it is currently a no-op.
+    /// `DataFrame.mapInArrow` — map an iterator of Arrow batches, in a stage of the
+    /// resource profile `profile`, if any, as PySpark's.
     #[pyo3(name = "mapInArrow", signature = (func, schema, barrier = false, profile = None))]
-    #[allow(unused_variables)]
     fn map_in_arrow(
         &self,
         py: Python<'_>,
@@ -2091,7 +2090,11 @@ impl PyDataFrame {
         validate_map_function(py, &func, eval_type::SQL_MAP_ARROW_ITER_UDF)?;
         let cols = py.detach(|| self.dataframe.columns()).to_pyerr()?;
         let udf = build_map_udf(py, &func, &schema, eval_type::SQL_MAP_ARROW_ITER_UDF, &cols)?;
-        Ok(PyDataFrame::new(self.dataframe.map_in_arrow(udf, barrier)))
+        let profile_id = profile_id_of(profile.as_ref())?;
+        Ok(PyDataFrame::new(
+            self.dataframe
+                .map_in_arrow_with_profile(udf, barrier, profile_id),
+        ))
     }
 
     /// `DataFrame.foreach`, as PySpark Connect's: a UDF over a struct of the columns of each
@@ -3194,6 +3197,15 @@ pub(crate) fn resolve_datatype(
     Err(pyo3::exceptions::PyTypeError::new_err(
         "schema must be a DataType or a DDL string",
     ))
+}
+
+/// The id of the resource profile `profile` of `mapInPandas` and `mapInArrow`, as PySpark's
+/// `MapPartitions` reads `profile.id`, which creates the profile on the server.
+fn profile_id_of(profile: Option<&Bound<'_, PyAny>>) -> PyResult<Option<i32>> {
+    match profile {
+        Some(profile) if !profile.is_none() => Ok(Some(profile.getattr("id")?.extract()?)),
+        _ => Ok(None),
+    }
 }
 
 /// Validate the function of a map UDF for its eval type with

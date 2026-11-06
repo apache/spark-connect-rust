@@ -689,7 +689,19 @@ impl DataFrame {
         func: CommonInlineUserDefinedFunctionExpression,
         is_barrier: bool,
     ) -> DataFrame {
-        self.map_partitions(func, is_barrier)
+        self.map_partitions(func, is_barrier, None)
+    }
+
+    /// Map over each partition with a pandas UDF in a stage of the resource profile of
+    /// `profile_id`, as `DataFrame.mapInPandas(func, schema, barrier, profile)` does with the
+    /// id of `profile`, which [`SparkSession::build_resource_profile`] registers.
+    pub fn map_in_pandas_with_profile(
+        &self,
+        func: CommonInlineUserDefinedFunctionExpression,
+        is_barrier: bool,
+        profile_id: Option<i32>,
+    ) -> DataFrame {
+        self.map_partitions(func, is_barrier, profile_id)
     }
 
     /// Map over each partition with an Arrow UDF (`DataFrame.mapInArrow`).
@@ -698,7 +710,18 @@ impl DataFrame {
         func: CommonInlineUserDefinedFunctionExpression,
         is_barrier: bool,
     ) -> DataFrame {
-        self.map_partitions(func, is_barrier)
+        self.map_partitions(func, is_barrier, None)
+    }
+
+    /// Map over each partition with an Arrow UDF in a stage of the resource profile of
+    /// `profile_id`, as `DataFrame.mapInArrow(func, schema, barrier, profile)` does.
+    pub fn map_in_arrow_with_profile(
+        &self,
+        func: CommonInlineUserDefinedFunctionExpression,
+        is_barrier: bool,
+        profile_id: Option<i32>,
+    ) -> DataFrame {
+        self.map_partitions(func, is_barrier, profile_id)
     }
 
     /// Build a `MapPartitions` relation from an already-constructed UDF.
@@ -706,12 +729,14 @@ impl DataFrame {
         &self,
         func: CommonInlineUserDefinedFunctionExpression,
         is_barrier: bool,
+        profile_id: Option<i32>,
     ) -> DataFrame {
         let schema = func.python_udf.output_type.clone();
         let plan = LogicalPlan::MapPartitions {
             input: Arc::clone(&self.plan),
             func,
             is_barrier,
+            profile_id,
         };
         Self::new_with_schema(self.session.clone(), plan, Some(schema))
     }
@@ -720,14 +745,14 @@ impl DataFrame {
     ///
     /// Backed by an Arrow map partition; results are forced and discarded.
     pub fn foreach(&self, func: CommonInlineUserDefinedFunctionExpression) -> Result<()> {
-        let _ = self.map_partitions(func, false).collect()?;
+        let _ = self.map_partitions(func, false, None).collect()?;
         Ok(())
     }
 
     /// Apply a function to each partition for its side effects
     /// (`DataFrame.foreachPartition`).
     pub fn foreach_partition(&self, func: CommonInlineUserDefinedFunctionExpression) -> Result<()> {
-        let _ = self.map_partitions(func, false).collect()?;
+        let _ = self.map_partitions(func, false, None).collect()?;
         Ok(())
     }
 
@@ -4183,6 +4208,39 @@ mod plan_construction_tests {
             true,
         );
         ser(&udtf_df);
+    }
+
+    #[test]
+    fn map_functions_send_the_id_of_their_resource_profile() {
+        use crate::types::DataType;
+        use crate::udf::{CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
+        use spark_connect_proto::relation::RelType;
+
+        let spark = session();
+        let df = spark.range(5).unwrap();
+        let udf = || {
+            CommonInlineUserDefinedFunctionExpression::new(
+                "f".to_string(),
+                true,
+                vec![],
+                PythonUDFPayload::new(DataType::Integer, 205, vec![1], "3.11".to_string()),
+            )
+        };
+        let sent = |mapped: DataFrame| match mapped.relation().rel_type {
+            Some(RelType::MapPartitions(map)) => (map.profile_id, map.is_barrier),
+            other => panic!("expected MapPartitions, got {other:?}"),
+        };
+        // As PySpark's MapPartitions, of the id of the profile, if any.
+        assert_eq!(
+            sent(df.map_in_pandas_with_profile(udf(), true, Some(7))),
+            (Some(7), Some(true))
+        );
+        assert_eq!(
+            sent(df.map_in_arrow_with_profile(udf(), false, Some(8))),
+            (Some(8), Some(false))
+        );
+        assert_eq!(sent(df.map_in_pandas(udf(), false)), (None, Some(false)));
+        assert_eq!(sent(df.map_in_arrow(udf(), true)), (None, Some(true)));
     }
 }
 

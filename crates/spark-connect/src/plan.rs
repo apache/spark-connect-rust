@@ -348,11 +348,13 @@ pub enum LogicalPlan {
         input: Arc<LogicalPlan>,
         index_columns: Vec<Expression>,
     },
-    /// MapPartitions: `DataFrame.mapInPandas` / `mapInArrow` (also backs foreach).
+    /// MapPartitions: `DataFrame.mapInPandas` / `mapInArrow` (also backs foreach), of the id
+    /// of the resource profile of its stage, if any.
     MapPartitions {
         input: Arc<LogicalPlan>,
         func: CommonInlineUserDefinedFunctionExpression,
         is_barrier: bool,
+        profile_id: Option<i32>,
     },
     /// GroupMap: `GroupedData.applyInPandas` / `applyInArrow`, and the stateful
     /// `transformWithState[InPandas]`.
@@ -1427,11 +1429,13 @@ impl LogicalPlan {
                 input,
                 func,
                 is_barrier,
+                profile_id,
             } => {
                 let mut mp = proto::MapPartitions::default();
                 mp.input = Some(Box::new(relation_of(input, plan_ids)));
                 mp.func = Some(func.to_proto());
                 mp.is_barrier = Some(*is_barrier);
+                mp.profile_id = *profile_id;
                 relation.rel_type = Some(proto::relation::RelType::MapPartitions(Box::new(mp)));
             }
             LogicalPlan::GroupMap {
