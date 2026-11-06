@@ -1328,6 +1328,15 @@ def test_to_pandas_converts_the_columns_as_pyspark(session):
         session.conf.unset("spark.sql.session.timeZone")
 
 
+def test_na_and_stat_functions_are_of_their_dataframe_as_pyspark(session):
+    # As PySpark's: the df of df.na and df.stat is df itself.
+    df = session.createDataFrame([(1, None), (None, 2.0)], "a int, b double")
+    assert df.na.df is df
+    assert df.stat.df is df
+    assert sorted(df.na.df.na.fill(0).collect()) == sorted(df.na.fill(0).collect())
+    assert df.stat.df.count() == 2
+
+
 def test_sample_by_samples_the_fractions_of_the_strata_as_pyspark(session):
     # As PySpark's sampleBy: each stratum by its fraction, of a column name or a Column.
     df = session.createDataFrame([(1, "a"), (2, "b"), (3, "a")], "id int, k string")
