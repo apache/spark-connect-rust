@@ -81,9 +81,12 @@ class InputNameTests(unittest.TestCase):
             # ExecutePlanRequest.plan(3) -> Plan.root(1) -> Relation.local_relation(11).
             request = _fields(raw)
             root = _fields(_fields(request[3][0])[1][0])
+            renames = []
             while 18 in root:  # Relation.to_df -> ToDF.input.
-                root = _fields(_fields(root[18][0])[1][0])
-            self.captured.append(_fields(root[11][0]))
+                rename = _fields(root[18][0])
+                renames.append([name.decode() for name in rename.get(2, [])])
+                root = _fields(rename[1][0])
+            self.captured.append((_fields(root[11][0]), renames))
             yield (_bytes(1, request[1][0]) + _bytes(15, b"input-name-fixture")
                    + _bytes(12, request[6][0]) + _bytes(13, b"complete")
                    + _bytes(14, b""))
@@ -126,34 +129,44 @@ class InputNameTests(unittest.TestCase):
         self.spark = SparkSession.builder.remote(f"sc://127.0.0.1:{port}").create()
         self.addCleanup(self.spark.stop)
 
-    def capture(self, frame):
+    def capture(self, frame, expected_ipc_names=None):
         before = len(self.captured)
         frame.toArrow()
         self.assertEqual(len(self.captured), before + 1)
-        local = self.captured[-1]
+        local, renames = self.captured[-1]
+        schema = json.loads(local[2][0])
+        payload_names = [field["name"] for field in schema["fields"]]
         if 1 in local:
             table = pa.ipc.open_stream(local[1][0]).read_all()
-            return (table.schema.names,
-                    [[table.column(j)[i].as_py() for j in range(table.num_columns)]
-                     for i in range(table.num_rows)])
-        schema = json.loads(local[2][0])
-        return [field["name"] for field in schema["fields"]], []
+            table.validate(full=True)
+            self.assertEqual(table.schema.names, payload_names)
+            values = [[table.column(j)[i].as_py() for j in range(table.num_columns)]
+                      for i in range(table.num_rows)]
+        else:
+            values = []
+        if expected_ipc_names is not None:
+            self.assertEqual(payload_names, expected_ipc_names)
+        for names in renames:
+            self.assertEqual(len(names), len(payload_names))
+        # toDF changes observable column names without changing the local IPC schema.
+        # Wrappers were captured from outside in, so the outermost names win.
+        return (renames[0] if renames else payload_names), values
 
     def test_name_precedence_and_values(self):
         cases = [
-            ([(7, 8), (9, 10)], None, ["_1", "_2"]),
-            ([Row(z=7, a=8), Row(z=9, a=10)], None, ["z", "a"]),
-            ([Row(z=7, a=8), Row(z=9, a=10)], ["x", "y"], ["x", "y"]),
-            ([{"z": 8, "a": 7}, {"z": 10, "a": 9}], None, ["a", "z"]),
-            ([{"z": 8, "a": 7}, {"z": 10, "a": 9}], ["x", "y"], ["x", "y"]),
+            ([(7, 8), (9, 10)], None, ["_1", "_2"], ["_1", "_2"]),
+            ([Row(z=7, a=8), Row(z=9, a=10)], None, ["z", "a"], ["z", "a"]),
+            ([Row(z=7, a=8), Row(z=9, a=10)], ["x", "y"], ["x", "y"], ["z", "a"]),
+            ([{"z": 8, "a": 7}, {"z": 10, "a": 9}], None, ["a", "z"], ["a", "z"]),
+            ([{"z": 8, "a": 7}, {"z": 10, "a": 9}], ["x", "y"], ["x", "y"], ["a", "z"]),
             (pd.DataFrame([[7, 8], [9, 10]], columns=["café", "雪"]),
-             None, ["café", "雪"]),
+             None, ["café", "雪"], ["café", "雪"]),
             (pd.DataFrame([[7, 8], [9, 10]], columns=["old", "names"]),
-             ["x", "y"], ["x", "y"]),
+             ["x", "y"], ["x", "y"], ["x", "y"]),
         ]
-        for data, schema, names in cases:
+        for data, schema, names, ipc_names in cases:
             with self.subTest(names=names, source=type(data).__name__):
-                self.assertEqual(self.capture(self.spark.createDataFrame(data, schema)),
+                self.assertEqual(self.capture(self.spark.createDataFrame(data, schema), ipc_names),
                                  (names, [[7, 8], [9, 10]]))
 
     def test_unusual_names_nulls_and_empty_input(self):
