@@ -35,6 +35,7 @@ from pyspark.serializers import CloudPickleSerializer
 # Eval types for Python UDTFs (mirrors pyspark.util.PythonEvalType).
 SQL_TABLE_UDF = 300
 SQL_ARROW_TABLE_UDF = 301
+SQL_ARROW_UDTF = 302
 
 
 # Verbatim from PySpark (pyspark.sql.udtf): validates the handler class of a UDTF.
@@ -97,7 +98,7 @@ class UserDefinedTableFunction:
         returnType: Optional[Any] = None,
         name: Optional[str] = None,
         evalType: int = SQL_TABLE_UDF,
-        deterministic: bool = True,
+        deterministic: bool = False,
     ):
         # As PySpark's UserDefinedTableFunction, for udtf(), arrow_udtf() and register().
         _validate_udtf_handler(func, returnType)
@@ -113,39 +114,26 @@ class UserDefinedTableFunction:
         # worker command contains only the handler class, unlike scalar UDFs.
         self.command = CloudPickleSerializer().dumps(func)
 
-    def _active_session(self):
-        from pyspark.sql import SparkSession
-
-        session = SparkSession.getActiveSession()
-        if session is None:
-            raise RuntimeError(
-                "No active SparkSession; a UDTF must be called within an active session."
-            )
-        return session
-
     def __call__(self, *args: Any) -> Any:
         from pyspark import _pyspark
+        from pyspark.sql import SparkSession
 
         return _pyspark.functions.pyfunc_make_udtf(
-            self._active_session(),
+            SparkSession.active(),
             self.name,
             self.returnType,
             self.evalType,
             self.command,
             self.python_ver,
             *args,
+            deterministic=self.deterministic,
         )
 
     def asDeterministic(self) -> "UserDefinedTableFunction":
-        """Return a copy of this UDTF marked as deterministic. Mirrors
+        """Mark this UDTF as deterministic, and return it. Mirrors
         ``UserDefinedTableFunction.asDeterministic``."""
-        return UserDefinedTableFunction(
-            self.func,
-            returnType=self.returnType,
-            name=self.name,
-            evalType=self.evalType,
-            deterministic=True,
-        )
+        self.deterministic = True
+        return self
 
 
 def udtf(
@@ -157,11 +145,49 @@ def udtf(
     """Create a user-defined table function (UDTF).
 
     Use as ``@udtf(returnType=...)`` on a handler class, or call
-    ``udtf(MyClass, returnType=...)`` directly.
+    ``udtf(MyClass, returnType=...)`` directly. As PySpark's ``_create_py_udtf``, the UDTF is
+    Arrow-optimized when ``useArrow`` is True, or is not given and
+    ``spark.sql.execution.pythonUDTF.arrow.enabled`` of the active session is true.
     """
-    eval_type = SQL_ARROW_TABLE_UDF if useArrow is True else SQL_TABLE_UDF
 
     def _udtf_decorator(handler: Type) -> UserDefinedTableFunction:
+        if useArrow is not None:
+            arrow_enabled = useArrow
+        else:
+            from pyspark.errors import PySparkRuntimeError
+            from pyspark.sql import SparkSession
+
+            arrow_enabled = False
+            try:
+                session = SparkSession.active()
+                arrow_enabled = (
+                    str(session.conf.get("spark.sql.execution.pythonUDTF.arrow.enabled")).lower()
+                    == "true"
+                )
+            except PySparkRuntimeError as e:
+                if e.getCondition() == "NO_ACTIVE_OR_DEFAULT_SESSION":
+                    pass  # Just uses the default if no session found.
+                else:
+                    raise e
+        eval_type = SQL_TABLE_UDF
+        if arrow_enabled:
+            try:
+                from pyspark.sql.pandas.utils import (
+                    require_minimum_pandas_version,
+                    require_minimum_pyarrow_version,
+                )
+
+                require_minimum_pandas_version()
+                require_minimum_pyarrow_version()
+                eval_type = SQL_ARROW_TABLE_UDF
+            except ImportError as e:
+                import warnings
+
+                warnings.warn(
+                    f"Arrow optimization for Python UDTFs cannot be enabled: {str(e)}. "
+                    f"Falling back to using regular Python UDTFs.",
+                    UserWarning,
+                )
         return UserDefinedTableFunction(handler, returnType=returnType, evalType=eval_type)
 
     if cls is not None:
@@ -176,14 +202,15 @@ def arrow_udtf(
 ) -> Any:
     """Create an Arrow-based user-defined table function (UDTF).
 
-    Mirrors ``pyspark.sql.functions.arrow_udtf``: like :func:`udtf` but the handler
-    operates on Arrow data (``SQL_ARROW_TABLE_UDF``).
+    Mirrors ``pyspark.sql.functions.arrow_udtf``: a PyArrow-native UDTF (``SQL_ARROW_UDTF``),
+    whose ``eval`` takes ``pyarrow`` arrays and returns ``pyarrow`` tables.
     """
     def _arrow_udtf_decorator(handler: Type) -> UserDefinedTableFunction:
+        from pyspark.sql.pandas.utils import require_minimum_pyarrow_version
+
+        require_minimum_pyarrow_version()
         _validate_arrow_udtf_handler(handler, returnType)
-        return UserDefinedTableFunction(
-            handler, returnType=returnType, evalType=SQL_ARROW_TABLE_UDF
-        )
+        return UserDefinedTableFunction(handler, returnType=returnType, evalType=SQL_ARROW_UDTF)
 
     if cls is not None:
         return _arrow_udtf_decorator(cls)

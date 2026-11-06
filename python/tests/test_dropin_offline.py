@@ -420,7 +420,7 @@ def test_functions_udtf_and_arrow_decorators():
         def eval(self, n):
             yield (n,)
 
-    assert AEcho.evalType == 301  # SQL_ARROW_TABLE_UDF
+    assert AEcho.evalType == 302  # SQL_ARROW_UDTF
 
     # functions.arrow_udf builds an Arrow scalar UDF.
     au = F.arrow_udf(lambda x: x, IntegerType())
@@ -710,6 +710,50 @@ def test_show_checks_its_arguments_as_pyspark():
         df.show(foo=1)
     with pytest.raises(TypeError, match=r"^DataFrame\._show_string\(\) got multiple values for argument 'n'$"):
         df._show_string(1, n=2)
+
+
+def test_udtfs_are_created_as_pyspark(mock_connect):
+    # As PySpark's _create_py_udtf and _create_pyarrow_udtf: a UDTF is not deterministic
+    # unless asDeterministic() marks it so, in place; arrow_udtf() makes a PyArrow-native
+    # UDTF (SQL_ARROW_UDTF); and udtf() makes an Arrow-optimized one (SQL_ARROW_TABLE_UDF)
+    # with useArrow=True, or without useArrow when the active session enables
+    # spark.sql.execution.pythonUDTF.arrow.enabled.
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    arrow_conf = "spark.sql.execution.pythonUDTF.arrow.enabled"
+
+    class Echo:
+        def eval(self, n):
+            yield (n,)
+
+    def sent(fn):
+        # ExecutePlanRequest.plan=3, Plan.root=1, Relation.common_inline_user_defined_table_
+        # function=38; CommonInlineUserDefinedTableFunction.deterministic=2, python_udtf=4;
+        # PythonUDTF.eval_type=2.
+        fn(F.lit(1)).collect()
+        relation = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        udtf = parse_message(parse_message(relation)[38][0])
+        return udtf.get(2, [0]) == [1], parse_message(udtf[4][0])[2][0]
+
+    # The server enables the config by default.
+    arrow = F.udtf(Echo, returnType="a int")
+    assert arrow.deterministic is False
+    assert sent(arrow) == (False, 301)
+    assert arrow.asDeterministic() is arrow and arrow.deterministic is True
+    assert sent(arrow) == (True, 301)
+    assert sent(F.udtf(returnType="a int", useArrow=False)(Echo)) == (False, 300)
+    assert sent(F.arrow_udtf(Echo, returnType="a int")) == (False, 302)
+    assert sent(F.arrow_udtf(returnType="a int")(Echo).asDeterministic()) == (True, 302)
+
+    service.confs = {arrow_conf: "false"}
+    try:
+        assert sent(F.udtf(returnType="a int")(Echo)) == (False, 300)
+        assert sent(F.udtf(Echo, returnType="a int", useArrow=True)) == (False, 301)
+    finally:
+        service.confs = {}
+    # Only udtf() without useArrow reads the configuration.
+    assert service.read_confs == [arrow_conf, arrow_conf]
 
 
 def test_decimal_literal_is_of_the_default_decimal_type_as_pyspark(mock_connect):
@@ -1389,20 +1433,30 @@ def test_udtf_construction():
 
 
 def test_udtf_call_without_session_raises():
-    from pyspark.sql.udtf import UserDefinedTableFunction
-    from pyspark.sql import SparkSession
-    # Ensure no active session, then calling must raise a clear error.
-    prev = SparkSession.getActiveSession()
-    if prev is not None:
-        pytest.skip("an active session exists in this process")
+    # As PySpark's, udtf() without a session is not Arrow-optimized, and the call raises the
+    # error of SparkSession.active(). In a new interpreter, which has no active session.
+    import subprocess
+    import sys
 
-    @__import__("pyspark.sql.udtf", fromlist=["udtf"]).udtf(returnType="a int")
-    class T2:
-        def eval(self, n):
-            yield (n,)
+    subprocess.run([sys.executable, "-c", """
+from pyspark.errors import PySparkRuntimeError
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import udtf
 
-    with pytest.raises(RuntimeError):
-        T2(1)
+@udtf(returnType="a int")
+class T2:
+    def eval(self, n):
+        yield (n,)
+
+assert T2.evalType == 300
+for call in (SparkSession.active, lambda: T2(1)):
+    try:
+        call()
+    except PySparkRuntimeError as error:
+        assert error.getCondition() == "NO_ACTIVE_OR_DEFAULT_SESSION", error
+    else:
+        raise AssertionError("no error")
+"""], check=True)
 
 
 def test_udtf_return_type_connect_validation_and_command():
@@ -1416,6 +1470,7 @@ def test_udtf_return_type_connect_validation_and_command():
 from pyspark.sql import SparkSession, DataFrame, functions as F, types as T
 from pyspark.serializers import CloudPickleSerializer
 
+# No server listens: with useArrow, udtf() does not read the Arrow config of the session.
 spark = SparkSession.builder.remote("sc://localhost:15002").getOrCreate()
 class Echo:
     def eval(self, value):
@@ -1425,8 +1480,8 @@ schema = T.StructType([T.StructField("value", T.LongType())])
 for return_type in ["value BIGINT", "STRUCT<value: BIGINT>",
                     "value ARRAY<STRUCT<x: INT>>", "invalid DDL !!!", "INT", schema]:
     for decorate in [False, True]:
-        fn = (F.udtf(returnType=return_type)(Echo) if decorate else
-              F.udtf(Echo, returnType=return_type))
+        fn = (F.udtf(returnType=return_type, useArrow=False)(Echo) if decorate else
+              F.udtf(Echo, returnType=return_type, useArrow=False))
         assert isinstance(fn(F.lit(1)), DataFrame)
         handler = CloudPickleSerializer().loads(fn.command)
         assert isinstance(handler, type)
@@ -1438,7 +1493,7 @@ class Dynamic(Echo):
     @staticmethod
     def analyze(value):
         pass
-assert isinstance(F.udtf(Dynamic)(F.lit(1)), DataFrame)
+assert isinstance(F.udtf(Dynamic, useArrow=False)(F.lit(1)), DataFrame)
 """], check=True)
 
 
@@ -1508,7 +1563,8 @@ with mock_connect_session() as (spark, service):
                     assert parse_message(field[2][0]) == {7: [b""]}  # LongType
                     assert field.get(3, [0]) == [0]  # nullable=False
                     assert json.loads(field[4][0]) == {"comment": "kept"}
-            assert udtf[2] == [300]
+            # SQL_ARROW_TABLE_UDF, as the server enables Arrow-optimized UDTFs by default.
+            assert udtf[2] == [301]
             command_handler = CloudPickleSerializer().loads(udtf[3][0])
             assert isinstance(command_handler, type)
             assert command_handler.__name__ == handler.__name__
@@ -2154,8 +2210,10 @@ def test_udtf_variants():
     """Test UDTF builder methods."""
     from pyspark.sql.udtf import UserDefinedTableFunction
 
-    # Create a simple UDTF for testing
-    @__import__("pyspark.sql.functions", fromlist=["udtf"]).udtf(returnType="a int")
+    # Create a simple UDTF for testing; not Arrow-optimized whatever the active session.
+    @__import__("pyspark.sql.functions", fromlist=["udtf"]).udtf(
+        returnType="a int", useArrow=False
+    )
     class SimpleUDTF:
         def eval(self, n):
             yield (n,)
@@ -2165,8 +2223,8 @@ def test_udtf_variants():
     assert SimpleUDTF.name == "SimpleUDTF"
     assert SimpleUDTF.evalType == 300  # SQL_TABLE_UDF
 
-    # Test deterministic flag
-    assert SimpleUDTF.deterministic is True
+    # As PySpark's, a UDTF is not deterministic unless asDeterministic() marks it so.
+    assert SimpleUDTF.deterministic is False
 
 
 def test_column_with_alias_chain():
@@ -4633,6 +4691,255 @@ def test_container_input_nested_array_struct_binary_ipc(container_input_capture_
                                   "record": {"x": 7, "y": "row"}, "blob": b"abc"}]
 
 
+# --------------------------------------------------------------------------- exact date input
+
+from datetime import (
+    date as _exact_date_date, datetime as _exact_date_datetime,
+    timezone as _exact_date_timezone,
+)
+from decimal import Decimal as _exact_date_Decimal
+from pyspark.sql import Row as _exact_date_Row
+
+
+def _exact_date_converted_value(mock_connect, value):
+    import pyarrow as pa
+
+    pd = pytest.importorskip("pandas")
+    spark, service = mock_connect
+    # py_to_value remains the generic pandas converter. Local rows now use
+    # infer.convert, which intentionally has different subclass/type semantics.
+    data = pd.DataFrame({"value": [value]}, dtype=object)
+    before = len(service.execute_requests)
+    spark.createDataFrame(data).toArrow()
+    requests = service.execute_requests
+    assert len(requests) == before + 1
+    request = parse_message(requests[-1])
+    relation = parse_message(parse_message(request[3][0])[1][0])
+    renames = []
+    while 18 in relation:  # Relation.to_df -> ToDF.input; column_names=2.
+        rename = parse_message(relation[18][0])
+        renames.append([name.decode() for name in rename.get(2, [])])
+        relation = parse_message(rename[1][0])
+    local = parse_message(relation[11][0])
+    table = pa.ipc.open_stream(local[1][0]).read_all()
+    table.validate(full=True)
+    assert (table.num_rows, table.num_columns) == (1, 1)
+    assert table.column_names == ["value"]
+    assert [field["name"] for field in json.loads(local[2][0])["fields"]] == table.column_names
+    for names in renames:
+        assert len(names) == table.num_columns
+    # The outermost toDF supplies observable names without rewriting raw IPC.
+    assert (renames[0] if renames else table.column_names) == ["value"]
+    return table.column(0)[0].as_py()
+
+
+@pytest.mark.parametrize("value", [
+    _exact_date_date.min, _exact_date_date.max, _exact_date_date(1, 3, 1), _exact_date_date(4, 2, 29),
+    _exact_date_date(1600, 2, 29), _exact_date_date(1900, 2, 28), _exact_date_date(1900, 3, 1),
+    _exact_date_date(1969, 12, 31), _exact_date_date(1970, 1, 1), _exact_date_date(1970, 1, 2),
+    _exact_date_date(2000, 2, 29), _exact_date_date(2100, 3, 1),
+])
+def test_exact_date_builtin_roundtrip(mock_connect, value):
+    actual = _exact_date_converted_value(mock_connect, value)
+    assert type(actual) is _exact_date_date
+    assert actual == value
+
+
+def test_exact_date_subclass_protocol_precedence(mock_connect):
+    trace = []
+
+    class Indexed(_exact_date_date):
+        def __index__(self):
+            trace.append("index")
+            return 42
+
+        def toordinal(self):
+            raise AssertionError("numeric extraction must precede date conversion")
+
+    class Floating(_exact_date_date):
+        def __float__(self):
+            trace.append("float")
+            return 1.25
+
+        def toordinal(self):
+            raise AssertionError("numeric extraction must precede date conversion")
+
+    class Ordinal(_exact_date_date):
+        def toordinal(self):
+            trace.append("ordinal")
+            return _exact_date_date(2000, 2, 29).toordinal()
+
+    class Plain(_exact_date_date):
+        pass
+
+    assert _exact_date_converted_value(mock_connect, Indexed(2020, 1, 1)) == 42
+    assert _exact_date_converted_value(mock_connect, Floating(2020, 1, 1)) == 1.25
+    assert _exact_date_converted_value(mock_connect, Ordinal(2020, 1, 1)) == _exact_date_date(2000, 2, 29)
+    assert type(_exact_date_converted_value(mock_connect, Plain(2020, 1, 1))) is _exact_date_date
+    assert trace == ["index", "float", "ordinal"]
+
+
+def test_exact_date_datetime_timestamp_encoding(mock_connect):
+    pd = pytest.importorskip("pandas")
+    for value in [_exact_date_datetime(2020, 2, 29, 12, 34, 56, 123456),
+                  _exact_date_datetime(2020, 2, 29, tzinfo=_exact_date_timezone.utc),
+                  pd.Timestamp("2020-02-29 12:34:56.123456"),
+                  pd.Timestamp("2020-02-29 12:34:56.123456Z")]:
+        actual = _exact_date_converted_value(mock_connect, value)
+        assert type(actual) is _exact_date_datetime
+        expected = value.to_pydatetime() if isinstance(value, pd.Timestamp) else value
+        assert actual == _exact_date_datetime.fromtimestamp(expected.timestamp(), _exact_date_timezone.utc)
+
+
+def test_exact_date_nested_unrelated_values(mock_connect):
+    value = _exact_date_Row(items=[_exact_date_date.min, None, _exact_date_date.max],
+                mapping={"epoch": _exact_date_date(1970, 1, 1)},
+                nested=_exact_date_Row(day=_exact_date_date(2000, 2, 29)),
+                amount=_exact_date_Decimal("-12.340"), number=42, flag=True, label="date")
+    actual = _exact_date_converted_value(mock_connect, value)
+    assert actual["items"] == [_exact_date_date.min, None, _exact_date_date.max]
+    assert dict(actual["mapping"]) == {"epoch": _exact_date_date(1970, 1, 1)}
+    assert actual["nested"]["day"] == _exact_date_date(2000, 2, 29)
+    assert actual["amount"] == _exact_date_Decimal("-12.340")
+    assert (actual["number"], actual["flag"], actual["label"]) == (42, True, "date")
+
+
+def test_exact_date_named_impostor_rejected():
+    pd = pytest.importorskip("pandas")
+    impostor = type("date", (), {"toordinal": lambda self: 719163})
+    with pytest.raises(TypeError, match="unsupported value type"):
+        _local_create_dataframe(pd.DataFrame({"value": [impostor()]}, dtype=object))
+
+
+def _exact_date_fields(data):
+    """Decode only the small protobuf envelope around a local Arrow relation."""
+    def _exact_date_varint(pos):
+        value, shift = 0, 0
+        while True:
+            byte = data[pos]
+            pos += 1
+            value |= (byte & 127) << shift
+            if byte < 128:
+                return value, pos
+            shift += 7
+
+    result, pos = {}, 0
+    while pos < len(data):
+        tag, pos = _exact_date_varint(pos)
+        wire = tag & 7
+        if wire == 2:
+            length, pos = _exact_date_varint(pos)
+            result[tag >> 3] = data[pos:pos + length]
+            pos += length
+        elif wire == 0:
+            _, pos = _exact_date_varint(pos)
+        elif wire in (1, 5):
+            pos += 8 if wire == 1 else 4
+        else:
+            raise AssertionError(f"unexpected protobuf wire type: {wire}")
+    return result
+
+
+def _exact_date_capture_server(connection):
+    from concurrent.futures import ThreadPoolExecutor
+    import grpc
+
+    captured = []
+
+    def _exact_date_execute(request, context):
+        # ExecutePlanRequest.plan=3 -> Plan.root=1 ->
+        # Relation.local_relation=11 -> LocalRelation.data=1.
+        relation = _exact_date_fields(_exact_date_fields(_exact_date_fields(request)[3])[1])
+        while 18 in relation:  # Relation.to_df -> ToDF.input.
+            relation = _exact_date_fields(_exact_date_fields(relation[18])[1])
+        captured.append(_exact_date_fields(relation[11])[1])
+        context.abort(grpc.StatusCode.INVALID_ARGUMENT, "captured date input")
+        yield b""  # Make this a streaming handler.
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        server = grpc.server(executor)
+        server.add_generic_rpc_handlers((grpc.method_handlers_generic_handler(
+            "spark.connect.SparkConnectService", {
+                "ExecutePlan": grpc.unary_stream_rpc_method_handler(_exact_date_execute),
+            }),))
+        port = server.add_insecure_port("127.0.0.1:0")
+        server.start()
+        connection.send(port)
+        try:
+            while True:
+                command = connection.recv()
+                if command == "stop":
+                    break
+                assert command == "get"
+                connection.send(captured.pop(0))
+        finally:
+            server.stop(0).wait()
+
+
+@pytest.fixture
+def exact_date_capture_input():
+    import multiprocessing
+    pytest.importorskip("grpc")
+    from pyspark.sql import SparkSession
+
+    context = multiprocessing.get_context("spawn")
+    parent, child = context.Pipe()
+    process = context.Process(target=_exact_date_capture_server, args=(child,))
+    process.start()
+    try:
+        assert parent.poll(20), "capture service failed to start"
+        spark = SparkSession.builder.remote(f"sc://127.0.0.1:{parent.recv()}").getOrCreate()
+
+        def _exact_date_capture(data, schema):
+            import pyarrow as pa
+            df = spark.createDataFrame(data, schema=schema)
+            with pytest.raises(Exception, match="captured date input"):
+                df.collect()
+            parent.send("get")
+            assert parent.poll(10), "capture service failed to return the IPC payload"
+            return pa.ipc.open_stream(parent.recv()).read_all()
+
+        yield _exact_date_capture
+    finally:
+        if process.is_alive():
+            parent.send("stop")
+        process.join(10)
+        if process.is_alive():
+            process.terminate()
+            process.join(10)
+        parent.close()
+        child.close()
+
+
+@pytest.mark.parametrize("source", ["tuples", "pandas"])
+@pytest.mark.parametrize("schema_kind", ["inferred", "names", "explicit", "ddl"])
+def test_exact_date_ipc_calendar_range(exact_date_capture_input, source, schema_kind):
+    import calendar
+    import pyarrow as pa
+    from pyspark.sql import types as T
+
+    # Every year's endpoints and leap day cover the complete supported calendar
+    # range, including non-leap centuries, without relying on the Rust decoder.
+    dates = [_exact_date_date.min, _exact_date_date.max, _exact_date_date(1969, 12, 31), _exact_date_date(1970, 1, 1),
+             _exact_date_date(1970, 1, 2), None]
+    for year in range(1, 10000):
+        dates.extend([_exact_date_date(year, 1, 1), _exact_date_date(year, 12, 31)])
+        if calendar.isleap(year):
+            dates.append(_exact_date_date(year, 2, 29))
+    schema = {"inferred": None, "names": ["day"], "ddl": "day date",
+              "explicit": T.StructType([T.StructField("day", T.DateType())])}[schema_kind]
+    data = [(value,) for value in dates]
+    if source == "pandas":
+        pd = pytest.importorskip("pandas")
+        data = pd.DataFrame(data, columns=["day"])
+    table = exact_date_capture_input(data, schema)
+    assert table.column(0).type == pa.date32()
+    assert table.column(0).to_pylist() == dates
+    epoch = _exact_date_date(1970, 1, 1)
+    expected_days = [None if value is None else (value - epoch).days for value in dates]
+    assert table.column(0).cast(pa.int32()).to_pylist() == expected_days
+
+
 # --------------------------------------------------------------------------- schema cache
 
 
@@ -4645,9 +4952,28 @@ def _shared_mock_connect():
 
 @pytest.fixture
 def mock_connect(_shared_mock_connect):
-    spark, service = _shared_mock_connect
+    # Each test has a session of its own of the shared server, which is the active session
+    # while the test runs, as the tests of what reads the active session expect.
+    from pyspark.sql import SparkSession
+
+    _, service = _shared_mock_connect
     service.reset()
-    return spark, service
+    spark = SparkSession.builder.remote(service.remote).getOrCreate()
+    yield spark, service
+    spark.stop()
+
+
+@pytest.fixture(autouse=True)
+def _no_session_left_active():
+    # Each test starts without an active session, as a new interpreter does. What reads the
+    # active session, such as udtf() of its Arrow configuration, would otherwise reach the
+    # server of a session that an earlier test left, which may not listen.
+    yield
+    from pyspark.sql import SparkSession
+
+    session = SparkSession.getActiveSession()
+    if session is not None:
+        session.stop()
 
 
 @pytest.mark.parametrize("first", ["schema", "columns", "dtypes"])
@@ -6064,6 +6390,22 @@ def test_pandas_conversion_and_its_imports_are_pyspark_modules():
 
     assert callable(_convert_arrow_table_to_pandas) and callable(captured.convert_exception)
     assert inspect.isgeneratorfunction(pyspark.util._load_from_socket.__wrapped__)
+
+
+def test_to_local_iterator_executes_with_its_first_row_as_pyspark(mock_connect):
+    # As PySpark's generator: the execution starts with the first row, which raises its
+    # error, and the iteration then ends.
+    from pyspark.errors import PySparkException
+
+    spark, service = mock_connect
+    service.execute_failure = "plan rejected"
+    rows = spark.range(3).toLocalIterator()
+    assert service.execute_calls == 0
+    with pytest.raises(PySparkException, match="plan rejected"):
+        next(rows)
+    assert service.execute_calls == 1
+    assert list(rows) == []
+    assert service.execute_calls == 1
 
 
 def test_execute_plan_error_carries_operation_id(mock_connect):

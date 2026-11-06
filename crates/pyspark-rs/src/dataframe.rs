@@ -1289,19 +1289,13 @@ impl PyDataFrame {
 
     /// Return an iterator over rows without materializing the entire result in memory.
     ///
-    /// Mirrors `pyspark.sql.DataFrame.toLocalIterator(prefetchPartitions=False)`.
+    /// Mirrors `pyspark.sql.DataFrame.toLocalIterator(prefetchPartitions=False)`, a generator:
+    /// the execution starts with the first row, and its errors are raised by the iteration.
     /// Yields Row objects lazily as batches are fetched from the server.
     #[pyo3(name = "toLocalIterator")]
     #[pyo3(signature = (prefetchPartitions=false))]
-    fn to_local_iterator(
-        &self,
-        py: Python<'_>,
-        prefetchPartitions: bool,
-    ) -> PyResult<PyLocalRowIterator> {
-        let iterator = py
-            .detach(|| self.dataframe.to_local_iterator(prefetchPartitions))
-            .to_pyerr()?;
-        Ok(PyLocalRowIterator::new(iterator))
+    fn to_local_iterator(&self, prefetchPartitions: bool) -> PyLocalRowIterator {
+        PyLocalRowIterator::new(self.dataframe.clone(), prefetchPartitions)
     }
 
     /// Collect the DataFrame into a `pyarrow.Table`.
@@ -2821,18 +2815,37 @@ fn rows_to_py(
 /// Implements `__iter__` and `__next__` to make it a proper Python iterator.
 #[pyclass(name = "LocalRowIterator", module = "pyspark.sql.dataframe")]
 pub struct PyLocalRowIterator {
-    iterator: LocalRowIterator,
+    dataframe: DataFrame,
+    prefetch_partitions: bool,
+    /// The rows of the execution, which the first row starts, as PySpark's generator does.
+    iterator: Option<LocalRowIterator>,
+    /// Whether the iteration ended, with its last row or an error, as a generator ends.
+    finished: bool,
     /// The converters of the fields of user-defined types of the rows, once the schema of the
     /// result is known: with the first row.
     converters: Option<Option<FieldConverters>>,
 }
 
 impl PyLocalRowIterator {
-    pub fn new(iterator: LocalRowIterator) -> Self {
+    pub fn new(dataframe: DataFrame, prefetch_partitions: bool) -> Self {
         PyLocalRowIterator {
-            iterator,
+            dataframe,
+            prefetch_partitions,
+            iterator: None,
+            finished: false,
             converters: None,
         }
+    }
+
+    /// The next row, starting the execution for the first.
+    fn next_row(&mut self) -> Option<spark_connect_core::error::Result<spark_connect::row::Row>> {
+        if self.iterator.is_none() {
+            match self.dataframe.to_local_iterator(self.prefetch_partitions) {
+                Ok(iterator) => self.iterator = Some(iterator),
+                Err(error) => return Some(Err(error)),
+            }
+        }
+        self.iterator.as_mut()?.next()
     }
 }
 
@@ -2847,18 +2860,28 @@ impl PyLocalRowIterator {
     ///
     /// Releases the GIL during the blocking fetch to allow other threads to run.
     fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<PyRow>> {
+        if self.finished {
+            return Ok(None);
+        }
         // Release the GIL while fetching from the Rust iterator (which may block on network I/O).
-        match py.detach(|| self.iterator.next()) {
+        match py.detach(|| self.next_row()) {
             Some(Ok(row)) => {
                 if self.converters.is_none() {
-                    let schema = self.iterator.schema();
+                    let schema = self.iterator.as_ref().and_then(LocalRowIterator::schema);
                     self.converters = Some(udt_field_converters(py, schema.as_ref())?);
                 }
                 let converters = self.converters.clone().flatten();
                 Ok(Some(PyRow::with_converters(row, converters)))
             }
-            Some(Err(_e)) => Ok(None), // On error, stop iterating
-            None => Ok(None),
+            // As PySpark raises the error of the execution, which ends the iteration.
+            Some(Err(error)) => {
+                self.finished = true;
+                Err(crate::errors::spark_error_to_py_exception(error))
+            }
+            None => {
+                self.finished = true;
+                Ok(None)
+            }
         }
     }
 }

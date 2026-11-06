@@ -158,11 +158,13 @@ def serve(connection):
         # ErrorInfo of `reason` and `metadata` in grpc-status-details-bin.
         execute_error = None
         # FetchErrorDetails returns `error_details` (raw FetchErrorDetailsResponse fields) and
-        # records the error id asked for. Config Get returns the values in `confs`, and fails
-        # for a key without one, as the server does for an unset config; it records the keys.
+        # records the error id asked for. Config Get returns the values in `confs`, or else
+        # those of `default_confs`, the defaults of SQL configs of the server, and fails for a
+        # key without one, as the server does for an unset config; it records the keys.
         error_details = b""
         fetched_error_ids = []
         confs = {}
+        default_confs = {"spark.sql.execution.pythonUDTF.arrow.enabled": "true"}
         read_confs = []
 
         def execute(self, request, context):
@@ -219,11 +221,12 @@ def serve(connection):
                 context.abort(grpc.StatusCode.UNIMPLEMENTED, "only Get is served")
             keys = [key.decode() for key in parse_message(operation[2][0]).get(1, [])]
             self.read_confs.extend(keys)
-            if any(key not in self.confs for key in keys):
+            confs = {**self.default_confs, **self.confs}
+            if any(key not in confs for key in keys):
                 context.abort(grpc.StatusCode.INTERNAL, "[SQL_CONF_NOT_FOUND]")
             # The response names the session, as the server's does.
             return message_field(1, request[1][0]) + b"".join(
-                message_field(2, message_field(1, key) + message_field(2, self.confs[key]))
+                message_field(2, message_field(1, key) + message_field(2, confs[key]))
                 for key in keys
             )
 
@@ -303,9 +306,12 @@ def mock_connect_session():
     spark = None
     try:
         assert parent.poll(20), "Mock server did not start"
-        port = parent.recv()
-        spark = SparkSession.builder.remote(f"sc://127.0.0.1:{port}").getOrCreate()
-        yield spark, RemoteService(parent)
+        remote = f"sc://127.0.0.1:{parent.recv()}"
+        spark = SparkSession.builder.remote(remote).getOrCreate()
+        service = RemoteService(parent)
+        # The URL of the server, for more sessions of it.
+        object.__setattr__(service, "remote", remote)
+        yield spark, service
     finally:
         try:
             if spark is not None:

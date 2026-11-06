@@ -54,6 +54,18 @@ def session():
         session.stop()
 
 
+@pytest.mark.parametrize("prefetch", [False, True])
+def test_to_local_iterator_raises_the_error_of_the_execution_as_pyspark(session, prefetch):
+    # As official PySpark 4.3.0: the error of a query that fails while it is iterated is
+    # raised by the iteration, which then ends, rather than ending it as if complete.
+    df = session.sql("SELECT assert_true(id < 0) AS x FROM range(3)")
+    rows = df.toLocalIterator(prefetch)
+    with pytest.raises(Exception) as error:
+        next(rows)
+    assert error.value.getCondition() == "USER_RAISED_EXCEPTION"
+    assert list(rows) == []
+
+
 def test_conf_get_with_a_none_default(session):
     key = "spark.connect.rust.test.unset"
     assert session.conf.get(key, None) is None
@@ -143,6 +155,19 @@ def test_udtf_takes_a_ddl_or_struct_return_type_as_pyspark(session):
     with pytest.raises(ParseException) as error:
         df.collect()
     assert error.value.getCondition() == "PARSE_SYNTAX_ERROR"
+
+
+def test_arrow_udtf_takes_and_returns_arrow_data_as_pyspark(session):
+    # As PySpark's arrow_udtf(), a PyArrow-native UDTF: eval() takes a pyarrow array of the
+    # argument, and returns pyarrow tables.
+    import pyarrow.compute as pc
+
+    @F.arrow_udtf(returnType="x long, kind string")
+    class PlusOne:
+        def eval(self, x):
+            yield pa.table({"x": pc.add(x, 1), "kind": pa.array([type(x).__name__] * len(x))})
+
+    assert PlusOne(F.lit(1)).collect() == [Row(x=2, kind="Int32Array")]
 
 
 def test_map_functions_take_a_ddl_schema(session):
