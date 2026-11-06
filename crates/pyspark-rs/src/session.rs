@@ -480,11 +480,31 @@ impl PySparkSession {
             (None, Some(names)) => names.clone(),
             (None, None) => Vec::new(),
         };
+        // Pandas retains the generic converter. Local rows use infer::convert,
+        // whose schema-driven quantization, null handling and errors are distinct.
+        let decimal_cls = match &given {
+            Some(fields)
+                if !fields.is_empty()
+                    && fields
+                        .iter()
+                        .all(|f| matches!(f.data_type, DataType::Decimal { .. })) =>
+            {
+                exact_decimal_input_type(py, &data, fields.len())
+            }
+            _ => None,
+        };
         let mut rows: Vec<Row> = Vec::with_capacity(data.len());
         for row in data.iter() {
             let values = row
                 .try_iter()?
-                .map(|v| py_to_value(&v?))
+                .map(|v| {
+                    let value = v?;
+                    if decimal_cls.is_some() {
+                        exact_decimal_or_null(&value)
+                    } else {
+                        py_to_value(&value)
+                    }
+                })
                 .collect::<PyResult<Vec<_>>>()?;
             if values.len() != row_names.len() {
                 // As pyspark, which checks every row against the width of the schema.
@@ -1415,6 +1435,102 @@ pub(crate) fn datetime_to_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
     };
     let timestamp_f64: f64 = normalized.call_method0("timestamp")?.extract()?;
     Ok((timestamp_f64 * 1_000_000.0).round() as i64)
+}
+
+/// Resolve a construction-local Decimal type after checking every row and cell.
+/// Read ordinary module dictionaries so missing/rebound attributes and module hooks
+/// take the old path without invoking them during this speculative guard.
+fn exact_decimal_input_type<'py>(
+    py: Python<'py>,
+    data: &Bound<'py, PyList>,
+    width: usize,
+) -> Option<Bound<'py, PyAny>> {
+    use pyo3::types::{PyModule, PyTuple, PyType};
+
+    if !data.is_exact_instance_of::<PyList>() || data.is_empty() {
+        return None;
+    }
+    let sys = py.import("sys").ok()?;
+    // Keep preflight and conversion under one GIL: without it another thread
+    // could replace rows, cells or module attributes after validation.
+    if let Ok(is_gil_enabled) = sys.getattr("_is_gil_enabled") {
+        if !is_gil_enabled.call0().ok()?.extract::<bool>().ok()? {
+            return None;
+        }
+    }
+    let modules = sys.getattr("modules").ok()?.cast_into::<PyDict>().ok()?;
+    let module = modules.get_item("decimal").ok()??;
+    let c_module = modules.get_item("_decimal").ok()??;
+    if !module.is_exact_instance_of::<PyModule>() || !c_module.is_exact_instance_of::<PyModule>() {
+        return None;
+    }
+    let decimal_cls = module
+        .cast::<PyModule>()
+        .ok()?
+        .dict()
+        .get_item("Decimal")
+        .ok()??;
+    let c_cls = c_module
+        .cast::<PyModule>()
+        .ok()?
+        .dict()
+        .get_item("Decimal")
+        .ok()??;
+    if !decimal_cls.is(&c_cls) || !decimal_cls.is_exact_instance_of::<PyType>() {
+        return None;
+    }
+    // Python subclasses can run __str__/as_tuple hooks, including rebinding Decimal.
+    // The C Decimal type is immutable; no Python class can satisfy this guard.
+    let flags = decimal_cls
+        .getattr("__flags__")
+        .ok()?
+        .extract::<u64>()
+        .ok()?;
+    // Py_TPFLAGS_IMMUTABLETYPE is not exposed by the Python 3.9 limited API.
+    const IMMUTABLE_TYPE_FLAG: u64 = 1 << 8;
+    if flags & IMMUTABLE_TYPE_FLAG == 0 {
+        return None;
+    }
+    // Reject even a simultaneous rebinding of both module attributes to an
+    // unrelated immutable builtin (notably bool, which the generic path checks first).
+    if !decimal_cls
+        .getattr("as_tuple")
+        .ok()?
+        .getattr("__objclass__")
+        .ok()?
+        .is(&decimal_cls)
+    {
+        return None;
+    }
+    let cell_matches = |v: Bound<'py, PyAny>| v.is_none() || v.get_type().is(&decimal_cls);
+    for row in data.iter() {
+        let valid = if row.is_exact_instance_of::<PyList>() {
+            let list = row.cast::<PyList>().ok()?;
+            list.len() == width && list.iter().all(&cell_matches)
+        } else if row.is_exact_instance_of::<PyTuple>() {
+            let tuple = row.cast::<PyTuple>().ok()?;
+            tuple.len() == width && tuple.iter().all(&cell_matches)
+        } else {
+            false
+        };
+        if !valid {
+            return None;
+        }
+    }
+    Some(decimal_cls)
+}
+
+fn exact_decimal_or_null(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
+    if obj.is_none() {
+        return Ok(Value::Null);
+    }
+    let value: String = obj.str()?.extract()?;
+    let scale = decimal_string_scale(&value);
+    Ok(Value::Decimal {
+        value,
+        precision: None,
+        scale,
+    })
 }
 
 /// If `obj` is a `decimal.Decimal`, return it as a `Value::Decimal` (string value + scale
