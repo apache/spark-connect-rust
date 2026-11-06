@@ -159,16 +159,16 @@ impl Fixture {
         .expect("fixture did not observe the expected RPC");
     }
 
-    async fn assert_one_release_all(&self) {
-        self.wait_for(|s| s.all_releases().len() == 1).await;
+    async fn assert_release_all_count(&self, expected: usize) {
+        self.wait_for(|s| s.all_releases().len() == expected).await;
         assert!(
             tokio::time::timeout(
                 Duration::from_millis(100),
-                self.wait_for(|s| s.all_releases().len() > 1)
+                self.wait_for(|s| s.all_releases().len() > expected)
             )
             .await
             .is_err(),
-            "execution was released more than once"
+            "execution received more ReleaseAll requests than expected"
         );
     }
 }
@@ -358,15 +358,17 @@ async fn completion_releases_once_without_waiting_for_release_reply() {
         result.response_type,
         Some(ResponseType::ResultComplete(_))
     ));
-    assert!(bounded(stream.message()).await.unwrap().is_none());
-    drop(stream);
+    // Observe terminal cleanup while the stream is alive: Drop must not mask it.
     fixture.wait_for(|s| !s.all_releases().is_empty()).await;
+    assert_eq!(fixture.state.release_finished.load(Ordering::SeqCst), 0);
     assert_identity(&fixture.state.all_releases()[0]);
+    assert!(bounded(stream.message()).await.unwrap().is_none());
     fixture.state.release_gate.notify_one();
     fixture
         .wait_for(|s| s.release_finished.load(Ordering::SeqCst) == 1)
         .await;
-    fixture.assert_one_release_all().await;
+    drop(stream);
+    fixture.assert_release_all_count(1).await;
 }
 
 #[tokio::test]
@@ -396,7 +398,7 @@ async fn dropping_unfinished_stream_releases_inside_or_outside_runtime() {
         } else {
             drop(stream);
         }
-        fixture.assert_one_release_all().await;
+        fixture.assert_release_all_count(1).await;
         assert_identity(&fixture.state.all_releases()[0]);
     }
 }
@@ -418,9 +420,12 @@ async fn terminal_failure_releases_and_preserves_the_original_error() {
         error.contains("query sentinel"),
         "unexpected error: {error}"
     );
+    fixture
+        .wait_for(|s| s.release_finished.load(Ordering::SeqCst) == 1)
+        .await;
     assert!(bounded(stream.message()).await.unwrap().is_none());
     drop(stream);
-    fixture.assert_one_release_all().await;
+    fixture.assert_release_all_count(1).await;
 }
 
 #[tokio::test]
@@ -443,8 +448,6 @@ async fn transient_release_failure_retries_without_changing_success() {
             .response_type,
         Some(ResponseType::ResultComplete(_))
     ));
-    assert!(bounded(stream.message()).await.unwrap().is_none());
-    drop(stream);
     fixture
         .wait_for(|s| s.release_finished.load(Ordering::SeqCst) == 2)
         .await;
@@ -452,6 +455,9 @@ async fn transient_release_failure_retries_without_changing_success() {
     assert_eq!(releases.len(), 2);
     assert_eq!(releases[0].request, releases[1].request);
     releases.iter().for_each(assert_identity);
+    assert!(bounded(stream.message()).await.unwrap().is_none());
+    drop(stream);
+    fixture.assert_release_all_count(2).await;
 }
 
 #[tokio::test]
@@ -474,12 +480,12 @@ async fn permanent_release_failure_does_not_retry_or_change_success() {
             .response_type,
         Some(ResponseType::ResultComplete(_))
     ));
-    assert!(bounded(stream.message()).await.unwrap().is_none());
-    drop(stream);
     fixture
         .wait_for(|s| s.release_finished.load(Ordering::SeqCst) == 1)
         .await;
-    fixture.assert_one_release_all().await;
+    assert!(bounded(stream.message()).await.unwrap().is_none());
+    drop(stream);
+    fixture.assert_release_all_count(1).await;
 }
 
 #[tokio::test]
@@ -521,7 +527,8 @@ async fn detached_stream_reattaches_before_releasing_the_execution() {
             result.unwrap().unwrap().response_type,
             Some(ResponseType::ResultComplete(_))
         ));
+        fixture.wait_for(|s| !s.all_releases().is_empty()).await;
         drop(stream);
-        fixture.assert_one_release_all().await;
+        fixture.assert_release_all_count(1).await;
     }
 }
