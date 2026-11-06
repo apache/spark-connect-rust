@@ -2287,6 +2287,17 @@ def test_spatial_types_construction():
     assert "geography" in gg.simpleString()
 
 
+def test_variant_val_pickles_as_pyspark():
+    import pickle
+
+    from pyspark.sql.types import VariantVal
+
+    # As PySpark's VariantVal(value, metadata), which pickles as a plain class does.
+    value = pickle.loads(pickle.dumps(VariantVal(b"\x0c\x01", b"\x01\x00\x00")))
+    assert type(value) is VariantVal
+    assert (value.value, value.metadata) == (b"\x0c\x01", b"\x01\x00\x00")
+
+
 def test_variant_values():
     """Test VariantVal and other variant types."""
     from pyspark.sql.types import VariantVal, Geometry, Geography
