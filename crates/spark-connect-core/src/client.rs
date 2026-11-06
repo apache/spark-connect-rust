@@ -95,6 +95,67 @@ fn artifact_hashing_task_error(error: tokio::task::JoinError) -> SparkError {
     SparkError::connect_msg(format!("Artifact hashing task failed: {error}"))
 }
 
+/// Per-RPC deadlines, as PySpark's `RpcDeadlines` of `pyspark.sql.connect.client`: the
+/// timeout of each call of a kind, or none. Those of a reattachable `ExecutePlan` and of a
+/// `ReattachExecute` are of each stream rather than of the execution: when one passes, the
+/// execution goes on on the server, and the client reattaches to resume its results. A
+/// non-reattachable `ExecutePlan` has none, as a timeout would end the execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RpcDeadlines {
+    pub reattachable_execute_plan: Option<Duration>,
+    pub reattach_execute: Option<Duration>,
+    pub analyze_plan: Option<Duration>,
+    pub add_artifacts: Option<Duration>,
+    pub config: Option<Duration>,
+    pub interrupt: Option<Duration>,
+    pub release_session: Option<Duration>,
+    pub artifact_status: Option<Duration>,
+    pub fetch_error_details: Option<Duration>,
+}
+
+impl Default for RpcDeadlines {
+    /// PySpark's: 10 minutes, and an hour for `AnalyzePlan` and `AddArtifacts`.
+    fn default() -> Self {
+        let minutes = |m: u64| Some(Duration::from_secs(m * 60));
+        RpcDeadlines {
+            reattachable_execute_plan: minutes(10),
+            reattach_execute: minutes(10),
+            analyze_plan: minutes(60),
+            add_artifacts: minutes(60),
+            config: minutes(10),
+            interrupt: minutes(10),
+            release_session: minutes(10),
+            artifact_status: minutes(10),
+            fetch_error_details: minutes(10),
+        }
+    }
+}
+
+impl RpcDeadlines {
+    /// No deadline for any call, as `RpcDeadlines.disabled()`.
+    pub fn disabled() -> Self {
+        RpcDeadlines {
+            reattachable_execute_plan: None,
+            reattach_execute: None,
+            analyze_plan: None,
+            add_artifacts: None,
+            config: None,
+            interrupt: None,
+            release_session: None,
+            artifact_status: None,
+            fetch_error_details: None,
+        }
+    }
+}
+
+/// `request` with the timeout `deadline`, which gRPC sends as its `grpc-timeout`.
+fn with_deadline<T>(mut request: Request<T>, deadline: Option<Duration>) -> Request<T> {
+    if let Some(deadline) = deadline {
+        request.set_timeout(deadline);
+    }
+    request
+}
+
 /// A Spark Connect client for communicating with a remote Spark server.
 ///
 /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient`.
@@ -114,6 +175,8 @@ pub struct SparkConnectClient {
     user_agent: String,
     /// Retry policy applied to RPCs (exponential backoff on transient failures).
     retry_policy: RetryPolicy,
+    /// The deadline of each kind of RPC.
+    rpc_deadlines: RpcDeadlines,
 }
 
 impl SparkConnectClient {
@@ -202,6 +265,7 @@ impl SparkConnectClient {
             metadata,
             user_agent,
             retry_policy: RetryPolicy::default(),
+            rpc_deadlines: RpcDeadlines::default(),
         })
     }
 
@@ -223,6 +287,7 @@ impl SparkConnectClient {
             metadata: self.metadata.clone(),
             user_agent: self.user_agent.clone(),
             retry_policy: self.retry_policy.clone(),
+            rpc_deadlines: self.rpc_deadlines.clone(),
         }
     }
 
@@ -238,6 +303,17 @@ impl SparkConnectClient {
     /// retrying on top); see that constructor for why double-retrying is wrong there.
     pub fn set_retry_policy(&mut self, policy: RetryPolicy) {
         self.retry_policy = policy;
+    }
+
+    /// Override the per-RPC deadlines of this client's calls, as the `rpc_deadlines` of
+    /// PySpark's `SparkConnectClient`.
+    pub fn set_rpc_deadlines(&mut self, deadlines: RpcDeadlines) {
+        self.rpc_deadlines = deadlines;
+    }
+
+    /// The per-RPC deadlines of this client's calls.
+    pub fn rpc_deadlines(&self) -> &RpcDeadlines {
+        &self.rpc_deadlines
     }
 
     /// Execute a plan and return a stream of responses.
@@ -337,7 +413,7 @@ impl SparkConnectClient {
             .max_decoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT)
             .max_encoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT);
         wait_ready(&mut grpc).await?;
-        let mut req = Request::new(request);
+        let mut req = with_deadline(Request::new(request), self.rpc_deadlines.analyze_plan);
         self._attach_metadata(&mut req);
         let path = tonic::codegen::http::uri::PathAndQuery::from_static(
             "/spark.connect.SparkConnectService/AnalyzePlan",
@@ -354,7 +430,10 @@ impl SparkConnectClient {
     /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.analyze_plan`.
     pub async fn analyze_plan(&self, request: AnalyzePlanRequest) -> Result<AnalyzePlanResponse> {
         self.with_retry(|| {
-            let mut req = Request::new(request.clone());
+            let mut req = with_deadline(
+                Request::new(request.clone()),
+                self.rpc_deadlines.analyze_plan,
+            );
             self._attach_metadata(&mut req);
             let mut stub = self.stub.clone();
             async move { stub.analyze_plan(req).await.map(Response::into_inner) }
@@ -401,16 +480,22 @@ impl SparkConnectClient {
     ) -> Result<ReattachableResponseStream> {
         let iter = ExecutePlanResponseReattachableIterator::new(request);
         let start = iter.request().clone();
+        let deadline = self.rpc_deadlines.reattachable_execute_plan;
+        let mut stream_deadline = None;
         let stream = self
             .with_retry(|| {
-                let mut req = Request::new(start.clone());
+                let mut req = with_deadline(Request::new(start.clone()), deadline);
                 self._attach_metadata(&mut req);
+                stream_deadline = deadline.map(|d| tokio::time::Instant::now() + d);
                 let mut stub = self.stub.clone();
                 async move { stub.execute_plan(req).await.map(Response::into_inner) }
             })
             .await;
         let stream = match stream {
-            Ok(stream) => stream,
+            Ok(stream) => Some(stream),
+            // As the reference iterator, past its deadline an execution is resumed by
+            // reattaching, as it goes on on the server.
+            Err(error) if error.grpc_code == Some(tonic::Code::DeadlineExceeded as i32) => None,
             Err(error) => {
                 // As the reference iterator releases an execution that fails at once, such
                 // as for an analysis error, so the server does not keep it until its
@@ -425,6 +510,7 @@ impl SparkConnectClient {
             retry_policy,
             iter,
             stream,
+            stream_deadline,
             done: false,
             released: false,
         })
@@ -438,7 +524,10 @@ impl SparkConnectClient {
         &self,
         request: FetchErrorDetailsRequest,
     ) -> Result<FetchErrorDetailsResponse> {
-        let mut req = Request::new(request);
+        let mut req = with_deadline(
+            Request::new(request),
+            self.rpc_deadlines.fetch_error_details,
+        );
         self._attach_metadata(&mut req);
         let resp = self.stub.clone().fetch_error_details(req).await;
         resp.map(Response::into_inner)
@@ -476,7 +565,10 @@ impl SparkConnectClient {
             }),
             ..Default::default()
         };
-        let mut req = Request::new(request);
+        let mut req = with_deadline(
+            Request::new(request),
+            self.rpc_deadlines.fetch_error_details,
+        );
         self._attach_metadata(&mut req);
         let response = self.stub.clone().fetch_error_details(req).await.ok()?;
         Some(response.into_inner())
@@ -527,7 +619,7 @@ impl SparkConnectClient {
     /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.config`.
     pub async fn config(&self, request: ConfigRequest) -> Result<ConfigResponse> {
         self.with_retry(|| {
-            let mut req = Request::new(request.clone());
+            let mut req = with_deadline(Request::new(request.clone()), self.rpc_deadlines.config);
             self._attach_metadata(&mut req);
             let mut stub = self.stub.clone();
             async move { stub.config(req).await.map(Response::into_inner) }
@@ -540,7 +632,8 @@ impl SparkConnectClient {
     /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.interrupt`.
     pub async fn interrupt(&self, request: InterruptRequest) -> Result<InterruptResponse> {
         self.with_retry(|| {
-            let mut req = Request::new(request.clone());
+            let mut req =
+                with_deadline(Request::new(request.clone()), self.rpc_deadlines.interrupt);
             self._attach_metadata(&mut req);
             let mut stub = self.stub.clone();
             async move { stub.interrupt(req).await.map(Response::into_inner) }
@@ -806,7 +899,7 @@ impl SparkConnectClient {
             ..Default::default()
         });
 
-        let mut req = Request::new(request);
+        let mut req = with_deadline(Request::new(request), self.rpc_deadlines.release_session);
         self._attach_metadata(&mut req);
         match self.stub.clone().release_session(req).await {
             Ok(_) => Ok(()),
@@ -941,7 +1034,10 @@ impl SparkConnectClient {
                 request
             })
             .collect();
-        let mut req = Request::new(futures::stream::iter(requests));
+        let mut req = with_deadline(
+            Request::new(futures::stream::iter(requests)),
+            self.rpc_deadlines.add_artifacts,
+        );
         self._attach_metadata(&mut req);
         self.stub
             .clone()
@@ -975,7 +1071,7 @@ impl SparkConnectClient {
         request.client_type = Some(self.user_agent.clone());
         request.names = names.to_vec();
 
-        let mut req = Request::new(request);
+        let mut req = with_deadline(Request::new(request), self.rpc_deadlines.artifact_status);
         self._attach_metadata(&mut req);
         let response = self.stub.clone().artifact_status(req).await?.into_inner();
         Ok(response
@@ -1031,7 +1127,10 @@ pub struct ReattachableResponseStream {
     client: SparkConnectClient,
     retry_policy: RetryPolicy,
     iter: ExecutePlanResponseReattachableIterator,
-    stream: Streaming<ExecutePlanResponse>,
+    /// The stream of the execution, or none to reattach before reading.
+    stream: Option<Streaming<ExecutePlanResponse>>,
+    /// When the deadline of the stream passes, as gRPC's of the call that opened it.
+    stream_deadline: Option<tokio::time::Instant>,
     done: bool,
     /// Whether `ReleaseAll` was sent, after which nothing else is released.
     released: bool,
@@ -1118,8 +1217,21 @@ impl ReattachableResponseStream {
         // As the reference iterator's `_has_next` retries with a `Retrying` of its own, the
         // reattaches of each response have the attempts and the elapsed time of the policy.
         let mut retry_state = RetryPolicyState::new(self.retry_policy.clone());
+        // When the first stream of this response passed its deadline, for the bound of the
+        // reattaches after deadlines, as of the reference `RetryException`s.
+        let mut past_deadlines_since: Option<std::time::Instant> = None;
         loop {
-            match self.stream.message().await {
+            let Some(stream) = self.stream.as_mut() else {
+                self.reattach(&mut retry_state).await?;
+                continue;
+            };
+            let next = match self.stream_deadline {
+                Some(deadline) => tokio::time::timeout_at(deadline, stream.message())
+                    .await
+                    .unwrap_or_else(|_| Err(tonic::Status::deadline_exceeded("Deadline Exceeded"))),
+                None => stream.message().await,
+            };
+            match next {
                 Ok(Some(resp)) => {
                     self.iter.set_last_response_id(&resp).await;
                     if self.iter.is_completed().await {
@@ -1134,6 +1246,21 @@ impl ReattachableResponseStream {
                 // purpose, after `senderMaxStreamDuration` or `senderMaxStreamSize`: the rest
                 // of the result is read by reattaching.
                 Ok(None) => self.reattach(&mut retry_state).await?,
+                // As the reference iterator: the per-RPC deadline of the stream passed, and the
+                // execution goes on on the server, so the iteration reattaches at once, for up
+                // to the policy's bound of such retries.
+                Err(status)
+                    if status.code() == tonic::Code::DeadlineExceeded
+                        && !self.iter.is_completed().await =>
+                {
+                    let since = *past_deadlines_since.get_or_insert_with(std::time::Instant::now);
+                    let bound = self.retry_policy.max_retry_exception_elapsed_time_ms;
+                    if bound.is_some_and(|ms| since.elapsed() >= Duration::from_millis(ms)) {
+                        let error = self.client.error_from_status(status).await;
+                        return Err(self.fail(error));
+                    }
+                    self.stream = None;
+                }
                 Err(status) => {
                     // Only reattach a still-running execution on a retriable drop.
                     if self.iter.is_completed().await || !self.retry_policy.can_retry(&status) {
@@ -1149,12 +1276,16 @@ impl ReattachableResponseStream {
     /// Resumes the execution from the last response read, retrying transient failures under
     /// `retry_state`.
     async fn reattach(&mut self, retry_state: &mut RetryPolicyState) -> Result<()> {
+        let deadline = self.client.rpc_deadlines.reattach_execute;
         loop {
             let mut req = Request::new(self.iter.create_reattach_request().await);
             self.attach_metadata(&mut req);
+            // After the metadata, which the deadline is a header of.
+            let req = with_deadline(req, deadline);
+            self.stream_deadline = deadline.map(|d| tokio::time::Instant::now() + d);
             match self.client.stub.clone().reattach_execute(req).await {
                 Ok(r) => {
-                    self.stream = r.into_inner();
+                    self.stream = Some(r.into_inner());
                     return Ok(());
                 }
                 Err(e) => {
