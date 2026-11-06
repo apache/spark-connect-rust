@@ -174,7 +174,7 @@ impl Expression {
                 ),
             },
             ExpressionNode::SQLExpression(sql) => sql.clone(),
-            ExpressionNode::CallFunction(_) => format!("{self:?}"),
+            ExpressionNode::CallFunction(cf) => cf.render(),
             ExpressionNode::WindowExpression(_) => format!("{self:?}"),
             ExpressionNode::LambdaFunction(lf) => format!("{lf:?}"),
             ExpressionNode::UnresolvedNamedLambdaVariable(var) => format!("{var:?}"),
@@ -830,6 +830,20 @@ impl CallFunctionWrapper {
         CallFunctionWrapper {
             function_name: function_name.into(),
             arguments,
+        }
+    }
+
+    /// Mirrors `CallFunction.__repr__`: `CallFunction('<name>', <arg>, ...)`.
+    pub fn render(&self) -> String {
+        if self.arguments.is_empty() {
+            format!("CallFunction('{}')", self.function_name)
+        } else {
+            let args: Vec<String> = self.arguments.iter().map(Expression::render).collect();
+            format!(
+                "CallFunction('{}', {})",
+                self.function_name,
+                args.join(", ")
+            )
         }
     }
 
@@ -1519,9 +1533,11 @@ mod tests {
     fn test_call_function_wrapper_render() {
         let cf = CallFunctionWrapper::new("my_func", vec![col("a"), col("b")]);
         let expr: Expression = ExpressionNode::CallFunction(Box::new(cf)).into();
-        // CallFunction renders as debug format
-        let rendered = expr.render();
-        assert!(rendered.contains("CallFunctionWrapper"));
+        // As `CallFunction.__repr__` in PySpark Connect.
+        assert_eq!(expr.render(), "CallFunction('my_func', a, b)");
+        let no_args = CallFunctionWrapper::new("current_date", vec![]);
+        let expr: Expression = ExpressionNode::CallFunction(Box::new(no_args)).into();
+        assert_eq!(expr.render(), "CallFunction('current_date')");
     }
 
     #[test]

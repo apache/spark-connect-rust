@@ -62,6 +62,25 @@ def test_conf_get_with_a_none_default(session):
         session.conf.get(key)
 
 
+def test_instr_and_regexp_replace_apply_their_optional_arguments(session):
+    # Column b holds "c", so the literal "b" and the column b find different positions.
+    df = session.createDataFrame([("abcabc", "c", "a", "z")], ["s", "b", "p", "r"])
+    out = df.select(
+        F.instr("s", "b"),
+        F.instr("s", "b", 3),
+        F.instr("s", "b", occurrence=2),
+        F.instr(F.col("s"), F.col("b"), F.lit(4)),
+        F.regexp_replace("s", "a", "z", 2),
+        F.regexp_replace("s", F.col("p"), F.col("r")),
+        F.call_function("instr", "s", F.lit("b")),
+    )
+    assert out.columns == [
+        "instr(s, b)", "instr(s, b, 3, 1)", "instr(s, b, 1, 2)", "instr(s, b, 4, 1)",
+        "regexp_replace(s, a, z, 2)", "regexp_replace(s, p, r, 1)", "instr(s, b)",
+    ]
+    assert tuple(out.first()) == (2, 5, 5, 6, "abczbc", "zbczbc", 2)
+
+
 @pytest.mark.parametrize("by_name", [True, False])
 def test_repartition_by_id_takes_a_column_name(session, by_name):
     df = session.range(12).withColumn("p", (F.col("id") % 3).cast("int"))

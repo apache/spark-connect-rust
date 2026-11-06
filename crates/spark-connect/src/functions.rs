@@ -2238,6 +2238,38 @@ pub fn instr(col1: Column, col2: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.instr(str, substr, start)`: searches from the
+/// 1-based position `start`.
+pub fn instr_with_start(col1: Column, col2: Column, start: Column) -> Column {
+    func(
+        "instr",
+        vec![
+            col1.expression().clone(),
+            col2.expression().clone(),
+            start.expression().clone(),
+        ],
+    )
+}
+
+/// Mirrors `pyspark.sql.functions.instr(str, substr, start, occurrence)`: the
+/// position of the `occurrence`-th match, searching from the 1-based position `start`.
+pub fn instr_with_start_and_occurrence(
+    col1: Column,
+    col2: Column,
+    start: Column,
+    occurrence: Column,
+) -> Column {
+    func(
+        "instr",
+        vec![
+            col1.expression().clone(),
+            col2.expression().clone(),
+            start.expression().clone(),
+            occurrence.expression().clone(),
+        ],
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.json_tuple`.
 pub fn json_tuple<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
     let cols: Vec<Column> = cols.into_iter().map(Into::into).collect();
@@ -3018,6 +3050,25 @@ pub fn regexp_replace(col1: Column, col2: Column, col3: Column) -> Column {
             col1.expression().clone(),
             col2.expression().clone(),
             col3.expression().clone(),
+        ],
+    )
+}
+
+/// Mirrors `pyspark.sql.functions.regexp_replace(string, pattern, replacement,
+/// position)`: replaces the matches from the 1-based position `position`.
+pub fn regexp_replace_with_position(
+    col1: Column,
+    col2: Column,
+    col3: Column,
+    position: Column,
+) -> Column {
+    func(
+        "regexp_replace",
+        vec![
+            col1.expression().clone(),
+            col2.expression().clone(),
+            col3.expression().clone(),
+            position.expression().clone(),
         ],
     )
 }
@@ -4542,6 +4593,56 @@ mod tests {
 
         let map_res = create_map(vec![c1, c2, c3]);
         let _ = map_res.to_proto();
+    }
+
+    #[test]
+    fn test_instr_and_regexp_replace_optional_args() {
+        // Each form is a plain function call, as `_invoke_function_over_columns` builds.
+        use spark_connect_proto::expression::ExprType;
+        let unresolved = |c: Column| match c.to_proto().expr_type {
+            Some(ExprType::UnresolvedFunction(f)) => (f.function_name, f.arguments.len()),
+            other => panic!("expected an UnresolvedFunction, got {other:?}"),
+        };
+        let s = || col("s");
+        assert_eq!(
+            unresolved(instr(s(), Column::new(lit_str("b")))),
+            ("instr".to_string(), 2)
+        );
+        assert_eq!(
+            unresolved(instr_with_start(
+                s(),
+                Column::new(lit_str("b")),
+                Column::new(lit_int(2))
+            )),
+            ("instr".to_string(), 3)
+        );
+        let four = instr_with_start_and_occurrence(
+            s(),
+            Column::new(lit_str("b")),
+            Column::new(lit_int(1)),
+            Column::new(lit_int(2)),
+        );
+        assert_eq!(four.expression().render(), "instr(s, b, 1, 2)");
+        assert_eq!(unresolved(four), ("instr".to_string(), 4));
+        assert_eq!(
+            unresolved(regexp_replace(
+                s(),
+                Column::new(lit_str("a")),
+                Column::new(lit_str("b"))
+            )),
+            ("regexp_replace".to_string(), 3)
+        );
+        let positioned = regexp_replace_with_position(
+            s(),
+            Column::new(lit_str("a")),
+            Column::new(lit_str("b")),
+            Column::new(lit_int(2)),
+        );
+        assert_eq!(
+            positioned.expression().render(),
+            "regexp_replace(s, a, b, 2)"
+        );
+        assert_eq!(unresolved(positioned), ("regexp_replace".to_string(), 4));
     }
 
     #[test]

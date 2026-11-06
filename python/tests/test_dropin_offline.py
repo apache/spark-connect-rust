@@ -4153,6 +4153,28 @@ def test_instr_regexp_replace_optional_args():
         F._call_function = orig
 
 
+@pytest.mark.parametrize("column,expected", [
+    # instr and regexp_replace are plain functions, as other functions are.
+    (lambda F: F.instr("s", "b"), "instr(s, b)"),
+    (lambda F: F.instr("s", "b", 2), "instr(s, b, 2)"),
+    (lambda F: F.instr("s", "b", occurrence=2), "instr(s, b, 1, 2)"),
+    (lambda F: F.instr("s", "b", 2, 3), "instr(s, b, 2, 3)"),
+    (lambda F: F.regexp_replace("s", "a", "b"), "regexp_replace(s, a, b)"),
+    (lambda F: F.regexp_replace("s", "a", "b", 2), "regexp_replace(s, a, b, 2)"),
+    (lambda F: F.regexp_replace("s", F.col("p"), F.col("r")), "regexp_replace(s, p, r)"),
+    # call_function builds a CallFunction, which renders as in PySpark.
+    (lambda F: F.call_function("abs", "x"), "CallFunction('abs', x)"),
+    (lambda F: F.call_function("current_date"), "CallFunction('current_date')"),
+    (lambda F: F.upper(F.call_function("abs", "x")), "upper(CallFunction('abs', x))"),
+    (lambda F: F.call_function("coalesce", "x", F.lit(None)).alias("y"),
+     "CallFunction('coalesce', x, NULL) AS y"),
+])
+def test_function_calls_render_as_pyspark(column, expected):
+    from pyspark.sql import functions as F
+
+    assert repr(column(F)) == f"Column<'{expected}'>"
+
+
 def test_variant_delete_requires_paths():
     from pyspark.errors import PySparkValueError
     from pyspark.sql import functions as F

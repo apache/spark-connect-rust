@@ -164,7 +164,8 @@ fn debug_render_and_proto_keep_the_existing_representation() {
         "arguments: [Literal(Integer(7))] })"
     );
     assert_eq!(format!("{call:?}"), expected_debug);
-    assert_eq!(call.render(), expected_debug);
+    // The render is PySpark's `CallFunction.__repr__`.
+    assert_eq!(call.render(), "CallFunction('f', 7)");
     assert_eq!(call.to_proto(), expected_proto);
 
     let source = col("value") + lit(1);
