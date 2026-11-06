@@ -1573,8 +1573,27 @@ impl PyDataFrame {
         PyColumn::new(spark_connect::functions::col(item))
     }
 
-    /// Ordinary schema-bearing representation; eager row rendering is not supported.
+    /// As PySpark's `DataFrame.__repr__`: the table of `_show_string` when the session's
+    /// `spark.sql.repl.eagerEval.enabled` is `true`, with its `maxNumRows` rows and its
+    /// `truncate`, and `DataFrame[name: type, ...]` otherwise. Like PySpark, it reads the
+    /// three settings, in one request, on every call.
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        const EAGER_EVAL: [&str; 3] = [
+            "spark.sql.repl.eagerEval.enabled",
+            "spark.sql.repl.eagerEval.maxNumRows",
+            "spark.sql.repl.eagerEval.truncate",
+        ];
+        let conf = self.dataframe.spark_session().conf();
+        let values = py.detach(|| conf.get_many(&EAGER_EVAL)).to_pyerr()?;
+        if values[0].as_deref() == Some("true") {
+            // As PySpark's `int(...)` of each setting.
+            let int = py.import("builtins")?.getattr("int")?;
+            let n: i32 = int.call1((values[1].as_deref(),))?.extract()?;
+            let truncate: i32 = int.call1((values[2].as_deref(),))?.extract()?;
+            return py
+                .detach(|| self.dataframe.show_string(n, truncate, false))
+                .to_pyerr();
+        }
         let fields = self
             .dtypes(py)?
             .into_iter()

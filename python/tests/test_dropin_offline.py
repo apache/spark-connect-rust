@@ -4797,10 +4797,25 @@ def _repr_serve(connection):
         data_type = _repr_struct(("id", _repr_message(7, b"")))
         failure = None
         execute_calls = 0
+        configs = {"spark.sql.repl.eagerEval.enabled": "false",
+                   "spark.sql.repl.eagerEval.maxNumRows": "20",
+                   "spark.sql.repl.eagerEval.truncate": "20"}
+        config_keys = []
 
         def execute(self, request, context):
             self.execute_calls += 1
             context.abort(grpc.StatusCode.UNIMPLEMENTED, "repr must not execute rows")
+
+        def config(self, request, context):
+            # ConfigRequest.session_id=1, operation=3, Operation.get=2, Get.keys=1;
+            # ConfigResponse.session_id=1, pairs=2, KeyValue.key=1, value=2.
+            request = parse_message(request)
+            keys = [key.decode() for key in
+                    parse_message(parse_message(request[3][0])[2][0]).get(1, [])]
+            self.config_keys = self.config_keys + [keys]
+            return _repr_message(1, request[1][0]) + b"".join(
+                _repr_message(2, _repr_message(1, key) + _repr_message(2, self.configs[key]))
+                for key in keys)
 
         def analyze(self, request, context):
             self.calls += 1
@@ -4821,7 +4836,8 @@ def _repr_serve(connection):
         handler = grpc.unary_unary_rpc_method_handler(service.analyze)
         server.add_generic_rpc_handlers((grpc.method_handlers_generic_handler(
             "spark.connect.SparkConnectService", {"AnalyzePlan": handler,
-                "ExecutePlan": grpc.unary_stream_rpc_method_handler(service.execute)}),))
+                "ExecutePlan": grpc.unary_stream_rpc_method_handler(service.execute),
+                "Config": grpc.unary_unary_rpc_method_handler(service.config)}),))
         port = server.add_insecure_port("127.0.0.1:0")
         server.start()
         connection.send(port)
@@ -4913,6 +4929,7 @@ def test_repr_formats_schema_without_executing_rows(repr_analyzed, schema, expec
     assert repr(df) == expected
     assert service.calls == 1
     assert service.execute_calls == 0
+    assert service.config_keys == [_REPR_EAGER_EVAL_KEYS]
 
 
 @pytest.mark.parametrize("failure, message", [
@@ -4932,6 +4949,25 @@ def test_repr_propagates_schema_errors_and_can_retry(repr_analyzed, failure, mes
     assert repr(df) == "DataFrame[id: bigint]"
     assert service.calls == 2
     assert service.execute_calls == 0
+
+
+_REPR_EAGER_EVAL_KEYS = ["spark.sql.repl.eagerEval.enabled",
+                         "spark.sql.repl.eagerEval.maxNumRows",
+                         "spark.sql.repl.eagerEval.truncate"]
+
+
+def test_repr_executes_the_show_string_with_eager_evaluation(repr_analyzed):
+    # As PySpark: with eager evaluation, repr is the table of _show_string, so it executes
+    # the DataFrame (which this mock refuses), rather than formatting the schema.
+    spark, service = repr_analyzed
+    service.configs = {"spark.sql.repl.eagerEval.enabled": "true",
+                       "spark.sql.repl.eagerEval.maxNumRows": "2",
+                       "spark.sql.repl.eagerEval.truncate": "3"}
+    with pytest.raises(Exception, match="repr must not execute rows"):
+        repr(spark.range(10))
+    assert service.execute_calls == 1
+    assert service.calls == 0
+    assert service.config_keys == [_REPR_EAGER_EVAL_KEYS]
 
 
 def test_repr_rejects_non_struct_schema(repr_analyzed):
