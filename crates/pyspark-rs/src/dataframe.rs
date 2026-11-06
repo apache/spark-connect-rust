@@ -1278,28 +1278,35 @@ impl PyDataFrame {
             .to_pyerr()
     }
 
-    /// Reliable checkpoint (materialize + truncate lineage).
+    /// Reliable checkpoint (materialize + truncate lineage), at once if `eager`, as PySpark's.
     #[pyo3(signature = (eager=true))]
-    #[allow(unused_variables)]
     fn checkpoint(&self, py: Python<'_>, eager: bool) -> PyResult<PyDataFrame> {
         Ok(PyDataFrame::new(
-            py.detach(|| self.dataframe.checkpoint()).to_pyerr()?,
+            py.detach(|| self.dataframe.checkpoint_with(eager).map_err(Box::new))
+                .to_pyerr()?,
         ))
     }
 
-    /// Local checkpoint. `storageLevel` is accepted for signature parity with reference
-    /// pyspark; the connect core's local checkpoint does not yet take a storage level,
-    /// so a supplied value is currently a no-op.
+    /// Local checkpoint, at once if `eager`, kept at `storageLevel`, else at the server's
+    /// default, as PySpark's.
     #[pyo3(name = "localCheckpoint", signature = (eager=true, storageLevel=None))]
-    #[allow(unused_variables)]
     fn local_checkpoint(
         &self,
         py: Python<'_>,
         eager: bool,
         storageLevel: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
+        let level = storageLevel
+            .filter(|level| !level.is_none())
+            .map(|level| crate::storagelevel::storage_level_proto(&level))
+            .transpose()?;
         Ok(PyDataFrame::new(
-            py.detach(|| self.dataframe.local_checkpoint()).to_pyerr()?,
+            py.detach(|| {
+                self.dataframe
+                    .local_checkpoint_with(eager, level)
+                    .map_err(Box::new)
+            })
+            .to_pyerr()?,
         ))
     }
 
@@ -1530,8 +1537,8 @@ impl PyDataFrame {
         self.unpivot(ids, values, variableColumnName, valueColumnName)
     }
 
-    /// Persist the DataFrame. A storage-level argument is accepted for API parity;
-    /// the default (MEMORY_AND_DISK) is used.
+    /// Persist the DataFrame at `storageLevel`, MEMORY_AND_DISK_DESER by default, as
+    /// PySpark's `DataFrame.persist()`.
     #[pyo3(signature = (storageLevel=None))]
     fn persist(
         &self,
@@ -1539,18 +1546,8 @@ impl PyDataFrame {
         storageLevel: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         use spark_connect::storage::StorageLevelExt;
-        // Honor the requested StorageLevel instead of always using MEMORY_AND_DISK.
-        // A pyspark StorageLevel exposes useDisk/useMemory/useOffHeap/deserialized/
-        // replication; map them onto the proto. Default (None) is MEMORY_AND_DISK_DESER,
-        // matching reference DataFrame.persist().
         let level = match storageLevel {
-            Some(obj) => spark_connect_proto::StorageLevel {
-                use_disk: obj.getattr("useDisk")?.extract()?,
-                use_memory: obj.getattr("useMemory")?.extract()?,
-                use_off_heap: obj.getattr("useOffHeap")?.extract()?,
-                deserialized: obj.getattr("deserialized")?.extract()?,
-                replication: obj.getattr("replication")?.extract()?,
-            },
+            Some(level) => crate::storagelevel::storage_level_proto(&level)?,
             None => spark_connect_proto::StorageLevel::memory_and_disk_deser(),
         };
         let df = py.detach(|| self.dataframe.persist(level)).to_pyerr()?;

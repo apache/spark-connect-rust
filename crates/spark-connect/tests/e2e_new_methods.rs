@@ -69,6 +69,14 @@ fn checkpoints_and_input_files_local() {
 
     let lc = df.local_checkpoint().expect("local_checkpoint");
     assert_eq!(lc.collect().expect("collect lc").len(), 10);
+    // A local checkpoint that is not eager, kept on disk, as localCheckpoint(False, DISK_ONLY).
+    use spark_connect::storage::StorageLevelExt;
+    let lazy = df
+        .local_checkpoint_with(false, Some(spark_connect_proto::StorageLevel::disk_only()))
+        .expect("local_checkpoint_with");
+    assert_eq!(lazy.count().expect("count lazy"), 10);
+    // A reliable checkpoint needs a checkpoint directory, which this server has none of.
+    assert!(df.checkpoint_with(false).is_err());
 
     // inputFiles on a computed relation is empty; is_local is false for a range.
     assert!(df.input_files().expect("input_files").is_empty());
