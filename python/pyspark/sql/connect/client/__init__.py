@@ -81,3 +81,35 @@ class PlanObservedMetrics(ObservedMetrics):
 
     def to_dict(self) -> Dict[str, Any]:
         return {"name": self._name, "keys": self._keys, "pairs": self.pairs}
+
+
+def _to_pandas(
+    table: Any,
+    schema: Any,
+    metrics: List[Any],
+    observed_metrics: List[Any],
+    *,
+    timezone: Any,
+    struct_handling_mode: Any,
+    self_destruct: Any,
+) -> Any:
+    """The pandas DataFrame of the Arrow ``table`` of a result, of ``schema`` if the server sent
+    it, as ``SparkConnectClient.to_pandas`` converts it: each column by its Spark type, in the
+    session time zone, with the metrics of the execution in ``attrs``."""
+    from pyspark.sql.pandas.conversion import _convert_arrow_table_to_pandas
+    from pyspark.sql.pandas.types import from_arrow_schema
+
+    schema = schema or from_arrow_schema(table.schema, prefer_timestamp_ntz=True)
+    pdf = _convert_arrow_table_to_pandas(
+        arrow_table=table,
+        schema=schema,
+        timezone=timezone,
+        struct_handling_mode=struct_handling_mode,
+        date_as_object=False,
+        self_destruct=self_destruct == "true",
+    )
+    if len(metrics) > 0:
+        pdf.attrs["metrics"] = metrics
+    if len(observed_metrics) > 0:
+        pdf.attrs["observed_metrics"] = observed_metrics
+    return pdf

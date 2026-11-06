@@ -19,7 +19,8 @@ use spark_connect_proto::{
 };
 
 use crate::artifact::{
-    build_artifact_request_stream, cache_artifact_requests, FileArtifact, NamedArtifact,
+    build_artifact_request_stream, cache_artifact_requests, check_artifact_upload, FileArtifact,
+    NamedArtifact,
 };
 use crate::channel::{ChannelBuilder, GRPC_MAX_MESSAGE_LENGTH_DEFAULT};
 use crate::error::{Result, SparkError};
@@ -63,7 +64,6 @@ const ARTIFACT_HASH_INLINE_MAX_BLOBS: usize = 128;
 /// blocking hashing starts, the task retains the blob buffers until it finishes.
 async fn hash_artifact_blobs(blobs: Vec<Vec<u8>>) -> Result<(Vec<Vec<u8>>, Vec<String>)> {
     use sha2::{Digest, Sha256};
-    use std::fmt::Write;
 
     let hash_inline = blobs.len() <= ARTIFACT_HASH_INLINE_MAX_BLOBS
         && blobs
@@ -75,13 +75,7 @@ async fn hash_artifact_blobs(blobs: Vec<Vec<u8>>) -> Result<(Vec<Vec<u8>>, Vec<S
     let hash = move || {
         let hashes = blobs
             .iter()
-            .map(|blob| {
-                let mut hash = String::with_capacity(64);
-                for byte in Sha256::digest(blob) {
-                    write!(&mut hash, "{byte:02x}").expect("writing to a String cannot fail");
-                }
-                hash
-            })
+            .map(|blob| format!("{:x}", Sha256::digest(blob)))
             .collect();
         (blobs, hashes)
     };
@@ -95,6 +89,7 @@ async fn hash_artifact_blobs(blobs: Vec<Vec<u8>>) -> Result<(Vec<Vec<u8>>, Vec<S
 
 fn artifact_hashing_task_error(error: tokio::task::JoinError) -> SparkError {
     if error.is_panic() {
+        // Preserve inline hashing panic behavior when hashing is offloaded.
         std::panic::resume_unwind(error.into_panic());
     }
     SparkError::connect_msg(format!("Artifact hashing task failed: {error}"))
@@ -413,12 +408,20 @@ impl SparkConnectClient {
                 let mut stub = self.stub.clone();
                 async move { stub.execute_plan(req).await.map(Response::into_inner) }
             })
-            .await
-            .map_err(|e| e.with_operation_id(iter.operation_id()))?;
+            .await;
+        let stream = match stream {
+            Ok(stream) => stream,
+            Err(error) => {
+                // As the reference iterator releases an execution that fails at once, such
+                // as for an analysis error, so the server does not keep it until its
+                // detached timeout.
+                self.spawn_release(self.execution_metadata(), iter.release_all_request());
+                return Err(error.with_operation_id(iter.operation_id()));
+            }
+        };
         let retry_policy = self.retry_policy.clone();
         Ok(ReattachableResponseStream {
             client: self.clone(),
-            retry_state: RetryPolicyState::new(retry_policy.clone()),
             retry_policy,
             iter,
             stream,
@@ -813,69 +816,26 @@ impl SparkConnectClient {
 
     /// Add artifacts to this session.
     ///
-    /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.add_artifacts`.
-    /// Handles chunking large artifacts and batching small ones according to CHUNK_SIZE.
+    /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.add_artifacts`, which
+    /// uploads each path in an attempt of its own under the retry policy. Handles chunking
+    /// large artifacts and batching small ones according to CHUNK_SIZE.
     pub async fn add_artifacts(
         &self,
         paths: &[&str],
-        _pyfile: bool,
-        _archive: bool,
-        _file: bool,
+        pyfile: bool,
+        archive: bool,
+        file: bool,
     ) -> Result<()> {
-        // Build list of named artifacts from file paths
-        let mut artifacts = Vec::new();
+        // Each path is named as PySpark's ArtifactManager names it, by the flags and its file
+        // extension (see `parse_artifact`).
         for path in paths {
-            // Extract just the filename as the artifact name
-            let path_obj = std::path::Path::new(path);
-            let file_name = path_obj
-                .file_name()
-                .and_then(|n| n.to_str())
-                .ok_or_else(|| {
-                    SparkError::connect_msg(format!("Invalid artifact path: {}", path))
-                })?;
-
-            // Determine artifact prefix based on file extension
-            let artifact_name = if _pyfile
-                && (file_name.ends_with(".py")
-                    || file_name.ends_with(".zip")
-                    || file_name.ends_with(".egg")
-                    || file_name.ends_with(".jar"))
-            {
-                format!("pyfiles/{}", file_name)
-            } else if _archive
-                && (file_name.ends_with(".zip")
-                    || file_name.ends_with(".jar")
-                    || file_name.ends_with(".tar.gz")
-                    || file_name.ends_with(".tgz")
-                    || file_name.ends_with(".tar"))
-            {
-                format!("archives/{}", file_name)
-            } else if _file {
-                format!("files/{}", file_name)
-            } else if file_name.ends_with(".jar") {
-                format!("jars/{}", file_name)
-            } else {
-                return Err(SparkError::connect_msg(format!(
-                    "Unsupported artifact type: {}",
-                    path
-                )));
-            };
-
-            // Create artifact from file
-            artifacts.push(NamedArtifact::new(
-                artifact_name,
-                Box::new(FileArtifact::new(path)),
-            ));
+            let (name, local) = crate::artifact::parse_artifact(path, pyfile, archive, file)
+                .map_err(|e| SparkError::connect_msg(e.to_string()))?;
+            let artifacts = vec![NamedArtifact::new(name, Box::new(FileArtifact::new(local)))];
+            let requests = build_artifact_request_stream(self.session_id.clone(), artifacts)?;
+            self.upload_artifact_requests(requests, None).await?;
         }
-
-        if artifacts.is_empty() {
-            return Ok(());
-        }
-
-        // Build request stream with proper chunking/batching
-        let requests = build_artifact_request_stream(self.session_id.clone(), artifacts)?;
-        self.upload_artifact_requests(futures::stream::iter(requests), None)
-            .await
+        Ok(())
     }
 
     /// Upload a single local file as an artifact under an explicit artifact name
@@ -889,12 +849,14 @@ impl SparkConnectClient {
             Box::new(FileArtifact::new(local_path)),
         )];
         let requests = build_artifact_request_stream(self.session_id.clone(), artifacts)?;
-        self.upload_artifact_requests(futures::stream::iter(requests), None)
-            .await
+        self.upload_artifact_requests(requests, None).await
     }
 
     /// Upload session-scoped cache blobs, returning SHA-256 hashes in input order.
     /// Existing artifacts and duplicate blobs are uploaded only once.
+    ///
+    /// As `SparkConnectClient.cache_artifacts`, the status check and the upload are one
+    /// attempt under the retry policy, so a transient failure of either retries both.
     pub async fn cache_artifacts(&self, blobs: Vec<Vec<u8>>) -> Result<Vec<String>> {
         use bytes::Bytes;
         use std::collections::HashSet;
@@ -904,24 +866,37 @@ impl SparkConnectClient {
         }
         let (blobs, hashes) = hash_artifact_blobs(blobs).await?;
         let names: Vec<String> = hashes.iter().map(|hash| format!("cache/{hash}")).collect();
-        let unique: HashSet<&str> = names.iter().map(String::as_str).collect();
-        let cached = self
-            .artifact_status(&unique.into_iter().collect::<Vec<_>>())
+        let blobs: Vec<Bytes> = blobs.into_iter().map(Bytes::from).collect();
+        let unique: Vec<String> = names
+            .iter()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .cloned()
+            .collect();
+        let (blobs, names, unique) = (&blobs, &names, &unique);
+        let uploaded = self
+            .with_retry(|| async move {
+                let cached = self.artifact_status_rpc(unique).await?;
+                let mut seen = HashSet::new();
+                let mut artifacts = Vec::new();
+                for (blob, name) in blobs.iter().zip(names) {
+                    if !cached.get(name).copied().unwrap_or(false) && seen.insert(name.clone()) {
+                        artifacts.push((name.clone(), blob.clone()));
+                    }
+                }
+                if artifacts.is_empty() {
+                    return Ok(None);
+                }
+                let expected: HashSet<String> =
+                    artifacts.iter().map(|(name, _)| name.clone()).collect();
+                let requests = cache_artifact_requests(self.session_id.clone(), artifacts);
+                let response = self.add_artifacts_rpc(requests).await?;
+                Ok(Some((response, expected)))
+            })
             .await?;
-        let mut seen = HashSet::new();
-        let mut artifacts = Vec::new();
-        for (blob, name) in blobs.into_iter().zip(names) {
-            if !cached.get(&name).copied().unwrap_or(false) && seen.insert(name.clone()) {
-                artifacts.push((name, Bytes::from(blob)));
-            }
+        if let Some((response, expected)) = uploaded {
+            check_artifact_upload(response, Some(&expected))?;
         }
-        if artifacts.is_empty() {
-            return Ok(hashes);
-        }
-        let expected: HashSet<String> = artifacts.iter().map(|(name, _)| name.clone()).collect();
-        let requests = cache_artifact_requests(self.session_id.clone(), artifacts);
-        self.upload_artifact_requests(futures::stream::iter(requests), Some(&expected))
-            .await?;
         Ok(hashes)
     }
 
@@ -934,52 +909,45 @@ impl SparkConnectClient {
         }
     }
 
-    /// Send artifact frames and validate the response.
-    /// Stamps user_context and client_type on every frame; all upload paths must
-    /// go through here.
-    /// Cache uploads also require an acknowledgement for every requested artifact.
-    /// The stream is consumed once; retries must rebuild the frames and restart
-    /// AddArtifacts rather than resume a partially consumed stream.
+    /// Send artifact frames, retrying a transient failure of the whole upload under the retry
+    /// policy, and validate the response. An attempt sends all the frames again: a stream is
+    /// not resumed. Cache uploads also require an acknowledgement for every requested
+    /// artifact.
     async fn upload_artifact_requests(
         &self,
-        requests: impl futures::Stream<Item = spark_connect_proto::AddArtifactsRequest> + Send + 'static,
+        requests: Vec<spark_connect_proto::AddArtifactsRequest>,
         expected_cache_names: Option<&std::collections::HashSet<String>>,
     ) -> Result<()> {
-        use futures::StreamExt;
+        let requests = &requests;
+        let response = self
+            .with_retry(|| self.add_artifacts_rpc(requests.clone()))
+            .await?;
+        check_artifact_upload(response, expected_cache_names)
+    }
 
+    /// The AddArtifacts call of `requests`, once. Stamps user_context and client_type on
+    /// every frame; all upload paths must go through here.
+    async fn add_artifacts_rpc(
+        &self,
+        requests: impl IntoIterator<Item = spark_connect_proto::AddArtifactsRequest>,
+    ) -> std::result::Result<spark_connect_proto::AddArtifactsResponse, tonic::Status> {
         let user_context = self.artifact_user_context();
         let client_type = self.user_agent.clone();
-        let requests = requests.map(move |mut request| {
-            request.user_context = Some(user_context.clone());
-            request.client_type = Some(client_type.clone());
-            request
-        });
-        let mut req = Request::new(requests);
+        let requests: Vec<_> = requests
+            .into_iter()
+            .map(|mut request| {
+                request.user_context = Some(user_context.clone());
+                request.client_type = Some(client_type.clone());
+                request
+            })
+            .collect();
+        let mut req = Request::new(futures::stream::iter(requests));
         self._attach_metadata(&mut req);
-        let response = match self.stub.clone().add_artifacts(req).await {
-            Ok(response) => response.into_inner(),
-            Err(status) => return Err(self.error_from_status(status).await),
-        };
-        let mut received = std::collections::HashSet::new();
-        for summary in response.artifacts {
-            if !summary.is_crc_successful {
-                return Err(SparkError::connect_msg(format!(
-                    "CRC check failed for artifact: {}",
-                    summary.name
-                )));
-            }
-            if expected_cache_names.is_some() {
-                received.insert(summary.name);
-            }
-        }
-        if let Some(expected) = expected_cache_names {
-            if !expected.is_subset(&received) {
-                return Err(SparkError::connect_msg(
-                    "Missing cache artifact upload acknowledgement",
-                ));
-            }
-        }
-        Ok(())
+        self.stub
+            .clone()
+            .add_artifacts(req)
+            .await
+            .map(Response::into_inner)
     }
 
     /// Check artifact status on the server.
@@ -989,26 +957,32 @@ impl SparkConnectClient {
         &self,
         names: &[&str],
     ) -> Result<std::collections::HashMap<String, bool>> {
+        let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+        match self.artifact_status_rpc(&names).await {
+            Ok(statuses) => Ok(statuses),
+            Err(status) => Err(self.error_from_status(status).await),
+        }
+    }
+
+    /// The ArtifactStatus call of `names`, once: whether each artifact exists.
+    async fn artifact_status_rpc(
+        &self,
+        names: &[String],
+    ) -> std::result::Result<std::collections::HashMap<String, bool>, tonic::Status> {
         let mut request = ArtifactStatusesRequest::default();
         request.session_id = self.session_id.clone();
         request.user_context = Some(self.artifact_user_context());
         request.client_type = Some(self.user_agent.clone());
-        request.names = names.iter().map(|n| n.to_string()).collect();
+        request.names = names.to_vec();
 
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
-        let response = match self.stub.clone().artifact_status(req).await {
-            Ok(response) => response.into_inner(),
-            Err(status) => return Err(self.error_from_status(status).await),
-        };
-
-        // Build map of artifact name -> exists status
-        let mut result = std::collections::HashMap::new();
-        for (name, status) in response.statuses {
-            result.insert(name, status.exists);
-        }
-
-        Ok(result)
+        let response = self.stub.clone().artifact_status(req).await?.into_inner();
+        Ok(response
+            .statuses
+            .into_iter()
+            .map(|(name, status)| (name, status.exists))
+            .collect())
     }
 
     /// Attach metadata headers to a request.
@@ -1056,7 +1030,6 @@ pub struct ReattachableResponseStream {
     /// The client that started the execution, whose stub, headers and session it uses.
     client: SparkConnectClient,
     retry_policy: RetryPolicy,
-    retry_state: RetryPolicyState,
     iter: ExecutePlanResponseReattachableIterator,
     stream: Streaming<ExecutePlanResponse>,
     done: bool,
@@ -1064,19 +1037,19 @@ pub struct ReattachableResponseStream {
     released: bool,
 }
 
-impl ReattachableResponseStream {
-    /// The gRPC metadata of every request about this execution.
-    fn metadata_map(&self) -> MetadataMap {
+impl SparkConnectClient {
+    /// The gRPC metadata of every request about an execution.
+    fn execution_metadata(&self) -> MetadataMap {
         let mut metadata = MetadataMap::new();
-        if let Ok(v) = MetadataValue::from_str(&self.client.user_agent) {
+        if let Ok(v) = MetadataValue::from_str(&self.user_agent) {
             let _ = metadata.insert("user-agent", v);
         }
-        if let Some(user_id) = &self.client.user_id {
+        if let Some(user_id) = &self.user_id {
             if let Ok(v) = MetadataValue::from_str(user_id) {
                 let _ = metadata.insert("user_id", v);
             }
         }
-        for (k, v) in &self.client.metadata {
+        for (k, v) in &self.metadata {
             if let Ok(v) = MetadataValue::from_str(v) {
                 if let Ok(key) = tonic::metadata::MetadataKey::from_bytes(k.as_bytes()) {
                     let _ = metadata.insert(key, v);
@@ -1084,6 +1057,52 @@ impl ReattachableResponseStream {
             }
         }
         metadata
+    }
+
+    /// Sends `request` in the background, so that reading is not delayed, retrying under the
+    /// client's retry policy. Like the reference client, a failure is only logged: the server
+    /// removes an execution that is never released once it has been detached for
+    /// `spark.connect.execute.manager.detachedTimeout`.
+    fn spawn_release(&self, metadata: MetadataMap, request: ReleaseExecuteRequest) {
+        let mut stub = self.stub.clone();
+        let policy = self.retry_policy.clone();
+        let release = async move {
+            let mut state = RetryPolicyState::new(policy.clone());
+            loop {
+                let mut req = Request::new(request.clone());
+                *req.metadata_mut() = metadata.clone();
+                match stub.release_execute(req).await {
+                    Ok(_) => return,
+                    Err(status) => {
+                        if policy.can_retry(&status) {
+                            if let Some(w) = state.next_attempt(None) {
+                                tokio::time::sleep(Duration::from_millis(w)).await;
+                                continue;
+                            }
+                        }
+                        tracing::warn!(
+                            "ReleaseExecute of operation {} failed: {}",
+                            request.operation_id,
+                            status
+                        );
+                        return;
+                    }
+                }
+            }
+        };
+        // A stream is read inside a runtime, but it can be dropped outside of any, for
+        // example after the `block_on` that read it.
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => drop(handle.spawn(release)),
+            Err(_) => drop(crate::runtime::get_runtime().spawn(release)),
+        }
+    }
+}
+
+impl ReattachableResponseStream {
+    /// The gRPC metadata of every request about this execution.
+    fn metadata_map(&self) -> MetadataMap {
+        self.client.execution_metadata()
     }
 
     fn attach_metadata<T>(&self, req: &mut Request<T>) {
@@ -1096,6 +1115,9 @@ impl ReattachableResponseStream {
         if self.done {
             return Ok(None);
         }
+        // As the reference iterator's `_has_next` retries with a `Retrying` of its own, the
+        // reattaches of each response have the attempts and the elapsed time of the policy.
+        let mut retry_state = RetryPolicyState::new(self.retry_policy.clone());
         loop {
             match self.stream.message().await {
                 Ok(Some(resp)) => {
@@ -1111,21 +1133,22 @@ impl ReattachableResponseStream {
                 // The server completes a reattachable stream before `ResultComplete` on
                 // purpose, after `senderMaxStreamDuration` or `senderMaxStreamSize`: the rest
                 // of the result is read by reattaching.
-                Ok(None) => self.reattach().await?,
+                Ok(None) => self.reattach(&mut retry_state).await?,
                 Err(status) => {
                     // Only reattach a still-running execution on a retriable drop.
                     if self.iter.is_completed().await || !self.retry_policy.can_retry(&status) {
                         let error = self.client.error_from_status(status).await;
                         return Err(self.fail(error));
                     }
-                    self.reattach().await?;
+                    self.reattach(&mut retry_state).await?;
                 }
             }
         }
     }
 
-    /// Resumes the execution from the last response read, retrying transient failures.
-    async fn reattach(&mut self) -> Result<()> {
+    /// Resumes the execution from the last response read, retrying transient failures under
+    /// `retry_state`.
+    async fn reattach(&mut self, retry_state: &mut RetryPolicyState) -> Result<()> {
         loop {
             let mut req = Request::new(self.iter.create_reattach_request().await);
             self.attach_metadata(&mut req);
@@ -1136,7 +1159,7 @@ impl ReattachableResponseStream {
                 }
                 Err(e) => {
                     if self.retry_policy.can_retry(&e) {
-                        if let Some(w) = self.retry_state.next_attempt(None) {
+                        if let Some(w) = retry_state.next_attempt(None) {
                             tokio::time::sleep(Duration::from_millis(w)).await;
                             continue;
                         }
@@ -1172,44 +1195,10 @@ impl ReattachableResponseStream {
         }
     }
 
-    /// Sends `request` in the background, so that reading is not delayed, retrying under the
-    /// client's retry policy. Like the reference client, a failure is only logged: the server
-    /// removes an execution that is never released once it has been detached for
-    /// `spark.connect.execute.manager.detachedTimeout`.
+    /// Sends `request` in the background, as [`SparkConnectClient::spawn_release`] does.
     fn spawn_release(&self, request: ReleaseExecuteRequest) {
-        let mut stub = self.client.stub.clone();
-        let metadata = self.metadata_map();
-        let policy = self.retry_policy.clone();
-        let release = async move {
-            let mut state = RetryPolicyState::new(policy.clone());
-            loop {
-                let mut req = Request::new(request.clone());
-                *req.metadata_mut() = metadata.clone();
-                match stub.release_execute(req).await {
-                    Ok(_) => return,
-                    Err(status) => {
-                        if policy.can_retry(&status) {
-                            if let Some(w) = state.next_attempt(None) {
-                                tokio::time::sleep(Duration::from_millis(w)).await;
-                                continue;
-                            }
-                        }
-                        tracing::warn!(
-                            "ReleaseExecute of operation {} failed: {}",
-                            request.operation_id,
-                            status
-                        );
-                        return;
-                    }
-                }
-            }
-        };
-        // A stream is read inside a runtime, but it can be dropped outside of any, for
-        // example after the `block_on` that read it.
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => drop(handle.spawn(release)),
-            Err(_) => drop(crate::runtime::get_runtime().spawn(release)),
-        }
+        self.client
+            .spawn_release(self.client.execution_metadata(), request);
     }
 }
 
@@ -1266,8 +1255,13 @@ mod tests {
 
     #[test]
     fn test_small_artifact_hashing_stays_inline_and_preserves_buffers() {
-        let (pending, hashes) =
-            hash_with_busy_blocking_pool(vec![Vec::new(), b"abc".to_vec(), b"abc".to_vec()]);
+        // The last digest starts with a zero, which hex encoding must preserve.
+        let (pending, hashes) = hash_with_busy_blocking_pool(vec![
+            Vec::new(),
+            b"abc".to_vec(),
+            b"abc".to_vec(),
+            b"s".to_vec(),
+        ]);
         assert!(
             !pending,
             "small artifact batches must not wait for a blocking thread"
@@ -1278,6 +1272,7 @@ mod tests {
                 "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
                 "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
                 "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                "043a718774c572bd8a25adbeb1bfcd5c0256ae11cecf9f9c3f925d0e52beaf89",
             ]
         );
     }
@@ -1344,12 +1339,35 @@ mod tests {
         assert_eq!(panic.downcast_ref::<&str>(), Some(&"hashing panic"));
     }
 
-    #[tokio::test]
-    async fn test_artifact_hashing_reports_task_cancellation() {
-        let task = tokio::spawn(std::future::pending::<()>());
-        task.abort();
-        let error = artifact_hashing_task_error(task.await.unwrap_err());
-        assert!(error.to_string().contains("Artifact hashing task failed:"));
+    #[test]
+    fn test_artifact_hashing_task_error_reports_queued_task_cancellation() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let (release, wait) = std::sync::mpsc::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                started.send(()).unwrap();
+                let _ = wait.recv();
+            });
+            ready.await.unwrap();
+
+            // Explicit abort models runtime shutdown cancelling queued hashing work;
+            // production hashing does not abort its handle.
+            let task = tokio::task::spawn_blocking(|| ());
+            task.abort();
+            // Release the blocking worker before assertions to avoid hanging shutdown.
+            release.send(()).unwrap();
+            blocker.await.unwrap();
+
+            let cancelled = task.await.unwrap_err();
+            assert!(cancelled.is_cancelled());
+            let error = artifact_hashing_task_error(cancelled);
+            assert!(error.to_string().contains("Artifact hashing task failed:"));
+        });
     }
 
     #[tokio::test]
