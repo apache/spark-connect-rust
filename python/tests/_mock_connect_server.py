@@ -101,6 +101,8 @@ def serve(connection):
         failure = None
         block_response = False
         response_gate = Event()
+        # With `block_execute` set, ExecutePlan waits for the gate too, as AnalyzePlan does.
+        block_execute = False
 
         # Each AnalyzePlanRequest, recorded.
         analyze_requests = []
@@ -113,6 +115,7 @@ def serve(connection):
             self.failure = None
             self.block_response = False
             self.response_gate.clear()
+            self.block_execute = False
             self.analyze_requests = []
             self.execute_requests = []
             self.execute_payload = b""
@@ -164,6 +167,11 @@ def serve(connection):
         def execute(self, request, context):
             self.execute_calls += 1
             self.execute_requests.append(request)
+            if self.block_execute and not self.response_gate.wait(5):
+                context.abort(
+                    grpc.StatusCode.DEADLINE_EXCEEDED,
+                    "Python thread could not run while the statement ran",
+                )
             if self.execute_failure:
                 context.abort(grpc.StatusCode.INVALID_ARGUMENT, self.execute_failure)
             if self.execute_error:
