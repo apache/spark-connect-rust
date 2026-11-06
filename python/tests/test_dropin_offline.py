@@ -455,46 +455,57 @@ def test_functions_keyword_and_dispatch_paths():
     assert repr(F._UNSET) == "<unset>"
 
 
-def test_dispatch_keeps_literal_string_args_literal():
-    # Guards _FN_COL_ARGS: a bare-str arg at a LITERAL position (e.g. a variant path)
-    # must reach the core UNCHANGED, not be resolved to a column via _to_col. If it were
-    # coerced, `variant_delete(v, "$.b")` would send an unresolved attribute col("$.b")
-    # and fail analysis on the server. Asserting only that a Column is built (as elsewhere)
-    # can't catch this, so we capture the exact positional args handed to the core: a
-    # value column is coerced away from str, while a literal path stays a str.
+def _sent_function_arguments(service):
+    """The arguments of the function that the last ExecutePlan selects: ("col", name) for a
+    column reference and ("lit", fields) for a literal."""
+    # ExecutePlanRequest.plan=3, Plan.root=1, Relation.project=3, Project.expressions=3,
+    # Expression.unresolved_function=3, UnresolvedFunction.arguments=2; an argument is an
+    # Expression.literal=1 or an .unresolved_attribute=2, of unparsed_identifier=1.
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+    expression = parse_message(parse_message(parse_message(plan)[3][0])[3][0])
+    arguments = []
+    for argument in parse_message(expression[3][0]).get(2, []):
+        argument = parse_message(argument)
+        if 2 in argument:
+            arguments.append(("col", parse_message(argument[2][0])[1][0].decode()))
+        else:
+            arguments.append(("lit", parse_message(argument[1][0])))
+    return arguments
+
+
+@pytest.mark.parametrize("call,expected", [
+    # Literal.string=13 and .boolean=3.
+    (lambda F: F.variant_get("v", "$.a", "int"),
+     [("col", "v"), ("lit", {13: [b"$.a"]}), ("lit", {13: [b"int"]})]),
+    (lambda F: F.try_variant_get("v", "$.a", "int"),
+     [("col", "v"), ("lit", {13: [b"$.a"]}), ("lit", {13: [b"int"]})]),
+    (lambda F: F.variant_delete("v", "$.a", "$.b"),
+     [("col", "v"), ("lit", {13: [b"$.a"]}), ("lit", {13: [b"$.b"]})]),
+    (lambda F: F.variant_insert("v", "$.b", "x"),
+     [("col", "v"), ("lit", {13: [b"$.b"]}), ("col", "x")]),
+    (lambda F: F.try_variant_insert("v", "$.b", "x"),
+     [("col", "v"), ("lit", {13: [b"$.b"]}), ("col", "x")]),
+    (lambda F: F.variant_set("v", "$.b", "x", True),
+     [("col", "v"), ("lit", {13: [b"$.b"]}), ("col", "x"), ("lit", {3: [1]})]),
+    (lambda F: F.try_variant_set("v", "$.b", "x", True),
+     [("col", "v"), ("lit", {13: [b"$.b"]}), ("col", "x"), ("lit", {3: [1]})]),
+    (lambda F: F.variant_array_append("v", "$", "x"),
+     [("col", "v"), ("lit", {13: [b"$"]}), ("col", "x")]),
+    (lambda F: F.try_variant_array_append("v", "$", "x"),
+     [("col", "v"), ("lit", {13: [b"$"]}), ("col", "x")]),
+    (lambda F: F.date_part("YEAR", "d"), [("col", "YEAR"), ("col", "d")]),
+    (lambda F: F.convert_timezone(None, "tz", "ts"), [("col", "tz"), ("col", "ts")]),
+])
+def test_function_arguments_are_columns_or_literals_as_pyspark(mock_connect, call, expected):
+    # A str is a literal where PySpark takes a str, as a variant path, and a column name
+    # where it takes a Column or a name, as date_part's field: a path sent as a column,
+    # such as variant_delete(v, "$.b"), would fail analysis on the server. The cases agree
+    # with official PySpark 4.3.0.
     from pyspark.sql import functions as F
 
-    captured = []
-
-    orig = F._call_function
-    F._call_function = lambda fname, *args: captured.append((fname, args)) or orig(fname, *args)
-    def is_col(x):
-        return type(x).__name__ == "Column"
-
-    try:
-        # (function call, positions that MUST stay raw literals — a str path or a bool
-        # flag — and positions that MUST be coerced to a column)
-        cases = [
-            (lambda: F.variant_get("v", "$.a", "int"), {1, 2}, {0}),
-            (lambda: F.try_variant_get("v", "$.a", "int"), {1, 2}, {0}),
-            (lambda: F.variant_delete("v", "$.a", "$.b"), {1, 2}, {0}),
-            (lambda: F.variant_insert("v", "$.b", "x"), {1}, {0, 2}),
-            (lambda: F.try_variant_insert("v", "$.b", "x"), {1}, {0, 2}),
-            (lambda: F.variant_set("v", "$.b", "x", True), {1, 3}, {0, 2}),
-            (lambda: F.try_variant_set("v", "$.b", "x", True), {1, 3}, {0, 2}),
-            (lambda: F.variant_array_append("v", "$", "x"), {1}, {0, 2}),
-            (lambda: F.try_variant_array_append("v", "$", "x"), {1}, {0, 2}),
-        ]
-        for call, literal_pos, col_pos in cases:
-            captured.clear()
-            call()
-            fname, args = captured[-1]
-            for i in literal_pos:
-                assert not is_col(args[i]), f"{fname} arg[{i}] should stay a raw literal, got a Column"
-            for i in col_pos:
-                assert is_col(args[i]), f"{fname} arg[{i}] should be coerced to a Column, got {type(args[i]).__name__}"
-    finally:
-        F._call_function = orig
+    spark, service = mock_connect
+    spark.range(1).select(call(F)).collect()
+    assert _sent_function_arguments(service) == expected
 
 
 def test_column_alias_metadata_offline():
@@ -1878,7 +1889,8 @@ def test_functions_substring():
 
     str_col = F.col("str")
     assert type(F.substring(str_col, 1, 5)).__name__ == "Column"
-    assert type(F.substr(str_col, 1, 5)).__name__ == "Column"
+    # As in PySpark, substr takes the position and length as Columns (or names).
+    assert type(F.substr(str_col, F.lit(1), F.lit(5))).__name__ == "Column"
 
 
 def test_functions_replace():
@@ -2754,8 +2766,8 @@ def test_functions_stack():
     """Test stack function for row construction."""
     from pyspark.sql import functions as F
 
-    # stack creates rows from arguments
-    result = F.stack(2, F.col("a"), F.col("b"))
+    # stack creates rows from arguments; as in PySpark, the count is a Column too.
+    result = F.stack(F.lit(2), F.col("a"), F.col("b"))
     assert type(result).__name__ == "Column"
 
 
@@ -4474,30 +4486,86 @@ def test_timestamp_nanos_types_roundtrip_and_pickle():
     assert pickle.loads(pickle.dumps(nested)).simpleString() == "struct<a:array<timestamp_ltz(9)>>"
 
 
-def test_instr_regexp_replace_optional_args():
+@pytest.mark.parametrize("call,expected", [
+    # Optional arguments are sent when given, as PySpark Connect's functions send them, and
+    # strings are column names where PySpark takes a Column or a name.
+    (lambda F: F.to_date("d", "dd/MM/yyyy"), 'to_date(d, dd/MM/yyyy)'),
+    (lambda F: F.to_timestamp("d", "yyyy-MM-dd"), 'to_timestamp(d, yyyy-MM-dd)'),
+    (lambda F: F.log(2.0, "x"), 'log(2.0, x)'),
+    (lambda F: F.log("x"), 'ln(x)'),
+    (lambda F: F.sort_array("a", asc=False), 'sort_array(a, False)'),
+    (lambda F: F.split("s", ",", 2), 'split(s, ,, 2)'),
+    (lambda F: F.substr("s", F.lit(1), F.lit(2)), 'substr(s, 1, 2)'),
+    (lambda F: F.like("p", F.lit("a!_c"), F.lit("!")), 'like(p, a!_c, !)'),
+    (lambda F: F.unix_timestamp("t"), 'unix_timestamp(t, yyyy-MM-dd HH:mm:ss)'),
+    (lambda F: F.unix_timestamp(), 'unix_timestamp()'),
+    (lambda F: F.months_between("a", "b", roundOff=False), 'months_between(a, b, False)'),
+    (lambda F: F.first("v", ignorenulls=True), 'first(v, True)'),
+    (lambda F: F.last("v", True), 'last(v, True)'),
+    (lambda F: F.aes_encrypt("i", "k", F.lit("ECB")), 'aes_encrypt(i, k, ECB, DEFAULT, , )'),
+    (lambda F: F.rand(7), 'rand(7)'),
+    (lambda F: F.randn(seed=7), 'randn(7)'),
+    (lambda F: F.shuffle("a", 7), 'shuffle(a, 7)'),
+    (lambda F: F.count_distinct("a", "b"), 'count(distinct a, b)'),
+    (lambda F: F.countDistinct("a", "b"), 'count(distinct a, b)'),
+    (lambda F: F.listagg_distinct("a", ","), 'listagg(distinct a, ,)'),
+    (lambda F: F.string_agg("a", ","), 'string_agg(a, ,)'),
+    (lambda F: F.any_value("a", True), 'any_value(a, True)'),
+    (lambda F: F.max_by("a", "b", 2), 'max_by(a, b, 2)'),
+    (lambda F: F.hll_sketch_agg("a", 10), 'hll_sketch_agg(a, 10)'),
+    (lambda F: F.approx_percentile("c", 0.5, 100), 'approx_percentile(c, 0.5, 100)'),
+    (lambda F: F.locate("b", "s", 3), 'locate(b, s, 3)'),
+    (lambda F: F.window("t", "1 hour", "30 minutes"), 'window(t, 1 hour, 30 minutes)'),
+    (lambda F: F.instr("s", "a", occurrence=2), 'instr(s, a, 1, 2)'),
+    (lambda F: F.regexp_replace("s", "a", "b", 4), 'regexp_replace(s, a, b, 4)'),
+    (lambda F: F.instr("s", "a"), 'instr(s, a)'),
+    (lambda F: F.instr("s", "a", 3), 'instr(s, a, 3)'),
+    (lambda F: F.regexp_replace("s", "a", "b"), 'regexp_replace(s, a, b)'),
+    (lambda F: F.regexp_replace("s", "a", "b", position=None), 'regexp_replace(s, a, b)'),
+    (lambda F: F.date_part(F.lit("YEAR"), "d"), 'date_part(YEAR, d)'),
+    # An explicit None is what PySpark makes of it: no argument, a NULL or the default.
+    (lambda F: F.round("c", None), 'round(c)'),
+    (lambda F: F.bround("c", None), 'bround(c)'),
+    (lambda F: F.first("c", None), 'first(c, NULL)'),
+    (lambda F: F.lag("c"), 'lag(c, 1)'),
+    (lambda F: F.lag("c", 2, None), 'lag(c, 2)'),
+    (lambda F: F.lead("c", offset=None), 'lead(c, NULL)'),
+    (lambda F: F.trim("c", None), 'trim(c)'),
+    (lambda F: F.approx_percentile("c", 0.5, None), 'approx_percentile(c, 0.5, NULL)'),
+    (lambda F: F.from_unixtime("c", None), 'from_unixtime(c, NULL)'),
+    (lambda F: F.sort_array("c", None), 'sort_array(c, NULL)'),
+    (lambda F: F.nth_value("c", 2, None), 'nth_value(c, 2)'),
+    (lambda F: F.tuple_union_double("a", "b"), 'tuple_union_double(a, b, 12, sum)'),
+    (lambda F: F.variant_strip_nulls("v", None), 'variant_strip_nulls(v, NULL)'),
+    (lambda F: F.instr("s", "a", None, None), 'instr(s, a)'),
+    (lambda F: F.array_join("a", ",", None), 'array_join(a, ,)'),
+])
+def test_function_arguments_as_pyspark(call, expected):
+    # The cases agree with official PySpark 4.3.0.
     from pyspark.sql import functions as F
 
-    captured = []
-    orig = F._call_function
-    F._call_function = lambda fname, *args: captured.append((fname, args)) or orig(fname, *args)
-    try:
-        F.instr("s", "a")
-        assert captured[-1][1][1:] == ("a",)
-        # occurrence without start searches from position 1 (pyspark 4.3.0).
-        F.instr("s", "a", occurrence=2)
-        assert captured[-1][1][1:] == ("a", 1, 2)
-        F.instr("s", "a", start=None, occurrence=None)
-        assert len(captured[-1][1]) == 2
-        F.instr("s", "a", 3)
-        assert captured[-1][1][1:] == ("a", 3)
-        F.regexp_replace("s", "a", "b")
-        assert len(captured[-1][1]) == 3
-        F.regexp_replace("s", "a", "b", position=None)
-        assert len(captured[-1][1]) == 3
-        F.regexp_replace("s", "a", "b", 4)
-        assert captured[-1][1][1:] == ("a", "b", 4)
-    finally:
-        F._call_function = orig
+    assert repr(call(F)) == f"Column<'{expected}'>"
+
+
+@pytest.mark.parametrize("call,error,condition,parameters", [
+    (lambda F: F.split("s", ",", None), 'PySparkTypeError', 'NOT_EXPECTED_TYPE', {'expected_type': 'Column or str', 'arg_name': 'col', 'arg_type': 'NoneType'}),
+    (lambda F: F.overlay("a", "b", "c", None), 'PySparkTypeError', 'NOT_EXPECTED_TYPE', {'expected_type': 'Column or str', 'arg_name': 'col', 'arg_type': 'NoneType'}),
+    (lambda F: F.percentile("a", 0.5, None), 'PySparkTypeError', 'NOT_EXPECTED_TYPE', {'expected_type': 'Column or int', 'arg_name': 'frequency', 'arg_type': 'NoneType'}),
+    (lambda F: F.substr("s", 1, 5), 'PySparkTypeError', 'NOT_EXPECTED_TYPE', {'expected_type': 'Column or str', 'arg_name': 'col', 'arg_type': 'int'}),
+    (lambda F: F.stack(2, "a", "b"), 'PySparkTypeError', 'NOT_EXPECTED_TYPE', {'expected_type': 'Column or str', 'arg_name': 'col', 'arg_type': 'int'}),
+    (lambda F: F.sha2("c", 100), 'PySparkValueError', 'VALUE_NOT_ALLOWED', {'arg_name': 'numBits', 'allowed_values': '[0, 224, 256, 384, 512]'}),
+])
+def test_function_arguments_raise_as_pyspark(call, error, condition, parameters):
+    # Before any request, with PySpark Connect's errors; the cases agree with official
+    # PySpark 4.3.0.
+    from pyspark.errors import PySparkTypeError, PySparkValueError
+    from pyspark.sql import functions as F
+
+    with pytest.raises((PySparkTypeError, PySparkValueError)) as raised:
+        call(F)
+    assert type(raised.value).__name__ == error
+    assert raised.value.getCondition() == condition
+    assert raised.value.getMessageParameters() == parameters
 
 
 @pytest.mark.parametrize("column,expected", [

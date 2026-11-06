@@ -5,18 +5,25 @@ Parses crates/spark-connect/src/functions.rs and generates optimized code.
 """
 
 import argparse
+import ast
+import dis
 import inspect
 import re
 import sys
+import textwrap
+import types
 from pathlib import Path
 
 _ap = argparse.ArgumentParser(description=__doc__)
 _ap.add_argument(
     "--pyspark-src",
     default=None,
-    help="Path to the reference PySpark package root (…/python). When given, generated "
-    "Python wrappers carry the reference's real parameter names/order so keyword calls "
-    "work; without it, wrappers fall back to the historical *args form.",
+    help="Path to the reference PySpark package root (…/python), with the dependencies of "
+    "PySpark Connect importable. When given, a function whose PySpark Connect "
+    "implementation only marshals its arguments into a function call is generated with "
+    "that implementation's signature and body; the others carry the reference's parameter "
+    "names and dispatch to the Rust core. Without it, wrappers fall back to the historical "
+    "*args form.",
 )
 _ap.add_argument(
     "--write-dispatch",
@@ -28,11 +35,14 @@ _ap.add_argument(
 )
 _args = _ap.parse_args()
 
-# Optionally load the reference pyspark to mirror real function signatures.
+# Optionally load the reference pyspark to mirror real function signatures, and its
+# PySpark Connect implementations.
 _ref_functions = None
+_ref_builtin = None
 if _args.pyspark_src:
     sys.path.insert(0, _args.pyspark_src)
     import pyspark.sql.functions as _ref_functions  # noqa: E402
+    import pyspark.sql.connect.functions.builtin as _ref_builtin  # noqa: E402
 
 # Read the spark-connect functions file
 functions_rs = Path("crates/spark-connect/src/functions.rs").read_text()
@@ -132,6 +142,13 @@ skip_functions = {
     "to_protobuf_with_descriptor",
     "to_protobuf_with_descriptor_and_options",
     "to_protobuf_with_options",
+    # listagg_distinct(col, delimiter) and string_agg_distinct: a distinct function call,
+    # which the Python wrappers of functions.py dispatch with or without the delimiter.
+    "listagg_distinct",
+    "string_agg_distinct",
+    # count_distinct(col, *cols) and countDistinct: a distinct count of all the columns.
+    "count_distinct",
+    "countDistinct",
 }
 
 # Categorize functions by their parameter types
@@ -326,23 +343,182 @@ def _emit_def(name, sig):
     return header + "\n" + "\n".join(body)
 
 
-# The authoritative wrapper set is the names already in functions_generated.py (the
-# shipped, golden-verified set). Deriving it from the Rust functions.rs regex is fragile:
-# generic signatures (e.g. `pub fn concat_ws<C: Into<Column>>(...)`) are silently missed.
-# We only *upgrade* each existing wrapper's signature; we never add or drop functions.
+# Upstream bodies.
+#
+# A function whose PySpark Connect implementation only marshals its arguments into a
+# function call -- with lit, _to_col and the other helpers of
+# pyspark.sql.connect.functions.builtin -- is generated with that implementation's own
+# signature and body. So it sends the arguments that PySpark sends: an optional argument
+# when it is given, the defaults that PySpark fills in, a NULL for an explicit None where
+# PySpark sends one, and PySpark's errors for arguments of other types. The globals that
+# such a body may read are those that the generated module provides:
+_UPSTREAM_GLOBALS = {
+    "ArrayType",
+    "Column",
+    "DataType",
+    "MapType",
+    "PySparkTypeError",
+    "PySparkValueError",
+    "StructType",
+    "_enum_to_value",
+    "_ensure_column_or_name",
+    "_invoke_binary_math_function",
+    "_invoke_function",
+    "_invoke_function_over_columns",
+    "_invoke_higher_order_function",
+    "_options_to_col",
+    "_to_col",
+    "cast",
+    "decimal",
+    "lit",
+    "py_random",
+    "sys",
+    "warnings",
+}
+# The helpers of pyspark.sql.connect.functions.builtin that the generated module defines
+# with their PySpark Connect bodies. functions.py injects lit, column, _invoke_function and
+# _invoke_higher_order_function, which the Rust core implements.
+_UPSTREAM_HELPERS = [
+    "_to_col",
+    "_invoke_function_over_columns",
+    "_invoke_binary_math_function",
+    "_ensure_column_or_name",
+    "_options_to_col",
+]
+# Functions that functions.py used to write by hand and that are now generated from their
+# PySpark Connect implementations, which they must have.
+_UPSTREAM_EXTRA = {
+    "array",
+    "avg",
+    "counter_diff",
+    "create_map",
+    "cume_dist",
+    "hmac",
+    "instr",
+    "json_tuple",
+    "lag",
+    "lead",
+    "map_concat",
+    "max",
+    "min",
+    "regexp_replace",
+    "sha2",
+    "struct",
+    "sum",
+    "try_variant_set",
+    "variant_delete",
+    "variant_set",
+    "variant_strip_nulls",
+    "vector_norm",
+    "vector_normalize",
+    "window",
+}
+
+
+def _code_objects(code):
+    yield code
+    for const in code.co_consts:
+        if isinstance(const, types.CodeType):
+            yield from _code_objects(const)
+
+
+def _upstream_impl(name):
+    """The PySpark Connect implementation of `name`, when it is a plain function."""
+    fn = getattr(_ref_builtin, name, None) if _ref_builtin is not None else None
+    if not isinstance(fn, types.FunctionType) or inspect.unwrap(fn) is not fn:
+        return None  # Absent, or decorated (as col and lit are, with _with_origin).
+    return fn
+
+
+def _upstream_eligible(names):
+    """The names whose implementation reads only the provided globals (or other such
+    functions) and imports nothing."""
+    reads = {}
+    for name in names:
+        fn = _upstream_impl(name)
+        if fn is None:
+            continue
+        loaded, imports = set(), False
+        for code in _code_objects(fn.__code__):
+            for ins in dis.get_instructions(code):
+                if ins.opname in ("LOAD_GLOBAL", "LOAD_NAME"):
+                    loaded.add(ins.argval)
+                elif ins.opname == "IMPORT_NAME":
+                    imports = True
+        if not imports:
+            # Builtins that the module does not shadow are not its globals.
+            reads[name] = {n for n in loaded if n in fn.__globals__}
+    eligible = set(reads)
+    while True:
+        kept = {n for n in eligible if reads[n] <= _UPSTREAM_GLOBALS | eligible}
+        if kept == eligible:
+            return eligible
+        eligible = kept
+
+
+def _is_literal(value):
+    try:
+        return ast.literal_eval(repr(value)) == value
+    except (ValueError, SyntaxError):
+        return False
+
+
+def _upstream_def(name, fn):
+    """`def name(<signature of fn without annotations>):` and the body of fn, verbatim
+    without its docstring."""
+    sig = inspect.signature(fn)
+    params = []
+    for p in sig.parameters.values():
+        if p.default is not inspect.Parameter.empty and not _is_literal(p.default):
+            raise SystemExit(f"{name}: the default {p.default!r} of {p.name} is not a literal")
+        params.append(p.replace(annotation=inspect.Parameter.empty))
+    sig = sig.replace(parameters=params, return_annotation=inspect.Signature.empty)
+    src = textwrap.dedent(inspect.getsource(fn))
+    node = ast.parse(src).body[0]
+    body = node.body
+    if (
+        isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        body = body[1:]
+    lines = src.splitlines()[body[0].lineno - 1 : node.end_lineno]
+    return f"def {name}{sig}:\n" + "\n".join(lines)
+
+
+# The wrapper set is the names already in functions_generated.py (the shipped,
+# golden-verified set) and _UPSTREAM_EXTRA. Deriving it from the Rust functions.rs regex is
+# fragile: generic signatures (e.g. `pub fn concat_ws<C: Into<Column>>(...)`) are silently
+# missed.
 wrappers_file = Path("python/pyspark/sql/functions_generated.py")
 _existing = wrappers_file.read_text() if wrappers_file.exists() else ""
-_wrapper_names = re.findall(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*_create_wrapper\(", _existing, re.M)
-_wrapper_names += re.findall(r"^def ([A-Za-z_][A-Za-z0-9_]*)\(", _existing, re.M)
-_wrapper_names = sorted(set(_wrapper_names))
-if not _wrapper_names:
+_wrapper_names = re.findall(r"^([A-Za-z][A-Za-z0-9_]*)\s*=\s*_create_wrapper\(", _existing, re.M)
+_wrapper_names += re.findall(r"^def ([A-Za-z][A-Za-z0-9_]*)\(", _existing, re.M)
+_wrapper_names = sorted(set(_wrapper_names) | _UPSTREAM_EXTRA)
+if not _existing:
     # First-time generation: fall back to the Rust-parsed function set.
-    _wrapper_names = sorted(n for n in functions if n not in skip_functions)
+    _wrapper_names = sorted(
+        {n for n in functions if n not in skip_functions} | _UPSTREAM_EXTRA
+    )
+
+_upstream = _upstream_eligible(_wrapper_names)
+_missing = sorted(_UPSTREAM_EXTRA - _upstream)
+if _missing:
+    raise SystemExit(
+        f"{', '.join(_missing)}: not generated from a PySpark Connect implementation, which "
+        "functions.py relies on (pass --pyspark-src)"
+    )
 
 python_wrappers = []
-n_typed = 0
+generated_names = []
+n_typed = n_upstream = 0
 for name in _wrapper_names:
-    if name in skip_functions:
+    if name in skip_functions and name not in _UPSTREAM_EXTRA:
+        continue
+    generated_names.append(name)
+    if name in _upstream:
+        python_wrappers.append(_upstream_def(name, _upstream_impl(name)))
+        n_upstream += 1
         continue
     ref_fn = getattr(_ref_functions, name, None) if _ref_functions is not None else None
     sig = None
@@ -358,28 +534,52 @@ for name in _wrapper_names:
         # Rust-only extra (not in the reference) — keep the historical *args form.
         python_wrappers.append(f'{name} = _create_wrapper("{name}")')
 
-python_code = (
-    '''"""Auto-generated wrapper functions for Spark SQL functions.
+_helpers = [_upstream_def(h, getattr(_ref_builtin, h)) for h in _UPSTREAM_HELPERS]
+_MODULE_HEADER = '''"""Auto-generated wrapper functions for Spark SQL functions.
 Generated by scripts/gen_fn_dispatch.py - do not edit directly.
 
-This module is meant to be imported after _create_wrapper, _wrap, and _unwrap
-are defined in functions.py
-"""
+A function whose PySpark Connect implementation only marshals its arguments into a
+function call has that implementation's signature and body, and the helpers below are
+PySpark Connect's, so it sends the arguments, the defaults and the errors that PySpark
+does. The other functions dispatch to the Rust core through _dispatch.
 
-# Generated wrappers (requires _create_wrapper to be defined)
-'''
-    + "\n".join(python_wrappers)
-    + """
+Before loading this module, functions.py injects _create_wrapper, _dispatch, _UNSET,
+_wrap, _unwrap and _call_function, and lit, column and _invoke_function, which build a
+literal, a column reference and an UnresolvedFunction in the Rust core
+(_invoke_higher_order_function follows once defined). It copies the names of __all__.
 """
+import decimal
+import random as py_random
+import sys
+import warnings
+from typing import cast
+
+from pyspark.errors import PySparkTypeError, PySparkValueError
+from pyspark.sql.column import Column
+from pyspark.sql.types import ArrayType, DataType, MapType, StructType
+from pyspark.sql.utils import enum_to_value as _enum_to_value
+
+
+# Helpers of pyspark.sql.connect.functions.builtin.
+'''
+python_code = (
+    _MODULE_HEADER
+    + "\n\n\n".join(_helpers)
+    + "\n\n\n# Generated functions.\n"
+    + "\n".join(python_wrappers)
+    + "\n\n\n__all__ = [\n"
+    + "".join(f'    "{n}",\n' for n in generated_names)
+    + "]\n"
 )
 
 print(f"Generated {len(python_wrappers)} Python wrapper functions")
+print(f"  From their PySpark Connect implementations: {n_upstream}")
+print(f"  Dispatching to the Rust core with the reference's signatures: {n_typed}")
 print("\nSummary:")
 print(f"  Total functions: {len(functions)}")
 print(f"  Hand-written (skipped): {len(skip_functions)}")
 print(f"  Auto-generated: {len(functions) - len(skip_functions)}")
 
 # Write Python wrappers file (to be imported in functions.py)
-wrappers_file = Path("python/pyspark/sql/functions_generated.py")
 wrappers_file.write_text(python_code)
 print(f"\nGenerated Python wrappers in {wrappers_file}")

@@ -272,11 +272,11 @@ pub fn call_builtin(name: &str, args: Vec<spark_connect::column::Column>) -> PyR
             },
             "countDistinct" => {
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
-                Ok(spark_funcs::countDistinct(args[0].clone()))
+                Ok(spark_funcs::count_distinct_columns(args[0].clone(), args[1..].to_vec()))
             },
             "count_distinct" => {
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
-                Ok(spark_funcs::count_distinct(args[0].clone()))
+                Ok(spark_funcs::count_distinct_columns(args[0].clone(), args[1..].to_vec()))
             },
             "count_if" => {
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
@@ -475,7 +475,7 @@ pub fn call_builtin(name: &str, args: Vec<spark_connect::column::Column>) -> PyR
             },
             "listagg_distinct" => {
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
-                Ok(spark_funcs::listagg_distinct(args[0].clone()))
+                if args.len() >= 2 { Ok(spark_funcs::listagg_distinct_with_delimiter(args[0].clone(), args[1].clone())) } else { Ok(spark_funcs::listagg_distinct(args[0].clone())) }
             },
             "ln" => {
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
@@ -747,7 +747,7 @@ pub fn call_builtin(name: &str, args: Vec<spark_connect::column::Column>) -> PyR
             },
             "string_agg_distinct" => {
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
-                Ok(spark_funcs::string_agg_distinct(args[0].clone()))
+                if args.len() >= 2 { Ok(spark_funcs::string_agg_distinct_with_delimiter(args[0].clone(), args[1].clone())) } else { Ok(spark_funcs::string_agg_distinct(args[0].clone())) }
             },
             "sumDistinct" => {
                 if args.is_empty() { return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>("Missing required column argument")); }
