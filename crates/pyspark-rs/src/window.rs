@@ -1,7 +1,7 @@
 //! PyO3 wrappers for window functions and specifications.
 
 use pyo3::prelude::*;
-use spark_connect::expression::{Expression, ExpressionNode, NullOrdering, SortOrder};
+use spark_connect::expression::{Expression, ExpressionNode, SortOrder};
 use spark_connect::window::{FrameBound, WindowSpec};
 
 use crate::dataframe::to_column_list;
@@ -16,18 +16,15 @@ fn to_partition_exprs(cols: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<Expression>> 
 }
 
 /// Build sort orders from ColumnOrName args; a bare string becomes an ascending
-/// SortOrder over that column (not a string literal).
+/// SortOrder over that column (not a string literal). A column that is not a sort order is
+/// ascending with nulls first, as `SortOrder(expr)` of PySpark defaults to.
 fn to_sort_orders(cols: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<SortOrder>> {
     let mut sort_orders = Vec::new();
     for column in to_column_list(cols)? {
         if let ExpressionNode::SortOrder(sort) = column.expression().node() {
             sort_orders.push((**sort).clone());
         } else {
-            sort_orders.push(SortOrder {
-                child: column.expression().clone(),
-                ascending: true,
-                null_ordering: NullOrdering::Last,
-            });
+            sort_orders.push(SortOrder::asc_nulls_first(column.expression().clone()));
         }
     }
     Ok(sort_orders)

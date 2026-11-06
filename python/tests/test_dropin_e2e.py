@@ -638,6 +638,21 @@ def test_column_alias_names_every_column_and_keeps_its_metadata(session):
     assert df.schema.fields[0].metadata == {"k": 1, "n": [1, 2], "s": "v"}
 
 
+def test_window_order_by_a_column_sorts_nulls_first_as_pyspark(session):
+    from pyspark.sql import Window
+
+    df = session.sql("SELECT * FROM VALUES (1, CAST(NULL AS INT)), (1, 2), (1, 1) AS t(g, o)")
+    # A column that is not a sort order is ascending with nulls first, as SortOrder(expr).
+    for window, expected in (
+        (Window.partitionBy("g").orderBy("o"), [(None, 1), (1, 2), (2, 3)]),
+        (Window.partitionBy("g").orderBy(F.col("o")), [(None, 1), (1, 2), (2, 3)]),
+        (Window.orderBy("o").partitionBy("g").orderBy("o"), [(None, 1), (1, 2), (2, 3)]),
+        (Window.partitionBy("g").orderBy(F.col("o").desc()), [(2, 1), (1, 2), (None, 3)]),
+    ):
+        rows = df.select("o", F.row_number().over(window).alias("rn")).orderBy("rn").collect()
+        assert [(r.o, r.rn) for r in rows] == expected
+
+
 def test_maps_keep_their_entries_in_order_with_keys_of_their_type(session):
     row = session.range(1).selectExpr(
         "map(2, 'b', 1, 'a') AS ints",
