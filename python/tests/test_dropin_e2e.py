@@ -88,6 +88,67 @@ def test_map_in_arrow_and_pandas_with_a_struct_type_built_with_add(session, sche
     assert [tuple(r) for r in rows] == [(0, 0), (1, 2), (2, 4)]
 
 
+def test_map_functions_take_a_ddl_schema(session):
+    df = session.createDataFrame([(1, 1.0), (1, 2.0), (2, 3.0)], ["k", "v"])
+    schema = "k long, v double"
+    grouped = df.groupBy("k")
+    for result in (
+        df.mapInPandas(lambda frames: frames, schema),
+        df.mapInArrow(lambda batches: batches, schema),
+        grouped.applyInPandas(lambda pdf: pdf, schema),
+        grouped.applyInArrow(lambda table: table, schema),
+        grouped.cogroup(grouped).applyInPandas(lambda left, right: left, schema),
+        grouped.cogroup(grouped).applyInArrow(lambda left, right: left, schema),
+    ):
+        assert sorted(tuple(r) for r in result.collect()) == [(1, 1.0), (1, 2.0), (2, 3.0)]
+
+
+def test_transform_with_state_in_pandas_takes_a_ddl_output_type(session, tmp_path):
+    import pandas as pd
+    from pyspark.sql.streaming.stateful_processor import StatefulProcessor
+
+    class Counter(StatefulProcessor):
+        def init(self, handle):
+            self.count = handle.getValueState("count", "c long")
+
+        def handleInputRows(self, key, rows, timerValues):
+            total = sum(len(pdf) for pdf in rows)
+            self.count.update((total,))
+            yield pd.DataFrame({"k": [key[0]], "c": [total]})
+
+        def close(self):
+            pass
+
+    confs = {
+        "spark.sql.streaming.stateStore.providerClass":
+            "org.apache.spark.sql.execution.streaming.state.RocksDBStateStoreProvider",
+        # A state store per shuffle partition; the default 200 take half a minute.
+        "spark.sql.shuffle.partitions": "2",
+    }
+    for key, value in confs.items():
+        session.conf.set(key, value)
+    try:
+        source = str(tmp_path / "source")
+        session.createDataFrame([(1,), (1,), (2,)], "k long").write.parquet(source)
+        query = (
+            session.readStream.schema("k long").parquet(source).groupBy("k")
+            .transformWithStateInPandas(Counter(), "k long, c long", "Update", "None")
+            .writeStream.format("memory").queryName("tws_ddl_output").outputMode("update")
+            .option("checkpointLocation", str(tmp_path / "checkpoint"))
+            .trigger(availableNow=True).start()
+        )
+        try:
+            query.awaitTermination(120)
+            assert query.exception() is None
+            rows = session.table("tws_ddl_output").collect()
+            assert sorted(tuple(r) for r in rows) == [(1, 2), (2, 1)]
+        finally:
+            query.stop()
+    finally:
+        for key in confs:
+            session.conf.unset(key)
+
+
 def _arrow_table():
     return pa.table(
         {

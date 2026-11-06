@@ -2464,7 +2464,14 @@ pub(crate) fn build_map_udf(
     input_cols: &[String],
 ) -> PyResult<CommonInlineUserDefinedFunctionExpression> {
     let return_type = resolve_datatype(schema)?;
-    let tup = PyTuple::new(py, [func.clone(), schema.clone()])?;
+    // The worker reads the pickled type as a `DataType`, so a DDL string is pickled as the
+    // type it parses to, as the reference client pickles the type of `_parse_ddl`.
+    let pickled_type = if schema.is_instance_of::<pyo3::types::PyString>() {
+        crate::types::data_type_to_py(py, &return_type)?.into_bound(py)
+    } else {
+        schema.clone()
+    };
+    let tup = PyTuple::new(py, [func.clone(), pickled_type])?;
     let command = py_cloudpickle(py, tup.as_any())?;
     let payload = PythonUDFPayload::new(return_type, eval_type_id, command, py_version(py));
     // The worker reconstructs the input pandas/Arrow DataFrame from the UDF's argument
