@@ -30,7 +30,14 @@ pub struct DataFrame {
     // resolved schema, but have their own cache for subsequent analysis.
     // The resolved value is immutable, so propagation need not copy wide schemas.
     schema_cache: Arc<Mutex<Option<Arc<DataType>>>>,
+    // The information of the last execution of this DataFrame, as PySpark's
+    // `DataFrame._execution_info`: exact clones share it, and a derived DataFrame, of
+    // another plan, has its own, which is empty until it executes.
+    execution: ExecutionSlot,
 }
+
+/// Where a DataFrame keeps the information of its last execution.
+pub(crate) type ExecutionSlot = Arc<Mutex<Option<ExecutionInfo>>>;
 
 /// Iterator over rows from a DataFrame, yielded lazily as the server streams results.
 ///
@@ -44,6 +51,21 @@ pub struct LocalRowIterator {
     source: RowSource,
     /// Set once the batch source is exhausted or has errored.
     done: bool,
+    /// The schema of the result that the server sends before the rows
+    /// (`ExecutePlanResponse.schema`), once received.
+    schema: SchemaSlot,
+}
+
+/// The schema of a result as the server sends it, shared with a prefetch task.
+type SchemaSlot = Arc<Mutex<Option<DataType>>>;
+
+/// Keeps the schema of `resp`, if it has one, in `slot`.
+fn keep_schema(resp: &mut proto::ExecutePlanResponse, slot: &SchemaSlot) -> Result<()> {
+    if let Some(data_type) = resp.schema.take() {
+        let schema = DataType::from_proto(&data_type)?;
+        *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(schema);
+    }
+    Ok(())
 }
 
 /// The source of successive Arrow batches for a [`LocalRowIterator`].
@@ -71,9 +93,10 @@ impl LocalRowIterator {
         stream: ReattachableResponseStream,
         prefetch_partitions: bool,
     ) -> Self {
+        let schema = SchemaSlot::default();
         let source = if prefetch_partitions {
             RowSource::Prefetch {
-                rx: spawn_prefetch(session, stream),
+                rx: spawn_prefetch(session, stream, Arc::clone(&schema)),
             }
         } else {
             RowSource::OnDemand {
@@ -87,7 +110,18 @@ impl LocalRowIterator {
             current_rows: vec![].into_iter(),
             source,
             done: false,
+            schema,
         }
+    }
+
+    /// The schema of the result, as the server sends it before the rows, once received: so
+    /// after the first row. Unlike the Arrow schema of the rows, it has the user-defined
+    /// types of the columns.
+    pub fn schema(&self) -> Option<DataType> {
+        self.schema
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// Fetch the next batch of rows, or `None` once the source is exhausted.
@@ -105,6 +139,9 @@ impl LocalRowIterator {
                 match block_on(stream.message()) {
                     Ok(Some(mut resp)) => {
                         capture_execution(&mut resp, execution_info, session);
+                        if let Err(e) = keep_schema(&mut resp, &self.schema) {
+                            return Some(Err(e));
+                        }
                         if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =
                             resp.response_type
                         {
@@ -166,6 +203,7 @@ impl Iterator for LocalRowIterator {
 fn spawn_prefetch(
     session: SparkSession,
     mut stream: ReattachableResponseStream,
+    schema: SchemaSlot,
 ) -> tokio::sync::mpsc::Receiver<Result<Vec<Row>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<Row>>>(1);
     get_runtime().spawn(async move {
@@ -174,6 +212,10 @@ fn spawn_prefetch(
             match stream.message().await {
                 Ok(Some(mut resp)) => {
                     capture_execution(&mut resp, &mut execution_info, &session);
+                    if let Err(e) = keep_schema(&mut resp, &schema) {
+                        let _ = tx.send(Err(e)).await;
+                        break;
+                    }
                     if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =
                         resp.response_type
                     {
@@ -234,7 +276,15 @@ impl DataFrame {
             session,
             plan: Arc::new(plan),
             schema_cache: Arc::new(Mutex::new(schema)),
+            execution: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Keep `info`, the information of an execution of this DataFrame, and record it as
+    /// the session's most recent one.
+    pub(crate) fn record_execution(&self, info: ExecutionInfo) {
+        *self.execution.lock().unwrap() = Some(info.clone());
+        self.session.record_execution(info);
     }
 
     fn cached_schema(&self) -> Option<Arc<DataType>> {
@@ -699,10 +749,18 @@ impl DataFrame {
 
     /// Collect all rows into memory.
     pub fn collect(&self) -> Result<Vec<Row>> {
+        self.collect_with_schema().map(|(rows, _)| rows)
+    }
+
+    /// Collect all rows into memory, with the schema of the result if the server sends it
+    /// (`ExecutePlanResponse.schema`), as the reference client's `_to_table` returns it.
+    /// Unlike the Arrow schema of the rows, it has the user-defined types of the columns.
+    pub fn collect_with_schema(&self) -> Result<(Vec<Row>, Option<DataType>)> {
         let request = self.build_execute_request()?;
         let mut stream = block_on(self.session.client().execute_plan_reattachable(request))?;
 
         let mut rows = vec![];
+        let mut schema = None;
         let mut info = ExecutionInfo::default();
         loop {
             let resp = block_on(stream.message())?;
@@ -710,6 +768,9 @@ impl DataFrame {
                 break;
             };
             capture_execution(&mut resp, &mut info, &self.session);
+            if let Some(data_type) = resp.schema.take() {
+                schema = Some(DataType::from_proto(&data_type)?);
+            }
             if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =
                 resp.response_type
             {
@@ -717,9 +778,9 @@ impl DataFrame {
                 rows.extend(batch_rows);
             }
         }
-        self.session.record_execution(info);
+        self.record_execution(info);
 
-        Ok(rows)
+        Ok((rows, schema))
     }
 
     /// Return an iterator that lazily streams rows from the server.
@@ -743,13 +804,13 @@ impl DataFrame {
         ))
     }
 
-    /// Execution metrics collected during the most recent action on this
-    /// DataFrame's session. Mirrors `pyspark.sql.DataFrame.executionInfo`.
-    ///
-    /// The metrics reflect the session's most recent execution; call this right
-    /// after an action (e.g. `collect`/`count`/`show`).
+    /// The information of the last execution of this DataFrame. Mirrors
+    /// `pyspark.sql.DataFrame.executionInfo`: set by `collect`, the Arrow and pandas
+    /// collects, the writes, the temp views and the checkpoints of this DataFrame, and empty
+    /// before one. An action that runs a derived DataFrame, such as `count` or `show`, sets
+    /// that one's, as in PySpark.
     pub fn execution_info(&self) -> Result<ExecutionInfo> {
-        self.session.last_execution_info().ok_or_else(|| {
+        self.execution.lock().unwrap().clone().ok_or_else(|| {
             SparkError::connect_msg("no execution info available; run an action first")
         })
     }
@@ -778,7 +839,7 @@ impl DataFrame {
                 batches.extend(record_batches);
             }
         }
-        self.session.record_execution(info);
+        self.record_execution(info);
 
         Ok(batches)
     }
@@ -815,12 +876,32 @@ impl DataFrame {
         }
     }
 
-    /// Show the first n rows.
-    pub fn show(&self, n: usize) -> Result<()> {
-        let limited = self.limit(n as i32).collect()?;
-        for row in limited {
-            println!("{}", row);
+    /// The table that `show` prints, as the server formats it: the first `n` rows, values
+    /// truncated to `truncate` characters (0 for none), vertical with a line per value.
+    /// Mirrors `DataFrame._show_string`, which sends a `ShowString` relation.
+    pub fn show_string(&self, n: i32, truncate: i32, vertical: bool) -> Result<String> {
+        let shown = DataFrame::new(
+            self.session.clone(),
+            LogicalPlan::ShowString {
+                input: Arc::clone(&self.plan),
+                num_rows: n,
+                truncate,
+                vertical,
+            },
+        );
+        match shown.collect()?.first().map(|row| row.values()) {
+            Some([Value::String(table)]) => Ok(table.clone()),
+            _ => Err(SparkError::connect_msg(
+                "ShowString returned no table of one string",
+            )),
         }
+    }
+
+    /// Print the first `n` rows as the server formats them, with values truncated to 20
+    /// characters. Mirrors `DataFrame.show(n)`.
+    pub fn show(&self, n: usize) -> Result<()> {
+        let n = i32::try_from(n).unwrap_or(i32::MAX);
+        println!("{}", self.show_string(n, 20, false)?);
         Ok(())
     }
 
@@ -879,6 +960,12 @@ impl DataFrame {
         self.limit(1).collect().map(|rows| rows.into_iter().next())
     }
 
+    /// The first row, with the schema of the result, as [`DataFrame::collect_with_schema`].
+    pub fn first_with_schema(&self) -> Result<(Option<Row>, Option<DataType>)> {
+        let (rows, schema) = self.limit(1).collect_with_schema()?;
+        Ok((rows.into_iter().next(), schema))
+    }
+
     /// Alias for first().
     pub fn head(&self) -> Result<Option<Row>> {
         self.first()
@@ -887,6 +974,12 @@ impl DataFrame {
     /// Get the first n rows.
     pub fn take(&self, n: usize) -> Result<Vec<Row>> {
         self.limit(n as i32).collect()
+    }
+
+    /// The first `n` rows, with the schema of the result, as
+    /// [`DataFrame::collect_with_schema`].
+    pub fn take_with_schema(&self, n: usize) -> Result<(Vec<Row>, Option<DataType>)> {
+        self.limit(n as i32).collect_with_schema()
     }
 
     /// Check if the DataFrame is empty.
@@ -947,6 +1040,7 @@ impl DataFrame {
     /// Mirrors `pyspark.sql.DataFrame.write`.
     pub fn write(&self) -> crate::readwriter::DataFrameWriter {
         crate::readwriter::DataFrameWriter::new(self.session.clone(), Arc::clone(&self.plan))
+            .recording_into(Arc::clone(&self.execution))
     }
 
     /// Create a [`DataFrameWriterV2`](crate::readwriter::DataFrameWriterV2) for
@@ -959,6 +1053,7 @@ impl DataFrame {
             Arc::clone(&self.plan),
             table_name,
         )
+        .recording_into(Arc::clone(&self.execution))
     }
 
     /// Merge a set of updates, insertions, and deletions into a target table.
@@ -973,6 +1068,7 @@ impl DataFrame {
             table.to_string(),
             condition,
         )
+        .recording_into(Arc::clone(&self.execution))
     }
 
     /// Create a DataStreamWriter for writing this streaming DataFrame to various sinks.
@@ -1055,10 +1151,11 @@ impl DataFrame {
         cmd.relation = Some(self.relation());
         cmd.local = local;
         cmd.eager = eager;
-        let responses = execute_command_collect(
+        let (responses, info) = execute_command_with_info(
             &self.session,
             proto::command::CommandType::CheckpointCommand(cmd),
         )?;
+        self.record_execution(info);
         for resp in &responses {
             if let Some(proto::execute_plan_response::ResponseType::CheckpointCommandResult(res)) =
                 &resp.response_type
@@ -1107,10 +1204,12 @@ impl DataFrame {
         cmd.name = name.to_string();
         cmd.is_global = global;
         cmd.replace = replace;
-        execute_command(
+        let (_, info) = execute_command_with_info(
             &self.session,
             proto::command::CommandType::CreateDataframeView(cmd),
-        )
+        )?;
+        self.record_execution(info);
+        Ok(())
     }
 
     /// Print the execution plan to the console. Mirrors `pyspark.sql.DataFrame.explain`
@@ -1881,6 +1980,15 @@ pub(crate) fn execute_command_collect(
     session: &SparkSession,
     command_type: proto::command::CommandType,
 ) -> Result<Vec<proto::ExecutePlanResponse>> {
+    execute_command_with_info(session, command_type).map(|(responses, _)| responses)
+}
+
+/// Like `execute_command_collect`, and also returns the information of the execution, which
+/// it records as the session's most recent one, for a DataFrame that keeps its own.
+pub(crate) fn execute_command_with_info(
+    session: &SparkSession,
+    command_type: proto::command::CommandType,
+) -> Result<(Vec<proto::ExecutePlanResponse>, ExecutionInfo)> {
     let mut command = proto::Command::default();
     command.command_type = Some(command_type);
 
@@ -1902,8 +2010,8 @@ pub(crate) fn execute_command_collect(
         capture_execution(&mut resp, &mut info, session);
         responses.push(resp);
     }
-    session.record_execution(info);
-    Ok(responses)
+    session.record_execution(info.clone());
+    Ok((responses, info))
 }
 
 /// Pull execution metrics/observed-metrics off a response and fire progress
@@ -1969,15 +2077,14 @@ pub(crate) fn decode_arrow_batch(
         let layouts = record_batch
             .columns()
             .iter()
-            .map(|column| ArrowValueLayout::new(column.data_type()))
+            .map(|column| ArrowValueLayout::new(column.as_ref()))
             .collect::<Vec<_>>();
 
         for row_idx in 0..num_rows {
             let mut values = Vec::with_capacity(record_batch.num_columns());
 
-            for (column, layout) in record_batch.columns().iter().zip(&layouts) {
-                let value = arrow_value_at_with_layout(column.as_ref(), row_idx, layout)?;
-                values.push(value);
+            for layout in &layouts {
+                values.push(layout.value_at(row_idx)?);
             }
 
             rows.push(Row::with_shared_fields(Arc::clone(&field_names), values));
@@ -2100,293 +2207,349 @@ fn record_batches_to_polars(
         .map_err(|e| SparkError::connect_msg(format!("Failed to create Polars DataFrame: {e}")))
 }
 
-/// Immutable decoding metadata prepared once for each column in a record batch.
-/// Container layouts follow their children so struct names are also shared inside
-/// lists and maps, without retaining the Arrow arrays after decoding.
-enum ArrowValueLayout {
-    Scalar,
-    List(Box<Self>),
-    Struct {
-        names: Arc<[String]>,
-        children: Vec<Self>,
-        is_variant: bool,
-    },
-    Map(Box<(Self, Self)>),
+/// A borrowed column decoder, resolved once per record batch. Returned Values
+/// own their contents; neither rows nor nested values retain the Arrow arrays.
+struct ArrowValueLayout<'a> {
+    array: &'a dyn arrow::array::Array,
+    decoder: ArrowValueDecoder<'a>,
 }
 
-impl ArrowValueLayout {
-    fn new(data_type: &arrow::datatypes::DataType) -> Self {
-        use arrow::datatypes::DataType;
-        match data_type {
-            DataType::List(field) => Self::List(Box::new(Self::new(field.data_type()))),
-            DataType::Struct(fields) => Self::Struct {
+enum ArrowValueDecoder<'a> {
+    Null,
+    Boolean(&'a arrow::array::BooleanArray),
+    Int8(&'a arrow::array::Int8Array),
+    Int16(&'a arrow::array::Int16Array),
+    Int32(&'a arrow::array::Int32Array),
+    Int64(&'a arrow::array::Int64Array),
+    Float32(&'a arrow::array::Float32Array),
+    Float64(&'a arrow::array::Float64Array),
+    String(&'a arrow::array::StringArray),
+    Binary(&'a arrow::array::BinaryArray),
+    Date32(&'a arrow::array::Date32Array),
+    TimestampMicrosecond(&'a arrow::array::TimestampMicrosecondArray),
+    UInt8(&'a arrow::array::UInt8Array),
+    UInt16(&'a arrow::array::UInt16Array),
+    UInt32(&'a arrow::array::UInt32Array),
+    UInt64(&'a arrow::array::UInt64Array),
+    Decimal128(&'a arrow::array::Decimal128Array),
+    LargeString(&'a arrow::array::LargeStringArray),
+    LargeBinary(&'a arrow::array::LargeBinaryArray),
+    StringView(&'a arrow::array::StringViewArray),
+    BinaryView(&'a arrow::array::BinaryViewArray),
+    TimestampSecond(&'a arrow::array::TimestampSecondArray),
+    TimestampMillisecond(&'a arrow::array::TimestampMillisecondArray),
+    TimestampNanosecond(&'a arrow::array::TimestampNanosecondArray),
+    Date64(&'a arrow::array::Date64Array),
+    DurationMicrosecond(&'a arrow::array::DurationMicrosecondArray),
+    Decimal256(&'a arrow::array::Decimal256Array),
+    FixedSizeBinary(&'a arrow::array::FixedSizeBinaryArray),
+    Time64Microsecond(&'a arrow::array::Time64MicrosecondArray),
+    Time64Nanosecond(&'a arrow::array::Time64NanosecondArray),
+    Time32Millisecond(&'a arrow::array::Time32MillisecondArray),
+    Time32Second(&'a arrow::array::Time32SecondArray),
+    IntervalYearMonth(&'a arrow::array::IntervalYearMonthArray),
+    IntervalDayTime(&'a arrow::array::IntervalDayTimeArray),
+    IntervalMonthDayNano(&'a arrow::array::IntervalMonthDayNanoArray),
+    List {
+        array: &'a arrow::array::ListArray,
+        child: Box<ArrowValueLayout<'a>>,
+    },
+    Struct {
+        names: Arc<[String]>,
+        children: Vec<ArrowValueLayout<'a>>,
+        variant_fields: Option<(Option<usize>, Option<usize>)>,
+    },
+    Map {
+        array: &'a arrow::array::MapArray,
+        children: Box<(ArrowValueLayout<'a>, ArrowValueLayout<'a>)>,
+    },
+    Unsupported,
+}
+
+impl<'a> ArrowValueLayout<'a> {
+    fn new(array: &'a dyn arrow::array::Array) -> Self {
+        use arrow::array::*;
+
+        // Resolution never fails: null parents and empty containers must not
+        // reject unsupported children that are never read.
+        let any = array.as_any();
+        let decoder = if any.is::<NullArray>() {
+            ArrowValueDecoder::Null
+        } else if let Some(array) = any.downcast_ref::<BooleanArray>() {
+            ArrowValueDecoder::Boolean(array)
+        } else if let Some(array) = any.downcast_ref::<Int8Array>() {
+            ArrowValueDecoder::Int8(array)
+        } else if let Some(array) = any.downcast_ref::<Int16Array>() {
+            ArrowValueDecoder::Int16(array)
+        } else if let Some(array) = any.downcast_ref::<Int32Array>() {
+            ArrowValueDecoder::Int32(array)
+        } else if let Some(array) = any.downcast_ref::<Int64Array>() {
+            ArrowValueDecoder::Int64(array)
+        } else if let Some(array) = any.downcast_ref::<Float32Array>() {
+            ArrowValueDecoder::Float32(array)
+        } else if let Some(array) = any.downcast_ref::<Float64Array>() {
+            ArrowValueDecoder::Float64(array)
+        } else if let Some(array) = any.downcast_ref::<StringArray>() {
+            ArrowValueDecoder::String(array)
+        } else if let Some(array) = any.downcast_ref::<BinaryArray>() {
+            ArrowValueDecoder::Binary(array)
+        } else if let Some(array) = any.downcast_ref::<Date32Array>() {
+            ArrowValueDecoder::Date32(array)
+        } else if let Some(array) = any.downcast_ref::<TimestampMicrosecondArray>() {
+            ArrowValueDecoder::TimestampMicrosecond(array)
+        } else if let Some(array) = any.downcast_ref::<UInt8Array>() {
+            ArrowValueDecoder::UInt8(array)
+        } else if let Some(array) = any.downcast_ref::<UInt16Array>() {
+            ArrowValueDecoder::UInt16(array)
+        } else if let Some(array) = any.downcast_ref::<UInt32Array>() {
+            ArrowValueDecoder::UInt32(array)
+        } else if let Some(array) = any.downcast_ref::<UInt64Array>() {
+            ArrowValueDecoder::UInt64(array)
+        } else if let Some(array) = any.downcast_ref::<Decimal128Array>() {
+            ArrowValueDecoder::Decimal128(array)
+        } else if let Some(array) = any.downcast_ref::<LargeStringArray>() {
+            ArrowValueDecoder::LargeString(array)
+        } else if let Some(array) = any.downcast_ref::<LargeBinaryArray>() {
+            ArrowValueDecoder::LargeBinary(array)
+        } else if let Some(array) = any.downcast_ref::<StringViewArray>() {
+            ArrowValueDecoder::StringView(array)
+        } else if let Some(array) = any.downcast_ref::<BinaryViewArray>() {
+            ArrowValueDecoder::BinaryView(array)
+        } else if let Some(array) = any.downcast_ref::<TimestampSecondArray>() {
+            ArrowValueDecoder::TimestampSecond(array)
+        } else if let Some(array) = any.downcast_ref::<TimestampMillisecondArray>() {
+            ArrowValueDecoder::TimestampMillisecond(array)
+        } else if let Some(array) = any.downcast_ref::<TimestampNanosecondArray>() {
+            ArrowValueDecoder::TimestampNanosecond(array)
+        } else if let Some(array) = any.downcast_ref::<Date64Array>() {
+            ArrowValueDecoder::Date64(array)
+        } else if let Some(array) = any.downcast_ref::<DurationMicrosecondArray>() {
+            ArrowValueDecoder::DurationMicrosecond(array)
+        } else if let Some(array) = any.downcast_ref::<Decimal256Array>() {
+            ArrowValueDecoder::Decimal256(array)
+        } else if let Some(array) = any.downcast_ref::<FixedSizeBinaryArray>() {
+            ArrowValueDecoder::FixedSizeBinary(array)
+        } else if let Some(array) = any.downcast_ref::<Time64MicrosecondArray>() {
+            ArrowValueDecoder::Time64Microsecond(array)
+        } else if let Some(array) = any.downcast_ref::<Time64NanosecondArray>() {
+            ArrowValueDecoder::Time64Nanosecond(array)
+        } else if let Some(array) = any.downcast_ref::<Time32MillisecondArray>() {
+            ArrowValueDecoder::Time32Millisecond(array)
+        } else if let Some(array) = any.downcast_ref::<Time32SecondArray>() {
+            ArrowValueDecoder::Time32Second(array)
+        } else if let Some(array) = any.downcast_ref::<IntervalYearMonthArray>() {
+            ArrowValueDecoder::IntervalYearMonth(array)
+        } else if let Some(array) = any.downcast_ref::<IntervalDayTimeArray>() {
+            ArrowValueDecoder::IntervalDayTime(array)
+        } else if let Some(array) = any.downcast_ref::<IntervalMonthDayNanoArray>() {
+            ArrowValueDecoder::IntervalMonthDayNano(array)
+        } else if let Some(array) = any.downcast_ref::<ListArray>() {
+            ArrowValueDecoder::List {
+                array,
+                child: Box::new(Self::new(array.values().as_ref())),
+            }
+        } else if let Some(array) = any.downcast_ref::<StructArray>() {
+            let fields = array.fields();
+            let is_variant = fields.iter().any(|field| {
+                field
+                    .metadata()
+                    .get("variant")
+                    .is_some_and(|value| value == "true")
+            });
+            ArrowValueDecoder::Struct {
                 names: fields.iter().map(|field| field.name().clone()).collect(),
-                children: fields
+                children: array
+                    .columns()
                     .iter()
-                    .map(|field| Self::new(field.data_type()))
+                    .map(|child| Self::new(child.as_ref()))
                     .collect(),
-                is_variant: fields.iter().any(|field| {
-                    field
-                        .metadata()
-                        .get("variant")
-                        .is_some_and(|value| value == "true")
+                variant_fields: is_variant.then(|| {
+                    (
+                        fields.iter().position(|field| field.name() == "value"),
+                        fields.iter().position(|field| field.name() == "metadata"),
+                    )
                 }),
-            },
-            DataType::Map(entries, _) => match entries.data_type() {
-                DataType::Struct(fields) => Self::Map(Box::new((
-                    Self::new(fields[0].data_type()),
-                    Self::new(fields[1].data_type()),
-                ))),
-                _ => unreachable!("Arrow map entries must be a struct"),
-            },
-            _ => Self::Scalar,
+            }
+        } else if let Some(array) = any.downcast_ref::<MapArray>() {
+            ArrowValueDecoder::Map {
+                array,
+                children: Box::new((
+                    Self::new(array.keys().as_ref()),
+                    Self::new(array.values().as_ref()),
+                )),
+            }
+        } else {
+            ArrowValueDecoder::Unsupported
+        };
+        Self { array, decoder }
+    }
+
+    fn value_at(&self, index: usize) -> Result<Value> {
+        if self.array.is_null(index) {
+            return Ok(Value::Null);
+        }
+        match &self.decoder {
+            // NullType may have no null buffer; every element is still Null.
+            ArrowValueDecoder::Null => Ok(Value::Null),
+            ArrowValueDecoder::Boolean(arr) => Ok(Value::Bool(arr.value(index))),
+            ArrowValueDecoder::Int8(arr) => Ok(Value::Byte(arr.value(index))),
+            ArrowValueDecoder::Int16(arr) => Ok(Value::Short(arr.value(index))),
+            ArrowValueDecoder::Int32(arr) => Ok(Value::Integer(arr.value(index))),
+            ArrowValueDecoder::Int64(arr) => Ok(Value::Long(arr.value(index))),
+            ArrowValueDecoder::Float32(arr) => Ok(Value::Float(arr.value(index))),
+            ArrowValueDecoder::Float64(arr) => Ok(Value::Double(arr.value(index))),
+            ArrowValueDecoder::String(arr) => Ok(Value::String(arr.value(index).to_string())),
+            ArrowValueDecoder::Binary(arr) => Ok(Value::Binary(arr.value(index).to_vec())),
+            ArrowValueDecoder::Date32(arr) => Ok(Value::Date(arr.value(index))),
+            ArrowValueDecoder::TimestampMicrosecond(arr) => Ok(Value::Timestamp(arr.value(index))),
+            ArrowValueDecoder::UInt8(arr) => Ok(Value::Short(arr.value(index) as i16)),
+            ArrowValueDecoder::UInt16(arr) => Ok(Value::Integer(arr.value(index) as i32)),
+            ArrowValueDecoder::UInt32(arr) => Ok(Value::Long(arr.value(index) as i64)),
+            ArrowValueDecoder::UInt64(arr) => {
+                let val = arr.value(index);
+                let i64_val = i64::try_from(val).map_err(|_| {
+                    SparkError::connect_msg(format!("UInt64 value {} exceeds i64 range", val))
+                })?;
+                Ok(Value::Long(i64_val))
+            }
+            // Decimal128 stays exact, preserving precision/scale rather than using lossy f64.
+            ArrowValueDecoder::Decimal128(arr) => {
+                let scale = arr.scale() as i32;
+                Ok(Value::Decimal {
+                    value: i128_to_decimal_string(arr.value(index), scale),
+                    precision: Some(arr.precision() as i32),
+                    scale: Some(scale),
+                })
+            }
+            ArrowValueDecoder::LargeString(arr) => Ok(Value::String(arr.value(index).to_string())),
+            ArrowValueDecoder::LargeBinary(arr) => Ok(Value::Binary(arr.value(index).to_vec())),
+            ArrowValueDecoder::StringView(arr) => Ok(Value::String(arr.value(index).to_string())),
+            ArrowValueDecoder::BinaryView(arr) => Ok(Value::Binary(arr.value(index).to_vec())),
+            ArrowValueDecoder::TimestampSecond(arr) => {
+                Ok(Value::Timestamp(arr.value(index) * 1_000_000))
+            }
+            ArrowValueDecoder::TimestampMillisecond(arr) => {
+                Ok(Value::Timestamp(arr.value(index) * 1_000))
+            }
+            ArrowValueDecoder::TimestampNanosecond(arr) => {
+                Ok(Value::Timestamp(arr.value(index) / 1_000))
+            }
+            ArrowValueDecoder::Date64(arr) => {
+                Ok(Value::Date((arr.value(index) / 86_400_000) as i32))
+            }
+            ArrowValueDecoder::DurationMicrosecond(arr) => {
+                Ok(Value::DayTimeInterval(arr.value(index)))
+            }
+            // Decimal256 also preserves exact digits; Arrow formats with the scale.
+            ArrowValueDecoder::Decimal256(arr) => Ok(Value::Decimal {
+                value: arr.value_as_string(index),
+                precision: Some(arr.precision() as i32),
+                scale: Some(arr.scale() as i32),
+            }),
+            ArrowValueDecoder::FixedSizeBinary(arr) => Ok(Value::Binary(arr.value(index).to_vec())),
+            // TimeType has no dedicated Value variant, so render as an ISO time string.
+            ArrowValueDecoder::Time64Microsecond(arr) => {
+                Ok(Value::String(micros_to_time_string(arr.value(index))))
+            }
+            ArrowValueDecoder::Time64Nanosecond(arr) => Ok(Value::String(micros_to_time_string(
+                arr.value(index) / 1_000,
+            ))),
+            ArrowValueDecoder::Time32Millisecond(arr) => Ok(Value::String(micros_to_time_string(
+                arr.value(index) as i64 * 1_000,
+            ))),
+            ArrowValueDecoder::Time32Second(arr) => Ok(Value::String(micros_to_time_string(
+                arr.value(index) as i64 * 1_000_000,
+            ))),
+            // Intervals likewise have no dedicated Value variant, so render as strings.
+            ArrowValueDecoder::IntervalYearMonth(arr) => {
+                let months = arr.value(index);
+                Ok(Value::String(format!(
+                    "{}-{}",
+                    months / 12,
+                    (months % 12).abs()
+                )))
+            }
+            ArrowValueDecoder::IntervalDayTime(arr) => {
+                let v = arr.value(index);
+                Ok(Value::String(format!(
+                    "{} days {} ms",
+                    v.days, v.milliseconds
+                )))
+            }
+            ArrowValueDecoder::IntervalMonthDayNano(arr) => {
+                let v = arr.value(index);
+                Ok(Value::String(format!(
+                    "{} months {} days {} ns",
+                    v.months, v.days, v.nanoseconds
+                )))
+            }
+            ArrowValueDecoder::List { array, child } => {
+                // Sliced list/map arrays retain their original children. Their
+                // offsets already identify the correct absolute child range.
+                let offsets = array.value_offsets();
+                let start = offsets[index] as usize;
+                let end = offsets[index + 1] as usize;
+                let mut items = Vec::with_capacity(end - start);
+                for child_index in start..end {
+                    items.push(child.value_at(child_index)?);
+                }
+                Ok(Value::List(items))
+            }
+            ArrowValueDecoder::Struct {
+                names,
+                children,
+                variant_fields,
+            } => {
+                // VARIANT arrives as struct<value: binary, metadata: binary>, with
+                // {"variant": "true"} on the metadata field. Return raw-byte
+                // Value::Variant so it materializes as pyspark's VariantVal rather
+                // than a plain {value, metadata} struct/dict.
+                if let Some((value, metadata)) = variant_fields {
+                    let binary_field = |column: Option<usize>| -> Result<Vec<u8>> {
+                        match column {
+                            Some(column) => match children[column].value_at(index)? {
+                                Value::Binary(bytes) => Ok(bytes),
+                                Value::Null => Ok(vec![]),
+                                _ => Err(SparkError::connect_msg("variant field is not binary")),
+                            },
+                            None => Ok(vec![]),
+                        }
+                    };
+                    return Ok(Value::Variant {
+                        value: binary_field(*value)?,
+                        metadata: binary_field(*metadata)?,
+                    });
+                }
+                let mut values = Vec::with_capacity(children.len());
+                for child in children {
+                    values.push(child.value_at(index)?);
+                }
+                Ok(Value::Struct(StructValue::new(Arc::clone(names), values)))
+            }
+            ArrowValueDecoder::Map { array, children } => {
+                let offsets = array.value_offsets();
+                let start = offsets[index] as usize;
+                let end = offsets[index + 1] as usize;
+                let mut map = Vec::with_capacity(end - start);
+                for child_index in start..end {
+                    map.push((
+                        children.0.value_at(child_index)?,
+                        children.1.value_at(child_index)?,
+                    ));
+                }
+                Ok(Value::Map(map))
+            }
+            ArrowValueDecoder::Unsupported => Err(SparkError::connect_msg(format!(
+                "Unsupported Arrow type {:?} - cannot convert to Value",
+                self.array.data_type()
+            ))),
         }
     }
 }
 
 #[cfg(test)]
 fn arrow_value_at(array: &dyn arrow::array::Array, index: usize) -> Result<Value> {
-    arrow_value_at_with_layout(array, index, &ArrowValueLayout::new(array.data_type()))
-}
-
-fn arrow_value_at_with_layout(
-    array: &dyn arrow::array::Array,
-    index: usize,
-    value_layout: &ArrowValueLayout,
-) -> Result<Value> {
-    use arrow::array::*;
-
-    if array.is_null(index) {
-        return Ok(Value::Null);
-    }
-
-    // A NullType column arrives as an all-null NullArray; every element is Null.
-    if array.as_any().downcast_ref::<NullArray>().is_some() {
-        return Ok(Value::Null);
-    }
-
-    // Try each array type
-    if let Some(arr) = array.as_any().downcast_ref::<BooleanArray>() {
-        return Ok(Value::Bool(arr.value(index)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Int8Array>() {
-        return Ok(Value::Byte(arr.value(index)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Int16Array>() {
-        return Ok(Value::Short(arr.value(index)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Int32Array>() {
-        return Ok(Value::Integer(arr.value(index)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Int64Array>() {
-        return Ok(Value::Long(arr.value(index)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Float32Array>() {
-        return Ok(Value::Float(arr.value(index)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Float64Array>() {
-        return Ok(Value::Double(arr.value(index)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<StringArray>() {
-        return Ok(Value::String(arr.value(index).to_string()));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<BinaryArray>() {
-        return Ok(Value::Binary(arr.value(index).to_vec()));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Date32Array>() {
-        return Ok(Value::Date(arr.value(index)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<TimestampMicrosecondArray>() {
-        return Ok(Value::Timestamp(arr.value(index)));
-    }
-    // Unsigned integers.
-    if let Some(arr) = array.as_any().downcast_ref::<UInt8Array>() {
-        return Ok(Value::Short(arr.value(index) as i16));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<UInt16Array>() {
-        return Ok(Value::Integer(arr.value(index) as i32));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<UInt32Array>() {
-        return Ok(Value::Long(arr.value(index) as i64));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<UInt64Array>() {
-        let val = arr.value(index);
-        let i64_val = i64::try_from(val).map_err(|_| {
-            SparkError::connect_msg(format!("UInt64 value {} exceeds i64 range", val))
-        })?;
-        return Ok(Value::Long(i64_val));
-    }
-    // Decimal128 -> Value::Decimal (exact, not lossy f64), preserving precision/scale.
-    if let Some(arr) = array.as_any().downcast_ref::<Decimal128Array>() {
-        let scale = arr.scale() as i32;
-        return Ok(Value::Decimal {
-            value: i128_to_decimal_string(arr.value(index), scale),
-            precision: Some(arr.precision() as i32),
-            scale: Some(scale),
-        });
-    }
-    // Large / view string & binary variants.
-    if let Some(arr) = array.as_any().downcast_ref::<LargeStringArray>() {
-        return Ok(Value::String(arr.value(index).to_string()));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<LargeBinaryArray>() {
-        return Ok(Value::Binary(arr.value(index).to_vec()));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<StringViewArray>() {
-        return Ok(Value::String(arr.value(index).to_string()));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<BinaryViewArray>() {
-        return Ok(Value::Binary(arr.value(index).to_vec()));
-    }
-    // Other timestamp units, normalized to microseconds.
-    if let Some(arr) = array.as_any().downcast_ref::<TimestampSecondArray>() {
-        return Ok(Value::Timestamp(arr.value(index) * 1_000_000));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<TimestampMillisecondArray>() {
-        return Ok(Value::Timestamp(arr.value(index) * 1_000));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<TimestampNanosecondArray>() {
-        return Ok(Value::Timestamp(arr.value(index) / 1_000));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Date64Array>() {
-        return Ok(Value::Date((arr.value(index) / 86_400_000) as i32));
-    }
-    // Spark DayTimeIntervalType uses Duration(Microsecond), not an Arrow
-    // Interval physical type. Keep signed micros exactly, including i64::MIN.
-    // Other duration units remain unsupported rather than being rounded.
-    if let Some(arr) = array.as_any().downcast_ref::<DurationMicrosecondArray>() {
-        return Ok(Value::DayTimeInterval(arr.value(index)));
-    }
-    // Nested: list, struct, map (recurse).
-    if let Some(arr) = array.as_any().downcast_ref::<ListArray>() {
-        let ArrowValueLayout::List(child_layout) = value_layout else {
-            unreachable!("layout is prepared from the array's data type");
-        };
-        let child = arr.value(index);
-        let mut items = Vec::with_capacity(child.len());
-        for i in 0..child.len() {
-            items.push(arrow_value_at_with_layout(child.as_ref(), i, child_layout)?);
-        }
-        return Ok(Value::List(items));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<StructArray>() {
-        let ArrowValueLayout::Struct {
-            names,
-            children,
-            is_variant,
-        } = value_layout
-        else {
-            unreachable!("layout is prepared from the array's data type");
-        };
-        // A VARIANT column arrives as struct<value: binary, metadata: binary> where the
-        // `metadata` field carries arrow metadata {"variant": "true"}. Recognize it and
-        // return a Value::Variant (raw bytes) so it materializes as a VariantVal (matching
-        // pyspark) rather than a plain {value, metadata} struct/dict.
-        if *is_variant {
-            let bin_field = |name: &str| -> Result<Vec<u8>> {
-                match arr.fields().iter().position(|field| field.name() == name) {
-                    Some(col_idx) => match arrow_value_at_with_layout(
-                        arr.column(col_idx).as_ref(),
-                        index,
-                        &children[col_idx],
-                    )? {
-                        Value::Binary(b) => Ok(b),
-                        Value::Null => Ok(vec![]),
-                        _ => Err(SparkError::connect_msg("variant field is not binary")),
-                    },
-                    None => Ok(vec![]),
-                }
-            };
-            return Ok(Value::Variant {
-                value: bin_field("value")?,
-                metadata: bin_field("metadata")?,
-            });
-        }
-        let mut values = Vec::with_capacity(children.len());
-        for (col, child_layout) in arr.columns().iter().zip(children) {
-            values.push(arrow_value_at_with_layout(
-                col.as_ref(),
-                index,
-                child_layout,
-            )?);
-        }
-        return Ok(Value::Struct(StructValue::new(Arc::clone(names), values)));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<MapArray>() {
-        let ArrowValueLayout::Map(children) = value_layout else {
-            unreachable!("layout is prepared from the array's data type");
-        };
-        let entries = arr.value(index);
-        let keys = entries.column(0);
-        let vals = entries.column(1);
-        // The entries in their order, with keys of their own type, as PySpark reads them.
-        let mut map = Vec::with_capacity(entries.len());
-        for i in 0..entries.len() {
-            map.push((
-                arrow_value_at_with_layout(keys.as_ref(), i, &children.0)?,
-                arrow_value_at_with_layout(vals.as_ref(), i, &children.1)?,
-            ));
-        }
-        return Ok(Value::Map(map));
-    }
-    // Decimal256 -> exact string-preserving Decimal (Arrow formats with the scale).
-    if let Some(arr) = array.as_any().downcast_ref::<Decimal256Array>() {
-        return Ok(Value::Decimal {
-            value: arr.value_as_string(index),
-            precision: Some(arr.precision() as i32),
-            scale: Some(arr.scale() as i32),
-        });
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<FixedSizeBinaryArray>() {
-        return Ok(Value::Binary(arr.value(index).to_vec()));
-    }
-    // TimeType (no dedicated Value): render as an ISO time string, normalized to micros.
-    if let Some(arr) = array.as_any().downcast_ref::<Time64MicrosecondArray>() {
-        return Ok(Value::String(micros_to_time_string(arr.value(index))));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Time64NanosecondArray>() {
-        return Ok(Value::String(micros_to_time_string(
-            arr.value(index) / 1_000,
-        )));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Time32MillisecondArray>() {
-        return Ok(Value::String(micros_to_time_string(
-            arr.value(index) as i64 * 1_000,
-        )));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<Time32SecondArray>() {
-        return Ok(Value::String(micros_to_time_string(
-            arr.value(index) as i64 * 1_000_000,
-        )));
-    }
-    // Interval types (no dedicated Value): render a compact string.
-    if let Some(arr) = array.as_any().downcast_ref::<IntervalYearMonthArray>() {
-        let months = arr.value(index);
-        return Ok(Value::String(format!(
-            "{}-{}",
-            months / 12,
-            (months % 12).abs()
-        )));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<IntervalDayTimeArray>() {
-        let v = arr.value(index);
-        return Ok(Value::String(format!(
-            "{} days {} ms",
-            v.days, v.milliseconds
-        )));
-    }
-    if let Some(arr) = array.as_any().downcast_ref::<IntervalMonthDayNanoArray>() {
-        let v = arr.value(index);
-        return Ok(Value::String(format!(
-            "{} months {} days {} ns",
-            v.months, v.days, v.nanoseconds
-        )));
-    }
-
-    Err(SparkError::connect_msg(format!(
-        "Unsupported Arrow type {:?} - cannot convert to Value",
-        array.data_type()
-    )))
+    ArrowValueLayout::new(array).value_at(index)
 }
 
 #[cfg(test)]
@@ -2398,7 +2561,11 @@ mod nested_decode_tests {
     use arrow::ipc::writer::StreamWriter;
     use arrow::record_batch::RecordBatch;
 
-    fn decode_batches(columns: Vec<(&str, ArrayRef)>, repeats: usize) -> Vec<Row> {
+    fn encoded_batches(
+        columns: Vec<(&str, ArrayRef)>,
+        repeats: usize,
+        empty_boundaries: bool,
+    ) -> proto::execute_plan_response::ArrowBatch {
         let schema = Arc::new(Schema::new(
             columns
                 .iter()
@@ -2413,16 +2580,29 @@ mod nested_decode_tests {
         let mut data = vec![];
         {
             let mut writer = StreamWriter::try_new(&mut data, &schema).unwrap();
+            if empty_boundaries {
+                writer
+                    .write(&RecordBatch::new_empty(schema.clone()))
+                    .unwrap();
+            }
             for _ in 0..repeats {
                 writer.write(&batch).unwrap();
             }
+            if empty_boundaries {
+                writer
+                    .write(&RecordBatch::new_empty(schema.clone()))
+                    .unwrap();
+            }
             writer.finish().unwrap();
         }
-        decode_arrow_batch(&proto::execute_plan_response::ArrowBatch {
+        proto::execute_plan_response::ArrowBatch {
             data: data.into(),
             ..Default::default()
-        })
-        .unwrap()
+        }
+    }
+
+    fn decode_batches(columns: Vec<(&str, ArrayRef)>, repeats: usize) -> Vec<Row> {
+        decode_arrow_batch(&encoded_batches(columns, repeats, false)).unwrap()
     }
 
     fn as_struct(value: &Value) -> &StructValue {
@@ -2430,6 +2610,230 @@ mod nested_decode_tests {
             panic!("expected struct, got {value:?}");
         };
         row
+    }
+
+    #[test]
+    fn mixed_nullable_slices_decode_across_empty_and_repeated_batches() {
+        let columns: Vec<(&str, ArrayRef)> = vec![
+            (
+                "dup",
+                Arc::new(Int64Array::from(vec![Some(-1), Some(7), None])),
+            ),
+            (
+                "dup",
+                Arc::new(StringArray::from(vec![Some("skip"), Some("é\0雪"), None])),
+            ),
+            (
+                "bool",
+                Arc::new(BooleanArray::from(vec![Some(true), Some(false), None])),
+            ),
+            (
+                "bytes",
+                Arc::new(BinaryArray::from(vec![
+                    Some(b"skip".as_ref()),
+                    Some(b"\0\xff".as_ref()),
+                    None,
+                ])),
+            ),
+            ("null", Arc::new(NullArray::new(3))),
+        ];
+        let batch = encoded_batches(
+            columns
+                .into_iter()
+                .map(|(name, array)| (name, array.slice(1, 2)))
+                .collect(),
+            2,
+            true,
+        );
+        let rows = decode_arrow_batch(&batch).unwrap();
+        assert_eq!(rows.len(), 4);
+        for batch in rows.chunks(2) {
+            assert_eq!(batch[0].fields(), &["dup", "dup", "bool", "bytes", "null"]);
+            assert_eq!(
+                batch[0].values(),
+                &[
+                    Value::Long(7),
+                    Value::String("é\0雪".into()),
+                    Value::Bool(false),
+                    Value::Binary(vec![0, 255]),
+                    Value::Null,
+                ]
+            );
+            assert_eq!(batch[1].values(), &vec![Value::Null; 5]);
+            assert_eq!(batch[0].get_by_name("dup"), Some(&Value::Long(7)));
+            assert!(std::ptr::eq(batch[0].fields(), batch[1].fields()));
+        }
+        // The IPC buffers and borrowed column layouts have already been dropped.
+        assert_eq!(rows[2].get(1), Some(&Value::String("é\0雪".into())));
+    }
+
+    #[test]
+    fn sliced_parents_decode_children_that_were_already_sliced() {
+        let leaf = StructArray::from(vec![(
+            Arc::new(Field::new("n", DataType::Int32, false)),
+            Arc::new(Int32Array::from(vec![-9, 10, 20, 30, 40, 50, 60])) as ArrayRef,
+        )]);
+        let entries = StructArray::from(vec![
+            (
+                Arc::new(Field::new("key", DataType::Utf8, false)),
+                Arc::new(StringArray::from(vec![
+                    "skip", "a", "b", "c", "d", "e", "f",
+                ])) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("value", leaf.data_type().clone(), true)),
+                Arc::new(leaf.clone()) as ArrayRef,
+            ),
+        ])
+        .slice(1, 6);
+        let child = leaf.slice(1, 6);
+        let offsets = OffsetBuffer::new(vec![0, 1, 3, 4, 6].into());
+        let list = ListArray::new(
+            Arc::new(Field::new("item", child.data_type().clone(), true)),
+            offsets.clone(),
+            Arc::new(child),
+            None,
+        )
+        .slice(1, 2);
+        let map = MapArray::new(
+            Arc::new(Field::new("entries", entries.data_type().clone(), false)),
+            offsets,
+            entries,
+            None,
+            false,
+        )
+        .slice(1, 2);
+        // Exercise the unserialized sliced arrays as well as the IPC path:
+        // serialization is allowed to normalize their physical child offsets.
+        let value = |n| Value::Struct(Row::new(vec!["n".into()], vec![Value::Integer(n)]).into());
+        let expected_lists = [
+            Value::List(vec![value(20), value(30)]),
+            Value::List(vec![value(40)]),
+        ];
+        let expected_maps = [
+            Value::Map(vec![
+                (Value::String("b".into()), value(20)),
+                (Value::String("c".into()), value(30)),
+            ]),
+            Value::Map(vec![(Value::String("d".into()), value(40))]),
+        ];
+        let list_layout = ArrowValueLayout::new(&list);
+        let map_layout = ArrowValueLayout::new(&map);
+        for i in 0..2 {
+            assert_eq!(list_layout.value_at(i).unwrap(), expected_lists[i]);
+            assert_eq!(map_layout.value_at(i).unwrap(), expected_maps[i]);
+        }
+        drop((list_layout, map_layout));
+        let rows = decode_batches(vec![("list", Arc::new(list)), ("map", Arc::new(map))], 1);
+        for i in 0..2 {
+            assert_eq!(
+                rows[i].values(),
+                &[expected_lists[i].clone(), expected_maps[i].clone()]
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_children_remain_lazy_under_nulls_empty_containers_and_variants() {
+        let null_duration = DurationSecondArray::from(vec![None]);
+        assert_eq!(arrow_value_at(&null_duration, 0).unwrap(), Value::Null);
+        let populated: ArrayRef = Arc::new(DurationSecondArray::from(vec![Some(7)]));
+        let list = ListArray::new(
+            Arc::new(Field::new("item", populated.data_type().clone(), true)),
+            OffsetBuffer::new(vec![0, 0].into()),
+            populated.clone(),
+            None,
+        );
+        assert_eq!(arrow_value_at(&list, 0).unwrap(), Value::List(vec![]));
+        let entries = StructArray::from(vec![
+            (
+                Arc::new(Field::new("key", DataType::Utf8, false)),
+                Arc::new(StringArray::from(vec!["a"])) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("value", populated.data_type().clone(), true)),
+                populated.clone(),
+            ),
+        ]);
+        let map = MapArray::new(
+            Arc::new(Field::new("entries", entries.data_type().clone(), false)),
+            OffsetBuffer::new(vec![0, 0].into()),
+            entries,
+            None,
+            false,
+        );
+        assert_eq!(
+            arrow_value_at(&map, 0).unwrap(),
+            Value::Map(Default::default())
+        );
+        let parent = StructArray::new(
+            vec![Arc::new(Field::new(
+                "unused",
+                populated.data_type().clone(),
+                true,
+            ))]
+            .into(),
+            vec![populated.clone()],
+            Some(NullBuffer::from(vec![false])),
+        );
+        assert_eq!(arrow_value_at(&parent, 0).unwrap(), Value::Null);
+        // Deliberately noncanonical: detection accepts a marker on any field,
+        // and the first matching "value" wins while an unsupported duplicate
+        // remains unread. The absent "metadata" field must still decode as empty.
+        let variant = StructArray::from(vec![
+            (
+                Arc::new(
+                    Field::new("value", DataType::Binary, false)
+                        .with_metadata([("variant".into(), "true".into())].into()),
+                ),
+                Arc::new(BinaryArray::from_iter_values([b"x".as_ref()])) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("value", populated.data_type().clone(), true)),
+                populated,
+            ),
+        ]);
+        assert_eq!(
+            arrow_value_at(&variant, 0).unwrap(),
+            Value::Variant {
+                value: vec![b'x'],
+                metadata: vec![]
+            }
+        );
+    }
+
+    #[test]
+    fn decoding_errors_keep_row_major_column_order() {
+        let first_column = encoded_batches(
+            vec![
+                ("u", Arc::new(UInt64Array::from(vec![u64::MAX]))),
+                (
+                    "duration",
+                    Arc::new(DurationSecondArray::from(vec![Some(1)])),
+                ),
+            ],
+            1,
+            false,
+        );
+        assert!(decode_arrow_batch(&first_column)
+            .unwrap_err()
+            .to_string()
+            .contains("UInt64 value 18446744073709551615 exceeds i64 range"));
+        let first_row = encoded_batches(
+            vec![
+                ("u", Arc::new(UInt64Array::from(vec![1, u64::MAX]))),
+                (
+                    "duration",
+                    Arc::new(DurationSecondArray::from(vec![Some(1), None])),
+                ),
+            ],
+            1,
+            false,
+        );
+        assert!(decode_arrow_batch(&first_row)
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported Arrow type Duration(Second) - cannot convert to Value"));
     }
 
     #[test]
@@ -3696,6 +4100,87 @@ mod arrow_value_tests {
                 Value::DayTimeInterval(i64::MAX)
             ]
         );
+    }
+
+    #[test]
+    fn typed_scalar_layouts_preserve_exact_values_and_normalization() {
+        let decimal128 = Decimal128Array::from(vec![-12345i128])
+            .with_precision_and_scale(10, 2)
+            .unwrap();
+        let decimal256 = Decimal256Array::from(vec![i256::from_i128(-12345)])
+            .with_precision_and_scale(10, 2)
+            .unwrap();
+        let decimal = Value::Decimal {
+            value: "-123.45".into(),
+            precision: Some(10),
+            scale: Some(2),
+        };
+        let cases: Vec<(ArrayRef, Value)> = vec![
+            (
+                Arc::new(TimestampSecondArray::from(vec![-1])),
+                Value::Timestamp(-1_000_000),
+            ),
+            (
+                Arc::new(TimestampMillisecondArray::from(vec![-1])),
+                Value::Timestamp(-1_000),
+            ),
+            (
+                Arc::new(TimestampNanosecondArray::from(vec![-1999])),
+                Value::Timestamp(-1),
+            ),
+            (
+                Arc::new(Date64Array::from(vec![-86_400_001])),
+                Value::Date(-1),
+            ),
+            (
+                Arc::new(UInt32Array::from(vec![u32::MAX])),
+                Value::Long(u32::MAX as i64),
+            ),
+            (Arc::new(decimal128), decimal.clone()),
+            (Arc::new(decimal256), decimal),
+            (
+                Arc::new(LargeStringArray::from_iter_values(["é\0雪"])),
+                Value::String("é\0雪".into()),
+            ),
+            (
+                Arc::new(StringViewArray::from_iter_values(["é\0雪"])),
+                Value::String("é\0雪".into()),
+            ),
+            (
+                Arc::new(LargeBinaryArray::from_iter_values([b"\0\xff".as_ref()])),
+                Value::Binary(vec![0, 255]),
+            ),
+            (
+                Arc::new(BinaryViewArray::from_iter_values([b"\0\xff".as_ref()])),
+                Value::Binary(vec![0, 255]),
+            ),
+            (
+                Arc::new(Time64NanosecondArray::from(vec![1_234_567])),
+                Value::String("00:00:00.001234".into()),
+            ),
+            (
+                Arc::new(Time32MillisecondArray::from(vec![1])),
+                Value::String("00:00:00.001000".into()),
+            ),
+        ];
+        for (array, expected) in cases {
+            assert_eq!(
+                ArrowValueLayout::new(array.as_ref()).value_at(0).unwrap(),
+                expected
+            );
+        }
+        for value in [
+            -0.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::from_bits(0x7ff8_0000_0000_0001),
+        ] {
+            let array = Float64Array::from(vec![value]);
+            let Value::Double(decoded) = arrow_value_at(&array, 0).unwrap() else {
+                panic!("expected double")
+            };
+            assert_eq!(decoded.to_bits(), value.to_bits());
+        }
     }
 
     #[test]

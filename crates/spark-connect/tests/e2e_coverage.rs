@@ -1030,9 +1030,17 @@ fn artifact_and_tag_surface() {
     // A larger file to exercise the multi-chunk path (well over one gRPC chunk).
     std::fs::write(&f2, vec![b'x'; 512 * 1024]).unwrap();
 
-    s.add_artifact(f1.to_str().unwrap()).expect("add_artifact");
-    s.add_artifacts(&[f1.to_str().unwrap(), f2.to_str().unwrap()])
-        .expect("add_artifacts");
+    // As PySpark, a file that is neither a jar nor a class needs the `file` flag.
+    assert!(s.add_artifact(f1.to_str().unwrap()).is_err());
+    s.add_artifacts_with(&[f1.to_str().unwrap()], false, false, true)
+        .expect("add_artifact");
+    s.add_artifacts_with(
+        &[f1.to_str().unwrap(), f2.to_str().unwrap()],
+        false,
+        false,
+        true,
+    )
+    .expect("add_artifacts");
     // copyFromLocalToFs: exercises the client-side named-artifact upload
     // (forward_to_fs/...). A single-node server rejects a *local* destination, but the
     // client upload code we're covering runs before that, so tolerate the server error.
@@ -1144,6 +1152,68 @@ fn ml_estimators_and_transformers() {
     let mut pipeline = Pipeline::new().set_stages(vec!["scaler", "lr"]);
     if let Ok(mut m) = pipeline.fit(&df) {
         let _ = m.transform(&df).and_then(|d| d.count());
+    }
+}
+
+#[test]
+fn collected_small_integer_rows_accept_floating_schemas() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::row::Value;
+    use spark_connect::types::{DataType, StructField};
+
+    let s = session();
+    for (sql_type, min, max) in [("TINYINT", -128, 127), ("SMALLINT", -32768, 32767)] {
+        let rows = s.sql(&format!(
+            "SELECT CAST(n AS {sql_type}) AS n FROM VALUES ({min}), (-1), (0), ({max}), (NULL) AS t(n)"
+        )).unwrap().collect().unwrap();
+        for row in &rows {
+            assert!(
+                matches!(
+                    (sql_type, row.get(0)),
+                    ("TINYINT", Some(Value::Byte(_)))
+                        | ("SMALLINT", Some(Value::Short(_)))
+                        | (_, Some(Value::Null))
+                ),
+                "unexpected {sql_type} source row: {row:?}"
+            );
+        }
+        for target in [DataType::Float, DataType::Double] {
+            let schema = DataType::Struct {
+                fields: vec![StructField {
+                    name: "n".into(),
+                    data_type: target.clone(),
+                    nullable: true,
+                    metadata: Default::default(),
+                }],
+            };
+            let actual = s
+                .create_dataframe(rows.clone(), schema)
+                .unwrap()
+                .collect()
+                .unwrap();
+            let mut actual: Vec<_> = actual
+                .iter()
+                .map(|row| match (&target, row.get(0).unwrap()) {
+                    (DataType::Float, Value::Float(n)) => Some(*n as f64),
+                    (DataType::Double, Value::Double(n)) => Some(*n),
+                    (_, Value::Null) => None,
+                    other => panic!("unexpected floating result: {other:?}"),
+                })
+                .collect();
+            actual.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            assert_eq!(
+                actual,
+                vec![
+                    None,
+                    Some(min as f64),
+                    Some(-1.0),
+                    Some(0.0),
+                    Some(max as f64)
+                ]
+            );
+        }
     }
 }
 
