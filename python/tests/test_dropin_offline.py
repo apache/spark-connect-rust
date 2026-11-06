@@ -4908,6 +4908,120 @@ def test_create_dataframe_raises_inference_errors_as_pyspark(data, condition, pa
     assert error.value.getMessageParameters() == parameters
 
 
+def test_sample_sort_group_by_and_drop_take_their_arguments_as_pyspark(mock_connect):
+    # As PySpark's: sample takes a fraction and a seed positionally, sort and groupBy take the
+    # 1-based ordinals of columns, a negative one of sort descending, and drop takes Columns,
+    # which it sends as expressions.
+    import struct
+
+    from pyspark.errors import PySparkIndexError, PySparkTypeError, PySparkValueError
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    df = spark.range(1)
+
+    def relation(dataframe, field):
+        # ExecutePlanRequest.plan=3, Plan.root=1.
+        dataframe.collect()
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        return parse_message(parse_message(plan)[field][0])
+
+    # Relation.sample=12: Sample.upper_bound=3, a double, seed=5.
+    for sampled in (df.sample(0.5, 42), df.sample(fraction=0.5, seed=42),
+                    df.sample(False, 0.5, 42)):
+        sample = relation(sampled, 12)
+        assert struct.unpack("<d", sample[3][0]) == (0.5,) and sample[5] == [42]
+    # Relation.drop=21: Drop.columns=2, of expressions, column_names=3.
+    drop = relation(df.drop(F.col("a"), "b"), 21)
+    assert len(drop[2]) == 1 and drop[3] == [b"b"]
+
+    def column_name(expression):
+        # Expression.unresolved_attribute=2, UnresolvedAttribute.unparsed_identifier=1.
+        return parse_message(parse_message(expression)[2][0])[1][0]
+
+    # Relation.sort=7, Sort.order=2: SortOrder.child=1, direction=2 (DESCENDING=2).
+    for sorted_df, direction in ((df.sort(1), 1), (df.orderBy(-1), 2),
+                                 (df.sort(1, ascending=False), 2)):
+        order = parse_message(relation(sorted_df, 7)[2][0])
+        assert column_name(order[1][0]) == b"id" and order[2] == [direction]
+    # Relation.aggregate=9, Aggregate.grouping_expressions=3.
+    grouping = relation(df.groupBy(1).count(), 9)[3]
+    assert [column_name(expression) for expression in grouping] == [b"id"]
+
+    for call, (error_type, condition, parameters) in (
+        (lambda: df.sort(), (PySparkValueError, "CANNOT_BE_EMPTY", {"item": "cols"})),
+        (lambda: df.sort(0), (PySparkIndexError, "ZERO_INDEX", {})),
+        (lambda: df.groupBy(0), (PySparkIndexError, "INDEX_NOT_POSITIVE", {"index": "0"})),
+        (lambda: df.sort(1.5), (PySparkTypeError, "NOT_EXPECTED_TYPE",
+                                {"expected_type": "Column, int or str", "arg_name": "col",
+                                 "arg_type": "float"})),
+        (lambda: df.groupBy(1.5), (PySparkTypeError, "NOT_EXPECTED_TYPE",
+                                   {"expected_type": "Column, int or str", "arg_name": "cols",
+                                    "arg_type": "float"})),
+        (lambda: df.drop(1), (PySparkTypeError, "NOT_EXPECTED_TYPE",
+                              {"expected_type": "Column or str", "arg_name": "cols",
+                               "arg_type": "tuple"})),
+        (lambda: df.sample(True, 1), (PySparkTypeError, "NOT_EXPECTED_TYPE",
+                                      {"expected_type": "bool, float or int",
+                                       "arg_name": "withReplacement (optional), fraction "
+                                                   "(required) and seed (optional)",
+                                       "arg_type": "bool, int, NoneType"})),
+    ):
+        with pytest.raises(error_type) as error:
+            call()
+        assert error.value.getCondition() == condition
+        assert error.value.getMessageParameters() == parameters
+
+
+def test_ordinals_and_names_of_columns_carry_the_origin_of_col_as_pyspark():
+    # As PySpark's, `df[ordinal]`, and the columns of sort and groupBy of an ordinal or a
+    # name, are of `F.col`, whose origin they carry. In a new interpreter, whose first column
+    # of a session reads spark.python.sql.dataFrameDebugging.enabled.
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    pytest.importorskip("grpc")
+    code = """
+import sys
+sys.path.insert(0, sys.argv[1])
+from _mock_connect_server import mock_connect_session, parse_message
+
+def fragment(expression):
+    # Expression.common=18 -> ExpressionCommon.origin=1 -> Origin.python_origin=1 ->
+    # PythonOrigin.fragment=1.
+    expression = parse_message(expression)
+    if 18 not in expression:
+        return None
+    common = parse_message(expression[18][0])
+    return parse_message(parse_message(common[1][0])[1][0])[1][0].decode()
+
+if __name__ == "__main__":
+    with mock_connect_session() as (spark, service):
+        df = spark.range(1)
+
+        def relation(dataframe, field):
+            # ExecutePlanRequest.plan=3, Plan.root=1.
+            dataframe.collect()
+            plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+            return parse_message(parse_message(plan)[field][0])
+
+        # Relation.project=3: Project.expressions=3.
+        found = [fragment(relation(df.select(df[0]), 3)[3][0])]
+        # Relation.sort=7: Sort.order=2, SortOrder.child=1.
+        for sorted_df in (df.sort(1), df.sort(-1), df.sort("id")):
+            found.append(fragment(parse_message(relation(sorted_df, 7)[2][0])[1][0]))
+        # Relation.aggregate=9: Aggregate.grouping_expressions=3.
+        for grouped in (df.groupBy(1), df.groupBy("id")):
+            found.append(fragment(relation(grouped.count(), 9)[3][0]))
+        print(found)
+"""
+    tests = str(Path(__file__).resolve().parent)
+    result = subprocess.run(
+        [sys.executable, "-c", code, tests], check=True, capture_output=True, text=True)
+    assert result.stdout.strip().splitlines()[-1] == str(["col"] * 6)
+
+
 def test_create_dataframe_checks_every_row_against_the_merged_schema():
     from pyspark.errors import PySparkValueError
 

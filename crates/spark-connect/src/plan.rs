@@ -162,6 +162,8 @@ pub enum LogicalPlan {
     Drop {
         input: Arc<LogicalPlan>,
         columns: Vec<String>,
+        /// The columns to drop as expressions, as PySpark's `Drop` of Columns sends them.
+        expressions: Vec<Expression>,
     },
     /// ToDF: `df.toDF(*column_names)`.
     ToDF {
@@ -989,9 +991,15 @@ impl LogicalPlan {
                     Some(proto::relation::RelType::WithColumnsRenamed(Box::new(wcr)));
             }
 
-            LogicalPlan::Drop { input, columns } => {
+            LogicalPlan::Drop {
+                input,
+                columns,
+                expressions,
+            } => {
                 let mut drop = proto::Drop::default();
                 drop.input = Some(Box::new(relation_of(input, plan_ids)));
+                drop.columns
+                    .extend(expressions.iter().map(|e| e.to_proto()));
                 drop.column_names.extend(columns.clone());
                 relation.rel_type = Some(proto::relation::RelType::Drop(Box::new(drop)));
             }
@@ -1850,6 +1858,7 @@ pub fn drop(input: impl Into<Arc<LogicalPlan>>, columns: Vec<String>) -> Logical
     LogicalPlan::Drop {
         input: input.into(),
         columns,
+        expressions: Vec::new(),
     }
 }
 
