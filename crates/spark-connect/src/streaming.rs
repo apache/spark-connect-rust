@@ -253,6 +253,23 @@ pub enum Trigger {
     AvailableNow,
     /// Continuous processing with checkpoint interval.
     Continuous(String),
+    /// Real-time processing, of batches of the duration (e.g., "5 seconds"), as PySpark's
+    /// `trigger(realTime=...)`.
+    RealTime(String),
+}
+
+impl Trigger {
+    /// The trigger of a `WriteStreamOperationStart`.
+    pub(crate) fn to_proto(&self) -> proto::write_stream_operation_start::Trigger {
+        use proto::write_stream_operation_start::Trigger as Proto;
+        match self {
+            Trigger::ProcessingTime(interval) => Proto::ProcessingTimeInterval(interval.clone()),
+            Trigger::Once => Proto::Once(true),
+            Trigger::AvailableNow => Proto::AvailableNow(true),
+            Trigger::Continuous(interval) => Proto::ContinuousCheckpointInterval(interval.clone()),
+            Trigger::RealTime(duration) => Proto::RealTimeBatchDuration(duration.clone()),
+        }
+    }
 }
 
 /// DataStreamWriter for writing streaming data to various sinks.
@@ -396,33 +413,7 @@ impl DataStreamWriter {
             write_op.query_name = name.clone();
         }
 
-        if let Some(trigger) = &self.trigger {
-            match trigger {
-                Trigger::ProcessingTime(interval) => {
-                    write_op.trigger = Some(
-                        proto::write_stream_operation_start::Trigger::ProcessingTimeInterval(
-                            interval.clone(),
-                        ),
-                    );
-                }
-                Trigger::Once => {
-                    write_op.trigger =
-                        Some(proto::write_stream_operation_start::Trigger::Once(true));
-                }
-                Trigger::AvailableNow => {
-                    write_op.trigger = Some(
-                        proto::write_stream_operation_start::Trigger::AvailableNow(true),
-                    );
-                }
-                Trigger::Continuous(interval) => {
-                    write_op.trigger = Some(
-                        proto::write_stream_operation_start::Trigger::ContinuousCheckpointInterval(
-                            interval.clone(),
-                        ),
-                    );
-                }
-            }
-        }
+        write_op.trigger = self.trigger.as_ref().map(Trigger::to_proto);
 
         if let Some(path) = &self.path {
             // A memory/console/foreach sink has no path; only set the destination for a
@@ -1294,6 +1285,31 @@ mod tests {
         let trigger = Trigger::Continuous("1 minute".to_string());
         let writer = writer.trigger(trigger);
         assert!(writer.trigger.is_some());
+    }
+
+    #[test]
+    fn triggers_are_sent_as_pyspark_sends_them() {
+        use proto::write_stream_operation_start::Trigger as Proto;
+        let cases = [
+            (
+                Trigger::ProcessingTime("1 second".to_string()),
+                Proto::ProcessingTimeInterval("1 second".to_string()),
+            ),
+            (Trigger::Once, Proto::Once(true)),
+            (Trigger::AvailableNow, Proto::AvailableNow(true)),
+            (
+                Trigger::Continuous("1 minute".to_string()),
+                Proto::ContinuousCheckpointInterval("1 minute".to_string()),
+            ),
+            // The real_time_batch_duration of PySpark's `trigger(realTime=...)`.
+            (
+                Trigger::RealTime("5 seconds".to_string()),
+                Proto::RealTimeBatchDuration("5 seconds".to_string()),
+            ),
+        ];
+        for (trigger, sent) in cases {
+            assert_eq!(trigger.to_proto(), sent);
+        }
     }
 
     #[test]

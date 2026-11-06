@@ -1470,6 +1470,22 @@ def test_dataframes_of_a_stream_are_streaming_as_pyspark(session):
     assert session.range(1).isStreaming is False
 
 
+def test_stream_writer_starts_a_query_of_its_real_time_trigger_as_pyspark(session):
+    # As PySpark's, the real-time trigger reaches the server, which runs real-time mode for
+    # some sinks only, not the memory sink.
+    from pyspark.errors import IllegalArgumentException
+
+    writer = session.readStream.format("rate").load().writeStream.format("memory")
+    with pytest.raises(IllegalArgumentException) as error:
+        query = writer.queryName("real_time_trigger").trigger(realTime="5 seconds").start()
+        try:
+            query.awaitTermination(10)
+        finally:
+            query.stop()
+    assert error.value.getCondition() == (
+        "STREAMING_REAL_TIME_MODE.OPERATOR_OR_SINK_NOT_IN_ALLOWLIST")
+
+
 def test_create_dataframe_raises_merge_errors_as_pyspark(session):
     from pyspark.errors import PySparkException
 
