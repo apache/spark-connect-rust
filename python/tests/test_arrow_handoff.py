@@ -1130,9 +1130,11 @@ def test_integer_columns_preserve_values_without_python_rows(protocol, monkeypat
     monkeypatch.setattr(pd.DataFrame, "astype", no_rows)
     with _arrow_input_service(protocol) as (spark, state):
         df = spark.createDataFrame(frame, schema=schema, verifySchema=verify)
-        # Inference and name lists produce a toDF wrapper on current master.
-        assert df.isLocal() == (schema_kind == "explicit")
+        # Every nonempty pandas input applies its names through toDF, including
+        # explicit struct schemas, just as the current row fallback does.
+        assert not df.isLocal()
         assert df.toArrow().column(0).to_pylist() == [3]
+        assert state["column_names"] == names
         assert state["result"] == (3, 2**53 + 1, -(2**63))
     table, resolved, renamed = observed[0]
     assert table.to_pydict() == {"a": [2**53 + 1, None, -(2**63)],

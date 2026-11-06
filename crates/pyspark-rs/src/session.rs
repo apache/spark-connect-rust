@@ -765,6 +765,27 @@ impl PySparkSession {
         }
         let spec = schema_spec(py, schema)?;
         if is_loaded_instance(py, data, "pandas", "DataFrame")? {
+            // Guarded integer columns share the existing Arrow importer. Schema
+            // validation above and unsupported pandas conversions keep master's
+            // normal ordering and row fallback.
+            let table = py
+                .import("pyspark.sql._pandas_input")?
+                .getattr("prepare_int64_table")?
+                .call1((data, schema))?;
+            if !table.is_none() {
+                let frame =
+                    crate::pyarrow_import::create_dataframe(py, &self.session, &table, schema)?;
+                // pandas applies explicit field names with toDF even though the
+                // local relation already carries them. Empty input stays local.
+                return Ok(match &spec {
+                    Spec::Struct(fields) if !fields.is_empty() && data.len()? > 0 => {
+                        PyDataFrame::new(frame.dataframe.to_df(
+                            fields.iter().map(|field| field.name.as_str()).collect(),
+                        ))
+                    }
+                    _ => frame,
+                });
+            }
             return self.create_from_pandas(py, data, spec);
         }
         self.create_from_local(py, data, spec)
