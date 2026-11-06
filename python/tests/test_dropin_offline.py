@@ -9285,6 +9285,53 @@ def test_connect_registry_defines_a_flow_of_spark_sql_without_running_it(mock_co
     assert 5 in parse_message(parse_message(parse_message(service.execute_requests[-1])[3][0])[2][0])
 
 
+_REQUESTS_WITHOUT_THE_GIL = {
+    "save": lambda spark: spark.range(1).write.format("parquet").save("/tmp/no_such_dir"),
+    "saveAsTable": lambda spark: spark.range(1).write.saveAsTable("t"),
+    "insertInto": lambda spark: spark.range(1).write.insertInto("t"),
+    "parquet": lambda spark: spark.range(1).write.parquet("/tmp/no_such_dir"),
+    "writeTo.create": lambda spark: spark.range(1).writeTo("t").create(),
+    "writeTo.append": lambda spark: spark.range(1).writeTo("t").append(),
+    "mergeInto.merge": lambda spark: spark.range(1)
+    .mergeInto("t", spark.range(1).id == 0)
+    .whenMatched()
+    .delete()
+    .merge(),
+    "isEmpty": lambda spark: spark.range(1).isEmpty(),
+    "catalog.currentDatabase": lambda spark: spark.catalog.currentDatabase(),
+    "catalog.tableExists": lambda spark: spark.catalog.tableExists("t"),
+    "catalog.refreshTable": lambda spark: spark.catalog.refreshTable("t"),
+    "writeStream.start": lambda spark: spark.readStream.format("rate")
+    .load()
+    .writeStream.format("noop")
+    .start(),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_REQUESTS_WITHOUT_THE_GIL))
+def test_requests_of_writes_the_catalog_and_streams_release_the_gil_as_pyspark(mock_connect, name):
+    # As PySpark's requests to the server, which release the GIL while they wait: this
+    # thread runs while the request waits for the server.
+    spark, service = mock_connect
+    service.block_execute = True
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        request = pool.submit(_REQUESTS_WITHOUT_THE_GIL[name], spark)
+        try:
+            for _ in range(500):
+                if service.execute_calls:
+                    break
+                time.sleep(0.01)
+            else:
+                raise AssertionError("The request never reached the server")
+            assert not request.done()
+        finally:
+            service.release_response()
+        error = request.exception(timeout=10)
+    # Whatever the request makes of the empty response of the mock server, it did not hold
+    # the GIL, which the server would have waited for.
+    assert "could not run" not in str(error or "")
+
+
 def test_sql_runs_a_statement_without_holding_the_gil(mock_connect):
     spark, service = mock_connect
     service.block_execute = True

@@ -2108,8 +2108,8 @@ impl PyDataFrame {
     }
 
     /// Check if the DataFrame is empty.
-    fn isEmpty(&self) -> PyResult<bool> {
-        self.dataframe.is_empty().to_pyerr()
+    fn isEmpty(&self, py: Python<'_>) -> PyResult<bool> {
+        detached(py, || self.dataframe.is_empty().map_err(Box::new))
     }
 
     /// Print the schema through Python stdout, honoring the maximum nesting depth.
@@ -2748,8 +2748,9 @@ impl PyMergeIntoWriter {
         slf
     }
 
-    fn merge(&self) -> PyResult<()> {
-        self.inner.clone().merge().to_pyerr()
+    fn merge(&self, py: Python<'_>) -> PyResult<()> {
+        let writer = self.inner.clone();
+        detached(py, || writer.merge().map_err(Box::new))
     }
 }
 
@@ -3015,6 +3016,7 @@ impl PyDataFrameWriter {
     #[pyo3(signature = (url, table, mode=None, properties=None))]
     fn jdbc(
         &mut self,
+        py: Python<'_>,
         url: &str,
         table: &str,
         mode: Option<&str>,
@@ -3031,13 +3033,14 @@ impl PyDataFrameWriter {
         }
         w = w.option("url", url).option("dbtable", table);
         self.inner = w.clone();
-        w.save(None).to_pyerr()
+        detached(py, || w.save(None).map_err(Box::new))
     }
 
     #[pyo3(signature = (path=None, format=None, mode=None, partitionBy=None, **options))]
     #[allow(non_snake_case)]
     fn save(
         &mut self,
+        py: Python<'_>,
         path: Option<String>,
         format: Option<&str>,
         mode: Option<&str>,
@@ -3047,13 +3050,14 @@ impl PyDataFrameWriter {
         let w = apply_write_common(self.inner.clone(), format, mode, partitionBy, options)?;
         // PySpark sets the inline format/mode/partitionBy/options on the writer itself.
         self.inner = w.clone();
-        w.save(path.as_deref()).to_pyerr()
+        detached(py, || w.save(path.as_deref()).map_err(Box::new))
     }
 
     #[pyo3(name = "saveAsTable", signature = (name, format=None, mode=None, partitionBy=None, **options))]
     #[allow(non_snake_case)]
     fn save_as_table(
         &mut self,
+        py: Python<'_>,
         name: &str,
         format: Option<&str>,
         mode: Option<&str>,
@@ -3062,20 +3066,25 @@ impl PyDataFrameWriter {
     ) -> PyResult<()> {
         let w = apply_write_common(self.inner.clone(), format, mode, partitionBy, options)?;
         self.inner = w.clone();
-        w.save_as_table(name).to_pyerr()
+        detached(py, || w.save_as_table(name).map_err(Box::new))
     }
 
     /// Insert into an existing table. `overwrite` maps to overwrite/append mode,
     /// mirroring reference `DataFrameWriter.insertInto(tableName, overwrite=None)`.
     #[pyo3(name = "insertInto", signature = (tableName, overwrite=None))]
-    fn insert_into(&mut self, tableName: &str, overwrite: Option<bool>) -> PyResult<()> {
+    fn insert_into(
+        &mut self,
+        py: Python<'_>,
+        tableName: &str,
+        overwrite: Option<bool>,
+    ) -> PyResult<()> {
         let mut w = self.inner.clone();
         if let Some(ow) = overwrite {
             w = w.mode(if ow { "overwrite" } else { "append" });
         }
         // PySpark sets the overwrite/append mode on the writer itself.
         self.inner = w.clone();
-        w.insert_into(tableName).to_pyerr()
+        detached(py, || w.insert_into(tableName).map_err(Box::new))
     }
 
     /// Write as PARQUET - full pyspark signature; each named option is
@@ -3084,6 +3093,7 @@ impl PyDataFrameWriter {
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn parquet(
         &mut self,
+        py: Python<'_>,
         path: &str,
         mode: Option<&Bound<'_, PyAny>>,
         partitionBy: Option<&Bound<'_, PyAny>>,
@@ -3104,7 +3114,7 @@ impl PyDataFrameWriter {
         w = wset_opt(w, "compression", compression)?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
         self.inner = w.clone().format("parquet");
-        w.parquet(path).to_pyerr()
+        detached(py, || w.parquet(path).map_err(Box::new))
     }
 
     /// Write as JSON - full pyspark signature; each named option is
@@ -3113,6 +3123,7 @@ impl PyDataFrameWriter {
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn json(
         &mut self,
+        py: Python<'_>,
         path: &str,
         mode: Option<&Bound<'_, PyAny>>,
         compression: Option<&Bound<'_, PyAny>>,
@@ -3134,7 +3145,7 @@ impl PyDataFrameWriter {
         w = wset_opt(w, "ignoreNullFields", ignoreNullFields)?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
         self.inner = w.clone().format("json");
-        w.json(path).to_pyerr()
+        detached(py, || w.json(path).map_err(Box::new))
     }
 
     /// Write as CSV - full pyspark signature; each named option is
@@ -3143,6 +3154,7 @@ impl PyDataFrameWriter {
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn csv(
         &mut self,
+        py: Python<'_>,
         path: &str,
         mode: Option<&Bound<'_, PyAny>>,
         compression: Option<&Bound<'_, PyAny>>,
@@ -3184,7 +3196,7 @@ impl PyDataFrameWriter {
         w = wset_opt(w, "lineSep", lineSep)?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
         self.inner = w.clone().format("csv");
-        w.csv(path).to_pyerr()
+        detached(py, || w.csv(path).map_err(Box::new))
     }
 
     /// Write as ORC - full pyspark signature; each named option is
@@ -3193,6 +3205,7 @@ impl PyDataFrameWriter {
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn orc(
         &mut self,
+        py: Python<'_>,
         path: &str,
         mode: Option<&Bound<'_, PyAny>>,
         partitionBy: Option<&Bound<'_, PyAny>>,
@@ -3213,7 +3226,7 @@ impl PyDataFrameWriter {
         w = wset_opt(w, "compression", compression)?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
         self.inner = w.clone().format("orc");
-        w.orc(path).to_pyerr()
+        detached(py, || w.orc(path).map_err(Box::new))
     }
 
     /// Write as TEXT - full pyspark signature; each named option is
@@ -3222,6 +3235,7 @@ impl PyDataFrameWriter {
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn text(
         &mut self,
+        py: Python<'_>,
         path: &str,
         compression: Option<&Bound<'_, PyAny>>,
         lineSep: Option<&Bound<'_, PyAny>>,
@@ -3231,7 +3245,7 @@ impl PyDataFrameWriter {
         w = wset_opt(w, "lineSep", lineSep)?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
         self.inner = w.clone().format("text");
-        w.text(path).to_pyerr()
+        detached(py, || w.text(path).map_err(Box::new))
     }
 
     /// Write as XML - full pyspark signature; each named option is
@@ -3240,6 +3254,7 @@ impl PyDataFrameWriter {
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn xml(
         &mut self,
+        py: Python<'_>,
         path: &str,
         rowTag: Option<&Bound<'_, PyAny>>,
         mode: Option<&Bound<'_, PyAny>>,
@@ -3273,7 +3288,7 @@ impl PyDataFrameWriter {
         w = wset_opt(w, "validateName", validateName)?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
         self.inner = w.clone().format("xml");
-        w.xml(path).to_pyerr()
+        detached(py, || w.xml(path).map_err(Box::new))
     }
 }
 
@@ -3368,34 +3383,48 @@ impl PyDataFrameWriterV2 {
         Ok(slf)
     }
 
-    fn create(&mut self) -> PyResult<()> {
-        self.inner.clone().create().to_pyerr()
+    fn create(&mut self, py: Python<'_>) -> PyResult<()> {
+        let writer = self.inner.clone();
+        detached(py, || writer.create().map_err(Box::new))
     }
 
-    fn replace(&mut self) -> PyResult<()> {
-        self.inner.clone().replace().to_pyerr()
+    fn replace(&mut self, py: Python<'_>) -> PyResult<()> {
+        let writer = self.inner.clone();
+        detached(py, || writer.replace().map_err(Box::new))
     }
 
     #[pyo3(name = "createOrReplace")]
-    fn create_or_replace(&mut self) -> PyResult<()> {
-        self.inner.clone().create_or_replace().to_pyerr()
+    fn create_or_replace(&mut self, py: Python<'_>) -> PyResult<()> {
+        let writer = self.inner.clone();
+        detached(py, || writer.create_or_replace().map_err(Box::new))
     }
 
-    fn append(&mut self) -> PyResult<()> {
-        self.inner.clone().append().to_pyerr()
+    fn append(&mut self, py: Python<'_>) -> PyResult<()> {
+        let writer = self.inner.clone();
+        detached(py, || writer.append().map_err(Box::new))
     }
 
     /// Overwrite the rows of `condition`, a Column or a column name, as PySpark's `F._to_col`,
     /// else `NOT_EXPECTED_TYPE` of `col`.
-    fn overwrite(&mut self, condition: &Bound<'_, PyAny>) -> PyResult<()> {
-        let condition = column_or_name(condition)?;
-        self.inner.clone().overwrite(condition).to_pyerr()
+    fn overwrite(&mut self, py: Python<'_>, condition: &Bound<'_, PyAny>) -> PyResult<()> {
+        let (writer, condition) = (self.inner.clone(), column_or_name(condition)?);
+        detached(py, || writer.overwrite(condition).map_err(Box::new))
     }
 
     #[pyo3(name = "overwritePartitions")]
-    fn overwrite_partitions(&mut self) -> PyResult<()> {
-        self.inner.clone().overwrite_partitions().to_pyerr()
+    fn overwrite_partitions(&mut self, py: Python<'_>) -> PyResult<()> {
+        let writer = self.inner.clone();
+        detached(py, || writer.overwrite_partitions().map_err(Box::new))
     }
+}
+
+/// `f` without the GIL, as PySpark's requests to the server release it while they wait, so
+/// that other Python threads run. `f` boxes its error, which keeps its result small.
+pub(crate) fn detached<T: Send>(
+    py: Python<'_>,
+    f: impl FnOnce() -> Result<T, Box<spark_connect_core::error::SparkError>> + Send,
+) -> PyResult<T> {
+    py.detach(f).to_pyerr()
 }
 
 // ---- Shared helpers for closure-based (UDF) DataFrame/GroupedData methods ----

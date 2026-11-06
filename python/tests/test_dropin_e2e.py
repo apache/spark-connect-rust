@@ -839,6 +839,72 @@ def test_registered_udtfs_are_called_from_sql_as_pyspark(session):
     assert session.sql("SELECT * FROM doubled_udtf(21L)").collect() == [Row(y=42)]
 
 
+def test_writes_the_catalog_and_streaming_queries_release_the_gil_as_pyspark(session, tmp_path):
+    # As PySpark's requests to the server, which release the GIL while they wait: another
+    # Python thread runs during them.
+    import threading
+    import time
+
+    def ticks_beside(call):
+        ticks, stop = [0], threading.Event()
+
+        def tick():
+            while not stop.is_set():
+                ticks[0] += 1
+                time.sleep(0.001)
+
+        thread = threading.Thread(target=tick)
+        thread.start()
+        try:
+            time.sleep(0.05)
+            before = ticks[0]
+            call()
+            return ticks[0] - before
+        finally:
+            stop.set()
+            thread.join()
+
+    from pyspark.sql.streaming import StreamingQueryListener
+
+    class Listener(StreamingQueryListener):
+        # The times of the progress of the query, which the listener runs in a thread.
+        progress = []
+
+        def onQueryStarted(self, event):
+            pass
+
+        def onQueryProgress(self, event):
+            self.progress.append(time.time())
+
+        def onQueryIdle(self, event):
+            pass
+
+        def onQueryTerminated(self, event):
+            pass
+
+    listener = Listener()
+    session.streams.addListener(listener)
+    stream = session.readStream.format("rate").load().writeStream.format("noop")
+    query = stream.trigger(processingTime="200 milliseconds").start()
+    try:
+        # The query makes progress first, which the listener receives between waits.
+        for _ in range(120):
+            if Listener.progress:
+                break
+            time.sleep(0.25)
+        start = time.time()
+        assert ticks_beside(lambda: query.awaitTermination(3)) > 100
+        end = time.time()
+    finally:
+        query.stop()
+        session.streams.removeListener(listener)
+    # The listener runs during awaitTermination too.
+    assert any(start < at < end for at in Listener.progress)
+    rows = session.range(2_000_000).selectExpr("id", "id * 2 AS v")
+    assert ticks_beside(lambda: rows.write.parquet(str(tmp_path / "rows"))) > 10
+    assert ticks_beside(lambda: [session.catalog.currentDatabase() for _ in range(20)]) > 10
+
+
 def test_catalog_and_stream_start_errors_carry_their_operation_id(session):
     for run in (
         lambda: session.catalog.setCurrentDatabase("no_such_database_60960"),
