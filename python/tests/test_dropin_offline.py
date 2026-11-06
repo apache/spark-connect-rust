@@ -1545,6 +1545,54 @@ def test_row_count_and_index():
         r.index(99)
 
 
+def test_na_and_stat_functions_check_their_arguments_as_pyspark():
+    # As PySpark's NA and statistic functions of a DataFrame, which check their arguments on
+    # the client.
+    from pyspark.errors import PySparkTypeError, PySparkValueError
+
+    df = _offline_session().range(1)
+
+    def not_expected(arg_name, expected_type, arg_type):
+        return (PySparkTypeError, "NOT_EXPECTED_TYPE",
+                {"arg_name": arg_name, "expected_type": expected_type, "arg_type": arg_type})
+
+    for call, (error_type, condition, parameters) in (
+        (lambda: df.dropna(how="bogus"), (PySparkValueError, "VALUE_NOT_ALLOWED",
+                                          {"arg_name": "how", "allowed_values": "['any', 'all']"})),
+        (lambda: df.na.drop(how=1), not_expected("how", "str", "int")),
+        (lambda: df.dropna(thresh=1.5), not_expected("thresh", "int", "float")),
+        (lambda: df.dropna(subset=1), not_expected("subset", "list, str or tuple", "int")),
+        (lambda: df.na.drop(subset=["id", 1]), not_expected("cols", "list, str or tuple", "int")),
+        (lambda: df.fillna([1]), not_expected("value", "bool, dict, float, int or str", "list")),
+        (lambda: df.na.fill({}), (PySparkValueError, "CANNOT_BE_EMPTY", {"item": "value"})),
+        (lambda: df.fillna({1: 0}), not_expected("key type of dict", "str", "int")),
+        (lambda: df.fillna({"id": [1]}),
+         not_expected("value type of dict", "bool, float, int or str", "list")),
+        (lambda: df.fillna(0, subset=1), not_expected("subset", "list or tuple", "int")),
+        (lambda: df.summary(1), not_expected("statistics", "list[str]", "int")),
+        (lambda: df.cov("id", 1), not_expected("col2", "str", "int")),
+        (lambda: df.stat.corr(1, "id"), not_expected("col1", "str", "int")),
+        (lambda: df.corr("id", "id", "kendall"), (PySparkValueError, "VALUE_NOT_ALLOWED",
+                                                  {"arg_name": "method",
+                                                   "allowed_values": "['pearson']"})),
+        (lambda: df.stat.crosstab("id", 1), not_expected("col2", "str", "int")),
+        (lambda: df.freqItems("id"), not_expected("cols", "list or tuple", "str")),
+        (lambda: df.approxQuantile(1, [0.5], 0.0), not_expected("col", "list, str or tuple", "int")),
+        (lambda: df.approxQuantile(["id", 1], [0.5], 0.0), not_expected("columns", "list[str]", "int")),
+        (lambda: df.stat.approxQuantile("id", 0.5, 0.0),
+         not_expected("probabilities", "list or tuple", "float")),
+        (lambda: df.approxQuantile("id", [1.5], 0.0),
+         not_expected("probabilities", "list[float, int]", "float")),
+        (lambda: df.approxQuantile("id", [0.5], "0"), not_expected("relativeError", "float or int", "str")),
+        (lambda: df.approxQuantile("id", [0.5], -1), (PySparkValueError, "NEGATIVE_VALUE",
+                                                     {"arg_name": "relativeError", "arg_value": "-1"})),
+    ):
+        with pytest.raises(error_type) as error:
+            call()
+        assert error.value.getCondition() == condition
+        assert error.value.getMessageParameters() == parameters
+
+
 def test_avro_protobuf_partitioning_submodules():
     # The official import paths resolve (the implementations live in
     # pyspark.sql.functions and are re-exported here).

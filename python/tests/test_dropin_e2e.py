@@ -1356,6 +1356,26 @@ def test_create_dataframe_infers_by_the_session_configurations_as_pyspark(sessio
             session.conf.unset(key)
 
 
+def test_na_and_stat_functions_take_their_arguments_as_pyspark(session):
+    # As PySpark's: the subset of dropna, a column name or a list or tuple of them, the columns
+    # of describe, names or a list of them, and the quantiles of approxQuantile of a list or
+    # tuple of columns, a list of those of each.
+    df = session.createDataFrame(
+        [(1, "a", None), (None, "b", 2.0), (3, None, 3.0)], "x int, k string, v double"
+    )
+    kept = [Row(x=1, k="a", v=None), Row(x=3, k=None, v=3.0)]
+    assert df.dropna(subset="x").collect() == kept
+    assert df.na.drop(subset=("x",)).collect() == kept
+    assert df.dropna(how="all", thresh=3).collect() == []
+    assert df.describe(["x", "v"]).columns == ["summary", "x", "v"]
+    assert df.describe(("x", "v")).columns == ["summary", "x", "v"]
+    assert df.approxQuantile(["x", "v"], [0.0, 1.0], 0.0) == [[1.0, 3.0], [2.0, 3.0]]
+    assert df.stat.approxQuantile("x", (0.0, 1), 0) == [1.0, 3.0]
+    linear = session.createDataFrame([(1, 2.0), (2, 4.0), (3, 6.0)], "a int, b double")
+    assert linear.corr("a", "b", None) == linear.stat.corr("a", "b", "pearson") == 1.0
+    assert df.freqItems(["k"]).columns == ["k_freqItems"]
+
+
 def test_functions_apply_their_optional_arguments_as_pyspark(session):
     df = session.sql(
         "SELECT 'key' AS k, 'msg' AS m, parse_json('{\"a\": 1}') AS v, "

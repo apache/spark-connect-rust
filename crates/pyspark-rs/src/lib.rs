@@ -46,6 +46,7 @@ mod resource;
 mod row;
 mod session;
 mod stat;
+mod stat_arguments;
 mod storagelevel;
 mod streaming;
 mod tablearg;
