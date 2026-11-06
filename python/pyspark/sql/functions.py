@@ -740,6 +740,7 @@ for _transform in _partition_transforms():
     _transform.__module__ = partitioning.__name__
     _transform.__qualname__ = _transform.__name__
     setattr(partitioning, _transform.__name__, _transform)
+del _transform
 partitioning.__all__ = ["years", "months", "days", "hours", "bucket"]
 
 

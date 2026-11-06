@@ -472,7 +472,9 @@ def test_functions_exports_fresh_process():
             part = importlib.import_module("pyspark.sql.functions.partitioning")
             assert part is F.partitioning is sys.modules[part.__name__]
             assert part.__all__ == ["years", "months", "days", "hours", "bucket"]
-            assert all(getattr(part, name) is getattr(F, name) for name in part.__all__)
+            # As in PySpark, distinct from those of pyspark.sql.functions, which are deprecated
+            # and call them.
+            assert all(getattr(part, name) is not getattr(F, name) for name in part.__all__)
             assert F.random is F.rand
             assert F.column is not F.col
             assert list(inspect.signature(F.first).parameters) == ["col", "ignorenulls"]
