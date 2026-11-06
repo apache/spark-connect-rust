@@ -58,6 +58,21 @@ helpers accept `impl Into<Arc<LogicalPlan>>`, so they accept either an owned
 `LogicalPlan` or an existing `Arc<LogicalPlan>`. Serialization still produces the
 same protobuf tree; sharing does not deduplicate repeated relations on the wire.
 
+## Native LogisticRegression
+
+The native `spark_connect::ml::LogisticRegression` fits Spark's JVM
+`org.apache.spark.ml.classification.LogisticRegression` through the Connect ML
+protocol. Training features must be ML vectors; convert an array column with
+`array_to_vector` before fitting. This differs from the deprecated Python
+`pyspark.ml.connect.classification.LogisticRegression`, which uses array features
+and PyTorch training.
+
+Fitting returns a server-cached model. Prediction uses that model's object
+reference and must use the same Spark session. Models are obtained through
+`Estimator::fit`; direct struct construction of `LogisticRegressionModel` is no
+longer supported. The cached model remains available until the session is closed,
+including when a model is cloned or a transformed DataFrame is executed later.
+
 ## How parity is verified
 
 Two independent gates in CI cover the two halves of a Spark Connect client - plan
