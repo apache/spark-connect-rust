@@ -1206,6 +1206,21 @@ impl PyDataFrame {
         Ok(PyColumn::new(spark_connect::functions::col(name)))
     }
 
+    /// Class attributes and all column names, matching Python Connect.
+    fn __dir__(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        // Inspect the class rather than the instance to avoid calling __dir__ again.
+        let mut attrs = py.get_type::<Self>().dir()?.extract::<Vec<String>>()?;
+        attrs.extend(self.columns(py)?);
+        attrs.sort();
+        attrs.dedup();
+        Ok(attrs)
+    }
+
+    /// Bracket completion keeps column order, duplicates and non-identifiers.
+    fn _ipython_key_completions_(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        self.columns(py)
+    }
+
     /// Aggregate over the whole DataFrame (shorthand for `groupBy().agg(...)`).
     ///
     /// Mirrors `pyspark.sql.DataFrame.agg(*exprs)`.
