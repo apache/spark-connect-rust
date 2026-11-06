@@ -162,7 +162,7 @@ impl PyGroupedData {
         )?;
         validate_map_function(py, &func, eval_type_id)?;
         let cols = py.detach(|| self.grouped_data.input_columns()).to_pyerr()?;
-        let udf = build_map_udf(py, "applyInPandas", &func, &schema, eval_type_id, &cols)?;
+        let udf = build_map_udf(py, &func, &schema, eval_type_id, &cols)?;
         Ok(PyDataFrame::new(self.grouped_data.apply_in_pandas(udf)))
     }
 
@@ -197,7 +197,7 @@ impl PyGroupedData {
         )?;
         validate_map_function(py, &func, eval_type_id)?;
         let cols = py.detach(|| self.grouped_data.input_columns()).to_pyerr()?;
-        let udf = build_map_udf(py, "applyInArrow", &func, &schema, eval_type_id, &cols)?;
+        let udf = build_map_udf(py, &func, &schema, eval_type_id, &cols)?;
         Ok(PyDataFrame::new(self.grouped_data.apply_in_arrow(udf)))
     }
 
@@ -225,7 +225,6 @@ impl PyGroupedData {
         let cols = py.detach(|| self.grouped_data.input_columns()).to_pyerr()?;
         let udf = build_map_udf(
             py,
-            "applyInPandasWithState",
             &func,
             &outputStructType,
             eval_type::SQL_GROUPED_MAP_PANDAS_UDF_WITH_STATE,
@@ -267,14 +266,7 @@ impl PyGroupedData {
             true,
         )?;
         let cols = py.detach(|| self.grouped_data.input_columns()).to_pyerr()?;
-        let udf = build_map_udf(
-            py,
-            "transformWithStateInPandas",
-            &func,
-            &outputStructType,
-            et,
-            &cols,
-        )?;
+        let udf = build_map_udf(py, &func, &outputStructType, et, &cols)?;
         let out = crate::types::py_to_data_type(&outputStructType)?;
         let etc = (!eventTimeColumnName.is_empty()).then_some(eventTimeColumnName);
         Ok(PyDataFrame::new(
@@ -312,14 +304,7 @@ impl PyGroupedData {
             false,
         )?;
         let cols = py.detach(|| self.grouped_data.input_columns()).to_pyerr()?;
-        let udf = build_map_udf(
-            py,
-            "transformWithState",
-            &func,
-            &outputStructType,
-            et,
-            &cols,
-        )?;
+        let udf = build_map_udf(py, &func, &outputStructType, et, &cols)?;
         let etc = (!eventTimeColumnName.is_empty()).then_some(eventTimeColumnName);
         Ok(PyDataFrame::new(self.grouped_data.transform_with_state(
             udf,
@@ -386,7 +371,6 @@ impl PyCoGroupedData {
         let cols = py.detach(|| self.inner.input_columns()).to_pyerr()?;
         let udf = build_map_udf(
             py,
-            "applyInPandas",
             &func,
             &schema,
             eval_type::SQL_COGROUPED_MAP_PANDAS_UDF,
@@ -407,7 +391,6 @@ impl PyCoGroupedData {
         let cols = py.detach(|| self.inner.input_columns()).to_pyerr()?;
         let udf = build_map_udf(
             py,
-            "applyInArrow",
             &func,
             &schema,
             eval_type::SQL_COGROUPED_MAP_ARROW_UDF,

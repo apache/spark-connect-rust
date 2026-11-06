@@ -881,6 +881,22 @@ def test_getitem_indexes_filters_and_selects_as_pyspark(session):
     assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
 
 
+def test_plans_name_the_udfs_of_map_functions_after_the_functions_as_pyspark(session, capfd):
+    # As PySpark's: the server's plan names the UDF of a map function after the function.
+    def my_arrow_func(iterator):
+        yield from iterator
+
+    def my_grouped_func(pdf):
+        return pdf
+
+    capfd.readouterr()
+    session.range(1).mapInArrow(my_arrow_func, "id long").explain()
+    session.range(1).groupBy("id").applyInPandas(my_grouped_func, "id long").explain()
+    out = capfd.readouterr().out
+    assert "MapInArrow my_arrow_func(" in out
+    assert "FlatMapGroupsInPandas [id#" in out and "], my_grouped_func(" in out
+
+
 def test_sql_runs_statements_eagerly(session):
     # sql() sends the statement at once: a command takes effect without an action, and the
     # DataFrame of its result is the local relation the server returned.

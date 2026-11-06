@@ -1702,7 +1702,6 @@ impl PyDataFrame {
         let cols = py.detach(|| self.dataframe.columns()).to_pyerr()?;
         let udf = build_map_udf(
             py,
-            "mapInPandas",
             &func,
             &schema,
             eval_type::SQL_MAP_PANDAS_ITER_UDF,
@@ -1725,14 +1724,7 @@ impl PyDataFrame {
     ) -> PyResult<PyDataFrame> {
         validate_map_function(py, &func, eval_type::SQL_MAP_ARROW_ITER_UDF)?;
         let cols = py.detach(|| self.dataframe.columns()).to_pyerr()?;
-        let udf = build_map_udf(
-            py,
-            "mapInArrow",
-            &func,
-            &schema,
-            eval_type::SQL_MAP_ARROW_ITER_UDF,
-            &cols,
-        )?;
+        let udf = build_map_udf(py, &func, &schema, eval_type::SQL_MAP_ARROW_ITER_UDF, &cols)?;
         Ok(PyDataFrame::new(self.dataframe.map_in_arrow(udf, barrier)))
     }
 
@@ -2725,16 +2717,26 @@ pub(crate) fn infer_group_map_eval_type(
     }
 }
 
+/// The name of the UDF of `func`, as PySpark's `UserDefinedFunction` names it: the
+/// function's `__name__`, or the name of its class for a callable object without one.
+fn udf_name(func: &Bound<'_, PyAny>) -> PyResult<String> {
+    if func.hasattr("__name__")? {
+        func.getattr("__name__")?.extract()
+    } else {
+        Ok(func.get_type().name()?.to_string())
+    }
+}
+
 /// Build a map/group UDF expression: cloudpickle `(func, schema)` as the command and
 /// carry the resolved schema as the output type (mirrors the scalar UDF command layout).
 pub(crate) fn build_map_udf(
     py: Python<'_>,
-    name: &str,
     func: &Bound<'_, PyAny>,
     schema: &Bound<'_, PyAny>,
     eval_type_id: i32,
     input_cols: &[String],
 ) -> PyResult<CommonInlineUserDefinedFunctionExpression> {
+    let name = udf_name(func)?;
     let return_type = resolve_datatype(schema)?;
     // The worker reads the pickled type as a `DataType`, so a DDL string is pickled as the
     // type it parses to, as the reference client pickles the type of `_parse_ddl`.
@@ -2755,10 +2757,7 @@ pub(crate) fn build_map_udf(
         .map(|c| spark_connect::functions::col(c).expression().clone())
         .collect();
     Ok(CommonInlineUserDefinedFunctionExpression::new(
-        name.to_string(),
-        true,
-        arguments,
-        payload,
+        name, true, arguments, payload,
     ))
 }
 
