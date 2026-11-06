@@ -8241,6 +8241,47 @@ def test_writer_setters_mutate_and_return_self(offline_spark):
     assert w.mode("append") is w
 
 
+def test_writer_v2_takes_its_arguments_as_pyspark(mock_connect):
+    # As PySpark's DataFrameWriterV2: overwrite takes a Column or a column name, and
+    # partitionedBy a Column or a column name of each argument, else NOT_EXPECTED_TYPE of col,
+    # also for a list; tableProperty(property, None) leaves the property unset.
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    df = spark.range(1)
+
+    def sent():
+        # ExecutePlanRequest.plan=3, Plan.command=2, Command.write_operation_v2=4.
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+        return parse_message(parse_message(plan[2][0])[4][0])
+
+    df.writeTo("t").overwrite("flag")
+    # WriteOperationV2.overwrite_condition=8: Expression.unresolved_attribute=2 of
+    # UnresolvedAttribute.unparsed_identifier=1.
+    condition = parse_message(sent()[8][0])
+    assert parse_message(condition[2][0])[1] == [b"flag"]
+    writer = df.writeTo("t").tableProperty("a", "1").tableProperty("b", "2")
+    writer.tableProperty("a", None).append()
+    # WriteOperationV2.table_properties=6, of entries of key=1 and value=2.
+    assert [parse_message(entry)[1] for entry in sent().get(6, [])] == [[b"b"]]
+    for args, arg_type in [((["id"],), "list"), (("id", 1), "int")]:
+        with pytest.raises(PySparkTypeError) as e:
+            df.writeTo("t").partitionedBy(*args)
+        assert e.value.getCondition() == "NOT_EXPECTED_TYPE"
+        assert e.value.getMessageParameters() == {
+            "arg_name": "col",
+            "expected_type": "Column or str",
+            "arg_type": arg_type,
+        }
+    with pytest.raises(PySparkTypeError) as e:
+        df.writeTo("t").overwrite(1)
+    assert e.value.getMessageParameters()["arg_name"] == "col"
+    df.writeTo("t").partitionedBy("id", F.col("id")).append()
+    # WriteOperationV2.partitioning_columns=4.
+    assert len(sent()[4]) == 2
+
+
 def test_writer_v2_setters_mutate_and_return_self(offline_spark):
     from pyspark.sql import functions as F
 
