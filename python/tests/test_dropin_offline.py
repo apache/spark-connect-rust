@@ -2342,6 +2342,45 @@ def test_session_builder_remote_url():
     assert type(builder2).__name__ == "SparkSessionBuilder"
 
 
+def test_session_builder_remote_takes_the_url_as_pyspark():
+    import inspect
+    import os
+    import subprocess
+    import sys
+
+    from pyspark.sql import SparkSession
+
+    # PySpark's SparkSession.Builder.remote(url), and the Connect builder's location.
+    assert list(inspect.signature(SparkSession.builder.remote).parameters) == ["url", "location"]
+    with pytest.raises(TypeError):
+        SparkSession.builder.remote("sc://a:1", location="sc://b:2")
+    # Each keyword's URL is the server the session uses, in a new interpreter, as the
+    # session becomes the active one.
+    tests = os.path.dirname(os.path.abspath(__file__))
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [tests, env.get("PYTHONPATH")]))
+    subprocess.run([sys.executable, "-c", """
+import multiprocessing
+from _mock_connect_server import RemoteService, serve
+from pyspark.sql import SparkSession
+
+parent, child = multiprocessing.get_context("spawn").Pipe()
+process = multiprocessing.get_context("spawn").Process(target=serve, args=(child,))
+process.start()
+try:
+    assert parent.poll(20), "Mock server did not start"
+    url = f"sc://127.0.0.1:{parent.recv()}"
+    for calls, keyword in enumerate(["url", "location"], start=1):
+        spark = SparkSession.builder.remote(**{keyword: url}).getOrCreate()
+        assert spark.range(3).columns == ["id"]
+        assert RemoteService(parent).calls == calls, keyword
+        spark.stop()
+finally:
+    parent.send(("stop",))
+    process.join(10)
+"""], check=True, env=env)
+
+
 def test_functions_struct_creation():
     """Test struct function for creating struct columns."""
     from pyspark.sql import functions as F
