@@ -250,19 +250,16 @@ fn scalar_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<LiteralExpression>>
     let py = obj.py();
 
     // decimal.Decimal -> Decimal literal (before int/float: Decimal has __float__/__int__).
+    // As PySpark's LiteralExpression of a Decimal, of DecimalType(): precision 10 and scale
+    // 0, which the server widens to those of the value, so lit(Decimal("1.5")) is a
+    // decimal(10,1).
     if let Ok(dec_mod) = py.import("decimal") {
         let decimal_cls = dec_mod.getattr("Decimal")?;
         if obj.is_instance(&decimal_cls)? {
-            let value: String = obj.str()?.extract()?;
-            let as_tuple = obj.call_method0("as_tuple")?;
-            let num_digits = as_tuple.get_item(1)?.len()? as i32;
-            let exp: i64 = as_tuple.get_item(2)?.extract().unwrap_or(0);
-            let scale = if exp < 0 { (-exp) as i32 } else { 0 };
-            let precision = num_digits.max(scale).max(1);
             return Ok(Some(LiteralExpression::Decimal {
-                value,
-                precision,
-                scale,
+                value: obj.str()?.extract()?,
+                precision: 10,
+                scale: 0,
             }));
         }
     }

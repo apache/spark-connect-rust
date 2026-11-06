@@ -608,6 +608,33 @@ def test_show_checks_its_arguments_as_pyspark():
         df._show_string(1, n=2)
 
 
+def test_decimal_literal_is_of_the_default_decimal_type_as_pyspark(mock_connect):
+    # As PySpark's LiteralExpression of a Decimal, of DecimalType(): precision 10 and scale
+    # 0, which the server widens to those of the value, wherever the literal is.
+    from decimal import Decimal
+
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    spark.range(1).select(
+        F.lit(Decimal("1.5")), F.col("id") == Decimal("-0.001"), F.lit(Decimal("12345678901.25"))
+    ).collect()
+    # ExecutePlanRequest.plan=3, Plan.root=1, Relation.project=3, Project.expressions=3;
+    # Expression.literal=1, Literal.decimal=12 (value=1, precision=2, scale=3);
+    # .unresolved_function=3, UnresolvedFunction.arguments=2.
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+    expressions = parse_message(parse_message(plan)[3][0])[3]
+
+    def decimal(literal):
+        return parse_message(parse_message(literal)[12][0])
+
+    first, compared, wide = (parse_message(e) for e in expressions)
+    compared = parse_message(parse_message(compared[3][0])[2][1])
+    assert decimal(first[1][0]) == {1: [b"1.5"], 2: [10], 3: [0]}
+    assert decimal(compared[1][0]) == {1: [b"-0.001"], 2: [10], 3: [0]}
+    assert decimal(wide[1][0]) == {1: [b"12345678901.25"], 2: [10], 3: [0]}
+
+
 def test_dropin_module_imports():
     # The thin re-export shims import cleanly.
     import pyspark.sql.dataframe  # noqa: F401
