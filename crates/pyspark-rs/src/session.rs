@@ -1,7 +1,7 @@
 //! PyO3 wrapper for Spark Connect sessions.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyDict, PyList, PyString};
 use spark_connect::row::{Row, StructValue, Value};
 use spark_connect::session::SparkSession;
 use spark_connect::types::{DataType, StructField};
@@ -444,6 +444,11 @@ impl PySparkSession {
         for label in data.getattr("columns")?.try_iter()? {
             columns.push(label?.str()?.extract::<String>()?);
         }
+        // The dtype of each column, which types a column without values, as Arrow does.
+        let mut dtypes = Vec::new();
+        for dtype in data.getattr("dtypes")?.try_iter()? {
+            dtypes.push(dtype?.str()?.extract::<String>()?);
+        }
         // df.astype(object).where(df.notna(), None).values.tolist() -> rows with None for NA.
         let notna = data.call_method0("notna")?;
         let obj = data.call_method1("astype", ("object",))?;
@@ -455,6 +460,8 @@ impl PySparkSession {
             crate::column::raise_pyspark(py, "PySparkValueError", "CANNOT_INFER_EMPTY_SCHEMA", &[])
         };
         // The given fields, and the names that toDF applies, which empty data does not get.
+        // The labels, which errors of a column name, as PySpark names its pandas.Series.
+        let labels = columns.clone();
         let (given, names) = match spec {
             Spec::Atomic(atomic) if !empty => {
                 // pyspark reports str() of the parsed type, which is its repr.
@@ -507,27 +514,44 @@ impl PySparkSession {
             rows.push(Row::new(row_names.clone(), values));
         }
         // A given struct wins; otherwise each field takes the type of its first non-null
-        // value (empty input has a struct schema, checked above).
+        // value (empty input has a struct schema, checked above), but for these, which are
+        // typed as Arrow types a pandas column, as PySpark does: a column of Decimals takes
+        // the precision and scale of all its values, and a column without values the type of
+        // its dtype.
         let fields = match given {
             Some(fields) => fields,
             None => {
                 let mut fields: Vec<StructField> = Vec::with_capacity(row_names.len());
                 for (i, name) in row_names.iter().enumerate() {
-                    let Some(value) = rows
+                    // As PySpark, whose Arrow conversion of the column fails for a null map key.
+                    if rows
                         .iter()
                         .filter_map(|row| row.get(i))
-                        .find(|value| !matches!(value, Value::Null))
-                    else {
-                        return Err(crate::column::raise_pyspark(
-                            py,
-                            "PySparkValueError",
-                            "CANNOT_DETERMINE_TYPE",
-                            &[],
+                        .any(has_null_map_key)
+                    {
+                        return Err(PyErr::from_value(
+                            py.import("pyspark.errors")?
+                                .getattr("PySparkTypeError")?
+                                .call1((format!(
+                                    "Exception thrown when converting pandas.Series ({}) with name \
+                                     '{}' to Arrow Array (None).",
+                                    dtypes.get(i).map_or("object", String::as_str),
+                                    labels.get(i).unwrap_or(name),
+                                ),))?,
                         ));
+                    }
+                    let first = rows
+                        .iter()
+                        .filter_map(|row| row.get(i))
+                        .find(|value| !matches!(value, Value::Null));
+                    let data_type = match first {
+                        Some(Value::Decimal { .. }) => pandas_decimal_type(&data, i)?,
+                        Some(value) => value_to_datatype(value),
+                        None => pandas_dtype_type(dtypes.get(i).map_or("object", String::as_str)),
                     };
                     fields.push(StructField {
                         name: name.clone(),
-                        data_type: value_to_datatype(value),
+                        data_type,
                         nullable: true,
                         metadata: Default::default(),
                     });
@@ -1263,6 +1287,78 @@ impl PyConnectClientStub {
     fn _cleanup_ml_cache(&self) {}
 }
 
+/// Whether `value` has a map with a null key, at any depth.
+fn has_null_map_key(value: &Value) -> bool {
+    match value {
+        Value::Map(entries) => entries
+            .iter()
+            .any(|(key, value)| matches!(key, Value::Null) || has_null_map_key(value)),
+        Value::List(items) => items.iter().any(has_null_map_key),
+        Value::Struct(row) => row.values().iter().any(has_null_map_key),
+        _ => false,
+    }
+}
+
+/// The type of a pandas column without values, by its dtype, as Arrow types it
+/// (`pa.Schema.from_pandas`): `void` for an object column of None, as for one of another
+/// dtype that Spark has no type for.
+fn pandas_dtype_type(dtype: &str) -> DataType {
+    match dtype {
+        "float64" | "Float64" => DataType::Double,
+        "float32" | "Float32" => DataType::Float,
+        "int64" | "Int64" => DataType::Long,
+        "int32" | "Int32" => DataType::Integer,
+        "int16" | "Int16" => DataType::Short,
+        "int8" | "Int8" => DataType::Byte,
+        "bool" | "boolean" => DataType::Boolean,
+        "string" | "str" => crate::infer::string_type(),
+        dtype if dtype.starts_with("datetime64") => DataType::Timestamp,
+        dtype if dtype.starts_with("timedelta64") => DataType::DayTimeInterval {
+            start_field: 0,
+            end_field: 3,
+        },
+        _ => DataType::Null,
+    }
+}
+
+/// The decimal type of column `i` of pandas rows, as Arrow infers it from all its Decimals:
+/// the most integer digits and the largest scale of the values.
+fn pandas_decimal_type(rows: &Bound<'_, PyList>, i: usize) -> PyResult<DataType> {
+    let (mut integer_digits, mut scale) = (0i64, 0i64);
+    for row in rows.iter() {
+        let value = row.get_item(i)?;
+        if value.is_none() {
+            continue;
+        }
+        let parts = value.call_method0("as_tuple")?;
+        let digits = parts.getattr("digits")?.len()? as i64;
+        // NaN and infinities have no exponent of digits, which Arrow cannot type either.
+        let Ok(exponent) = parts.getattr("exponent")?.extract::<i64>() else {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Decimal {} has no precision to type a column by",
+                value.str()?
+            )));
+        };
+        let (precision, value_scale) = if exponent < 0 {
+            (digits.max(-exponent), -exponent)
+        } else {
+            (digits + exponent, 0)
+        };
+        integer_digits = integer_digits.max(precision - value_scale);
+        scale = scale.max(value_scale);
+    }
+    let precision = integer_digits + scale;
+    if precision > 38 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Decimal precision {precision} is out of the range of DecimalType, up to 38"
+        )));
+    }
+    Ok(DataType::Decimal {
+        precision: precision.max(1) as i32,
+        scale: scale as i32,
+    })
+}
+
 /// Infer the Spark `DataType` for a `createDataFrame` column from its (first) value.
 /// Nested collections are inferred recursively; nulls and empty collections use
 /// String as a fallback. Interval input conversion is tracked in SPARK-60659.
@@ -1492,7 +1588,10 @@ fn decimal_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Option<Value>> {
     if !obj.is_instance(&decimal_cls)? {
         return Ok(None);
     }
-    let dec_str: String = obj.str()?.extract()?;
+    // Without an exponent, as `1E+2` is written, which the Arrow encoder parses.
+    let dec_str: String = PyString::new(py, "{:f}")
+        .call_method1("format", (obj,))?
+        .extract()?;
     let as_tuple = obj.call_method0("as_tuple")?;
     let mut scale: Option<i32> = None;
     if let Ok(exp_obj) = as_tuple.get_item(2) {

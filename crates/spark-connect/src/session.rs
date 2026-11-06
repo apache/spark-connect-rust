@@ -1191,6 +1191,9 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
                     Value::Map(m) => {
                         valid.append(true);
                         for (k, val) in m {
+                            if matches!(k, Value::Null) {
+                                return Err(SparkError::connect_msg("A map key cannot be null"));
+                            }
                             keys.push(k.clone());
                             vals.push(val.clone());
                         }
@@ -1210,19 +1213,22 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
                 ),
             ]
             .into();
-            let entries = StructArray::new(entry_fields.clone(), vec![key_arr, val_arr], None);
+            let entries = StructArray::try_new(entry_fields.clone(), vec![key_arr, val_arr], None)
+                .map_err(|e| SparkError::connect_msg(format!("map build: {e}")))?;
             let entries_field = Arc::new(Field::new(
                 "entries",
                 arrow::datatypes::DataType::Struct(entry_fields),
                 false,
             ));
-            Ok(Arc::new(MapArray::new(
+            MapArray::try_new(
                 entries_field,
                 OffsetBuffer::new(offsets.into()),
                 entries,
                 Some(NullBuffer::new(valid.finish())),
                 false,
-            )))
+            )
+            .map(|array| Arc::new(array) as Arc<dyn Array>)
+            .map_err(|e| SparkError::connect_msg(format!("map build: {e}")))
         }
         other => Err(SparkError::connect_msg(format!(
             "Unsupported type for Arrow createDataFrame conversion: {other:?}"
@@ -1825,6 +1831,18 @@ mod tests {
             let error = rows_to_arrow_ipc(&rows, &schema).unwrap_err().to_string();
             assert!(error.contains(message), "{error}");
         }
+    }
+
+    #[test]
+    fn a_null_map_key_is_an_error() {
+        let map = DataType::Map {
+            key_type: Box::new(DataType::Long),
+            value_type: Box::new(DataType::Long),
+            value_contains_null: true,
+        };
+        let value = Value::Map(vec![(Value::Null, Value::Long(1))]);
+        let error = values_to_arrow(&[value], &map).unwrap_err().to_string();
+        assert!(error.contains("A map key cannot be null"), "{error}");
     }
 
     #[test]

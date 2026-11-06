@@ -8,6 +8,7 @@ that require a live server live in test_dropin_e2e.py and are gated on SPARK_REM
 
 import array
 import datetime
+import re
 import decimal
 import json
 import pickle
@@ -3570,6 +3571,20 @@ for schema in schemas:
     else:
         raise AssertionError("expected a width validation error")
 """], check=True)
+
+
+def test_create_dataframe_types_pandas_columns_as_arrow():
+    pd = pytest.importorskip("pandas")
+    np = pytest.importorskip("numpy")
+    from pyspark.errors import PySparkTypeError
+
+    # As PySpark, whose Arrow conversion types a column without values by its dtype, rather
+    # than raising CANNOT_DETERMINE_TYPE (the live suite checks the types).
+    for column in [[np.nan, np.nan], [None, None], pd.to_datetime([None, None])]:
+        _local_create_dataframe(pd.DataFrame({"id": [1, 2], "s": column}))
+    with pytest.raises(PySparkTypeError, match=re.escape(
+            "Exception thrown when converting pandas.Series (object) with name 'm' to Arrow")):
+        _local_create_dataframe(pd.DataFrame({"m": [{None: 1}]}))
 
 
 def _local_create_dataframe(*args):
