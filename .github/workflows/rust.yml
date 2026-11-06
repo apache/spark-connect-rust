@@ -151,11 +151,13 @@ jobs:
         # The client builds the UDF command by running the packer embedded in the
         # crate as `python -c` (needs `pyspark` for its vendored cloudpickle + the
         # pure-Python type parser); `wasmtime` is what the executors need at run time
-        # and lets a follow-up job exercise the module directly.
-        run: python -m pip install --upgrade cloudpickle pyspark wasmtime
+        # and, with `pyarrow`, lets the runner tests exercise the module directly.
+        run: python -m pip install --upgrade cloudpickle pyspark wasmtime pyarrow
 
       - name: Feature-gated unit tests
-        run: cargo test -p apache-spark-connect --features wasm-udf
+        run: |
+          cargo test -p apache-spark-connect --features wasm-udf
+          cargo test -p apache-spark-connect-macros
 
       - name: Build the macro/build helpers and WASM UDF crates + examples
         run: |
@@ -171,3 +173,6 @@ jobs:
         # `DataType` the executors unpickle. No separate `pyspark_wasm_udf` package
         # is needed on any path now, so just run the ignored end-to-end test.
         run: cargo test -p apache-spark-connect --features wasm-udf -- --ignored packer_produces
+
+      - name: WASM UDF runners (pyarrow batches, no server)
+        run: cargo test --manifest-path tests/wasm-udf/Cargo.toml -- --ignored

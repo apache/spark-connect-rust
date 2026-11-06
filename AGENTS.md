@@ -282,13 +282,17 @@ Do not rely on the previous version's suite. When bumping to vX.Y.Z:
 - The packer is a Python script **embedded in the crate**
   (`crates/spark-connect/src/wasm_packer.py`, pulled in with `include_str!`). The
   Rust client runs it as `python -c <src>` (so it executes as `__main__`), which
-  makes cloudpickle serialize the `WasmScalarUDF` runner **by value** into the UDF
-  command. Because it runs as `__main__` there is **no** separate `pyspark_wasm_udf`
-  pip package: the client needs only a Python interpreter with `pyspark` (for its
-  vendored `cloudpickle` + `pyspark.sql.types._parse_datatype_json_value`), and the
-  executors need only `wasmtime`. If the packer's ABI/codec changes, keep it
+  makes cloudpickle serialize the runner (`WasmScalarUDF` per row, `WasmArrowUDF`
+  per Arrow batch) **by value** into the UDF command. Because it runs as `__main__`
+  there is **no** separate `pyspark_wasm_udf` pip package: the client needs only a
+  Python interpreter with `pyspark` (for its vendored `cloudpickle` +
+  `pyspark.sql.types._parse_datatype_json_value`), and the executors need only
+  `wasmtime`. If the packer's ABI/codec changes, keep it
   byte-compatible with `spark_connect::wasm_udf::AbiType` and the build-time runtime
-  in `apache-spark-connect-build`.
+  in `apache-spark-connect-build`. The tests that check this are outside the
+  workspace: `cargo test --manifest-path tests/wasm-udf/Cargo.toml -- --ignored`
+  (Python with `pyspark`, `pyarrow` and `wasmtime`), formatted with
+  `cargo fmt --manifest-path tests/wasm-udf/Cargo.toml`.
 - Registration mirrors pyspark: `spark.udf().register("name", &udf)` (a
   session-side `UdfRegistration` handle), then callable from SQL.
 - Removing Python on the client entirely would mean pre-baking the cloudpickled
