@@ -4154,6 +4154,45 @@ def test_row_hash_matches_tuple():
     assert hash(Row(a=Row(b=1))) == hash(((1,),))
 
 
+def test_observations_check_their_arguments_as_pyspark(mock_connect):
+    # As PySpark's Observation and DataFrame.observe, which check their arguments on the
+    # client, and ask the server whether the DataFrame is streaming, as `df.isStreaming`.
+    from pyspark.errors import PySparkAssertionError, PySparkTypeError, PySparkValueError
+    from pyspark.sql import Observation
+    from pyspark.sql import functions as F
+
+    spark, _ = mock_connect
+    count = F.count(F.lit(1)).alias("c")
+    df = spark.range(1)
+    for call, error_type, condition, parameters in (
+        (lambda: Observation(1), PySparkTypeError, "NOT_EXPECTED_TYPE",
+         {"arg_name": "name", "expected_type": "str", "arg_type": "int"}),
+        (lambda: Observation(""), PySparkValueError, "VALUE_NOT_NON_EMPTY_STR",
+         {"arg_name": "name", "arg_value": ""}),
+        (lambda: Observation("o").get, PySparkAssertionError, "NO_OBSERVE_BEFORE_GET", {}),
+        (lambda: df.observe(Observation("o")), PySparkValueError, "CANNOT_BE_EMPTY",
+         {"item": "exprs"}),
+        (lambda: df.observe("o", "id"), PySparkTypeError, "NOT_EXPECTED_TYPE",
+         {"arg_name": "exprs", "expected_type": "list[Column]", "arg_type": "tuple"}),
+        (lambda: df.observe(1, count), PySparkTypeError, "NOT_EXPECTED_TYPE",
+         {"arg_name": "observation", "expected_type": "Observation or str", "arg_type": "int"}),
+    ):
+        with pytest.raises(error_type) as error:
+            call()
+        assert error.value.getCondition() == condition
+        assert error.value.getMessageParameters() == parameters
+    # An unnamed observation is of a random UUID once it is used, and is used once; it has no
+    # metrics until an action runs.
+    observation = Observation()
+    assert observation._name is None
+    df.observe(observation, count)
+    assert len(observation._name) == 36 and observation.get == {}
+    for observe in (lambda: df.observe(observation, count), lambda: observation._on(df, count)):
+        with pytest.raises(PySparkAssertionError) as error:
+            observe()
+        assert error.value.getCondition() == "REUSE_OBSERVATION"
+
+
 def test_row_usable_in_set_and_dict():
     """Equal Rows collapse in a set and work as dict keys."""
     from pyspark.sql import Row

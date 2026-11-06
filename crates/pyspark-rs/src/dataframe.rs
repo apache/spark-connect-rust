@@ -1230,24 +1230,65 @@ impl PyDataFrame {
         )
     }
 
-    /// Observe named metrics on the stream/df. `observation` is an Observation
-    /// object or a name string; the remaining args are aggregate metric columns.
-    /// Mirrors `DataFrame.observe(observation, *exprs)`.
+    /// Observe metrics, as PySpark's `DataFrame.observe(observation, *exprs)`: the Columns
+    /// `exprs`, which an Observation receives, or which are observed by a name.
     #[pyo3(signature = (observation, *exprs))]
     fn observe(
         &self,
+        py: Python<'_>,
         observation: &Bound<'_, PyAny>,
         exprs: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let name =
-            if let Ok(obs) = observation.extract::<PyRef<crate::observation::PyObservation>>() {
-                obs.inner.name().to_string()
-            } else {
-                observation.extract::<String>()?
-            };
-        let columns = to_column_list(exprs)?;
-        let e: Vec<_> = columns.iter().map(|c| c.expression().clone()).collect();
-        Ok(PyDataFrame::new(self.dataframe.observe(&name, e)))
+        if exprs.is_empty() {
+            return Err(crate::column::raise_pyspark(
+                py,
+                "PySparkValueError",
+                "CANNOT_BE_EMPTY",
+                &[("item", "exprs")],
+            ));
+        }
+        let mut columns = Vec::with_capacity(exprs.len());
+        for expr in &exprs {
+            match expr.extract::<PyRef<'_, PyColumn>>() {
+                Ok(column) => columns.push(column.column.expression().clone()),
+                Err(_) => {
+                    return Err(crate::column::raise_pyspark(
+                        py,
+                        "PySparkTypeError",
+                        "NOT_EXPECTED_TYPE",
+                        &[
+                            ("arg_name", "exprs"),
+                            ("expected_type", "list[Column]"),
+                            ("arg_type", "tuple"),
+                        ],
+                    ))
+                }
+            }
+        }
+        if let Ok(observation) =
+            observation.extract::<PyRef<'_, crate::observation::PyObservation>>()
+        {
+            let observation = &observation.inner;
+            return py
+                .detach(|| self.dataframe.observe_with(observation, columns))
+                .to_pyerr()
+                .map(PyDataFrame::new);
+        }
+        if observation.is_instance_of::<pyo3::types::PyString>() {
+            let name: String = observation.extract()?;
+            return Ok(PyDataFrame::new(self.dataframe.observe(&name, columns)));
+        }
+        let type_name = observation.get_type().name()?.to_string();
+        Err(crate::column::raise_pyspark(
+            py,
+            "PySparkTypeError",
+            "NOT_EXPECTED_TYPE",
+            &[
+                ("arg_name", "observation"),
+                ("expected_type", "Observation or str"),
+                ("arg_type", &type_name),
+            ],
+        ))
     }
 
     /// Register as a temporary view (session-scoped).
@@ -3446,7 +3487,7 @@ fn execution_metrics<'py>(
 /// `data_type` is the literal's type when the enclosing literal carries it; a struct's
 /// field names come from it, else from the literal's own `data_type`, else from the
 /// deprecated `struct_type`.
-fn literal_to_py(
+pub(crate) fn literal_to_py(
     py: Python<'_>,
     literal: &spark_connect_proto::expression::Literal,
     data_type: Option<&spark_connect_proto::DataType>,

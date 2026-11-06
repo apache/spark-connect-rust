@@ -1406,6 +1406,40 @@ def test_decimal_literals_are_of_the_types_of_pyspark(session):
     )
 
 
+def test_observations_receive_the_observed_metrics_as_pyspark(session):
+    # As PySpark's: each action that runs a DataFrame of an observation sets in it the metrics
+    # that the server observed, for each observation of a name on its own, and get raises the
+    # error of collecting them.
+    from pyspark.errors import PySparkException
+    from pyspark.sql import Observation
+
+    first, second = Observation("m"), Observation("m")
+    df1 = session.range(3).observe(
+        first, F.count(F.lit(1)).alias("c"), F.sum("id").alias("s"), F.lit(None).alias("n")
+    )
+    df2 = session.range(5).observe(second, F.count(F.lit(1)).alias("c"))
+    assert first.get == {} and second.get == {}
+    assert df1.collect() == [Row(id=0), Row(id=1), Row(id=2)]
+    assert first.get == {"c": 3, "s": 3, "n": None} and second.get == {}
+    df2.select("*").write.format("noop").mode("overwrite").save()
+    assert second.get == {"c": 5}
+    assert df1.where("id > 0").count() == 2 and first.get["c"] == 3
+
+    failing = Observation("failing")
+    df = session.range(2).observe(failing, F.raise_error(F.lit("test error")).alias("e"))
+    assert df.collect() == [Row(id=0), Row(id=1)]
+    with pytest.raises(PySparkException, match="test error"):
+        failing.get
+
+    # A streaming DataFrame, which the server tells, is not observed.
+    from pyspark.errors import IllegalArgumentException
+
+    stream = session.readStream.format("rate").load()
+    with pytest.raises(IllegalArgumentException) as error:
+        stream.observe(Observation(), F.count(F.lit(1)).alias("c"))
+    assert error.value.getCondition() == "UNSUPPORTED_OPERATION"
+
+
 def test_ml_vector_functions_as_pyspark(session):
     from pyspark.ml.functions import array_to_vector, vector_to_array
 
