@@ -147,7 +147,8 @@ def serve(connection):
 
         # ExecutePlan records each request and streams one response carrying
         # `execute_payload` (raw ExecutePlanResponse fields), then ResultComplete; with
-        # `execute_failure` set it aborts instead. Responses echo the request's
+        # `execute_failure` set it aborts instead, with INVALID_ARGUMENT and that message, or
+        # with the status code name and message of a tuple. Responses echo the request's
         # operation id, as the server does.
         execute_requests = []
         execute_payload = b""
@@ -173,7 +174,12 @@ def serve(connection):
                     "Python thread could not run while the statement ran",
                 )
             if self.execute_failure:
-                context.abort(grpc.StatusCode.INVALID_ARGUMENT, self.execute_failure)
+                code, message = (
+                    self.execute_failure
+                    if isinstance(self.execute_failure, tuple)
+                    else ("INVALID_ARGUMENT", self.execute_failure)
+                )
+                context.abort(getattr(grpc.StatusCode, code), message)
             if self.execute_error:
                 message, reason, metadata = self.execute_error
                 # google.rpc: Status.code=1, message=2, details=3; Any.type_url=1, value=2;
