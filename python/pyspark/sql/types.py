@@ -405,8 +405,18 @@ def _create_row(fields, values):
 
 def _udt_converter(dataType):
     """The function that turns a collected value of ``dataType`` into what PySpark gives for it,
-    deserializing the values of its user-defined types as PySpark's
-    ``ArrowTableToRowsConversion`` does, or None for a type without a user-defined type."""
+    deserializing the values of its user-defined types, and making the Geometry and Geography
+    of its spatial values, as PySpark's ``ArrowTableToRowsConversion`` does, or None for a type
+    without either."""
+    if isinstance(dataType, (GeometryType, GeographyType)):
+        spatial = Geometry if isinstance(dataType, GeometryType) else Geography
+
+        def convert_spatial(value):
+            if value is None:
+                return None
+            return spatial.fromWKB(value["wkb"], value["srid"])
+
+        return convert_spatial
     if isinstance(dataType, UserDefinedType):
         inner = _udt_converter(dataType.sqlType())
 

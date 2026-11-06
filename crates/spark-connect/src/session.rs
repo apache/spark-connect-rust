@@ -944,6 +944,7 @@ fn schema_to_arrow_fields(schema: &DataType) -> Result<Vec<arrow::datatypes::Fie
 /// Map a Spark `DataType` to its Arrow `DataType`, recursively (array/map/struct included).
 fn datatype_to_arrow(dt: &DataType) -> Result<arrow::datatypes::DataType> {
     use arrow::datatypes::{DataType as A, Field, Fields, TimeUnit};
+    use std::collections::HashMap;
     Ok(match dt {
         DataType::Null => A::Null,
         DataType::Boolean => A::Boolean,
@@ -1010,6 +1011,39 @@ fn datatype_to_arrow(dt: &DataType) -> Result<arrow::datatypes::DataType> {
                 .into();
             A::Struct(f)
         }
+        // As PySpark's `to_arrow_type`: the struct of the binary value and metadata of a
+        // VARIANT, and of the srid and WKB of a GEOMETRY or a GEOGRAPHY, whose metadata tags
+        // the struct as one of these types.
+        DataType::Variant => A::Struct(
+            vec![
+                Field::new("value", A::Binary, false),
+                Field::new("metadata", A::Binary, false)
+                    .with_metadata(HashMap::from([("variant".to_string(), "true".to_string())])),
+            ]
+            .into(),
+        ),
+        DataType::Geometry { srid } | DataType::Geography { srid } => {
+            let kind = if matches!(dt, DataType::Geometry { .. }) {
+                "geometry"
+            } else {
+                "geography"
+            };
+            A::Struct(
+                vec![
+                    Field::new("srid", A::Int32, false),
+                    Field::new("wkb", A::Binary, false).with_metadata(HashMap::from([
+                        (kind.to_string(), "true".to_string()),
+                        ("srid".to_string(), srid.to_string()),
+                    ])),
+                ]
+                .into(),
+            )
+        }
+        // As PySpark's, a user-defined type is sent as its SQL type.
+        DataType::Udt {
+            sql_type: Some(sql_type),
+            ..
+        } => datatype_to_arrow(sql_type)?,
         other => {
             return Err(SparkError::connect_msg(format!(
                 "Unsupported type for Arrow createDataFrame conversion: {other:?}"
@@ -1204,6 +1238,79 @@ fn values_to_arrow(values: &[&Value], dt: &DataType) -> Result<Arc<dyn arrow::ar
                 Some(NullBuffer::new(valid.finish())),
             )))
         }
+        // The struct of a VARIANT's value and metadata, and of a GEOMETRY's or a GEOGRAPHY's
+        // srid and WKB, as `datatype_to_arrow` declares; their fields are not nullable, so a
+        // null value has empty ones.
+        DataType::Variant | DataType::Geometry { .. } | DataType::Geography { .. } => {
+            let mut first = Vec::with_capacity(values.len());
+            let mut second: Vec<&[u8]> = Vec::with_capacity(values.len());
+            let mut valid = arrow::array::builder::BooleanBufferBuilder::new(values.len());
+            for v in values {
+                match (*v, dt) {
+                    (Value::Null, _) => {
+                        valid.append(false);
+                        first.push(None);
+                        second.push(&[]);
+                    }
+                    (Value::Variant { value, metadata }, DataType::Variant) => {
+                        valid.append(true);
+                        first.push(Some(value.as_slice()));
+                        second.push(metadata.as_slice());
+                    }
+                    (Value::Struct(sf), DataType::Geometry { .. } | DataType::Geography { .. }) => {
+                        let (Some(Value::Integer(_)), Some(Value::Binary(wkb))) =
+                            (sf.get_by_name("srid"), sf.get_by_name("wkb"))
+                        else {
+                            return Err(SparkError::connect_msg("Type mismatch in row data"));
+                        };
+                        valid.append(true);
+                        first.push(None);
+                        second.push(wkb.as_slice());
+                    }
+                    _ => return Err(SparkError::connect_msg("Type mismatch in row data")),
+                }
+            }
+            let arrow::datatypes::DataType::Struct(afields) = datatype_to_arrow(dt)? else {
+                unreachable!("these types are structs")
+            };
+            let nulls = Some(NullBuffer::new(valid.finish()));
+            let arrays: Vec<Arc<dyn Array>> = match dt {
+                DataType::Variant => vec![
+                    Arc::new(BinaryArray::from(
+                        first
+                            .iter()
+                            .map(|v| v.unwrap_or(&[]))
+                            .collect::<Vec<&[u8]>>(),
+                    )),
+                    Arc::new(BinaryArray::from(second)),
+                ],
+                _ => {
+                    let srids: Vec<i32> = values
+                        .iter()
+                        .map(|v| match *v {
+                            Value::Struct(sf) => match sf.get_by_name("srid") {
+                                Some(Value::Integer(srid)) => *srid,
+                                _ => 0,
+                            },
+                            _ => 0,
+                        })
+                        .collect();
+                    vec![
+                        Arc::new(Int32Array::from(srids)),
+                        Arc::new(BinaryArray::from(second)),
+                    ]
+                }
+            };
+            Ok(Arc::new(
+                StructArray::try_new(afields, arrays, nulls).map_err(|e| {
+                    SparkError::connect_msg(format!("Arrow struct build error: {e}"))
+                })?,
+            ))
+        }
+        DataType::Udt {
+            sql_type: Some(sql_type),
+            ..
+        } => values_to_arrow(values, sql_type),
         DataType::Struct { fields } => {
             let mut cols: Vec<Vec<&Value>> = vec![Vec::with_capacity(values.len()); fields.len()];
             let mut valid = arrow::array::builder::BooleanBufferBuilder::new(values.len());
@@ -2229,6 +2336,90 @@ mod tests {
                 .unwrap(),
             &Time64NanosecondArray::from(vec![Some(3_723_456_789_000), None])
         );
+    }
+
+    #[test]
+    fn input_ipc_sends_variants_spatial_and_udt_values_as_pyspark() {
+        // As PySpark's `to_arrow_type`: the structs of a VARIANT's value and metadata, and of a
+        // GEOMETRY's srid and WKB, which their metadata tags, and a UDT as its SQL type.
+        use arrow::array::{Array, BinaryArray, Int32Array, ListArray, StructArray};
+        let udt = DataType::Udt {
+            type_str: "udt".to_string(),
+            jvm_class: None,
+            python_class: Some("pyspark.testing.objects.ExamplePointUDT".to_string()),
+            serialized_python_class: None,
+            sql_type: Some(Box::new(DataType::Array {
+                element_type: Box::new(DataType::Double),
+                contains_null: false,
+            })),
+        };
+        let schema = schema(vec![
+            DataType::Variant,
+            DataType::Geometry { srid: 4326 },
+            udt,
+        ]);
+        let geometry = Value::Struct(
+            Row::new(
+                vec!["srid".to_string(), "wkb".to_string()],
+                vec![Value::Integer(4326), Value::Binary(vec![1, 2])],
+            )
+            .into(),
+        );
+        let rows = vec![
+            row(vec![
+                Value::Variant {
+                    value: vec![12, 1],
+                    metadata: vec![1, 0, 0],
+                },
+                geometry,
+                Value::List(vec![Value::Double(1.0), Value::Double(2.0)]),
+            ]),
+            row(vec![Value::Null, Value::Null, Value::Null]),
+        ];
+        let batch = read_batch(&rows, &schema);
+        let variant = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let fields = variant.fields();
+        assert_eq!(
+            fields[1].metadata().get("variant").map(String::as_str),
+            Some("true")
+        );
+        let metadata = variant
+            .column(1)
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        assert_eq!(metadata.value(0), [1, 0, 0]);
+        assert!(variant.is_null(1));
+        let geometry = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let wkb_field = &geometry.fields()[1];
+        assert_eq!(
+            wkb_field.metadata().get("geometry").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            wkb_field.metadata().get("srid").map(String::as_str),
+            Some("4326")
+        );
+        let srid = geometry
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        assert_eq!(srid.value(0), 4326);
+        assert!(geometry.is_null(1));
+        assert!(batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .is_some());
     }
 
     #[test]
