@@ -778,7 +778,7 @@ impl PySparkSession {
                 // pandas applies explicit field names with toDF even though the
                 // local relation already carries them. Empty input stays local.
                 return Ok(match &spec {
-                    Spec::Struct(fields) if !fields.is_empty() && data.len()? > 0 => {
+                    Spec::Struct(fields) if !fields.is_empty() && table.len()? > 0 => {
                         PyDataFrame::new(frame.dataframe.to_df(
                             fields.iter().map(|field| field.name.as_str()).collect(),
                         ))
