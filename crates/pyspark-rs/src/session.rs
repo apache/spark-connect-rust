@@ -1532,6 +1532,15 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
         }
     }
 
+    // datetime.timedelta -> a day-time interval, as DayTimeIntervalType.toInternal.
+    if let Some(dt_mod) = &datetime_mod {
+        if let Ok(timedelta_cls) = dt_mod.getattr("timedelta") {
+            if obj.is_instance(&timedelta_cls)? {
+                return Ok(Value::DayTimeInterval(crate::infer::timedelta_micros(obj)?));
+            }
+        }
+    }
+
     // Check for datetime.date (after datetime.datetime)
     if let Some(dt_mod) = &datetime_mod {
         if let Ok(date_cls) = dt_mod.getattr("date") {

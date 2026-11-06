@@ -578,6 +578,36 @@ def test_add_artifacts_raises_for_paths_that_pyspark_does_not_upload(tmp_path):
         "arg_names": "'pyfile', 'archive' and/or 'file'", "condition": "True together"}
 
 
+def test_show_checks_its_arguments_as_pyspark():
+    import inspect
+
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import DataFrame
+
+    assert str(inspect.signature(DataFrame.show)) == "(self, /, n=20, truncate=True, vertical=False)"
+    df = _offline_session().range(3)
+    # Raised before any request, as by DataFrame._show_string.
+    for kwargs, name, expected, arg_type in (
+        ({"n": True}, "n", "int", "bool"),
+        ({"n": "3"}, "n", "int", "str"),
+        ({"n": None}, "n", "int", "NoneType"),
+        ({"vertical": 1}, "vertical", "bool", "int"),
+        ({"vertical": None}, "vertical", "bool", "NoneType"),
+        ({"truncate": "x"}, "truncate", "bool", "str"),
+    ):
+        with pytest.raises(PySparkTypeError) as error:
+            df.show(**kwargs)
+        assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+        assert error.value.getMessageParameters() == {
+            "expected_type": expected, "arg_name": name, "arg_type": arg_type}
+    with pytest.raises(TypeError, match=r"^int\(\) argument must be"):
+        df.show(truncate=None)
+    with pytest.raises(TypeError, match=r"^DataFrame\.show\(\) got an unexpected keyword argument 'foo'$"):
+        df.show(foo=1)
+    with pytest.raises(TypeError, match=r"^DataFrame\._show_string\(\) got multiple values for argument 'n'$"):
+        df._show_string(1, n=2)
+
+
 def test_dropin_module_imports():
     # The thin re-export shims import cleanly.
     import pyspark.sql.dataframe  # noqa: F401
@@ -2287,6 +2317,17 @@ def test_spatial_types_construction():
     assert "geography" in gg.simpleString()
 
 
+def test_variant_val_pickles_as_pyspark():
+    import pickle
+
+    from pyspark.sql.types import VariantVal
+
+    # As PySpark's VariantVal(value, metadata), which pickles as a plain class does.
+    value = pickle.loads(pickle.dumps(VariantVal(b"\x0c\x01", b"\x01\x00\x00")))
+    assert type(value) is VariantVal
+    assert (value.value, value.metadata) == (b"\x0c\x01", b"\x01\x00\x00")
+
+
 def test_variant_values():
     """Test VariantVal and other variant types."""
     from pyspark.sql.types import VariantVal, Geometry, Geography
@@ -3614,6 +3655,29 @@ def test_create_dataframe_types_pandas_columns_as_arrow():
         _local_create_dataframe(pd.DataFrame({"m": [{None: 1}]}))
 
 
+def test_timedelta_values_convert_as_pyspark():
+    import datetime
+    import re
+
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.sql import functions as F
+
+    # A day-time interval, rather than UNSUPPORTED_DATA_TYPE (the live suite checks values).
+    one = datetime.timedelta(days=1, seconds=2, microseconds=3)
+    F.lit(one)
+    _local_create_dataframe([(one,), (None,)])
+    _local_create_dataframe([(5,), (1.5,)], "d interval day to second")
+    # Other values raise as PyArrow's conversion to duration[us] does.
+    for value, error, message in (
+        (True, pa.ArrowTypeError, "Expected integer, got bool"),
+        ("x", pa.ArrowTypeError, "object of type <class 'str'> cannot be converted to int"),
+        (float("nan"), ValueError, "cannot convert float NaN to integer"),
+        (2**63, OverflowError, "Python int too large to convert to C long"),
+    ):
+        with pytest.raises(error, match="^" + re.escape(message) + "$"):
+            _local_create_dataframe([(value,)], "d interval day to second")
+
+
 def _local_create_dataframe(*args):
     # The local relation and its toDF are built without a server.
     return _offline_session().createDataFrame(*args)
@@ -4437,6 +4501,66 @@ def test_instr_regexp_replace_optional_args():
 
 
 @pytest.mark.parametrize("column,expected", [
+    # As PySpark Connect's Expression reprs: an operator renders as a function.
+    (lambda F: F.col("a") + 1, "+(a, 1)"),
+    (lambda F: 1 - F.col("a"), "-(1, a)"),
+    (lambda F: (F.col("a") + 1) * (F.col("b") - 2), "*(+(a, 1), -(b, 2))"),
+    (lambda F: -F.col("a"), "negative(a)"),
+    (lambda F: ~F.col("a"), "not(a)"),
+    (lambda F: F.col("a") != 1, "not(==(a, 1))"),
+    (lambda F: F.col("a") & F.col("b"), "and(a, b)"),
+    (lambda F: F.col("a").between(1, 2), "and(>=(a, 1), <=(a, 2))"),
+    (lambda F: F.when(F.col("a") > 1, 1).otherwise(0), "CASE WHEN >(a, 1) THEN 1 ELSE 0 END"),
+    (lambda F: F.countDistinct("a"), "count(distinct a)"),
+    (lambda F: F.col("a").cast("int"), "CAST(a AS INT)"),
+    (lambda F: F.col("a").cast("struct<x:int,y:string>"), "CAST(a AS STRUCT<X:INT,Y:STRING>)"),
+    (lambda F: F.col("a").try_cast("int"), "TRY_CAST(a AS INT)"),
+    (lambda F: F.col("*"), "unresolvedstar()"),
+    (lambda F: F.count("*"), "count(unresolvedstar())"),
+    (lambda F: F.col("t.*"), "unresolvedstar(t.*)"),
+    (lambda F: F.col("a")[0], "a['0']"),
+    (lambda F: F.col("a")["k"], "a['k']"),
+    # Literals, as LiteralExpression.__repr__ shows their Python values.
+    (lambda F: F.lit(True), "True"),
+    (lambda F: F.lit(None), "NULL"),
+    (lambda F: F.lit(1.5), "1.5"),
+    (lambda F: F.lit(1e20), "1e+20"),
+    (lambda F: F.lit(1e-07), "1e-07"),
+    (lambda F: F.lit(float("nan")), "nan"),
+    (lambda F: F.lit(b"a'b"), 'b"a\'b"'),
+    (lambda F: F.lit(bytes([0, 9, 92, 200])), "b'\\x00\\t\\\\\\xc8'"),
+    (lambda F: F.lit(__import__("datetime").date(1999, 12, 31)), "1999-12-31"),
+    # A naive datetime is a local time, rendered in the local time zone again.
+    (lambda F: F.lit(__import__("datetime").datetime(2020, 1, 2, 3, 4, 5, 6)),
+     "2020-01-02 03:04:05.000006"),
+    (lambda F: F.lit(__import__("decimal").Decimal("-1.50")), "-1.50"),
+])
+def test_column_reprs_as_pyspark(column, expected):
+    from pyspark.sql import functions as F
+
+    assert repr(column(F)) == f"Column<'{expected}'>"
+
+
+def test_window_and_lambda_reprs_as_pyspark():
+    import re
+
+    from pyspark.sql import Window
+    from pyspark.sql import functions as F
+
+    spec = Window.partitionBy("g").orderBy(F.col("o").desc()).rowsBetween(-1, 1)
+    assert repr(spec) == "WindowSpec(PartitionBy(g), OrderBy(o DESC NULLS LAST), WindowFrame(ROW_FRAME, -1, 1))"
+    window = F.sum("a").over(
+        Window.orderBy(F.col("o").asc()).rangeBetween(Window.unboundedPreceding, Window.currentRow))
+    assert repr(window) == (
+        "Column<'WindowExpression(sum(a), (WindowSpec(OrderBy(o ASC NULLS FIRST), "
+        "WindowFrame(RANGE_FRAME, -9223372036854775808, 0))))'>")
+    # A lambda variable is named by a counter, as in PySpark.
+    assert re.fullmatch(
+        r"Column<'transform\(a, LambdaFunction\(\+\(x_(\d+), 1\), x_\1\)\)'>",
+        repr(F.transform("a", lambda x: x + 1)))
+
+
+@pytest.mark.parametrize("column,expected", [
     # instr and regexp_replace are plain functions, as other functions are.
     (lambda F: F.instr("s", "b"), "instr(s, b)"),
     (lambda F: F.instr("s", "b", 2), "instr(s, b, 2)"),
@@ -4680,8 +4804,11 @@ def test_execution_info_decodes_observed_metrics_and_operation_id(mock_connect):
     service.execute_payload = message_field(6, observed)
 
     assert spark.range(1).executionInfo is None
-    spark.range(1).collect()
-    info = spark.range(1).executionInfo
+    df = spark.range(1)
+    df.collect()
+    info = df.executionInfo
+    # The information is that of the DataFrame that ran, as in PySpark.
+    assert spark.range(1).executionInfo is None
     assert info.operation_id == _request_operation_id(service.execute_requests[-1])
     ((name, pairs),) = info.flows
     assert name == "o"
@@ -4700,8 +4827,9 @@ def test_execution_info_unsupported_literal_raises_on_flows(mock_connect):
     # Literal.calendar_interval=19 (months=1): the reference rejects it in _to_value.
     observed = message_field(1, "o") + message_field(2, message_field(19, varint_field(1, 2)))
     service.execute_payload = message_field(6, observed)
-    spark.range(1).collect()
-    info = spark.range(1).executionInfo
+    df = spark.range(1)
+    df.collect()
+    info = df.executionInfo
     assert info.operation_id == _request_operation_id(service.execute_requests[-1])
     with pytest.raises(PySparkTypeError, match="UNSUPPORTED_LITERAL"):
         info.flows

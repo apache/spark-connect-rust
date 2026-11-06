@@ -97,6 +97,15 @@ pub enum LogicalPlan {
     },
     /// Tail: `df.tail(n)` - returns last n rows.
     Tail { input: Arc<LogicalPlan>, limit: i32 },
+    /// ShowString: the table of `df.show(...)`, which the server formats as one string:
+    /// `num_rows` rows, values truncated to `truncate` characters (0 for none), vertical
+    /// with a line per value.
+    ShowString {
+        input: Arc<LogicalPlan>,
+        num_rows: i32,
+        truncate: i32,
+        vertical: bool,
+    },
     /// Deduplicate: `df.distinct()` or `df.dropDuplicates()`.
     Deduplicate {
         input: Arc<LogicalPlan>,
@@ -704,6 +713,21 @@ impl LogicalPlan {
                 tail.input = Some(Box::new(relation_of(input, plan_ids)));
                 tail.limit = *limit;
                 relation.rel_type = Some(proto::relation::RelType::Tail(Box::new(tail)));
+            }
+
+            LogicalPlan::ShowString {
+                input,
+                num_rows,
+                truncate,
+                vertical,
+            } => {
+                let show = proto::ShowString {
+                    input: Some(Box::new(relation_of(input, plan_ids))),
+                    num_rows: *num_rows,
+                    truncate: *truncate,
+                    vertical: *vertical,
+                };
+                relation.rel_type = Some(proto::relation::RelType::ShowString(Box::new(show)));
             }
 
             LogicalPlan::Deduplicate {

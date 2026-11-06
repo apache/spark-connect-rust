@@ -66,8 +66,8 @@ fn aliases_and_function_arguments_share_reused_subtrees() {
         assert_shared(argument, source.expression());
     }
     assert_eq!(source.to_proto(), before);
-    assert_eq!(left.expression().render(), "(value + 1) AS left");
-    assert_eq!(right.expression().render(), "(value + 1) AS right");
+    assert_eq!(left.expression().render(), "+(value, 1) AS left");
+    assert_eq!(right.expression().render(), "+(value, 1) AS right");
 }
 
 #[test]
@@ -100,7 +100,7 @@ fn case_branches_share_children_without_mutating_the_original() {
     assert_eq!(original.to_proto(), before);
     assert_eq!(
         completed.expression().render(),
-        "CASE WHEN (value > 0) THEN (value + 1) ELSE 0 END"
+        "CASE WHEN >(value, 0) THEN +(value, 1) ELSE 0 END"
     );
 }
 
@@ -170,7 +170,7 @@ fn debug_render_and_proto_keep_the_existing_representation() {
 
     let source = col("value") + lit(1);
     let alias = source.clone().alias("total");
-    assert_eq!(alias.expression().render(), "(value + 1) AS total");
+    assert_eq!(alias.expression().render(), "+(value, 1) AS total");
     assert_eq!(
         alias.to_proto(),
         Alias::new(source.expression().clone(), "total").to_proto()

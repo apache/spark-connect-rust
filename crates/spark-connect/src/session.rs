@@ -893,6 +893,8 @@ fn datatype_to_arrow(dt: &DataType) -> Result<arrow::datatypes::DataType> {
         }
         DataType::TimestampNtzNanos { .. } => A::Timestamp(TimeUnit::Nanosecond, None),
         DataType::Time { .. } => A::Time64(TimeUnit::Microsecond),
+        // As Spark's Arrow conversion of DayTimeIntervalType.
+        DataType::DayTimeInterval { .. } => A::Duration(TimeUnit::Microsecond),
         DataType::Decimal { precision, scale } => A::Decimal128(*precision as u8, *scale as i8),
         DataType::Array {
             element_type,
@@ -1032,6 +1034,7 @@ fn values_to_arrow(values: &[Value], dt: &DataType) -> Result<Arc<dyn arrow::arr
             Ok(Arc::new(BinaryArray::from(vals?)))
         }
         DataType::Date => prim!(Date32Array, Value::Date),
+        DataType::DayTimeInterval { .. } => prim!(DurationMicrosecondArray, Value::DayTimeInterval),
         DataType::Timestamp | DataType::TimestampNtz => {
             let vals: Result<Vec<Option<i64>>> = values
                 .iter()
@@ -1659,6 +1662,30 @@ mod tests {
         assert!(reader.next().is_none());
         assert_eq!(batch.num_rows(), rows.len());
         batch
+    }
+
+    #[test]
+    fn input_ipc_writes_day_time_intervals_as_microsecond_durations() {
+        // As Spark's Arrow conversion of DayTimeIntervalType.
+        let interval = DataType::DayTimeInterval {
+            start_field: 0,
+            end_field: 3,
+        };
+        let rows = vec![
+            row(vec![Value::DayTimeInterval(86_402_000_003)]),
+            row(vec![Value::Null]),
+            row(vec![Value::DayTimeInterval(-999_995)]),
+        ];
+        let batch = read_batch(&rows, &schema(vec![interval]));
+        let column = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::DurationMicrosecondArray>()
+            .unwrap();
+        assert_eq!(
+            column.iter().collect::<Vec<_>>(),
+            vec![Some(86_402_000_003), None, Some(-999_995)]
+        );
     }
 
     #[test]

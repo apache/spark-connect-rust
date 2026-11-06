@@ -273,6 +273,38 @@ def test_add_artifacts_reach_udfs_as_pyspark(session, tmp_path):
     assert session.range(1).select(read("id")).first()[0] == "from the module|file content|inside"
 
 
+def test_execution_info_is_that_of_each_dataframe_as_pyspark(session):
+    a = session.range(3)
+    assert a.executionInfo is None
+    a.collect()
+    assert a.executionInfo is not None
+    # Another DataFrame, and one that an action runs derived from it, have none.
+    b = session.range(5)
+    b.count()
+    b.first()
+    assert b.executionInfo is None and a.select("id").executionInfo is None
+    for run in (
+        lambda df: df.toArrow(),
+        lambda df: df.toPandas(),
+        lambda df: df.createOrReplaceTempView("execution_info_view"),
+        lambda df: df.write.mode("overwrite").format("noop").save(),
+    ):
+        df = session.range(2)
+        run(df)
+        assert df.executionInfo is not None
+        assert df.executionInfo.operation_id != a.executionInfo.operation_id
+
+
+def test_catalog_and_stream_start_errors_carry_their_operation_id(session):
+    for run in (
+        lambda: session.catalog.setCurrentDatabase("no_such_database_60960"),
+        lambda: session.readStream.format("rate").load().writeStream.format("no_such_sink_60960").start(),
+    ):
+        with pytest.raises(Exception) as error:
+            run()
+        assert isinstance(error.value.operation_id, str) and error.value.operation_id
+
+
 def test_create_dataframe_from_empty_arrow_table(session):
     empty = pa.table({"a": pa.array([], pa.int64()), "b": pa.array([], pa.string())})
     df = session.createDataFrame(empty, "a long, b string")
@@ -429,6 +461,29 @@ def test_collect_reads_a_result_across_stream_ends(session):
     assert session.range(n).toArrow().num_rows == n
 
 
+def test_timedelta_is_a_day_time_interval_as_pyspark(session):
+    import datetime
+
+    import pyarrow as pa
+
+    values = [datetime.timedelta(days=1, seconds=2, microseconds=3),
+              datetime.timedelta(seconds=-1, microseconds=5)]
+    df = session.range(1).select(*[F.lit(v).alias(f"t{i}") for i, v in enumerate(values)])
+    assert df.dtypes == [("t0", "interval day to second"), ("t1", "interval day to second")]
+    assert tuple(df.first()) == tuple(values)
+    df = session.createDataFrame([(v,) for v in values] + [(None,)], ["t"])
+    assert df.dtypes == [("t", "interval day to second")]
+    assert [r.t for r in df.collect()] == values + [None]
+    # As PyArrow's conversion to duration[us]: an int, or a float truncated, is microseconds.
+    df = session.createDataFrame([(5,), (1.5,)], "d interval day to second")
+    assert [r.d for r in df.collect()] == [
+        datetime.timedelta(microseconds=5), datetime.timedelta(microseconds=1)]
+    with pytest.raises(pa.ArrowTypeError, match="Expected integer, got bool"):
+        session.createDataFrame([(True,)], "d interval day to second")
+    with pytest.raises(pa.ArrowTypeError, match="object of type <class 'str'> cannot be converted to int"):
+        session.createDataFrame([("x",)], "d interval day to second")
+
+
 def test_server_errors_carry_their_condition_and_details(session):
     from pyspark.errors import AnalysisException, ArithmeticException, ParseException
     from pyspark.errors.exceptions.connect import SparkConnectGrpcException, SQLQueryContext
@@ -557,6 +612,23 @@ def test_column_attributes_select_struct_fields_and_slices_substrings(session):
     assert tuple(out.first()) == (1, "q", 1, "bcd", "ab")
 
 
+def test_collected_rows_keep_their_values_as_pyspark(session):
+    import pickle
+
+    # A row holds the same values for as long as it lives, as a tuple does, so it equals
+    # itself with a NaN or a VARIANT value, and keeps its hash.
+    row = session.sql("SELECT double('NaN') x, 1 y").first()
+    assert row == row and hash(row) == hash(row)
+    assert row[0] is row[0] and row.x is row[0]
+    variant = session.sql("""SELECT parse_json('{"a": 1}') v""").first()
+    assert variant == variant and hash(variant) == hash(variant)
+    nested = session.sql("SELECT named_struct('a', double('NaN')) s").first()
+    assert nested == nested and nested.s is nested.s
+    # Rows of VARIANT values pickle, as in PySpark.
+    rows = pickle.loads(pickle.dumps(session.sql("SELECT parse_json('1') v, 2 n").collect()))
+    assert (rows[0].v.toJson(), rows[0].n) == ("1", 2)
+
+
 def test_sql_runs_statements_eagerly(session):
     # sql() sends the statement at once: a command takes effect without an action, and the
     # DataFrame of its result is the local relation the server returned.
@@ -624,6 +696,35 @@ def test_sql_formats_the_query_with_keyword_arguments_as_pyspark(session):
         assert [tuple(r) for r in run().collect()] == rows
 
 
+def test_show_prints_the_table_of_the_server_as_pyspark(session):
+    import contextlib
+    import io
+
+    df = session.sql("SELECT id, repeat('x', 25) AS s FROM range(2)")
+
+    def shown(**kwargs):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):  # Python's print, as PySpark's show.
+            df.show(**kwargs)
+        return out.getvalue()
+
+    assert shown() == (
+        "+---+--------------------+\n"
+        "| id|                   s|\n"
+        "+---+--------------------+\n"
+        "|  0|xxxxxxxxxxxxxxxxx...|\n"
+        "|  1|xxxxxxxxxxxxxxxxx...|\n"
+        "+---+--------------------+\n\n")
+    assert shown(n=1, truncate=5) == (
+        "+---+-----+\n| id|    s|\n+---+-----+\n|  0|xx...|\n+---+-----+\nonly showing top 1 row\n")
+    assert shown(truncate=False).splitlines()[3] == "|0  |" + "x" * 25 + "|"
+    assert shown(n=1, vertical=True) == (
+        "-RECORD 0-------------------\n"
+        " id  | 0                    \n"
+        " s   | xxxxxxxxxxxxxxxxx... \n"
+        "only showing top 1 row\n")
+
+
 def test_sql_keyword_arguments_are_not_parameters_as_pyspark(session):
     with pytest.raises(AnalysisException) as error:
         session.sql("SELECT :p AS v", p=5).collect()
@@ -636,6 +737,21 @@ def test_column_alias_names_every_column_and_keeps_its_metadata(session):
     assert [tuple(r) for r in df.collect()] == [("k1", 1)]
     df = session.range(1).select(F.col("id").alias("x", metadata={"k": 1, "n": [1, 2], "s": "v"}))
     assert df.schema.fields[0].metadata == {"k": 1, "n": [1, 2], "s": "v"}
+
+
+def test_window_order_by_a_column_sorts_nulls_first_as_pyspark(session):
+    from pyspark.sql import Window
+
+    df = session.sql("SELECT * FROM VALUES (1, CAST(NULL AS INT)), (1, 2), (1, 1) AS t(g, o)")
+    # A column that is not a sort order is ascending with nulls first, as SortOrder(expr).
+    for window, expected in (
+        (Window.partitionBy("g").orderBy("o"), [(None, 1), (1, 2), (2, 3)]),
+        (Window.partitionBy("g").orderBy(F.col("o")), [(None, 1), (1, 2), (2, 3)]),
+        (Window.orderBy("o").partitionBy("g").orderBy("o"), [(None, 1), (1, 2), (2, 3)]),
+        (Window.partitionBy("g").orderBy(F.col("o").desc()), [(2, 1), (1, 2), (None, 3)]),
+    ):
+        rows = df.select("o", F.row_number().over(window).alias("rn")).orderBy("rn").collect()
+        assert [(r.o, r.rn) for r in rows] == expected
 
 
 def test_maps_keep_their_entries_in_order_with_keys_of_their_type(session):
