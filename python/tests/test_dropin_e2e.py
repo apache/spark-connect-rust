@@ -104,6 +104,24 @@ def test_conf_get_with_a_none_default(session):
         session.conf.get(key)
 
 
+def test_user_id_of_the_connection_string_reaches_every_request_as_pyspark():
+    # The server keys a session by the user ID in each request. As in PySpark, the
+    # queries carry the user ID of the connection string, as the configs do, so a config
+    # set with spark.conf.set applies to the queries and the other way around.
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("SPARK_REMOTE is required for live-server tests")
+    remote += ";user_id=user-context-probe" if ";" in remote else "/;user_id=user-context-probe"
+    spark = SparkSession.builder.remote(remote).create()
+    try:
+        spark.conf.set("spark.sql.shuffle.partitions", "7")
+        assert spark.sql("SET spark.sql.shuffle.partitions").collect()[0][1] == "7"
+        spark.sql("SET spark.sql.shuffle.partitions=9").collect()
+        assert spark.conf.get("spark.sql.shuffle.partitions") == "9"
+    finally:
+        spark.stop()
+
+
 def test_get_or_create_returns_the_session_with_the_options_as_pyspark(session):
     # As PySpark's builder: getOrCreate() returns the active session, and sets the options
     # of the builder on it; one that fails, of a static configuration, is ignored.
