@@ -1160,10 +1160,17 @@ fn collected_small_integer_rows_accept_floating_schemas() {
         let rows = s.sql(&format!(
             "SELECT CAST(n AS {sql_type}) AS n FROM VALUES ({min}), (-1), (0), ({max}), (NULL) AS t(n)"
         )).unwrap().collect().unwrap();
-        assert!(matches!(
-            rows[0].get(0),
-            Some(Value::Byte(_)) | Some(Value::Short(_))
-        ));
+        for row in &rows {
+            assert!(
+                matches!(
+                    (sql_type, row.get(0)),
+                    ("TINYINT", Some(Value::Byte(_)))
+                        | ("SMALLINT", Some(Value::Short(_)))
+                        | (_, Some(Value::Null))
+                ),
+                "unexpected {sql_type} source row: {row:?}"
+            );
+        }
         for target in [DataType::Float, DataType::Double] {
             let schema = DataType::Struct {
                 fields: vec![StructField {
