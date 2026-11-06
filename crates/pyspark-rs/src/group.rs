@@ -4,7 +4,9 @@ use pyo3::prelude::*;
 use spark_connect::group::{CoGroupedData as RustCoGroupedData, GroupedData as RustGroupedData};
 use spark_connect::udf::eval_type;
 
-use crate::dataframe::{build_map_udf, PyDataFrame};
+use crate::dataframe::{
+    build_map_udf, infer_group_map_eval_type, validate_map_function, PyDataFrame,
+};
 use crate::errors::ResultExt;
 use crate::functions::to_column;
 
@@ -151,15 +153,16 @@ impl PyGroupedData {
         func: Bound<'_, PyAny>,
         schema: Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
-        let cols = py.detach(|| self.grouped_data.input_columns()).to_pyerr()?;
-        let udf = build_map_udf(
+        let eval_type_id = infer_group_map_eval_type(
             py,
-            "applyInPandas",
             &func,
-            &schema,
+            "infer_group_pandas_eval_type_from_func",
+            "Cannot infer the eval type from type hints.",
             eval_type::SQL_GROUPED_MAP_PANDAS_UDF,
-            &cols,
         )?;
+        validate_map_function(py, &func, eval_type_id)?;
+        let cols = py.detach(|| self.grouped_data.input_columns()).to_pyerr()?;
+        let udf = build_map_udf(py, "applyInPandas", &func, &schema, eval_type_id, &cols)?;
         Ok(PyDataFrame::new(self.grouped_data.apply_in_pandas(udf)))
     }
 
@@ -184,15 +187,17 @@ impl PyGroupedData {
         func: Bound<'_, PyAny>,
         schema: Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
-        let cols = py.detach(|| self.grouped_data.input_columns()).to_pyerr()?;
-        let udf = build_map_udf(
+        // The reference client's warning, with its trailing space.
+        let eval_type_id = infer_group_map_eval_type(
             py,
-            "applyInArrow",
             &func,
-            &schema,
+            "infer_group_arrow_eval_type_from_func",
+            "Cannot infer the eval type from type hints. ",
             eval_type::SQL_GROUPED_MAP_ARROW_UDF,
-            &cols,
         )?;
+        validate_map_function(py, &func, eval_type_id)?;
+        let cols = py.detach(|| self.grouped_data.input_columns()).to_pyerr()?;
+        let udf = build_map_udf(py, "applyInArrow", &func, &schema, eval_type_id, &cols)?;
         Ok(PyDataFrame::new(self.grouped_data.apply_in_arrow(udf)))
     }
 
@@ -216,6 +221,7 @@ impl PyGroupedData {
         outputMode: &str,
         timeoutConf: &str,
     ) -> PyResult<PyDataFrame> {
+        validate_map_function(py, &func, eval_type::SQL_GROUPED_MAP_PANDAS_UDF_WITH_STATE)?;
         let cols = py.detach(|| self.grouped_data.input_columns()).to_pyerr()?;
         let udf = build_map_udf(
             py,
@@ -376,6 +382,7 @@ impl PyCoGroupedData {
         func: Bound<'_, PyAny>,
         schema: Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
+        validate_map_function(py, &func, eval_type::SQL_COGROUPED_MAP_PANDAS_UDF)?;
         let cols = py.detach(|| self.inner.input_columns()).to_pyerr()?;
         let udf = build_map_udf(
             py,
@@ -396,6 +403,7 @@ impl PyCoGroupedData {
         func: Bound<'_, PyAny>,
         schema: Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
+        validate_map_function(py, &func, eval_type::SQL_COGROUPED_MAP_ARROW_UDF)?;
         let cols = py.detach(|| self.inner.input_columns()).to_pyerr()?;
         let udf = build_map_udf(
             py,

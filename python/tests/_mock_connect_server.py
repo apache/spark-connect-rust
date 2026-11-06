@@ -101,6 +101,8 @@ def serve(connection):
         failure = None
         block_response = False
         response_gate = Event()
+        # With `block_execute` set, ExecutePlan waits for the gate too, as AnalyzePlan does.
+        block_execute = False
 
         # Each AnalyzePlanRequest, recorded.
         analyze_requests = []
@@ -113,6 +115,7 @@ def serve(connection):
             self.failure = None
             self.block_response = False
             self.response_gate.clear()
+            self.block_execute = False
             self.analyze_requests = []
             self.execute_requests = []
             self.execute_payload = b""
@@ -144,7 +147,8 @@ def serve(connection):
 
         # ExecutePlan records each request and streams one response carrying
         # `execute_payload` (raw ExecutePlanResponse fields), then ResultComplete; with
-        # `execute_failure` set it aborts instead. Responses echo the request's
+        # `execute_failure` set it aborts instead, with INVALID_ARGUMENT and that message, or
+        # with the status code name and message of a tuple. Responses echo the request's
         # operation id, as the server does.
         execute_requests = []
         execute_payload = b""
@@ -164,8 +168,18 @@ def serve(connection):
         def execute(self, request, context):
             self.execute_calls += 1
             self.execute_requests.append(request)
+            if self.block_execute and not self.response_gate.wait(5):
+                context.abort(
+                    grpc.StatusCode.DEADLINE_EXCEEDED,
+                    "Python thread could not run while the statement ran",
+                )
             if self.execute_failure:
-                context.abort(grpc.StatusCode.INVALID_ARGUMENT, self.execute_failure)
+                code, message = (
+                    self.execute_failure
+                    if isinstance(self.execute_failure, tuple)
+                    else ("INVALID_ARGUMENT", self.execute_failure)
+                )
+                context.abort(getattr(grpc.StatusCode, code), message)
             if self.execute_error:
                 message, reason, metadata = self.execute_error
                 # google.rpc: Status.code=1, message=2, details=3; Any.type_url=1, value=2;
