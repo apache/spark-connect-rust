@@ -1166,22 +1166,45 @@ impl DataFrame {
 
     /// Checkpoint this DataFrame to disk.
     pub fn checkpoint(&self) -> Result<DataFrame> {
-        self.checkpoint_impl(false, true)
+        self.checkpoint_with(true)
+    }
+
+    /// Checkpoint this DataFrame, at once if `eager`, else when it is first used, mirroring
+    /// `DataFrame.checkpoint(eager)`.
+    pub fn checkpoint_with(&self, eager: bool) -> Result<DataFrame> {
+        self.checkpoint_impl(false, eager, None)
     }
 
     /// Create a local checkpoint of this DataFrame.
     pub fn local_checkpoint(&self) -> Result<DataFrame> {
-        self.checkpoint_impl(true, true)
+        self.local_checkpoint_with(true, None)
+    }
+
+    /// Create a local checkpoint of this DataFrame, at once if `eager`, kept at
+    /// `storage_level`, else at the server's default, mirroring
+    /// `DataFrame.localCheckpoint(eager, storageLevel)`.
+    pub fn local_checkpoint_with(
+        &self,
+        eager: bool,
+        storage_level: Option<proto::StorageLevel>,
+    ) -> Result<DataFrame> {
+        self.checkpoint_impl(true, eager, storage_level)
     }
 
     /// Execute a `CheckpointCommand` and return a DataFrame referencing the resulting
     /// cached remote relation. Mirrors `DataFrame.checkpoint`/`localCheckpoint`, which
     /// materialize server-side and return a handle to the checkpointed data.
-    fn checkpoint_impl(&self, local: bool, eager: bool) -> Result<DataFrame> {
+    fn checkpoint_impl(
+        &self,
+        local: bool,
+        eager: bool,
+        storage_level: Option<proto::StorageLevel>,
+    ) -> Result<DataFrame> {
         let mut cmd = proto::CheckpointCommand::default();
         cmd.relation = Some(self.relation());
         cmd.local = local;
         cmd.eager = eager;
+        cmd.storage_level = storage_level;
         let (responses, info) = execute_command_with_info(
             &self.session,
             proto::command::CommandType::CheckpointCommand(cmd),

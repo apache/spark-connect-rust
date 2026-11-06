@@ -367,6 +367,36 @@ def test_storage_level():
     assert StorageLevel.DISK_ONLY != StorageLevel.MEMORY_ONLY
 
 
+def test_checkpoints_send_their_eager_and_storage_level_as_pyspark(mock_connect):
+    # As PySpark's, checkpoint(eager) and localCheckpoint(eager, storageLevel) send them in
+    # their CheckpointCommand, of which the mock answers with a CachedRemoteRelation.
+    from pyspark.storagelevel import StorageLevel
+
+    spark, service = mock_connect
+    # ExecutePlanResponse.checkpoint_command_result=19 -> relation=1 -> relation_id=1.
+    service.execute_payload = message_field(19, message_field(1, message_field(1, "r1")))
+
+    def sent():
+        # ExecutePlanRequest.plan=3 -> Plan.command=2 -> Command.checkpoint_command=14: local=2,
+        # eager=3, storage_level=4, where false is not sent.
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+        return parse_message(parse_message(plan[2][0])[14][0])
+
+    df = spark.range(1)
+    for checkpoint, local, eager in ((lambda: df.checkpoint(), [], [1]),
+                                     (lambda: df.checkpoint(eager=False), [], []),
+                                     (lambda: df.localCheckpoint(), [1], [1]),
+                                     (lambda: df.localCheckpoint(False), [1], [])):
+        assert type(checkpoint()).__name__ == "DataFrame"
+        command = sent()
+        assert (command.get(2, []), command.get(3, []), command.get(4)) == (local, eager, None)
+    df.localCheckpoint(storageLevel=StorageLevel.DISK_ONLY)
+    # StorageLevel: use_disk=1, use_memory=2, use_off_heap=3, deserialized=4, replication=5.
+    assert parse_message(sent()[4][0]) == {1: [1], 5: [1]}
+    df.localCheckpoint(True, StorageLevel(False, True, True, True, 2))
+    assert parse_message(sent()[4][0]) == {2: [1], 3: [1], 4: [1], 5: [2]}
+
+
 # --------------------------------------------------------------------------- session builder
 
 def test_session_builder_chaining_offline():
