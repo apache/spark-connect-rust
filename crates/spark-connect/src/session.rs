@@ -687,6 +687,36 @@ impl SparkSession {
         )
     }
 
+    /// Register a Python user-defined table function (UDTF) as `name` on the server, so that
+    /// SQL calls it: a `register_table_function` command of the
+    /// `CommonInlineUserDefinedTableFunction` of the UDTF, without arguments. Mirrors
+    /// `SparkConnectClient.register_udtf`, of `spark.udtf.register`. The Python client
+    /// cloudpickles the handler class as `command`, and sets `eval_type` (300 SQL_TABLE_UDF,
+    /// 301 SQL_ARROW_TABLE_UDF, 302 SQL_ARROW_UDTF).
+    pub fn register_table_function(
+        &self,
+        name: &str,
+        return_type: Option<&DataType>,
+        eval_type: i32,
+        command: &[u8],
+        python_ver: &str,
+        deterministic: bool,
+    ) -> Result<()> {
+        let function = crate::plan::common_inline_udtf(
+            name,
+            deterministic,
+            &[],
+            return_type,
+            eval_type,
+            command,
+            python_ver,
+        );
+        crate::dataframe::execute_command(
+            self,
+            proto::command::CommandType::RegisterTableFunction(function),
+        )
+    }
+
     /// Build and register a ResourceProfile with the server.
     ///
     /// Sends a `CreateResourceProfileCommand` to the server with the specified executor

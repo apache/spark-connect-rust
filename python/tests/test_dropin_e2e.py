@@ -429,6 +429,27 @@ def test_execution_info_is_that_of_each_dataframe_as_pyspark(session):
         assert df.executionInfo.operation_id != a.executionInfo.operation_id
 
 
+def test_registered_udtfs_are_called_from_sql_as_pyspark(session):
+    # As PySpark's spark.udtf.register: the server knows the UDTF by its name.
+    @F.udtf(returnType="x int")
+    class Count:
+        def eval(self, n):
+            for i in range(n):
+                yield (i,)
+
+    @F.arrow_udtf(returnType=StructType([StructField("y", LongType())]))
+    class Doubled:
+        def eval(self, x):
+            import pyarrow.compute as pc
+
+            yield pa.table({"y": pc.multiply(x, 2)})
+
+    assert session.udtf.register("count_udtf", Count) is Count
+    assert session.sql("SELECT * FROM count_udtf(2)").collect() == [Row(x=0), Row(x=1)]
+    session.udtf.register("doubled_udtf", Doubled)
+    assert session.sql("SELECT * FROM doubled_udtf(21L)").collect() == [Row(y=42)]
+
+
 def test_catalog_and_stream_start_errors_carry_their_operation_id(session):
     for run in (
         lambda: session.catalog.setCurrentDatabase("no_such_database_60960"),

@@ -224,10 +224,41 @@ def arrow_udtf(
 
 
 class UDTFRegistration:
-    """Registration accessor mirroring ``SparkSession.udtf``."""
+    """
+    Wrapper for user-defined table function registration, as ``spark.udtf``. Mirrors
+    ``pyspark.sql.connect.udtf.UDTFRegistration``.
 
-    def register(self, name: str, f: Any, returnType: Optional[Any] = None):
-        if isinstance(f, UserDefinedTableFunction):
-            f.name = name
-            return f
-        return UserDefinedTableFunction(f, returnType=returnType, name=name)
+    .. versionadded:: 3.5.0
+    """
+
+    def __init__(self, sparkSession: Any):
+        self.sparkSession = sparkSession
+
+    def register(
+        self,
+        name: str,
+        f: "UserDefinedTableFunction",
+    ) -> "UserDefinedTableFunction":
+        """Register the UDTF ``f`` as ``name`` on the server, so that SQL calls it, and return
+        ``f``. As PySpark's, ``f`` is a UDTF of ``udtf()`` or ``arrow_udtf()``."""
+        if not isinstance(f, UserDefinedTableFunction):
+            raise PySparkTypeError(
+                errorClass="CANNOT_REGISTER_UDTF",
+                messageParameters={
+                    "name": name,
+                },
+            )
+
+        if f.evalType not in [SQL_TABLE_UDF, SQL_ARROW_TABLE_UDF, SQL_ARROW_UDTF]:
+            raise PySparkTypeError(
+                errorClass="INVALID_UDTF_EVAL_TYPE",
+                messageParameters={
+                    "name": name,
+                    "eval_type": "SQL_TABLE_UDF, SQL_ARROW_TABLE_UDF, SQL_ARROW_UDTF",
+                },
+            )
+
+        self.sparkSession._registerPythonUdtf(
+            name, f.returnType, f.evalType, f.command, f.python_ver, f.deterministic
+        )
+        return f
