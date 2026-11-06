@@ -4680,8 +4680,11 @@ def test_execution_info_decodes_observed_metrics_and_operation_id(mock_connect):
     service.execute_payload = message_field(6, observed)
 
     assert spark.range(1).executionInfo is None
-    spark.range(1).collect()
-    info = spark.range(1).executionInfo
+    df = spark.range(1)
+    df.collect()
+    info = df.executionInfo
+    # The information is that of the DataFrame that ran, as in PySpark.
+    assert spark.range(1).executionInfo is None
     assert info.operation_id == _request_operation_id(service.execute_requests[-1])
     ((name, pairs),) = info.flows
     assert name == "o"
@@ -4700,8 +4703,9 @@ def test_execution_info_unsupported_literal_raises_on_flows(mock_connect):
     # Literal.calendar_interval=19 (months=1): the reference rejects it in _to_value.
     observed = message_field(1, "o") + message_field(2, message_field(19, varint_field(1, 2)))
     service.execute_payload = message_field(6, observed)
-    spark.range(1).collect()
-    info = spark.range(1).executionInfo
+    df = spark.range(1)
+    df.collect()
+    info = df.executionInfo
     assert info.operation_id == _request_operation_id(service.execute_requests[-1])
     with pytest.raises(PySparkTypeError, match="UNSUPPORTED_LITERAL"):
         info.flows

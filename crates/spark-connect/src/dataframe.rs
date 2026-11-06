@@ -30,7 +30,14 @@ pub struct DataFrame {
     // resolved schema, but have their own cache for subsequent analysis.
     // The resolved value is immutable, so propagation need not copy wide schemas.
     schema_cache: Arc<Mutex<Option<Arc<DataType>>>>,
+    // The information of the last execution of this DataFrame, as PySpark's
+    // `DataFrame._execution_info`: exact clones share it, and a derived DataFrame, of
+    // another plan, has its own, which is empty until it executes.
+    execution: ExecutionSlot,
 }
+
+/// Where a DataFrame keeps the information of its last execution.
+pub(crate) type ExecutionSlot = Arc<Mutex<Option<ExecutionInfo>>>;
 
 /// Iterator over rows from a DataFrame, yielded lazily as the server streams results.
 ///
@@ -234,7 +241,15 @@ impl DataFrame {
             session,
             plan: Arc::new(plan),
             schema_cache: Arc::new(Mutex::new(schema)),
+            execution: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Keep `info`, the information of an execution of this DataFrame, and record it as
+    /// the session's most recent one.
+    pub(crate) fn record_execution(&self, info: ExecutionInfo) {
+        *self.execution.lock().unwrap() = Some(info.clone());
+        self.session.record_execution(info);
     }
 
     fn cached_schema(&self) -> Option<Arc<DataType>> {
@@ -717,7 +732,7 @@ impl DataFrame {
                 rows.extend(batch_rows);
             }
         }
-        self.session.record_execution(info);
+        self.record_execution(info);
 
         Ok(rows)
     }
@@ -743,13 +758,13 @@ impl DataFrame {
         ))
     }
 
-    /// Execution metrics collected during the most recent action on this
-    /// DataFrame's session. Mirrors `pyspark.sql.DataFrame.executionInfo`.
-    ///
-    /// The metrics reflect the session's most recent execution; call this right
-    /// after an action (e.g. `collect`/`count`/`show`).
+    /// The information of the last execution of this DataFrame. Mirrors
+    /// `pyspark.sql.DataFrame.executionInfo`: set by `collect`, the Arrow and pandas
+    /// collects, the writes, the temp views and the checkpoints of this DataFrame, and empty
+    /// before one. An action that runs a derived DataFrame, such as `count` or `show`, sets
+    /// that one's, as in PySpark.
     pub fn execution_info(&self) -> Result<ExecutionInfo> {
-        self.session.last_execution_info().ok_or_else(|| {
+        self.execution.lock().unwrap().clone().ok_or_else(|| {
             SparkError::connect_msg("no execution info available; run an action first")
         })
     }
@@ -778,7 +793,7 @@ impl DataFrame {
                 batches.extend(record_batches);
             }
         }
-        self.session.record_execution(info);
+        self.record_execution(info);
 
         Ok(batches)
     }
@@ -947,6 +962,7 @@ impl DataFrame {
     /// Mirrors `pyspark.sql.DataFrame.write`.
     pub fn write(&self) -> crate::readwriter::DataFrameWriter {
         crate::readwriter::DataFrameWriter::new(self.session.clone(), Arc::clone(&self.plan))
+            .recording_into(Arc::clone(&self.execution))
     }
 
     /// Create a [`DataFrameWriterV2`](crate::readwriter::DataFrameWriterV2) for
@@ -959,6 +975,7 @@ impl DataFrame {
             Arc::clone(&self.plan),
             table_name,
         )
+        .recording_into(Arc::clone(&self.execution))
     }
 
     /// Merge a set of updates, insertions, and deletions into a target table.
@@ -973,6 +990,7 @@ impl DataFrame {
             table.to_string(),
             condition,
         )
+        .recording_into(Arc::clone(&self.execution))
     }
 
     /// Create a DataStreamWriter for writing this streaming DataFrame to various sinks.
@@ -1055,10 +1073,11 @@ impl DataFrame {
         cmd.relation = Some(self.relation());
         cmd.local = local;
         cmd.eager = eager;
-        let responses = execute_command_collect(
+        let (responses, info) = execute_command_with_info(
             &self.session,
             proto::command::CommandType::CheckpointCommand(cmd),
         )?;
+        self.record_execution(info);
         for resp in &responses {
             if let Some(proto::execute_plan_response::ResponseType::CheckpointCommandResult(res)) =
                 &resp.response_type
@@ -1107,10 +1126,12 @@ impl DataFrame {
         cmd.name = name.to_string();
         cmd.is_global = global;
         cmd.replace = replace;
-        execute_command(
+        let (_, info) = execute_command_with_info(
             &self.session,
             proto::command::CommandType::CreateDataframeView(cmd),
-        )
+        )?;
+        self.record_execution(info);
+        Ok(())
     }
 
     /// Print the execution plan to the console. Mirrors `pyspark.sql.DataFrame.explain`
@@ -1881,6 +1902,15 @@ pub(crate) fn execute_command_collect(
     session: &SparkSession,
     command_type: proto::command::CommandType,
 ) -> Result<Vec<proto::ExecutePlanResponse>> {
+    execute_command_with_info(session, command_type).map(|(responses, _)| responses)
+}
+
+/// Like `execute_command_collect`, and also returns the information of the execution, which
+/// it records as the session's most recent one, for a DataFrame that keeps its own.
+pub(crate) fn execute_command_with_info(
+    session: &SparkSession,
+    command_type: proto::command::CommandType,
+) -> Result<(Vec<proto::ExecutePlanResponse>, ExecutionInfo)> {
     let mut command = proto::Command::default();
     command.command_type = Some(command_type);
 
@@ -1902,8 +1932,8 @@ pub(crate) fn execute_command_collect(
         capture_execution(&mut resp, &mut info, session);
         responses.push(resp);
     }
-    session.record_execution(info);
-    Ok(responses)
+    session.record_execution(info.clone());
+    Ok((responses, info))
 }
 
 /// Pull execution metrics/observed-metrics off a response and fire progress
