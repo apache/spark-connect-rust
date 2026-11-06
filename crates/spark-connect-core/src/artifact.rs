@@ -94,6 +94,34 @@ impl NamedArtifact {
     }
 }
 
+/// Checks the response of an artifact upload: every artifact passed its CRC check and, for
+/// a cache upload, every artifact of `expected_cache_names` was acknowledged.
+pub(crate) fn check_artifact_upload(
+    response: spark_connect_proto::AddArtifactsResponse,
+    expected_cache_names: Option<&std::collections::HashSet<String>>,
+) -> Result<()> {
+    let mut received = std::collections::HashSet::new();
+    for summary in response.artifacts {
+        if !summary.is_crc_successful {
+            return Err(SparkError::connect_msg(format!(
+                "CRC check failed for artifact: {}",
+                summary.name
+            )));
+        }
+        if expected_cache_names.is_some() {
+            received.insert(summary.name);
+        }
+    }
+    if let Some(expected) = expected_cache_names {
+        if !expected.is_subset(&received) {
+            return Err(SparkError::connect_msg(
+                "Missing cache artifact upload acknowledgement",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Frame cached in-memory artifacts as they are consumed by the upload stream.
 /// Payload slices share the original allocation instead of copying each chunk.
 /// The allocation is freed when its last slice is dropped, not chunk by chunk.

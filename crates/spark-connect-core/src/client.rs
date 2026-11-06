@@ -19,7 +19,8 @@ use spark_connect_proto::{
 };
 
 use crate::artifact::{
-    build_artifact_request_stream, cache_artifact_requests, FileArtifact, NamedArtifact,
+    build_artifact_request_stream, cache_artifact_requests, check_artifact_upload, FileArtifact,
+    NamedArtifact,
 };
 use crate::channel::{ChannelBuilder, GRPC_MAX_MESSAGE_LENGTH_DEFAULT};
 use crate::error::{Result, SparkError};
@@ -815,8 +816,9 @@ impl SparkConnectClient {
 
     /// Add artifacts to this session.
     ///
-    /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.add_artifacts`.
-    /// Handles chunking large artifacts and batching small ones according to CHUNK_SIZE.
+    /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.add_artifacts`, which
+    /// uploads each path in an attempt of its own under the retry policy. Handles chunking
+    /// large artifacts and batching small ones according to CHUNK_SIZE.
     pub async fn add_artifacts(
         &self,
         paths: &[&str],
@@ -826,21 +828,14 @@ impl SparkConnectClient {
     ) -> Result<()> {
         // Each path is named as PySpark's ArtifactManager names it, by the flags and its file
         // extension (see `parse_artifact`).
-        let mut artifacts = Vec::new();
         for path in paths {
             let (name, local) = crate::artifact::parse_artifact(path, pyfile, archive, file)
                 .map_err(|e| SparkError::connect_msg(e.to_string()))?;
-            artifacts.push(NamedArtifact::new(name, Box::new(FileArtifact::new(local))));
+            let artifacts = vec![NamedArtifact::new(name, Box::new(FileArtifact::new(local)))];
+            let requests = build_artifact_request_stream(self.session_id.clone(), artifacts)?;
+            self.upload_artifact_requests(requests, None).await?;
         }
-
-        if artifacts.is_empty() {
-            return Ok(());
-        }
-
-        // Build request stream with proper chunking/batching
-        let requests = build_artifact_request_stream(self.session_id.clone(), artifacts)?;
-        self.upload_artifact_requests(futures::stream::iter(requests), None)
-            .await
+        Ok(())
     }
 
     /// Upload a single local file as an artifact under an explicit artifact name
@@ -854,12 +849,14 @@ impl SparkConnectClient {
             Box::new(FileArtifact::new(local_path)),
         )];
         let requests = build_artifact_request_stream(self.session_id.clone(), artifacts)?;
-        self.upload_artifact_requests(futures::stream::iter(requests), None)
-            .await
+        self.upload_artifact_requests(requests, None).await
     }
 
     /// Upload session-scoped cache blobs, returning SHA-256 hashes in input order.
     /// Existing artifacts and duplicate blobs are uploaded only once.
+    ///
+    /// As `SparkConnectClient.cache_artifacts`, the status check and the upload are one
+    /// attempt under the retry policy, so a transient failure of either retries both.
     pub async fn cache_artifacts(&self, blobs: Vec<Vec<u8>>) -> Result<Vec<String>> {
         use bytes::Bytes;
         use std::collections::HashSet;
@@ -869,24 +866,37 @@ impl SparkConnectClient {
         }
         let (blobs, hashes) = hash_artifact_blobs(blobs).await?;
         let names: Vec<String> = hashes.iter().map(|hash| format!("cache/{hash}")).collect();
-        let unique: HashSet<&str> = names.iter().map(String::as_str).collect();
-        let cached = self
-            .artifact_status(&unique.into_iter().collect::<Vec<_>>())
+        let blobs: Vec<Bytes> = blobs.into_iter().map(Bytes::from).collect();
+        let unique: Vec<String> = names
+            .iter()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .cloned()
+            .collect();
+        let (blobs, names, unique) = (&blobs, &names, &unique);
+        let uploaded = self
+            .with_retry(|| async move {
+                let cached = self.artifact_status_rpc(unique).await?;
+                let mut seen = HashSet::new();
+                let mut artifacts = Vec::new();
+                for (blob, name) in blobs.iter().zip(names) {
+                    if !cached.get(name).copied().unwrap_or(false) && seen.insert(name.clone()) {
+                        artifacts.push((name.clone(), blob.clone()));
+                    }
+                }
+                if artifacts.is_empty() {
+                    return Ok(None);
+                }
+                let expected: HashSet<String> =
+                    artifacts.iter().map(|(name, _)| name.clone()).collect();
+                let requests = cache_artifact_requests(self.session_id.clone(), artifacts);
+                let response = self.add_artifacts_rpc(requests).await?;
+                Ok(Some((response, expected)))
+            })
             .await?;
-        let mut seen = HashSet::new();
-        let mut artifacts = Vec::new();
-        for (blob, name) in blobs.into_iter().zip(names) {
-            if !cached.get(&name).copied().unwrap_or(false) && seen.insert(name.clone()) {
-                artifacts.push((name, Bytes::from(blob)));
-            }
+        if let Some((response, expected)) = uploaded {
+            check_artifact_upload(response, Some(&expected))?;
         }
-        if artifacts.is_empty() {
-            return Ok(hashes);
-        }
-        let expected: HashSet<String> = artifacts.iter().map(|(name, _)| name.clone()).collect();
-        let requests = cache_artifact_requests(self.session_id.clone(), artifacts);
-        self.upload_artifact_requests(futures::stream::iter(requests), Some(&expected))
-            .await?;
         Ok(hashes)
     }
 
@@ -899,52 +909,45 @@ impl SparkConnectClient {
         }
     }
 
-    /// Send artifact frames and validate the response.
-    /// Stamps user_context and client_type on every frame; all upload paths must
-    /// go through here.
-    /// Cache uploads also require an acknowledgement for every requested artifact.
-    /// The stream is consumed once; retries must rebuild the frames and restart
-    /// AddArtifacts rather than resume a partially consumed stream.
+    /// Send artifact frames, retrying a transient failure of the whole upload under the retry
+    /// policy, and validate the response. An attempt sends all the frames again: a stream is
+    /// not resumed. Cache uploads also require an acknowledgement for every requested
+    /// artifact.
     async fn upload_artifact_requests(
         &self,
-        requests: impl futures::Stream<Item = spark_connect_proto::AddArtifactsRequest> + Send + 'static,
+        requests: Vec<spark_connect_proto::AddArtifactsRequest>,
         expected_cache_names: Option<&std::collections::HashSet<String>>,
     ) -> Result<()> {
-        use futures::StreamExt;
+        let requests = &requests;
+        let response = self
+            .with_retry(|| self.add_artifacts_rpc(requests.clone()))
+            .await?;
+        check_artifact_upload(response, expected_cache_names)
+    }
 
+    /// The AddArtifacts call of `requests`, once. Stamps user_context and client_type on
+    /// every frame; all upload paths must go through here.
+    async fn add_artifacts_rpc(
+        &self,
+        requests: impl IntoIterator<Item = spark_connect_proto::AddArtifactsRequest>,
+    ) -> std::result::Result<spark_connect_proto::AddArtifactsResponse, tonic::Status> {
         let user_context = self.artifact_user_context();
         let client_type = self.user_agent.clone();
-        let requests = requests.map(move |mut request| {
-            request.user_context = Some(user_context.clone());
-            request.client_type = Some(client_type.clone());
-            request
-        });
-        let mut req = Request::new(requests);
+        let requests: Vec<_> = requests
+            .into_iter()
+            .map(|mut request| {
+                request.user_context = Some(user_context.clone());
+                request.client_type = Some(client_type.clone());
+                request
+            })
+            .collect();
+        let mut req = Request::new(futures::stream::iter(requests));
         self._attach_metadata(&mut req);
-        let response = match self.stub.clone().add_artifacts(req).await {
-            Ok(response) => response.into_inner(),
-            Err(status) => return Err(self.error_from_status(status).await),
-        };
-        let mut received = std::collections::HashSet::new();
-        for summary in response.artifacts {
-            if !summary.is_crc_successful {
-                return Err(SparkError::connect_msg(format!(
-                    "CRC check failed for artifact: {}",
-                    summary.name
-                )));
-            }
-            if expected_cache_names.is_some() {
-                received.insert(summary.name);
-            }
-        }
-        if let Some(expected) = expected_cache_names {
-            if !expected.is_subset(&received) {
-                return Err(SparkError::connect_msg(
-                    "Missing cache artifact upload acknowledgement",
-                ));
-            }
-        }
-        Ok(())
+        self.stub
+            .clone()
+            .add_artifacts(req)
+            .await
+            .map(Response::into_inner)
     }
 
     /// Check artifact status on the server.
@@ -954,26 +957,32 @@ impl SparkConnectClient {
         &self,
         names: &[&str],
     ) -> Result<std::collections::HashMap<String, bool>> {
+        let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+        match self.artifact_status_rpc(&names).await {
+            Ok(statuses) => Ok(statuses),
+            Err(status) => Err(self.error_from_status(status).await),
+        }
+    }
+
+    /// The ArtifactStatus call of `names`, once: whether each artifact exists.
+    async fn artifact_status_rpc(
+        &self,
+        names: &[String],
+    ) -> std::result::Result<std::collections::HashMap<String, bool>, tonic::Status> {
         let mut request = ArtifactStatusesRequest::default();
         request.session_id = self.session_id.clone();
         request.user_context = Some(self.artifact_user_context());
         request.client_type = Some(self.user_agent.clone());
-        request.names = names.iter().map(|n| n.to_string()).collect();
+        request.names = names.to_vec();
 
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
-        let response = match self.stub.clone().artifact_status(req).await {
-            Ok(response) => response.into_inner(),
-            Err(status) => return Err(self.error_from_status(status).await),
-        };
-
-        // Build map of artifact name -> exists status
-        let mut result = std::collections::HashMap::new();
-        for (name, status) in response.statuses {
-            result.insert(name, status.exists);
-        }
-
-        Ok(result)
+        let response = self.stub.clone().artifact_status(req).await?.into_inner();
+        Ok(response
+            .statuses
+            .into_iter()
+            .map(|(name, status)| (name, status.exists))
+            .collect())
     }
 
     /// Attach metadata headers to a request.
