@@ -129,6 +129,23 @@ def _dataframe(batches, *, protocol, payloads=None, calls=None):
             server_side_session_id=server_id,
         ).SerializeToString()
 
+    def config(request, context):
+        # The settings that toPandas reads first, as SparkConnectClient.to_pandas does.
+        if calls is not None:
+            calls["config"] = calls.get("config", 0) + 1
+        request = protocol("ConfigRequest").FromString(request)
+        settings = {
+            "spark.sql.session.timeZone": "UTC",
+            "spark.sql.execution.pandas.structHandlingMode": "legacy",
+            "spark.sql.execution.arrow.pyspark.selfDestruct.enabled": "false",
+        }
+        return protocol(
+            "ConfigResponse",
+            session_id=request.session_id,
+            server_side_session_id=server_id,
+            pairs=[dict(key=key, value=settings[key]) for key in request.operation.get.keys],
+        ).SerializeToString()
+
     def release_session(request, context):
         request = protocol("ReleaseSessionRequest").FromString(request)
         return protocol(
@@ -147,6 +164,7 @@ def _dataframe(batches, *, protocol, payloads=None, calls=None):
                         "ExecutePlan": grpc.unary_stream_rpc_method_handler(execute),
                         "ReleaseExecute": grpc.unary_unary_rpc_method_handler(release_execute),
                         "ReleaseSession": grpc.unary_unary_rpc_method_handler(release_session),
+                        "Config": grpc.unary_unary_rpc_method_handler(config),
                     },
                 )
             ]
@@ -288,12 +306,25 @@ def test_to_pandas_uses_the_same_handoff(protocol):
     arrays = [batch.column(index) for index in indices]
     selected = pa.RecordBatch.from_arrays(arrays, schema=schema)
     batches = [selected.slice(0, 2), selected.slice(2, 2)]
-    expected = pa.Table.from_batches(batches).to_pandas()
+    # As SparkConnectClient.to_pandas converts the same table: of the Spark types of its Arrow
+    # schema (the server sends no schema here), in the session time zone.
+    from pyspark.sql.pandas.conversion import _convert_arrow_table_to_pandas
+    from pyspark.sql.pandas.types import from_arrow_schema
+
+    table = pa.Table.from_batches(batches)
+    expected = _convert_arrow_table_to_pandas(
+        arrow_table=table,
+        schema=from_arrow_schema(table.schema, prefer_timestamp_ntz=True),
+        timezone="UTC",
+        struct_handling_mode="legacy",
+        date_as_object=False,
+        self_destruct=False,
+    )
     calls = {}
     with _dataframe(protocol=protocol, batches=batches, calls=calls) as (frame, _):
         actual = frame.toPandas()
     pd.testing.assert_frame_equal(actual, expected)
-    assert calls == {"execute": 1}
+    assert calls == {"config": 1, "execute": 1}
 
 
 @pytest.mark.parametrize(
