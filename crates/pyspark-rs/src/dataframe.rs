@@ -1,7 +1,7 @@
 //! PyO3 wrapper for spark_connect::dataframe::DataFrame.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyTuple};
+use pyo3::types::{PyDict, PyInt, PyList, PyTuple};
 use spark_connect::dataframe::{DataFrame, LocalRowIterator};
 use spark_connect::plan::JoinType;
 use spark_connect::udf::{eval_type, CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
@@ -10,7 +10,7 @@ use crate::column::PyColumn;
 use crate::errors::ResultExt;
 use crate::functions::to_column;
 use crate::group::PyGroupedData;
-use crate::row::{value_to_py, PyRow};
+use crate::row::{value_to_py, FieldConverters, PyRow};
 use crate::streaming::PyDataStreamWriter;
 use crate::types::PyDataType;
 
@@ -50,6 +50,113 @@ pub struct PyDataFrame {
 }
 
 impl PyDataFrame {
+    /// The pandas DataFrame of the result, as `SparkConnectClient.to_pandas` makes it: the
+    /// settings of the conversion first, in one request; then the Arrow result with the schema
+    /// that the server sends, which `pyspark.sql.connect.client._to_pandas` converts.
+    fn to_pandas(
+        &self,
+        py: Python<'_>,
+        struct_handling_mode: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let settings = py
+            .detach(|| {
+                self.dataframe.spark_session().conf().get_many(&[
+                    "spark.sql.session.timeZone",
+                    "spark.sql.execution.pandas.structHandlingMode",
+                    "spark.sql.execution.arrow.pyspark.selfDestruct.enabled",
+                ])
+            })
+            .to_pyerr()?;
+        let (batches, schema) = py
+            .detach(|| self.dataframe.collect_record_batches_with_schema())
+            .to_pyerr()?;
+        let table = crate::pyarrow_export::record_batches_to_pyarrow(py, batches)?;
+        let schema = match &schema {
+            Some(schema) => crate::types::data_type_to_py(py, schema)?,
+            None => py.None(),
+        };
+        let (metrics, observed) = match self.dataframe.execution_info() {
+            Ok(info) => execution_metrics(py, &info)?,
+            Err(_) => (
+                pyo3::types::PyList::empty(py),
+                pyo3::types::PyList::empty(py),
+            ),
+        };
+        let kwargs = pyo3::types::PyDict::new(py);
+        kwargs.set_item("timezone", &settings[0])?;
+        match struct_handling_mode {
+            Some(mode) => kwargs.set_item("struct_handling_mode", mode.str()?)?,
+            None => kwargs.set_item("struct_handling_mode", &settings[1])?,
+        }
+        kwargs.set_item("self_destruct", &settings[2])?;
+        let pdf = py.import("pyspark.sql.connect.client")?.call_method(
+            "_to_pandas",
+            (table, schema, metrics, observed),
+            Some(&kwargs),
+        )?;
+        Ok(pdf.unbind())
+    }
+
+    /// The table of `show` and `_show_string`, for the arguments of `function`.
+    fn show_table(
+        &self,
+        py: Python<'_>,
+        function: &str,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<String> {
+        let [n, truncate, vertical] = bind_arguments(
+            function,
+            args,
+            kwargs,
+            ["n", "truncate", "vertical"],
+            [
+                20i32.into_pyobject(py)?.into_any(),
+                pyo3::types::PyBool::new(py, true).to_owned().into_any(),
+                pyo3::types::PyBool::new(py, false).to_owned().into_any(),
+            ],
+        )?;
+        let not_expected = |expected: &str, name: &str, value: &Bound<'_, PyAny>| -> PyErr {
+            let type_name = value
+                .get_type()
+                .name()
+                .map(|name| name.to_string())
+                .unwrap_or_default();
+            crate::column::raise_pyspark(
+                py,
+                "PySparkTypeError",
+                "NOT_EXPECTED_TYPE",
+                &[
+                    ("expected_type", expected),
+                    ("arg_name", name),
+                    ("arg_type", &type_name),
+                ],
+            )
+        };
+        if n.is_instance_of::<pyo3::types::PyBool>() || !n.is_instance_of::<pyo3::types::PyInt>() {
+            return Err(not_expected("int", "n", &n));
+        }
+        if !vertical.is_instance_of::<pyo3::types::PyBool>() {
+            return Err(not_expected("bool", "vertical", &vertical));
+        }
+        let truncate =
+            if truncate.is_instance_of::<pyo3::types::PyBool>() && truncate.is_truthy()? {
+                20
+            } else {
+                // As `int(truncate)`, whose ValueError is PySpark's NOT_EXPECTED_TYPE.
+                match py.import("builtins")?.getattr("int")?.call1((&truncate,)) {
+                    Ok(value) => value.extract::<i32>()?,
+                    Err(err) if err.is_instance_of::<pyo3::exceptions::PyValueError>(py) => {
+                        return Err(not_expected("bool", "truncate", &truncate));
+                    }
+                    Err(err) => return Err(err),
+                }
+            };
+        let (n, vertical) = (n.extract::<i32>()?, vertical.extract::<bool>()?);
+        py.detach(|| self.dataframe.show_string(n, truncate, vertical))
+            .to_pyerr()
+    }
+
     pub fn new(dataframe: DataFrame) -> Self {
         PyDataFrame { dataframe }
     }
@@ -1146,6 +1253,21 @@ impl PyDataFrame {
         Ok(PyColumn::new(spark_connect::functions::col(name)))
     }
 
+    /// Class attributes and all column names, matching Python Connect.
+    fn __dir__(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        // Inspect the class rather than the instance to avoid calling __dir__ again.
+        let mut attrs = py.get_type::<Self>().dir()?.extract::<Vec<String>>()?;
+        attrs.extend(self.columns(py)?);
+        attrs.sort();
+        attrs.dedup();
+        Ok(attrs)
+    }
+
+    /// Bracket completion keeps column order, duplicates and non-identifiers.
+    fn _ipython_key_completions_(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        self.columns(py)
+    }
+
     /// Aggregate over the whole DataFrame (shorthand for `groupBy().agg(...)`).
     ///
     /// Mirrors `pyspark.sql.DataFrame.agg(*exprs)`.
@@ -1159,8 +1281,10 @@ impl PyDataFrame {
     /// Collect all rows into memory.
     fn collect(&self, py: Python<'_>) -> PyResult<Vec<PyRow>> {
         // Release the GIL across the blocking RPC so other Python threads run.
-        let rows = py.detach(|| self.dataframe.collect()).to_pyerr()?;
-        Ok(rows.into_iter().map(PyRow::new).collect())
+        let (rows, schema) = py
+            .detach(|| self.dataframe.collect_with_schema())
+            .to_pyerr()?;
+        rows_to_py(py, rows, schema.as_ref())
     }
 
     /// Return an iterator over rows without materializing the entire result in memory.
@@ -1196,24 +1320,27 @@ impl PyDataFrame {
 
     /// Collect the DataFrame into a pandas DataFrame.
     ///
-    /// Mirrors `pyspark.sql.DataFrame.toPandas()`: decodes the result via Arrow
-    /// (`toArrow`) and converts the `pyarrow.Table` with `to_pandas()`.
+    /// Mirrors `pyspark.sql.DataFrame.toPandas()`, as `SparkConnectClient.to_pandas` converts
+    /// the Arrow result: each column by its Spark type, in the session time zone.
     fn toPandas(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let table = self.to_arrow(py)?;
-        let df = table.bind(py).call_method0("to_pandas")?;
-        Ok(df.unbind())
+        self.to_pandas(py, None)
     }
 
     /// Internal Arrow-based pandas conversion used by pandas-on-Spark
-    /// (`pyspark.sql.connect.dataframe.DataFrame._to_pandas`). Accepts and ignores
-    /// keyword options such as `pandasStructHandlingMode`; delegates to `toPandas`.
-    #[pyo3(signature = (**_kwargs))]
+    /// (`pyspark.sql.connect.dataframe.DataFrame._to_pandas`): `toPandas`, with
+    /// `pandasStructHandlingMode` overriding `spark.sql.execution.pandas.structHandlingMode`,
+    /// as in `SparkConnectClient.to_pandas`.
+    #[pyo3(signature = (**kwargs))]
     fn _to_pandas(
         &self,
         py: Python<'_>,
-        _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+        kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        self.toPandas(py)
+        let mode = match kwargs {
+            Some(kwargs) => kwargs.get_item("pandasStructHandlingMode")?,
+            None => None,
+        };
+        self.to_pandas(py, mode)
     }
 
     /// Get the count of rows.
@@ -1221,13 +1348,32 @@ impl PyDataFrame {
         py.detach(|| self.dataframe.count()).to_pyerr()
     }
 
-    /// Show the first n rows.
-    #[pyo3(signature = (n=20, truncate=true, vertical=false))]
-    fn show(&self, py: Python<'_>, n: usize, truncate: bool, vertical: bool) -> PyResult<()> {
-        // truncate/vertical are accepted for PySpark signature parity; the Rust core
-        // currently renders with its default formatting.
-        let _ = (truncate, vertical);
-        py.detach(|| self.dataframe.show(n)).to_pyerr()
+    /// Print the first `n` rows as the server formats them. Mirrors `DataFrame.show`, which
+    /// prints the table of `_show_string` with Python's `print`.
+    #[pyo3(signature = (*args, **kwargs), text_signature = "($self, n=20, truncate=True, vertical=False)")]
+    fn show(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let table = self.show_table(py, "DataFrame.show", args, kwargs)?;
+        py.import("builtins")?.call_method1("print", (table,))?;
+        Ok(())
+    }
+
+    /// The table that `show` prints: the first `n` rows (20 by default), values truncated
+    /// to 20 characters for `truncate=True`, to `int(truncate)` otherwise (0 for none), and
+    /// vertical with a line per value. Mirrors `DataFrame._show_string`, with its errors,
+    /// for any value given, None included.
+    #[pyo3(name = "_show_string", signature = (*args, **kwargs), text_signature = "($self, n=20, truncate=True, vertical=False)")]
+    fn show_string(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<String> {
+        self.show_table(py, "DataFrame._show_string", args, kwargs)
     }
 
     /// Execution info from the most recent action, as a `pyspark.sql.metrics.ExecutionInfo`
@@ -1240,32 +1386,7 @@ impl PyDataFrame {
             return Ok(py.None());
         };
         let metrics_mod = py.import("pyspark.sql.metrics")?;
-        let plan_metrics_cls = metrics_mod.getattr("PlanMetrics")?;
-        let metric_value_cls = metrics_mod.getattr("MetricValue")?;
-        // Mirrors SparkConnectClient._build_metrics.
-        let plan_metrics = pyo3::types::PyList::empty(py);
-        if let Some(m) = &info.metrics {
-            for x in &m.metrics {
-                let values = pyo3::types::PyList::empty(py);
-                for (k, v) in &x.execution_metrics {
-                    values.append(metric_value_cls.call1((k, v.value, &v.metric_type))?)?;
-                }
-                plan_metrics
-                    .append(plan_metrics_cls.call1((&x.name, x.plan_id, x.parent, values))?)?;
-            }
-        }
-        let observed_cls = py
-            .import("pyspark.sql.connect.client")?
-            .getattr("PlanObservedMetrics")?;
-        let observed = pyo3::types::PyList::empty(py);
-        for o in &info.observed_metrics {
-            let values = o
-                .values
-                .iter()
-                .map(|l| literal_to_py(py, l, None))
-                .collect::<PyResult<Vec<_>>>()?;
-            observed.append(observed_cls.call1((&o.name, values, o.keys.clone()))?)?;
-        }
+        let (plan_metrics, observed) = execution_metrics(py, &info)?;
         let ei = metrics_mod.getattr("ExecutionInfo")?.call1((
             plan_metrics,
             observed,
@@ -1310,8 +1431,10 @@ impl PyDataFrame {
 
     /// Get the first row.
     fn first(&self, py: Python<'_>) -> PyResult<Option<PyRow>> {
-        let row = py.detach(|| self.dataframe.first()).to_pyerr()?;
-        Ok(row.map(PyRow::new))
+        let (row, schema) = py
+            .detach(|| self.dataframe.first_with_schema())
+            .to_pyerr()?;
+        Ok(rows_to_py(py, row.into_iter().collect(), schema.as_ref())?.pop())
     }
 
     /// Alias for first.
@@ -1320,25 +1443,23 @@ impl PyDataFrame {
         use pyo3::IntoPyObjectExt;
         match n {
             // head() -> the first Row (or None), matching reference pyspark.
-            None => {
-                let row = py.detach(|| self.dataframe.first()).to_pyerr()?;
-                row.map(PyRow::new).into_py_any(py)
-            }
+            None => self.first(py)?.into_py_any(py),
             // head(n) -> a list of the first n Rows.
             Some(k) => {
-                let rows = py.detach(|| self.dataframe.limit(k).collect()).to_pyerr()?;
-                rows.into_iter()
-                    .map(PyRow::new)
-                    .collect::<Vec<_>>()
-                    .into_py_any(py)
+                let (rows, schema) = py
+                    .detach(|| self.dataframe.limit(k).collect_with_schema())
+                    .to_pyerr()?;
+                rows_to_py(py, rows, schema.as_ref())?.into_py_any(py)
             }
         }
     }
 
     /// Get the first n rows.
     fn take(&self, py: Python<'_>, num: usize) -> PyResult<Vec<PyRow>> {
-        let rows = py.detach(|| self.dataframe.take(num)).to_pyerr()?;
-        Ok(rows.into_iter().map(PyRow::new).collect())
+        let (rows, schema) = py
+            .detach(|| self.dataframe.take_with_schema(num))
+            .to_pyerr()?;
+        rows_to_py(py, rows, schema.as_ref())
     }
 
     /// Column names (a property, mirroring `DataFrame.columns`).
@@ -1349,10 +1470,10 @@ impl PyDataFrame {
 
     /// Get the last `num` rows as a list of Rows (eager, like pyspark `tail`).
     fn tail(&self, py: Python<'_>, num: i32) -> PyResult<Vec<PyRow>> {
-        let rows = py
-            .detach(|| self.dataframe.tail(num).collect())
+        let (rows, schema) = py
+            .detach(|| self.dataframe.tail(num).collect_with_schema())
             .to_pyerr()?;
-        Ok(rows.into_iter().map(PyRow::new).collect())
+        rows_to_py(py, rows, schema.as_ref())
     }
 
     /// Sample a fraction of rows. Mirrors `DataFrame.sample(withReplacement=None,
@@ -1431,10 +1552,15 @@ impl PyDataFrame {
         else {
             unreachable!("schema() validates struct responses")
         };
-        Ok(fields
+        // As PySpark, a user-defined type is named by its simpleString(), such as `vector`,
+        // which only its Python class knows.
+        fields
             .into_iter()
-            .map(|field| (field.name, field.data_type.simple_string()))
-            .collect())
+            .map(|field| {
+                let name = crate::types::simple_string_with_udts(py, &field.data_type)?;
+                Ok((field.name, name))
+            })
+            .collect()
     }
 
     /// Additional set operation: unionAll (alias for union).
@@ -1483,9 +1609,41 @@ impl PyDataFrame {
         }
     }
 
-    /// Column access by name (`df["col"]`).
-    fn __getitem__(&self, item: &str) -> PyColumn {
-        PyColumn::new(spark_connect::functions::col(item))
+    /// As PySpark's `DataFrame.__getitem__`: a column by name (`df["col"]`) or position
+    /// (`df[0]`), the rows that match a Column (`df[df.a > 1]`, as `filter`), or the
+    /// projection of a list or tuple of columns (`df[["a", "b"]]`, as `select`).
+    fn __getitem__(&self, py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        use pyo3::IntoPyObjectExt;
+
+        let name = if let Ok(name) = item.cast::<pyo3::types::PyString>() {
+            name.extract::<String>()?
+        } else if item.is_instance_of::<PyColumn>() {
+            return self.filter(item)?.into_py_any(py);
+        } else if item.is_instance_of::<PyList>() || item.is_instance_of::<PyTuple>() {
+            let cols = item.try_iter()?.collect::<PyResult<Vec<_>>>()?;
+            return self.select(py, cols)?.into_py_any(py);
+        } else if item.is_instance_of::<PyInt>() {
+            let columns = self.columns(py)?;
+            // Use Python list indexing for negative indices, bools (an int
+            // subclass), and IndexError even for integers larger than isize.
+            PyList::new(py, columns)?
+                .as_any()
+                .get_item(item)?
+                .extract::<String>()?
+        } else {
+            let arg_type = item.get_type().name()?.to_string();
+            return Err(crate::column::raise_pyspark(
+                py,
+                "PySparkTypeError",
+                "NOT_EXPECTED_TYPE",
+                &[
+                    ("expected_type", "Column, int, list, str or tuple"),
+                    ("arg_name", "item"),
+                    ("arg_type", &arg_type),
+                ],
+            ));
+        };
+        PyColumn::new(spark_connect::functions::col(&name)).into_py_any(py)
     }
 
     /// Private column accessor used by pandas-on-Spark (`sdf._col(name)`); mirrors the
@@ -1494,8 +1652,34 @@ impl PyDataFrame {
         PyColumn::new(spark_connect::functions::col(item))
     }
 
-    fn __repr__(&self) -> String {
-        "DataFrame".to_string()
+    /// As PySpark's `DataFrame.__repr__`: the table of `_show_string` when the session's
+    /// `spark.sql.repl.eagerEval.enabled` is `true`, with its `maxNumRows` rows and its
+    /// `truncate`, and `DataFrame[name: type, ...]` otherwise. Like PySpark, it reads the
+    /// three settings, in one request, on every call.
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        const EAGER_EVAL: [&str; 3] = [
+            "spark.sql.repl.eagerEval.enabled",
+            "spark.sql.repl.eagerEval.maxNumRows",
+            "spark.sql.repl.eagerEval.truncate",
+        ];
+        let conf = self.dataframe.spark_session().conf();
+        let values = py.detach(|| conf.get_many(&EAGER_EVAL)).to_pyerr()?;
+        if values[0].as_deref() == Some("true") {
+            // As PySpark's `int(...)` of each setting.
+            let int = py.import("builtins")?.getattr("int")?;
+            let n: i32 = int.call1((values[1].as_deref(),))?.extract()?;
+            let truncate: i32 = int.call1((values[2].as_deref(),))?.extract()?;
+            return py
+                .detach(|| self.dataframe.show_string(n, truncate, false))
+                .to_pyerr();
+        }
+        let fields = self
+            .dtypes(py)?
+            .into_iter()
+            .map(|(name, dtype)| format!("{name}: {dtype}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Ok(format!("DataFrame[{fields}]"))
     }
 
     /// `DataFrame.mapInPandas` — map an iterator of pandas DataFrames.
@@ -1513,6 +1697,7 @@ impl PyDataFrame {
         barrier: bool,
         profile: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
+        validate_map_function(py, &func, eval_type::SQL_MAP_PANDAS_ITER_UDF)?;
         let cols = py.detach(|| self.dataframe.columns()).to_pyerr()?;
         let udf = build_map_udf(
             py,
@@ -1537,6 +1722,7 @@ impl PyDataFrame {
         barrier: bool,
         profile: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
+        validate_map_function(py, &func, eval_type::SQL_MAP_ARROW_ITER_UDF)?;
         let cols = py.detach(|| self.dataframe.columns()).to_pyerr()?;
         let udf = build_map_udf(
             py,
@@ -2438,6 +2624,51 @@ pub(crate) fn py_version(py: Python<'_>) -> String {
     .unwrap_or_else(|| "3.11".to_string())
 }
 
+/// The arguments of a call, bound to `names` positionally and by keyword as Python binds a
+/// signature of those names with `defaults`, raising Python's `TypeError`s of `function`
+/// for too many, repeated or unexpected arguments. For a method that tells a value of None
+/// from an argument not given.
+fn bind_arguments<'py, const N: usize>(
+    function: &str,
+    args: &Bound<'py, PyTuple>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+    names: [&str; N],
+    defaults: [Bound<'py, PyAny>; N],
+) -> PyResult<[Bound<'py, PyAny>; N]> {
+    if args.len() > N {
+        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "{function}() takes from 1 to {} positional arguments but {} were given",
+            N + 1,
+            args.len() + 1
+        )));
+    }
+    let mut values: [Option<Bound<'py, PyAny>>; N] = std::array::from_fn(|_| None);
+    for (i, value) in args.iter().enumerate() {
+        values[i] = Some(value);
+    }
+    if let Some(kwargs) = kwargs {
+        for (key, value) in kwargs.iter() {
+            let key: String = key.extract()?;
+            let Some(i) = names.iter().position(|name| *name == key) else {
+                return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                    "{function}() got an unexpected keyword argument '{key}'"
+                )));
+            };
+            if values[i].is_some() {
+                return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                    "{function}() got multiple values for argument '{key}'"
+                )));
+            }
+            values[i] = Some(value);
+        }
+    }
+    let mut defaults = defaults.into_iter();
+    Ok(values.map(|value| {
+        let default = defaults.next().expect("a default per name");
+        value.unwrap_or(default)
+    }))
+}
+
 /// Resolve a Python schema argument (a `DataType` wrapper or a DDL string) into a Rust DataType.
 pub(crate) fn resolve_datatype(
     schema: &Bound<'_, PyAny>,
@@ -2453,6 +2684,46 @@ pub(crate) fn resolve_datatype(
     ))
 }
 
+/// Validate the function of a map UDF for its eval type with
+/// `pyspark.sql.pandas.functions._validate_vectorized_udf`, as the reference client does
+/// before it builds the UDF.
+pub(crate) fn validate_map_function(
+    py: Python<'_>,
+    func: &Bound<'_, PyAny>,
+    eval_type_id: i32,
+) -> PyResult<()> {
+    py.import("pyspark.sql.pandas.functions")?
+        .call_method1("_validate_vectorized_udf", (func, eval_type_id))?;
+    Ok(())
+}
+
+/// The eval type of a grouped map function from its type hints, by `infer` of
+/// `pyspark.sql.pandas.typehints` (the iterator forms, for example), as the reference
+/// client infers it. `default` is used when the hints give none, and when they cannot be
+/// read, after the reference client's `warning`.
+pub(crate) fn infer_group_map_eval_type(
+    py: Python<'_>,
+    func: &Bound<'_, PyAny>,
+    infer: &str,
+    warning: &str,
+    default: i32,
+) -> PyResult<i32> {
+    match py
+        .import("pyspark.sql.pandas.typehints")?
+        .call_method1(infer, (func,))
+    {
+        Ok(inferred) if inferred.is_none() => Ok(default),
+        Ok(inferred) => inferred.extract(),
+        Err(err) if err.is_instance_of::<pyo3::exceptions::PyException>(py) => {
+            let category = py.get_type::<pyo3::exceptions::PyUserWarning>();
+            py.import("warnings")?
+                .call_method1("warn", (warning, category))?;
+            Ok(default)
+        }
+        Err(err) => Err(err),
+    }
+}
+
 /// Build a map/group UDF expression: cloudpickle `(func, schema)` as the command and
 /// carry the resolved schema as the output type (mirrors the scalar UDF command layout).
 pub(crate) fn build_map_udf(
@@ -2464,7 +2735,14 @@ pub(crate) fn build_map_udf(
     input_cols: &[String],
 ) -> PyResult<CommonInlineUserDefinedFunctionExpression> {
     let return_type = resolve_datatype(schema)?;
-    let tup = PyTuple::new(py, [func.clone(), schema.clone()])?;
+    // The worker reads the pickled type as a `DataType`, so a DDL string is pickled as the
+    // type it parses to, as the reference client pickles the type of `_parse_ddl`.
+    let pickled_type = if schema.is_instance_of::<pyo3::types::PyString>() {
+        crate::types::data_type_to_py(py, &return_type)?.into_bound(py)
+    } else {
+        schema.clone()
+    };
+    let tup = PyTuple::new(py, [func.clone(), pickled_type])?;
     let command = py_cloudpickle(py, tup.as_any())?;
     let payload = PythonUDFPayload::new(return_type, eval_type_id, command, py_version(py));
     // The worker reconstructs the input pandas/Arrow DataFrame from the UDF's argument
@@ -2504,17 +2782,57 @@ fn build_side_effect_udf(
     ))
 }
 
+/// The converters of the fields of a result of `schema` that deserialize its values of
+/// user-defined types, as PySpark does when it collects them
+/// (`pyspark.sql.types._udt_field_converters`); None without a user-defined type.
+fn udt_field_converters(
+    py: Python<'_>,
+    schema: Option<&spark_connect::types::DataType>,
+) -> PyResult<Option<FieldConverters>> {
+    let Some(schema) = schema.filter(|schema| crate::types::has_udt(schema)) else {
+        return Ok(None);
+    };
+    let schema = crate::types::data_type_to_py(py, schema)?;
+    let converters = py
+        .import("pyspark.sql.types")?
+        .call_method1("_udt_field_converters", (schema,))?;
+    if converters.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(std::sync::Arc::new(converters.extract()?)))
+}
+
+/// The collected `rows` of a result of `schema`, whose values of user-defined types are
+/// deserialized when first read.
+fn rows_to_py(
+    py: Python<'_>,
+    rows: Vec<spark_connect::row::Row>,
+    schema: Option<&spark_connect::types::DataType>,
+) -> PyResult<Vec<PyRow>> {
+    let converters = udt_field_converters(py, schema)?;
+    Ok(rows
+        .into_iter()
+        .map(|row| PyRow::with_converters(row, converters.clone()))
+        .collect())
+}
+
 /// Python wrapper for LocalRowIterator yielding Row objects lazily.
 ///
 /// Implements `__iter__` and `__next__` to make it a proper Python iterator.
 #[pyclass(name = "LocalRowIterator", module = "pyspark.sql.dataframe")]
 pub struct PyLocalRowIterator {
     iterator: LocalRowIterator,
+    /// The converters of the fields of user-defined types of the rows, once the schema of the
+    /// result is known: with the first row.
+    converters: Option<Option<FieldConverters>>,
 }
 
 impl PyLocalRowIterator {
     pub fn new(iterator: LocalRowIterator) -> Self {
-        PyLocalRowIterator { iterator }
+        PyLocalRowIterator {
+            iterator,
+            converters: None,
+        }
     }
 }
 
@@ -2528,17 +2846,58 @@ impl PyLocalRowIterator {
     /// Fetch the next row from the iterator.
     ///
     /// Releases the GIL during the blocking fetch to allow other threads to run.
-    fn __next__(&mut self, py: Python<'_>) -> Option<PyRow> {
-        loop {
-            // Release the GIL while fetching from the Rust iterator (which may block on network I/O).
-            let next_result = py.detach(|| self.iterator.next());
-            match next_result {
-                Some(Ok(row)) => return Some(PyRow::new(row)),
-                Some(Err(_e)) => return None, // On error, stop iterating
-                None => return None,
+    fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<PyRow>> {
+        // Release the GIL while fetching from the Rust iterator (which may block on network I/O).
+        match py.detach(|| self.iterator.next()) {
+            Some(Ok(row)) => {
+                if self.converters.is_none() {
+                    let schema = self.iterator.schema();
+                    self.converters = Some(udt_field_converters(py, schema.as_ref())?);
+                }
+                let converters = self.converters.clone().flatten();
+                Ok(Some(PyRow::with_converters(row, converters)))
             }
+            Some(Err(_e)) => Ok(None), // On error, stop iterating
+            None => Ok(None),
         }
     }
+}
+
+/// The metrics and observed metrics of an execution, as the lists of `PlanMetrics` and
+/// `PlanObservedMetrics` that `SparkConnectClient._build_metrics` makes.
+fn execution_metrics<'py>(
+    py: Python<'py>,
+    info: &spark_connect::session::ExecutionInfo,
+) -> PyResult<(
+    Bound<'py, pyo3::types::PyList>,
+    Bound<'py, pyo3::types::PyList>,
+)> {
+    let metrics_mod = py.import("pyspark.sql.metrics")?;
+    let plan_metrics_cls = metrics_mod.getattr("PlanMetrics")?;
+    let metric_value_cls = metrics_mod.getattr("MetricValue")?;
+    let plan_metrics = pyo3::types::PyList::empty(py);
+    if let Some(m) = &info.metrics {
+        for x in &m.metrics {
+            let values = pyo3::types::PyList::empty(py);
+            for (k, v) in &x.execution_metrics {
+                values.append(metric_value_cls.call1((k, v.value, &v.metric_type))?)?;
+            }
+            plan_metrics.append(plan_metrics_cls.call1((&x.name, x.plan_id, x.parent, values))?)?;
+        }
+    }
+    let observed_cls = py
+        .import("pyspark.sql.connect.client")?
+        .getattr("PlanObservedMetrics")?;
+    let observed = pyo3::types::PyList::empty(py);
+    for o in &info.observed_metrics {
+        let values = o
+            .values
+            .iter()
+            .map(|l| literal_to_py(py, l, None))
+            .collect::<PyResult<Vec<_>>>()?;
+        observed.append(observed_cls.call1((&o.name, values, o.keys.clone()))?)?;
+    }
+    Ok((plan_metrics, observed))
 }
 
 /// Convert an observed-metric literal to a Python value. Mirrors

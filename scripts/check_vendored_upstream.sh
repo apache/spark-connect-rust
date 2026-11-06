@@ -47,9 +47,13 @@ VENDORED_DIRS=(
 # Individual files under python/pyspark vendored verbatim from upstream. Listed per-file
 # (not per-dir) because their parent dirs also hold fork-adapted files that intentionally
 # differ (e.g. pipelines/api.py's connect->functions import repointing, and the Rust-backed
-# errors/exceptions/__init__.py; upstream's errors/exceptions/{captured,connect}.py are
-# omitted here as they need py4j/grpc). Keep these byte-identical to the tag.
+# errors/exceptions/__init__.py; upstream's errors/exceptions/connect.py is omitted here
+# as it needs grpc, and captured.py imports py4j only where the JVM is used). Keep these
+# byte-identical to the tag.
 VENDORED_FILES=(
+  # Call sites of the JVM gateway, which pyspark.sql.pandas.conversion imports.
+  "traceback_utils.py"
+
   # Logging
   "logger/__init__.py"
   "logger/logger.py"
@@ -61,6 +65,7 @@ VENDORED_FILES=(
   "errors/error-conditions.json"
   "errors/utils.py"
   "errors/exceptions/base.py"
+  "errors/exceptions/captured.py"
   "errors/exceptions/tblib.py"
 
   # Pipelines
@@ -90,6 +95,9 @@ VENDORED_FILES=(
   "ml/functions.py"
   # ML connect base ABCs (Estimator/Transformer/Evaluator/Model) - pure upstream.
   "ml/connect/base.py"
+  # vector_to_array/array_to_vector of pyspark.ml.functions build their columns here, through
+  # pyspark.sql.connect.functions.builtin - pure upstream.
+  "ml/connect/functions.py"
 
   # ML: param (param API is unmodified)
   "ml/param/__init__.py"
@@ -136,6 +144,8 @@ VENDORED_FILES=(
   "sql/pandas/typehints.py"
   "sql/pandas/types.py"
   "sql/pandas/utils.py"
+  # pandas_udf and arrow_udf, which create the UDF with pyspark.sql.connect.udf._create_udf.
+  "sql/pandas/functions.py"
 
   # SQL: core utilities
   "sql/variant_utils.py"
@@ -145,6 +155,9 @@ VENDORED_FILES=(
   "sql/profiler.py"
   # ExecutionInfo / PlanMetrics / MetricValue (DataFrame.executionInfo).
   "sql/metrics.py"
+
+  # SQL: streaming. TwsTester runs a StatefulProcessor locally - pure upstream.
+  "sql/streaming/tws_tester.py"
 
   # Streaming (excluding adapted context, dstream, util)
   "streaming/__init__.py"

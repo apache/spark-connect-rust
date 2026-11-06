@@ -133,32 +133,35 @@ impl Expression {
             ExpressionNode::ColumnReference(col_ref) => col_ref.name.clone(),
             ExpressionNode::UnresolvedFunction(func) => func.render(),
             ExpressionNode::UnresolvedStar(target) => match target {
-                Some(t) => t.clone(),
-                None => "*".to_string(),
+                Some(t) => format!("unresolvedstar({t})"),
+                None => "unresolvedstar()".to_string(),
             },
+            // As `ColumnAlias.__repr__`: the names joined by commas.
             ExpressionNode::Alias(alias) => {
-                let name = if alias.names.len() == 1 {
-                    alias.names[0].clone()
-                } else {
-                    format!("({})", alias.names.join(", "))
-                };
-                format!("{} AS {}", alias.child.render(), name)
+                format!("{} AS {}", alias.child.render(), alias.names.join(","))
             }
+            // As `CastExpression.__repr__`: the type in upper case.
             ExpressionNode::Cast(cast) => {
                 let type_str = match &cast.target {
                     CastTarget::Type(dt) => dt.simple_string(),
                     CastTarget::TypeStr(s) => s.clone(),
+                }
+                .to_uppercase();
+                let name = if cast.eval_mode == Some(CastEvalMode::Try) {
+                    "TRY_CAST"
+                } else {
+                    "CAST"
                 };
-                format!("CAST({} AS {})", cast.child.render(), type_str)
+                format!("{name}({} AS {type_str})", cast.child.render())
             }
             ExpressionNode::DirectShufflePartitionId(child) => {
-                format!("DIRECT_SHUFFLE_PARTITION_ID({})", child.render())
+                format!("DirectShufflePartitionID(child={})", child.render())
             }
-            ExpressionNode::UnresolvedRegex(col_name) => col_name.clone(),
+            ExpressionNode::UnresolvedRegex(col_name) => format!("UnresolvedRegex({col_name})"),
             ExpressionNode::SortOrder(sort) => sort.render(),
             ExpressionNode::CaseWhen(case_when) => case_when.render(),
             ExpressionNode::UnresolvedExtractValue(ev) => {
-                format!("{}[{}]", ev.child.render(), ev.extraction.render())
+                format!("{}['{}']", ev.child.render(), ev.extraction.render())
             }
             ExpressionNode::UpdateFields(uf) => match &uf.value_expression {
                 Some(v) => format!(
@@ -174,11 +177,23 @@ impl Expression {
                 ),
             },
             ExpressionNode::SQLExpression(sql) => sql.clone(),
-            ExpressionNode::CallFunction(_) => format!("{self:?}"),
-            ExpressionNode::WindowExpression(_) => format!("{self:?}"),
-            ExpressionNode::LambdaFunction(lf) => format!("{lf:?}"),
-            ExpressionNode::UnresolvedNamedLambdaVariable(var) => format!("{var:?}"),
-            ExpressionNode::CommonInlineUserDefinedFunction(_) => format!("{self:?}"),
+            ExpressionNode::CallFunction(cf) => cf.render(),
+            ExpressionNode::WindowExpression(we) => we.render(),
+            // As `LambdaFunction.__repr__` and `UnresolvedNamedLambdaVariable.__repr__`.
+            ExpressionNode::LambdaFunction(lf) => {
+                let args: Vec<&str> = lf.arguments.iter().map(|a| a.name_parts.as_str()).collect();
+                format!(
+                    "LambdaFunction({}, {})",
+                    lf.function.render(),
+                    args.join(", ")
+                )
+            }
+            ExpressionNode::UnresolvedNamedLambdaVariable(var) => var.name_parts.clone(),
+            // As `CommonInlineUserDefinedFunction.__repr__`.
+            ExpressionNode::CommonInlineUserDefinedFunction(udf) => {
+                let args: Vec<String> = udf.arguments.iter().map(Expression::render).collect();
+                format!("{}({})", udf.function_name, args.join(", "))
+            }
         }
     }
 
@@ -348,34 +363,42 @@ impl LiteralExpression {
         expr
     }
 
-    /// Render the literal value, mirroring `LiteralExpression.__repr__`.
+    /// Render the literal value, mirroring `LiteralExpression.__repr__`: the Python value,
+    /// as `f"{value}"` shows it, and a date, time, timestamp or day-time interval in the
+    /// formats that it gives them.
     pub fn render(&self) -> String {
         match self {
             LiteralExpression::Null(_) => "NULL".to_string(),
-            LiteralExpression::Boolean(b) => {
-                if *b {
-                    "true".to_string()
-                } else {
-                    "false".to_string()
-                }
-            }
+            LiteralExpression::Boolean(b) => if *b { "True" } else { "False" }.to_string(),
             LiteralExpression::Byte(v)
             | LiteralExpression::Short(v)
             | LiteralExpression::Integer(v) => v.to_string(),
             LiteralExpression::Long(v) => v.to_string(),
-            LiteralExpression::Float(v) => v.to_string(),
-            LiteralExpression::Double(v) => v.to_string(),
+            LiteralExpression::Float(v) => python_float_repr(*v as f64),
+            LiteralExpression::Double(v) => python_float_repr(*v),
             LiteralExpression::Decimal { value, .. } => value.clone(),
             LiteralExpression::String(v) => v.clone(),
-            LiteralExpression::Binary(v) => format!("{v:?}"),
-            LiteralExpression::Date(v) => v.to_string(),
-            LiteralExpression::Timestamp(v) | LiteralExpression::TimestampNtz(v) => v.to_string(),
-            LiteralExpression::DayTimeInterval(v) => v.to_string(),
-            LiteralExpression::Time { nano, .. } => nano.to_string(),
+            LiteralExpression::Binary(v) => python_bytes_repr(v),
+            LiteralExpression::Date(v) => date_repr(*v),
+            LiteralExpression::Timestamp(v) => timestamp_repr(*v, true),
+            LiteralExpression::TimestampNtz(v) => timestamp_repr(*v, false),
+            LiteralExpression::DayTimeInterval(v) => iso_duration(*v),
+            LiteralExpression::Time { nano, .. } => time_repr(*nano),
+            // A Python list, as `str(list)` shows its elements.
             LiteralExpression::Array { elements, .. } => {
-                let inner: Vec<String> = elements.iter().map(|e| e.render()).collect();
+                let inner: Vec<String> = elements.iter().map(|e| e.render_in_container()).collect();
                 format!("[{}]", inner.join(", "))
             }
+        }
+    }
+
+    /// The literal as Python's `repr` shows it within a container, such as a list: a string
+    /// quoted, and None for a null.
+    fn render_in_container(&self) -> String {
+        match self {
+            LiteralExpression::Null(_) => "None".to_string(),
+            LiteralExpression::String(v) => python_str_repr(v),
+            other => other.render(),
         }
     }
 
@@ -556,27 +579,13 @@ impl UnresolvedFunction {
     /// binary operators render infix as `(a op b)`, the unary `not`/negate render
     /// prefixed, everything else as `name(arg, arg, ...)`.
     pub fn render(&self) -> String {
-        const INFIX_OPS: &[&str] = &[
-            "+", "-", "*", "/", "%", "==", "!=", "<", "<=", ">", ">=", "and", "or", "&", "|", "^",
-            "<=>",
-        ];
-        if self.args.len() == 2 && INFIX_OPS.contains(&self.name.as_str()) {
-            return format!(
-                "({} {} {})",
-                self.args[0].render(),
-                self.name,
-                self.args[1].render()
-            );
-        }
-        if self.args.len() == 1 {
-            match self.name.as_str() {
-                "not" => return format!("(NOT {})", self.args[0].render()),
-                "negative" | "negate" => return format!("(- {})", self.args[0].render()),
-                _ => {}
-            }
-        }
+        // As `UnresolvedFunction.__repr__`, which renders an operator as a function too.
         let inner: Vec<String> = self.args.iter().map(|a| a.render()).collect();
-        format!("{}({})", self.name, inner.join(", "))
+        if self.is_distinct {
+            format!("{}(distinct {})", self.name, inner.join(", "))
+        } else {
+            format!("{}({})", self.name, inner.join(", "))
+        }
     }
 
     pub fn to_proto(&self) -> proto::Expression {
@@ -605,6 +614,19 @@ impl Alias {
         Self {
             child,
             names: vec![name.into()],
+            metadata: None,
+        }
+    }
+
+    /// An alias of several names, or of none, as the reference client's `ColumnAlias`
+    /// takes them: a generator's columns are named in order.
+    pub fn with_names<S: Into<String>>(
+        child: Expression,
+        names: impl IntoIterator<Item = S>,
+    ) -> Self {
+        Self {
+            child,
+            names: names.into_iter().map(Into::into).collect(),
             metadata: None,
         }
     }
@@ -833,6 +855,20 @@ impl CallFunctionWrapper {
         }
     }
 
+    /// Mirrors `CallFunction.__repr__`: `CallFunction('<name>', <arg>, ...)`.
+    pub fn render(&self) -> String {
+        if self.arguments.is_empty() {
+            format!("CallFunction('{}')", self.function_name)
+        } else {
+            let args: Vec<String> = self.arguments.iter().map(Expression::render).collect();
+            format!(
+                "CallFunction('{}', {})",
+                self.function_name,
+                args.join(", ")
+            )
+        }
+    }
+
     /// Convert to protobuf.
     pub fn to_proto(&self) -> proto::Expression {
         let mut expr = proto::Expression::default();
@@ -865,6 +901,51 @@ pub enum FrameBoundary {
     UnboundedFollowing,
 }
 
+impl FrameBoundary {
+    /// The boundary as the int that `rowsBetween` and `rangeBetween` take, as
+    /// `WindowFrame.__repr__` shows it.
+    pub fn value(&self) -> i64 {
+        match self {
+            FrameBoundary::UnboundedPreceding => i64::MIN,
+            FrameBoundary::Preceding(n) => -n,
+            FrameBoundary::CurrentRow => 0,
+            FrameBoundary::Following(n) => *n,
+            FrameBoundary::UnboundedFollowing => i64::MAX,
+        }
+    }
+}
+
+/// As `WindowSpec.__repr__` of PySpark Connect: its partitioning, ordering and frame. A
+/// frame type of 1 is a row frame, and another a range frame, as in the proto.
+pub fn window_spec_repr(
+    partition_spec: &[Expression],
+    order_spec: &[SortOrder],
+    frame_spec: Option<&(u32, FrameBoundary, FrameBoundary)>,
+) -> String {
+    let mut parts = Vec::new();
+    if !partition_spec.is_empty() {
+        let partitions: Vec<String> = partition_spec.iter().map(Expression::render).collect();
+        parts.push(format!("PartitionBy({})", partitions.join(", ")));
+    }
+    if !order_spec.is_empty() {
+        let orders: Vec<String> = order_spec.iter().map(SortOrder::render).collect();
+        parts.push(format!("OrderBy({})", orders.join(", ")));
+    }
+    if let Some((frame_type, lower, upper)) = frame_spec {
+        let kind = if *frame_type == 1 {
+            "ROW_FRAME"
+        } else {
+            "RANGE_FRAME"
+        };
+        parts.push(format!(
+            "WindowFrame({kind}, {}, {})",
+            lower.value(),
+            upper.value()
+        ));
+    }
+    format!("WindowSpec({})", parts.join(", "))
+}
+
 impl WindowExpressionWrapper {
     /// Create a new WindowExpressionWrapper.
     pub fn new(
@@ -882,6 +963,19 @@ impl WindowExpressionWrapper {
     }
 
     /// Convert to protobuf.
+    /// As `WindowExpression.__repr__`.
+    pub fn render(&self) -> String {
+        let spec = window_spec_repr(
+            &self.partition_spec,
+            &self.order_spec,
+            self.frame_spec.as_ref(),
+        );
+        format!(
+            "WindowExpression({}, ({spec}))",
+            self.window_function.render()
+        )
+    }
+
     pub fn to_proto(&self) -> proto::Expression {
         let mut expr = proto::Expression::default();
         let mut window = proto::expression::Window::default();
@@ -1015,6 +1109,158 @@ impl UnresolvedNamedLambdaVariable {
     }
 }
 
+/// Python's `repr` of a float, as PySpark's reprs show one: the shortest digits that
+/// round-trip, in fixed notation for a decimal exponent from -4 to 15, otherwise in
+/// scientific notation with a signed exponent of at least two digits.
+fn python_float_repr(x: f64) -> String {
+    if x.is_nan() {
+        return "nan".to_string();
+    }
+    if x.is_infinite() {
+        return if x > 0.0 { "inf" } else { "-inf" }.to_string();
+    }
+    if x == 0.0 {
+        return if x.is_sign_negative() { "-0.0" } else { "0.0" }.to_string();
+    }
+    let scientific = format!("{x:e}");
+    let (mantissa, exponent) = scientific.split_once('e').unwrap_or((&scientific, "0"));
+    let exponent: i32 = exponent.parse().unwrap_or(0);
+    let (sign, mantissa) = match mantissa.strip_prefix('-') {
+        Some(mantissa) => ("-", mantissa),
+        None => ("", mantissa),
+    };
+    let digits = mantissa.replace('.', "");
+    if (-4..16).contains(&exponent) {
+        let point = exponent + 1;
+        let fixed = if point <= 0 {
+            format!("0.{}{digits}", "0".repeat(point.unsigned_abs() as usize))
+        } else if point as usize >= digits.len() {
+            format!("{digits}{}.0", "0".repeat(point as usize - digits.len()))
+        } else {
+            format!(
+                "{}.{}",
+                &digits[..point as usize],
+                &digits[point as usize..]
+            )
+        };
+        format!("{sign}{fixed}")
+    } else {
+        let mantissa = if digits.len() == 1 {
+            digits
+        } else {
+            format!("{}.{}", &digits[..1], &digits[1..])
+        };
+        let exponent_sign = if exponent < 0 { '-' } else { '+' };
+        format!("{sign}{mantissa}e{exponent_sign}{:02}", exponent.abs())
+    }
+}
+
+/// The quote that Python's `repr` puts around a string or bytes: a double quote if it has
+/// a single quote and no double quote, otherwise a single quote.
+fn python_quote(has_single: bool, has_double: bool) -> char {
+    if has_single && !has_double {
+        '"'
+    } else {
+        '\''
+    }
+}
+
+/// Python's `repr` of `bytes`, which `f"{value}"` of bytes also is.
+fn python_bytes_repr(bytes: &[u8]) -> String {
+    let quote = python_quote(bytes.contains(&b'\''), bytes.contains(&b'"'));
+    let mut out = String::from("b");
+    out.push(quote);
+    for &byte in bytes {
+        match byte {
+            b'\\' => out.push_str("\\\\"),
+            b'\t' => out.push_str("\\t"),
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            byte if byte as char == quote => {
+                out.push('\\');
+                out.push(quote);
+            }
+            0x20..=0x7e => out.push(byte as char),
+            byte => out.push_str(&format!("\\x{byte:02x}")),
+        }
+    }
+    out.push(quote);
+    out
+}
+
+/// Python's `repr` of a string, as a list shows its strings.
+fn python_str_repr(value: &str) -> String {
+    let quote = python_quote(value.contains('\''), value.contains('"'));
+    let mut out = String::new();
+    out.push(quote);
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if c.is_control() => {
+                let code = c as u32;
+                if code < 0x100 {
+                    out.push_str(&format!("\\x{code:02x}"));
+                } else if code < 0x10000 {
+                    out.push_str(&format!("\\u{code:04x}"));
+                } else {
+                    out.push_str(&format!("\\U{code:08x}"));
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
+}
+
+/// A date of `days` since the epoch, as `DateType.fromInternal` and `%Y-%m-%d` give it.
+fn date_repr(days: i32) -> String {
+    chrono::NaiveDate::from_num_days_from_ce_opt(days.saturating_add(719_163))
+        .map(|date| date.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| days.to_string())
+}
+
+/// A timestamp of `micros` since the epoch, as `%Y-%m-%d %H:%M:%S.%f` gives it: in the local
+/// time zone, as `TimestampType.fromInternal` does, or in UTC, as `TimestampNTZType`'s does.
+fn timestamp_repr(micros: i64, local: bool) -> String {
+    const FORMAT: &str = "%Y-%m-%d %H:%M:%S%.6f";
+    match chrono::DateTime::from_timestamp_micros(micros) {
+        Some(utc) if local => utc.with_timezone(&chrono::Local).format(FORMAT).to_string(),
+        Some(utc) => utc.naive_utc().format(FORMAT).to_string(),
+        None => micros.to_string(),
+    }
+}
+
+/// A time of `nano` since midnight, as `TimeType.fromInternal` and `%H:%M:%S.%f` give it.
+fn time_repr(nano: i64) -> String {
+    let (hours, rest) = (nano / 3_600_000_000_000, nano % 3_600_000_000_000);
+    let (minutes, rest) = (rest / 60_000_000_000, rest % 60_000_000_000);
+    let (seconds, rest) = (rest / 1_000_000_000, rest % 1_000_000_000);
+    format!("{hours:02}:{minutes:02}:{seconds:02}.{:06}", rest / 1_000)
+}
+
+/// A day-time interval of `micros`, as pandas' `Timedelta.isoformat` gives it: the days of
+/// the interval, which are negative for a negative one, and the time of day after them, with
+/// the seconds of the fraction without trailing zeros.
+fn iso_duration(micros: i64) -> String {
+    const DAY: i64 = 86_400_000_000;
+    let days = micros.div_euclid(DAY);
+    let rest = micros.rem_euclid(DAY);
+    let (hours, rest) = (rest / 3_600_000_000, rest % 3_600_000_000);
+    let (minutes, rest) = (rest / 60_000_000, rest % 60_000_000);
+    let (seconds, micro) = (rest / 1_000_000, rest % 1_000_000);
+    let fraction = format!("{seconds}.{micro:06}000");
+    let seconds = fraction.trim_end_matches('0').trim_end_matches('.');
+    format!("P{days}DT{hours}H{minutes}M{seconds}S")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1036,19 +1282,19 @@ mod tests {
             "NULL"
         );
 
-        // Binary operators render infix, mirroring UnresolvedFunction.__repr__.
+        // An operator renders as a function, as UnresolvedFunction.__repr__.
         let add = Expression::function(
             "+",
             vec![col("x"), Expression::literal(LiteralExpression::Integer(1))],
         );
-        assert_eq!(add.render(), "(x + 1)");
+        assert_eq!(add.render(), "+(x, 1)");
 
         let eq = Expression::function("==", vec![col("a"), col("b")]);
-        assert_eq!(eq.render(), "(a == b)");
+        assert_eq!(eq.render(), "==(a, b)");
 
         // Unary not.
         let neq = Expression::function("not", vec![eq.clone()]);
-        assert_eq!(neq.render(), "(NOT (a == b))");
+        assert_eq!(neq.render(), "not(==(a, b))");
 
         // Non-operator function renders as name(args).
         let f = Expression::function("coalesce", vec![col("a"), col("b")]);
@@ -1066,11 +1312,11 @@ mod tests {
                 eval_mode: None,
             })))
             .render(),
-            "CAST(x AS int)"
+            "CAST(x AS INT)"
         );
         assert_eq!(
             Expression::from(ExpressionNode::UnresolvedStar(None)).render(),
-            "*"
+            "unresolvedstar()"
         );
 
         // Equal expressions render identically; different ones differ
@@ -1174,7 +1420,7 @@ mod tests {
     #[test]
     fn test_literal_render_float() {
         let lit = LiteralExpression::Float(3.14);
-        assert_eq!(lit.render(), "3.14");
+        assert_eq!(lit.render(), "3.140000104904175");
     }
 
     #[test]
@@ -1191,21 +1437,21 @@ mod tests {
 
     #[test]
     fn test_literal_render_binary() {
-        let lit = LiteralExpression::Binary(vec![1, 2, 3]);
-        let rendered = lit.render();
-        assert!(rendered.contains("[1, 2, 3]"));
+        let lit = LiteralExpression::Binary(vec![1, 2, 3, b'a', b'\'']);
+        // As Python's repr of bytes.
+        assert_eq!(lit.render(), "b\"\\x01\\x02\\x03a'\"");
     }
 
     #[test]
     fn test_literal_render_date() {
         let lit = LiteralExpression::Date(18993);
-        assert_eq!(lit.render(), "18993");
+        assert_eq!(lit.render(), "2022-01-01");
     }
 
     #[test]
     fn test_literal_render_timestamp_ntz() {
         let lit = LiteralExpression::TimestampNtz(1693526400000000);
-        assert_eq!(lit.render(), "1693526400000000");
+        assert_eq!(lit.render(), "2023-09-01 00:00:00.000000");
     }
 
     #[test]
@@ -1214,7 +1460,7 @@ mod tests {
             nano: 3600000000000i64,
             precision: 9,
         };
-        assert_eq!(lit.render(), "3600000000000");
+        assert_eq!(lit.render(), "01:00:00.000000");
     }
 
     #[test]
@@ -1252,20 +1498,20 @@ mod tests {
     #[test]
     fn test_expression_render_unresolved_star_with_target() {
         let expr: Expression = ExpressionNode::UnresolvedStar(Some("table.*".to_string())).into();
-        assert_eq!(expr.render(), "table.*");
+        assert_eq!(expr.render(), "unresolvedstar(table.*)");
     }
 
     #[test]
     fn test_expression_render_unresolved_regex() {
         let expr: Expression = ExpressionNode::UnresolvedRegex("`col_.*`".to_string()).into();
-        assert_eq!(expr.render(), "`col_.*`");
+        assert_eq!(expr.render(), "UnresolvedRegex(`col_.*`)");
     }
 
     #[test]
     fn test_expression_render_direct_shuffle_partition_id() {
         let child = col("x");
         let expr: Expression = ExpressionNode::DirectShufflePartitionId(child).into();
-        assert_eq!(expr.render(), "DIRECT_SHUFFLE_PARTITION_ID(x)");
+        assert_eq!(expr.render(), "DirectShufflePartitionID(child=x)");
     }
 
     #[test]
@@ -1274,7 +1520,7 @@ mod tests {
         let extraction = Expression::literal(LiteralExpression::string("field"));
         let ev = ExtractValue::new(child, extraction);
         let expr: Expression = ExpressionNode::UnresolvedExtractValue(Box::new(ev)).into();
-        assert_eq!(expr.render(), "struct_col[field]");
+        assert_eq!(expr.render(), "struct_col['field']");
     }
 
     #[test]
@@ -1331,7 +1577,7 @@ mod tests {
             Expression::literal(LiteralExpression::boolean(true)),
             Expression::literal(LiteralExpression::int(1)),
         )]);
-        assert_eq!(cw.render(), "CASE WHEN true THEN 1 END");
+        assert_eq!(cw.render(), "CASE WHEN True THEN 1 END");
     }
 
     #[test]
@@ -1346,7 +1592,7 @@ mod tests {
                 Expression::literal(LiteralExpression::int(2)),
             ),
         ]);
-        assert_eq!(cw.render(), "CASE WHEN true THEN 1 WHEN false THEN 2 END");
+        assert_eq!(cw.render(), "CASE WHEN True THEN 1 WHEN False THEN 2 END");
     }
 
     #[test]
@@ -1356,7 +1602,7 @@ mod tests {
             Expression::literal(LiteralExpression::int(1)),
         )])
         .with_else(Expression::literal(LiteralExpression::int(99)));
-        assert_eq!(cw.render(), "CASE WHEN true THEN 1 ELSE 99 END");
+        assert_eq!(cw.render(), "CASE WHEN True THEN 1 ELSE 99 END");
     }
 
     #[test]
@@ -1372,13 +1618,13 @@ mod tests {
     #[test]
     fn test_unresolved_function_render_negate() {
         let func = UnresolvedFunction::new("negate", vec![col("x")]);
-        assert_eq!(func.render(), "(- x)");
+        assert_eq!(func.render(), "negate(x)");
     }
 
     #[test]
     fn test_unresolved_function_render_negative() {
         let func = UnresolvedFunction::new("negative", vec![col("x")]);
-        assert_eq!(func.render(), "(- x)");
+        assert_eq!(func.render(), "negative(x)");
     }
 
     #[test]
@@ -1402,7 +1648,12 @@ mod tests {
             metadata: None,
         };
         let expr: Expression = ExpressionNode::Alias(Box::new(alias)).into();
-        assert_eq!(expr.render(), "x AS (a, b)");
+        // As `ColumnAlias.__repr__`: the names joined by commas.
+        assert_eq!(expr.render(), "x AS a,b");
+        let none: Expression =
+            ExpressionNode::Alias(Box::new(Alias::with_names(col("x"), Vec::<String>::new())))
+                .into();
+        assert_eq!(none.render(), "x AS ");
     }
 
     #[test]
@@ -1414,7 +1665,7 @@ mod tests {
             },
         );
         let expr: Expression = ExpressionNode::Cast(Box::new(cast)).into();
-        assert_eq!(expr.render(), "CAST(x AS string)");
+        assert_eq!(expr.render(), "CAST(x AS STRING)");
     }
 
     #[test]
@@ -1427,13 +1678,13 @@ mod tests {
     #[test]
     fn test_literal_boolean_true_render() {
         let lit = LiteralExpression::boolean(true);
-        assert_eq!(lit.render(), "true");
+        assert_eq!(lit.render(), "True");
     }
 
     #[test]
     fn test_literal_boolean_false_render() {
         let lit = LiteralExpression::boolean(false);
-        assert_eq!(lit.render(), "false");
+        assert_eq!(lit.render(), "False");
     }
 
     #[test]
@@ -1442,27 +1693,27 @@ mod tests {
             "not",
             vec![Expression::literal(LiteralExpression::boolean(true))],
         );
-        assert_eq!(func.render(), "(NOT true)");
+        assert_eq!(func.render(), "not(True)");
     }
 
     #[test]
     fn test_infix_operators_render() {
         let ops = vec![
-            ("+", "(1 + 2)"),
-            ("-", "(1 - 2)"),
-            ("*", "(1 * 2)"),
-            ("/", "(1 / 2)"),
-            ("%", "(1 % 2)"),
-            ("==", "(1 == 2)"),
-            ("!=", "(1 != 2)"),
-            ("<", "(1 < 2)"),
-            ("<=", "(1 <= 2)"),
-            (">", "(1 > 2)"),
-            (">=", "(1 >= 2)"),
-            ("&", "(1 & 2)"),
-            ("|", "(1 | 2)"),
-            ("^", "(1 ^ 2)"),
-            ("<=>", "(1 <=> 2)"),
+            ("+", "+(1, 2)"),
+            ("-", "-(1, 2)"),
+            ("*", "*(1, 2)"),
+            ("/", "/(1, 2)"),
+            ("%", "%(1, 2)"),
+            ("==", "==(1, 2)"),
+            ("!=", "!=(1, 2)"),
+            ("<", "<(1, 2)"),
+            ("<=", "<=(1, 2)"),
+            (">", ">(1, 2)"),
+            (">=", ">=(1, 2)"),
+            ("&", "&(1, 2)"),
+            ("|", "|(1, 2)"),
+            ("^", "^(1, 2)"),
+            ("<=>", "<=>(1, 2)"),
         ];
 
         for (op_name, expected_result) in ops.iter().take(15) {
@@ -1489,7 +1740,7 @@ mod tests {
                 Expression::literal(LiteralExpression::boolean(false)),
             ],
         );
-        assert_eq!(and_func.render(), "(true and false)");
+        assert_eq!(and_func.render(), "and(True, False)");
 
         let or_func = UnresolvedFunction::new(
             "or",
@@ -1498,7 +1749,7 @@ mod tests {
                 Expression::literal(LiteralExpression::boolean(false)),
             ],
         );
-        assert_eq!(or_func.render(), "(true or false)");
+        assert_eq!(or_func.render(), "or(True, False)");
     }
 
     #[test]
@@ -1519,9 +1770,11 @@ mod tests {
     fn test_call_function_wrapper_render() {
         let cf = CallFunctionWrapper::new("my_func", vec![col("a"), col("b")]);
         let expr: Expression = ExpressionNode::CallFunction(Box::new(cf)).into();
-        // CallFunction renders as debug format
-        let rendered = expr.render();
-        assert!(rendered.contains("CallFunctionWrapper"));
+        // As `CallFunction.__repr__` in PySpark Connect.
+        assert_eq!(expr.render(), "CallFunction('my_func', a, b)");
+        let no_args = CallFunctionWrapper::new("current_date", vec![]);
+        let expr: Expression = ExpressionNode::CallFunction(Box::new(no_args)).into();
+        assert_eq!(expr.render(), "CallFunction('current_date')");
     }
 
     #[test]
@@ -1533,24 +1786,25 @@ mod tests {
             None,
         );
         let expr: Expression = ExpressionNode::WindowExpression(Box::new(we)).into();
-        let rendered = expr.render();
-        assert!(rendered.contains("WindowExpressionWrapper"));
+        // As WindowExpression.__repr__.
+        assert_eq!(
+            expr.render(),
+            "WindowExpression(sum(x), (WindowSpec(PartitionBy(group_col))))"
+        );
     }
 
     #[test]
     fn test_lambda_function_render() {
         let lf = LambdaFunction::new(col("x"), vec![UnresolvedNamedLambdaVariable::new("x")]);
         let expr: Expression = ExpressionNode::LambdaFunction(Box::new(lf)).into();
-        let rendered = expr.render();
-        assert!(rendered.contains("LambdaFunction"));
+        assert_eq!(expr.render(), "LambdaFunction(x, x)");
     }
 
     #[test]
     fn test_unresolved_named_lambda_variable_render() {
         let var = UnresolvedNamedLambdaVariable::new("x");
         let expr: Expression = ExpressionNode::UnresolvedNamedLambdaVariable(var).into();
-        let rendered = expr.render();
-        assert!(rendered.contains("UnresolvedNamedLambdaVariable"));
+        assert_eq!(expr.render(), "x");
     }
 
     #[test]

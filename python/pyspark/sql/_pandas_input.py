@@ -181,8 +181,8 @@ def prepare_int64_table(frame, schema):
                or type(dtype) is Int64Dtype
                for dtype in dtypes):
         return None
-    # The importer's configuration RPCs outweigh row conversion for small NumPy
-    # frames. Nullable extension columns still use Arrow for reliable null typing.
+    # The importer's configuration RPC outweighs row conversion for small NumPy frames.
+    # Nullable Int64 frames use Arrow at any size, which keeps their null masks.
     if len(frame) < 1000 and not any(type(dtype) is Int64Dtype for dtype in dtypes):
         return None
 
@@ -254,6 +254,8 @@ def prepare_int64_table(frame, schema):
             type(name) is str and "\x00" not in name for name in schema
         ):
             return None
+        # As PySpark Connect, the Arrow table keeps the pandas names, and the list is
+        # applied with toDF.
 
     columns = [frame.iloc[:, i] for i in range(width)]
     for i, (column, dtype) in enumerate(zip(columns, dtypes)):

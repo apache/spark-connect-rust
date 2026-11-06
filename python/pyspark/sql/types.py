@@ -347,8 +347,95 @@ def _drop_metadata(d):
         return MapType(_drop_metadata(d.keyType), _drop_metadata(d.valueType), d.valueContainsNull)
     return d
 
+def _has_type(dt, dts):
+    """Return whether there are specified types (mirrors pyspark.sql.types._has_type)."""
+    if isinstance(dt, dts):
+        return True
+    elif isinstance(dt, StructType):
+        return any(_has_type(f.dataType, dts) for f in dt.fields)
+    elif isinstance(dt, ArrayType):
+        return _has_type(dt.elementType, dts)
+    elif isinstance(dt, MapType):
+        return _has_type(dt.keyType, dts) or _has_type(dt.valueType, dts)
+    elif isinstance(dt, UserDefinedType):
+        return _has_type(dt.sqlType(), dts)
+    else:
+        return False
+
+
+def _from_numpy_type(nt):
+    """Convert NumPy type to Spark data type."""
+    import numpy as np
+
+    if nt == np.dtype("bool"):
+        return BooleanType()
+    elif nt == np.dtype("int8"):
+        return ByteType()
+    elif nt == np.dtype("int16"):
+        return ShortType()
+    elif nt == np.dtype("int32"):
+        return IntegerType()
+    elif nt == np.dtype("int64"):
+        return LongType()
+    elif nt == np.dtype("float32"):
+        return FloatType()
+    elif nt == np.dtype("float64"):
+        return DoubleType()
+    elif nt.type == np.dtype("str"):
+        return StringType()
+
+    return None
+
+
 def _create_row(fields, values):
     """A Row of ``values`` named by ``fields``, as in PySpark, whose pickled rows call it."""
     row = Row(*values)
     row.__fields__ = fields
     return row
+
+
+def _udt_converter(dataType):
+    """The function that turns a collected value of ``dataType`` into what PySpark gives for it,
+    deserializing the values of its user-defined types as PySpark's
+    ``ArrowTableToRowsConversion`` does, or None for a type without a user-defined type."""
+    if isinstance(dataType, UserDefinedType):
+        inner = _udt_converter(dataType.sqlType())
+
+        def convert_udt(value):
+            if value is None:
+                return None
+            return dataType.deserialize(value if inner is None else inner(value))
+
+        return convert_udt
+    if isinstance(dataType, ArrayType):
+        element = _udt_converter(dataType.elementType)
+        if element is None:
+            return None
+        return lambda value: None if value is None else [element(v) for v in value]
+    if isinstance(dataType, MapType):
+        key, val = _udt_converter(dataType.keyType), _udt_converter(dataType.valueType)
+        if key is None and val is None:
+            return None
+        key = key or (lambda v: v)
+        val = val or (lambda v: v)
+        return lambda value: None if value is None else {key(k): val(v) for k, v in value.items()}
+    if isinstance(dataType, StructType):
+        fields = _udt_field_converters(dataType)
+        if fields is None:
+            return None
+        row = Row(*dataType.names)
+
+        def convert_struct(value):
+            if value is None:
+                return None
+            return row(*[v if f is None else f(v) for f, v in zip(fields, value)])
+
+        return convert_struct
+    return None
+
+
+def _udt_field_converters(schema):
+    """The converters of the fields of ``schema`` (see ``_udt_converter``), or None when no
+    field has a user-defined type. The client applies them to the rows that it collects."""
+    converters = [_udt_converter(field.dataType) for field in schema.fields]
+    return None if all(c is None for c in converters) else converters
