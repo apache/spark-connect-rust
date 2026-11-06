@@ -129,6 +129,23 @@ def _dataframe(batches, *, protocol, payloads=None, calls=None):
             server_side_session_id=server_id,
         ).SerializeToString()
 
+    def config(request, context):
+        # The settings that toPandas reads first, as SparkConnectClient.to_pandas does.
+        if calls is not None:
+            calls["config"] = calls.get("config", 0) + 1
+        request = protocol("ConfigRequest").FromString(request)
+        settings = {
+            "spark.sql.session.timeZone": "UTC",
+            "spark.sql.execution.pandas.structHandlingMode": "legacy",
+            "spark.sql.execution.arrow.pyspark.selfDestruct.enabled": "false",
+        }
+        return protocol(
+            "ConfigResponse",
+            session_id=request.session_id,
+            server_side_session_id=server_id,
+            pairs=[dict(key=key, value=settings[key]) for key in request.operation.get.keys],
+        ).SerializeToString()
+
     def release_session(request, context):
         request = protocol("ReleaseSessionRequest").FromString(request)
         return protocol(
@@ -147,6 +164,7 @@ def _dataframe(batches, *, protocol, payloads=None, calls=None):
                         "ExecutePlan": grpc.unary_stream_rpc_method_handler(execute),
                         "ReleaseExecute": grpc.unary_unary_rpc_method_handler(release_execute),
                         "ReleaseSession": grpc.unary_unary_rpc_method_handler(release_session),
+                        "Config": grpc.unary_unary_rpc_method_handler(config),
                     },
                 )
             ]
@@ -288,12 +306,25 @@ def test_to_pandas_uses_the_same_handoff(protocol):
     arrays = [batch.column(index) for index in indices]
     selected = pa.RecordBatch.from_arrays(arrays, schema=schema)
     batches = [selected.slice(0, 2), selected.slice(2, 2)]
-    expected = pa.Table.from_batches(batches).to_pandas()
+    # As SparkConnectClient.to_pandas converts the same table: of the Spark types of its Arrow
+    # schema (the server sends no schema here), in the session time zone.
+    from pyspark.sql.pandas.conversion import _convert_arrow_table_to_pandas
+    from pyspark.sql.pandas.types import from_arrow_schema
+
+    table = pa.Table.from_batches(batches)
+    expected = _convert_arrow_table_to_pandas(
+        arrow_table=table,
+        schema=from_arrow_schema(table.schema, prefer_timestamp_ntz=True),
+        timezone="UTC",
+        struct_handling_mode="legacy",
+        date_as_object=False,
+        self_destruct=False,
+    )
     calls = {}
     with _dataframe(protocol=protocol, batches=batches, calls=calls) as (frame, _):
         actual = frame.toPandas()
     pd.testing.assert_frame_equal(actual, expected)
-    assert calls == {"execute": 1}
+    assert calls == {"config": 1, "execute": 1}
 
 
 @pytest.mark.parametrize(
@@ -427,9 +458,12 @@ def _arrow_input_service(
         "spark.sql.session.localRelationBatchOfChunksSizeBytes": str(1024**3),
     }
     config.update(overrides)
+    # The tests may queue status codes in `status_failures` and `upload_failures`: each
+    # ArtifactStatus or AddArtifacts call fails with the next one, while any is left.
     state = {"cache": {}, "uploads": 0, "relations": [], "message_sizes": [],
              "config": config, "config_requests": [], "input_tables": [], "tables": [],
-             "upload_contexts": [], "status_contexts": []}
+             "upload_contexts": [], "status_contexts": [],
+             "status_failures": [], "upload_failures": [], "upload_attempts": 0}
     server_id = "00000000-0000-0000-0000-000000000001"
 
     def attribution(request, context):
@@ -464,11 +498,16 @@ def _arrow_input_service(
     def statuses(raw, context):
         request = protocol("ArtifactStatusesRequest").FromString(raw)
         state["status_contexts"].append(attribution(request, context))
+        if state["status_failures"]:
+            context.abort(state["status_failures"].pop(0), "artifact status unavailable")
         return protocol("ArtifactStatusesResponse", session_id=request.session_id,
                         statuses={name: dict(exists=name in state["cache"])
                                   for name in request.names}).SerializeToString()
 
     def upload(requests, context):
+        state["upload_attempts"] += 1
+        if state["upload_failures"]:
+            context.abort(state["upload_failures"].pop(0), "artifact upload unavailable")
         summaries = []
         name, expected, buffer = None, 0, bytearray()
         session_id = None
@@ -680,7 +719,8 @@ def test_file_upload_attribution_on_every_frame(
         )
         assert state["cache"][artifact_names[0]] == small.read_bytes()
         assert state["cache"][artifact_names[1]] == large.read_bytes()
-        assert state["uploads"] == (1 if upload == "file" else 2)
+        # One upload per path, as PySpark's add_artifacts makes one.
+        assert state["uploads"] == 2
         assert not state["status_contexts"]
         _assert_artifact_contexts(
             state["upload_contexts"],
@@ -688,6 +728,51 @@ def test_file_upload_attribution_on_every_frame(
             user_id=user_id or "",
             user_agent=user_agent or "_SPARK_CONNECT_PYTHON",
         )
+
+
+def test_cached_arrow_upload_retries_a_transient_failure_from_the_status_check(protocol):
+    # As SparkConnectClient.cache_artifacts, the status check and the upload are one attempt
+    # under the retry policy: a transient failure of either is retried from the status check.
+    table = pa.table({"id": range(10_000)})
+    with _arrow_input_service(protocol, **{
+        "spark.sql.session.localRelationCacheThreshold": "0",
+    }) as (spark, state):
+        state["status_failures"].append(grpc.StatusCode.UNAVAILABLE)
+        state["upload_failures"].append(grpc.StatusCode.UNAVAILABLE)
+        df = spark.createDataFrame(table)
+        assert not state["status_failures"] and not state["upload_failures"]
+        assert state["upload_attempts"] == state["uploads"] + 1
+        # The failed status check, the one before the failed upload, and the one before the
+        # upload; the server then reads the cached data: its rows, first and last values.
+        assert len(state["status_contexts"]) == 3
+        df.toArrow()
+        assert state["result"] == (10_000, 0, 9_999)
+
+
+def test_cached_arrow_upload_does_not_retry_another_failure(protocol):
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+
+    table = pa.table({"id": range(10_000)})
+    with _arrow_input_service(protocol, **{
+        "spark.sql.session.localRelationCacheThreshold": "0",
+    }) as (spark, state):
+        state["upload_failures"].append(grpc.StatusCode.PERMISSION_DENIED)
+        with pytest.raises(SparkConnectGrpcException, match="artifact upload unavailable"):
+            spark.createDataFrame(table)
+        assert state["upload_attempts"] == 1 and state["uploads"] == 0
+
+
+def test_artifact_upload_retries_a_transient_failure_of_each_path(protocol, tmp_path):
+    # As SparkConnectClient.add_artifacts, each path is uploaded in an attempt of its own.
+    first, second = tmp_path / "first.txt", tmp_path / "second.txt"
+    first.write_bytes(b"first artifact")
+    second.write_bytes(b"second artifact")
+    with _arrow_input_service(protocol, allow_file_artifacts=True) as (spark, state):
+        state["upload_failures"].append(grpc.StatusCode.UNAVAILABLE)
+        spark.addArtifacts(str(first), str(second), file=True)
+        assert state["cache"]["files/first.txt"] == b"first artifact"
+        assert state["cache"]["files/second.txt"] == b"second artifact"
+        assert (state["upload_attempts"], state["uploads"]) == (3, 2)
 
 
 @pytest.mark.parametrize("cached", [False, True], ids=["inline", "cached"])

@@ -47,9 +47,13 @@ VENDORED_DIRS=(
 # Individual files under python/pyspark vendored verbatim from upstream. Listed per-file
 # (not per-dir) because their parent dirs also hold fork-adapted files that intentionally
 # differ (e.g. pipelines/api.py's connect->functions import repointing, and the Rust-backed
-# errors/exceptions/__init__.py; upstream's errors/exceptions/{captured,connect}.py are
-# omitted here as they need py4j/grpc). Keep these byte-identical to the tag.
+# errors/exceptions/__init__.py; upstream's errors/exceptions/connect.py is omitted here
+# as it needs grpc, and captured.py imports py4j only where the JVM is used). Keep these
+# byte-identical to the tag.
 VENDORED_FILES=(
+  # Call sites of the JVM gateway, which pyspark.sql.pandas.conversion imports.
+  "traceback_utils.py"
+
   # Logging
   "logger/__init__.py"
   "logger/logger.py"
@@ -61,6 +65,7 @@ VENDORED_FILES=(
   "errors/error-conditions.json"
   "errors/utils.py"
   "errors/exceptions/base.py"
+  "errors/exceptions/captured.py"
   "errors/exceptions/tblib.py"
 
   # Pipelines
@@ -139,6 +144,8 @@ VENDORED_FILES=(
   "sql/pandas/typehints.py"
   "sql/pandas/types.py"
   "sql/pandas/utils.py"
+  # pandas_udf and arrow_udf, which create the UDF with pyspark.sql.connect.udf._create_udf.
+  "sql/pandas/functions.py"
 
   # SQL: core utilities
   "sql/variant_utils.py"

@@ -250,11 +250,6 @@ def btrim(str, trim=None):
         return _invoke_function_over_columns("btrim", str, trim)
     else:
         return _invoke_function_over_columns("btrim", str)
-def bucket(numBuckets, col):
-    _a = []
-    _a.append(numBuckets)
-    _a.append(col)
-    return _dispatch("bucket", _a)
 def cardinality(col):
     return _invoke_function_over_columns("cardinality", col)
 def cbrt(col):
@@ -396,10 +391,6 @@ def dayofweek(col):
     return _invoke_function_over_columns("dayofweek", col)
 def dayofyear(col):
     return _invoke_function_over_columns("dayofyear", col)
-def days(col):
-    _a = []
-    _a.append(col)
-    return _dispatch("days", _a)
 def decode(col, charset):
     return _invoke_function("decode", _to_col(col), lit(charset))
 def degrees(col):
@@ -577,10 +568,6 @@ def hmac(key, message, algorithm=None):
         return _invoke_function_over_columns("hmac", key, message, algorithm)
 def hour(col):
     return _invoke_function_over_columns("hour", col)
-def hours(col):
-    _a = []
-    _a.append(col)
-    return _dispatch("hours", _a)
 def hypot(col1, col2):
     return _invoke_binary_math_function("hypot", col1, col2)
 def ifnull(col1, col2):
@@ -960,10 +947,6 @@ def month(col):
     return _invoke_function_over_columns("month", col)
 def monthname(col):
     return _invoke_function_over_columns("monthname", col)
-def months(col):
-    _a = []
-    _a.append(col)
-    return _dispatch("months", _a)
 def months_between(date1, date2, roundOff=True):
     return _invoke_function("months_between", _to_col(date1), _to_col(date2), lit(roundOff))
 def named_struct(*cols):
@@ -1972,11 +1955,6 @@ def weekday(col):
     return _invoke_function_over_columns("weekday", col)
 def weekofyear(col):
     return _invoke_function_over_columns("weekofyear", col)
-def when(condition, value):
-    _a = []
-    _a.append(condition)
-    _a.append(value)
-    return _dispatch("when", _a)
 def width_bucket(v, min, max, numBucket):
     numBucket = _enum_to_value(numBucket)
     numBucket = lit(numBucket) if isinstance(numBucket, int) else numBucket
@@ -2048,10 +2026,6 @@ def xxhash64(*cols):
     return _invoke_function_over_columns("xxhash64", *cols)
 def year(col):
     return _invoke_function_over_columns("year", col)
-def years(col):
-    _a = []
-    _a.append(col)
-    return _dispatch("years", _a)
 def zeroifnull(col):
     return _invoke_function_over_columns("zeroifnull", col)
 
@@ -2119,7 +2093,6 @@ __all__ = [
     "bool_or",
     "bround",
     "btrim",
-    "bucket",
     "cardinality",
     "cbrt",
     "ceil",
@@ -2177,7 +2150,6 @@ __all__ = [
     "dayofmonth",
     "dayofweek",
     "dayofyear",
-    "days",
     "decode",
     "degrees",
     "dense_rank",
@@ -2225,7 +2197,6 @@ __all__ = [
     "hll_union_agg",
     "hmac",
     "hour",
-    "hours",
     "hypot",
     "ifnull",
     "ilike",
@@ -2320,7 +2291,6 @@ __all__ = [
     "monotonically_increasing_id",
     "month",
     "monthname",
-    "months",
     "months_between",
     "named_struct",
     "nanvl",
@@ -2576,7 +2546,6 @@ __all__ = [
     "version",
     "weekday",
     "weekofyear",
-    "when",
     "width_bucket",
     "window",
     "window_time",
@@ -2591,6 +2560,5 @@ __all__ = [
     "xpath_string",
     "xxhash64",
     "year",
-    "years",
     "zeroifnull",
 ]

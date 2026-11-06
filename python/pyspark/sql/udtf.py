@@ -25,14 +25,62 @@ from pyspark._pyspark import (
     AnalyzeResult, SkipRestOfInputTableException,
 )
 
+import inspect
 import sys
 from typing import Any, Optional, Type
 
+from pyspark.errors import PySparkAttributeError, PySparkTypeError
 from pyspark.serializers import CloudPickleSerializer
 
 # Eval types for Python UDTFs (mirrors pyspark.util.PythonEvalType).
 SQL_TABLE_UDF = 300
 SQL_ARROW_TABLE_UDF = 301
+
+
+# Verbatim from PySpark (pyspark.sql.udtf): validates the handler class of a UDTF.
+def _validate_udtf_handler(cls: Any, returnType: Optional[Any]) -> None:
+    """Validate the handler class of a UDTF."""
+
+    if not isinstance(cls, type):
+        raise PySparkTypeError(
+            errorClass="INVALID_UDTF_HANDLER_TYPE", messageParameters={"type": type(cls).__name__}
+        )
+
+    if not hasattr(cls, "eval"):
+        raise PySparkAttributeError(
+            errorClass="INVALID_UDTF_NO_EVAL", messageParameters={"name": cls.__name__}
+        )
+
+    has_analyze = hasattr(cls, "analyze")
+    has_analyze_staticmethod = has_analyze and isinstance(
+        inspect.getattr_static(cls, "analyze"), staticmethod
+    )
+    if returnType is None and not has_analyze_staticmethod:
+        raise PySparkAttributeError(
+            errorClass="INVALID_UDTF_RETURN_TYPE", messageParameters={"name": cls.__name__}
+        )
+    if returnType is not None and has_analyze:
+        raise PySparkAttributeError(
+            errorClass="INVALID_UDTF_BOTH_RETURN_TYPE_AND_ANALYZE",
+            messageParameters={"name": cls.__name__},
+        )
+
+
+# Verbatim from PySpark Connect (pyspark.sql.connect.udtf): validates the handler class of a
+# PyArrow UDTF.
+def _validate_arrow_udtf_handler(cls: Any, returnType: Optional[Any]) -> None:
+    """Validate the handler class of a PyArrow UDTF."""
+    # First run standard UDTF validation
+    _validate_udtf_handler(cls, returnType)
+
+    # Block analyze method usage in arrow UDTFs
+    # TODO(SPARK-53286): Support analyze method for Arrow UDTFs to enable dynamic return types
+    has_analyze = hasattr(cls, "analyze")
+    if has_analyze:
+        raise PySparkAttributeError(
+            errorClass="INVALID_ARROW_UDTF_WITH_ANALYZE",
+            messageParameters={"name": cls.__name__},
+        )
 
 
 class UserDefinedTableFunction:
@@ -51,6 +99,8 @@ class UserDefinedTableFunction:
         evalType: int = SQL_TABLE_UDF,
         deterministic: bool = True,
     ):
+        # As PySpark's UserDefinedTableFunction, for udtf(), arrow_udtf() and register().
+        _validate_udtf_handler(func, returnType)
         self.func = func
         self.returnType = returnType
         self.evalType = evalType
@@ -130,6 +180,7 @@ def arrow_udtf(
     operates on Arrow data (``SQL_ARROW_TABLE_UDF``).
     """
     def _arrow_udtf_decorator(handler: Type) -> UserDefinedTableFunction:
+        _validate_arrow_udtf_handler(handler, returnType)
         return UserDefinedTableFunction(
             handler, returnType=returnType, evalType=SQL_ARROW_TABLE_UDF
         )

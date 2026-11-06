@@ -793,6 +793,38 @@ def test_column_alias_names_every_column_and_keeps_its_metadata(session):
     assert df.schema.fields[0].metadata == {"k": 1, "n": [1, 2], "s": "v"}
 
 
+def test_to_pandas_converts_the_columns_as_pyspark(session):
+    # As official PySpark 4.3.0's SparkConnectClient.to_pandas: each column by its Spark type,
+    # in the session time zone, with the metrics of the execution in attrs.
+    from decimal import Decimal
+
+    import pandas as pd
+    from pyspark.ml.functions import array_to_vector
+    from pyspark.ml.linalg import DenseVector
+
+    df = session.sql(
+        "SELECT TIMESTAMP'2024-01-02 03:04:05' AS ts, map('k', 1) AS m, "
+        "named_struct('a', 1, 'b', 'x') AS st, 1.5BD AS d, array(1.5D, 2.0D) AS av"
+    ).withColumn("vec", array_to_vector("av")).drop("av")
+    pdf = df.toPandas()
+    assert str(pdf.dtypes["ts"]) == "datetime64[ns]"
+    assert pdf["ts"][0] == pd.Timestamp("2024-01-02 03:04:05")
+    assert pdf["m"][0] == {"k": 1}
+    assert pdf["st"][0] == {"a": 1, "b": "x"}
+    assert pdf["d"][0] == Decimal("1.5")
+    assert pdf["vec"][0] == DenseVector([1.5, 2.0])
+    assert sorted(pdf.attrs) == ["metrics"]
+    assert type(pdf.attrs["metrics"][0]).__name__ == "PlanMetrics"
+    struct = df.select("st")._to_pandas(pandasStructHandlingMode="row")["st"][0]
+    assert type(struct).__name__ == "Row" and struct == Row(a=1, b="x")
+    session.conf.set("spark.sql.session.timeZone", "Asia/Seoul")
+    try:
+        local = session.sql("SELECT TIMESTAMP'2024-01-02 03:04:05' AS ts").toPandas()
+        assert local["ts"][0] == pd.Timestamp("2024-01-02 03:04:05")
+    finally:
+        session.conf.unset("spark.sql.session.timeZone")
+
+
 def test_window_order_by_a_column_sorts_nulls_first_as_pyspark(session):
     from pyspark.sql import Window
 
