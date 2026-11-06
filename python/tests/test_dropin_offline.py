@@ -5375,14 +5375,33 @@ def test_positional_indexing_integer_subclass_and_string_lookup(positional_index
 
 
 def test_positional_indexing_invalid_index_types_do_not_analyze(positional_indexing_analyzed):
+    from pyspark.errors import PySparkTypeError
+
     class Position:
         def __index__(self):
             return 0
     spark, service = positional_indexing_analyzed
     df = spark.range(10)
     for value in [0.0, None, b"id", slice(0, 1), Position()]:
-        with pytest.raises(TypeError):
+        # As PySpark, which takes a Column, an int, a list, a str or a tuple.
+        with pytest.raises(PySparkTypeError) as error:
             df[value]
+        assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+        assert error.value.getMessageParameters() == {
+            "expected_type": "Column, int, list, str or tuple", "arg_name": "item",
+            "arg_type": type(value).__name__}
+    assert service.calls == 0
+
+
+def test_positional_indexing_columns_filter_and_sequences_select(positional_indexing_analyzed):
+    from pyspark.sql import DataFrame
+
+    # As PySpark: a Column filters the rows, and a list or tuple selects its columns,
+    # without looking the schema up. The live tests check the rows.
+    spark, service = positional_indexing_analyzed
+    df = spark.range(10)
+    for item in [df["id"] > 1, ["id"], ("id", "id"), [["id"]], []]:
+        assert type(df[item]) is DataFrame
     assert service.calls == 0
 
 
