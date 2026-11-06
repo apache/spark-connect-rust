@@ -420,7 +420,7 @@ def test_functions_udtf_and_arrow_decorators():
         def eval(self, n):
             yield (n,)
 
-    assert AEcho.evalType == 301  # SQL_ARROW_TABLE_UDF
+    assert AEcho.evalType == 302  # SQL_ARROW_UDTF
 
     # functions.arrow_udf builds an Arrow scalar UDF.
     au = F.arrow_udf(lambda x: x, IntegerType())
@@ -710,6 +710,50 @@ def test_show_checks_its_arguments_as_pyspark():
         df.show(foo=1)
     with pytest.raises(TypeError, match=r"^DataFrame\._show_string\(\) got multiple values for argument 'n'$"):
         df._show_string(1, n=2)
+
+
+def test_udtfs_are_created_as_pyspark(mock_connect):
+    # As PySpark's _create_py_udtf and _create_pyarrow_udtf: a UDTF is not deterministic
+    # unless asDeterministic() marks it so, in place; arrow_udtf() makes a PyArrow-native
+    # UDTF (SQL_ARROW_UDTF); and udtf() makes an Arrow-optimized one (SQL_ARROW_TABLE_UDF)
+    # with useArrow=True, or without useArrow when the active session enables
+    # spark.sql.execution.pythonUDTF.arrow.enabled.
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    arrow_conf = "spark.sql.execution.pythonUDTF.arrow.enabled"
+
+    class Echo:
+        def eval(self, n):
+            yield (n,)
+
+    def sent(fn):
+        # ExecutePlanRequest.plan=3, Plan.root=1, Relation.common_inline_user_defined_table_
+        # function=38; CommonInlineUserDefinedTableFunction.deterministic=2, python_udtf=4;
+        # PythonUDTF.eval_type=2.
+        fn(F.lit(1)).collect()
+        relation = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        udtf = parse_message(parse_message(relation)[38][0])
+        return udtf.get(2, [0]) == [1], parse_message(udtf[4][0])[2][0]
+
+    # The server enables the config by default.
+    arrow = F.udtf(Echo, returnType="a int")
+    assert arrow.deterministic is False
+    assert sent(arrow) == (False, 301)
+    assert arrow.asDeterministic() is arrow and arrow.deterministic is True
+    assert sent(arrow) == (True, 301)
+    assert sent(F.udtf(returnType="a int", useArrow=False)(Echo)) == (False, 300)
+    assert sent(F.arrow_udtf(Echo, returnType="a int")) == (False, 302)
+    assert sent(F.arrow_udtf(returnType="a int")(Echo).asDeterministic()) == (True, 302)
+
+    service.confs = {arrow_conf: "false"}
+    try:
+        assert sent(F.udtf(returnType="a int")(Echo)) == (False, 300)
+        assert sent(F.udtf(Echo, returnType="a int", useArrow=True)) == (False, 301)
+    finally:
+        service.confs = {}
+    # Only udtf() without useArrow reads the configuration.
+    assert service.read_confs == [arrow_conf, arrow_conf]
 
 
 def test_decimal_literal_is_of_the_default_decimal_type_as_pyspark(mock_connect):
@@ -1389,20 +1433,30 @@ def test_udtf_construction():
 
 
 def test_udtf_call_without_session_raises():
-    from pyspark.sql.udtf import UserDefinedTableFunction
-    from pyspark.sql import SparkSession
-    # Ensure no active session, then calling must raise a clear error.
-    prev = SparkSession.getActiveSession()
-    if prev is not None:
-        pytest.skip("an active session exists in this process")
+    # As PySpark's, udtf() without a session is not Arrow-optimized, and the call raises the
+    # error of SparkSession.active(). In a new interpreter, which has no active session.
+    import subprocess
+    import sys
 
-    @__import__("pyspark.sql.udtf", fromlist=["udtf"]).udtf(returnType="a int")
-    class T2:
-        def eval(self, n):
-            yield (n,)
+    subprocess.run([sys.executable, "-c", """
+from pyspark.errors import PySparkRuntimeError
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import udtf
 
-    with pytest.raises(RuntimeError):
-        T2(1)
+@udtf(returnType="a int")
+class T2:
+    def eval(self, n):
+        yield (n,)
+
+assert T2.evalType == 300
+for call in (SparkSession.active, lambda: T2(1)):
+    try:
+        call()
+    except PySparkRuntimeError as error:
+        assert error.getCondition() == "NO_ACTIVE_OR_DEFAULT_SESSION", error
+    else:
+        raise AssertionError("no error")
+"""], check=True)
 
 
 def test_udtf_return_type_connect_validation_and_command():
@@ -1416,6 +1470,7 @@ def test_udtf_return_type_connect_validation_and_command():
 from pyspark.sql import SparkSession, DataFrame, functions as F, types as T
 from pyspark.serializers import CloudPickleSerializer
 
+# No server listens: with useArrow, udtf() does not read the Arrow config of the session.
 spark = SparkSession.builder.remote("sc://localhost:15002").getOrCreate()
 class Echo:
     def eval(self, value):
@@ -1425,8 +1480,8 @@ schema = T.StructType([T.StructField("value", T.LongType())])
 for return_type in ["value BIGINT", "STRUCT<value: BIGINT>",
                     "value ARRAY<STRUCT<x: INT>>", "invalid DDL !!!", "INT", schema]:
     for decorate in [False, True]:
-        fn = (F.udtf(returnType=return_type)(Echo) if decorate else
-              F.udtf(Echo, returnType=return_type))
+        fn = (F.udtf(returnType=return_type, useArrow=False)(Echo) if decorate else
+              F.udtf(Echo, returnType=return_type, useArrow=False))
         assert isinstance(fn(F.lit(1)), DataFrame)
         handler = CloudPickleSerializer().loads(fn.command)
         assert isinstance(handler, type)
@@ -1438,7 +1493,7 @@ class Dynamic(Echo):
     @staticmethod
     def analyze(value):
         pass
-assert isinstance(F.udtf(Dynamic)(F.lit(1)), DataFrame)
+assert isinstance(F.udtf(Dynamic, useArrow=False)(F.lit(1)), DataFrame)
 """], check=True)
 
 
@@ -1508,7 +1563,8 @@ with mock_connect_session() as (spark, service):
                     assert parse_message(field[2][0]) == {7: [b""]}  # LongType
                     assert field.get(3, [0]) == [0]  # nullable=False
                     assert json.loads(field[4][0]) == {"comment": "kept"}
-            assert udtf[2] == [300]
+            # SQL_ARROW_TABLE_UDF, as the server enables Arrow-optimized UDTFs by default.
+            assert udtf[2] == [301]
             command_handler = CloudPickleSerializer().loads(udtf[3][0])
             assert isinstance(command_handler, type)
             assert command_handler.__name__ == handler.__name__
@@ -2154,8 +2210,10 @@ def test_udtf_variants():
     """Test UDTF builder methods."""
     from pyspark.sql.udtf import UserDefinedTableFunction
 
-    # Create a simple UDTF for testing
-    @__import__("pyspark.sql.functions", fromlist=["udtf"]).udtf(returnType="a int")
+    # Create a simple UDTF for testing; not Arrow-optimized whatever the active session.
+    @__import__("pyspark.sql.functions", fromlist=["udtf"]).udtf(
+        returnType="a int", useArrow=False
+    )
     class SimpleUDTF:
         def eval(self, n):
             yield (n,)
@@ -2165,8 +2223,8 @@ def test_udtf_variants():
     assert SimpleUDTF.name == "SimpleUDTF"
     assert SimpleUDTF.evalType == 300  # SQL_TABLE_UDF
 
-    # Test deterministic flag
-    assert SimpleUDTF.deterministic is True
+    # As PySpark's, a UDTF is not deterministic unless asDeterministic() marks it so.
+    assert SimpleUDTF.deterministic is False
 
 
 def test_column_with_alias_chain():
@@ -4645,9 +4703,28 @@ def _shared_mock_connect():
 
 @pytest.fixture
 def mock_connect(_shared_mock_connect):
-    spark, service = _shared_mock_connect
+    # Each test has a session of its own of the shared server, which is the active session
+    # while the test runs, as the tests of what reads the active session expect.
+    from pyspark.sql import SparkSession
+
+    _, service = _shared_mock_connect
     service.reset()
-    return spark, service
+    spark = SparkSession.builder.remote(service.remote).getOrCreate()
+    yield spark, service
+    spark.stop()
+
+
+@pytest.fixture(autouse=True)
+def _no_session_left_active():
+    # Each test starts without an active session, as a new interpreter does. What reads the
+    # active session, such as udtf() of its Arrow configuration, would otherwise reach the
+    # server of a session that an earlier test left, which may not listen.
+    yield
+    from pyspark.sql import SparkSession
+
+    session = SparkSession.getActiveSession()
+    if session is not None:
+        session.stop()
 
 
 @pytest.mark.parametrize("first", ["schema", "columns", "dtypes"])

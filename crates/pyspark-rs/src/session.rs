@@ -1089,11 +1089,17 @@ impl PySparkSession {
             .map(PySparkSession::new)
     }
 
-    /// The active session; errors if none. Mirrors `SparkSession.active`.
+    /// The active session; errors if none. Mirrors `SparkSession.active`, which raises
+    /// `NO_ACTIVE_OR_DEFAULT_SESSION`.
     #[staticmethod]
-    fn active() -> PyResult<PySparkSession> {
+    fn active(py: Python<'_>) -> PyResult<PySparkSession> {
         Self::get_active_session().ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err("No active SparkSession found")
+            crate::column::raise_pyspark(
+                py,
+                "PySparkRuntimeError",
+                "NO_ACTIVE_OR_DEFAULT_SESSION",
+                &[],
+            )
         })
     }
 

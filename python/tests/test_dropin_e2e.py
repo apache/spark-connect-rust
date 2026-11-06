@@ -145,6 +145,19 @@ def test_udtf_takes_a_ddl_or_struct_return_type_as_pyspark(session):
     assert error.value.getCondition() == "PARSE_SYNTAX_ERROR"
 
 
+def test_arrow_udtf_takes_and_returns_arrow_data_as_pyspark(session):
+    # As PySpark's arrow_udtf(), a PyArrow-native UDTF: eval() takes a pyarrow array of the
+    # argument, and returns pyarrow tables.
+    import pyarrow.compute as pc
+
+    @F.arrow_udtf(returnType="x long, kind string")
+    class PlusOne:
+        def eval(self, x):
+            yield pa.table({"x": pc.add(x, 1), "kind": pa.array([type(x).__name__] * len(x))})
+
+    assert PlusOne(F.lit(1)).collect() == [Row(x=2, kind="Int32Array")]
+
+
 def test_map_functions_take_a_ddl_schema(session):
     df = session.createDataFrame([(1, 1.0), (1, 2.0), (2, 3.0)], ["k", "v"])
     schema = "k long, v double"
