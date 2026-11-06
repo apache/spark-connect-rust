@@ -3362,6 +3362,51 @@ def test_types_all_exports_spatial_and_variant():
         assert name in T.__all__, name
 
 
+def test_streaming_exports_the_stateful_processor_and_tws_tester():
+    import pandas as pd
+
+    from pyspark.sql import Row
+    from pyspark.sql.streaming import StatefulProcessor, StatefulProcessorHandle, TwsTester
+    from pyspark.sql.streaming import stateful_processor, tws_tester
+
+    assert StatefulProcessor is stateful_processor.StatefulProcessor
+    assert StatefulProcessorHandle is stateful_processor.StatefulProcessorHandle
+    assert TwsTester is tws_tester.TwsTester
+
+    class RunningCount(StatefulProcessor):
+        # As the running count of PySpark's tests of TwsTester.
+        def __init__(self, use_pandas):
+            self.use_pandas = use_pandas
+
+        def init(self, handle):
+            self.count = handle.getValueState(
+                "count", T.StructType([T.StructField("value", T.IntegerType())]))
+
+        def handleInputRows(self, key, rows, timerValues):
+            count = self.count.get()[0] if self.count.exists() else 0
+            if self.use_pandas:
+                count += sum(len(frame) for frame in rows)
+                self.count.update((count,))
+                yield pd.DataFrame({"key": [key[0]], "count": [count]})
+            else:
+                count += sum(1 for _ in rows)
+                self.count.update((count,))
+                yield Row(key=key[0], count=count)
+
+        def close(self):
+            pass
+
+    tester = TwsTester(RunningCount(use_pandas=False))
+    assert tester.test("key1", [Row(value="a")]) == [Row(key="key1", count=1)]
+    assert tester.test("key1", [Row(value="a"), Row(value="a")]) == [Row(key="key1", count=3)]
+    assert tester.peekValueState("count", "key1") == (3,)
+    assert tester.peekValueState("count", "key2") is None
+
+    tester = TwsTester(RunningCount(use_pandas=True))
+    result = tester.testInPandas("key1", pd.DataFrame({"value": ["a", "a"]}))
+    assert result.to_dict("list") == {"key": ["key1"], "count": [2]}
+
+
 def test_merge_into_writer_nested_class_refs():
     from pyspark.sql.merge import MergeIntoWriter
 
