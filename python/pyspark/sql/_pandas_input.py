@@ -286,10 +286,11 @@ def timestamp_columns(frame, schema):
     buffers separately so NaT's sentinel never participates in alignment tests.
     """
     import sys
-    from types import GetSetDescriptorType, WrapperDescriptorType
+    from types import FunctionType, GetSetDescriptorType, WrapperDescriptorType
 
     import numpy as np
     import pandas as pd
+    from pandas.core import frame as frame_module, generic as generic_module
     try:
         from pandas.core.arrays.datetimes import DatetimeArray
         from pandas.core.dtypes.dtypes import DatetimeTZDtype
@@ -305,7 +306,23 @@ def timestamp_columns(frame, schema):
     from pyspark.sql import types as sql_types
 
     if (pd.DataFrame is not DataFrame or type(frame) is not DataFrame
-            or type(schema) is not NativeStructType or not len(frame)):
+            or type(schema) is not NativeStructType or not len(frame)
+            or any(name in vars(frame) for name in ("astype", "notna", "where"))):
+        return None
+    # The row path calls these normalization methods before reading cells.
+    # Preserve customized transformations and errors before any Arrow Config RPC.
+    for name, module, qualname in (
+        ("astype", generic_module, "NDFrame.astype"),
+        ("notna", frame_module, "DataFrame.notna"),
+        ("where", generic_module, "NDFrame.where"),
+    ):
+        method = getattr(DataFrame, name)
+        if (type(method) is not FunctionType or method.__name__ != name
+                or method.__qualname__ != qualname or method.__module__ != module.__name__
+                or method.__globals__ is not vars(module)):
+            return None
+    if (DataFrame.astype is not generic_module.NDFrame.astype
+            or DataFrame.where is not generic_module.NDFrame.where):
         return None
     if not _has_canonical_columns(frame.columns):
         return None
@@ -390,6 +407,10 @@ def timestamp_columns(frame, schema):
         if unit == "ns" and np.any(column.array.asi8[column.notna()] % 1000):
             return None
         columns.append(column)
+    # Reject unsupported host zones before Rust queries the session time zone.
+    # Their row fallback builds a local relation without any configuration RPC.
+    if not timestamp_columns_are_aware(columns) and not _timestamp_host_is_utc():
+        return None
     return columns
 
 
@@ -400,20 +421,26 @@ def timestamp_columns_are_aware(columns):
     return all(type(column.dtype) is DatetimeTZDtype for column in columns)
 
 
+def _timestamp_host_is_utc():
+    """Require an explicit UTC host setting and an initialized UTC runtime zone."""
+    import os
+    import time
+
+    return os.environ.get("TZ") == "UTC" and time.tzname == ("UTC", "UTC")
+
+
 def prepare_timestamp_table(columns, schema, timezone):
     """Preserve instants without row materialization or a host-zone conversion.
 
     Aware columns carry their own timezone. Naive columns are deliberately
-    restricted to UTC host/session pairs: the existing row path uses the host
-    zone, unlike Python Connect's session-zone conversion (and DST fold policy).
+    restricted to literal ``TZ=UTC`` and session ``UTC``, with a UTC runtime
+    zone: the existing row path uses the host zone, unlike Python Connect's
+    session-zone conversion (and DST fold policy).
     """
-    import os
-    import time
     import pyarrow as pa
 
     if not timestamp_columns_are_aware(columns):
-        if (timezone != "UTC" or os.environ.get("TZ") != "UTC"
-                or time.tzname != ("UTC", "UTC")):
+        if timezone != "UTC" or not _timestamp_host_is_utc():
             return None
     return pa.Table.from_arrays(
         [pa.array(column, type=pa.timestamp("us", tz="UTC"), from_pandas=True)
