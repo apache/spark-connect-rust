@@ -103,6 +103,11 @@ class UserDefinedTableFunction:
         # As PySpark's UserDefinedTableFunction, for udtf(), arrow_udtf() and register().
         _validate_udtf_handler(func, returnType)
         self.func = func
+        # As PySpark Connect's: a DDL string is a type that the server parses.
+        if isinstance(returnType, str):
+            from pyspark.sql.connect.types import UnparsedDataType
+
+            returnType = UnparsedDataType(returnType)
         self.returnType = returnType
         self.evalType = evalType
         self.name = name or (

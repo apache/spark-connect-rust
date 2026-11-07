@@ -30,16 +30,9 @@ impl PyDataSourceRegistration {
     /// Mirrors `pyspark.sql.SparkSession.dataSource.register`.
     /// The data source class is cloudpickled and sent to the server.
     fn register(&self, py: Python<'_>, data_source_class: &Bound<'_, PyAny>) -> PyResult<()> {
-        // Get the name via the classmethod `name()`
-        let name_result = data_source_class.call_method0("name");
-        let name: String = match name_result {
-            Ok(name_obj) => name_obj.extract()?,
-            Err(_) => {
-                return Err(pyo3::exceptions::PyTypeError::new_err(
-                    "DataSource class must have a classmethod name()",
-                ))
-            }
-        };
+        // The name of the classmethod `name()`, as PySpark Connect's: the AttributeError of a
+        // class without one.
+        let name: String = data_source_class.call_method0("name")?.extract()?;
 
         // Cloudpickle the class
         let command = py_cloudpickle(py, data_source_class)?;
