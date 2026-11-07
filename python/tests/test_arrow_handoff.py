@@ -4383,6 +4383,38 @@ def test_string_large_inline_input_keeps_row_transport_and_schema(protocol):
 
 # Exact built-in date columns reuse Arrow without materializing pandas rows.
 
+@pytest.mark.parametrize("accessor", ["values", "to_numpy"])
+def test_date_series_accessors_do_not_replace_validated_cells(monkeypatch, accessor):
+    from pyspark.sql._pandas_input import prepare_date_table
+
+    dates = [date.min, date.max, date(1969, 12, 31), date(2000, 2, 29)] * 2500
+    nullable = [None if i % 7 == 0 else value for i, value in enumerate(dates)]
+    expected = {"renamed": dates, "nullable": nullable}
+    frame = pd.DataFrame({"original": dates, "nullable": nullable}, dtype=object)
+    schema = T.StructType([
+        T.StructField("renamed", T.DateType(), False),
+        T.StructField("nullable", T.DateType()),
+    ])
+    row_values = frame.astype(object).where(frame.notna(), None).values.tolist()
+    calls = []
+
+    def replacement(series, *args, **kwargs):
+        calls.append(accessor)
+        return np.full(len(series), date(2021, 2, 3), dtype=object)
+
+    monkeypatch.setattr(pd.Series, accessor,
+                        property(replacement) if accessor == "values" else replacement)
+    table = prepare_date_table(frame, schema)
+    assert table is not None
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    actual = pa.ipc.open_stream(sink.getvalue()).read_all()
+    assert actual.to_pydict() == expected
+    assert frame.astype(object).where(frame.notna(), None).values.tolist() == row_values
+    assert calls == []
+
+
 @pytest.mark.parametrize("cached", [False, True])
 @pytest.mark.parametrize("verify", [False, True])
 def test_date_columns_preserve_every_ipc_cell(protocol, monkeypatch, cached, verify):
