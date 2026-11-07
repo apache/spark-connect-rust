@@ -10939,6 +10939,82 @@ def test_reader_parses_a_dataframe_of_strings_as_pyspark(mock_connect, read, for
     assert (reader._format, reader._schema, reader._options) == ("csv", "a INT", {"sep": ","})
 
 
+def test_reader_and_writer_check_their_arguments_as_pyspark(mock_connect):
+    # As PySpark Connect's: a write of a mode other than append, overwrite, error (or
+    # errorifexists, which PySpark documents) and ignore raises UNSUPPORTED_OPERATION, of the
+    # last mode set; format(None) unsets the format; the reader raises JVM_ATTRIBUTE_NOT_SUPPORTED
+    # of _jreader, asserts the bounds of a JDBC column and refuses a schema in changes; and csv,
+    # text and orc of None read without a path.
+    from pyspark.errors import AnalysisException, PySparkAttributeError, PySparkValueError
+
+    spark, service = mock_connect
+    df = spark.range(3)
+    for write, mode in [
+        (lambda: df.write.mode("bad").save("p"), "bad"),
+        (lambda: df.write.mode("append").mode("default").saveAsTable("t"), "default"),
+        (lambda: df.write.mode(" append").insertInto("t"), " append"),
+        (lambda: df.write.parquet("p", mode=""), ""),
+        (lambda: df.write.jdbc("jdbc:x", "t", mode="bad"), "bad"),
+    ]:
+        with pytest.raises(PySparkValueError) as e:
+            write()
+        assert e.value.getCondition() == "UNSUPPORTED_OPERATION"
+        assert e.value.getMessageParameters() == {"operation": mode}
+
+    def sent_write():
+        # ExecutePlanRequest.plan=3, Plan.command=2, Command.write_operation=2.
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+        return parse_message(parse_message(plan[2][0])[2][0])
+
+    # WriteOperation.source=2 and mode=5, of SAVE_MODE_APPEND=1 and SAVE_MODE_ERROR_IF_EXISTS=3.
+    df.write.mode("bad").mode("APPEND").format("json").format(None).save("p")
+    assert 2 not in sent_write() and sent_write()[5] == [1]
+    df.write.mode("errorifexists").insertInto("t")
+    assert sent_write()[5] == [3]
+    df.write.jdbc("jdbc:x", "t", properties={"user": 1, "flag": True, "skip": None})
+    # WriteOperation.options=9, of entries of key=1 and value=2.
+    options = {parse_message(entry)[1][0]: parse_message(entry)[2][0] for entry in sent_write()[9]}
+    assert options == {b"user": b"1", b"flag": b"true", b"url": b"jdbc:x", b"dbtable": b"t"}
+
+    reader = spark.read.format("csv")
+    assert reader.format(None) is reader and reader._format is None
+    stream = spark.readStream.format("rate")
+    assert stream.format(None) is stream
+    with pytest.raises(PySparkAttributeError) as e:
+        spark.read._jreader
+    assert e.value.getCondition() == "JVM_ATTRIBUTE_NOT_SUPPORTED"
+    assert e.value.getMessageParameters() == {"attr_name": "_jreader"}
+    with pytest.raises(AnalysisException) as e:
+        spark.read.schema("a int").changes("t")
+    assert e.value.getCondition() == "_LEGACY_ERROR_TEMP_1189"
+    assert e.value.getMessageParameters() == {"operation": "changes"}
+    assert "User specified schema not supported with `changes`." in str(e.value)
+    for bounds, missing in [({}, "lowerBound"), ({"lowerBound": 1}, "upperBound"),
+                            ({"lowerBound": 1, "upperBound": 2}, "numPartitions")]:
+        reader = spark.read
+        with pytest.raises(AssertionError, match=f"{missing} can not be None when ``column``"):
+            reader.jdbc("jdbc:x", "t", column="c", **bounds)
+        assert reader._format == "jdbc" and reader._options == {}
+
+    def sent_data_source():
+        # Relation.read=2 -> Read.data_source=2: options=3, of entries of key=1 and value=2,
+        # and predicates=5.
+        source = parse_message(_sent_relation(service.analyze_requests[-1], 2)[2][0])
+        options = {parse_message(e)[1][0].decode(): parse_message(e)[2][0].decode()
+                   for e in source.get(3, [])}
+        return options, [p.decode() for p in source.get(5, [])]
+
+    spark.read.jdbc("jdbc:x", "t", column="c", lowerBound=1, upperBound=2, numPartitions="3",
+                    predicates=["p"], properties={"user": 1, "flag": True}).columns
+    assert sent_data_source() == ({
+        "partitionColumn": "c", "lowerBound": "1", "upperBound": "2", "numPartitions": "3",
+        "user": "1", "flag": "true", "url": "jdbc:x", "dbtable": "t"}, [])
+    spark.read.jdbc("jdbc:x", "t", lowerBound=1, predicates=["p"]).columns
+    assert sent_data_source() == ({"url": "jdbc:x", "dbtable": "t"}, ["p"])
+    for read in (spark.read.csv, spark.read.text, spark.read.orc):
+        read(None).columns
+        assert _sent_data_source_paths(service.analyze_requests[-1]) == []
+
 def test_reader_paths_are_checked_as_pyspark(offline_spark):
     from pyspark.errors import PySparkTypeError
 

@@ -80,9 +80,12 @@ impl PyDataFrameReader {
     }
 }
 
-/// The paths of `path`, a path or a list of them, as PySpark's `load` takes them: anything
-/// else fails its assertion.
+/// The paths of `path`, a path or a list of them, or None for none, as PySpark's `load` takes
+/// them: anything else fails its assertion.
 fn paths_of(path: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
+    if path.is_none() {
+        return Ok(vec![]);
+    }
     if path.is_instance_of::<pyo3::types::PyString>() {
         return Ok(vec![path.extract()?]);
     }
@@ -216,6 +219,29 @@ pub(crate) fn reader_schema(schema: &Bound<'_, PyAny>) -> PyResult<String> {
     ))
 }
 
+/// The `AnalysisException` of `_LEGACY_ERROR_TEMP_1189` that PySpark's `DataFrameReader.changes`
+/// and `DataStreamReader.changes` raise for a reader of a schema, of the message of the JVM
+/// error class, which PySpark's error classes lack.
+pub(crate) fn changes_of_schema_error(py: Python<'_>) -> PyErr {
+    let exception = (|| {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("errorClass", "_LEGACY_ERROR_TEMP_1189")?;
+        let parameters = PyDict::new(py);
+        parameters.set_item("operation", "changes")?;
+        kwargs.set_item("messageParameters", parameters)?;
+        py.import("pyspark.errors")?
+            .getattr("AnalysisException")?
+            .call(
+                ("User specified schema not supported with `changes`.",),
+                Some(&kwargs),
+            )
+    })();
+    match exception {
+        Ok(exception) => PyErr::from_value(exception),
+        Err(err) => err,
+    }
+}
+
 /// Apply the `schema` argument of a format method, as pyspark does through `schema()`.
 fn apply_reader_schema(r: DataFrameReader, v: &Bound<'_, PyAny>) -> PyResult<DataFrameReader> {
     Ok(r.schema(reader_schema(v)?))
@@ -223,9 +249,13 @@ fn apply_reader_schema(r: DataFrameReader, v: &Bound<'_, PyAny>) -> PyResult<Dat
 
 #[pymethods]
 impl PyDataFrameReader {
-    /// Set the source format (e.g. "parquet", "json", "csv").
-    fn format<'py>(mut slf: PyRefMut<'py, Self>, source: &str) -> PyRefMut<'py, Self> {
-        slf.inner = slf.inner.clone().format(source);
+    /// Set the source format (e.g. "parquet", "json", "csv"). As PySpark's, None unsets it, so
+    /// that the server reads its default source.
+    fn format<'py>(mut slf: PyRefMut<'py, Self>, source: Option<&str>) -> PyRefMut<'py, Self> {
+        slf.inner = match source {
+            Some(source) => slf.inner.clone().format(source),
+            None => slf.inner.clone().clear_format(),
+        };
         slf
     }
 
@@ -289,6 +319,18 @@ impl PyDataFrameReader {
         self.inner.get_options().clone()
     }
 
+    /// The JVM reader of classic PySpark, which PySpark Connect's raises
+    /// `JVM_ATTRIBUTE_NOT_SUPPORTED` for.
+    #[getter]
+    fn _jreader(&self, py: Python<'_>) -> PyResult<()> {
+        Err(crate::column::raise_pyspark(
+            py,
+            "PySparkAttributeError",
+            "JVM_ATTRIBUTE_NOT_SUPPORTED",
+            &[("attr_name", "_jreader")],
+        ))
+    }
+
     /// Load data from the (optional) path. Mirrors the reference
     /// `DataFrameReader.load(path=None, format=None, schema=None, **options)`: the
     /// one-shot form applies format/schema/options here before reading, equivalent to
@@ -319,9 +361,13 @@ impl PyDataFrameReader {
         Ok(PyDataFrame::new(self.inner.clone().table(tableName)))
     }
 
-    /// Read the CDC changes of a named table. Mirrors `DataFrameReader.changes`.
+    /// Read the CDC changes of a named table. Mirrors `DataFrameReader.changes`, which raises an
+    /// `AnalysisException` of `_LEGACY_ERROR_TEMP_1189` for a reader of a schema.
     #[allow(non_snake_case)]
-    fn changes(&self, tableName: &str) -> PyResult<PyDataFrame> {
+    fn changes(&self, py: Python<'_>, tableName: &str) -> PyResult<PyDataFrame> {
+        if !self.inner.get_schema().is_empty() {
+            return Err(changes_of_schema_error(py));
+        }
         Ok(PyDataFrame::new(self.inner.clone().changes(tableName)))
     }
 
@@ -593,48 +639,58 @@ impl PyDataFrameReader {
         self.read_or_parse(r, "xml", spark_connect::plan::ParseFormat::Xml, path)
     }
 
-    /// Read from a JDBC source. Mirrors `DataFrameReader.jdbc(url, table,
-    /// column=None, lowerBound=None, upperBound=None, numPartitions=None,
-    /// predicates=None, properties=None)`: the column/bound/partition args and the
-    /// connection `properties` are threaded as reader options (connect represents
-    /// them that way); `predicates` stays the partitioning predicate list.
+    /// Read from a JDBC source. Mirrors `DataFrameReader.jdbc(url, table, column=None,
+    /// lowerBound=None, upperBound=None, numPartitions=None, predicates=None, properties=None)`,
+    /// which keeps the format, then the options, on the reader:
+    /// - of a `column`, it asserts the bounds and `numPartitions`, and reads the partitions of
+    ///   the column, ignoring `predicates`;
+    /// - else, it reads the partitions of `predicates`, ignoring the bounds and `numPartitions`.
+    ///
+    /// The column, the bounds, `numPartitions` and the values of `properties` are options, of any
+    /// type (None skipped, bools lowercased).
     #[pyo3(signature = (url, table, column=None, lowerBound=None, upperBound=None, numPartitions=None, predicates=None, properties=None))]
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn jdbc(
         &mut self,
         url: &str,
         table: &str,
-        column: Option<String>,
+        column: Option<&Bound<'_, PyAny>>,
         lowerBound: Option<&Bound<'_, PyAny>>,
         upperBound: Option<&Bound<'_, PyAny>>,
-        numPartitions: Option<i32>,
+        numPartitions: Option<&Bound<'_, PyAny>>,
         predicates: Option<Vec<String>>,
-        properties: Option<HashMap<String, String>>,
+        properties: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
+        self.inner = self.inner.clone().format("jdbc");
         let mut r = self.inner.clone();
-        if let Some(c) = column {
-            r = r.option("partitionColumn", &c);
-        }
-        if let Some(lb) = lowerBound {
-            r = r.option("lowerBound", &lb.str()?.to_string());
-        }
-        if let Some(ub) = upperBound {
-            r = r.option("upperBound", &ub.str()?.to_string());
-        }
-        if let Some(n) = numPartitions {
-            r = r.option("numPartitions", &n.to_string());
-        }
-        if let Some(props) = properties {
-            for (k, v) in props {
-                r = r.option(&k, &v);
+        let predicates = match column {
+            Some(column) => {
+                for (bound, name) in [
+                    (lowerBound, "lowerBound"),
+                    (upperBound, "upperBound"),
+                    (numPartitions, "numPartitions"),
+                ] {
+                    if bound.is_none() {
+                        return Err(pyo3::exceptions::PyAssertionError::new_err(format!(
+                            "{name} can not be None when ``column`` is specified"
+                        )));
+                    }
+                }
+                r = set_opt(r, "partitionColumn", Some(column))?;
+                r = set_opt(r, "lowerBound", lowerBound)?;
+                r = set_opt(r, "upperBound", upperBound)?;
+                r = set_opt(r, "numPartitions", numPartitions)?;
+                None
+            }
+            None => predicates,
+        };
+        if let Some(properties) = properties {
+            for (key, value) in properties.iter() {
+                r = set_opt(r, &key.str()?.to_cow()?, Some(&value))?;
             }
         }
-        // PySpark's jdbc also leaves format/url/dbtable on the reader.
-        self.inner = r
-            .clone()
-            .format("jdbc")
-            .option("url", url)
-            .option("dbtable", table);
+        // PySpark's jdbc also leaves url/dbtable on the reader.
+        self.inner = r.clone().option("url", url).option("dbtable", table);
         Ok(PyDataFrame::new(r.jdbc(url, table, predicates)))
     }
 }

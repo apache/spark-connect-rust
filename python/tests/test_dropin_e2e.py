@@ -1269,6 +1269,33 @@ def test_dataframe_columns_resolve_against_their_dataframe_as_pyspark(session):
     assert error.value.getCondition() == "AMBIGUOUS_COLUMN_REFERENCE"
 
 
+def test_reader_and_writer_check_their_arguments_as_pyspark(session, tmp_path):
+    # As PySpark Connect's: a write of an unsupported save mode raises UNSUPPORTED_OPERATION
+    # and writes nothing; format(None) writes and reads the default source, Parquet; the reader
+    # refuses a schema in changes and asserts the bounds of a JDBC column; text of None reads
+    # no rows.
+    from pyspark.errors import PySparkAttributeError
+
+    df = session.createDataFrame([(1, "a"), (2, "b")], "id int, s string")
+    path = str(tmp_path / "out")
+    with pytest.raises(PySparkValueError) as e:
+        df.write.mode("bad").save(path)
+    assert e.value.getCondition() == "UNSUPPORTED_OPERATION"
+    assert e.value.getMessageParameters() == {"operation": "bad"}
+    assert not os.path.exists(path)
+    df.write.format("json").format(None).save(path)
+    assert sorted(session.read.parquet(path).collect()) == [Row(id=1, s="a"), Row(id=2, s="b")]
+    assert session.read.format("json").format(None).load(path).count() == 2
+    with pytest.raises(AnalysisException) as e:
+        session.read.schema("a int").changes("t")
+    assert e.value.getCondition() == "_LEGACY_ERROR_TEMP_1189"
+    with pytest.raises(AssertionError, match="lowerBound can not be None"):
+        session.read.jdbc("jdbc:x", "t", column="c")
+    with pytest.raises(PySparkAttributeError) as e:
+        session.read._jreader
+    assert e.value.getCondition() == "JVM_ATTRIBUTE_NOT_SUPPORTED"
+    assert session.read.text(None).count() == 0
+
 def test_writer_v2_takes_its_arguments_as_pyspark(session):
     # As PySpark's DataFrameWriterV2: tableProperty(property, None) leaves the property unset,
     # partitionedBy raises NOT_EXPECTED_TYPE of col for a list, and overwrite takes a column

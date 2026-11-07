@@ -47,6 +47,13 @@ impl DataStreamReader {
         self
     }
 
+    /// Unset the format, so that the server reads its default source
+    /// (`spark.sql.sources.default`), as PySpark's `format(None)`.
+    pub fn clear_format(mut self) -> Self {
+        self.format = None;
+        self
+    }
+
     /// Set the schema from a DDL string or JSON string.
     pub fn schema(mut self, schema: impl Into<String>) -> Self {
         self.schema = schema.into();

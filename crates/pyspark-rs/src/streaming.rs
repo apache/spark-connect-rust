@@ -148,8 +148,16 @@ impl PyDataStreamReader {
 
 #[pymethods]
 impl PyDataStreamReader {
-    fn format<'py>(mut slf: PyRefMut<'py, Self>, source: &str) -> PyResult<PyRefMut<'py, Self>> {
-        slf.inner = slf.inner.clone().format(source);
+    /// Set the source format. As PySpark's, None unsets it, so that the server reads its
+    /// default source.
+    fn format<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        source: Option<&str>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        slf.inner = match source {
+            Some(source) => slf.inner.clone().format(source),
+            None => slf.inner.clone().clear_format(),
+        };
         Ok(slf)
     }
 
@@ -278,20 +286,7 @@ impl PyDataStreamReader {
     /// schema.
     fn changes(&self, py: Python<'_>, tableName: &str) -> PyResult<PyDataFrame> {
         if !self.inner.get_schema().is_empty() {
-            // Of the message of the JVM error class, which PySpark's error classes lack.
-            let kwargs = PyDict::new(py);
-            kwargs.set_item("errorClass", "_LEGACY_ERROR_TEMP_1189")?;
-            let parameters = PyDict::new(py);
-            parameters.set_item("operation", "changes")?;
-            kwargs.set_item("messageParameters", parameters)?;
-            let exception = py
-                .import("pyspark.errors")?
-                .getattr("AnalysisException")?
-                .call(
-                    ("User specified schema not supported with `changes`.",),
-                    Some(&kwargs),
-                )?;
-            return Err(PyErr::from_value(exception));
+            return Err(crate::readwriter::changes_of_schema_error(py));
         }
         Ok(PyDataFrame::new(self.inner.clone().changes(tableName)))
     }
