@@ -334,12 +334,17 @@ pub(crate) fn infer_type(obj: &Bound<'_, PyAny>, o: Options<'_>) -> PyResult<Dat
             end_field: 3,
         });
     }
+    // As PySpark's `_infer_type`, the type of a value is `GeometryType(srid)` or
+    // `GeographyType(srid)`, which raises `ST_INVALID_SRID_VALUE` for an SRID that the type does
+    // not take (the explicit schema is not checked here, the server checks the values of it).
     if obj.is_exact_instance_of::<PyGeometry>() {
-        let srid = obj.call_method0(intern!(py, "getSrid"))?.extract()?;
+        let srid = obj.call_method0(intern!(py, "getSrid"))?;
+        let srid = crate::types::spatial_type_srid(&srid, false)?;
         return Ok(DataType::Geometry { srid });
     }
     if obj.is_exact_instance_of::<PyGeography>() {
-        let srid = obj.call_method0(intern!(py, "getSrid"))?.extract()?;
+        let srid = obj.call_method0(intern!(py, "getSrid"))?;
+        let srid = crate::types::spatial_type_srid(&srid, true)?;
         return Ok(DataType::Geography { srid });
     }
     if obj.hasattr(intern!(py, "__UDT__"))? {
