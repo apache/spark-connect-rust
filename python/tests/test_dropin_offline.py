@@ -1919,6 +1919,49 @@ def test_udtf_analyze_result_family():
     assert issubclass(SkipRestOfInputTableException, Exception)
 
 
+def test_udtf_analyze_result_subclass_preserves_custom_state():
+    from dataclasses import dataclass, fields
+    from pyspark.serializers import CloudPickleSerializer
+    from pyspark.sql.connect.udtf import AnalyzeResult as ConnectAnalyzeResult
+    from pyspark.sql.udtf import AnalyzeResult, udtf
+
+    assert ConnectAnalyzeResult is AnalyzeResult
+
+    @dataclass
+    class ResultWithBuffer(AnalyzeResult):
+        buffer: str = ""
+
+    schema = T.StructType([T.StructField("buffer", T.StringType())])
+    result = ResultWithBuffer(schema, buffer="kept")
+    assert [field.name for field in fields(result)] == [
+        "schema", "withSinglePartition", "partitionBy", "orderBy", "select", "buffer",
+    ]
+    assert result.partitionBy == result.orderBy == result.select == ()
+    assert result.withSinglePartition is False
+    result.buffer = "updated"
+    restored = CloudPickleSerializer().loads(CloudPickleSerializer().dumps(result))
+    assert isinstance(restored, AnalyzeResult)
+    assert restored == result
+
+    class Handler:
+        def __init__(self, analyze_result):
+            self.buffer = analyze_result.buffer
+
+        @staticmethod
+        def analyze(argument):
+            return ResultWithBuffer(schema, withSinglePartition=True, buffer="kept")
+
+        def eval(self, argument):
+            yield (self.buffer,)
+
+    function = udtf(Handler, useArrow=False)
+    handler = CloudPickleSerializer().loads(function.command)
+    analysis = handler.analyze(None)
+    assert isinstance(analysis, AnalyzeResult)
+    assert analysis.schema == schema and analysis.withSinglePartition is True
+    assert list(handler(analysis).eval(None)) == [("kept",)]
+
+
 def test_variant_spatial_and_user_defined_values_are_sent_as_pyspark(mock_connect):
     # As PySpark's LocalDataToArrowConversion: a VariantVal is the struct of its value and
     # metadata, a Geometry or a Geography that of its srid and WKB, whose metadata tags the
