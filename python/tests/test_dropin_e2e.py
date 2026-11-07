@@ -967,6 +967,32 @@ def test_dataframe_columns_resolve_against_their_dataframe_as_pyspark(session):
     assert error.value.getCondition() == "AMBIGUOUS_COLUMN_REFERENCE"
 
 
+def test_writer_v2_takes_its_arguments_as_pyspark(session):
+    # As PySpark's DataFrameWriterV2: tableProperty(property, None) leaves the property unset,
+    # partitionedBy raises NOT_EXPECTED_TYPE of col for a list, and overwrite takes a column
+    # name, which the server takes: a table of the session catalog does not overwrite by a
+    # condition.
+    import uuid
+
+    from pyspark.errors import AnalysisException, PySparkTypeError
+
+    name = f"writer_v2_arguments_{uuid.uuid4().hex[:8]}"
+    df = session.createDataFrame([(1, True), (2, False)], "id int, flag boolean")
+    try:
+        writer = df.writeTo(name).using("parquet").tableProperty("a", "1")
+        writer.tableProperty("a", None).tableProperty("b", "2").create()
+        rows = session.sql(f"SHOW TBLPROPERTIES {name}").collect()
+        properties = {row.key: row.value for row in rows}
+        assert properties.get("b") == "2" and "a" not in properties
+        with pytest.raises(PySparkTypeError) as e:
+            df.writeTo(name).partitionedBy(["id"])
+        assert e.value.getCondition() == "NOT_EXPECTED_TYPE"
+        with pytest.raises(AnalysisException):
+            df.writeTo(name).overwrite("flag")
+    finally:
+        session.sql(f"DROP TABLE IF EXISTS {name}")
+
+
 def test_collect_reads_a_result_across_stream_ends(session):
     # Takes several response streams when the server's senderMaxStreamSize is small.
     n = 300_000

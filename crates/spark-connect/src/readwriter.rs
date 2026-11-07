@@ -554,6 +554,13 @@ impl DataFrameWriterV2 {
         self
     }
 
+    /// Leave the table property `property` unset, as PySpark's `tableProperty(property, None)`,
+    /// which the command does not send.
+    pub fn unset_table_property(mut self, property: &str) -> Self {
+        self.table_properties.remove(property);
+        self
+    }
+
     /// Partition the output table by the given columns.
     pub fn partition_by<C: Into<Column>>(mut self, columns: impl IntoIterator<Item = C>) -> Self {
         self.partition_cols = columns.into_iter().map(Into::into).collect();

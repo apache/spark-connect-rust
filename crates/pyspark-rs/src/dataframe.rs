@@ -3244,25 +3244,32 @@ impl PyDataFrameWriterV2 {
         Ok(slf)
     }
 
+    /// Set the table property `property` to `value`, or leave it unset for None, as PySpark's.
     #[pyo3(name = "tableProperty")]
     fn table_property<'py>(
         mut slf: PyRefMut<'py, Self>,
         property: &str,
-        value: &str,
+        value: Option<&str>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        slf.inner = slf.inner.clone().table_property(property, value);
+        slf.inner = match value {
+            Some(value) => slf.inner.clone().table_property(property, value),
+            None => slf.inner.clone().unset_table_property(property),
+        };
         Ok(slf)
     }
 
+    /// Partition by the columns, each a Column or a column name, as PySpark's `F._to_col` of
+    /// each, else `NOT_EXPECTED_TYPE` of `col`, also for a list.
     #[pyo3(name = "partitionedBy", signature = (col, *cols))]
     fn partitioned_by<'py>(
         mut slf: PyRefMut<'py, Self>,
         col: Bound<'_, PyAny>,
         cols: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        let mut all = vec![col];
-        all.extend(cols);
-        let columns = to_column_list(all)?;
+        let columns = std::iter::once(&col)
+            .chain(&cols)
+            .map(column_or_name)
+            .collect::<PyResult<Vec<_>>>()?;
         slf.inner = slf.inner.clone().partition_by(columns);
         Ok(slf)
     }
@@ -3296,11 +3303,11 @@ impl PyDataFrameWriterV2 {
         self.inner.clone().append().to_pyerr()
     }
 
-    fn overwrite(&mut self, condition: &PyColumn) -> PyResult<()> {
-        self.inner
-            .clone()
-            .overwrite(condition.column.clone())
-            .to_pyerr()
+    /// Overwrite the rows of `condition`, a Column or a column name, as PySpark's `F._to_col`,
+    /// else `NOT_EXPECTED_TYPE` of `col`.
+    fn overwrite(&mut self, condition: &Bound<'_, PyAny>) -> PyResult<()> {
+        let condition = column_or_name(condition)?;
+        self.inner.clone().overwrite(condition).to_pyerr()
     }
 
     #[pyo3(name = "overwritePartitions")]
