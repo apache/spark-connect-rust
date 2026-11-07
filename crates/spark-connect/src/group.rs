@@ -83,6 +83,17 @@ impl GroupedData {
                 }
             }
         }
+        Self::new_grouping_sets_of(dataframe, grouping_sets, group_cols)
+    }
+
+    /// Grouped data of the grouping sets `grouping_sets` and the grouping columns
+    /// `group_cols`, the columns of the result besides the aggregations, as PySpark's
+    /// `groupingSets(groupingSets, *cols)`.
+    pub(crate) fn new_grouping_sets_of(
+        dataframe: DataFrame,
+        grouping_sets: Vec<Vec<Column>>,
+        group_cols: Vec<Column>,
+    ) -> Self {
         GroupedData {
             dataframe,
             group_cols,
@@ -118,6 +129,11 @@ impl GroupedData {
     /// map/apply UDF's argument columns so the worker's pandas/Arrow input is named.
     pub fn input_columns(&self) -> Result<Vec<String>> {
         self.dataframe.columns()
+    }
+
+    /// The session of the grouped DataFrame.
+    pub fn spark_session(&self) -> crate::session::SparkSession {
+        self.dataframe.spark_session()
     }
 
     /// Grouping-key expressions for this grouped data.
@@ -666,6 +682,11 @@ impl CoGroupedData {
         let mut cols = self.left.input_columns()?;
         cols.extend(self.right.input_columns()?);
         Ok(cols)
+    }
+
+    /// The session of the cogrouped DataFrames.
+    pub fn spark_session(&self) -> crate::session::SparkSession {
+        self.left.spark_session()
     }
 
     /// Apply a pandas UDF to each cogroup (`cogroup(...).applyInPandas`).

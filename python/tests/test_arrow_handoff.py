@@ -463,7 +463,8 @@ def _arrow_input_service(
     state = {"cache": {}, "uploads": 0, "relations": [], "message_sizes": [],
              "config": config, "config_requests": [], "input_tables": [], "tables": [],
              "upload_contexts": [], "status_contexts": [],
-             "status_failures": [], "upload_failures": [], "upload_attempts": 0}
+             "status_failures": [], "upload_failures": [], "upload_attempts": 0,
+             "ddl_strings": []}
     server_id = "00000000-0000-0000-0000-000000000001"
 
     def attribution(request, context):
@@ -493,6 +494,48 @@ def _arrow_input_service(
         return protocol("ConfigResponse", session_id=request.session_id,
                         pairs=[dict(key=k, value=config[k]) for k in reversed(keys)
                                if config.get(k) is not None]
+                        ).SerializeToString()
+
+    def top_level_split(text):
+        parts, depth, start = [], 0, 0
+        for i, char in enumerate(text):
+            depth += {"<": 1, ">": -1}.get(char, 0)
+            if char == "," and depth == 0:
+                parts.append(text[start:i])
+                start = i + 1
+        return parts + [text[start:]]
+
+    def ddl_type(text):
+        """The DataType of a DDL of these tests, as the server's `ddl_parse` parses it: atomic
+        types, arrays and maps of them, and structs of `name type` fields."""
+        text, kinds = text.strip(), {
+            "long": "long", "bigint": "long", "int": "integer", "integer": "integer",
+            "double": "double", "float": "float", "string": "string", "date": "date",
+            "boolean": "boolean", "binary": "binary", "timestamp": "timestamp"}
+        lower = text.lower()
+        if lower.startswith("array<") and lower.endswith(">"):
+            return protocol("DataType", array=dict(
+                element_type=ddl_type(text[6:-1]), contains_null=True))
+        if lower.startswith("map<") and lower.endswith(">"):
+            key, value = top_level_split(text[4:-1])
+            return protocol("DataType", map=dict(
+                key_type=ddl_type(key), value_type=ddl_type(value), value_contains_null=True))
+        if lower in kinds:
+            return protocol("DataType", **{kinds[lower]: {}})
+        fields = [field.strip().split(None, 1) for field in top_level_split(text)]
+        return protocol("DataType", struct=dict(fields=[
+            dict(name=name, data_type=ddl_type(kind), nullable=True) for name, kind in fields]))
+
+    def analyze(raw, context):
+        # As the server, which parses the DDL schemas that the client sends (`_parse_ddl`);
+        # the tests ask for no other analysis.
+        request = protocol("AnalyzePlanRequest").FromString(raw)
+        if request.WhichOneof("analyze") != "ddl_parse":
+            context.abort(grpc.StatusCode.UNIMPLEMENTED, "Method not found!")
+        state["ddl_strings"].append(request.ddl_parse.ddl_string)
+        return protocol("AnalyzePlanResponse", session_id=request.session_id,
+                        server_side_session_id=server_id,
+                        ddl_parse=dict(parsed=ddl_type(request.ddl_parse.ddl_string))
                         ).SerializeToString()
 
     def statuses(raw, context):
@@ -621,6 +664,7 @@ def _arrow_input_service(
         server.add_generic_rpc_handlers([grpc.method_handlers_generic_handler(
             "spark.connect.SparkConnectService", {
                 "Config": grpc.unary_unary_rpc_method_handler(configure),
+                "AnalyzePlan": grpc.unary_unary_rpc_method_handler(analyze),
                 "ArtifactStatus": grpc.unary_unary_rpc_method_handler(statuses),
                 "AddArtifacts": grpc.stream_unary_rpc_method_handler(upload),
                 "ExecutePlan": grpc.unary_stream_rpc_method_handler(execute),
@@ -865,6 +909,8 @@ def test_arrow_input_ddl_width_errors(protocol, schema, expected_width):
         assert error.value.getMessageParameters() == {
             "expected_length": expected_width, "actual_length": "2",
         }
+        # As PySpark Connect's, the server parses the DDL schema.
+        assert state["ddl_strings"] == [schema]
         assert not state["relations"]
         assert state["uploads"] == 0
 

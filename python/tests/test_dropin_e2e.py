@@ -104,6 +104,24 @@ def test_conf_get_with_a_none_default(session):
         session.conf.get(key)
 
 
+def test_user_id_of_the_connection_string_reaches_every_request_as_pyspark():
+    # The server keys a session by the user ID in each request. As in PySpark, the
+    # queries carry the user ID of the connection string, as the configs do, so a config
+    # set with spark.conf.set applies to the queries and the other way around.
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("SPARK_REMOTE is required for live-server tests")
+    remote += ";user_id=user-context-probe" if ";" in remote else "/;user_id=user-context-probe"
+    spark = SparkSession.builder.remote(remote).create()
+    try:
+        spark.conf.set("spark.sql.shuffle.partitions", "7")
+        assert spark.sql("SET spark.sql.shuffle.partitions").collect()[0][1] == "7"
+        spark.sql("SET spark.sql.shuffle.partitions=9").collect()
+        assert spark.conf.get("spark.sql.shuffle.partitions") == "9"
+    finally:
+        spark.stop()
+
+
 def test_get_or_create_returns_the_session_with_the_options_as_pyspark(session):
     # As PySpark's builder: getOrCreate() returns the active session, and sets the options
     # of the builder on it; one that fails, of a static configuration, is ignored.
@@ -541,6 +559,26 @@ def test_foreach_foreach_partition_and_to_json_as_pyspark(session):
     assert json.collect() == [Row(value='{"id":1,"name":"a","bin":"eA=="}'), Row(value='{"id":2}')]
 
 
+def test_clone_session_copies_the_state_of_the_session_as_pyspark(session):
+    # As PySpark's: the clone has the configurations and the temporary views of the session,
+    # of an id of its own or of the one given, and changes to either do not show in the other.
+    import uuid
+
+    session.conf.set("spark.sql.shuffle.partitions", "7")
+    session.range(2).createOrReplaceTempView("cloned_view")
+    try:
+        clone = session.cloneSession()
+        assert clone.session_id != session.session_id
+        assert clone.conf.get("spark.sql.shuffle.partitions") == "7"
+        assert clone.table("cloned_view").count() == 2
+        clone.conf.set("spark.sql.shuffle.partitions", "9")
+        assert session.conf.get("spark.sql.shuffle.partitions") == "7"
+        new_id = str(uuid.uuid4())
+        assert session.cloneSession(new_id).session_id == new_id
+    finally:
+        session.conf.unset("spark.sql.shuffle.partitions")
+
+
 def test_execution_info_is_that_of_each_dataframe_as_pyspark(session):
     a = session.range(3)
     assert a.executionInfo is None
@@ -607,6 +645,23 @@ def test_create_dataframe_from_empty_arrow_table(session):
 
 
 _Pair = namedtuple("_Pair", ["x", "y"])
+
+
+def test_grouping_sets_return_the_rows_of_pyspark(session):
+    # As PySpark's: the grouping columns are those of `cols`, null in the rows of a set that
+    # does not hold them, and none without `cols`.
+    df = session.createDataFrame(
+        [(1, "x", 10), (1, "y", 20), (2, "x", 30)], "a int, b string, c int")
+    total = F.sum("c").alias("s")
+    with_columns = df.groupingSets([["a"], []], "a", "b").agg(total)
+    assert with_columns.columns == ["a", "b", "s"]
+    assert sorted(with_columns.collect(), key=lambda r: (r.a is None, r.a)) == [
+        Row(a=1, b=None, s=30), Row(a=2, b=None, s=30), Row(a=None, b=None, s=60)]
+    without_columns = df.groupingSets([["a"], ["b"]]).agg(total)
+    assert without_columns.columns == ["s"]
+    assert sorted(r.s for r in without_columns.collect()) == [20, 30, 30, 40]
+    # Of ordinals too.
+    assert df.groupingSets([[2]], 2).agg(total).columns == ["b", "s"]
 
 
 def test_grouped_aggregations_name_and_take_columns_as_pyspark(session):
@@ -1335,6 +1390,37 @@ def test_window_order_by_a_column_sorts_nulls_first_as_pyspark(session):
         assert [(r.o, r.rn) for r in rows] == expected
 
 
+def test_create_dataframe_takes_the_ddl_of_spark_as_pyspark(session):
+    # As PySpark Connect's, which parses a DDL schema on the server: nested structs, arrays and
+    # maps of them, backtick-quoted names, and NOT NULL and COMMENT clauses.
+    schema = (
+        "st struct<a:int,b:double>, arr array<struct<c:int>>, m map<string,struct<x:int>>, "
+        "`a b` int NOT NULL COMMENT 'c'"
+    )
+    df = session.createDataFrame([((1, 2.0), [(3,)], {"k": (4,)}, 5)], schema)
+    assert df.schema.simpleString() == (
+        "struct<st:struct<a:int,b:double>,arr:array<struct<c:int>>,"
+        "m:map<string,struct<x:int>>,a b:int>"
+    )
+    assert df.collect() == [
+        Row(st=Row(a=1, b=2.0), arr=[Row(c=3)], m={"k": Row(x=4)}, **{"a b": 5})
+    ]
+    # Collations, which the server names, and the errors of the server's parser.
+    collated = session.createDataFrame([("x",)], "s STRING COLLATE UTF8_LCASE")
+    assert collated.schema.simpleString() == "struct<s:string collate UTF8_LCASE>"
+    from pyspark.errors import ParseException
+
+    for ddl, condition in [("a INT,", "PARSE_SYNTAX_ERROR"), ("a BOGUS", "UNSUPPORTED_DATATYPE")]:
+        with pytest.raises(ParseException) as error:
+            session.createDataFrame([], ddl)
+        assert error.value.getCondition() == condition
+    # As do the map functions, of their schemas.
+    mapped = session.range(2).mapInPandas(lambda it: it, "id long NOT NULL COMMENT 'k'")
+    assert [(f.name, f.nullable, f.metadata) for f in mapped.schema.fields] == [
+        ("id", False, {"comment": "k"})]
+    assert mapped.collect() == [Row(id=0), Row(id=1)]
+
+
 def test_functions_send_their_optional_arguments_as_pyspark(session):
     # The values of official PySpark 4.3.0; each optional argument used to be dropped.
     df = session.sql(
@@ -1404,6 +1490,40 @@ def test_decimal_literals_are_of_the_types_of_pyspark(session):
         Decimal("1.5"), Decimal("0"), Decimal("123456789012.5"), Decimal("-0.001"),
         Decimal("3.375"),
     )
+
+
+def test_observations_receive_the_observed_metrics_as_pyspark(session):
+    # As PySpark's: each action that runs a DataFrame of an observation sets in it the metrics
+    # that the server observed, for each observation of a name on its own, and get raises the
+    # error of collecting them.
+    from pyspark.errors import PySparkException
+    from pyspark.sql import Observation
+
+    first, second = Observation("m"), Observation("m")
+    df1 = session.range(3).observe(
+        first, F.count(F.lit(1)).alias("c"), F.sum("id").alias("s"), F.lit(None).alias("n")
+    )
+    df2 = session.range(5).observe(second, F.count(F.lit(1)).alias("c"))
+    assert first.get == {} and second.get == {}
+    assert df1.collect() == [Row(id=0), Row(id=1), Row(id=2)]
+    assert first.get == {"c": 3, "s": 3, "n": None} and second.get == {}
+    df2.select("*").write.format("noop").mode("overwrite").save()
+    assert second.get == {"c": 5}
+    assert df1.where("id > 0").count() == 2 and first.get["c"] == 3
+
+    failing = Observation("failing")
+    df = session.range(2).observe(failing, F.raise_error(F.lit("test error")).alias("e"))
+    assert df.collect() == [Row(id=0), Row(id=1)]
+    with pytest.raises(PySparkException, match="test error"):
+        failing.get
+
+    # A streaming DataFrame, which the server tells, is not observed.
+    from pyspark.errors import IllegalArgumentException
+
+    stream = session.readStream.format("rate").load()
+    with pytest.raises(IllegalArgumentException) as error:
+        stream.observe(Observation(), F.count(F.lit(1)).alias("c"))
+    assert error.value.getCondition() == "UNSUPPORTED_OPERATION"
 
 
 def test_ml_vector_functions_as_pyspark(session):
@@ -1574,6 +1694,20 @@ def test_create_dataframe_raises_merge_errors_as_pyspark(session):
             session.createDataFrame(data)
         assert error.value.getCondition() == condition, data
         assert error.value.getMessageParameters() == parameters, data
+
+
+def test_persist_cache_and_unpersist_return_the_dataframe_itself_as_pyspark(session):
+    # As PySpark's: the DataFrame itself, cached at the storage level given.
+    from pyspark.storagelevel import StorageLevel
+
+    df = session.range(3)
+    try:
+        assert df.persist(StorageLevel.DISK_ONLY) is df
+        assert df.storageLevel == StorageLevel.DISK_ONLY
+        assert df.unpersist(blocking=True) is df
+        assert df.cache() is df and df.count() == 3
+    finally:
+        df.unpersist()
 
 
 def test_create_dataframe_converts_numpy_scalars_as_pyspark(session):

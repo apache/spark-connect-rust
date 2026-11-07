@@ -2934,6 +2934,23 @@ pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAn
     Ok(o)
 }
 
+/// The type of `schema`, a DataType or a DDL string, which the server parses, as PySpark
+/// Connect's `_parse_ddl` does: so any DDL of Spark, with nested types, quoted names,
+/// collations and the NOT NULL and COMMENT of fields, parses as Spark parses it.
+pub(crate) fn schema_data_type(
+    py: Python<'_>,
+    session: &spark_connect::session::SparkSession,
+    schema: &Bound<'_, PyAny>,
+) -> PyResult<DataType> {
+    if schema.is_instance_of::<pyo3::types::PyString>() {
+        let ddl: String = schema.extract()?;
+        return crate::errors::ResultExt::to_pyerr(
+            py.detach(|| session.parse_ddl(&ddl).map_err(Box::new)),
+        );
+    }
+    py_to_data_type(schema)
+}
+
 pub(crate) fn py_to_data_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
     if let Ok(g) = obj.extract::<PyRef<PyGeometryType>>() {
         return Ok(DataType::Geometry { srid: g.srid });
