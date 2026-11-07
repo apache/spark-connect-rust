@@ -38,6 +38,36 @@ pub struct ExecutionInfo {
     pub operation_id: Option<String>,
 }
 
+/// The operation tags of a session, per thread, as PySpark Connect keeps them in the
+/// `thread_local` of its client: those that a thread added, which the operations that it
+/// starts carry. A new thread has none.
+#[derive(Default)]
+pub(crate) struct ThreadTags {
+    by_thread: Mutex<std::collections::HashMap<std::thread::ThreadId, Vec<String>>>,
+}
+
+impl ThreadTags {
+    /// The tags of the current thread.
+    fn current(&self) -> Vec<String> {
+        let by_thread = self.by_thread.lock().unwrap_or_else(|e| e.into_inner());
+        by_thread
+            .get(&std::thread::current().id())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Change the tags of the current thread, and forget a thread without tags.
+    fn update(&self, change: impl FnOnce(&mut Vec<String>)) {
+        let mut by_thread = self.by_thread.lock().unwrap_or_else(|e| e.into_inner());
+        let thread = std::thread::current().id();
+        let tags = by_thread.entry(thread).or_default();
+        change(tags);
+        if tags.is_empty() {
+            by_thread.remove(&thread);
+        }
+    }
+}
+
 /// A Spark Connect session for interacting with a remote Spark cluster.
 ///
 /// Mirrors `pyspark.sql.SparkSession`.
@@ -46,9 +76,10 @@ pub struct SparkSession {
     client: Arc<SparkConnectClient>,
     /// Stable plan IDs for the plan nodes this session serializes.
     plan_ids: Arc<PlanIds>,
-    /// Operation tags attached to every ExecutePlan request from this session.
-    /// Mirrors `pyspark.sql.connect.session.SparkSession`'s addTag/removeTag/getTags.
-    tags: Arc<Mutex<Vec<String>>>,
+    /// Operation tags attached to every ExecutePlan request that a thread starts from this
+    /// session, those of the thread. Mirrors `pyspark.sql.connect.session.SparkSession`'s
+    /// addTag/removeTag/getTags, of the `thread_local` of its client.
+    tags: Arc<ThreadTags>,
     /// Metrics/observed-metrics captured from the most recent execution on this
     /// session. Backs `DataFrame::execution_info` and the profiler accessor.
     last_execution: Arc<Mutex<Option<ExecutionInfo>>>,
@@ -72,7 +103,7 @@ impl SparkSession {
         SparkSession {
             client: Arc::new(client),
             plan_ids: Arc::new(PlanIds::new()),
-            tags: Arc::new(Mutex::new(Vec::new())),
+            tags: Arc::new(ThreadTags::default()),
             last_execution: Arc::new(Mutex::new(None)),
             progress_handlers: Arc::new(Mutex::new(Vec::new())),
             progress_handler_id: Arc::new(AtomicU64::new(0)),
@@ -82,9 +113,11 @@ impl SparkSession {
         }
     }
 
-    /// Add a tag to be attached to all subsequent operations from this session.
+    /// Add a tag to be attached to all subsequent operations that this thread starts from
+    /// this session.
     ///
-    /// Mirrors `SparkSession.addTag`. Tags cannot be empty or contain a comma.
+    /// Mirrors `SparkSession.addTag`, whose tags are those of the current thread. Tags cannot
+    /// be empty or contain a comma.
     pub fn add_tag(&self, tag: &str) -> Result<()> {
         if tag.is_empty() {
             return Err(SparkError::value(
@@ -98,26 +131,27 @@ impl SparkSession {
                 &[("detail", "Tag cannot contain ','")],
             ));
         }
-        let mut tags = self.tags.lock().unwrap();
-        if !tags.iter().any(|t| t == tag) {
-            tags.push(tag.to_string());
-        }
+        self.tags.update(|tags| {
+            if !tags.iter().any(|t| t == tag) {
+                tags.push(tag.to_string());
+            }
+        });
         Ok(())
     }
 
-    /// Remove a previously added tag. Mirrors `SparkSession.removeTag`.
+    /// Remove a tag that this thread added. Mirrors `SparkSession.removeTag`.
     pub fn remove_tag(&self, tag: &str) {
-        self.tags.lock().unwrap().retain(|t| t != tag);
+        self.tags.update(|tags| tags.retain(|t| t != tag));
     }
 
-    /// Get the tags currently set on this session. Mirrors `SparkSession.getTags`.
+    /// Get the tags that this thread set on this session. Mirrors `SparkSession.getTags`.
     pub fn get_tags(&self) -> Vec<String> {
-        self.tags.lock().unwrap().clone()
+        self.tags.current()
     }
 
-    /// Clear all tags set on this session. Mirrors `SparkSession.clearTags`.
+    /// Clear the tags that this thread set on this session. Mirrors `SparkSession.clearTags`.
     pub fn clear_tags(&self) {
-        self.tags.lock().unwrap().clear();
+        self.tags.update(Vec::clear);
     }
 
     /// Register a handler invoked for every `ExecutionProgress` message received
@@ -193,9 +227,10 @@ impl SparkSession {
             .unwrap_or_default()
     }
 
-    /// Internal accessor used by the execute-request builders to attach tags.
+    /// Internal accessor used by the execute-request builders to attach the tags of the
+    /// current thread, which builds the request.
     pub(crate) fn tags(&self) -> Vec<String> {
-        self.tags.lock().unwrap().clone()
+        self.tags.current()
     }
 
     /// Start a brand-new session over the same connection. Mirrors
@@ -205,7 +240,7 @@ impl SparkSession {
         SparkSession {
             client: Arc::new(self.client.with_new_session_id()),
             plan_ids: Arc::new(PlanIds::new()),
-            tags: Arc::new(Mutex::new(Vec::new())),
+            tags: Arc::new(ThreadTags::default()),
             last_execution: Arc::new(Mutex::new(None)),
             progress_handlers: Arc::new(Mutex::new(Vec::new())),
             progress_handler_id: Arc::new(AtomicU64::new(0)),
@@ -2325,6 +2360,31 @@ mod tests {
             .remote("sc://localhost:15002")
             .get_or_create()
             .expect("failed to build session")
+    }
+
+    #[test]
+    fn tags_are_those_of_each_thread() {
+        // As PySpark Connect's, whose tags are of the current thread: a new thread has none,
+        // and the tags it adds are on its own requests only.
+        let spark = session();
+        spark.add_tag("main").unwrap();
+        let other = spark.clone();
+        let child = std::thread::spawn(move || {
+            let before = other.get_tags();
+            other.add_tag("child").unwrap();
+            let added = (other.get_tags(), other.tags());
+            other.remove_tag("child");
+            (before, added, other.get_tags())
+        })
+        .join()
+        .unwrap();
+        let child_tags = vec!["child".to_string()];
+        assert_eq!(child, (vec![], (child_tags.clone(), child_tags), vec![]));
+        assert_eq!(spark.get_tags(), vec!["main".to_string()]);
+        assert_eq!(spark.tags(), vec!["main".to_string()]);
+        spark.clear_tags();
+        assert!(spark.get_tags().is_empty());
+        assert!(spark.tags.by_thread.lock().unwrap().is_empty());
     }
 
     #[test]

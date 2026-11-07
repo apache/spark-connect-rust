@@ -550,6 +550,39 @@ def test_builder_options_are_set_on_the_session_as_pyspark(mock_connect):
     assert len(service.set_confs) == 1
 
 
+def test_tags_are_those_of_each_thread_as_pyspark(mock_connect):
+    # As PySpark's: the tags of addTag are those of the current thread, of a set of getTags,
+    # which the operations that the thread starts carry; a new thread starts without tags.
+    import threading
+
+    spark, service = mock_connect
+
+    def sent_tags():
+        # ExecutePlanRequest.tags=7.
+        return sorted(tag.decode() for tag in parse_message(service.execute_requests[-1]).get(7, []))
+
+    spark.addTag("main")
+    seen = {}
+
+    def child():
+        seen["before"] = spark.getTags()
+        spark.addTag("child")
+        seen["after"] = spark.getTags()
+        spark.range(1).collect()
+        seen["sent"] = sent_tags()
+
+    thread = threading.Thread(target=child)
+    thread.start()
+    thread.join()
+    try:
+        assert seen == {"before": set(), "after": {"child"}, "sent": ["child"]}
+        assert spark.getTags() == {"main"}
+        spark.range(1).collect()
+        assert sent_tags() == ["main"]
+    finally:
+        spark.clearTags()
+
+
 def test_session_builder_class_constructor():
     from pyspark.sql import SparkSession
     b = SparkSession.Builder()

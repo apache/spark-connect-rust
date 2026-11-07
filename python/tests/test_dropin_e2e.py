@@ -915,6 +915,42 @@ def test_subqueries_and_table_arguments_return_the_rows_of_pyspark(session):
         session.range(1).asTable().orderBy("id")
 
 
+def test_tags_are_those_of_each_thread_as_pyspark(session):
+    # As PySpark's: the tags of a thread are on its operations only, so interruptTag of the tag
+    # of one thread interrupts its operation, but not that of another thread.
+    import threading
+    import time
+
+    from pyspark.sql import functions as F
+
+    slow = F.udf(lambda x: (time.sleep(8), x)[1], "long")
+    results = {}
+
+    def run(name, tag):
+        if tag:
+            session.addTag(tag)
+        try:
+            results[name] = session.range(1).select(slow("id")).collect()
+        except Exception as e:  # noqa: BLE001
+            results[name] = e
+        finally:
+            session.clearTags()
+
+    tagged = threading.Thread(target=run, args=("tagged", "tag_of_a_thread"))
+    tagged.start()
+    time.sleep(1)
+    untagged = threading.Thread(target=run, args=("untagged", None))
+    untagged.start()
+    time.sleep(3)
+    assert session.getTags() == set()
+    interrupted = session.interruptTag("tag_of_a_thread")
+    tagged.join(60)
+    untagged.join(60)
+    assert len(interrupted) == 1
+    assert isinstance(results["tagged"], Exception)
+    assert [tuple(row) for row in results["untagged"]] == [(0,)]
+
+
 def test_grouped_map_functions_take_iterators_by_their_type_hints(session):
     from typing import Iterator, Tuple
 
