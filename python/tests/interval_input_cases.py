@@ -47,6 +47,7 @@ INFERENCE_CONFS = {
 class IntervalInputConversionTests(unittest.TestCase):
     def test_overflow_is_checked_recursively_before_rpc(self):
         spark = SparkSession.builder.remote("sc://127.0.0.1:1").create()
+        self.addCleanup(spark.stop)
         interval = T.DayTimeIntervalType()
         for micros in (-(2**63) - 1, 2**63, -(2**63) - 86400000000):
             value = timedelta(microseconds=micros)
@@ -73,6 +74,7 @@ class IntervalInputConversionTests(unittest.TestCase):
 
     def test_inference_rejects_mixed_interval_and_numeric_values(self):
         spark = SparkSession.builder.remote("sc://127.0.0.1:1").create()
+        self.addCleanup(spark.stop)
         delta = timedelta(microseconds=-1)
         with self.assertRaises(PySparkTypeError) as error:
             spark.createDataFrame([(delta,), (1,)])
@@ -101,6 +103,7 @@ class IntervalInputConversionTests(unittest.TestCase):
 
     def test_bounds_and_null_first_inputs_build_without_rpc(self):
         spark = SparkSession.builder.remote("sc://127.0.0.1:1").create()
+        self.addCleanup(spark.stop)
         for schema in (None, ["interval"], T.StructType([
                 T.StructField("interval", T.DayTimeIntervalType())])):
             spark.createDataFrame([(None,), (timedelta(microseconds=LOWEST),),

@@ -41,6 +41,9 @@ from pyspark.sql.types import (
     TimestampType,
 )
 
+# Keep interval round trips in the live suite selected by CI.
+from interval_input_cases import IntervalInputLiveTests  # noqa: F401
+
 
 @pytest.fixture
 def session():
