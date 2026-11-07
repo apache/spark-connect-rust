@@ -214,6 +214,27 @@ jobs:
             pyspark/pipelines/tests \
             2>&1 | tee /tmp/pipelines_connect.log
 
+      - name: Pipelines CLI tests through the drop-in (official tests, against the server)
+        # The official tests of the CLI modules of pyspark.pipelines (vendored byte for byte)
+        # run on the drop-in's own classes (our ./python), not over the transport plugin.
+        if: always() && steps.pipeline-connect-tests.outcome != 'skipped'
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          set -o pipefail
+          PYTHONPATH="$(pwd)/python" python -m pytest \
+            -q \
+            -rfE \
+            --tb=short \
+            -p no:cacheprovider \
+            python/pyspark/pipelines/tests/test_cli.py \
+            python/pyspark/pipelines/tests/test_init_cli.py \
+            python/pyspark/pipelines/tests/test_add_pipeline_analysis_context.py \
+            python/pyspark/pipelines/tests/test_block_session_mutations.py \
+            python/pyspark/pipelines/tests/test_spark_connect.py \
+            python/pyspark/pipelines/tests/test_auto_cdc_flow.py \
+            2>&1 | tee /tmp/pipelines_dropin.log
+
       - name: Upload pipelines parity log + server log
         if: always()
         uses: actions/upload-artifact@v4
@@ -222,5 +243,6 @@ jobs:
           path: |
             /tmp/pipelines_pure_python.log
             /tmp/pipelines_connect.log
+            /tmp/pipelines_dropin.log
             /tmp/connect-server.log
           if-no-files-found: warn

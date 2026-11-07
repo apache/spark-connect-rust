@@ -35,6 +35,16 @@ from pyspark.serializers import (
 
 _is_remote_only = None
 
+# The ranges of the integral types of the JVM, as PySpark's.
+JVM_BYTE_MIN: int = -(1 << 7)
+JVM_BYTE_MAX: int = (1 << 7) - 1
+JVM_SHORT_MIN: int = -(1 << 15)
+JVM_SHORT_MAX: int = (1 << 15) - 1
+JVM_INT_MIN: int = -(1 << 31)
+JVM_INT_MAX: int = (1 << 31) - 1
+JVM_LONG_MIN: int = -(1 << 63)
+JVM_LONG_MAX: int = (1 << 63) - 1
+
 
 def print_exec(stream: TextIO) -> None:
     """Print the current exception traceback to ``stream`` (used by serializers)."""
@@ -633,3 +643,73 @@ def _do_server_auth(conn: "io.IOBase", auth_secret: str) -> None:
             errorClass="UNEXPECTED_RESPONSE_FROM_SERVER",
             messageParameters={},
         )
+
+
+# The names of PySpark's pyspark.util that its other modules and tools use, from Apache Spark
+# v4.3.0.
+import gc  # noqa: E402
+from typing import Generator, List, TypeVar  # noqa: E402
+
+__all__: List[str] = []
+
+FuncT = TypeVar("FuncT", bound=Callable[..., Any])
+
+
+def fail_on_stopiteration(f: Callable) -> Callable:
+    """
+    Wraps the input function to fail on 'StopIteration' by raising a 'RuntimeError'
+    prevents silent loss of data when 'f' is used in a for loop in Spark code
+    """
+
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return f(*args, **kwargs)
+        except StopIteration as exc:
+            raise PySparkRuntimeError(
+                errorClass="STOP_ITERATION_OCCURRED",
+                messageParameters={
+                    "exc": str(exc),
+                },
+            )
+
+    return wrapper
+
+
+@contextlib.contextmanager
+def disable_gc() -> Generator[None, None, None]:
+    gc_enabled_originally = gc.isenabled()
+    if gc_enabled_originally:
+        gc.disable()
+    try:
+        yield
+    finally:
+        if gc_enabled_originally:
+            gc.enable()
+
+
+# This function will be called in `pyspark` script as well,
+# so this should be available without a running Spark.
+# If move or rename, please update the script too.
+def spark_connect_mode() -> str:
+    """
+    Return the env var SPARK_CONNECT_MODE; otherwise "1" if `pyspark_connect` is available.
+    """
+    connect_by_default = os.environ.get("SPARK_CONNECT_MODE")
+    if connect_by_default is not None:
+        return connect_by_default
+    try:
+        import pyspark_connect  # noqa: F401
+
+        return "1"
+    except ImportError:
+        return "0"
+
+
+def default_api_mode() -> str:
+    """
+    Return the default API mode.
+    """
+    if spark_connect_mode() == "1":
+        return "connect"
+    else:
+        return "classic"

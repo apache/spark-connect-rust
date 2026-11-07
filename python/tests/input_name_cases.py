@@ -112,6 +112,7 @@ class InputNameTests(unittest.TestCase):
                 b"spark.sql.session.localRelationChunkSizeBytes": str(1 << 40).encode(),
                 b"spark.sql.session.localRelationBatchOfChunksSizeBytes": str(1 << 40).encode(),
                 b"spark.sql.execution.pandas.convertToArrowArraySafely": b"true",
+                b"spark.sql.execution.pandas.inferPandasDictAsMap": b"false",
             }
             pairs = b"".join(_bytes(2, _bytes(1, key) + _bytes(2, values[key]))
                              for key in keys)
@@ -143,8 +144,13 @@ class InputNameTests(unittest.TestCase):
         frame.toArrow()
         self.assertEqual(len(self.captured), before + 1)
         local, renames = self.captured[-1]
-        schema = json.loads(local[2][0])
-        payload_names = [field["name"] for field in schema["fields"]]
+        if 2 in local:
+            schema = json.loads(local[2][0])
+            payload_names = [field["name"] for field in schema["fields"]]
+        else:
+            # As PySpark's Arrow conversion of pandas input without a schema, which sends the
+            # table without one: the names of the table.
+            payload_names = pa.ipc.open_stream(local[1][0]).read_all().schema.names
         if 1 in local:
             table = pa.ipc.open_stream(local[1][0]).read_all()
             table.validate(full=True)
@@ -168,10 +174,11 @@ class InputNameTests(unittest.TestCase):
             ([Row(z=7, a=8), Row(z=9, a=10)], ["x", "y"], ["x", "y"], ["z", "a"]),
             ([{"z": 8, "a": 7}, {"z": 10, "a": 9}], None, ["a", "z"], ["a", "z"]),
             ([{"z": 8, "a": 7}, {"z": 10, "a": 9}], ["x", "y"], ["x", "y"], ["a", "z"]),
+            # The Arrow conversion of pandas input names its table's columns _0, _1, ... for toDF.
             (pd.DataFrame([[7, 8], [9, 10]], columns=["café", "雪"]),
-             None, ["café", "雪"], ["café", "雪"]),
+             None, ["café", "雪"], ["_0", "_1"]),
             (pd.DataFrame([[7, 8], [9, 10]], columns=["old", "names"]),
-             ["x", "y"], ["x", "y"], ["x", "y"]),
+             ["x", "y"], ["x", "y"], ["_0", "_1"]),
         ]
         for data, schema, names, ipc_names in cases:
             with self.subTest(names=names, source=type(data).__name__):

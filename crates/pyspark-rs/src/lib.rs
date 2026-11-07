@@ -27,6 +27,7 @@ pub(crate) fn coerce_option_value(v: &Bound<'_, PyAny>) -> PyResult<Option<Strin
 mod catalog;
 mod column;
 mod conf;
+mod connect_bridge;
 mod dataframe;
 mod datasource;
 mod errors;
@@ -69,7 +70,6 @@ use dataframe::{
 };
 use datasource::PyDataSourceRegistration;
 use group::{PyCoGroupedData, PyGroupedData};
-use profiler::PyProfilerCollector;
 use readwriter::PyDataFrameReader;
 use resource::{
     PyExecutorResourceRequests, PyResourceProfile, PyResourceProfileBuilder, PyTaskResourceRequests,
@@ -96,7 +96,6 @@ use window::{PyFrameBound, PyWindow, PyWindowSpec};
 fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySparkSession>()?;
     m.add_class::<PyHook>()?;
-    m.add_class::<session::PyConnectClientStub>()?;
     m.add_class::<PySparkSessionBuilder>()?;
     // As PySpark's nested class: `<pyspark.sql.session.SparkSession.Builder object at ...>`.
     m.getattr("Builder")?
@@ -126,6 +125,8 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // The core DataType JSON grammar, which `pyspark.sql.types` parses type JSON with.
     m.add_function(wrap_pyfunction!(types::parse_datatype_json, m)?)?;
+    m.add_function(wrap_pyfunction!(connect_bridge::_data_type_proto, m)?)?;
+    m.add_function(wrap_pyfunction!(connect_bridge::_data_type_of_proto, m)?)?;
     m.add_function(wrap_pyfunction!(column::column_reference_name, m)?)?;
 
     m.add_function(wrap_pyfunction!(pandas_input::_pandas_string_ipc, m)?)?;
@@ -169,7 +170,6 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Data source and profiler classes
     m.add_class::<PyDataSourceRegistration>()?;
-    m.add_class::<PyProfilerCollector>()?;
 
     // Register DataType classes
     m.add_class::<PyDataType>()?;

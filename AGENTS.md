@@ -129,10 +129,15 @@ Cover these classes: `DataFrame`, `Column`, `SparkSession`, `SparkSession.Builde
 `Catalog`, `Window`, `WindowSpec`, `Observation` (add any new connect classes the
 new version introduces).
 
-**Justified non-gaps** (absent on purpose because we use a native Rust transport,
-not the Python gRPC client): `Column.to_plan(session)` and `SparkSession.client`.
-Anything else in the diff is a real gap to close. Re-run the diff until it shows
-only these.
+There are no justified non-gaps: anything in the diff is a real gap to close. Re-run the
+diff until it shows none.
+
+`SparkSession.client` is not the gRPC `SparkConnectClient`: it is the client that the
+vendored `pyspark.ml` (and any module that builds its own `spark.connect` messages) uses
+over the Rust transport - `execute_command(pb2.Command)` and the ML cache RPCs - with the
+generated `pyspark.sql.connect.proto` (vendored `*_pb2.py`, which needs `protobuf`).
+`DataFrame(plan, session)`, `DataFrame._plan` and `Column._expr` are the other half of
+that bridge: a `LogicalPlan` of Python sends its `plan(session)` relation as it is.
 
 ## 3. Close API gaps (three layers)
 

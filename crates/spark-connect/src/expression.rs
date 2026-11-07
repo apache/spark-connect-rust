@@ -577,10 +577,17 @@ impl LiteralExpression {
                 proto::expression::literal::LiteralType::Time(time)
             }
             LiteralExpression::Array {
-                element_type: _,
+                element_type,
                 elements,
             } => {
                 let mut array = proto::expression::literal::Array::default();
+                // The type of the elements, which the server requires of an array literal
+                // (`ARRAY_LITERAL_MISSING_DATA_TYPE`), as PySpark's `LiteralExpression.to_plan`
+                // writes it, also where the proto deprecates the field.
+                #[allow(deprecated)]
+                {
+                    array.element_type = Some(element_type.to_proto());
+                }
                 for elem in elements {
                     let elem_proto = elem.to_proto();
                     if let Some(proto::expression::ExprType::Literal(lit)) = elem_proto.expr_type {
@@ -2152,6 +2159,9 @@ mod tests {
             if let Some(proto::expression::literal::LiteralType::Array(arr)) = literal.literal_type
             {
                 assert_eq!(arr.elements.len(), 2);
+                #[allow(deprecated)]
+                let element_type = arr.element_type;
+                assert_eq!(element_type, Some(DataType::Integer.to_proto()));
             } else {
                 panic!("Expected array literal type");
             }

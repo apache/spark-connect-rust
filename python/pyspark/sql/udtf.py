@@ -32,6 +32,16 @@ from typing import Any, Optional, Type
 from pyspark.errors import PySparkAttributeError, PySparkTypeError
 from pyspark.serializers import CloudPickleSerializer
 
+__all__ = [
+    "AnalyzeArgument",
+    "AnalyzeResult",
+    "PartitioningColumn",
+    "OrderingColumn",
+    "SelectedColumn",
+    "SkipRestOfInputTableException",
+    "UDTFRegistration",
+]
+
 # Eval types for Python UDTFs (mirrors pyspark.util.PythonEvalType).
 SQL_TABLE_UDF = 300
 SQL_ARROW_TABLE_UDF = 301
@@ -103,6 +113,11 @@ class UserDefinedTableFunction:
         # As PySpark's UserDefinedTableFunction, for udtf(), arrow_udtf() and register().
         _validate_udtf_handler(func, returnType)
         self.func = func
+        # As PySpark Connect's: a DDL string is a type that the server parses.
+        if isinstance(returnType, str):
+            from pyspark.sql.connect.types import UnparsedDataType
+
+            returnType = UnparsedDataType(returnType)
         self.returnType = returnType
         self.evalType = evalType
         self.name = name or (

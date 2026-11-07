@@ -227,9 +227,18 @@ pub fn value_to_py<'py>(py: Python<'py>, v: &Value) -> PyResult<Bound<'py, PyAny
             // Convert days-since-epoch (i32) to datetime.date
             let date_mod = py.import("datetime")?;
             let date_cls = date_mod.getattr("date")?;
-            // 719163 is the ordinal of 1970-01-01
-            let ordinal = (*d as i64) + 719163i64;
-            date_cls.call_method1("fromordinal", (ordinal,))?.into_any()
+            if (-719_162..=2_932_896).contains(d) {
+                // 719163 is the ordinal of 1970-01-01
+                let ordinal = (*d as i64) + 719163i64;
+                date_cls.call_method1("fromordinal", (ordinal,))?.into_any()
+            } else {
+                // Out of the dates of Python, as PyArrow's `Date32Scalar.as_py`, of
+                // `date(1970, 1, 1) + timedelta(days=d)`, which raises its OverflowError.
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("days", *d)?;
+                let delta = date_mod.getattr("timedelta")?.call((), Some(&kwargs))?;
+                date_cls.call1((1970, 1, 1))?.add(delta)?.into_any()
+            }
         }
         // TIMESTAMP (with a time zone): the instant, shown in the local time zone of the client,
         // as PySpark's Arrow conversion does (`astimezone()` of the UTC datetime, naive).

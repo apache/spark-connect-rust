@@ -111,6 +111,7 @@ class IntegerTupleTests(unittest.TestCase):
                 b"spark.sql.session.localRelationChunkSizeBytes": str(1 << 40).encode(),
                 b"spark.sql.session.localRelationBatchOfChunksSizeBytes": str(1 << 40).encode(),
                 b"spark.sql.execution.pandas.convertToArrowArraySafely": b"true",
+                b"spark.sql.execution.pandas.inferPandasDictAsMap": b"false",
             }
             pairs = b"".join(_bytes(2, _bytes(1, key) + _bytes(2, values[key]))
                              for key in keys)

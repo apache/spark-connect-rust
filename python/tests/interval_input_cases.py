@@ -137,7 +137,8 @@ class IntervalInputConversionTests(unittest.TestCase):
             self.assertEqual(table.column(0).cast(pa.int64()).to_pylist(), values)
             for value in (timedelta.min, timedelta.max):
                 overflow = pd.DataFrame({"interval": pd.Series([value], dtype=object)})
-                with self.assertRaises(OverflowError):
+                # As PySpark's Arrow conversion: ArrowInvalid, a ValueError, of the duration.
+                with self.assertRaises(ValueError):
                     spark.createDataFrame(overflow)
             self.assertEqual(service.execute_calls, 1)
 

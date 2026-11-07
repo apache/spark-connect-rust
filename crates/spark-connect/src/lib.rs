@@ -50,7 +50,6 @@ pub use expression::{
 pub use group::{CoGroupedData, GroupedData};
 pub use merge::MergeIntoWriter;
 pub use observation::Observation;
-pub use profiler::ProfilerCollector;
 pub use progress::{ProgressUpdate, StageInfo};
 pub use readwriter::{
     DataFrameReader, DataFrameWriter, DataFrameWriterV2, ReadType, SaveMode, TableSaveMethod,
@@ -59,6 +58,7 @@ pub use resource::{
     ExecutorResourceRequests, ResourceProfile, ResourceProfileBuilder, TaskResourceRequests,
 };
 pub use session::{SparkSession, SparkSessionBuilder};
+pub use spark_connect_core::client::ExecutePlanHook;
 /// Re-exported so fallible APIs (e.g. the `#[spark_wasm_udf]`-generated UDF
 /// constructors) can name the client's `Result`/error types.
 pub use spark_connect_core::error::{

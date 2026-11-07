@@ -220,7 +220,7 @@ jobs:
         env:
           SPARK_REMOTE: sc://localhost:15002
           PYTHONPATH: ${{ github.workspace }}/python
-        run: python -m pytest tests/test_arrow_e2e.py tests/test_dropin_e2e.py -q
+        run: python -m pytest tests/test_arrow_e2e.py tests/test_dropin_e2e.py tests/test_ml_e2e.py -q
 
       - name: Restart Connect server in local-cluster mode
         # Resource profiles and artifact distribution across executors can only be

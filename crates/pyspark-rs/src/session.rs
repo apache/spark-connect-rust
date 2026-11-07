@@ -12,7 +12,6 @@ use crate::catalog::PyCatalog;
 use crate::dataframe::PyDataFrame;
 use crate::datasource::PyDataSourceRegistration;
 use crate::errors::ResultExt;
-use crate::profiler::PyProfilerCollector;
 use crate::resource::PyResourceProfile;
 use crate::streaming::{PyDataStreamReader, PyStreamingQueryManager};
 
@@ -26,6 +25,9 @@ pub struct PySparkSessionBuilder {
     remote_url: Option<String>,
     /// Runtime configs set via `.config(...)`, applied after the session connects.
     configs: Vec<(String, String)>,
+    /// The hook factories of `_registerHook`, which a new session calls with itself, as
+    /// PySpark's builder does.
+    hook_factories: Vec<std::sync::Arc<Py<PyAny>>>,
 }
 
 impl PySparkSessionBuilder {
@@ -33,6 +35,7 @@ impl PySparkSessionBuilder {
         PySparkSessionBuilder {
             remote_url: None,
             configs: Vec::new(),
+            hook_factories: Vec::new(),
         }
     }
 }
@@ -143,16 +146,16 @@ impl PySparkSessionBuilder {
         Ok(slf)
     }
 
-    /// `_registerHook` - register an execution-hook factory (mirrors pyspark's Builder).
-    /// Accepted for API parity; this native-transport client sends ExecutePlanRequests
-    /// from Rust, so registered `Hook.on_execute_plan` callbacks are not invoked (see
-    /// `PyHook`). Chainable, matching the builder pattern.
+    /// `_registerHook` - register a factory of a `SparkSession.Hook`, as PySpark's builder: a
+    /// session that the builder creates calls it with itself, and calls the `on_execute_plan`
+    /// of the hook with each `ExecutePlanRequest` of its executions before it sends it.
     #[pyo3(name = "_registerHook")]
     fn register_hook<'py>(
-        slf: PyRefMut<'py, Self>,
+        mut slf: PyRefMut<'py, Self>,
         hook_factory: &Bound<'_, PyAny>,
     ) -> PyRefMut<'py, Self> {
-        let _ = hook_factory;
+        slf.hook_factories
+            .push(std::sync::Arc::new(hook_factory.clone().unbind()));
         slf
     }
 
@@ -214,13 +217,16 @@ impl PySparkSessionBuilder {
     #[pyo3(name = "getOrCreate")]
     fn get_or_create(&self, py: Python<'_>) -> PyResult<Py<PySparkSession>> {
         let url = self.url(py)?;
-        let session = {
+        let (session, created) = {
             let _creating = session_lock();
             match active_session(py).or_else(|| default_session(py)) {
-                Some(session) => session,
-                None => new_session(py, &url)?,
+                Some(session) => (session, false),
+                None => (new_session(py, &url)?, true),
             }
         };
+        if created {
+            self.install_hooks(py, &session)?;
+        }
         self.apply_options(py, &session.borrow(py).session)?;
         log_client_banner(py);
         Ok(session)
@@ -234,6 +240,7 @@ impl PySparkSessionBuilder {
             let _creating = session_lock();
             new_session(py, &url)?
         };
+        self.install_hooks(py, &session)?;
         self.apply_options(py, &session.borrow(py).session)?;
         log_client_banner(py);
         Ok(session)
@@ -241,6 +248,33 @@ impl PySparkSessionBuilder {
 }
 
 impl PySparkSessionBuilder {
+    /// The hooks of the factories of `_registerHook` for `session`, a session that the builder
+    /// created, as PySpark's `SparkSession(hook_factories=...)` makes them: of each factory
+    /// called with the session, of whose `on_execute_plan` the session's executions send the
+    /// requests. The factories run after the lock of the creation of sessions is released, as
+    /// Python code may release the GIL that the lock is held with.
+    fn install_hooks(&self, py: Python<'_>, session: &Py<PySparkSession>) -> PyResult<()> {
+        if self.hook_factories.is_empty() {
+            return Ok(());
+        }
+        let hooks = self
+            .hook_factories
+            .iter()
+            .map(|factory| {
+                factory
+                    .bind(py)
+                    .call1((session.clone_ref(py),))
+                    .map(Bound::unbind)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let hook: spark_connect::ExecutePlanHook = std::sync::Arc::new(move |request| {
+            Python::attach(|py| call_execute_plan_hooks(py, &hooks, request))
+                .map_err(crate::errors::callback_error)
+        });
+        session.borrow(py).session.set_execute_plan_hook(Some(hook));
+        Ok(())
+    }
+
     /// Set an option, capturing `spark.remote` as the endpoint, and validate the startup URLs
     /// after it, as PySpark's `config`.
     fn set_option(&mut self, py: Python<'_>, key: &str, value: String) -> PyResult<()> {
@@ -350,6 +384,36 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// The request that `hooks` return of `request`, as PySpark's client calls its session hooks:
+/// each `on_execute_plan` with the request of the one before, as a `pb2.ExecutePlanRequest`
+/// of the generated `pyspark.sql.connect.proto`, of the operation ID of `request`.
+fn call_execute_plan_hooks(
+    py: Python<'_>,
+    hooks: &[Py<PyAny>],
+    request: spark_connect_proto::ExecutePlanRequest,
+) -> PyResult<spark_connect_proto::ExecutePlanRequest> {
+    use prost::Message;
+    let operation_id = request.operation_id.clone();
+    let mut message = py
+        .import("pyspark.sql.connect.proto")?
+        .getattr("ExecutePlanRequest")?
+        .call_method1(
+            "FromString",
+            (pyo3::types::PyBytes::new(py, &request.encode_to_vec()),),
+        )?;
+    for hook in hooks {
+        message = hook.bind(py).call_method1("on_execute_plan", (message,))?;
+        if let Some(operation_id) = &operation_id {
+            message.setattr("operation_id", operation_id)?;
+        }
+    }
+    let bytes = message.call_method0("SerializeToString")?;
+    spark_connect_proto::ExecutePlanRequest::decode(
+        bytes.cast::<pyo3::types::PyBytes>()?.as_bytes(),
+    )
+    .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
+}
+
 /// Held while a session is got or created, as PySpark's `SparkSession._lock`, so that threads
 /// get the same default session. Taken with the GIL, which is not released while it is held.
 fn session_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -439,19 +503,24 @@ fn log_client_banner(py: Python<'_>) {
     });
 }
 
-/// `SparkSession.Hook` - injects behavior around plan execution (mirrors pyspark's
-/// `SparkSession.Hook`). In pyspark, `on_execute_plan` rewrites the Python
-/// `ExecutePlanRequest` before the gRPC client sends it. This client uses a native Rust
-/// transport that builds and sends the request in Rust (there is no Python request to
-/// rewrite), so the hook is a passthrough - the same architectural reason
-/// `SparkSession.client` is absent. Exposed for API parity and subclassing.
+/// `SparkSession.Hook` - injects behavior around plan execution, as PySpark's
+/// `SparkSession.Hook`: a session calls the `on_execute_plan` of each hook of the factories of
+/// `_registerHook` with each `ExecutePlanRequest`, as a message of the generated
+/// `pyspark.sql.connect.proto`, before it sends it, and sends the request that it returns. The
+/// base hook returns the request as it is.
 #[pyclass(name = "Hook", module = "pyspark.sql.connect.session", subclass)]
 pub struct PyHook;
 
 #[pymethods]
 impl PyHook {
+    /// A hook, of the arguments of the `__init__` of a subclass, which `__new__` leaves to it,
+    /// as `object.__new__` does for PySpark's hooks.
     #[new]
-    fn new() -> Self {
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn new(
+        _args: &Bound<'_, pyo3::types::PyTuple>,
+        _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> Self {
         PyHook
     }
 
@@ -482,8 +551,14 @@ pub struct PySparkSession {
 
 impl PySparkSession {
     pub fn new(session: SparkSession) -> Self {
-        // The progress of the session, for the progress bars of its executions.
-        Python::attach(|py| crate::progress::session_progress(py, &session));
+        // The progress of the session, for the progress bars of its executions, and its
+        // profiles, which the updates of its first execution update too.
+        Python::attach(|py| {
+            crate::progress::session_progress(py, &session);
+            if let Err(error) = crate::profiler::profiler_collector(py, &session) {
+                error.write_unraisable(py, None);
+            }
+        });
         PySparkSession { session }
     }
 
@@ -602,6 +677,12 @@ impl PySparkSession {
                 out.push(infer::convert(&row[i], &field.data_type, field.nullable)?);
             }
         }
+        // Then, as PySpark, the schema converts to Arrow, which has no char or varchar type.
+        for field in &fields {
+            if let Some(err) = infer::unsupported_arrow_type(py, &field.data_type)? {
+                return Err(err);
+            }
+        }
         // The names, with those that inference added, must name every column.
         if let Some(cols) = &cols {
             if cols.len() != fields.len() {
@@ -699,6 +780,188 @@ impl PySparkSession {
         Ok(Some(PyDataFrame::new(frame.dataframe.to_df(
             fields.iter().map(|field| field.name.as_str()).collect(),
         ))))
+    }
+
+    /// A DataFrame of a pandas DataFrame without a schema, or of names, as PySpark Connect
+    /// converts one: each column by PySpark's Arrow conversion, of the type that Arrow infers
+    /// (`prepare_inferred_pandas_table`), sent without a schema, for the server to infer the
+    /// types of the Arrow data. The columns are named with `toDF`: by their labels, as strings,
+    /// or by the names, and `_n` for the n-th column past them.
+    ///
+    /// None for a frame that the row path converts: an empty one, a customized one
+    /// (`accepts_pandas_frame`), and any without pyarrow, which the row path does not need.
+    fn create_from_pandas_inferred(
+        &self,
+        py: Python<'_>,
+        data: &Bound<'_, PyAny>,
+        spec: &Spec,
+    ) -> PyResult<Option<PyDataFrame>> {
+        let names = match spec {
+            Spec::None => None,
+            Spec::Names(names) => Some(names),
+            Spec::Struct(_) | Spec::Atomic(_) => return Ok(None),
+        };
+        if data.len()? == 0 {
+            return Ok(None);
+        }
+        let helper = py.import("pyspark.sql._pandas_input")?;
+        if !helper.getattr("pyarrow_available")?.call0()?.is_truthy()?
+            || !helper
+                .getattr("accepts_pandas_frame")?
+                .call1((data,))?
+                .is_truthy()?
+        {
+            return Ok(None);
+        }
+        let width = data.getattr("columns")?.len()?;
+        let mut columns: Vec<String> = match names {
+            Some(names) => names.clone(),
+            None => {
+                let mut labels = Vec::with_capacity(width);
+                for label in data.getattr("columns")?.try_iter()? {
+                    let label = label?;
+                    labels.push(match label.cast::<pyo3::types::PyString>() {
+                        Ok(label) => label.to_cow()?.into_owned(),
+                        Err(_) => label.str()?.to_cow()?.into_owned(),
+                    });
+                }
+                if labels.is_empty() {
+                    return Err(crate::column::raise_pyspark(
+                        py,
+                        "PySparkValueError",
+                        "CANNOT_INFER_EMPTY_SCHEMA",
+                        &[],
+                    ));
+                }
+                labels
+            }
+        };
+        if columns.len() < width {
+            columns.extend((columns.len()..width).map(|i| format!("_{}", i + 1)));
+        }
+        let options = py.detach(|| self.session.arrow_input_options().to_pyerr())?;
+        let conf = |key: &'static str| {
+            py.detach(|| self.session.conf().get(key))
+                .to_pyerr()
+                .map(|value| value.as_deref() == Some("true"))
+        };
+        let safecheck = conf("spark.sql.execution.pandas.convertToArrowArraySafely")?;
+        let infer_dict_as_map =
+            names.is_none() && conf("spark.sql.execution.pandas.inferPandasDictAsMap")?;
+        let result = helper.getattr("prepare_inferred_pandas_table")?.call1((
+            data,
+            options.timezone().unwrap_or("UTC"),
+            safecheck,
+            options.use_large_var_types() == Some("true"),
+            infer_dict_as_map,
+            options.timestamp_type() == Some("TIMESTAMP_NTZ"),
+        ))?;
+        let table = result.get_item(0)?;
+        if let Some(struct_names) = result.get_item(1)?.extract::<Option<Vec<String>>>()? {
+            columns = struct_names;
+        }
+        let actual: usize = table.getattr("num_columns")?.extract()?;
+        if columns.len() != actual {
+            return Err(crate::column::raise_pyspark(
+                py,
+                "PySparkValueError",
+                "AXIS_LENGTH_MISMATCH",
+                &[
+                    ("expected_length", &columns.len().to_string()),
+                    ("actual_length", &actual.to_string()),
+                ],
+            ));
+        }
+        let batches = crate::pyarrow_import::table_batches(&table)?;
+        let df = py
+            .detach(|| {
+                self.session
+                    .create_dataframe_from_arrow_with_options(batches, None, &options)
+                    .map_err(Box::new)
+            })
+            .to_pyerr()?;
+        Ok(Some(PyDataFrame::new(if columns.is_empty() {
+            df
+        } else {
+            df.to_df(columns.iter().map(String::as_str).collect())
+        })))
+    }
+
+    /// A DataFrame of a numpy array, as PySpark Connect's `createDataFrame` builds it: an Arrow
+    /// table of a column of each column of the array, sent with the schema, if any, for the
+    /// server to cast to. The columns are named by the given names, else `value` for a
+    /// 1-dimensional array or an array of one column, else `_1`, `_2`, ...
+    ///
+    /// It raises `INVALID_NDARRAY_DIMENSION` for an array of another dimension, and
+    /// `AXIS_LENGTH_MISMATCH` for names, or a schema, of another number of columns. An empty
+    /// array is empty data, of the schema, if any.
+    fn create_from_ndarray(
+        &self,
+        py: Python<'_>,
+        data: &Bound<'_, PyAny>,
+        spec: Spec,
+    ) -> PyResult<PyDataFrame> {
+        let ndim: usize = data.getattr("ndim")?.extract()?;
+        if ndim != 1 && ndim != 2 {
+            return Err(crate::column::raise_pyspark(
+                py,
+                "PySparkValueError",
+                "INVALID_NDARRAY_DIMENSION",
+                &[("dimensions", "1 or 2")],
+            ));
+        }
+        if data.len()? == 0 {
+            return self.create_from_local(py, PyList::empty(py).as_any(), spec);
+        }
+        let width: usize = if ndim == 1 {
+            1
+        } else {
+            data.getattr("shape")?.get_item(1)?.extract()?
+        };
+        let (names, num_cols, schema) = match spec {
+            Spec::Names(names) => (Some(names), None, None),
+            Spec::Struct(fields) => (None, Some(fields.len()), Some(DataType::Struct { fields })),
+            Spec::Atomic(atomic) => (None, Some(1), Some(atomic)),
+            Spec::None => (None, None, None),
+        };
+        let names = names.unwrap_or_else(|| {
+            if width == 1 {
+                vec!["value".to_string()]
+            } else {
+                (1..=width).map(|i| format!("_{i}")).collect()
+            }
+        });
+        let axis_length_mismatch = |expected: usize| {
+            crate::column::raise_pyspark(
+                py,
+                "PySparkValueError",
+                "AXIS_LENGTH_MISMATCH",
+                &[
+                    ("expected_length", &expected.to_string()),
+                    ("actual_length", &width.to_string()),
+                ],
+            )
+        };
+        if names.len() != width {
+            return Err(axis_length_mismatch(names.len()));
+        }
+        let table = py
+            .import("pyspark.sql._arrow_input")?
+            .getattr("ndarray_table")?
+            .call1((data, names))?;
+        if let Some(expected) = num_cols.filter(|&expected| expected != width) {
+            return Err(axis_length_mismatch(expected));
+        }
+        let batches = crate::pyarrow_import::table_batches(&table)?;
+        let options = py.detach(|| self.session.arrow_input_options().to_pyerr())?;
+        let df = py
+            .detach(|| {
+                self.session
+                    .create_dataframe_from_arrow_with_options(batches, schema, &options)
+                    .map_err(Box::new)
+            })
+            .to_pyerr()?;
+        Ok(PyDataFrame::new(df))
     }
 
     /// A DataFrame of a pandas DataFrame: its rows as lists with NaN and NaT as None, typed
@@ -1177,6 +1440,9 @@ impl PySparkSession {
             return crate::pyarrow_import::create_dataframe(py, &self.session, data, schema);
         }
         let spec = schema_spec(py, &self.session, schema)?;
+        if is_loaded_instance(py, data, "numpy", "ndarray")? {
+            return self.create_from_ndarray(py, data, spec);
+        }
         if is_loaded_instance(py, data, "pandas", "DataFrame")? {
             // Guarded integer columns share the existing Arrow importer. Schema
             // validation above and unsupported pandas conversions keep master's
@@ -1338,6 +1604,9 @@ impl PySparkSession {
                     return Ok(frame);
                 }
             }
+            if let Some(frame) = self.create_from_pandas_inferred(py, data, &spec)? {
+                return Ok(frame);
+            }
             return self.create_from_pandas(py, data, spec);
         }
         // Preserve schema parsing, ignored-argument warnings, and pandas/Arrow routing.
@@ -1471,6 +1740,7 @@ impl PySparkSession {
     /// active session and the cached `SQLContext` if they belong to this session.
     fn stop(&self, py: Python<'_>) -> PyResult<()> {
         crate::progress::forget_session(&self.session);
+        crate::profiler::forget_session(&self.session);
         if let Err(e) = py.detach(|| self.session.stop()) {
             let logger = py
                 .import("logging")?
@@ -1647,21 +1917,98 @@ impl PySparkSession {
         self.session.session_id().to_string()
     }
 
+    /// Add the extension of the bytes of a `google.protobuf.Any`, `extension`, to the user context
+    /// of the requests of this session: of all the threads, if `is_global`, else of the current
+    /// thread. Its ID: for the user context extensions of `client`.
+    fn _add_user_context_extension(&self, extension: &[u8], is_global: bool) -> PyResult<String> {
+        use prost::Message;
+        let extension = prost_types::Any::decode(extension)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+        Ok(if is_global {
+            self.session.add_global_user_context_extension(extension)
+        } else {
+            self.session
+                .add_threadlocal_user_context_extension(extension)
+        })
+    }
+
+    /// The user context extensions of this session, the global ones if `is_global`, else those
+    /// of the current thread, as their IDs and the bytes of each `google.protobuf.Any`: for
+    /// `client`.
+    fn _user_context_extensions<'py>(
+        &self,
+        py: Python<'py>,
+        is_global: bool,
+    ) -> Vec<(String, Bound<'py, pyo3::types::PyBytes>)> {
+        use prost::Message;
+        let extensions = if is_global {
+            self.session.global_user_context_extensions()
+        } else {
+            self.session.threadlocal_user_context_extensions()
+        };
+        extensions
+            .into_iter()
+            .map(|(id, extension)| {
+                (
+                    id,
+                    pyo3::types::PyBytes::new(py, &extension.encode_to_vec()),
+                )
+            })
+            .collect()
+    }
+
+    /// Remove the user context extension of `extension_id`, for `client`.
+    fn _remove_user_context_extension(&self, extension_id: &str) {
+        self.session.remove_user_context_extension(extension_id);
+    }
+
+    /// Remove the user context extensions of the current thread and the global ones, for
+    /// `client`.
+    fn _clear_user_context_extensions(&self) {
+        self.session.clear_user_context_extensions();
+    }
+
+    /// The responses of the server to `command`, the bytes of a `spark.connect.Command` built
+    /// outside the client, such as the ML commands of `pyspark.ml`, as the bytes of each
+    /// `ExecutePlanResponse`: for the `execute_command` of `client`.
+    fn _execute_command<'py>(
+        &self,
+        py: Python<'py>,
+        command: &[u8],
+    ) -> PyResult<Vec<Bound<'py, pyo3::types::PyBytes>>> {
+        use prost::Message;
+        let command = spark_connect_proto::Command::decode(command)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+        let responses = py
+            .detach(|| {
+                self.session
+                    .execute_command_proto(command)
+                    .map_err(Box::new)
+            })
+            .to_pyerr()?;
+        Ok(responses
+            .iter()
+            .map(|response| pyo3::types::PyBytes::new(py, &response.encode_to_vec()))
+            .collect())
+    }
+
+    /// The client of PySpark Connect's `session.client`, as far as the modules of PySpark that
+    /// build their own messages, such as `pyspark.ml`, use it: of their commands and of the ML
+    /// cache, over the Rust transport (`pyspark.sql.connect.client`).
+    #[getter]
+    fn client(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        Ok(slf
+            .py()
+            .import("pyspark.sql.connect.client")?
+            .getattr("_client_of")?
+            .call1((slf,))?
+            .unbind())
+    }
+
     /// The session id (property form, mirrors `SparkSession.session_id`).
     #[getter]
     fn session_id(&self) -> String {
         self.session.session_id().to_string()
-    }
-
-    /// The low-level Connect client. In the reference client this is the gRPC
-    /// `SparkConnectClient`; here the transport is Rust, so we expose a minimal stub
-    /// carrying the bits test/util code touches (`_server_session_id`, `_cleanup_ml_cache`),
-    /// mirroring `SparkSession.client` enough for harnesses like `ReusedConnectTestCase`.
-    #[getter]
-    fn client(&self) -> PyConnectClientStub {
-        PyConnectClientStub {
-            session_id: self.session.session_id().to_string(),
-        }
     }
 
     /// Whether this session has been stopped. Mirrors `SparkSession.is_stopped`.
@@ -1753,13 +2100,22 @@ impl PySparkSession {
         crate::progress::session_progress(py, &self.session).clear(py)
     }
 
-    /// Get the profiler collector for this session.
-    ///
-    /// Mirrors `SparkSession.profile`. Profile data is accumulated across query
-    /// executions and can be shown, dumped, or cleared via the returned collector.
+    /// The UDF profiles of the session, as PySpark Connect's `spark.profile`: a `Profile` of its
+    /// `ConnectProfilerCollector`, of `show`, `dump`, `render` and `clear`.
     #[getter]
-    fn profile(&self) -> PyProfilerCollector {
-        PyProfilerCollector::new(self.session.profiler())
+    fn profile(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let collector = crate::profiler::profiler_collector(py, &self.session)?;
+        Ok(py
+            .import("pyspark.sql.profiler")?
+            .getattr("Profile")?
+            .call1((collector,))?
+            .unbind())
+    }
+
+    /// The `ConnectProfilerCollector` of the session, as PySpark Connect's.
+    #[getter(_profiler_collector)]
+    fn profiler_collector(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        crate::profiler::profiler_collector(py, &self.session)
     }
 
     /// Get the data source registration accessor.
@@ -2015,26 +2371,6 @@ fn check_local_artifact(
         py.import("importlib")?.call_method0("invalidate_caches")?;
     }
     Ok(())
-}
-
-/// Minimal stand-in for the reference `SparkConnectClient`, returned by
-/// `SparkSession.client`. The real client is the Rust transport; this only surfaces the
-/// members that test/utility code (e.g. `ReusedConnectTestCase`) touches.
-#[pyclass(name = "SparkConnectClientStub", module = "pyspark.sql.connect.client")]
-pub struct PyConnectClientStub {
-    session_id: String,
-}
-
-#[pymethods]
-impl PyConnectClientStub {
-    /// The server-side session id (property, mirrors `client._server_session_id`).
-    #[getter]
-    fn _server_session_id(&self) -> String {
-        self.session_id.clone()
-    }
-
-    /// No-op: the Rust transport has no client-side ML cache to clear.
-    fn _cleanup_ml_cache(&self) {}
 }
 
 /// Whether `value` has a map with a null key, at any depth.

@@ -6,14 +6,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use spark_connect_core::channel::ChannelBuilder;
-use spark_connect_core::client::SparkConnectClient;
+use spark_connect_core::client::{ExecutePlanHook, SparkConnectClient};
 use spark_connect_core::error::{Result, SparkError};
 use spark_connect_core::runtime::block_on;
 use spark_connect_proto as proto;
 
 use crate::dataframe::DataFrame;
 use crate::plan::{LogicalPlan, PlanIds};
-use crate::profiler::ProfilerCollector;
+use crate::profiler::PythonAccumulators;
 use crate::progress::{ExecutionStream, ProgressTracker, ProgressUpdate};
 use crate::row::{Row, Value};
 use crate::types::DataType;
@@ -89,8 +89,8 @@ pub struct SparkSession {
     progress_handlers: Arc<Mutex<Vec<(u64, ProgressHandler)>>>,
     /// Monotonic id source for `register_progress_handler`.
     progress_handler_id: Arc<AtomicU64>,
-    /// Profiler collector for accumulating profile results across executions.
-    profiler: Arc<ProfilerCollector>,
+    /// The handler of the updates of the Python accumulators of its executions.
+    python_accumulators: PythonAccumulators,
     /// Whether `stop()` has been called on this session (shared across clones).
     /// Backs `is_stopped`.
     stopped: Arc<AtomicBool>,
@@ -108,7 +108,7 @@ impl SparkSession {
             last_execution: Arc::new(Mutex::new(None)),
             progress_handlers: Arc::new(Mutex::new(Vec::new())),
             progress_handler_id: Arc::new(AtomicU64::new(0)),
-            profiler: Arc::new(ProfilerCollector::new()),
+            python_accumulators: PythonAccumulators::default(),
             stopped: Arc::new(AtomicBool::new(false)),
             server_version: Arc::new(Mutex::new(None)),
         }
@@ -248,8 +248,8 @@ impl SparkSession {
     /// Raw observed metrics from the most recent execution only.
     ///
     /// This is a low-level snapshot of the last execution's observed metrics. For
-    /// the profiler surface that mirrors `SparkSession.profile` (results accumulated
-    /// across executions, with show/dump/clear), use [`SparkSession::profiler`].
+    /// the UDF profiles of `SparkSession.profile`, whose results the server sends as the updates
+    /// of Python accumulators, see [`SparkSession::set_python_accumulator_handler`].
     pub fn profile(&self) -> Vec<proto::execute_plan_response::ObservedMetrics> {
         self.last_execution_info()
             .map(|i| i.observed_metrics)
@@ -273,7 +273,7 @@ impl SparkSession {
             last_execution: Arc::new(Mutex::new(None)),
             progress_handlers: Arc::new(Mutex::new(Vec::new())),
             progress_handler_id: Arc::new(AtomicU64::new(0)),
-            profiler: Arc::new(ProfilerCollector::new()),
+            python_accumulators: PythonAccumulators::default(),
             stopped: Arc::new(AtomicBool::new(false)),
             server_version: Arc::new(Mutex::new(None)),
         }
@@ -295,6 +295,14 @@ impl SparkSession {
         let mut session = self.new_session();
         session.client = Arc::new(client);
         Ok(session)
+    }
+
+    /// Set the hook of the executions of this session, and of its clones, or clear it: the
+    /// hook is called with each `ExecutePlanRequest` before it is sent, and the request sent is
+    /// the one it returns, of the operation ID of the original. Mirrors the hooks of
+    /// `SparkSession.Hook.on_execute_plan`, of `SparkSession.Builder._registerHook`.
+    pub fn set_execute_plan_hook(&self, hook: Option<ExecutePlanHook>) {
+        self.client.set_execute_plan_hook(hook);
     }
 
     /// The stable plan IDs of the plan nodes this session serializes.
@@ -705,6 +713,21 @@ impl SparkSession {
         Ok(())
     }
 
+    /// Execute `command`, a command built outside the core, such as the ML commands of
+    /// `pyspark.ml`, and return the responses of the server, as the Python client's
+    /// `execute_command` reads them. Not a stable API.
+    #[doc(hidden)]
+    pub fn execute_command_proto(
+        &self,
+        command: spark_connect_proto::Command,
+    ) -> Result<Vec<spark_connect_proto::ExecutePlanResponse>> {
+        let Some(command_type) = command.command_type else {
+            return Err(SparkError::value_msg("a command of no command type"));
+        };
+        let (responses, _) = crate::dataframe::execute_command_with_info(self, command_type)?;
+        Ok(responses)
+    }
+
     /// Get the runtime configuration for this session.
     ///
     /// Mirrors `pyspark.sql.SparkSession.conf`.
@@ -724,6 +747,44 @@ impl SparkSession {
     /// Mirrors `pyspark.sql.SparkSession.session_id` / the connect client session id.
     pub fn session_id(&self) -> &str {
         self.client.session_id()
+    }
+
+    /// Add `extension` to the user context of the requests that the current thread sends from
+    /// this session, and return its ID. Mirrors PySpark's
+    /// `SparkConnectClient.add_threadlocal_user_context_extension`.
+    pub fn add_threadlocal_user_context_extension(&self, extension: prost_types::Any) -> String {
+        self.client
+            .add_threadlocal_user_context_extension(extension)
+    }
+
+    /// Add `extension` to the user context of the requests of all the threads of this session,
+    /// and return its ID. Mirrors PySpark's `add_global_user_context_extension`.
+    pub fn add_global_user_context_extension(&self, extension: prost_types::Any) -> String {
+        self.client.add_global_user_context_extension(extension)
+    }
+
+    /// Remove the user context extension of `extension_id`. Mirrors PySpark's
+    /// `remove_user_context_extension`.
+    pub fn remove_user_context_extension(&self, extension_id: &str) {
+        self.client.remove_user_context_extension(extension_id);
+    }
+
+    /// The user context extensions of the current thread, of their IDs. Mirrors PySpark's
+    /// `thread_local.user_context_extensions` of a client.
+    pub fn threadlocal_user_context_extensions(&self) -> Vec<(String, prost_types::Any)> {
+        self.client.threadlocal_user_context_extensions()
+    }
+
+    /// The global user context extensions, of their IDs. Mirrors PySpark's
+    /// `global_user_context_extensions` of a client.
+    pub fn global_user_context_extensions(&self) -> Vec<(String, prost_types::Any)> {
+        self.client.global_user_context_extensions()
+    }
+
+    /// Remove the user context extensions of the current thread and the global ones. Mirrors
+    /// PySpark's `clear_user_context_extensions`.
+    pub fn clear_user_context_extensions(&self) {
+        self.client.clear_user_context_extensions();
     }
 
     /// Return the Spark version of the connected server.
@@ -944,14 +1005,17 @@ impl SparkSession {
         )
     }
 
-    /// Get the profiler collector for this session.
-    ///
-    /// Mirrors the client-visible surface of `SparkSession.profile`. Profile data is
-    /// accumulated across query executions and can be shown, dumped, or cleared via the
-    /// returned collector. Profile data is populated by the server only when UDF profiling
-    /// is enabled via `spark.python.profile*` or `spark.sql.pyspark.udf.profiler` configuration.
-    pub fn profiler(&self) -> Arc<ProfilerCollector> {
-        Arc::clone(&self.profiler)
+    /// Set the handler of the updates of the Python accumulators of the executions of this
+    /// session: each pickled `(id, update)` of their `__python_accumulator__` observed metrics,
+    /// of which the UDF profilers send their results, as PySpark Connect's client unpickles each
+    /// into its `ConnectProfilerCollector`.
+    pub fn set_python_accumulator_handler(&self, handler: impl Fn(&[u8]) + Send + Sync + 'static) {
+        self.python_accumulators.set_handler(Arc::new(handler));
+    }
+
+    /// The handler of the updates of the Python accumulators, of the executions.
+    pub(crate) fn python_accumulators(&self) -> &PythonAccumulators {
+        &self.python_accumulators
     }
 
     /// Stop this Spark session.
@@ -981,7 +1045,7 @@ impl Clone for SparkSession {
             last_execution: Arc::clone(&self.last_execution),
             progress_handlers: Arc::clone(&self.progress_handlers),
             progress_handler_id: Arc::clone(&self.progress_handler_id),
-            profiler: Arc::clone(&self.profiler),
+            python_accumulators: self.python_accumulators.clone(),
             stopped: Arc::clone(&self.stopped),
             server_version: Arc::clone(&self.server_version),
         }

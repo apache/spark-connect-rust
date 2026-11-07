@@ -1,6 +1,7 @@
 //! PyO3 wrappers for Spark DataTypes.
 
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use spark_connect::types::{DataType, StructField};
 use std::collections::BTreeMap;
 
@@ -262,9 +263,18 @@ impl PyDataType {
     }
 
     // --- DataType object-model methods (v4.2.0 parity) ---
+    /// As PySpark's `DataType.json`, of the `jsonValue` of the type, also of a pure-Python
+    /// subclass, such as an `UnparsedDataType`, whose `jsonValue` raises.
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
-        Ok(py_to_data_type(slf.as_any())?.json())
+        let py = slf.py();
+        let kwargs = pyo3::types::PyDict::new(py);
+        kwargs.set_item("separators", (",", ":"))?;
+        kwargs.set_item("sort_keys", true)?;
+        py.import("json")?
+            .getattr("dumps")?
+            .call((slf.call_method0("jsonValue")?,), Some(&kwargs))?
+            .extract()
     }
     #[pyo3(name = "jsonValue")]
     fn __obj_json_value<'py>(
@@ -305,9 +315,17 @@ impl PyDataType {
             .call_method1("_parse_datatype_string", (ddl,))?
             .unbind())
     }
+    /// The name of the type, as PySpark's classmethod `DataType.typeName`: the name of the class
+    /// without its `Type`, lowercased, such as `integer` of `IntegerType`, also of a subclass.
+    #[classmethod]
     #[pyo3(name = "typeName")]
-    fn __dt_type_name(&self) -> String {
-        self.inner.type_name()
+    fn __dt_type_name(cls: &Bound<'_, pyo3::types::PyType>) -> PyResult<String> {
+        let name = cls.name()?.to_string();
+        let stem: String = name
+            .chars()
+            .take(name.chars().count().saturating_sub(4))
+            .collect();
+        Ok(stem.to_lowercase())
     }
 
     /// As pyspark's `DataType.__repr__`: the class name, for the base class and for
@@ -430,9 +448,16 @@ impl PyNullType {
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"void\"")
     }
+    /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
+    /// returns it.
     #[new]
-    fn new() -> pyo3::PyClassInitializer<Self> {
-        init_chain!(DataType::Null, PyNullType, [])
+    fn new(py: Python<'_>) -> PyResult<Py<Self>> {
+        static INSTANCE: PyOnceLock<Py<PyNullType>> = PyOnceLock::new();
+        INSTANCE
+            .get_or_try_init(py, || {
+                Py::new(py, init_chain!(DataType::Null, PyNullType, []))
+            })
+            .map(|instance| instance.clone_ref(py))
     }
     fn __repr__(&self) -> String {
         "NullType()".to_string()
@@ -441,8 +466,10 @@ impl PyNullType {
     fn simple_string(&self) -> &'static str {
         "void"
     }
+    /// As PySpark's, which names this type `void`.
+    #[classmethod]
     #[pyo3(name = "typeName")]
-    fn type_name(&self) -> &'static str {
+    fn type_name(_cls: &Bound<'_, pyo3::types::PyType>) -> &'static str {
         "void"
     }
 }
@@ -486,19 +513,25 @@ impl PyBooleanType {
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"boolean\"")
     }
+    /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
+    /// returns it.
     #[new]
-    fn new() -> pyo3::PyClassInitializer<Self> {
-        init_chain!(DataType::Boolean, PyBooleanType, [PyAtomicType])
+    fn new(py: Python<'_>) -> PyResult<Py<Self>> {
+        static INSTANCE: PyOnceLock<Py<PyBooleanType>> = PyOnceLock::new();
+        INSTANCE
+            .get_or_try_init(py, || {
+                Py::new(
+                    py,
+                    init_chain!(DataType::Boolean, PyBooleanType, [PyAtomicType]),
+                )
+            })
+            .map(|instance| instance.clone_ref(py))
     }
     fn __repr__(&self) -> String {
         "BooleanType()".to_string()
     }
     #[pyo3(name = "simpleString")]
     fn simple_string(&self) -> &'static str {
-        "boolean"
-    }
-    #[pyo3(name = "typeName")]
-    fn type_name(&self) -> &'static str {
         "boolean"
     }
 }
@@ -542,13 +575,23 @@ impl PyByteType {
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"byte\"")
     }
+    /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
+    /// returns it.
     #[new]
-    fn new() -> pyo3::PyClassInitializer<Self> {
-        init_chain!(
-            DataType::Byte,
-            PyByteType,
-            [PyAtomicType, PyNumericType, PyIntegralType]
-        )
+    fn new(py: Python<'_>) -> PyResult<Py<Self>> {
+        static INSTANCE: PyOnceLock<Py<PyByteType>> = PyOnceLock::new();
+        INSTANCE
+            .get_or_try_init(py, || {
+                Py::new(
+                    py,
+                    init_chain!(
+                        DataType::Byte,
+                        PyByteType,
+                        [PyAtomicType, PyNumericType, PyIntegralType]
+                    ),
+                )
+            })
+            .map(|instance| instance.clone_ref(py))
     }
     fn __repr__(&self) -> String {
         "ByteType()".to_string()
@@ -556,10 +599,6 @@ impl PyByteType {
     #[pyo3(name = "simpleString")]
     fn simple_string(&self) -> &'static str {
         "tinyint"
-    }
-    #[pyo3(name = "typeName")]
-    fn type_name(&self) -> &'static str {
-        "byte"
     }
 }
 
@@ -602,13 +641,23 @@ impl PyShortType {
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"short\"")
     }
+    /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
+    /// returns it.
     #[new]
-    fn new() -> pyo3::PyClassInitializer<Self> {
-        init_chain!(
-            DataType::Short,
-            PyShortType,
-            [PyAtomicType, PyNumericType, PyIntegralType]
-        )
+    fn new(py: Python<'_>) -> PyResult<Py<Self>> {
+        static INSTANCE: PyOnceLock<Py<PyShortType>> = PyOnceLock::new();
+        INSTANCE
+            .get_or_try_init(py, || {
+                Py::new(
+                    py,
+                    init_chain!(
+                        DataType::Short,
+                        PyShortType,
+                        [PyAtomicType, PyNumericType, PyIntegralType]
+                    ),
+                )
+            })
+            .map(|instance| instance.clone_ref(py))
     }
     fn __repr__(&self) -> String {
         "ShortType()".to_string()
@@ -616,10 +665,6 @@ impl PyShortType {
     #[pyo3(name = "simpleString")]
     fn simple_string(&self) -> &'static str {
         "smallint"
-    }
-    #[pyo3(name = "typeName")]
-    fn type_name(&self) -> &'static str {
-        "short"
     }
 }
 
@@ -662,13 +707,23 @@ impl PyIntegerType {
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"integer\"")
     }
+    /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
+    /// returns it.
     #[new]
-    fn new() -> pyo3::PyClassInitializer<Self> {
-        init_chain!(
-            DataType::Integer,
-            PyIntegerType,
-            [PyAtomicType, PyNumericType, PyIntegralType]
-        )
+    fn new(py: Python<'_>) -> PyResult<Py<Self>> {
+        static INSTANCE: PyOnceLock<Py<PyIntegerType>> = PyOnceLock::new();
+        INSTANCE
+            .get_or_try_init(py, || {
+                Py::new(
+                    py,
+                    init_chain!(
+                        DataType::Integer,
+                        PyIntegerType,
+                        [PyAtomicType, PyNumericType, PyIntegralType]
+                    ),
+                )
+            })
+            .map(|instance| instance.clone_ref(py))
     }
     fn __repr__(&self) -> String {
         "IntegerType()".to_string()
@@ -676,10 +731,6 @@ impl PyIntegerType {
     #[pyo3(name = "simpleString")]
     fn simple_string(&self) -> &'static str {
         "int"
-    }
-    #[pyo3(name = "typeName")]
-    fn type_name(&self) -> &'static str {
-        "integer"
     }
 }
 
@@ -722,13 +773,23 @@ impl PyLongType {
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"long\"")
     }
+    /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
+    /// returns it.
     #[new]
-    fn new() -> pyo3::PyClassInitializer<Self> {
-        init_chain!(
-            DataType::Long,
-            PyLongType,
-            [PyAtomicType, PyNumericType, PyIntegralType]
-        )
+    fn new(py: Python<'_>) -> PyResult<Py<Self>> {
+        static INSTANCE: PyOnceLock<Py<PyLongType>> = PyOnceLock::new();
+        INSTANCE
+            .get_or_try_init(py, || {
+                Py::new(
+                    py,
+                    init_chain!(
+                        DataType::Long,
+                        PyLongType,
+                        [PyAtomicType, PyNumericType, PyIntegralType]
+                    ),
+                )
+            })
+            .map(|instance| instance.clone_ref(py))
     }
     fn __repr__(&self) -> String {
         "LongType()".to_string()
@@ -736,10 +797,6 @@ impl PyLongType {
     #[pyo3(name = "simpleString")]
     fn simple_string(&self) -> &'static str {
         "bigint"
-    }
-    #[pyo3(name = "typeName")]
-    fn type_name(&self) -> &'static str {
-        "long"
     }
 }
 
@@ -782,23 +839,29 @@ impl PyFloatType {
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"float\"")
     }
+    /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
+    /// returns it.
     #[new]
-    fn new() -> pyo3::PyClassInitializer<Self> {
-        init_chain!(
-            DataType::Float,
-            PyFloatType,
-            [PyAtomicType, PyNumericType, PyFractionalType]
-        )
+    fn new(py: Python<'_>) -> PyResult<Py<Self>> {
+        static INSTANCE: PyOnceLock<Py<PyFloatType>> = PyOnceLock::new();
+        INSTANCE
+            .get_or_try_init(py, || {
+                Py::new(
+                    py,
+                    init_chain!(
+                        DataType::Float,
+                        PyFloatType,
+                        [PyAtomicType, PyNumericType, PyFractionalType]
+                    ),
+                )
+            })
+            .map(|instance| instance.clone_ref(py))
     }
     fn __repr__(&self) -> String {
         "FloatType()".to_string()
     }
     #[pyo3(name = "simpleString")]
     fn simple_string(&self) -> &'static str {
-        "float"
-    }
-    #[pyo3(name = "typeName")]
-    fn type_name(&self) -> &'static str {
         "float"
     }
 }
@@ -842,23 +905,29 @@ impl PyDoubleType {
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"double\"")
     }
+    /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
+    /// returns it.
     #[new]
-    fn new() -> pyo3::PyClassInitializer<Self> {
-        init_chain!(
-            DataType::Double,
-            PyDoubleType,
-            [PyAtomicType, PyNumericType, PyFractionalType]
-        )
+    fn new(py: Python<'_>) -> PyResult<Py<Self>> {
+        static INSTANCE: PyOnceLock<Py<PyDoubleType>> = PyOnceLock::new();
+        INSTANCE
+            .get_or_try_init(py, || {
+                Py::new(
+                    py,
+                    init_chain!(
+                        DataType::Double,
+                        PyDoubleType,
+                        [PyAtomicType, PyNumericType, PyFractionalType]
+                    ),
+                )
+            })
+            .map(|instance| instance.clone_ref(py))
     }
     fn __repr__(&self) -> String {
         "DoubleType()".to_string()
     }
     #[pyo3(name = "simpleString")]
     fn simple_string(&self) -> &'static str {
-        "double"
-    }
-    #[pyo3(name = "typeName")]
-    fn type_name(&self) -> &'static str {
         "double"
     }
 }
@@ -871,6 +940,11 @@ pub struct PyDecimalType {
 
 #[pymethods]
 impl PyDecimalType {
+    /// As PySpark's `DecimalType.hasPrecisionInfo`, a public attribute that is always true.
+    #[getter(hasPrecisionInfo)]
+    fn has_precision_info(&self) -> bool {
+        true
+    }
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
@@ -935,10 +1009,6 @@ impl PyDecimalType {
     fn simple_string(&self) -> String {
         format!("decimal({},{})", self.precision, self.scale)
     }
-    #[pyo3(name = "typeName")]
-    fn type_name(&self) -> &'static str {
-        "decimal"
-    }
 }
 
 #[pyclass(name = "StringType", module = "pyspark.sql.types", extends = PyAtomicType)]
@@ -948,6 +1018,11 @@ pub struct PyStringType {
 
 #[pymethods]
 impl PyStringType {
+    /// The collation of the strings, as PySpark's `StringType.collation`.
+    #[getter]
+    fn collation(&self) -> String {
+        self.collation.clone()
+    }
     // Collation providers, mirroring `StringType.providerSpark/providerICU/providers`.
     #[classattr]
     #[allow(non_upper_case_globals)]
@@ -1024,10 +1099,6 @@ impl PyStringType {
             format!("string collate {}", self.collation)
         }
     }
-    #[pyo3(name = "typeName")]
-    fn type_name(&self) -> &'static str {
-        "string"
-    }
 
     /// Provider ("spark" for UTF8*, else "icu") for a collation name.
     /// Mirrors `StringType.collationProvider`.
@@ -1087,19 +1158,25 @@ impl PyBinaryType {
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"binary\"")
     }
+    /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
+    /// returns it.
     #[new]
-    fn new() -> pyo3::PyClassInitializer<Self> {
-        init_chain!(DataType::Binary, PyBinaryType, [PyAtomicType])
+    fn new(py: Python<'_>) -> PyResult<Py<Self>> {
+        static INSTANCE: PyOnceLock<Py<PyBinaryType>> = PyOnceLock::new();
+        INSTANCE
+            .get_or_try_init(py, || {
+                Py::new(
+                    py,
+                    init_chain!(DataType::Binary, PyBinaryType, [PyAtomicType]),
+                )
+            })
+            .map(|instance| instance.clone_ref(py))
     }
     fn __repr__(&self) -> String {
         "BinaryType()".to_string()
     }
     #[pyo3(name = "simpleString")]
     fn simple_string(&self) -> &'static str {
-        "binary"
-    }
-    #[pyo3(name = "typeName")]
-    fn type_name(&self) -> &'static str {
         "binary"
     }
 }
@@ -1146,19 +1223,25 @@ impl PyDateType {
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"date\"")
     }
+    /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
+    /// returns it.
     #[new]
-    fn new() -> pyo3::PyClassInitializer<Self> {
-        init_chain!(DataType::Date, PyDateType, [PyAtomicType, PyDatetimeType])
+    fn new(py: Python<'_>) -> PyResult<Py<Self>> {
+        static INSTANCE: PyOnceLock<Py<PyDateType>> = PyOnceLock::new();
+        INSTANCE
+            .get_or_try_init(py, || {
+                Py::new(
+                    py,
+                    init_chain!(DataType::Date, PyDateType, [PyAtomicType, PyDatetimeType]),
+                )
+            })
+            .map(|instance| instance.clone_ref(py))
     }
     fn __repr__(&self) -> String {
         "DateType()".to_string()
     }
     #[pyo3(name = "simpleString")]
     fn simple_string(&self) -> &'static str {
-        "date"
-    }
-    #[pyo3(name = "typeName")]
-    fn type_name(&self) -> &'static str {
         "date"
     }
 }
@@ -1202,23 +1285,29 @@ impl PyTimestampType {
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"timestamp\"")
     }
+    /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
+    /// returns it.
     #[new]
-    fn new() -> pyo3::PyClassInitializer<Self> {
-        init_chain!(
-            DataType::Timestamp,
-            PyTimestampType,
-            [PyAtomicType, PyDatetimeType]
-        )
+    fn new(py: Python<'_>) -> PyResult<Py<Self>> {
+        static INSTANCE: PyOnceLock<Py<PyTimestampType>> = PyOnceLock::new();
+        INSTANCE
+            .get_or_try_init(py, || {
+                Py::new(
+                    py,
+                    init_chain!(
+                        DataType::Timestamp,
+                        PyTimestampType,
+                        [PyAtomicType, PyDatetimeType]
+                    ),
+                )
+            })
+            .map(|instance| instance.clone_ref(py))
     }
     fn __repr__(&self) -> String {
         "TimestampType()".to_string()
     }
     #[pyo3(name = "simpleString")]
     fn simple_string(&self) -> &'static str {
-        "timestamp"
-    }
-    #[pyo3(name = "typeName")]
-    fn type_name(&self) -> &'static str {
         "timestamp"
     }
 }
@@ -1262,13 +1351,23 @@ impl PyTimestampNTZType {
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"timestamp_ntz\"")
     }
+    /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
+    /// returns it.
     #[new]
-    fn new() -> pyo3::PyClassInitializer<Self> {
-        init_chain!(
-            DataType::TimestampNtz,
-            PyTimestampNTZType,
-            [PyAtomicType, PyDatetimeType]
-        )
+    fn new(py: Python<'_>) -> PyResult<Py<Self>> {
+        static INSTANCE: PyOnceLock<Py<PyTimestampNTZType>> = PyOnceLock::new();
+        INSTANCE
+            .get_or_try_init(py, || {
+                Py::new(
+                    py,
+                    init_chain!(
+                        DataType::TimestampNtz,
+                        PyTimestampNTZType,
+                        [PyAtomicType, PyDatetimeType]
+                    ),
+                )
+            })
+            .map(|instance| instance.clone_ref(py))
     }
     fn __repr__(&self) -> String {
         "TimestampNTZType()".to_string()
@@ -1277,8 +1376,10 @@ impl PyTimestampNTZType {
     fn simple_string(&self) -> &'static str {
         "timestamp_ntz"
     }
+    /// As PySpark's, which names this type `timestamp_ntz`.
+    #[classmethod]
     #[pyo3(name = "typeName")]
-    fn type_name(&self) -> &'static str {
+    fn type_name(_cls: &Bound<'_, pyo3::types::PyType>) -> &'static str {
         "timestamp_ntz"
     }
 }
@@ -1378,10 +1479,6 @@ impl PyArrayType {
             "array<{}>",
             simple_string_with_udts(py, &self.element_type)?
         ))
-    }
-    #[pyo3(name = "typeName")]
-    fn type_name(&self) -> &'static str {
-        "array"
     }
 
     /// A copy with all nullability fields set true (recursively). Mirrors `ArrayType.toNullable()`.
@@ -1531,10 +1628,6 @@ impl PyMapType {
             simple_string_with_udts(py, &self.value_type)?
         ))
     }
-    #[pyo3(name = "typeName")]
-    fn type_name(&self) -> &'static str {
-        "map"
-    }
 
     /// A copy with all nullability fields set true (recursively). Mirrors `MapType.toNullable()`.
     #[pyo3(name = "toNullable")]
@@ -1583,11 +1676,15 @@ impl PyStructField {
             simple_string_with_udts(py, &self.field.data_type)?
         ))
     }
+    /// As PySpark's, `StructField.typeName` raises `INVALID_TYPENAME_CALL`: a field has no type
+    /// name, but its `dataType` has.
     #[pyo3(name = "typeName")]
-    fn __sf_type_name(&self) -> PyResult<String> {
-        // Mirrors pyspark: StructField.typeName raises; use typeName on the type.
-        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-            "StructField does not have typeName. Use typeName on its type explicitly instead.",
+    fn __sf_type_name(&self, py: Python<'_>) -> PyResult<String> {
+        Err(crate::column::raise_pyspark(
+            py,
+            "PySparkTypeError",
+            "INVALID_TYPENAME_CALL",
+            &[],
         ))
     }
     #[pyo3(name = "json")]
@@ -2008,10 +2105,6 @@ impl PyStructType {
     }
 
     /// `StructType.typeName()` == "struct".
-    #[pyo3(name = "typeName")]
-    fn __st_type_name(&self) -> &'static str {
-        "struct"
-    }
 
     /// Field names in order. Mirrors `StructType.fieldNames()`.
     #[pyo3(name = "fieldNames")]
@@ -2124,6 +2217,11 @@ pub struct PyCharType {
 
 #[pymethods]
 impl PyCharType {
+    /// The length of the strings, as PySpark's `CharType.length`.
+    #[getter]
+    fn length(&self) -> i32 {
+        self.length
+    }
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
@@ -2177,10 +2275,6 @@ impl PyCharType {
     fn simple_string(&self) -> String {
         format!("char({})", self.length)
     }
-    #[pyo3(name = "typeName")]
-    fn type_name(&self) -> &'static str {
-        "char"
-    }
 }
 
 #[pyclass(name = "VarcharType", module = "pyspark.sql.types", extends = PyAtomicType)]
@@ -2190,6 +2284,11 @@ pub struct PyVarcharType {
 
 #[pymethods]
 impl PyVarcharType {
+    /// The maximum length of the strings, as PySpark's `VarcharType.length`.
+    #[getter]
+    fn length(&self) -> i32 {
+        self.length
+    }
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
@@ -2243,10 +2342,6 @@ impl PyVarcharType {
     fn simple_string(&self) -> String {
         format!("varchar({})", self.length)
     }
-    #[pyo3(name = "typeName")]
-    fn type_name(&self) -> &'static str {
-        "varchar"
-    }
 }
 
 #[pyclass(name = "TimeType", module = "pyspark.sql.types", extends = PyAnyTimeType)]
@@ -2256,6 +2351,11 @@ pub struct PyTimeType {
 
 #[pymethods]
 impl PyTimeType {
+    /// The precision of the times, as PySpark's `TimeType.precision`.
+    #[getter]
+    fn precision(&self) -> i32 {
+        self.precision
+    }
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
@@ -2310,10 +2410,6 @@ impl PyTimeType {
     #[pyo3(name = "simpleString")]
     fn simple_string(&self) -> String {
         format!("time({})", self.precision)
-    }
-    #[pyo3(name = "typeName")]
-    fn type_name(&self) -> &'static str {
-        "time"
     }
 }
 
@@ -2514,9 +2610,19 @@ impl PyCalendarIntervalType {
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"calendarinterval\"")
     }
+    /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
+    /// returns it.
     #[new]
-    fn new() -> pyo3::PyClassInitializer<Self> {
-        init_chain!(DataType::CalendarInterval, PyCalendarIntervalType, [])
+    fn new(py: Python<'_>) -> PyResult<Py<Self>> {
+        static INSTANCE: PyOnceLock<Py<PyCalendarIntervalType>> = PyOnceLock::new();
+        INSTANCE
+            .get_or_try_init(py, || {
+                Py::new(
+                    py,
+                    init_chain!(DataType::CalendarInterval, PyCalendarIntervalType, []),
+                )
+            })
+            .map(|instance| instance.clone_ref(py))
     }
     fn __repr__(&self) -> String {
         "CalendarIntervalType()".to_string()
@@ -2525,9 +2631,11 @@ impl PyCalendarIntervalType {
     fn simple_string(&self) -> &'static str {
         "interval"
     }
+    /// As PySpark's, which names this type `interval`.
+    #[classmethod]
     #[pyo3(name = "typeName")]
-    fn type_name(&self) -> &'static str {
-        "calendarinterval"
+    fn type_name(_cls: &Bound<'_, pyo3::types::PyType>) -> &'static str {
+        "interval"
     }
 }
 
@@ -2539,6 +2647,16 @@ pub struct PyYearMonthIntervalType {
 
 #[pymethods]
 impl PyYearMonthIntervalType {
+    /// The first field, as PySpark's `YearMonthIntervalType.startField`.
+    #[getter(startField)]
+    fn start_field(&self) -> i32 {
+        self.start_field
+    }
+    /// The last field, as PySpark's `YearMonthIntervalType.endField`.
+    #[getter(endField)]
+    fn end_field(&self) -> i32 {
+        self.end_field
+    }
     #[classattr]
     const YEAR: i32 = 0;
     #[classattr]
@@ -2607,10 +2725,6 @@ impl PyYearMonthIntervalType {
             self.start_field, self.end_field
         )
     }
-    #[pyo3(name = "typeName")]
-    fn type_name(&self) -> &'static str {
-        "yearmonthinterval"
-    }
 }
 
 #[pyclass(name = "DayTimeIntervalType", module = "pyspark.sql.types", extends = PyAnsiIntervalType)]
@@ -2621,6 +2735,16 @@ pub struct PyDayTimeIntervalType {
 
 #[pymethods]
 impl PyDayTimeIntervalType {
+    /// The first field, as PySpark's `DayTimeIntervalType.startField`.
+    #[getter(startField)]
+    fn start_field(&self) -> i32 {
+        self.start_field
+    }
+    /// The last field, as PySpark's `DayTimeIntervalType.endField`.
+    #[getter(endField)]
+    fn end_field(&self) -> i32 {
+        self.end_field
+    }
     #[classattr]
     const DAY: i32 = 0;
     #[classattr]
@@ -2693,10 +2817,6 @@ impl PyDayTimeIntervalType {
             self.start_field, self.end_field
         )
     }
-    #[pyo3(name = "typeName")]
-    fn type_name(&self) -> &'static str {
-        "daytimeinterval"
-    }
 }
 
 #[pyclass(name = "VariantType", module = "pyspark.sql.types", extends = PyAtomicType)]
@@ -2747,10 +2867,6 @@ impl PyVariantType {
     }
     #[pyo3(name = "simpleString")]
     fn simple_string(&self) -> &'static str {
-        "variant"
-    }
-    #[pyo3(name = "typeName")]
-    fn type_name(&self) -> &'static str {
         "variant"
     }
 }
@@ -2809,10 +2925,6 @@ impl PyGeometryType {
     fn simple_string(&self) -> String {
         DataType::Geometry { srid: self.srid }.simple_string()
     }
-    #[pyo3(name = "typeName")]
-    fn type_name(&self) -> &'static str {
-        "geometry"
-    }
 }
 
 #[pyclass(name = "GeographyType", module = "pyspark.sql.types", extends = PySpatialType)]
@@ -2860,10 +2972,6 @@ impl PyGeographyType {
     #[pyo3(name = "simpleString")]
     fn simple_string(&self) -> String {
         DataType::Geography { srid: self.srid }.simple_string()
-    }
-    #[pyo3(name = "typeName")]
-    fn type_name(&self) -> &'static str {
-        "geography"
     }
 }
 
@@ -2995,42 +3103,14 @@ pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAn
         };
     }
     let o = match dt {
-        DataType::Null => obj!(init_chain!(DataType::Null, PyNullType, [])),
-        DataType::Boolean => obj!(init_chain!(
-            DataType::Boolean,
-            PyBooleanType,
-            [PyAtomicType]
-        )),
-        DataType::Byte => obj!(init_chain!(
-            DataType::Byte,
-            PyByteType,
-            [PyAtomicType, PyNumericType, PyIntegralType]
-        )),
-        DataType::Short => obj!(init_chain!(
-            DataType::Short,
-            PyShortType,
-            [PyAtomicType, PyNumericType, PyIntegralType]
-        )),
-        DataType::Integer => obj!(init_chain!(
-            DataType::Integer,
-            PyIntegerType,
-            [PyAtomicType, PyNumericType, PyIntegralType]
-        )),
-        DataType::Long => obj!(init_chain!(
-            DataType::Long,
-            PyLongType,
-            [PyAtomicType, PyNumericType, PyIntegralType]
-        )),
-        DataType::Float => obj!(init_chain!(
-            DataType::Float,
-            PyFloatType,
-            [PyAtomicType, PyNumericType, PyFractionalType]
-        )),
-        DataType::Double => obj!(init_chain!(
-            DataType::Double,
-            PyDoubleType,
-            [PyAtomicType, PyNumericType, PyFractionalType]
-        )),
+        DataType::Null => PyNullType::new(py)?.into_any(),
+        DataType::Boolean => PyBooleanType::new(py)?.into_any(),
+        DataType::Byte => PyByteType::new(py)?.into_any(),
+        DataType::Short => PyShortType::new(py)?.into_any(),
+        DataType::Integer => PyIntegerType::new(py)?.into_any(),
+        DataType::Long => PyLongType::new(py)?.into_any(),
+        DataType::Float => PyFloatType::new(py)?.into_any(),
+        DataType::Double => PyDoubleType::new(py)?.into_any(),
         DataType::Decimal { precision, scale } => {
             let (precision, scale) = (*precision, *scale);
             obj!(init_chain!(
@@ -3050,22 +3130,10 @@ pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAn
             [PyAtomicType],
             value
         )),
-        DataType::Binary => obj!(init_chain!(DataType::Binary, PyBinaryType, [PyAtomicType])),
-        DataType::Date => obj!(init_chain!(
-            DataType::Date,
-            PyDateType,
-            [PyAtomicType, PyDatetimeType]
-        )),
-        DataType::Timestamp => obj!(init_chain!(
-            DataType::Timestamp,
-            PyTimestampType,
-            [PyAtomicType, PyDatetimeType]
-        )),
-        DataType::TimestampNtz => obj!(init_chain!(
-            DataType::TimestampNtz,
-            PyTimestampNTZType,
-            [PyAtomicType, PyDatetimeType]
-        )),
+        DataType::Binary => PyBinaryType::new(py)?.into_any(),
+        DataType::Date => PyDateType::new(py)?.into_any(),
+        DataType::Timestamp => PyTimestampType::new(py)?.into_any(),
+        DataType::TimestampNtz => PyTimestampNTZType::new(py)?.into_any(),
         DataType::Array {
             element_type,
             contains_null,
@@ -3155,11 +3223,7 @@ pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAn
                 value
             ))
         }
-        DataType::CalendarInterval => obj!(init_chain!(
-            DataType::CalendarInterval,
-            PyCalendarIntervalType,
-            []
-        )),
+        DataType::CalendarInterval => PyCalendarIntervalType::new(py)?.into_any(),
         DataType::YearMonthInterval {
             start_field,
             end_field,
@@ -3221,7 +3285,12 @@ pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAn
         }
         // An unparsed DDL string has no concrete Python class; keep it as a bare `DataType`.
         // (The Python parser delegates JSON strings back here, so routing it there would loop.)
-        DataType::Unparsed { .. } => Py::new(py, PyDataType { inner: dt.clone() })?.into_any(),
+        // As PySpark Connect's, a DDL string that the server parses.
+        DataType::Unparsed { data_type_string } => py
+            .import("pyspark.sql.connect.types")?
+            .getattr("UnparsedDataType")?
+            .call1((data_type_string,))?
+            .unbind(),
         DataType::Udt { .. } => {
             // A UDT reconstructs by re-importing its Python class; delegate to the Python
             // parser.
@@ -3387,6 +3456,19 @@ pub(crate) fn py_to_data_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
                 python_class: get("pyClass")?,
                 serialized_python_class: get("serializedClass")?,
                 sql_type: Some(Box::new(sql_type)),
+            });
+        }
+    }
+    // `UnparsedDataType` of `pyspark.sql.connect.types`, a pure-Python subclass of the base, is
+    // a DDL string that the server parses.
+    if let Ok(unparsed_cls) = obj
+        .py()
+        .import("pyspark.sql.connect.types")
+        .and_then(|m| m.getattr("UnparsedDataType"))
+    {
+        if obj.is_instance(&unparsed_cls)? {
+            return Ok(DataType::Unparsed {
+                data_type_string: obj.getattr("data_type_string")?.extract()?,
             });
         }
     }

@@ -67,6 +67,31 @@ def test_to_arrow_empty_result(session):
     assert table.num_rows == 0
 
 
+def test_arrow_c_stream_reads_the_partitions_as_pyspark(session):
+    # As official PySpark 4.3.0's DataFrame.__arrow_c_stream__: an Arrow C stream of the rows,
+    # of the Arrow schema of the DataFrame, of a batch of each partition, which
+    # pa.RecordBatchReader.from_stream reads.
+    df = session.range(0, 6, 1, 3).selectExpr(
+        "id", "CAST(id AS STRING) AS s", "array(id, id + 1) AS a", "named_struct('x', id) AS n"
+    )
+    expected = df.toArrow()
+    reader = pa.RecordBatchReader.from_stream(df)
+    assert reader.schema == expected.schema
+    batches = list(reader)
+    assert len(batches) == 3
+    assert pa.Table.from_batches(batches, expected.schema).to_pydict() == expected.to_pydict()
+    assert type(df.__arrow_c_stream__()).__name__ == "PyCapsule"
+
+    # The stream of a requested schema is cast to it.
+    requested = pa.schema([("id", pa.int32()), ("s", pa.large_string())])
+    table = pa.RecordBatchReader.from_stream(df.select("id", "s"), schema=requested).read_all()
+    assert table.schema == requested
+    assert table.to_pydict() == {"id": list(range(6)), "s": [str(i) for i in range(6)]}
+
+    empty = pa.RecordBatchReader.from_stream(session.range(0)).read_all()
+    assert empty.num_rows == 0 and empty.schema == pa.schema([pa.field("id", pa.int64(), False)])
+
+
 def test_create_dataframe_arrow_cached_upload(session):
     """Materialize cached Arrow input larger than 1 MiB on a real server."""
     import numpy as np

@@ -206,6 +206,12 @@ fn retry_exception_bound_passed(
         .is_some_and(|ms| since.elapsed() >= Duration::from_millis(ms))
 }
 
+/// A hook of the executions of a client, as PySpark's `SparkSession.Hook.on_execute_plan`: it is
+/// called with each `ExecutePlanRequest` before the client sends it, and returns the request to
+/// send, which keeps the operation ID of the original.
+pub type ExecutePlanHook =
+    std::sync::Arc<dyn Fn(ExecutePlanRequest) -> Result<ExecutePlanRequest> + Send + Sync>;
+
 /// A Spark Connect client for communicating with a remote Spark server.
 ///
 /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient`.
@@ -223,10 +229,24 @@ pub struct SparkConnectClient {
     metadata: Vec<(String, String)>,
     /// User-agent header.
     user_agent: String,
+    /// The user context extensions of the requests of the client.
+    user_context_extensions: std::sync::Arc<std::sync::Mutex<UserContextExtensions>>,
     /// Retry policy applied to RPCs (exponential backoff on transient failures).
     retry_policy: RetryPolicy,
     /// The deadline of each kind of RPC.
     rpc_deadlines: RpcDeadlines,
+    /// The hook of the executions, if any, shared by the clients of the clones of the session,
+    /// as PySpark's clones keep the hooks of a session.
+    execute_plan_hook: std::sync::Arc<std::sync::RwLock<Option<ExecutePlanHook>>>,
+}
+
+/// The user context extensions of a client, as PySpark's `SparkConnectClient` keeps them: those
+/// of all the threads, and those of each thread, which the requests of a thread carry, of their
+/// IDs.
+#[derive(Debug, Default)]
+struct UserContextExtensions {
+    global: Vec<(String, prost_types::Any)>,
+    by_thread: std::collections::HashMap<std::thread::ThreadId, Vec<(String, prost_types::Any)>>,
 }
 
 impl SparkConnectClient {
@@ -314,8 +334,10 @@ impl SparkConnectClient {
             user_id: builder.user_id().map(String::from),
             metadata,
             user_agent,
+            user_context_extensions: Default::default(),
             retry_policy: RetryPolicy::default(),
             rpc_deadlines: RpcDeadlines::default(),
+            execute_plan_hook: Default::default(),
         })
     }
 
@@ -336,14 +358,140 @@ impl SparkConnectClient {
             user_id: self.user_id.clone(),
             metadata: self.metadata.clone(),
             user_agent: self.user_agent.clone(),
+            // As PySpark's client of a new session, of no user context extensions.
+            user_context_extensions: Default::default(),
             retry_policy: self.retry_policy.clone(),
             rpc_deadlines: self.rpc_deadlines.clone(),
+            execute_plan_hook: std::sync::Arc::clone(&self.execute_plan_hook),
         }
+    }
+
+    /// Set the hook of the executions of this client and of its clones, or clear it.
+    pub fn set_execute_plan_hook(&self, hook: Option<ExecutePlanHook>) {
+        *self
+            .execute_plan_hook
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = hook;
+    }
+
+    /// `request` as the hook of the executions, if any, returns it, of the operation ID of
+    /// `request`, as PySpark's client keeps the operation ID of the request of a hook.
+    #[allow(clippy::result_large_err)] // SparkError is large; changing the type would break the API
+    fn hooked(&self, request: ExecutePlanRequest) -> Result<ExecutePlanRequest> {
+        let hook = self
+            .execute_plan_hook
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let Some(hook) = hook else {
+            return Ok(request);
+        };
+        let operation_id = request.operation_id.clone();
+        let mut request = hook(request)?;
+        request.operation_id = operation_id;
+        Ok(request)
     }
 
     /// Get the user ID, if set.
     pub fn user_id(&self) -> Option<&str> {
         self.user_id.as_deref()
+    }
+
+    /// Add `extension` to the user context of the requests that the current thread sends,
+    /// and return its ID, as PySpark's `add_threadlocal_user_context_extension`.
+    pub fn add_threadlocal_user_context_extension(&self, extension: prost_types::Any) -> String {
+        let id = format!("threadlocal_{}", Uuid::new_v4());
+        self.user_context_extensions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .by_thread
+            .entry(std::thread::current().id())
+            .or_default()
+            .push((id.clone(), extension));
+        id
+    }
+
+    /// Add `extension` to the user context of the requests of all the threads, and return its
+    /// ID, as PySpark's `add_global_user_context_extension`.
+    pub fn add_global_user_context_extension(&self, extension: prost_types::Any) -> String {
+        let id = format!("global_{}", Uuid::new_v4());
+        self.user_context_extensions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .global
+            .push((id.clone(), extension));
+        id
+    }
+
+    /// Remove the extension of `extension_id`, one of the current thread or a global one, as
+    /// PySpark's `remove_user_context_extension`.
+    pub fn remove_user_context_extension(&self, extension_id: &str) {
+        let mut extensions = self
+            .user_context_extensions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if extension_id.starts_with("threadlocal_") {
+            if let Some(own) = extensions.by_thread.get_mut(&std::thread::current().id()) {
+                own.retain(|(id, _)| id != extension_id);
+            }
+        } else if extension_id.starts_with("global_") {
+            extensions.global.retain(|(id, _)| id != extension_id);
+        }
+    }
+
+    /// Remove the extensions of the current thread and the global ones, as PySpark's
+    /// `clear_user_context_extensions`.
+    pub fn clear_user_context_extensions(&self) {
+        let mut extensions = self
+            .user_context_extensions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        extensions.by_thread.remove(&std::thread::current().id());
+        extensions.global.clear();
+    }
+
+    /// The user context extensions of the current thread, of their IDs, as PySpark's
+    /// `thread_local.user_context_extensions` of a client.
+    pub fn threadlocal_user_context_extensions(&self) -> Vec<(String, prost_types::Any)> {
+        self.user_context_extensions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .by_thread
+            .get(&std::thread::current().id())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The global user context extensions, of their IDs, as PySpark's
+    /// `global_user_context_extensions` of a client.
+    pub fn global_user_context_extensions(&self) -> Vec<(String, prost_types::Any)> {
+        self.user_context_extensions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .global
+            .clone()
+    }
+
+    /// Add the global user context extensions, and then those of the current thread, to
+    /// `context`, as PySpark's `_update_request_with_user_context_extensions` does for the
+    /// requests of executions, analyses, configurations, error details and interrupts.
+    fn extend_user_context(&self, context: &mut Option<UserContext>) {
+        let extensions = self
+            .user_context_extensions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let own = extensions.by_thread.get(&std::thread::current().id());
+        if extensions.global.is_empty() && own.is_none_or(Vec::is_empty) {
+            return;
+        }
+        let context = context.get_or_insert_with(UserContext::default);
+        context.extensions.extend(
+            extensions
+                .global
+                .iter()
+                .chain(own.into_iter().flatten())
+                .map(|(_, extension)| extension.clone()),
+        );
     }
 
     /// Override the retry policy applied to this client's RPCs.
@@ -373,7 +521,9 @@ impl SparkConnectClient {
         &self,
         mut request: ExecutePlanRequest,
     ) -> Result<Streaming<ExecutePlanResponse>> {
+        self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
+        let request = self.hooked(request)?;
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
         match self.stub.clone().execute_plan(req).await {
@@ -488,6 +638,7 @@ impl SparkConnectClient {
         &self,
         mut request: AnalyzePlanRequest,
     ) -> Result<AnalyzePlanResponse> {
+        self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
         self.with_retry(|| {
             let deadline = self.rpc_deadlines.analyze_plan;
@@ -540,9 +691,12 @@ impl SparkConnectClient {
         &self,
         mut request: ExecutePlanRequest,
     ) -> Result<ReattachableResponseStream> {
+        self.extend_user_context(&mut request.user_context);
         // Before the iterator: its ReattachExecute and ReleaseExecute requests take the
-        // user context of this request.
+        // user context of this request, and the request of the hook, as PySpark's iterator
+        // is of the request that the hooks return.
         self.fill_user_context(&mut request.user_context);
+        let request = self.hooked(request)?;
         let iter = ExecutePlanResponseReattachableIterator::new(request);
         let start = iter.request().clone();
         let deadline = self.rpc_deadlines.reattachable_execute_plan;
@@ -594,6 +748,7 @@ impl SparkConnectClient {
         &self,
         mut request: FetchErrorDetailsRequest,
     ) -> Result<FetchErrorDetailsResponse> {
+        self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
         let deadline = self.rpc_deadlines.fetch_error_details;
         let mut req = with_deadline(Request::new(request), deadline);
@@ -687,6 +842,7 @@ impl SparkConnectClient {
     ///
     /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.config`.
     pub async fn config(&self, mut request: ConfigRequest) -> Result<ConfigResponse> {
+        self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
         self.with_retry(|| {
             let deadline = self.rpc_deadlines.config;
@@ -706,6 +862,7 @@ impl SparkConnectClient {
     ///
     /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.interrupt`.
     pub async fn interrupt(&self, mut request: InterruptRequest) -> Result<InterruptResponse> {
+        self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
         self.with_retry(|| {
             let deadline = self.rpc_deadlines.interrupt;

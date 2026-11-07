@@ -743,7 +743,6 @@ fn session_extras_surface() {
     let s = session();
     let _ = s.session_id();
     let _ = s.profile();
-    let _ = s.profiler();
     let _ = s.read(); // batch DataFrameReader
     assert_eq!(s.empty_data_frame().unwrap().count().unwrap(), 0);
     let ns = s.new_session();

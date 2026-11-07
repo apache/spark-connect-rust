@@ -286,10 +286,11 @@ def timestamp_columns(frame, schema):
     buffers separately so NaT's sentinel never participates in alignment tests.
     """
     import sys
-    from types import GetSetDescriptorType, WrapperDescriptorType
+    from types import FunctionType, GetSetDescriptorType, WrapperDescriptorType
 
     import numpy as np
     import pandas as pd
+    from pandas.core import frame as frame_module, generic as generic_module
     try:
         from pandas.core.arrays.datetimes import DatetimeArray
         from pandas.core.dtypes.dtypes import DatetimeTZDtype
@@ -305,7 +306,23 @@ def timestamp_columns(frame, schema):
     from pyspark.sql import types as sql_types
 
     if (pd.DataFrame is not DataFrame or type(frame) is not DataFrame
-            or type(schema) is not NativeStructType or not len(frame)):
+            or type(schema) is not NativeStructType or not len(frame)
+            or any(name in vars(frame) for name in ("astype", "notna", "where"))):
+        return None
+    # The row path calls these normalization methods before reading cells.
+    # Preserve customized transformations and errors before any Arrow Config RPC.
+    for name, module, qualname in (
+        ("astype", generic_module, "NDFrame.astype"),
+        ("notna", frame_module, "DataFrame.notna"),
+        ("where", generic_module, "NDFrame.where"),
+    ):
+        method = getattr(DataFrame, name)
+        if (type(method) is not FunctionType or method.__name__ != name
+                or method.__qualname__ != qualname or method.__module__ != module.__name__
+                or method.__globals__ is not vars(module)):
+            return None
+    if (DataFrame.astype is not generic_module.NDFrame.astype
+            or DataFrame.where is not generic_module.NDFrame.where):
         return None
     if not _has_canonical_columns(frame.columns):
         return None
@@ -390,6 +407,10 @@ def timestamp_columns(frame, schema):
         if unit == "ns" and np.any(column.array.asi8[column.notna()] % 1000):
             return None
         columns.append(column)
+    # Reject unsupported host zones before Rust queries the session time zone.
+    # Their row fallback builds a local relation without any configuration RPC.
+    if not timestamp_columns_are_aware(columns) and not _timestamp_host_is_utc():
+        return None
     return columns
 
 
@@ -400,20 +421,26 @@ def timestamp_columns_are_aware(columns):
     return all(type(column.dtype) is DatetimeTZDtype for column in columns)
 
 
+def _timestamp_host_is_utc():
+    """Require an explicit UTC host setting and an initialized UTC runtime zone."""
+    import os
+    import time
+
+    return os.environ.get("TZ") == "UTC" and time.tzname == ("UTC", "UTC")
+
+
 def prepare_timestamp_table(columns, schema, timezone):
     """Preserve instants without row materialization or a host-zone conversion.
 
     Aware columns carry their own timezone. Naive columns are deliberately
-    restricted to UTC host/session pairs: the existing row path uses the host
-    zone, unlike Python Connect's session-zone conversion (and DST fold policy).
+    restricted to literal ``TZ=UTC`` and session ``UTC``, with a UTC runtime
+    zone: the existing row path uses the host zone, unlike Python Connect's
+    session-zone conversion (and DST fold policy).
     """
-    import os
-    import time
     import pyarrow as pa
 
     if not timestamp_columns_are_aware(columns):
-        if (timezone != "UTC" or os.environ.get("TZ") != "UTC"
-                or time.tzname != ("UTC", "UTC")):
+        if timezone != "UTC" or not _timestamp_host_is_utc():
             return None
     return pa.Table.from_arrays(
         [pa.array(column, type=pa.timestamp("us", tz="UTC"), from_pandas=True)
@@ -474,10 +501,15 @@ def prepare_float64_table(frame, schema):
     if any(type(column) is not Series or type(column.array) is not NumpyExtensionArray
            for column in columns):
         return None
+    # NumPy subclasses can customize the row path's astype conversion even
+    # inside pandas' concrete NumPy wrapper. Keep their hooks, accepting the
+    # row path's cost for subclasses such as np.memmap.
+    if any(type(column.array._ndarray) is not np.ndarray for column in columns):
+        return None
     # Native row conversion reads Rust fields, bypassing mutable Python accessors.
     for name in ("DoubleType", "StructField", "StructType"):
         cls = getattr(native, name)
-        if (getattr(sql_types, name, None) is not cls
+        if (vars(sql_types).get(name) is not cls
                 or cls.__getattribute__ is not object.__getattribute__
                 or any("__class__" in vars(base) for base in cls.__mro__ if base is not object)):
             return None
@@ -796,19 +828,31 @@ def prepare_date_table(frame, schema):
         except ImportError:
             return None
     columns = [frame.iloc[:, i] for i in range(width)]
+    arrays = []
     for column, field in zip(columns, schema.fields):
-        if type(column) is not Series or type(column.array) is not NumpyExtensionArray:
+        if type(column) is not Series:
+            return None
+        backing = column.array
+        if type(backing) is not NumpyExtensionArray:
+            return None
+        array = backing._ndarray
+        if (type(array) is not np.ndarray or array.ndim != 1
+                or type(array.dtype) is not type(np.dtype("object"))
+                or array.dtype != np.dtype("object") or len(array) != len(frame)):
             return None
         # Arrow rejects nulls in non-nullable fields; let the row path retain
         # its existing behavior for that input instead.
         if not all(type(value) is date or (value is None and field.nullable)
-                   for value in column.to_numpy(copy=False)):
+                   for value in array):
             return None
+        arrays.append(array)
 
     import pyarrow as pa
 
     return pa.Table.from_arrays(
-        [pa.array(column, type=pa.date32(), from_pandas=False) for column in columns],
+        # Series accessors can be customized independently of the DataFrame row
+        # path. Emit the same concrete storage whose cells were checked above.
+        [pa.array(array, type=pa.date32(), from_pandas=False) for array in arrays],
         names=schema.names,
     )
 
@@ -865,6 +909,12 @@ def accepts_pandas_table(frame, schema):
     names by lookup, so each namespace must still hold the native classes. The schema is
     the caller's object, or a DDL string, which is parsed.
     """
+    return accepts_pandas_frame(frame) and (type(schema) is str or _canonical_struct(schema))
+
+
+def accepts_pandas_frame(frame):
+    """Whether PySpark's Arrow conversion may convert this frame, as `accepts_pandas_table`
+    checks it, but for a schema."""
     import sys
 
     import pandas as pd
@@ -929,7 +979,7 @@ def accepts_pandas_table(frame, schema):
                     and vars(importer)[name] is not getattr(converter, name, None))
             ):
                 return False
-    return type(schema) is str or _canonical_struct(schema)
+    return True
 
 
 def prepare_pandas_table(frame, schema, timezone, safecheck, prefers_large_types):
@@ -990,3 +1040,94 @@ def arrow_decimal_column(values, dtype, name):
         raise PySparkTypeError(message)
     return array.type.precision, array.type.scale, array.to_pylist()
 
+
+def pyarrow_available():
+    """Whether pyarrow can be imported, checked without importing it. Without it, a frame
+    without a schema keeps the row path, which does not need it."""
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec("pyarrow") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def prepare_inferred_pandas_table(frame, timezone, safecheck, prefers_large_types,
+                                  infer_dict_as_map, prefer_timestamp_ntz):
+    """Convert a pandas frame without a schema, or of names, as PySpark Connect does.
+
+    Each column goes through PySpark's own Arrow conversion, of the type that Arrow infers,
+    except that datetimes are timestamps, of the session time zone, and timedeltas day-time
+    intervals, for the server to infer the types of the table. With `inferPandasDictAsMap`
+    (`infer_dict_as_map`), the frame converts under the struct of the types that Arrow infers,
+    where a column of dicts is a map, and the table takes the names and the Arrow types of the
+    struct. Returns the table and the names of that struct, or None. The caller checks the
+    frame with `accepts_pandas_frame`.
+    """
+    import pandas as pd
+    import pyarrow as pa
+    from pandas.api.types import is_datetime64_dtype, is_timedelta64_dtype
+
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql.pandas.conversion import create_arrow_table_from_pandas
+    from pyspark.sql.pandas.types import (
+        _deduplicate_field_names,
+        from_arrow_type,
+        to_arrow_schema,
+    )
+    from pyspark.sql.types import (
+        DayTimeIntervalType,
+        MapType,
+        StringType,
+        StructType,
+        TimestampType,
+    )
+
+    struct = None
+    if infer_dict_as_map:
+        struct = StructType()
+        for field in pa.Schema.from_pandas(frame):
+            field_type = field.type
+            if isinstance(field_type, pa.StructType):
+                if len(field_type) == 0:
+                    raise PySparkValueError(
+                        errorClass="CANNOT_INFER_EMPTY_SCHEMA",
+                        messageParameters={},
+                    )
+                spark_type = MapType(
+                    StringType(), from_arrow_type(field_type.field(0).type, prefer_timestamp_ntz)
+                )
+            else:
+                spark_type = from_arrow_type(field_type, prefer_timestamp_ntz)
+            struct = struct.add(field.name, spark_type, nullable=field.nullable)
+        deduplicated = _deduplicate_field_names(struct)
+        spark_types = [field.dataType for field in deduplicated.fields]
+    else:
+        spark_types = [
+            (
+                TimestampType()
+                if is_datetime64_dtype(t) or isinstance(t, pd.DatetimeTZDtype)
+                else DayTimeIntervalType()
+                if is_timedelta64_dtype(t)
+                else None
+            )
+            for t in frame.dtypes
+        ]
+    if len(frame.columns) == 0:
+        # pa.RecordBatch.from_pandas keeps the number of rows of a frame of no columns.
+        table = pa.Table.from_batches([pa.RecordBatch.from_pandas(frame)])
+    else:
+        table = create_arrow_table_from_pandas(
+            [(c, st) for (_, c), st in zip(frame.items(), spark_types)],
+            timezone=timezone,
+            safecheck=safecheck,
+            prefers_large_types=prefers_large_types,
+        )
+    if struct is None:
+        return table, None
+    if len(struct.fields) > 0:
+        arrow_schema = to_arrow_schema(
+            deduplicated, timezone="UTC", prefers_large_types=prefers_large_types
+        )
+        table = table.rename_columns(deduplicated.names).cast(arrow_schema)
+    return table, [str(name) for name in struct.fieldNames()]

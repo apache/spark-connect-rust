@@ -27,6 +27,19 @@ pub struct TransformWithStateInfo {
 /// Child plans are immutable shared nodes, so adding a transformation does not clone
 /// its ancestors. Call `to_proto()` to materialize a fresh protobuf tree without plan
 /// IDs; requests give every shared node its stable plan ID (see `PlanIds`).
+/// The owner of a relation built outside the core, which a plan of it keeps alive while any
+/// DataFrame uses it: such as the Python plan of `pyspark.ml`, which keeps the models whose
+/// cached objects on the server the relation refers to, as PySpark Connect's DataFrame keeps its
+/// plan.
+#[derive(Clone)]
+pub struct RelationOwner(pub Arc<dyn std::any::Any + Send + Sync>);
+
+impl std::fmt::Debug for RelationOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RelationOwner")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum LogicalPlan {
     /// A range of integers: `range(start, end, step)`.
@@ -106,6 +119,20 @@ pub enum LogicalPlan {
         truncate: i32,
         vertical: bool,
     },
+    /// HtmlString: the HTML table of `df._repr_html_()`, which the server formats as one
+    /// string: `num_rows` rows, values truncated to `truncate` characters (0 for none).
+    HtmlString {
+        input: Arc<LogicalPlan>,
+        num_rows: i32,
+        truncate: i32,
+    },
+    /// A relation built outside the core, as the plans of `pyspark.ml` build theirs
+    /// (`pyspark.ml.connect.proto.TransformerRelation`), sent as it is, with the plan ID of the
+    /// core, and the owner of the relation, if any, which the plan keeps alive.
+    Raw {
+        relation: Box<proto::Relation>,
+        owner: Option<RelationOwner>,
+    },
     /// Deduplicate: `df.distinct()` or `df.dropDuplicates()`.
     Deduplicate {
         input: Arc<LogicalPlan>,
@@ -126,6 +153,9 @@ pub enum LogicalPlan {
         upper_bound: f64,
         with_replacement: bool,
         seed: Option<i64>,
+        /// Whether the input is sorted, or cached, to be in a deterministic order, as the
+        /// splits of `randomSplit` are, so that they are disjoint.
+        deterministic_order: bool,
     },
     /// Repartition: `df.repartition(num_partitions)`.
     Repartition {
@@ -851,6 +881,24 @@ impl LogicalPlan {
                 relation.rel_type = Some(proto::relation::RelType::ShowString(Box::new(show)));
             }
 
+            LogicalPlan::HtmlString {
+                input,
+                num_rows,
+                truncate,
+            } => {
+                let html = proto::HtmlString {
+                    input: Some(Box::new(relation_of(input, plan_ids))),
+                    num_rows: *num_rows,
+                    truncate: *truncate,
+                };
+                relation.rel_type = Some(proto::relation::RelType::HtmlString(Box::new(html)));
+            }
+
+            LogicalPlan::Raw { relation: raw, .. } => {
+                relation = raw.as_ref().clone();
+                relation.common.get_or_insert_with(Default::default);
+            }
+
             LogicalPlan::Deduplicate {
                 input,
                 all_columns_as_keys,
@@ -921,6 +969,7 @@ impl LogicalPlan {
                 upper_bound,
                 with_replacement,
                 seed,
+                deterministic_order,
             } => {
                 let mut sample = proto::Sample::default();
                 sample.input = Some(Box::new(relation_of(input, plan_ids)));
@@ -930,6 +979,7 @@ impl LogicalPlan {
                 if let Some(s) = seed {
                     sample.seed = Some(*s);
                 }
+                sample.deterministic_order = *deterministic_order;
                 relation.rel_type = Some(proto::relation::RelType::Sample(Box::new(sample)));
             }
 
@@ -1841,6 +1891,7 @@ pub fn sample(
         upper_bound,
         with_replacement,
         seed,
+        deterministic_order: false,
     }
 }
 
