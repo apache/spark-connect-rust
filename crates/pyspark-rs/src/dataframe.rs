@@ -2016,7 +2016,7 @@ impl PyDataFrame {
         let (rows, schema) = py
             .detach(|| self.dataframe.collect_with_schema())
             .to_pyerr()?;
-        rows_to_py(py, rows, schema.as_ref())
+        rows_to_py(py, &self.dataframe, rows, schema.as_ref())
     }
 
     /// Return an iterator over rows without materializing the entire result in memory.
@@ -2208,7 +2208,8 @@ impl PyDataFrame {
         let (row, schema) = py
             .detach(|| self.dataframe.first_with_schema())
             .to_pyerr()?;
-        Ok(rows_to_py(py, row.into_iter().collect(), schema.as_ref())?.pop())
+        let rows = row.into_iter().collect();
+        Ok(rows_to_py(py, &self.dataframe, rows, schema.as_ref())?.pop())
     }
 
     /// Alias for first.
@@ -2223,7 +2224,7 @@ impl PyDataFrame {
                 let (rows, schema) = py
                     .detach(|| self.dataframe.limit(k).collect_with_schema())
                     .to_pyerr()?;
-                rows_to_py(py, rows, schema.as_ref())?.into_py_any(py)
+                rows_to_py(py, &self.dataframe, rows, schema.as_ref())?.into_py_any(py)
             }
         }
     }
@@ -2233,7 +2234,7 @@ impl PyDataFrame {
         let (rows, schema) = py
             .detach(|| self.dataframe.take_with_schema(num))
             .to_pyerr()?;
-        rows_to_py(py, rows, schema.as_ref())
+        rows_to_py(py, &self.dataframe, rows, schema.as_ref())
     }
 
     /// Column names (a property, mirroring `DataFrame.columns`).
@@ -2247,7 +2248,7 @@ impl PyDataFrame {
         let (rows, schema) = py
             .detach(|| self.dataframe.tail(num).collect_with_schema())
             .to_pyerr()?;
-        rows_to_py(py, rows, schema.as_ref())
+        rows_to_py(py, &self.dataframe, rows, schema.as_ref())
     }
 
     /// Sample a fraction of rows, as PySpark's `DataFrame.sample(withReplacement=None,
@@ -3989,19 +3990,46 @@ fn check_collectable(
     Ok(())
 }
 
-/// The collected `rows` of a result of `schema`, whose values of user-defined types are
-/// deserialized when first read.
+/// Whether the binary values of a result of `schema` of `dataframe` are `bytes`, as PySpark
+/// Connect's `DataFrame._get_binary_as_bytes` gives it: the conf
+/// `spark.sql.execution.pyspark.binaryAsBytes`, true unless it is set to another value than
+/// `true`. The conf is read only for a result with a binary value, the only one it changes.
+fn binary_as_bytes(
+    py: Python<'_>,
+    dataframe: &DataFrame,
+    schema: Option<&spark_connect::types::DataType>,
+) -> PyResult<bool> {
+    let binary =
+        |t: &spark_connect::types::DataType| matches!(t, spark_connect::types::DataType::Binary);
+    if !schema.is_some_and(|schema| has_type(schema, &binary)) {
+        return Ok(true);
+    }
+    let value = py
+        .detach(|| {
+            dataframe
+                .spark_session()
+                .conf()
+                .get_with_default("spark.sql.execution.pyspark.binaryAsBytes", Some("true"))
+        })
+        .to_pyerr()?;
+    Ok(value.is_some_and(|value| value.eq_ignore_ascii_case("true")))
+}
+
+/// The collected `rows` of a result of `schema` of `dataframe`, whose values of user-defined
+/// types are deserialized when first read.
 fn rows_to_py(
     py: Python<'_>,
+    dataframe: &DataFrame,
     rows: Vec<spark_connect::row::Row>,
     schema: Option<&spark_connect::types::DataType>,
 ) -> PyResult<Vec<PyRow>> {
     check_arrow_schema(py, schema)?;
     check_collectable(py, schema)?;
     let converters = udt_field_converters(py, schema)?;
+    let binary_as_bytes = binary_as_bytes(py, dataframe, schema)?;
     Ok(rows
         .into_iter()
-        .map(|row| PyRow::with_converters(row, converters.clone()))
+        .map(|row| PyRow::with_converters(row, converters.clone(), binary_as_bytes))
         .collect())
 }
 
@@ -4019,6 +4047,8 @@ pub struct PyLocalRowIterator {
     /// The converters of the fields of user-defined types of the rows, once the schema of the
     /// result is known: with the first row.
     converters: Option<Option<FieldConverters>>,
+    /// Whether the binary values of the rows are `bytes`, known with the converters.
+    binary_as_bytes: bool,
 }
 
 impl PyLocalRowIterator {
@@ -4029,6 +4059,7 @@ impl PyLocalRowIterator {
             iterator: None,
             finished: false,
             converters: None,
+            binary_as_bytes: true,
         }
     }
 
@@ -4067,13 +4098,19 @@ impl PyLocalRowIterator {
                     self.finished = true;
                     return Err(error);
                 }
-                self.converters = Some(udt_field_converters(py, Some(&schema))?);
+                let converters = udt_field_converters(py, Some(&schema))?;
+                self.binary_as_bytes = binary_as_bytes(py, &self.dataframe, Some(&schema))?;
+                self.converters = Some(converters);
             }
         }
         match next {
             Some(Ok(row)) => {
                 let converters = self.converters.clone().flatten();
-                Ok(Some(PyRow::with_converters(row, converters)))
+                Ok(Some(PyRow::with_converters(
+                    row,
+                    converters,
+                    self.binary_as_bytes,
+                )))
             }
             // As PySpark raises the error of the execution, which ends the iteration.
             Some(Err(error)) => {

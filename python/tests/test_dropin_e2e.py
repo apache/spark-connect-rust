@@ -1382,6 +1382,39 @@ def test_collect_reads_a_result_across_stream_ends(session):
     assert session.range(n).toArrow().num_rows == n
 
 
+def test_binary_values_of_collected_rows_follow_binary_as_bytes_as_pyspark(session):
+    # As PySpark Connect's `DataFrame._get_binary_as_bytes`: the binary values of the rows of
+    # collect and toLocalIterator, and so of first, head, take and tail, also those in arrays,
+    # maps and structs, are bytes, unless spark.sql.execution.pyspark.binaryAsBytes is set to
+    # another value than true, case-insensitively, which makes them bytearray.
+    df = session.sql(
+        "SELECT CAST('ab' AS BINARY) AS b, array(CAST('c' AS BINARY)) AS a, "
+        "named_struct('x', CAST('d' AS BINARY)) AS s, map('k', CAST('e' AS BINARY)) AS m"
+    )
+
+    def types(row):
+        return [type(value) for value in (row.b, row.a[0], row.s.x, row.m["k"])]
+
+    key = "spark.sql.execution.pyspark.binaryAsBytes"
+    try:
+        for value, expected in [("false", bytearray), ("TRUE", bytes), ("FALSE", bytearray)]:
+            session.conf.set(key, value)
+            assert types(df.collect()[0]) == [expected] * 4
+            assert types(next(df.toLocalIterator())) == [expected] * 4
+            assert types(next(df.toLocalIterator(prefetchPartitions=True))) == [expected] * 4
+            for row in [df.first(), df.head(), df.head(1)[0], df.take(1)[0], df.tail(1)[0]]:
+                assert types(row) == [expected] * 4
+            assert df.collect() == [Row(b=b"ab", a=[b"c"], s=Row(x=b"d"), m={"k": b"e"})]
+        # A result without a binary value is the same either way.
+        assert session.range(1).collect() == [Row(id=0)]
+    finally:
+        session.conf.unset(key)
+    assert types(df.collect()[0]) == [bytes] * 4
+    assert types(next(df.toLocalIterator())) == [bytes] * 4
+
+
+
+
 def test_internal_values_of_collected_rows_are_those_of_spark_as_pyspark(session):
     # As PySpark's: the toInternal of a collected row is the internal value of Spark that the
     # server computes, the days and the microseconds since the epoch, and its fromInternal is
