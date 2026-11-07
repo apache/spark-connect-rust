@@ -5128,6 +5128,48 @@ def test_spark_conf_chain_operations():
     assert len(conf.getAll()) == 4
 
 
+def test_sessions_and_dataframes_pickle_of_the_active_session_as_pyspark(mock_connect):
+    # As PySpark Connect's, with cloudpickle: a session pickles as a function of its ID, which
+    # gives back the active session of that ID, and a DataFrame of its session and its plan, of
+    # its plan IDs, so that it is sent as it is. Where no session is active, as on a Python
+    # worker of the server, both raise NO_ACTIVE_SESSION, as the session unpickles first; where
+    # another is, PySparkAssertionError. Plain pickle cannot pickle the function, a local one.
+    import pickle
+    import threading
+
+    from pyspark.errors import PySparkAssertionError, PySparkRuntimeError
+    from pyspark.serializers import CloudPickleSerializer
+
+    spark, _ = mock_connect
+    serializer = CloudPickleSerializer()
+    assert serializer.loads(serializer.dumps(spark)) is spark
+    df = spark.range(3).selectExpr("id * 2 AS x")
+    copy = serializer.loads(serializer.dumps(df))
+    assert type(copy) is type(df) and copy._relation_bytes() == df._relation_bytes()
+    assert copy.sparkSession.session_id == spark.session_id
+    for obj in (spark, df):
+        with pytest.raises((AttributeError, pickle.PicklingError)):
+            pickle.dumps(obj)
+
+    errors = []
+
+    def unpickle(data):
+        try:
+            serializer.loads(data)
+        except PySparkRuntimeError as error:
+            errors.append(error.getCondition())
+
+    for obj in (spark, df):
+        thread = threading.Thread(target=unpickle, args=(serializer.dumps(obj),))
+        thread.start()
+        thread.join()
+    assert errors == ["NO_ACTIVE_SESSION", "NO_ACTIVE_SESSION"]
+    with pytest.raises(PySparkAssertionError, match="Expected session ID does not match"):
+        SparkSession._getActiveSessionIfMatches("another")
+
+
+
+
 def test_inheritable_threads_inherit_the_tags_of_the_session_as_pyspark(mock_connect):
     # As PySpark's of Spark Connect: InheritableThread takes the tags of its session of the
     # thread that starts it, and inheritable_thread_target those of the thread that wraps the

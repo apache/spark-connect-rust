@@ -578,6 +578,34 @@ impl PyDataFrame {
         pyo3::types::PyBytes::new(py, &self.dataframe.to_relation().encode_to_vec())
     }
 
+    /// A DataFrame pickles, as PySpark Connect's, of its session, which gives back the active
+    /// session of its ID, and of its plan, here the bytes of its relation. The session unpickles
+    /// first: so on a Python worker of the server, which has no active session, a pickled
+    /// DataFrame raises `NO_ACTIVE_SESSION`, as PySpark's does.
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let this = slf.borrow();
+        py.import("pyspark.sql.connect.dataframe")?
+            .getattr("_reduce_dataframe")?
+            .call1((this.spark_session(), this._relation_bytes(py)))
+    }
+
+    /// The DataFrame of `relation`, the bytes of a relation of `session`, as a pickled DataFrame
+    /// unpickles.
+    #[staticmethod]
+    fn _of_relation(
+        session: &Bound<'_, crate::session::PySparkSession>,
+        relation: &[u8],
+    ) -> PyResult<PyDataFrame> {
+        use prost::Message;
+        let relation = spark_connect_proto::Relation::decode(relation)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+        Ok(PyDataFrame::new(DataFrame::from_sent_relation(
+            session.borrow().session.clone(),
+            relation,
+        )))
+    }
+
     /// The plan of this DataFrame, as PySpark Connect's `DataFrame._plan`, whose
     /// `plan(client)` is its relation, over which `pyspark.ml` builds its plans
     /// (`pyspark.sql.connect.plan`).
