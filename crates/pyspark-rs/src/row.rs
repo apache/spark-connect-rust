@@ -4,7 +4,7 @@ use pyo3::basic::CompareOp;
 use pyo3::exceptions::PyIndexError;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyBytes, PyDict, PyList, PySlice, PyString, PyTuple};
+use pyo3::types::{PyByteArray, PyBytes, PyDict, PyList, PySlice, PyString, PyTuple};
 use spark_connect::row::{Row, Value};
 
 use crate::column::raise_pyspark;
@@ -34,6 +34,9 @@ enum RowData {
         values: PyOnceLock<Py<PyTuple>>,
         /// The converters of its fields, when one has a user-defined type.
         converters: Option<FieldConverters>,
+        /// Whether its binary values are `bytes`, or `bytearray`, as PySpark gives them per
+        /// `spark.sql.execution.pyspark.binaryAsBytes`.
+        binary_as_bytes: bool,
     },
     /// A row made in Python, which holds its Python values as they are, as PySpark's does.
     Python {
@@ -44,17 +47,23 @@ enum RowData {
 
 impl PyRow {
     pub fn new(row: Row) -> Self {
-        Self::with_converters(row, None)
+        Self::with_converters(row, None, true)
     }
 
     /// A row that the server returned, whose values of user-defined types `converters`
-    /// deserializes when they are first read.
-    pub(crate) fn with_converters(row: Row, converters: Option<FieldConverters>) -> Self {
+    /// deserializes when they are first read, and whose binary values are `bytes` if
+    /// `binary_as_bytes`, or else `bytearray`.
+    pub(crate) fn with_converters(
+        row: Row,
+        converters: Option<FieldConverters>,
+        binary_as_bytes: bool,
+    ) -> Self {
         PyRow {
             data: RowData::Spark {
                 row,
                 values: PyOnceLock::new(),
                 converters,
+                binary_as_bytes,
             },
             named: true,
         }
@@ -85,6 +94,7 @@ impl PyRow {
                 row,
                 values,
                 converters,
+                binary_as_bytes,
             } => {
                 let values = values.get_or_try_init(py, || -> PyResult<Py<PyTuple>> {
                     let convert = |i: usize| {
@@ -98,7 +108,7 @@ impl PyRow {
                         .iter()
                         .enumerate()
                         .map(|(i, v)| {
-                            let value = value_to_py(py, v)?;
+                            let value = value_to_py(py, v, *binary_as_bytes)?;
                             match convert(i) {
                                 Some(converter) => converter.bind(py).call1((value,)),
                                 None => Ok(value),
@@ -207,8 +217,13 @@ fn micros_timedelta(py: Python<'_>, micros: i64) -> PyResult<Bound<'_, PyAny>> {
     ))
 }
 
-/// Convert a Spark `Value` into a Python object (PyO3 0.28 `IntoPyObject`).
-pub fn value_to_py<'py>(py: Python<'py>, v: &Value) -> PyResult<Bound<'py, PyAny>> {
+/// Convert a Spark `Value` into a Python object (PyO3 0.28 `IntoPyObject`), whose binary values
+/// are `bytes` if `binary_as_bytes`, or else `bytearray`, also in arrays, maps and structs.
+pub fn value_to_py<'py>(
+    py: Python<'py>,
+    v: &Value,
+    binary_as_bytes: bool,
+) -> PyResult<Bound<'py, PyAny>> {
     // Propagate conversion failures as Python exceptions with `?` rather than
     // panicking across the FFI boundary (the conversions are near-infallible,
     // but a panic here would unwind into CPython).
@@ -222,7 +237,8 @@ pub fn value_to_py<'py>(py: Python<'py>, v: &Value) -> PyResult<Bound<'py, PyAny
         Value::Float(f) => (*f as f64).into_pyobject(py)?.into_any(),
         Value::Double(f) => (*f).into_pyobject(py)?.into_any(),
         Value::String(s) => s.as_str().into_pyobject(py)?.into_any(),
-        Value::Binary(b) => PyBytes::new(py, b).into_any(),
+        Value::Binary(b) if binary_as_bytes => PyBytes::new(py, b).into_any(),
+        Value::Binary(b) => PyByteArray::new(py, b).into_any(),
         Value::Date(d) => {
             // Convert days-since-epoch (i32) to datetime.date
             let date_mod = py.import("datetime")?;
@@ -288,7 +304,7 @@ pub fn value_to_py<'py>(py: Python<'py>, v: &Value) -> PyResult<Bound<'py, PyAny
         Value::List(items) => {
             let list = PyList::empty(py);
             for it in items {
-                list.append(value_to_py(py, it)?)?;
+                list.append(value_to_py(py, it, binary_as_bytes)?)?;
             }
             list.into_any()
         }
@@ -297,16 +313,22 @@ pub fn value_to_py<'py>(py: Python<'py>, v: &Value) -> PyResult<Bound<'py, PyAny
             // TypeError, as in PySpark.
             let dict = PyDict::new(py);
             for (k, val) in m {
-                dict.set_item(value_to_py(py, k)?, value_to_py(py, val)?)?;
+                dict.set_item(
+                    value_to_py(py, k, binary_as_bytes)?,
+                    value_to_py(py, val, binary_as_bytes)?,
+                )?;
             }
             dict.into_any()
         }
         Value::Struct(row) => {
             // A struct value materializes as a Row (named fields), matching PySpark,
             // rather than a plain dict. Cloning keeps shared names and independent values.
-            Py::new(py, PyRow::new(row.clone().into()))?
-                .into_bound(py)
-                .into_any()
+            Py::new(
+                py,
+                PyRow::with_converters(row.clone().into(), None, binary_as_bytes),
+            )?
+            .into_bound(py)
+            .into_any()
         }
         Value::Variant { value, metadata } => {
             // A VARIANT materializes as a VariantVal (toJson/toPython decode lazily),
