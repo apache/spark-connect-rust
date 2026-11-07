@@ -1655,6 +1655,21 @@ def test_collected_rows_behave_as_pyspark_rows(session):
     assert repr(pickle.loads(pickle.dumps(duplicate))) == "Row(a=1, a=2)"
 
 
+def test_grouped_data_are_represented_as_pyspark(session):
+    # As PySpark Connect's: the repr of a GroupedData names its grouping expressions, the
+    # columns of its DataFrame and their types, and the type of the grouping.
+    from pyspark.sql import functions as F
+
+    df = session.createDataFrame([(1, "a", 2.0)], "k int, s string, v double")
+    assert repr(df.groupBy(F.col("k") + 1, "s")) == (
+        "GroupedData[grouping expressions: [+(k, 1), s], "
+        "value: [k: int, s: string, v: double], type: GroupBy]")
+    assert repr(df.rollup("k")).endswith("type: RollUp]")
+    assert repr(df.groupBy("k").pivot("s")).endswith("type: Pivot]")
+
+
+
+
 def test_pivot_pivots_only_a_group_by_as_pyspark(session):
     # As PySpark's: the pivot of a rollup, a cube, grouping sets or a pivot raises
     # UNSUPPORTED_OPERATION, rather than pivoting as a groupBy, which pivots.

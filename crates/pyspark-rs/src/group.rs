@@ -103,6 +103,40 @@ impl PyGroupedData {
 
 #[pymethods]
 impl PyGroupedData {
+    /// As PySpark Connect's: the grouping expressions, the columns of the DataFrame and their
+    /// types, and the type of the grouping, such as
+    /// `GroupedData[grouping expressions: [k], value: [k: int, v: double], type: GroupBy]`.
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        use spark_connect::plan::AggregateGroupType;
+
+        let grouping: Vec<String> = self
+            .grouped_data
+            .grouping_columns()
+            .iter()
+            .map(|column| column.expression().render())
+            .collect();
+        let dataframe = self.grouped_data.dataframe().clone();
+        let dtypes = py
+            .detach(|| dataframe.dtypes().map_err(Box::new))
+            .to_pyerr()?;
+        let values: Vec<String> = dtypes
+            .iter()
+            .map(|(name, data_type)| format!("{name}: {data_type}"))
+            .collect();
+        let kind = match self.grouped_data.group_type() {
+            AggregateGroupType::GroupBy => "GroupBy",
+            AggregateGroupType::Rollup => "RollUp",
+            AggregateGroupType::Cube => "Cube",
+            AggregateGroupType::GroupingSets => "GroupingSets",
+            AggregateGroupType::Pivot => "Pivot",
+        };
+        Ok(format!(
+            "GroupedData[grouping expressions: [{}], value: [{}], type: {kind}]",
+            grouping.join(", "),
+            values.join(", ")
+        ))
+    }
+
     /// Aggregate with expressions (accepts Column objects), or the dict form
     /// `agg({"col": "aggfunc"})` (PySpark parity), e.g. `agg({"age": "max"})`.
     #[pyo3(signature = (*exprs))]
