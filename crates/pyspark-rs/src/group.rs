@@ -9,6 +9,25 @@ use crate::dataframe::{
 };
 use crate::errors::ResultExt;
 
+/// As PySpark's `_check_same_session` of the DataFrames of grouped data: `SESSION_NOT_SAME`
+/// unless `other` is of the session of `this`.
+fn check_same_session(
+    py: Python<'_>,
+    this: &RustGroupedData,
+    other: &RustGroupedData,
+) -> PyResult<()> {
+    if this.spark_session().session_id() == other.spark_session().session_id() {
+        Ok(())
+    } else {
+        Err(crate::column::raise_pyspark(
+            py,
+            "SessionNotSameException",
+            "SESSION_NOT_SAME",
+            &[],
+        ))
+    }
+}
+
 /// Python wrapper for Spark GroupedData.
 #[pyclass(name = "GroupedData", module = "pyspark.sql.group")]
 pub struct PyGroupedData {
@@ -122,25 +141,49 @@ impl PyGroupedData {
         Ok(PyDataFrame::new(df))
     }
 
-    /// Pivot on a column; `values=None` auto-discovers the distinct pivot values.
+    /// Pivot on a column; `values=None` auto-discovers the distinct pivot values. As PySpark's,
+    /// only the grouping of `groupBy` pivots, else `UNSUPPORTED_OPERATION`, and then the column
+    /// is a str and the values a list of bools, floats, ints and strs, else `NOT_EXPECTED_TYPE`.
     #[pyo3(signature = (pivot_col, values=None))]
     fn pivot(
         &self,
-        pivot_col: &str,
-        values: Option<Vec<Bound<'_, PyAny>>>,
+        pivot_col: &Bound<'_, PyAny>,
+        values: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyGroupedData> {
-        let pcol = spark_connect::functions::col(pivot_col);
+        use crate::stat_arguments::not_expected_type;
+        use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyString};
+        self.grouped_data.check_pivot().to_pyerr()?;
+        let Ok(name) = pivot_col.cast::<PyString>() else {
+            return Err(not_expected_type(pivot_col, "pivot_col", "str"));
+        };
         let vals = match values {
             None => None,
-            Some(vs) => {
-                let mut out = Vec::with_capacity(vs.len());
-                for v in &vs {
-                    out.push(crate::session::py_to_value(v)?);
+            Some(values) => {
+                let Ok(values) = values.cast::<PyList>() else {
+                    return Err(not_expected_type(values, "values", "list"));
+                };
+                let mut out = Vec::with_capacity(values.len());
+                for value in values.iter() {
+                    if !(value.is_instance_of::<PyBool>()
+                        || value.is_instance_of::<PyFloat>()
+                        || value.is_instance_of::<PyInt>()
+                        || value.is_instance_of::<PyString>())
+                    {
+                        return Err(not_expected_type(
+                            &value,
+                            "value",
+                            "bool, float, int or str",
+                        ));
+                    }
+                    out.push(crate::session::py_to_value(&value)?);
                 }
                 Some(out)
             }
         };
-        Ok(PyGroupedData::new(self.grouped_data.pivot(pcol, vals)))
+        let pcol = spark_connect::functions::col(&name.to_cow()?);
+        Ok(PyGroupedData::new(
+            self.grouped_data.pivot(pcol, vals).to_pyerr()?,
+        ))
     }
 
     /// Sum values in each group.
@@ -233,10 +276,11 @@ impl PyGroupedData {
 
     /// `GroupedData.cogroup`.
     #[pyo3(name = "cogroup")]
-    fn cogroup(&self, other: &PyGroupedData) -> PyCoGroupedData {
-        PyCoGroupedData {
+    fn cogroup(&self, py: Python<'_>, other: &PyGroupedData) -> PyResult<PyCoGroupedData> {
+        check_same_session(py, &self.grouped_data, &other.grouped_data)?;
+        Ok(PyCoGroupedData {
             inner: self.grouped_data.cogroup(&other.grouped_data),
-        }
+        })
     }
 
     /// `GroupedData.applyInPandasWithState` (stateful streaming).
@@ -290,6 +334,9 @@ impl PyGroupedData {
         initialState: Option<PyRef<'_, PyGroupedData>>,
         eventTimeColumnName: &str,
     ) -> PyResult<PyDataFrame> {
+        if let Some(state) = &initialState {
+            check_same_session(py, &self.grouped_data, &state.grouped_data)?;
+        }
         let (func, et) = twus_func(
             py,
             &statefulProcessor,
@@ -337,6 +384,9 @@ impl PyGroupedData {
         initialState: Option<PyRef<'_, PyGroupedData>>,
         eventTimeColumnName: &str,
     ) -> PyResult<PyDataFrame> {
+        if let Some(state) = &initialState {
+            check_same_session(py, &self.grouped_data, &state.grouped_data)?;
+        }
         let (func, et) = twus_func(
             py,
             &statefulProcessor,

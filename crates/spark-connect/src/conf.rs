@@ -23,30 +23,41 @@ impl RuntimeConf {
         RuntimeConf { client }
     }
 
-    /// Set a configuration key-value pair.
-    ///
-    /// Converts boolean and integer values to strings as required by the server.
+    /// Set a configuration key-value pair, returning the warnings of the server, such as of a
+    /// deprecated or unsupported configuration, which PySpark's `RuntimeConf.set` warns.
     ///
     /// # Arguments
     ///
     /// * `key` - The configuration key (e.g., "spark.sql.shuffle.partitions")
-    /// * `value` - The configuration value as a string, integer, or boolean
+    /// * `value` - The configuration value, as a string, such as "true" for a boolean
     ///
     /// # Example
     ///
     /// ```ignore
     /// conf.set("spark.sql.shuffle.partitions", "200")?;
-    /// conf.set("spark.sql.adaptive.enabled", true)?;
-    /// conf.set("spark.sql.maxMetadataStringLength", 100)?;
+    /// conf.set("spark.sql.adaptive.enabled", "true")?;
     /// ```
-    pub fn set(&self, key: &str, value: &str) -> Result<()> {
+    pub fn set(&self, key: &str, value: &str) -> Result<Vec<String>> {
         block_on(self.client.set_config(key, value))
     }
 
     /// Set several configuration values in one request, ignoring the failures to set them,
-    /// such as of static configurations, when `silent`. Mirrors `RuntimeConf._set_all`.
-    pub fn set_all(&self, pairs: &[(String, String)], silent: bool) -> Result<()> {
+    /// such as of static configurations, when `silent`, returning the warnings of the server.
+    /// Mirrors `RuntimeConf._set_all`.
+    pub fn set_all(&self, pairs: &[(String, String)], silent: bool) -> Result<Vec<String>> {
         block_on(self.client.set_configs(pairs, silent))
+    }
+
+    /// Set configuration values in one request, as PySpark's `RuntimeConf.set` and `_set_all`
+    /// send them: a pair without a value is sent without one, as PySpark sends None, which the
+    /// server rejects, and with `silent` the failures to set them are ignored. Returns the
+    /// warnings of the server.
+    pub fn set_pairs(
+        &self,
+        pairs: &[(&str, Option<&str>)],
+        silent: Option<bool>,
+    ) -> Result<Vec<String>> {
+        block_on(self.client.set_config_values(pairs, silent))
     }
 
     /// Get a configuration value by key.
@@ -97,7 +108,8 @@ impl RuntimeConf {
         Ok(results)
     }
 
-    /// Unset a configuration key (reset to default).
+    /// Unset a configuration key (reset to default), returning the warnings of the server,
+    /// which PySpark's `RuntimeConf.unset` warns.
     ///
     /// # Arguments
     ///
@@ -108,7 +120,7 @@ impl RuntimeConf {
     /// ```ignore
     /// conf.unset("spark.sql.shuffle.partitions")?;
     /// ```
-    pub fn unset(&self, key: &str) -> Result<()> {
+    pub fn unset(&self, key: &str) -> Result<Vec<String>> {
         block_on(self.client.unset_config(key))
     }
 

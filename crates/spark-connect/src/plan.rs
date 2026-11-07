@@ -182,6 +182,14 @@ pub enum LogicalPlan {
         /// The parameters, literal expressions or columns, as PySpark's `lit` of them.
         parameters: Vec<Expression>,
     },
+    /// Parse: a DataFrame of one string column parsed into a structured DataFrame, as
+    /// PySpark's `Parse` of `spark.read.json`, `csv` and `xml` of a DataFrame.
+    Parse {
+        input: Arc<LogicalPlan>,
+        format: ParseFormat,
+        schema: Option<DataType>,
+        options: HashMap<String, String>,
+    },
     /// Unpivot: `df.unpivot(...)`.
     Unpivot {
         input: Arc<LogicalPlan>,
@@ -1049,6 +1057,20 @@ impl LogicalPlan {
                 relation.rel_type = Some(proto::relation::RelType::Hint(Box::new(hint)));
             }
 
+            LogicalPlan::Parse {
+                input,
+                format,
+                schema,
+                options,
+            } => {
+                relation.rel_type = Some(proto::relation::RelType::Parse(Box::new(proto::Parse {
+                    input: Some(Box::new(relation_of(input, plan_ids))),
+                    format: format.to_proto() as i32,
+                    schema: schema.as_ref().map(|s| s.to_proto()),
+                    options: options.clone(),
+                })));
+            }
+
             LogicalPlan::Unpivot {
                 input,
                 ids,
@@ -1894,6 +1916,24 @@ pub fn to_schema(input: impl Into<Arc<LogicalPlan>>, schema: DataType) -> Logica
     LogicalPlan::ToSchema {
         input: input.into(),
         schema,
+    }
+}
+
+/// The format of a `Parse`: PySpark's `ParseFormat` of `spark.read.csv`, `json` and `xml`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParseFormat {
+    Csv,
+    Json,
+    Xml,
+}
+
+impl ParseFormat {
+    fn to_proto(self) -> proto::parse::ParseFormat {
+        match self {
+            ParseFormat::Csv => proto::parse::ParseFormat::Csv,
+            ParseFormat::Json => proto::parse::ParseFormat::Json,
+            ParseFormat::Xml => proto::parse::ParseFormat::Xml,
+        }
     }
 }
 

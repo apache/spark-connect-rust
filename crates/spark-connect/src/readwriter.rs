@@ -76,7 +76,13 @@ impl DataFrameReader {
 
     /// Load data from the specified path(s) with the configured format, schema, and options.
     pub fn load(self, path: Option<&str>) -> DataFrame {
-        let paths = path.map(|p| vec![p.to_string()]);
+        self.load_paths(path.map(|p| vec![p.to_string()]).unwrap_or_default())
+    }
+
+    /// Load data from `paths`, mirroring `DataFrameReader.load` of a list of paths, with the
+    /// configured format, schema, and options.
+    pub fn load_paths(self, paths: Vec<String>) -> DataFrame {
+        let paths = Some(paths);
         let plan = LogicalPlan::Read {
             read_type: ReadType::DataSource {
                 format: self.format,
@@ -103,6 +109,27 @@ impl DataFrameReader {
             is_streaming: None,
         };
         DataFrame::new(self.session, plan)
+    }
+
+    /// Parse the strings of `input`, a DataFrame of one string column, as `format`, with the
+    /// schema and the options of this reader, mirroring `DataFrameReader.json`, `csv` and `xml`
+    /// of a DataFrame: a schema of JSON, or else of DDL, which the server parses, as PySpark's
+    /// `StructType.fromDDL`.
+    pub fn parse(self, format: crate::plan::ParseFormat, input: &DataFrame) -> Result<DataFrame> {
+        let schema = if self.schema.is_empty() {
+            None
+        } else if self.schema.starts_with('{') {
+            Some(crate::types::DataType::from_json_str(&self.schema)?)
+        } else {
+            Some(self.session.parse_ddl(&self.schema)?)
+        };
+        let plan = LogicalPlan::Parse {
+            input: Arc::clone(&input.plan),
+            format,
+            schema,
+            options: self.options,
+        };
+        Ok(DataFrame::new(self.session, plan))
     }
 
     /// Read from a named table.
@@ -527,6 +554,13 @@ impl DataFrameWriterV2 {
         self
     }
 
+    /// Leave the table property `property` unset, as PySpark's `tableProperty(property, None)`,
+    /// which the command does not send.
+    pub fn unset_table_property(mut self, property: &str) -> Self {
+        self.table_properties.remove(property);
+        self
+    }
+
     /// Partition the output table by the given columns.
     pub fn partition_by<C: Into<Column>>(mut self, columns: impl IntoIterator<Item = C>) -> Self {
         self.partition_cols = columns.into_iter().map(Into::into).collect();
@@ -875,5 +909,58 @@ mod tests {
             }
             _ => panic!("expected Read plan"),
         }
+    }
+
+    #[test]
+    fn parse_sends_the_strings_with_the_schema_and_options_of_the_reader() {
+        use crate::plan::ParseFormat;
+        use crate::types::DataType;
+        use proto::relation::RelType;
+
+        let spark = session();
+        // A lazy plan, as `spark.sql` runs on the call.
+        let strings = spark.range(1).unwrap();
+        let parse_of = |reader: DataFrameReader, format| match reader
+            .parse(format, &strings)
+            .unwrap()
+            .relation()
+            .rel_type
+        {
+            Some(RelType::Parse(parse)) => parse,
+            other => panic!("expected Parse, got {other:?}"),
+        };
+        // A schema of JSON, as PySpark's `StructType.fromJson`; one of DDL the server parses
+        // (the e2e tests check it).
+        let json = DataType::from_ddl("a INT, b STRING").unwrap().json();
+        let parse = parse_of(
+            spark.read().schema(json).option("sep", ";"),
+            ParseFormat::Csv,
+        );
+        assert_eq!(parse.format, proto::parse::ParseFormat::Csv as i32);
+        assert_eq!(
+            parse.schema,
+            Some(DataType::from_ddl("a INT, b STRING").unwrap().to_proto())
+        );
+        assert_eq!(parse.options.get("sep").map(String::as_str), Some(";"));
+        assert!(matches!(
+            parse.input.and_then(|input| input.rel_type),
+            Some(RelType::Range(_))
+        ));
+        let json = DataType::from_ddl("c BIGINT").unwrap().json();
+        let parse = parse_of(spark.read().schema(json), ParseFormat::Json);
+        assert_eq!(parse.format, proto::parse::ParseFormat::Json as i32);
+        assert_eq!(
+            parse.schema,
+            Some(DataType::from_ddl("c BIGINT").unwrap().to_proto())
+        );
+        // Without one, the server infers it.
+        let parse = parse_of(spark.read(), ParseFormat::Xml);
+        assert_eq!(parse.format, proto::parse::ParseFormat::Xml as i32);
+        assert_eq!(parse.schema, None);
+        assert!(spark
+            .read()
+            .schema("{not json".to_string())
+            .parse(ParseFormat::Json, &strings)
+            .is_err());
     }
 }
