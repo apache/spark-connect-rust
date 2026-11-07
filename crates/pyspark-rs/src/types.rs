@@ -11,7 +11,9 @@ pub(crate) fn normalize_tree_depth(depth: &Bound<'_, PyAny>) -> PyResult<i32> {
     if !depth.gt(0)? || depth.ge(i32::MAX)? {
         Ok(i32::MAX)
     } else {
-        Ok(depth.extract::<f64>()?.ceil() as i32)
+        // A positive Fraction or Decimal may underflow to zero as f64. Keep
+        // it at depth one: zero would request an unlimited tree instead.
+        Ok((depth.extract::<f64>()?.ceil() as i32).max(1))
     }
 }
 

@@ -17,6 +17,7 @@ import pickle
 import time
 from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor
+from fractions import Fraction
 from threading import Barrier
 
 import pytest
@@ -11324,6 +11325,8 @@ _PRINT_SCHEMA_FULL = (
         (0, _PRINT_SCHEMA_FULL),
         (1, _PRINT_SCHEMA_LEVEL1),
         (1.5, _PRINT_SCHEMA_LEVEL2),
+        (Fraction(1, 10**400), _PRINT_SCHEMA_LEVEL1),
+        (decimal.Decimal("1e-1000"), _PRINT_SCHEMA_LEVEL1),
         (2**100, _PRINT_SCHEMA_FULL),
         (float("nan"), _PRINT_SCHEMA_FULL),
     ],
