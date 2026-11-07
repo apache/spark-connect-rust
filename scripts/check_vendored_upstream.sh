@@ -93,6 +93,9 @@ VENDORED_FILES=(
   "accumulators.py"
   "memory_profiler_ext.py"
   "profiler.py"
+  # The ConnectProfilerCollector of spark.profile, of the UDF profiles that the client takes
+  # from the updates of the Python accumulators of its executions.
+  "sql/connect/profiler.py"
   "worker_util.py"
   "instrumentation_utils.py"
 

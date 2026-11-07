@@ -2258,8 +2258,8 @@ fn capture_execution(
     if !resp.observed_metrics.is_empty() {
         let metrics = std::mem::take(&mut resp.observed_metrics);
         set_observations(session, &metrics);
-        // Feed observed metrics to the profiler collector
-        session.profiler().accumulate_observed_metrics(&metrics);
+        // The updates of the Python accumulators, such as the results of the UDF profilers.
+        session.python_accumulators().accumulate(&metrics);
         info.observed_metrics.extend(metrics);
     }
 }

@@ -2452,6 +2452,31 @@ def test_stream_writer_starts_a_query_of_its_real_time_trigger_as_pyspark(sessio
         "STREAMING_REAL_TIME_MODE.OPERATOR_OR_SINK_NOT_IN_ALLOWLIST")
 
 
+def test_udf_profiles_are_shown_by_spark_profile_as_pyspark(session, capsys):
+    # As PySpark Connect's: with the UDF profiler, spark.profile shows the profile of each UDF
+    # that an execution ran, which clear removes.
+    from pyspark.sql.functions import udf
+
+    session.profile.clear()
+    session.conf.set("spark.sql.pyspark.udf.profiler", "perf")
+    try:
+        @udf("long")
+        def plus_one(x):
+            return x + 1
+
+        session.range(4).select(plus_one("id")).collect()
+    finally:
+        session.conf.unset("spark.sql.pyspark.udf.profiler")
+    capsys.readouterr()
+    session.profile.show(type="perf")
+    assert "Profile of UDF<id=" in capsys.readouterr().out
+    session.profile.clear()
+    session.profile.show()
+    assert capsys.readouterr().out == ""
+
+
+
+
 def test_create_dataframe_raises_merge_errors_as_pyspark(session):
     from pyspark.errors import PySparkException
 

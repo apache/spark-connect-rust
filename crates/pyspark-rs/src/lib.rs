@@ -72,7 +72,6 @@ use dataframe::{
 };
 use datasource::PyDataSourceRegistration;
 use group::{PyCoGroupedData, PyGroupedData};
-use profiler::PyProfilerCollector;
 use readwriter::PyDataFrameReader;
 use resource::{
     PyExecutorResourceRequests, PyResourceProfile, PyResourceProfileBuilder, PyTaskResourceRequests,
@@ -178,7 +177,6 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Data source and profiler classes
     m.add_class::<PyDataSourceRegistration>()?;
-    m.add_class::<PyProfilerCollector>()?;
 
     // Register DataType classes
     m.add_class::<PyDataType>()?;

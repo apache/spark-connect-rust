@@ -7136,6 +7136,57 @@ def test_schema_cache_random_split_and_observe_reuse_warm_schema(mock_connect):
     assert service.calls == 1
 
 
+def test_udf_profiles_are_collected_from_the_python_accumulators_as_pyspark(
+        mock_connect, capsys, caplog):
+    # As PySpark Connect's: spark.profile is a Profile of a ConnectProfilerCollector, which the
+    # pickled updates of the UDF profiler, in the __python_accumulator__ observed metrics of an
+    # execution, update; the updates of other accumulators are ignored, and the warning of one
+    # that does not unpickle is logged.
+    import cProfile
+    import pstats
+
+    from pyspark.accumulators import SpecialAccumulatorIds, specialAccumulatorSer
+    from pyspark.sql.connect.profiler import ConnectProfilerCollector
+    from pyspark.sql.profiler import Profile
+
+    spark, service = mock_connect
+    profiler = cProfile.Profile()
+    profiler.enable()
+    sum(range(10))
+    profiler.disable()
+    # As the profiler of the Python worker sends its stats.
+    stats = pstats.Stats(profiler, stream=None)
+    stats.stream = None
+
+    def accumulator_metrics(*updates):
+        # ExecutePlanResponse.observed_metrics=6 -> ObservedMetrics name=1, values=2
+        # (Expression.Literal binary=2).
+        observed = message_field(1, "__python_accumulator__")
+        for update in updates:
+            observed += message_field(2, message_field(2, update))
+        return message_field(6, observed)
+
+    service.execute_payload = accumulator_metrics(
+        specialAccumulatorSer.dumps(
+            (SpecialAccumulatorIds.SQL_UDF_PROFIER_V2, {7: {"perf": stats}})),
+        specialAccumulatorSer.dumps((SpecialAccumulatorIds.SQL_UDF_PROFIER, {8: (stats, None)})),
+        b"not a pickle",
+    )
+    with caplog.at_level("WARNING"):
+        spark.range(1).collect()
+    assert isinstance(spark.profile, Profile)
+    assert isinstance(spark._profiler_collector, ConnectProfilerCollector)
+    assert list(spark._profiler_collector._profile_results) == [7]
+    assert "Error unpickling accumulator metric" in caplog.text
+    capsys.readouterr()
+    spark.profile.show(type="perf")
+    assert "Profile of UDF<id=7>" in capsys.readouterr().out
+    spark.profile.clear()
+    assert spark._profiler_collector._profile_results == {}
+
+
+
+
 def test_schema_cache_cold_children_keep_independent_caches(mock_connect):
     spark, service = mock_connect
     df = spark.range(10)
