@@ -89,6 +89,21 @@ The Python model uses the existing `MLModel.transform` interface. Model inspecti
 (coefficients, intercept and summaries), single-vector prediction and model
 persistence are not exposed by this addition.
 
+## pyspark.ml
+
+The DataFrame-based `pyspark.ml` API (`pyspark.ml.classification`, `feature`,
+`regression`, `clustering`, `evaluation`, `tuning`, `stat`, `Pipeline`, ...) is
+Apache Spark's own, vendored from v4.3.0: estimators fit, models transform, and
+pipelines save and load on the server as with PySpark Connect, over the Rust
+transport. These modules build their own `spark.connect` messages with the
+generated `pyspark.sql.connect.proto`, which needs the `protobuf` package
+(`pip install "protobuf>=6.33.5"`). The package is not a dependency of
+`pyspark-client-rust`: without it, `pyspark.ml` imports, but a fit or a transform
+raises an `AttributeError` that names `protobuf`.
+
+A DataFrame of a plan of `pyspark.ml` (`DataFrame(plan, session)`) takes the plan ID
+of this client rather than the one of the plan, which its columns refer to.
+
 ## How parity is verified
 
 Two independent gates in CI cover the two halves of a Spark Connect client - plan

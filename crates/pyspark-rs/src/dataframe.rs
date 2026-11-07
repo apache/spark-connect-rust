@@ -545,6 +545,52 @@ fn watermark_argument(value: &Bound<'_, PyAny>, name: &str) -> PyResult<String> 
 
 #[pymethods]
 impl PyDataFrame {
+    /// A DataFrame of `plan`, a plan of the Python client (`pyspark.sql.connect.plan`), such as
+    /// the plans of `pyspark.ml`, as PySpark Connect's `DataFrame(plan, session)`: of the
+    /// relation of `plan.plan(session.client)`, which the client sends as it is.
+    #[new]
+    fn py_new(
+        plan: &Bound<'_, PyAny>,
+        session: &Bound<'_, crate::session::PySparkSession>,
+    ) -> PyResult<Self> {
+        use prost::Message;
+        let relation = plan
+            .call_method1("plan", (session.getattr("client")?,))?
+            .call_method0("SerializeToString")?;
+        let relation = spark_connect_proto::Relation::decode(
+            relation.cast::<pyo3::types::PyBytes>()?.as_bytes(),
+        )
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+        // The plan, as PySpark Connect's DataFrame keeps it, keeps the models whose cached
+        // objects on the server the relation refers to (`__source_instance__`).
+        let owner: std::sync::Arc<dyn std::any::Any + Send + Sync> =
+            std::sync::Arc::new(plan.clone().unbind());
+        Ok(PyDataFrame::new(DataFrame::from_relation(
+            session.borrow().session.clone(),
+            relation,
+            Some(owner),
+        )))
+    }
+
+    /// The bytes of the relation of this DataFrame as it is sent, for the plan of `_plan`.
+    fn _relation_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, pyo3::types::PyBytes> {
+        use prost::Message;
+        pyo3::types::PyBytes::new(py, &self.dataframe.to_relation().encode_to_vec())
+    }
+
+    /// The plan of this DataFrame, as PySpark Connect's `DataFrame._plan`, whose
+    /// `plan(client)` is its relation, over which `pyspark.ml` builds its plans
+    /// (`pyspark.sql.connect.plan`).
+    #[getter]
+    fn _plan(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        Ok(slf
+            .py()
+            .import("pyspark.sql.connect.plan")?
+            .getattr("_DataFramePlan")?
+            .call1((slf,))?
+            .unbind())
+    }
+
     /// Select columns (accepts Column objects or string names).
     #[pyo3(signature = (*cols))]
     fn select(&self, _py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
