@@ -502,6 +502,37 @@ def test_map_functions_take_a_ddl_schema(session):
         assert sorted(tuple(r) for r in result.collect()) == [(1, 1.0), (1, 2.0), (2, 3.0)]
 
 
+def test_inheritable_threads_run_with_the_tags_of_their_parents_as_pyspark(session):
+    # As PySpark's: the operation of an InheritableThread carries the tags of the thread that
+    # started it, so interruptTag of a tag of the parent interrupts it.
+    import threading
+    import time
+
+    from pyspark import InheritableThread
+    from pyspark.sql import functions as F
+
+    slow = F.udf(lambda x: (time.sleep(30), x)[1], "long")
+    results = {}
+
+    def run():
+        try:
+            results["child"] = session.range(1).select(slow("id")).collect()
+        except Exception as e:  # noqa: BLE001
+            results["child"] = e
+
+    session.addTag("tag_of_the_parent")
+    try:
+        thread = InheritableThread(target=run, session=session)
+        thread.start()
+        time.sleep(3)
+        interrupted = session.interruptTag("tag_of_the_parent")
+        thread.join(60)
+    finally:
+        session.clearTags()
+    assert len(interrupted) == 1
+    assert isinstance(results["child"], Exception)
+
+
 def test_map_functions_run_in_the_stage_of_their_resource_profile(session):
     # As PySpark's, mapInPandas and mapInArrow send their resource profile, which the server
     # creates: a server that does not support it, as one in local mode, rejects it, and

@@ -74,6 +74,7 @@ from pyspark.sql import (
     Column,
     Row,
 )
+from pyspark.util import InheritableThread, inheritable_thread_target
 
 __all__ = [
     "SparkSession",
@@ -91,5 +92,7 @@ __all__ = [
     "TaskContext",
     "BarrierTaskContext",
     "BarrierTaskInfo",
+    "InheritableThread",
+    "inheritable_thread_target",
     "__version__",
 ]

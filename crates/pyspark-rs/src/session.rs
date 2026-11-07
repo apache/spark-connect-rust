@@ -325,6 +325,13 @@ fn new_session(py: Python<'_>, url: &str) -> PyResult<Py<PySparkSession>> {
         .get_or_create()
         .to_pyerr()?;
     let session = Py::new(py, PySparkSession::new(session))?;
+    set_default_and_active(py, &session);
+    Ok(session)
+}
+
+/// Make `session` the default session, and the active session of this thread, when they are
+/// not set, as PySpark's `SparkSession._set_default_and_active_session`.
+fn set_default_and_active(py: Python<'_>, session: &Py<PySparkSession>) {
     {
         let mut default = default_slot().lock().unwrap_or_else(|e| e.into_inner());
         if default.is_none() {
@@ -337,7 +344,6 @@ fn new_session(py: Python<'_>, url: &str) -> PyResult<Py<PySparkSession>> {
             *active = Some(session.clone_ref(py));
         }
     });
-    Ok(session)
 }
 
 /// Emit a one-time INFO log identifying this as the Rust-backed Spark Connect
@@ -1713,6 +1719,14 @@ impl PySparkSession {
     #[pyo3(name = "removeTag")]
     fn remove_tag(&self, tag: &str) {
         self.session.remove_tag(tag)
+    }
+
+    /// Make `session` the default session, and the active session of this thread, when they
+    /// are not set, as PySpark's, which `inheritable_thread_target` calls in a new thread.
+    #[staticmethod]
+    #[pyo3(name = "_set_default_and_active_session")]
+    fn set_default_and_active_session(py: Python<'_>, session: Py<PySparkSession>) {
+        set_default_and_active(py, &session);
     }
 
     /// The tags of the current thread, a set, as PySpark's `getTags`.
