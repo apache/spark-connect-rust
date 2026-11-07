@@ -791,6 +791,52 @@ def test_reader_schema_keeps_field_metadata(session, tmp_path, ddl):
     assert stream.schema.fields[0].metadata == {"comment": "the key"}
 
 
+def test_reader_writer_and_catalog_return_the_results_of_pyspark(session, tmp_path):
+    # As PySpark's: csv, json and xml of a DataFrame of strings parse them, the readers load
+    # every path, and createTable creates the table on the call, of its schema and options.
+    import warnings
+
+    strings = session.createDataFrame([("1;x",), ("2;y",)], "value string")
+    assert session.read.csv(strings, sep=";", schema="a INT, b STRING").collect() == [
+        Row(a=1, b="x"), Row(a=2, b="y")]
+    assert session.read.csv(strings, sep=";").columns == ["_c0", "_c1"]
+    documents = session.createDataFrame([('{"a": 1, "b": "x"}',)], "value string")
+    assert session.read.json(documents).collect() == [Row(a=1, b="x")]
+    assert session.read.json(documents, schema=StructType([StructField("a", LongType())])) \
+        .collect() == [Row(a=1)]
+    elements = session.createDataFrame([("<row><a>1</a></row>",)], "value string")
+    assert session.read.xml(elements, rowTag="row").collect() == [Row(a=1)]
+    for name in ("p1", "p2"):
+        session.range(2).write.mode("overwrite").parquet(str(tmp_path / name))
+    paths = [str(tmp_path / "p1"), str(tmp_path / "p2")]
+    assert session.read.parquet(*paths).count() == 4
+    assert session.read.format("parquet").load(paths).count() == 4
+    session.range(3).write.mode(None).json(str(tmp_path / "j"))
+    assert session.read.json([str(tmp_path / "j")]).count() == 3
+    session.sql("DROP TABLE IF EXISTS e2e_created_eagerly")
+    try:
+        schema = StructType([StructField("a", LongType()), StructField("b", StringType())])
+        created = session.catalog.createTable(
+            "e2e_created_eagerly", source="parquet", schema=schema, description="d",
+            compression="snappy")
+        assert session.catalog.tableExists("e2e_created_eagerly")
+        assert created.columns == ["a", "b"]
+        assert session.catalog.getTable("e2e_created_eagerly").description == "d"
+    finally:
+        session.sql("DROP TABLE IF EXISTS e2e_created_eagerly")
+    session.sql("DROP TABLE IF EXISTS e2e_external_eagerly")
+    try:
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter("always")
+            external = session.catalog.createExternalTable(
+                "e2e_external_eagerly", path=paths[0], source="parquet")
+            assert session.catalog.tableExists("e2e_external_eagerly", "default")
+        assert external.count() == 2
+        assert [w.category for w in record] == [FutureWarning, FutureWarning]
+    finally:
+        session.sql("DROP TABLE IF EXISTS e2e_external_eagerly")
+
+
 def test_subqueries_and_table_arguments_return_the_rows_of_pyspark(session):
     # As PySpark's DataFrame.scalar(), DataFrame.exists(), Column.isin(df) and asTable():
     # scalar, correlated and IN subqueries, and the rows of a DataFrame as a UDTF argument.

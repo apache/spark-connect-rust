@@ -2,6 +2,8 @@
 //!
 //! Provides access to database and table metadata, and catalog operations.
 
+use std::collections::HashMap;
+
 use spark_connect_core::error::{Result, SparkError};
 use spark_connect_core::runtime::block_on;
 use spark_connect_proto as proto;
@@ -523,19 +525,31 @@ impl Catalog {
         path: Option<&str>,
         source: Option<&str>,
     ) -> Result<DataFrame> {
-        let mut create_ext = proto::CreateExternalTable::default();
-        create_ext.table_name = table_name.to_string();
-        if let Some(p) = path {
-            create_ext.path = Some(p.to_string());
-        }
-        if let Some(s) = source {
-            create_ext.source = Some(s.to_string());
-        }
+        self.create_external_table_with(table_name, path, source, None, HashMap::new())
+    }
+
+    /// Create an external table of a schema and options, mirroring
+    /// `Catalog.createExternalTable(tableName, path, source, schema, **options)`.
+    pub fn create_external_table_with(
+        &self,
+        table_name: &str,
+        path: Option<&str>,
+        source: Option<&str>,
+        schema: Option<&crate::types::DataType>,
+        options: HashMap<String, String>,
+    ) -> Result<DataFrame> {
+        let create_ext = proto::CreateExternalTable {
+            table_name: table_name.to_string(),
+            path: path.map(str::to_string),
+            source: source.map(str::to_string),
+            schema: schema.map(|s| s.to_proto()),
+            options,
+        };
 
         let mut catalog_msg = proto::Catalog::default();
         catalog_msg.cat_type = Some(proto::catalog::CatType::CreateExternalTable(create_ext));
 
-        self.execute_catalog_as_dataframe(&catalog_msg)
+        self.execute_catalog_eagerly(&catalog_msg)
     }
 
     /// Create a table.
@@ -548,22 +562,33 @@ impl Catalog {
         source: Option<&str>,
         description: Option<&str>,
     ) -> Result<DataFrame> {
-        let mut create_tbl = proto::CreateTable::default();
-        create_tbl.table_name = table_name.to_string();
-        if let Some(p) = path {
-            create_tbl.path = Some(p.to_string());
-        }
-        if let Some(s) = source {
-            create_tbl.source = Some(s.to_string());
-        }
-        if let Some(d) = description {
-            create_tbl.description = Some(d.to_string());
-        }
+        self.create_table_with(table_name, path, source, None, description, HashMap::new())
+    }
+
+    /// Create a table of a schema and options, mirroring
+    /// `Catalog.createTable(tableName, path, source, schema, description, **options)`.
+    pub fn create_table_with(
+        &self,
+        table_name: &str,
+        path: Option<&str>,
+        source: Option<&str>,
+        schema: Option<&crate::types::DataType>,
+        description: Option<&str>,
+        options: HashMap<String, String>,
+    ) -> Result<DataFrame> {
+        let create_tbl = proto::CreateTable {
+            table_name: table_name.to_string(),
+            path: path.map(str::to_string),
+            source: source.map(str::to_string),
+            description: description.map(str::to_string),
+            schema: schema.map(|s| s.to_proto()),
+            options,
+        };
 
         let mut catalog_msg = proto::Catalog::default();
         catalog_msg.cat_type = Some(proto::catalog::CatType::CreateTable(create_tbl));
 
-        self.execute_catalog_as_dataframe(&catalog_msg)
+        self.execute_catalog_eagerly(&catalog_msg)
     }
 
     /// Drop a temporary view.
@@ -1054,6 +1079,15 @@ impl Catalog {
             catalog: catalog.clone(),
         };
         Ok(DataFrame::new(self.session.clone(), plan))
+    }
+
+    /// The DataFrame of a catalog operation, executed once first, as PySpark's
+    /// `createTable` executes it eagerly (`df._to_table()`), so that the table exists on
+    /// return.
+    fn execute_catalog_eagerly(&self, catalog: &proto::Catalog) -> Result<DataFrame> {
+        let df = self.execute_catalog_as_dataframe(catalog)?;
+        df.to_arrow()?;
+        Ok(df)
     }
 
     /// Build an ExecutePlanRequest for a catalog operation.

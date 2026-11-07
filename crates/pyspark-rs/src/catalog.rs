@@ -8,6 +8,70 @@ use spark_connect::catalog::{
 use crate::dataframe::PyDataFrame;
 use crate::errors::ResultExt;
 
+/// PySpark's FutureWarning of the deprecated `dbName` of the catalog method `method`.
+fn warn_db_name(py: Python<'_>, method: &str, db_name: Option<&str>) -> PyResult<()> {
+    if db_name.is_some() {
+        py.import("warnings")?.call_method1(
+            "warn",
+            (
+                format!(
+                    "`dbName` has been deprecated since Spark 3.4 and might be removed in a \
+                     future version. Use {method}(`dbName.tableName`) instead."
+                ),
+                py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+/// The schema of `createTable`, a StructType, as PySpark's, else `NOT_EXPECTED_TYPE`.
+fn table_schema(
+    schema: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<spark_connect::types::DataType>> {
+    let Some(schema) = schema.filter(|schema| !schema.is_none()) else {
+        return Ok(None);
+    };
+    if let Ok(st) = schema.extract::<PyRef<'_, crate::types::PyStructType>>() {
+        return Ok(Some(spark_connect::types::DataType::Struct {
+            fields: st.fields.clone(),
+        }));
+    }
+    let type_name = schema.get_type().name()?.to_string();
+    Err(crate::column::raise_pyspark(
+        schema.py(),
+        "PySparkTypeError",
+        "NOT_EXPECTED_TYPE",
+        &[
+            ("arg_name", "schema"),
+            ("expected_type", "struct type"),
+            ("arg_type", &type_name),
+        ],
+    ))
+}
+
+/// The `**options` of `createTable`, as PySpark's: strings, where a `None` is left out.
+fn table_options(
+    options: Option<&Bound<'_, pyo3::types::PyDict>>,
+) -> PyResult<std::collections::HashMap<String, String>> {
+    let mut map = std::collections::HashMap::new();
+    for (key, value) in options.into_iter().flat_map(|options| options.iter()) {
+        if value.is_none() {
+            continue;
+        }
+        if !value.is_instance_of::<pyo3::types::PyString>() {
+            // As the protobuf map of strings that PySpark sets the options in.
+            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "{} has type {}, but expected one of: (<class 'bytes'>, <class 'str'>)",
+                value.repr()?,
+                value.get_type().str()?
+            )));
+        }
+        map.insert(key.extract()?, value.extract()?);
+    }
+    Ok(map)
+}
+
 /// `pyspark.sql.catalog.CatalogMetadata`.
 #[pyclass(name = "CatalogMetadata", module = "pyspark.sql.catalog")]
 pub struct PyCatalogMetadata {
@@ -290,7 +354,8 @@ impl PyCatalog {
 
     /// Check if table exists. Mirrors `Catalog.tableExists(tableName, dbName=None) -> bool`.
     #[pyo3(signature = (tableName, dbName=None))]
-    fn tableExists(&self, tableName: &str, dbName: Option<&str>) -> PyResult<bool> {
+    fn tableExists(&self, py: Python<'_>, tableName: &str, dbName: Option<&str>) -> PyResult<bool> {
+        warn_db_name(py, "tableExists", dbName)?;
         self.catalog
             .table_exists_with_database(tableName, dbName)
             .to_pyerr()
@@ -322,7 +387,13 @@ impl PyCatalog {
 
     /// Check if function exists. Mirrors `Catalog.functionExists(functionName, dbName=None) -> bool`.
     #[pyo3(signature = (functionName, dbName=None))]
-    fn functionExists(&self, functionName: &str, dbName: Option<&str>) -> PyResult<bool> {
+    fn functionExists(
+        &self,
+        py: Python<'_>,
+        functionName: &str,
+        dbName: Option<&str>,
+    ) -> PyResult<bool> {
+        warn_db_name(py, "functionExists", dbName)?;
         self.catalog
             .function_exists_with_database(functionName, dbName)
             .to_pyerr()
@@ -338,7 +409,13 @@ impl PyCatalog {
     /// List columns of a table. Mirrors `Catalog.listColumns(tableName, dbName=None) -> List[Column]`.
     #[pyo3(signature = (tableName, dbName=None))]
     #[allow(non_snake_case)]
-    fn listColumns(&self, tableName: &str, dbName: Option<&str>) -> PyResult<Vec<PyCatalogColumn>> {
+    fn listColumns(
+        &self,
+        py: Python<'_>,
+        tableName: &str,
+        dbName: Option<&str>,
+    ) -> PyResult<Vec<PyCatalogColumn>> {
+        warn_db_name(py, "listColumns", dbName)?;
         Ok(self
             .catalog
             .list_columns_typed(tableName, dbName)
@@ -403,11 +480,13 @@ impl PyCatalog {
         self.catalog.recover_partitions(tableName).to_pyerr()
     }
 
-    /// Create a table from a data source.
+    /// Create a table from a data source, as PySpark's: of a StructType `schema` and string
+    /// `**options`, created on return.
     #[pyo3(signature = (tableName, path=None, source=None, schema=None, description=None, **options))]
-    #[allow(non_snake_case, unused_variables)]
+    #[allow(non_snake_case, clippy::too_many_arguments)]
     fn createTable(
         &self,
+        py: Python<'_>,
         tableName: &str,
         path: Option<&str>,
         source: Option<&str>,
@@ -415,27 +494,46 @@ impl PyCatalog {
         description: Option<&str>,
         options: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<PyDataFrame> {
-        self.catalog
-            .create_table(tableName, path, source, description)
-            .map(PyDataFrame::new)
-            .to_pyerr()
+        let schema = table_schema(schema)?;
+        let options = table_options(options)?;
+        py.detach(|| {
+            self.catalog
+                .create_table_with(
+                    tableName,
+                    path,
+                    source,
+                    schema.as_ref(),
+                    description,
+                    options,
+                )
+                .map_err(Box::new)
+        })
+        .map(PyDataFrame::new)
+        .to_pyerr()
     }
 
-    /// Create an external table from a data source.
+    /// Create an external table from a data source: deprecated, as PySpark's, which warns and
+    /// creates the table as `createTable` does.
     #[pyo3(signature = (tableName, path=None, source=None, schema=None, **options))]
-    #[allow(non_snake_case, unused_variables)]
+    #[allow(non_snake_case)]
     fn createExternalTable(
         &self,
+        py: Python<'_>,
         tableName: &str,
         path: Option<&str>,
         source: Option<&str>,
         schema: Option<&Bound<'_, PyAny>>,
         options: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<PyDataFrame> {
-        self.catalog
-            .create_external_table(tableName, path, source)
-            .map(PyDataFrame::new)
-            .to_pyerr()
+        py.import("warnings")?.call_method1(
+            "warn",
+            (
+                "createExternalTable is deprecated since Spark 4.0, please use createTable \
+                 instead.",
+                py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+            ),
+        )?;
+        self.createTable(py, tableName, path, source, schema, None, options)
     }
 
     /// Register a Python function as a UDF, returning the registered UDF. Deprecated

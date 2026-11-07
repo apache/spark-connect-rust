@@ -9297,6 +9297,214 @@ def test_reader_schema_is_sent_as_pyspark_sends_it(mock_connect, read):
         "arg_name": "schema", "expected_type": "str or struct type", "arg_type": "LongType"}
 
 
+def _sent_relation(request, field):
+    """The relation `field` of the root of a captured AnalyzePlanRequest or ExecutePlanRequest:
+    AnalyzePlanRequest.schema=4 -> plan=1, or ExecutePlanRequest.plan=3; then Plan.root=1."""
+    message = parse_message(request)
+    plan = parse_message(message[4][0])[1][0] if 4 in message else message[3][0]
+    root = parse_message(parse_message(plan)[1][0])
+    assert field in root, sorted(root)
+    return parse_message(root[field][0])
+
+
+def _struct_field_names(data_type):
+    # DataType.struct=21 -> Struct.fields=1 -> StructField.name=1.
+    struct = parse_message(parse_message(data_type)[21][0])
+    return [parse_message(field)[1][0].decode() for field in struct[1]]
+
+
+@pytest.mark.parametrize("read, format, option", [
+    (lambda spark, df: spark.read.csv(df, schema="a INT, b STRING", sep=";"), 1, b"sep"),
+    (lambda spark, df: spark.read.json(df, schema="a INT, b STRING", lineSep=";"), 2,
+     b"lineSep"),
+    (lambda spark, df: spark.read.xml(df, schema="a INT, b STRING", rowTag=";"), 3, b"rowTag"),
+], ids=["csv", "json", "xml"])
+def test_reader_parses_a_dataframe_of_strings_as_pyspark(mock_connect, read, format, option):
+    # As PySpark's, csv, json and xml of a DataFrame parse its strings: a Parse (Relation.parse
+    # =30) of the DataFrame (input=1) in the format (format=2), with the schema (schema=3) of
+    # the reader and its options (options=4).
+    spark, service = mock_connect
+    strings = T.StructType([T.StructField("value", T.StringType())])
+    read(spark, spark.createDataFrame([("1;x",)], strings)).columns
+    parse = _sent_relation(service.analyze_requests[-1], 30)
+    assert parse[2] == [format]
+    # The server parses a DDL schema, as PySpark's `StructType.fromDDL`:
+    # AnalyzePlanRequest.ddl_parse=11 -> ddl_string=1.
+    assert [parse_message(parse_message(request)[11][0])[1][0]
+            for request in service.analyze_requests if 11 in parse_message(request)] == [
+        b"a INT, b STRING"]
+    assert _struct_field_names(parse[3][0]) == ["a", "b"]
+    assert parse_message(parse[4][0]) == {1: [option], 2: [b";"]}
+    assert 1 in parse
+    # A schema of JSON, as a StructType sends it, or none.
+    struct = T.StructType([T.StructField("c", T.LongType())])
+    spark.read.json(spark.createDataFrame([("{}",)], strings), schema=struct).columns
+    assert _struct_field_names(_sent_relation(service.analyze_requests[-1], 30)[3][0]) == ["c"]
+    spark.read.csv(spark.createDataFrame([("1",)], strings)).columns
+    assert 3 not in _sent_relation(service.analyze_requests[-1], 30)
+    # The reader keeps the schema and the options of a parse, but not its format, which
+    # only `load` sets.
+    reader = spark.read.format("parquet")
+    reader.csv(spark.createDataFrame([("1",)], strings), schema="a INT", sep=";")
+    assert (reader._format, reader._schema, reader._options) == ("parquet", "a INT", {"sep": ";"})
+    reader.csv("p", sep=",")
+    assert (reader._format, reader._schema, reader._options) == ("csv", "a INT", {"sep": ","})
+
+
+def test_reader_paths_are_checked_as_pyspark(offline_spark):
+    from pyspark.errors import PySparkTypeError
+
+    # json and xml take a path, a list of them or a DataFrame; csv loads any other path,
+    # which load then asserts, as PySpark's.
+    for read in (offline_spark.read.json, offline_spark.read.xml):
+        for path in (1, ("p",)):
+            with pytest.raises(PySparkTypeError) as error:
+                read(path)
+            assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+            assert error.value.getMessageParameters() == {
+                "arg_name": "path", "expected_type": "str, list, or DataFrame",
+                "arg_type": type(path).__name__}
+    for read in (
+        lambda path: offline_spark.read.csv(path),
+        lambda path: offline_spark.read.load(path),
+        lambda path: offline_spark.read.orc(path),
+        lambda path: offline_spark.read.text(path),
+        lambda path: offline_spark.read.json([path]),
+    ):
+        for path in (("p",), 1):
+            with pytest.raises(AssertionError):
+                read(path)
+    with pytest.raises(AssertionError):
+        offline_spark.read.parquet("p", 1)
+
+
+def _sent_data_source_paths(request):
+    # Relation.read=2 -> Read.data_source=2 -> DataSource.paths=4.
+    read = _sent_relation(request, 2)
+    return [path.decode() for path in parse_message(read[2][0]).get(4, [])]
+
+
+@pytest.mark.parametrize("read", [
+    lambda spark: spark.read.json(["a", "b"]),
+    lambda spark: spark.read.csv(["a", "b"]),
+    lambda spark: spark.read.xml(["a", "b"], rowTag="row"),
+    lambda spark: spark.read.parquet("a", "b"),
+    lambda spark: spark.read.orc(["a", "b"]),
+    lambda spark: spark.read.text(["a", "b"]),
+    lambda spark: spark.read.load(["a", "b"], format="json"),
+], ids=["json", "csv", "xml", "parquet", "orc", "text", "load"])
+def test_reader_loads_every_path_as_pyspark(mock_connect, read):
+    spark, service = mock_connect
+    read(spark).columns
+    assert _sent_data_source_paths(service.analyze_requests[-1]) == ["a", "b"]
+
+
+def test_writer_bucket_sort_and_cluster_columns_are_checked_as_pyspark(offline_spark):
+    from pyspark.errors import PySparkTypeError, PySparkValueError
+
+    w = offline_spark.range(3).write
+    assert w.mode(None) is w
+    assert w.bucketBy(True, "id") is w
+    assert w.bucketBy(2, ["id"]) is w and w.bucketBy(2, ("id", "x")) is w
+    assert w.sortBy(["id"]) is w and w.sortBy("id", "x") is w
+    assert w.clusterBy(["id"]) is w and w.clusterBy(("id", "x")) is w
+    for call, condition, parameters in [
+        (lambda: w.bucketBy("2", "id"), "NOT_EXPECTED_TYPE",
+         {"arg_name": "numBuckets", "expected_type": "int", "arg_type": "str"}),
+        (lambda: w.bucketBy(2.0, "id"), "NOT_EXPECTED_TYPE",
+         {"arg_name": "numBuckets", "expected_type": "int", "arg_type": "float"}),
+        (lambda: w.bucketBy(2, ["id"], "x"), "CANNOT_SET_TOGETHER",
+         {"arg_list": "`col` of type list and `cols`"}),
+        (lambda: w.sortBy(("id",), "x"), "CANNOT_SET_TOGETHER",
+         {"arg_list": "`col` of type tuple and `cols`"}),
+        (lambda: w.bucketBy(2, 1), "NOT_EXPECTED_TYPE",
+         {"arg_name": "col", "expected_type": "list[str]", "arg_type": "int"}),
+        (lambda: w.bucketBy(2, "id", 1), "NOT_EXPECTED_TYPE",
+         {"arg_name": "cols", "expected_type": "list[str]", "arg_type": "int"}),
+        (lambda: w.sortBy(["id", 1]), "NOT_EXPECTED_TYPE",
+         {"arg_name": "cols", "expected_type": "list[str]", "arg_type": "int"}),
+        (lambda: w.sortBy(1), "NOT_EXPECTED_TYPE",
+         {"arg_name": "col", "expected_type": "list[str]", "arg_type": "int"}),
+    ]:
+        with pytest.raises((PySparkTypeError, PySparkValueError)) as error:
+            call()
+        assert error.value.getCondition() == condition
+        assert error.value.getMessageParameters() == parameters
+    # As PySpark's `col[0]` of an empty list, and its assertion of the clustering columns.
+    with pytest.raises(IndexError):
+        w.bucketBy(2, [])
+    for call in (w.clusterBy, lambda: w.clusterBy([])):
+        with pytest.raises(AssertionError, match="clusterBy needs one or more"):
+            call()
+
+
+def _sent_catalog(request, field):
+    # Relation.catalog=200 -> the Catalog operation `field`.
+    return parse_message(_sent_relation(request, 200)[field][0])
+
+
+def test_catalog_creates_tables_eagerly_as_pyspark(mock_connect):
+    import warnings
+
+    from pyspark.errors import PySparkTypeError
+
+    spark, service = mock_connect
+    struct = T.StructType([T.StructField("a", T.LongType()), T.StructField("b", T.StringType())])
+    # As PySpark's, createTable runs on the call, a CreateTable (Catalog.create_table=14) of
+    # the table (table_name=1), path=2, source=3, description=4, schema=5 and options=6, of
+    # strings, where a None is left out.
+    spark.catalog.createTable(
+        "t", path="/p", source="parquet", schema=struct, description="d", k="v", skipped=None)
+    create = _sent_catalog(service.execute_requests[-1], 14)
+    assert (create[1], create[2], create[3], create[4]) == ([b"t"], [b"/p"], [b"parquet"], [b"d"])
+    assert _struct_field_names(create[5][0]) == ["a", "b"]
+    assert [parse_message(entry) for entry in create[6]] == [{1: [b"k"], 2: [b"v"]}]
+    with pytest.raises(TypeError, match="1 has type <class 'int'>"):
+        spark.catalog.createTable("t", source="parquet", k=1)
+    for schema in ("a INT", T.LongType()):
+        with pytest.raises(PySparkTypeError) as error:
+            spark.catalog.createTable("t", source="parquet", schema=schema)
+        assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+        assert error.value.getMessageParameters() == {
+            "arg_name": "schema", "expected_type": "struct type",
+            "arg_type": type(schema).__name__}
+    # createExternalTable warns that it is deprecated and creates the table as createTable.
+    calls = len(service.execute_requests)
+    with pytest.warns(FutureWarning, match="createExternalTable is deprecated since Spark 4.0"):
+        spark.catalog.createExternalTable("e", path="/e", source="csv", schema=struct, sep=";")
+    assert len(service.execute_requests) == calls + 1
+    create = _sent_catalog(service.execute_requests[-1], 14)
+    assert (create[1], create[2], create[3]) == ([b"e"], [b"/e"], [b"csv"])
+    assert 4 not in create and _struct_field_names(create[5][0]) == ["a", "b"]
+    assert [parse_message(entry) for entry in create[6]] == [{1: [b"sep"], 2: [b";"]}]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)
+        with pytest.raises(PySparkTypeError):
+            spark.catalog.createExternalTable("e", schema=1)
+
+
+@pytest.mark.parametrize("call, method", [
+    (lambda catalog, *db: catalog.tableExists("t", *db), "tableExists"),
+    (lambda catalog, *db: catalog.functionExists("f", *db), "functionExists"),
+    (lambda catalog, *db: catalog.listColumns("t", *db), "listColumns"),
+], ids=["tableExists", "functionExists", "listColumns"])
+def test_catalog_warns_of_the_deprecated_db_name_as_pyspark(mock_connect, call, method):
+    import contextlib
+    import warnings
+
+    spark, _ = mock_connect
+    # As PySpark's, only a call of `dbName` warns, before its request, which the mock answers
+    # with no rows.
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        for db in ((), ("db",)):
+            with contextlib.suppress(Exception):
+                call(spark.catalog, *db)
+    assert [str(w.message) for w in record if issubclass(w.category, FutureWarning)] == [
+        "`dbName` has been deprecated since Spark 3.4 and might be removed in a future version. "
+        f"Use {method}(`dbName.tableName`) instead."]
+
+
 # Exact built-in string conversion guards. A Row made in Python keeps its values as they
 # are, as PySpark's does, so these check the conversion that createDataFrame makes.
 
