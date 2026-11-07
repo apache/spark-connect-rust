@@ -49,6 +49,29 @@ pub struct PyDataFrame {
 }
 
 impl PyDataFrame {
+    /// `other`, a DataFrame of the session of this one, as PySpark's `_check_same_session`
+    /// takes the DataFrame of a method: else `SESSION_NOT_SAME`, as for what is not a
+    /// DataFrame.
+    pub(crate) fn same_session<'py>(
+        &self,
+        other: &Bound<'py, PyAny>,
+    ) -> PyResult<PyRef<'py, PyDataFrame>> {
+        match other.extract::<PyRef<'py, PyDataFrame>>() {
+            Ok(df)
+                if df.dataframe.spark_session().session_id()
+                    == self.dataframe.spark_session().session_id() =>
+            {
+                Ok(df)
+            }
+            _ => Err(crate::column::raise_pyspark(
+                other.py(),
+                "SessionNotSameException",
+                "SESSION_NOT_SAME",
+                &[],
+            )),
+        }
+    }
+
     /// The pandas DataFrame of the result, as `SparkConnectClient.to_pandas` makes it: the
     /// settings of the conversion first, in one request; then the Arrow result with the schema
     /// that the server sends, which `pyspark.sql.connect.client._to_pandas` converts.
@@ -676,10 +699,11 @@ impl PyDataFrame {
     #[pyo3(signature = (other, on=None, how=None))]
     fn join(
         &self,
-        other: &PyDataFrame,
+        other: &Bound<'_, PyAny>,
         on: Option<Bound<'_, PyAny>>,
         how: Option<&str>,
     ) -> PyResult<PyDataFrame> {
+        let other = self.same_session(other)?;
         let join_type = parse_join_type(how.unwrap_or("inner"))?;
 
         // Resolve `on`: None | Column | str | list[str].
@@ -718,8 +742,11 @@ impl PyDataFrame {
     }
 
     /// Cross join.
-    fn crossJoin(&self, other: &PyDataFrame) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.cross_join(&other.dataframe))
+    fn crossJoin(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let other = self.same_session(other)?;
+        Ok(PyDataFrame::new(
+            self.dataframe.cross_join(&other.dataframe),
+        ))
     }
 
     /// Lateral (correlated) join. `on` is an optional Column condition; `how`
@@ -727,10 +754,11 @@ impl PyDataFrame {
     #[pyo3(signature = (other, on=None, how=None))]
     fn lateralJoin(
         &self,
-        other: &PyDataFrame,
+        other: &Bound<'_, PyAny>,
         on: Option<PyRef<PyColumn>>,
         how: Option<&str>,
     ) -> PyResult<PyDataFrame> {
+        let other = self.same_session(other)?;
         let join_type = parse_join_type(how.unwrap_or("inner"))?;
         let on_col = on.map(|c| c.column.clone());
         Ok(PyDataFrame::new(self.dataframe.lateral_join(
@@ -857,40 +885,52 @@ impl PyDataFrame {
 
     /// Zip this DataFrame with another column-wise (side-by-side). Mirrors
     /// `DataFrame.zip(other)`.
-    fn zip(&self, other: &PyDataFrame) -> PyResult<PyDataFrame> {
+    fn zip(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let other = self.same_session(other)?;
         Ok(PyDataFrame::new(
             self.dataframe.zip(&other.dataframe).to_pyerr()?,
         ))
     }
 
     /// Union with another DataFrame.
-    fn union(&self, other: &PyDataFrame) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.union(&other.dataframe))
+    fn union(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let other = self.same_session(other)?;
+        Ok(PyDataFrame::new(self.dataframe.union(&other.dataframe)))
     }
 
     /// Union by name, optionally filling columns missing on one side with null.
     #[pyo3(signature = (other, allowMissingColumns=false))]
-    fn unionByName(&self, other: &PyDataFrame, allowMissingColumns: bool) -> PyDataFrame {
-        PyDataFrame::new(
+    fn unionByName(
+        &self,
+        other: &Bound<'_, PyAny>,
+        allowMissingColumns: bool,
+    ) -> PyResult<PyDataFrame> {
+        let other = self.same_session(other)?;
+        Ok(PyDataFrame::new(
             self.dataframe
                 .union_by_name_opt(&other.dataframe, allowMissingColumns),
-        )
+        ))
     }
 
     /// Intersect with another DataFrame.
-    fn intersect(&self, other: &PyDataFrame) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.intersect(&other.dataframe))
+    fn intersect(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let other = self.same_session(other)?;
+        Ok(PyDataFrame::new(self.dataframe.intersect(&other.dataframe)))
     }
 
     /// Intersect keeping duplicates (reference pyspark `intersectAll`).
     #[pyo3(name = "intersectAll")]
-    fn intersect_all(&self, other: &PyDataFrame) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.intersect_all(&other.dataframe))
+    fn intersect_all(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let other = self.same_session(other)?;
+        Ok(PyDataFrame::new(
+            self.dataframe.intersect_all(&other.dataframe),
+        ))
     }
 
     /// Subtract another DataFrame.
-    fn subtract(&self, other: &PyDataFrame) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.subtract(&other.dataframe))
+    fn subtract(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let other = self.same_session(other)?;
+        Ok(PyDataFrame::new(self.dataframe.subtract(&other.dataframe)))
     }
 
     /// Repartition. Mirrors reference `repartition(numPartitions, *cols)` where the
@@ -1052,8 +1092,13 @@ impl PyDataFrame {
 
     /// Whether this DataFrame is semantically equal to `other`.
     #[pyo3(name = "sameSemantics")]
-    fn same_semantics(&self, py: Python<'_>, other: &PyDataFrame) -> PyResult<bool> {
-        py.detach(|| self.dataframe.same_semantics(&other.dataframe))
+    fn same_semantics(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        // As PySpark's: a DataFrame, else NOT_EXPECTED_TYPE, of the same session.
+        if !other.is_instance_of::<PyDataFrame>() {
+            return Err(not_expected_type(other, "other", "DataFrame"));
+        }
+        let other = self.same_session(other)?.dataframe.clone();
+        py.detach(|| self.dataframe.same_semantics(&other))
             .to_pyerr()
     }
 
@@ -1079,8 +1124,11 @@ impl PyDataFrame {
 
     /// Except all (keeps duplicates).
     #[pyo3(name = "exceptAll")]
-    fn except_all(&self, other: &PyDataFrame) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.except_all(&other.dataframe))
+    fn except_all(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let other = self.same_session(other)?;
+        Ok(PyDataFrame::new(
+            self.dataframe.except_all(&other.dataframe),
+        ))
     }
 
     /// Rename multiple columns from an {old: new} mapping.
@@ -2021,8 +2069,9 @@ impl PyDataFrame {
     }
 
     /// Additional set operation: unionAll (alias for union).
-    fn unionAll(&self, other: &PyDataFrame) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.union(&other.dataframe))
+    fn unionAll(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let other = self.same_session(other)?;
+        Ok(PyDataFrame::new(self.dataframe.union(&other.dataframe)))
     }
 
     /// The V1 writer interface (`df.write`).
@@ -2228,21 +2277,22 @@ impl PyDataFrame {
     #[pyo3(name = "nearestByJoin", signature = (other, rankingExpression, numResults = 1, mode = "brute", direction = "asc", joinType = "inner"))]
     fn nearest_by_join(
         &self,
-        other: &PyDataFrame,
+        other: &Bound<'_, PyAny>,
         rankingExpression: &PyColumn,
         numResults: i32,
         mode: &str,
         direction: &str,
         joinType: &str,
-    ) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.nearest_by_join(
+    ) -> PyResult<PyDataFrame> {
+        let other = self.same_session(other)?;
+        Ok(PyDataFrame::new(self.dataframe.nearest_by_join(
             &other.dataframe,
             rankingExpression.column.clone(),
             numResults,
             mode,
             direction,
             joinType,
-        ))
+        )))
     }
 
     /// `DataFrame.metadataColumn`.

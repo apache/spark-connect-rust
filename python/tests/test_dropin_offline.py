@@ -7763,6 +7763,36 @@ def _offline_session():
     return SparkSession.builder.remote("sc://localhost:1").getOrCreate()
 
 
+def test_dataframes_of_other_sessions_raise_session_not_same_as_pyspark():
+    # As PySpark's `_check_same_session`, of the DataFrames that the methods take, before any
+    # request: SESSION_NOT_SAME for a DataFrame of another session, and for what is not one.
+    from pyspark.errors import PySparkTypeError, SessionNotSameException
+    from pyspark.sql import functions as F
+
+    spark = _offline_session()
+    a, b = spark.range(1), spark.newSession().range(1)
+    for call in (
+        lambda: a.join(b), lambda: a.crossJoin(b), lambda: a.lateralJoin(b),
+        lambda: a.union(b), lambda: a.unionAll(b), lambda: a.unionByName(b),
+        lambda: a.intersect(b), lambda: a.intersectAll(b), lambda: a.subtract(b),
+        lambda: a.exceptAll(b), lambda: a.zip(b), lambda: a.nearestByJoin(b, F.lit(1)),
+        lambda: a.sameSemantics(b), lambda: a.union(1), lambda: a.join("id"),
+        lambda: a.groupBy("id").cogroup(b.groupBy("id")),
+    ):
+        with pytest.raises(SessionNotSameException) as error:
+            call()
+        assert error.value.getCondition() == "SESSION_NOT_SAME"
+    with pytest.raises(PySparkTypeError) as error:
+        a.sameSemantics(None)
+    assert error.value.getMessageParameters() == {
+        "expected_type": "DataFrame", "arg_name": "other", "arg_type": "NoneType"}
+    # Of the same session, they are taken.
+    c = spark.range(1)
+    for result in (a.join(c), a.union(c), a.unionByName(c), a.exceptAll(c)):
+        assert type(result).__name__ == "DataFrame"
+    assert type(a.groupBy("id").cogroup(c.groupBy("id"))).__name__ == "PandasCogroupedOps"
+
+
 def test_explain_checks_its_arguments_and_prints_with_print_as_pyspark(mock_connect):
     # As PySpark's DataFrame._explain_string, which checks its arguments and the mode, and
     # explain, which prints its plan with Python's print.
