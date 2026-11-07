@@ -20,8 +20,8 @@ use spark_connect_proto::{
 };
 
 use crate::artifact::{
-    build_artifact_request_stream, cache_artifact_requests, check_artifact_upload, FileArtifact,
-    NamedArtifact,
+    cache_artifact_requests, check_artifact_upload, take_frame_failure, ArtifactFrames,
+    FileArtifact, NamedArtifact,
 };
 use crate::channel::{ChannelBuilder, GRPC_MAX_MESSAGE_LENGTH_DEFAULT};
 use crate::error::{Result, SparkError};
@@ -1079,9 +1079,8 @@ impl SparkConnectClient {
         for path in paths {
             let (name, local) = crate::artifact::parse_artifact(path, pyfile, archive, file)
                 .map_err(|e| SparkError::connect_msg(e.to_string()))?;
-            let artifacts = vec![NamedArtifact::new(name, Box::new(FileArtifact::new(local)))];
-            let requests = build_artifact_request_stream(self.session_id.clone(), artifacts)?;
-            self.upload_artifact_requests(requests, None).await?;
+            let artifact = NamedArtifact::new(name, Box::new(FileArtifact::new(local)));
+            self.upload_artifact(&artifact).await?;
         }
         Ok(())
     }
@@ -1092,12 +1091,9 @@ impl SparkConnectClient {
     /// Used by `SparkSession::copy_from_local_to_fs`, which names the artifact
     /// `forward_to_fs/<dest>` so the server writes it to the target filesystem path.
     pub async fn add_named_artifact(&self, name: &str, local_path: &str) -> Result<()> {
-        let artifacts = vec![NamedArtifact::new(
-            name.to_string(),
-            Box::new(FileArtifact::new(local_path)),
-        )];
-        let requests = build_artifact_request_stream(self.session_id.clone(), artifacts)?;
-        self.upload_artifact_requests(requests, None).await
+        let artifact =
+            NamedArtifact::new(name.to_string(), Box::new(FileArtifact::new(local_path)));
+        self.upload_artifact(&artifact).await
     }
 
     /// Upload session-scoped cache blobs, returning SHA-256 hashes in input order.
@@ -1173,38 +1169,47 @@ impl SparkConnectClient {
         }
     }
 
-    /// Send artifact frames, retrying a transient failure of the whole upload under the retry
-    /// policy, and validate the response. An attempt sends all the frames again: a stream is
-    /// not resumed. Cache uploads also require an acknowledgement for every requested
-    /// artifact.
-    async fn upload_artifact_requests(
-        &self,
-        requests: Vec<spark_connect_proto::AddArtifactsRequest>,
-        expected_cache_names: Option<&std::collections::HashSet<String>>,
-    ) -> Result<()> {
-        let requests = &requests;
-        let response = self
-            .with_retry(|| self.add_artifacts_rpc(requests.clone()))
-            .await?;
-        check_artifact_upload(response, expected_cache_names)
+    /// Upload one artifact, retrying a transient failure of the whole upload under the retry
+    /// policy, and validate the response. An attempt sends all the frames again from the start:
+    /// a stream is not resumed. The frames are read as the RPC consumes them, so an attempt
+    /// holds one chunk of the artifact at a time.
+    async fn upload_artifact(&self, artifact: &NamedArtifact) -> Result<()> {
+        let mut state = RetryPolicyState::new(self.retry_policy.clone());
+        loop {
+            // A data source that cannot be opened is an error before any frame is sent.
+            let frames = ArtifactFrames::new(self.session_id.clone(), artifact)?;
+            let failure = frames.failure();
+            let result = self.add_artifacts_rpc(frames).await;
+            // A read that failed ended the frames early, whatever the RPC answered.
+            take_frame_failure(&failure)?;
+            match result {
+                Ok(response) => return check_artifact_upload(response, None),
+                Err(status) => {
+                    if self.retry_policy.can_retry(&status) {
+                        if let Some(wait_ms) = state.next_attempt(None) {
+                            tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                            continue;
+                        }
+                    }
+                    return Err(self.error_from_status(status).await);
+                }
+            }
+        }
     }
 
     /// The AddArtifacts call of `requests`, once. Stamps user_context and client_type on
-    /// every frame; all upload paths must go through here.
+    /// every frame as it is sent; all upload paths must go through here.
     async fn add_artifacts_rpc(
         &self,
-        requests: impl IntoIterator<Item = spark_connect_proto::AddArtifactsRequest>,
+        requests: impl Iterator<Item = spark_connect_proto::AddArtifactsRequest> + Send + 'static,
     ) -> std::result::Result<spark_connect_proto::AddArtifactsResponse, tonic::Status> {
         let user_context = self.artifact_user_context();
         let client_type = self.user_agent.clone();
-        let requests: Vec<_> = requests
-            .into_iter()
-            .map(|mut request| {
-                request.user_context = Some(user_context.clone());
-                request.client_type = Some(client_type.clone());
-                request
-            })
-            .collect();
+        let requests = requests.map(move |mut request| {
+            request.user_context = Some(user_context.clone());
+            request.client_type = Some(client_type.clone());
+            request
+        });
         let deadline = self.rpc_deadlines.add_artifacts;
         let mut req = with_deadline(Request::new(futures::stream::iter(requests)), deadline);
         self._attach_metadata(&mut req);

@@ -6,6 +6,7 @@ use spark_connect::row::{Row, StructValue, Value};
 use spark_connect::session::SparkSession;
 use spark_connect::types::{DataType, StructField};
 use spark_connect::udf::{CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
+use spark_connect_core::artifact::{parse_artifact, UnsupportedArtifact};
 
 use crate::catalog::PyCatalog;
 use crate::dataframe::PyDataFrame;
@@ -1636,7 +1637,8 @@ impl PySparkSession {
     /// Add local files, or `file:` URIs, as artifacts of the session, as PySpark's
     /// `addArtifacts(*path, pyfile=False, archive=False, file=False)`: each path is named by
     /// the flags and its extension, and the errors for a path that is not supported are
-    /// PySpark's (see `spark_connect_core::artifact::parse_artifact`).
+    /// PySpark's (see `spark_connect_core::artifact::parse_artifact`). A class file is refused,
+    /// as PySpark's ArtifactManager does not upload one.
     #[pyo3(name = "addArtifacts", signature = (*path, pyfile=false, archive=false, file=false))]
     fn add_artifacts(
         &self,
@@ -1646,8 +1648,6 @@ impl PySparkSession {
         archive: bool,
         file: bool,
     ) -> PyResult<()> {
-        use spark_connect_core::artifact::{parse_artifact, UnsupportedArtifact};
-
         if [pyfile, archive, file].iter().filter(|flag| **flag).count() > 1 {
             return Err(crate::column::raise_pyspark(
                 py,
@@ -1659,29 +1659,18 @@ impl PySparkSession {
                 ],
             ));
         }
+        // As PySpark's _parse_artifacts, every path is parsed, and a local file opened, before
+        // any upload.
         for p in &path {
-            if let Err(unsupported) = parse_artifact(p, pyfile, archive, file) {
-                return Err(match unsupported {
-                    UnsupportedArtifact::Format(local) => crate::column::raise_pyspark(
-                        py,
-                        "PySparkRuntimeError",
-                        "UNSUPPORTED_OPERATION",
-                        &[("operation", &format!("{local} file format"))],
-                    ),
-                    UnsupportedArtifact::Scheme(scheme) => crate::column::raise_pyspark(
-                        py,
-                        "PySparkRuntimeError",
-                        "UNSUPPORTED_OPERATION",
-                        &[("operation", &format!("{scheme} scheme"))],
-                    ),
-                    UnsupportedArtifact::HashInArchivePath => crate::column::raise_pyspark(
-                        py,
-                        "PySparkValueError",
-                        "VALUE_ALLOWED",
-                        &[("arg_name", "artifact path"), ("disallowed_value", "#")],
-                    ),
-                });
+            let (name, local) = match parse_artifact(p, pyfile, archive, file) {
+                Ok(parsed) => parsed,
+                Err(unsupported) => return Err(unsupported_artifact_error(py, unsupported)),
+            };
+            if name.starts_with("classes/") {
+                let format = UnsupportedArtifact::Format(local.to_string_lossy().into_owned());
+                return Err(unsupported_artifact_error(py, format));
             }
+            check_local_artifact(py, &name, &local, pyfile)?;
         }
         let refs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
         py.detach(|| {
@@ -1729,6 +1718,56 @@ impl PySparkSession {
             .to_pyerr()?;
         Ok(PySparkSession::new(session))
     }
+}
+
+/// PySpark's error for a path of `addArtifacts` that it does not upload.
+fn unsupported_artifact_error(py: Python<'_>, unsupported: UnsupportedArtifact) -> PyErr {
+    match unsupported {
+        UnsupportedArtifact::Format(local) => crate::column::raise_pyspark(
+            py,
+            "PySparkRuntimeError",
+            "UNSUPPORTED_OPERATION",
+            &[("operation", &format!("{local} file format"))],
+        ),
+        UnsupportedArtifact::Scheme(scheme) => crate::column::raise_pyspark(
+            py,
+            "PySparkRuntimeError",
+            "UNSUPPORTED_OPERATION",
+            &[("operation", &format!("{scheme} scheme"))],
+        ),
+        UnsupportedArtifact::HashInArchivePath => crate::column::raise_pyspark(
+            py,
+            "PySparkValueError",
+            "VALUE_ALLOWED",
+            &[("arg_name", "artifact path"), ("disallowed_value", "#")],
+        ),
+    }
+}
+
+/// The client side of parsing a local artifact, as PySpark's `_parse_artifacts` does it: a
+/// Python file, zip, egg or jar of `pyfile` is importable by the client, and the file is opened
+/// as PySpark's `LocalFile` opens it, so that a missing file or a directory raises the error of
+/// `open` before any upload.
+fn check_local_artifact(
+    py: Python<'_>,
+    name: &str,
+    local: &std::path::Path,
+    pyfile: bool,
+) -> PyResult<()> {
+    let local = local.to_string_lossy();
+    let importable = pyfile && name.starts_with("pyfiles/");
+    if importable && !name.ends_with(".py") {
+        py.import("sys")?
+            .getattr("path")?
+            .call_method1("insert", (1, local.as_ref()))?;
+    }
+    py.import("builtins")?
+        .call_method1("open", (local.as_ref(), "rb"))?
+        .call_method0("close")?;
+    if importable {
+        py.import("importlib")?.call_method0("invalidate_caches")?;
+    }
+    Ok(())
 }
 
 /// Minimal stand-in for the reference `SparkConnectClient`, returned by
