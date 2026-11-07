@@ -213,11 +213,97 @@ fn catalog_extras_surface() {
     let _ = c.refresh_table("cov_view2");
     let _ = c.clear_cache();
 
-    // create_table / create_external_table: the client builds and submits the
-    // catalog command; with a bogus source the server rejects it, but the client
-    // serialization path runs either way. Accept success or a server error.
-    let _ = c.create_table("cov_created_tbl", None, Some("parquet"), Some("desc"));
-    let _ = c.create_external_table("cov_ext_tbl", None, Some("parquet"));
+    // create_table and create_external_table create the table on the call, as PySpark's,
+    // of the schema, the description and the options given.
+    let drop = |name: &str| {
+        let _ = s
+            .sql(&format!("DROP TABLE IF EXISTS {name}"))
+            .and_then(|d| d.collect());
+    };
+    drop("cov_eager_tbl");
+    let schema = spark_connect::types::DataType::from_ddl("a BIGINT, b STRING").unwrap();
+    let options = HashMap::from([("compression".to_string(), "snappy".to_string())]);
+    let created = c
+        .create_table_with(
+            "cov_eager_tbl",
+            None,
+            Some("parquet"),
+            Some(&schema),
+            Some("desc"),
+            options,
+        )
+        .unwrap();
+    assert!(c.table_exists("cov_eager_tbl").unwrap());
+    assert_eq!(created.columns().unwrap(), vec!["a", "b"]);
+    assert_eq!(
+        c.get_table_typed("cov_eager_tbl").unwrap().description,
+        Some("desc".to_string())
+    );
+    drop("cov_eager_tbl");
+    let dir = std::env::temp_dir().join(format!("cov_eager_ext_{}", std::process::id()));
+    let path = dir.to_string_lossy().into_owned();
+    s.range(3)
+        .unwrap()
+        .write()
+        .mode("overwrite")
+        .parquet(&path)
+        .unwrap();
+    drop("cov_eager_ext");
+    let external = c
+        .create_external_table_with(
+            "cov_eager_ext",
+            Some(&path),
+            Some("parquet"),
+            None,
+            HashMap::new(),
+        )
+        .unwrap();
+    assert!(c.table_exists("cov_eager_ext").unwrap());
+    assert_eq!(external.count().unwrap(), 3);
+    drop("cov_eager_ext");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `spark.read.csv`, `json` and `xml` of a DataFrame of strings parse them, as PySpark's
+/// `Parse`, with the schema and the options of the reader.
+#[test]
+fn reader_parses_a_dataframe_of_strings() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::plan::ParseFormat;
+    let s = session();
+    let csv = s.sql("SELECT '1;x' AS value").unwrap();
+    let parsed = s
+        .read()
+        .schema("a INT, b STRING".to_string())
+        .option("sep", ";")
+        .parse(ParseFormat::Csv, &csv)
+        .unwrap();
+    assert_eq!(parsed.columns().unwrap(), vec!["a", "b"]);
+    let rows = parsed.collect().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get(0).and_then(|v| v.as_i64()), Some(1));
+    let json = s.sql(r#"SELECT '{"a": 2}' AS value"#).unwrap();
+    let schema =
+        r#"{"type":"struct","fields":[{"name":"a","type":"long","nullable":true,"metadata":{}}]}"#;
+    let parsed = s
+        .read()
+        .schema(schema.to_string())
+        .parse(ParseFormat::Json, &json)
+        .unwrap();
+    assert_eq!(
+        parsed.collect().unwrap()[0].get(0).and_then(|v| v.as_i64()),
+        Some(2)
+    );
+    // Without a schema, the server infers one.
+    let xml = s.sql("SELECT '<row><a>3</a></row>' AS value").unwrap();
+    let parsed = s
+        .read()
+        .option("rowTag", "row")
+        .parse(ParseFormat::Xml, &xml)
+        .unwrap();
+    assert_eq!(parsed.columns().unwrap(), vec!["a"]);
 }
 
 /// DDL catalog operations added for v4.2.0 parity: create/drop database, drop/analyze/
@@ -394,6 +480,7 @@ fn agg_na_stat_reshape_surface() {
     let _ = df
         .group_by(vec![col("id")])
         .pivot(col("name"), None)
+        .unwrap()
         .count()
         .collect();
 
@@ -656,7 +743,6 @@ fn session_extras_surface() {
     let s = session();
     let _ = s.session_id();
     let _ = s.profile();
-    let _ = s.profiler();
     let _ = s.read(); // batch DataFrameReader
     assert_eq!(s.empty_data_frame().unwrap().count().unwrap(), 0);
     let ns = s.new_session();

@@ -8,7 +8,6 @@
 
 use std::collections::HashMap;
 
-use spark_connect_core::client::ReattachableResponseStream;
 use spark_connect_core::error::{Result, SparkError};
 use spark_connect_core::runtime::block_on;
 use spark_connect_proto as proto;
@@ -229,7 +228,7 @@ pub fn define_sql_graph_elements(
 pub struct PipelineRunStream {
     session: SparkSession,
     request: Option<proto::ExecutePlanRequest>,
-    stream: Option<ReattachableResponseStream>,
+    stream: Option<crate::progress::ExecutionStream>,
 }
 
 impl PipelineRunStream {
@@ -241,9 +240,7 @@ impl PipelineRunStream {
                 .request
                 .take()
                 .expect("pipeline run stream already exhausted its request");
-            self.stream = Some(block_on(
-                self.session.client().execute_plan_reattachable(request),
-            )?);
+            self.stream = Some(self.session.execute_plan(request)?);
         }
         block_on(self.stream.as_mut().unwrap().message())
     }

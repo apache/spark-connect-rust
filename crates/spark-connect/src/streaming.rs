@@ -7,7 +7,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use uuid;
 
-use spark_connect_core::client::ReattachableResponseStream;
 use spark_connect_core::error::{Result, SparkError};
 use spark_connect_core::runtime::block_on;
 use spark_connect_proto as proto;
@@ -645,6 +644,7 @@ impl StreamingQuery {
                     return Ok(Some(StreamingQueryException {
                         message: msg,
                         error_class: exc.error_class.unwrap_or_default(),
+                        stack_trace: exc.stack_trace,
                     }));
                 }
             }
@@ -725,12 +725,14 @@ pub struct StreamingQueryStatus {
 pub struct StreamingQueryException {
     pub message: String,
     pub error_class: String,
+    /// The JVM stack trace of the exception, if the server sends it.
+    pub stack_trace: Option<String>,
 }
 
 /// An iterator over streaming query listener events from the server.
 /// Yields events incrementally as they arrive, without buffering the entire stream.
 pub struct ListenerEventStream {
-    stream: ReattachableResponseStream,
+    stream: crate::progress::ExecutionStream,
     buffered_events: std::vec::IntoIter<(i32, String)>,
     done: bool,
 }
@@ -1103,7 +1105,7 @@ impl StreamingQueryManager {
             ..Default::default()
         };
 
-        let response_stream = block_on(self.session.client().execute_plan_reattachable(request))?;
+        let response_stream = self.session.execute_plan(request)?;
 
         Ok(ListenerEventStream {
             stream: response_stream,

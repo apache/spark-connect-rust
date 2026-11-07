@@ -210,6 +210,16 @@ impl PyColumn {
     #[pyo3(name = "try_cast")]
     fn try_cast(&self, dataType: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("try_cast");
+        // As PySpark's: a DataType or a str, else NOT_EXPECTED_TYPE.
+        if !dataType.is_instance_of::<crate::types::PyDataType>()
+            && !dataType.is_instance_of::<pyo3::types::PyString>()
+        {
+            return Err(crate::stat_arguments::not_expected_type(
+                dataType,
+                "dataType",
+                "DataType or str",
+            ));
+        }
         if let Ok(s) = dataType.extract::<String>() {
             Ok(PyColumn::new(self.column.clone().try_cast_str(&s)))
         } else {
@@ -762,14 +772,14 @@ impl PyColumn {
                 ));
             }
         }
-        // pyspark's Column.isin unpacks a single list/tuple/set argument:
-        // col.isin([1, 2]) == col.isin(1, 2). pandas-on-Spark's Series.isin relies on
-        // this (it passes a single list of lit(..) columns).
+        // pyspark's Column.isin unpacks a single list or set argument, but not a tuple, which
+        // is a value (UNSUPPORTED_DATA_TYPE of lit): col.isin([1, 2]) == col.isin(1, 2).
+        // pandas-on-Spark's Series.isin relies on this (it passes a single list of lit(..)
+        // columns).
         let mut items: Vec<Py<PyAny>> = cols;
         if items.len() == 1 {
             let only = items[0].bind(py);
             if only.is_instance_of::<pyo3::types::PyList>()
-                || only.is_instance_of::<pyo3::types::PyTuple>()
                 || only.is_instance_of::<pyo3::types::PySet>()
             {
                 items = only

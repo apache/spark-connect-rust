@@ -7,9 +7,9 @@
 
 use pyo3::prelude::*;
 use spark_connect::ml::{
-    BinaryClassificationEvaluator, CrossValidator, Estimator, Evaluator, LogisticRegression,
-    MaxAbsScaler, Model, MulticlassClassificationEvaluator, Pipeline, RegressionEvaluator,
-    StandardScaler, StringIndexer, Transformer, VectorAssembler,
+    BinaryClassificationEvaluator, CrossValidator, Estimator, Evaluator, LinearSVC,
+    LogisticRegression, MaxAbsScaler, Model, MulticlassClassificationEvaluator, Pipeline,
+    RegressionEvaluator, StandardScaler, StringIndexer, Transformer, VectorAssembler,
 };
 
 use crate::dataframe::PyDataFrame;
@@ -255,6 +255,141 @@ impl PyLogisticRegression {
     fn fit(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<PyMLModel> {
         let mut e = self.inner.clone();
         let model = py.detach(|| e.fit(&df.dataframe)).to_pyerr()?;
+        Ok(PyMLModel { model })
+    }
+}
+
+/// Linear support vector classifier backed by Spark Connect's JVM ML API.
+#[pyclass(name = "LinearSVC", module = "pyspark.ml.connect.classification")]
+pub struct PyLinearSVC {
+    inner: LinearSVC,
+}
+
+#[pymethods]
+impl PyLinearSVC {
+    #[new]
+    #[pyo3(signature = (*, featuresCol="features", labelCol="label", predictionCol="prediction", maxIter=100, regParam=0.0, tol=1e-6, rawPredictionCol="rawPrediction", fitIntercept=true, standardization=true, threshold=0.0, weightCol=None, aggregationDepth=2, maxBlockSizeInMB=0.0))]
+    #[allow(non_snake_case, clippy::too_many_arguments)]
+    fn new(
+        featuresCol: &str,
+        labelCol: &str,
+        predictionCol: &str,
+        maxIter: i64,
+        regParam: f64,
+        tol: f64,
+        rawPredictionCol: &str,
+        fitIntercept: bool,
+        standardization: bool,
+        threshold: f64,
+        weightCol: Option<&str>,
+        aggregationDepth: i64,
+        maxBlockSizeInMB: f64,
+    ) -> Self {
+        let mut inner = LinearSVC::new()
+            .set_feature_col(featuresCol)
+            .set_label_col(labelCol)
+            .set_prediction_col(predictionCol)
+            .set_max_iter(maxIter)
+            .set_reg_param(regParam)
+            .set_tol(tol)
+            .set_raw_prediction_col(rawPredictionCol)
+            .set_fit_intercept(fitIntercept)
+            .set_standardization(standardization)
+            .set_threshold(threshold)
+            .set_aggregation_depth(aggregationDepth)
+            .set_max_block_size_in_mb(maxBlockSizeInMB);
+        if let Some(col) = weightCol {
+            inner = inner.set_weight_col(col);
+        }
+        Self { inner }
+    }
+
+    #[pyo3(name = "setFeaturesCol")]
+    fn set_feature_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_feature_col(value);
+        slf
+    }
+
+    #[pyo3(name = "setLabelCol")]
+    fn set_label_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_label_col(value);
+        slf
+    }
+
+    #[pyo3(name = "setPredictionCol")]
+    fn set_prediction_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_prediction_col(value);
+        slf
+    }
+
+    #[pyo3(name = "setMaxIter")]
+    fn set_max_iter(mut slf: PyRefMut<'_, Self>, value: i64) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_max_iter(value);
+        slf
+    }
+
+    #[pyo3(name = "setRegParam")]
+    fn set_reg_param(mut slf: PyRefMut<'_, Self>, value: f64) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_reg_param(value);
+        slf
+    }
+
+    #[pyo3(name = "setTol")]
+    fn set_tol(mut slf: PyRefMut<'_, Self>, value: f64) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_tol(value);
+        slf
+    }
+
+    #[pyo3(name = "setRawPredictionCol")]
+    fn set_raw_prediction_col<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        value: &str,
+    ) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_raw_prediction_col(value);
+        slf
+    }
+
+    #[pyo3(name = "setFitIntercept")]
+    fn set_fit_intercept(mut slf: PyRefMut<'_, Self>, value: bool) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_fit_intercept(value);
+        slf
+    }
+
+    #[pyo3(name = "setStandardization")]
+    fn set_standardization(mut slf: PyRefMut<'_, Self>, value: bool) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_standardization(value);
+        slf
+    }
+
+    #[pyo3(name = "setThreshold")]
+    fn set_threshold(mut slf: PyRefMut<'_, Self>, value: f64) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_threshold(value);
+        slf
+    }
+
+    #[pyo3(name = "setWeightCol")]
+    fn set_weight_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_weight_col(value);
+        slf
+    }
+
+    #[pyo3(name = "setAggregationDepth")]
+    fn set_aggregation_depth(mut slf: PyRefMut<'_, Self>, value: i64) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_aggregation_depth(value);
+        slf
+    }
+
+    #[pyo3(name = "setMaxBlockSizeInMB")]
+    fn set_max_block_size_in_mb(mut slf: PyRefMut<'_, Self>, value: f64) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_max_block_size_in_mb(value);
+        slf
+    }
+
+    fn fit(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<PyMLModel> {
+        let mut estimator = self.inner.clone();
+        let model = py
+            .detach(|| estimator.fit(&df.dataframe).map_err(Box::new))
+            .to_pyerr()?;
         Ok(PyMLModel { model })
     }
 }

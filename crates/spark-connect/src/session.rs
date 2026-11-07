@@ -13,14 +13,15 @@ use spark_connect_proto as proto;
 
 use crate::dataframe::DataFrame;
 use crate::plan::{LogicalPlan, PlanIds};
-use crate::profiler::ProfilerCollector;
+use crate::profiler::PythonAccumulators;
+use crate::progress::{ExecutionStream, ProgressTracker, ProgressUpdate};
 use crate::row::{Row, Value};
 use crate::types::DataType;
 
-/// A progress handler invoked with each `ExecutionProgress` message received on
-/// the response stream. Mirrors `SparkSession.registerProgressHandler`.
-pub type ProgressHandler =
-    Arc<dyn Fn(&proto::execute_plan_response::ExecutionProgress) + Send + Sync>;
+/// A progress handler of the executions of a session, as PySpark's `ProgressHandler`: it is
+/// called with each progress of the server that has tasks, and once more, as done, when the
+/// execution ends. Mirrors `SparkSession.registerProgressHandler`.
+pub type ProgressHandler = Arc<dyn Fn(&ProgressUpdate) + Send + Sync>;
 
 /// Metrics captured from the last executed query. Mirrors the data behind
 /// `pyspark.sql.DataFrame.executionInfo` / `client.core.ExecutionInfo`.
@@ -38,6 +39,36 @@ pub struct ExecutionInfo {
     pub operation_id: Option<String>,
 }
 
+/// The operation tags of a session, per thread, as PySpark Connect keeps them in the
+/// `thread_local` of its client: those that a thread added, which the operations that it
+/// starts carry. A new thread has none.
+#[derive(Default)]
+pub(crate) struct ThreadTags {
+    by_thread: Mutex<std::collections::HashMap<std::thread::ThreadId, Vec<String>>>,
+}
+
+impl ThreadTags {
+    /// The tags of the current thread.
+    fn current(&self) -> Vec<String> {
+        let by_thread = self.by_thread.lock().unwrap_or_else(|e| e.into_inner());
+        by_thread
+            .get(&std::thread::current().id())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Change the tags of the current thread, and forget a thread without tags.
+    fn update(&self, change: impl FnOnce(&mut Vec<String>)) {
+        let mut by_thread = self.by_thread.lock().unwrap_or_else(|e| e.into_inner());
+        let thread = std::thread::current().id();
+        let tags = by_thread.entry(thread).or_default();
+        change(tags);
+        if tags.is_empty() {
+            by_thread.remove(&thread);
+        }
+    }
+}
+
 /// A Spark Connect session for interacting with a remote Spark cluster.
 ///
 /// Mirrors `pyspark.sql.SparkSession`.
@@ -46,19 +77,20 @@ pub struct SparkSession {
     client: Arc<SparkConnectClient>,
     /// Stable plan IDs for the plan nodes this session serializes.
     plan_ids: Arc<PlanIds>,
-    /// Operation tags attached to every ExecutePlan request from this session.
-    /// Mirrors `pyspark.sql.connect.session.SparkSession`'s addTag/removeTag/getTags.
-    tags: Arc<Mutex<Vec<String>>>,
+    /// Operation tags attached to every ExecutePlan request that a thread starts from this
+    /// session, those of the thread. Mirrors `pyspark.sql.connect.session.SparkSession`'s
+    /// addTag/removeTag/getTags, of the `thread_local` of its client.
+    tags: Arc<ThreadTags>,
     /// Metrics/observed-metrics captured from the most recent execution on this
     /// session. Backs `DataFrame::execution_info` and the profiler accessor.
     last_execution: Arc<Mutex<Option<ExecutionInfo>>>,
-    /// Registered progress handlers, keyed by id (for removal). Invoked on each
-    /// `ExecutionProgress` message. Mirrors `registerProgressHandler`.
+    /// Registered progress handlers, keyed by id (for removal). Invoked with each progress of
+    /// an execution, and when it ends. Mirrors `registerProgressHandler`.
     progress_handlers: Arc<Mutex<Vec<(u64, ProgressHandler)>>>,
     /// Monotonic id source for `register_progress_handler`.
     progress_handler_id: Arc<AtomicU64>,
-    /// Profiler collector for accumulating profile results across executions.
-    profiler: Arc<ProfilerCollector>,
+    /// The handler of the updates of the Python accumulators of its executions.
+    python_accumulators: PythonAccumulators,
     /// Whether `stop()` has been called on this session (shared across clones).
     /// Backs `is_stopped`.
     stopped: Arc<AtomicBool>,
@@ -72,60 +104,72 @@ impl SparkSession {
         SparkSession {
             client: Arc::new(client),
             plan_ids: Arc::new(PlanIds::new()),
-            tags: Arc::new(Mutex::new(Vec::new())),
+            tags: Arc::new(ThreadTags::default()),
             last_execution: Arc::new(Mutex::new(None)),
             progress_handlers: Arc::new(Mutex::new(Vec::new())),
             progress_handler_id: Arc::new(AtomicU64::new(0)),
-            profiler: Arc::new(ProfilerCollector::new()),
+            python_accumulators: PythonAccumulators::default(),
             stopped: Arc::new(AtomicBool::new(false)),
             server_version: Arc::new(Mutex::new(None)),
         }
     }
 
-    /// Add a tag to be attached to all subsequent operations from this session.
+    /// Add a tag to be attached to all subsequent operations that this thread starts from
+    /// this session.
     ///
-    /// Mirrors `SparkSession.addTag`. Tags cannot be empty or contain a comma.
+    /// Mirrors `SparkSession.addTag`, whose tags are those of the current thread. Tags cannot
+    /// be empty or contain a comma (see [`SparkSession::check_tag`]).
     pub fn add_tag(&self, tag: &str) -> Result<()> {
-        if tag.is_empty() {
-            return Err(SparkError::value(
-                "INVALID_TAG",
-                &[("detail", "Tag cannot be empty")],
-            ));
-        }
+        Self::check_tag(tag)?;
+        self.tags.update(|tags| {
+            if !tags.iter().any(|t| t == tag) {
+                tags.push(tag.to_string());
+            }
+        });
+        Ok(())
+    }
+
+    /// The errors of a tag, as PySpark Connect's `_throw_if_invalid_tag`: `VALUE_ALLOWED` for a
+    /// tag of a comma, which separates the tags of Spark jobs, and `VALUE_NOT_NON_EMPTY_STR` for
+    /// an empty tag. `add_tag` checks them, as does the `removeTag` of the Python client.
+    pub fn check_tag(tag: &str) -> Result<()> {
         if tag.contains(',') {
             return Err(SparkError::value(
-                "INVALID_TAG",
-                &[("detail", "Tag cannot contain ','")],
+                "VALUE_ALLOWED",
+                &[("arg_name", "Spark Connect tag"), ("disallowed_value", ",")],
             ));
         }
-        let mut tags = self.tags.lock().unwrap();
-        if !tags.iter().any(|t| t == tag) {
-            tags.push(tag.to_string());
+        if tag.is_empty() {
+            return Err(SparkError::value(
+                "VALUE_NOT_NON_EMPTY_STR",
+                &[("arg_name", "Spark Connect tag"), ("arg_value", "")],
+            ));
         }
         Ok(())
     }
 
-    /// Remove a previously added tag. Mirrors `SparkSession.removeTag`.
+    /// Remove a tag that this thread added. Mirrors `SparkSession.removeTag`.
     pub fn remove_tag(&self, tag: &str) {
-        self.tags.lock().unwrap().retain(|t| t != tag);
+        self.tags.update(|tags| tags.retain(|t| t != tag));
     }
 
-    /// Get the tags currently set on this session. Mirrors `SparkSession.getTags`.
+    /// Get the tags that this thread set on this session. Mirrors `SparkSession.getTags`.
     pub fn get_tags(&self) -> Vec<String> {
-        self.tags.lock().unwrap().clone()
+        self.tags.current()
     }
 
-    /// Clear all tags set on this session. Mirrors `SparkSession.clearTags`.
+    /// Clear the tags that this thread set on this session. Mirrors `SparkSession.clearTags`.
     pub fn clear_tags(&self) {
-        self.tags.lock().unwrap().clear();
+        self.tags.update(Vec::clear);
     }
 
-    /// Register a handler invoked for every `ExecutionProgress` message received
-    /// during query execution. Returns an id usable with
-    /// [`SparkSession::remove_progress_handler`]. Mirrors `registerProgressHandler`.
+    /// Register a handler of the progress of the executions of this session: it is called with
+    /// each progress of the server that has tasks, and once more, as done, when the execution
+    /// ends, also of an error, as PySpark's `Progress` calls its handlers. Returns an id usable
+    /// with [`SparkSession::remove_progress_handler`]. Mirrors `registerProgressHandler`.
     pub fn register_progress_handler(
         &self,
-        handler: impl Fn(&proto::execute_plan_response::ExecutionProgress) + Send + Sync + 'static,
+        handler: impl Fn(&ProgressUpdate) + Send + Sync + 'static,
     ) -> u64 {
         let id = self.progress_handler_id.fetch_add(1, Ordering::SeqCst);
         self.progress_handlers
@@ -149,12 +193,10 @@ impl SparkSession {
         self.progress_handlers.lock().unwrap().clear();
     }
 
-    /// Invoke all registered progress handlers with a progress message. Called by
-    /// the execute loop; not part of the public API.
-    pub(crate) fn notify_progress(
-        &self,
-        progress: &proto::execute_plan_response::ExecutionProgress,
-    ) {
+    /// Invoke all registered progress handlers with the progress of an execution, which
+    /// `update` builds only when there is a handler. Called by the progress of executions; not
+    /// part of the public API.
+    pub(crate) fn notify_progress(&self, update: impl FnOnce() -> ProgressUpdate) {
         // Clone the handler `Arc`s out of the lock so a handler can't deadlock by
         // touching the session's handler list.
         let handlers: Vec<ProgressHandler> = {
@@ -165,9 +207,30 @@ impl SparkSession {
                 .map(|(_, h)| Arc::clone(h))
                 .collect()
         };
-        for h in handlers {
-            h(progress);
+        if handlers.is_empty() {
+            return;
         }
+        let update = update();
+        for h in handlers {
+            h(&update);
+        }
+    }
+
+    /// Execute `request` on the server, with the progress of the execution for the progress
+    /// handlers. Its operation ID is that of the request, or a new one, which the client
+    /// assigns before it sends the request, as PySpark's `Progress` of the request has it.
+    pub(crate) fn execute_plan(
+        &self,
+        mut request: proto::ExecutePlanRequest,
+    ) -> Result<ExecutionStream> {
+        let operation_id = request
+            .operation_id
+            .get_or_insert_with(|| uuid::Uuid::new_v4().to_string())
+            .clone();
+        // Before the request: an execution that fails to start ends, as done, too.
+        let progress = ProgressTracker::new(self, Some(operation_id));
+        let stream = block_on(self.client().execute_plan_reattachable(request))?;
+        Ok(ExecutionStream::new(stream, progress))
     }
 
     /// Store the metrics captured from the most recent execution. Called by the
@@ -185,17 +248,18 @@ impl SparkSession {
     /// Raw observed metrics from the most recent execution only.
     ///
     /// This is a low-level snapshot of the last execution's observed metrics. For
-    /// the profiler surface that mirrors `SparkSession.profile` (results accumulated
-    /// across executions, with show/dump/clear), use [`SparkSession::profiler`].
+    /// the UDF profiles of `SparkSession.profile`, whose results the server sends as the updates
+    /// of Python accumulators, see [`SparkSession::set_python_accumulator_handler`].
     pub fn profile(&self) -> Vec<proto::execute_plan_response::ObservedMetrics> {
         self.last_execution_info()
             .map(|i| i.observed_metrics)
             .unwrap_or_default()
     }
 
-    /// Internal accessor used by the execute-request builders to attach tags.
+    /// Internal accessor used by the execute-request builders to attach the tags of the
+    /// current thread, which builds the request.
     pub(crate) fn tags(&self) -> Vec<String> {
-        self.tags.lock().unwrap().clone()
+        self.tags.current()
     }
 
     /// Start a brand-new session over the same connection. Mirrors
@@ -205,11 +269,11 @@ impl SparkSession {
         SparkSession {
             client: Arc::new(self.client.with_new_session_id()),
             plan_ids: Arc::new(PlanIds::new()),
-            tags: Arc::new(Mutex::new(Vec::new())),
+            tags: Arc::new(ThreadTags::default()),
             last_execution: Arc::new(Mutex::new(None)),
             progress_handlers: Arc::new(Mutex::new(Vec::new())),
             progress_handler_id: Arc::new(AtomicU64::new(0)),
-            profiler: Arc::new(ProfilerCollector::new()),
+            python_accumulators: PythonAccumulators::default(),
             stopped: Arc::new(AtomicBool::new(false)),
             server_version: Arc::new(Mutex::new(None)),
         }
@@ -292,6 +356,28 @@ impl SparkSession {
             }
             _ => Err(SparkError::connect_msg(
                 "AnalyzePlan response did not contain a DDL parse result",
+            )),
+        }
+    }
+
+    /// Convert the JSON of a schema to DDL on the server, mirroring PySpark Connect's
+    /// `_to_ddl`: the `JsonToDDL` of an `AnalyzePlanRequest`, as Spark writes it.
+    pub fn json_to_ddl(&self, json: &str) -> Result<String> {
+        let request = proto::AnalyzePlanRequest {
+            session_id: self.client().session_id().to_string(),
+            user_context: Some(proto::UserContext::default()),
+            analyze: Some(proto::analyze_plan_request::Analyze::JsonToDdl(
+                proto::analyze_plan_request::JsonToDdl {
+                    json_string: json.to_string(),
+                },
+            )),
+            ..Default::default()
+        };
+        let response = block_on(self.client().analyze_plan(request))?;
+        match response.result {
+            Some(proto::analyze_plan_response::Result::JsonToDdl(r)) => Ok(r.ddl_string),
+            _ => Err(SparkError::connect_msg(
+                "AnalyzePlan response did not contain a DDL string",
             )),
         }
     }
@@ -418,16 +504,42 @@ impl SparkSession {
         // Empty data -> send the schema only (no Arrow `data`); the server builds an empty
         // relation from the schema. A zero-row Arrow payload would be empty bytes, which the
         // server cannot parse ("Unexpected end of input. Missing schema.").
-        let data = if rows.is_empty() {
-            None
-        } else {
-            Some(rows_to_arrow_ipc(&rows, &schema)?)
-        };
-        let plan = LogicalPlan::LocalRelation {
+        if rows.is_empty() {
+            let plan = LogicalPlan::LocalRelation {
+                schema: Some(schema),
+                data: None,
+            };
+            return Ok(DataFrame::new(self.clone(), plan));
+        }
+        let batch = rows_to_arrow_batch(&rows, &schema)?;
+        Ok(DataFrame::new(
+            self.clone(),
+            self.local_relation(batch, schema)?,
+        ))
+    }
+
+    /// The local relation of `batch`: inline, without reading the server's configuration, when
+    /// it is smaller than [`LOCAL_RELATION_SETTINGS_BYTES`]; otherwise as the Arrow importer
+    /// sends one, which reads the server's local-relation settings and uploads the data as
+    /// cache artifacts at `spark.sql.session.localRelationCacheThreshold`, as PySpark does. A
+    /// single gRPC message cannot carry a relation beyond the server's message size limit.
+    fn local_relation(
+        &self,
+        batch: arrow::record_batch::RecordBatch,
+        schema: DataType,
+    ) -> Result<LogicalPlan> {
+        if crate::arrow_input::batch_data_size(&batch) >= LOCAL_RELATION_SETTINGS_BYTES {
+            return crate::arrow_input::create_relation(
+                &self.client,
+                vec![batch],
+                Some(schema),
+                None,
+            );
+        }
+        Ok(LogicalPlan::LocalRelation {
             schema: Some(schema),
-            data,
-        };
-        Ok(DataFrame::new(self.clone(), plan))
+            data: Some(batch_to_arrow_ipc(&batch)?),
+        })
     }
 
     /// Create an inline local relation from columns with the same encoding as local rows.
@@ -441,29 +553,39 @@ impl SparkSession {
     ) -> Result<DataFrame> {
         let arrow_schema = arrow::datatypes::Schema::new(schema_to_arrow_fields(&schema)?);
         let row_count = columns.first().map_or(0, |column| column.len());
-        let data = Some(columns_to_arrow_ipc(columns, arrow_schema, row_count)?);
-        let plan = LogicalPlan::LocalRelation {
-            schema: Some(schema),
-            data,
-        };
-        Ok(DataFrame::new(self.clone(), plan))
+        let batch = columns_to_arrow_batch(columns, arrow_schema, row_count)?;
+        Ok(DataFrame::new(
+            self.clone(),
+            self.local_relation(batch, schema)?,
+        ))
     }
 
     /// Internal binding bridge for Arrow IPC already validated and encoded from
-    /// local rows or columns. Retains the row path's inline transport policy.
+    /// local rows or columns. Retains the row path's transport policy: inline, unless the
+    /// IPC is large enough to consult the server's local-relation settings.
     #[doc(hidden)]
     pub fn create_dataframe_from_inline_arrow_ipc(
         &self,
         data: Vec<u8>,
         schema: DataType,
-    ) -> DataFrame {
-        DataFrame::new(
-            self.clone(),
+    ) -> Result<DataFrame> {
+        let plan = if data.len() >= LOCAL_RELATION_SETTINGS_BYTES {
+            let reader =
+                arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(data), None)
+                    .map_err(|e| {
+                        SparkError::connect_msg(format!("Failed to read Arrow IPC: {e}"))
+                    })?;
+            let batches = reader
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|e| SparkError::connect_msg(format!("Failed to read Arrow IPC: {e}")))?;
+            crate::arrow_input::create_relation(&self.client, batches, Some(schema), None)?
+        } else {
             LogicalPlan::LocalRelation {
                 schema: Some(schema),
                 data: Some(data),
-            },
-        )
+            }
+        };
+        Ok(DataFrame::new(self.clone(), plan))
     }
 
     /// Create a local DataFrame from Arrow batches without materializing rows.
@@ -535,10 +657,9 @@ impl SparkSession {
 
     /// Register a Java UDF/UDAF by class name, mirroring the reference
     /// `client.register_java(name, javaClassName, return_type, aggregate)` used by
-    /// `UDFRegistration.registerJavaFunction` / `registerJavaUDAF`: builds a
-    /// `CommonInlineUserDefinedFunction` carrying a `JavaUDF` and sends it as the
-    /// `RegisterFunction` command. `return_type_ddl` is only used for non-aggregate
-    /// functions (matching the reference, which omits the output type when aggregate).
+    /// `UDFRegistration.registerJavaFunction` / `registerJavaUDAF`. `return_type_ddl`, a DDL
+    /// string, is sent unparsed, for the server to parse, as PySpark sends a string: see
+    /// [`SparkSession::register_java_function_with`].
     pub fn register_java_function(
         &self,
         name: &str,
@@ -546,16 +667,35 @@ impl SparkSession {
         return_type_ddl: Option<&str>,
         aggregate: bool,
     ) -> Result<()> {
+        let return_type = return_type_ddl.map(|ddl| DataType::Unparsed {
+            data_type_string: ddl.to_string(),
+        });
+        self.register_java_function_with(name, java_class_name, return_type, aggregate)
+    }
+
+    /// Register a Java UDF/UDAF by class name, of the return type `return_type`, as PySpark's
+    /// `UDFRegistration.registerJavaFunction` / `registerJavaUDAF`: the
+    /// `CommonInlineUserDefinedFunction` of a `JavaUDF`, which is not deterministic, sent as the
+    /// `RegisterFunction` command. `aggregate` is only used without a return type (matching
+    /// the reference, which omits it for a function of an output type).
+    pub fn register_java_function_with(
+        &self,
+        name: &str,
+        java_class_name: &str,
+        return_type: Option<DataType>,
+        aggregate: bool,
+    ) -> Result<()> {
         let mut java_udf = proto::JavaUdf::default();
         java_udf.class_name = java_class_name.to_string();
-        if let Some(ddl) = return_type_ddl {
-            java_udf.output_type = Some(crate::types::DataType::from_ddl(ddl)?.to_proto());
+        if let Some(return_type) = return_type {
+            java_udf.output_type = Some(return_type.to_proto());
         } else {
             java_udf.aggregate = aggregate;
         }
         let mut fun = proto::CommonInlineUserDefinedFunction::default();
         fun.function_name = name.to_string();
-        fun.deterministic = true;
+        // As PySpark's CommonInlineUserDefinedFunction, which is not deterministic by default.
+        fun.deterministic = false;
         fun.function =
             Some(proto::common_inline_user_defined_function::Function::JavaUdf(java_udf));
         crate::dataframe::execute_command_collect(
@@ -661,7 +801,8 @@ impl SparkSession {
 
     /// Add local files, or `file:` URIs, as artifacts of the session, mirroring
     /// `pyspark.sql.SparkSession.addArtifacts(*path)`: a `.jar` is added to the classpath and
-    /// a `.class` to the classes; any other file is not supported without a flag of
+    /// a `.class` to the classes (a Rust extension: PySpark does not upload class files); any
+    /// other file is not supported without a flag of
     /// [`add_artifacts_with`](Self::add_artifacts_with).
     pub fn add_artifacts(&self, paths: &[&str]) -> Result<()> {
         self.add_artifacts_with(paths, false, false, false)
@@ -803,14 +944,17 @@ impl SparkSession {
         )
     }
 
-    /// Get the profiler collector for this session.
-    ///
-    /// Mirrors the client-visible surface of `SparkSession.profile`. Profile data is
-    /// accumulated across query executions and can be shown, dumped, or cleared via the
-    /// returned collector. Profile data is populated by the server only when UDF profiling
-    /// is enabled via `spark.python.profile*` or `spark.sql.pyspark.udf.profiler` configuration.
-    pub fn profiler(&self) -> Arc<ProfilerCollector> {
-        Arc::clone(&self.profiler)
+    /// Set the handler of the updates of the Python accumulators of the executions of this
+    /// session: each pickled `(id, update)` of their `__python_accumulator__` observed metrics,
+    /// of which the UDF profilers send their results, as PySpark Connect's client unpickles each
+    /// into its `ConnectProfilerCollector`.
+    pub fn set_python_accumulator_handler(&self, handler: impl Fn(&[u8]) + Send + Sync + 'static) {
+        self.python_accumulators.set_handler(Arc::new(handler));
+    }
+
+    /// The handler of the updates of the Python accumulators, of the executions.
+    pub(crate) fn python_accumulators(&self) -> &PythonAccumulators {
+        &self.python_accumulators
     }
 
     /// Stop this Spark session.
@@ -840,7 +984,7 @@ impl Clone for SparkSession {
             last_execution: Arc::clone(&self.last_execution),
             progress_handlers: Arc::clone(&self.progress_handlers),
             progress_handler_id: Arc::clone(&self.progress_handler_id),
-            profiler: Arc::clone(&self.profiler),
+            python_accumulators: self.python_accumulators.clone(),
             stopped: Arc::clone(&self.stopped),
             server_version: Arc::clone(&self.server_version),
         }
@@ -895,12 +1039,18 @@ fn row_width_mismatch(row_index: usize, actual: usize, expected: usize) -> Spark
 
 /// Convert Arrow RecordBatch data to IPC bytes.
 /// Used by createDataFrame to package local data.
-fn rows_to_arrow_ipc(rows: &[Row], schema: &DataType) -> Result<Vec<u8>> {
-    use arrow::datatypes::Schema as ArrowSchema;
+/// The size of a local relation, in Arrow data, from which `createDataFrame` reads the
+/// server's local-relation settings to decide whether to upload it, well below the default
+/// gRPC message size limit of the server (128 MiB). Smaller relations are sent inline without
+/// that RPC, even above `spark.sql.session.localRelationCacheThreshold` (1 MiB by default),
+/// at which PySpark uploads them.
+const LOCAL_RELATION_SETTINGS_BYTES: usize = 32 << 20;
 
-    if rows.is_empty() {
-        return Ok(vec![]);
-    }
+fn rows_to_arrow_batch(
+    rows: &[Row],
+    schema: &DataType,
+) -> Result<arrow::record_batch::RecordBatch> {
+    use arrow::datatypes::Schema as ArrowSchema;
 
     // Convert our schema to Arrow schema
     let arrow_schema_vec = schema_to_arrow_fields(schema)?;
@@ -925,21 +1075,33 @@ fn rows_to_arrow_ipc(rows: &[Row], schema: &DataType) -> Result<Vec<u8>> {
         columns.push(values_to_arrow(&column, &field.data_type)?);
     }
 
-    columns_to_arrow_ipc(columns, arrow_schema, rows.len())
+    columns_to_arrow_batch(columns, arrow_schema, rows.len())
 }
 
-fn columns_to_arrow_ipc(
+/// The Arrow IPC stream of local rows, as the server reads a local relation.
+#[cfg(test)]
+fn rows_to_arrow_ipc(rows: &[Row], schema: &DataType) -> Result<Vec<u8>> {
+    if rows.is_empty() {
+        return Ok(vec![]);
+    }
+    batch_to_arrow_ipc(&rows_to_arrow_batch(rows, schema)?)
+}
+
+fn columns_to_arrow_batch(
     columns: Vec<arrow::array::ArrayRef>,
     arrow_schema: arrow::datatypes::Schema,
     row_count: usize,
-) -> Result<Vec<u8>> {
-    use arrow::ipc::writer::StreamWriter;
+) -> Result<arrow::record_batch::RecordBatch> {
     use arrow::record_batch::RecordBatch;
 
     // Preserve the row count even for a batch without columns.
     let options = arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(row_count));
-    let batch = RecordBatch::try_new_with_options(Arc::new(arrow_schema), columns, &options)
-        .map_err(|e| SparkError::connect_msg(format!("Failed to create Arrow batch: {}", e)))?;
+    RecordBatch::try_new_with_options(Arc::new(arrow_schema), columns, &options)
+        .map_err(|e| SparkError::connect_msg(format!("Failed to create Arrow batch: {}", e)))
+}
+
+fn batch_to_arrow_ipc(batch: &arrow::record_batch::RecordBatch) -> Result<Vec<u8>> {
+    use arrow::ipc::writer::StreamWriter;
 
     // Write to IPC stream
     let mut buffer = Vec::new();
@@ -975,6 +1137,30 @@ fn schema_to_arrow_fields(schema: &DataType) -> Result<Vec<arrow::datatypes::Fie
         }
         _ => Err(SparkError::connect_msg("Schema is not a struct")),
     }
+}
+
+/// The names of nested struct fields as PySpark's `_dedup_names` gives them: a name that occurs
+/// more than once is numbered per occurrence, as `name_0`, `name_1`, and others are kept.
+fn dedup_field_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let names: Vec<&str> = names.into_iter().collect();
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for name in &names {
+        *counts.entry(*name).or_insert(0) += 1;
+    }
+    let mut next: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    names
+        .iter()
+        .map(|&name| {
+            if counts[name] > 1 {
+                let i = next.entry(name).or_insert(0);
+                let deduped = format!("{name}_{i}");
+                *i += 1;
+                deduped
+            } else {
+                name.to_string()
+            }
+        })
+        .collect()
 }
 
 /// Map a Spark `DataType` to its Arrow `DataType`, recursively (array/map/struct included).
@@ -1033,12 +1219,17 @@ fn datatype_to_arrow(dt: &DataType) -> Result<arrow::datatypes::DataType> {
                 false,
             )
         }
+        // The names of nested fields are deduplicated, as PySpark's `_deduplicate_field_names`
+        // does for the Arrow schema it sends. The server cannot read duplicate names, while the
+        // schema of the relation keeps the names of the fields.
         DataType::Struct { fields } => {
+            let names = dedup_field_names(fields.iter().map(|field| field.name.as_str()));
             let f: Fields = fields
                 .iter()
-                .map(|field| {
+                .zip(names)
+                .map(|(field, name)| {
                     Ok(Field::new(
-                        &field.name,
+                        name,
                         datatype_to_arrow(&field.data_type)?,
                         field.nullable,
                     ))
@@ -1188,7 +1379,7 @@ fn values_to_arrow(values: &[&Value], dt: &DataType) -> Result<Arc<dyn arrow::ar
                 .iter()
                 .map(|v| match *v {
                     Value::Null => Ok(None),
-                    Value::Timestamp(t) => Ok(Some(*t)),
+                    Value::Timestamp(t) | Value::TimestampNtz(t) => Ok(Some(*t)),
                     _ => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
@@ -1207,9 +1398,13 @@ fn values_to_arrow(values: &[&Value], dt: &DataType) -> Result<Arc<dyn arrow::ar
                 .iter()
                 .map(|v| match *v {
                     Value::Null => Ok(None),
-                    Value::Timestamp(t) => t.checked_mul(1_000).map(Some).ok_or_else(|| {
-                        SparkError::connect_msg("Timestamp out of range for nanosecond precision")
-                    }),
+                    Value::Timestamp(t) | Value::TimestampNtz(t) => {
+                        t.checked_mul(1_000).map(Some).ok_or_else(|| {
+                            SparkError::connect_msg(
+                                "Timestamp out of range for nanosecond precision",
+                            )
+                        })
+                    }
                     _ => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
@@ -1395,17 +1590,11 @@ fn values_to_arrow(values: &[&Value], dt: &DataType) -> Result<Arc<dyn arrow::ar
                 .enumerate()
                 .map(|(i, f)| values_to_arrow(&cols[i], &f.data_type))
                 .collect::<Result<_>>()?;
-            let afields: Fields = fields
-                .iter()
-                .map(|f| {
-                    Ok(Field::new(
-                        &f.name,
-                        datatype_to_arrow(&f.data_type)?,
-                        f.nullable,
-                    ))
-                })
-                .collect::<Result<Vec<_>>>()?
-                .into();
+            // The Arrow fields of the struct, with the deduplicated names of `datatype_to_arrow`,
+            // which the column's type has.
+            let arrow::datatypes::DataType::Struct(afields) = datatype_to_arrow(dt)? else {
+                unreachable!("a struct is a struct")
+            };
             // A struct without fields takes its length from the values.
             StructArray::try_new_with_length(
                 afields,
@@ -2111,6 +2300,15 @@ mod tests {
     }
 
     #[test]
+    fn nested_duplicate_field_names_are_numbered_per_occurrence_as_pyspark() {
+        assert_eq!(dedup_field_names(["a", "b"]), vec!["a", "b"]);
+        assert_eq!(
+            dedup_field_names(["a", "a", "b", "a"]),
+            vec!["a_0", "a_1", "b", "a_2"]
+        );
+    }
+
+    #[test]
     fn struct_arrow_encoding_preserves_lookup_map_and_null_semantics() {
         use arrow::array::{Array, Int16Array, Int32Array, Int64Array, StructArray};
 
@@ -2257,6 +2455,31 @@ mod tests {
     }
 
     #[test]
+    fn tags_are_those_of_each_thread() {
+        // As PySpark Connect's, whose tags are of the current thread: a new thread has none,
+        // and the tags it adds are on its own requests only.
+        let spark = session();
+        spark.add_tag("main").unwrap();
+        let other = spark.clone();
+        let child = std::thread::spawn(move || {
+            let before = other.get_tags();
+            other.add_tag("child").unwrap();
+            let added = (other.get_tags(), other.tags());
+            other.remove_tag("child");
+            (before, added, other.get_tags())
+        })
+        .join()
+        .unwrap();
+        let child_tags = vec!["child".to_string()];
+        assert_eq!(child, (vec![], (child_tags.clone(), child_tags), vec![]));
+        assert_eq!(spark.get_tags(), vec!["main".to_string()]);
+        assert_eq!(spark.tags(), vec!["main".to_string()]);
+        spark.clear_tags();
+        assert!(spark.get_tags().is_empty());
+        assert!(spark.tags.by_thread.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn arrow_local_relation_preserves_batches_and_rejects_schema_mismatch() {
         use arrow::array::Array;
         use arrow::datatypes::{DataType as ArrowType, Field, Schema};
@@ -2386,6 +2609,24 @@ mod tests {
         spark.remove_tag("test_tag");
         let tags = spark.get_tags();
         assert!(!tags.contains(&"test_tag".to_string()));
+    }
+
+    #[test]
+    fn tags_have_the_errors_of_pyspark() {
+        // As PySpark Connect's `_throw_if_invalid_tag`: a comma, then an empty tag.
+        for (tag, error_class) in [
+            (",", "VALUE_ALLOWED"),
+            ("a,b", "VALUE_ALLOWED"),
+            ("", "VALUE_NOT_NON_EMPTY_STR"),
+        ] {
+            let error = SparkSession::check_tag(tag).unwrap_err();
+            assert_eq!(error.get_error_class().as_deref(), Some(error_class));
+            assert_eq!(
+                error.get_message_parameters().unwrap()["arg_name"],
+                "Spark Connect tag"
+            );
+        }
+        assert!(SparkSession::check_tag("ok").is_ok());
     }
 
     #[test]

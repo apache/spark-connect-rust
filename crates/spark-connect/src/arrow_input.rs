@@ -120,7 +120,7 @@ fn validate(batches: &[RecordBatch]) -> Result<()> {
     Ok(())
 }
 
-fn batch_data_size(batch: &RecordBatch) -> usize {
+pub(crate) fn batch_data_size(batch: &RecordBatch) -> usize {
     batch
         .columns()
         .iter()
