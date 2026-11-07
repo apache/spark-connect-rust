@@ -83,15 +83,23 @@ const UNBOUNDED_FOLLOWING: i64 = i64::MAX;
 /// Resolve a frame-bound argument, the `start` of a frame if `start`, else its end: a plain
 /// int (negative=preceding/positive=following) or a `FrameBound`. As PySpark's
 /// `rowsBetween` and `rangeBetween`, a start of `-sys.maxsize` or less is unbounded preceding
-/// and an end of `sys.maxsize` or more unbounded following, while a start of
-/// `Window.unboundedFollowing` or an end of `Window.unboundedPreceding` is a value.
+/// and an end of `sys.maxsize` or more unbounded following, also of a float, such as
+/// `float("-inf")` and `float("inf")`, while a start of `Window.unboundedFollowing` or an end of
+/// `Window.unboundedPreceding` is a value.
 fn to_frame_bound(v: &Bound<'_, PyAny>, start: bool) -> PyResult<FrameBound> {
     if let Ok(fb) = v.extract::<PyFrameBound>() {
         return Ok(fb.bound);
     }
     if !v.is_instance_of::<pyo3::types::PyInt>() {
-        // PySpark's WindowFrame asserts an int, after a comparison that a number makes.
         if v.is_instance_of::<pyo3::types::PyFloat>() {
+            // As PySpark's: a bound past the threshold of its side is unbounded, and
+            // WindowFrame asserts that another is an int.
+            if start && v.le(-i64::MAX)? {
+                return Ok(FrameBound::UnboundedPreceding);
+            }
+            if !start && v.ge(i64::MAX)? {
+                return Ok(FrameBound::UnboundedFollowing);
+            }
             return Err(pyo3::exceptions::PyAssertionError::new_err(()));
         }
         return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(

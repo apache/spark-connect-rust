@@ -9007,6 +9007,16 @@ def test_window_frames_and_columns_are_checked_as_pyspark():
             "arg_name": name, "min": "-2147483648", "max": "2147483647"}
     with pytest.raises(AssertionError):
         o.rowsBetween(1.5, 2)
+    # A float bound past the threshold of its side is unbounded, as PySpark compares it with
+    # Window._PRECEDING_THRESHOLD and _FOLLOWING_THRESHOLD before WindowFrame asserts an int.
+    inf = float("inf")
+    unbounded = (Window.unboundedPreceding, Window.unboundedFollowing)
+    assert repr(o.rowsBetween(-inf, inf)) == repr(o.rowsBetween(*unbounded))
+    assert repr(o.rangeBetween(-inf, inf)) == repr(o.rangeBetween(*unbounded))
+    assert repr(o.rowsBetween(-1e30, 1e30)) == repr(o.rowsBetween(*unbounded))
+    for start, end in ((inf, 0), (0, -inf), (-1e30, 1.5)):
+        with pytest.raises(AssertionError):
+            o.rowsBetween(start, end)
     for call, arg_type in ((lambda: Window.partitionBy(1), "int"),
                            (lambda: Window.partitionBy(("id",)), "tuple"),
                            (lambda: Window.orderBy(1), "int"),
