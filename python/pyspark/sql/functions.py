@@ -1,8 +1,40 @@
 """pyspark.sql.functions module exposing Rust-backed SQL functions."""
 
-import os
+import decimal
+import functools
+import importlib.util as _importlib_util
+import inspect
+import os as _os
+import sys
+import warnings
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Iterable,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    Type,
+    Union,
+    ValuesView,
+    cast,
+    overload,
+)
 
 from pyspark import _pyspark
+from pyspark.errors import PySparkTypeError, PySparkValueError
+from pyspark.sql.column import Column
+from pyspark.sql.types import (
+    ArrayType,
+    ByteType,
+    DataType,
+    MapType,
+    NumericType,
+    StringType,
+    StructType,
+)
 
 _functions = getattr(_pyspark, 'functions', None)
 
@@ -16,18 +48,6 @@ _pyfunc_expr = _functions.pyfunc_expr
 _pyfunc_count = _functions.pyfunc_count
 _pyfunc_when = _functions.pyfunc_when
 _call_function = _functions.pyfunc_call_function
-# Mixed function bindings
-_pyfunc_from_avro = _functions.pyfunc_from_avro
-_pyfunc_from_avro_with_options = _functions.pyfunc_from_avro_with_options
-_pyfunc_to_avro_with_schema = _functions.pyfunc_to_avro_with_schema
-_pyfunc_from_protobuf = _functions.pyfunc_from_protobuf
-_pyfunc_from_protobuf_with_descriptor = _functions.pyfunc_from_protobuf_with_descriptor
-_pyfunc_from_protobuf_with_descriptor_and_options = _functions.pyfunc_from_protobuf_with_descriptor_and_options
-_pyfunc_from_protobuf_with_options = _functions.pyfunc_from_protobuf_with_options
-_pyfunc_to_protobuf = _functions.pyfunc_to_protobuf
-_pyfunc_to_protobuf_with_descriptor = _functions.pyfunc_to_protobuf_with_descriptor
-_pyfunc_to_protobuf_with_descriptor_and_options = _functions.pyfunc_to_protobuf_with_descriptor_and_options
-_pyfunc_to_protobuf_with_options = _functions.pyfunc_to_protobuf_with_options
 
 # Utility functions for wrapping/unwrapping columns
 def _unwrap(obj):
@@ -290,8 +310,8 @@ def _dict_to_options_column(options_dict):
         # Convert dict to alternating keys and values: [k1, v1, k2, v2, ...]
         args = []
         for k, v in options_dict.items():
-            args.append(k)
-            args.append(v)
+            args.append(str(k))
+            args.append(str(v))
         # Use create_map with literal strings - we'll build the Column through _call_function
         # since create_map is auto-generated
         return _call_function("create_map", *[_pyfunc_lit(arg) for arg in args])
@@ -380,94 +400,12 @@ def when(condition, value):
     return _pyfunc_when(condition, value if isinstance(value, _pyspark.Column) else lit(value))
 
 
-# Mixed/special functions - explicit wrappers for non-generic dispatch
-def from_avro(data, json_format_schema):
-    """Deserialize Avro data into a column.
-
-    Args:
-        data: column containing binary Avro data
-        json_format_schema: JSON string schema for the Avro data
-    """
-    return _pyfunc_from_avro(_to_col(data), json_format_schema)
-
-def from_avro_with_options(data, json_format_schema, options=None):
-    """Deserialize Avro data into a column with options.
-
-    Args:
-        data: column containing binary Avro data
-        json_format_schema: JSON string schema for the Avro data
-        options: dict or Column of options
-    """
-    if options is None:
-        return _pyfunc_from_avro(_to_col(data), json_format_schema)
-    options_col = _dict_to_options_column(options)
-    return _pyfunc_from_avro_with_options(_to_col(data), json_format_schema, options_col)
-
-def to_avro_with_schema(data, json_format_schema):
-    """Serialize a column to Avro binary format with schema.
-
-    Args:
-        data: column to serialize
-        json_format_schema: JSON string schema for the Avro data
-    """
-    return _pyfunc_to_avro_with_schema(_to_col(data), json_format_schema)
-
-def from_protobuf(data, message_name, desc_file_path=None, options=None, binary_descriptor_set=None):
-    """Deserialize Protobuf data into a column.
-
-    Args:
-        data: column containing binary Protobuf data
-        message_name: name of the Protobuf message type
-        desc_file_path: optional, path to descriptor file
-        options: optional, dict or Column of options
-        binary_descriptor_set: optional, binary descriptor set bytes
-    """
-    if binary_descriptor_set is not None and options is not None:
-        options_col = _dict_to_options_column(options)
-        return _pyfunc_from_protobuf_with_descriptor_and_options(
-            _to_col(data), message_name, binary_descriptor_set, options_col
-        )
-    elif binary_descriptor_set is not None:
-        return _pyfunc_from_protobuf_with_descriptor(
-            _to_col(data), message_name, binary_descriptor_set
-        )
-    elif options is not None:
-        options_col = _dict_to_options_column(options)
-        return _pyfunc_from_protobuf_with_options(_to_col(data), message_name, options_col)
-    else:
-        return _pyfunc_from_protobuf(_to_col(data), message_name)
-
-def to_protobuf(data, message_name, desc_file_path=None, options=None, binary_descriptor_set=None):
-    """Serialize a column to Protobuf binary format.
-
-    Args:
-        data: column to serialize
-        message_name: name of the Protobuf message type
-        desc_file_path: optional, path to descriptor file
-        options: optional, dict or Column of options
-        binary_descriptor_set: optional, binary descriptor set bytes
-    """
-    if binary_descriptor_set is not None and options is not None:
-        options_col = _dict_to_options_column(options)
-        return _pyfunc_to_protobuf_with_descriptor_and_options(
-            _to_col(data), message_name, binary_descriptor_set, options_col
-        )
-    elif binary_descriptor_set is not None:
-        return _pyfunc_to_protobuf_with_descriptor(
-            _to_col(data), message_name, binary_descriptor_set
-        )
-    elif options is not None:
-        options_col = _dict_to_options_column(options)
-        return _pyfunc_to_protobuf_with_options(_to_col(data), message_name, options_col)
-    else:
-        return _pyfunc_to_protobuf(_to_col(data), message_name)
-
 # Now we can import generated wrappers (they use _create_wrapper defined above)
 # We do this via exec to make _create_wrapper available in the generated module's namespace
-import importlib.util
-spec = importlib.util.spec_from_file_location("functions_generated",
-                                               os.path.join(os.path.dirname(__file__), "functions_generated.py"))
-_gen_module = importlib.util.module_from_spec(spec)
+_spec = _importlib_util.spec_from_file_location(
+    "functions_generated", _os.path.join(_os.path.dirname(__file__), "functions_generated.py")
+)
+_gen_module = _importlib_util.module_from_spec(_spec)
 # Inject our helper functions into the generated module's namespace before loading. The
 # functions generated from their PySpark Connect implementations call lit, column and
 # _invoke_function (an UnresolvedFunction of the name and arguments), as PySpark Connect's
@@ -481,11 +419,14 @@ _gen_module._call_function = _call_function
 _gen_module.lit = lit
 _gen_module.column = _pyfunc_col
 _gen_module._invoke_function = _functions.pyfunc_invoke_function
-spec.loader.exec_module(_gen_module)
+_spec.loader.exec_module(_gen_module)
 
-# Import all generated functions into this module
+# Import all generated functions into this module, except those that PySpark does not expose
+# here: to_avro is pyspark.sql.avro.functions.to_avro, which takes the schema of its data.
+_NOT_IN_PYSPARK_FUNCTIONS = ("to_avro",)
 for name in _gen_module.__all__:
-    globals()[name] = getattr(_gen_module, name)
+    if name not in _NOT_IN_PYSPARK_FUNCTIONS:
+        globals()[name] = getattr(_gen_module, name)
 
 # PySpark Connect's _to_col, which raises PySparkTypeError NOT_EXPECTED_TYPE for an
 # argument that is neither a Column nor a column name.
@@ -808,34 +749,576 @@ except Exception:  # pragma: no cover
     pass
 from pyspark.sql.pandas.functions import PandasUDFType, ArrowUDFType  # noqa: E402,F401
 
-# Build __all__ with all function names
+# The public names of PySpark 4.3.0's pyspark.sql.functions, in its order. A star import
+# brings in exactly these; the other names of this module (e.g. chr, random, uuid, which
+# PySpark also has as attributes) are not exported, so they do not shadow the builtins and
+# the stdlib modules of the same names.
 __all__ = [
+    "broadcast",
+    "call_function",
     "col",
+    "column",
     "lit",
     "expr",
-    "sum",
-    "count",
-    "avg",
-    "max",
-    "min",
+    "coalesce",
+    "ifnull",
+    "nanvl",
+    "nullif",
+    "nullifzero",
+    "nvl",
+    "nvl2",
     "when",
-    "udf",
+    "zeroifnull",
+    "equal_null",
+    "ilike",
+    "isnan",
+    "isnotnull",
+    "isnull",
+    "like",
+    "regexp",
+    "regexp_like",
+    "rlike",
+    "asc",
+    "asc_nulls_first",
+    "asc_nulls_last",
+    "desc",
+    "desc_nulls_first",
+    "desc_nulls_last",
+    "abs",
+    "acos",
+    "acosh",
+    "asin",
+    "asinh",
+    "atan",
+    "atan2",
+    "atanh",
+    "bin",
+    "bround",
+    "cbrt",
+    "ceil",
+    "ceiling",
+    "conv",
+    "cos",
+    "cosh",
+    "cot",
+    "csc",
+    "degrees",
+    "e",
+    "exp",
+    "expm1",
+    "factorial",
+    "floor",
+    "greatest",
+    "hex",
+    "hypot",
+    "least",
+    "ln",
+    "log",
+    "log10",
+    "log1p",
+    "log2",
+    "negate",
+    "negative",
+    "pi",
+    "pmod",
+    "positive",
+    "pow",
+    "power",
+    "radians",
+    "rand",
+    "randn",
+    "rint",
+    "round",
+    "sec",
+    "sign",
+    "signum",
+    "sin",
+    "sinh",
+    "sqrt",
+    "tan",
+    "tanh",
+    "try_add",
+    "try_divide",
+    "try_mod",
+    "try_multiply",
+    "try_subtract",
+    "unhex",
+    "uniform",
+    "width_bucket",
+    "ascii",
+    "base64",
+    "bit_length",
+    "btrim",
+    "char",
+    "char_length",
+    "character_length",
+    "collate",
+    "collation",
+    "concat_ws",
+    "contains",
+    "decode",
+    "elt",
+    "encode",
+    "endswith",
+    "find_in_set",
+    "format_number",
+    "format_string",
+    "from_base32",
+    "initcap",
+    "instr",
+    "is_valid_utf8",
+    "jaro_winkler_similarity",
+    "lcase",
+    "left",
+    "length",
+    "levenshtein",
+    "locate",
+    "lower",
+    "lpad",
+    "ltrim",
+    "make_valid_utf8",
+    "mask",
+    "octet_length",
+    "overlay",
+    "position",
+    "printf",
+    "quote",
+    "randstr",
+    "regexp_count",
+    "regexp_extract",
+    "regexp_extract_all",
+    "regexp_instr",
+    "regexp_replace",
+    "regexp_substr",
+    "repeat",
+    "replace",
+    "right",
+    "rpad",
+    "rtrim",
+    "sentences",
+    "soundex",
+    "split",
+    "split_part",
+    "startswith",
+    "substr",
+    "substring",
+    "substring_index",
+    "to_base32",
+    "to_binary",
+    "to_char",
+    "to_number",
+    "to_varchar",
+    "translate",
+    "trim",
+    "try_to_binary",
+    "try_to_number",
+    "try_validate_utf8",
+    "ucase",
+    "unbase64",
+    "upper",
+    "validate_utf8",
+    "bit_count",
+    "bit_get",
+    "bitwise_not",
+    "getbit",
+    "shiftleft",
+    "shiftright",
+    "shiftrightunsigned",
+    "add_months",
+    "convert_timezone",
+    "curdate",
+    "current_date",
+    "current_time",
+    "current_timestamp",
+    "current_timezone",
+    "date_add",
+    "date_diff",
+    "date_format",
+    "date_from_unix_date",
+    "date_part",
+    "date_sub",
+    "date_trunc",
+    "dateadd",
+    "datediff",
+    "datepart",
+    "day",
+    "dayname",
+    "dayofmonth",
+    "dayofweek",
+    "dayofyear",
+    "extract",
+    "from_unixtime",
+    "from_utc_timestamp",
+    "hour",
+    "last_day",
+    "localtimestamp",
+    "make_date",
+    "make_dt_interval",
+    "make_interval",
+    "make_time",
+    "make_timestamp",
+    "make_timestamp_ltz",
+    "make_timestamp_ntz",
+    "make_ym_interval",
+    "minute",
+    "month",
+    "monthname",
+    "months_between",
+    "next_day",
+    "now",
+    "quarter",
+    "second",
+    "session_window",
+    "timestamp_add",
+    "timestamp_diff",
+    "timestamp_micros",
+    "timestamp_millis",
+    "timestamp_nanos",
+    "timestamp_seconds",
+    "time_bucket",
+    "time_diff",
+    "time_from_micros",
+    "time_from_millis",
+    "time_from_seconds",
+    "time_to_micros",
+    "time_to_millis",
+    "time_to_seconds",
+    "time_trunc",
+    "to_date",
+    "to_time",
+    "to_timestamp",
+    "to_timestamp_ltz",
+    "to_timestamp_ntz",
+    "to_unix_timestamp",
+    "to_utc_timestamp",
+    "trunc",
+    "try_make_interval",
+    "try_make_timestamp",
+    "try_make_timestamp_ltz",
+    "try_make_timestamp_ntz",
+    "try_to_time",
+    "try_to_timestamp",
+    "try_to_date",
+    "unix_date",
+    "unix_micros",
+    "unix_millis",
+    "unix_nanos",
+    "unix_seconds",
+    "unix_timestamp",
+    "weekday",
+    "weekofyear",
+    "window",
+    "window_time",
+    "year",
+    "crc32",
+    "hash",
+    "md5",
+    "sha",
+    "sha1",
+    "sha2",
+    "xxhash64",
+    "aggregate",
+    "array_sort",
+    "cardinality",
+    "concat",
+    "element_at",
+    "exists",
+    "filter",
+    "forall",
+    "map_filter",
+    "map_zip_with",
+    "reduce",
+    "reverse",
+    "size",
+    "transform",
+    "transform_keys",
+    "transform_values",
+    "try_element_at",
+    "zip_with",
+    "array",
+    "array_append",
+    "array_compact",
+    "array_contains",
+    "array_distinct",
+    "array_except",
+    "array_insert",
+    "array_intersect",
+    "array_join",
+    "array_max",
+    "array_min",
+    "array_position",
+    "array_prepend",
+    "array_remove",
+    "array_repeat",
+    "array_size",
+    "array_union",
+    "arrays_overlap",
+    "arrays_zip",
+    "flatten",
+    "get",
+    "sequence",
+    "shuffle",
+    "slice",
+    "sort_array",
+    "named_struct",
+    "struct",
+    "create_map",
+    "map_concat",
+    "map_contains_key",
+    "map_entries",
+    "map_from_arrays",
+    "map_from_entries",
+    "map_keys",
+    "map_values",
+    "str_to_map",
+    "any_value",
+    "approx_count_distinct",
+    "approx_percentile",
+    "array_agg",
+    "avg",
+    "bit_and",
+    "bit_or",
+    "bit_xor",
+    "bitmap_and_agg",
+    "bitmap_construct_agg",
+    "bitmap_or_agg",
+    "bool_and",
+    "bool_or",
+    "collect_list",
+    "collect_set",
+    "collect_union",
+    "corr",
+    "count",
+    "count_distinct",
+    "count_if",
+    "count_min_sketch",
+    "covar_pop",
+    "covar_samp",
+    "every",
+    "first",
+    "first_value",
+    "grouping",
+    "grouping_id",
+    "histogram_numeric",
+    "hll_sketch_agg",
+    "hll_union_agg",
+    "kll_sketch_agg_bigint",
+    "kll_sketch_agg_double",
+    "kll_sketch_agg_float",
+    "kll_merge_agg_bigint",
+    "kll_merge_agg_double",
+    "kll_merge_agg_float",
+    "kurtosis",
+    "last",
+    "last_value",
+    "listagg",
+    "listagg_distinct",
+    "max",
+    "max_by",
+    "mean",
+    "median",
+    "min",
+    "min_by",
+    "mode",
+    "percentile",
+    "percentile_approx",
+    "product",
+    "regr_avgx",
+    "regr_avgy",
+    "regr_count",
+    "regr_intercept",
+    "regr_r2",
+    "regr_slope",
+    "regr_sxx",
+    "regr_sxy",
+    "regr_syy",
+    "skewness",
+    "some",
+    "std",
+    "stddev",
+    "stddev_pop",
+    "stddev_samp",
+    "string_agg",
+    "string_agg_distinct",
+    "sum",
+    "sum_distinct",
+    "theta_intersection_agg",
+    "theta_sketch_agg",
+    "theta_union_agg",
+    "tuple_intersection_agg_double",
+    "tuple_intersection_agg_integer",
+    "tuple_sketch_agg_double",
+    "tuple_sketch_agg_integer",
+    "tuple_union_agg_double",
+    "tuple_union_agg_integer",
+    "try_avg",
+    "try_sum",
+    "var_pop",
+    "var_samp",
+    "variance",
+    "counter_diff",
+    "cume_dist",
+    "dense_rank",
+    "lag",
+    "lead",
+    "nth_value",
+    "ntile",
+    "percent_rank",
+    "rank",
+    "row_number",
+    "explode",
+    "explode_outer",
+    "inline",
+    "inline_outer",
+    "posexplode",
+    "posexplode_outer",
+    "stack",
+    "years",
+    "months",
+    "days",
+    "hours",
+    "bucket",
+    "from_csv",
+    "schema_of_csv",
+    "to_csv",
+    "from_json",
+    "get_json_object",
+    "json_array_length",
+    "json_object_keys",
+    "json_tuple",
+    "schema_of_json",
+    "to_json",
+    "is_valid_variant",
+    "is_variant_null",
+    "parse_json",
+    "schema_of_variant",
+    "schema_of_variant_agg",
+    "try_variant_get",
+    "variant_array_append",
+    "try_variant_array_append",
+    "variant_delete",
+    "variant_strip_nulls",
+    "variant_get",
+    "variant_insert",
+    "try_variant_insert",
+    "variant_set",
+    "try_variant_set",
+    "try_parse_json",
+    "to_variant_object",
+    "from_xml",
+    "schema_of_xml",
+    "to_xml",
+    "xpath",
+    "xpath_boolean",
+    "xpath_double",
+    "xpath_float",
+    "xpath_int",
+    "xpath_long",
+    "xpath_number",
+    "xpath_short",
+    "xpath_string",
+    "parse_url",
+    "try_parse_url",
+    "url_decode",
+    "url_encode",
+    "try_url_decode",
+    "aes_decrypt",
+    "aes_encrypt",
+    "assert_true",
+    "bitmap_bit_position",
+    "bitmap_bucket_number",
+    "bitmap_count",
+    "current_catalog",
+    "current_database",
+    "current_path",
+    "current_schema",
+    "current_user",
+    "hmac",
+    "input_file_block_length",
+    "input_file_block_start",
+    "input_file_name",
+    "java_method",
+    "monotonically_increasing_id",
+    "raise_error",
+    "reflect",
+    "session_user",
+    "spark_partition_id",
+    "try_aes_decrypt",
+    "try_reflect",
+    "typeof",
+    "user",
+    "version",
+    "AnalyzeArgument",
+    "AnalyzeResult",
+    "ArrowUDFType",
+    "OrderingColumn",
+    "PandasUDFType",
+    "PartitioningColumn",
+    "SelectedColumn",
+    "SkipRestOfInputTableException",
+    "UserDefinedFunction",
+    "UserDefinedTableFunction",
+    "arrow_udf",
+    "hll_sketch_estimate",
+    "hll_union",
+    "kll_sketch_get_n_bigint",
+    "kll_sketch_get_n_double",
+    "kll_sketch_get_n_float",
+    "kll_sketch_get_quantile_bigint",
+    "kll_sketch_get_quantile_double",
+    "kll_sketch_get_quantile_float",
+    "kll_sketch_get_rank_bigint",
+    "kll_sketch_get_rank_double",
+    "kll_sketch_get_rank_float",
+    "kll_sketch_merge_bigint",
+    "kll_sketch_merge_double",
+    "kll_sketch_merge_float",
+    "kll_sketch_to_string_bigint",
+    "kll_sketch_to_string_double",
+    "kll_sketch_to_string_float",
+    "theta_difference",
+    "theta_intersection",
+    "theta_sketch_estimate",
+    "theta_union",
+    "tuple_difference_double",
+    "tuple_difference_integer",
+    "tuple_difference_theta_double",
+    "tuple_difference_theta_integer",
+    "tuple_intersection_double",
+    "tuple_intersection_integer",
+    "tuple_intersection_theta_double",
+    "tuple_intersection_theta_integer",
+    "tuple_sketch_estimate_double",
+    "tuple_sketch_estimate_integer",
+    "tuple_sketch_summary_double",
+    "tuple_sketch_summary_integer",
+    "tuple_sketch_theta_double",
+    "tuple_sketch_theta_integer",
+    "tuple_union_double",
+    "tuple_union_integer",
+    "tuple_union_theta_double",
+    "tuple_union_theta_integer",
+    "st_asbinary",
+    "st_geogfromwkb",
+    "st_geomfromwkb",
+    "st_setsrid",
+    "st_srid",
+    "vector_cosine_similarity",
+    "vector_inner_product",
+    "vector_l2_distance",
+    "vector_norm",
+    "vector_normalize",
+    "vector_avg",
+    "vector_sum",
+    "call_udf",
     "pandas_udf",
+    "udf",
+    "udtf",
+    "arrow_udtf",
+    "unwrap_udt",
 ]
-
-# Add all other function names (dynamically)
-import inspect
-_export_globals = list(globals().items())
-_exported_names = set(__all__)
-for name, obj in _export_globals:
-    if (callable(obj) and
-        not name.startswith('_') and
-        name not in _exported_names and
-        name not in ['inspect', 'importlib', '_gen_module', 'spec', 'os']):
-        __all__.append(name)
-        _exported_names.add(name)
 # Leave no loop variables behind, as PySpark has no `functions.name` or `functions.obj`.
-del _export_globals, _exported_names, name, obj
+del name
 
 # Expose the `builtin` submodule at ``pyspark.sql.functions.builtin``. Upstream v4.2.0 splits
 # functions into a package whose ``builtin`` submodule holds the actual functions and whose

@@ -560,12 +560,11 @@ def test_functions_exports_fresh_process():
         from pyspark.sql import functions as F
         assert not hasattr(F, "name") and not hasattr(F, "obj")
 
-        initial = ["col", "lit", "expr", "sum", "count", "avg", "max", "min",
-                   "when", "udf", "pandas_udf"]
+        official = __OFFICIAL_FUNCTIONS_ALL__
 
         def check_exports():
             assert type(F.__all__) is list
-            assert F.__all__[:len(initial)] == initial
+            assert F.__all__ == official
             assert len(F.__all__) == len(set(F.__all__))
             assert all(callable(getattr(F, name)) for name in F.__all__)
             assert not any(name.startswith("_") for name in F.__all__)
@@ -605,7 +604,7 @@ def test_functions_exports_fresh_process():
         importlib.reload(F)
         assert F.__all__ is not old_all
         assert check_exports() == expected
-    ''')], capture_output=True, text=True)
+    ''').replace("__OFFICIAL_FUNCTIONS_ALL__", repr(OFFICIAL_FUNCTIONS_ALL))], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
 
 
@@ -1294,11 +1293,14 @@ def test_functions_module_wrappers():
     assert type(F.sha2(c, 256)).__name__ == "Column"
     assert type(F.window(F.col("t"), "10 minutes")).__name__ == "Column"
     assert type(F.window(F.col("t"), "10 minutes", "5 minutes", "0 seconds")).__name__ == "Column"
-    assert type(F.from_avro(c, "{}")).__name__ == "Column"
-    assert type(F.from_avro_with_options(c, "{}", {"mode": "PERMISSIVE"})).__name__ == "Column"
-    assert type(F.to_avro_with_schema(c, "{}")).__name__ == "Column"
-    assert type(F.from_protobuf(c, "M", options={"x": "y"})).__name__ == "Column"
-    assert type(F.to_protobuf(c, "M", options={"x": "y"})).__name__ == "Column"
+    import pyspark.sql.avro.functions as avro
+    import pyspark.sql.protobuf.functions as protobuf
+
+    assert type(avro.from_avro(c, "{}")).__name__ == "Column"
+    assert type(avro.from_avro(c, "{}", {"mode": "PERMISSIVE"})).__name__ == "Column"
+    assert type(avro.to_avro(c, "{}")).__name__ == "Column"
+    assert type(protobuf.from_protobuf(c, "M", options={"x": "y"})).__name__ == "Column"
+    assert type(protobuf.to_protobuf(c, "M", options={"x": "y"})).__name__ == "Column"
 
 
 def test_type_class_hierarchy():
@@ -2223,14 +2225,20 @@ def test_sql_is_remote():
     assert S.is_remote() is True
 
 
-def test_functions_protobuf_descriptor_branches():
+def test_functions_protobuf_descriptor_branches(tmp_path):
+    import pyspark.sql.protobuf.functions as protobuf
     from pyspark.sql import functions as F
+
     c = F.col("v")
-    # descriptor-file and binary-descriptor-set branches
-    assert type(F.from_protobuf(c, "M", desc_file_path="/tmp/x.desc")).__name__ == "Column"
-    assert type(F.from_protobuf(c, "M", binary_descriptor_set=b"\x00")).__name__ == "Column"
-    assert type(F.to_protobuf(c, "M", desc_file_path="/tmp/x.desc")).__name__ == "Column"
-    assert type(F.to_protobuf(c, "M", binary_descriptor_set=b"\x00")).__name__ == "Column"
+    descriptor = tmp_path / "m.desc"
+    descriptor.write_bytes(b"\x00")
+    # descriptor-file and binary-descriptor-set branches, with and without options
+    assert type(protobuf.from_protobuf(c, "M", descFilePath=str(descriptor))).__name__ == "Column"
+    assert type(protobuf.from_protobuf(c, "M", binaryDescriptorSet=b"\x00")).__name__ == "Column"
+    assert type(protobuf.to_protobuf(c, "M", descFilePath=str(descriptor))).__name__ == "Column"
+    assert type(protobuf.to_protobuf(c, "M", binaryDescriptorSet=b"\x00")).__name__ == "Column"
+    assert type(protobuf.from_protobuf(c, "M", descFilePath=str(descriptor), options={"x": "y"})).__name__ == "Column"
+    assert type(protobuf.to_protobuf(c, "M", binaryDescriptorSet=b"\x00", options={"x": "y"})).__name__ == "Column"
 
 
 def test_udf_defaults_and_registration():
@@ -7030,6 +7038,207 @@ def test_completion_propagates_schema_errors_and_can_retry(completion_analyzed, 
     service.failure = None
     assert "id" in getattr(df, method)()
     assert service.calls == 3
+
+
+# --------------------------------------------------------------------------- functions exports and literals of NumPy scalars
+
+# The public names of PySpark 4.3.0's pyspark.sql.functions, in its order (__all__ is static there).
+OFFICIAL_FUNCTIONS_ALL = """
+    broadcast call_function col column lit expr coalesce ifnull nanvl nullif nullifzero nvl
+    nvl2 when zeroifnull equal_null ilike isnan isnotnull isnull like regexp regexp_like
+    rlike asc asc_nulls_first asc_nulls_last desc desc_nulls_first desc_nulls_last abs acos
+    acosh asin asinh atan atan2 atanh bin bround cbrt ceil ceiling conv cos cosh cot csc
+    degrees e exp expm1 factorial floor greatest hex hypot least ln log log10 log1p log2
+    negate negative pi pmod positive pow power radians rand randn rint round sec sign signum
+    sin sinh sqrt tan tanh try_add try_divide try_mod try_multiply try_subtract unhex
+    uniform width_bucket ascii base64 bit_length btrim char char_length character_length
+    collate collation concat_ws contains decode elt encode endswith find_in_set
+    format_number format_string from_base32 initcap instr is_valid_utf8
+    jaro_winkler_similarity lcase left length levenshtein locate lower lpad ltrim
+    make_valid_utf8 mask octet_length overlay position printf quote randstr regexp_count
+    regexp_extract regexp_extract_all regexp_instr regexp_replace regexp_substr repeat
+    replace right rpad rtrim sentences soundex split split_part startswith substr substring
+    substring_index to_base32 to_binary to_char to_number to_varchar translate trim
+    try_to_binary try_to_number try_validate_utf8 ucase unbase64 upper validate_utf8
+    bit_count bit_get bitwise_not getbit shiftleft shiftright shiftrightunsigned add_months
+    convert_timezone curdate current_date current_time current_timestamp current_timezone
+    date_add date_diff date_format date_from_unix_date date_part date_sub date_trunc dateadd
+    datediff datepart day dayname dayofmonth dayofweek dayofyear extract from_unixtime
+    from_utc_timestamp hour last_day localtimestamp make_date make_dt_interval make_interval
+    make_time make_timestamp make_timestamp_ltz make_timestamp_ntz make_ym_interval minute
+    month monthname months_between next_day now quarter second session_window timestamp_add
+    timestamp_diff timestamp_micros timestamp_millis timestamp_nanos timestamp_seconds
+    time_bucket time_diff time_from_micros time_from_millis time_from_seconds time_to_micros
+    time_to_millis time_to_seconds time_trunc to_date to_time to_timestamp to_timestamp_ltz
+    to_timestamp_ntz to_unix_timestamp to_utc_timestamp trunc try_make_interval
+    try_make_timestamp try_make_timestamp_ltz try_make_timestamp_ntz try_to_time
+    try_to_timestamp try_to_date unix_date unix_micros unix_millis unix_nanos unix_seconds
+    unix_timestamp weekday weekofyear window window_time year crc32 hash md5 sha sha1 sha2
+    xxhash64 aggregate array_sort cardinality concat element_at exists filter forall
+    map_filter map_zip_with reduce reverse size transform transform_keys transform_values
+    try_element_at zip_with array array_append array_compact array_contains array_distinct
+    array_except array_insert array_intersect array_join array_max array_min array_position
+    array_prepend array_remove array_repeat array_size array_union arrays_overlap arrays_zip
+    flatten get sequence shuffle slice sort_array named_struct struct create_map map_concat
+    map_contains_key map_entries map_from_arrays map_from_entries map_keys map_values
+    str_to_map any_value approx_count_distinct approx_percentile array_agg avg bit_and
+    bit_or bit_xor bitmap_and_agg bitmap_construct_agg bitmap_or_agg bool_and bool_or
+    collect_list collect_set collect_union corr count count_distinct count_if
+    count_min_sketch covar_pop covar_samp every first first_value grouping grouping_id
+    histogram_numeric hll_sketch_agg hll_union_agg kll_sketch_agg_bigint
+    kll_sketch_agg_double kll_sketch_agg_float kll_merge_agg_bigint kll_merge_agg_double
+    kll_merge_agg_float kurtosis last last_value listagg listagg_distinct max max_by mean
+    median min min_by mode percentile percentile_approx product regr_avgx regr_avgy
+    regr_count regr_intercept regr_r2 regr_slope regr_sxx regr_sxy regr_syy skewness some
+    std stddev stddev_pop stddev_samp string_agg string_agg_distinct sum sum_distinct
+    theta_intersection_agg theta_sketch_agg theta_union_agg tuple_intersection_agg_double
+    tuple_intersection_agg_integer tuple_sketch_agg_double tuple_sketch_agg_integer
+    tuple_union_agg_double tuple_union_agg_integer try_avg try_sum var_pop var_samp variance
+    counter_diff cume_dist dense_rank lag lead nth_value ntile percent_rank rank row_number
+    explode explode_outer inline inline_outer posexplode posexplode_outer stack years months
+    days hours bucket from_csv schema_of_csv to_csv from_json get_json_object
+    json_array_length json_object_keys json_tuple schema_of_json to_json is_valid_variant
+    is_variant_null parse_json schema_of_variant schema_of_variant_agg try_variant_get
+    variant_array_append try_variant_array_append variant_delete variant_strip_nulls
+    variant_get variant_insert try_variant_insert variant_set try_variant_set try_parse_json
+    to_variant_object from_xml schema_of_xml to_xml xpath xpath_boolean xpath_double
+    xpath_float xpath_int xpath_long xpath_number xpath_short xpath_string parse_url
+    try_parse_url url_decode url_encode try_url_decode aes_decrypt aes_encrypt assert_true
+    bitmap_bit_position bitmap_bucket_number bitmap_count current_catalog current_database
+    current_path current_schema current_user hmac input_file_block_length
+    input_file_block_start input_file_name java_method monotonically_increasing_id
+    raise_error reflect session_user spark_partition_id try_aes_decrypt try_reflect typeof
+    user version AnalyzeArgument AnalyzeResult ArrowUDFType OrderingColumn PandasUDFType
+    PartitioningColumn SelectedColumn SkipRestOfInputTableException UserDefinedFunction
+    UserDefinedTableFunction arrow_udf hll_sketch_estimate hll_union kll_sketch_get_n_bigint
+    kll_sketch_get_n_double kll_sketch_get_n_float kll_sketch_get_quantile_bigint
+    kll_sketch_get_quantile_double kll_sketch_get_quantile_float kll_sketch_get_rank_bigint
+    kll_sketch_get_rank_double kll_sketch_get_rank_float kll_sketch_merge_bigint
+    kll_sketch_merge_double kll_sketch_merge_float kll_sketch_to_string_bigint
+    kll_sketch_to_string_double kll_sketch_to_string_float theta_difference
+    theta_intersection theta_sketch_estimate theta_union tuple_difference_double
+    tuple_difference_integer tuple_difference_theta_double tuple_difference_theta_integer
+    tuple_intersection_double tuple_intersection_integer tuple_intersection_theta_double
+    tuple_intersection_theta_integer tuple_sketch_estimate_double
+    tuple_sketch_estimate_integer tuple_sketch_summary_double tuple_sketch_summary_integer
+    tuple_sketch_theta_double tuple_sketch_theta_integer tuple_union_double
+    tuple_union_integer tuple_union_theta_double tuple_union_theta_integer st_asbinary
+    st_geogfromwkb st_geomfromwkb st_setsrid st_srid vector_cosine_similarity
+    vector_inner_product vector_l2_distance vector_norm vector_normalize vector_avg
+    vector_sum call_udf pandas_udf udf udtf arrow_udtf unwrap_udt
+""".split()
+
+
+def test_star_import_of_functions_exports_the_official_names_only():
+    # A star import brings in exactly the names of PySpark's __all__. The names that PySpark has
+    # only as attributes (chr, random, uuid, ...) are not exported, so they do not shadow the
+    # builtin chr and the stdlib random and uuid; nor are the avro and protobuf functions, which
+    # PySpark has in pyspark.sql.avro.functions and pyspark.sql.protobuf.functions.
+    import builtins
+
+    from pyspark.sql import functions as F
+
+    assert F.__all__ == OFFICIAL_FUNCTIONS_ALL
+    namespace = {}
+    exec("from pyspark.sql.functions import *", namespace)
+    namespace.pop("__builtins__")
+    assert list(namespace) == OFFICIAL_FUNCTIONS_ALL
+    for name in ("chr", "random", "uuid", "countDistinct", "bitwiseNOT", "toDegrees",
+                 "approxCountDistinct"):
+        assert name not in namespace
+        assert callable(getattr(F, name))
+    assert F.random is F.rand
+    assert "chr" not in namespace and builtins.chr(65) == "A"
+    for name in ("from_avro", "from_avro_with_options", "to_avro", "to_avro_with_schema",
+                 "from_protobuf", "to_protobuf"):
+        assert name not in namespace
+        assert not hasattr(F, name)
+
+
+def test_avro_and_protobuf_functions_are_on_their_official_modules(tmp_path, mock_connect):
+    import pyspark.sql.avro.functions as avro
+    import pyspark.sql.protobuf.functions as protobuf
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    c = F.col("v")
+    assert type(avro.from_avro(c, "{}")).__name__ == "Column"
+    assert type(avro.from_avro("v", "{}", {"mode": "PERMISSIVE"})).__name__ == "Column"
+    assert type(avro.to_avro(c)).__name__ == "Column"
+    assert type(avro.to_avro(c, "{}")).__name__ == "Column"
+    with pytest.raises(PySparkTypeError) as error:
+        avro.from_avro(1, "{}")
+    assert error.value.getCondition() == "INVALID_TYPE"
+    assert error.value.getMessageParameters() == {
+        "arg_name": "data", "arg_type": "pyspark.sql.Column or str"}
+    # As PySpark's, the descriptor file is read (it was ignored before), and the bytes reach the
+    # server as the binary of the function's descriptor set.
+    descriptor = tmp_path / "m.desc"
+    descriptor.write_bytes(b"\x00fue-e-descriptor\xff")
+    spark.range(1).select(protobuf.from_protobuf(F.col("id"), "M", descFilePath=str(descriptor))).collect()
+    assert b"\x00fue-e-descriptor\xff" in service.execute_requests[-1]
+
+
+def test_numpy_scalar_literals_are_typed_by_their_dtype_as_pyspark(mock_connect):
+    import struct
+
+    np = pytest.importorskip("numpy")
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    # As PySpark's LiteralExpression of a NumPy scalar, typed by its dtype: a bool, a signed int
+    # of 8 to 64 bits (tinyint to bigint), float32 (float) and float64 (double). The Literal
+    # fields are: boolean=3, byte=4, short=5, integer=6, long=7, float=10, double=11, string=13,
+    # binary=2.
+    cases = [
+        (np.bool_(True), 3, 1),
+        (np.int8(5), 4, 5),
+        (np.int16(5), 5, 5),
+        (np.int32(5), 6, 5),
+        (np.int64(5), 7, 5),
+        (np.int64(2**40), 7, 2**40),
+        (np.float32(1.5), 10, struct.pack("<f", 1.5)),
+        (np.float64(1.5), 11, struct.pack("<d", 1.5)),
+        (np.str_("abc"), 13, b"abc"),
+        (np.bytes_(b"ab"), 2, b"ab"),
+        # A Python int and float keep their types: int (integer) and double.
+        (5, 6, 5),
+        (1.5, 11, struct.pack("<d", 1.5)),
+    ]
+    for value, field, expected in cases:
+        spark.range(1).select(F.lit(value)).collect()
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        expression = parse_message(parse_message(parse_message(plan)[3][0])[3][0])
+        literal = parse_message(expression[1][0])
+        assert sorted(literal) == [field], repr(value)
+        assert literal[field] == [expected], repr(value)
+
+
+def test_numpy_scalars_of_other_types_are_unsupported_as_pyspark(mock_connect):
+    np = pytest.importorskip("numpy")
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+
+    # As PySpark's, the unsupported NumPy scalars are UNSUPPORTED_DATA_TYPE, named by their
+    # Python type; and an array of an unsupported dtype is UNSUPPORTED_NUMPY_ARRAY_SCALAR.
+    for value, type_name in [
+        (np.uint8(5), "uint8"),
+        (np.uint64(5), "uint64"),
+        (np.float16(1.5), "float16"),
+        (np.longdouble(1.5), "longdouble"),
+        (np.complex128(1 + 2j), "complex128"),
+        (np.datetime64("2020-01-01"), "datetime64"),
+        (np.timedelta64(1, "D"), "timedelta64"),
+    ]:
+        with pytest.raises(PySparkTypeError) as error:
+            F.lit(value)
+        assert error.value.getCondition() == "UNSUPPORTED_DATA_TYPE"
+        assert error.value.getMessageParameters() == {"data_type": type_name}
+    with pytest.raises(PySparkTypeError) as error:
+        F.lit(np.array([1], dtype=np.uint8))
+    assert error.value.getCondition() == "UNSUPPORTED_NUMPY_ARRAY_SCALAR"
+    assert error.value.getMessageParameters() == {"dtype": "uint8"}
 
 
 # --------------------------------------------------------------------------- 4.3.0 gaps
