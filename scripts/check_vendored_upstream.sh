@@ -54,6 +54,10 @@ VENDORED_FILES=(
   # Call sites of the JVM gateway, which pyspark.sql.pandas.conversion imports.
   "traceback_utils.py"
 
+  # The SparkConf and the TaskContext of pyspark, pure Python, which it exports.
+  "conf.py"
+  "taskcontext.py"
+
   # Logging
   "logger/__init__.py"
   "logger/logger.py"

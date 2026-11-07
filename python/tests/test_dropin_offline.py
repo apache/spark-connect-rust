@@ -2210,14 +2210,57 @@ with mock_connect_session() as (spark, service):
 """, str(Path(__file__).resolve().parent)], check=True)
 
 
-def test_spark_conf_stub():
+def test_spark_conf_is_that_of_pyspark():
+    # As PySpark's SparkConf of a Connect-only client, which keeps its settings in Python.
     from pyspark import SparkConf
-    c = SparkConf().set("a", "1").setAll({"b": "2", "c": "3"})
+    c = SparkConf().set("a", "1").setAll([("b", "2"), ("c", "3")])
     assert c.get("a") == "1"
     assert dict(c.getAll())["b"] == "2"
-    c.remove("a")
-    assert c.get("a", "default") == "default"
-    c.remove("nonexistent")  # removing an absent key is a no-op
+    assert c.contains("b") and not c.contains("z")
+    assert c.setIfMissing("a", "x").get("a") == "1"
+    assert c.setAppName("app").setMaster("local[2]").get("spark.app.name") == "app"
+    assert "spark.master=local[2]" in c.toDebugString().splitlines()
+
+
+def test_pyspark_exports_the_names_of_the_pyspark_client():
+    # As the PySpark client's pyspark, of a Connect-only client: its SparkConf, TaskContext,
+    # accumulators, serializers, profilers and decorators, of their modules.
+    import pyspark
+    from pyspark.accumulators import Accumulator, AccumulatorParam
+    from pyspark.conf import SparkConf
+    from pyspark.profiler import BasicProfiler, Profiler
+    from pyspark.serializers import CPickleSerializer, MarshalSerializer
+    from pyspark.taskcontext import BarrierTaskContext, BarrierTaskInfo, TaskContext
+
+    for name, value in [
+        ("SparkConf", SparkConf),
+        ("TaskContext", TaskContext),
+        ("BarrierTaskContext", BarrierTaskContext),
+        ("BarrierTaskInfo", BarrierTaskInfo),
+        ("Accumulator", Accumulator),
+        ("AccumulatorParam", AccumulatorParam),
+        ("MarshalSerializer", MarshalSerializer),
+        ("CPickleSerializer", CPickleSerializer),
+        ("Profiler", Profiler),
+        ("BasicProfiler", BasicProfiler),
+    ]:
+        assert getattr(pyspark, name) is value, name
+    assert TaskContext.get() is None
+
+    @pyspark.since(4.3)
+    def documented():
+        """A function."""
+
+    assert documented.__doc__.endswith(".. versionadded:: 4.3")
+
+    class Estimator:
+        @pyspark.keyword_only
+        def set(self, a=None):
+            return self._input_kwargs
+
+    assert Estimator().set(a=1) == {"a": 1}
+    with pytest.raises(TypeError, match="forces keyword arguments"):
+        Estimator().set(1)
 
 
 def test_sql_is_remote():
@@ -4165,21 +4208,23 @@ def test_row_length():
 
 
 def test_since_decorator():
-    """Test the @since decorator from pyspark."""
+    """Test the @since decorator from pyspark, which appends the version to the docstring."""
     from pyspark import since
 
     @since(3.0)
     def new_function():
+        """A function."""
         return "result"
 
-    # The decorator should be transparent (pass-through)
     assert new_function() == "result"
+    assert new_function.__doc__ == "A function.\n\n.. versionadded:: 3.0"
 
-    @since("4.0")
-    def another_func():
-        return 42
+    # As PySpark's, of a function that has a docstring.
+    with pytest.raises(AssertionError):
 
-    assert another_func() == 42
+        @since("4.0")
+        def another_func():
+            return 42
 
 
 def test_spark_conf_empty_config():
@@ -4188,16 +4233,6 @@ def test_spark_conf_empty_config():
 
     conf = SparkConf()
     assert conf.getAll() == []
-
-
-def test_spark_conf_remove_missing():
-    """Test removing a non-existent key from SparkConf."""
-    from pyspark import SparkConf
-
-    conf = SparkConf()
-    # Removing a key that doesn't exist should not raise
-    result = conf.remove("nonexistent")
-    assert result is conf  # Should return self for chaining
 
 
 def test_spark_conf_get_with_default():
@@ -4218,7 +4253,7 @@ def test_spark_conf_chain_operations():
     conf = (SparkConf()
             .set("key1", "value1")
             .set("key2", "value2")
-            .setAll({"key3": "value3", "key4": "value4"}))
+            .setAll([("key3", "value3"), ("key4", "value4")]))
 
     assert conf.get("key1") == "value1"
     assert conf.get("key3") == "value3"

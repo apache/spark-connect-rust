@@ -502,6 +502,24 @@ def test_create_dataframe_from_arrow_table(session, schema, expected):
     assert _rows(df) == ARROW_TABLE_ROWS
 
 
+def test_spark_conf_and_task_context_are_those_of_pyspark(session):
+    # As PySpark's: pyspark exports the SparkConf, whose settings the builder sets on the
+    # session, and the TaskContext, which a UDF uses on the server.
+    from pyspark import SparkConf, TaskContext
+    from pyspark.sql import functions as F
+
+    key = "spark.sql.test.conf.of.a.spark.conf"
+    conf = SparkConf().set(key, "v").setIfMissing(key, "other")
+    try:
+        assert SparkSession.builder.config(conf=conf).getOrCreate() is session
+        assert session.conf.get(key) == "v"
+    finally:
+        session.conf.unset(key)
+    partition = F.udf(lambda: TaskContext.get().partitionId(), "int")
+    rows = session.range(0, 4, 1, 2).select(partition().alias("p")).distinct().collect()
+    assert sorted(row.p for row in rows) == [0, 1]
+
+
 def test_add_artifacts_reach_udfs_as_pyspark(session, tmp_path):
     import uuid
     import zipfile
