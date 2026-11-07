@@ -616,9 +616,12 @@ impl PySparkSession {
             }
             false
         } else {
+            // A VariantVal of PySpark has a `__dict__`, so that it is taken as a row, which
+            // PySpark's `to_row` rejects, as `row_values` does.
             !(first.is_instance_of::<crate::row::PyRow>()
                 || first.is_instance_of::<pyo3::types::PyTuple>()
                 || first.is_instance_of::<PyList>()
+                || first.is_instance_of::<crate::values::PyVariantVal>()
                 || first.hasattr("__dict__")?)
         };
 
@@ -633,6 +636,9 @@ impl PySparkSession {
                     let row_type = if single {
                         let items = infer::positional(py, vec![item.clone()], cols.as_mut());
                         infer::infer_fields(py, items, options)?
+                    } else if item.is_instance_of::<crate::values::PyVariantVal>() {
+                        // PySpark infers the type of its `__dict__`, then rejects the row.
+                        return Err(infer::variant_row(py));
                     } else {
                         infer::infer_schema(item, cols.as_mut(), options)?
                     };

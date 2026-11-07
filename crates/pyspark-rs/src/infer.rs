@@ -1568,6 +1568,11 @@ pub(crate) fn value_field(data_type: DataType) -> StructField {
     nullable_field("value".to_string(), data_type)
 }
 
+/// What PySpark's `to_row` raises for a row that is a VariantVal.
+pub(crate) fn variant_row(py: Python<'_>) -> PyErr {
+    pyspark_message(py, "PySparkValueError", "Rows cannot be of type VariantVal")
+}
+
 /// The values of a row in the order of `fields`, as PySpark's `to_row` takes them: nulls for
 /// None, a tuple or a Row by position, a dict by name, another object by its `__dict__`, and
 /// another value, such as a list, by position.
@@ -1590,11 +1595,7 @@ pub(crate) fn row_values<'py>(
         return values_by_name(item, fields);
     }
     if item.is_instance_of::<PyVariantVal>() {
-        return Err(pyspark_message(
-            py,
-            "PySparkValueError",
-            "Rows cannot be of type VariantVal",
-        ));
+        return Err(variant_row(py));
     }
     if item.hasattr(intern!(py, "__dict__"))? {
         return values_by_name(&item.getattr(intern!(py, "__dict__"))?, fields);

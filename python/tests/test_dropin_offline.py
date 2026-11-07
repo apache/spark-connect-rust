@@ -4454,6 +4454,30 @@ def test_variant_val_pickles_as_pyspark():
     assert (value.value, value.metadata) == (b"\x0c\x01", b"\x01\x00\x00")
 
 
+def test_str_of_variant_values_is_their_json_and_they_are_no_rows_as_pyspark():
+    # As PySpark's VariantVal: str is its JSON, in UTC, as toJson(); repr is of its bytes. And
+    # as PySpark's createDataFrame, whose VariantVal has a __dict__, so that it is a row, which
+    # to_row rejects: a VariantVal is no row, also without a schema or of one that is not a
+    # struct; but rows of a first None are rows of single values, of the VariantVals too.
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql.types import VariantVal
+
+    v = VariantVal.parseJson('{"b": [1, "2", true, null], "a": 1.5}')
+    assert str(v) == v.toJson() == '{"a":1.5,"b":[1,"2",true,null]}'
+    assert repr(v) == "VariantVal(%r, %r)" % (v.value, v.metadata)
+    assert str(VariantVal.parseJson('"x"')) == '"x"'
+    assert "%s" % VariantVal.parseJson("1") == "1"
+
+    spark = _offline_session()
+    struct = T.StructType([T.StructField("v", T.VariantType())])
+    for data, schema in [([v], struct), ([v, None], struct), ([v], None), ([v], T.VariantType())]:
+        with pytest.raises(PySparkValueError, match="Rows cannot be of type VariantVal"):
+            spark.createDataFrame(data, schema)
+    assert type(spark.createDataFrame([None, v], struct)).__name__ == "DataFrame"
+
+
+
+
 def test_variant_values():
     """Test VariantVal and other variant types."""
     from pyspark.sql.types import VariantVal, Geometry, Geography
