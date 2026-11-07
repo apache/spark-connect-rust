@@ -6147,6 +6147,7 @@ def test_container_input_recursive_leaf_and_row_types(container_input_capture_in
     assert type(result["decimal"]) is ContainerInputDecimal
 
 
+# DDL handler for the exact-date capture server below.
 def _ddl_parse(request, context):
     # As the server, of the DDL schemas that the client asks it to parse (`_parse_ddl`).
     import grpc
@@ -6159,13 +6160,13 @@ def _ddl_parse(request, context):
 
 @pytest.fixture
 def container_input_capture_input(request):
-    pd = pytest.importorskip("pandas")
     # Check the optional dependency before acquiring the shared server/session.
+    pd = pytest.importorskip("pandas")
     mock_connect = request.getfixturevalue("mock_connect")
 
     def capture(data, schema):
-        # The optimized converter is the pandas/generic path. Local rows use
-        # infer.convert, which has different container/numeric-protocol semantics.
+        # Keep input on the pandas path (generic conversion or Arrow import).
+        # Local rows use infer.convert with different container/numeric semantics.
         if not isinstance(data, pd.DataFrame):
             data = pd.DataFrame(data, dtype=object)
         return _native_number_input_table(mock_connect, data, schema)
@@ -6173,7 +6174,7 @@ def container_input_capture_input(request):
     return capture
 
 
-@pytest.mark.parametrize("source", ["pandas_object_dtype", "pandas"])
+@pytest.mark.parametrize("source", ["positional_columns", "named_columns"])
 @pytest.mark.parametrize("schema_kind", ["inferred", "names", "explicit", "ddl"])
 @pytest.mark.parametrize("container", [list, tuple])
 def test_container_input_array_input_ipc(container_input_capture_input, source, schema_kind, container):
@@ -6183,8 +6184,8 @@ def test_container_input_array_input_ipc(container_input_capture_input, source, 
     schema = {"inferred": None, "names": ["items"], "ddl": "items array<bigint>",
               "explicit": T.StructType([T.StructField("items", T.ArrayType(T.LongType()))])}[schema_kind]
     data = [(value,) for value in values]
-    if source == "pandas":
-        pd = pytest.importorskip("pandas")
+    if source == "named_columns":
+        import pandas as pd
         data = pd.DataFrame(data, columns=["items"])
     table = container_input_capture_input(data, schema)
     assert table.column(0).type == pa.list_(pa.int64())
