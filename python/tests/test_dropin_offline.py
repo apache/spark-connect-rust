@@ -6818,6 +6818,88 @@ def test_arrow_input_large_upload_live_server():
         spark.stop()
 
 
+# --------------------------------------------------------------------------- spatial values with invalid or mixed SRIDs
+_SPATIAL_WKB = bytes.fromhex("0101000000000000000000F03F0000000000000040")
+
+
+def _sent_local_field_types(spark, service, data, schema=None):
+    # The JSON types of the fields of the local relation that createDataFrame sends.
+    df = spark.createDataFrame(data, schema) if schema is not None else spark.createDataFrame(data)
+    df.toArrow()
+    request = parse_message(service.execute_requests[-1])
+    relation = parse_message(parse_message(request[3][0])[1][0])
+    while 18 in relation:  # Relation.to_df -> ToDF.input.
+        relation = parse_message(parse_message(relation[18][0])[1][0])
+    local = parse_message(relation[11][0])  # Relation.local_relation=11 -> LocalRelation.schema=2.
+    return [field["type"] for field in json.loads(local[2][0])["fields"]]
+
+
+@pytest.mark.parametrize("make, srid", [
+    (lambda: T.Geography.fromWKB(_SPATIAL_WKB, 4269), 4269),
+    (lambda: T.Geometry.fromWKB(_SPATIAL_WKB, 4269), 4269),
+    (lambda: T.Geometry.fromWKB(_SPATIAL_WKB, 99999), 99999),
+    (lambda: T.Geography.fromWKB(_SPATIAL_WKB, 99999), 99999),
+    (lambda: T.Geography.fromWKB(_SPATIAL_WKB, 0), 0),
+    (lambda: T.Geography.fromWKB(_SPATIAL_WKB, 3857), 3857),
+    (lambda: T.Geography.fromWKB(_SPATIAL_WKB, -1), -1),
+])
+def test_inferred_spatial_value_with_an_srid_its_type_does_not_take_is_rejected(mock_connect, make, srid):
+    # As PySpark's _infer_type, which builds GeometryType(srid) or GeographyType(srid) for each
+    # value: createDataFrame raises ST_INVALID_SRID_VALUE for a top-level value, for one nested
+    # in an array, and for the value after a null.
+    from pyspark.errors import IllegalArgumentException
+
+    spark, _ = mock_connect
+    for data in ([(make(),)], [([make()],)], [(None,), (make(),)]):
+        with pytest.raises(IllegalArgumentException) as error:
+            spark.createDataFrame(data)
+        assert error.value.getCondition() == "ST_INVALID_SRID_VALUE"
+        assert error.value.getMessageParameters() == {"srid": str(srid)}
+
+
+def test_mixed_geography_srids_fail_at_the_row_with_the_invalid_srid(mock_connect):
+    # Official PySpark infers each row's type before merging the rows, so the second row of
+    # GEOGRAPHY SRIDs 4326 and 4269 raises the error with its SRID, as does 0 after 4326.
+    from pyspark.errors import IllegalArgumentException
+
+    spark, _ = mock_connect
+    for second in (4269, 0):
+        with pytest.raises(IllegalArgumentException) as error:
+            spark.createDataFrame([
+                (T.Geography.fromWKB(_SPATIAL_WKB, 4326),),
+                (T.Geography.fromWKB(_SPATIAL_WKB, second),),
+            ])
+        assert error.value.getCondition() == "ST_INVALID_SRID_VALUE"
+        assert error.value.getMessageParameters() == {"srid": str(second)}
+
+
+def test_inferred_spatial_types_of_valid_srids_are_as_pyspark(mock_connect):
+    # GEOMETRY takes the SRIDs 0, 3857 and 4326, and merges differing SRIDs into GEOMETRY(ANY)
+    # as PySpark's _merge_type does; GEOGRAPHY takes only 4326.
+    from pyspark.sql.types import Geometry
+
+    spark, service = mock_connect
+    geometry = lambda srid: Geometry.fromWKB(_SPATIAL_WKB, srid)  # noqa: E731
+    types = lambda data: _sent_local_field_types(spark, service, data)  # noqa: E731
+    assert types([(geometry(0),), (geometry(3857),), (geometry(4326),)]) == [
+        T.GeometryType("ANY").jsonValue()]
+    assert types([(geometry(4326),), (None,), (geometry(4326),)]) == [
+        T.GeometryType(4326).jsonValue()]
+    assert types([([geometry(4326)],), ([geometry(3857)],)]) == [
+        T.ArrayType(T.GeometryType("ANY")).jsonValue()]
+    assert types([(T.Geography.fromWKB(_SPATIAL_WKB, 4326),)]) == [
+        T.GeographyType(4326).jsonValue()]
+
+
+def test_explicit_schema_spatial_values_are_not_inferred_from_their_srids(mock_connect):
+    # With an explicit schema, PySpark does not build the type from each value's SRID, so a
+    # GEOGRAPHY(ANY) takes a value of SRID 4269 without the client checking it.
+    spark, service = mock_connect
+    schema = T.StructType([T.StructField("g", T.GeographyType("ANY"))])
+    data = [(T.Geography.fromWKB(_SPATIAL_WKB, 4269),), (T.Geography.fromWKB(_SPATIAL_WKB, 4326),)]
+    assert _sent_local_field_types(spark, service, data, schema) == [T.GeographyType("ANY").jsonValue()]
+
+
 # ------------------------------------------------------- DataFrame completion
 
 def _completion_varint(value):
