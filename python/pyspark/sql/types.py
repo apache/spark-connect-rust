@@ -560,3 +560,190 @@ def _udt_field_converters(schema):
     field has a user-defined type. The client applies them to the rows that it collects."""
     converters = [_udt_converter(field.dataType) for field in schema.fields]
     return None if all(c is None for c in converters) else converters
+
+
+def _to_internal(dataType, obj):
+    """The internal SQL value of the Python value ``obj``, as the ``toInternal`` of the PySpark
+    type of ``dataType``: the days of a date since the epoch, the microseconds of a timestamp
+    and of a day-time interval, the nanoseconds of a time, and the dicts of variants and spatial
+    values, also in the elements, keys, values and fields of arrays, maps and structs."""
+    import calendar
+    import time
+
+    from pyspark.errors import PySparkNotImplementedError
+
+    if isinstance(dataType, StructField):
+        return dataType.dataType.toInternal(obj)
+    elif isinstance(dataType, DateType):
+        if obj is not None:
+            return obj.toordinal() - DateType.EPOCH_ORDINAL
+    elif isinstance(dataType, TimeType):
+        if obj is not None:
+            return (
+                obj.hour * 3_600_000_000_000
+                + obj.minute * 60_000_000_000
+                + obj.second * 1_000_000_000
+                + obj.microsecond * 1_000
+            )
+    elif isinstance(dataType, TimestampType):
+        if obj is not None:
+            seconds = (
+                calendar.timegm(obj.utctimetuple()) if obj.tzinfo else time.mktime(obj.timetuple())
+            )
+            return int(seconds) * 1000000 + obj.microsecond
+    elif isinstance(dataType, TimestampNTZType):
+        if obj is not None:
+            seconds = calendar.timegm(obj.timetuple())
+            return int(seconds) * 1000000 + obj.microsecond
+    elif isinstance(dataType, DayTimeIntervalType):
+        if obj is not None:
+            return (((obj.days * 86400) + obj.seconds) * 1_000_000) + obj.microseconds
+    elif isinstance(dataType, (YearMonthIntervalType, CalendarIntervalType)):
+        raise PySparkNotImplementedError(
+            errorClass="NOT_IMPLEMENTED",
+            messageParameters={"feature": "%s.toInternal" % type(dataType).__name__},
+        )
+    elif isinstance(dataType, VariantType):
+        if obj is None:
+            return None
+        assert isinstance(obj, VariantVal)
+        return {"value": obj.value, "metadata": obj.metadata}
+    elif isinstance(dataType, (GeometryType, GeographyType)):
+        if obj is None:
+            return None
+        assert isinstance(obj, Geometry if isinstance(dataType, GeometryType) else Geography)
+        return {"srid": obj.srid, "wkb": obj.wkb}
+    elif isinstance(dataType, ArrayType):
+        if not dataType.needConversion():
+            return obj
+        return obj and [dataType.elementType.toInternal(v) for v in obj]
+    elif isinstance(dataType, MapType):
+        if not dataType.needConversion():
+            return obj
+        return obj and dict(
+            (dataType.keyType.toInternal(k), dataType.valueType.toInternal(v))
+            for k, v in obj.items()
+        )
+    elif isinstance(dataType, StructType):
+        return _struct_to_internal(dataType, obj)
+    else:
+        return obj
+
+
+def _struct_to_internal(dataType, obj):
+    """``StructType.toInternal``, as PySpark's: the tuple of the values of the fields of a
+    dict, a tuple, a list, a Row or an object, converted where a field needs it."""
+    from pyspark.errors import PySparkValueError
+
+    if obj is None:
+        return
+    if isinstance(obj, VariantVal):
+        raise PySparkValueError("Rows cannot be of type VariantVal")
+    names, fields = dataType.names, dataType.fields
+    # A Row is a tuple in PySpark.
+    if dataType._needSerializeAnyField:
+        # Only calling toInternal function for fields that need conversion
+        need = dataType._needConversion
+        if isinstance(obj, dict):
+            return tuple(
+                f.toInternal(obj.get(n)) if c else obj.get(n)
+                for n, f, c in zip(names, fields, need)
+            )
+        elif isinstance(obj, (tuple, list, Row)):
+            return tuple(f.toInternal(v) if c else v for f, v, c in zip(fields, obj, need))
+        elif hasattr(obj, "__dict__"):
+            d = obj.__dict__
+            return tuple(
+                f.toInternal(d.get(n)) if c else d.get(n) for n, f, c in zip(names, fields, need)
+            )
+    else:
+        if isinstance(obj, dict):
+            return tuple(obj.get(n) for n in names)
+        elif isinstance(obj, (list, tuple, Row)):
+            return tuple(obj)
+        elif hasattr(obj, "__dict__"):
+            d = obj.__dict__
+            return tuple(d.get(n) for n in names)
+    raise PySparkValueError(
+        errorClass="UNEXPECTED_TUPLE_WITH_STRUCT",
+        messageParameters={"tuple": str(obj)},
+    )
+
+
+def _from_internal(dataType, obj):
+    """The Python value of the internal SQL value ``obj``, as the ``fromInternal`` of the
+    PySpark type of ``dataType``: the inverse of ``_to_internal``, of which a struct is a
+    Row."""
+    import datetime
+
+    from pyspark.errors import PySparkNotImplementedError
+
+    if isinstance(dataType, StructField):
+        return dataType.dataType.fromInternal(obj)
+    elif isinstance(dataType, DateType):
+        if obj is not None:
+            return datetime.date.fromordinal(obj + DateType.EPOCH_ORDINAL)
+    elif isinstance(dataType, TimeType):
+        if obj is not None:
+            hours, remainder = divmod(obj, 3_600_000_000_000)
+            minutes, remainder = divmod(remainder, 60_000_000_000)
+            seconds, remainder = divmod(remainder, 1_000_000_000)
+            microseconds = remainder // 1_000
+            return datetime.time(hours, minutes, seconds, microseconds)
+    elif isinstance(dataType, TimestampType):
+        if obj is not None:
+            # using int to avoid precision loss in float
+            return datetime.datetime.fromtimestamp(obj // 1000000).replace(
+                microsecond=obj % 1000000
+            )
+    elif isinstance(dataType, TimestampNTZType):
+        if obj is not None:
+            # using int to avoid precision loss in float
+            return datetime.datetime.fromtimestamp(obj // 1000000, datetime.timezone.utc).replace(
+                microsecond=obj % 1000000, tzinfo=None
+            )
+    elif isinstance(dataType, DayTimeIntervalType):
+        if obj is not None:
+            return datetime.timedelta(microseconds=obj)
+    elif isinstance(dataType, (YearMonthIntervalType, CalendarIntervalType)):
+        raise PySparkNotImplementedError(
+            errorClass="NOT_IMPLEMENTED",
+            messageParameters={"feature": "%s.fromInternal" % type(dataType).__name__},
+        )
+    elif isinstance(dataType, VariantType):
+        if obj is None or not all(key in obj for key in ["value", "metadata"]):
+            return None
+        return VariantVal(obj["value"], obj["metadata"])
+    elif isinstance(dataType, (GeometryType, GeographyType)):
+        if obj is None or not all(key in obj for key in ["srid", "bytes"]):
+            return None
+        cls = Geometry if isinstance(dataType, GeometryType) else Geography
+        return cls(obj["bytes"], obj["srid"])
+    elif isinstance(dataType, ArrayType):
+        if not dataType.needConversion():
+            return obj
+        return obj and [dataType.elementType.fromInternal(v) for v in obj]
+    elif isinstance(dataType, MapType):
+        if not dataType.needConversion():
+            return obj
+        return obj and dict(
+            (dataType.keyType.fromInternal(k), dataType.valueType.fromInternal(v))
+            for k, v in obj.items()
+        )
+    elif isinstance(dataType, StructType):
+        if obj is None:
+            return
+        if isinstance(obj, Row):
+            # it's already converted by pickler
+            return obj
+        if dataType._needSerializeAnyField:
+            # Only calling fromInternal function for fields that need conversion
+            values = [
+                f.fromInternal(v) if c else v
+                for f, v, c in zip(dataType.fields, obj, dataType._needConversion)
+            ]
+        else:
+            values = obj
+        return _create_row(dataType.names, values)
+    else:
+        return obj

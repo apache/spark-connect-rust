@@ -280,6 +280,75 @@ def _eq_cases():
     ]
 
 
+def test_data_types_convert_values_to_and_from_internal_as_pyspark(monkeypatch):
+    # As PySpark's toInternal and fromInternal: the days of a date since the epoch, the
+    # microseconds of a timestamp and of a day-time interval, the nanoseconds of a time, the
+    # dicts of variants and spatial values, and the elements, keys, values and fields of
+    # arrays, maps and structs; and needConversion of the types that convert.
+    import datetime
+
+    from pyspark.errors import PySparkNotImplementedError, PySparkValueError
+    from pyspark.sql.types import Geometry, VariantVal
+    from pyspark.testing.objects import PythonOnlyUDT
+
+    d, dt = datetime.date(2020, 1, 1), datetime.datetime(2020, 1, 1, 12, 30, 15, 123456)
+    assert T.DateType().toInternal(d) == 18262 and T.DateType().fromInternal(18262) == d
+    assert T.DateType().toInternal(None) is None
+    utc = dt.replace(tzinfo=datetime.timezone.utc)
+    assert T.TimestampType().toInternal(utc) == 1577881815123456
+    assert T.TimestampType().fromInternal(1577881815123456) == (
+        datetime.datetime.fromtimestamp(1577881815).replace(microsecond=123456))
+    assert T.TimestampNTZType().toInternal(dt) == 1577881815123456
+    assert T.TimestampNTZType().fromInternal(1577881815123456) == dt
+    time = datetime.time(12, 30, 15, 123456)
+    assert T.TimeType().toInternal(time) == 45015123456000
+    assert T.TimeType().fromInternal(45015123456000) == time
+    delta = datetime.timedelta(days=1, seconds=5, microseconds=7)
+    assert T.DayTimeIntervalType().toInternal(delta) == 86405000007
+    assert T.DayTimeIntervalType().fromInternal(86405000007) == delta
+    for data_type in (T.YearMonthIntervalType(), T.CalendarIntervalType()):
+        for convert in (data_type.toInternal, data_type.fromInternal):
+            with pytest.raises(PySparkNotImplementedError) as e:
+                convert(1)
+            assert e.value.getCondition() == "NOT_IMPLEMENTED"
+    variant = VariantVal(b"\x0c\x01", b"\x01\x00\x00")
+    internal = {"value": b"\x0c\x01", "metadata": b"\x01\x00\x00"}
+    assert T.VariantType().toInternal(variant) == internal
+    assert T.VariantType().fromInternal(internal).value == b"\x0c\x01"
+    wkb = bytes.fromhex("0101000000000000000000f03f0000000000000040")
+    assert T.GeometryType(4326).toInternal(Geometry.fromWKB(wkb, 4326)) == {
+        "srid": 4326, "wkb": wkb}
+    point = T.GeometryType(4326).fromInternal({"srid": 4326, "bytes": wkb})
+    assert (point.srid, point.wkb) == (4326, wkb)
+
+    st = T.StructType([
+        T.StructField("a", T.IntegerType()),
+        T.StructField("d", T.DateType()),
+        T.StructField("l", T.ArrayType(T.DateType())),
+        T.StructField("m", T.MapType(T.StringType(), T.DateType())),
+    ])
+    internal = (1, 18262, [18262, None], {"k": 18262})
+    row = Row(a=1, d=d, l=[d, None], m={"k": d})
+    for value in ((1, d, [d, None], {"k": d}), {"a": 1, "d": d, "l": [d, None], "m": {"k": d}},
+                  row):
+        assert st.toInternal(value) == internal
+    assert st.fromInternal(internal) == row
+    assert (st._needSerializeAnyField, st._needConversion) == (True, [False, True, True, True])
+    assert st.fields[1].toInternal(d) == 18262
+    with pytest.raises(PySparkValueError) as e:
+        st.toInternal(5)
+    assert e.value.getCondition() == "UNEXPECTED_TUPLE_WITH_STRUCT"
+
+    for data_type in (T.VariantType(), T.GeometryType(4326), T.GeographyType(4326),
+                      T.ArrayType(PythonOnlyUDT()), T.YearMonthIntervalType()):
+        assert data_type.needConversion() is True
+    assert T.ArrayType(T.IntegerType()).needConversion() is False
+    monkeypatch.setenv("PYSPARK_YM_INTERVAL_LEGACY", "1")
+    assert T.ArrayType(T.YearMonthIntervalType()).needConversion() is False
+
+
+
+
 def test_datatype_eq_and_hash_match_pyspark():
     cases = _eq_cases()
     left = [f() for f in cases]
