@@ -67,6 +67,25 @@ def test_to_local_iterator_raises_the_error_of_the_execution_as_pyspark(session,
     assert list(rows) == []
 
 
+def test_udtfs_of_ddl_return_types_are_unparsed_as_pyspark(session):
+    # As PySpark Connect's: the returnType of a UDTF of a DDL string is an UnparsedDataType,
+    # which the server parses.
+    from pyspark.sql.connect.types import UnparsedDataType
+    from pyspark.sql.functions import lit, udtf
+
+    @udtf(returnType="x int, y string")
+    class Pairs:
+        def eval(self, n: int):
+            for i in range(n):
+                yield i, str(i)
+
+    assert isinstance(Pairs.returnType, UnparsedDataType)
+    assert Pairs.returnType.data_type_string == "x int, y string"
+    assert [tuple(row) for row in Pairs(lit(2)).collect()] == [(0, "0"), (1, "1")]
+
+
+
+
 def test_udf_and_udtf_calls_take_named_arguments_as_pyspark(session):
     # As PySpark's: the keyword arguments of a UDF or UDTF call are its named arguments, and
     # a bare string is a column name.

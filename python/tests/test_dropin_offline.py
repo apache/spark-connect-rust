@@ -207,10 +207,14 @@ def test_spatial_and_collated_json_forms_parse():
 
 
 def test_unparsed_datatype_pickle_roundtrip():
+    # The core's JSON form of an unparsed type is the UnparsedDataType of
+    # pyspark.sql.connect.types, which pickles of its DDL string, as its JSON raises.
+    from pyspark.sql.connect.types import UnparsedDataType
+
     t = T._parse_datatype_json_value("unparsed(some_ddl)")
-    assert t.json() == '"unparsed(some_ddl)"'
+    assert isinstance(t, UnparsedDataType) and t.data_type_string == "some_ddl"
     r = pickle.loads(pickle.dumps(t))
-    assert r == t and r.json() == t.json()
+    assert r == t and repr(r) == "UnparsedDataType('some_ddl')"
 
 
 def test_user_defined_type_pickle_roundtrip():
@@ -2108,6 +2112,44 @@ def test_catalog_result_classes():
     assert Table("t", None, ["a", "b"], None, "MANAGED", False).database is None
 
 
+def test_unparsed_data_types_are_those_of_pyspark(mock_connect):
+    # As PySpark Connect's: UnparsedDataType of pyspark.sql.connect.types is a DDL string of a
+    # type that the server parses, whose JSON and conversions raise
+    # INVALID_CALL_ON_UNRESOLVED_OBJECT; the returnType of a UDTF of a DDL string is one; and
+    # the registration of a data source without a name raises the AttributeError of name().
+    import pickle
+
+    from pyspark.errors import PySparkAssertionError
+    from pyspark.sql.connect.types import UnparsedDataType
+    from pyspark.sql.functions import udtf
+
+    spark, _ = mock_connect
+    unparsed = UnparsedDataType("a int, b string")
+    assert isinstance(unparsed, T.DataType)
+    assert repr(unparsed) == "UnparsedDataType('a int, b string')"
+    assert unparsed.simpleString() == "unparsed('a int, b string')"
+    for name, call in (("jsonValue", unparsed.jsonValue), ("jsonValue", unparsed.json),
+                       ("needConversion", unparsed.needConversion),
+                       ("toInternal", lambda: unparsed.toInternal(1)),
+                       ("fromInternal", lambda: unparsed.fromInternal(1))):
+        with pytest.raises(PySparkAssertionError) as e:
+            call()
+        assert e.value.getCondition() == "INVALID_CALL_ON_UNRESOLVED_OBJECT"
+        assert e.value.getMessageParameters() == {"func_name": name}
+    assert repr(pickle.loads(pickle.dumps(unparsed))) == repr(unparsed)
+
+    @udtf(returnType="x int")
+    class Tables:
+        def eval(self, n: int):
+            yield (n,)
+
+    assert repr(Tables.returnType) == "UnparsedDataType('x int')"
+    with pytest.raises(AttributeError):
+        spark.dataSource.register(1)
+
+
+
+
 def test_udtf_analyze_result_family():
     from pyspark.sql.udtf import (
         AnalyzeArgument, PartitioningColumn, OrderingColumn, SelectedColumn,
@@ -2445,6 +2487,7 @@ def test_udtf_return_type_connect_validation_and_command():
 
     subprocess.run([sys.executable, "-c", """
 from pyspark.sql import SparkSession, DataFrame, functions as F, types as T
+from pyspark.sql.connect.types import UnparsedDataType
 from pyspark.serializers import CloudPickleSerializer
 
 # No server listens: with useArrow, udtf() does not read the Arrow config of the session.
@@ -2463,7 +2506,10 @@ for return_type in ["value BIGINT", "STRUCT<value: BIGINT>",
         handler = CloudPickleSerializer().loads(fn.command)
         assert isinstance(handler, type)
         assert list(handler().eval(7)) == [(7,)]
-        assert fn.returnType == return_type
+        # As PySpark Connect's, a DDL string is an UnparsedDataType.
+        expected = (UnparsedDataType(return_type) if isinstance(return_type, str)
+                    else return_type)
+        assert fn.returnType == expected
 
 # Dynamic schemas omit return_type and leave analysis to the Python handler.
 class Dynamic(Echo):

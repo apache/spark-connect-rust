@@ -262,9 +262,18 @@ impl PyDataType {
     }
 
     // --- DataType object-model methods (v4.2.0 parity) ---
+    /// As PySpark's `DataType.json`, of the `jsonValue` of the type, also of a pure-Python
+    /// subclass, such as an `UnparsedDataType`, whose `jsonValue` raises.
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
-        Ok(py_to_data_type(slf.as_any())?.json())
+        let py = slf.py();
+        let kwargs = pyo3::types::PyDict::new(py);
+        kwargs.set_item("separators", (",", ":"))?;
+        kwargs.set_item("sort_keys", true)?;
+        py.import("json")?
+            .getattr("dumps")?
+            .call((slf.call_method0("jsonValue")?,), Some(&kwargs))?
+            .extract()
     }
     #[pyo3(name = "jsonValue")]
     fn __obj_json_value<'py>(
@@ -3221,7 +3230,12 @@ pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAn
         }
         // An unparsed DDL string has no concrete Python class; keep it as a bare `DataType`.
         // (The Python parser delegates JSON strings back here, so routing it there would loop.)
-        DataType::Unparsed { .. } => Py::new(py, PyDataType { inner: dt.clone() })?.into_any(),
+        // As PySpark Connect's, a DDL string that the server parses.
+        DataType::Unparsed { data_type_string } => py
+            .import("pyspark.sql.connect.types")?
+            .getattr("UnparsedDataType")?
+            .call1((data_type_string,))?
+            .unbind(),
         DataType::Udt { .. } => {
             // A UDT reconstructs by re-importing its Python class; delegate to the Python
             // parser.
@@ -3387,6 +3401,19 @@ pub(crate) fn py_to_data_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
                 python_class: get("pyClass")?,
                 serialized_python_class: get("serializedClass")?,
                 sql_type: Some(Box::new(sql_type)),
+            });
+        }
+    }
+    // `UnparsedDataType` of `pyspark.sql.connect.types`, a pure-Python subclass of the base, is
+    // a DDL string that the server parses.
+    if let Ok(unparsed_cls) = obj
+        .py()
+        .import("pyspark.sql.connect.types")
+        .and_then(|m| m.getattr("UnparsedDataType"))
+    {
+        if obj.is_instance(&unparsed_cls)? {
+            return Ok(DataType::Unparsed {
+                data_type_string: obj.getattr("data_type_string")?.extract()?,
             });
         }
     }
