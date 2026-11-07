@@ -70,6 +70,19 @@ def test_to_local_iterator_raises_the_error_of_the_execution_as_pyspark(session,
     assert list(rows) == []
 
 
+def test_pandas_api_takes_its_index_and_plot_is_of_pyspark(session):
+    # As PySpark's DataFrame.pandas_api(index_col): a pandas-on-Spark DataFrame of the index
+    # of the columns of index_col; and DataFrame.plot, the PySparkPlotAccessor of the DataFrame.
+    sdf = session.createDataFrame([("a", 1, 2.0), ("b", 2, 3.0)], ["k", "i", "f"])
+    psdf = sdf.pandas_api(index_col="k")
+    assert psdf.index.name == "k" and list(psdf.columns) == ["i", "f"]
+    assert psdf.sort_index().to_pandas()["i"].tolist() == [1, 2]
+    assert sdf.pandas_api().index.name is None
+    pytest.importorskip("plotly")
+    figure = sdf.plot.line(x="k", y=["i", "f"])
+    assert type(figure).__name__ == "Figure" and len(figure.data) == 2
+
+
 def test_udtfs_of_ddl_return_types_are_unparsed_as_pyspark(session):
     # As PySpark Connect's: the returnType of a UDTF of a DDL string is an UnparsedDataType,
     # which the server parses.

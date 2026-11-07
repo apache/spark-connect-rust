@@ -2176,8 +2176,9 @@ impl PyDataFrame {
         Ok(ei.unbind())
     }
 
-    /// Convert to a pandas-on-Spark DataFrame. Mirrors `DataFrame.pandas_api`;
-    /// bridges into the vendored `pyspark.pandas`.
+    /// Convert to a pandas-on-Spark DataFrame, as PySpark's `DataFrame.pandas_api`: of the
+    /// `InternalFrame` of this DataFrame, of the index of the columns of `index_col`
+    /// (`pyspark.pandas.namespace._get_index_map`), of the vendored `pyspark.pandas`.
     #[pyo3(name = "pandas_api")]
     #[pyo3(signature = (index_col=None))]
     fn pandas_api(
@@ -2185,20 +2186,35 @@ impl PyDataFrame {
         py: Python<'_>,
         index_col: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let ps = py.import("pyspark.pandas")?;
-        let df_cls = ps.getattr("DataFrame")?;
+        let (index_spark_columns, index_names) = py
+            .import("pyspark.pandas.namespace")?
+            .getattr("_get_index_map")?
+            .call1((&slf, index_col))?
+            .extract::<(Bound<'_, PyAny>, Bound<'_, PyAny>)>()?;
         let kwargs = pyo3::types::PyDict::new(py);
-        if let Some(ic) = index_col {
-            kwargs.set_item("index_col", ic)?;
-        }
-        Ok(df_cls.call((slf,), Some(&kwargs))?.unbind())
+        kwargs.set_item("spark_frame", &slf)?;
+        kwargs.set_item("index_spark_columns", index_spark_columns)?;
+        kwargs.set_item("index_names", index_names)?;
+        let internal = py
+            .import("pyspark.pandas.internal")?
+            .getattr("InternalFrame")?
+            .call((), Some(&kwargs))?;
+        Ok(py
+            .import("pyspark.pandas.frame")?
+            .getattr("DataFrame")?
+            .call1((internal,))?
+            .unbind())
     }
 
-    /// pandas-on-Spark plotting accessor. Mirrors `DataFrame.plot`.
+    /// The plot accessor of the DataFrame, as PySpark's `DataFrame.plot`: the
+    /// `PySparkPlotAccessor` of `pyspark.sql.plot`, of this DataFrame.
     #[getter]
     fn plot(slf: Bound<'_, Self>, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let psdf = Self::pandas_api(slf, py, None)?;
-        Ok(psdf.bind(py).getattr("plot")?.unbind())
+        Ok(py
+            .import("pyspark.sql.plot")?
+            .getattr("PySparkPlotAccessor")?
+            .call1((slf,))?
+            .unbind())
     }
 
     /// The schema of this DataFrame as a `StructType` (a property, mirroring
