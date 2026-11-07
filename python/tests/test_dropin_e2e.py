@@ -1508,6 +1508,30 @@ def test_create_dataframe_takes_the_ddl_of_spark_as_pyspark(session):
     assert mapped.collect() == [Row(id=0), Row(id=1)]
 
 
+
+def test_ddl_types_are_parsed_by_the_server_as_pyspark(session):
+    # As PySpark Connect's DataType.fromDDL and _parse_datatype_string, which ask the server
+    # of the active session to parse a DDL string, as does a UDF of a DDL return type.
+    from pyspark.errors import ParseException
+    from pyspark.sql import types as T
+    from pyspark.sql.types import _parse_datatype_string
+
+    field = T.DataType.fromDDL("a INT NOT NULL COMMENT 'c'").fields[0]
+    assert (field.nullable, field.metadata) == (False, {"comment": "c"})
+    assert T.StructType.fromDDL("st struct<a:int,b:double>").simpleString() == (
+        "struct<st:struct<a:int,b:double>>")
+    assert T.DataType.fromDDL("s STRING COLLATE UTF8_LCASE").simpleString() == (
+        "struct<s:string collate UTF8_LCASE>")
+    assert _parse_datatype_string("decimal(10, 2)") == T.DecimalType(10, 2)
+    for ddl, condition in [("a INT,", "PARSE_SYNTAX_ERROR"), ("a BOGUS", "UNSUPPORTED_DATATYPE")]:
+        with pytest.raises(ParseException) as error:
+            T.DataType.fromDDL(ddl)
+        assert error.value.getCondition() == condition
+    pair = F.udf(lambda x: (x, 1.5), "st struct<a:bigint,b:double>")
+    assert pair.returnType.simpleString() == "struct<st:struct<a:bigint,b:double>>"
+    result = session.range(1).select(F.udf(lambda x: (x, 1.5), "struct<a:bigint,b:double>")("id"))
+    assert [tuple(r[0]) for r in result.collect()] == [(0, 1.5)]
+
 def test_functions_send_their_optional_arguments_as_pyspark(session):
     # The values of official PySpark 4.3.0; each optional argument used to be dropped.
     df = session.sql(
