@@ -3321,6 +3321,57 @@ def test_float64_literal_numpy_dtype_custom_backing_keeps_row_error(protocol):
 
 
 
+@pytest.mark.parametrize("raises", [False, True])
+def test_float64_ndarray_subclass_converts_as_pyspark(protocol, raises):
+    # The fast path declines a NumPy subclass behind pandas' concrete wrapper; the frame then
+    # converts as PySpark's Arrow conversion does, which reads the raw storage and does not
+    # call the subclass's astype, whatever it would do.
+    from pyspark.sql._pandas_input import prepare_float64_table
+
+    calls = []
+
+    class Values(np.ndarray):
+        def astype(self, *args, **kwargs):
+            calls.append("astype")
+            if raises:
+                raise ValueError("custom ndarray astype")
+            return np.ndarray.astype(self, *args, **kwargs) + 7.0
+
+    values = np.arange(100000, dtype=np.float64)
+    # Avoid pandas consolidating the subclass storage into a plain ndarray.
+    frame = pd.DataFrame({"x": values.view(Values)}, copy=False)
+    schema = T.StructType([T.StructField("x", T.DoubleType())])
+    assert type(frame["x"].array._ndarray) is Values
+    assert prepare_float64_table(frame, schema) is None
+    with _arrow_input_service(protocol) as (spark, state):
+        spark.createDataFrame(frame, schema).toArrow()
+        _assert_float64_ipc(state["input_tables"][0], [values], schema)
+        assert calls == []
+        assert state["uploads"] == 0
+
+
+def test_float64_missing_schema_alias_keeps_native_row_path(protocol, monkeypatch):
+    values = np.arange(100000, dtype=np.float64)
+    frame = pd.DataFrame({"x": values})
+    schema = T.StructType([T.StructField("x", T.DoubleType())])
+    calls = []
+
+    def lazy_attribute(name):
+        if name == "DoubleType":
+            calls.append(name)
+            raise RuntimeError("schema alias hook must not run before row conversion")
+        raise AttributeError(name)
+
+    monkeypatch.delitem(vars(T), "DoubleType")
+    monkeypatch.setattr(T, "__getattr__", lazy_attribute, raising=False)
+    with _arrow_input_service(protocol) as (spark, state):
+        spark.createDataFrame(frame, schema).toArrow()
+        _assert_float64_ipc(state["input_tables"][0], [values], schema)
+        assert calls == []
+        assert state["uploads"] == 0
+
+
+
 def test_float64_missing_concrete_numpy_backing_class_keeps_fallback(monkeypatch):
     import pandas.core.arrays.numpy_ as numpy_arrays
     from pyspark.sql._pandas_input import prepare_float64_table

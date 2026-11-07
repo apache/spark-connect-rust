@@ -474,10 +474,15 @@ def prepare_float64_table(frame, schema):
     if any(type(column) is not Series or type(column.array) is not NumpyExtensionArray
            for column in columns):
         return None
+    # NumPy subclasses can customize the row path's astype conversion even
+    # inside pandas' concrete NumPy wrapper. Keep their hooks, accepting the
+    # row path's cost for subclasses such as np.memmap.
+    if any(type(column.array._ndarray) is not np.ndarray for column in columns):
+        return None
     # Native row conversion reads Rust fields, bypassing mutable Python accessors.
     for name in ("DoubleType", "StructField", "StructType"):
         cls = getattr(native, name)
-        if (getattr(sql_types, name, None) is not cls
+        if (vars(sql_types).get(name) is not cls
                 or cls.__getattribute__ is not object.__getattribute__
                 or any("__class__" in vars(base) for base in cls.__mro__ if base is not object)):
             return None
