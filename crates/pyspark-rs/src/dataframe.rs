@@ -182,9 +182,19 @@ impl PyDataFrame {
         cols: Vec<Bound<'_, PyAny>>,
         arg_name: &str,
     ) -> PyResult<Vec<spark_connect::column::Column>> {
+        self.grouping_column_list(py, unwrap_sequence(cols)?, arg_name)
+    }
+
+    /// The grouping columns of `cols`, each a Column, a column name or the 1-based ordinal of
+    /// a column, as PySpark's `_to_cols` of ordinals takes the items of a sequence.
+    fn grouping_column_list(
+        &self,
+        py: Python<'_>,
+        cols: Vec<Bound<'_, PyAny>>,
+        arg_name: &str,
+    ) -> PyResult<Vec<spark_connect::column::Column>> {
         use pyo3::types::{PyBool, PyString};
-        unwrap_sequence(cols)?
-            .iter()
+        cols.iter()
             .map(|c| {
                 if let Ok(column) = c.extract::<PyRef<'_, PyColumn>>() {
                     return Ok(column.column.clone());
@@ -964,23 +974,40 @@ impl PyDataFrame {
 
     /// Grouping sets aggregation: `groupingSets([[a, b], [a], []], "a", "b")`.
     ///
-    /// `*cols` (the overall grouping columns) is accepted for signature parity with
-    /// reference pyspark; the connect core derives the grouping from the sets, so the
-    /// trailing columns are currently informational.
+    /// As PySpark's: `*cols` are the grouping columns, the columns of the result besides the
+    /// aggregations, of Columns, names and ordinals, as are those of the sets.
     #[pyo3(name = "groupingSets", signature = (groupingSets, *cols))]
-    #[allow(unused_variables)]
     fn grouping_sets(
         &self,
         py: Python<'_>,
-        groupingSets: Vec<Vec<Bound<'_, PyAny>>>,
+        groupingSets: &Bound<'_, PyAny>,
         cols: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<PyGroupedData> {
-        let mut out: Vec<Vec<spark_connect::column::Column>> =
-            Vec::with_capacity(groupingSets.len());
-        for s in groupingSets {
-            out.push(self.grouping_columns(py, s, "groupingSets")?);
+        use pyo3::types::{PyInt, PyString};
+        // As PySpark's `_to_cols(grouping_set)`: a set is a sequence of columns, or one column.
+        let mut sets = Vec::new();
+        for set in groupingSets.try_iter()? {
+            let set = set?;
+            let one = set.is_instance_of::<PyString>()
+                || set.is_instance_of::<PyInt>()
+                || set.is_instance_of::<PyColumn>();
+            let sequence = !one
+                && py
+                    .import("collections.abc")?
+                    .getattr("Sequence")
+                    .and_then(|sequence| set.is_instance(&sequence))?;
+            let items = if sequence {
+                set.try_iter()?.collect::<PyResult<Vec<_>>>()?
+            } else {
+                vec![set]
+            };
+            sets.push(self.grouping_column_list(py, items, "groupingSets")?);
         }
-        Ok(PyGroupedData::new(self.dataframe.grouping_sets(out)))
+        // As PySpark's `_to_cols(cols)`, of the columns themselves, not a list of them.
+        let columns = self.grouping_column_list(py, cols, "cols")?;
+        Ok(PyGroupedData::new(
+            self.dataframe.grouping_sets_with_columns(sets, columns),
+        ))
     }
 
     /// Drop duplicates within the event-time watermark.
@@ -1079,18 +1106,25 @@ impl PyDataFrame {
     }
 
     /// Persist with the default MEMORY_AND_DISK storage level.
-    fn cache(&self, py: Python<'_>) -> PyResult<PyDataFrame> {
-        let df = py.detach(|| self.dataframe.cache()).to_pyerr()?;
-        Ok(PyDataFrame::new(df))
+    fn cache<'py>(slf: PyRef<'py, Self>, py: Python<'py>) -> PyResult<PyRef<'py, Self>> {
+        // As PySpark's, which returns the DataFrame itself.
+        let df = slf.dataframe.clone();
+        py.detach(|| df.cache().map_err(Box::new)).to_pyerr()?;
+        Ok(slf)
     }
 
     /// Mark the DataFrame as non-persistent.
     #[pyo3(signature = (blocking=false))]
-    fn unpersist(&self, py: Python<'_>, blocking: bool) -> PyResult<PyDataFrame> {
-        let df = py
-            .detach(|| self.dataframe.unpersist(blocking))
+    fn unpersist<'py>(
+        slf: PyRef<'py, Self>,
+        py: Python<'py>,
+        blocking: bool,
+    ) -> PyResult<PyRef<'py, Self>> {
+        // As PySpark's, which returns the DataFrame itself.
+        let df = slf.dataframe.clone();
+        py.detach(|| df.unpersist(blocking).map_err(Box::new))
             .to_pyerr()?;
-        Ok(PyDataFrame::new(df))
+        Ok(slf)
     }
 
     /// Print the plan with Python's `print`, as PySpark's `DataFrame.explain`, which prints
@@ -1230,24 +1264,65 @@ impl PyDataFrame {
         )
     }
 
-    /// Observe named metrics on the stream/df. `observation` is an Observation
-    /// object or a name string; the remaining args are aggregate metric columns.
-    /// Mirrors `DataFrame.observe(observation, *exprs)`.
+    /// Observe metrics, as PySpark's `DataFrame.observe(observation, *exprs)`: the Columns
+    /// `exprs`, which an Observation receives, or which are observed by a name.
     #[pyo3(signature = (observation, *exprs))]
     fn observe(
         &self,
+        py: Python<'_>,
         observation: &Bound<'_, PyAny>,
         exprs: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let name =
-            if let Ok(obs) = observation.extract::<PyRef<crate::observation::PyObservation>>() {
-                obs.inner.name().to_string()
-            } else {
-                observation.extract::<String>()?
-            };
-        let columns = to_column_list(exprs)?;
-        let e: Vec<_> = columns.iter().map(|c| c.expression().clone()).collect();
-        Ok(PyDataFrame::new(self.dataframe.observe(&name, e)))
+        if exprs.is_empty() {
+            return Err(crate::column::raise_pyspark(
+                py,
+                "PySparkValueError",
+                "CANNOT_BE_EMPTY",
+                &[("item", "exprs")],
+            ));
+        }
+        let mut columns = Vec::with_capacity(exprs.len());
+        for expr in &exprs {
+            match expr.extract::<PyRef<'_, PyColumn>>() {
+                Ok(column) => columns.push(column.column.expression().clone()),
+                Err(_) => {
+                    return Err(crate::column::raise_pyspark(
+                        py,
+                        "PySparkTypeError",
+                        "NOT_EXPECTED_TYPE",
+                        &[
+                            ("arg_name", "exprs"),
+                            ("expected_type", "list[Column]"),
+                            ("arg_type", "tuple"),
+                        ],
+                    ))
+                }
+            }
+        }
+        if let Ok(observation) =
+            observation.extract::<PyRef<'_, crate::observation::PyObservation>>()
+        {
+            let observation = &observation.inner;
+            return py
+                .detach(|| self.dataframe.observe_with(observation, columns))
+                .to_pyerr()
+                .map(PyDataFrame::new);
+        }
+        if observation.is_instance_of::<pyo3::types::PyString>() {
+            let name: String = observation.extract()?;
+            return Ok(PyDataFrame::new(self.dataframe.observe(&name, columns)));
+        }
+        let type_name = observation.get_type().name()?.to_string();
+        Err(crate::column::raise_pyspark(
+            py,
+            "PySparkTypeError",
+            "NOT_EXPECTED_TYPE",
+            &[
+                ("arg_name", "observation"),
+                ("expected_type", "Observation or str"),
+                ("arg_type", &type_name),
+            ],
+        ))
     }
 
     /// Register as a temporary view (session-scoped).
@@ -1540,18 +1615,21 @@ impl PyDataFrame {
     /// Persist the DataFrame at `storageLevel`, MEMORY_AND_DISK_DESER by default, as
     /// PySpark's `DataFrame.persist()`.
     #[pyo3(signature = (storageLevel=None))]
-    fn persist(
-        &self,
-        py: Python<'_>,
+    fn persist<'py>(
+        slf: PyRef<'py, Self>,
+        py: Python<'py>,
         storageLevel: Option<Bound<'_, PyAny>>,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<PyRef<'py, Self>> {
         use spark_connect::storage::StorageLevelExt;
         let level = match storageLevel {
             Some(level) => crate::storagelevel::storage_level_proto(&level)?,
             None => spark_connect_proto::StorageLevel::memory_and_disk_deser(),
         };
-        let df = py.detach(|| self.dataframe.persist(level)).to_pyerr()?;
-        Ok(PyDataFrame::new(df))
+        // As PySpark's, which returns the DataFrame itself.
+        let df = slf.dataframe.clone();
+        py.detach(|| df.persist(level).map_err(Box::new))
+            .to_pyerr()?;
+        Ok(slf)
     }
 
     /// Column access by attribute (`df.colname` -> Column), mirroring reference pyspark: the
@@ -2061,6 +2139,7 @@ impl PyDataFrame {
         let cols = py.detach(|| self.dataframe.columns()).to_pyerr()?;
         let udf = build_map_udf(
             py,
+            &self.dataframe.spark_session(),
             &func,
             &schema,
             eval_type::SQL_MAP_PANDAS_ITER_UDF,
@@ -2086,7 +2165,14 @@ impl PyDataFrame {
     ) -> PyResult<PyDataFrame> {
         validate_map_function(py, &func, eval_type::SQL_MAP_ARROW_ITER_UDF)?;
         let cols = py.detach(|| self.dataframe.columns()).to_pyerr()?;
-        let udf = build_map_udf(py, &func, &schema, eval_type::SQL_MAP_ARROW_ITER_UDF, &cols)?;
+        let udf = build_map_udf(
+            py,
+            &self.dataframe.spark_session(),
+            &func,
+            &schema,
+            eval_type::SQL_MAP_ARROW_ITER_UDF,
+            &cols,
+        )?;
         let profile_id = profile_id_of(profile.as_ref())?;
         Ok(PyDataFrame::new(
             self.dataframe
@@ -3181,15 +3267,18 @@ fn bind_arguments<'py, const N: usize>(
     }))
 }
 
-/// Resolve a Python schema argument (a `DataType` wrapper or a DDL string) into a Rust DataType.
+/// Resolve a Python schema argument (a `DataType` wrapper or a DDL string) into a Rust
+/// DataType: a DDL string as the server of `session` parses it, as PySpark's `_parse_ddl`.
 pub(crate) fn resolve_datatype(
+    py: Python<'_>,
+    session: &spark_connect::session::SparkSession,
     schema: &Bound<'_, PyAny>,
 ) -> PyResult<spark_connect::types::DataType> {
     if let Ok(dt) = schema.extract::<PyRef<PyDataType>>() {
         return Ok(dt.inner.clone());
     }
-    if let Ok(s) = schema.extract::<String>() {
-        return spark_connect::types::DataType::from_ddl(&s).to_pyerr();
+    if schema.is_instance_of::<pyo3::types::PyString>() {
+        return crate::types::schema_data_type(py, session, schema);
     }
     Err(pyo3::exceptions::PyTypeError::new_err(
         "schema must be a DataType or a DDL string",
@@ -3259,13 +3348,14 @@ fn udf_name(func: &Bound<'_, PyAny>) -> PyResult<String> {
 /// carry the resolved schema as the output type (mirrors the scalar UDF command layout).
 pub(crate) fn build_map_udf(
     py: Python<'_>,
+    session: &spark_connect::session::SparkSession,
     func: &Bound<'_, PyAny>,
     schema: &Bound<'_, PyAny>,
     eval_type_id: i32,
     input_cols: &[String],
 ) -> PyResult<CommonInlineUserDefinedFunctionExpression> {
     let name = udf_name(func)?;
-    let return_type = resolve_datatype(schema)?;
+    let return_type = resolve_datatype(py, session, schema)?;
     // The worker reads the pickled type as a `DataType`, so a DDL string is pickled as the
     // type it parses to, as the reference client pickles the type of `_parse_ddl`.
     let pickled_type = if schema.is_instance_of::<pyo3::types::PyString>() {
@@ -3446,7 +3536,7 @@ fn execution_metrics<'py>(
 /// `data_type` is the literal's type when the enclosing literal carries it; a struct's
 /// field names come from it, else from the literal's own `data_type`, else from the
 /// deprecated `struct_type`.
-fn literal_to_py(
+pub(crate) fn literal_to_py(
     py: Python<'_>,
     literal: &spark_connect_proto::expression::Literal,
     data_type: Option<&spark_connect_proto::DataType>,

@@ -169,7 +169,8 @@ impl PyGroupedData {
         )?;
         validate_map_function(py, &func, eval_type_id)?;
         let cols = py.detach(|| self.grouped_data.input_columns()).to_pyerr()?;
-        let udf = build_map_udf(py, &func, &schema, eval_type_id, &cols)?;
+        let session = self.grouped_data.spark_session();
+        let udf = build_map_udf(py, &session, &func, &schema, eval_type_id, &cols)?;
         Ok(PyDataFrame::new(self.grouped_data.apply_in_pandas(udf)))
     }
 
@@ -204,7 +205,8 @@ impl PyGroupedData {
         )?;
         validate_map_function(py, &func, eval_type_id)?;
         let cols = py.detach(|| self.grouped_data.input_columns()).to_pyerr()?;
-        let udf = build_map_udf(py, &func, &schema, eval_type_id, &cols)?;
+        let session = self.grouped_data.spark_session();
+        let udf = build_map_udf(py, &session, &func, &schema, eval_type_id, &cols)?;
         Ok(PyDataFrame::new(self.grouped_data.apply_in_arrow(udf)))
     }
 
@@ -230,14 +232,16 @@ impl PyGroupedData {
     ) -> PyResult<PyDataFrame> {
         validate_map_function(py, &func, eval_type::SQL_GROUPED_MAP_PANDAS_UDF_WITH_STATE)?;
         let cols = py.detach(|| self.grouped_data.input_columns()).to_pyerr()?;
+        let session = self.grouped_data.spark_session();
         let udf = build_map_udf(
             py,
+            &session,
             &func,
             &outputStructType,
             eval_type::SQL_GROUPED_MAP_PANDAS_UDF_WITH_STATE,
             &cols,
         )?;
-        let state_schema = crate::dataframe::resolve_datatype(&stateStructType)?;
+        let state_schema = crate::dataframe::resolve_datatype(py, &session, &stateStructType)?;
         Ok(PyDataFrame::new(
             self.grouped_data.apply_in_pandas_with_state(
                 udf,
@@ -273,8 +277,17 @@ impl PyGroupedData {
             true,
         )?;
         let cols = py.detach(|| self.grouped_data.input_columns()).to_pyerr()?;
-        let udf = build_map_udf(py, &func, &outputStructType, et, &cols)?;
-        let out = crate::types::py_to_data_type(&outputStructType)?;
+        let session = self.grouped_data.spark_session();
+        let udf = build_map_udf(py, &session, &func, &outputStructType, et, &cols)?;
+        // As PySpark's, which sends a DDL string as an `UnparsedDataType`, for the server to
+        // parse.
+        let out = if outputStructType.is_instance_of::<pyo3::types::PyString>() {
+            spark_connect::types::DataType::Unparsed {
+                data_type_string: outputStructType.extract()?,
+            }
+        } else {
+            crate::types::py_to_data_type(&outputStructType)?
+        };
         let etc = (!eventTimeColumnName.is_empty()).then_some(eventTimeColumnName);
         Ok(PyDataFrame::new(
             self.grouped_data.transform_with_state_in_pandas(
@@ -311,7 +324,8 @@ impl PyGroupedData {
             false,
         )?;
         let cols = py.detach(|| self.grouped_data.input_columns()).to_pyerr()?;
-        let udf = build_map_udf(py, &func, &outputStructType, et, &cols)?;
+        let session = self.grouped_data.spark_session();
+        let udf = build_map_udf(py, &session, &func, &outputStructType, et, &cols)?;
         let etc = (!eventTimeColumnName.is_empty()).then_some(eventTimeColumnName);
         Ok(PyDataFrame::new(self.grouped_data.transform_with_state(
             udf,
@@ -378,6 +392,7 @@ impl PyCoGroupedData {
         let cols = py.detach(|| self.inner.input_columns()).to_pyerr()?;
         let udf = build_map_udf(
             py,
+            &self.inner.spark_session(),
             &func,
             &schema,
             eval_type::SQL_COGROUPED_MAP_PANDAS_UDF,
@@ -398,6 +413,7 @@ impl PyCoGroupedData {
         let cols = py.detach(|| self.inner.input_columns()).to_pyerr()?;
         let udf = build_map_udf(
             py,
+            &self.inner.spark_session(),
             &func,
             &schema,
             eval_type::SQL_COGROUPED_MAP_ARROW_UDF,

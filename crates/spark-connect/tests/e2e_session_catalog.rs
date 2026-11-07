@@ -167,8 +167,66 @@ fn session_runtime_helpers() {
     // Derived sessions share the transport but are independent handles.
     let ns = spark.new_session();
     let _ = ns.range(1);
-    let cs = spark.clone_session();
+    let cs = spark.clone_session().expect("clone_session");
     let _ = cs.range(1);
+}
+
+/// `clone_session` clones the session on the server, as PySpark's `cloneSession`: the clone,
+/// of a session id of its own or the one given, has the configurations and the temporary
+/// views of the session, and changes to either do not show in the other.
+#[test]
+fn clone_session_copies_the_state_of_the_session() {
+    if !should_run() {
+        return;
+    }
+    let spark = session();
+    spark
+        .conf()
+        .set("spark.sql.shuffle.partitions", "7")
+        .expect("conf set");
+    spark
+        .sql("SELECT 1 AS a")
+        .expect("sql")
+        .create_or_replace_temp_view("e2e_clone_v")
+        .expect("create view");
+    let clone = spark.clone_session().expect("clone_session");
+    assert_ne!(clone.session_id(), spark.session_id());
+    assert_eq!(
+        clone
+            .conf()
+            .get("spark.sql.shuffle.partitions")
+            .expect("conf get")
+            .as_deref(),
+        Some("7")
+    );
+    assert_eq!(
+        clone
+            .table("e2e_clone_v")
+            .expect("table")
+            .count()
+            .expect("count"),
+        1
+    );
+    // Isolated: a change in the clone does not show in the session.
+    clone
+        .conf()
+        .set("spark.sql.shuffle.partitions", "9")
+        .expect("conf set");
+    assert_eq!(
+        spark
+            .conf()
+            .get("spark.sql.shuffle.partitions")
+            .expect("conf get")
+            .as_deref(),
+        Some("7")
+    );
+    let id = uuid::Uuid::new_v4().to_string();
+    let named = spark
+        .clone_session_with_id(Some(&id))
+        .expect("clone with id");
+    assert_eq!(named.session_id(), id);
+    assert!(spark.clone_session_with_id(Some("not-a-uuid")).is_err());
+    let _ = spark.conf().unset("spark.sql.shuffle.partitions");
 }
 
 /// Register a progress handler, run a query so the execute loop invokes it, then
@@ -290,5 +348,35 @@ fn sql_resolves_the_dataframes_that_the_query_names() {
         )
         .expect("filter");
     assert_eq!(shown.collect().expect("collect").len(), 2);
+    let _ = spark.stop();
+}
+
+/// `parse_ddl` parses a DDL string on the server, as PySpark Connect's `_parse_ddl`: of a
+/// schema or a type, with the NOT NULL and COMMENT of fields, and the server's errors.
+#[test]
+fn parse_ddl_parses_on_the_server() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::types::DataType;
+    let spark = session();
+    let parsed = spark
+        .parse_ddl("a INT NOT NULL COMMENT 'c', b STRUCT<x: DOUBLE>")
+        .expect("parse");
+    let DataType::Struct { fields } = parsed else {
+        panic!("expected a struct, got {parsed:?}");
+    };
+    assert_eq!(
+        fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+        vec!["a", "b"]
+    );
+    assert!(!fields[0].nullable);
+    assert_eq!(
+        fields[0].metadata.get("comment"),
+        Some(&serde_json::Value::String("c".to_string()))
+    );
+    assert_eq!(spark.parse_ddl("bigint").expect("parse"), DataType::Long);
+    let error = spark.parse_ddl("a INT,").expect_err("a syntax error");
+    assert_eq!(error.error_class, "PARSE_SYNTAX_ERROR");
     let _ = spark.stop();
 }
