@@ -477,6 +477,62 @@ assert SparkSession.getActiveSession() is again and SparkSession.active() is aga
 """], check=True)
 
 
+def test_conf_warns_the_warnings_of_the_server_and_checks_its_arguments_as_pyspark(mock_connect):
+    # As PySpark's RuntimeConf: set, unset and the options of the builder warn each warning
+    # of the server; set sends a bool as "true" or "false", an int as its str(), and None as no
+    # value, and raises the TypeError of protobuf for another value; get raises
+    # NOT_EXPECTED_TYPE of a key, and of a default other than None, that is not a str.
+    import warnings
+
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import SparkSession
+
+    spark, service = mock_connect
+    service.config_warnings = ["one", "two"]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        spark.conf.set("k", True)
+        spark.conf.unset("k")
+        builder = SparkSession.builder.remote("sc://localhost:1").config("spark.sql.k", "v")
+        assert builder.getOrCreate() is spark
+    assert [(w.category, str(w.message)) for w in caught] == [
+        (UserWarning, "one"),
+        (UserWarning, "two"),
+    ] * 3
+    assert service.unset_confs == [["k"]]
+    service.config_warnings = []
+    for value in [1, "x", None, b"y"]:
+        spark.conf.set("v", value)
+    assert [pairs for pairs, _ in service.set_confs] == [
+        [("k", "true")],
+        [("spark.sql.k", "v")],
+        [("v", "1")],
+        [("v", "x")],
+        [("v", None)],
+        [("v", "y")],
+    ]
+    for value in [1.5, [1], object()]:
+        with pytest.raises(TypeError, match="Cannot set spark.connect.KeyValue.value"):
+            spark.conf.set("v", value)
+    with pytest.raises(ValueError, match="isn't valid UTF-8"):
+        spark.conf.set("v", b"\xff")
+    assert len(service.set_confs) == 6
+    for args, arg_name, arg_type in [
+        ((1,), "key", "int"),
+        ((None,), "key", "NoneType"),
+        (("k", 1), "default", "int"),
+        (("k", True), "default", "bool"),
+    ]:
+        with pytest.raises(PySparkTypeError) as e:
+            spark.conf.get(*args)
+        assert e.value.getCondition() == "NOT_EXPECTED_TYPE"
+        assert e.value.getMessageParameters() == {
+            "arg_name": arg_name,
+            "expected_type": "str",
+            "arg_type": arg_type,
+        }
+
+
 def test_builder_options_are_set_on_the_session_as_pyspark(mock_connect):
     # As PySpark's _apply_options: the options of the builder, but spark.remote and
     # spark.master, are set on the session that getOrCreate() returns, also an existing one,

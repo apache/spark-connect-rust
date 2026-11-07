@@ -96,6 +96,31 @@ def test_udf_and_udtf_calls_take_named_arguments_as_pyspark(session):
     assert error.value.getCondition() == "UNRESOLVED_COLUMN.WITHOUT_SUGGESTION"
 
 
+def test_conf_warns_the_warnings_of_the_server_and_takes_its_values_as_pyspark(session):
+    # As PySpark's: set and unset warn the warnings of the server, the server rejects a set of
+    # None, a set of a float raises a TypeError, and get checks its key and default.
+    import warnings
+
+    from pyspark.errors import IllegalArgumentException, PySparkTypeError
+
+    key = "spark.sql.execution.arrow.enabled"
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        session.conf.set(key, False)
+        session.conf.unset(key)
+    warning = f"The SQL config '{key}' is NOT supported in Spark Connect"
+    assert [(w.category, str(w.message)) for w in caught] == [(UserWarning, warning)] * 2
+    with pytest.raises(IllegalArgumentException, match="value cannot be null"):
+        session.conf.set("spark.sql.test.conf.of.none", None)
+    with pytest.raises(TypeError):
+        session.conf.set("spark.sql.test.conf.of.a.float", 1.5)
+    assert session.conf.get("spark.sql.test.conf.of.none", None) is None
+    for args in [(1,), ("spark.sql.test.conf.of.none", 1)]:
+        with pytest.raises(PySparkTypeError) as e:
+            session.conf.get(*args)
+        assert e.value.getCondition() == "NOT_EXPECTED_TYPE"
+
+
 def test_conf_get_with_a_none_default(session):
     key = "spark.connect.rust.test.unset"
     assert session.conf.get(key, None) is None

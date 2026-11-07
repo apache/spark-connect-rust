@@ -753,46 +753,49 @@ impl SparkConnectClient {
         Ok(keys.iter().map(|k| config_dict.get(*k).cloned()).collect())
     }
 
-    /// Set configuration values for the session.
+    /// Set configuration values for the session, returning the warnings of the server, such
+    /// as of a deprecated or unsupported configuration.
     ///
     /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.set_config`.
-    pub async fn set_config(&self, key: &str, value: &str) -> Result<()> {
-        let mut request = ConfigRequest::default();
-        request.session_id = self.session_id.clone();
-        request.user_context = Some(UserContext {
-            user_id: self.user_id.clone().unwrap_or_default(),
-            ..Default::default()
-        });
-
-        let mut set = spark_connect_proto::config_request::Set::default();
-        set.pairs.push(spark_connect_proto::KeyValue {
-            key: key.to_string(),
-            value: Some(value.to_string()),
-        });
-
-        let mut operation = spark_connect_proto::config_request::Operation::default();
-        operation.op_type = Some(spark_connect_proto::config_request::operation::OpType::Set(
-            set,
-        ));
-        request.operation = Some(operation);
-
-        let _ = self.config(request).await?;
-        Ok(())
+    pub async fn set_config(&self, key: &str, value: &str) -> Result<Vec<String>> {
+        self.set_config_values(&[(key, Some(value))], None).await
     }
 
     /// Set configuration values in one request, ignoring the failures to set them when
-    /// `silent`. Mirrors `pyspark.sql.connect.conf.RuntimeConf._set_all`, with which the
-    /// session builder applies its options.
-    pub async fn set_configs(&self, pairs: &[(String, String)], silent: bool) -> Result<()> {
+    /// `silent`, returning the warnings of the server. Mirrors
+    /// `pyspark.sql.connect.conf.RuntimeConf._set_all`, with which the session builder applies
+    /// its options.
+    pub async fn set_configs(
+        &self,
+        pairs: &[(String, String)],
+        silent: bool,
+    ) -> Result<Vec<String>> {
+        let pairs: Vec<(&str, Option<&str>)> = pairs
+            .iter()
+            .map(|(key, value)| (key.as_str(), Some(value.as_str())))
+            .collect();
+        self.set_config_values(&pairs, Some(silent)).await
+    }
+
+    /// Set configuration values in one request, as PySpark's `RuntimeConf.set` and `_set_all`
+    /// send them: a pair without a value is sent without one, as PySpark sends None, which the
+    /// server rejects, and with `silent` the failures to set them, such as of static
+    /// configurations, are ignored. Returns the warnings of the server, such as of a
+    /// deprecated or unsupported configuration, which PySpark warns.
+    pub async fn set_config_values(
+        &self,
+        pairs: &[(&str, Option<&str>)],
+        silent: Option<bool>,
+    ) -> Result<Vec<String>> {
         let set = spark_connect_proto::config_request::Set {
             pairs: pairs
                 .iter()
                 .map(|(key, value)| spark_connect_proto::KeyValue {
-                    key: key.clone(),
-                    value: Some(value.clone()),
+                    key: key.to_string(),
+                    value: value.map(str::to_string),
                 })
                 .collect(),
-            silent: Some(silent),
+            silent,
         };
         let request = ConfigRequest {
             session_id: self.session_id.clone(),
@@ -807,8 +810,7 @@ impl SparkConnectClient {
             }),
             ..Default::default()
         };
-        let _ = self.config(request).await?;
-        Ok(())
+        Ok(self.config(request).await?.warnings)
     }
 
     /// Get configuration values with default fallbacks.
@@ -857,10 +859,11 @@ impl SparkConnectClient {
             .collect())
     }
 
-    /// Unset a configuration value.
+    /// Unset a configuration value, returning the warnings of the server, such as of a
+    /// deprecated or unsupported configuration.
     ///
     /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.unset_config`.
-    pub async fn unset_config(&self, key: &str) -> Result<()> {
+    pub async fn unset_config(&self, key: &str) -> Result<Vec<String>> {
         let mut request = ConfigRequest::default();
         request.session_id = self.session_id.clone();
         request.user_context = Some(UserContext {
@@ -876,8 +879,7 @@ impl SparkConnectClient {
             Some(spark_connect_proto::config_request::operation::OpType::Unset(unset));
         request.operation = Some(operation);
 
-        let _ = self.config(request).await?;
-        Ok(())
+        Ok(self.config(request).await?.warnings)
     }
 
     /// Get all configuration values from the session.
