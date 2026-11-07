@@ -1662,6 +1662,20 @@ def test_create_dataframe_raises_merge_errors_as_pyspark(session):
         assert error.value.getMessageParameters() == parameters, data
 
 
+def test_persist_cache_and_unpersist_return_the_dataframe_itself_as_pyspark(session):
+    # As PySpark's: the DataFrame itself, cached at the storage level given.
+    from pyspark.storagelevel import StorageLevel
+
+    df = session.range(3)
+    try:
+        assert df.persist(StorageLevel.DISK_ONLY) is df
+        assert df.storageLevel == StorageLevel.DISK_ONLY
+        assert df.unpersist(blocking=True) is df
+        assert df.cache() is df and df.count() == 3
+    finally:
+        df.unpersist()
+
+
 def test_create_dataframe_converts_numpy_scalars_as_pyspark(session):
     np = pytest.importorskip("numpy")
     df = session.createDataFrame(

@@ -399,6 +399,19 @@ def test_checkpoints_send_their_eager_and_storage_level_as_pyspark(mock_connect)
     assert parse_message(sent()[4][0]) == {2: [1], 3: [1], 4: [1], 5: [2]}
 
 
+def test_persist_cache_and_unpersist_return_the_dataframe_itself_as_pyspark(mock_connect):
+    # As PySpark's, which persist the plan of the DataFrame and return it, not a copy.
+    from pyspark.storagelevel import StorageLevel
+
+    spark, _ = mock_connect
+    df = spark.range(1)
+    assert df.persist() is df
+    assert df.persist(StorageLevel.DISK_ONLY) is df
+    assert df.cache() is df
+    assert df.unpersist() is df
+    assert df.unpersist(blocking=True) is df
+
+
 # --------------------------------------------------------------------------- session builder
 
 def test_session_builder_chaining_offline():
