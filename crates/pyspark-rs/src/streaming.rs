@@ -4,8 +4,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use spark_connect::streaming::{
     DataStreamReader, DataStreamWriter, ListenerEventStream, StreamingQuery,
-    StreamingQueryException, StreamingQueryListener, StreamingQueryListenerEvent,
-    StreamingQueryManager, StreamingQueryStatus, Trigger,
+    StreamingQueryListener, StreamingQueryListenerEvent, StreamingQueryManager, Trigger,
 };
 use spark_connect::udf::PythonUDFPayload;
 use std::collections::HashMap;
@@ -811,73 +810,46 @@ impl PyDataStreamWriter {
     }
 }
 
-/// Python wrapper for StreamingQueryStatus.
-#[pyclass(
-    name = "StreamingQueryStatus",
-    module = "pyspark.sql.streaming.query",
-    from_py_object
-)]
-#[derive(Clone)]
-pub struct PyStreamingQueryStatus {
-    inner: StreamingQueryStatus,
-}
-
-impl PyStreamingQueryStatus {
-    pub fn new(status: StreamingQueryStatus) -> Self {
-        PyStreamingQueryStatus { inner: status }
+/// The timeout of `awaitTermination` and `awaitAnyTermination`, in seconds, as PySpark's take
+/// it: an int or a float, which must be positive, else `VALUE_NOT_POSITIVE` of the name of its
+/// type.
+fn positive_timeout(timeout: Option<&Bound<'_, PyAny>>) -> PyResult<Option<f64>> {
+    let Some(timeout) = timeout else {
+        return Ok(None);
+    };
+    let number = timeout.is_instance_of::<pyo3::types::PyInt>()
+        || timeout.is_instance_of::<pyo3::types::PyFloat>();
+    match number.then(|| timeout.extract::<f64>()).transpose()? {
+        Some(seconds) if seconds > 0.0 => Ok(Some(seconds)),
+        _ => {
+            let type_name = timeout.get_type().name()?.to_string();
+            Err(crate::column::raise_pyspark(
+                timeout.py(),
+                "PySparkValueError",
+                "VALUE_NOT_POSITIVE",
+                &[("arg_name", "timeout"), ("arg_value", &type_name)],
+            ))
+        }
     }
 }
 
-#[pymethods]
-impl PyStreamingQueryStatus {
-    #[getter]
-    fn is_active(&self) -> bool {
-        self.inner.is_active
-    }
+/// A bool argument that PySpark sets on a proto bool field, which takes a bool or an int, and
+/// raises the `TypeError` of protobuf for another value.
+pub(crate) struct ProtoBool(pub(crate) bool);
 
-    #[getter]
-    fn status_message(&self) -> String {
-        self.inner.status_message.clone()
-    }
+impl<'a, 'py> FromPyObject<'a, 'py> for ProtoBool {
+    type Error = PyErr;
 
-    #[getter]
-    fn is_data_available(&self) -> bool {
-        self.inner.is_data_available
-    }
-
-    #[getter]
-    fn is_trigger_active(&self) -> bool {
-        self.inner.is_trigger_active
-    }
-}
-
-/// Python wrapper for StreamingQueryException.
-#[pyclass(
-    name = "StreamingQueryException",
-    module = "pyspark.sql.streaming.query",
-    from_py_object
-)]
-#[derive(Clone)]
-pub struct PyStreamingQueryException {
-    inner: StreamingQueryException,
-}
-
-impl PyStreamingQueryException {
-    pub fn new(exc: StreamingQueryException) -> Self {
-        PyStreamingQueryException { inner: exc }
-    }
-}
-
-#[pymethods]
-impl PyStreamingQueryException {
-    #[getter]
-    fn message(&self) -> String {
-        self.inner.message.clone()
-    }
-
-    #[getter]
-    fn error_class(&self) -> String {
-        self.inner.error_class.clone()
+    fn extract(obj: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        if obj.is_instance_of::<pyo3::types::PyInt>() {
+            return Ok(ProtoBool(obj.is_truthy()?));
+        }
+        let shown = obj.repr()?;
+        Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "Cannot set spark.connect.StreamingQueryCommand.ExplainCommand.extended to {shown}: \
+             {shown} has type {}, but expected one of: (<class 'bool'>, <class 'int'>)",
+            obj.get_type().repr()?
+        )))
     }
 }
 
@@ -915,10 +887,16 @@ impl PyStreamingQuery {
         self.inner.is_active().to_pyerr()
     }
 
+    /// The status of the query, as PySpark's: a dict of its `message`, `isDataAvailable` and
+    /// `isTriggerActive`.
     #[getter]
-    fn status(&self) -> PyResult<PyStreamingQueryStatus> {
+    fn status<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let status = self.inner.status().to_pyerr()?;
-        Ok(PyStreamingQueryStatus::new(status))
+        let dict = PyDict::new(py);
+        dict.set_item("message", status.status_message)?;
+        dict.set_item("isDataAvailable", status.is_data_available)?;
+        dict.set_item("isTriggerActive", status.is_trigger_active)?;
+        Ok(dict)
     }
 
     fn stop(&self) -> PyResult<()> {
@@ -926,7 +904,8 @@ impl PyStreamingQuery {
     }
 
     #[pyo3(signature = (timeout=None))]
-    fn awaitTermination(&self, timeout: Option<f64>) -> PyResult<Option<bool>> {
+    fn awaitTermination(&self, timeout: Option<&Bound<'_, PyAny>>) -> PyResult<Option<bool>> {
+        let timeout = positive_timeout(timeout)?;
         self.inner.await_termination(timeout).to_pyerr()
     }
 
@@ -946,16 +925,36 @@ impl PyStreamingQuery {
 
     /// Print the plan of the query with Python's `print`, as PySpark's
     /// `StreamingQuery.explain(extended=False)`.
-    #[pyo3(signature = (extended=false))]
-    fn explain(&self, py: Python<'_>, extended: bool) -> PyResult<()> {
-        let plan = py.detach(|| self.inner.explain(extended)).to_pyerr()?;
+    #[pyo3(signature = (extended=ProtoBool(false)))]
+    fn explain(&self, py: Python<'_>, extended: ProtoBool) -> PyResult<()> {
+        let plan = py
+            .detach(|| self.inner.explain(extended.0).map_err(Box::new))
+            .to_pyerr()?;
         py.import("builtins")?.call_method1("print", (plan,))?;
         Ok(())
     }
 
-    fn exception(&self) -> PyResult<Option<PyStreamingQueryException>> {
-        let exc = self.inner.exception().to_pyerr()?;
-        Ok(exc.map(PyStreamingQueryException::new))
+    /// The exception of a failed query, as PySpark's: the `StreamingQueryException` of
+    /// `pyspark.errors.exceptions.connect`, of the message of the server without the type of
+    /// its Java exception, and with its JVM stack trace, and of the error class as its reason.
+    fn exception(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let Some(exception) = self.inner.exception().to_pyerr()? else {
+            return Ok(None);
+        };
+        // The message is the `toString` of the Java StreamingQueryException: drop its type.
+        let mut message = match exception.message.split_once(": ") {
+            Some((_, message)) => message.to_string(),
+            None => exception.message,
+        };
+        if let Some(stack_trace) = exception.stack_trace {
+            message.push_str(&format!("\n\nJVM stacktrace:\n{stack_trace}"));
+        }
+        let class = py
+            .import("pyspark.errors.exceptions.connect")?
+            .getattr("StreamingQueryException")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("reason", exception.error_class)?;
+        Ok(Some(class.call((message,), Some(&kwargs))?.unbind()))
     }
 }
 
@@ -985,7 +984,8 @@ impl PyStreamingQueryManager {
     }
 
     #[pyo3(signature = (timeout=None))]
-    fn awaitAnyTermination(&self, timeout: Option<f64>) -> PyResult<Option<bool>> {
+    fn awaitAnyTermination(&self, timeout: Option<&Bound<'_, PyAny>>) -> PyResult<Option<bool>> {
+        let timeout = positive_timeout(timeout)?;
         self.inner.await_any_termination(timeout).to_pyerr()
     }
 

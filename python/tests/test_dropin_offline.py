@@ -8715,6 +8715,40 @@ def test_dataframe_methods_raise_the_argument_errors_of_pyspark():
             call()
 
 
+def test_streaming_queries_check_their_timeouts_as_pyspark(mock_connect):
+    # As PySpark's: StreamingQueryException of pyspark.sql.streaming is that of
+    # pyspark.errors; the waits of a query and of spark.streams raise VALUE_NOT_POSITIVE of a
+    # timeout that is not a positive number, of the name of its type; and explain takes an
+    # int as a bool, but no other value.
+    import pyspark.errors
+    import pyspark.sql.streaming
+    import pyspark.sql.streaming.query
+    from pyspark.errors import PySparkValueError
+
+    exception = pyspark.errors.StreamingQueryException
+    assert pyspark.sql.streaming.StreamingQueryException is exception
+    assert pyspark.sql.streaming.query.StreamingQueryException is exception
+    assert not hasattr(pyspark.sql.streaming, "StreamingQueryStatus")
+    spark, service = mock_connect
+    # ExecutePlanResponse.write_stream_operation_start_result=8: query_id=1 (id=1, run_id=2).
+    service.execute_payload = message_field(
+        8, message_field(1, message_field(1, "q") + message_field(2, "r"))
+    )
+    query = spark.readStream.format("rate").load().writeStream.format("noop").start()
+    for timeout in (0, -1, 0.0, "1", [1]):
+        for wait in (query.awaitTermination, spark.streams.awaitAnyTermination):
+            with pytest.raises(PySparkValueError) as e:
+                wait(timeout)
+            assert e.value.getCondition() == "VALUE_NOT_POSITIVE"
+            assert e.value.getMessageParameters() == {
+                "arg_name": "timeout",
+                "arg_value": type(timeout).__name__,
+            }
+    for extended in (1.5, "x", None):
+        with pytest.raises(TypeError, match="but expected one of"):
+            query.explain(extended)
+
+
 def test_stream_writer_setters_mutate_and_return_self(offline_spark):
     w = offline_spark.readStream.format("rate").load().writeStream
     assert w.outputMode("append") is w
