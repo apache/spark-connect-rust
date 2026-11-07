@@ -1968,6 +1968,7 @@ fn value_to_proto_literal(v: &crate::row::Value) -> proto::expression::Literal {
         Value::String(s) => LiteralType::String(s.clone()),
         Value::Date(d) => LiteralType::Date(*d),
         Value::Timestamp(t) => LiteralType::Timestamp(*t),
+        Value::TimestampNtz(t) => LiteralType::TimestampNtz(*t),
         // Spark rejects interval NA fills. Preserve the type so it errors instead
         // of silently filling string columns with the Value's Debug text.
         Value::DayTimeInterval(t) => LiteralType::DayTimeInterval(*t),

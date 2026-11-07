@@ -104,6 +104,78 @@ def test_conf_get_with_a_none_default(session):
         session.conf.get(key)
 
 
+def _run_in_time_zone(code, zone):
+    # Runs `code` in a new interpreter whose time zone is `zone`: the local time zone of the
+    # client, which the test process (UTC) does not have.
+    import subprocess
+    import sys
+
+    env = dict(os.environ, TZ=zone)
+    result = subprocess.run(
+        [sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=300)
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
+def test_ntz_collect_is_the_wall_clock_in_the_client_time_zone_as_pyspark():
+    # As PySpark's Arrow conversion: a TIMESTAMP_NTZ is the wall clock, whatever the time zone of
+    # the client, from year 1 to year 9999 and inside arrays, maps and structs, while a TIMESTAMP
+    # is the instant, shown in the local time zone (here seven hours behind UTC, in July).
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("SPARK_REMOTE is required for live-server tests")
+    out = _run_in_time_zone("""
+import datetime
+from pyspark.sql import SparkSession
+spark = SparkSession.builder.remote(%r).getOrCreate()
+print(spark.createDataFrame([(datetime.datetime(2020, 7, 1, 12, 0),)], "t timestamp_ntz").collect())
+print(spark.sql("select timestamp_ntz'2020-07-01 12:00:00' t").collect())
+print(spark.sql("select timestamp_ntz'0001-01-01 00:00:00' t, timestamp_ntz'9999-12-31 23:59:59.999999' u").collect())
+print(spark.sql(
+    "select array(timestamp_ntz'2020-07-01 12:00:00') a, map('k', timestamp_ntz'2020-07-01 12:00:00') m, "
+    "named_struct('x', timestamp_ntz'2020-07-01 12:00:00') s").collect())
+print(spark.sql("select timestamp'2020-07-01 12:00:00' t, timestamp_micros(9223372036854775) u").collect())
+""" % remote, "America/Los_Angeles")
+    lines = out.strip().splitlines()
+    assert lines[0] == "[Row(t=datetime.datetime(2020, 7, 1, 12, 0))]"
+    assert lines[1] == "[Row(t=datetime.datetime(2020, 7, 1, 12, 0))]"
+    assert lines[2] == ("[Row(t=datetime.datetime(1, 1, 1, 0, 0), "
+                        "u=datetime.datetime(9999, 12, 31, 23, 59, 59, 999999))]")
+    assert lines[3] == ("[Row(a=[datetime.datetime(2020, 7, 1, 12, 0)], "
+                        "m={'k': datetime.datetime(2020, 7, 1, 12, 0)}, "
+                        "s=Row(x=datetime.datetime(2020, 7, 1, 12, 0)))]")
+    assert lines[4] == ("[Row(t=datetime.datetime(2020, 7, 1, 5, 0), "
+                        "u=datetime.datetime(2262, 4, 11, 16, 47, 16, 854775))]")
+
+
+def test_year_month_intervals_are_not_collected_as_pyspark(session):
+    # As PySpark's Arrow conversion of the rows: a year-month interval, also nested, is not
+    # collected in Spark Connect, and raises NOT_IMPLEMENTED, even for an empty result.
+    import datetime
+
+    from pyspark.errors import PySparkNotImplementedError
+
+    message = (r"\[NOT_IMPLEMENTED\] Collecting a year-month interval value in Spark Connect "
+               r"is not implemented\.")
+    df = session.sql("SELECT INTERVAL '1-2' YEAR TO MONTH ym")
+    for collect in (
+        lambda d: d.collect(),
+        lambda d: d.first(),
+        lambda d: d.head(1),
+        lambda d: d.take(1),
+        lambda d: list(d.toLocalIterator()),
+        lambda d: d.where("1 = 0").collect(),
+        lambda d: session.sql("SELECT array(INTERVAL '1-2' YEAR TO MONTH) a").collect(),
+        lambda d: session.sql("SELECT map('a', INTERVAL '1-2' YEAR TO MONTH) m").collect(),
+        lambda d: session.sql("SELECT named_struct('a', INTERVAL '1-2' YEAR TO MONTH) s").collect(),
+    ):
+        with pytest.raises(PySparkNotImplementedError, match=message):
+            collect(df)
+    # A day-time interval is collected as a timedelta.
+    assert session.sql("SELECT INTERVAL '1 02:03:04' DAY TO SECOND dt").collect()[0][0] == (
+        datetime.timedelta(days=1, seconds=7384))
+
+
 def test_user_id_of_the_connection_string_reaches_every_request_as_pyspark():
     # The server keys a session by the user ID in each request. As in PySpark, the
     # queries carry the user ID of the connection string, as the configs do, so a config

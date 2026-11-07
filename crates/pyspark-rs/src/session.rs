@@ -1701,6 +1701,7 @@ fn value_to_datatype(v: &Value) -> DataType {
         Value::Binary(_) => DataType::Binary,
         Value::Date(_) => DataType::Date,
         Value::Timestamp(_) => DataType::Timestamp,
+        Value::TimestampNtz(_) => DataType::TimestampNtz,
         // As PySpark infers TimeType() of a datetime.time.
         Value::Time(_) => DataType::Time { precision: 6 },
         Value::DayTimeInterval(_) => DataType::DayTimeInterval {

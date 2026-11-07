@@ -7,7 +7,9 @@ that require a live server live in test_dropin_e2e.py and are gated on SPARK_REM
 """
 
 import array
+import contextlib
 import datetime
+import os
 import re
 import decimal
 import json
@@ -20,6 +22,7 @@ from threading import Barrier
 import pytest
 
 from _mock_connect_server import (
+    ddl_data_type,
     ddl_json,
     ddl_parse_response,
     message_field,
@@ -7295,6 +7298,151 @@ def test_create_auto_cdc_flow_scd2_track_history():
     assert flow.stored_as_scd_type == 2
     assert len(flow.track_history_column_list) == 2
     assert flow.spark_conf == {"k": "v"}
+
+
+# --------------------------------------------------------------------------- collect of NTZ timestamps, distant timestamps and year-month intervals
+
+
+@contextlib.contextmanager
+def _client_time_zone(name):
+    # The process time zone, which the local conversions of datetime read, for a block.
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = name
+    time.tzset()
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous
+        time.tzset()
+
+
+def _collect_mock_result(mock_connect, table, schema_ddl):
+    # Makes the mock server answer the next execution with `table` (Arrow IPC) of the type
+    # `schema_ddl`: ExecutePlanResponse.schema=7, arrow_batch=2 (ArrowBatch.row_count=1, data=2).
+    import pyarrow as pa
+
+    spark, service = mock_connect
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    batch = varint_field(1, table.num_rows) + message_field(2, sink.getvalue().to_pybytes())
+    service.execute_payload = message_field(7, ddl_data_type(schema_ddl)) + message_field(2, batch)
+    return spark.range(1)
+
+
+def _micros_since_epoch(value):
+    # The microseconds since 1970-01-01 00:00:00 of a naive datetime, exactly.
+    return (value - datetime.datetime(1970, 1, 1)) // datetime.timedelta(microseconds=1)
+
+
+def _naive_from_micros(micros):
+    # The naive datetime of `micros` microseconds since the epoch, as integer arithmetic.
+    return datetime.datetime(1970, 1, 1) + datetime.timedelta(microseconds=micros)
+
+
+_NTZ_VALUES = [
+    datetime.datetime(1, 1, 1),
+    datetime.datetime(1500, 3, 1, 1, 2, 3, 4),
+    datetime.datetime(2020, 7, 1, 12, 0),
+    datetime.datetime(9999, 12, 31, 23, 59, 59, 999999),
+]
+
+
+def test_ntz_collect_is_the_wall_clock_in_any_time_zone_as_pyspark(mock_connect):
+    # TIMESTAMP_NTZ (no time zone in Arrow) is the wall clock, which the time zone of the client
+    # does not shift, from year 1 to year 9999, in arrays, maps and structs too.
+    import pyarrow as pa
+
+    ntz = pa.timestamp("us")
+    values = [_micros_since_epoch(v) for v in _NTZ_VALUES]
+    table = pa.table({
+        "t": pa.array(values, ntz),
+        "a": pa.array([[v] for v in values], pa.list_(ntz)),
+        "m": pa.array([[("k", v)] for v in values], pa.map_(pa.string(), ntz)),
+        "s": pa.array([{"x": v} for v in values], pa.struct([("x", ntz)])),
+    })
+    df = _collect_mock_result(
+        mock_connect, table,
+        "t timestamp_ntz, a array<timestamp_ntz>, m map<string,timestamp_ntz>, "
+        "s struct<x:timestamp_ntz>")
+    for zone in ("UTC", "America/Los_Angeles", "Asia/Kolkata"):
+        with _client_time_zone(zone):
+            rows = df.collect()
+            assert [r.t for r in rows] == _NTZ_VALUES
+            assert [r.a for r in rows] == [[v] for v in _NTZ_VALUES]
+            assert [r.m for r in rows] == [{"k": v} for v in _NTZ_VALUES]
+            assert [r.s for r in rows] == [Row(x=v) for v in _NTZ_VALUES]
+
+
+def test_ltz_collect_is_the_instant_in_the_client_time_zone_as_pyspark(mock_connect):
+    # TIMESTAMP (Arrow with a time zone) is the instant, shown in the local time zone of the
+    # client, with its microseconds exact however far it is from the epoch.
+    import pyarrow as pa
+
+    micros = [
+        _micros_since_epoch(datetime.datetime(2020, 7, 1, 12, 0)),
+        _micros_since_epoch(datetime.datetime(2020, 7, 1, 12, 0, 0, 1)),
+        9223372036854775,
+        -9223372036854775,
+        253402300799999999,
+        -62135596800000000,
+        1,
+        -1,
+    ]
+    table = pa.table({"t": pa.array(micros, pa.timestamp("us", tz="UTC"))})
+    df = _collect_mock_result(mock_connect, table, "t timestamp")
+    with _client_time_zone("UTC"):
+        assert [r.t for r in df.collect()] == [_naive_from_micros(m) for m in micros]
+    # Year 1 is out of the range of a local time in Los Angeles (as in PySpark), so it is left out.
+    in_range = [m for m in micros if m != -62135596800000000]
+    df = _collect_mock_result(
+        mock_connect, pa.table({"t": pa.array(in_range, pa.timestamp("us", tz="UTC"))}), "t timestamp")
+    with _client_time_zone("America/Los_Angeles"):
+        rows = [r.t for r in df.collect()]
+        assert rows[0] == datetime.datetime(2020, 7, 1, 5, 0)
+        assert rows[1] == datetime.datetime(2020, 7, 1, 5, 0, 0, 1)
+        # 2262-04-11 23:47:16.854775 UTC is PDT, seven hours earlier.
+        assert rows[2] == datetime.datetime(2262, 4, 11, 16, 47, 16, 854775)
+
+
+@pytest.mark.parametrize("collect", [
+    lambda df: df.collect(),
+    lambda df: df.first(),
+    lambda df: df.head(1),
+    lambda df: df.take(1),
+    lambda df: list(df.toLocalIterator()),
+])
+@pytest.mark.parametrize("schema_ddl, table_type", [
+    ("ym interval year to month", "int32"),
+    ("a array<interval year to month>", "list"),
+    ("m map<string,interval year to month>", "map"),
+    ("s struct<ym:interval year to month>", "struct"),
+])
+def test_year_month_intervals_are_not_collected_as_pyspark(
+        mock_connect, collect, schema_ddl, table_type):
+    # PySpark's Arrow conversion of the rows raises NOT_IMPLEMENTED for a year-month interval
+    # anywhere in the schema, before any row is converted, so an empty result raises too.
+    # The Arrow data is empty: Spark Connect has no pyarrow type to build a year-month one.
+    import pyarrow as pa
+    from pyspark.errors import PySparkNotImplementedError
+
+    arrow_type = {
+        "int32": pa.int32(),
+        "list": pa.list_(pa.int32()),
+        "map": pa.map_(pa.string(), pa.int32()),
+        "struct": pa.struct([("ym", pa.int32())]),
+    }[table_type]
+    column = "ym" if table_type == "int32" else ("s" if table_type == "struct" else
+                                                  ("m" if table_type == "map" else "a"))
+    table = pa.table({column: pa.array([], arrow_type)})
+    df = _collect_mock_result(mock_connect, table, schema_ddl)
+    with pytest.raises(PySparkNotImplementedError, match=(
+            r"\[NOT_IMPLEMENTED\] Collecting a year-month interval value in Spark Connect "
+            r"is not implemented\.")):
+        collect(df)
 
 
 # ---------------------------------------------------------------- DataFrame repr
