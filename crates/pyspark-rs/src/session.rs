@@ -397,6 +397,19 @@ impl PyHook {
 }
 
 /// Python wrapper for a Spark session.
+/// A tag of `addTag` or `removeTag`: `CANNOT_BE_NONE` for None, as PySpark Connect's.
+fn tag_of(py: Python<'_>, tag: &Bound<'_, PyAny>) -> PyResult<String> {
+    if tag.is_none() {
+        return Err(crate::column::raise_pyspark(
+            py,
+            "PySparkValueError",
+            "CANNOT_BE_NONE",
+            &[("arg_name", "Spark Connect tag")],
+        ));
+    }
+    tag.extract()
+}
+
 #[pyclass(name = "SparkSession", module = "pyspark.sql.session")]
 pub struct PySparkSession {
     pub(crate) session: SparkSession,
@@ -1306,7 +1319,9 @@ impl PySparkSession {
         crate::tvf::PyTableValuedFunction::new(self.session.tvf())
     }
 
-    /// Copy a local file to the Spark-managed filesystem (`copyFromLocalToFs`).
+    /// Copy a local file to the Spark-managed filesystem (`copyFromLocalToFs`), with the errors
+    /// of PySpark Connect's: `NO_SCHEMA_AND_DRIVER_DEFAULT_SCHEME` for a destination of a scheme,
+    /// and an `AssertionError` for a local path that is not a file.
     #[pyo3(name = "copyFromLocalToFs")]
     fn copy_from_local_to_fs(
         &self,
@@ -1314,8 +1329,49 @@ impl PySparkSession {
         local_path: &str,
         dest_path: &str,
     ) -> PyResult<()> {
+        let scheme: String = py
+            .import("urllib.parse")?
+            .call_method1("urlparse", (dest_path,))?
+            .getattr("scheme")?
+            .extract()?;
+        if !scheme.is_empty() {
+            return Err(crate::column::raise_pyspark(
+                py,
+                "PySparkValueError",
+                "NO_SCHEMA_AND_DRIVER_DEFAULT_SCHEME",
+                &[("arg_name", "dest_path")],
+            ));
+        }
+        let is_file: bool = py
+            .import("pathlib")?
+            .getattr("Path")?
+            .call1((local_path,))?
+            .call_method0("absolute")?
+            .call_method0("is_file")?
+            .extract()?;
+        if !is_file {
+            return Err(pyo3::exceptions::PyAssertionError::new_err(
+                "local path must be a file path.",
+            ));
+        }
         py.detach(|| self.session.copy_from_local_to_fs(local_path, dest_path))
             .to_pyerr()
+    }
+
+    /// As PySpark Connect's: the attributes of the JVM of a classic session raise
+    /// `JVM_ATTRIBUTE_NOT_SUPPORTED`, and the others are not attributes.
+    fn __getattr__(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
+        if ["_jsc", "_jconf", "_jvm", "_jsparkSession", "sparkContext"].contains(&name) {
+            return Err(crate::column::raise_pyspark(
+                py,
+                "PySparkAttributeError",
+                "JVM_ATTRIBUTE_NOT_SUPPORTED",
+                &[("attr_name", name)],
+            ));
+        }
+        Err(pyo3::exceptions::PyAttributeError::new_err(format!(
+            "'SparkSession' object has no attribute '{name}'"
+        )))
     }
 
     /// DataFrameReader for batch reads (`spark.read`).
@@ -1671,8 +1727,19 @@ impl PySparkSession {
         py.detach(|| self.session.version()).to_pyerr()
     }
 
-    fn table(&self, tableName: &str) -> PyResult<PyDataFrame> {
-        Ok(PyDataFrame::new(self.session.table(tableName).to_pyerr()?))
+    /// The DataFrame of a table, as PySpark Connect's: `NOT_EXPECTED_TYPE` for a name that is not
+    /// a str.
+    fn table(&self, tableName: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let Ok(name) = tableName.cast::<pyo3::types::PyString>() else {
+            return Err(crate::stat_arguments::not_expected_type(
+                tableName,
+                "tableName",
+                "str",
+            ));
+        };
+        Ok(PyDataFrame::new(
+            self.session.table(&name.to_cow()?).to_pyerr()?,
+        ))
     }
 
     // Reference: emptyDataFrame(schema) -> createDataFrame([], schema). We accept an
@@ -1711,14 +1778,21 @@ impl PySparkSession {
             .to_pyerr()
     }
 
+    /// Add a tag of the current thread, with the errors of PySpark Connect's tags: `CANNOT_BE_NONE`
+    /// for None, and those of [`SparkSession::check_tag`].
     #[pyo3(name = "addTag")]
-    fn add_tag(&self, tag: &str) -> PyResult<()> {
-        self.session.add_tag(tag).to_pyerr()
+    fn add_tag(&self, py: Python<'_>, tag: &Bound<'_, PyAny>) -> PyResult<()> {
+        let tag = tag_of(py, tag)?;
+        self.session.add_tag(&tag).to_pyerr()
     }
 
+    /// Remove a tag of the current thread, with the errors of `addTag`, as PySpark Connect's.
     #[pyo3(name = "removeTag")]
-    fn remove_tag(&self, tag: &str) {
-        self.session.remove_tag(tag)
+    fn remove_tag(&self, py: Python<'_>, tag: &Bound<'_, PyAny>) -> PyResult<()> {
+        let tag = tag_of(py, tag)?;
+        SparkSession::check_tag(&tag).to_pyerr()?;
+        self.session.remove_tag(&tag);
+        Ok(())
     }
 
     /// Make `session` the default session, and the active session of this thread, when they
