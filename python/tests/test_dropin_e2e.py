@@ -1918,6 +1918,20 @@ def test_sql_fails_at_a_statement_that_does_not_parse(session):
         session.sql("SELEC 1")
 
 
+def test_repr_html_is_the_html_table_of_eager_evaluation_as_pyspark(session):
+    # As PySpark Connect's: _repr_html_ is None without eager evaluation, else the HTML table of
+    # the DataFrame, after which __repr__ is the string of the schema.
+    df = session.range(2)
+    assert df._repr_html_() is None
+    session.conf.set("spark.sql.repl.eagerEval.enabled", "true")
+    try:
+        html = df._repr_html_()
+        assert html.startswith("<table border='1'>") and "<th>id</th>" in html
+        assert repr(df) == "DataFrame[id: bigint]"
+        assert "+---+" in repr(session.range(2))
+    finally:
+        session.conf.unset("spark.sql.repl.eagerEval.enabled")
+
 def test_sql_formats_the_query_with_keyword_arguments_as_pyspark(session):
     from decimal import Decimal
 

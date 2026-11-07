@@ -106,6 +106,13 @@ pub enum LogicalPlan {
         truncate: i32,
         vertical: bool,
     },
+    /// HtmlString: the HTML table of `df._repr_html_()`, which the server formats as one
+    /// string: `num_rows` rows, values truncated to `truncate` characters (0 for none).
+    HtmlString {
+        input: Arc<LogicalPlan>,
+        num_rows: i32,
+        truncate: i32,
+    },
     /// Deduplicate: `df.distinct()` or `df.dropDuplicates()`.
     Deduplicate {
         input: Arc<LogicalPlan>,
@@ -852,6 +859,19 @@ impl LogicalPlan {
                     vertical: *vertical,
                 };
                 relation.rel_type = Some(proto::relation::RelType::ShowString(Box::new(show)));
+            }
+
+            LogicalPlan::HtmlString {
+                input,
+                num_rows,
+                truncate,
+            } => {
+                let html = proto::HtmlString {
+                    input: Some(Box::new(relation_of(input, plan_ids))),
+                    num_rows: *num_rows,
+                    truncate: *truncate,
+                };
+                relation.rel_type = Some(proto::relation::RelType::HtmlString(Box::new(html)));
             }
 
             LogicalPlan::Deduplicate {

@@ -46,7 +46,17 @@ fn flatten_str_cols(cols: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<String>> {
 #[pyclass(name = "DataFrame", module = "pyspark.sql.connect.dataframe", subclass)]
 pub struct PyDataFrame {
     pub(crate) dataframe: DataFrame,
+    /// Whether `_repr_html_` was called, as PySpark's `_support_repr_html`: then `__repr__` is
+    /// the string of the schema, so that a notebook does not show the DataFrame twice.
+    support_repr_html: std::sync::atomic::AtomicBool,
 }
+
+/// The settings of the eager evaluation of `__repr__` and `_repr_html_`.
+const EAGER_EVAL: [&str; 3] = [
+    "spark.sql.repl.eagerEval.enabled",
+    "spark.sql.repl.eagerEval.maxNumRows",
+    "spark.sql.repl.eagerEval.truncate",
+];
 
 impl PyDataFrame {
     /// `other`, a DataFrame of the session of this one, as PySpark's `_check_same_session`
@@ -180,7 +190,24 @@ impl PyDataFrame {
     }
 
     pub fn new(dataframe: DataFrame) -> Self {
-        PyDataFrame { dataframe }
+        PyDataFrame {
+            dataframe,
+            support_repr_html: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// The number of rows and the truncation of the eager evaluation, as PySpark's `int` of
+    /// each setting, if it is enabled.
+    fn eager_eval(&self, py: Python<'_>) -> PyResult<Option<(i32, i32)>> {
+        let conf = self.dataframe.spark_session().conf();
+        let values = py.detach(|| conf.get_many(&EAGER_EVAL)).to_pyerr()?;
+        if values[0].as_deref() != Some("true") {
+            return Ok(None);
+        }
+        let int = py.import("builtins")?.getattr("int")?;
+        let n: i32 = int.call1((values[1].as_deref(),))?.extract()?;
+        let truncate: i32 = int.call1((values[2].as_deref(),))?.extract()?;
+        Ok(Some((n, truncate)))
     }
 
     /// The column at the 0-based index `index`, as PySpark's `df[index]`: `col` of the name of
@@ -2340,21 +2367,16 @@ impl PyDataFrame {
     /// `truncate`, and `DataFrame[name: type, ...]` otherwise. Like PySpark, it reads the
     /// three settings, in one request, on every call.
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
-        const EAGER_EVAL: [&str; 3] = [
-            "spark.sql.repl.eagerEval.enabled",
-            "spark.sql.repl.eagerEval.maxNumRows",
-            "spark.sql.repl.eagerEval.truncate",
-        ];
-        let conf = self.dataframe.spark_session().conf();
-        let values = py.detach(|| conf.get_many(&EAGER_EVAL)).to_pyerr()?;
-        if values[0].as_deref() == Some("true") {
-            // As PySpark's `int(...)` of each setting.
-            let int = py.import("builtins")?.getattr("int")?;
-            let n: i32 = int.call1((values[1].as_deref(),))?.extract()?;
-            let truncate: i32 = int.call1((values[2].as_deref(),))?.extract()?;
-            return py
-                .detach(|| self.dataframe.show_string(n, truncate, false))
-                .to_pyerr();
+        // As PySpark's: once `_repr_html_` was called, the string of the schema.
+        if !self
+            .support_repr_html
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            if let Some((n, truncate)) = self.eager_eval(py)? {
+                return py
+                    .detach(|| self.dataframe.show_string(n, truncate, false))
+                    .to_pyerr();
+            }
         }
         let fields = self
             .dtypes(py)?
@@ -2363,6 +2385,22 @@ impl PyDataFrame {
             .collect::<Vec<_>>()
             .join(", ");
         Ok(format!("DataFrame[{fields}]"))
+    }
+
+    /// The HTML table of the DataFrame, which notebooks show, as PySpark Connect's
+    /// `_repr_html_`: with `spark.sql.repl.eagerEval.enabled`, the table of the first
+    /// `maxNumRows` rows, values truncated to `truncate` characters, which the server formats
+    /// (`HtmlString`); else None. Once called, `__repr__` is the string of the schema.
+    fn _repr_html_(&self, py: Python<'_>) -> PyResult<Option<String>> {
+        self.support_repr_html
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        match self.eager_eval(py)? {
+            Some((n, truncate)) => py
+                .detach(|| self.dataframe.html_string(n, truncate))
+                .to_pyerr()
+                .map(Some),
+            None => Ok(None),
+        }
     }
 
     /// `DataFrame.mapInPandas` — map an iterator of pandas DataFrames, in a stage of the
