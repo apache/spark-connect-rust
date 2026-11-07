@@ -145,6 +145,12 @@ no scheduled backstop for Rust source changes. To validate a maintenance branch,
 manually dispatch `release.yml` with `branch` set to that branch, empty
 `release-version` and `rc-count` inputs, and `finalize: false`.
 
+Wheel checks and release wheel builds pass `--locked` to Maturin. The selected
+source branch must contain an up-to-date `Cargo.lock`; repair missing or stale
+lockfiles before dispatching a release. Wheel and sdist recipes install Maturin
+within the `>=1.0,<2.0` range declared in `pyproject.toml`. Wheel artifact uploads
+fail if the build produces no wheel.
+
 The shared recipe uses no dependency or build caches, so each run is a clean build
 matching the release. Checks have a 45-minute timeout;
 releases retain their six-hour limit. Check artifacts expire after one day;
