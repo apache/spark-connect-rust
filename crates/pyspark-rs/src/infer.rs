@@ -7,7 +7,9 @@
 use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 
-use pyo3::exceptions::{PyAssertionError, PyOverflowError, PyTypeError, PyValueError};
+use pyo3::exceptions::{
+    PyAssertionError, PyNotImplementedError, PyOverflowError, PyTypeError, PyValueError,
+};
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
@@ -841,22 +843,86 @@ fn arrow_type_name(obj: &Bound<'_, PyAny>) -> PyResult<String> {
     })
 }
 
-/// An error of PyArrow, of `class` with `message`, as its conversions raise it.
+/// An error of PyArrow, of `class` with `message`, as its conversions raise it: `ArrowInvalid`,
+/// a `ValueError`, `ArrowTypeError`, a `TypeError`, or `ArrowNotImplementedError`, a
+/// `NotImplementedError`. Without PyArrow, the built-in class that it derives from.
 fn pyarrow_error(py: Python<'_>, class: &str, message: String) -> PyResult<PyErr> {
-    let error = py
-        .import(intern!(py, "pyarrow"))?
-        .getattr(class)?
-        .call1((message,))?;
-    Ok(PyErr::from_value(error))
+    match py
+        .import(intern!(py, "pyarrow"))
+        .and_then(|pyarrow| pyarrow.getattr(class))
+    {
+        Ok(class) => Ok(PyErr::from_value(class.call1((message,))?)),
+        Err(_) => Ok(match class {
+            "ArrowTypeError" => PyTypeError::new_err(message),
+            "ArrowNotImplementedError" => PyNotImplementedError::new_err(message),
+            _ => PyValueError::new_err(message),
+        }),
+    }
 }
 
-/// The error of a value that PyArrow cannot convert to the type it is named by.
+/// The `ArrowInvalid` of a value that PyArrow cannot convert to the type it is named by.
 fn arrow_invalid(obj: &Bound<'_, PyAny>, arrow_type: &str) -> PyResult<PyErr> {
-    Ok(PyValueError::new_err(format!(
-        "Could not convert {} with type {}: tried to convert to {arrow_type}",
-        obj.repr()?,
-        arrow_type_name(obj)?
-    )))
+    pyarrow_error(
+        obj.py(),
+        "ArrowInvalid",
+        format!(
+            "Could not convert {} with type {}: tried to convert to {arrow_type}",
+            obj.repr()?,
+            arrow_type_name(obj)?
+        ),
+    )
+}
+
+/// `obj` as an int, as PyArrow's `PyObjectToPyInt` takes it: by `__index__`, else by the
+/// `__int__` of its type, which may raise, such as for a NaN; else the `ArrowTypeError` "object
+/// of type <class 'T'> cannot be converted to int". A float, a `Decimal` and a NumPy number or
+/// bool are taken by their `__int__`.
+fn py_int<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let py = obj.py();
+    // SAFETY: PyNumber_Index returns a new reference, or NULL with an exception set.
+    if let Ok(index) =
+        unsafe { Bound::from_owned_ptr_or_err(py, pyo3::ffi::PyNumber_Index(obj.as_ptr())) }
+    {
+        return Ok(index);
+    }
+    let ty = obj.get_type();
+    if ty.hasattr(intern!(py, "__int__"))? {
+        return ty.getattr(intern!(py, "__int__"))?.call1((obj,));
+    }
+    Err(pyarrow_error(
+        py,
+        "ArrowTypeError",
+        format!("object of type {} cannot be converted to int", ty.repr()?),
+    )?)
+}
+
+/// `obj` as an integer of `bits` bits, as PyArrow's `CIntFromPython` takes it: not a bool (an
+/// `ArrowTypeError`), an int, else by `py_int`. A value out of the range of the bits raises an
+/// `ArrowInvalid` of `overflow`, else "Value X too large to fit in C integer type", and one out
+/// of the range of a C long Python's `OverflowError`.
+fn c_int_from_python(obj: &Bound<'_, PyAny>, bits: u32, overflow: Option<&str>) -> PyResult<i64> {
+    let py = obj.py();
+    if obj.is_instance_of::<PyBool>() {
+        return Err(pyarrow_error(
+            py,
+            "ArrowTypeError",
+            "Expected integer, got bool".into(),
+        )?);
+    }
+    let int = if obj.is_instance_of::<PyInt>() {
+        obj.clone()
+    } else {
+        py_int(obj)?
+    };
+    let value: i64 = int.extract()?;
+    if bits < 64 && !(-(1i64 << (bits - 1))..(1i64 << (bits - 1))).contains(&value) {
+        let message = match overflow {
+            Some(message) => message.to_string(),
+            None => format!("Value {} too large to fit in C integer type", int.str()?),
+        };
+        return Err(pyarrow_error(py, "ArrowInvalid", message)?);
+    }
+    Ok(value)
 }
 
 /// The kind of a NumPy scalar of a bool or a number, which PyArrow converts as the Python
@@ -891,6 +957,18 @@ fn numpy_scalar(obj: &Bound<'_, PyAny>) -> PyResult<Option<NumpyScalar>> {
     Ok(None)
 }
 
+/// Whether `obj` is a NumPy scalar of any kind. NumPy is not imported when it is not loaded.
+fn numpy_generic(obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let py = obj.py();
+    let modules = py
+        .import(intern!(py, "sys"))?
+        .getattr(intern!(py, "modules"))?;
+    match modules.cast::<PyDict>()?.get_item(intern!(py, "numpy"))? {
+        Some(numpy) if !numpy.is_none() => obj.is_instance(&numpy.getattr(intern!(py, "generic"))?),
+        _ => Ok(false),
+    }
+}
+
 /// An integer as a floating-point value, which PyArrow takes only when it is exact: within
 /// 2^53 for a double and 2^24 for a float.
 fn exact_float(obj: &Bound<'_, PyAny>, dt: &DataType) -> PyResult<f64> {
@@ -899,15 +977,25 @@ fn exact_float(obj: &Bound<'_, PyAny>, dt: &DataType) -> PyResult<f64> {
         _ => (53, "double"),
     };
     let out_of_range = || -> PyResult<PyErr> {
-        Ok(PyValueError::new_err(format!(
-            "Integer value {} is outside of the range exactly representable by a IEEE 754 \
-             {precision} precision value",
-            obj.str()?
-        )))
+        pyarrow_error(
+            obj.py(),
+            "ArrowInvalid",
+            format!(
+                "Integer value {} is outside of the range exactly representable by a IEEE 754 \
+                 {precision} precision value",
+                obj.str()?
+            ),
+        )
     };
     let value: i64 = match obj.extract() {
         Ok(value) => value,
-        Err(_) => return Err(out_of_range()?),
+        Err(_) => {
+            return Err(pyarrow_error(
+                obj.py(),
+                "ArrowInvalid",
+                "PyLong is too large to fit int64".into(),
+            )?)
+        }
     };
     if value.unsigned_abs() > 1u64 << bits {
         return Err(out_of_range()?);
@@ -1071,21 +1159,9 @@ pub(crate) fn convert(obj: &Bound<'_, PyAny>, dt: &DataType, nullable: bool) -> 
             };
             Ok(Value::String(text))
         }
-        DataType::Char { .. } | DataType::Varchar { .. } => {
-            if let Ok(text) = obj.cast::<PyString>() {
-                Ok(Value::String(text.to_cow()?.into_owned()))
-            } else if let Ok(bytes) = obj.cast::<PyBytes>() {
-                Ok(Value::String(
-                    String::from_utf8(bytes.as_bytes().to_vec())
-                        .map_err(|e| PyValueError::new_err(e.to_string()))?,
-                ))
-            } else {
-                Err(PyTypeError::new_err(format!(
-                    "Expected bytes, got a '{}' object",
-                    type_name(obj)?
-                )))
-            }
-        }
+        // As PySpark, which has no converter of these types: the value goes as it is to
+        // `to_arrow_schema`, which raises for the type (`unsupported_arrow_type`).
+        DataType::Char { .. } | DataType::Varchar { .. } => Ok(Value::Null),
         DataType::Boolean => {
             if obj.is_instance_of::<PyBool>() || numpy_scalar(obj)? == Some(NumpyScalar::Bool) {
                 Ok(Value::Bool(obj.is_truthy()?))
@@ -1109,7 +1185,7 @@ pub(crate) fn convert(obj: &Bound<'_, PyAny>, dt: &DataType, nullable: bool) -> 
                     Some(NumpyScalar::Integer) => exact_float(obj, dt)?,
                     _ => {
                         let arrow_type = if matches!(dt, DataType::Float) {
-                            "float"
+                            "float32"
                         } else {
                             "double"
                         };
@@ -1124,20 +1200,17 @@ pub(crate) fn convert(obj: &Bound<'_, PyAny>, dt: &DataType, nullable: bool) -> 
         }
         DataType::DayTimeInterval { .. } => Ok(Value::DayTimeInterval(duration_micros(obj)?)),
         DataType::Date => Ok(Value::Date(date_days(obj)?)),
-        // As PyArrow's `time64[ns]`, to which PySpark passes the value as it is: a time, and
-        // the nanoseconds of an int, or of a float, truncated.
+        // As PyArrow's `time64[ns]`, to which PySpark passes the value as it is: a time, else
+        // the nanoseconds of the value as `CIntFromPython` takes it.
         DataType::Time { .. } => {
             if obj.is_instance(TIME.import(py, "datetime", "time")?.as_any())? {
                 Ok(Value::Time(time_nanos(obj)?))
-            } else if obj.is_instance_of::<PyInt>() {
-                Ok(Value::Time(obj.extract()?))
-            } else if obj.is_instance_of::<PyFloat>() {
-                Ok(Value::Time(obj.extract::<f64>()? as i64))
             } else {
-                Err(PyTypeError::new_err(format!(
-                    "object of type {} cannot be converted to int",
-                    obj.get_type().repr()?
-                )))
+                Ok(Value::Time(c_int_from_python(
+                    obj,
+                    64,
+                    Some("Integer too large for int64"),
+                )?))
             }
         }
         // As PySpark's converters of these types: the value and metadata of a VariantVal, and
@@ -1202,71 +1275,43 @@ pub(crate) fn convert(obj: &Bound<'_, PyAny>, dt: &DataType, nullable: bool) -> 
 }
 
 /// The days since the epoch of a value of a date column, as PyArrow converts it to date32: a
-/// date, or the date of a datetime; an int, or a float truncated, as days; and a NumPy bool or
-/// number as the value it stands for. Another value raises PyArrow's error.
+/// date, or the date of a datetime, else the days of the value as `CIntFromPython` takes it, in
+/// the range of an int32, else the `ArrowInvalid` "Integer too large for date32".
 fn date_days(obj: &Bound<'_, PyAny>) -> PyResult<i32> {
     let py = obj.py();
     if obj.is_instance(DATE.import(py, "datetime", "date")?.as_any())? {
         let ordinal: i64 = obj.call_method0(intern!(py, "toordinal"))?.extract()?;
         return Ok((ordinal - 719_163) as i32);
     }
-    if obj.is_instance_of::<PyBool>() {
-        return Err(pyarrow_error(
+    Ok(c_int_from_python(obj, 32, Some("Integer too large for date32"))? as i32)
+}
+
+/// The `UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION` of the first char or varchar type of `dt`,
+/// depth first, which PySpark's `to_arrow_schema` raises when it converts the schema of local
+/// rows to Arrow: it has no Arrow type of these types.
+pub(crate) fn unsupported_arrow_type(py: Python<'_>, dt: &DataType) -> PyResult<Option<PyErr>> {
+    fn first_char(dt: &DataType) -> Option<&DataType> {
+        match dt {
+            DataType::Char { .. } | DataType::Varchar { .. } => Some(dt),
+            DataType::Struct { fields } => fields.iter().find_map(|f| first_char(&f.data_type)),
+            DataType::Array { element_type, .. } => first_char(element_type),
+            DataType::Map {
+                key_type,
+                value_type,
+                ..
+            } => first_char(key_type).or_else(|| first_char(value_type)),
+            _ => None,
+        }
+    }
+    Ok(match first_char(dt) {
+        Some(char_type) => Some(raise_pyspark(
             py,
-            "ArrowTypeError",
-            "Expected integer, got bool".into(),
-        )?);
-    }
-    let kind = if obj.is_instance_of::<PyInt>() {
-        Some(NumpyScalar::Integer)
-    } else if obj.is_instance_of::<PyFloat>() {
-        Some(NumpyScalar::Floating)
-    } else {
-        numpy_scalar(obj)?
-    };
-    let days: i64 = match kind {
-        Some(NumpyScalar::Bool) => i64::from(obj.is_truthy()?),
-        Some(NumpyScalar::Integer) => obj.extract()?,
-        Some(NumpyScalar::Floating) => {
-            let value: f64 = obj.extract()?;
-            if value.is_nan() {
-                return Err(PyValueError::new_err("cannot convert float NaN to integer"));
-            }
-            if value.is_infinite() {
-                return Err(PyOverflowError::new_err(
-                    "cannot convert float infinity to integer",
-                ));
-            }
-            let truncated = value.trunc();
-            if !(-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&truncated) {
-                return Err(PyOverflowError::new_err(
-                    "Python int too large to convert to C long",
-                ));
-            }
-            truncated as i64
-        }
-        None => {
-            return Err(pyarrow_error(
-                py,
-                "ArrowTypeError",
-                format!(
-                    "object of type {} cannot be converted to int",
-                    obj.get_type().repr()?
-                ),
-            )?)
-        }
-    };
-    // The days of PyArrow's dates: from 0001-01-01 to 9999-12-31, and a larger magnitude is
-    // out of the range of a Python timedelta.
-    if days.unsigned_abs() > 999_999_999 {
-        return Err(PyOverflowError::new_err(format!(
-            "days={days}; must have magnitude <= 999999999"
-        )));
-    }
-    if !(-719_162..=2_932_896).contains(&days) {
-        return Err(PyOverflowError::new_err("date value out of range"));
-    }
-    Ok(days as i32)
+            "PySparkTypeError",
+            "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION",
+            &[("data_type", &data_type_str(py, char_type)?)],
+        )),
+        None => None,
+    })
 }
 
 /// Whether PySpark's `LocalDataToArrowConversion._need_converter` gives a value of `dt` a
@@ -1368,60 +1413,33 @@ fn udt_of<'py>(
     class.call0()
 }
 
-/// A value of a day-time interval column, as PyArrow converts one to `duration[us]`: a
-/// timedelta to its microseconds, as `DayTimeIntervalType.toInternal`, and an int, or a
-/// float truncated, as microseconds. Another value raises PyArrow's error.
+/// The microseconds of a value of a day-time interval column, as PyArrow converts it to
+/// `duration[us]`: a timedelta; a NumPy scalar of `timedelta64[us]`, as another NumPy scalar
+/// raises `ArrowNotImplementedError`; else the value as `CIntFromPython` takes it.
 fn duration_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
     let py = obj.py();
     if obj.is_instance(TIMEDELTA.import(py, "datetime", "timedelta")?.as_any())? {
         return timedelta_micros(obj);
     }
-    if obj.is_instance_of::<PyBool>() {
-        return Err(pyarrow_error(
-            py,
-            "ArrowTypeError",
-            "Expected integer, got bool".into(),
-        )?);
-    }
-    if numpy_scalar(obj)?.is_some() {
+    if numpy_generic(obj)? {
         let arrow_type = py.import(intern!(py, "pyarrow"))?.call_method1(
             intern!(py, "from_numpy_dtype"),
             (obj.getattr(intern!(py, "dtype"))?,),
         )?;
+        let arrow_type = arrow_type.str()?.to_cow()?.into_owned();
+        if arrow_type == "duration[us]" {
+            // The microseconds that the scalar holds, as PyArrow reads them.
+            return obj
+                .call_method1(intern!(py, "astype"), (intern!(py, "int64"),))?
+                .extract();
+        }
         return Err(pyarrow_error(
             py,
             "ArrowNotImplementedError",
-            format!("Expected np.timedelta64 but got: {}", arrow_type.str()?),
+            format!("Expected np.timedelta64 but got: {arrow_type}"),
         )?);
     }
-    let too_large = || PyOverflowError::new_err("Python int too large to convert to C long");
-    if obj.is_instance_of::<PyInt>() {
-        return obj.extract::<i64>().map_err(|_| too_large());
-    }
-    if let Ok(value) = obj.cast::<PyFloat>() {
-        let value = value.value();
-        if value.is_nan() {
-            return Err(PyValueError::new_err("cannot convert float NaN to integer"));
-        }
-        if value.is_infinite() {
-            return Err(PyOverflowError::new_err(
-                "cannot convert float infinity to integer",
-            ));
-        }
-        let truncated = value.trunc();
-        if !(-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&truncated) {
-            return Err(too_large());
-        }
-        return Ok(truncated as i64);
-    }
-    Err(pyarrow_error(
-        py,
-        "ArrowTypeError",
-        format!(
-            "object of type {} cannot be converted to int",
-            obj.get_type().repr()?
-        ),
-    )?)
+    c_int_from_python(obj, 64, None)
 }
 
 /// The microseconds of a `datetime.timedelta`, as `DayTimeIntervalType.toInternal`:/// The microseconds of a `datetime.timedelta`, as `DayTimeIntervalType.toInternal`:
@@ -1438,7 +1456,9 @@ pub(crate) fn timedelta_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
         .ok_or_else(|| PyOverflowError::new_err("Python int too large to convert to C long"))
 }
 
-/// An integral value, as PyArrow converts one: an int in range, or a float truncated.
+/// An integral value, as PyArrow converts one: the value as `CIntFromPython` takes it, such as an
+/// int in range, a float truncated or a `Decimal`. The error of a value that is not an int, or a
+/// NumPy integer, is the `ArrowInvalid` "Could not convert".
 fn convert_integral(obj: &Bound<'_, PyAny>, dt: &DataType) -> PyResult<Value> {
     let (bits, arrow_type) = match dt {
         DataType::Byte => (8, "int8"),
@@ -1446,35 +1466,18 @@ fn convert_integral(obj: &Bound<'_, PyAny>, dt: &DataType) -> PyResult<Value> {
         DataType::Integer => (32, "int32"),
         _ => (64, "int64"),
     };
-    if obj.is_instance_of::<PyBool>() {
-        return Err(PyTypeError::new_err("Expected integer, got bool"));
-    }
-    // A float, also of NumPy, is truncated, as PyArrow does.
-    let truncated = |obj: &Bound<'_, PyAny>| -> PyResult<i64> {
-        let value: f64 = obj.extract()?;
-        // The range of i64 is [-2^63, 2^63), both bounds exact as f64.
-        if !(i64::MIN as f64..i64::MAX as f64).contains(&value.trunc()) {
-            return Err(arrow_invalid(obj, arrow_type)?);
-        }
-        Ok(value.trunc() as i64)
-    };
-    let value: i64 = if obj.is_instance_of::<PyInt>() {
-        obj.extract()?
-    } else if obj.is_instance_of::<PyFloat>() {
-        truncated(obj)?
-    } else {
-        match numpy_scalar(obj)? {
-            Some(NumpyScalar::Integer) => obj.extract()?,
-            Some(NumpyScalar::Floating) => truncated(obj)?,
-            Some(NumpyScalar::Bool) => i64::from(obj.is_truthy()?),
-            None => return Err(arrow_invalid(obj, arrow_type)?),
+    let value = match c_int_from_python(obj, bits, None) {
+        Ok(value) => value,
+        Err(err) => {
+            let int_scalar =
+                obj.is_instance_of::<PyInt>() || numpy_scalar(obj)? == Some(NumpyScalar::Integer);
+            return Err(if int_scalar {
+                err
+            } else {
+                arrow_invalid(obj, arrow_type)?
+            });
         }
     };
-    if bits < 64 && !(-(1i64 << (bits - 1))..(1i64 << (bits - 1))).contains(&value) {
-        return Err(PyValueError::new_err(format!(
-            "Value {value} too large to fit in C integer type"
-        )));
-    }
     Ok(match dt {
         DataType::Byte => Value::Byte(value as i8),
         DataType::Short => Value::Short(value as i16),
