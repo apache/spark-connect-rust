@@ -40,9 +40,9 @@ from pyspark.sql.streaming.listener import (
 from pyspark._pyspark import (
     StreamingQuery as _StreamingQuery,
     StreamingQueryManager as _StreamingQueryManager,
-    StreamingQueryStatus as _StreamingQueryStatus,
-    StreamingQueryException as _StreamingQueryException,
 )
+# As PySpark's, the exception of a failed query is that of pyspark.errors.
+from pyspark.errors import StreamingQueryException  # noqa: F401
 
 if TYPE_CHECKING:
     from pyspark.sql.session import SparkSession
@@ -55,8 +55,6 @@ _QUERY_IDLE_EVENT = 3
 
 # Re-export the core classes from the Rust extension
 StreamingQuery = _StreamingQuery
-StreamingQueryStatus = _StreamingQueryStatus
-StreamingQueryException = _StreamingQueryException
 
 
 def _dispatch_listener_event(listener, event_type, event_json):
@@ -86,9 +84,4 @@ def _dispatch_listener_event(listener, event_type, event_json):
 StreamingQueryManager = _StreamingQueryManager
 
 
-__all__ = [
-    "StreamingQuery",
-    "StreamingQueryManager",
-    "StreamingQueryStatus",
-    "StreamingQueryException",
-]
+__all__ = ["StreamingQuery", "StreamingQueryManager"]

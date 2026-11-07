@@ -1888,6 +1888,42 @@ def test_dataframes_of_a_stream_are_streaming_as_pyspark(session):
     assert session.range(1).isStreaming is False
 
 
+def test_streaming_queries_return_the_status_and_the_exception_of_pyspark(session):
+    # As PySpark's: the status of a query is a dict, and the exception of a failed query is
+    # the StreamingQueryException of pyspark.errors, of the message of the server and its JVM
+    # stack trace, which awaitTermination raises.
+    import time
+
+    from pyspark.errors import StreamingQueryException
+    from pyspark.sql import functions as F
+
+    stream = session.readStream.format("rate").load()
+    query = stream.writeStream.format("noop").start()
+    try:
+        assert type(query.status) is dict
+        assert sorted(query.status) == ["isDataAvailable", "isTriggerActive", "message"]
+        query.explain(1)
+        assert query.exception() is None
+    finally:
+        query.stop()
+    failing = stream.select(F.assert_true(F.col("value") < 0)).writeStream.format("noop")
+    failed = failing.start()
+    try:
+        for _ in range(120):
+            if not failed.isActive:
+                break
+            time.sleep(0.5)
+        exception = failed.exception()
+        assert isinstance(exception, StreamingQueryException)
+        message = str(exception)
+        assert message.startswith("(STREAM_FAILED) [USER_RAISED_EXCEPTION]")
+        assert "JVM stacktrace:" in message
+        with pytest.raises(StreamingQueryException):
+            failed.awaitTermination(1)
+    finally:
+        failed.stop()
+
+
 def test_stream_writer_starts_a_query_of_its_real_time_trigger_as_pyspark(session):
     # As PySpark's, the real-time trigger reaches the server, which runs real-time mode for
     # some sinks only, not the memory sink.
