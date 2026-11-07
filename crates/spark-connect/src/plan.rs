@@ -547,6 +547,16 @@ impl PlanIds {
         id
     }
 
+    /// Give `node` the plan ID `id`, of a relation that this session sent: so a DataFrame of the
+    /// relation, such as one that was pickled, keeps the plan ID of the DataFrame it was of.
+    pub(crate) fn assign(&self, node: &Arc<LogicalPlan>, id: i64) {
+        let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        nodes.next = nodes.next.max(id.saturating_add(1));
+        nodes
+            .ids
+            .insert(Arc::as_ptr(node) as usize, (Arc::downgrade(node), id));
+    }
+
     /// The live node of the plan ID `id`, as the server reports a relation by its plan ID.
     pub(crate) fn node_of(&self, id: i64) -> Option<Arc<LogicalPlan>> {
         let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());

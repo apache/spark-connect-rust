@@ -2049,6 +2049,47 @@ impl PySparkSession {
         active_session(py)
     }
 
+    /// The active session of this thread, if its ID is `session_id`, as PySpark Connect's
+    /// `SparkSession._getActiveSessionIfMatches`, which gives back a pickled session: without
+    /// an active session, as on a Python worker of the server, it raises `NO_ACTIVE_SESSION`,
+    /// and for another one, `PySparkAssertionError`.
+    #[staticmethod]
+    #[pyo3(name = "_getActiveSessionIfMatches")]
+    fn get_active_session_if_matches(
+        py: Python<'_>,
+        session_id: &str,
+    ) -> PyResult<Py<PySparkSession>> {
+        let Some(session) = active_session(py) else {
+            return Err(crate::column::raise_pyspark(
+                py,
+                "PySparkRuntimeError",
+                "NO_ACTIVE_SESSION",
+                &[],
+            ));
+        };
+        let active_id = session.borrow(py).session.session_id().to_string();
+        if active_id != session_id {
+            let error = py
+                .import("pyspark.errors")?
+                .getattr("PySparkAssertionError")?
+                .call1((format!(
+                    "Expected session ID does not match active session ID: \
+                     {session_id} != {active_id}"
+                ),))?;
+            return Err(PyErr::from_value(error));
+        }
+        Ok(session)
+    }
+
+    /// A session pickles, as PySpark Connect's: as a function of its ID, which cloudpickle
+    /// pickles by value, that gives back the active session of that ID
+    /// (`_getActiveSessionIfMatches`).
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        py.import("pyspark.sql.connect.session")?
+            .getattr("_reduce_session")?
+            .call1((self.session.session_id().to_string(),))
+    }
+
     /// The type of the DDL string `ddl`, as the server parses it, as PySpark Connect's
     /// `SparkSession._parse_ddl`, of a `DDLParse` of an `AnalyzePlanRequest`.
     fn _parse_ddl(&self, py: Python<'_>, ddl: &str) -> PyResult<Py<PyAny>> {

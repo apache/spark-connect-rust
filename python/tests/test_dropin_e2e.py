@@ -229,6 +229,33 @@ def test_repr_shows_the_rows_with_eager_evaluation_as_pyspark(session):
     assert repr(df) == "DataFrame[id: bigint]"
 
 
+def test_udtfs_and_udfs_of_a_dataframe_or_the_session_raise_no_active_session_as_pyspark(session):
+    # As PySpark Connect's: a UDTF or a UDF that captures a DataFrame or the session pickles it
+    # of its session, which raises NO_ACTIVE_SESSION on the Python worker of the server, where
+    # no session is active.
+    from pyspark.errors import PythonException
+
+    df = session.range(10)
+
+    @F.udtf(returnType="x: int")
+    class Collect:
+        def eval(self):
+            df.collect()
+            yield (1,)
+
+    with pytest.raises(PythonException, match="NO_ACTIVE_SESSION"):
+        Collect().collect()
+
+    @F.udf("int")
+    def of_session(x):
+        return len(session.version) + x
+
+    with pytest.raises(PythonException, match="NO_ACTIVE_SESSION"):
+        session.range(1).select(of_session("id")).collect()
+
+
+
+
 def test_join_with_an_unsupported_join_type_raises_as_pyspark(session):
     # As PySpark: the join type is checked when the join is built, which raises the
     # AnalysisException of UNSUPPORTED_JOIN_TYPE, naming the type as it is normalized.

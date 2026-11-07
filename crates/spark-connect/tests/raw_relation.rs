@@ -97,6 +97,29 @@ fn raw_relations_keep_their_owners_alive_while_a_dataframe_uses_them() {
 }
 
 #[test]
+fn sent_relations_keep_the_plan_ids_of_the_dataframes_they_were_of() {
+    // As a pickled DataFrame of PySpark Connect, whose plan keeps its plan IDs: the DataFrame of
+    // a relation that its session sent is sent as it is, and the columns of the DataFrame it
+    // was of refer to it.
+    let session = offline();
+    let df = session.range(3).unwrap().select([col("id").alias("x")]);
+    let relation = df.to_relation();
+    let plan_id = relation.common.as_ref().and_then(|common| common.plan_id);
+    let copy = DataFrame::from_sent_relation(session.clone(), relation.clone());
+    assert_eq!(copy.to_relation(), relation);
+    assert_eq!(copy.clone().to_relation(), relation);
+    let filtered = copy.filter(df.col("x").gt(lit(0)));
+    let Some(proto::relation::RelType::Filter(filter)) = filtered.to_relation().rel_type else {
+        panic!("expected a filter");
+    };
+    assert_eq!(filter.input.as_deref(), Some(&relation));
+    assert!(format!("{:?}", filter.condition).contains(&format!("plan_id: {:?}", plan_id)));
+    // The other plans of the session take other plan IDs.
+    let other = session.range(1).unwrap().to_relation();
+    assert_ne!(other.common.and_then(|common| common.plan_id), plan_id);
+}
+
+#[test]
 fn commands_of_no_command_type_are_errors() {
     let error = offline()
         .execute_command_proto(proto::Command::default())

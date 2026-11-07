@@ -1007,6 +1007,23 @@ impl DataFrame {
         )
     }
 
+    /// The DataFrame of `relation`, a relation that `session` sent, such as that of a DataFrame
+    /// that was pickled, which keeps its plan ID, as PySpark Connect's pickled plans keep
+    /// theirs: so it is sent as it is, and the columns of the DataFrame it was of resolve
+    /// against it. Not a stable API.
+    #[doc(hidden)]
+    pub fn from_sent_relation(session: SparkSession, relation: proto::Relation) -> DataFrame {
+        let plan_id = relation.common.as_ref().and_then(|common| common.plan_id);
+        let dataframe = DataFrame::from_relation(session, relation, None);
+        if let Some(plan_id) = plan_id {
+            dataframe
+                .session
+                .plan_ids()
+                .assign(&dataframe.plan, plan_id);
+        }
+        dataframe
+    }
+
     /// The relation of this DataFrame as it is sent, with the plan IDs of its session, for a
     /// plan built outside the core over it, such as of `pyspark.ml`. Not a stable API.
     #[doc(hidden)]
