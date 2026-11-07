@@ -6132,7 +6132,7 @@ def test_decimal_scale_of_subclasses(decimal_ipc_session):
             spark.createDataFrame(pd.DataFrame({"v": [failing("1.5")]}, dtype=object), ["v"])
 
 
-@pytest.mark.parametrize("schema", [["v"], "v decimal(10, 4)"])
+@pytest.mark.parametrize("schema", [["v"], T.StructType([T.StructField("v", T.DecimalType(10, 4))])])
 def test_decimal_scale_avoids_coefficient_tuple(decimal_ipc_session, schema):
     # Exact Decimals are typed and converted from their text: no DecimalTuple is built.
     import cProfile
