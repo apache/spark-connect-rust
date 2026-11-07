@@ -1263,6 +1263,44 @@ def test_progress_handlers_are_called_with_the_progress_of_executions_as_pyspark
 
 
 
+def test_enums_are_literals_of_their_values_as_pyspark():
+    # As PySpark's enum_to_value: an Enum is the literal of its value, of lit, the Column
+    # operators and the functions that take a value, also of an Enum of an Enum.
+    from enum import Enum
+
+    from pyspark.sql import functions as F
+
+    class IntEnum(Enum):
+        X = 1
+
+    class StrEnum(Enum):
+        S = "s"
+
+    class BoolEnum(Enum):
+        T = True
+
+    class Nested(Enum):
+        N = IntEnum.X
+
+    c = F.col("id")
+    for column, expected in [
+        (c + IntEnum.X, "+(id, 1)"),
+        (IntEnum.X + c, "+(1, id)"),
+        (c == IntEnum.X, "==(id, 1)"),
+        (F.col("b") & BoolEnum.T, "and(b, True)"),
+        (F.lit(IntEnum.X), "1"),
+        (F.lit(StrEnum.S), "s"),
+        (F.lit(Nested.N), "1"),
+        (c.isin(IntEnum.X), "in(id, 1)"),
+        (c.between(IntEnum.X, 5), "and(>=(id, 1), <=(id, 5))"),
+        (F.col("s").contains(StrEnum.S), "contains(s, s)"),
+        (c ** IntEnum.X, "power(id, 1)"),
+        (F.concat_ws(StrEnum.S, c), "concat_ws(s, id)"),
+        (F.array_contains(F.col("a"), IntEnum.X), "array_contains(a, 1)"),
+    ]:
+        assert repr(column) == f"Column<'{expected}'>"
+
+
 def test_udfs_are_created_as_pyspark(mock_connect):
     # As PySpark's _create_py_udf: udf() without useArrow makes an Arrow-optimized UDF
     # (SQL_ARROW_BATCHED_UDF) when the active session enables
