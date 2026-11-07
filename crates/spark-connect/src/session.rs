@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use spark_connect_core::channel::ChannelBuilder;
-use spark_connect_core::client::SparkConnectClient;
+use spark_connect_core::client::{ExecutePlanHook, SparkConnectClient};
 use spark_connect_core::error::{Result, SparkError};
 use spark_connect_core::runtime::block_on;
 use spark_connect_proto as proto;
@@ -295,6 +295,14 @@ impl SparkSession {
         let mut session = self.new_session();
         session.client = Arc::new(client);
         Ok(session)
+    }
+
+    /// Set the hook of the executions of this session, and of its clones, or clear it: the
+    /// hook is called with each `ExecutePlanRequest` before it is sent, and the request sent is
+    /// the one it returns, of the operation ID of the original. Mirrors the hooks of
+    /// `SparkSession.Hook.on_execute_plan`, of `SparkSession.Builder._registerHook`.
+    pub fn set_execute_plan_hook(&self, hook: Option<ExecutePlanHook>) {
+        self.client.set_execute_plan_hook(hook);
     }
 
     /// The stable plan IDs of the plan nodes this session serializes.
