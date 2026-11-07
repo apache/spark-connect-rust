@@ -10,6 +10,7 @@
 use bytes::Bytes;
 use crc32fast::Hasher;
 use std::io::{Cursor, Read};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use spark_connect_proto::{add_artifacts_request, AddArtifactsRequest};
 
@@ -275,61 +276,158 @@ pub fn build_artifact_request_stream(
     Ok(requests)
 }
 
+/// The error that ended the frames of an upload early, if one did. The frames stop at a read
+/// that fails; the upload reports the error once its RPC has returned.
+pub(crate) type FrameFailure = Arc<Mutex<Option<SparkError>>>;
+
+/// Take the error that ended the frames of an upload early, if one did.
+pub(crate) fn take_frame_failure(failure: &FrameFailure) -> Result<()> {
+    match failure
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take()
+    {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// The frames of an upload of one artifact, produced as the RPC consumes them, so that a large
+/// artifact is held one chunk at a time rather than as a whole. An attempt that is retried
+/// builds its frames again, from the start of the artifact.
+///
+/// The frames are those of [`build_artifact_request_stream`] for the artifact: one batch when it
+/// is at most [`CHUNK_SIZE`] bytes, otherwise a `BeginChunk` and then `Chunk`s, each a full
+/// chunk but the last.
+pub(crate) struct ArtifactFrames {
+    session_id: String,
+    name: String,
+    size: u64,
+    /// The data, until its last frame is produced or a read fails.
+    reader: Option<Box<dyn Read + Send>>,
+    /// Whether the first chunk of a chunked artifact has been produced.
+    begun: bool,
+    failure: FrameFailure,
+}
+
+impl ArtifactFrames {
+    /// Open the data of `artifact`, so that a data source that cannot be read is an error before
+    /// any frame is sent.
+    pub(crate) fn new(session_id: String, artifact: &NamedArtifact) -> Result<Self> {
+        let size = artifact.data.size()?;
+        let reader = artifact.data.stream()?;
+        Ok(Self {
+            session_id,
+            name: artifact.name.clone(),
+            size,
+            reader: Some(reader),
+            begun: false,
+            failure: Arc::default(),
+        })
+    }
+
+    /// The failure that ends these frames early, which the upload checks once its RPC returns.
+    pub(crate) fn failure(&self) -> FrameFailure {
+        self.failure.clone()
+    }
+
+    fn next_payload(&mut self) -> Result<Option<add_artifacts_request::Payload>> {
+        let Some(mut reader) = self.reader.take() else {
+            return Ok(None);
+        };
+        if self.size <= CHUNK_SIZE as u64 {
+            let mut data = Vec::new();
+            reader
+                .read_to_end(&mut data)
+                .map_err(|e| SparkError::connect_msg(format!("Failed to read artifact: {}", e)))?;
+            let crc = compute_crc32(&data) as i64;
+            let artifact = add_artifacts_request::SingleChunkArtifact {
+                name: self.name.clone(),
+                data: Some(add_artifacts_request::ArtifactChunk {
+                    data: Bytes::from(data),
+                    crc,
+                }),
+            };
+            return Ok(Some(add_artifacts_request::Payload::Batch(
+                add_artifacts_request::Batch {
+                    artifacts: vec![artifact],
+                },
+            )));
+        }
+        let mut buf = vec![0u8; CHUNK_SIZE];
+        let filled = read_full(reader.as_mut(), &mut buf).map_err(|e| {
+            SparkError::connect_msg(format!("Failed to read artifact chunk: {}", e))
+        })?;
+        buf.truncate(filled);
+        if filled == 0 {
+            return Ok(None);
+        }
+        if filled == CHUNK_SIZE {
+            self.reader = Some(reader);
+        }
+        let crc = compute_crc32(&buf) as i64;
+        let chunk = add_artifacts_request::ArtifactChunk {
+            data: Bytes::from(buf),
+            crc,
+        };
+        if self.begun {
+            Ok(Some(add_artifacts_request::Payload::Chunk(chunk)))
+        } else {
+            self.begun = true;
+            Ok(Some(add_artifacts_request::Payload::BeginChunk(
+                add_artifacts_request::BeginChunkedArtifact {
+                    name: self.name.clone(),
+                    total_bytes: self.size as i64,
+                    num_chunks: self.size.div_ceil(CHUNK_SIZE as u64) as i64,
+                    initial_chunk: Some(chunk),
+                },
+            )))
+        }
+    }
+}
+
+impl Iterator for ArtifactFrames {
+    type Item = AddArtifactsRequest;
+
+    fn next(&mut self) -> Option<AddArtifactsRequest> {
+        match self.next_payload() {
+            Ok(Some(payload)) => Some(AddArtifactsRequest {
+                session_id: self.session_id.clone(),
+                payload: Some(payload),
+                ..Default::default()
+            }),
+            Ok(None) => None,
+            Err(error) => {
+                self.reader = None;
+                *self.failure.lock().unwrap_or_else(PoisonError::into_inner) = Some(error);
+                None
+            }
+        }
+    }
+}
+
+/// Fill `buf` from `reader` until it is full or the data ends, and return the count read.
+fn read_full(reader: &mut dyn Read, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match reader.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(filled)
+}
+
 /// Build requests for a large chunked artifact.
 fn build_chunked_artifact_requests(
     session_id: String,
     artifact: NamedArtifact,
 ) -> Result<Vec<AddArtifactsRequest>> {
-    let mut requests = Vec::new();
-    let total_size = artifact.data.size()? as i64;
-    let num_chunks = (total_size as usize).div_ceil(CHUNK_SIZE);
-
-    let mut stream = artifact.data.stream()?;
-    let mut first_chunk = true;
-
-    let mut buf = vec![0u8; CHUNK_SIZE];
-    loop {
-        let n = stream.read(&mut buf).map_err(|e| {
-            SparkError::connect_msg(format!("Failed to read artifact chunk: {}", e))
-        })?;
-        if n == 0 {
-            break;
-        }
-
-        let chunk_data = buf[..n].to_vec();
-        let crc = compute_crc32(&chunk_data) as i64;
-
-        if first_chunk {
-            // Begin chunked artifact with metadata and initial chunk
-            let mut request = AddArtifactsRequest::default();
-            request.session_id = session_id.clone();
-            request.payload = Some(add_artifacts_request::Payload::BeginChunk(
-                add_artifacts_request::BeginChunkedArtifact {
-                    name: artifact.name.clone(),
-                    total_bytes: total_size,
-                    num_chunks: num_chunks as i64,
-                    initial_chunk: Some(add_artifacts_request::ArtifactChunk {
-                        data: Bytes::from(chunk_data),
-                        crc,
-                    }),
-                },
-            ));
-            requests.push(request);
-            first_chunk = false;
-        } else {
-            // Subsequent chunk
-            let mut request = AddArtifactsRequest::default();
-            request.session_id = session_id.clone();
-            request.payload = Some(add_artifacts_request::Payload::Chunk(
-                add_artifacts_request::ArtifactChunk {
-                    data: Bytes::from(chunk_data),
-                    crc,
-                },
-            ));
-            requests.push(request);
-        }
-    }
-
+    let mut frames = ArtifactFrames::new(session_id, &artifact)?;
+    let requests: Vec<AddArtifactsRequest> = frames.by_ref().collect();
+    take_frame_failure(&frames.failure())?;
     Ok(requests)
 }
 
@@ -399,6 +497,12 @@ fn unquote(text: &str) -> String {
 /// - With `file`, any file is `files/<name>`.
 /// - Otherwise a `.class` is `classes/<name>`, a `.jar` is `jars/<name>`, and any other file
 ///   is not supported.
+///
+/// The `classes/` of a class file is an extension of this crate: PySpark's `ArtifactManager`
+/// does not upload class files, so the PySpark drop-in refuses them.
+///
+/// The local path is normalized as `pathlib` normalizes it (no trailing or repeated separators,
+/// and no `.` components), so that it reads the same in an error message.
 pub fn parse_artifact(
     path_or_uri: &str,
     pyfile: bool,
@@ -436,6 +540,7 @@ pub fn parse_artifact(
         "file" => std::path::PathBuf::from(unquote(path)),
         _ => return Err(UnsupportedArtifact::Scheme(scheme)),
     };
+    let local: std::path::PathBuf = local.components().collect();
     let local_path = local.to_string_lossy().into_owned();
     let name = local
         .file_name()
@@ -524,6 +629,12 @@ mod tests {
                 "/d/b%23c.zip#alias",
                 (false, true, false),
                 Err(HashInArchivePath),
+            ),
+            // The local path is normalized as pathlib normalizes it, in the error too.
+            (
+                "/d//x/./n.txt/",
+                (false, false, false),
+                Err(Format("/d/x/n.txt".to_string())),
             ),
         ];
         for (path, (pyfile, archive, file), expected) in cases {
@@ -843,5 +954,192 @@ mod tests {
         drop(second_initial_request);
         assert_eq!(second_drops.load(Ordering::SeqCst), 1);
         assert_eq!(first_drops.load(Ordering::SeqCst), 1);
+    }
+
+    /// Test data that is produced as it is read, and counts the bytes read of it.
+    struct Counted {
+        size: u64,
+        read: Arc<std::sync::atomic::AtomicUsize>,
+        /// The read that fails, when the data has one.
+        fails_at_read: Option<usize>,
+    }
+
+    impl ArtifactData for Counted {
+        fn size(&self) -> Result<u64> {
+            Ok(self.size)
+        }
+
+        fn stream(&self) -> Result<Box<dyn Read + Send>> {
+            Ok(Box::new(CountedReader {
+                remaining: self.size as usize,
+                read: self.read.clone(),
+                reads: 0,
+                fails_at_read: self.fails_at_read,
+            }))
+        }
+    }
+
+    struct CountedReader {
+        remaining: usize,
+        read: Arc<std::sync::atomic::AtomicUsize>,
+        reads: usize,
+        fails_at_read: Option<usize>,
+    }
+
+    impl Read for CountedReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.reads += 1;
+            if self.fails_at_read == Some(self.reads) {
+                return Err(std::io::Error::other("disk gone"));
+            }
+            let n = buf.len().min(self.remaining);
+            buf[..n].fill(7);
+            self.remaining -= n;
+            self.read.fetch_add(n, std::sync::atomic::Ordering::SeqCst);
+            Ok(n)
+        }
+    }
+
+    fn counted(size: u64) -> (NamedArtifact, Arc<std::sync::atomic::AtomicUsize>) {
+        let read = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let data = Counted {
+            size,
+            read: read.clone(),
+            fails_at_read: None,
+        };
+        (
+            NamedArtifact::new("files/n.bin".to_string(), Box::new(data)),
+            read,
+        )
+    }
+
+    #[test]
+    fn artifact_frames_are_read_as_the_rpc_consumes_them() {
+        let size = (CHUNK_SIZE * 10 + 3) as u64;
+        let (artifact, read) = counted(size);
+        let mut frames = ArtifactFrames::new("s".to_string(), &artifact).unwrap();
+        // Opening the data reads none of it.
+        assert_eq!(read.load(std::sync::atomic::Ordering::SeqCst), 0);
+        frames.next().unwrap();
+        assert_eq!(read.load(std::sync::atomic::Ordering::SeqCst), CHUNK_SIZE);
+        frames.next().unwrap();
+        assert_eq!(
+            read.load(std::sync::atomic::Ordering::SeqCst),
+            2 * CHUNK_SIZE
+        );
+        assert_eq!(frames.by_ref().count(), 9);
+        assert_eq!(
+            read.load(std::sync::atomic::Ordering::SeqCst),
+            size as usize
+        );
+        assert!(take_frame_failure(&frames.failure()).is_ok());
+    }
+
+    #[test]
+    fn chunked_artifact_frames_begin_and_then_carry_each_chunk_with_its_crc() {
+        let size = CHUNK_SIZE * 2 + 5;
+        let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+        let artifact = NamedArtifact::new(
+            "jars/c.jar".to_string(),
+            Box::new(InMemoryArtifact::new(data.clone())),
+        );
+        let frames: Vec<AddArtifactsRequest> = ArtifactFrames::new("s".to_string(), &artifact)
+            .unwrap()
+            .collect();
+        assert_eq!(frames.len(), 3);
+        let mut expected = data.chunks(CHUNK_SIZE);
+        for (index, frame) in frames.iter().enumerate() {
+            assert_eq!(frame.session_id, "s");
+            let chunk = expected.next().unwrap();
+            let (payload, crc) = match frame.payload.as_ref().unwrap() {
+                add_artifacts_request::Payload::BeginChunk(begin) => {
+                    assert_eq!(index, 0);
+                    assert_eq!(begin.name, "jars/c.jar");
+                    assert_eq!(begin.total_bytes, size as i64);
+                    assert_eq!(begin.num_chunks, 3);
+                    let initial = begin.initial_chunk.as_ref().unwrap();
+                    (initial.data.to_vec(), initial.crc)
+                }
+                add_artifacts_request::Payload::Chunk(chunk) => {
+                    assert_ne!(index, 0);
+                    (chunk.data.to_vec(), chunk.crc)
+                }
+                other => panic!("unexpected frame {other:?}"),
+            };
+            assert_eq!(payload, chunk);
+            assert_eq!(crc, compute_crc32(chunk) as i64);
+        }
+    }
+
+    #[test]
+    fn a_small_artifact_frame_is_one_batch() {
+        let artifact = NamedArtifact::new(
+            "classes/A.class".to_string(),
+            Box::new(InMemoryArtifact::new(b"cafebabe".to_vec())),
+        );
+        let frames: Vec<AddArtifactsRequest> = ArtifactFrames::new("s".to_string(), &artifact)
+            .unwrap()
+            .collect();
+        let [frame] = frames.as_slice() else {
+            panic!("expected one frame, got {}", frames.len());
+        };
+        let Some(add_artifacts_request::Payload::Batch(batch)) = &frame.payload else {
+            panic!("expected a batch");
+        };
+        let [only] = batch.artifacts.as_slice() else {
+            panic!("expected one artifact");
+        };
+        assert_eq!(only.name, "classes/A.class");
+        let chunk = only.data.as_ref().unwrap();
+        assert_eq!(chunk.data.as_ref(), b"cafebabe");
+        assert_eq!(chunk.crc, compute_crc32(b"cafebabe") as i64);
+    }
+
+    #[test]
+    fn a_failed_read_ends_the_frames_and_is_reported_once() {
+        let read = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let artifact = NamedArtifact::new(
+            "files/n.bin".to_string(),
+            Box::new(Counted {
+                size: (CHUNK_SIZE * 3) as u64,
+                read,
+                // The first chunk is read; the read of the second chunk fails.
+                fails_at_read: Some(2),
+            }),
+        );
+        let mut frames = ArtifactFrames::new("s".to_string(), &artifact).unwrap();
+        let failure = frames.failure();
+        assert!(frames.next().is_some());
+        assert!(frames.next().is_none());
+        assert!(frames.next().is_none());
+        let error = take_frame_failure(&failure).unwrap_err();
+        assert!(
+            error.to_string().contains("Failed to read artifact chunk"),
+            "{error}"
+        );
+        assert!(take_frame_failure(&failure).is_ok());
+    }
+
+    #[test]
+    fn artifact_frames_are_the_same_on_every_attempt() {
+        let size = CHUNK_SIZE * 2 + 1;
+        let data: Vec<u8> = (0..size).map(|i| (i % 13) as u8).collect();
+        let make = || {
+            NamedArtifact::new(
+                "jars/c.jar".to_string(),
+                Box::new(InMemoryArtifact::new(data.clone())),
+            )
+        };
+        let first = make();
+        let second = make();
+        let a: Vec<AddArtifactsRequest> = ArtifactFrames::new("s".to_string(), &first)
+            .unwrap()
+            .collect();
+        let b: Vec<AddArtifactsRequest> = ArtifactFrames::new("s".to_string(), &second)
+            .unwrap()
+            .collect();
+        assert_eq!(a, b);
+        let batch = build_artifact_request_stream("s".to_string(), vec![make()]).unwrap();
+        assert_eq!(a, batch);
     }
 }

@@ -7,7 +7,9 @@ that require a live server live in test_dropin_e2e.py and are gated on SPARK_REM
 """
 
 import array
+import contextlib
 import datetime
+import os
 import re
 import decimal
 import json
@@ -20,6 +22,7 @@ from threading import Barrier
 import pytest
 
 from _mock_connect_server import (
+    ddl_data_type,
     ddl_json,
     ddl_parse_response,
     message_field,
@@ -5814,6 +5817,42 @@ def test_container_input_nested_array_struct_binary_ipc(container_input_capture_
                                   "record": {"x": 7, "y": "row"}, "blob": b"abc"}]
 
 
+# --------------------------------------------------------------------------- pandas columns of Decimals and other values
+
+
+@pytest.mark.parametrize("values, expected", [
+    (["1.5", 2], (2, 1, ["1.5", "2.0"])),
+    ([2, "1.5"], (2, 1, ["2.0", "1.5"])),
+    (["1.5", 2.5], "PySparkTypeError"),
+    (["1.5", ("x",)], "PySparkTypeError"),
+    (["1.5", True], "PySparkValueError"),
+    (["-0.5", -3, None], "PySparkValueError"),
+])
+def test_pandas_columns_of_decimals_and_other_values_follow_arrow(decimal_ipc_session, values, expected):
+    # PySpark's conversion leaves such a column to Arrow, which types it, takes ints as
+    # Decimals and raises for the others (strings in `values` are Decimals here, and a 1-tuple
+    # holds a plain string).
+    from decimal import Decimal
+    import pyarrow as pa
+    from pyspark import errors
+
+    pd = pytest.importorskip("pandas")
+    spark, payload = decimal_ipc_session
+    cells = [Decimal(v) if isinstance(v, str) else v[0] if isinstance(v, tuple) else v
+             for v in values]
+    data = pd.DataFrame({"d": cells}, dtype=object)
+    if isinstance(expected, str):
+        with pytest.raises(getattr(errors, expected), match=r"pandas.Series \(object\) with name 'd'"):
+            spark.createDataFrame(data)
+        assert not payload.exists()
+        return
+    precision, scale, texts = expected
+    spark.createDataFrame(data).collect()
+    table = pa.ipc.open_stream(payload.read_bytes()).read_all()
+    assert table.column(0).type == pa.decimal128(precision, scale)
+    assert table.column(0).to_pylist() == [Decimal(text) for text in texts]
+
+
 # --------------------------------------------------------------------------- exact date input
 
 from datetime import (
@@ -6427,6 +6466,36 @@ def test_decimal_scale_of_non_finite_values(decimal_ipc_session, text):
     with pytest.raises(ValueError, match="has no precision to type a column by"):
         spark.createDataFrame(data, ["v"])
     assert not payload.exists()
+
+
+def test_decimal_quanta_of_each_type_and_conversion(decimal_ipc_session):
+    # Each decimal type of a conversion is quantized with its own quantum and context, which
+    # are built once per conversion, as PySpark builds them once per converter: a change of
+    # decimal.DefaultContext applies from the next createDataFrame.
+    import decimal
+    from decimal import Decimal
+    import pyarrow as pa
+
+    spark, payload = decimal_ipc_session
+    schema = T.StructType([T.StructField("a", T.DecimalType(10, 2)),
+                           T.StructField("b", T.DecimalType(5, 1)),
+                           T.StructField("c", T.DecimalType(10, 2))])
+    rows = [(Decimal("1.235"), Decimal("2.25"), Decimal("-0.005")),
+            (Decimal("1.245"), Decimal("2.35"), None)]
+    spark.createDataFrame(rows, schema).collect()
+    table = pa.ipc.open_stream(payload.read_bytes()).read_all()
+    assert table.to_pydict() == {
+        "a": [Decimal("1.24"), Decimal("1.24")],
+        "b": [Decimal("2.2"), Decimal("2.4")],
+        "c": [Decimal("-0.00"), None],
+    }
+    decimal.DefaultContext.traps[decimal.Inexact] = True
+    try:
+        with pytest.raises(decimal.Inexact):
+            spark.createDataFrame(rows, schema)
+    finally:
+        decimal.DefaultContext.traps[decimal.Inexact] = False
+    spark.createDataFrame(rows[1:], schema)
 
 
 # --------------------------------------------------------------------------- schema cache
@@ -7083,6 +7152,120 @@ def test_arrow_input_large_upload_live_server():
         assert df.selectExpr("sum(length(payload)) AS total").collect()[0][0] == rows * 1024
     finally:
         spark.stop()
+
+
+# --------------------------------------------------------------------------- local rows of NumPy arrays, ints for dates and nested duplicate names
+
+def _local_rows_relation_of(service, df):
+    # The LocalRelation of a DataFrame of local rows, as the server receives it: its Arrow IPC
+    # data (LocalRelation.data=1), and its schema JSON (LocalRelation.schema=2).
+    import pyarrow as pa
+
+    df.toArrow()
+    request = parse_message(service.execute_requests[-1])
+    relation = parse_message(parse_message(request[3][0])[1][0])
+    while 18 in relation:  # Relation.to_df -> ToDF.input.
+        relation = parse_message(parse_message(relation[18][0])[1][0])
+    local = parse_message(relation[11][0])
+    return pa.ipc.open_stream(local[1][0]).read_all(), json.loads(local[2][0])
+
+
+def test_numpy_arrays_in_array_fields_convert_as_pyspark(mock_connect):
+    # As PySpark: an array whose elements need no converter (numbers and bools) is taken as
+    # PyArrow takes it, so a NumPy array is an array of its values. An array whose elements
+    # need one (strings) must be a list or an array.array, or PySpark asserts.
+    from pyspark.sql import types as T
+
+    np = pytest.importorskip("numpy")
+    spark, service = mock_connect
+    table, _ = _local_rows_relation_of(
+        service, spark.createDataFrame(
+            [(np.array([1, 2]), np.array([1.5, 2.0]), np.array([True, False]))],
+            "a array<bigint>, b array<double>, c array<boolean>"))
+    assert table.column("a").to_pylist() == [[1, 2]]
+    assert table.column("b").to_pylist() == [[1.5, 2.0]]
+    assert table.column("c").to_pylist() == [[True, False]]
+
+    long_array = T.StructType([T.StructField("a", T.ArrayType(T.LongType()))])
+    table, _ = _local_rows_relation_of(
+        service, spark.createDataFrame([(np.array([1, 2]),)], long_array))
+    assert table.column("a").to_pylist() == [[1, 2]]
+    table, _ = _local_rows_relation_of(
+        service, spark.createDataFrame([((np.array([1, 2]),),)], "s struct<a:array<bigint>>"))
+    assert table.column("s").to_pylist() == [{"a": [1, 2]}]
+
+    for data, schema in [
+        ([(np.array(["a", "b"]),)], "a array<string>"),
+        ([(("a", "b"),)], "a array<string>"),
+        ([(np.array([1, 2]),)], T.StructType([T.StructField(
+            "a", T.ArrayType(T.LongType(), containsNull=False))])),
+    ]:
+        # PySpark's assertion, which has no message.
+        with pytest.raises(AssertionError) as error:
+            spark.createDataFrame(data, schema)
+        assert str(error.value) == ""
+
+
+def test_ints_of_date_fields_convert_as_pyarrow(mock_connect):
+    # As PySpark: PyArrow takes an int, or a float truncated, as days since the epoch, and a
+    # NumPy bool or number as the value it stands for. A Python bool, a string and the days
+    # out of the calendar range raise PyArrow's errors.
+    import re
+
+    import pyarrow as pa
+
+    np = pytest.importorskip("numpy")
+    spark, service = mock_connect
+    table, _ = _local_rows_relation_of(
+        service, spark.createDataFrame([(1,), (-1,), (None,)], "a date"))
+    assert table.schema.field(0).type == pa.date32()
+    assert table.column(0).cast(pa.int32()).to_pylist() == [1, -1, None]
+    table, _ = _local_rows_relation_of(service, spark.createDataFrame(
+        [(np.int64(3),), (1.5,), (-1.5,), (np.bool_(True),), (2932896,), (-719162,)], "a date"))
+    assert table.column(0).cast(pa.int32()).to_pylist() == [3, 1, -1, 1, 2932896, -719162]
+
+    for value, error, message in (
+        (True, pa.ArrowTypeError, "Expected integer, got bool"),
+        ("x", pa.ArrowTypeError, "object of type <class 'str'> cannot be converted to int"),
+        (float("nan"), ValueError, "cannot convert float NaN to integer"),
+        (2932897, OverflowError, "date value out of range"),
+        (-719163, OverflowError, "date value out of range"),
+        (10**9, OverflowError, "days=1000000000; must have magnitude <= 999999999"),
+        (2**70, OverflowError, "Python int too large to convert to C long"),
+    ):
+        with pytest.raises(error, match="^" + re.escape(message) + "$"):
+            spark.createDataFrame([(value,)], "a date")
+
+
+def test_nested_duplicate_field_names_are_deduplicated_in_the_arrow_schema(mock_connect):
+    # As PySpark's _deduplicate_field_names: the Arrow schema of nested struct fields numbers
+    # duplicate names, which the server cannot read, while the schema of the relation keeps
+    # the names. A top-level duplicate name is not renamed.
+    import pyarrow as pa
+    from pyspark.sql import Row
+    from pyspark.sql import types as T
+
+    spark, service = mock_connect
+    R = Row("a", "a")
+    table, schema = _local_rows_relation_of(service, spark.createDataFrame([(R(1, 2),)]))
+    assert table.schema.field(0).type == pa.struct([("a_0", pa.int64()), ("a_1", pa.int64())])
+    assert table.column(0).to_pylist() == [{"a_0": 1, "a_1": 2}]
+    assert [f["name"] for f in schema["fields"][0]["type"]["fields"]] == ["a", "a"]
+
+    explicit = T.StructType([T.StructField("s", T.StructType([
+        T.StructField("a", T.LongType()), T.StructField("a", T.LongType())]))])
+    table, schema = _local_rows_relation_of(service, spark.createDataFrame([((1, 2),)], explicit))
+    assert table.column("s").to_pylist() == [{"a_0": 1, "a_1": 2}]
+    assert [f["name"] for f in schema["fields"][0]["type"]["fields"]] == ["a", "a"]
+
+    table, _ = _local_rows_relation_of(service, spark.createDataFrame(
+        [([(1, 2)],)], "s array<struct<a:bigint,a:bigint>>"))
+    assert table.column("s").to_pylist() == [[{"a_0": 1, "a_1": 2}]]
+
+    table, _ = _local_rows_relation_of(service, spark.createDataFrame(
+        [(1, 2)], "a bigint, a bigint"))
+    assert table.schema.names == ["a", "a"]
+    assert table.column(1).to_pylist() == [2]
 
 
 # ------------------------------------------------------- DataFrame completion
@@ -8094,6 +8277,151 @@ def test_create_auto_cdc_flow_scd2_track_history():
     assert flow.stored_as_scd_type == 2
     assert len(flow.track_history_column_list) == 2
     assert flow.spark_conf == {"k": "v"}
+
+
+# --------------------------------------------------------------------------- collect of NTZ timestamps, distant timestamps and year-month intervals
+
+
+@contextlib.contextmanager
+def _client_time_zone(name):
+    # The process time zone, which the local conversions of datetime read, for a block.
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = name
+    time.tzset()
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous
+        time.tzset()
+
+
+def _collect_mock_result(mock_connect, table, schema_ddl):
+    # Makes the mock server answer the next execution with `table` (Arrow IPC) of the type
+    # `schema_ddl`: ExecutePlanResponse.schema=7, arrow_batch=2 (ArrowBatch.row_count=1, data=2).
+    import pyarrow as pa
+
+    spark, service = mock_connect
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    batch = varint_field(1, table.num_rows) + message_field(2, sink.getvalue().to_pybytes())
+    service.execute_payload = message_field(7, ddl_data_type(schema_ddl)) + message_field(2, batch)
+    return spark.range(1)
+
+
+def _micros_since_epoch(value):
+    # The microseconds since 1970-01-01 00:00:00 of a naive datetime, exactly.
+    return (value - datetime.datetime(1970, 1, 1)) // datetime.timedelta(microseconds=1)
+
+
+def _naive_from_micros(micros):
+    # The naive datetime of `micros` microseconds since the epoch, as integer arithmetic.
+    return datetime.datetime(1970, 1, 1) + datetime.timedelta(microseconds=micros)
+
+
+_NTZ_VALUES = [
+    datetime.datetime(1, 1, 1),
+    datetime.datetime(1500, 3, 1, 1, 2, 3, 4),
+    datetime.datetime(2020, 7, 1, 12, 0),
+    datetime.datetime(9999, 12, 31, 23, 59, 59, 999999),
+]
+
+
+def test_ntz_collect_is_the_wall_clock_in_any_time_zone_as_pyspark(mock_connect):
+    # TIMESTAMP_NTZ (no time zone in Arrow) is the wall clock, which the time zone of the client
+    # does not shift, from year 1 to year 9999, in arrays, maps and structs too.
+    import pyarrow as pa
+
+    ntz = pa.timestamp("us")
+    values = [_micros_since_epoch(v) for v in _NTZ_VALUES]
+    table = pa.table({
+        "t": pa.array(values, ntz),
+        "a": pa.array([[v] for v in values], pa.list_(ntz)),
+        "m": pa.array([[("k", v)] for v in values], pa.map_(pa.string(), ntz)),
+        "s": pa.array([{"x": v} for v in values], pa.struct([("x", ntz)])),
+    })
+    df = _collect_mock_result(
+        mock_connect, table,
+        "t timestamp_ntz, a array<timestamp_ntz>, m map<string,timestamp_ntz>, "
+        "s struct<x:timestamp_ntz>")
+    for zone in ("UTC", "America/Los_Angeles", "Asia/Kolkata"):
+        with _client_time_zone(zone):
+            rows = df.collect()
+            assert [r.t for r in rows] == _NTZ_VALUES
+            assert [r.a for r in rows] == [[v] for v in _NTZ_VALUES]
+            assert [r.m for r in rows] == [{"k": v} for v in _NTZ_VALUES]
+            assert [r.s for r in rows] == [Row(x=v) for v in _NTZ_VALUES]
+
+
+def test_ltz_collect_is_the_instant_in_the_client_time_zone_as_pyspark(mock_connect):
+    # TIMESTAMP (Arrow with a time zone) is the instant, shown in the local time zone of the
+    # client, with its microseconds exact however far it is from the epoch.
+    import pyarrow as pa
+
+    micros = [
+        _micros_since_epoch(datetime.datetime(2020, 7, 1, 12, 0)),
+        _micros_since_epoch(datetime.datetime(2020, 7, 1, 12, 0, 0, 1)),
+        9223372036854775,
+        -9223372036854775,
+        253402300799999999,
+        -62135596800000000,
+        1,
+        -1,
+    ]
+    table = pa.table({"t": pa.array(micros, pa.timestamp("us", tz="UTC"))})
+    df = _collect_mock_result(mock_connect, table, "t timestamp")
+    with _client_time_zone("UTC"):
+        assert [r.t for r in df.collect()] == [_naive_from_micros(m) for m in micros]
+    # Year 1 is out of the range of a local time in Los Angeles (as in PySpark), so it is left out.
+    in_range = [m for m in micros if m != -62135596800000000]
+    df = _collect_mock_result(
+        mock_connect, pa.table({"t": pa.array(in_range, pa.timestamp("us", tz="UTC"))}), "t timestamp")
+    with _client_time_zone("America/Los_Angeles"):
+        rows = [r.t for r in df.collect()]
+        assert rows[0] == datetime.datetime(2020, 7, 1, 5, 0)
+        assert rows[1] == datetime.datetime(2020, 7, 1, 5, 0, 0, 1)
+        # 2262-04-11 23:47:16.854775 UTC is PDT, seven hours earlier.
+        assert rows[2] == datetime.datetime(2262, 4, 11, 16, 47, 16, 854775)
+
+
+@pytest.mark.parametrize("collect", [
+    lambda df: df.collect(),
+    lambda df: df.first(),
+    lambda df: df.head(1),
+    lambda df: df.take(1),
+    lambda df: list(df.toLocalIterator()),
+])
+@pytest.mark.parametrize("schema_ddl, table_type", [
+    ("ym interval year to month", "int32"),
+    ("a array<interval year to month>", "list"),
+    ("m map<string,interval year to month>", "map"),
+    ("s struct<ym:interval year to month>", "struct"),
+])
+def test_year_month_intervals_are_not_collected_as_pyspark(
+        mock_connect, collect, schema_ddl, table_type):
+    # PySpark's Arrow conversion of the rows raises NOT_IMPLEMENTED for a year-month interval
+    # anywhere in the schema, before any row is converted, so an empty result raises too.
+    # The Arrow data is empty: Spark Connect has no pyarrow type to build a year-month one.
+    import pyarrow as pa
+    from pyspark.errors import PySparkNotImplementedError
+
+    arrow_type = {
+        "int32": pa.int32(),
+        "list": pa.list_(pa.int32()),
+        "map": pa.map_(pa.string(), pa.int32()),
+        "struct": pa.struct([("ym", pa.int32())]),
+    }[table_type]
+    column = "ym" if table_type == "int32" else ("s" if table_type == "struct" else
+                                                  ("m" if table_type == "map" else "a"))
+    table = pa.table({column: pa.array([], arrow_type)})
+    df = _collect_mock_result(mock_connect, table, schema_ddl)
+    with pytest.raises(PySparkNotImplementedError, match=(
+            r"\[NOT_IMPLEMENTED\] Collecting a year-month interval value in Spark Connect "
+            r"is not implemented\.")):
+        collect(df)
 
 
 # ---------------------------------------------------------------- DataFrame repr
@@ -9630,6 +9958,81 @@ def test_merge_into_writer_mutates_and_returns_self(offline_spark):
     assert m.whenMatched().updateAll() is m
 
 
+# --------------------------------------------------------------------------- artifact uploads that stream their chunks, and class files
+
+def test_add_artifacts_refuses_the_paths_pyspark_refuses(tmp_path):
+    # Each error is PySpark's for the path and the flags, raised before any upload.
+    import errno
+
+    from pyspark.errors import PySparkRuntimeError, PySparkValueError
+
+    for name in ["A.class", "m.py", "n.txt", "b.tar.gz", "b.zip", "b#c.zip"]:
+        (tmp_path / name).write_bytes(b"x")
+    (tmp_path / "dirx.jar").mkdir()
+    (tmp_path / "sub").mkdir()
+
+    def at(name):
+        return str(tmp_path / name)
+
+    def unsupported(name):
+        return {"operation": f"{at(name)} file format"}
+
+    cases = [
+        # A class file is refused, unless it is a file.
+        (at("A.class"), {}, PySparkRuntimeError, "UNSUPPORTED_OPERATION", unsupported("A.class")),
+        (at("A.class"), {"pyfile": True}, PySparkRuntimeError, "UNSUPPORTED_OPERATION", unsupported("A.class")),
+        (at("A.class"), {"archive": True}, PySparkRuntimeError, "UNSUPPORTED_OPERATION", unsupported("A.class")),
+        # A flag takes only its formats, and a fragment names only an archive.
+        (at("m.py"), {"archive": True}, PySparkRuntimeError, "UNSUPPORTED_OPERATION", unsupported("m.py")),
+        (at("n.txt"), {"pyfile": True}, PySparkRuntimeError, "UNSUPPORTED_OPERATION", unsupported("n.txt")),
+        (at("b.tar.gz"), {"pyfile": True}, PySparkRuntimeError, "UNSUPPORTED_OPERATION", unsupported("b.tar.gz")),
+        (at("b.zip") + "#alias", {}, PySparkRuntimeError, "UNSUPPORTED_OPERATION", unsupported("b.zip")),
+        (at("b%23c.zip") + "#alias", {"archive": True}, PySparkValueError, "VALUE_ALLOWED",
+         {"arg_name": "artifact path", "disallowed_value": "#"}),
+        # Remote URIs are refused whatever the flags.
+        ("s3://bucket/a.jar", {}, PySparkRuntimeError, "UNSUPPORTED_OPERATION", {"operation": "s3 scheme"}),
+        ("hdfs://h/a.jar", {"file": True}, PySparkRuntimeError, "UNSUPPORTED_OPERATION",
+         {"operation": "hdfs scheme"}),
+        # A path without a suffix is a format, even when it is a directory.
+        (at("sub"), {}, PySparkRuntimeError, "UNSUPPORTED_OPERATION", unsupported("sub")),
+    ]
+    spark = _offline_session()
+    for path, flags, error_type, condition, parameters in cases:
+        with pytest.raises(error_type) as error:
+            spark.addArtifacts(path, **flags)
+        assert error.value.getCondition() == condition, path
+        assert error.value.getMessageParameters() == parameters, path
+    # A file that Python cannot open is the error of open, as PySpark's LocalFile raises it.
+    for path, flags, expected in [
+        (at("sub"), {"file": True}, f"[Errno 21] Is a directory: '{at('sub')}'"),
+        (at("dirx.jar"), {"archive": True}, f"[Errno 21] Is a directory: '{at('dirx.jar')}'"),
+        (at("missing.jar"), {}, f"[Errno 2] No such file or directory: '{at('missing.jar')}'"),
+        ("file://" + at("missing.jar"), {"pyfile": True},
+         f"[Errno 2] No such file or directory: '{at('missing.jar')}'"),
+    ]:
+        with pytest.raises(OSError) as error:
+            spark.addArtifacts(path, **flags)
+        assert str(error.value) == expected, path
+        assert error.value.errno in (errno.ENOENT, errno.EISDIR), path
+
+
+def test_add_artifacts_puts_a_pyfile_zip_on_the_client_path_before_opening_it(tmp_path, monkeypatch):
+    # As PySpark's _parse_artifacts: a zip, egg or jar of pyfile is put on sys.path before its
+    # file is opened, and a Python file is not.
+    import sys
+
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    spark = _offline_session()
+    zipped = str(tmp_path / "missing.zip")
+    with pytest.raises(FileNotFoundError):
+        spark.addArtifacts(zipped, pyfile=True)
+    assert sys.path[1] == zipped
+    before = list(sys.path)
+    with pytest.raises(FileNotFoundError):
+        spark.addArtifacts(str(tmp_path / "missing.py"), pyfile=True)
+    assert sys.path == before
+
+
 # --------------------------------------------------------------------------- reader schema
 
 def _sent_read_schema(request):
@@ -9936,6 +10339,88 @@ def test_exact_string_subclass_uses_generic_conversion():
         assert error.value.getCondition() == "CANNOT_MERGE_TYPE"
         assert error.value.getMessageParameters() == {
             "data_type1": "StructType", "data_type2": data_type}
+
+
+# --------------------------------------------------------------------------- spatial values with invalid or mixed SRIDs
+_SPATIAL_WKB = bytes.fromhex("0101000000000000000000F03F0000000000000040")
+
+
+def _sent_local_field_types(spark, service, data, schema=None):
+    # The JSON types of the fields of the local relation that createDataFrame sends.
+    df = spark.createDataFrame(data, schema) if schema is not None else spark.createDataFrame(data)
+    df.toArrow()
+    request = parse_message(service.execute_requests[-1])
+    relation = parse_message(parse_message(request[3][0])[1][0])
+    while 18 in relation:  # Relation.to_df -> ToDF.input.
+        relation = parse_message(parse_message(relation[18][0])[1][0])
+    local = parse_message(relation[11][0])  # Relation.local_relation=11 -> LocalRelation.schema=2.
+    return [field["type"] for field in json.loads(local[2][0])["fields"]]
+
+
+@pytest.mark.parametrize("make, srid", [
+    (lambda: T.Geography.fromWKB(_SPATIAL_WKB, 4269), 4269),
+    (lambda: T.Geometry.fromWKB(_SPATIAL_WKB, 4269), 4269),
+    (lambda: T.Geometry.fromWKB(_SPATIAL_WKB, 99999), 99999),
+    (lambda: T.Geography.fromWKB(_SPATIAL_WKB, 99999), 99999),
+    (lambda: T.Geography.fromWKB(_SPATIAL_WKB, 0), 0),
+    (lambda: T.Geography.fromWKB(_SPATIAL_WKB, 3857), 3857),
+    (lambda: T.Geography.fromWKB(_SPATIAL_WKB, -1), -1),
+])
+def test_inferred_spatial_value_with_an_srid_its_type_does_not_take_is_rejected(mock_connect, make, srid):
+    # As PySpark's _infer_type, which builds GeometryType(srid) or GeographyType(srid) for each
+    # value: createDataFrame raises ST_INVALID_SRID_VALUE for a top-level value, for one nested
+    # in an array, and for the value after a null.
+    from pyspark.errors import IllegalArgumentException
+
+    spark, _ = mock_connect
+    for data in ([(make(),)], [([make()],)], [(None,), (make(),)]):
+        with pytest.raises(IllegalArgumentException) as error:
+            spark.createDataFrame(data)
+        assert error.value.getCondition() == "ST_INVALID_SRID_VALUE"
+        assert error.value.getMessageParameters() == {"srid": str(srid)}
+
+
+def test_mixed_geography_srids_fail_at_the_row_with_the_invalid_srid(mock_connect):
+    # Official PySpark infers each row's type before merging the rows, so the second row of
+    # GEOGRAPHY SRIDs 4326 and 4269 raises the error with its SRID, as does 0 after 4326.
+    from pyspark.errors import IllegalArgumentException
+
+    spark, _ = mock_connect
+    for second in (4269, 0):
+        with pytest.raises(IllegalArgumentException) as error:
+            spark.createDataFrame([
+                (T.Geography.fromWKB(_SPATIAL_WKB, 4326),),
+                (T.Geography.fromWKB(_SPATIAL_WKB, second),),
+            ])
+        assert error.value.getCondition() == "ST_INVALID_SRID_VALUE"
+        assert error.value.getMessageParameters() == {"srid": str(second)}
+
+
+def test_inferred_spatial_types_of_valid_srids_are_as_pyspark(mock_connect):
+    # GEOMETRY takes the SRIDs 0, 3857 and 4326, and merges differing SRIDs into GEOMETRY(ANY)
+    # as PySpark's _merge_type does; GEOGRAPHY takes only 4326.
+    from pyspark.sql.types import Geometry
+
+    spark, service = mock_connect
+    geometry = lambda srid: Geometry.fromWKB(_SPATIAL_WKB, srid)  # noqa: E731
+    types = lambda data: _sent_local_field_types(spark, service, data)  # noqa: E731
+    assert types([(geometry(0),), (geometry(3857),), (geometry(4326),)]) == [
+        T.GeometryType("ANY").jsonValue()]
+    assert types([(geometry(4326),), (None,), (geometry(4326),)]) == [
+        T.GeometryType(4326).jsonValue()]
+    assert types([([geometry(4326)],), ([geometry(3857)],)]) == [
+        T.ArrayType(T.GeometryType("ANY")).jsonValue()]
+    assert types([(T.Geography.fromWKB(_SPATIAL_WKB, 4326),)]) == [
+        T.GeographyType(4326).jsonValue()]
+
+
+def test_explicit_schema_spatial_values_are_not_inferred_from_their_srids(mock_connect):
+    # With an explicit schema, PySpark does not build the type from each value's SRID, so a
+    # GEOGRAPHY(ANY) takes a value of SRID 4269 without the client checking it.
+    spark, service = mock_connect
+    schema = T.StructType([T.StructField("g", T.GeographyType("ANY"))])
+    data = [(T.Geography.fromWKB(_SPATIAL_WKB, 4269),), (T.Geography.fromWKB(_SPATIAL_WKB, 4326),)]
+    assert _sent_local_field_types(spark, service, data, schema) == [T.GeographyType("ANY").jsonValue()]
 
 
 # --------------------------------------------------------------------------- map functions

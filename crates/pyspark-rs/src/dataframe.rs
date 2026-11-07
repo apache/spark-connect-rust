@@ -3598,6 +3598,50 @@ fn udt_field_converters(
     Ok(Some(std::sync::Arc::new(converters.extract()?)))
 }
 
+/// Whether `data_type` holds a year-month interval, also nested in an array, a map, a struct or
+/// a user-defined type (`pyspark.sql.types._has_type`).
+fn has_year_month_interval(data_type: &spark_connect::types::DataType) -> bool {
+    use spark_connect::types::DataType;
+    match data_type {
+        DataType::YearMonthInterval { .. } => true,
+        DataType::Struct { fields } => fields
+            .iter()
+            .any(|field| has_year_month_interval(&field.data_type)),
+        DataType::Array { element_type, .. } => has_year_month_interval(element_type),
+        DataType::Map {
+            key_type,
+            value_type,
+            ..
+        } => has_year_month_interval(key_type) || has_year_month_interval(value_type),
+        DataType::Udt {
+            sql_type: Some(sql_type),
+            ..
+        } => has_year_month_interval(sql_type),
+        _ => false,
+    }
+}
+
+/// Raises as PySpark's Arrow conversion of the rows does for a result of `schema` with a
+/// year-month interval, which Spark Connect cannot collect: the error is raised even when the
+/// result has no rows.
+fn check_collectable(
+    py: Python<'_>,
+    schema: Option<&spark_connect::types::DataType>,
+) -> PyResult<()> {
+    if schema.is_some_and(has_year_month_interval) {
+        return Err(crate::column::raise_pyspark(
+            py,
+            "PySparkNotImplementedError",
+            "NOT_IMPLEMENTED",
+            &[(
+                "feature",
+                "Collecting a year-month interval value in Spark Connect",
+            )],
+        ));
+    }
+    Ok(())
+}
+
 /// The collected `rows` of a result of `schema`, whose values of user-defined types are
 /// deserialized when first read.
 fn rows_to_py(
@@ -3605,6 +3649,7 @@ fn rows_to_py(
     rows: Vec<spark_connect::row::Row>,
     schema: Option<&spark_connect::types::DataType>,
 ) -> PyResult<Vec<PyRow>> {
+    check_collectable(py, schema)?;
     let converters = udt_field_converters(py, schema)?;
     Ok(rows
         .into_iter()
@@ -3666,12 +3711,19 @@ impl PyLocalRowIterator {
             return Ok(None);
         }
         // Release the GIL while fetching from the Rust iterator (which may block on network I/O).
-        match py.detach(|| self.next_row()) {
-            Some(Ok(row)) => {
-                if self.converters.is_none() {
-                    let schema = self.iterator.as_ref().and_then(LocalRowIterator::schema);
-                    self.converters = Some(udt_field_converters(py, schema.as_ref())?);
+        let next = py.detach(|| self.next_row());
+        if self.converters.is_none() {
+            if let Some(schema) = self.iterator.as_ref().and_then(LocalRowIterator::schema) {
+                // The result is known once its first message arrives, possibly with no rows.
+                if let Err(error) = check_collectable(py, Some(&schema)) {
+                    self.finished = true;
+                    return Err(error);
                 }
+                self.converters = Some(udt_field_converters(py, Some(&schema))?);
+            }
+        }
+        match next {
+            Some(Ok(row)) => {
                 let converters = self.converters.clone().flatten();
                 Ok(Some(PyRow::with_converters(row, converters)))
             }

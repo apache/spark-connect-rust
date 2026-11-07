@@ -6,6 +6,7 @@ use spark_connect::row::{Row, StructValue, Value};
 use spark_connect::session::SparkSession;
 use spark_connect::types::{DataType, StructField};
 use spark_connect::udf::{CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
+use spark_connect_core::artifact::{parse_artifact, UnsupportedArtifact};
 
 use crate::catalog::PyCatalog;
 use crate::dataframe::PyDataFrame;
@@ -509,6 +510,7 @@ impl PySparkSession {
         let mut values: Vec<Vec<Value>> = (0..parts.len())
             .map(|_| Vec::with_capacity(fields.len()))
             .collect();
+        let _quanta = infer::DecimalQuanta::new();
         for (i, field) in fields.iter().enumerate() {
             for (row, out) in parts.iter().zip(values.iter_mut()) {
                 out.push(infer::convert(&row[i], &field.data_type, field.nullable)?);
@@ -655,10 +657,48 @@ impl PySparkSession {
                         .iter()
                         .filter_map(|row| row.get(i))
                         .find(|value| !matches!(value, Value::Null));
-                    let data_type = match first {
-                        Some(Value::Decimal { .. }) => pandas_decimal_type(&data, &rows, i)?,
-                        Some(value) => value_to_datatype(value),
-                        None => pandas_dtype_type(dtypes.get(i).map_or("object", String::as_str)),
+                    let cells = || rows.iter().filter_map(|row| row.get(i));
+                    let data_type = if !cells().any(|v| matches!(v, Value::Decimal { .. })) {
+                        match first {
+                            Some(value) => value_to_datatype(value),
+                            None => {
+                                pandas_dtype_type(dtypes.get(i).map_or("object", String::as_str))
+                            }
+                        }
+                    } else if cells().all(|v| matches!(v, Value::Decimal { .. } | Value::Null)) {
+                        pandas_decimal_type(&data, &rows, i)?
+                    } else {
+                        // Decimals with other values, which PySpark's conversion leaves to
+                        // Arrow: it types the column, takes ints as Decimals and raises for
+                        // the others, so the column is typed and converted by Arrow here too.
+                        let column = data
+                            .iter()
+                            .map(|row| row.get_item(i))
+                            .collect::<PyResult<Vec<_>>>()?;
+                        let typed = py
+                            .import("pyspark.sql._pandas_input")?
+                            .getattr("arrow_decimal_column")?
+                            .call1((
+                                column,
+                                dtypes.get(i).map_or("object", String::as_str),
+                                labels.get(i).unwrap_or(name),
+                            ))?;
+                        let (precision, scale, values): (i32, i32, Vec<Bound<'_, PyAny>>) =
+                            typed.extract()?;
+                        let values = values
+                            .iter()
+                            .map(|v| Ok(py_to_value(v)?))
+                            .collect::<PyResult<Vec<Value>>>()?;
+                        rows = std::mem::take(&mut rows)
+                            .into_iter()
+                            .zip(values)
+                            .map(|(row, value)| {
+                                let mut cells = row.into_values();
+                                cells[i] = value;
+                                StructValue::new(row_names.clone(), cells).into()
+                            })
+                            .collect();
+                        DataType::Decimal { precision, scale }
                     };
                     fields.push(StructField {
                         name: name.clone(),
@@ -1597,7 +1637,8 @@ impl PySparkSession {
     /// Add local files, or `file:` URIs, as artifacts of the session, as PySpark's
     /// `addArtifacts(*path, pyfile=False, archive=False, file=False)`: each path is named by
     /// the flags and its extension, and the errors for a path that is not supported are
-    /// PySpark's (see `spark_connect_core::artifact::parse_artifact`).
+    /// PySpark's (see `spark_connect_core::artifact::parse_artifact`). A class file is refused,
+    /// as PySpark's ArtifactManager does not upload one.
     #[pyo3(name = "addArtifacts", signature = (*path, pyfile=false, archive=false, file=false))]
     fn add_artifacts(
         &self,
@@ -1607,8 +1648,6 @@ impl PySparkSession {
         archive: bool,
         file: bool,
     ) -> PyResult<()> {
-        use spark_connect_core::artifact::{parse_artifact, UnsupportedArtifact};
-
         if [pyfile, archive, file].iter().filter(|flag| **flag).count() > 1 {
             return Err(crate::column::raise_pyspark(
                 py,
@@ -1620,29 +1659,18 @@ impl PySparkSession {
                 ],
             ));
         }
+        // As PySpark's _parse_artifacts, every path is parsed, and a local file opened, before
+        // any upload.
         for p in &path {
-            if let Err(unsupported) = parse_artifact(p, pyfile, archive, file) {
-                return Err(match unsupported {
-                    UnsupportedArtifact::Format(local) => crate::column::raise_pyspark(
-                        py,
-                        "PySparkRuntimeError",
-                        "UNSUPPORTED_OPERATION",
-                        &[("operation", &format!("{local} file format"))],
-                    ),
-                    UnsupportedArtifact::Scheme(scheme) => crate::column::raise_pyspark(
-                        py,
-                        "PySparkRuntimeError",
-                        "UNSUPPORTED_OPERATION",
-                        &[("operation", &format!("{scheme} scheme"))],
-                    ),
-                    UnsupportedArtifact::HashInArchivePath => crate::column::raise_pyspark(
-                        py,
-                        "PySparkValueError",
-                        "VALUE_ALLOWED",
-                        &[("arg_name", "artifact path"), ("disallowed_value", "#")],
-                    ),
-                });
+            let (name, local) = match parse_artifact(p, pyfile, archive, file) {
+                Ok(parsed) => parsed,
+                Err(unsupported) => return Err(unsupported_artifact_error(py, unsupported)),
+            };
+            if name.starts_with("classes/") {
+                let format = UnsupportedArtifact::Format(local.to_string_lossy().into_owned());
+                return Err(unsupported_artifact_error(py, format));
             }
+            check_local_artifact(py, &name, &local, pyfile)?;
         }
         let refs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
         py.detach(|| {
@@ -1690,6 +1718,56 @@ impl PySparkSession {
             .to_pyerr()?;
         Ok(PySparkSession::new(session))
     }
+}
+
+/// PySpark's error for a path of `addArtifacts` that it does not upload.
+fn unsupported_artifact_error(py: Python<'_>, unsupported: UnsupportedArtifact) -> PyErr {
+    match unsupported {
+        UnsupportedArtifact::Format(local) => crate::column::raise_pyspark(
+            py,
+            "PySparkRuntimeError",
+            "UNSUPPORTED_OPERATION",
+            &[("operation", &format!("{local} file format"))],
+        ),
+        UnsupportedArtifact::Scheme(scheme) => crate::column::raise_pyspark(
+            py,
+            "PySparkRuntimeError",
+            "UNSUPPORTED_OPERATION",
+            &[("operation", &format!("{scheme} scheme"))],
+        ),
+        UnsupportedArtifact::HashInArchivePath => crate::column::raise_pyspark(
+            py,
+            "PySparkValueError",
+            "VALUE_ALLOWED",
+            &[("arg_name", "artifact path"), ("disallowed_value", "#")],
+        ),
+    }
+}
+
+/// The client side of parsing a local artifact, as PySpark's `_parse_artifacts` does it: a
+/// Python file, zip, egg or jar of `pyfile` is importable by the client, and the file is opened
+/// as PySpark's `LocalFile` opens it, so that a missing file or a directory raises the error of
+/// `open` before any upload.
+fn check_local_artifact(
+    py: Python<'_>,
+    name: &str,
+    local: &std::path::Path,
+    pyfile: bool,
+) -> PyResult<()> {
+    let local = local.to_string_lossy();
+    let importable = pyfile && name.starts_with("pyfiles/");
+    if importable && !name.ends_with(".py") {
+        py.import("sys")?
+            .getattr("path")?
+            .call_method1("insert", (1, local.as_ref()))?;
+    }
+    py.import("builtins")?
+        .call_method1("open", (local.as_ref(), "rb"))?
+        .call_method0("close")?;
+    if importable {
+        py.import("importlib")?.call_method0("invalidate_caches")?;
+    }
+    Ok(())
 }
 
 /// Minimal stand-in for the reference `SparkConnectClient`, returned by
@@ -1752,7 +1830,7 @@ fn pandas_decimal_type(data: &Bound<'_, PyList>, rows: &[Row], i: usize) -> PyRe
     // The digits and exponent of an exact Decimal come from the text that `py_to_value` took
     // of it, rather than from `as_tuple()`, which builds a DecimalTuple of every digit; a
     // subclass, which can override either, is asked for `as_tuple()`, as Arrow does.
-    let decimal_cls = data.py().import("decimal")?.getattr("Decimal")?;
+    let decimal_cls = crate::infer::DECIMAL.import(data.py(), "decimal", "Decimal")?;
     let (mut integer_digits, mut scale) = (0i64, 0i64);
     for (row, converted) in data.iter().zip(rows) {
         let value = row.get_item(i)?;
@@ -1760,7 +1838,7 @@ fn pandas_decimal_type(data: &Bound<'_, PyList>, rows: &[Row], i: usize) -> PyRe
             continue;
         }
         let from_text = match converted.get(i) {
-            Some(Value::Decimal { value: text, .. }) if value.get_type().is(&decimal_cls) => {
+            Some(Value::Decimal { value: text, .. }) if value.get_type().is(decimal_cls) => {
                 decimal_text_digits(text)
             }
             _ => None,
@@ -1819,6 +1897,7 @@ fn value_to_datatype(v: &Value) -> DataType {
         Value::Binary(_) => DataType::Binary,
         Value::Date(_) => DataType::Date,
         Value::Timestamp(_) => DataType::Timestamp,
+        Value::TimestampNtz(_) => DataType::TimestampNtz,
         // As PySpark infers TimeType() of a datetime.time.
         Value::Time(_) => DataType::Time { precision: 6 },
         Value::DayTimeInterval(_) => DataType::DayTimeInterval {
@@ -2131,19 +2210,17 @@ pub(crate) fn datetime_to_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
 /// Decimal defines `__float__`/`__int__`.
 fn decimal_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Option<Value>> {
     let py = obj.py();
-    let dec_mod = match py.import("decimal") {
-        Ok(m) => m,
-        Err(_) => return Ok(None),
-    };
-    let decimal_cls = dec_mod.getattr("Decimal")?;
-    if !obj.is_instance(&decimal_cls)? {
+    // Imported once: looking the class up per value was a module import and an attribute
+    // read of every converted value.
+    let decimal_cls = crate::infer::DECIMAL.import(py, "decimal", "Decimal")?;
+    if !obj.is_instance(decimal_cls.as_any())? {
         return Ok(None);
     }
     // As written, in scientific notation for `1E+2` or `1.5E-7`: the Arrow encoder parses
     // either notation, in work bounded by the length of the text, which a fixed-point form
     // of `1E+1000000000` would not be.
     let dec_str: String = obj.str()?.extract()?;
-    let scale = if obj.get_type().is(&decimal_cls) {
+    let scale = if obj.get_type().is(decimal_cls) {
         // Exact Decimal strings preserve the coefficient's trailing zeros and exponent.
         // Subclasses may override either __str__ or as_tuple, so keep their old path.
         decimal_string_scale(&dec_str)
