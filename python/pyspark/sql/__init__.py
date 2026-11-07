@@ -91,3 +91,16 @@ if Geography is not None:
     __all__.append("Geography")
 if Geometry is not None:
     __all__.append("Geometry")
+
+# As PySpark's, whose modules of pyspark.sql import these submodules, so that they are
+# attributes of pyspark.sql.
+from pyspark.sql import (  # noqa: E402,F401
+    conf,
+    geo_utils,
+    profiler,
+    sql_formatter,
+    streaming,
+    table_arg,
+    tvf_argument,
+    variant_utils,
+)

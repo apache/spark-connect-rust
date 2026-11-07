@@ -577,10 +577,17 @@ impl LiteralExpression {
                 proto::expression::literal::LiteralType::Time(time)
             }
             LiteralExpression::Array {
-                element_type: _,
+                element_type,
                 elements,
             } => {
                 let mut array = proto::expression::literal::Array::default();
+                // The type of the elements, which the server requires of an array literal
+                // (`ARRAY_LITERAL_MISSING_DATA_TYPE`), as PySpark's `LiteralExpression.to_plan`
+                // writes it, also where the proto deprecates the field.
+                #[allow(deprecated)]
+                {
+                    array.element_type = Some(element_type.to_proto());
+                }
                 for elem in elements {
                     let elem_proto = elem.to_proto();
                     if let Some(proto::expression::ExprType::Literal(lit)) = elem_proto.expr_type {
@@ -1239,8 +1246,10 @@ impl WindowExpressionWrapper {
         if let Some((frame_type, lower, upper)) = &self.frame_spec {
             let mut frame = proto::expression::window::WindowFrame::default();
             frame.frame_type = *frame_type as i32;
-            frame.lower = Some(Box::new(to_proto_frame_boundary(lower)));
-            frame.upper = Some(Box::new(to_proto_frame_boundary(upper)));
+            // A frame type of 1 is a row frame, and another a range frame.
+            let rows = *frame_type == 1;
+            frame.lower = Some(Box::new(to_proto_frame_boundary(lower, rows)));
+            frame.upper = Some(Box::new(to_proto_frame_boundary(upper, rows)));
             window.frame_spec = Some(Box::new(frame));
         }
 
@@ -1249,12 +1258,28 @@ impl WindowExpressionWrapper {
     }
 }
 
-/// Convert FrameBoundary to proto FrameBoundary.
+/// Convert FrameBoundary to proto FrameBoundary, as PySpark Connect's `WindowExpression`
+/// sends the boundary of a value: an integer literal in a row frame, and a long literal in a
+/// range frame.
 fn to_proto_frame_boundary(
     boundary: &FrameBoundary,
+    rows: bool,
 ) -> proto::expression::window::window_frame::FrameBoundary {
-    let mut proto_boundary = proto::expression::window::window_frame::FrameBoundary::default();
-    proto_boundary.boundary = match boundary {
+    let offset = |value: i64| {
+        // A ROWS-frame offset must be an IntegerType literal (Spark rejects bigint with
+        // SPECIFIED_WINDOW_FRAME_UNACCEPTED_TYPE); one out of its range is sent as a long,
+        // for the server to reject, rather than truncated.
+        let literal = match i32::try_from(value) {
+            Ok(value) if rows => LiteralExpression::int(value),
+            _ => LiteralExpression::long(value),
+        };
+        Some(
+            proto::expression::window::window_frame::frame_boundary::Boundary::Value(Box::new(
+                Expression::literal(literal).to_proto(),
+            )),
+        )
+    };
+    let boundary = match boundary {
         FrameBoundary::UnboundedPreceding => {
             Some(proto::expression::window::window_frame::frame_boundary::Boundary::Unbounded(true))
         }
@@ -1264,20 +1289,11 @@ fn to_proto_frame_boundary(
         FrameBoundary::CurrentRow => Some(
             proto::expression::window::window_frame::frame_boundary::Boundary::CurrentRow(true),
         ),
-        // A ROWS-frame offset must be an IntegerType literal (Spark rejects bigint with
-        // SPECIFIED_WINDOW_FRAME_UNACCEPTED_TYPE), and preceding is a negative offset.
-        FrameBoundary::Preceding(n) => Some(
-            proto::expression::window::window_frame::frame_boundary::Boundary::Value(Box::new(
-                Expression::literal(LiteralExpression::int(-(*n as i32))).to_proto(),
-            )),
-        ),
-        FrameBoundary::Following(n) => Some(
-            proto::expression::window::window_frame::frame_boundary::Boundary::Value(Box::new(
-                Expression::literal(LiteralExpression::int(*n as i32)).to_proto(),
-            )),
-        ),
+        // A preceding boundary is a negative offset.
+        FrameBoundary::Preceding(n) => offset(n.saturating_neg()),
+        FrameBoundary::Following(n) => offset(*n),
     };
-    proto_boundary
+    proto::expression::window::window_frame::FrameBoundary { boundary }
 }
 
 impl SortOrder {
@@ -2143,6 +2159,9 @@ mod tests {
             if let Some(proto::expression::literal::LiteralType::Array(arr)) = literal.literal_type
             {
                 assert_eq!(arr.elements.len(), 2);
+                #[allow(deprecated)]
+                let element_type = arr.element_type;
+                assert_eq!(element_type, Some(DataType::Integer.to_proto()));
             } else {
                 panic!("Expected array literal type");
             }

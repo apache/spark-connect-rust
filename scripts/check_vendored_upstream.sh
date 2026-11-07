@@ -54,6 +54,13 @@ VENDORED_FILES=(
   # Call sites of the JVM gateway, which pyspark.sql.pandas.conversion imports.
   "traceback_utils.py"
 
+  # The SparkConf and the TaskContext of pyspark, pure Python, which it exports.
+  "conf.py"
+  "taskcontext.py"
+
+  # The Arrow C stream of a DataFrame, of DataFrame.__arrow_c_stream__.
+  "sql/interchange.py"
+
   # Logging
   "logger/__init__.py"
   "logger/logger.py"
@@ -72,6 +79,18 @@ VENDORED_FILES=(
   "pipelines/__init__.py"
   "pipelines/flow.py"
   "pipelines/output.py"
+  # The CLI of Spark Declarative Pipelines (spark-pipelines), and the official tests of it, which
+  # run through this client against a server.
+  "pipelines/cli.py"
+  "pipelines/init_cli.py"
+  "pipelines/add_pipeline_analysis_context.py"
+  "pipelines/block_session_mutations.py"
+  "pipelines/tests/test_cli.py"
+  "pipelines/tests/test_init_cli.py"
+  "pipelines/tests/test_add_pipeline_analysis_context.py"
+  "pipelines/tests/test_block_session_mutations.py"
+  "pipelines/tests/test_spark_connect.py"
+  "pipelines/tests/test_auto_cdc_flow.py"
   "pipelines/source_code_location.py"
   "pipelines/graph_element_registry.py"
   "pipelines/type_error_utils.py"
@@ -81,10 +100,28 @@ VENDORED_FILES=(
   "pipelines/tests/test_decorators.py"
   "pipelines/tests/test_graph_element_registry.py"
 
+  # The progress handlers and the progress bar of the executions of a session, whose
+  # ExecutePlanResponse is that of the message class of pyspark/sql/connect/proto.py.
+  "sql/connect/shell/progress.py"
+
+  # The logger of Spark Connect, and the types of the connect import path.
+  "sql/connect/logging.py"
+  "sql/connect/_typing.py"
+  # The conversions of the storage levels and the cached relations of their messages.
+  "sql/connect/conversion.py"
+
+  # The spatial reference systems of the spatial types, and the SQLStringFormatter, of
+  # pyspark.sql.
+  "sql/geo_utils.py"
+  "sql/sql_formatter.py"
+
   # Top-level modules
   "accumulators.py"
   "memory_profiler_ext.py"
   "profiler.py"
+  # The ConnectProfilerCollector of spark.profile, of the UDF profiles that the client takes
+  # from the updates of the Python accumulators of its executions.
+  "sql/connect/profiler.py"
   "worker_util.py"
   "instrumentation_utils.py"
 
@@ -93,6 +130,57 @@ VENDORED_FILES=(
   "ml/dl_util.py"
   "ml/util.py"
   "ml/functions.py"
+  # ML: the API of estimators, models, pipelines, evaluators and tuning, which runs on the server
+  # through the Connect ML protocol (pyspark.ml.util), over the client of SparkSession.client.
+  "ml/__init__.py"
+  "ml/_typing.pyi"
+  "ml/base.py"
+  "ml/classification.py"
+  "ml/clustering.py"
+  "ml/evaluation.py"
+  "ml/feature.py"
+  "ml/fpm.py"
+  "ml/image.py"
+  "ml/model_cache.py"
+  "ml/pipeline.py"
+  "ml/recommendation.py"
+  "ml/regression.py"
+  "ml/stat.py"
+  "ml/tree.py"
+  "ml/tuning.py"
+  "ml/wrapper.py"
+  # ML: the internals of pyspark.ml on Connect: its plans, the serialization of its params, and
+  # its readers and writers.
+  "ml/connect/proto.py"
+  "ml/connect/serialize.py"
+  "ml/connect/readwrite.py"
+  "ml/connect/io_utils.py"
+  "ml/connect/summarizer.py"
+  "ml/connect/util.py"
+  # The generated Spark Connect protobuf messages, which pyspark.ml builds (not base_pb2_grpc:
+  # the Rust transport speaks gRPC; sql/connect/proto/__init__.py is the client's own).
+  "sql/connect/proto/base_pb2.py"
+  "sql/connect/proto/base_pb2.pyi"
+  "sql/connect/proto/types_pb2.py"
+  "sql/connect/proto/types_pb2.pyi"
+  "sql/connect/proto/commands_pb2.py"
+  "sql/connect/proto/commands_pb2.pyi"
+  "sql/connect/proto/expressions_pb2.py"
+  "sql/connect/proto/expressions_pb2.pyi"
+  "sql/connect/proto/relations_pb2.py"
+  "sql/connect/proto/relations_pb2.pyi"
+  "sql/connect/proto/catalog_pb2.py"
+  "sql/connect/proto/catalog_pb2.pyi"
+  "sql/connect/proto/common_pb2.py"
+  "sql/connect/proto/common_pb2.pyi"
+  "sql/connect/proto/ml_pb2.py"
+  "sql/connect/proto/ml_pb2.pyi"
+  "sql/connect/proto/ml_common_pb2.py"
+  "sql/connect/proto/ml_common_pb2.pyi"
+  "sql/connect/proto/pipelines_pb2.py"
+  "sql/connect/proto/pipelines_pb2.pyi"
+  "sql/connect/proto/example_plugins_pb2.py"
+  "sql/connect/proto/example_plugins_pb2.pyi"
   # ML connect base ABCs (Estimator/Transformer/Evaluator/Model) - pure upstream.
   "ml/connect/base.py"
   # vector_to_array/array_to_vector of pyspark.ml.functions build their columns here, through

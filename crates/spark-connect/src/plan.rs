@@ -27,6 +27,19 @@ pub struct TransformWithStateInfo {
 /// Child plans are immutable shared nodes, so adding a transformation does not clone
 /// its ancestors. Call `to_proto()` to materialize a fresh protobuf tree without plan
 /// IDs; requests give every shared node its stable plan ID (see `PlanIds`).
+/// The owner of a relation built outside the core, which a plan of it keeps alive while any
+/// DataFrame uses it: such as the Python plan of `pyspark.ml`, which keeps the models whose
+/// cached objects on the server the relation refers to, as PySpark Connect's DataFrame keeps its
+/// plan.
+#[derive(Clone)]
+pub struct RelationOwner(pub Arc<dyn std::any::Any + Send + Sync>);
+
+impl std::fmt::Debug for RelationOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RelationOwner")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum LogicalPlan {
     /// A range of integers: `range(start, end, step)`.
@@ -106,6 +119,20 @@ pub enum LogicalPlan {
         truncate: i32,
         vertical: bool,
     },
+    /// HtmlString: the HTML table of `df._repr_html_()`, which the server formats as one
+    /// string: `num_rows` rows, values truncated to `truncate` characters (0 for none).
+    HtmlString {
+        input: Arc<LogicalPlan>,
+        num_rows: i32,
+        truncate: i32,
+    },
+    /// A relation built outside the core, as the plans of `pyspark.ml` build theirs
+    /// (`pyspark.ml.connect.proto.TransformerRelation`), sent as it is, with the plan ID of the
+    /// core, and the owner of the relation, if any, which the plan keeps alive.
+    Raw {
+        relation: Box<proto::Relation>,
+        owner: Option<RelationOwner>,
+    },
     /// Deduplicate: `df.distinct()` or `df.dropDuplicates()`.
     Deduplicate {
         input: Arc<LogicalPlan>,
@@ -126,6 +153,9 @@ pub enum LogicalPlan {
         upper_bound: f64,
         with_replacement: bool,
         seed: Option<i64>,
+        /// Whether the input is sorted, or cached, to be in a deterministic order, as the
+        /// splits of `randomSplit` are, so that they are disjoint.
+        deterministic_order: bool,
     },
     /// Repartition: `df.repartition(num_partitions)`.
     Repartition {
@@ -181,6 +211,14 @@ pub enum LogicalPlan {
         name: String,
         /// The parameters, literal expressions or columns, as PySpark's `lit` of them.
         parameters: Vec<Expression>,
+    },
+    /// Parse: a DataFrame of one string column parsed into a structured DataFrame, as
+    /// PySpark's `Parse` of `spark.read.json`, `csv` and `xml` of a DataFrame.
+    Parse {
+        input: Arc<LogicalPlan>,
+        format: ParseFormat,
+        schema: Option<DataType>,
+        options: HashMap<String, String>,
     },
     /// Unpivot: `df.unpivot(...)`.
     Unpivot {
@@ -507,6 +545,16 @@ impl PlanIds {
         nodes.next += 1;
         nodes.ids.insert(key, (Arc::downgrade(node), id));
         id
+    }
+
+    /// Give `node` the plan ID `id`, of a relation that this session sent: so a DataFrame of the
+    /// relation, such as one that was pickled, keeps the plan ID of the DataFrame it was of.
+    pub(crate) fn assign(&self, node: &Arc<LogicalPlan>, id: i64) {
+        let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        nodes.next = nodes.next.max(id.saturating_add(1));
+        nodes
+            .ids
+            .insert(Arc::as_ptr(node) as usize, (Arc::downgrade(node), id));
     }
 
     /// The live node of the plan ID `id`, as the server reports a relation by its plan ID.
@@ -843,6 +891,24 @@ impl LogicalPlan {
                 relation.rel_type = Some(proto::relation::RelType::ShowString(Box::new(show)));
             }
 
+            LogicalPlan::HtmlString {
+                input,
+                num_rows,
+                truncate,
+            } => {
+                let html = proto::HtmlString {
+                    input: Some(Box::new(relation_of(input, plan_ids))),
+                    num_rows: *num_rows,
+                    truncate: *truncate,
+                };
+                relation.rel_type = Some(proto::relation::RelType::HtmlString(Box::new(html)));
+            }
+
+            LogicalPlan::Raw { relation: raw, .. } => {
+                relation = raw.as_ref().clone();
+                relation.common.get_or_insert_with(Default::default);
+            }
+
             LogicalPlan::Deduplicate {
                 input,
                 all_columns_as_keys,
@@ -913,6 +979,7 @@ impl LogicalPlan {
                 upper_bound,
                 with_replacement,
                 seed,
+                deterministic_order,
             } => {
                 let mut sample = proto::Sample::default();
                 sample.input = Some(Box::new(relation_of(input, plan_ids)));
@@ -922,6 +989,7 @@ impl LogicalPlan {
                 if let Some(s) = seed {
                     sample.seed = Some(*s);
                 }
+                sample.deterministic_order = *deterministic_order;
                 relation.rel_type = Some(proto::relation::RelType::Sample(Box::new(sample)));
             }
 
@@ -1047,6 +1115,20 @@ impl LogicalPlan {
                 hint.parameters
                     .extend(parameters.iter().map(|p| p.to_proto()));
                 relation.rel_type = Some(proto::relation::RelType::Hint(Box::new(hint)));
+            }
+
+            LogicalPlan::Parse {
+                input,
+                format,
+                schema,
+                options,
+            } => {
+                relation.rel_type = Some(proto::relation::RelType::Parse(Box::new(proto::Parse {
+                    input: Some(Box::new(relation_of(input, plan_ids))),
+                    format: format.to_proto() as i32,
+                    schema: schema.as_ref().map(|s| s.to_proto()),
+                    options: options.clone(),
+                })));
             }
 
             LogicalPlan::Unpivot {
@@ -1819,6 +1901,7 @@ pub fn sample(
         upper_bound,
         with_replacement,
         seed,
+        deterministic_order: false,
     }
 }
 
@@ -1897,6 +1980,24 @@ pub fn to_schema(input: impl Into<Arc<LogicalPlan>>, schema: DataType) -> Logica
     }
 }
 
+/// The format of a `Parse`: PySpark's `ParseFormat` of `spark.read.csv`, `json` and `xml`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParseFormat {
+    Csv,
+    Json,
+    Xml,
+}
+
+impl ParseFormat {
+    fn to_proto(self) -> proto::parse::ParseFormat {
+        match self {
+            ParseFormat::Csv => proto::parse::ParseFormat::Csv,
+            ParseFormat::Json => proto::parse::ParseFormat::Json,
+            ParseFormat::Xml => proto::parse::ParseFormat::Xml,
+        }
+    }
+}
+
 /// Create a Hint plan, of parameters given as strings: an integer-looking parameter is an
 /// Integer (int32) literal, matching PySpark's `lit(int)`, otherwise a String literal. (A
 /// Long literal is rejected as a partitionNum by e.g. the REBALANCE hint, which expects an
@@ -1968,6 +2069,7 @@ fn value_to_proto_literal(v: &crate::row::Value) -> proto::expression::Literal {
         Value::String(s) => LiteralType::String(s.clone()),
         Value::Date(d) => LiteralType::Date(*d),
         Value::Timestamp(t) => LiteralType::Timestamp(*t),
+        Value::TimestampNtz(t) => LiteralType::TimestampNtz(*t),
         // Spark rejects interval NA fills. Preserve the type so it errors instead
         // of silently filling string columns with the Value's Debug text.
         Value::DayTimeInterval(t) => LiteralType::DayTimeInterval(*t),

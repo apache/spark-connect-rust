@@ -189,12 +189,30 @@ pub fn register_functions(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<
     Ok(())
 }
 
+/// `enum.Enum`, of whose instances a literal is of the value.
+static ENUM: pyo3::sync::PyOnceLock<Py<pyo3::types::PyType>> = pyo3::sync::PyOnceLock::new();
+
+/// The value of `obj`, the value of the value of an `Enum` while it is one, else `obj`, as
+/// PySpark's `pyspark.sql.utils.enum_to_value`, which its `lit`, Column operators and functions
+/// apply to the values that they take.
+pub(crate) fn enum_to_value<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let py = obj.py();
+    let enum_type = ENUM.import(py, "enum", "Enum")?;
+    let mut value = obj.clone();
+    while value.is_instance(enum_type)? {
+        value = value.getattr("value")?;
+    }
+    Ok(value)
+}
+
 /// Convert a Python object to a Rust Column (handles Column or scalars that become literals).
 pub fn to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
     // Try to get as PyColumn first
     if let Ok(col) = obj.extract::<Bound<'_, PyColumn>>() {
         return Ok(col.borrow().column.clone());
     }
+    // An Enum is the literal of its value, as PySpark's.
+    let obj = &enum_to_value(obj)?;
 
     // Check for None
     if obj.is_none() {
@@ -222,6 +240,11 @@ pub fn to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
             "UNSUPPORTED_DATA_TYPE",
             &[("data_type", "ndarray")],
         ));
+    }
+
+    // A NumPy scalar is typed by its dtype, as PySpark's `LiteralExpression._infer_type`.
+    if let Some(lit) = numpy_scalar_literal(obj)? {
+        return Ok(Column::new(Expression::literal(lit)));
     }
 
     // Non-primitive scalars must be checked BEFORE int/float: Decimal defines
@@ -286,6 +309,53 @@ fn numpy_ndarray_ndim(obj: &Bound<'_, PyAny>) -> PyResult<Option<usize>> {
         }
         _ => Ok(None),
     }
+}
+
+/// The literal of a NumPy scalar, typed as PySpark's `LiteralExpression._infer_type` types it: a
+/// bool, a signed int of 8 to 64 bits (tinyint to bigint), or a float32 or float64. A str or bytes
+/// scalar is `None`, for the string and binary conversions to take. Any other NumPy scalar (an
+/// unsigned int, float16, longdouble, complex, datetime64 or timedelta64) is
+/// UNSUPPORTED_DATA_TYPE, named by its Python type. NumPy is looked up in `sys.modules`, as a
+/// NumPy scalar exists only when NumPy is imported.
+fn numpy_scalar_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<LiteralExpression>> {
+    let py = obj.py();
+    let modules = py.import("sys")?.getattr("modules")?;
+    let numpy = match modules.cast::<pyo3::types::PyDict>()?.get_item("numpy")? {
+        Some(numpy) if !numpy.is_none() => numpy,
+        _ => return Ok(None),
+    };
+    if !obj.is_instance(&numpy.getattr("generic")?)? {
+        return Ok(None);
+    }
+    if obj.is_instance(&numpy.getattr("bool_")?)? {
+        return Ok(Some(LiteralExpression::Boolean(obj.is_truthy()?)));
+    }
+    let dtype = obj.getattr("dtype")?;
+    let kind: String = dtype.getattr("kind")?.extract()?;
+    let itemsize: usize = dtype.getattr("itemsize")?.extract()?;
+    let literal = match (kind.as_str(), itemsize) {
+        ("U", _) | ("S", _) => return Ok(None),
+        ("i", 1) => LiteralExpression::Byte(obj.extract::<i64>()? as i32),
+        ("i", 2) => LiteralExpression::Short(obj.extract::<i64>()? as i32),
+        ("i", 4) => LiteralExpression::Integer(obj.extract::<i64>()? as i32),
+        ("i", 8) => LiteralExpression::Long(obj.extract::<i64>()?),
+        ("f", 4) => LiteralExpression::Float(obj.extract::<f64>()? as f32),
+        ("f", 8) => LiteralExpression::Double(obj.extract::<f64>()?),
+        _ => {
+            let type_name = obj
+                .get_type()
+                .name()
+                .map(|n| n.to_string())
+                .unwrap_or_else(|_| "<unknown>".to_string());
+            return Err(crate::column::raise_pyspark(
+                py,
+                "PySparkTypeError",
+                "UNSUPPORTED_DATA_TYPE",
+                &[("data_type", &type_name)],
+            ));
+        }
+    };
+    Ok(Some(literal))
 }
 
 /// Build a literal for the non-primitive scalar Python types (`datetime`, `date`,

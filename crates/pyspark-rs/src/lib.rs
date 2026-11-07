@@ -27,6 +27,7 @@ pub(crate) fn coerce_option_value(v: &Bound<'_, PyAny>) -> PyResult<Option<Strin
 mod catalog;
 mod column;
 mod conf;
+mod connect_bridge;
 mod dataframe;
 mod datasource;
 mod errors;
@@ -40,6 +41,7 @@ mod origin;
 mod pandas_input;
 mod pipelines;
 mod profiler;
+mod progress;
 mod pyarrow_export;
 mod pyarrow_import;
 mod readwriter;
@@ -58,10 +60,7 @@ mod udtf_analyze;
 mod values;
 mod window;
 
-use catalog::{
-    PyCatalog, PyCatalogColumn, PyCatalogMetadata, PyDatabase, PyFunction, PyTable,
-    PyTablePartition,
-};
+use catalog::PyCatalog;
 use column::PyColumn;
 use conf::PyRuntimeConf;
 use dataframe::{
@@ -71,7 +70,6 @@ use dataframe::{
 };
 use datasource::PyDataSourceRegistration;
 use group::{PyCoGroupedData, PyGroupedData};
-use profiler::PyProfilerCollector;
 use readwriter::PyDataFrameReader;
 use resource::{
     PyExecutorResourceRequests, PyResourceProfile, PyResourceProfileBuilder, PyTaskResourceRequests,
@@ -81,7 +79,7 @@ use session::{PyHook, PySparkSession, PySparkSessionBuilder};
 use stat::PyStatFunctions;
 use streaming::{
     PyDataStreamReader, PyDataStreamWriter, PyListenerEventStream, PyStreamingQuery,
-    PyStreamingQueryException, PyStreamingQueryManager, PyStreamingQueryStatus, PyTrigger,
+    PyStreamingQueryManager, PyTrigger,
 };
 use types::{
     PyAnsiIntervalType, PyAnyTimeType, PyArrayType, PyAtomicType, PyBinaryType, PyBooleanType,
@@ -98,8 +96,10 @@ use window::{PyFrameBound, PyWindow, PyWindowSpec};
 fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySparkSession>()?;
     m.add_class::<PyHook>()?;
-    m.add_class::<session::PyConnectClientStub>()?;
     m.add_class::<PySparkSessionBuilder>()?;
+    // As PySpark's nested class: `<pyspark.sql.session.SparkSession.Builder object at ...>`.
+    m.getattr("Builder")?
+        .setattr("__qualname__", "SparkSession.Builder")?;
     m.add_class::<PyDataFrame>()?;
     m.add_class::<PyDataFrameWriter>()?;
     m.add_class::<PyDataFrameWriterV2>()?;
@@ -117,12 +117,6 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<transport::ResponseStream>()?;
     m.add("RustRpcError", m.py().get_type::<transport::RustRpcError>())?;
     m.add_class::<PyCatalog>()?;
-    m.add_class::<PyCatalogMetadata>()?;
-    m.add_class::<PyDatabase>()?;
-    m.add_class::<PyTable>()?;
-    m.add_class::<PyCatalogColumn>()?;
-    m.add_class::<PyFunction>()?;
-    m.add_class::<PyTablePartition>()?;
     m.add_class::<eval_type::PyPythonEvalType>()?;
     m.add_class::<PyRuntimeConf>()?;
     m.add_class::<PyDataFrameReader>()?;
@@ -131,6 +125,8 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // The core DataType JSON grammar, which `pyspark.sql.types` parses type JSON with.
     m.add_function(wrap_pyfunction!(types::parse_datatype_json, m)?)?;
+    m.add_function(wrap_pyfunction!(connect_bridge::_data_type_proto, m)?)?;
+    m.add_function(wrap_pyfunction!(connect_bridge::_data_type_of_proto, m)?)?;
     m.add_function(wrap_pyfunction!(column::column_reference_name, m)?)?;
 
     m.add_function(wrap_pyfunction!(pandas_input::_pandas_string_ipc, m)?)?;
@@ -163,8 +159,6 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDataStreamWriter>()?;
     m.add_class::<PyTrigger>()?;
     m.add_class::<PyStreamingQuery>()?;
-    m.add_class::<PyStreamingQueryStatus>()?;
-    m.add_class::<PyStreamingQueryException>()?;
     m.add_class::<PyStreamingQueryManager>()?;
     m.add_class::<PyListenerEventStream>()?;
 
@@ -176,7 +170,6 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Data source and profiler classes
     m.add_class::<PyDataSourceRegistration>()?;
-    m.add_class::<PyProfilerCollector>()?;
 
     // Register DataType classes
     m.add_class::<PyDataType>()?;
@@ -250,6 +243,7 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ml::PyStringIndexer>()?;
     m.add_class::<ml::PyVectorAssembler>()?;
     m.add_class::<ml::PyLogisticRegression>()?;
+    m.add_class::<ml::PyLinearSVC>()?;
     m.add_class::<ml::PyRegressionEvaluator>()?;
     m.add_class::<ml::PyBinaryClassificationEvaluator>()?;
     m.add_class::<ml::PyPipeline>()?;

@@ -4,7 +4,7 @@ use pyo3::basic::CompareOp;
 use pyo3::exceptions::PyIndexError;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyBytes, PyDict, PyList, PySlice, PyString, PyTuple};
+use pyo3::types::{PyByteArray, PyBytes, PyDict, PyList, PySlice, PyString, PyTuple};
 use spark_connect::row::{Row, Value};
 
 use crate::column::raise_pyspark;
@@ -34,6 +34,9 @@ enum RowData {
         values: PyOnceLock<Py<PyTuple>>,
         /// The converters of its fields, when one has a user-defined type.
         converters: Option<FieldConverters>,
+        /// Whether its binary values are `bytes`, or `bytearray`, as PySpark gives them per
+        /// `spark.sql.execution.pyspark.binaryAsBytes`.
+        binary_as_bytes: bool,
     },
     /// A row made in Python, which holds its Python values as they are, as PySpark's does.
     Python {
@@ -44,17 +47,23 @@ enum RowData {
 
 impl PyRow {
     pub fn new(row: Row) -> Self {
-        Self::with_converters(row, None)
+        Self::with_converters(row, None, true)
     }
 
     /// A row that the server returned, whose values of user-defined types `converters`
-    /// deserializes when they are first read.
-    pub(crate) fn with_converters(row: Row, converters: Option<FieldConverters>) -> Self {
+    /// deserializes when they are first read, and whose binary values are `bytes` if
+    /// `binary_as_bytes`, or else `bytearray`.
+    pub(crate) fn with_converters(
+        row: Row,
+        converters: Option<FieldConverters>,
+        binary_as_bytes: bool,
+    ) -> Self {
         PyRow {
             data: RowData::Spark {
                 row,
                 values: PyOnceLock::new(),
                 converters,
+                binary_as_bytes,
             },
             named: true,
         }
@@ -85,6 +94,7 @@ impl PyRow {
                 row,
                 values,
                 converters,
+                binary_as_bytes,
             } => {
                 let values = values.get_or_try_init(py, || -> PyResult<Py<PyTuple>> {
                     let convert = |i: usize| {
@@ -98,7 +108,7 @@ impl PyRow {
                         .iter()
                         .enumerate()
                         .map(|(i, v)| {
-                            let value = value_to_py(py, v)?;
+                            let value = value_to_py(py, v, *binary_as_bytes)?;
                             match convert(i) {
                                 Some(converter) => converter.bind(py).call1((value,)),
                                 None => Ok(value),
@@ -178,8 +188,42 @@ impl PyRow {
     }
 }
 
-/// Convert a Spark `Value` into a Python object (PyO3 0.28 `IntoPyObject`).
-pub fn value_to_py<'py>(py: Python<'py>, v: &Value) -> PyResult<Bound<'py, PyAny>> {
+/// `datetime.datetime(1970, 1, 1)`, the epoch of Spark's timestamps, without a time zone.
+fn naive_epoch(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+    py.import("datetime")?
+        .getattr("datetime")?
+        .call1((1970, 1, 1))
+}
+
+/// `datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)`, the epoch of the instants.
+fn utc_epoch(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+    let datetime = py.import("datetime")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("tzinfo", datetime.getattr("timezone")?.getattr("utc")?)?;
+    datetime
+        .getattr("datetime")?
+        .call((1970, 1, 1), Some(&kwargs))
+}
+
+/// The `datetime.timedelta` of `micros` microseconds, exact over the whole i64 range: a float
+/// of seconds would lose the microseconds of the values far from the epoch.
+fn micros_timedelta(py: Python<'_>, micros: i64) -> PyResult<Bound<'_, PyAny>> {
+    let days = micros.div_euclid(86_400_000_000);
+    let remainder = micros.rem_euclid(86_400_000_000);
+    py.import("datetime")?.getattr("timedelta")?.call1((
+        days,
+        remainder / 1_000_000,
+        remainder % 1_000_000,
+    ))
+}
+
+/// Convert a Spark `Value` into a Python object (PyO3 0.28 `IntoPyObject`), whose binary values
+/// are `bytes` if `binary_as_bytes`, or else `bytearray`, also in arrays, maps and structs.
+pub fn value_to_py<'py>(
+    py: Python<'py>,
+    v: &Value,
+    binary_as_bytes: bool,
+) -> PyResult<Bound<'py, PyAny>> {
     // Propagate conversion failures as Python exceptions with `?` rather than
     // panicking across the FFI boundary (the conversions are near-infallible,
     // but a panic here would unwind into CPython).
@@ -193,24 +237,37 @@ pub fn value_to_py<'py>(py: Python<'py>, v: &Value) -> PyResult<Bound<'py, PyAny
         Value::Float(f) => (*f as f64).into_pyobject(py)?.into_any(),
         Value::Double(f) => (*f).into_pyobject(py)?.into_any(),
         Value::String(s) => s.as_str().into_pyobject(py)?.into_any(),
-        Value::Binary(b) => PyBytes::new(py, b).into_any(),
+        Value::Binary(b) if binary_as_bytes => PyBytes::new(py, b).into_any(),
+        Value::Binary(b) => PyByteArray::new(py, b).into_any(),
         Value::Date(d) => {
             // Convert days-since-epoch (i32) to datetime.date
             let date_mod = py.import("datetime")?;
             let date_cls = date_mod.getattr("date")?;
-            // 719163 is the ordinal of 1970-01-01
-            let ordinal = (*d as i64) + 719163i64;
-            date_cls.call_method1("fromordinal", (ordinal,))?.into_any()
+            if (-719_162..=2_932_896).contains(d) {
+                // 719163 is the ordinal of 1970-01-01
+                let ordinal = (*d as i64) + 719163i64;
+                date_cls.call_method1("fromordinal", (ordinal,))?.into_any()
+            } else {
+                // Out of the dates of Python, as PyArrow's `Date32Scalar.as_py`, of
+                // `date(1970, 1, 1) + timedelta(days=d)`, which raises its OverflowError.
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("days", *d)?;
+                let delta = date_mod.getattr("timedelta")?.call((), Some(&kwargs))?;
+                date_cls.call1((1970, 1, 1))?.add(delta)?.into_any()
+            }
         }
+        // TIMESTAMP (with a time zone): the instant, shown in the local time zone of the client,
+        // as PySpark's Arrow conversion does (`astimezone()` of the UTC datetime, naive).
         Value::Timestamp(t) => {
-            // Convert microseconds-since-epoch (i64) to datetime.datetime
-            let datetime_mod = py.import("datetime")?;
-            let datetime_cls = datetime_mod.getattr("datetime")?;
-            let seconds = *t as f64 / 1_000_000.0;
-            datetime_cls
-                .call_method1("fromtimestamp", (seconds,))?
-                .into_any()
+            let utc = utc_epoch(py)?.add(micros_timedelta(py, *t)?)?;
+            let local = utc.call_method0("astimezone")?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("tzinfo", py.None())?;
+            local.call_method("replace", (), Some(&kwargs))?.into_any()
         }
+        // TIMESTAMP_NTZ (without a time zone): the wall clock, which no time zone shifts, as
+        // PySpark's `TimestampNTZType.fromInternal` gives it.
+        Value::TimestampNtz(t) => naive_epoch(py)?.add(micros_timedelta(py, *t)?)?,
         Value::Time(nanos) => {
             // As PySpark's `TimeType.fromInternal`: a datetime.time of the microseconds.
             let (hours, remainder) = (
@@ -247,7 +304,7 @@ pub fn value_to_py<'py>(py: Python<'py>, v: &Value) -> PyResult<Bound<'py, PyAny
         Value::List(items) => {
             let list = PyList::empty(py);
             for it in items {
-                list.append(value_to_py(py, it)?)?;
+                list.append(value_to_py(py, it, binary_as_bytes)?)?;
             }
             list.into_any()
         }
@@ -256,16 +313,22 @@ pub fn value_to_py<'py>(py: Python<'py>, v: &Value) -> PyResult<Bound<'py, PyAny
             // TypeError, as in PySpark.
             let dict = PyDict::new(py);
             for (k, val) in m {
-                dict.set_item(value_to_py(py, k)?, value_to_py(py, val)?)?;
+                dict.set_item(
+                    value_to_py(py, k, binary_as_bytes)?,
+                    value_to_py(py, val, binary_as_bytes)?,
+                )?;
             }
             dict.into_any()
         }
         Value::Struct(row) => {
             // A struct value materializes as a Row (named fields), matching PySpark,
             // rather than a plain dict. Cloning keeps shared names and independent values.
-            Py::new(py, PyRow::new(row.clone().into()))?
-                .into_bound(py)
-                .into_any()
+            Py::new(
+                py,
+                PyRow::with_converters(row.clone().into(), None, binary_as_bytes),
+            )?
+            .into_bound(py)
+            .into_any()
         }
         Value::Variant { value, metadata } => {
             // A VARIANT materializes as a VariantVal (toJson/toPython decode lazily),

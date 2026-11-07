@@ -6,29 +6,28 @@ use spark_connect::row::{Row, StructValue, Value};
 use spark_connect::session::SparkSession;
 use spark_connect::types::{DataType, StructField};
 use spark_connect::udf::{CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
+use spark_connect_core::artifact::{parse_artifact, UnsupportedArtifact};
 
 use crate::catalog::PyCatalog;
 use crate::dataframe::PyDataFrame;
 use crate::datasource::PyDataSourceRegistration;
 use crate::errors::ResultExt;
-use crate::profiler::PyProfilerCollector;
 use crate::resource::PyResourceProfile;
 use crate::streaming::{PyDataStreamReader, PyStreamingQueryManager};
 
 /// Python wrapper for a Spark session builder.
 ///
-/// Mirrors `pyspark.sql.SparkSession.Builder`: chainable and reached via the
-/// `SparkSession.builder` class attribute.
-#[pyclass(
-    name = "SparkSessionBuilder",
-    module = "pyspark.sql.session",
-    from_py_object
-)]
+/// Mirrors `pyspark.sql.SparkSession.Builder`: each method sets its option on the builder and
+/// returns it, and `SparkSession.builder` is a new builder of each access.
+#[pyclass(name = "Builder", module = "pyspark.sql.session", from_py_object)]
 #[derive(Clone)]
 pub struct PySparkSessionBuilder {
     remote_url: Option<String>,
     /// Runtime configs set via `.config(...)`, applied after the session connects.
     configs: Vec<(String, String)>,
+    /// The hook factories of `_registerHook`, which a new session calls with itself, as
+    /// PySpark's builder does.
+    hook_factories: Vec<std::sync::Arc<Py<PyAny>>>,
 }
 
 impl PySparkSessionBuilder {
@@ -36,7 +35,25 @@ impl PySparkSessionBuilder {
         PySparkSessionBuilder {
             remote_url: None,
             configs: Vec::new(),
+            hook_factories: Vec::new(),
         }
+    }
+}
+
+/// `SparkSession.builder`, as PySpark's `classproperty(lambda cls: cls.Builder())`: each access
+/// of the class, or of a session, is a new builder, so the options of one do not leak into
+/// another.
+#[pyclass(name = "classproperty", module = "pyspark.sql.session")]
+pub struct PyBuilderProperty;
+
+#[pymethods]
+impl PyBuilderProperty {
+    fn __get__(
+        &self,
+        _instance: Option<&Bound<'_, PyAny>>,
+        _owner: Option<&Bound<'_, PyAny>>,
+    ) -> PySparkSessionBuilder {
+        PySparkSessionBuilder::new()
     }
 }
 
@@ -53,7 +70,11 @@ impl PySparkSessionBuilder {
     /// Mirrors `SparkSession.Builder.remote(url)`, and the Connect session builder's
     /// `remote(location="sc://localhost")`: the URL is `url` or the keyword `location`.
     #[pyo3(signature = (url=None, *, location=None))]
-    fn remote(&self, url: Option<&str>, location: Option<&str>) -> PyResult<PySparkSessionBuilder> {
+    fn remote<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        url: Option<&str>,
+        location: Option<&str>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
         let url = match (url, location) {
             (Some(_), Some(_)) => {
                 return Err(pyo3::exceptions::PyTypeError::new_err(
@@ -63,9 +84,9 @@ impl PySparkSessionBuilder {
             (Some(url), None) | (None, Some(url)) => url,
             (None, None) => "sc://localhost",
         };
-        let mut b = self.clone();
-        b.remote_url = Some(url.to_string());
-        Ok(b)
+        let py = slf.py();
+        slf.set_option(py, "spark.remote", url.to_string())?;
+        Ok(slf)
     }
 
     /// Set a config option, or several via `map`. Mirrors
@@ -73,26 +94,26 @@ impl PySparkSessionBuilder {
     /// `spark.remote` sets the connect endpoint; other keys are applied as runtime confs
     /// on connect. `conf` accepts a `SparkConf` (its `getAll()` pairs are applied).
     #[pyo3(signature = (key=None, value=None, map=None, conf=None))]
-    fn config(
-        &self,
+    fn config<'py>(
+        mut slf: PyRefMut<'py, Self>,
         key: Option<&str>,
         value: Option<&Bound<'_, PyAny>>,
         map: Option<&Bound<'_, PyDict>>,
         conf: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PySparkSessionBuilder> {
-        let mut b = self.clone();
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let py = slf.py();
         if let Some(k) = key {
             let v = match value {
                 Some(v) => crate::coerce_option_value(v)?.unwrap_or_default(),
                 None => String::new(),
             };
-            b.set_conf(k, v);
+            slf.set_option(py, k, v)?;
         }
         if let Some(m) = map {
             for (k, v) in m.iter() {
                 let ks = k.str()?.to_string();
                 let vs = crate::coerce_option_value(&v)?.unwrap_or_default();
-                b.set_conf(&ks, vs);
+                slf.set_option(py, &ks, vs)?;
             }
         }
         if let Some(c) = conf {
@@ -101,36 +122,41 @@ impl PySparkSessionBuilder {
                 let pair = pair?;
                 let k: String = pair.get_item(0)?.str()?.to_string();
                 let v: String = pair.get_item(1)?.str()?.to_string();
-                b.set_conf(&k, v);
+                slf.set_option(py, &k, v)?;
             }
         }
-        Ok(b)
+        Ok(slf)
     }
 
     /// `appName` - the option `spark.app.name`, as PySpark's builder sets. Like any option,
     /// it is set on the session silently, so it has no effect on a running server.
     #[pyo3(name = "appName")]
-    fn app_name(&self, name: &str) -> PySparkSessionBuilder {
-        let mut b = self.clone();
-        b.set_conf("spark.app.name", name.to_string());
-        b
+    fn app_name<'py>(mut slf: PyRefMut<'py, Self>, name: &str) -> PyResult<PyRefMut<'py, Self>> {
+        let py = slf.py();
+        slf.set_option(py, "spark.app.name", name.to_string())?;
+        Ok(slf)
     }
 
-    /// `master` - not applicable to a remote Connect session (no local cluster to
-    /// point at); accepted and ignored for API parity, like pyspark Connect.
-    fn master(&self, master: &str) -> PySparkSessionBuilder {
-        let _ = master;
-        self.clone()
+    /// `master` - the option `spark.master`, as PySpark's builder sets: a session of Spark
+    /// Connect does not take it, and with a remote it raises
+    /// `CANNOT_CONFIGURE_SPARK_CONNECT_MASTER`.
+    fn master<'py>(mut slf: PyRefMut<'py, Self>, master: &str) -> PyResult<PyRefMut<'py, Self>> {
+        let py = slf.py();
+        slf.set_option(py, "spark.master", master.to_string())?;
+        Ok(slf)
     }
 
-    /// `_registerHook` - register an execution-hook factory (mirrors pyspark's Builder).
-    /// Accepted for API parity; this native-transport client sends ExecutePlanRequests
-    /// from Rust, so registered `Hook.on_execute_plan` callbacks are not invoked (see
-    /// `PyHook`). Chainable, matching the builder pattern.
+    /// `_registerHook` - register a factory of a `SparkSession.Hook`, as PySpark's builder: a
+    /// session that the builder creates calls it with itself, and calls the `on_execute_plan`
+    /// of the hook with each `ExecutePlanRequest` of its executions before it sends it.
     #[pyo3(name = "_registerHook")]
-    fn register_hook(&self, hook_factory: &Bound<'_, PyAny>) -> PySparkSessionBuilder {
-        let _ = hook_factory;
-        self.clone()
+    fn register_hook<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        hook_factory: &Bound<'_, PyAny>,
+    ) -> PyRefMut<'py, Self> {
+        slf.hook_factories
+            .push(std::sync::Arc::new(hook_factory.clone().unbind()));
+        slf
     }
 
     /// `channelBuilder` - accept a Spark Connect ChannelBuilder and reconstruct an
@@ -140,10 +166,10 @@ impl PySparkSessionBuilder {
     /// do not apply to the native Rust transport, but the endpoint + params are honored).
     #[pyo3(name = "channelBuilder")]
     #[allow(non_snake_case)]
-    fn channel_builder(
-        &self,
+    fn channel_builder<'py>(
+        mut slf: PyRefMut<'py, Self>,
         channelBuilder: &Bound<'_, PyAny>,
-    ) -> PyResult<PySparkSessionBuilder> {
+    ) -> PyResult<PyRefMut<'py, Self>> {
         // Endpoint: prefer the builder's host/port (DefaultChannelBuilder exposes both).
         let host: String = channelBuilder
             .getattr("host")
@@ -172,16 +198,16 @@ impl PySparkSessionBuilder {
                 }
             }
         }
-        let mut b = self.clone();
-        b.remote_url = Some(url);
-        Ok(b)
+        let py = slf.py();
+        slf.set_option(py, "spark.remote", url)?;
+        Ok(slf)
     }
 
     /// `enableHiveSupport` - a no-op for a Connect client (the remote server's
     /// catalog is fixed); accepted for API parity.
     #[pyo3(name = "enableHiveSupport")]
-    fn enable_hive_support(&self) -> PySparkSessionBuilder {
-        self.clone()
+    fn enable_hive_support(slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
+        slf
     }
 
     /// Get the active session of this thread, or else the default session, or create one
@@ -191,13 +217,16 @@ impl PySparkSessionBuilder {
     #[pyo3(name = "getOrCreate")]
     fn get_or_create(&self, py: Python<'_>) -> PyResult<Py<PySparkSession>> {
         let url = self.url(py)?;
-        let session = {
+        let (session, created) = {
             let _creating = session_lock();
             match active_session(py).or_else(|| default_session(py)) {
-                Some(session) => session,
-                None => new_session(py, &url)?,
+                Some(session) => (session, false),
+                None => (new_session(py, &url)?, true),
             }
         };
+        if created {
+            self.install_hooks(py, &session)?;
+        }
         self.apply_options(py, &session.borrow(py).session)?;
         log_client_banner(py);
         Ok(session)
@@ -211,6 +240,7 @@ impl PySparkSessionBuilder {
             let _creating = session_lock();
             new_session(py, &url)?
         };
+        self.install_hooks(py, &session)?;
         self.apply_options(py, &session.borrow(py).session)?;
         log_client_banner(py);
         Ok(session)
@@ -218,13 +248,83 @@ impl PySparkSessionBuilder {
 }
 
 impl PySparkSessionBuilder {
-    /// Record a config pair, capturing `spark.remote` as the endpoint.
-    fn set_conf(&mut self, key: &str, value: String) {
+    /// The hooks of the factories of `_registerHook` for `session`, a session that the builder
+    /// created, as PySpark's `SparkSession(hook_factories=...)` makes them: of each factory
+    /// called with the session, of whose `on_execute_plan` the session's executions send the
+    /// requests. The factories run after the lock of the creation of sessions is released, as
+    /// Python code may release the GIL that the lock is held with.
+    fn install_hooks(&self, py: Python<'_>, session: &Py<PySparkSession>) -> PyResult<()> {
+        if self.hook_factories.is_empty() {
+            return Ok(());
+        }
+        let hooks = self
+            .hook_factories
+            .iter()
+            .map(|factory| {
+                factory
+                    .bind(py)
+                    .call1((session.clone_ref(py),))
+                    .map(Bound::unbind)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let hook: spark_connect::ExecutePlanHook = std::sync::Arc::new(move |request| {
+            Python::attach(|py| call_execute_plan_hooks(py, &hooks, request))
+                .map_err(crate::errors::callback_error)
+        });
+        session.borrow(py).session.set_execute_plan_hook(Some(hook));
+        Ok(())
+    }
+
+    /// Set an option, capturing `spark.remote` as the endpoint, and validate the startup URLs
+    /// after it, as PySpark's `config`.
+    fn set_option(&mut self, py: Python<'_>, key: &str, value: String) -> PyResult<()> {
         if key == "spark.remote" {
             self.remote_url = Some(value);
         } else {
             self.configs.push((key.to_string(), value));
         }
+        self.validate_startup_urls(py)
+    }
+
+    /// As PySpark's `_validate_startup_urls`: a master (`spark.master`, or else `MASTER`) with a
+    /// remote (`spark.remote`, or else `SPARK_REMOTE`) raises
+    /// `CANNOT_CONFIGURE_SPARK_CONNECT_MASTER`, and a remote other than `SPARK_REMOTE`, with
+    /// `SPARK_LOCAL_REMOTE`, raises `CANNOT_CONFIGURE_SPARK_CONNECT` unless it is a local one.
+    fn validate_startup_urls(&self, py: Python<'_>) -> PyResult<()> {
+        let master = self
+            .configs
+            .iter()
+            .rev()
+            .find(|(key, _)| key == "spark.master")
+            .map(|(_, value)| value.clone())
+            .or_else(|| std::env::var("MASTER").ok());
+        let remote = self
+            .remote_url
+            .clone()
+            .or_else(|| std::env::var("SPARK_REMOTE").ok());
+        if let (Some(master), Some(remote)) = (&master, &remote) {
+            return Err(crate::column::raise_pyspark(
+                py,
+                "PySparkRuntimeError",
+                "CANNOT_CONFIGURE_SPARK_CONNECT_MASTER",
+                &[("master_url", master), ("connect_url", remote)],
+            ));
+        }
+        if let (Some(remote), Ok(existing), Ok(_)) = (
+            &self.remote_url,
+            std::env::var("SPARK_REMOTE"),
+            std::env::var("SPARK_LOCAL_REMOTE"),
+        ) {
+            if &existing != remote && !remote.starts_with("local") {
+                return Err(crate::column::raise_pyspark(
+                    py,
+                    "PySparkRuntimeError",
+                    "CANNOT_CONFIGURE_SPARK_CONNECT",
+                    &[("existing_url", &existing), ("new_url", remote)],
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// The URL of the session: that of `remote()`, or else of `SPARK_REMOTE`, as PySpark's
@@ -261,7 +361,11 @@ impl PySparkSessionBuilder {
             return Ok(());
         }
         let conf = session.conf();
-        py.detach(|| conf.set_all(&options, true)).to_pyerr()
+        let warnings = py
+            .detach(|| conf.set_all(&options, true).map_err(Box::new))
+            .to_pyerr()?;
+        // As PySpark's `_set_all`, which warns each warning of the server.
+        crate::conf::warn_all(py, &warnings)
     }
 }
 
@@ -278,6 +382,36 @@ thread_local! {
     /// `SparkSession._active_session`.
     static ACTIVE_SESSION: std::cell::RefCell<Option<Py<PySparkSession>>> =
         const { std::cell::RefCell::new(None) };
+}
+
+/// The request that `hooks` return of `request`, as PySpark's client calls its session hooks:
+/// each `on_execute_plan` with the request of the one before, as a `pb2.ExecutePlanRequest`
+/// of the generated `pyspark.sql.connect.proto`, of the operation ID of `request`.
+fn call_execute_plan_hooks(
+    py: Python<'_>,
+    hooks: &[Py<PyAny>],
+    request: spark_connect_proto::ExecutePlanRequest,
+) -> PyResult<spark_connect_proto::ExecutePlanRequest> {
+    use prost::Message;
+    let operation_id = request.operation_id.clone();
+    let mut message = py
+        .import("pyspark.sql.connect.proto")?
+        .getattr("ExecutePlanRequest")?
+        .call_method1(
+            "FromString",
+            (pyo3::types::PyBytes::new(py, &request.encode_to_vec()),),
+        )?;
+    for hook in hooks {
+        message = hook.bind(py).call_method1("on_execute_plan", (message,))?;
+        if let Some(operation_id) = &operation_id {
+            message.setattr("operation_id", operation_id)?;
+        }
+    }
+    let bytes = message.call_method0("SerializeToString")?;
+    spark_connect_proto::ExecutePlanRequest::decode(
+        bytes.cast::<pyo3::types::PyBytes>()?.as_bytes(),
+    )
+    .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
 }
 
 /// Held while a session is got or created, as PySpark's `SparkSession._lock`, so that threads
@@ -320,6 +454,13 @@ fn new_session(py: Python<'_>, url: &str) -> PyResult<Py<PySparkSession>> {
         .get_or_create()
         .to_pyerr()?;
     let session = Py::new(py, PySparkSession::new(session))?;
+    set_default_and_active(py, &session);
+    Ok(session)
+}
+
+/// Make `session` the default session, and the active session of this thread, when they are
+/// not set, as PySpark's `SparkSession._set_default_and_active_session`.
+fn set_default_and_active(py: Python<'_>, session: &Py<PySparkSession>) {
     {
         let mut default = default_slot().lock().unwrap_or_else(|e| e.into_inner());
         if default.is_none() {
@@ -332,7 +473,6 @@ fn new_session(py: Python<'_>, url: &str) -> PyResult<Py<PySparkSession>> {
             *active = Some(session.clone_ref(py));
         }
     });
-    Ok(session)
 }
 
 /// Emit a one-time INFO log identifying this as the Rust-backed Spark Connect
@@ -363,19 +503,24 @@ fn log_client_banner(py: Python<'_>) {
     });
 }
 
-/// `SparkSession.Hook` - injects behavior around plan execution (mirrors pyspark's
-/// `SparkSession.Hook`). In pyspark, `on_execute_plan` rewrites the Python
-/// `ExecutePlanRequest` before the gRPC client sends it. This client uses a native Rust
-/// transport that builds and sends the request in Rust (there is no Python request to
-/// rewrite), so the hook is a passthrough - the same architectural reason
-/// `SparkSession.client` is absent. Exposed for API parity and subclassing.
+/// `SparkSession.Hook` - injects behavior around plan execution, as PySpark's
+/// `SparkSession.Hook`: a session calls the `on_execute_plan` of each hook of the factories of
+/// `_registerHook` with each `ExecutePlanRequest`, as a message of the generated
+/// `pyspark.sql.connect.proto`, before it sends it, and sends the request that it returns. The
+/// base hook returns the request as it is.
 #[pyclass(name = "Hook", module = "pyspark.sql.connect.session", subclass)]
 pub struct PyHook;
 
 #[pymethods]
 impl PyHook {
+    /// A hook, of the arguments of the `__init__` of a subclass, which `__new__` leaves to it,
+    /// as `object.__new__` does for PySpark's hooks.
     #[new]
-    fn new() -> Self {
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn new(
+        _args: &Bound<'_, pyo3::types::PyTuple>,
+        _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> Self {
         PyHook
     }
 
@@ -386,6 +531,19 @@ impl PyHook {
 }
 
 /// Python wrapper for a Spark session.
+/// A tag of `addTag` or `removeTag`: `CANNOT_BE_NONE` for None, as PySpark Connect's.
+fn tag_of(py: Python<'_>, tag: &Bound<'_, PyAny>) -> PyResult<String> {
+    if tag.is_none() {
+        return Err(crate::column::raise_pyspark(
+            py,
+            "PySparkValueError",
+            "CANNOT_BE_NONE",
+            &[("arg_name", "Spark Connect tag")],
+        ));
+    }
+    tag.extract()
+}
+
 #[pyclass(name = "SparkSession", module = "pyspark.sql.session")]
 pub struct PySparkSession {
     pub(crate) session: SparkSession,
@@ -393,6 +551,14 @@ pub struct PySparkSession {
 
 impl PySparkSession {
     pub fn new(session: SparkSession) -> Self {
+        // The progress of the session, for the progress bars of its executions, and its
+        // profiles, which the updates of its first execution update too.
+        Python::attach(|py| {
+            crate::progress::session_progress(py, &session);
+            if let Err(error) = crate::profiler::profiler_collector(py, &session) {
+                error.write_unraisable(py, None);
+            }
+        });
         PySparkSession { session }
     }
 
@@ -505,9 +671,16 @@ impl PySparkSession {
         let mut values: Vec<Vec<Value>> = (0..parts.len())
             .map(|_| Vec::with_capacity(fields.len()))
             .collect();
+        let _quanta = infer::DecimalQuanta::new();
         for (i, field) in fields.iter().enumerate() {
             for (row, out) in parts.iter().zip(values.iter_mut()) {
                 out.push(infer::convert(&row[i], &field.data_type, field.nullable)?);
+            }
+        }
+        // Then, as PySpark, the schema converts to Arrow, which has no char or varchar type.
+        for field in &fields {
+            if let Some(err) = infer::unsupported_arrow_type(py, &field.data_type)? {
+                return Err(err);
             }
         }
         // The names, with those that inference added, must name every column.
@@ -538,6 +711,259 @@ impl PySparkSession {
         }))
     }
 
+    /// A DataFrame of a non-empty pandas DataFrame under an explicit struct schema of the
+    /// same width, converted as PySpark does: each column by its Arrow conversion (session
+    /// time zone, safe casts), then the table cast to the schema, which the importer
+    /// sends as Arrow. None when the width differs, which the row path reports.
+    fn create_from_pandas_arrow(
+        &self,
+        py: Python<'_>,
+        data: &Bound<'_, PyAny>,
+        schema: &Bound<'_, PyAny>,
+        fields: &[StructField],
+    ) -> PyResult<Option<PyDataFrame>> {
+        if fields.is_empty() || data.len()? == 0 || data.getattr("columns")?.len()? != fields.len()
+        {
+            return Ok(None);
+        }
+        // The caller's schema object is checked, before any configuration request is sent.
+        let helper = py.import("pyspark.sql._pandas_input")?;
+        if !helper
+            .getattr("accepts_pandas_table")?
+            .call1((data, schema))?
+            .is_truthy()?
+        {
+            return Ok(None);
+        }
+        let options = py.detach(|| self.session.arrow_input_options().to_pyerr())?;
+        // The option is always set, as the importer requires it.
+        let timezone = options.timezone().unwrap_or("UTC").to_owned();
+        let large = options.use_large_var_types() == Some("true");
+        let safecheck = py
+            .detach(|| {
+                self.session
+                    .conf()
+                    .get("spark.sql.execution.pandas.convertToArrowArraySafely")
+            })
+            .to_pyerr()?
+            .as_deref()
+            == Some("true");
+        // The caller's StructType, which the guard checked, is converted as given; a DDL
+        // string is parsed into the same fields.
+        let schema_py = if schema
+            .extract::<PyRef<crate::types::PyStructType>>()
+            .is_ok()
+        {
+            schema.clone().unbind()
+        } else {
+            crate::types::data_type_to_py(
+                py,
+                &DataType::Struct {
+                    fields: fields.to_vec(),
+                },
+            )?
+        };
+        let table = helper.getattr("prepare_pandas_table")?.call1((
+            data,
+            schema_py.bind(py),
+            timezone,
+            safecheck,
+            large,
+        ))?;
+        let frame = crate::pyarrow_import::create_dataframe(
+            py,
+            &self.session,
+            &table,
+            Some(schema_py.bind(py)),
+        )?;
+        // As the other pandas paths, the explicit names are applied with toDF.
+        Ok(Some(PyDataFrame::new(frame.dataframe.to_df(
+            fields.iter().map(|field| field.name.as_str()).collect(),
+        ))))
+    }
+
+    /// A DataFrame of a pandas DataFrame without a schema, or of names, as PySpark Connect
+    /// converts one: each column by PySpark's Arrow conversion, of the type that Arrow infers
+    /// (`prepare_inferred_pandas_table`), sent without a schema, for the server to infer the
+    /// types of the Arrow data. The columns are named with `toDF`: by their labels, as strings,
+    /// or by the names, and `_n` for the n-th column past them.
+    ///
+    /// None for a frame that the row path converts: an empty one, a customized one
+    /// (`accepts_pandas_frame`), and any without pyarrow, which the row path does not need.
+    fn create_from_pandas_inferred(
+        &self,
+        py: Python<'_>,
+        data: &Bound<'_, PyAny>,
+        spec: &Spec,
+    ) -> PyResult<Option<PyDataFrame>> {
+        let names = match spec {
+            Spec::None => None,
+            Spec::Names(names) => Some(names),
+            Spec::Struct(_) | Spec::Atomic(_) => return Ok(None),
+        };
+        if data.len()? == 0 {
+            return Ok(None);
+        }
+        let helper = py.import("pyspark.sql._pandas_input")?;
+        if !helper.getattr("pyarrow_available")?.call0()?.is_truthy()?
+            || !helper
+                .getattr("accepts_pandas_frame")?
+                .call1((data,))?
+                .is_truthy()?
+        {
+            return Ok(None);
+        }
+        let width = data.getattr("columns")?.len()?;
+        let mut columns: Vec<String> = match names {
+            Some(names) => names.clone(),
+            None => {
+                let mut labels = Vec::with_capacity(width);
+                for label in data.getattr("columns")?.try_iter()? {
+                    let label = label?;
+                    labels.push(match label.cast::<pyo3::types::PyString>() {
+                        Ok(label) => label.to_cow()?.into_owned(),
+                        Err(_) => label.str()?.to_cow()?.into_owned(),
+                    });
+                }
+                if labels.is_empty() {
+                    return Err(crate::column::raise_pyspark(
+                        py,
+                        "PySparkValueError",
+                        "CANNOT_INFER_EMPTY_SCHEMA",
+                        &[],
+                    ));
+                }
+                labels
+            }
+        };
+        if columns.len() < width {
+            columns.extend((columns.len()..width).map(|i| format!("_{}", i + 1)));
+        }
+        let options = py.detach(|| self.session.arrow_input_options().to_pyerr())?;
+        let conf = |key: &'static str| {
+            py.detach(|| self.session.conf().get(key))
+                .to_pyerr()
+                .map(|value| value.as_deref() == Some("true"))
+        };
+        let safecheck = conf("spark.sql.execution.pandas.convertToArrowArraySafely")?;
+        let infer_dict_as_map =
+            names.is_none() && conf("spark.sql.execution.pandas.inferPandasDictAsMap")?;
+        let result = helper.getattr("prepare_inferred_pandas_table")?.call1((
+            data,
+            options.timezone().unwrap_or("UTC"),
+            safecheck,
+            options.use_large_var_types() == Some("true"),
+            infer_dict_as_map,
+            options.timestamp_type() == Some("TIMESTAMP_NTZ"),
+        ))?;
+        let table = result.get_item(0)?;
+        if let Some(struct_names) = result.get_item(1)?.extract::<Option<Vec<String>>>()? {
+            columns = struct_names;
+        }
+        let actual: usize = table.getattr("num_columns")?.extract()?;
+        if columns.len() != actual {
+            return Err(crate::column::raise_pyspark(
+                py,
+                "PySparkValueError",
+                "AXIS_LENGTH_MISMATCH",
+                &[
+                    ("expected_length", &columns.len().to_string()),
+                    ("actual_length", &actual.to_string()),
+                ],
+            ));
+        }
+        let batches = crate::pyarrow_import::table_batches(&table)?;
+        let df = py
+            .detach(|| {
+                self.session
+                    .create_dataframe_from_arrow_with_options(batches, None, &options)
+                    .map_err(Box::new)
+            })
+            .to_pyerr()?;
+        Ok(Some(PyDataFrame::new(if columns.is_empty() {
+            df
+        } else {
+            df.to_df(columns.iter().map(String::as_str).collect())
+        })))
+    }
+
+    /// A DataFrame of a numpy array, as PySpark Connect's `createDataFrame` builds it: an Arrow
+    /// table of a column of each column of the array, sent with the schema, if any, for the
+    /// server to cast to. The columns are named by the given names, else `value` for a
+    /// 1-dimensional array or an array of one column, else `_1`, `_2`, ...
+    ///
+    /// It raises `INVALID_NDARRAY_DIMENSION` for an array of another dimension, and
+    /// `AXIS_LENGTH_MISMATCH` for names, or a schema, of another number of columns. An empty
+    /// array is empty data, of the schema, if any.
+    fn create_from_ndarray(
+        &self,
+        py: Python<'_>,
+        data: &Bound<'_, PyAny>,
+        spec: Spec,
+    ) -> PyResult<PyDataFrame> {
+        let ndim: usize = data.getattr("ndim")?.extract()?;
+        if ndim != 1 && ndim != 2 {
+            return Err(crate::column::raise_pyspark(
+                py,
+                "PySparkValueError",
+                "INVALID_NDARRAY_DIMENSION",
+                &[("dimensions", "1 or 2")],
+            ));
+        }
+        if data.len()? == 0 {
+            return self.create_from_local(py, PyList::empty(py).as_any(), spec);
+        }
+        let width: usize = if ndim == 1 {
+            1
+        } else {
+            data.getattr("shape")?.get_item(1)?.extract()?
+        };
+        let (names, num_cols, schema) = match spec {
+            Spec::Names(names) => (Some(names), None, None),
+            Spec::Struct(fields) => (None, Some(fields.len()), Some(DataType::Struct { fields })),
+            Spec::Atomic(atomic) => (None, Some(1), Some(atomic)),
+            Spec::None => (None, None, None),
+        };
+        let names = names.unwrap_or_else(|| {
+            if width == 1 {
+                vec!["value".to_string()]
+            } else {
+                (1..=width).map(|i| format!("_{i}")).collect()
+            }
+        });
+        let axis_length_mismatch = |expected: usize| {
+            crate::column::raise_pyspark(
+                py,
+                "PySparkValueError",
+                "AXIS_LENGTH_MISMATCH",
+                &[
+                    ("expected_length", &expected.to_string()),
+                    ("actual_length", &width.to_string()),
+                ],
+            )
+        };
+        if names.len() != width {
+            return Err(axis_length_mismatch(names.len()));
+        }
+        let table = py
+            .import("pyspark.sql._arrow_input")?
+            .getattr("ndarray_table")?
+            .call1((data, names))?;
+        if let Some(expected) = num_cols.filter(|&expected| expected != width) {
+            return Err(axis_length_mismatch(expected));
+        }
+        let batches = crate::pyarrow_import::table_batches(&table)?;
+        let options = py.detach(|| self.session.arrow_input_options().to_pyerr())?;
+        let df = py
+            .detach(|| {
+                self.session
+                    .create_dataframe_from_arrow_with_options(batches, schema, &options)
+                    .map_err(Box::new)
+            })
+            .to_pyerr()?;
+        Ok(PyDataFrame::new(df))
+    }
+
     /// A DataFrame of a pandas DataFrame: its rows as lists with NaN and NaT as None, typed
     /// by the first non-null value of each column, and its column labels, as strings, or the
     /// given names, applied with `toDF`.
@@ -547,6 +973,9 @@ impl PySparkSession {
         data: &Bound<'_, PyAny>,
         spec: Spec,
     ) -> PyResult<PyDataFrame> {
+        // Without a struct schema, PySpark infers the Arrow type of each column, which has
+        // no int64 for a Python int beyond the 64-bit range.
+        let inferred = !matches!(spec, Spec::Struct(_));
         let mut columns = Vec::new();
         for label in data.getattr("columns")?.try_iter()? {
             columns.push(label?.str()?.extract::<String>()?);
@@ -608,7 +1037,19 @@ impl PySparkSession {
         for row in data.iter() {
             let values = row
                 .try_iter()?
-                .map(|v| py_to_value(&v?))
+                .map(|v| {
+                    let v = v?;
+                    if inferred {
+                        if let Ok(i) = v.cast_exact::<pyo3::types::PyInt>() {
+                            if i.extract::<i64>().is_err() {
+                                return Err(pyo3::exceptions::PyOverflowError::new_err(
+                                    "Python int too large to convert to C long",
+                                ));
+                            }
+                        }
+                    }
+                    py_to_value(&v)
+                })
                 .collect::<PyResult<Vec<_>>>()?;
             if values.len() != row_names.len() {
                 // As pyspark, which checks every row against the width of the schema.
@@ -651,10 +1092,48 @@ impl PySparkSession {
                         .iter()
                         .filter_map(|row| row.get(i))
                         .find(|value| !matches!(value, Value::Null));
-                    let data_type = match first {
-                        Some(Value::Decimal { .. }) => pandas_decimal_type(&data, i)?,
-                        Some(value) => value_to_datatype(value),
-                        None => pandas_dtype_type(dtypes.get(i).map_or("object", String::as_str)),
+                    let cells = || rows.iter().filter_map(|row| row.get(i));
+                    let data_type = if !cells().any(|v| matches!(v, Value::Decimal { .. })) {
+                        match first {
+                            Some(value) => value_to_datatype(value),
+                            None => {
+                                pandas_dtype_type(dtypes.get(i).map_or("object", String::as_str))
+                            }
+                        }
+                    } else if cells().all(|v| matches!(v, Value::Decimal { .. } | Value::Null)) {
+                        pandas_decimal_type(&data, &rows, i)?
+                    } else {
+                        // Decimals with other values, which PySpark's conversion leaves to
+                        // Arrow: it types the column, takes ints as Decimals and raises for
+                        // the others, so the column is typed and converted by Arrow here too.
+                        let column = data
+                            .iter()
+                            .map(|row| row.get_item(i))
+                            .collect::<PyResult<Vec<_>>>()?;
+                        let typed = py
+                            .import("pyspark.sql._pandas_input")?
+                            .getattr("arrow_decimal_column")?
+                            .call1((
+                                column,
+                                dtypes.get(i).map_or("object", String::as_str),
+                                labels.get(i).unwrap_or(name),
+                            ))?;
+                        let (precision, scale, values): (i32, i32, Vec<Bound<'_, PyAny>>) =
+                            typed.extract()?;
+                        let values = values
+                            .iter()
+                            .map(|v| Ok(py_to_value(v)?))
+                            .collect::<PyResult<Vec<Value>>>()?;
+                        rows = std::mem::take(&mut rows)
+                            .into_iter()
+                            .zip(values)
+                            .map(|(row, value)| {
+                                let mut cells = row.into_values();
+                                cells[i] = value;
+                                StructValue::new(row_names.clone(), cells).into()
+                            })
+                            .collect();
+                        DataType::Decimal { precision, scale }
                     };
                     fields.push(StructField {
                         name: name.clone(),
@@ -799,33 +1278,31 @@ fn schema_spec(
 
 #[pymethods]
 impl PySparkSession {
-    /// The session builder, reached as `SparkSession.builder` (class attribute,
-    /// matching pyspark).
+    /// The session builder, reached as `SparkSession.builder`: a new builder of each access, as
+    /// PySpark's `classproperty`.
     #[classattr]
-    fn builder() -> PySparkSessionBuilder {
-        PySparkSessionBuilder::new()
+    fn builder() -> PyBuilderProperty {
+        PyBuilderProperty
     }
 
     /// Create a DataFrame representing a range of integers.
     ///
     /// Mirrors `pyspark.sql.SparkSession.range(start, end=None, step=1, numPartitions=None)`:
     /// called with a single positional arg it means `range(0, start)`.
-    #[pyo3(signature = (start, end=None, step=1, numPartitions=None))]
+    /// Each argument is taken by its `int()`, as PySpark's `range` takes them.
+    #[pyo3(signature = (start, end=None, step=RangeStep::Omitted, numPartitions=None))]
     #[allow(non_snake_case)]
     fn range(
         &self,
-        start: i64,
-        end: Option<i64>,
-        step: i64,
-        numPartitions: Option<i32>,
+        start: &Bound<'_, PyAny>,
+        end: Option<&Bound<'_, PyAny>>,
+        step: RangeStep,
+        numPartitions: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let (start, end) = match end {
-            Some(e) => (start, e),
-            None => (0, start),
-        };
+        let (start, end, step, num_partitions) = range_arguments(start, end, step, numPartitions)?;
         let df = self
             .session
-            .range_full(start, end, step, numPartitions)
+            .range_full(start, end, step, num_partitions)
             .to_pyerr()?;
         Ok(PyDataFrame::new(df))
     }
@@ -963,6 +1440,9 @@ impl PySparkSession {
             return crate::pyarrow_import::create_dataframe(py, &self.session, data, schema);
         }
         let spec = schema_spec(py, &self.session, schema)?;
+        if is_loaded_instance(py, data, "numpy", "ndarray")? {
+            return self.create_from_ndarray(py, data, spec);
+        }
         if is_loaded_instance(py, data, "pandas", "DataFrame")? {
             // Guarded integer columns share the existing Arrow importer. Schema
             // validation above and unsupported pandas conversions keep master's
@@ -1039,9 +1519,14 @@ impl PySparkSession {
                 let schema = DataType::Struct {
                     fields: fields.clone(),
                 };
-                let frame = self
-                    .session
-                    .create_dataframe_from_inline_arrow_ipc(ipc.extract()?, schema);
+                let ipc: Vec<u8> = ipc.extract()?;
+                let frame = py
+                    .detach(|| {
+                        self.session
+                            .create_dataframe_from_inline_arrow_ipc(ipc, schema)
+                            .map_err(Box::new)
+                    })
+                    .to_pyerr()?;
                 // Match pandas row input: explicit nonempty field names travel
                 // through toDF as well as the local relation's logical schema.
                 return Ok(PyDataFrame::new(
@@ -1052,6 +1537,22 @@ impl PySparkSession {
                 .import("pyspark.sql._pandas_input")?
                 .getattr("prepare_string_input")?
                 .call1((data, schema))?;
+            // Columns kept in pandas' Arrow string storage come as an Arrow table, which the
+            // importer sends, or uploads at the relation cache threshold.
+            if !ipc.is_none() && !ipc.is_instance_of::<pyo3::types::PyBytes>() {
+                let frame =
+                    crate::pyarrow_import::create_dataframe(py, &self.session, &ipc, schema)?;
+                return Ok(match &spec {
+                    Spec::Struct(fields) if !fields.is_empty() && ipc.len()? > 0 => {
+                        PyDataFrame::new(
+                            frame
+                                .dataframe
+                                .to_df(fields.iter().map(|field| field.name.as_str()).collect()),
+                        )
+                    }
+                    _ => frame,
+                });
+            }
             if !ipc.is_none() {
                 let fields = match &spec {
                     Spec::Struct(fields) => fields,
@@ -1064,9 +1565,14 @@ impl PySparkSession {
                 let schema = DataType::Struct {
                     fields: fields.clone(),
                 };
-                let frame = self
-                    .session
-                    .create_dataframe_from_inline_arrow_ipc(ipc.extract()?, schema);
+                let ipc: Vec<u8> = ipc.extract()?;
+                let frame = py
+                    .detach(|| {
+                        self.session
+                            .create_dataframe_from_inline_arrow_ipc(ipc, schema)
+                            .map_err(Box::new)
+                    })
+                    .to_pyerr()?;
                 // Match pandas row input: explicit nonempty field names travel
                 // through toDF as well as the local relation's logical schema.
                 return Ok(PyDataFrame::new(
@@ -1090,6 +1596,16 @@ impl PySparkSession {
                     }
                     _ => frame,
                 });
+            }
+            // An explicit struct schema converts with PySpark's Arrow conversion, which
+            // reports the same values and errors. Other schemas keep the row path.
+            if let (Spec::Struct(fields), Some(schema)) = (&spec, schema) {
+                if let Some(frame) = self.create_from_pandas_arrow(py, data, schema, fields)? {
+                    return Ok(frame);
+                }
+            }
+            if let Some(frame) = self.create_from_pandas_inferred(py, data, &spec)? {
+                return Ok(frame);
             }
             return self.create_from_pandas(py, data, spec);
         }
@@ -1139,7 +1655,9 @@ impl PySparkSession {
         crate::tvf::PyTableValuedFunction::new(self.session.tvf())
     }
 
-    /// Copy a local file to the Spark-managed filesystem (`copyFromLocalToFs`).
+    /// Copy a local file to the Spark-managed filesystem (`copyFromLocalToFs`), with the errors
+    /// of PySpark Connect's: `NO_SCHEMA_AND_DRIVER_DEFAULT_SCHEME` for a destination of a scheme,
+    /// and an `AssertionError` for a local path that is not a file.
     #[pyo3(name = "copyFromLocalToFs")]
     fn copy_from_local_to_fs(
         &self,
@@ -1147,8 +1665,49 @@ impl PySparkSession {
         local_path: &str,
         dest_path: &str,
     ) -> PyResult<()> {
+        let scheme: String = py
+            .import("urllib.parse")?
+            .call_method1("urlparse", (dest_path,))?
+            .getattr("scheme")?
+            .extract()?;
+        if !scheme.is_empty() {
+            return Err(crate::column::raise_pyspark(
+                py,
+                "PySparkValueError",
+                "NO_SCHEMA_AND_DRIVER_DEFAULT_SCHEME",
+                &[("arg_name", "dest_path")],
+            ));
+        }
+        let is_file: bool = py
+            .import("pathlib")?
+            .getattr("Path")?
+            .call1((local_path,))?
+            .call_method0("absolute")?
+            .call_method0("is_file")?
+            .extract()?;
+        if !is_file {
+            return Err(pyo3::exceptions::PyAssertionError::new_err(
+                "local path must be a file path.",
+            ));
+        }
         py.detach(|| self.session.copy_from_local_to_fs(local_path, dest_path))
             .to_pyerr()
+    }
+
+    /// As PySpark Connect's: the attributes of the JVM of a classic session raise
+    /// `JVM_ATTRIBUTE_NOT_SUPPORTED`, and the others are not attributes.
+    fn __getattr__(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
+        if ["_jsc", "_jconf", "_jvm", "_jsparkSession", "sparkContext"].contains(&name) {
+            return Err(crate::column::raise_pyspark(
+                py,
+                "PySparkAttributeError",
+                "JVM_ATTRIBUTE_NOT_SUPPORTED",
+                &[("attr_name", name)],
+            ));
+        }
+        Err(pyo3::exceptions::PyAttributeError::new_err(format!(
+            "'SparkSession' object has no attribute '{name}'"
+        )))
     }
 
     /// DataFrameReader for batch reads (`spark.read`).
@@ -1180,6 +1739,8 @@ impl PySparkSession {
     /// to release the session on the server is logged, not raised. Also clears the
     /// active session and the cached `SQLContext` if they belong to this session.
     fn stop(&self, py: Python<'_>) -> PyResult<()> {
+        crate::progress::forget_session(&self.session);
+        crate::profiler::forget_session(&self.session);
         if let Err(e) = py.detach(|| self.session.stop()) {
             let logger = py
                 .import("logging")?
@@ -1243,7 +1804,9 @@ impl PySparkSession {
     }
 
     /// Register a Java UDF/UDAF by class name (used by
-    /// `UDFRegistration.registerJavaFunction` / `registerJavaUDAF`).
+    /// `UDFRegistration.registerJavaFunction` / `registerJavaUDAF`), of the return type
+    /// `return_type`, as PySpark's `JavaUDF` sends it: a DDL string unparsed, for the server
+    /// to parse, and a DataType as itself, else `UNSUPPORTED_OPERATION` of "data type ...".
     #[pyo3(name = "_registerJavaFunction", signature = (name, java_class_name, return_type=None, aggregate=false))]
     #[allow(non_snake_case)]
     fn register_java_function_py(
@@ -1251,12 +1814,32 @@ impl PySparkSession {
         py: Python<'_>,
         name: &str,
         java_class_name: &str,
-        return_type: Option<&str>,
+        return_type: Option<&Bound<'_, PyAny>>,
         aggregate: bool,
     ) -> PyResult<()> {
+        let return_type = match return_type {
+            None => None,
+            Some(ddl) if ddl.is_instance_of::<pyo3::types::PyString>() => {
+                Some(DataType::Unparsed {
+                    data_type_string: ddl.extract()?,
+                })
+            }
+            Some(data_type) if data_type.is_instance_of::<crate::types::PyDataType>() => {
+                Some(crate::types::py_to_data_type(data_type)?)
+            }
+            Some(other) => {
+                return Err(crate::column::raise_pyspark(
+                    py,
+                    "PySparkValueError",
+                    "UNSUPPORTED_OPERATION",
+                    &[("operation", &format!("data type {}", other.str()?))],
+                ))
+            }
+        };
         py.detach(|| {
             self.session
-                .register_java_function(name, java_class_name, return_type, aggregate)
+                .register_java_function_with(name, java_class_name, return_type, aggregate)
+                .map_err(Box::new)
         })
         .to_pyerr()
     }
@@ -1334,21 +1917,117 @@ impl PySparkSession {
         self.session.session_id().to_string()
     }
 
+    /// Add the extension of the bytes of a `google.protobuf.Any`, `extension`, to the user context
+    /// of the requests of this session: of all the threads, if `is_global`, else of the current
+    /// thread. Its ID: for the user context extensions of `client`.
+    fn _add_user_context_extension(&self, extension: &[u8], is_global: bool) -> PyResult<String> {
+        use prost::Message;
+        let extension = prost_types::Any::decode(extension)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+        Ok(if is_global {
+            self.session.add_global_user_context_extension(extension)
+        } else {
+            self.session
+                .add_threadlocal_user_context_extension(extension)
+        })
+    }
+
+    /// The user context extensions of this session, the global ones if `is_global`, else those
+    /// of the current thread, as their IDs and the bytes of each `google.protobuf.Any`: for
+    /// `client`.
+    fn _user_context_extensions<'py>(
+        &self,
+        py: Python<'py>,
+        is_global: bool,
+    ) -> Vec<(String, Bound<'py, pyo3::types::PyBytes>)> {
+        use prost::Message;
+        let extensions = if is_global {
+            self.session.global_user_context_extensions()
+        } else {
+            self.session.threadlocal_user_context_extensions()
+        };
+        extensions
+            .into_iter()
+            .map(|(id, extension)| {
+                (
+                    id,
+                    pyo3::types::PyBytes::new(py, &extension.encode_to_vec()),
+                )
+            })
+            .collect()
+    }
+
+    /// Remove the user context extension of `extension_id`, for `client`.
+    fn _remove_user_context_extension(&self, extension_id: &str) {
+        self.session.remove_user_context_extension(extension_id);
+    }
+
+    /// Remove the user context extensions of the current thread and the global ones, for
+    /// `client`.
+    fn _clear_user_context_extensions(&self) {
+        self.session.clear_user_context_extensions();
+    }
+
+    /// The responses of the server to `command`, the bytes of a `spark.connect.Command` built
+    /// outside the client, such as the ML commands of `pyspark.ml`, as the bytes of each
+    /// `ExecutePlanResponse`: for the `execute_command` of `client`.
+    fn _execute_command<'py>(
+        &self,
+        py: Python<'py>,
+        command: &[u8],
+    ) -> PyResult<Vec<Bound<'py, pyo3::types::PyBytes>>> {
+        use prost::Message;
+        let command = spark_connect_proto::Command::decode(command)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+        let responses = py
+            .detach(|| {
+                self.session
+                    .execute_command_proto(command)
+                    .map_err(Box::new)
+            })
+            .to_pyerr()?;
+        Ok(responses
+            .iter()
+            .map(|response| pyo3::types::PyBytes::new(py, &response.encode_to_vec()))
+            .collect())
+    }
+
+    /// The client of PySpark Connect's `session.client`, as far as the modules of PySpark that
+    /// build their own messages, such as `pyspark.ml`, use it: of their commands and of the ML
+    /// cache, over the Rust transport (`pyspark.sql.connect.client`).
+    #[getter]
+    fn client(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        Ok(slf
+            .py()
+            .import("pyspark.sql.connect.client")?
+            .getattr("_client_of")?
+            .call1((slf,))?
+            .unbind())
+    }
+
+    /// Release the session on the server, without stopping it, for `client.release_session`.
+    fn _release_session(&self, py: Python<'_>) -> PyResult<()> {
+        let session = self.session.clone();
+        py.detach(|| session.release_session().map_err(Box::new))
+            .to_pyerr()
+    }
+
+    /// Close the session without releasing it on the server, for `client.close`.
+    fn _close(&self) {
+        self.session.close();
+    }
+
+    /// The client of the session, as PySpark Connect's `SparkSession._client`, which the
+    /// modules of PySpark read, such as the `TorchDistributor` of `pyspark.ml`: `client`.
+    #[getter]
+    fn _client(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        Self::client(slf)
+    }
+
     /// The session id (property form, mirrors `SparkSession.session_id`).
     #[getter]
     fn session_id(&self) -> String {
         self.session.session_id().to_string()
-    }
-
-    /// The low-level Connect client. In the reference client this is the gRPC
-    /// `SparkConnectClient`; here the transport is Rust, so we expose a minimal stub
-    /// carrying the bits test/util code touches (`_server_session_id`, `_cleanup_ml_cache`),
-    /// mirroring `SparkSession.client` enough for harnesses like `ReusedConnectTestCase`.
-    #[getter]
-    fn client(&self) -> PyConnectClientStub {
-        PyConnectClientStub {
-            session_id: self.session.session_id().to_string(),
-        }
     }
 
     /// Whether this session has been stopped. Mirrors `SparkSession.is_stopped`.
@@ -1389,6 +2068,56 @@ impl PySparkSession {
         active_session(py)
     }
 
+    /// The active session of this thread, if its ID is `session_id`, as PySpark Connect's
+    /// `SparkSession._getActiveSessionIfMatches`, which gives back a pickled session: without
+    /// an active session, as on a Python worker of the server, it raises `NO_ACTIVE_SESSION`,
+    /// and for another one, `PySparkAssertionError`.
+    #[staticmethod]
+    #[pyo3(name = "_getActiveSessionIfMatches")]
+    fn get_active_session_if_matches(
+        py: Python<'_>,
+        session_id: &str,
+    ) -> PyResult<Py<PySparkSession>> {
+        let Some(session) = active_session(py) else {
+            return Err(crate::column::raise_pyspark(
+                py,
+                "PySparkRuntimeError",
+                "NO_ACTIVE_SESSION",
+                &[],
+            ));
+        };
+        let active_id = session.borrow(py).session.session_id().to_string();
+        if active_id != session_id {
+            let error = py
+                .import("pyspark.errors")?
+                .getattr("PySparkAssertionError")?
+                .call1((format!(
+                    "Expected session ID does not match active session ID: \
+                     {session_id} != {active_id}"
+                ),))?;
+            return Err(PyErr::from_value(error));
+        }
+        Ok(session)
+    }
+
+    /// A session pickles, as PySpark Connect's: as a function of its ID, which cloudpickle
+    /// pickles by value, that gives back the active session of that ID
+    /// (`_getActiveSessionIfMatches`).
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        py.import("pyspark.sql.connect.session")?
+            .getattr("_reduce_session")?
+            .call1((self.session.session_id().to_string(),))
+    }
+
+    /// The type of the DDL string `ddl`, as the server parses it, as PySpark Connect's
+    /// `SparkSession._parse_ddl`, of a `DDLParse` of an `AnalyzePlanRequest`.
+    fn _parse_ddl(&self, py: Python<'_>, ddl: &str) -> PyResult<Py<PyAny>> {
+        let data_type = py
+            .detach(|| self.session.parse_ddl(ddl).map_err(Box::new))
+            .to_pyerr()?;
+        crate::types::data_type_to_py(py, &data_type)
+    }
+
     /// The active session of this thread, or else the default session; errors if neither.
     /// Mirrors `SparkSession.active`, which raises `NO_ACTIVE_OR_DEFAULT_SESSION`.
     #[staticmethod]
@@ -1405,50 +2134,48 @@ impl PySparkSession {
             })
     }
 
-    /// Register a progress handler invoked on each execution-progress message.
-    /// Returns an id for `removeProgressHandler`. Mirrors `registerProgressHandler`.
+    /// Register a handler of the progress of the executions of the session, as PySpark
+    /// Connect's: once, called with the keyword arguments of `ProgressHandler` (`stages`,
+    /// `inflight_tasks`, `operation_id` and `done`) for each progress of an execution, and
+    /// once more, as done, when it ends.
     #[pyo3(name = "registerProgressHandler")]
-    fn register_progress_handler(&self, handler: Py<PyAny>) -> u64 {
-        self.session.register_progress_handler(move |progress| {
-            Python::attach(|py| {
-                let dict = pyo3::types::PyDict::new(py);
-                let _ = dict.set_item("num_inflight_tasks", progress.num_inflight_tasks);
-                let stages = PyList::empty(py);
-                for s in &progress.stages {
-                    let sd = pyo3::types::PyDict::new(py);
-                    let _ = sd.set_item("stage_id", s.stage_id);
-                    let _ = sd.set_item("num_tasks", s.num_tasks);
-                    let _ = sd.set_item("num_completed_tasks", s.num_completed_tasks);
-                    let _ = sd.set_item("input_bytes_read", s.input_bytes_read);
-                    let _ = sd.set_item("done", s.done);
-                    let _ = stages.append(sd);
-                }
-                let _ = dict.set_item("stages", stages);
-                // Best-effort: ignore handler errors so progress never breaks execution.
-                let _ = handler.call1(py, (dict,));
-            });
-        })
+    fn register_progress_handler(
+        &self,
+        py: Python<'_>,
+        handler: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        crate::progress::session_progress(py, &self.session).register(py, handler)
     }
 
-    /// Remove a progress handler by id. Mirrors `removeProgressHandler`.
+    /// Remove a progress handler, as PySpark Connect's: a `ValueError` for one that is not
+    /// registered.
     #[pyo3(name = "removeProgressHandler")]
-    fn remove_progress_handler(&self, handler: u64) {
-        self.session.remove_progress_handler(handler);
+    fn remove_progress_handler(&self, py: Python<'_>, handler: &Bound<'_, PyAny>) -> PyResult<()> {
+        crate::progress::session_progress(py, &self.session).remove(py, handler)
     }
 
     /// Remove all progress handlers. Mirrors `clearProgressHandlers`.
     #[pyo3(name = "clearProgressHandlers")]
-    fn clear_progress_handlers(&self) {
-        self.session.clear_progress_handlers();
+    fn clear_progress_handlers(&self, py: Python<'_>) -> PyResult<()> {
+        crate::progress::session_progress(py, &self.session).clear(py)
     }
 
-    /// Get the profiler collector for this session.
-    ///
-    /// Mirrors `SparkSession.profile`. Profile data is accumulated across query
-    /// executions and can be shown, dumped, or cleared via the returned collector.
+    /// The UDF profiles of the session, as PySpark Connect's `spark.profile`: a `Profile` of its
+    /// `ConnectProfilerCollector`, of `show`, `dump`, `render` and `clear`.
     #[getter]
-    fn profile(&self) -> PyProfilerCollector {
-        PyProfilerCollector::new(self.session.profiler())
+    fn profile(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let collector = crate::profiler::profiler_collector(py, &self.session)?;
+        Ok(py
+            .import("pyspark.sql.profiler")?
+            .getattr("Profile")?
+            .call1((collector,))?
+            .unbind())
+    }
+
+    /// The `ConnectProfilerCollector` of the session, as PySpark Connect's.
+    #[getter(_profiler_collector)]
+    fn profiler_collector(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        crate::profiler::profiler_collector(py, &self.session)
     }
 
     /// Get the data source registration accessor.
@@ -1473,8 +2200,19 @@ impl PySparkSession {
         py.detach(|| self.session.version()).to_pyerr()
     }
 
-    fn table(&self, tableName: &str) -> PyResult<PyDataFrame> {
-        Ok(PyDataFrame::new(self.session.table(tableName).to_pyerr()?))
+    /// The DataFrame of a table, as PySpark Connect's: `NOT_EXPECTED_TYPE` for a name that is not
+    /// a str.
+    fn table(&self, tableName: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let Ok(name) = tableName.cast::<pyo3::types::PyString>() else {
+            return Err(crate::stat_arguments::not_expected_type(
+                tableName,
+                "tableName",
+                "str",
+            ));
+        };
+        Ok(PyDataFrame::new(
+            self.session.table(&name.to_cow()?).to_pyerr()?,
+        ))
     }
 
     // Reference: emptyDataFrame(schema) -> createDataFrame([], schema). We accept an
@@ -1513,19 +2251,45 @@ impl PySparkSession {
             .to_pyerr()
     }
 
+    /// Add a tag of the current thread, with the errors of PySpark Connect's tags: `CANNOT_BE_NONE`
+    /// for None, and those of [`SparkSession::check_tag`].
     #[pyo3(name = "addTag")]
-    fn add_tag(&self, tag: &str) -> PyResult<()> {
-        self.session.add_tag(tag).to_pyerr()
+    fn add_tag(&self, py: Python<'_>, tag: &Bound<'_, PyAny>) -> PyResult<()> {
+        let tag = tag_of(py, tag)?;
+        self.session.add_tag(&tag).to_pyerr()
     }
 
+    /// Remove a tag of the current thread, with the errors of `addTag`, as PySpark Connect's.
     #[pyo3(name = "removeTag")]
-    fn remove_tag(&self, tag: &str) {
-        self.session.remove_tag(tag)
+    fn remove_tag(&self, py: Python<'_>, tag: &Bound<'_, PyAny>) -> PyResult<()> {
+        let tag = tag_of(py, tag)?;
+        SparkSession::check_tag(&tag).to_pyerr()?;
+        self.session.remove_tag(&tag);
+        Ok(())
     }
 
+    /// Make `session` the default session, and the active session of this thread, when they
+    /// are not set, as PySpark's, which `inheritable_thread_target` calls in a new thread.
+    #[staticmethod]
+    #[pyo3(name = "_set_default_and_active_session")]
+    fn set_default_and_active_session(py: Python<'_>, session: Py<PySparkSession>) {
+        set_default_and_active(py, &session);
+    }
+
+    /// The DDL of the schema `struct`, as PySpark Connect's `_to_ddl`: the server converts
+    /// its JSON.
+    #[pyo3(name = "_to_ddl")]
+    fn to_ddl(&self, py: Python<'_>, r#struct: &Bound<'_, PyAny>) -> PyResult<String> {
+        let json: String = r#struct.call_method0("json")?.extract()?;
+        let session = self.session.clone();
+        py.detach(|| session.json_to_ddl(&json).map_err(Box::new))
+            .to_pyerr()
+    }
+
+    /// The tags of the current thread, a set, as PySpark's `getTags`.
     #[pyo3(name = "getTags")]
-    fn get_tags(&self) -> Vec<String> {
-        self.session.get_tags()
+    fn get_tags<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PySet>> {
+        pyo3::types::PySet::new(py, self.session.get_tags())
     }
 
     #[pyo3(name = "clearTags")]
@@ -1536,7 +2300,8 @@ impl PySparkSession {
     /// Add local files, or `file:` URIs, as artifacts of the session, as PySpark's
     /// `addArtifacts(*path, pyfile=False, archive=False, file=False)`: each path is named by
     /// the flags and its extension, and the errors for a path that is not supported are
-    /// PySpark's (see `spark_connect_core::artifact::parse_artifact`).
+    /// PySpark's (see `spark_connect_core::artifact::parse_artifact`). A class file is refused,
+    /// as PySpark's ArtifactManager does not upload one.
     #[pyo3(name = "addArtifacts", signature = (*path, pyfile=false, archive=false, file=false))]
     fn add_artifacts(
         &self,
@@ -1546,8 +2311,6 @@ impl PySparkSession {
         archive: bool,
         file: bool,
     ) -> PyResult<()> {
-        use spark_connect_core::artifact::{parse_artifact, UnsupportedArtifact};
-
         if [pyfile, archive, file].iter().filter(|flag| **flag).count() > 1 {
             return Err(crate::column::raise_pyspark(
                 py,
@@ -1559,29 +2322,18 @@ impl PySparkSession {
                 ],
             ));
         }
+        // As PySpark's _parse_artifacts, every path is parsed, and a local file opened, before
+        // any upload.
         for p in &path {
-            if let Err(unsupported) = parse_artifact(p, pyfile, archive, file) {
-                return Err(match unsupported {
-                    UnsupportedArtifact::Format(local) => crate::column::raise_pyspark(
-                        py,
-                        "PySparkRuntimeError",
-                        "UNSUPPORTED_OPERATION",
-                        &[("operation", &format!("{local} file format"))],
-                    ),
-                    UnsupportedArtifact::Scheme(scheme) => crate::column::raise_pyspark(
-                        py,
-                        "PySparkRuntimeError",
-                        "UNSUPPORTED_OPERATION",
-                        &[("operation", &format!("{scheme} scheme"))],
-                    ),
-                    UnsupportedArtifact::HashInArchivePath => crate::column::raise_pyspark(
-                        py,
-                        "PySparkValueError",
-                        "VALUE_ALLOWED",
-                        &[("arg_name", "artifact path"), ("disallowed_value", "#")],
-                    ),
-                });
+            let (name, local) = match parse_artifact(p, pyfile, archive, file) {
+                Ok(parsed) => parsed,
+                Err(unsupported) => return Err(unsupported_artifact_error(py, unsupported)),
+            };
+            if name.starts_with("classes/") {
+                let format = UnsupportedArtifact::Format(local.to_string_lossy().into_owned());
+                return Err(unsupported_artifact_error(py, format));
             }
+            check_local_artifact(py, &name, &local, pyfile)?;
         }
         let refs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
         py.detach(|| {
@@ -1631,24 +2383,54 @@ impl PySparkSession {
     }
 }
 
-/// Minimal stand-in for the reference `SparkConnectClient`, returned by
-/// `SparkSession.client`. The real client is the Rust transport; this only surfaces the
-/// members that test/utility code (e.g. `ReusedConnectTestCase`) touches.
-#[pyclass(name = "SparkConnectClientStub", module = "pyspark.sql.connect.client")]
-pub struct PyConnectClientStub {
-    session_id: String,
+/// PySpark's error for a path of `addArtifacts` that it does not upload.
+fn unsupported_artifact_error(py: Python<'_>, unsupported: UnsupportedArtifact) -> PyErr {
+    match unsupported {
+        UnsupportedArtifact::Format(local) => crate::column::raise_pyspark(
+            py,
+            "PySparkRuntimeError",
+            "UNSUPPORTED_OPERATION",
+            &[("operation", &format!("{local} file format"))],
+        ),
+        UnsupportedArtifact::Scheme(scheme) => crate::column::raise_pyspark(
+            py,
+            "PySparkRuntimeError",
+            "UNSUPPORTED_OPERATION",
+            &[("operation", &format!("{scheme} scheme"))],
+        ),
+        UnsupportedArtifact::HashInArchivePath => crate::column::raise_pyspark(
+            py,
+            "PySparkValueError",
+            "VALUE_ALLOWED",
+            &[("arg_name", "artifact path"), ("disallowed_value", "#")],
+        ),
+    }
 }
 
-#[pymethods]
-impl PyConnectClientStub {
-    /// The server-side session id (property, mirrors `client._server_session_id`).
-    #[getter]
-    fn _server_session_id(&self) -> String {
-        self.session_id.clone()
+/// The client side of parsing a local artifact, as PySpark's `_parse_artifacts` does it: a
+/// Python file, zip, egg or jar of `pyfile` is importable by the client, and the file is opened
+/// as PySpark's `LocalFile` opens it, so that a missing file or a directory raises the error of
+/// `open` before any upload.
+fn check_local_artifact(
+    py: Python<'_>,
+    name: &str,
+    local: &std::path::Path,
+    pyfile: bool,
+) -> PyResult<()> {
+    let local = local.to_string_lossy();
+    let importable = pyfile && name.starts_with("pyfiles/");
+    if importable && !name.ends_with(".py") {
+        py.import("sys")?
+            .getattr("path")?
+            .call_method1("insert", (1, local.as_ref()))?;
     }
-
-    /// No-op: the Rust transport has no client-side ML cache to clear.
-    fn _cleanup_ml_cache(&self) {}
+    py.import("builtins")?
+        .call_method1("open", (local.as_ref(), "rb"))?
+        .call_method0("close")?;
+    if importable {
+        py.import("importlib")?.call_method0("invalidate_caches")?;
+    }
+    Ok(())
 }
 
 /// Whether `value` has a map with a null key, at any depth.
@@ -1687,21 +2469,37 @@ fn pandas_dtype_type(dtype: &str) -> DataType {
 
 /// The decimal type of column `i` of pandas rows, as Arrow infers it from all its Decimals:
 /// the most integer digits and the largest scale of the values.
-fn pandas_decimal_type(rows: &Bound<'_, PyList>, i: usize) -> PyResult<DataType> {
+fn pandas_decimal_type(data: &Bound<'_, PyList>, rows: &[Row], i: usize) -> PyResult<DataType> {
+    // The digits and exponent of an exact Decimal come from the text that `py_to_value` took
+    // of it, rather than from `as_tuple()`, which builds a DecimalTuple of every digit; a
+    // subclass, which can override either, is asked for `as_tuple()`, as Arrow does.
+    let decimal_cls = crate::infer::DECIMAL.import(data.py(), "decimal", "Decimal")?;
     let (mut integer_digits, mut scale) = (0i64, 0i64);
-    for row in rows.iter() {
+    for (row, converted) in data.iter().zip(rows) {
         let value = row.get_item(i)?;
         if value.is_none() {
             continue;
         }
-        let parts = value.call_method0("as_tuple")?;
-        let digits = parts.getattr("digits")?.len()? as i64;
-        // NaN and infinities have no exponent of digits, which Arrow cannot type either.
-        let Ok(exponent) = parts.getattr("exponent")?.extract::<i64>() else {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Decimal {} has no precision to type a column by",
-                value.str()?
-            )));
+        let from_text = match converted.get(i) {
+            Some(Value::Decimal { value: text, .. }) if value.get_type().is(decimal_cls) => {
+                decimal_text_digits(text)
+            }
+            _ => None,
+        };
+        let (digits, exponent) = match from_text {
+            Some(parts) => parts,
+            None => {
+                let parts = value.call_method0("as_tuple")?;
+                let digits = parts.getattr("digits")?.len()? as i64;
+                // NaN and infinities have no exponent of digits, which Arrow cannot type either.
+                let Ok(exponent) = parts.getattr("exponent")?.extract::<i64>() else {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "Decimal {} has no precision to type a column by",
+                        value.str()?
+                    )));
+                };
+                (digits, exponent)
+            }
         };
         let (precision, value_scale) = if exponent < 0 {
             (digits.max(-exponent), -exponent)
@@ -1725,7 +2523,7 @@ fn pandas_decimal_type(rows: &Bound<'_, PyList>, i: usize) -> PyResult<DataType>
 
 /// Infer the Spark `DataType` for a `createDataFrame` column from its (first) value.
 /// Nested collections are inferred recursively; nulls and empty collections use
-/// String as a fallback. Interval input conversion is tracked in SPARK-60659.
+/// String as a fallback.
 fn value_to_datatype(v: &Value) -> DataType {
     let utf8 = || DataType::String {
         collation: "UTF8_BINARY".to_string(),
@@ -1742,6 +2540,7 @@ fn value_to_datatype(v: &Value) -> DataType {
         Value::Binary(_) => DataType::Binary,
         Value::Date(_) => DataType::Date,
         Value::Timestamp(_) => DataType::Timestamp,
+        Value::TimestampNtz(_) => DataType::TimestampNtz,
         // As PySpark infers TimeType() of a datetime.time.
         Value::Time(_) => DataType::Time { precision: 6 },
         Value::DayTimeInterval(_) => DataType::DayTimeInterval {
@@ -2050,36 +2849,128 @@ pub(crate) fn datetime_to_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
 }
 
 /// If `obj` is a `decimal.Decimal`, return it as a `Value::Decimal` (string value + scale
-/// from `as_tuple()`); otherwise `None`. Checked before int/float in `py_to_value` because
+/// from its exponent); otherwise `None`. Checked before int/float in `py_to_value` because
 /// Decimal defines `__float__`/`__int__`.
 fn decimal_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Option<Value>> {
     let py = obj.py();
-    let dec_mod = match py.import("decimal") {
-        Ok(m) => m,
-        Err(_) => return Ok(None),
-    };
-    let decimal_cls = dec_mod.getattr("Decimal")?;
-    if !obj.is_instance(&decimal_cls)? {
+    // Imported once: looking the class up per value was a module import and an attribute
+    // read of every converted value.
+    let decimal_cls = crate::infer::DECIMAL.import(py, "decimal", "Decimal")?;
+    if !obj.is_instance(decimal_cls.as_any())? {
         return Ok(None);
     }
     // As written, in scientific notation for `1E+2` or `1.5E-7`: the Arrow encoder parses
     // either notation, in work bounded by the length of the text, which a fixed-point form
     // of `1E+1000000000` would not be.
     let dec_str: String = obj.str()?.extract()?;
-    let as_tuple = obj.call_method0("as_tuple")?;
-    let mut scale: Option<i32> = None;
-    if let Ok(exp_obj) = as_tuple.get_item(2) {
-        if !exp_obj.is_none() {
-            if let Ok(exp) = exp_obj.extract::<i64>() {
-                if exp <= 0 {
-                    scale = Some((-exp) as i32);
+    let scale = if obj.get_type().is(decimal_cls) {
+        // Exact Decimal strings preserve the coefficient's trailing zeros and exponent.
+        // Subclasses may override either __str__ or as_tuple, so keep their old path.
+        decimal_string_scale(&dec_str)
+    } else {
+        let as_tuple = obj.call_method0("as_tuple")?;
+        let mut scale = None;
+        if let Ok(exp_obj) = as_tuple.get_item(2) {
+            if !exp_obj.is_none() {
+                if let Ok(exp) = exp_obj.extract::<i64>() {
+                    if exp <= 0 {
+                        scale = Some((-exp) as i32);
+                    }
                 }
             }
         }
-    }
+        scale
+    };
     Ok(Some(Value::Decimal {
         value: dec_str,
         precision: None,
         scale,
     }))
+}
+
+/// The scale of `Decimal.as_tuple()`, from the text of an exact Decimal: the negated exponent,
+/// or `None` for a positive exponent and for NaN and the infinities.
+fn decimal_string_scale(value: &str) -> Option<i32> {
+    let (_, exponent) = decimal_text_digits(value)?;
+    // As the scale of `as_tuple()`, including its i32 cast.
+    (exponent <= 0).then(|| (-exponent) as i32)
+}
+
+/// The number of digits and the exponent of `Decimal.as_tuple()`, from the text (`str()`) of
+/// an exact Decimal, which keeps every digit of its coefficient and its exponent: `123.4500`
+/// has 7 digits and the exponent -4, `1E+3` 1 and 3, `0.000` 1 and -3. `None` for NaN and the
+/// infinities, which have no such exponent.
+fn decimal_text_digits(value: &str) -> Option<(i64, i64)> {
+    let unsigned = value.trim_start_matches(['-', '+']);
+    if !unsigned.as_bytes().first()?.is_ascii_digit() {
+        return None;
+    }
+    let (coefficient, exponent) = match unsigned.split_once(['E', 'e']) {
+        Some((coefficient, exponent)) => (coefficient, exponent.parse::<i64>().ok()?),
+        None => (unsigned, 0),
+    };
+    let (integer, fraction) = coefficient.split_once('.').unwrap_or((coefficient, ""));
+    // The digits from the first nonzero one; zero has the single digit 0.
+    let leading_zeros = integer.len() - integer.trim_start_matches('0').len();
+    let leading_zeros = if leading_zeros == integer.len() {
+        leading_zeros + (fraction.len() - fraction.trim_start_matches('0').len())
+    } else {
+        leading_zeros
+    };
+    let digits = (integer.len() + fraction.len() - leading_zeros).max(1) as i64;
+    Some((digits, exponent - fraction.len() as i64))
+}
+
+/// The `step` of `range`, which PySpark defaults to 1, told apart from None, whose `int()`
+/// raises.
+pub(crate) enum RangeStep {
+    Omitted,
+    Given(Py<PyAny>),
+}
+
+impl<'a, 'py> FromPyObject<'a, 'py> for RangeStep {
+    type Error = PyErr;
+
+    fn extract(obj: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        Ok(RangeStep::Given(obj.to_owned().unbind()))
+    }
+}
+
+/// The start, end, step and number of partitions of `spark.range` and `spark.tvf.range`, as
+/// PySpark's `range` takes them: the `int()` of each, of the number of partitions first, with
+/// `range(n)` from 0 to `n`. A value out of the range of its proto field is the `ValueError` of
+/// protobuf.
+pub(crate) fn range_arguments(
+    start: &Bound<'_, PyAny>,
+    end: Option<&Bound<'_, PyAny>>,
+    step: RangeStep,
+    num_partitions: Option<&Bound<'_, PyAny>>,
+) -> PyResult<(i64, i64, i64, Option<i32>)> {
+    let py = start.py();
+    let int = |value: &Bound<'_, PyAny>| -> PyResult<i64> {
+        let int = py.get_type::<pyo3::types::PyInt>().call1((value,))?;
+        int.extract::<i64>().map_err(|_| value_out_of_range(&int))
+    };
+    let num_partitions = match num_partitions {
+        None => None,
+        Some(value) => {
+            let int = py.get_type::<pyo3::types::PyInt>().call1((value,))?;
+            Some(int.extract::<i32>().map_err(|_| value_out_of_range(&int))?)
+        }
+    };
+    let (start, end) = match end {
+        Some(end) => (int(start)?, int(end)?),
+        None => (0, int(start)?),
+    };
+    let step = match step {
+        RangeStep::Omitted => 1,
+        RangeStep::Given(step) => int(step.bind(py))?,
+    };
+    Ok((start, end, step, num_partitions))
+}
+
+/// The `ValueError` of protobuf for an int out of the range of its field.
+fn value_out_of_range(int: &Bound<'_, PyAny>) -> PyErr {
+    let shown = int.str().map(|text| text.to_string()).unwrap_or_default();
+    pyo3::exceptions::PyValueError::new_err(format!("Value out of range: {shown}"))
 }

@@ -50,6 +50,21 @@ pub struct GroupedData {
 }
 
 impl GroupedData {
+    /// The grouping columns, as PySpark Connect's `GroupedData._grouping_cols`.
+    pub fn grouping_columns(&self) -> &[Column] {
+        &self.group_cols
+    }
+
+    /// The type of the grouping, as PySpark Connect's `GroupedData._group_type`.
+    pub fn group_type(&self) -> AggregateGroupType {
+        self.group_type
+    }
+
+    /// The DataFrame that is grouped, as PySpark Connect's `GroupedData._df`.
+    pub fn dataframe(&self) -> &DataFrame {
+        &self.dataframe
+    }
+
     /// Create a new GroupedData.
     pub(crate) fn new(
         dataframe: DataFrame,
@@ -108,21 +123,46 @@ impl GroupedData {
     ///
     /// Mirrors `df.groupBy(...).pivot(col, values)`. When `values` is `None` the
     /// server computes the distinct values; when supplied they are serialized as
-    /// pivot-value literals (previously they were dropped entirely).
-    pub fn pivot(&self, pivot_col: Column, values: Option<Vec<crate::row::Value>>) -> GroupedData {
+    /// pivot-value literals. As PySpark's, only the grouping of `group_by` pivots: that of
+    /// a rollup, a cube, grouping sets or a pivot is the error of [`GroupedData::check_pivot`].
+    pub fn pivot(
+        &self,
+        pivot_col: Column,
+        values: Option<Vec<crate::row::Value>>,
+    ) -> Result<GroupedData> {
+        self.check_pivot()?;
         let pivot_values = values
             .unwrap_or_default()
             .into_iter()
             .map(value_to_lit_expr)
             .collect();
-        GroupedData {
+        Ok(GroupedData {
             dataframe: self.dataframe.clone(),
             group_cols: self.group_cols.clone(),
             group_type: AggregateGroupType::Pivot,
             pivot_col: Some(pivot_col.expression().clone()),
             pivot_values,
             grouping_sets: vec![],
-        }
+        })
+    }
+
+    /// Whether this grouping pivots, as PySpark's `GroupedData.pivot` checks before its
+    /// arguments: only that of `group_by` does. That of a rollup, a cube or grouping sets is
+    /// an `UNSUPPORTED_OPERATION` error of "PIVOT after ROLLUP", "PIVOT after CUBE" or
+    /// "PIVOT after GROUPING_SETS", and that of a pivot of "Repeated PIVOT operation".
+    pub fn check_pivot(&self) -> Result<()> {
+        let operation = match self.group_type {
+            AggregateGroupType::GroupBy => return Ok(()),
+            AggregateGroupType::Pivot => "Repeated PIVOT operation",
+            AggregateGroupType::Rollup => "PIVOT after ROLLUP",
+            AggregateGroupType::Cube => "PIVOT after CUBE",
+            AggregateGroupType::GroupingSets => "PIVOT after GROUPING_SETS",
+        };
+        Err(SparkError::classed(
+            SparkErrorKind::NotImplementedError,
+            "UNSUPPORTED_OPERATION",
+            &[("operation", operation)],
+        ))
     }
 
     /// Column names of the underlying (pre-grouping) DataFrame. These are passed as the
@@ -986,9 +1026,37 @@ mod tests {
         let spark = session();
         let df = spark.range(10).unwrap();
         let grouped = df.group_by(vec![crate::column::col("id")]);
-        let pivot_grouped = grouped.pivot(crate::column::col("category"), None);
+        let pivot_grouped = grouped.pivot(crate::column::col("category"), None).unwrap();
         assert_eq!(pivot_grouped.group_type, AggregateGroupType::Pivot);
         assert!(pivot_grouped.pivot_col.is_some());
+    }
+
+    #[test]
+    fn only_the_grouping_of_group_by_pivots() {
+        let df = session().range(1).unwrap();
+        let id = || vec![crate::column::col("id")];
+        let pivot = |grouped: GroupedData| grouped.pivot(crate::column::col("id"), None);
+        assert!(pivot(df.group_by(id())).is_ok());
+        for (grouped, operation) in [
+            (df.rollup(id()), "PIVOT after ROLLUP"),
+            (df.cube(id()), "PIVOT after CUBE"),
+            (df.grouping_sets(vec![id()]), "PIVOT after GROUPING_SETS"),
+            (
+                pivot(df.group_by(id())).unwrap(),
+                "Repeated PIVOT operation",
+            ),
+        ] {
+            let error = pivot(grouped).err().expect("an error");
+            assert_eq!(error.kind, SparkErrorKind::NotImplementedError);
+            assert_eq!(
+                error.get_condition().as_deref(),
+                Some("UNSUPPORTED_OPERATION")
+            );
+            assert_eq!(
+                error.get_message_parameters().unwrap()["operation"],
+                operation
+            );
+        }
     }
 
     #[test]
@@ -1007,6 +1075,7 @@ mod tests {
                         .collect(),
                 ),
             )
+            .unwrap()
             .count();
         let Some(RelType::Aggregate(aggregate)) = pivot.plan.to_proto().rel_type else {
             panic!("expected Aggregate");

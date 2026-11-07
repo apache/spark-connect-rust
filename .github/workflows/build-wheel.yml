@@ -104,8 +104,8 @@ jobs:
           WHEEL_TARGET: ${{ inputs.target }}
           WHEEL_USE_ZIG: ${{ inputs.zig }}
         run: |
-          python -m pip install --upgrade maturin
-          args=(--release --out dist --target "$WHEEL_TARGET")
+          python -m pip install --upgrade "maturin>=1.0,<2.0"
+          args=(--release --locked --out dist --target "$WHEEL_TARGET")
           if [[ "$WHEEL_USE_ZIG" == "true" ]]; then
             python -m pip install ziglang
             args+=(--zig)
@@ -115,4 +115,5 @@ jobs:
         with:
           name: wheels-${{ inputs.target }}
           path: dist/*.whl
+          if-no-files-found: error
           retention-days: ${{ inputs.artifact_retention_days }}

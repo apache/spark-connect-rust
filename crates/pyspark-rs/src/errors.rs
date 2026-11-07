@@ -143,9 +143,53 @@ fn grpc_error_to_py<'py>(py: Python<'py>, message: &str, code: i32) -> PyResult<
         .call((), Some(&kwargs))
 }
 
+/// The error class of the error of the core of an exception of a Python callback that the core
+/// calls, such as a hook of `SparkSession.Hook`: its `callback_id` is that of the exception, which
+/// the error raises as it is.
+const PYTHON_CALLBACK_ERROR: &str = "PYTHON_CALLBACK_ERROR";
+
+/// The exceptions of the Python callbacks that the core calls, by their IDs, until the errors of
+/// the core that carry them are raised.
+static CALLBACK_EXCEPTIONS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<u64, PyErr>>,
+> = std::sync::LazyLock::new(Default::default);
+
+static NEXT_CALLBACK_EXCEPTION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The error of the core of `exception`, the exception of a Python callback that the core calls,
+/// which [`spark_error_to_py_exception`] raises as it is: as PySpark raises the exception of a
+/// hook from the execution that calls it.
+pub(crate) fn callback_error(exception: PyErr) -> SparkError {
+    let id = NEXT_CALLBACK_EXCEPTION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    CALLBACK_EXCEPTIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(id, exception);
+    SparkError::classed(
+        SparkErrorKind::Python,
+        PYTHON_CALLBACK_ERROR,
+        &[("callback_id", &id.to_string())],
+    )
+}
+
+/// The exception of the Python callback of `err`, if it is the error of one.
+fn callback_exception(err: &SparkError) -> Option<PyErr> {
+    if err.error_class != PYTHON_CALLBACK_ERROR {
+        return None;
+    }
+    let id = err.params.get("callback_id")?.parse::<u64>().ok()?;
+    CALLBACK_EXCEPTIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&id)
+}
+
 /// Maps a SparkError to a Python exception, attempting to raise the correct typed
 /// exception based on the error kind. Falls back to PyRuntimeError if import fails.
 pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
+    if let Some(exception) = callback_exception(&err) {
+        return exception;
+    }
     let msg = err.message();
     let operation_id = err.operation_id.clone();
     let class_name = kind_to_pyspark_class_name(err.kind);

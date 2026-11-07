@@ -41,6 +41,13 @@ impl DataFrameReader {
         self
     }
 
+    /// Unset the format, so that the server reads its default source
+    /// (`spark.sql.sources.default`), as PySpark's `format(None)`.
+    pub fn clear_format(mut self) -> Self {
+        self.format = None;
+        self
+    }
+
     /// Set the schema from a DDL string or JSON string.
     pub fn schema(mut self, schema: String) -> Self {
         self.schema = schema;
@@ -76,7 +83,13 @@ impl DataFrameReader {
 
     /// Load data from the specified path(s) with the configured format, schema, and options.
     pub fn load(self, path: Option<&str>) -> DataFrame {
-        let paths = path.map(|p| vec![p.to_string()]);
+        self.load_paths(path.map(|p| vec![p.to_string()]).unwrap_or_default())
+    }
+
+    /// Load data from `paths`, mirroring `DataFrameReader.load` of a list of paths, with the
+    /// configured format, schema, and options.
+    pub fn load_paths(self, paths: Vec<String>) -> DataFrame {
+        let paths = Some(paths);
         let plan = LogicalPlan::Read {
             read_type: ReadType::DataSource {
                 format: self.format,
@@ -103,6 +116,27 @@ impl DataFrameReader {
             is_streaming: None,
         };
         DataFrame::new(self.session, plan)
+    }
+
+    /// Parse the strings of `input`, a DataFrame of one string column, as `format`, with the
+    /// schema and the options of this reader, mirroring `DataFrameReader.json`, `csv` and `xml`
+    /// of a DataFrame: a schema of JSON, or else of DDL, which the server parses, as PySpark's
+    /// `StructType.fromDDL`.
+    pub fn parse(self, format: crate::plan::ParseFormat, input: &DataFrame) -> Result<DataFrame> {
+        let schema = if self.schema.is_empty() {
+            None
+        } else if self.schema.starts_with('{') {
+            Some(crate::types::DataType::from_json_str(&self.schema)?)
+        } else {
+            Some(self.session.parse_ddl(&self.schema)?)
+        };
+        let plan = LogicalPlan::Parse {
+            input: Arc::clone(&input.plan),
+            format,
+            schema,
+            options: self.options,
+        };
+        Ok(DataFrame::new(self.session, plan))
     }
 
     /// Read from a named table.
@@ -250,6 +284,8 @@ pub struct DataFrameWriter {
     input_plan: Arc<LogicalPlan>,
     format: Option<String>,
     mode: SaveMode,
+    /// The last mode set when it is not a save mode, which fails the write.
+    unsupported_mode: Option<String>,
     options: HashMap<String, String>,
     partition_cols: Vec<String>,
     cluster_cols: Vec<String>,
@@ -272,6 +308,7 @@ impl DataFrameWriter {
             input_plan,
             format: None,
             mode: SaveMode::ErrorIfExists,
+            unsupported_mode: None,
             options: HashMap::new(),
             partition_cols: vec![],
             cluster_cols: vec![],
@@ -304,10 +341,16 @@ impl DataFrameWriter {
         self
     }
 
-    /// Set the save mode.
+    /// Set the save mode: `append`, `overwrite`, `error` (or `errorifexists`) or `ignore`, in
+    /// any case. As PySpark's, the write fails with `UNSUPPORTED_OPERATION` when the last mode
+    /// set is any other string.
     pub fn mode(mut self, mode: &str) -> Self {
-        if let Some(m) = SaveMode::from_str(mode) {
-            self.mode = m;
+        match SaveMode::from_str(mode) {
+            Some(m) => {
+                self.mode = m;
+                self.unsupported_mode = None;
+            }
+            None => self.unsupported_mode = Some(mode.to_string()),
         }
         self
     }
@@ -315,6 +358,13 @@ impl DataFrameWriter {
     /// Set the format/source type.
     pub fn format(mut self, source: &str) -> Self {
         self.format = Some(source.to_string());
+        self
+    }
+
+    /// Unset the format, so that the server writes its default source
+    /// (`spark.sql.sources.default`), as PySpark's `format(None)`.
+    pub fn clear_format(mut self) -> Self {
+        self.format = None;
         self
     }
 
@@ -358,6 +408,12 @@ impl DataFrameWriter {
         &self,
         save_type: Option<proto::write_operation::SaveType>,
     ) -> Result<proto::WriteOperation> {
+        if let Some(mode) = &self.unsupported_mode {
+            return Err(spark_connect_core::error::SparkError::value(
+                "UNSUPPORTED_OPERATION",
+                &[("operation", mode)],
+            ));
+        }
         let mut op = proto::WriteOperation::default();
         op.input = Some(build_input_relation(&self.input_plan, &self.session));
         op.source = self.format.clone();
@@ -527,6 +583,13 @@ impl DataFrameWriterV2 {
         self
     }
 
+    /// Leave the table property `property` unset, as PySpark's `tableProperty(property, None)`,
+    /// which the command does not send.
+    pub fn unset_table_property(mut self, property: &str) -> Self {
+        self.table_properties.remove(property);
+        self
+    }
+
     /// Partition the output table by the given columns.
     pub fn partition_by<C: Into<Column>>(mut self, columns: impl IntoIterator<Item = C>) -> Self {
         self.partition_cols = columns.into_iter().map(Into::into).collect();
@@ -632,6 +695,47 @@ mod tests {
         match op.save_type {
             Some(proto::write_operation::SaveType::Path(p)) => assert_eq!(p, "/tmp/out"),
             other => panic!("expected Path save_type, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v1_write_operation_of_an_unsupported_mode_fails() {
+        // As PySpark's: the last mode set decides, in any case, and any other string fails the
+        // write with UNSUPPORTED_OPERATION.
+        let spark = session();
+        let df = spark.range(3).unwrap();
+        let path = || {
+            Some(proto::write_operation::SaveType::Path(
+                "/tmp/out".to_string(),
+            ))
+        };
+        for mode in ["bad", "default", "", " append"] {
+            let err = df
+                .write()
+                .mode("append")
+                .mode(mode)
+                .build_write_operation(path())
+                .unwrap_err();
+            assert_eq!(
+                err.get_condition().as_deref(),
+                Some("UNSUPPORTED_OPERATION")
+            );
+            assert_eq!(err.params.get("operation").map(String::as_str), Some(mode));
+        }
+        for (mode, expected) in [
+            ("APPEND", SaveMode::Append),
+            ("Overwrite", SaveMode::Overwrite),
+            ("error", SaveMode::ErrorIfExists),
+            ("errorifexists", SaveMode::ErrorIfExists),
+            ("ignore", SaveMode::Ignore),
+        ] {
+            let op = df
+                .write()
+                .mode("bad")
+                .mode(mode)
+                .build_write_operation(path())
+                .unwrap();
+            assert_eq!(op.mode, expected.to_proto());
         }
     }
 
@@ -875,5 +979,58 @@ mod tests {
             }
             _ => panic!("expected Read plan"),
         }
+    }
+
+    #[test]
+    fn parse_sends_the_strings_with_the_schema_and_options_of_the_reader() {
+        use crate::plan::ParseFormat;
+        use crate::types::DataType;
+        use proto::relation::RelType;
+
+        let spark = session();
+        // A lazy plan, as `spark.sql` runs on the call.
+        let strings = spark.range(1).unwrap();
+        let parse_of = |reader: DataFrameReader, format| match reader
+            .parse(format, &strings)
+            .unwrap()
+            .relation()
+            .rel_type
+        {
+            Some(RelType::Parse(parse)) => parse,
+            other => panic!("expected Parse, got {other:?}"),
+        };
+        // A schema of JSON, as PySpark's `StructType.fromJson`; one of DDL the server parses
+        // (the e2e tests check it).
+        let json = DataType::from_ddl("a INT, b STRING").unwrap().json();
+        let parse = parse_of(
+            spark.read().schema(json).option("sep", ";"),
+            ParseFormat::Csv,
+        );
+        assert_eq!(parse.format, proto::parse::ParseFormat::Csv as i32);
+        assert_eq!(
+            parse.schema,
+            Some(DataType::from_ddl("a INT, b STRING").unwrap().to_proto())
+        );
+        assert_eq!(parse.options.get("sep").map(String::as_str), Some(";"));
+        assert!(matches!(
+            parse.input.and_then(|input| input.rel_type),
+            Some(RelType::Range(_))
+        ));
+        let json = DataType::from_ddl("c BIGINT").unwrap().json();
+        let parse = parse_of(spark.read().schema(json), ParseFormat::Json);
+        assert_eq!(parse.format, proto::parse::ParseFormat::Json as i32);
+        assert_eq!(
+            parse.schema,
+            Some(DataType::from_ddl("c BIGINT").unwrap().to_proto())
+        );
+        // Without one, the server infers it.
+        let parse = parse_of(spark.read(), ParseFormat::Xml);
+        assert_eq!(parse.format, proto::parse::ParseFormat::Xml as i32);
+        assert_eq!(parse.schema, None);
+        assert!(spark
+            .read()
+            .schema("{not json".to_string())
+            .parse(ParseFormat::Json, &strings)
+            .is_err());
     }
 }

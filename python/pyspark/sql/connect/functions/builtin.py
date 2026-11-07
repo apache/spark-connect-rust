@@ -17,7 +17,9 @@
 """Re-export of ``pyspark.sql.functions`` under the Connect import path."""
 from typing import TYPE_CHECKING
 
-from pyspark.sql.functions import *  # noqa: F401,F403
+# Every public name of pyspark.sql.functions.builtin, also the deprecated functions that
+# ``pyspark.sql.functions.__all__`` leaves out, as PySpark Connect's builtin has them.
+from pyspark.sql.functions.builtin import *  # noqa: F401,F403
 from pyspark.sql.functions import col, expr, _invoke_function, _to_col  # noqa: F401
 
 if TYPE_CHECKING:

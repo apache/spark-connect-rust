@@ -35,7 +35,7 @@ use spark_connect_proto::{
     ReleaseExecuteResponse, UserContext,
 };
 use tokio::net::TcpListener;
-use tokio::sync::Notify;
+use tokio::sync::{oneshot, Notify};
 use tonic::body::Body;
 use tonic::codegen::{http, BoxFuture, Service};
 use tonic::metadata::MetadataMap;
@@ -59,6 +59,8 @@ enum Scenario {
     Error,
     Eof,
     Disconnect,
+    /// A retryable INTERNAL status carrying Spark's cursor-disconnect marker.
+    CursorDisconnect,
     /// The ExecutePlan call fails itself, with a trailers-only response, as for an
     /// analysis error.
     Reject,
@@ -70,10 +72,23 @@ struct CapturedRelease {
     metadata: MetadataMap,
 }
 
+#[derive(Clone)]
+struct CapturedExecute {
+    request: ExecutePlanRequest,
+    metadata: MetadataMap,
+}
+
+#[derive(Clone)]
+struct CapturedReattach {
+    request: ReattachExecuteRequest,
+    metadata: MetadataMap,
+}
+
 struct State {
     scenario: Scenario,
+    executions: Mutex<Vec<CapturedExecute>>,
     releases: Mutex<Vec<CapturedRelease>>,
-    reattaches: Mutex<Vec<ReattachExecuteRequest>>,
+    reattaches: Mutex<Vec<CapturedReattach>>,
     /// What each ReattachExecute call does, in order: fail with a code, or stream responses.
     /// When none is left, a call completes the result.
     reattach_script: Mutex<VecDeque<Result<Vec<ExecutePlanResponse>, Code>>>,
@@ -117,6 +132,7 @@ impl Fixture {
     async fn start(scenario: Scenario) -> Self {
         let state = Arc::new(State {
             scenario,
+            executions: Mutex::new(Vec::new()),
             releases: Mutex::new(Vec::new()),
             reattaches: Mutex::new(Vec::new()),
             reattach_script: Mutex::new(VecDeque::new()),
@@ -177,7 +193,8 @@ impl Fixture {
     }
 
     async fn assert_release_all_count(&self, expected: usize) {
-        self.wait_for(|s| s.all_releases().len() == expected).await;
+        self.wait_for(|s| s.all_releases().len() >= expected).await;
+        assert_eq!(self.state.all_releases().len(), expected);
         assert!(
             tokio::time::timeout(
                 Duration::from_millis(100),
@@ -226,13 +243,17 @@ fn assert_identity(captured: &CapturedRelease) {
         original.operation_id
     );
     assert_eq!(captured.request.client_type, original.client_type);
+    assert_metadata(&captured.metadata);
+}
+
+fn assert_metadata(metadata: &MetadataMap) {
     assert_eq!(
-        captured.metadata.get("authorization").unwrap(),
+        metadata.get("authorization").unwrap(),
         "Bearer fixture-token"
     );
-    assert_eq!(captured.metadata.get("user_id").unwrap(), "transport-user");
-    assert_eq!(captured.metadata.get("x-cleanup").unwrap(), "fixture-value");
-    assert!(captured.metadata.get("user-agent").is_some());
+    assert_eq!(metadata.get("user_id").unwrap(), "transport-user");
+    assert_eq!(metadata.get("x-cleanup").unwrap(), "fixture-value");
+    assert!(metadata.get("user-agent").is_some());
 }
 
 #[derive(Clone)]
@@ -287,6 +308,11 @@ impl ServerStreamingService<ExecutePlanRequest> for Execute {
 
     fn call(&mut self, request: Request<ExecutePlanRequest>) -> Self::Future {
         self.0.record_timeout("ExecutePlan", request.metadata());
+        let metadata = request.metadata().clone();
+        self.0.executions.lock().unwrap().push(CapturedExecute {
+            request: request.into_inner(),
+            metadata,
+        });
         if let Scenario::Reject = self.0.scenario {
             return Box::pin(async { Err(Status::invalid_argument("plan sentinel")) });
         }
@@ -302,6 +328,10 @@ impl ServerStreamingService<ExecutePlanRequest> for Execute {
             Scenario::Disconnect => Box::pin(stream::iter([
                 Ok(response("first", false)),
                 Err(Status::unavailable("stream disconnected")),
+            ])),
+            Scenario::CursorDisconnect => Box::pin(stream::iter([
+                Ok(response("first", false)),
+                Err(Status::internal("INVALID_CURSOR.DISCONNECTED")),
             ])),
             Scenario::Reject => unreachable!("rejected before streaming"),
         };
@@ -319,7 +349,11 @@ impl ServerStreamingService<ReattachExecuteRequest> for Reattach {
     fn call(&mut self, request: Request<ReattachExecuteRequest>) -> Self::Future {
         let state = self.0.clone();
         state.record_timeout("ReattachExecute", request.metadata());
-        state.reattaches.lock().unwrap().push(request.into_inner());
+        let metadata = request.metadata().clone();
+        state.reattaches.lock().unwrap().push(CapturedReattach {
+            request: request.into_inner(),
+            metadata,
+        });
         state.changed.notify_waiters();
         Box::pin(async move {
             if state.block_reattach.load(Ordering::SeqCst) {
@@ -387,6 +421,19 @@ async fn completion_releases_once_without_waiting_for_release_reply() {
         result.response_type,
         Some(ResponseType::ResultComplete(_))
     ));
+    let captured = fixture.state.executions.lock().unwrap()[0].clone();
+    assert_metadata(&captured.metadata);
+    let executed = captured.request;
+    let original = execute_request();
+    assert_eq!(executed.session_id, original.session_id);
+    assert_eq!(executed.user_context, original.user_context);
+    assert_eq!(executed.operation_id, original.operation_id);
+    assert_eq!(executed.client_type, original.client_type);
+    assert!(executed.request_options.iter().any(|option| matches!(
+        &option.request_option,
+        Some(spark_connect_proto::execute_plan_request::request_option::RequestOption::ReattachOptions(options))
+            if options.reattachable
+    )));
     // Observe terminal cleanup while the stream is alive: Drop must not mask it.
     fixture.wait_for(|s| !s.all_releases().is_empty()).await;
     assert_eq!(fixture.state.release_finished.load(Ordering::SeqCst), 0);
@@ -401,35 +448,50 @@ async fn completion_releases_once_without_waiting_for_release_reply() {
 }
 
 #[tokio::test]
-async fn dropping_unfinished_stream_releases_inside_or_outside_runtime() {
-    for outside_runtime in [false, true] {
-        let fixture = Fixture::start(Scenario::Open).await;
-        let mut stream = bounded(fixture.client.execute_plan_reattachable(execute_request()))
+async fn dropping_unfinished_stream_releases_inside_runtime() {
+    assert_unfinished_drop(false).await;
+}
+
+#[tokio::test]
+async fn dropping_unfinished_stream_releases_outside_runtime() {
+    assert_unfinished_drop(true).await;
+}
+
+async fn assert_unfinished_drop(outside_runtime: bool) {
+    let fixture = Fixture::start(Scenario::Open).await;
+    let mut stream = bounded(fixture.client.execute_plan_reattachable(execute_request()))
+        .await
+        .unwrap();
+    assert_eq!(
+        bounded(stream.message())
             .await
-            .unwrap();
-        assert_eq!(
-            bounded(stream.message())
-                .await
-                .unwrap()
-                .unwrap()
-                .response_id,
-            "first"
-        );
-        fixture
-            .wait_for(|s| !s.releases.lock().unwrap().is_empty())
-            .await;
-        let until = fixture.state.releases.lock().unwrap()[0].clone();
-        assert_identity(&until);
-        assert!(matches!(until.request.release,
-            Some(Release::ReleaseUntil(ref until)) if until.response_id == "first"));
-        if outside_runtime {
-            std::thread::spawn(move || drop(stream)).join().unwrap();
-        } else {
+            .unwrap()
+            .unwrap()
+            .response_id,
+        "first"
+    );
+    fixture
+        .wait_for(|s| !s.releases.lock().unwrap().is_empty())
+        .await;
+    let until = fixture.state.releases.lock().unwrap()[0].clone();
+    assert_identity(&until);
+    assert!(matches!(until.request.release,
+        Some(Release::ReleaseUntil(ref until)) if until.response_id == "first"));
+    if outside_runtime {
+        let (finished, completion) = oneshot::channel();
+        drop(std::thread::spawn(move || {
             drop(stream);
-        }
-        fixture.assert_release_all_count(1).await;
-        assert_identity(&fixture.state.all_releases()[0]);
+            let _ = finished.send(());
+        }));
+        tokio::time::timeout(WAIT, completion)
+            .await
+            .expect("drop did not return")
+            .expect("drop thread panicked");
+    } else {
+        drop(stream);
     }
+    fixture.assert_release_all_count(1).await;
+    assert_identity(&fixture.state.all_releases()[0]);
 }
 
 #[tokio::test]
@@ -518,53 +580,101 @@ async fn permanent_release_failure_does_not_retry_or_change_success() {
 }
 
 #[tokio::test]
-async fn detached_stream_reattaches_before_releasing_the_execution() {
-    for scenario in [Scenario::Eof, Scenario::Disconnect] {
-        let fixture = Fixture::start(scenario).await;
-        fixture.state.block_reattach.store(true, Ordering::SeqCst);
-        let mut stream = bounded(fixture.client.execute_plan_reattachable(execute_request()))
+async fn eof_reattaches_before_releasing_the_execution() {
+    assert_detached_reattachment(Scenario::Eof).await;
+}
+
+#[tokio::test]
+async fn unavailable_reattaches_before_releasing_the_execution() {
+    assert_detached_reattachment(Scenario::Disconnect).await;
+}
+
+#[tokio::test]
+async fn disconnected_cursor_reattaches_before_releasing_the_execution() {
+    assert_detached_reattachment(Scenario::CursorDisconnect).await;
+}
+
+async fn assert_detached_reattachment(scenario: Scenario) {
+    let fixture = Fixture::start(scenario).await;
+    fixture.state.block_reattach.store(true, Ordering::SeqCst);
+    let mut stream = bounded(fixture.client.execute_plan_reattachable(execute_request()))
+        .await
+        .unwrap();
+    assert_eq!(
+        bounded(stream.message())
             .await
-            .unwrap();
-        assert_eq!(
-            bounded(stream.message())
-                .await
-                .unwrap()
-                .unwrap()
-                .response_id,
-            "first"
-        );
-        let next = tokio::spawn(async move {
-            let result = bounded(stream.message()).await;
-            (stream, result)
-        });
-        fixture
-            .wait_for(|s| !s.reattaches.lock().unwrap().is_empty())
-            .await;
-        let reattach = fixture.state.reattaches.lock().unwrap()[0].clone();
-        assert_eq!(
-            reattach.operation_id,
-            execute_request().operation_id.unwrap()
-        );
-        assert_eq!(reattach.last_response_id.as_deref(), Some("first"));
-        assert!(
-            tokio::time::timeout(
-                Duration::from_millis(100),
-                fixture.wait_for(|s| !s.all_releases().is_empty())
-            )
+            .unwrap()
+            .unwrap()
+            .response_id,
+        "first"
+    );
+    let next = tokio::spawn(async move {
+        let result = bounded(stream.message()).await;
+        (stream, result)
+    });
+    fixture
+        .wait_for(|s| !s.reattaches.lock().unwrap().is_empty())
+        .await;
+    let captured = fixture.state.reattaches.lock().unwrap()[0].clone();
+    let reattach = captured.request;
+    let original = execute_request();
+    assert_eq!(reattach.session_id, original.session_id);
+    assert_eq!(reattach.user_context, original.user_context);
+    assert_eq!(reattach.client_type, original.client_type);
+    assert_metadata(&captured.metadata);
+    assert_eq!(reattach.operation_id, original.operation_id.unwrap());
+    assert_eq!(reattach.last_response_id.as_deref(), Some("first"));
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            fixture.wait_for(|s| !s.all_releases().is_empty())
+        )
+        .await
+        .is_err(),
+        "released before reattachment completed"
+    );
+    fixture.state.reattach_gate.notify_one();
+    let (stream, result) = tokio::time::timeout(WAIT, next).await.unwrap().unwrap();
+    assert!(matches!(
+        result.unwrap().unwrap().response_type,
+        Some(ResponseType::ResultComplete(_))
+    ));
+    fixture.wait_for(|s| !s.all_releases().is_empty()).await;
+    drop(stream);
+    fixture.assert_release_all_count(1).await;
+}
+
+#[tokio::test]
+async fn permanent_reattach_failure_releases_and_preserves_the_error() {
+    let fixture = Fixture::start(Scenario::Eof).await;
+    fixture
+        .state
+        .reattach_script
+        .lock()
+        .unwrap()
+        .push_back(Err(Code::PermissionDenied));
+    let mut stream = bounded(fixture.client.execute_plan_reattachable(execute_request()))
+        .await
+        .unwrap();
+    assert_eq!(
+        bounded(stream.message())
             .await
-            .is_err(),
-            "released before reattachment completed"
-        );
-        fixture.state.reattach_gate.notify_one();
-        let (stream, result) = tokio::time::timeout(WAIT, next).await.unwrap().unwrap();
-        assert!(matches!(
-            result.unwrap().unwrap().response_type,
-            Some(ResponseType::ResultComplete(_))
-        ));
-        fixture.wait_for(|s| !s.all_releases().is_empty()).await;
-        drop(stream);
-        fixture.assert_release_all_count(1).await;
-    }
+            .unwrap()
+            .unwrap()
+            .response_id,
+        "first"
+    );
+    let error = bounded(stream.message()).await.unwrap_err();
+    assert!(error.message.contains("reattach sentinel"), "{error:?}");
+    assert_eq!(error.grpc_code, Some(Code::PermissionDenied as i32));
+    assert_eq!(error.operation_id, execute_request().operation_id);
+    // Observe failure cleanup before Drop can send a fallback release.
+    fixture.wait_for(|s| !s.all_releases().is_empty()).await;
+    assert_identity(&fixture.state.all_releases()[0]);
+    assert!(bounded(stream.message()).await.unwrap().is_none());
+    drop(stream);
+    fixture.assert_release_all_count(1).await;
+    assert_eq!(fixture.state.reattaches.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -644,7 +754,7 @@ async fn execution_streams_carry_their_deadlines_and_reattach_past_them() {
     let reattaches = fixture.state.reattaches.lock().unwrap().clone();
     let resumed: Vec<_> = reattaches
         .iter()
-        .map(|r| r.last_response_id.clone())
+        .map(|r| r.request.last_response_id.clone())
         .collect();
     assert_eq!(
         resumed,

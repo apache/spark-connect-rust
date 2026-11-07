@@ -16,9 +16,15 @@ from typing import (
     IO,
     Iterator,
     Optional,
+    Set,
     TextIO,
     Tuple,
+    Union,
+    TYPE_CHECKING,
 )
+
+if TYPE_CHECKING:
+    from pyspark.sql import SparkSession
 
 from pyspark.serializers import (
     write_int,
@@ -28,6 +34,16 @@ from pyspark.serializers import (
 )
 
 _is_remote_only = None
+
+# The ranges of the integral types of the JVM, as PySpark's.
+JVM_BYTE_MIN: int = -(1 << 7)
+JVM_BYTE_MAX: int = (1 << 7) - 1
+JVM_SHORT_MIN: int = -(1 << 15)
+JVM_SHORT_MAX: int = (1 << 15) - 1
+JVM_INT_MIN: int = -(1 << 31)
+JVM_INT_MAX: int = (1 << 31) - 1
+JVM_LONG_MIN: int = -(1 << 63)
+JVM_LONG_MAX: int = (1 << 63) - 1
 
 
 def print_exec(stream: TextIO) -> None:
@@ -70,6 +86,138 @@ def _parse_memory(s: str) -> int:
     return int(float(s[:-1]) * units[s[-1].lower()])
 
 # Evaluation-type constants (Rust-backed), mirroring pyspark.util.PythonEvalType.
+
+def inheritable_thread_target(f: Union[Callable, "SparkSession"]) -> Callable:
+    """
+    Return thread target wrapper which is recommended to be used in PySpark when the
+    pinned thread mode is enabled. The wrapper function, before calling original
+    thread target, it inherits the inheritable properties specific
+    to JVM thread such as ``InheritableThreadLocal``, or thread local such as tags
+    with Spark Connect.
+
+    When the pinned thread mode is off, the target wrapper is a no-op.
+
+    .. versionadded:: 3.2.0
+
+    .. versionchanged:: 3.5.0
+        Supports Spark Connect.
+
+    Parameters
+    ----------
+    f : function, or :class:`SparkSession`
+        the original thread target, or :class:`SparkSession` if Spark Connect is being used.
+        See the examples below.
+
+    Notes
+    -----
+    This API is experimental.
+
+    It is important to know that it captures the local properties or tags when you
+    decorate it whereas :class:`InheritableThread` captures when the thread is started.
+    Therefore, it is encouraged to decorate it when you want to capture the local
+    properties.
+
+    For example, the local properties or tags from the current Spark context or Spark
+    session is captured when you define a function here instead of the invocation:
+
+    >>> @inheritable_thread_target
+    ... def target_func():
+    ...     pass  # your codes.
+
+    If you have any updates on local properties or tags afterwards, it would not be
+    reflected to the Spark context in ``target_func()``.
+
+    The example below mimics the behavior of JVM threads as close as possible:
+
+    >>> Thread(target=inheritable_thread_target(target_func)).start()  # doctest: +SKIP
+
+    If you're using Spark Connect or if you want to inherit the tags properly,
+    you should explicitly provide Spark session as follows:
+
+    >>> @inheritable_thread_target(session)  # doctest: +SKIP
+    ... def target_func():
+    ...     pass  # your codes.
+
+    >>> Thread(target=inheritable_thread_target(session)(target_func)).start()  # doctest: +SKIP
+    """
+    # As PySpark's of Spark Connect, the only mode of this client: `f` is the session, whose
+    # tags, those of this thread, the thread inherits, with the session as its active one.
+    from pyspark.sql import SparkSession
+
+    session = f
+
+    def outer(ff: Callable) -> Callable:
+        assert isinstance(session, SparkSession), (
+            "f is expected to be SparkSession for spark connect"
+        )
+        tags = set(session.getTags())
+
+        @functools.wraps(ff)
+        def inner(*args: Any, **kwargs: Any) -> Any:
+            # Propagates the active remote spark session to the current thread.
+            assert isinstance(session, SparkSession), (
+                "f is expected to be SparkSession for spark connect"
+            )
+
+            SparkSession._set_default_and_active_session(session)
+            # Set the tags of the session in the child thread.
+            session.clearTags()
+            for tag in tags:
+                session.addTag(tag)
+            return ff(*args, **kwargs)
+
+        return inner
+
+    return outer
+
+
+class InheritableThread(threading.Thread):
+    """
+    Thread that is recommended to be used in PySpark when the pinned thread mode is
+    enabled. The wrapper function, before calling original thread target, it
+    inherits the inheritable properties specific to JVM thread such as
+    ``InheritableThreadLocal``, or thread local such as tags
+    with Spark Connect.
+
+    When the pinned thread mode is off, this works as :class:`threading.Thread`.
+
+    .. versionadded:: 3.1.0
+
+    .. versionchanged:: 3.5.0
+        Supports Spark Connect.
+
+    Notes
+    -----
+    This API is experimental.
+    """
+
+    _props: Any
+    _tags: Set[str]
+    _session: "SparkSession"
+
+    def __init__(
+        self, target: Callable, *args: Any, session: Optional["SparkSession"] = None, **kwargs: Any
+    ):
+        # As PySpark's of Spark Connect: the thread takes the tags of `session` of the thread
+        # that starts it.
+        assert session is not None, "Spark Connect must be provided."
+        self._session = session
+
+        def copy_local_properties(*a: Any, **k: Any) -> Any:
+            assert hasattr(self, "_tags")
+            assert session is not None
+            session.clearTags()
+            for tag in self._tags:
+                session.addTag(tag)
+            return target(*a, **k)
+
+        super().__init__(target=copy_local_properties, *args, **kwargs)  # type: ignore[misc]
+
+    def start(self) -> None:
+        assert hasattr(self, "_session")
+        self._tags = set(self._session.getTags())
+        return super().start()
+
 from pyspark._pyspark import PythonEvalType  # noqa: E402,F401
 
 
@@ -495,3 +643,73 @@ def _do_server_auth(conn: "io.IOBase", auth_secret: str) -> None:
             errorClass="UNEXPECTED_RESPONSE_FROM_SERVER",
             messageParameters={},
         )
+
+
+# The names of PySpark's pyspark.util that its other modules and tools use, from Apache Spark
+# v4.3.0.
+import gc  # noqa: E402
+from typing import Generator, List, TypeVar  # noqa: E402
+
+__all__: List[str] = []
+
+FuncT = TypeVar("FuncT", bound=Callable[..., Any])
+
+
+def fail_on_stopiteration(f: Callable) -> Callable:
+    """
+    Wraps the input function to fail on 'StopIteration' by raising a 'RuntimeError'
+    prevents silent loss of data when 'f' is used in a for loop in Spark code
+    """
+
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return f(*args, **kwargs)
+        except StopIteration as exc:
+            raise PySparkRuntimeError(
+                errorClass="STOP_ITERATION_OCCURRED",
+                messageParameters={
+                    "exc": str(exc),
+                },
+            )
+
+    return wrapper
+
+
+@contextlib.contextmanager
+def disable_gc() -> Generator[None, None, None]:
+    gc_enabled_originally = gc.isenabled()
+    if gc_enabled_originally:
+        gc.disable()
+    try:
+        yield
+    finally:
+        if gc_enabled_originally:
+            gc.enable()
+
+
+# This function will be called in `pyspark` script as well,
+# so this should be available without a running Spark.
+# If move or rename, please update the script too.
+def spark_connect_mode() -> str:
+    """
+    Return the env var SPARK_CONNECT_MODE; otherwise "1" if `pyspark_connect` is available.
+    """
+    connect_by_default = os.environ.get("SPARK_CONNECT_MODE")
+    if connect_by_default is not None:
+        return connect_by_default
+    try:
+        import pyspark_connect  # noqa: F401
+
+        return "1"
+    except ImportError:
+        return "0"
+
+
+def default_api_mode() -> str:
+    """
+    Return the default API mode.
+    """
+    if spark_connect_mode() == "1":
+        return "connect"
+    else:
+        return "classic"

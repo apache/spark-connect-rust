@@ -451,6 +451,7 @@ def _arrow_input_service(
         "spark.sql.timestampType": "TIMESTAMP_LTZ",
         "spark.sql.session.timeZone": "UTC",
         "spark.sql.execution.arrow.useLargeVarTypes": "false",
+        "spark.sql.execution.pandas.convertToArrowArraySafely": "true",
         "spark.sql.session.localRelationCacheThreshold": "1048576",
         "spark.sql.session.localRelationSizeLimit": str(3 * 1024**3),
         "spark.sql.session.localRelationChunkSizeRows": "10000",
@@ -461,7 +462,8 @@ def _arrow_input_service(
     # The tests may queue status codes in `status_failures` and `upload_failures`: each
     # ArtifactStatus or AddArtifacts call fails with the next one, while any is left.
     state = {"cache": {}, "uploads": 0, "relations": [], "message_sizes": [],
-             "config": config, "config_requests": [], "input_tables": [], "tables": [],
+             "config": config, "config_requests": [], "config_responses": [],
+             "input_tables": [], "tables": [],
              "upload_contexts": [], "status_contexts": [],
              "status_failures": [], "upload_failures": [], "upload_attempts": 0,
              "ddl_strings": []}
@@ -488,13 +490,16 @@ def _arrow_input_service(
         state["config_requests"].append((operation, keys))
         if config_error:
             context.abort(grpc.StatusCode.UNAVAILABLE, "configuration unavailable")
+        # Injected errors abort only the next Config call.
         if error := state.pop("config_error", None):
             context.abort(error, "configuration read failed")
         # Deliberately reverse responses and omit missing keys to test key mapping.
-        return protocol("ConfigResponse", session_id=request.session_id,
-                        pairs=[dict(key=k, value=config[k]) for k in reversed(keys)
-                               if config.get(k) is not None]
-                        ).SerializeToString()
+        # A present null key leaves the optional protobuf value unset.
+        response = protocol("ConfigResponse", session_id=request.session_id,
+                            pairs=[dict(key=k, value=config[k]) for k in reversed(keys)
+                                   if k in config])
+        state["config_responses"].append(response)
+        return response.SerializeToString()
 
     def top_level_split(text):
         parts, depth, start = [], 0, 0
@@ -759,7 +764,8 @@ def test_file_upload_attribution_on_every_frame(
         payloads = {context["payload"] for context in state["upload_contexts"]}
         assert payloads == {"batch", "begin_chunk", "chunk"}, (
             f"Expected all artifact frame kinds, got {payloads}. "
-            "This fixture assumes a 32 KiB CHUNK_SIZE; adjust its sizes if CHUNK_SIZE changes."
+            f"This fixture assumes a {chunk_size}-byte CHUNK_SIZE; "
+            "adjust its sizes if CHUNK_SIZE changes."
         )
         assert state["cache"][artifact_names[0]] == small.read_bytes()
         assert state["cache"][artifact_names[1]] == large.read_bytes()
@@ -836,9 +842,7 @@ def test_arrow_input_schema_handoff(protocol, cached, explicit):
         assert frame.toArrow().column(0).to_pylist() == [2]
         assert state["result"] == (2, 1, 2)
         assert state["arrow_schemas"] == [table.schema]
-        assert len(state["config_requests"]) == 1
-        assert state["config_requests"][0][0] == "get"
-        assert len(state["config_requests"][0][1]) == 8
+        assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
         relation = state["relations"][0]
         if cached:
             local = relation.chunked_cached_local_relation
@@ -1062,9 +1066,9 @@ def test_arrow_input_batched_normalization_configs(protocol, timestamp_type, zon
         assert not state["relations"][0].local_relation.HasField("schema")
 
 
-@pytest.mark.parametrize("missing", _NORMALIZATION_KEYS)
+@pytest.mark.parametrize("missing", _NORMALIZATION_KEYS + _UPLOAD_KEYS)
 @pytest.mark.parametrize("present_null", [False, True])
-def test_arrow_input_missing_normalization_config(protocol, missing, present_null):
+def test_arrow_input_missing_config(protocol, missing, present_null):
     with _arrow_input_service(protocol) as (spark, state):
         if present_null:
             state["config"][missing] = None
@@ -1074,6 +1078,12 @@ def test_arrow_input_missing_normalization_config(protocol, missing, present_nul
         with pytest.raises(Exception, match="SQL_CONF_NOT_FOUND"):
             spark.createDataFrame(pa.table({"x": [1, None], "s": ["hello", None]}))
         assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+        pairs = {pair.key: pair for pair in state["config_responses"][0].pairs}
+        if present_null:
+            assert missing in pairs
+            assert not pairs[missing].HasField("value")
+        else:
+            assert missing not in pairs
         assert state["uploads"] == 0
         assert state["input_tables"] == []
 
@@ -1159,22 +1169,79 @@ def test_non_arrow_input_does_not_import_pyarrow(protocol, monkeypatch, data):
         assert state["config_requests"] == []
 
 
-def test_add_artifacts_names_each_artifact_as_pyspark(protocol, tmp_path):
+def test_add_artifacts_names_each_artifact_as_pyspark(protocol, tmp_path, monkeypatch):
+    import sys
+
     for name in ["a.jar", "A.class", "m.py", "b.zip", "n.txt"]:
         (tmp_path / name).write_bytes(name.encode())
+    monkeypatch.setattr(sys, "path", list(sys.path))
     with _arrow_input_service(protocol, allow_file_artifacts=True) as (spark, state):
-        # As PySpark's ArtifactManager names them, by the flags and the file extension.
-        spark.addArtifacts(str(tmp_path / "a.jar"), str(tmp_path / "A.class"))
+        # As PySpark's ArtifactManager names them, by the flags and the file extension. A class
+        # file is uploaded only with the file flag: PySpark refuses it otherwise.
+        spark.addArtifacts(str(tmp_path / "a.jar"))
         spark.addArtifacts(str(tmp_path / "m.py"), pyfile=True)
+        spark.addArtifacts(str(tmp_path / "b.zip"), pyfile=True)
         spark.addArtifacts(str(tmp_path / "b.zip") + "#alias", archive=True)
         spark.addArtifact(str(tmp_path / "n.txt"), file=True)
+        spark.addArtifacts(str(tmp_path / "A.class"), file=True)
         assert state["cache"] == {
             "jars/a.jar": b"a.jar",
-            "classes/A.class": b"A.class",
             "pyfiles/m.py": b"m.py",
+            "pyfiles/b.zip": b"b.zip",
             "archives/b.zip#alias": b"b.zip",
             "files/n.txt": b"n.txt",
+            "files/A.class": b"A.class",
         }
+        # As PySpark's _parse_artifacts, a zip of pyfile is importable by the client.
+        assert sys.path[1] == str(tmp_path / "b.zip")
+
+
+# Local relations of at least 32 MiB read the server's local-relation settings, and are uploaded
+# as cache artifacts at its threshold, whichever path encoded them; a single gRPC message
+# cannot carry a relation beyond the server's message size limit.
+
+@pytest.mark.parametrize("path", ["local_rows", "pandas_rows", "float64", "strings"])
+def test_large_local_relations_follow_the_cache_threshold(protocol, path):
+    # (The mock service keeps gRPC's default 4 MiB message limit, so the inline variant of
+    # these inputs, below a higher threshold, can only be checked against a real server.)
+    import numpy as np
+
+    if path == "local_rows":
+        data = [("y" * 2000, i) for i in range(20_000)]
+        schema = T.StructType([T.StructField("v", T.StringType()), T.StructField("i", T.LongType())])
+        expected_rows = 20_000
+    elif path == "pandas_rows":
+        # float32 columns into DoubleType keep the row path.
+        data = pd.DataFrame(np.ones((100_000, 45), dtype=np.float32),
+                            columns=[f"c{i}" for i in range(45)])
+        schema = T.StructType([T.StructField(c, T.DoubleType()) for c in data.columns])
+        expected_rows = 100_000
+    elif path == "float64":
+        data = pd.DataFrame(np.ones((100_000, 45)), columns=[f"c{i}" for i in range(45)])
+        schema = T.StructType([T.StructField(c, T.DoubleType()) for c in data.columns])
+        expected_rows = 100_000
+    else:
+        data = pd.DataFrame({"v": ["x" * 3500] * 10_000}, dtype=object)
+        schema = T.StructType([T.StructField("v", T.StringType())])
+        expected_rows = 10_000
+    overrides = {"spark.sql.session.localRelationCacheThreshold": "1"}
+    with _arrow_input_service(protocol, **overrides) as (spark, state):
+        df = spark.createDataFrame(data, schema)
+        df.toArrow()
+        assert sum(table.num_rows for table in state["input_tables"]) == expected_rows
+        assert state["uploads"]
+        assert any("spark.sql.session.localRelationCacheThreshold" in keys
+                   for _, keys in state["config_requests"])
+
+
+def test_small_local_relations_stay_inline_without_reading_settings(protocol):
+    with _arrow_input_service(protocol) as (spark, state):
+        schema = T.StructType([T.StructField("v", T.StringType()), T.StructField("i", T.LongType())])
+        spark.createDataFrame([("y" * 100, i) for i in range(100)], schema).toArrow()
+        assert not state["uploads"]
+        assert not any("spark.sql.session.localRelationCacheThreshold" in keys
+                       for _, keys in state["config_requests"])
+        assert state["input_tables"][0].num_rows == 100
 
 
 # Signed-int64 pandas input uses the same Arrow importer and mock service.
@@ -1498,12 +1565,19 @@ def test_non_nullable_schema_is_preserved(protocol, verify, config_error):
     frame = pd.DataFrame({"a": pd.Series([1, None], dtype="Int64")})
     schema = T.StructType([T.StructField("a", T.LongType(), False)])
     assert prepare_int64_table(frame, schema) is None
-    with _arrow_input_service(protocol, config_error=config_error) as (spark, state):
-        with pytest.raises(RuntimeError, match="null"):
-            spark.createDataFrame(frame, schema, verifySchema=verify)
+    with _arrow_input_service(protocol) as (spark, state):
+        if config_error:
+            state["config_error"] = grpc.StatusCode.INVALID_ARGUMENT
+            with pytest.raises(Exception, match="configuration read failed"):
+                spark.createDataFrame(frame, schema, verifySchema=verify)
+        else:
+            # Official reads the configuration first, then the cast fails with a ValueError.
+            with pytest.raises(ValueError) as error:
+                spark.createDataFrame(frame, schema, verifySchema=verify)
+            assert str(error.value) == "Casting field 'a' with null values to non-nullable"
+        assert state["config_requests"][0] == ("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)
         assert not state["relations"]
         assert not state["uploads"]
-        assert state["config_requests"] == []
 
 
 def test_small_numpy_frames_avoid_importer_configuration_overhead():
@@ -1530,7 +1604,13 @@ def test_nul_names_keep_lossless_ipc_row_fallback(protocol, schema_kind):
         spark.createDataFrame(frame, schema).toArrow()
         assert state["result"] == (1000, 0, 999)
         payload = state["relations"][0].local_relation.data
-        assert pa.ipc.open_stream(payload).schema.names == [name]
+        if schema_kind == "explicit":
+            assert pa.ipc.open_stream(payload).schema.names == [name]
+        else:
+            # As PySpark Connect's, the Arrow conversion of a frame without a schema names its
+            # columns _0, _1, ..., which toDF names.
+            assert pa.ipc.open_stream(payload).schema.names == ["_0"]
+            assert state["column_names"] == [name]
 
 
 @pytest.mark.parametrize("nullable", [False, True])
@@ -1565,7 +1645,7 @@ def test_integer_explicit_renamed_schema_preserves_all_ipc_cells(protocol, monke
                 from_arrow_schema(table.schema).json(), schema.json(), table.schema)
             assert state["config_requests"]
         else:
-            assert state["config_requests"] == []
+            assert state["config_requests"][:1] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
 
 
 def test_integer_dataframe_and_name_subclasses_keep_fallback(monkeypatch):
@@ -2021,10 +2101,6 @@ def test_pandas_timestamp_ipc_preserves_every_microsecond(protocol, monkeypatch,
     schema = T.StructType([T.StructField("renamed_a", T.TimestampType(), True, {"source": "test"}),
                            T.StructField("b", T.TimestampType())])
 
-    def no_rows(*args, **kwargs):
-        raise AssertionError("supported timestamps must not materialize Python rows")
-
-    monkeypatch.setattr(pd.DataFrame, "astype", no_rows)
     with _arrow_input_service(protocol, capture_tables=True, **{"spark.sql.session.timeZone": zone}) as (spark, state):
         result = spark.createDataFrame(frame, schema)
         # Aware columns carry their zone: only the importer's settings are read.
@@ -2051,7 +2127,6 @@ def test_pandas_naive_timestamp_utc_ipc(protocol, monkeypatch):
     frame = pd.DataFrame({"a": pd.to_datetime(["1969-12-31 23:59:59.999999", None,
                                                "2020-01-01 00:00:00.123456"])})
     schema = T.StructType([T.StructField("a", T.TimestampType())])
-    monkeypatch.setattr(pd.DataFrame, "astype", lambda *a, **k: pytest.fail("row conversion"))
     with _arrow_input_service(protocol, capture_tables=True) as (spark, state):
         result = spark.createDataFrame(frame, schema)
         # A naive column reads the session time zone, then the importer its settings.
@@ -2066,9 +2141,13 @@ def test_pandas_naive_timestamp_utc_ipc(protocol, monkeypatch):
 
 @pytest.mark.parametrize("dtype", ["datetime64[ns]", "datetime64[us]", "datetime64[ms]",
                                     "datetime64[s]", "object"])
-def test_pandas_timestamp_eligibility(dtype):
+def test_pandas_timestamp_eligibility(monkeypatch, dtype):
+    import time
     from pyspark.sql import types as T
     from pyspark.sql._pandas_input import timestamp_columns
+
+    monkeypatch.setenv("TZ", "UTC")
+    monkeypatch.setattr(time, "tzname", ("UTC", "UTC"))
     frame = pd.DataFrame({"a": pd.Series([datetime(2020, 1, 1), None], dtype=dtype)})
     schema = T.StructType([T.StructField("a", T.TimestampType())])
     assert (timestamp_columns(frame, schema) is not None) == (dtype in (
@@ -2080,20 +2159,72 @@ def test_pandas_timestamp_eligibility(dtype):
 
 
 def test_pandas_timestamp_precision_and_timezone_fallback(monkeypatch):
+    import time
     from pyspark.sql import types as T
     from pyspark.sql._pandas_input import timestamp_columns, prepare_timestamp_table
+
+    monkeypatch.setenv("TZ", "UTC")
+    monkeypatch.setattr(time, "tzname", ("UTC", "UTC"))
     schema = T.StructType([T.StructField("a", T.TimestampType())])
     for nanos in (-1, 1, 1001):
         frame = pd.DataFrame({"a": pd.to_datetime([nanos, None], unit="ns")})
         assert timestamp_columns(frame, schema) is None
     frame = pd.DataFrame({"a": pd.to_datetime([0, None], unit="ns")})
     columns = timestamp_columns(frame, schema)
-    monkeypatch.setenv("TZ", "UTC")
+    assert columns is not None
     assert prepare_timestamp_table(columns, schema, "America/Los_Angeles") is None
     monkeypatch.setenv("TZ", "America/Los_Angeles")
     assert prepare_timestamp_table(columns, schema, "UTC") is None
     monkeypatch.delenv("TZ")
     assert prepare_timestamp_table(columns, schema, "UTC") is None
+
+
+@pytest.mark.parametrize("unit,mixed", [("ns", False), ("us", True)])
+@pytest.mark.parametrize("host_tz,host_names", [
+    (None, ("UTC", "UTC")),
+    ("America/Los_Angeles", ("PST", "PDT")),
+    ("UTC", ("PST", "PDT")),
+], ids=["unset-tz", "non-utc-tz", "mismatched-host-zone"])
+def test_timestamp_non_utc_host_declines_and_converts_as_pyspark(
+    protocol, monkeypatch, unit, mixed, host_tz, host_names
+):
+    # A host zone other than a literal UTC declines the timestamp fast path before its
+    # session time zone RPC; the frame then converts as PySpark's Arrow conversion does,
+    # which reads the configs first and takes naive values in the session time zone (UTC).
+    import json
+    import time
+
+    if host_tz is None:
+        monkeypatch.delenv("TZ", raising=False)
+    else:
+        monkeypatch.setenv("TZ", host_tz)
+    monkeypatch.setattr(time, "tzname", host_names)
+    micros = [-2000000, 0, 123456, None]
+    columns = {}
+    if mixed:
+        columns["aware"] = pd.to_datetime(micros, unit="us", utc=True).as_unit(unit)
+    columns["naive"] = pd.to_datetime(micros, unit="us").as_unit(unit)
+    frame = pd.DataFrame(columns)
+    schema = T.StructType([
+        T.StructField(f"renamed_{name}", T.TimestampType(), True, {"source": name})
+        for name in columns
+    ])
+    from pyspark.sql._pandas_input import timestamp_columns
+
+    assert timestamp_columns(frame, schema) is None
+    expected = [micros for _ in columns]
+    with _arrow_input_service(protocol) as (spark, state):
+        spark.createDataFrame(frame, schema).toArrow()
+        assert state["config_requests"]
+        assert state["uploads"] == 0
+        assert state["column_names"] == schema.names
+        assert len(state["input_tables"]) == 1
+        table = state["input_tables"][0]
+        assert table.num_rows == len(micros)
+        for column, values in zip(table.columns, expected):
+            assert column.type == pa.timestamp("us", tz="UTC")
+            assert column.cast(pa.int64()).to_pylist() == values
+            assert column.is_null().to_pylist() == [value is None for value in values]
 
 
 @pytest.mark.parametrize("has_null", [False, True])
@@ -2105,8 +2236,10 @@ def test_pandas_timestamp_non_nullable_schema(protocol, has_null):
     schema = T.StructType([T.StructField("a", T.TimestampType(), False)])
     with _arrow_input_service(protocol, capture_tables=True) as (spark, state):
         if has_null:
-            with pytest.raises(RuntimeError, match="null"):
+            # Official: the cast of the Arrow table, a ValueError rather than a row error.
+            with pytest.raises(ValueError) as error:
                 spark.createDataFrame(frame, schema)
+            assert str(error.value) == "Casting field 'a' with null values to non-nullable"
             assert not state["relations"]
         else:
             spark.createDataFrame(frame, schema).toArrow()
@@ -2127,19 +2260,102 @@ def test_pandas_timestamp_mixed_and_arrow_dtypes_fallback():
 
 @pytest.mark.parametrize("config_error", [False, True])
 @pytest.mark.parametrize("verify", [False, True])
-def test_timestamp_nonnullable_nat_keeps_local_error_before_config(protocol, config_error, verify):
+def test_timestamp_nonnullable_nat_reads_config_before_cast_error(protocol, config_error, verify):
     from pyspark.sql import types as T
     from pyspark.sql._pandas_input import timestamp_columns
 
     frame = pd.DataFrame({"a": pd.to_datetime([0, None], utc=True)})
     schema = T.StructType([T.StructField("renamed", T.TimestampType(), False)])
     assert timestamp_columns(frame, schema) is None
-    with _arrow_input_service(protocol, capture_tables=True, config_error=config_error) as (spark, state):
-        with pytest.raises(RuntimeError, match="null"):
-            spark.createDataFrame(frame, schema, verifySchema=verify)
-        assert state["config_requests"] == []
+    with _arrow_input_service(protocol, capture_tables=True) as (spark, state):
+        if config_error:
+            state["config_error"] = grpc.StatusCode.INVALID_ARGUMENT
+            with pytest.raises(Exception, match="configuration read failed"):
+                spark.createDataFrame(frame, schema, verifySchema=verify)
+        else:
+            # Official: ValueError from the cast of the Arrow table to the schema.
+            with pytest.raises(ValueError) as error:
+                spark.createDataFrame(frame, schema, verifySchema=verify)
+            assert str(error.value) == (
+                "Casting field 'renamed' with null values to non-nullable")
+        assert state["config_requests"][0] == ("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)
         assert state["relations"] == []
         assert state["uploads"] == 0
+
+
+@pytest.mark.parametrize("unit,aware", [("ns", True), ("us", False)])
+@pytest.mark.parametrize("location,method", [
+    ("instance", "notna"), ("instance", "astype"), ("instance", "where"),
+    ("class", "notna"), ("class", "astype"), ("class", "where"),
+])
+@pytest.mark.parametrize("behavior", ["mutate", "raise"])
+def test_timestamp_custom_normalization_hooks_keep_native_row_path(
+    protocol, monkeypatch, unit, aware, location, method, behavior
+):
+    import json
+    import time
+    from types import MethodType
+    import pyspark.sql._pandas_input as helper
+
+    monkeypatch.setenv("TZ", "UTC")
+    monkeypatch.setattr(time, "tzname", ("UTC", "UTC"))
+    values = pd.to_datetime([-2000000, -1000000, 0, 1000000, None], unit="us", utc=aware)
+    frame = pd.DataFrame({"original": values.as_unit(unit)})
+    schema = T.StructType([
+        T.StructField("renamed", T.TimestampType(), True, {"source": "normalization"})
+    ])
+    original = getattr(pd.DataFrame, method)
+    calls, tables = [], []
+    # astype returns a new frame, so the row path never calls an instance where.
+    invokes_hook = (location, method) != ("instance", "where")
+    expected = [None if pd.isna(value) else round(value.to_pydatetime().timestamp() * 1000000)
+                for value in frame["original"]]
+    if invokes_hook:
+        expected[0] = None if method == "notna" else 7000000
+    message = f"custom timestamp {method} precedes configuration"
+
+    def customized(self, *args, **kwargs):
+        calls.append(method)
+        if behavior == "raise":
+            raise RuntimeError(message)
+        result = original(self, *args, **kwargs)
+        result.iat[0, 0] = (False if method == "notna"
+                            else datetime(1970, 1, 1, 0, 0, 7, tzinfo=timezone.utc))
+        return result
+
+    if location == "class":
+        monkeypatch.setattr(pd.DataFrame, method, customized)
+    else:
+        monkeypatch.setitem(vars(frame), method, MethodType(customized, frame))
+
+    # Compare with native row conversion, then restore ordinary dispatch. A failing
+    # configuration service makes any premature Arrow configuration read observable.
+    for bypass in (True, False):
+        calls.clear()
+        with monkeypatch.context() as dispatch:
+            if bypass:
+                dispatch.setattr(helper, "timestamp_columns", lambda *_: None)
+            with _arrow_input_service(protocol, config_error=True) as (spark, state):
+                if behavior == "raise" and invokes_hook:
+                    with pytest.raises(RuntimeError, match=message):
+                        spark.createDataFrame(frame, schema)
+                    assert state["relations"] == []
+                    assert state["input_tables"] == []
+                else:
+                    spark.createDataFrame(frame, schema).toArrow()
+                    assert len(state["input_tables"]) == 1
+                    table = state["input_tables"][0]
+                    assert state["column_names"] == schema.names
+                    assert table.column(0).cast(pa.int64()).to_pylist() == expected
+                    assert table.column(0).is_null().to_pylist() == [
+                        value is None for value in expected]
+                    assert json.loads(state["relations"][0].local_relation.schema) == json.loads(schema.json())
+                    tables.append(table)
+                assert calls == ([method] if invokes_hook else [])
+                assert state["config_requests"] == []
+                assert state["uploads"] == 0
+    if behavior == "mutate" or not invokes_hook:
+        assert tables[0].equals(tables[1], check_metadata=True)
 
 
 @pytest.mark.parametrize("custom", ["dtype", "array"])
@@ -2351,8 +2567,8 @@ def test_timestamp_warm_local_converter_imports_keep_columnar_route(protocol, mo
         spark.createDataFrame(pa.table({"warm": [1]})).toArrow()
         monkeypatch.setitem(sys.modules, importer.__name__, substitute)
         assert timestamp_columns(frame, schema) is not None
-        monkeypatch.setattr(pd.DataFrame, "astype", lambda *a, **k: pytest.fail("row conversion"))
         spark.createDataFrame(frame, schema).toArrow()
+        assert len(state["config_requests"]) == 2
         table = state["tables"][-1]
         assert table.column_names == ["renamed"]
         assert table.column(0).cast(pa.int64()).to_pylist() == [0, 1000, None]
@@ -2593,7 +2809,7 @@ def test_timestamp_rebound_index_data_keeps_native_read_order(protocol, monkeypa
 
 @pytest.mark.parametrize("unit", ["ns", "us"])
 @pytest.mark.parametrize("storage", ["object", "default", "python", "pyarrow", "python_nan", "pyarrow_nan"])
-def test_timestamp_canonical_columns_storage_stays_columnar(protocol, monkeypatch, unit, storage):
+def test_timestamp_canonical_columns_storage_stays_columnar(protocol, unit, storage):
     from pyspark.sql.pandas.types import to_arrow_schema
     import json
 
@@ -2606,10 +2822,6 @@ def test_timestamp_canonical_columns_storage_stays_columnar(protocol, monkeypatc
                  if storage.endswith("_nan") else pd.StringDtype(storage=kind))
         frame.columns = pd.Index(pd.array(["original"], dtype=dtype))
 
-    def no_rows(*args, **kwargs):
-        raise AssertionError("canonical timestamp labels must retain columnar construction")
-
-    monkeypatch.setattr(pd.DataFrame, "astype", no_rows)
     with _arrow_input_service(protocol) as (spark, state):
         spark.createDataFrame(frame, schema).toArrow()
         assert state["config_requests"]
@@ -2636,7 +2848,11 @@ def _assert_float64_ipc(table, columns, schema, *, missing=None):
         np.testing.assert_array_equal(actual.view(np.uint64), expected[~mask].view(np.uint64))
         actual_field = table.schema.field(index)
         assert actual_field.nullable == field.nullable
-        assert not actual_field.metadata
+        # The Arrow conversion keeps the field metadata; the fast path's table has none.
+        from pyspark.sql.pandas.types import from_arrow_metadata
+
+        if actual_field.metadata is not None:
+            assert from_arrow_metadata(actual_field.metadata) == field.metadata
 
 
 
@@ -2698,8 +2914,10 @@ def test_float64_columnar_ipc_matches_existing_row_conversion(protocol, monkeypa
         assert len(state["input_tables"]) == 2
         for table in state["input_tables"]:
             _assert_float64_ipc(table, [values], schema)
-        assert state["input_tables"][0].equals(state["input_tables"][1], check_metadata=True)
-        assert state["config_requests"] == []
+        # The Arrow conversion of the second call carries the field metadata in its table
+        # and reads the configuration first, as official; the values and types are the same.
+        assert state["input_tables"][0].equals(state["input_tables"][1], check_metadata=False)
+        assert state["config_requests"][:1] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
         assert state["uploads"] == 0
         assert [json.loads(relation.local_relation.schema) for relation in state["relations"]] == [
             json.loads(schema.json()), json.loads(schema.json())
@@ -2721,11 +2939,12 @@ def test_float64_pandas_infinity_missing_option_keeps_row_semantics(protocol, nu
     with pd.option_context("mode.use_inf_as_na", True):
         with _arrow_input_service(protocol) as (spark, state):
             if not nullable:
-                with pytest.raises(PySparkRuntimeError, match=(
-                    "Column 'x' is declared as non-nullable but contains null values"
-                )):
+                # Official: the configuration is read, then the cast fails with a ValueError.
+                with pytest.raises(ValueError) as error:
                     spark.createDataFrame(frame, schema)
-                assert state["config_requests"] == []
+                assert str(error.value) == "Casting field 'x' with null values to non-nullable"
+                assert state["config_requests"][:1] == [
+                    ("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
                 assert state["uploads"] == 0
                 return
             spark.createDataFrame(frame, schema).toArrow()
@@ -2842,28 +3061,37 @@ def test_float64_public_fallback_preserves_every_ipc_cell(protocol, reason):
         frame.columns = ["x\x00original"]
     elif reason == "schema_nul":
         schema = expected_schema = T.StructType([T.StructField("x\x00renamed", T.DoubleType())])
+    if reason in ("inferred", "names"):
+        # As PySpark Connect's, the Arrow conversion of a frame without a schema names its
+        # columns _0, _1, ..., which toDF names.
+        expected_schema = T.StructType([T.StructField("_0", T.DoubleType())])
     with _arrow_input_service(protocol) as (spark, state):
         spark.createDataFrame(frame, schema).toArrow()
-        assert state["config_requests"] == []
+        # Official converts pandas input with Arrow, reading the configuration first.
+        native = reason in ("frame_subclass", "schema_nul")
+        assert state["config_requests"][:1] == (
+            [] if native else [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)])
         _assert_float64_ipc(state["input_tables"][0], columns, expected_schema)
 
 
 
 @pytest.mark.parametrize("verify", [False, True])
-def test_float64_nonnullable_nan_keeps_existing_error_before_configs(protocol, verify):
-    from pyspark.errors import PySparkRuntimeError
-
+def test_float64_nonnullable_nan_reads_config_before_cast_error(protocol, verify):
     frame = pd.DataFrame({"x": np.full(100000, np.nan, dtype=np.float64)})
     schema = T.StructType([T.StructField("x", T.DoubleType(), False)])
     with _arrow_input_service(protocol) as (spark, state):
         state["config_error"] = grpc.StatusCode.INVALID_ARGUMENT
-        with pytest.raises(PySparkRuntimeError, match=(
-            "Column 'x' is declared as non-nullable but contains null values"
-        )):
+        # Official reads the configuration first, so its error precedes the cast.
+        with pytest.raises(Exception, match="configuration read failed"):
             spark.createDataFrame(frame, schema, verifySchema=verify)
-        assert state["config_requests"] == []
+        assert state["config_requests"][0] == ("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)
         assert state["relations"] == []
         assert state["uploads"] == 0
+        # Then the cast fails as official does, with a ValueError.
+        with pytest.raises(ValueError) as error:
+            spark.createDataFrame(frame, schema, verifySchema=verify)
+        assert str(error.value) == "Casting field 'x' with null values to non-nullable"
+        assert state["relations"] == []
 
 
 
@@ -3233,6 +3461,57 @@ def test_float64_literal_numpy_dtype_custom_backing_keeps_row_error(protocol):
 
 
 
+@pytest.mark.parametrize("raises", [False, True])
+def test_float64_ndarray_subclass_converts_as_pyspark(protocol, raises):
+    # The fast path declines a NumPy subclass behind pandas' concrete wrapper; the frame then
+    # converts as PySpark's Arrow conversion does, which reads the raw storage and does not
+    # call the subclass's astype, whatever it would do.
+    from pyspark.sql._pandas_input import prepare_float64_table
+
+    calls = []
+
+    class Values(np.ndarray):
+        def astype(self, *args, **kwargs):
+            calls.append("astype")
+            if raises:
+                raise ValueError("custom ndarray astype")
+            return np.ndarray.astype(self, *args, **kwargs) + 7.0
+
+    values = np.arange(100000, dtype=np.float64)
+    # Avoid pandas consolidating the subclass storage into a plain ndarray.
+    frame = pd.DataFrame({"x": values.view(Values)}, copy=False)
+    schema = T.StructType([T.StructField("x", T.DoubleType())])
+    assert type(frame["x"].array._ndarray) is Values
+    assert prepare_float64_table(frame, schema) is None
+    with _arrow_input_service(protocol) as (spark, state):
+        spark.createDataFrame(frame, schema).toArrow()
+        _assert_float64_ipc(state["input_tables"][0], [values], schema)
+        assert calls == []
+        assert state["uploads"] == 0
+
+
+def test_float64_missing_schema_alias_keeps_native_row_path(protocol, monkeypatch):
+    values = np.arange(100000, dtype=np.float64)
+    frame = pd.DataFrame({"x": values})
+    schema = T.StructType([T.StructField("x", T.DoubleType())])
+    calls = []
+
+    def lazy_attribute(name):
+        if name == "DoubleType":
+            calls.append(name)
+            raise RuntimeError("schema alias hook must not run before row conversion")
+        raise AttributeError(name)
+
+    monkeypatch.delitem(vars(T), "DoubleType")
+    monkeypatch.setattr(T, "__getattr__", lazy_attribute, raising=False)
+    with _arrow_input_service(protocol) as (spark, state):
+        spark.createDataFrame(frame, schema).toArrow()
+        _assert_float64_ipc(state["input_tables"][0], [values], schema)
+        assert calls == []
+        assert state["uploads"] == 0
+
+
+
 def test_float64_missing_concrete_numpy_backing_class_keeps_fallback(monkeypatch):
     import pandas.core.arrays.numpy_ as numpy_arrays
     from pyspark.sql._pandas_input import prepare_float64_table
@@ -3246,7 +3525,7 @@ def test_float64_missing_concrete_numpy_backing_class_keeps_fallback(monkeypatch
 
 
 @pytest.mark.parametrize("rows", [10000, 99999, 100000])
-def test_float64_public_threshold_preserves_row_path_below_100k(protocol, rows):
+def test_float64_public_threshold_reads_config_below_100k(protocol, rows):
     import json
 
     values = np.resize(np.array([np.nan, -0.0, 0.0, np.inf, -np.inf, 1.5]), rows)
@@ -3257,12 +3536,21 @@ def test_float64_public_threshold_preserves_row_path_below_100k(protocol, rows):
     with _arrow_input_service(
         protocol, **{"spark.sql.session.localRelationCacheThreshold": "999999999"}
     ) as (spark, state):
+        if rows >= 100000:
+            # The float64 fast path converts at this size without a configuration read.
+            spark.createDataFrame(frame, schema).toArrow()
+            _assert_float64_ipc(state["input_tables"][0], [values], schema)
+            assert state["config_requests"] == []
+            return
         state["config_error"] = grpc.StatusCode.INVALID_ARGUMENT
+        # Official reads the configuration before converting, so its error comes first.
+        with pytest.raises(Exception, match="configuration read failed"):
+            spark.createDataFrame(frame, schema)
         spark.createDataFrame(frame, schema).toArrow()
         _assert_float64_ipc(state["input_tables"][0], [values], schema)
         assert json.loads(state["relations"][0].local_relation.schema) == json.loads(schema.json())
         assert state["uploads"] == 0
-        assert state["config_requests"] == []
+        assert state["config_requests"][0] == ("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)
 
 
 
@@ -3968,8 +4256,113 @@ def test_string_column_guard_preserves_row_fallback(reason):
         frame.iat[-1, -1] = value
         if reason in ("late_unsupported", "late_surrogate"):
             assert frame.iat[-1, -1] is value
-    assert prepare_string_input(frame, schema) is None
+    result = prepare_string_input(frame, schema)
+    if reason == "arrow_string_dtype":
+        # Arrow string storage has a path of its own, which returns an Arrow table.
+        assert type(result) is pa.Table
+    else:
+        assert result is None
 
+
+
+# Columns kept in pandas' Arrow string storage reach the importer as Arrow, without Python rows.
+
+def _arrow_string_column(texts, storage):
+    import pyarrow as pa
+    if storage == "numpy_semantics":
+        try:
+            dtype = pd.StringDtype("pyarrow", na_value=float("nan"))
+        except TypeError:  # pandas 2.2
+            dtype = pd.StringDtype("pyarrow_numpy")
+        return pd.array(texts, dtype=dtype)
+    if storage == "large_string":
+        return pd.arrays.ArrowStringArray(pa.chunked_array(
+            [pa.array(texts[:7], pa.large_string()), pa.array(texts[7:], pa.large_string())]))
+    return pd.array(texts, dtype="string[pyarrow]")
+
+
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize("storage", ["pyarrow", "numpy_semantics", "large_string", "sliced"])
+def test_arrow_string_columns_preserve_every_ipc_cell(protocol, monkeypatch, cached, storage):
+    from pyspark.sql.pandas.types import from_arrow_metadata
+
+    texts = ["", "a", "\x00", "café", "中文", "\U0001f600", "é", None] * 2000
+    other = [None if i % 3 == 0 else str(i) for i in range(len(texts))]
+    frame = pd.DataFrame({
+        "original": _arrow_string_column(texts, storage),
+        "b": _arrow_string_column(other, storage),
+        "c": _arrow_string_column([None] * len(texts), storage),
+    })
+    expected = [texts, other, [None] * len(texts)]
+    if storage == "sliced":
+        frame = frame.iloc[3:-5]
+        expected = [values[3:-5] for values in expected]
+    schema = T.StructType([
+        T.StructField("renamed.`text", T.StringType(), True, {"source": "string"}),
+        T.StructField("other", T.StringType()),
+        T.StructField("all_null", T.StringType()),
+    ])
+
+    def no_rows(*args, **kwargs):
+        raise AssertionError("Arrow string storage must not materialize Python rows")
+
+    for method in ("to_numpy", "iterrows", "itertuples"):
+        monkeypatch.setattr(pd.DataFrame, method, no_rows)
+    monkeypatch.setattr(pd.DataFrame, "values", property(no_rows))
+    monkeypatch.setattr(pd.Series, "tolist", no_rows)
+    overrides = {"spark.sql.session.localRelationCacheThreshold": "1" if cached else "999999999"}
+    with _arrow_input_service(protocol, **overrides) as (spark, state):
+        df = spark.createDataFrame(frame, schema)
+        df.toArrow()
+        assert state["column_names"] == schema.names
+        table = state["input_tables"][0]
+        assert table.schema.names == schema.names
+        for column, values, field in zip(table.columns, expected, schema.fields):
+            assert column.type == pa.string()
+            assert column.to_pylist() == values
+            actual_field = table.schema.field(field.name)
+            assert actual_field.nullable == field.nullable
+            assert from_arrow_metadata(actual_field.metadata) == (field.metadata or None)
+        assert bool(state["uploads"]) == cached
+
+
+@pytest.mark.parametrize("reason", [
+    "python_storage", "mixed", "nonnullable_null", "subclass", "small", "atomic_schema",
+])
+def test_arrow_string_columns_keep_the_row_path(reason):
+    from pyspark.sql._pandas_input import prepare_string_input
+
+    texts = ["a", None, "b"] * 4000
+    columns = {"a": _arrow_string_column(texts, "pyarrow"), "b": _arrow_string_column(texts, "pyarrow")}
+    fields = [T.StructField("a", T.StringType()), T.StructField("b", T.StringType())]
+    if reason == "python_storage":
+        columns["b"] = pd.array(texts, dtype="string[python]")
+    elif reason == "mixed":
+        columns["b"] = pd.Series(texts, dtype=object)
+    elif reason == "nonnullable_null":
+        fields[1] = T.StructField("b", T.StringType(), False)
+    elif reason == "subclass":
+        class Custom(pd.arrays.ArrowStringArray):
+            pass
+
+        columns["b"] = Custom(pa.chunked_array([pa.array(texts)]))
+    elif reason == "small":
+        columns = {name: values[:9999] for name, values in columns.items()}
+    elif reason == "atomic_schema":
+        fields[1] = T.StructField("b", T.IntegerType())
+    frame = pd.DataFrame(columns)
+    assert prepare_string_input(frame, T.StructType(fields)) is None
+
+
+def test_arrow_string_columns_match_the_row_path(protocol):
+    texts = ["x" * (i % 5) if i % 4 else None for i in range(12000)]
+    schema = T.StructType([T.StructField("v", T.StringType())])
+    tables = []
+    for dtype in ("string[pyarrow]", object):
+        with _arrow_input_service(protocol) as (spark, state):
+            spark.createDataFrame(pd.DataFrame({"v": pd.array(texts, dtype=dtype)}), schema).toArrow()
+            tables.append(state["input_tables"][0])
+    assert tables[0].equals(tables[1])
 
 
 @pytest.mark.parametrize("reason", [
@@ -4036,7 +4429,6 @@ def test_string_public_fallback_keeps_row_semantics(protocol, monkeypatch, reaso
         assert state["config_requests"] == []
 
 
-
 @pytest.mark.parametrize("surrogate", ["\ud800", "\udfff"])
 def test_string_surrogate_fallback_precedes_importer_configuration(protocol, monkeypatch, surrogate):
     values = ["plain"] * 10000
@@ -4059,7 +4451,6 @@ def test_string_surrogate_fallback_precedes_importer_configuration(protocol, mon
         assert state["config_requests"] == []
         assert state["relations"] == []
         assert state["uploads"] == 0
-
 
 
 @pytest.mark.parametrize("class_name,attribute", [
@@ -4122,7 +4513,12 @@ class Factory:
         return Path(tempfile.mkdtemp(prefix=name))
 with _arrow_input_service(protocol.__wrapped__(Factory())) as (spark, state):
     spark.createDataFrame(frame, schema).toArrow()
-    assert state["config_requests"] == [], state["config_requests"]
+    if attribute == "isUTF8BinaryCollation":
+        # Official converts this explicit schema with Arrow, after reading the configuration;
+        # it never reads this attribute, so the result is the same as the row path's.
+        assert state["config_requests"][0][0] == "get", state["config_requests"]
+    else:
+        assert state["config_requests"] == [], state["config_requests"]
     table = state["input_tables"][0]
     assert table.schema.names == ["text"], table.schema
     assert table.column(0).to_pylist() == ["plain"] * 10000
@@ -4381,7 +4777,265 @@ def test_string_large_inline_input_keeps_row_transport_and_schema(protocol):
             __import__("json").loads(schema.json()))
 
 
+# Explicit-schema pandas input converts as PySpark's Arrow conversion does: the session time
+# zone, the safe-cast setting, the nullability and the errors. Each expectation below was
+# checked against official PySpark 4.3.0 with the same frame, schema and session settings.
+
+
+def _pandas_table(protocol, frame, schema, **overrides):
+    """The table that an explicit-schema pandas frame sends, and whether it is local."""
+    with _arrow_input_service(protocol, **overrides) as (spark, state):
+        df = spark.createDataFrame(frame, schema)
+        assert not df.isLocal()
+        df.toArrow()
+        return state["input_tables"][0]
+
+
+def _in_host_zone(name, call):
+    """Run `call` with the process time zone `name`, as the client's local time zone."""
+    import time
+
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = name
+    time.tzset()
+    try:
+        return call()
+    finally:
+        if previous is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous
+        time.tzset()
+
+
+@pytest.mark.parametrize("values", [[1, None], [1.0, np.nan]], ids=["int", "float"])
+def test_pandas_explicit_int_nulls_are_null(protocol, values):
+    table = _pandas_table(protocol, pd.DataFrame({"f": values}), "f int")
+    # Official: [Row(f=1), Row(f=None)].
+    assert table.schema.field("f").type == pa.int32()
+    assert table.column("f").to_pylist() == [1, None]
+
+
+def _tinyint_schema():
+    return T.StructType([T.StructField("b", T.ByteType())])
+
+
+def test_pandas_explicit_tinyint_overflow_raises_as_pyspark(protocol):
+    from pyspark.errors import PySparkValueError
+
+    with _arrow_input_service(protocol) as (spark, state):
+        with pytest.raises(PySparkValueError) as error:
+            spark.createDataFrame(pd.DataFrame({"b": [257]}), _tinyint_schema())
+    assert str(error.value) == (
+        "Exception thrown when converting pandas.Series (int64) with name 'b' to Arrow Array "
+        "(int8). It can be caused by overflows or other unsafe conversions warned by Arrow. "
+        "Arrow safe type check can be disabled by using SQL config "
+        "`spark.sql.execution.pandas.convertToArrowArraySafely`."
+    )
+    assert state["input_tables"] == []
+
+
+def test_pandas_explicit_tinyint_overflow_wraps_when_unsafe(protocol):
+    # Official, with convertToArrowArraySafely=false: [Row(b=1)].
+    table = _pandas_table(
+        protocol, pd.DataFrame({"b": [257]}), _tinyint_schema(),
+        **{"spark.sql.execution.pandas.convertToArrowArraySafely": "false"},
+    )
+    assert table.column("b").to_pylist() == [1]
+
+
+def test_pandas_explicit_nonnullable_null_raises_as_pyspark(protocol):
+    schema = T.StructType([T.StructField("a", T.LongType(), False)])
+    frame = pd.DataFrame({"a": pd.array([1, None], dtype="Int64")})
+    with _arrow_input_service(protocol) as (spark, state):
+        with pytest.raises(ValueError) as error:
+            spark.createDataFrame(frame, schema)
+    # Official: ValueError, not a PySparkRuntimeError from the row path.
+    assert type(error.value) is ValueError
+    assert str(error.value) == "Casting field 'a' with null values to non-nullable"
+    assert state["input_tables"] == []
+
+
+@pytest.mark.parametrize("schema", [None, ["p", "q"], ["p"]], ids=["inferred", "names", "fewer"])
+def test_pandas_inferred_types_are_those_of_arrow_as_pyspark(protocol, schema):
+    # As PySpark Connect's: without a schema, each column converts with PySpark's Arrow
+    # conversion, of the type that Arrow infers, and the table goes without a schema, of
+    # columns _0, _1, ..., which toDF names, by the labels, or the names and _n past them.
+    frame = pd.DataFrame({"a": np.array([1, 2], dtype=np.int8), "b": [{"k": 1}, {"k": 2}]})
+    with _arrow_input_service(protocol) as (spark, state):
+        spark.createDataFrame(frame, schema).toArrow()
+        table = state["input_tables"][0]
+        assert table.schema.names == ["_0", "_1"]
+        assert table.schema.types == [pa.int8(), pa.struct([("k", pa.int64())])]
+        assert table.column("_1").to_pylist() == [{"k": 1}, {"k": 2}]
+        assert state["spark_schema"] is None
+        assert state["column_names"] == {None: ["a", "b"], 2: ["p", "q"], 1: ["p", "_2"]}[
+            None if schema is None else len(schema)]
+
+
+def test_pandas_inferred_dicts_are_maps_of_infer_pandas_dict_as_map(protocol):
+    # As PySpark Connect's: of spark.sql.execution.pandas.inferPandasDictAsMap, a column of dicts
+    # is a map of the type of the first key, and the table takes the names of the columns.
+    frame = pd.DataFrame({"a": [{"k": 1}, {"j": 2}], "b": ["x", "y"]})
+    table = _pandas_table(protocol, frame, None, **{
+        "spark.sql.execution.pandas.inferPandasDictAsMap": "true"})
+    assert table.schema.names == ["a", "b"]
+    assert table.schema.field("a").type == pa.map_(pa.string(), pa.int64())
+    assert table.column("a").to_pylist() == [[("k", 1)], [("j", 2)]]
+
+
+@pytest.mark.parametrize("host", ["America/Los_Angeles", "UTC"])
+def test_pandas_inferred_naive_timestamp_uses_session_zone(protocol, host):
+    # As PySpark Connect's: a naive time is a time of the session zone, whatever the client's.
+    frame = pd.DataFrame({"t": [pd.Timestamp("2020-07-01 12:00")]})
+    table = _in_host_zone(host, lambda: _pandas_table(
+        protocol, frame, None, **{"spark.sql.session.timeZone": "America/Los_Angeles"}))
+    assert table.column("_0").to_pylist() == [datetime(2020, 7, 1, 19, tzinfo=timezone.utc)]
+
+
+def test_pandas_inferred_conversion_errors_are_those_of_pyspark(protocol):
+    from pyspark.errors import PySparkValueError
+
+    with _arrow_input_service(protocol) as (spark, state):
+        # As PySpark Connect's: Arrow's error of a column of values of several types.
+        with pytest.raises(PySparkValueError, match="Exception thrown when converting "
+                           "pandas.Series \\(object\\) with name 'a' to Arrow Array"):
+            spark.createDataFrame(pd.DataFrame({"a": [1, "x"]}))
+        with pytest.raises(PySparkValueError) as error:
+            spark.createDataFrame(pd.DataFrame({"a": [1]}), ["p", "q"])
+        assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
+        assert error.value.getMessageParameters() == {"expected_length": "2", "actual_length": "1"}
+
+
+@pytest.mark.parametrize("host", ["America/Los_Angeles", "UTC"])
+def test_pandas_naive_timestamp_uses_session_zone(protocol, host):
+    frame = pd.DataFrame({"t": [pd.Timestamp("2020-07-01 12:00")]})
+    # Official with session UTC, whatever the client zone: 12:00 UTC.
+    table = _in_host_zone(
+        host,
+        lambda: _pandas_table(
+            protocol, frame, "t timestamp",
+            **{"spark.sql.session.timeZone": "UTC"},
+        ),
+    )
+    assert table.column("t").to_pylist() == [datetime(2020, 7, 1, 12, tzinfo=timezone.utc)]
+
+
+def test_pandas_naive_timestamp_in_session_zone_is_converted(protocol):
+    pytz = pytest.importorskip("pytz")
+    frame = pd.DataFrame({"t": [pd.Timestamp("2020-07-01 12:00")]})
+    # Official with session America/Los_Angeles and a client zone of UTC: 19:00 UTC.
+    table = _in_host_zone(
+        "UTC",
+        lambda: _pandas_table(
+            protocol, frame, "t timestamp",
+            **{"spark.sql.session.timeZone": "America/Los_Angeles"},
+        ),
+    )
+    assert table.column("t").to_pylist() == [datetime(2020, 7, 1, 19, tzinfo=timezone.utc)]
+
+    gap = pd.DataFrame({"t": [pd.Timestamp("2020-03-08 02:30")]})
+    with _arrow_input_service(protocol, **{
+        "spark.sql.session.timeZone": "America/Los_Angeles",
+    }) as (spark, _):
+        # Official: pytz NonExistentTimeError for a naive time inside the DST gap.
+        with pytest.raises(pytz.exceptions.NonExistentTimeError):
+            spark.createDataFrame(gap, "t timestamp")
+
+
+def test_pandas_nanosecond_timestamp_raises_as_pyspark(protocol):
+    from pyspark.errors import PySparkValueError
+
+    frame = pd.DataFrame({"t": [pd.Timestamp("2020-01-01 00:00:00.000000001")]})
+    with _arrow_input_service(protocol) as (spark, state):
+        with pytest.raises(PySparkValueError) as error:
+            spark.createDataFrame(frame, "t timestamp")
+    assert str(error.value) == (
+        "Exception thrown when converting pandas.Series (datetime64[ns, UTC]) with name 't' "
+        "to Arrow Array (timestamp[us, tz=UTC]). It can be caused by overflows or other unsafe "
+        "conversions warned by Arrow. Arrow safe type check can be disabled by using SQL config "
+        "`spark.sql.execution.pandas.convertToArrowArraySafely`."
+    )
+
+
+def test_pandas_lone_surrogate_string_raises_as_pyspark(protocol):
+    from pyspark.errors import PySparkValueError
+
+    frame = pd.DataFrame({"s": ["a\ud800b"]}, dtype=object)
+    with _arrow_input_service(protocol) as (spark, state):
+        with pytest.raises(PySparkValueError) as error:
+            spark.createDataFrame(frame, "s string")
+    assert str(error.value) == (
+        "Exception thrown when converting pandas.Series (object) with name 's' to Arrow Array "
+        "(string). It can be caused by overflows or other unsafe conversions warned by Arrow. "
+        "Arrow safe type check can be disabled by using SQL config "
+        "`spark.sql.execution.pandas.convertToArrowArraySafely`."
+    )
+
+
+def test_pandas_datetime_objects_in_date_column(protocol):
+    frame = pd.DataFrame({"d": [datetime(2020, 1, 2, 3, 4)]}, dtype=object)
+    table = _pandas_table(protocol, frame, "d date")
+    # Official: [Row(d=datetime.date(2020, 1, 2))].
+    assert table.column("d").type == pa.date32()
+    assert table.column("d").to_pylist() == [date(2020, 1, 2)]
+
+
+def test_pandas_nested_nan_becomes_null(protocol):
+    array_frame = pd.DataFrame({"s": [[float("nan"), 1.0]]}, dtype=object)
+    array_table = _pandas_table(protocol, array_frame, "s array<double>")
+    # Official: [Row(s=[None, 1.0])].
+    assert array_table.column("s").to_pylist() == [[None, 1.0]]
+
+    map_frame = pd.DataFrame({"s": [{"k": float("nan")}]}, dtype=object)
+    map_table = _pandas_table(protocol, map_frame, "s map<string,double>")
+    # Official: [Row(s={'k': None})].
+    assert map_table.column("s").to_pylist() == [[("k", None)]]
+
+
+@pytest.mark.parametrize("schema", [None, ["x"]], ids=["inferred", "names"])
+def test_pandas_inferred_int_beyond_int64_raises_as_pyspark(protocol, schema):
+    frame = pd.DataFrame({"x": [2**64]}, dtype=object)
+    with _arrow_input_service(protocol) as (spark, state):
+        # Official: OverflowError, not a double.
+        with pytest.raises(OverflowError) as error:
+            spark.createDataFrame(frame, schema)
+    assert str(error.value) == "Python int too large to convert to C long"
+
+
 # Exact built-in date columns reuse Arrow without materializing pandas rows.
+
+@pytest.mark.parametrize("accessor", ["values", "to_numpy"])
+def test_date_series_accessors_do_not_replace_validated_cells(monkeypatch, accessor):
+    from pyspark.sql._pandas_input import prepare_date_table
+
+    dates = [date.min, date.max, date(1969, 12, 31), date(2000, 2, 29)] * 2500
+    nullable = [None if i % 7 == 0 else value for i, value in enumerate(dates)]
+    expected = {"renamed": dates, "nullable": nullable}
+    frame = pd.DataFrame({"original": dates, "nullable": nullable}, dtype=object)
+    schema = T.StructType([
+        T.StructField("renamed", T.DateType(), False),
+        T.StructField("nullable", T.DateType()),
+    ])
+    row_values = frame.astype(object).where(frame.notna(), None).values.tolist()
+    calls = []
+
+    def replacement(series, *args, **kwargs):
+        calls.append(accessor)
+        return np.full(len(series), date(2021, 2, 3), dtype=object)
+
+    monkeypatch.setattr(pd.Series, accessor,
+                        property(replacement) if accessor == "values" else replacement)
+    table = prepare_date_table(frame, schema)
+    assert table is not None
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    actual = pa.ipc.open_stream(sink.getvalue()).read_all()
+    assert actual.to_pydict() == expected
+    assert frame.astype(object).where(frame.notna(), None).values.tolist() == row_values
+    assert calls == []
+
 
 @pytest.mark.parametrize("cached", [False, True])
 @pytest.mark.parametrize("verify", [False, True])

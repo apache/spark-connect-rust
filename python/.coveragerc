@@ -32,6 +32,8 @@ omit =
     */pyspark/sql/streaming/*
     */pyspark/sql/worker/*
     */pyspark/sql/plot/*
+    # The generated messages of Spark Connect, vendored with pyspark.ml.
+    */pyspark/sql/connect/proto/*_pb2.py
     */pyspark/sql/pandas/*
     */pyspark/sql/functions_generated.py
     */pyspark/sql/datasource.py
@@ -41,6 +43,7 @@ omit =
     */pyspark/sql/datasource_internal.py
     */pyspark/sql/profiler.py
     */pyspark/sql/metrics.py
+    */pyspark/sql/interchange.py
     */pyspark/serializers.py
     */pyspark/loose_version.py
     */pyspark/_globals.py
@@ -55,6 +58,10 @@ omit =
     */pyspark/memory_profiler_ext.py
     */pyspark/worker_util.py
     */pyspark/instrumentation_utils.py
+    # The logger and the types of the connect import path, vendored.
+    */pyspark/sql/connect/logging.py
+    */pyspark/sql/connect/_typing.py
+    */pyspark/sql/connect/conversion.py
     */pyspark/_pyspark*
     */tests/*
 

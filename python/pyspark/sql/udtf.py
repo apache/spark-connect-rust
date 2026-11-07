@@ -26,11 +26,22 @@ from pyspark._pyspark import (
 )
 
 import inspect
+import pickle
 import sys
 from typing import Any, Optional, Type
 
-from pyspark.errors import PySparkAttributeError, PySparkTypeError
+from pyspark.errors import PySparkAttributeError, PySparkPicklingError, PySparkTypeError
 from pyspark.serializers import CloudPickleSerializer
+
+__all__ = [
+    "AnalyzeArgument",
+    "AnalyzeResult",
+    "PartitioningColumn",
+    "OrderingColumn",
+    "SelectedColumn",
+    "SkipRestOfInputTableException",
+    "UDTFRegistration",
+]
 
 # Eval types for Python UDTFs (mirrors pyspark.util.PythonEvalType).
 SQL_TABLE_UDF = 300
@@ -103,6 +114,11 @@ class UserDefinedTableFunction:
         # As PySpark's UserDefinedTableFunction, for udtf(), arrow_udtf() and register().
         _validate_udtf_handler(func, returnType)
         self.func = func
+        # As PySpark Connect's: a DDL string is a type that the server parses.
+        if isinstance(returnType, str):
+            from pyspark.sql.connect.types import UnparsedDataType
+
+            returnType = UnparsedDataType(returnType)
         self.returnType = returnType
         self.evalType = evalType
         self.name = name or (
@@ -110,9 +126,24 @@ class UserDefinedTableFunction:
         )
         self.deterministic = deterministic
         self.python_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
-        # Connect sends the schema separately in PythonUDTF.return_type. The
-        # worker command contains only the handler class, unlike scalar UDFs.
-        self.command = CloudPickleSerializer().dumps(func)
+
+    @property
+    def command(self) -> bytes:
+        """The pickled handler class, as PySpark Connect's ``PythonUDTF.command``: pickled when
+        the UDTF is used, and ``UDTF_SERIALIZATION_ERROR`` of a handler that does not pickle.
+        Connect sends the schema separately, in ``PythonUDTF.return_type``, so the command is
+        only the handler class, unlike that of a scalar UDF."""
+        try:
+            return CloudPickleSerializer().dumps(self.func)
+        except pickle.PicklingError:
+            raise PySparkPicklingError(
+                errorClass="UDTF_SERIALIZATION_ERROR",
+                messageParameters={
+                    "name": self.name,
+                    "message": "Please check the stack trace and "
+                    "make sure the function is serializable.",
+                },
+            )
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         from pyspark import _pyspark

@@ -31,8 +31,11 @@ pub enum Value {
     Binary(Vec<u8>),
     /// Date (days since epoch)
     Date(i32),
-    /// Timestamp (microseconds since epoch)
+    /// Timestamp with local time zone (`TimestampType`), in microseconds since the epoch.
     Timestamp(i64),
+    /// Timestamp without time zone (`TimestampNTZType`), in microseconds of its wall clock
+    /// since 1970-01-01 00:00:00, which the time zone of the client does not shift.
+    TimestampNtz(i64),
     /// TIME, in nanoseconds since midnight, as PySpark's internal value of `TimeType`.
     Time(i64),
     /// Spark day-time interval, in signed microseconds. The full i64 range is
@@ -74,6 +77,7 @@ impl fmt::Debug for Value {
             Self::Binary(v) => f.debug_tuple("Binary").field(v).finish(),
             Self::Date(v) => f.debug_tuple("Date").field(v).finish(),
             Self::Timestamp(v) => f.debug_tuple("Timestamp").field(v).finish(),
+            Self::TimestampNtz(v) => f.debug_tuple("TimestampNtz").field(v).finish(),
             Self::Time(v) => f.debug_tuple("Time").field(v).finish(),
             Self::DayTimeInterval(v) => f.debug_tuple("DayTimeInterval").field(v).finish(),
             Self::Decimal {
@@ -177,6 +181,7 @@ impl fmt::Display for Value {
             Value::Binary(b) => write!(f, "{:?}", b),
             Value::Date(d) => write!(f, "{}", d),
             Value::Timestamp(t) => write!(f, "{}", t),
+            Value::TimestampNtz(t) => write!(f, "{}", t),
             Value::Time(t) => write!(f, "{}", t),
             Value::DayTimeInterval(t) => write!(f, "{}", t),
             Value::Decimal {

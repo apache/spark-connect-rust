@@ -94,6 +94,39 @@ fn py_obj_to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
     to_column(obj)
 }
 
+/// The expression of a Column, as PySpark Connect's `Column._expr`: its `str` and `repr` are
+/// its rendering, as `Column<'...'>` shows it, and its `to_plan` its `spark.connect.Expression`.
+/// The expressions of PySpark Connect are those of `pyspark.sql.connect.expressions`, of which
+/// the Rust core builds the expressions of a Column.
+#[pyclass(name = "_ColumnExpression", module = "pyspark.sql.connect.expressions")]
+pub struct PyColumnExpression {
+    column: Column,
+}
+
+#[pymethods]
+impl PyColumnExpression {
+    fn __repr__(&self) -> String {
+        self.column.expression().render()
+    }
+
+    fn __str__(&self) -> String {
+        self.__repr__()
+    }
+
+    /// The `spark.connect.Expression` of this expression, of the generated
+    /// `pyspark.sql.connect.proto`.
+    fn to_plan(&self, py: Python<'_>, session: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        use prost::Message;
+        let _ = session;
+        let bytes = pyo3::types::PyBytes::new(py, &self.column.to_proto().encode_to_vec());
+        Ok(py
+            .import("pyspark.sql.connect.proto")?
+            .getattr("Expression")?
+            .call_method1("FromString", (bytes,))?
+            .unbind())
+    }
+}
+
 #[pymethods]
 impl PyColumn {
     /// Alias the column with each given name, optionally attaching column metadata (a
@@ -210,6 +243,16 @@ impl PyColumn {
     #[pyo3(name = "try_cast")]
     fn try_cast(&self, dataType: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("try_cast");
+        // As PySpark's: a DataType or a str, else NOT_EXPECTED_TYPE.
+        if !dataType.is_instance_of::<crate::types::PyDataType>()
+            && !dataType.is_instance_of::<pyo3::types::PyString>()
+        {
+            return Err(crate::stat_arguments::not_expected_type(
+                dataType,
+                "dataType",
+                "DataType or str",
+            ));
+        }
         if let Ok(s) = dataType.extract::<String>() {
             Ok(PyColumn::new(self.column.clone().try_cast_str(&s)))
         } else {
@@ -620,6 +663,22 @@ impl PyColumn {
         format!("Column<'{}'>", self.column.expression().render())
     }
 
+    /// The expression of this column, as PySpark Connect's `Column._expr`: its `str` is the
+    /// rendering of the expression that `Column<'...'>` shows, of which `pyspark.ml.stat` names
+    /// its metrics.
+    #[getter]
+    fn _expr(&self) -> PyColumnExpression {
+        PyColumnExpression {
+            column: self.column.clone(),
+        }
+    }
+
+    /// The `spark.connect.Expression` of this column, as PySpark Connect's `Column.to_plan`: that
+    /// of its expression, of the generated `pyspark.sql.connect.proto`.
+    fn to_plan(&self, py: Python<'_>, session: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self._expr().to_plan(py, session)
+    }
+
     fn __str__(&self) -> String {
         let _origin = crate::origin::with_origin("__str__");
         self.__repr__()
@@ -762,14 +821,14 @@ impl PyColumn {
                 ));
             }
         }
-        // pyspark's Column.isin unpacks a single list/tuple/set argument:
-        // col.isin([1, 2]) == col.isin(1, 2). pandas-on-Spark's Series.isin relies on
-        // this (it passes a single list of lit(..) columns).
+        // pyspark's Column.isin unpacks a single list or set argument, but not a tuple, which
+        // is a value (UNSUPPORTED_DATA_TYPE of lit): col.isin([1, 2]) == col.isin(1, 2).
+        // pandas-on-Spark's Series.isin relies on this (it passes a single list of lit(..)
+        // columns).
         let mut items: Vec<Py<PyAny>> = cols;
         if items.len() == 1 {
             let only = items[0].bind(py);
             if only.is_instance_of::<pyo3::types::PyList>()
-                || only.is_instance_of::<pyo3::types::PyTuple>()
                 || only.is_instance_of::<pyo3::types::PySet>()
             {
                 items = only

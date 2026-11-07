@@ -5,7 +5,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use spark_connect_core::client::ReattachableResponseStream;
 use spark_connect_core::error::{Result, SparkError};
 use spark_connect_core::runtime::{block_on, get_runtime};
 use spark_connect_proto as proto;
@@ -13,6 +12,7 @@ use spark_connect_proto as proto;
 use crate::column::Column;
 use crate::expression::{Expression, ExpressionNode};
 use crate::plan::{AggregateGroupType, JoinType, LogicalPlan, SetOpType};
+use crate::progress::ExecutionStream;
 use crate::row::{Row, StructValue, Value};
 use crate::session::{ExecutionInfo, SparkSession};
 use crate::types::DataType;
@@ -74,7 +74,9 @@ enum RowSource {
     /// one is exhausted (`prefetchPartitions=False`).
     OnDemand {
         session: SparkSession,
-        stream: ReattachableResponseStream,
+        // Boxed: the stream, with the progress of its execution, is much larger than a
+        // receiver.
+        stream: Box<ExecutionStream>,
         execution_info: ExecutionInfo,
         execution_recorded: bool,
     },
@@ -90,7 +92,7 @@ impl LocalRowIterator {
     /// Create a new `LocalRowIterator` over an already-issued ExecutePlan stream.
     pub(crate) fn new(
         session: SparkSession,
-        stream: ReattachableResponseStream,
+        stream: ExecutionStream,
         prefetch_partitions: bool,
     ) -> Self {
         let schema = SchemaSlot::default();
@@ -101,7 +103,7 @@ impl LocalRowIterator {
         } else {
             RowSource::OnDemand {
                 session,
-                stream,
+                stream: Box::new(stream),
                 execution_info: ExecutionInfo::default(),
                 execution_recorded: false,
             }
@@ -145,7 +147,8 @@ impl LocalRowIterator {
                         if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =
                             resp.response_type
                         {
-                            return Some(decode_arrow_batch(&batch));
+                            let schema = self.schema.lock().unwrap_or_else(|p| p.into_inner());
+                            return Some(decode_arrow_batch_of(&batch, schema.as_ref()));
                         }
                         // Metrics/progress response: keep pulling for a batch.
                     }
@@ -202,7 +205,7 @@ impl Iterator for LocalRowIterator {
 /// stream ends. Backs `to_local_iterator(prefetch_partitions = true)`.
 fn spawn_prefetch(
     session: SparkSession,
-    mut stream: ReattachableResponseStream,
+    mut stream: ExecutionStream,
     schema: SchemaSlot,
 ) -> tokio::sync::mpsc::Receiver<Result<Vec<Row>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<Row>>>(1);
@@ -219,7 +222,11 @@ fn spawn_prefetch(
                     if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =
                         resp.response_type
                     {
-                        match decode_arrow_batch(&batch) {
+                        let decoded = {
+                            let schema = schema.lock().unwrap_or_else(|p| p.into_inner());
+                            decode_arrow_batch_of(&batch, schema.as_ref())
+                        };
+                        match decoded {
                             Ok(rows) => {
                                 // A send error means the consumer dropped the
                                 // iterator; stop fetching.
@@ -756,7 +763,8 @@ impl DataFrame {
         Ok(())
     }
 
-    /// Sample rows.
+    /// Sample rows. Without a seed, the client chooses a random one, as PySpark's, so that every
+    /// execution of the sample returns the same rows.
     pub fn sample(&self, fraction: f64, seed: Option<i64>) -> DataFrame {
         self.sample_opt(fraction, false, seed)
     }
@@ -774,7 +782,8 @@ impl DataFrame {
             lower_bound: 0.0,
             upper_bound: fraction,
             with_replacement,
-            seed,
+            seed: Some(seed.unwrap_or_else(random_seed)),
+            deterministic_order: false,
         };
         self.with_cached_schema(plan)
     }
@@ -798,7 +807,7 @@ impl DataFrame {
     /// Unlike the Arrow schema of the rows, it has the user-defined types of the columns.
     pub fn collect_with_schema(&self) -> Result<(Vec<Row>, Option<DataType>)> {
         let request = self.build_execute_request()?;
-        let mut stream = block_on(self.session.client().execute_plan_reattachable(request))?;
+        let mut stream = self.session.execute_plan(request)?;
 
         let mut rows = vec![];
         let mut schema = None;
@@ -815,7 +824,7 @@ impl DataFrame {
             if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =
                 resp.response_type
             {
-                let batch_rows = decode_arrow_batch(&batch)?;
+                let batch_rows = decode_arrow_batch_of(&batch, schema.as_ref())?;
                 rows.extend(batch_rows);
             }
         }
@@ -837,7 +846,7 @@ impl DataFrame {
     ///   fetched on demand only once the previous batch is exhausted.
     pub fn to_local_iterator(&self, prefetch_partitions: bool) -> Result<LocalRowIterator> {
         let request = self.build_execute_request()?;
-        let stream = block_on(self.session.client().execute_plan_reattachable(request))?;
+        let stream = self.session.execute_plan(request)?;
         Ok(LocalRowIterator::new(
             self.session.clone(),
             stream,
@@ -874,7 +883,7 @@ impl DataFrame {
         &self,
     ) -> Result<(Vec<arrow::record_batch::RecordBatch>, Option<DataType>)> {
         let request = self.build_execute_request()?;
-        let mut stream = block_on(self.session.client().execute_plan_reattachable(request))?;
+        let mut stream = self.session.execute_plan(request)?;
 
         let mut batches = vec![];
         let mut schema = None;
@@ -953,12 +962,73 @@ impl DataFrame {
         }
     }
 
+    /// The HTML table of the first `n` rows, values truncated to `truncate` characters (0 for
+    /// none), as the server formats it. Mirrors the table of `DataFrame._repr_html_()`.
+    pub fn html_string(&self, n: i32, truncate: i32) -> Result<String> {
+        let html = DataFrame::new(
+            self.session.clone(),
+            LogicalPlan::HtmlString {
+                input: Arc::clone(&self.plan),
+                num_rows: n,
+                truncate,
+            },
+        );
+        match html.collect()?.first().map(|row| row.values()) {
+            Some([Value::String(table)]) => Ok(table.clone()),
+            _ => Err(SparkError::connect_msg(
+                "HtmlString returned no table of one string",
+            )),
+        }
+    }
+
     /// Print the first `n` rows as the server formats them, with values truncated to 20
     /// characters. Mirrors `DataFrame.show(n)`.
     pub fn show(&self, n: usize) -> Result<()> {
         let n = i32::try_from(n).unwrap_or(i32::MAX);
         println!("{}", self.show_string(n, 20, false)?);
         Ok(())
+    }
+
+    /// A DataFrame of `relation`, a relation built outside the core, such as the plans of
+    /// `pyspark.ml`, which the core sends as it is, keeping `owner`, if any, alive while any
+    /// DataFrame of it is. Not a stable API.
+    #[doc(hidden)]
+    pub fn from_relation(
+        session: SparkSession,
+        relation: proto::Relation,
+        owner: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    ) -> DataFrame {
+        DataFrame::new(
+            session,
+            LogicalPlan::Raw {
+                relation: Box::new(relation),
+                owner: owner.map(crate::plan::RelationOwner),
+            },
+        )
+    }
+
+    /// The DataFrame of `relation`, a relation that `session` sent, such as that of a DataFrame
+    /// that was pickled, which keeps its plan ID, as PySpark Connect's pickled plans keep
+    /// theirs: so it is sent as it is, and the columns of the DataFrame it was of resolve
+    /// against it. Not a stable API.
+    #[doc(hidden)]
+    pub fn from_sent_relation(session: SparkSession, relation: proto::Relation) -> DataFrame {
+        let plan_id = relation.common.as_ref().and_then(|common| common.plan_id);
+        let dataframe = DataFrame::from_relation(session, relation, None);
+        if let Some(plan_id) = plan_id {
+            dataframe
+                .session
+                .plan_ids()
+                .assign(&dataframe.plan, plan_id);
+        }
+        dataframe
+    }
+
+    /// The relation of this DataFrame as it is sent, with the plan IDs of its session, for a
+    /// plan built outside the core over it, such as of `pyspark.ml`. Not a stable API.
+    #[doc(hidden)]
+    pub fn to_relation(&self) -> proto::Relation {
+        build_input_relation(&self.plan, &self.session)
     }
 
     /// Get the schema of this DataFrame.
@@ -1757,6 +1827,9 @@ impl DataFrame {
 
     /// Randomly split this DataFrame into multiple parts.
     pub fn random_split(&self, weights: Vec<f64>, seed: Option<i64>) -> Vec<DataFrame> {
+        // As PySpark's: one seed of every split, of the client without a seed, and the input
+        // in a deterministic order, so that the splits are disjoint and have every row.
+        let seed = Some(seed.unwrap_or_else(random_seed));
         let total: f64 = weights.iter().sum();
         let normalized: Vec<f64> = weights.iter().map(|w| w / total).collect();
 
@@ -1771,6 +1844,7 @@ impl DataFrame {
                 upper_bound: upper,
                 with_replacement: false,
                 seed,
+                deterministic_order: true,
             };
             results.push(self.with_cached_schema(plan));
             cumulative = upper;
@@ -1780,6 +1854,8 @@ impl DataFrame {
     }
 
     /// Print the schema of this DataFrame.
+    ///
+    /// The output ends with a blank line, matching Scala and Python.
     pub fn print_schema(&self) -> Result<()> {
         let schema = self.schema()?;
         println!("{}", schema.tree_string()?);
@@ -1958,10 +2034,16 @@ impl DataFrame {
     /// re-selected with the given metadata attached (serialized to a JSON map).
     pub fn with_metadata(&self, column_name: &str, metadata: HashMap<String, String>) -> DataFrame {
         let metadata_json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
+        self.with_metadata_json(column_name, &metadata_json)
+    }
+
+    /// Set the metadata of a column of its JSON, of any JSON values, as PySpark's
+    /// `withMetadata` sends `json.dumps(metadata)`.
+    pub fn with_metadata_json(&self, column_name: &str, metadata_json: &str) -> DataFrame {
         let plan = LogicalPlan::WithColumnMetadata {
             input: Arc::clone(&self.plan),
             column_name: column_name.to_string(),
-            metadata_json,
+            metadata_json: metadata_json.to_string(),
         };
         DataFrame::new(self.session.clone(), plan)
     }
@@ -2223,7 +2305,7 @@ pub(crate) fn execute_command_with_info(
     request.tags = session.tags();
     request.plan = Some(plan);
 
-    let mut stream = block_on(session.client().execute_plan_reattachable(request))?;
+    let mut stream = session.execute_plan(request)?;
     // Drain the response stream so the command runs to completion server-side,
     // capturing any metrics/progress emitted along the way.
     let mut info = ExecutionInfo::default();
@@ -2236,9 +2318,10 @@ pub(crate) fn execute_command_with_info(
     Ok((responses, info))
 }
 
-/// Pull execution metrics/observed-metrics off a response and fire progress
-/// handlers. `metrics`/`observed_metrics` are top-level fields (not part of the
-/// `response_type` oneof), so this must run before `response_type` is consumed.
+/// Pull execution metrics/observed-metrics off a response; the `ExecutionStream` of the
+/// response updates the progress of the execution. `metrics`/`observed_metrics` are top-level
+/// fields (not part of the `response_type` oneof), so this must run before `response_type` is
+/// consumed.
 fn capture_execution(
     resp: &mut proto::ExecutePlanResponse,
     info: &mut ExecutionInfo,
@@ -2253,14 +2336,9 @@ fn capture_execution(
     if !resp.observed_metrics.is_empty() {
         let metrics = std::mem::take(&mut resp.observed_metrics);
         set_observations(session, &metrics);
-        // Feed observed metrics to the profiler collector
-        session.profiler().accumulate_observed_metrics(&metrics);
+        // The updates of the Python accumulators, such as the results of the UDF profilers.
+        session.python_accumulators().accumulate(&metrics);
         info.observed_metrics.extend(metrics);
-    }
-    if let Some(proto::execute_plan_response::ResponseType::ExecutionProgress(progress)) =
-        &resp.response_type
-    {
-        session.notify_progress(progress);
     }
 }
 
@@ -2296,9 +2374,35 @@ fn set_observations(
     }
 }
 
+/// A random seed of a sample without one, as PySpark's `random.randint(0, sys.maxsize)`: the
+/// client chooses it, so that every execution of the sample returns the same rows.
+fn random_seed() -> i64 {
+    (uuid::Uuid::new_v4().as_u128() >> 65) as i64
+}
+
 /// Decode an Arrow batch into rows.
 pub(crate) fn decode_arrow_batch(
     batch: &proto::execute_plan_response::ArrowBatch,
+) -> Result<Vec<Row>> {
+    decode_arrow_batch_of(batch, None)
+}
+
+/// The fields of `schema`, a struct of `columns` fields, for the columns of a batch: none of
+/// another schema, whose names the batch keeps.
+fn spark_fields(schema: Option<&DataType>, columns: usize) -> Option<&[crate::types::StructField]> {
+    match schema {
+        Some(DataType::Struct { fields }) if fields.len() == columns => Some(fields),
+        _ => None,
+    }
+}
+
+/// The rows of `batch`, of the names of `schema`, the schema of the result that the server sends
+/// before the rows, if any: as PySpark's `ArrowTableToRowsConversion` builds them by the schema,
+/// the fields of nested structs have the names of the schema, which keep the duplicate names
+/// that the Arrow data of the server numbers (`a_0`, `a_1`).
+pub(crate) fn decode_arrow_batch_of(
+    batch: &proto::execute_plan_response::ArrowBatch,
+    spark_schema: Option<&DataType>,
 ) -> Result<Vec<Row>> {
     use arrow::ipc::reader::StreamReader;
     use std::io::Cursor;
@@ -2324,15 +2428,22 @@ pub(crate) fn decode_arrow_batch(
         if num_rows == 0 {
             continue;
         }
-        let field_names = schema
-            .fields()
-            .iter()
-            .map(|field| field.name().clone())
-            .collect::<Arc<[String]>>();
+        let fields = spark_fields(spark_schema, record_batch.num_columns());
+        let field_names = match fields {
+            Some(fields) => fields.iter().map(|field| field.name.clone()).collect(),
+            None => schema
+                .fields()
+                .iter()
+                .map(|field| field.name().clone())
+                .collect::<Arc<[String]>>(),
+        };
         let layouts = record_batch
             .columns()
             .iter()
-            .map(|column| ArrowValueLayout::new(column.as_ref()))
+            .enumerate()
+            .map(|(i, column)| {
+                ArrowValueLayout::of(column.as_ref(), fields.map(|fields| &fields[i].data_type))
+            })
             .collect::<Vec<_>>();
 
         for row_idx in 0..num_rows {
@@ -2469,6 +2580,17 @@ struct ArrowValueLayout<'a> {
     decoder: ArrowValueDecoder<'a>,
 }
 
+/// The Value of a timestamp of `micros` since the epoch. Spark's Arrow types declare
+/// TIMESTAMP_NTZ without a time zone and TIMESTAMP with one (`ArrowUtils.toArrowType`), so the
+/// time zone of the Arrow type tells the two apart.
+fn timestamp_value(micros: i64, has_time_zone: bool) -> Value {
+    if has_time_zone {
+        Value::Timestamp(micros)
+    } else {
+        Value::TimestampNtz(micros)
+    }
+}
+
 enum ArrowValueDecoder<'a> {
     Null,
     Boolean(&'a arrow::array::BooleanArray),
@@ -2522,8 +2644,25 @@ enum ArrowValueDecoder<'a> {
 }
 
 impl<'a> ArrowValueLayout<'a> {
+    #[cfg(test)]
     fn new(array: &'a dyn arrow::array::Array) -> Self {
+        Self::of(array, None)
+    }
+
+    /// The layout of `array`, of the Spark type `data_type` if known: the fields of its structs,
+    /// also in arrays, maps and user-defined types, have the names of the type.
+    fn of(array: &'a dyn arrow::array::Array, data_type: Option<&DataType>) -> Self {
         use arrow::array::*;
+
+        // A user-defined type is in the Arrow data of its SQL type.
+        let mut data_type = data_type;
+        while let Some(DataType::Udt {
+            sql_type: Some(sql_type),
+            ..
+        }) = data_type
+        {
+            data_type = Some(sql_type);
+        }
 
         // Resolution never fails: null parents and empty containers must not
         // reject unsupported children that are never read.
@@ -2599,9 +2738,13 @@ impl<'a> ArrowValueLayout<'a> {
         } else if let Some(array) = any.downcast_ref::<IntervalMonthDayNanoArray>() {
             ArrowValueDecoder::IntervalMonthDayNano(array)
         } else if let Some(array) = any.downcast_ref::<ListArray>() {
+            let element_type = match data_type {
+                Some(DataType::Array { element_type, .. }) => Some(element_type.as_ref()),
+                _ => None,
+            };
             ArrowValueDecoder::List {
                 array,
-                child: Box::new(Self::new(array.values().as_ref())),
+                child: Box::new(Self::of(array.values().as_ref(), element_type)),
             }
         } else if let Some(array) = any.downcast_ref::<StructArray>() {
             let fields = array.fields();
@@ -2611,12 +2754,27 @@ impl<'a> ArrowValueLayout<'a> {
                     .get("variant")
                     .is_some_and(|value| value == "true")
             });
+            let spark_fields = match data_type {
+                Some(DataType::Struct { fields: spark }) if spark.len() == fields.len() => {
+                    Some(spark)
+                }
+                _ => None,
+            };
             ArrowValueDecoder::Struct {
-                names: fields.iter().map(|field| field.name().clone()).collect(),
+                names: match spark_fields {
+                    Some(spark) => spark.iter().map(|field| field.name.clone()).collect(),
+                    None => fields.iter().map(|field| field.name().clone()).collect(),
+                },
                 children: array
                     .columns()
                     .iter()
-                    .map(|child| Self::new(child.as_ref()))
+                    .enumerate()
+                    .map(|(i, child)| {
+                        Self::of(
+                            child.as_ref(),
+                            spark_fields.map(|spark| &spark[i].data_type),
+                        )
+                    })
                     .collect(),
                 variant_fields: is_variant.then(|| {
                     (
@@ -2626,11 +2784,19 @@ impl<'a> ArrowValueLayout<'a> {
                 }),
             }
         } else if let Some(array) = any.downcast_ref::<MapArray>() {
+            let (key_type, value_type) = match data_type {
+                Some(DataType::Map {
+                    key_type,
+                    value_type,
+                    ..
+                }) => (Some(key_type.as_ref()), Some(value_type.as_ref())),
+                _ => (None, None),
+            };
             ArrowValueDecoder::Map {
                 array,
                 children: Box::new((
-                    Self::new(array.keys().as_ref()),
-                    Self::new(array.values().as_ref()),
+                    Self::of(array.keys().as_ref(), key_type),
+                    Self::of(array.values().as_ref(), value_type),
                 )),
             }
         } else {
@@ -2656,7 +2822,9 @@ impl<'a> ArrowValueLayout<'a> {
             ArrowValueDecoder::String(arr) => Ok(Value::String(arr.value(index).to_string())),
             ArrowValueDecoder::Binary(arr) => Ok(Value::Binary(arr.value(index).to_vec())),
             ArrowValueDecoder::Date32(arr) => Ok(Value::Date(arr.value(index))),
-            ArrowValueDecoder::TimestampMicrosecond(arr) => Ok(Value::Timestamp(arr.value(index))),
+            ArrowValueDecoder::TimestampMicrosecond(arr) => {
+                Ok(timestamp_value(arr.value(index), arr.timezone().is_some()))
+            }
             ArrowValueDecoder::UInt8(arr) => Ok(Value::Short(arr.value(index) as i16)),
             ArrowValueDecoder::UInt16(arr) => Ok(Value::Integer(arr.value(index) as i32)),
             ArrowValueDecoder::UInt32(arr) => Ok(Value::Long(arr.value(index) as i64)),
@@ -2680,15 +2848,18 @@ impl<'a> ArrowValueLayout<'a> {
             ArrowValueDecoder::LargeBinary(arr) => Ok(Value::Binary(arr.value(index).to_vec())),
             ArrowValueDecoder::StringView(arr) => Ok(Value::String(arr.value(index).to_string())),
             ArrowValueDecoder::BinaryView(arr) => Ok(Value::Binary(arr.value(index).to_vec())),
-            ArrowValueDecoder::TimestampSecond(arr) => {
-                Ok(Value::Timestamp(arr.value(index) * 1_000_000))
-            }
-            ArrowValueDecoder::TimestampMillisecond(arr) => {
-                Ok(Value::Timestamp(arr.value(index) * 1_000))
-            }
-            ArrowValueDecoder::TimestampNanosecond(arr) => {
-                Ok(Value::Timestamp(arr.value(index) / 1_000))
-            }
+            ArrowValueDecoder::TimestampSecond(arr) => Ok(timestamp_value(
+                arr.value(index) * 1_000_000,
+                arr.timezone().is_some(),
+            )),
+            ArrowValueDecoder::TimestampMillisecond(arr) => Ok(timestamp_value(
+                arr.value(index) * 1_000,
+                arr.timezone().is_some(),
+            )),
+            ArrowValueDecoder::TimestampNanosecond(arr) => Ok(timestamp_value(
+                arr.value(index) / 1_000,
+                arr.timezone().is_some(),
+            )),
             ArrowValueDecoder::Date64(arr) => {
                 Ok(Value::Date((arr.value(index) / 86_400_000) as i32))
             }
@@ -2916,6 +3087,77 @@ mod nested_decode_tests {
         }
         // The IPC buffers and borrowed column layouts have already been dropped.
         assert_eq!(rows[2].get(1), Some(&Value::String("é\0雪".into())));
+    }
+
+    #[test]
+    fn nested_struct_fields_take_the_names_of_the_schema_of_the_result() {
+        // As PySpark's ArrowTableToRowsConversion, which builds the rows by the schema of the
+        // result: the fields of nested structs, also in arrays and maps, have the names of the
+        // schema, which keep the duplicate names that the server's Arrow data numbers.
+        use crate::types::{DataType as Spark, StructField as SparkField};
+        let field = |name: &str, data_type: Spark| SparkField {
+            name: name.to_string(),
+            data_type,
+            nullable: true,
+            metadata: Default::default(),
+        };
+        let pair = || {
+            StructArray::from(vec![
+                (
+                    Arc::new(Field::new("a_0", DataType::Int32, true)),
+                    Arc::new(Int32Array::from(vec![1])) as ArrayRef,
+                ),
+                (
+                    Arc::new(Field::new("a_1", DataType::Int32, true)),
+                    Arc::new(Int32Array::from(vec![2])) as ArrayRef,
+                ),
+            ])
+        };
+        let list = ListArray::new(
+            Arc::new(Field::new("element", pair().data_type().clone(), true)),
+            arrow::buffer::OffsetBuffer::from_lengths([1]),
+            Arc::new(pair()),
+            None,
+        );
+        let batch = encoded_batches(
+            vec![("v", Arc::new(pair()) as ArrayRef), ("w", Arc::new(list))],
+            1,
+            false,
+        );
+        let pair_type = || Spark::Struct {
+            fields: vec![field("a", Spark::Integer), field("a", Spark::Integer)],
+        };
+        let schema = Spark::Struct {
+            fields: vec![
+                field("v", pair_type()),
+                field(
+                    "w",
+                    Spark::Array {
+                        element_type: Box::new(pair_type()),
+                        contains_null: true,
+                    },
+                ),
+            ],
+        };
+        let rows = decode_arrow_batch_of(&batch, Some(&schema)).unwrap();
+        assert_eq!(rows[0].fields(), &["v", "w"]);
+        assert_eq!(as_struct(rows[0].get(0).unwrap()).fields(), &["a", "a"]);
+        let Some(Value::List(items)) = rows[0].get(1) else {
+            panic!("expected a list");
+        };
+        assert_eq!(as_struct(&items[0]).fields(), &["a", "a"]);
+        assert_eq!(
+            as_struct(&items[0]).values(),
+            &[Value::Integer(1), Value::Integer(2)]
+        );
+        // Without the schema, or of a schema of another shape, the names of the Arrow data.
+        let other = Spark::Struct {
+            fields: vec![field("v", Spark::Integer)],
+        };
+        for schema in [None, Some(&other)] {
+            let rows = decode_arrow_batch_of(&batch, schema).unwrap();
+            assert_eq!(as_struct(rows[0].get(0).unwrap()).fields(), &["a_0", "a_1"]);
+        }
     }
 
     #[test]
@@ -3352,6 +3594,78 @@ mod nested_decode_tests {
 mod cache_tests {
     use super::*;
     use prost::Message;
+
+    #[test]
+    fn print_schema_includes_final_blank_line() {
+        const CHILD: &str = "SPARK_CONNECT_PRINT_SCHEMA_STDOUT_CHILD";
+        const BEGIN: &str = "__PRINT_SCHEMA_BEGIN__\n";
+        const END: &str = "__PRINT_SCHEMA_END__";
+        if std::env::var_os(CHILD).is_some() {
+            // A cache regression must fail promptly instead of waiting on an RPC.
+            let _watchdog = std::thread::spawn(|| {
+                std::thread::sleep(std::time::Duration::from_secs(30));
+                eprintln!("print_schema stdout child timed out");
+                std::process::exit(1);
+            });
+            let spark = SparkSession::builder()
+                .remote("sc://localhost:1")
+                .get_or_create()
+                .unwrap();
+            let nested = DataType::from_json(&serde_json::json!({
+                "type": "struct",
+                "fields": [{"name": "outer", "type": {
+                    "type": "struct",
+                    "fields": [{"name": "inner", "type": "integer", "nullable": false, "metadata": {}}]
+                }, "nullable": true, "metadata": {}}]
+            }))
+            .unwrap();
+            print!("{BEGIN}");
+            for schema in [nested, DataType::Struct { fields: vec![] }] {
+                let df = spark.range(0).unwrap();
+                *df.schema_cache.lock().unwrap() = Some(Arc::new(schema));
+                df.print_schema().unwrap();
+            }
+            println!("{END}");
+            return;
+        }
+
+        // A separate process exposes real stdout without changing global capture
+        // or sharing it with the other parallel tests in this process.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "dataframe::cache_tests::print_schema_includes_final_blank_line",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let printed = stdout
+            .split_once(BEGIN)
+            .expect("child must run the schema print test")
+            .1
+            .split_once(END)
+            .expect("child must finish printing schemas")
+            .0;
+        assert_eq!(
+            printed,
+            concat!(
+                "root\n",
+                " |-- outer: struct (nullable = true)\n",
+                " |    |-- inner: integer (nullable = false)\n",
+                "\n",
+                "root\n",
+                "\n",
+            ),
+        );
+    }
 
     #[test]
     fn schema_cache_shares_exact_clones_but_not_changed_plans_or_new_sources() {
@@ -4093,6 +4407,37 @@ mod plan_construction_tests {
         }
     }
 
+    /// As PySpark's: without a seed, the client takes one, of every split of `random_split`,
+    /// whose input is in a deterministic order, and of a sample.
+    #[test]
+    fn samples_take_a_seed_of_the_client() {
+        let spark = session();
+        let df = spark.range(10).unwrap();
+        let seeds: Vec<(Option<i64>, bool)> = df
+            .random_split(vec![0.5, 0.5], None)
+            .iter()
+            .map(|split| match split.plan.as_ref() {
+                LogicalPlan::Sample {
+                    seed,
+                    deterministic_order,
+                    ..
+                } => (*seed, *deterministic_order),
+                other => panic!("expected a Sample plan, got {other:?}"),
+            })
+            .collect();
+        assert!(seeds[0].0.is_some_and(|seed| seed >= 0));
+        assert_eq!(seeds[0], seeds[1]);
+        assert!(seeds[0].1);
+        match df.sample(0.5, None).plan.as_ref() {
+            LogicalPlan::Sample {
+                seed: Some(_),
+                deterministic_order: false,
+                ..
+            } => {}
+            other => panic!("expected a Sample plan of a seed, got {other:?}"),
+        }
+    }
+
     #[test]
     fn random_split_plan() {
         let spark = session();
@@ -4539,16 +4884,25 @@ mod arrow_value_tests {
         };
         let cases: Vec<(ArrayRef, Value)> = vec![
             (
-                Arc::new(TimestampSecondArray::from(vec![-1])),
+                Arc::new(TimestampSecondArray::from(vec![-1]).with_timezone_utc()),
                 Value::Timestamp(-1_000_000),
             ),
             (
-                Arc::new(TimestampMillisecondArray::from(vec![-1])),
+                Arc::new(TimestampMillisecondArray::from(vec![-1]).with_timezone_utc()),
                 Value::Timestamp(-1_000),
             ),
             (
-                Arc::new(TimestampNanosecondArray::from(vec![-1999])),
+                Arc::new(TimestampNanosecondArray::from(vec![-1999]).with_timezone_utc()),
                 Value::Timestamp(-1),
+            ),
+            // Without a time zone, as TIMESTAMP_NTZ is declared.
+            (
+                Arc::new(TimestampSecondArray::from(vec![-1])),
+                Value::TimestampNtz(-1_000_000),
+            ),
+            (
+                Arc::new(TimestampMicrosecondArray::from(vec![-1])),
+                Value::TimestampNtz(-1),
             ),
             (
                 Arc::new(Date64Array::from(vec![-86_400_001])),
@@ -4649,6 +5003,14 @@ mod arrow_value_tests {
         ));
         assert!(matches!(
             arrow_value_at(&TimestampMicrosecondArray::from(vec![1i64]), 0).unwrap(),
+            Value::TimestampNtz(1)
+        ));
+        assert!(matches!(
+            arrow_value_at(
+                &TimestampMicrosecondArray::from(vec![1i64]).with_timezone_utc(),
+                0
+            )
+            .unwrap(),
             Value::Timestamp(1)
         ));
     }
@@ -4715,14 +5077,38 @@ mod arrow_value_tests {
     fn timestamps_and_date64() {
         assert!(matches!(
             arrow_value_at(&TimestampSecondArray::from(vec![1i64]), 0).unwrap(),
-            Value::Timestamp(_)
+            Value::TimestampNtz(_)
         ));
         assert!(matches!(
             arrow_value_at(&TimestampMillisecondArray::from(vec![1i64]), 0).unwrap(),
-            Value::Timestamp(_)
+            Value::TimestampNtz(_)
         ));
         assert!(matches!(
             arrow_value_at(&TimestampNanosecondArray::from(vec![1000i64]), 0).unwrap(),
+            Value::TimestampNtz(_)
+        ));
+        assert!(matches!(
+            arrow_value_at(
+                &TimestampSecondArray::from(vec![1i64]).with_timezone_utc(),
+                0
+            )
+            .unwrap(),
+            Value::Timestamp(_)
+        ));
+        assert!(matches!(
+            arrow_value_at(
+                &TimestampMillisecondArray::from(vec![1i64]).with_timezone_utc(),
+                0
+            )
+            .unwrap(),
+            Value::Timestamp(_)
+        ));
+        assert!(matches!(
+            arrow_value_at(
+                &TimestampNanosecondArray::from(vec![1000i64]).with_timezone_utc(),
+                0
+            )
+            .unwrap(),
             Value::Timestamp(_)
         ));
         assert!(matches!(

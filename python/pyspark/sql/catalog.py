@@ -16,20 +16,65 @@
 #
 """Catalog + its metadata result classes, mirroring ``pyspark.sql.catalog``.
 
-The Catalog and the metadata result classes (Database/Table/Column/Function/
-CatalogMetadata/TablePartition) are all implemented natively in the Rust core and
-re-exported here (``CatalogColumn`` is exposed as ``Column`` to avoid colliding with
-the expression ``Column`` in the extension module)."""
+The Catalog is implemented natively in the Rust core and re-exported here. Its methods return
+the NamedTuples of PySpark's ``pyspark.sql.catalog`` below (Database, Table, Column, Function,
+CatalogMetadata and TablePartition), which are tuples, as PySpark's are."""
 
-from pyspark._pyspark import (
-    Catalog,
-    CatalogMetadata,
-    Database,
-    Table,
-    CatalogColumn as Column,
-    Function,
-    TablePartition,
-)
+from typing import List, NamedTuple, Optional
+
+from pyspark._pyspark import Catalog
+
+
+class CatalogMetadata(NamedTuple):
+    name: str
+    description: Optional[str]
+
+
+class Database(NamedTuple):
+    name: str
+    catalog: Optional[str]
+    description: Optional[str]
+    locationUri: str
+
+
+class Table(NamedTuple):
+    name: str
+    catalog: Optional[str]
+    namespace: Optional[List[str]]
+    description: Optional[str]
+    tableType: str
+    isTemporary: bool
+
+    @property
+    def database(self) -> Optional[str]:
+        if self.namespace is not None and len(self.namespace) == 1:
+            return self.namespace[0]
+        else:
+            return None
+
+
+class Column(NamedTuple):
+    name: str
+    description: Optional[str]
+    dataType: str
+    nullable: bool
+    isPartition: bool
+    isBucket: bool
+    isCluster: bool
+
+
+class Function(NamedTuple):
+    name: str
+    catalog: Optional[str]
+    namespace: Optional[List[str]]
+    description: Optional[str]
+    className: str
+    isTemporary: bool
+
+
+class TablePartition(NamedTuple):
+    partition: str
+
 
 __all__ = [
     "Catalog",

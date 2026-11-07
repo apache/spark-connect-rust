@@ -73,6 +73,48 @@ reference and must use the same Spark session. Models are obtained through
 longer supported. The cached model remains available until the session is closed,
 including when a model is cloned or a transformed DataFrame is executed later.
 
+## Native LinearSVC
+
+`spark_connect::ml::LinearSVC` trains Spark's JVM binary linear support vector
+classifier through the Connect ML protocol. Use vector features and labels 0 or 1.
+Rust builder setters cover all 13 constructor parameters, including `set_reg_param`,
+`set_tol`, `set_weight_col` and `set_threshold`. Unset parameters use Spark's defaults.
+The Python binding is available as `pyspark.ml.connect.classification.LinearSVC`
+and `pyspark.ml.connect.LinearSVC`, with the upstream keyword-only constructor
+parameters and mutating `setFeaturesCol`, `setRegParam`, etc. methods.
+
+`fit` returns a server-cached model; `transform` must use the fitting session.
+Clones and lazy prediction DataFrames remain usable until that session closes.
+The Python model uses the existing `MLModel.transform` interface. Model inspection
+(coefficients, intercept and summaries), single-vector prediction and model
+persistence are not exposed by this addition.
+
+## pyspark.ml
+
+The DataFrame-based `pyspark.ml` API (`pyspark.ml.classification`, `feature`,
+`regression`, `clustering`, `evaluation`, `tuning`, `stat`, `Pipeline`, ...) is
+Apache Spark's own, vendored from v4.3.0: estimators fit, models transform, and
+pipelines save and load on the server as with PySpark Connect, over the Rust
+transport. These modules build their own `spark.connect` messages with the
+generated `pyspark.sql.connect.proto`, which needs the `protobuf` package
+(`pip install "protobuf>=6.33.5"`). The package is not a dependency of
+`pyspark-client-rust`: without it, `pyspark.ml` imports, but a fit or a transform
+raises an `AttributeError` that names `protobuf`.
+
+A DataFrame of a plan of `pyspark.ml` (`DataFrame(plan, session)`) takes the plan ID
+of this client rather than the one of the plan, which its columns refer to.
+
+## Spark Declarative Pipelines CLI
+
+The CLI of Spark Declarative Pipelines (`python -m pyspark.pipelines.cli init`, `run` and
+`dry-run`) and its modules are Apache Spark's own, vendored from v4.3.0, and Apache Spark's
+tests of them pass with this client. The CLI needs `pyyaml` and `protobuf`, which, as for
+`pyspark.ml`, are not dependencies of `pyspark-client-rust`. The user context extensions of a
+client (`spark.client.add_threadlocal_user_context_extension` and
+`add_global_user_context_extension`), which the CLI adds for the analyses of a pipeline, are
+sent with the requests of executions, analyses, configurations, error details and interrupts,
+as PySpark sends them.
+
 ## How parity is verified
 
 Two independent gates in CI cover the two halves of a Spark Connect client - plan

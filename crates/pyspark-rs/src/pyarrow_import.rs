@@ -25,6 +25,19 @@ use spark_connect::session::SparkSession;
 use crate::dataframe::PyDataFrame;
 use crate::errors::ResultExt;
 
+/// The record batches of a pyarrow table, at least one, so that a table without rows keeps its
+/// schema, as PySpark's IPC stream does, for the relation to carry it.
+pub(crate) fn table_batches(table: &Bound<'_, PyAny>) -> PyResult<Vec<RecordBatch>> {
+    // PyArrow 10 readers support _export_to_c, even without PyCapsules.
+    let (mut batches, arrow_schema) =
+        Table::from_pyarrow_bound(&table.call_method0("to_reader")?)?.into_inner();
+    // A cast drops the rows of a zero-column table, leaving no batches.
+    if batches.is_empty() {
+        batches.push(RecordBatch::new_empty(arrow_schema));
+    }
+    Ok(batches)
+}
+
 pub(crate) fn create_dataframe(
     py: Python<'_>,
     session: &SparkSession,
@@ -67,15 +80,7 @@ pub(crate) fn create_dataframe(
     let batches = if empty {
         Vec::new()
     } else {
-        // PyArrow 10 readers support _export_to_c, even without PyCapsules.
-        let (mut batches, arrow_schema) =
-            Table::from_pyarrow_bound(&normalized.call_method0("to_reader")?)?.into_inner();
-        // The cast drops the rows of a zero-column table, leaving no batches. Keep its
-        // schema, as PySpark's IPC stream does, so the relation still carries one.
-        if batches.is_empty() {
-            batches.push(RecordBatch::new_empty(arrow_schema));
-        }
-        batches
+        table_batches(&normalized)?
     };
     let dataframe = py.detach(|| {
         match options.as_ref() {

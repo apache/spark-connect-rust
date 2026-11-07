@@ -21,6 +21,7 @@ values here are those of the reference client; the tests pass with it as well.
 """
 
 import os
+import time
 from collections import namedtuple
 from datetime import date, datetime
 
@@ -40,6 +41,9 @@ from pyspark.sql.types import (
     StructType,
     TimestampType,
 )
+
+# Keep interval round trips in the live suite selected by CI.
+from interval_input_cases import IntervalInputLiveTests  # noqa: F401
 
 
 @pytest.fixture
@@ -64,6 +68,38 @@ def test_to_local_iterator_raises_the_error_of_the_execution_as_pyspark(session,
         next(rows)
     assert error.value.getCondition() == "USER_RAISED_EXCEPTION"
     assert list(rows) == []
+
+
+def test_pandas_api_takes_its_index_and_plot_is_of_pyspark(session):
+    # As PySpark's DataFrame.pandas_api(index_col): a pandas-on-Spark DataFrame of the index
+    # of the columns of index_col; and DataFrame.plot, the PySparkPlotAccessor of the DataFrame.
+    sdf = session.createDataFrame([("a", 1, 2.0), ("b", 2, 3.0)], ["k", "i", "f"])
+    psdf = sdf.pandas_api(index_col="k")
+    assert psdf.index.name == "k" and list(psdf.columns) == ["i", "f"]
+    assert psdf.sort_index().to_pandas()["i"].tolist() == [1, 2]
+    assert sdf.pandas_api().index.name is None
+    pytest.importorskip("plotly")
+    figure = sdf.plot.line(x="k", y=["i", "f"])
+    assert type(figure).__name__ == "Figure" and len(figure.data) == 2
+
+
+def test_udtfs_of_ddl_return_types_are_unparsed_as_pyspark(session):
+    # As PySpark Connect's: the returnType of a UDTF of a DDL string is an UnparsedDataType,
+    # which the server parses.
+    from pyspark.sql.connect.types import UnparsedDataType
+    from pyspark.sql.functions import lit, udtf
+
+    @udtf(returnType="x int, y string")
+    class Pairs:
+        def eval(self, n: int):
+            for i in range(n):
+                yield i, str(i)
+
+    assert isinstance(Pairs.returnType, UnparsedDataType)
+    assert Pairs.returnType.data_type_string == "x int, y string"
+    assert [tuple(row) for row in Pairs(lit(2)).collect()] == [(0, "0"), (1, "1")]
+
+
 
 
 def test_udf_and_udtf_calls_take_named_arguments_as_pyspark(session):
@@ -96,12 +132,46 @@ def test_udf_and_udtf_calls_take_named_arguments_as_pyspark(session):
     assert error.value.getCondition() == "UNRESOLVED_COLUMN.WITHOUT_SUGGESTION"
 
 
+def test_conf_warns_the_warnings_of_the_server_and_takes_its_values_as_pyspark(session):
+    # As PySpark's: set and unset warn the warnings of the server, the server rejects a set of
+    # None, a set of a float raises a TypeError, and get checks its key and default.
+    import warnings
+
+    from pyspark.errors import IllegalArgumentException, PySparkTypeError
+
+    key = "spark.sql.execution.arrow.enabled"
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        session.conf.set(key, False)
+        session.conf.unset(key)
+    warning = f"The SQL config '{key}' is NOT supported in Spark Connect"
+    assert [(w.category, str(w.message)) for w in caught] == [(UserWarning, warning)] * 2
+    with pytest.raises(IllegalArgumentException, match="value cannot be null"):
+        session.conf.set("spark.sql.test.conf.of.none", None)
+    with pytest.raises(TypeError):
+        session.conf.set("spark.sql.test.conf.of.a.float", 1.5)
+    assert session.conf.get("spark.sql.test.conf.of.none", None) is None
+    for args in [(1,), ("spark.sql.test.conf.of.none", 1)]:
+        with pytest.raises(PySparkTypeError) as e:
+            session.conf.get(*args)
+        assert e.value.getCondition() == "NOT_EXPECTED_TYPE"
+
+
 def test_conf_get_with_a_none_default(session):
     key = "spark.connect.rust.test.unset"
     assert session.conf.get(key, None) is None
     assert session.conf.get(key, "x") == "x"
     with pytest.raises(Exception, match="SQL_CONF_NOT_FOUND"):
         session.conf.get(key)
+
+
+def test_numpy_scalar_literals_have_the_types_of_their_dtypes_as_pyspark(session):
+    np = pytest.importorskip("numpy")
+    from pyspark.sql import functions as F
+
+    # As PySpark: a NumPy scalar's literal is typed by its dtype, as the server reports it.
+    df = session.range(1).select(F.lit(np.int64(5)), F.lit(np.float32(1.5)), F.lit(np.int8(5)))
+    assert [f.dataType.simpleString() for f in df.schema.fields] == ["bigint", "float", "tinyint"]
 
 
 def test_user_id_of_the_connection_string_reaches_every_request_as_pyspark():
@@ -141,6 +211,19 @@ def test_get_or_create_returns_the_session_with_the_options_as_pyspark(session):
         session.conf.set(key, previous)
 
 
+def test_nested_duplicate_field_names_of_local_rows_reach_the_server(session):
+    # As PySpark: the server reads the Arrow data of nested fields with deduplicated names,
+    # and the schema of the relation keeps the names, so the rows come back as they were.
+    R = Row("a", "a")
+    df = session.createDataFrame([(R(1, 2),)])
+    assert df.schema.simpleString() == "struct<_1:struct<a:bigint,a:bigint>>"
+    assert tuple(df.collect()[0]._1) == (1, 2)
+    df = session.createDataFrame([((1, 2),)], "s struct<a:bigint,a:bigint>")
+    assert tuple(df.collect()[0].s) == (1, 2)
+    df = session.createDataFrame([([(1, 2)],)], "s array<struct<a:bigint,a:bigint>>")
+    assert [tuple(item) for item in df.collect()[0].s] == [(1, 2)]
+
+
 def test_repr_shows_the_rows_with_eager_evaluation_as_pyspark(session):
     df = session.range(3)
     assert repr(df) == "DataFrame[id: bigint]"
@@ -157,6 +240,76 @@ def test_repr_shows_the_rows_with_eager_evaluation_as_pyspark(session):
         for key in keys:
             session.conf.unset(key)
     assert repr(df) == "DataFrame[id: bigint]"
+
+
+def test_udtfs_and_udfs_of_a_dataframe_or_the_session_raise_no_active_session_as_pyspark(session):
+    # As PySpark Connect's: a UDTF or a UDF that captures a DataFrame or the session pickles it
+    # of its session, which raises NO_ACTIVE_SESSION on the Python worker of the server, where
+    # no session is active.
+    from pyspark.errors import PythonException
+
+    df = session.range(10)
+
+    @F.udtf(returnType="x: int")
+    class Collect:
+        def eval(self):
+            df.collect()
+            yield (1,)
+
+    with pytest.raises(PythonException, match="NO_ACTIVE_SESSION"):
+        Collect().collect()
+
+    @F.udf("int")
+    def of_session(x):
+        return len(session.version) + x
+
+    with pytest.raises(PythonException, match="NO_ACTIVE_SESSION"):
+        session.range(1).select(of_session("id")).collect()
+
+
+
+
+def test_join_with_an_unsupported_join_type_raises_as_pyspark(session):
+    # As PySpark: the join type is checked when the join is built, which raises the
+    # AnalysisException of UNSUPPORTED_JOIN_TYPE, naming the type as it is normalized.
+    df = session.range(3)
+    with pytest.raises(AnalysisException) as error:
+        df.join(df, "id", "foo").collect()
+    assert error.value.getCondition() == "UNSUPPORTED_JOIN_TYPE"
+    assert error.value.getMessageParameters()["typ"] == "foo"
+    assert sorted(row.id for row in df.join(df, "id", "left_semi").collect()) == [0, 1, 2]
+
+
+def test_streaming_query_status_and_progress_are_as_pyspark(session):
+    # As PySpark: the status is a dict of message, isDataAvailable and isTriggerActive, and the
+    # progress is a StreamingQueryProgress, a dict, of the query.
+    from pyspark.sql.streaming.listener import StreamingQueryProgress
+
+    query = (
+        session.readStream.format("rate")
+        .load()
+        .writeStream.format("memory")
+        .queryName("fug_status_query")
+        .start()
+    )
+    try:
+        # Wait, bounded, for the first micro-batch, rather than processAllAvailable.
+        deadline = time.monotonic() + 60
+        while query.lastProgress is None and time.monotonic() < deadline:
+            time.sleep(0.5)
+        status = query.status
+        assert isinstance(status, dict)
+        assert list(status) == ["message", "isDataAvailable", "isTriggerActive"]
+        assert isinstance(status["message"], str)
+        assert isinstance(status["isDataAvailable"], bool)
+        assert isinstance(status["isTriggerActive"], bool)
+        last = query.lastProgress
+        assert isinstance(last, StreamingQueryProgress)
+        assert last["name"] == "fug_status_query"
+        recent = query.recentProgress
+        assert recent and all(isinstance(p, StreamingQueryProgress) for p in recent)
+    finally:
+        query.stop()
 
 
 def test_replace_and_unpivot_take_their_arguments_as_pyspark(session):
@@ -186,6 +339,100 @@ def test_replace_and_unpivot_take_their_arguments_as_pyspark(session):
     assert wide.unpivot(F.col("id"), ("x", F.col("y")), "var", "val").collect() == expected
     assert wide.melt(["id"], None, "var", "val").collect() == expected
     assert wide.melt("id", "x", "var", "val").collect() == expected[:1]
+
+
+def _run_in_time_zone(code, zone):
+    # Runs `code` in a new interpreter whose time zone is `zone`: the local time zone of the
+    # client, which the test process (UTC) does not have.
+    import subprocess
+    import sys
+
+    env = dict(os.environ, TZ=zone)
+    result = subprocess.run(
+        [sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=300)
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
+def test_ntz_collect_is_the_wall_clock_in_the_client_time_zone_as_pyspark():
+    # As PySpark's Arrow conversion: a TIMESTAMP_NTZ is the wall clock, whatever the time zone of
+    # the client, from year 1 to year 9999 and inside arrays, maps and structs, while a TIMESTAMP
+    # is the instant, shown in the local time zone (here seven hours behind UTC, in July).
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("SPARK_REMOTE is required for live-server tests")
+    out = _run_in_time_zone("""
+import datetime
+from pyspark.sql import SparkSession
+spark = SparkSession.builder.remote(%r).getOrCreate()
+print(spark.createDataFrame([(datetime.datetime(2020, 7, 1, 12, 0),)], "t timestamp_ntz").collect())
+print(spark.sql("select timestamp_ntz'2020-07-01 12:00:00' t").collect())
+print(spark.sql("select timestamp_ntz'0001-01-01 00:00:00' t, timestamp_ntz'9999-12-31 23:59:59.999999' u").collect())
+print(spark.sql(
+    "select array(timestamp_ntz'2020-07-01 12:00:00') a, map('k', timestamp_ntz'2020-07-01 12:00:00') m, "
+    "named_struct('x', timestamp_ntz'2020-07-01 12:00:00') s").collect())
+print(spark.sql("select timestamp'2020-07-01 12:00:00' t, timestamp_micros(9223372036854775) u").collect())
+""" % remote, "America/Los_Angeles")
+    lines = out.strip().splitlines()
+    assert lines[0] == "[Row(t=datetime.datetime(2020, 7, 1, 12, 0))]"
+    assert lines[1] == "[Row(t=datetime.datetime(2020, 7, 1, 12, 0))]"
+    assert lines[2] == ("[Row(t=datetime.datetime(1, 1, 1, 0, 0), "
+                        "u=datetime.datetime(9999, 12, 31, 23, 59, 59, 999999))]")
+    assert lines[3] == ("[Row(a=[datetime.datetime(2020, 7, 1, 12, 0)], "
+                        "m={'k': datetime.datetime(2020, 7, 1, 12, 0)}, "
+                        "s=Row(x=datetime.datetime(2020, 7, 1, 12, 0)))]")
+    assert lines[4] == ("[Row(t=datetime.datetime(2020, 7, 1, 5, 0), "
+                        "u=datetime.datetime(2262, 4, 11, 16, 47, 16, 854775))]")
+
+
+def test_year_month_intervals_are_not_collected_as_pyspark(session):
+    # As PySpark's Arrow conversion of the rows: a year-month interval, also nested, is not
+    # collected in Spark Connect, and raises NOT_IMPLEMENTED, even for an empty result.
+    import datetime
+
+    from pyspark.errors import PySparkNotImplementedError
+
+    message = (r"\[NOT_IMPLEMENTED\] Collecting a year-month interval value in Spark Connect "
+               r"is not implemented\.")
+    df = session.sql("SELECT INTERVAL '1-2' YEAR TO MONTH ym")
+    for collect in (
+        lambda d: d.collect(),
+        lambda d: d.first(),
+        lambda d: d.head(1),
+        lambda d: d.take(1),
+        lambda d: list(d.toLocalIterator()),
+        lambda d: d.where("1 = 0").collect(),
+        lambda d: session.sql("SELECT array(INTERVAL '1-2' YEAR TO MONTH) a").collect(),
+        lambda d: session.sql("SELECT map('a', INTERVAL '1-2' YEAR TO MONTH) m").collect(),
+        lambda d: session.sql("SELECT named_struct('a', INTERVAL '1-2' YEAR TO MONTH) s").collect(),
+    ):
+        with pytest.raises(PySparkNotImplementedError, match=message):
+            collect(df)
+    # A day-time interval is collected as a timedelta.
+    assert session.sql("SELECT INTERVAL '1 02:03:04' DAY TO SECOND dt").collect()[0][0] == (
+        datetime.timedelta(days=1, seconds=7384))
+
+
+def test_stream_reader_checks_its_arguments_as_pyspark(session, tmp_path):
+    # As PySpark's DataStreamReader, which checks a path, a source name and the schema of
+    # changes in the client, rather than sending them to the server.
+    from pyspark.errors import PySparkTypeError, PySparkValueError
+
+    source = tmp_path / "source"
+    session.range(2).write.json(str(source))
+    assert session.readStream.schema("id long").json(str(source)).isStreaming
+    with pytest.raises(PySparkValueError) as e:
+        session.readStream.format("json").schema("id long").load("")
+    assert e.value.getCondition() == "VALUE_NOT_NON_EMPTY_STR"
+    with pytest.raises(PySparkTypeError) as e:
+        session.readStream.json([str(source)])
+    assert e.value.getCondition() == "NOT_EXPECTED_TYPE"
+    with pytest.raises(PySparkValueError) as e:
+        session.readStream.name("a-b")
+    assert e.value.getCondition() == "INVALID_STREAMING_SOURCE_NAME"
+    with pytest.raises(AnalysisException) as e:
+        session.readStream.schema("id long").changes("t")
+    assert e.value.getCondition() == "_LEGACY_ERROR_TEMP_1189"
 
 
 def test_instr_and_regexp_replace_apply_their_optional_arguments(session):
@@ -266,6 +513,20 @@ def test_arrow_udtf_takes_and_returns_arrow_data_as_pyspark(session):
     assert PlusOne(F.lit(1)).collect() == [Row(x=2, kind="Int32Array")]
 
 
+def test_java_functions_are_registered_of_their_return_types_as_pyspark(session):
+    # As PySpark's: spark.udf.sparkSession is the session, and registerJavaFunction sends a
+    # DDL string for the server to parse, so an invalid one is its PARSE_SYNTAX_ERROR.
+    from pyspark.errors import ParseException
+
+    assert session.udf.sparkSession is session
+    with pytest.raises(ParseException) as e:
+        session.udf.registerJavaFunction("java_f", "com.example.NoSuchFunction", "nonsense")
+    assert e.value.getCondition() == "PARSE_SYNTAX_ERROR"
+    with pytest.raises(PySparkValueError) as e:
+        session.udf.registerJavaFunction("java_f", "com.example.NoSuchFunction", 1)
+    assert e.value.getCondition() == "UNSUPPORTED_OPERATION"
+
+
 def test_udfs_are_arrow_optimized_or_of_their_type_hints_as_pyspark(session):
     # As PySpark's udf(): Arrow-optimized as the server enables by default, so Arrow
     # converts a result to the return type; and a function with pandas type hints is a
@@ -301,6 +562,37 @@ def test_map_functions_take_a_ddl_schema(session):
         grouped.cogroup(grouped).applyInArrow(lambda left, right: left, schema),
     ):
         assert sorted(tuple(r) for r in result.collect()) == [(1, 1.0), (1, 2.0), (2, 3.0)]
+
+
+def test_inheritable_threads_run_with_the_tags_of_their_parents_as_pyspark(session):
+    # As PySpark's: the operation of an InheritableThread carries the tags of the thread that
+    # started it, so interruptTag of a tag of the parent interrupts it.
+    import threading
+    import time
+
+    from pyspark import InheritableThread
+    from pyspark.sql import functions as F
+
+    slow = F.udf(lambda x: (time.sleep(30), x)[1], "long")
+    results = {}
+
+    def run():
+        try:
+            results["child"] = session.range(1).select(slow("id")).collect()
+        except Exception as e:  # noqa: BLE001
+            results["child"] = e
+
+    session.addTag("tag_of_the_parent")
+    try:
+        thread = InheritableThread(target=run, session=session)
+        thread.start()
+        time.sleep(3)
+        interrupted = session.interruptTag("tag_of_the_parent")
+        thread.join(60)
+    finally:
+        session.clearTags()
+    assert len(interrupted) == 1
+    assert isinstance(results["child"], Exception)
 
 
 def test_map_functions_run_in_the_stage_of_their_resource_profile(session):
@@ -493,6 +785,24 @@ def test_create_dataframe_from_arrow_table(session, schema, expected):
     assert _rows(df) == ARROW_TABLE_ROWS
 
 
+def test_spark_conf_and_task_context_are_those_of_pyspark(session):
+    # As PySpark's: pyspark exports the SparkConf, whose settings the builder sets on the
+    # session, and the TaskContext, which a UDF uses on the server.
+    from pyspark import SparkConf, TaskContext
+    from pyspark.sql import functions as F
+
+    key = "spark.sql.test.conf.of.a.spark.conf"
+    conf = SparkConf().set(key, "v").setIfMissing(key, "other")
+    try:
+        assert SparkSession.builder.config(conf=conf).getOrCreate() is session
+        assert session.conf.get(key) == "v"
+    finally:
+        session.conf.unset(key)
+    partition = F.udf(lambda: TaskContext.get().partitionId(), "int")
+    rows = session.range(0, 4, 1, 2).select(partition().alias("p")).distinct().collect()
+    assert sorted(row.p for row in rows) == [0, 1]
+
+
 def test_add_artifacts_reach_udfs_as_pyspark(session, tmp_path):
     import uuid
     import zipfile
@@ -620,6 +930,72 @@ def test_registered_udtfs_are_called_from_sql_as_pyspark(session):
     assert session.sql("SELECT * FROM count_udtf(2)").collect() == [Row(x=0), Row(x=1)]
     session.udtf.register("doubled_udtf", Doubled)
     assert session.sql("SELECT * FROM doubled_udtf(21L)").collect() == [Row(y=42)]
+
+
+def test_writes_the_catalog_and_streaming_queries_release_the_gil_as_pyspark(session, tmp_path):
+    # As PySpark's requests to the server, which release the GIL while they wait: another
+    # Python thread runs during them.
+    import threading
+    import time
+
+    def ticks_beside(call):
+        ticks, stop = [0], threading.Event()
+
+        def tick():
+            while not stop.is_set():
+                ticks[0] += 1
+                time.sleep(0.001)
+
+        thread = threading.Thread(target=tick)
+        thread.start()
+        try:
+            time.sleep(0.05)
+            before = ticks[0]
+            call()
+            return ticks[0] - before
+        finally:
+            stop.set()
+            thread.join()
+
+    from pyspark.sql.streaming import StreamingQueryListener
+
+    class Listener(StreamingQueryListener):
+        # The times of the progress of the query, which the listener runs in a thread.
+        progress = []
+
+        def onQueryStarted(self, event):
+            pass
+
+        def onQueryProgress(self, event):
+            self.progress.append(time.time())
+
+        def onQueryIdle(self, event):
+            pass
+
+        def onQueryTerminated(self, event):
+            pass
+
+    listener = Listener()
+    session.streams.addListener(listener)
+    stream = session.readStream.format("rate").load().writeStream.format("noop")
+    query = stream.trigger(processingTime="200 milliseconds").start()
+    try:
+        # The query makes progress first, which the listener receives between waits.
+        for _ in range(120):
+            if Listener.progress:
+                break
+            time.sleep(0.25)
+        start = time.time()
+        assert ticks_beside(lambda: query.awaitTermination(3)) > 100
+        end = time.time()
+    finally:
+        query.stop()
+        session.streams.removeListener(listener)
+    # The listener runs during awaitTermination too.
+    assert any(start < at < end for at in Listener.progress)
+    rows = session.range(2_000_000).selectExpr("id", "id * 2 AS v")
+    assert ticks_beside(lambda: rows.write.parquet(str(tmp_path / "rows"))) > 10
+    assert ticks_beside(lambda: [session.catalog.currentDatabase() for _ in range(20)]) > 10
 
 
 def test_catalog_and_stream_start_errors_carry_their_operation_id(session):
@@ -782,6 +1158,66 @@ def test_reader_schema_keeps_field_metadata(session, tmp_path, ddl):
     assert stream.schema.fields[0].metadata == {"comment": "the key"}
 
 
+def test_reader_writer_and_catalog_return_the_results_of_pyspark(session, tmp_path):
+    # As PySpark's: csv, json and xml of a DataFrame of strings parse them, the readers load
+    # every path, and createTable creates the table on the call, of its schema and options.
+    import warnings
+
+    strings = session.createDataFrame([("1;x",), ("2;y",)], "value string")
+    assert session.read.csv(strings, sep=";", schema="a INT, b STRING").collect() == [
+        Row(a=1, b="x"), Row(a=2, b="y")]
+    assert session.read.csv(strings, sep=";").columns == ["_c0", "_c1"]
+    documents = session.createDataFrame([('{"a": 1, "b": "x"}',)], "value string")
+    assert session.read.json(documents).collect() == [Row(a=1, b="x")]
+    assert session.read.json(documents, schema=StructType([StructField("a", LongType())])) \
+        .collect() == [Row(a=1)]
+    elements = session.createDataFrame([("<row><a>1</a></row>",)], "value string")
+    assert session.read.xml(elements, rowTag="row").collect() == [Row(a=1)]
+    for name in ("p1", "p2"):
+        session.range(2).write.mode("overwrite").parquet(str(tmp_path / name))
+    paths = [str(tmp_path / "p1"), str(tmp_path / "p2")]
+    assert session.read.parquet(*paths).count() == 4
+    assert session.read.format("parquet").load(paths).count() == 4
+    session.range(3).write.mode(None).json(str(tmp_path / "j"))
+    assert session.read.json([str(tmp_path / "j")]).count() == 3
+    session.sql("DROP TABLE IF EXISTS e2e_created_eagerly")
+    try:
+        schema = StructType([StructField("a", LongType()), StructField("b", StringType())])
+        created = session.catalog.createTable(
+            "e2e_created_eagerly", source="parquet", schema=schema, description="d",
+            compression="snappy")
+        assert session.catalog.tableExists("e2e_created_eagerly")
+        assert created.columns == ["a", "b"]
+        assert session.catalog.getTable("e2e_created_eagerly").description == "d"
+    finally:
+        session.sql("DROP TABLE IF EXISTS e2e_created_eagerly")
+    session.sql("DROP TABLE IF EXISTS e2e_external_eagerly")
+    try:
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter("always")
+            external = session.catalog.createExternalTable(
+                "e2e_external_eagerly", path=paths[0], source="parquet")
+            assert session.catalog.tableExists("e2e_external_eagerly", "default")
+        assert external.count() == 2
+        assert [w.category for w in record] == [FutureWarning, FutureWarning]
+    finally:
+        session.sql("DROP TABLE IF EXISTS e2e_external_eagerly")
+
+
+def test_table_arguments_are_those_of_pyspark_sql_table_arg(session):
+    # As the PySpark client: DataFrame.asTable() is a TableArg of pyspark.sql.table_arg, and a
+    # TableValuedFunctionArgument of pyspark.sql.tvf_argument.
+    from pyspark.sql.table_arg import TableArg
+    from pyspark.sql.tvf_argument import TableValuedFunctionArgument
+
+    table = session.range(3).asTable()
+    assert isinstance(table, TableArg)
+    assert isinstance(table, TableValuedFunctionArgument)
+    assert isinstance(table.partitionBy("id"), TableArg)
+
+
+
+
 def test_subqueries_and_table_arguments_return_the_rows_of_pyspark(session):
     # As PySpark's DataFrame.scalar(), DataFrame.exists(), Column.isin(df) and asTable():
     # scalar, correlated and IN subqueries, and the rows of a DataFrame as a UDTF argument.
@@ -819,6 +1255,42 @@ def test_subqueries_and_table_arguments_return_the_rows_of_pyspark(session):
     ]
     with pytest.raises(IllegalArgumentException, match="before orderBy"):
         session.range(1).asTable().orderBy("id")
+
+
+def test_tags_are_those_of_each_thread_as_pyspark(session):
+    # As PySpark's: the tags of a thread are on its operations only, so interruptTag of the tag
+    # of one thread interrupts its operation, but not that of another thread.
+    import threading
+    import time
+
+    from pyspark.sql import functions as F
+
+    slow = F.udf(lambda x: (time.sleep(8), x)[1], "long")
+    results = {}
+
+    def run(name, tag):
+        if tag:
+            session.addTag(tag)
+        try:
+            results[name] = session.range(1).select(slow("id")).collect()
+        except Exception as e:  # noqa: BLE001
+            results[name] = e
+        finally:
+            session.clearTags()
+
+    tagged = threading.Thread(target=run, args=("tagged", "tag_of_a_thread"))
+    tagged.start()
+    time.sleep(1)
+    untagged = threading.Thread(target=run, args=("untagged", None))
+    untagged.start()
+    time.sleep(3)
+    assert session.getTags() == set()
+    interrupted = session.interruptTag("tag_of_a_thread")
+    tagged.join(60)
+    untagged.join(60)
+    assert len(interrupted) == 1
+    assert isinstance(results["tagged"], Exception)
+    assert [tuple(row) for row in results["untagged"]] == [(0,)]
 
 
 def test_grouped_map_functions_take_iterators_by_their_type_hints(session):
@@ -873,11 +1345,134 @@ def test_dataframe_columns_resolve_against_their_dataframe_as_pyspark(session):
     assert error.value.getCondition() == "AMBIGUOUS_COLUMN_REFERENCE"
 
 
+def test_reader_and_writer_check_their_arguments_as_pyspark(session, tmp_path):
+    # As PySpark Connect's: a write of an unsupported save mode raises UNSUPPORTED_OPERATION
+    # and writes nothing; format(None) writes and reads the default source, Parquet; the reader
+    # refuses a schema in changes and asserts the bounds of a JDBC column; text of None reads
+    # no rows.
+    from pyspark.errors import PySparkAttributeError
+
+    df = session.createDataFrame([(1, "a"), (2, "b")], "id int, s string")
+    path = str(tmp_path / "out")
+    with pytest.raises(PySparkValueError) as e:
+        df.write.mode("bad").save(path)
+    assert e.value.getCondition() == "UNSUPPORTED_OPERATION"
+    assert e.value.getMessageParameters() == {"operation": "bad"}
+    assert not os.path.exists(path)
+    df.write.format("json").format(None).save(path)
+    assert sorted(session.read.parquet(path).collect()) == [Row(id=1, s="a"), Row(id=2, s="b")]
+    assert session.read.format("json").format(None).load(path).count() == 2
+    with pytest.raises(AnalysisException) as e:
+        session.read.schema("a int").changes("t")
+    assert e.value.getCondition() == "_LEGACY_ERROR_TEMP_1189"
+    with pytest.raises(AssertionError, match="lowerBound can not be None"):
+        session.read.jdbc("jdbc:x", "t", column="c")
+    with pytest.raises(PySparkAttributeError) as e:
+        session.read._jreader
+    assert e.value.getCondition() == "JVM_ATTRIBUTE_NOT_SUPPORTED"
+    assert session.read.text(None).count() == 0
+
+def test_writer_v2_takes_its_arguments_as_pyspark(session):
+    # As PySpark's DataFrameWriterV2: tableProperty(property, None) leaves the property unset,
+    # partitionedBy raises NOT_EXPECTED_TYPE of col for a list, and overwrite takes a column
+    # name, which the server takes: a table of the session catalog does not overwrite by a
+    # condition.
+    import uuid
+
+    from pyspark.errors import AnalysisException, PySparkTypeError
+
+    name = f"writer_v2_arguments_{uuid.uuid4().hex[:8]}"
+    df = session.createDataFrame([(1, True), (2, False)], "id int, flag boolean")
+    try:
+        writer = df.writeTo(name).using("parquet").tableProperty("a", "1")
+        writer.tableProperty("a", None).tableProperty("b", "2").create()
+        rows = session.sql(f"SHOW TBLPROPERTIES {name}").collect()
+        properties = {row.key: row.value for row in rows}
+        assert properties.get("b") == "2" and "a" not in properties
+        with pytest.raises(PySparkTypeError) as e:
+            df.writeTo(name).partitionedBy(["id"])
+        assert e.value.getCondition() == "NOT_EXPECTED_TYPE"
+        with pytest.raises(AnalysisException):
+            df.writeTo(name).overwrite("flag")
+    finally:
+        session.sql(f"DROP TABLE IF EXISTS {name}")
+
+
+def test_collected_rows_take_the_names_of_the_schema_of_the_result_as_pyspark(session):
+    # As PySpark Connect's: the fields of nested structs have the names of the schema, which keep
+    # duplicate names, and collect raises for a calendar interval.
+    from pyspark.errors import PySparkTypeError
+
+    df = session.sql(
+        "SELECT named_struct('a', 1, 'a', 2) AS v, array(named_struct('b', 1, 'b', 'x')) AS w")
+    row = df.collect()[0]
+    assert row.v.__fields__ == ["a", "a"] and tuple(row.v) == (1, 2) and row.v.a == 1
+    assert row.w[0].__fields__ == ["b", "b"]
+    assert row.asDict(recursive=True) == {"v": {"a": 2}, "w": [{"b": "x"}]}
+    assert next(df.toLocalIterator()).v.__fields__ == ["a", "a"]
+    with pytest.raises(PySparkTypeError) as e:
+        session.sql("SELECT make_interval(1) AS v").collect()
+    assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION"
+    assert e.value.getMessageParameters() == {"data_type": "month_day_nano_interval"}
+
 def test_collect_reads_a_result_across_stream_ends(session):
     # Takes several response streams when the server's senderMaxStreamSize is small.
     n = 300_000
     assert len(session.range(n).collect()) == n
     assert session.range(n).toArrow().num_rows == n
+
+
+def test_binary_values_of_collected_rows_follow_binary_as_bytes_as_pyspark(session):
+    # As PySpark Connect's `DataFrame._get_binary_as_bytes`: the binary values of the rows of
+    # collect and toLocalIterator, and so of first, head, take and tail, also those in arrays,
+    # maps and structs, are bytes, unless spark.sql.execution.pyspark.binaryAsBytes is set to
+    # another value than true, case-insensitively, which makes them bytearray.
+    df = session.sql(
+        "SELECT CAST('ab' AS BINARY) AS b, array(CAST('c' AS BINARY)) AS a, "
+        "named_struct('x', CAST('d' AS BINARY)) AS s, map('k', CAST('e' AS BINARY)) AS m"
+    )
+
+    def types(row):
+        return [type(value) for value in (row.b, row.a[0], row.s.x, row.m["k"])]
+
+    key = "spark.sql.execution.pyspark.binaryAsBytes"
+    try:
+        for value, expected in [("false", bytearray), ("TRUE", bytes), ("FALSE", bytearray)]:
+            session.conf.set(key, value)
+            assert types(df.collect()[0]) == [expected] * 4
+            assert types(next(df.toLocalIterator())) == [expected] * 4
+            assert types(next(df.toLocalIterator(prefetchPartitions=True))) == [expected] * 4
+            for row in [df.first(), df.head(), df.head(1)[0], df.take(1)[0], df.tail(1)[0]]:
+                assert types(row) == [expected] * 4
+            assert df.collect() == [Row(b=b"ab", a=[b"c"], s=Row(x=b"d"), m={"k": b"e"})]
+        # A result without a binary value is the same either way.
+        assert session.range(1).collect() == [Row(id=0)]
+    finally:
+        session.conf.unset(key)
+    assert types(df.collect()[0]) == [bytes] * 4
+    assert types(next(df.toLocalIterator())) == [bytes] * 4
+
+
+
+
+def test_internal_values_of_collected_rows_are_those_of_spark_as_pyspark(session):
+    # As PySpark's: the toInternal of a collected row is the internal value of Spark that the
+    # server computes, the days and the microseconds since the epoch, and its fromInternal is
+    # the row.
+    df = session.sql(
+        "select date'2020-01-01' as d, timestamp'2020-01-01 12:30:15.123456' as ts, "
+        "timestamp_ntz'2020-01-01 12:30:15.123456' as ntz, "
+        "interval '1 02:03:04.000005' day to second as i, array(date'2020-01-02') as a, "
+        "map('k', date'2020-01-03') as m")
+    row = df.first()
+    days, micros, next_days, last_days = session.sql(
+        "select unix_date(date'2020-01-01'), unix_micros(timestamp'2020-01-01 12:30:15.123456'), "
+        "unix_date(date'2020-01-02'), unix_date(date'2020-01-03')").first()
+    internal = df.schema.toInternal(row)
+    assert internal == (days, micros, micros, 93784000005, [next_days], {"k": last_days})
+    assert df.schema.fromInternal(internal) == row
+
+
 
 
 def test_time_values_round_trip_as_pyspark(session):
@@ -972,6 +1567,27 @@ def test_errors_carry_the_dataframe_query_contexts_of_pyspark(session):
     ]
 
 
+def test_sessions_raise_the_errors_of_tags_tables_and_jvm_attributes_as_pyspark(session):
+    # As PySpark Connect's: the errors of a tag of a comma, of an empty tag, of a name of a
+    # table that is not a str, and of the SparkContext of a classic session.
+    from pyspark.errors import PySparkAttributeError, PySparkTypeError, PySparkValueError
+
+    with pytest.raises(PySparkValueError) as e:
+        session.addTag("a,b")
+    assert e.value.getCondition() == "VALUE_ALLOWED"
+    with pytest.raises(PySparkValueError) as e:
+        session.removeTag("")
+    assert e.value.getCondition() == "VALUE_NOT_NON_EMPTY_STR"
+    with pytest.raises(PySparkTypeError) as e:
+        session.table(1)
+    assert e.value.getCondition() == "NOT_EXPECTED_TYPE"
+    with pytest.raises(PySparkAttributeError) as e:
+        session.sparkContext
+    assert e.value.getCondition() == "JVM_ATTRIBUTE_NOT_SUPPORTED"
+
+
+
+
 def test_server_errors_carry_their_condition_and_details(session):
     from pyspark.errors import AnalysisException, ArithmeticException, ParseException
     from pyspark.errors.exceptions.connect import SparkConnectGrpcException, SQLQueryContext
@@ -1004,6 +1620,30 @@ def test_server_errors_carry_their_condition_and_details(session):
     assert context.fragment() == "1/0"
     # spark.sql.connect.serverStacktrace.enabled is true by default.
     assert "\n\nJVM stacktrace:\norg.apache.spark.SparkArithmeticException" in str(e)
+
+
+def test_progress_handlers_receive_the_progress_of_executions_as_pyspark(session):
+    # As PySpark Connect's: a handler is called with the keyword arguments of ProgressHandler,
+    # of each execution: its stages, its running tasks, its operation, and, last, done.
+    from pyspark.sql.connect.shell.progress import StageInfo
+
+    calls = []
+
+    def handler(*, stages, inflight_tasks, operation_id, done):
+        calls.append((list(stages), inflight_tasks, operation_id, done))
+
+    session.registerProgressHandler(handler)
+    try:
+        session.range(0, 8, 1, 4).selectExpr("sum(id)").collect()
+    finally:
+        session.removeProgressHandler(handler)
+    assert calls and calls[-1][3] is True
+    assert [done for *_, done in calls].count(True) == 1
+    assert len({operation_id for _, _, operation_id, _ in calls}) == 1
+    assert all(isinstance(stage, StageInfo) for stages, *_ in calls for stage in stages)
+    assert all(isinstance(inflight, int) for _, inflight, _, _ in calls)
+
+
 
 
 def test_apply_in_pandas_with_state_runs_as_pyspark(session, tmp_path):
@@ -1069,6 +1709,22 @@ def test_variant_spatial_and_user_defined_values_round_trip_as_pyspark(session):
     assert geometry == Geometry.fromWKB(wkb, 0)
 
 
+def test_create_dataframe_of_pandas_infers_the_types_of_arrow_as_pyspark(session):
+    # As PySpark Connect's: without a schema, the columns of a pandas DataFrame convert with
+    # PySpark's Arrow conversion, of the types that Arrow infers, and a naive datetime is a time
+    # of the session time zone.
+    import numpy as np
+    import pandas as pd
+
+    frame = pd.DataFrame({"a": np.array([1, 2], dtype=np.int8), "b": [{"k": 1}, {"k": 2}],
+                          "c": np.array([1.5, 2.5], dtype=np.float32)})
+    df = session.createDataFrame(frame)
+    assert df.schema.simpleString() == "struct<a:tinyint,b:struct<k:bigint>,c:float>"
+    assert [row.b.k for row in df.orderBy("a").collect()] == [1, 2]
+    naive = pd.DataFrame({"t": [pd.Timestamp("2020-07-01 12:00")]})
+    rows = session.createDataFrame(naive).selectExpr("CAST(t AS STRING) AS s").collect()
+    assert rows == [Row(s="2020-07-01 12:00:00")]
+
 def test_create_dataframe_types_pandas_columns_as_pyspark(session):
     from decimal import Decimal
 
@@ -1091,6 +1747,23 @@ def test_create_dataframe_types_pandas_columns_as_pyspark(session):
         df = session.createDataFrame(pd.DataFrame(data))
         assert df.schema.simpleString() == schema, data
         assert [tuple(r) for r in df.collect()] == rows, data
+
+
+def test_session_builders_keep_the_options_set_on_them_as_pyspark(session):
+    # As PySpark's: the methods of a builder set their option on it, so an option set without
+    # chaining is set on the session of getOrCreate.
+    import os
+
+    from pyspark.sql import SparkSession
+
+    builder = SparkSession.builder.remote(os.environ["SPARK_REMOTE"])
+    builder.config("spark.connect.rust.test.builder", "kept")
+    try:
+        assert builder.getOrCreate().conf.get("spark.connect.rust.test.builder") == "kept"
+    finally:
+        session.conf.unset("spark.connect.rust.test.builder")
+
+
 
 
 def test_collected_rows_behave_as_pyspark_rows(session):
@@ -1118,6 +1791,45 @@ def test_collected_rows_behave_as_pyspark_rows(session):
     assert repr(pickle.loads(pickle.dumps(duplicate))) == "Row(a=1, a=2)"
 
 
+def test_grouped_data_are_represented_as_pyspark(session):
+    # As PySpark Connect's: the repr of a GroupedData names its grouping expressions, the
+    # columns of its DataFrame and their types, and the type of the grouping.
+    from pyspark.sql import functions as F
+
+    df = session.createDataFrame([(1, "a", 2.0)], "k int, s string, v double")
+    assert repr(df.groupBy(F.col("k") + 1, "s")) == (
+        "GroupedData[grouping expressions: [+(k, 1), s], "
+        "value: [k: int, s: string, v: double], type: GroupBy]")
+    assert repr(df.rollup("k")).endswith("type: RollUp]")
+    assert repr(df.groupBy("k").pivot("s")).endswith("type: Pivot]")
+
+
+
+
+def test_pivot_pivots_only_a_group_by_as_pyspark(session):
+    # As PySpark's: the pivot of a rollup, a cube, grouping sets or a pivot raises
+    # UNSUPPORTED_OPERATION, rather than pivoting as a groupBy, which pivots.
+    from pyspark.errors import PySparkNotImplementedError, PySparkTypeError
+
+    df = session.createDataFrame(
+        [(1, 10, "a"), (1, 20, "b"), (2, 30, "a")], "k int, v int, s string"
+    )
+    for grouped in [
+        df.rollup("k"),
+        df.cube("k"),
+        df.groupingSets([["k"]], "k"),
+        df.groupBy("k").pivot("s"),
+    ]:
+        with pytest.raises(PySparkNotImplementedError) as e:
+            grouped.pivot("s")
+        assert e.value.getCondition() == "UNSUPPORTED_OPERATION"
+    rows = df.groupBy("k").pivot("s", ["a", "b"]).sum("v").orderBy("k").collect()
+    assert [tuple(row) for row in rows] == [(1, 10, 20), (2, 30, None)]
+    with pytest.raises(PySparkTypeError) as e:
+        df.groupBy("k").pivot("s", ("a",))
+    assert e.value.getCondition() == "NOT_EXPECTED_TYPE"
+
+
 def test_sample_sort_group_by_drop_and_select_expr_as_pyspark(session):
     # As PySpark's: sample takes a fraction and a seed positionally, sort and groupBy take the
     # 1-based ordinals of columns, drop takes Columns, and selectExpr a list of expressions.
@@ -1135,6 +1847,20 @@ def test_sample_sort_group_by_drop_and_select_expr_as_pyspark(session):
     assert df.selectExpr(["x", "k AS name"]).columns == ["x", "name"]
     assert df.sample(0.5, 42).collect() == df.sample(fraction=0.5, seed=42).collect()
 
+
+
+def test_dataframes_of_other_sessions_are_not_taken_as_pyspark(session):
+    # As PySpark's, a DataFrame of another session, whose temporary views this session would
+    # not find, is not taken: SESSION_NOT_SAME.
+    from pyspark.errors import SessionNotSameException
+
+    other = session.newSession()
+    other.range(3).createOrReplaceTempView("view_of_another_session")
+    theirs = other.table("view_of_another_session")
+    for call in (lambda: session.range(3).join(theirs, "id"),
+                 lambda: session.range(3).union(theirs)):
+        with pytest.raises(SessionNotSameException):
+            call()
 
 def test_column_attributes_select_struct_fields_and_slices_substrings(session):
     df = session.sql("SELECT named_struct('x', 1, 'y', named_struct('z', 'q')) AS s, 'abcdef' AS t")
@@ -1158,6 +1884,14 @@ def test_collected_rows_keep_their_values_as_pyspark(session):
     # Rows of VARIANT values pickle, as in PySpark.
     rows = pickle.loads(pickle.dumps(session.sql("SELECT parse_json('1') v, 2 n").collect()))
     assert (rows[0].v.toJson(), rows[0].n) == ("1", 2)
+
+
+def test_transpose_takes_a_column_name_as_pyspark(session):
+    # As PySpark's transpose, of a Column or a column name as the index column.
+    df = session.createDataFrame([("a", 1, 2), ("b", 3, 4)], "k string, x int, y int")
+    by_name = df.transpose("k")
+    assert by_name.columns == ["key", "a", "b"]
+    assert by_name.collect() == df.transpose(F.col("k")).collect()
 
 
 def test_getitem_indexes_filters_and_selects_as_pyspark(session):
@@ -1192,6 +1926,28 @@ def test_plans_name_the_udfs_of_map_functions_after_the_functions_as_pyspark(ses
     assert "FlatMapGroupsInPandas [id#" in out and "], my_grouped_func(" in out
 
 
+def test_range_and_table_valued_functions_take_their_arguments_as_pyspark(session):
+    # As PySpark's: range takes the int() of its arguments, and the table-valued functions
+    # take Columns or column names, so a str is a column, else NOT_EXPECTED_TYPE of col.
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+
+    assert [row.id for row in session.range("3").collect()] == [0, 1, 2]
+    assert [row.id for row in session.tvf.range(0, 6.5, 2.5, "2").collect()] == [0, 2, 4]
+    with pytest.raises(ValueError, match="invalid literal"):
+        session.range("x").collect()
+    with pytest.raises(ValueError, match="Value out of range"):
+        session.tvf.range(2**63).collect()
+    with pytest.raises(AnalysisException) as e:
+        session.tvf.json_tuple(F.lit('{"a": 1}'), "a").collect()
+    assert e.value.getCondition() == "UNRESOLVED_COLUMN.WITHOUT_SUGGESTION"
+    with pytest.raises(PySparkTypeError) as e:
+        session.tvf.explode([1, 2])
+    assert e.value.getCondition() == "NOT_EXPECTED_TYPE"
+    rows = session.tvf.json_tuple(F.lit('{"a": 1}'), F.lit("a")).collect()
+    assert [tuple(row) for row in rows] == [("1",)]
+
+
 def test_sql_runs_statements_eagerly(session):
     # sql() sends the statement at once: a command takes effect without an action, and the
     # DataFrame of its result is the local relation the server returned.
@@ -1206,6 +1962,20 @@ def test_sql_runs_statements_eagerly(session):
     query = session.sql("SELECT 1 AS x")
     assert not query.isLocal()
     assert [tuple(r) for r in query.collect()] == [(1,)]
+
+
+def test_struct_types_take_their_keys_and_fields_as_pyspark(session):
+    # As PySpark's StructType: add takes the JSON value of a data type, and a missing field is
+    # KEY_NOT_EXISTS.
+    from pyspark.errors import PySparkKeyError
+    from pyspark.sql import types as T
+
+    schema = T.StructType().add("a", "long").add("b", "string")
+    df = session.createDataFrame([(1, "x")], schema)
+    assert df.schema.simpleString() == "struct<a:bigint,b:string>"
+    with pytest.raises(PySparkKeyError) as e:
+        df.schema["zz"]
+    assert e.value.getCondition() == "KEY_NOT_EXISTS"
 
 
 def test_lists_and_numpy_arrays_are_arrays_as_pyspark(session):
@@ -1225,10 +1995,51 @@ def test_lists_and_numpy_arrays_are_arrays_as_pyspark(session):
         ([1, 2], [1, 2], [1.5], ["x"], True, [0, 0], Row(id=0), [3])]
 
 
+def test_stream_writer_takes_its_query_name_and_columns_as_pyspark(session, tmp_path):
+    # As PySpark's DataStreamWriter: partitionBy takes a list of column names, and queryName
+    # raises VALUE_NOT_NON_EMPTY_STR for an empty name.
+    from pyspark.errors import PySparkValueError
+
+    source, sink = tmp_path / "source", tmp_path / "sink"
+    session.createDataFrame([(0, "a"), (1, "b")], "id long, k string").write.json(str(source))
+    query = (
+        session.readStream.schema("id long, k string")
+        .json(str(source))
+        .writeStream.format("parquet")
+        .partitionBy(["k"])
+        .option("checkpointLocation", str(tmp_path / "checkpoint"))
+        .trigger(availableNow=True)
+        .start(str(sink))
+    )
+    query.awaitTermination()
+    assert query.exception() is None
+    assert sorted(path.name for path in sink.iterdir() if path.name.startswith("k=")) == [
+        "k=a",
+        "k=b",
+    ]
+    with pytest.raises(PySparkValueError) as e:
+        session.readStream.format("rate").load().writeStream.queryName("")
+    assert e.value.getCondition() == "VALUE_NOT_NON_EMPTY_STR"
+
+
 def test_sql_fails_at_a_statement_that_does_not_parse(session):
     with pytest.raises(AnalysisException, match="PARSE_SYNTAX_ERROR"):
         session.sql("SELEC 1")
 
+
+def test_repr_html_is_the_html_table_of_eager_evaluation_as_pyspark(session):
+    # As PySpark Connect's: _repr_html_ is None without eager evaluation, else the HTML table of
+    # the DataFrame, after which __repr__ is the string of the schema.
+    df = session.range(2)
+    assert df._repr_html_() is None
+    session.conf.set("spark.sql.repl.eagerEval.enabled", "true")
+    try:
+        html = df._repr_html_()
+        assert html.startswith("<table border='1'>") and "<th>id</th>" in html
+        assert repr(df) == "DataFrame[id: bigint]"
+        assert "+---+" in repr(session.range(2))
+    finally:
+        session.conf.unset("spark.sql.repl.eagerEval.enabled")
 
 def test_sql_formats_the_query_with_keyword_arguments_as_pyspark(session):
     from decimal import Decimal
@@ -1299,6 +2110,7 @@ def test_explain_prints_with_python_print_as_pyspark(session):
     # sys.stdout, which redirect_stdout captures, and return None.
     import contextlib
     import io
+    import time
 
     df = session.range(1)
     printed = io.StringIO()
@@ -1314,7 +2126,12 @@ def test_explain_prints_with_python_print_as_pyspark(session):
         .writeStream.format("memory").queryName("explain_prints").start()
     )
     try:
-        query.processAllAvailable()
+        # The plan of a batch of the query, after its first. processAllAvailable() would wait
+        # for a rate source to have no new rows, which a slow machine never reaches.
+        for _ in range(240):
+            if query.lastProgress is not None:
+                break
+            time.sleep(0.25)
         printed = io.StringIO()
         with contextlib.redirect_stdout(printed):
             assert query.explain(True) is None
@@ -1330,6 +2147,35 @@ def test_column_alias_names_every_column_and_keeps_its_metadata(session):
     df = session.range(1).select(F.col("id").alias("x", metadata={"k": 1, "n": [1, 2], "s": "v"}))
     assert df.schema.fields[0].metadata == {"k": 1, "n": [1, 2], "s": "v"}
 
+
+def test_to_arrow_casts_to_the_arrow_schema_of_the_schema_as_pyspark(session):
+    # As PySpark Connect's: the Arrow types of the Spark types, of UTC timestamps and of strings
+    # even of large var types, and the errors of the types that PySpark does not convert to
+    # Arrow and of duplicate names of nested fields.
+    import pyarrow as pa
+    from pyspark.errors import PySparkTypeError, UnsupportedOperationException
+
+    confs = {"spark.sql.execution.arrow.useLargeVarTypes": "true",
+             "spark.sql.session.timeZone": "America/Los_Angeles"}
+    previous = {key: session.conf.get(key) for key in confs}
+    for key, value in confs.items():
+        session.conf.set(key, value)
+    try:
+        table = session.sql("SELECT 'x' AS s, TIMESTAMP'2020-01-01 00:00:00' AS t").toArrow()
+    finally:
+        for key, value in previous.items():
+            session.conf.set(key, value)
+    assert table.schema.field("s").type == pa.string()
+    assert table.schema.field("t").type == pa.timestamp("us", tz="UTC")
+    for expr, data_type in [("INTERVAL '1-2' YEAR TO MONTH", "YearMonthIntervalType(0, 1)"),
+                            ("make_interval(1)", "CalendarIntervalType()")]:
+        with pytest.raises(PySparkTypeError) as e:
+            session.sql(f"SELECT {expr} AS v").toArrow()
+        assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION"
+        assert e.value.getMessageParameters() == {"data_type": data_type}
+    with pytest.raises(UnsupportedOperationException) as e:
+        session.sql("SELECT named_struct('a', 1, 'a', 2) AS v").toArrow()
+    assert e.value.getCondition() == "DUPLICATED_FIELD_NAME_IN_ARROW_STRUCT"
 
 def test_to_pandas_converts_the_columns_as_pyspark(session):
     # As official PySpark 4.3.0's SparkConnectClient.to_pandas: each column by its Spark type,
@@ -1363,6 +2209,15 @@ def test_to_pandas_converts_the_columns_as_pyspark(session):
         session.conf.unset("spark.sql.session.timeZone")
 
 
+def test_na_and_stat_functions_are_of_their_dataframe_as_pyspark(session):
+    # As PySpark's: the df of df.na and df.stat is df itself.
+    df = session.createDataFrame([(1, None), (None, 2.0)], "a int, b double")
+    assert df.na.df is df
+    assert df.stat.df is df
+    assert sorted(df.na.df.na.fill(0).collect()) == sorted(df.na.fill(0).collect())
+    assert df.stat.df.count() == 2
+
+
 def test_sample_by_samples_the_fractions_of_the_strata_as_pyspark(session):
     # As PySpark's sampleBy: each stratum by its fraction, of a column name or a Column.
     df = session.createDataFrame([(1, "a"), (2, "b"), (3, "a")], "id int, k string")
@@ -1389,6 +2244,27 @@ def test_window_order_by_a_column_sorts_nulls_first_as_pyspark(session):
         rows = df.select("o", F.row_number().over(window).alias("rn")).orderBy("rn").collect()
         assert [(r.o, r.rn) for r in rows] == expected
 
+
+def test_create_dataframe_of_a_numpy_array_as_pyspark(session):
+    # As PySpark Connect's: a column of each column of a 1- or 2-dimensional array, named by the
+    # names, else `value` for one column, else `_1`, `_2`, ..., of the types of the array, or
+    # cast to the schema by the server.
+    import numpy as np
+
+    df = session.createDataFrame(np.array([1, 2]))
+    assert df.schema.simpleString() == "struct<value:bigint>"
+    assert sorted(df.collect()) == [Row(value=1), Row(value=2)]
+    df = session.createDataFrame(np.array([[1.5, 2.5], [3.5, 4.5]]))
+    assert df.schema.simpleString() == "struct<_1:double,_2:double>"
+    assert session.createDataFrame(np.array([[1, 2]]), "a string, b double").collect() == [
+        Row(a="1", b=2.0)]
+    assert session.createDataFrame(np.array(["x", "y"]), ["s"]).columns == ["s"]
+    with pytest.raises(PySparkValueError) as e:
+        session.createDataFrame(np.zeros((2, 2, 2)))
+    assert e.value.getCondition() == "INVALID_NDARRAY_DIMENSION"
+    with pytest.raises(PySparkValueError) as e:
+        session.createDataFrame(np.array([[1, 2]]), ["x"])
+    assert e.value.getCondition() == "AXIS_LENGTH_MISMATCH"
 
 def test_create_dataframe_takes_the_ddl_of_spark_as_pyspark(session):
     # As PySpark Connect's, which parses a DDL schema on the server: nested structs, arrays and
@@ -1421,6 +2297,49 @@ def test_create_dataframe_takes_the_ddl_of_spark_as_pyspark(session):
     assert mapped.collect() == [Row(id=0), Row(id=1)]
 
 
+
+def test_schemas_of_collated_strings_are_of_the_json_of_pyspark(session):
+    # As PySpark's: the JSON of a schema has the collations of its strings in the metadata of
+    # their fields, and StructType.fromJson reads them back.
+    import json
+
+    from pyspark.sql.types import StructType
+
+    schema = session.sql(
+        "select 'a' collate UTF8_LCASE as s, array('b' collate UNICODE) as a").schema
+    assert schema.json() == (
+        '{"fields":[{"metadata":{"__COLLATIONS":{"s":"spark.UTF8_LCASE"}},"name":"s",'
+        '"nullable":false,"type":"string"},{"metadata":{"__COLLATIONS":{"a.element":'
+        '"icu.UNICODE"}},"name":"a","nullable":false,"type":{"containsNull":false,'
+        '"elementType":"string","type":"array"}}],"type":"struct"}')
+    assert StructType.fromJson(json.loads(schema.json())) == schema
+
+
+
+
+def test_ddl_types_are_parsed_by_the_server_as_pyspark(session):
+    # As PySpark Connect's DataType.fromDDL and _parse_datatype_string, which ask the server
+    # of the active session to parse a DDL string, as does a UDF of a DDL return type.
+    from pyspark.errors import ParseException
+    from pyspark.sql import types as T
+    from pyspark.sql.types import _parse_datatype_string
+
+    field = T.DataType.fromDDL("a INT NOT NULL COMMENT 'c'").fields[0]
+    assert (field.nullable, field.metadata) == (False, {"comment": "c"})
+    assert T.StructType.fromDDL("st struct<a:int,b:double>").simpleString() == (
+        "struct<st:struct<a:int,b:double>>")
+    assert T.DataType.fromDDL("s STRING COLLATE UTF8_LCASE").simpleString() == (
+        "struct<s:string collate UTF8_LCASE>")
+    assert _parse_datatype_string("decimal(10, 2)") == T.DecimalType(10, 2)
+    for ddl, condition in [("a INT,", "PARSE_SYNTAX_ERROR"), ("a BOGUS", "UNSUPPORTED_DATATYPE")]:
+        with pytest.raises(ParseException) as error:
+            T.DataType.fromDDL(ddl)
+        assert error.value.getCondition() == condition
+    pair = F.udf(lambda x: (x, 1.5), "st struct<a:bigint,b:double>")
+    assert pair.returnType.simpleString() == "struct<st:struct<a:bigint,b:double>>"
+    result = session.range(1).select(F.udf(lambda x: (x, 1.5), "struct<a:bigint,b:double>")("id"))
+    assert [tuple(r[0]) for r in result.collect()] == [(0, 1.5)]
+
 def test_functions_send_their_optional_arguments_as_pyspark(session):
     # The values of official PySpark 4.3.0; each optional argument used to be dropped.
     df = session.sql(
@@ -1451,6 +2370,49 @@ def test_functions_send_their_optional_arguments_as_pyspark(session):
     assert nulls.groupBy("g").agg(F.first("v", ignorenulls=True)).first()[1] == 5
 
 
+def test_window_frames_return_the_rows_of_pyspark(session):
+    # As PySpark's: a range frame of a boundary out of the range of an int, which was
+    # truncated, and the frames of the bounds of -sys.maxsize and sys.maxsize, unbounded.
+    import sys
+
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql import Window
+
+    df = session.range(4)
+    o = Window.orderBy("id")
+
+    def sums(window):
+        return sorted(r.s for r in df.select(F.sum("id").over(window).alias("s")).collect())
+
+    assert sums(o.rangeBetween(-(1 << 40), 0)) == [0, 1, 3, 6]
+    assert sums(o.rangeBetween(0, 1 << 40)) == [3, 5, 6, 6]
+    assert sums(o.rowsBetween(-sys.maxsize, sys.maxsize)) == [6, 6, 6, 6]
+    assert sums(o.rangeBetween(-sys.maxsize, sys.maxsize)) == [6, 6, 6, 6]
+    with pytest.raises(PySparkValueError, match="VALUE_NOT_BETWEEN"):
+        sums(o.rowsBetween(-(1 << 31) - 1, 0))
+
+
+def test_struct_types_convert_to_the_ddl_of_spark_as_pyspark(session):
+    # As PySpark Connect's StructType.toDDL: the server writes the DDL of the schema, which
+    # createDataFrame parses back.
+    from pyspark.sql import types as T
+
+    st = T.StructType([
+        T.StructField("a", T.IntegerType()),
+        T.StructField("b b", T.StringType(), False),
+        T.StructField("m", T.MapType(
+            T.StringType(), T.StructType([T.StructField("x", T.DecimalType(10, 2))]))),
+        T.StructField("c", T.StringType(), metadata={"comment": "the c"}),
+    ])
+    ddl = st.toDDL()
+    assert ddl == (
+        "a INT,`b b` STRING NOT NULL,m MAP<STRING, STRUCT<x: DECIMAL(10,2)>>,"
+        "c STRING COMMENT 'the c'")
+    assert session.createDataFrame([], ddl).schema == st
+
+
+
+
 def test_maps_keep_their_entries_in_order_with_keys_of_their_type(session):
     row = session.range(1).selectExpr(
         "map(2, 'b', 1, 'a') AS ints",
@@ -1469,6 +2431,21 @@ def test_maps_keep_their_entries_in_order_with_keys_of_their_type(session):
     df = session.createDataFrame([({2: "b", 1: "a"},)])
     assert df.schema.simpleString() == "struct<_1:map<bigint,string>>"
     assert list(df.first()[0].items()) == [(2, "b"), (1, "a")]
+
+
+def test_types_of_schemas_have_the_attributes_of_pyspark(session):
+    # As PySpark's: the types of a schema of the server have the attributes of their
+    # parameters.
+    schema = session.sql(
+        "select 'a' collate UTF8_LCASE as s, interval '1' hour as i, time'12:30:00' as t, "
+        "1.5bd as d").schema
+    assert schema["s"].dataType.collation == "UTF8_LCASE"
+    assert (schema["i"].dataType.startField, schema["i"].dataType.endField) == (1, 1)
+    assert schema["t"].dataType.precision == 6
+    assert schema["d"].dataType.hasPrecisionInfo is True
+    assert schema["i"].dataType.typeName() == type(schema["i"].dataType).typeName()
+
+
 
 
 def test_decimal_literals_are_of_the_types_of_pyspark(session):
@@ -1526,12 +2503,51 @@ def test_observations_receive_the_observed_metrics_as_pyspark(session):
     assert error.value.getCondition() == "UNSUPPORTED_OPERATION"
 
 
+def test_try_cast_and_isin_raise_the_errors_of_pyspark(session):
+    # As PySpark Connect's: try_cast of an int, and isin of a tuple, raise PySpark's errors.
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+
+    df = session.range(3)
+    with pytest.raises(PySparkTypeError) as e:
+        df.select(F.col("id").try_cast(1))
+    assert e.value.getCondition() == "NOT_EXPECTED_TYPE"
+    with pytest.raises(PySparkTypeError) as e:
+        df.where(F.col("id").isin((1, 2)))
+    assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE"
+    assert df.where(F.col("id").isin([1, 2])).count() == 2
+
+
+
+
 def test_ml_vector_functions_as_pyspark(session):
     from pyspark.ml.functions import array_to_vector, vector_to_array
 
     df = session.sql("SELECT array(1.5D, 2.0D) AS a").select(array_to_vector("a").alias("vec"))
     row = df.select(vector_to_array("vec").alias("d"), vector_to_array("vec", "float32").alias("f"))
     assert tuple(row.first()) == ([1.5, 2.0], [1.5, 2.0])
+
+
+def test_udfs_of_types_with_user_defined_types_run_on_the_server_as_pyspark(session):
+    # As PySpark's: a UDF of a return type of an array of ExamplePointUDT, whose JSON's pyClass
+    # imports no class, runs on the Python worker of the server, to which the type pickles with
+    # the user-defined type it is made of.
+    from pyspark.testing.objects import ExamplePoint, ExamplePointUDT
+
+    @F.udf(returnType=ArrayType(ExamplePointUDT()))
+    def points(d):
+        return [ExamplePoint(d + i, 10 * d + i) for i in range(2)]
+
+    @F.udf(returnType=DoubleType())
+    def last_y(es):
+        return es[-1].y
+
+    df = session.range(1).select(F.lit(1.0).alias("d"))
+    expected = [Row(p=[ExamplePoint(1.0, 10.0), ExamplePoint(2.0, 11.0)])]
+    assert df.select(points("d").alias("p")).collect() == expected
+    assert df.select(last_y(points("d")).alias("y")).collect() == [Row(y=11.0)]
+
+
 
 
 def test_udfs_return_user_defined_types_of_main_as_pyspark():
@@ -1647,6 +2663,51 @@ def test_create_dataframe_merges_the_types_of_every_row_as_pyspark(session):
         assert [tuple(r) for r in df.collect()] == [(text,), ("5",)]
 
 
+def test_foreach_runs_a_function_and_a_writer_of_each_row_as_pyspark(session, tmp_path):
+    # As PySpark's foreach: a function of a row, and an object of open, process and close, run
+    # on each row of each batch, here writing a file of each row on the local server.
+    from pyspark.errors import PySparkAttributeError
+
+    source, out = tmp_path / "source", tmp_path / "out"
+    session.range(3).write.json(str(source))
+    out.mkdir()
+    directory = str(out)
+
+    def write_row(row):
+        import os
+
+        open(os.path.join(directory, f"function_{row.id}"), "w").close()
+
+    class Writer:
+        def open(self, partition_id, epoch_id):
+            return True
+
+        def process(self, row):
+            import os
+
+            open(os.path.join(directory, f"writer_{row.id}"), "w").close()
+
+        def close(self, error):
+            pass
+
+    for name, function in [("function", write_row), ("writer", Writer())]:
+        query = (
+            session.readStream.schema("id long")
+            .json(str(source))
+            .writeStream.foreach(function)
+            .option("checkpointLocation", str(tmp_path / f"checkpoint_{name}"))
+            .trigger(availableNow=True)
+            .start()
+        )
+        query.awaitTermination()
+        assert query.exception() is None
+    expected = [f"{name}_{i}" for name in ("function", "writer") for i in range(3)]
+    assert sorted(path.name for path in out.iterdir()) == expected
+    with pytest.raises(PySparkAttributeError) as e:
+        session.readStream.format("rate").load().writeStream.foreach(1)
+    assert e.value.getCondition() == "ATTRIBUTE_NOT_CALLABLE"
+
+
 def test_dataframes_of_a_stream_are_streaming_as_pyspark(session):
     # As PySpark's, which asks the server: a DataFrame with a streaming source is streaming.
     stream = session.readStream.format("rate").load()
@@ -1659,6 +2720,42 @@ def test_dataframes_of_a_stream_are_streaming_as_pyspark(session):
     ):
         assert df.isStreaming is True
     assert session.range(1).isStreaming is False
+
+
+def test_streaming_queries_return_the_status_and_the_exception_of_pyspark(session):
+    # As PySpark's: the status of a query is a dict, and the exception of a failed query is
+    # the StreamingQueryException of pyspark.errors, of the message of the server and its JVM
+    # stack trace, which awaitTermination raises.
+    import time
+
+    from pyspark.errors import StreamingQueryException
+    from pyspark.sql import functions as F
+
+    stream = session.readStream.format("rate").load()
+    query = stream.writeStream.format("noop").start()
+    try:
+        assert type(query.status) is dict
+        assert sorted(query.status) == ["isDataAvailable", "isTriggerActive", "message"]
+        query.explain(1)
+        assert query.exception() is None
+    finally:
+        query.stop()
+    failing = stream.select(F.assert_true(F.col("value") < 0)).writeStream.format("noop")
+    failed = failing.start()
+    try:
+        for _ in range(120):
+            if not failed.isActive:
+                break
+            time.sleep(0.5)
+        exception = failed.exception()
+        assert isinstance(exception, StreamingQueryException)
+        message = str(exception)
+        assert message.startswith("(STREAM_FAILED) [USER_RAISED_EXCEPTION]")
+        assert "JVM stacktrace:" in message
+        with pytest.raises(StreamingQueryException):
+            failed.awaitTermination(1)
+    finally:
+        failed.stop()
 
 
 def test_stream_writer_starts_a_query_of_its_real_time_trigger_as_pyspark(session):
@@ -1675,6 +2772,31 @@ def test_stream_writer_starts_a_query_of_its_real_time_trigger_as_pyspark(sessio
             query.stop()
     assert error.value.getCondition() == (
         "STREAMING_REAL_TIME_MODE.OPERATOR_OR_SINK_NOT_IN_ALLOWLIST")
+
+
+def test_udf_profiles_are_shown_by_spark_profile_as_pyspark(session, capsys):
+    # As PySpark Connect's: with the UDF profiler, spark.profile shows the profile of each UDF
+    # that an execution ran, which clear removes.
+    from pyspark.sql.functions import udf
+
+    session.profile.clear()
+    session.conf.set("spark.sql.pyspark.udf.profiler", "perf")
+    try:
+        @udf("long")
+        def plus_one(x):
+            return x + 1
+
+        session.range(4).select(plus_one("id")).collect()
+    finally:
+        session.conf.unset("spark.sql.pyspark.udf.profiler")
+    capsys.readouterr()
+    session.profile.show(type="perf")
+    assert "Profile of UDF<id=" in capsys.readouterr().out
+    session.profile.clear()
+    session.profile.show()
+    assert capsys.readouterr().out == ""
+
+
 
 
 def test_create_dataframe_raises_merge_errors_as_pyspark(session):
@@ -1696,6 +2818,22 @@ def test_create_dataframe_raises_merge_errors_as_pyspark(session):
         assert error.value.getMessageParameters() == parameters, data
 
 
+def test_samples_and_splits_take_a_seed_of_the_client_as_pyspark(session):
+    # As PySpark's: without a seed, the client takes one, so every action of a sample returns
+    # the same rows, and the splits of randomSplit are disjoint and have every row; and the
+    # metadata of withMetadata takes any JSON value.
+    df = session.range(0, 2000, 1, 8)
+    sample = df.sample(0.5)
+    assert sorted(row.id for row in sample.collect()) == sorted(row.id for row in sample.collect())
+    first, second = df.randomSplit([0.5, 0.5])
+    assert first.count() + second.count() == 2000
+    assert first.intersect(second).count() == 0
+    metadata = {"k": 1, "l": [1, 2], "s": "v"}
+    assert df.withMetadata("id", metadata).schema["id"].metadata == metadata
+
+
+
+
 def test_persist_cache_and_unpersist_return_the_dataframe_itself_as_pyspark(session):
     # As PySpark's: the DataFrame itself, cached at the storage level given.
     from pyspark.storagelevel import StorageLevel
@@ -1710,12 +2848,64 @@ def test_persist_cache_and_unpersist_return_the_dataframe_itself_as_pyspark(sess
         df.unpersist()
 
 
+def test_values_of_local_rows_convert_and_raise_as_pyarrow(session):
+    # As PySpark Connect's: PyArrow takes the __int__ of a Decimal in an int or a date field,
+    # raises its own errors, and takes the days of a date out of the dates of Python, which
+    # then raise the OverflowError of PyArrow's `date(1970, 1, 1) + timedelta(days=d)`.
+    import decimal
+
+    import pyarrow as pa
+    from pyspark.errors import PySparkTypeError
+
+    D = decimal.Decimal
+    df = session.createDataFrame([(D("2.7"), D("1.5"))], "i int, d date")
+    assert df.collect() == [Row(i=2, d=date(1970, 1, 2))]
+    with pytest.raises(pa.ArrowInvalid, match="tried to convert to int32"):
+        session.createDataFrame([("x",)], "v int")
+    with pytest.raises(PySparkTypeError) as e:
+        session.createDataFrame([("x",)], "v char(3)")
+    assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION"
+    df = session.createDataFrame([(2932897,)], "v date")
+    assert df.count() == 1
+    with pytest.raises(OverflowError, match="^date value out of range$"):
+        # PySpark raises in collect; the client's rows convert their values when read.
+        df.collect()[0].v
+
 def test_create_dataframe_converts_numpy_scalars_as_pyspark(session):
     np = pytest.importorskip("numpy")
     df = session.createDataFrame(
         [(np.int64(1), np.float32(0.5), np.bool_(True), np.float32(1.5))],
         "a bigint, b double, c boolean, d bigint")
     assert [tuple(r) for r in df.collect()] == [(1, 0.5, True, 1)]
+
+
+def test_catalogs_return_the_named_tuples_of_pyspark(session):
+    # As PySpark's: the methods of the catalog return the NamedTuples of pyspark.sql.catalog,
+    # and registerFunction registers a UDF with spark.udf.register, with its FutureWarning.
+    from pyspark.sql.catalog import Column, Database, Function, Table
+
+    session.sql("drop table if exists default.catalog_tuples_t")
+    session.sql("create table default.catalog_tuples_t (a int, b string) using parquet")
+    try:
+        table = session.catalog.getTable("default.catalog_tuples_t")
+        assert isinstance(table, Table)
+        assert table == (
+            "catalog_tuples_t", "spark_catalog", ["default"], None, "MANAGED", False)
+        assert table._asdict()["tableType"] == "MANAGED" and table.database == "default"
+        assert session.catalog.listColumns("default.catalog_tuples_t") == [
+            Column("a", None, "int", True, False, False, False),
+            Column("b", None, "string", True, False, False, False),
+        ]
+        assert isinstance(session.catalog.getDatabase("default"), Database)
+        name, *_ = session.catalog.getFunction("abs")
+        assert name == "abs" and isinstance(session.catalog.getFunction("abs"), Function)
+        with pytest.warns(FutureWarning, match="Use spark.udf.register instead"):
+            session.catalog.registerFunction("catalog_tuples_plus_one", lambda x: x + 1, "int")
+        assert session.sql("select catalog_tuples_plus_one(1) as v").first().v == 2
+    finally:
+        session.sql("drop table if exists default.catalog_tuples_t")
+
+
 
 
 def test_create_dataframe_infers_by_the_session_configurations_as_pyspark(session):
@@ -1821,3 +3011,49 @@ def test_logistic_regression_fits_the_data_and_predicts_on_new_rows(session):
     ]
     with pytest.raises(Exception):
         estimator.fit(session.range(3))
+
+
+@pytest.mark.parametrize("use_setters", [False, True], ids=["constructor", "setters"])
+def test_linear_svc_fits_the_labels_and_predicts_on_new_rows(session, use_setters):
+    try:
+        from pyspark._pyspark import LinearSVC
+    except ImportError:
+        from pyspark.ml.classification import LinearSVC
+    from pyspark.ml.connect.functions import array_to_vector
+
+    training = session.sql(
+        "SELECT array(CAST(x AS DOUBLE)) AS xs, "
+        "CAST(CASE WHEN x > 0 THEN 1 ELSE 0 END AS DOUBLE) AS target, 1.0D AS weight "
+        "FROM VALUES (-4), (-3), (-2), (-1), (1), (2), (3), (4) AS t(x)"
+    ).withColumn("input", array_to_vector("xs"))
+    held_out = session.sql(
+        "SELECT id, array(CAST(x AS DOUBLE)) AS xs "
+        "FROM VALUES (0, -3.5), (1, -1.5), (2, 1.5), (3, 3.5) AS t(id, x)"
+    ).withColumn("input", array_to_vector("xs"))
+    kwargs = dict(featuresCol="input", labelCol="target", predictionCol="pred",
+                  rawPredictionCol="margin", maxIter=50, regParam=0.1, tol=1e-6,
+                  fitIntercept=False, standardization=False, threshold=0.0,
+                  weightCol="weight", aggregationDepth=2, maxBlockSizeInMB=1.0)
+    if use_setters:
+        estimator = LinearSVC()
+        for name, value in kwargs.items():
+            setter = getattr(estimator, "set" + name[0].upper() + name[1:])
+            assert setter(value) is estimator
+    else:
+        estimator = LinearSVC(**kwargs)
+    first = estimator.fit(training)
+    second = estimator.fit(training.withColumn("target", F.lit(1.0) - F.col("target")))
+    result = first.transform(held_out)
+    assert "margin" in result.columns
+    assert [r.pred for r in result.orderBy("id").collect()] == [0.0, 0.0, 1.0, 1.0]
+    assert [r.pred for r in second.transform(held_out).orderBy("id").collect()] == [
+        1.0, 1.0, 0.0, 0.0
+    ]
+    estimator.setThreshold(1e6)
+    assert [r.pred for r in estimator.fit(training).transform(held_out).orderBy("id").collect()] == [0.0] * 4
+    with pytest.raises(Exception):
+        estimator.fit(session.range(3))
+    with pytest.raises(Exception):
+        estimator.fit(training.withColumn("target", F.lit(2.0)))
+    with pytest.raises(Exception):
+        estimator.setRegParam(-1.0).fit(training)
