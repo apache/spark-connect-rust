@@ -1451,6 +1451,28 @@ def test_functions_send_their_optional_arguments_as_pyspark(session):
     assert nulls.groupBy("g").agg(F.first("v", ignorenulls=True)).first()[1] == 5
 
 
+def test_window_frames_return_the_rows_of_pyspark(session):
+    # As PySpark's: a range frame of a boundary out of the range of an int, which was
+    # truncated, and the frames of the bounds of -sys.maxsize and sys.maxsize, unbounded.
+    import sys
+
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql import Window
+
+    df = session.range(4)
+    o = Window.orderBy("id")
+
+    def sums(window):
+        return sorted(r.s for r in df.select(F.sum("id").over(window).alias("s")).collect())
+
+    assert sums(o.rangeBetween(-(1 << 40), 0)) == [0, 1, 3, 6]
+    assert sums(o.rangeBetween(0, 1 << 40)) == [3, 5, 6, 6]
+    assert sums(o.rowsBetween(-sys.maxsize, sys.maxsize)) == [6, 6, 6, 6]
+    assert sums(o.rangeBetween(-sys.maxsize, sys.maxsize)) == [6, 6, 6, 6]
+    with pytest.raises(PySparkValueError, match="VALUE_NOT_BETWEEN"):
+        sums(o.rowsBetween(-(1 << 31) - 1, 0))
+
+
 def test_maps_keep_their_entries_in_order_with_keys_of_their_type(session):
     row = session.range(1).selectExpr(
         "map(2, 'b', 1, 'a') AS ints",
