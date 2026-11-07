@@ -22,16 +22,18 @@ Mirrors pyspark.sql.connect.udtf and pyspark.sql.functions.udtf.
 
 from pyspark._pyspark import (
     AnalyzeArgument, PartitioningColumn, OrderingColumn, SelectedColumn,
-    AnalyzeResult, SkipRestOfInputTableException,
+    SkipRestOfInputTableException,
 )
 
 import inspect
 import pickle
 import sys
-from typing import Any, Optional, Type
+from dataclasses import dataclass, field
+from typing import Any, Optional, Sequence, Type
 
 from pyspark.errors import PySparkAttributeError, PySparkPicklingError, PySparkTypeError
 from pyspark.serializers import CloudPickleSerializer
+from pyspark.sql.types import StructType
 
 __all__ = [
     "AnalyzeArgument",
@@ -47,6 +49,21 @@ __all__ = [
 SQL_TABLE_UDF = 300
 SQL_ARROW_TABLE_UDF = 301
 SQL_ARROW_UDTF = 302
+
+
+@dataclass
+class AnalyzeResult:
+    """The result of a Python UDTF's ``analyze`` static method.
+
+    As in PySpark, this is a mutable dataclass so a handler can subclass it to
+    return custom analysis state, which is passed to the handler's constructor.
+    """
+
+    schema: StructType
+    withSinglePartition: bool = False
+    partitionBy: Sequence[PartitioningColumn] = field(default_factory=tuple)
+    orderBy: Sequence[OrderingColumn] = field(default_factory=tuple)
+    select: Sequence[SelectedColumn] = field(default_factory=tuple)
 
 
 # Verbatim from PySpark (pyspark.sql.udtf): validates the handler class of a UDTF.
