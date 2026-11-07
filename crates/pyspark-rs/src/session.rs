@@ -2463,7 +2463,7 @@ fn pandas_decimal_type(data: &Bound<'_, PyList>, rows: &[Row], i: usize) -> PyRe
 
 /// Infer the Spark `DataType` for a `createDataFrame` column from its (first) value.
 /// Nested collections are inferred recursively; nulls and empty collections use
-/// String as a fallback. Interval input conversion is tracked in SPARK-60659.
+/// String as a fallback.
 fn value_to_datatype(v: &Value) -> DataType {
     let utf8 = || DataType::String {
         collation: "UTF8_BINARY".to_string(),

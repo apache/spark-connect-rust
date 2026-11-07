@@ -2042,6 +2042,7 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
+        assert_eq!(decoded.len(), rows.len());
         for (actual, expected) in decoded.iter().zip(&rows) {
             assert_eq!(actual.values(), expected.values());
         }
