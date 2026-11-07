@@ -482,6 +482,17 @@ def test_storage_level():
     assert StorageLevel.DISK_ONLY != StorageLevel.MEMORY_ONLY
 
 
+def test_dataframe_plot_is_the_plot_accessor_of_pyspark():
+    # As PySpark's DataFrame.plot: the PySparkPlotAccessor of pyspark.sql.plot, of the
+    # DataFrame itself.
+    from pyspark.sql.plot import PySparkPlotAccessor
+
+    df = _offline_session().range(1)
+    plot = df.plot
+    assert type(plot) is PySparkPlotAccessor
+    assert plot.data is df
+
+
 def test_checkpoints_send_their_eager_and_storage_level_as_pyspark(mock_connect):
     # As PySpark's, checkpoint(eager) and localCheckpoint(eager, storageLevel) send them in
     # their CheckpointCommand, of which the mock answers with a CachedRemoteRelation.
