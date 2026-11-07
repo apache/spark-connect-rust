@@ -1029,6 +1029,18 @@ impl SparkSession {
         block_on(self.client.release_session())
     }
 
+    /// Release the session on the server, as `SparkConnectClient.release_session`: its state
+    /// there, without stopping this session.
+    pub fn release_session(&self) -> Result<()> {
+        block_on(self.client.release_session())
+    }
+
+    /// Close this session without releasing it on the server, as `SparkConnectClient.close`
+    /// closes its channel: it is stopped, and `stop()` does nothing more.
+    pub fn close(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+    }
+
     /// Whether `stop()` has been called on this session. Mirrors
     /// `pyspark.sql.connect.session.SparkSession.is_stopped`.
     pub fn is_stopped(&self) -> bool {

@@ -183,9 +183,10 @@ class CachedRemoteRelation(LogicalPlan):
         # If session is already closed, all cached DataFrame should be released.
         if session is not None and not session.client.is_closed and self._relation_id is not None:
             try:
-                # The command of the Rust transport, as PySpark Connect's sends it.
+                # The command, as PySpark Connect's sends it, whose responses are ignored: they
+                # are not converted, as that of a checkpoint is into another cached relation.
                 command = RemoveRemoteCachedRelation(self).command(session=session.client)
-                session.client.execute_command(command)
+                session._execute_command(command.SerializeToString())
             except Exception as e:
                 logger.warning(f"RemoveRemoteCachedRelation failed with exception: {e}.")
 

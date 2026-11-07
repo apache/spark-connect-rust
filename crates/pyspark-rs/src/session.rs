@@ -2005,6 +2005,25 @@ impl PySparkSession {
             .unbind())
     }
 
+    /// Release the session on the server, without stopping it, for `client.release_session`.
+    fn _release_session(&self, py: Python<'_>) -> PyResult<()> {
+        let session = self.session.clone();
+        py.detach(|| session.release_session().map_err(Box::new))
+            .to_pyerr()
+    }
+
+    /// Close the session without releasing it on the server, for `client.close`.
+    fn _close(&self) {
+        self.session.close();
+    }
+
+    /// The client of the session, as PySpark Connect's `SparkSession._client`, which the
+    /// modules of PySpark read, such as the `TorchDistributor` of `pyspark.ml`: `client`.
+    #[getter]
+    fn _client(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        Self::client(slf)
+    }
+
     /// The session id (property form, mirrors `SparkSession.session_id`).
     #[getter]
     fn session_id(&self) -> String {
