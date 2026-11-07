@@ -1288,7 +1288,7 @@ fn values_to_arrow(values: &[&Value], dt: &DataType) -> Result<Arc<dyn arrow::ar
                 .iter()
                 .map(|v| match *v {
                     Value::Null => Ok(None),
-                    Value::Timestamp(t) => Ok(Some(*t)),
+                    Value::Timestamp(t) | Value::TimestampNtz(t) => Ok(Some(*t)),
                     _ => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
@@ -1307,9 +1307,13 @@ fn values_to_arrow(values: &[&Value], dt: &DataType) -> Result<Arc<dyn arrow::ar
                 .iter()
                 .map(|v| match *v {
                     Value::Null => Ok(None),
-                    Value::Timestamp(t) => t.checked_mul(1_000).map(Some).ok_or_else(|| {
-                        SparkError::connect_msg("Timestamp out of range for nanosecond precision")
-                    }),
+                    Value::Timestamp(t) | Value::TimestampNtz(t) => {
+                        t.checked_mul(1_000).map(Some).ok_or_else(|| {
+                            SparkError::connect_msg(
+                                "Timestamp out of range for nanosecond precision",
+                            )
+                        })
+                    }
                     _ => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
