@@ -16,13 +16,18 @@
 #
 """The types of ``pyspark.sql.connect.types`` that are not those of ``pyspark.sql.types``, as
 PySpark Connect's: ``UnparsedDataType``, a DDL string of a type that the server parses. The
-conversions between the types and their protobuf messages of PySpark Connect's module are those
-of the Rust transport."""
+conversions between the types and their ``spark.connect.DataType`` messages,
+``pyspark_types_to_proto_types`` and ``proto_schema_to_pyspark_data_type``, are those of the Rust
+transport, of the messages of the generated ``pyspark.sql.connect.proto``, which needs the
+``protobuf`` package."""
 
-from typing import Any, Dict
+from typing import TYPE_CHECKING, Any, Dict
 
 from pyspark.errors import PySparkAssertionError
 from pyspark.sql.types import DataType
+
+if TYPE_CHECKING:
+    import pyspark.sql.connect.proto as pb2
 
 
 class UnparsedDataType(DataType):
@@ -96,6 +101,22 @@ class UnparsedDataType(DataType):
     def __reduce__(self) -> Any:
         # The DataType of the drop-in pickles through its JSON, which an unparsed type has not.
         return (UnparsedDataType, (self.data_type_string,))
+
+
+def pyspark_types_to_proto_types(data_type: DataType) -> "pb2.DataType":
+    """The ``spark.connect.DataType`` of ``data_type``, as the client sends the type."""
+    import pyspark.sql.connect.proto as pb2
+    from pyspark._pyspark import _data_type_proto
+
+    return pb2.DataType.FromString(_data_type_proto(data_type))
+
+
+def proto_schema_to_pyspark_data_type(schema: "pb2.DataType") -> DataType:
+    """The type of ``schema``, a ``spark.connect.DataType``, as the client reads the types of the
+    server."""
+    from pyspark._pyspark import _data_type_of_proto
+
+    return _data_type_of_proto(schema.SerializeToString())
 
 
 __all__ = ["UnparsedDataType"]

@@ -989,6 +989,31 @@ impl DataFrame {
         Ok(())
     }
 
+    /// A DataFrame of `relation`, a relation built outside the core, such as the plans of
+    /// `pyspark.ml`, which the core sends as it is, keeping `owner`, if any, alive while any
+    /// DataFrame of it is. Not a stable API.
+    #[doc(hidden)]
+    pub fn from_relation(
+        session: SparkSession,
+        relation: proto::Relation,
+        owner: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    ) -> DataFrame {
+        DataFrame::new(
+            session,
+            LogicalPlan::Raw {
+                relation: Box::new(relation),
+                owner: owner.map(crate::plan::RelationOwner),
+            },
+        )
+    }
+
+    /// The relation of this DataFrame as it is sent, with the plan IDs of its session, for a
+    /// plan built outside the core over it, such as of `pyspark.ml`. Not a stable API.
+    #[doc(hidden)]
+    pub fn to_relation(&self) -> proto::Relation {
+        build_input_relation(&self.plan, &self.session)
+    }
+
     /// Get the schema of this DataFrame.
     ///
     /// The first successful lookup is cached and shared with exact clones.

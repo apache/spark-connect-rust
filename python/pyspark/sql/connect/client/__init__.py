@@ -15,16 +15,13 @@
 # limitations under the License.
 #
 
-"""Compatibility shim for pyspark.sql.connect.client: re-exports SparkConnectClient and related classes."""
+"""Compatibility shim for pyspark.sql.connect.client: ``SparkConnectClient``, the class of
+``SparkSession.client``, and related classes."""
 
-try:
-    from pyspark._pyspark import SparkConnectClientStub as SparkConnectClient
-    __all__ = ["SparkConnectClient"]
-except ImportError:
-    # If Rust backend not available, guard the export
-    __all__ = []
+__all__ = ["SparkConnectClient"]
 
 
+import weakref
 from typing import Any, Dict, List
 
 from pyspark.sql.metrics import ObservedMetrics
@@ -113,3 +110,108 @@ def _to_pandas(
     if len(observed_metrics) > 0:
         pdf.attrs["observed_metrics"] = observed_metrics
     return pdf
+
+
+class SparkConnectClient:
+    """The client of ``SparkSession.client``: of PySpark Connect's ``SparkConnectClient``, what
+    the modules of PySpark that build their own messages, such as ``pyspark.ml``, use: their
+    commands and the ML cache, over the Rust transport of the session, and the session ID. The
+    messages are those of the generated ``pyspark.sql.connect.proto``. The Rust transport is the
+    rest of the client, of the DataFrame API."""
+
+    def __init__(self, session: Any) -> None:
+        self._session = session
+        # The thread of an ML cache RPC in flight, as SparkConnectClient's re-entrancy guard of a
+        # RemoteModelRef finalizer that deletes a model.
+        self._ml_cache_rpc_thread: Any = None
+
+    @property
+    def _server_session_id(self) -> str:
+        return self._session.session_id
+
+    def execute_command(self, command: Any, observations: Any = None) -> Any:
+        """Execute ``command``, a ``spark.connect.Command``, as SparkConnectClient's
+        ``execute_command``: no data, the properties of the results of the responses, of their
+        field names, and no execution information."""
+        import pyspark.sql.connect.proto as pb2
+
+        properties: Dict[str, Any] = {}
+        for data in self._session._execute_command(command.SerializeToString()):
+            response = pb2.ExecutePlanResponse.FromString(data)
+            # The results of commands, as SparkConnectClient._execute_and_fetch_as_iterator
+            # yields them.
+            if response.HasField("sql_command_result"):
+                properties["sql_command_result"] = response.sql_command_result.relation
+            for field in (
+                "write_stream_operation_start_result",
+                "streaming_query_command_result",
+                "streaming_query_manager_command_result",
+                "streaming_query_listener_events_result",
+                "get_resources_command_result",
+                "ml_command_result",
+                "pipeline_command_result",
+            ):
+                if response.HasField(field):
+                    properties[field] = getattr(response, field)
+        return None, properties, None
+
+    def _delete_ml_cache(self, cache_ids: List[str], evict_only: bool = False) -> List[str]:
+        """Delete the cached objects of ``cache_ids`` on the server, as SparkConnectClient's: the
+        IDs deleted, or none if it fails."""
+        import threading
+
+        import pyspark.sql.connect.proto as pb2
+
+        try:
+            if len(cache_ids) > 0:
+                if self._ml_cache_rpc_thread == threading.get_ident():
+                    return []
+                command = pb2.Command()
+                command.ml_command.delete.obj_refs.extend(
+                    [pb2.ObjectRef(id=cache_id) for cache_id in cache_ids]
+                )
+                command.ml_command.delete.evict_only = evict_only
+                self._ml_cache_rpc_thread = threading.get_ident()
+                try:
+                    _, properties, _ = self.execute_command(command)
+                finally:
+                    self._ml_cache_rpc_thread = None
+                if "ml_command_result" in properties:
+                    ml_command_result = properties["ml_command_result"]
+                    return ml_command_result.operator_info.obj_ref.id.split(",")
+            return []
+        except Exception:
+            return []
+
+    def _cleanup_ml_cache(self) -> None:
+        """Clean the ML cache of the session on the server, as SparkConnectClient's."""
+        import threading
+
+        try:
+            import pyspark.sql.connect.proto as pb2
+
+            if self._ml_cache_rpc_thread == threading.get_ident():
+                return
+            command = pb2.Command()
+            command.ml_command.clean_cache.SetInParent()
+            self._ml_cache_rpc_thread = threading.get_ident()
+            try:
+                self.execute_command(command)
+            finally:
+                self._ml_cache_rpc_thread = None
+        except Exception:
+            pass
+
+
+# The client of each session, by its ID, while it is in use.
+_CLIENTS: "weakref.WeakValueDictionary[str, SparkConnectClient]" = weakref.WeakValueDictionary()
+
+
+def _client_of(session: Any) -> "SparkConnectClient":
+    """The client of ``session``, the same object while it is in use, as ``SparkSession.client``
+    is one object per session."""
+    client = _CLIENTS.get(session.session_id)
+    if client is None or client._session is not session:
+        client = SparkConnectClient(session)
+        _CLIENTS[session.session_id] = client
+    return client

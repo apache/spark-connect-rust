@@ -32,6 +32,8 @@ omit =
     */pyspark/sql/streaming/*
     */pyspark/sql/worker/*
     */pyspark/sql/plot/*
+    # The generated messages of Spark Connect, vendored with pyspark.ml.
+    */pyspark/sql/connect/proto/*_pb2.py
     */pyspark/sql/pandas/*
     */pyspark/sql/functions_generated.py
     */pyspark/sql/datasource.py

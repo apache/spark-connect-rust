@@ -94,6 +94,39 @@ fn py_obj_to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
     to_column(obj)
 }
 
+/// The expression of a Column, as PySpark Connect's `Column._expr`: its `str` and `repr` are
+/// its rendering, as `Column<'...'>` shows it, and its `to_plan` its `spark.connect.Expression`.
+/// The expressions of PySpark Connect are those of `pyspark.sql.connect.expressions`, of which
+/// the Rust core builds the expressions of a Column.
+#[pyclass(name = "_ColumnExpression", module = "pyspark.sql.connect.expressions")]
+pub struct PyColumnExpression {
+    column: Column,
+}
+
+#[pymethods]
+impl PyColumnExpression {
+    fn __repr__(&self) -> String {
+        self.column.expression().render()
+    }
+
+    fn __str__(&self) -> String {
+        self.__repr__()
+    }
+
+    /// The `spark.connect.Expression` of this expression, of the generated
+    /// `pyspark.sql.connect.proto`.
+    fn to_plan(&self, py: Python<'_>, session: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        use prost::Message;
+        let _ = session;
+        let bytes = pyo3::types::PyBytes::new(py, &self.column.to_proto().encode_to_vec());
+        Ok(py
+            .import("pyspark.sql.connect.proto")?
+            .getattr("Expression")?
+            .call_method1("FromString", (bytes,))?
+            .unbind())
+    }
+}
+
 #[pymethods]
 impl PyColumn {
     /// Alias the column with each given name, optionally attaching column metadata (a
@@ -628,6 +661,16 @@ impl PyColumn {
     /// (`Column<'<expr>'>`). pandas-on-Spark's `spark_column_equals` relies on this.
     fn __repr__(&self) -> String {
         format!("Column<'{}'>", self.column.expression().render())
+    }
+
+    /// The expression of this column, as PySpark Connect's `Column._expr`: its `str` is the
+    /// rendering of the expression that `Column<'...'>` shows, of which `pyspark.ml.stat` names
+    /// its metrics.
+    #[getter]
+    fn _expr(&self) -> PyColumnExpression {
+        PyColumnExpression {
+            column: self.column.clone(),
+        }
     }
 
     fn __str__(&self) -> String {

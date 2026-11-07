@@ -705,6 +705,21 @@ impl SparkSession {
         Ok(())
     }
 
+    /// Execute `command`, a command built outside the core, such as the ML commands of
+    /// `pyspark.ml`, and return the responses of the server, as the Python client's
+    /// `execute_command` reads them. Not a stable API.
+    #[doc(hidden)]
+    pub fn execute_command_proto(
+        &self,
+        command: spark_connect_proto::Command,
+    ) -> Result<Vec<spark_connect_proto::ExecutePlanResponse>> {
+        let Some(command_type) = command.command_type else {
+            return Err(SparkError::value_msg("a command of no command type"));
+        };
+        let (responses, _) = crate::dataframe::execute_command_with_info(self, command_type)?;
+        Ok(responses)
+    }
+
     /// Get the runtime configuration for this session.
     ///
     /// Mirrors `pyspark.sql.SparkSession.conf`.

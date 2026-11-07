@@ -1847,21 +1847,47 @@ impl PySparkSession {
         self.session.session_id().to_string()
     }
 
+    /// The responses of the server to `command`, the bytes of a `spark.connect.Command` built
+    /// outside the client, such as the ML commands of `pyspark.ml`, as the bytes of each
+    /// `ExecutePlanResponse`: for the `execute_command` of `client`.
+    fn _execute_command<'py>(
+        &self,
+        py: Python<'py>,
+        command: &[u8],
+    ) -> PyResult<Vec<Bound<'py, pyo3::types::PyBytes>>> {
+        use prost::Message;
+        let command = spark_connect_proto::Command::decode(command)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+        let responses = py
+            .detach(|| {
+                self.session
+                    .execute_command_proto(command)
+                    .map_err(Box::new)
+            })
+            .to_pyerr()?;
+        Ok(responses
+            .iter()
+            .map(|response| pyo3::types::PyBytes::new(py, &response.encode_to_vec()))
+            .collect())
+    }
+
+    /// The client of PySpark Connect's `session.client`, as far as the modules of PySpark that
+    /// build their own messages, such as `pyspark.ml`, use it: of their commands and of the ML
+    /// cache, over the Rust transport (`pyspark.sql.connect.client`).
+    #[getter]
+    fn client(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        Ok(slf
+            .py()
+            .import("pyspark.sql.connect.client")?
+            .getattr("_client_of")?
+            .call1((slf,))?
+            .unbind())
+    }
+
     /// The session id (property form, mirrors `SparkSession.session_id`).
     #[getter]
     fn session_id(&self) -> String {
         self.session.session_id().to_string()
-    }
-
-    /// The low-level Connect client. In the reference client this is the gRPC
-    /// `SparkConnectClient`; here the transport is Rust, so we expose a minimal stub
-    /// carrying the bits test/util code touches (`_server_session_id`, `_cleanup_ml_cache`),
-    /// mirroring `SparkSession.client` enough for harnesses like `ReusedConnectTestCase`.
-    #[getter]
-    fn client(&self) -> PyConnectClientStub {
-        PyConnectClientStub {
-            session_id: self.session.session_id().to_string(),
-        }
     }
 
     /// Whether this session has been stopped. Mirrors `SparkSession.is_stopped`.
@@ -2224,26 +2250,6 @@ fn check_local_artifact(
         py.import("importlib")?.call_method0("invalidate_caches")?;
     }
     Ok(())
-}
-
-/// Minimal stand-in for the reference `SparkConnectClient`, returned by
-/// `SparkSession.client`. The real client is the Rust transport; this only surfaces the
-/// members that test/utility code (e.g. `ReusedConnectTestCase`) touches.
-#[pyclass(name = "SparkConnectClientStub", module = "pyspark.sql.connect.client")]
-pub struct PyConnectClientStub {
-    session_id: String,
-}
-
-#[pymethods]
-impl PyConnectClientStub {
-    /// The server-side session id (property, mirrors `client._server_session_id`).
-    #[getter]
-    fn _server_session_id(&self) -> String {
-        self.session_id.clone()
-    }
-
-    /// No-op: the Rust transport has no client-side ML cache to clear.
-    fn _cleanup_ml_cache(&self) {}
 }
 
 /// Whether `value` has a map with a null key, at any depth.

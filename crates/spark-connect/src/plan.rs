@@ -27,6 +27,19 @@ pub struct TransformWithStateInfo {
 /// Child plans are immutable shared nodes, so adding a transformation does not clone
 /// its ancestors. Call `to_proto()` to materialize a fresh protobuf tree without plan
 /// IDs; requests give every shared node its stable plan ID (see `PlanIds`).
+/// The owner of a relation built outside the core, which a plan of it keeps alive while any
+/// DataFrame uses it: such as the Python plan of `pyspark.ml`, which keeps the models whose
+/// cached objects on the server the relation refers to, as PySpark Connect's DataFrame keeps its
+/// plan.
+#[derive(Clone)]
+pub struct RelationOwner(pub Arc<dyn std::any::Any + Send + Sync>);
+
+impl std::fmt::Debug for RelationOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RelationOwner")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum LogicalPlan {
     /// A range of integers: `range(start, end, step)`.
@@ -112,6 +125,13 @@ pub enum LogicalPlan {
         input: Arc<LogicalPlan>,
         num_rows: i32,
         truncate: i32,
+    },
+    /// A relation built outside the core, as the plans of `pyspark.ml` build theirs
+    /// (`pyspark.ml.connect.proto.TransformerRelation`), sent as it is, with the plan ID of the
+    /// core, and the owner of the relation, if any, which the plan keeps alive.
+    Raw {
+        relation: Box<proto::Relation>,
+        owner: Option<RelationOwner>,
     },
     /// Deduplicate: `df.distinct()` or `df.dropDuplicates()`.
     Deduplicate {
@@ -872,6 +892,11 @@ impl LogicalPlan {
                     truncate: *truncate,
                 };
                 relation.rel_type = Some(proto::relation::RelType::HtmlString(Box::new(html)));
+            }
+
+            LogicalPlan::Raw { relation: raw, .. } => {
+                relation = raw.as_ref().clone();
+                relation.common.get_or_insert_with(Default::default);
             }
 
             LogicalPlan::Deduplicate {
