@@ -87,32 +87,11 @@ fn py_new_struct(py: Python<'_>, fields: Vec<StructField>) -> PyResult<Py<PyStru
     )
 }
 
-/// Parse a type-JSON dict (as passed to `<Type>.fromJson`) into a core `DataType`.
-/// The dict may omit the top-level `"type"` key (each `fromJson` is a classmethod on a
-/// specific type), so inject `default_type` when it is absent before handing the object
-/// to the core JSON parser.
-fn from_json_dict(
-    py: Python<'_>,
-    json: &Bound<'_, PyAny>,
-    default_type: &str,
-) -> PyResult<DataType> {
-    use pyo3::types::PyDict;
-    let value: Bound<'_, PyAny> = if let Ok(d) = json.cast::<PyDict>() {
-        let d = d.copy()?;
-        if !d.contains("type")? {
-            d.set_item("type", default_type)?;
-        }
-        d.into_any()
-    } else {
-        json.clone()
-    };
-    let s: String = py
-        .import("json")?
-        .getattr("dumps")?
-        .call1((value,))?
-        .extract()?;
-    DataType::from_json_str(&s)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+/// The `fromJson` helper `name` of the shim `pyspark.sql.types`, which parses the nested JSON
+/// forms of the types as PySpark's: the collations of a struct field by their paths, and the
+/// Python class of a `udt`. The core's grammar parses the strings of the atomic types.
+fn shim_from_json<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
+    py.import("pyspark.sql.types")?.getattr(name)
 }
 
 /// Convert a Python `StructField` metadata dict to the core JSON-value map. Values may be any
@@ -129,6 +108,82 @@ fn py_metadata_to_map(
         .extract()?;
     serde_json::from_str(&s)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+}
+
+/// The keys of the JSON objects of the nested data types, in the order of PySpark's
+/// `jsonValue`: struct, array, map, and the UDTs of a Scala class or of a pickled Python class.
+const TYPE_JSON_KEYS: [&str; 11] = [
+    "type",
+    "fields",
+    "elementType",
+    "containsNull",
+    "keyType",
+    "valueType",
+    "valueContainsNull",
+    "class",
+    "pyClass",
+    "serializedClass",
+    "sqlType",
+];
+
+/// The keys of the JSON object of a struct field, in the order of PySpark's `jsonValue`.
+const FIELD_JSON_KEYS: [&str; 4] = ["name", "type", "nullable", "metadata"];
+
+/// The JSON text of the JSON value `v` of a data type (of a struct field, if `field`), with
+/// the keys of its objects in the order of PySpark's `jsonValue`. The core's JSON objects
+/// sort their keys, as `json()` does; the metadata of a field stays in that order.
+fn ordered_json_text(v: &serde_json::Value, field: bool) -> String {
+    let Some(object) = v.as_object() else {
+        return v.to_string();
+    };
+    let order: &[&str] = if field {
+        &FIELD_JSON_KEYS
+    } else {
+        &TYPE_JSON_KEYS
+    };
+    let keys = order
+        .iter()
+        .copied()
+        .filter(|key| object.contains_key(*key))
+        .chain(
+            object
+                .keys()
+                .map(String::as_str)
+                .filter(|key| !order.contains(key)),
+        );
+    let entries: Vec<String> = keys
+        .map(|key| {
+            let value = &object[key];
+            let text = match (field, key) {
+                (true, "type") | (false, "elementType" | "keyType" | "valueType" | "sqlType") => {
+                    ordered_json_text(value, false)
+                }
+                (false, "fields") => match value.as_array() {
+                    Some(fields) => {
+                        let fields: Vec<String> =
+                            fields.iter().map(|f| ordered_json_text(f, true)).collect();
+                        format!("[{}]", fields.join(","))
+                    }
+                    None => value.to_string(),
+                },
+                _ => value.to_string(),
+            };
+            format!("{}:{}", serde_json::Value::from(key), text)
+        })
+        .collect();
+    format!("{{{}}}", entries.join(","))
+}
+
+/// The `jsonValue` of the JSON value `v` of a data type (of a struct field, if `field`): its
+/// dicts have the keys in the order of PySpark's, as `json.dumps(t.jsonValue())` shows.
+fn py_json_value<'py>(
+    py: Python<'py>,
+    v: &serde_json::Value,
+    field: bool,
+) -> PyResult<Bound<'py, PyAny>> {
+    py.import("json")?
+        .getattr("loads")?
+        .call1((ordered_json_text(v, field),))
 }
 
 /// Convert the core JSON-value metadata map back to a Python dict.
@@ -182,7 +237,7 @@ impl PyDataType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -311,7 +366,7 @@ impl PyNullType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -361,7 +416,7 @@ impl PyBooleanType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -411,7 +466,7 @@ impl PyByteType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -465,7 +520,7 @@ impl PyShortType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -519,7 +574,7 @@ impl PyIntegerType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -573,7 +628,7 @@ impl PyLongType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -627,7 +682,7 @@ impl PyFloatType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -681,7 +736,7 @@ impl PyDoubleType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -738,7 +793,7 @@ impl PyDecimalType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -821,7 +876,7 @@ impl PyStringType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -908,7 +963,7 @@ impl PyBinaryType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -961,7 +1016,7 @@ impl PyDateType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -1011,7 +1066,7 @@ impl PyTimestampType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -1065,7 +1120,7 @@ impl PyTimestampNTZType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -1133,7 +1188,7 @@ impl PyArrayType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -1220,9 +1275,9 @@ impl PyArrayType {
         fieldPath: String,
         collationsMap: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let _ = (fieldPath, collationsMap);
-        let dt = from_json_dict(py, json, "array")?;
-        data_type_to_py(py, &dt)
+        Ok(shim_from_json(py, "_array_type_from_json")?
+            .call1((json, fieldPath, collationsMap))?
+            .unbind())
     }
 }
 
@@ -1262,7 +1317,7 @@ impl PyMapType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -1367,9 +1422,9 @@ impl PyMapType {
         fieldPath: String,
         collationsMap: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let _ = (fieldPath, collationsMap);
-        let dt = from_json_dict(py, json, "map")?;
-        data_type_to_py(py, &dt)
+        Ok(shim_from_json(py, "_map_type_from_json")?
+            .call1((json, fieldPath, collationsMap))?
+            .unbind())
     }
 }
 
@@ -1405,7 +1460,7 @@ impl PyStructField {
     #[pyo3(name = "jsonValue")]
     fn __sf_json_value<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let v = self.field.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, true)
     }
     #[pyo3(name = "needConversion")]
     fn __sf_need_conversion(&self) -> bool {
@@ -1504,15 +1559,10 @@ impl PyStructField {
         _cls: &Bound<'_, pyo3::types::PyType>,
         py: Python<'_>,
         json: &Bound<'_, PyAny>,
-    ) -> PyResult<PyStructField> {
-        let s: String = py
-            .import("json")?
-            .getattr("dumps")?
+    ) -> PyResult<Py<PyAny>> {
+        Ok(shim_from_json(py, "_struct_field_from_json")?
             .call1((json,))?
-            .extract()?;
-        let field = StructField::from_json_str(&s)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PyStructField { field })
+            .unbind())
     }
     #[new]
     #[pyo3(signature = (name, dataType, nullable=true, metadata=None))]
@@ -1598,7 +1648,7 @@ impl PyStructType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -1868,20 +1918,10 @@ impl PyStructType {
         _cls: &Bound<'_, pyo3::types::PyType>,
         py: Python<'_>,
         json: &Bound<'_, PyAny>,
-    ) -> PyResult<Py<PyStructType>> {
-        let s: String = py
-            .import("json")?
-            .getattr("dumps")?
+    ) -> PyResult<Py<PyAny>> {
+        Ok(shim_from_json(py, "_struct_type_from_json")?
             .call1((json,))?
-            .extract()?;
-        match DataType::from_json_str(&s)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
-        {
-            DataType::Struct { fields } => py_new_struct(py, fields),
-            _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "fromJson did not produce a StructType",
-            )),
-        }
+            .unbind())
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
@@ -1921,7 +1961,7 @@ impl PyCharType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -1981,7 +2021,7 @@ impl PyVarcharType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -2041,7 +2081,7 @@ impl PyTimeType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -2105,7 +2145,7 @@ impl PyTimestampNTZNanosType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -2178,7 +2218,7 @@ impl PyTimestampLTZNanosType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -2247,7 +2287,7 @@ impl PyCalendarIntervalType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -2304,7 +2344,7 @@ impl PyYearMonthIntervalType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -2384,7 +2424,7 @@ impl PyDayTimeIntervalType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -2453,7 +2493,7 @@ impl PyVariantType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {

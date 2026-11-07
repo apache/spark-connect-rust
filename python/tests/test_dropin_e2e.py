@@ -1968,6 +1968,25 @@ def test_create_dataframe_takes_the_ddl_of_spark_as_pyspark(session):
 
 
 
+def test_schemas_of_collated_strings_are_of_the_json_of_pyspark(session):
+    # As PySpark's: the JSON of a schema has the collations of its strings in the metadata of
+    # their fields, and StructType.fromJson reads them back.
+    import json
+
+    from pyspark.sql.types import StructType
+
+    schema = session.sql(
+        "select 'a' collate UTF8_LCASE as s, array('b' collate UNICODE) as a").schema
+    assert schema.json() == (
+        '{"fields":[{"metadata":{"__COLLATIONS":{"s":"spark.UTF8_LCASE"}},"name":"s",'
+        '"nullable":false,"type":"string"},{"metadata":{"__COLLATIONS":{"a.element":'
+        '"icu.UNICODE"}},"name":"a","nullable":false,"type":{"containsNull":false,'
+        '"elementType":"string","type":"array"}}],"type":"struct"}')
+    assert StructType.fromJson(json.loads(schema.json())) == schema
+
+
+
+
 def test_ddl_types_are_parsed_by_the_server_as_pyspark(session):
     # As PySpark Connect's DataType.fromDDL and _parse_datatype_string, which ask the server
     # of the active session to parse a DDL string, as does a UDF of a DDL return type.

@@ -2731,6 +2731,72 @@ def test_map_type_from_json():
     assert reconstructed.simpleString() == map_type.simpleString()
 
 
+def test_struct_fields_keep_the_collations_of_their_strings_in_their_metadata_as_pyspark():
+    # As PySpark's: the JSON of a struct field has the collations of its strings, also in its
+    # arrays and maps, in the __COLLATIONS of its metadata, and the readers take them back;
+    # jsonValue has the keys of PySpark's, in its order.
+    from pyspark.errors import PySparkTypeError, PySparkValueError
+    from pyspark.sql.types import _parse_datatype_json_string
+    from pyspark.testing.objects import PythonOnlyUDT
+
+    st = T.StructType([
+        T.StructField("s", T.StringType("UTF8_LCASE")),
+        T.StructField("a", T.ArrayType(T.StringType("UNICODE"))),
+        T.StructField("m", T.MapType(
+            T.StringType("UTF8_LCASE"), T.ArrayType(T.StringType("UNICODE_CI"), False))),
+        T.StructField("n", T.StructType([T.StructField("t", T.StringType("UTF8_LCASE"))])),
+        T.StructField("plain", T.StringType(), False, {"k": "v"}),
+    ])
+    assert st.json() == (
+        '{"fields":[{"metadata":{"__COLLATIONS":{"s":"spark.UTF8_LCASE"}},"name":"s",'
+        '"nullable":true,"type":"string"},{"metadata":{"__COLLATIONS":{"a.element":'
+        '"icu.UNICODE"}},"name":"a","nullable":true,"type":{"containsNull":true,'
+        '"elementType":"string","type":"array"}},{"metadata":{"__COLLATIONS":{"m.key":'
+        '"spark.UTF8_LCASE","m.value.element":"icu.UNICODE_CI"}},"name":"m","nullable":true,'
+        '"type":{"keyType":"string","type":"map","valueContainsNull":true,"valueType":'
+        '{"containsNull":false,"elementType":"string","type":"array"}}},{"metadata":{},'
+        '"name":"n","nullable":true,"type":{"fields":[{"metadata":{"__COLLATIONS":{"t":'
+        '"spark.UTF8_LCASE"}},"name":"t","nullable":true,"type":"string"}],"type":"struct"}},'
+        '{"metadata":{"k":"v"},"name":"plain","nullable":false,"type":"string"}],'
+        '"type":"struct"}')
+    assert json.dumps(st.jsonValue()).startswith(
+        '{"type": "struct", "fields": [{"name": "s", "type": "string", "nullable": true, '
+        '"metadata": {"__COLLATIONS": {"s": "spark.UTF8_LCASE"}}}, {"name": "a", "type": '
+        '{"type": "array", "elementType": "string", "containsNull": true}')
+    assert _parse_datatype_json_string(st.json()) == st
+    assert T.StructType.fromJson(json.loads(st.json())) == st
+    assert T.StructField.fromJson(st.fields[2].jsonValue()) == st.fields[2]
+    assert pickle.loads(pickle.dumps(st)) == st
+    assert T.ArrayType.fromJson(
+        {"elementType": "string", "containsNull": True}, "f", {"f.element": "UTF8_LCASE"}
+    ) == T.ArrayType(T.StringType("UTF8_LCASE"))
+    assert T.MapType.fromJson(
+        {"keyType": "string", "valueType": "string", "valueContainsNull": True}, "",
+        {"key": "UNICODE"},
+    ) == T.MapType(T.StringType("UNICODE"), T.StringType())
+    # A struct of a user-defined type reads back too.
+    udt = T.StructType([T.StructField("p", PythonOnlyUDT())])
+    assert T.StructType.fromJson(udt.jsonValue()) == udt
+
+    def field(type_json, collation):
+        return {"name": "f", "type": type_json, "nullable": True,
+                "metadata": {"__COLLATIONS": {"f": collation}}}
+
+    with pytest.raises(PySparkValueError) as e:
+        T.StructField.fromJson(field("string", "other.UTF8_LCASE"))
+    assert e.value.getCondition() == "COLLATION_INVALID_PROVIDER"
+    assert e.value.getMessageParameters() == {
+        "provider": "other", "supportedProviders": "spark, icu"}
+    for type_json, json_type in (("integer", "integer"), ({"type": "array", "elementType": (
+            "string"), "containsNull": True}, "array")):
+        with pytest.raises(PySparkTypeError) as e:
+            T.StructField.fromJson(field(type_json, "spark.UTF8_LCASE"))
+        assert e.value.getCondition() == "INVALID_JSON_DATA_TYPE_FOR_COLLATIONS"
+        assert e.value.getMessageParameters() == {"jsonType": json_type}
+
+
+
+
 def test_string_type_collation():
     """Test StringType with collation parameter."""
     # StringType with explicit collation

@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::fmt::{self, Write};
 use std::hash::{Hash, Hasher};
 
-use spark_connect_core::error::{Result, SparkError};
+use spark_connect_core::error::{Result, SparkError, SparkErrorKind};
 
 /// The base DataType representation, mirroring `pyspark.sql.types.DataType`.
 ///
@@ -477,7 +477,7 @@ impl DataType {
 
     /// Parses a JSON value into a DataType, mirroring the reverse of `json()` / `jsonValue()`.
     pub fn from_json(value: &serde_json::Value) -> Result<DataType> {
-        parse_json_value(value, None)
+        parse_json_value(value, "", &CollationsMap::new())
     }
 
     /// Parses a JSON string into a DataType (convenience over [`from_json`]).
@@ -855,13 +855,27 @@ impl StructField {
         format!("{}:{}", self.name, self.data_type.simple_string())
     }
 
-    /// Returns the JSON value representation, mirroring `StructField.jsonValue()`.
+    /// Returns the JSON value representation, mirroring `StructField.jsonValue()`: the
+    /// collations of the strings of the field, also in its arrays and maps, are in the
+    /// `__COLLATIONS` of its metadata, by their paths, and not in its type, as Spark writes them.
     pub fn json_value(&self) -> serde_json::Value {
+        let mut collations = serde_json::Map::new();
+        visit_collations(&self.data_type, &self.name, &mut collations);
+        let (data_type, metadata) = if collations.is_empty() {
+            (self.data_type.json_value(), self.metadata.clone())
+        } else {
+            let mut metadata = self.metadata.clone();
+            metadata.insert(
+                COLLATIONS_METADATA_KEY.to_string(),
+                serde_json::Value::Object(collations),
+            );
+            (without_collations(&self.data_type).json_value(), metadata)
+        };
         serde_json::json!({
             "name": &self.name,
-            "type": self.data_type.json_value(),
+            "type": data_type,
             "nullable": self.nullable,
-            "metadata": self.metadata,
+            "metadata": metadata,
         })
     }
 
@@ -869,25 +883,10 @@ impl StructField {
     pub fn from_json_str(s: &str) -> Result<StructField> {
         let v: serde_json::Value = serde_json::from_str(s)
             .map_err(|e| SparkError::value("INVALID_JSON", &[("detail", &e.to_string())]))?;
-        let name = v
-            .get("name")
-            .and_then(|x| x.as_str())
-            .ok_or_else(|| SparkError::value("INVALID_JSON", &[("detail", "missing field name")]))?
-            .to_string();
-        let nullable = v.get("nullable").and_then(|x| x.as_bool()).unwrap_or(true);
-        let data_type = DataType::from_json(v.get("type").unwrap_or(&serde_json::Value::Null))?;
-        let mut metadata = BTreeMap::new();
-        if let Some(md) = v.get("metadata").and_then(|x| x.as_object()) {
-            for (k, val) in md {
-                metadata.insert(k.clone(), val.clone());
-            }
-        }
-        Ok(StructField {
-            name,
-            data_type,
-            nullable,
-            metadata,
-        })
+        let field = v.as_object().ok_or_else(|| {
+            SparkError::value("INVALID_JSON", &[("detail", "a field is not an object")])
+        })?;
+        parse_json_field(field)
     }
 }
 
@@ -1170,11 +1169,201 @@ fn interval_string(start_field: i32, end_field: i32, fields: &[(&str, i32)]) -> 
     }
 }
 
-/// Parses a JSON value into a DataType
-fn parse_json_value(value: &serde_json::Value, _field_name: Option<&str>) -> Result<DataType> {
+/// The key of the metadata of a struct field of the collations of its strings, as Spark's.
+const COLLATIONS_METADATA_KEY: &str = "__COLLATIONS";
+
+/// The collations of the strings of a field of `data_type` at `path`, also in its arrays and
+/// maps but not in its structs, whose fields have their own, as PySpark's
+/// `StructField.getCollationMetadata`: `<provider>.<collation>` of each path.
+fn visit_collations(
+    data_type: &DataType,
+    path: &str,
+    collations: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    match data_type {
+        DataType::Array { element_type, .. } => {
+            visit_collations(element_type, &format!("{path}.element"), collations)
+        }
+        DataType::Map {
+            key_type,
+            value_type,
+            ..
+        } => {
+            visit_collations(key_type, &format!("{path}.key"), collations);
+            visit_collations(value_type, &format!("{path}.value"), collations);
+        }
+        DataType::String { collation } if collation != "UTF8_BINARY" => {
+            // As PySpark's `StringType.collationProvider`.
+            let provider = if collation.starts_with("UTF8") {
+                "spark"
+            } else {
+                "icu"
+            };
+            collations.insert(path.to_string(), format!("{provider}.{collation}").into());
+        }
+        _ => {}
+    }
+}
+
+/// `data_type` without the collations of its strings, also in its arrays and maps, which the
+/// JSON of a struct field keeps in its metadata.
+fn without_collations(data_type: &DataType) -> DataType {
+    match data_type {
+        DataType::Array {
+            element_type,
+            contains_null,
+        } => DataType::Array {
+            element_type: Box::new(without_collations(element_type)),
+            contains_null: *contains_null,
+        },
+        DataType::Map {
+            key_type,
+            value_type,
+            value_contains_null,
+        } => DataType::Map {
+            key_type: Box::new(without_collations(key_type)),
+            value_type: Box::new(without_collations(value_type)),
+            value_contains_null: *value_contains_null,
+        },
+        DataType::String { .. } => DataType::String {
+            collation: "UTF8_BINARY".to_string(),
+        },
+        other => other.clone(),
+    }
+}
+
+/// The collations of the strings of a struct field by their paths, `__COLLATIONS` of its
+/// metadata without their providers, as the `collationsMap` of PySpark's `fromJson`.
+type CollationsMap = std::collections::HashMap<String, String>;
+
+/// The JSON type names to which a collation of a struct field applies, as PySpark's
+/// `_all_mappable_types`: it makes a `string` a collated string, and raises
+/// `INVALID_JSON_DATA_TYPE_FOR_COLLATIONS` for the others.
+const MAPPABLE_TYPE_NAMES: [&str; 16] = [
+    "string",
+    "binary",
+    "boolean",
+    "decimal",
+    "float",
+    "double",
+    "byte",
+    "short",
+    "integer",
+    "long",
+    "date",
+    "timestamp",
+    "timestamp_ntz",
+    "void",
+    "variant",
+    "interval",
+];
+
+/// The path of `child` (`element`, `key` or `value`) of a type at `path`, as PySpark's
+/// `fromJson` of arrays and maps names it.
+fn child_path(path: &str, child: &str) -> String {
+    if path.is_empty() {
+        child.to_string()
+    } else {
+        format!("{path}.{child}")
+    }
+}
+
+/// The collations of the `__COLLATIONS` of `metadata`, which this removes, as PySpark's
+/// `StructField.fromJson`: each is `<provider>.<collation>`, of the `spark` or `icu` provider.
+fn take_field_collations(
+    metadata: &mut BTreeMap<String, serde_json::Value>,
+) -> Result<CollationsMap> {
+    let Some(collations) = metadata.remove(COLLATIONS_METADATA_KEY) else {
+        return Ok(CollationsMap::new());
+    };
+    let mut by_path = CollationsMap::new();
+    for (path, value) in collations.as_object().into_iter().flatten() {
+        let parts: Vec<&str> = value.as_str().unwrap_or_default().split('.').collect();
+        let [provider, collation] = parts[..] else {
+            return Err(SparkError::value(
+                "INVALID_DATATYPE_FORMAT",
+                &[("detail", "a collation is not of a provider and a name")],
+            ));
+        };
+        if !["spark", "icu"].contains(&provider.to_lowercase().as_str()) {
+            return Err(SparkError::value(
+                "COLLATION_INVALID_PROVIDER",
+                &[("provider", provider), ("supportedProviders", "spark, icu")],
+            ));
+        }
+        by_path.insert(path.clone(), collation.to_string());
+    }
+    Ok(by_path)
+}
+
+/// Parses the JSON object of a struct field, mirroring `StructField.fromJson`: the strings at
+/// the paths of the `__COLLATIONS` of its metadata are of their collations.
+fn parse_json_field(field: &serde_json::Map<String, serde_json::Value>) -> Result<StructField> {
+    let name = field
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            SparkError::value(
+                "INVALID_DATATYPE_FORMAT",
+                &[("detail", "StructField missing name")],
+            )
+        })?
+        .to_string();
+    let field_type = field.get("type").ok_or_else(|| {
+        SparkError::value(
+            "INVALID_DATATYPE_FORMAT",
+            &[("detail", "StructField missing type")],
+        )
+    })?;
+    let nullable = field
+        .get("nullable")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let mut metadata: BTreeMap<String, serde_json::Value> = field
+        .get("metadata")
+        .and_then(|v| v.as_object())
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .unwrap_or_default();
+    let collations = take_field_collations(&mut metadata)?;
+    Ok(StructField {
+        data_type: parse_json_value(field_type, &name, &collations)?,
+        name,
+        nullable,
+        metadata,
+    })
+}
+
+/// Raises, as PySpark's `_assert_valid_type_for_collation`, for a collation of a field path of
+/// a type that is not a string.
+fn check_collated_type(path: &str, json_type: &str, collations: &CollationsMap) -> Result<()> {
+    if collations.contains_key(path) && json_type != "string" {
+        return Err(SparkError::classed(
+            SparkErrorKind::TypeError,
+            "INVALID_JSON_DATA_TYPE_FOR_COLLATIONS",
+            &[("jsonType", json_type)],
+        ));
+    }
+    Ok(())
+}
+
+/// Parses a JSON value into a DataType at `field_path` of a struct field, mirroring PySpark's
+/// `_parse_datatype_json_value`: a string of a path of `collations` is of its collation.
+fn parse_json_value(
+    value: &serde_json::Value,
+    field_path: &str,
+    collations: &CollationsMap,
+) -> Result<DataType> {
     match value {
-        serde_json::Value::String(s) => parse_json_type_string(s),
-        serde_json::Value::Object(obj) => parse_json_object(obj),
+        serde_json::Value::String(s) => match collations.get(field_path) {
+            Some(collation) if MAPPABLE_TYPE_NAMES.contains(&s.as_str()) => {
+                check_collated_type(field_path, s, collations)?;
+                Ok(DataType::String {
+                    collation: collation.clone(),
+                })
+            }
+            _ => parse_json_type_string(s),
+        },
+        serde_json::Value::Object(obj) => parse_json_object(obj, field_path, collations),
         _ => Err(SparkError::value(
             "INVALID_DATATYPE_FORMAT",
             &[("detail", "Expected string or object for DataType")],
@@ -1235,8 +1424,15 @@ fn parse_json_type_string(s: &str) -> Result<DataType> {
     }
 }
 
-fn parse_json_object(obj: &serde_json::Map<String, serde_json::Value>) -> Result<DataType> {
+fn parse_json_object(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    field_path: &str,
+    collations: &CollationsMap,
+) -> Result<DataType> {
     let type_field = obj.get("type").and_then(|v| v.as_str());
+    if let Some(json_type @ ("array" | "map" | "struct")) = type_field {
+        check_collated_type(field_path, json_type, collations)?;
+    }
 
     match type_field {
         Some("array") => {
@@ -1251,7 +1447,11 @@ fn parse_json_object(obj: &serde_json::Map<String, serde_json::Value>) -> Result
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
             Ok(DataType::Array {
-                element_type: Box::new(parse_json_value(element_type, None)?),
+                element_type: Box::new(parse_json_value(
+                    element_type,
+                    &child_path(field_path, "element"),
+                    collations,
+                )?),
                 contains_null,
             })
         }
@@ -1273,8 +1473,16 @@ fn parse_json_object(obj: &serde_json::Map<String, serde_json::Value>) -> Result
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
             Ok(DataType::Map {
-                key_type: Box::new(parse_json_value(key_type, None)?),
-                value_type: Box::new(parse_json_value(value_type, None)?),
+                key_type: Box::new(parse_json_value(
+                    key_type,
+                    &child_path(field_path, "key"),
+                    collations,
+                )?),
+                value_type: Box::new(parse_json_value(
+                    value_type,
+                    &child_path(field_path, "value"),
+                    collations,
+                )?),
                 value_contains_null,
             })
         }
@@ -1290,44 +1498,25 @@ fn parse_json_object(obj: &serde_json::Map<String, serde_json::Value>) -> Result
                 })?;
 
             let mut fields = Vec::new();
-            for field_obj in fields_arr {
-                if let Some(field_map) = field_obj.as_object() {
-                    let name = field_map
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| {
-                            SparkError::value(
-                                "INVALID_DATATYPE_FORMAT",
-                                &[("detail", "StructField missing name")],
-                            )
-                        })?
-                        .to_string();
-                    let field_type = field_map.get("type").ok_or_else(|| {
-                        SparkError::value(
-                            "INVALID_DATATYPE_FORMAT",
-                            &[("detail", "StructField missing type")],
-                        )
-                    })?;
-                    let data_type = parse_json_value(field_type, Some(&name))?;
-                    let nullable = field_map
-                        .get("nullable")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(true);
-                    let metadata = field_map
-                        .get("metadata")
-                        .and_then(|v| v.as_object())
-                        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-                        .unwrap_or_default();
-
-                    fields.push(StructField {
-                        name,
-                        data_type,
-                        nullable,
-                        metadata,
-                    });
-                }
+            for field in fields_arr.iter().filter_map(|field| field.as_object()) {
+                fields.push(parse_json_field(field)?);
             }
             Ok(DataType::Struct { fields })
+        }
+        // The inverse of `json_value` of a UDT: its classes and the JSON of its SQL type.
+        Some("udt") => {
+            let text = |key: &str| obj.get(key).and_then(|v| v.as_str()).map(str::to_string);
+            let sql_type = match obj.get("sqlType") {
+                Some(sql_type) => Some(Box::new(DataType::from_json(sql_type)?)),
+                None => None,
+            };
+            Ok(DataType::Udt {
+                type_str: "udt".to_string(),
+                jvm_class: text("class"),
+                python_class: text("pyClass"),
+                serialized_python_class: text("serializedClass"),
+                sql_type,
+            })
         }
         _ => Err(SparkError::value(
             "INVALID_DATATYPE_FORMAT",

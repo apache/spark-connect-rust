@@ -306,53 +306,136 @@ def _parse_datatype_json_string(json_string):
     return _parse_datatype_json_value(_json.loads(json_string))
 
 
-def _parse_datatype_json_value(v):
+#: The key of the metadata of a struct field of the collations of its strings, as PySpark's.
+_COLLATIONS_METADATA_KEY = "__COLLATIONS"
+
+#: The JSON type names to which a collation of a struct field applies, as PySpark's
+#: ``_all_mappable_types``: it makes a ``string`` a collated string, and raises
+#: ``INVALID_JSON_DATA_TYPE_FOR_COLLATIONS`` for the others.
+_MAPPABLE_TYPE_NAMES = frozenset(
+    [
+        "string", "binary", "boolean", "decimal", "float", "double", "byte", "short",
+        "integer", "long", "date", "timestamp", "timestamp_ntz", "void", "variant", "interval",
+    ]
+)
+
+
+def _parse_datatype_json_value(json_value, fieldPath="", collationsMap=None):
     """Recursively reconstruct a DataType from a parsed Spark-JSON value (a string for
     atomic/parameterized types, or a dict for the nested struct/array/map forms).
 
     The string forms (atomics, ``decimal(p,s)``, ``string collate X``, intervals,
     ``geometry(<crs>)``, ``geography(<crs>, <alg>)``, ...) are parsed by the Rust core's
     JSON grammar, so the drop-in keeps one grammar. The nested object forms recurse here,
-    because a ``udt`` leaf has to reconstruct its Python class."""
+    because a ``udt`` leaf has to reconstruct its Python class.
+
+    As PySpark's, a string at a ``fieldPath`` of ``collationsMap``, the collations of the
+    ``__COLLATIONS`` of the metadata of a struct field by their paths, is of its collation."""
     import json as _json
 
-    if isinstance(v, str):
+    if not isinstance(json_value, dict):
+        if (
+            collationsMap is not None
+            and fieldPath in collationsMap
+            and json_value in _MAPPABLE_TYPE_NAMES
+        ):
+            _assert_valid_type_for_collation(fieldPath, json_value, collationsMap)
+            return StringType(collationsMap[fieldPath])
         from pyspark._pyspark import parse_datatype_json
 
         try:
-            return parse_datatype_json(_json.dumps(v))
+            return parse_datatype_json(_json.dumps(json_value))
         except ValueError:
             # As PySpark's, of a str that is not the JSON value of a data type.
-            raise _pyspark_value_error("CANNOT_PARSE_DATATYPE", {"msg": str(v)}) from None
-    elif isinstance(v, dict):
-        t = v.get("type")
-        if t == "struct":
-            fields = [
-                StructField(
-                    f["name"],
-                    _parse_datatype_json_value(f["type"]),
-                    f.get("nullable", True),
-                    f.get("metadata", {}) or {},
-                )
-                for f in v["fields"]
-            ]
-            return StructType(fields)
-        elif t == "array":
-            return ArrayType(
-                _parse_datatype_json_value(v["elementType"]),
-                v.get("containsNull", True),
-            )
-        elif t == "map":
-            return MapType(
-                _parse_datatype_json_value(v["keyType"]),
-                _parse_datatype_json_value(v["valueType"]),
-                v.get("valueContainsNull", True),
-            )
-        elif t == "udt":
-            return UserDefinedType.fromJson(v)
-        # As PySpark's, of an object of a type that is not one of a data type.
-        raise _pyspark_value_error("UNSUPPORTED_DATA_TYPE", {"data_type": str(t)})
-    raise _pyspark_value_error("CANNOT_PARSE_DATATYPE", {"msg": str(v)})
+            raise _pyspark_value_error(
+                "CANNOT_PARSE_DATATYPE", {"msg": str(json_value)}
+            ) from None
+    tpe = json_value["type"]
+    if tpe in ("array", "map", "struct"):
+        if collationsMap is not None and fieldPath in collationsMap:
+            _assert_valid_type_for_collation(fieldPath, tpe, collationsMap)
+        if tpe == "array":
+            return _array_type_from_json(json_value, fieldPath, collationsMap)
+        elif tpe == "map":
+            return _map_type_from_json(json_value, fieldPath, collationsMap)
+        return _struct_type_from_json(json_value)
+    elif tpe == "udt":
+        return UserDefinedType.fromJson(json_value)
+    # As PySpark's, of an object of a type that is not one of a data type.
+    raise _pyspark_value_error("UNSUPPORTED_DATA_TYPE", {"data_type": str(tpe)})
+
+
+def _array_type_from_json(json_value, fieldPath="", collationsMap=None):
+    """``ArrayType.fromJson``: its element at ``element`` of ``fieldPath``, as PySpark's."""
+    elementType = _parse_datatype_json_value(
+        json_value["elementType"],
+        "element" if fieldPath == "" else fieldPath + ".element",
+        collationsMap,
+    )
+    return ArrayType(elementType, json_value["containsNull"])
+
+
+def _map_type_from_json(json_value, fieldPath="", collationsMap=None):
+    """``MapType.fromJson``: its key and value at ``key`` and ``value`` of ``fieldPath``, as
+    PySpark's."""
+    keyType = _parse_datatype_json_value(
+        json_value["keyType"], "key" if fieldPath == "" else fieldPath + ".key", collationsMap
+    )
+    valueType = _parse_datatype_json_value(
+        json_value["valueType"],
+        "value" if fieldPath == "" else fieldPath + ".value",
+        collationsMap,
+    )
+    return MapType(keyType, valueType, json_value["valueContainsNull"])
+
+
+def _struct_field_from_json(json_value):
+    """``StructField.fromJson``, as PySpark's: the ``__COLLATIONS`` of its metadata,
+    ``<provider>.<collation>`` by the paths of its strings, are the collations of those
+    strings, and not metadata."""
+    metadata = json_value.get("metadata")
+    collationsMap = {}
+    if metadata and _COLLATIONS_METADATA_KEY in metadata:
+        for key, value in metadata[_COLLATIONS_METADATA_KEY].items():
+            nameParts = value.split(".")
+            assert len(nameParts) == 2
+            provider, name = nameParts[0], nameParts[1]
+            _assert_valid_collation_provider(provider)
+            collationsMap[key] = name
+        metadata = {
+            key: value for key, value in metadata.items() if key != _COLLATIONS_METADATA_KEY
+        }
+    return StructField(
+        json_value["name"],
+        _parse_datatype_json_value(json_value["type"], json_value["name"], collationsMap),
+        json_value.get("nullable", True),
+        metadata,
+    )
+
+
+def _struct_type_from_json(json_value):
+    """``StructType.fromJson``, as PySpark's."""
+    return StructType([_struct_field_from_json(f) for f in json_value["fields"]])
+
+
+def _assert_valid_type_for_collation(fieldPath, fieldType, collationMap):
+    """As PySpark's: a collation is of a string."""
+    if fieldPath in collationMap and fieldType != "string":
+        from pyspark.errors import PySparkTypeError
+
+        raise PySparkTypeError(
+            errorClass="INVALID_JSON_DATA_TYPE_FOR_COLLATIONS",
+            messageParameters={"jsonType": fieldType},
+        )
+
+
+def _assert_valid_collation_provider(provider):
+    """As PySpark's: a collation is of a provider of ``StringType.providers``."""
+    if provider.lower() not in StringType.providers:
+        raise _pyspark_value_error(
+            "COLLATION_INVALID_PROVIDER",
+            {"provider": provider, "supportedProviders": ", ".join(StringType.providers)},
+        )
 
 
 def _pyspark_value_error(error_class, parameters):
