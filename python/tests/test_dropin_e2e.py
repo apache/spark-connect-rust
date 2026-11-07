@@ -2626,6 +2626,29 @@ def test_persist_cache_and_unpersist_return_the_dataframe_itself_as_pyspark(sess
         df.unpersist()
 
 
+def test_values_of_local_rows_convert_and_raise_as_pyarrow(session):
+    # As PySpark Connect's: PyArrow takes the __int__ of a Decimal in an int or a date field,
+    # raises its own errors, and takes the days of a date out of the dates of Python, which
+    # then raise the OverflowError of PyArrow's `date(1970, 1, 1) + timedelta(days=d)`.
+    import decimal
+
+    import pyarrow as pa
+    from pyspark.errors import PySparkTypeError
+
+    D = decimal.Decimal
+    df = session.createDataFrame([(D("2.7"), D("1.5"))], "i int, d date")
+    assert df.collect() == [Row(i=2, d=date(1970, 1, 2))]
+    with pytest.raises(pa.ArrowInvalid, match="tried to convert to int32"):
+        session.createDataFrame([("x",)], "v int")
+    with pytest.raises(PySparkTypeError) as e:
+        session.createDataFrame([("x",)], "v char(3)")
+    assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION"
+    df = session.createDataFrame([(2932897,)], "v date")
+    assert df.count() == 1
+    with pytest.raises(OverflowError, match="^date value out of range$"):
+        # PySpark raises in collect; the client's rows convert their values when read.
+        df.collect()[0].v
+
 def test_create_dataframe_converts_numpy_scalars_as_pyspark(session):
     np = pytest.importorskip("numpy")
     df = session.createDataFrame(

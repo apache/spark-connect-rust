@@ -607,6 +607,12 @@ impl PySparkSession {
                 out.push(infer::convert(&row[i], &field.data_type, field.nullable)?);
             }
         }
+        // Then, as PySpark, the schema converts to Arrow, which has no char or varchar type.
+        for field in &fields {
+            if let Some(err) = infer::unsupported_arrow_type(py, &field.data_type)? {
+                return Err(err);
+            }
+        }
         // The names, with those that inference added, must name every column.
         if let Some(cols) = &cols {
             if cols.len() != fields.len() {

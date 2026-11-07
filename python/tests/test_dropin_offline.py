@@ -7985,19 +7985,71 @@ def test_ints_of_date_fields_convert_as_pyarrow(mock_connect):
     table, _ = _local_rows_relation_of(service, spark.createDataFrame(
         [(np.int64(3),), (1.5,), (-1.5,), (np.bool_(True),), (2932896,), (-719162,)], "a date"))
     assert table.column(0).cast(pa.int32()).to_pylist() == [3, 1, -1, 1, 2932896, -719162]
+    # PyArrow takes the days of an int32, also out of the dates of Python, and the Decimal
+    # of the `__int__` of its value.
+    table, _ = _local_rows_relation_of(service, spark.createDataFrame(
+        [(2932897,), (-719163,), (10**9,), (decimal.Decimal("2.5"),)], "a date"))
+    assert table.column(0).cast(pa.int32()).to_pylist() == [2932897, -719163, 10**9, 2]
 
     for value, error, message in (
         (True, pa.ArrowTypeError, "Expected integer, got bool"),
         ("x", pa.ArrowTypeError, "object of type <class 'str'> cannot be converted to int"),
         (float("nan"), ValueError, "cannot convert float NaN to integer"),
-        (2932897, OverflowError, "date value out of range"),
-        (-719163, OverflowError, "date value out of range"),
-        (10**9, OverflowError, "days=1000000000; must have magnitude <= 999999999"),
+        (2**40, pa.ArrowInvalid, "Integer too large for date32"),
         (2**70, OverflowError, "Python int too large to convert to C long"),
     ):
         with pytest.raises(error, match="^" + re.escape(message) + "$"):
             spark.createDataFrame([(value,)], "a date")
 
+
+def test_values_of_local_rows_convert_and_raise_as_pyarrow(mock_connect):
+    # As PySpark Connect's, which passes these values to PyArrow as they are: an int, date,
+    # day-time interval and time field takes the __index__, else the __int__, of a value, such
+    # as a Decimal, and the errors are PyArrow's. A char or varchar field raises the error of
+    # PySpark's to_arrow_schema.
+    import re
+
+    import pyarrow as pa
+    from pyspark.errors import PySparkTypeError
+
+    np = pytest.importorskip("numpy")
+    spark, service = mock_connect
+    D = decimal.Decimal
+    table, _ = _local_rows_relation_of(service, spark.createDataFrame(
+        [(D("2.7"), D("1.5"), D("3.9"), D("4.2"), np.timedelta64(5, "us"))],
+        "i int, d date, t interval day to second, n time, u interval day to second"))
+    assert [table.column(name).cast(cast).to_pylist()[0]
+            for name, cast in [("i", pa.int32()), ("d", pa.int32()), ("t", pa.int64()),
+                               ("n", pa.int64()), ("u", pa.int64())]] == [2, 1, 3, 4, 5]
+    for value, ddl, error, message in [
+        ("x", "int", pa.ArrowInvalid,
+         "Could not convert 'x' with type str: tried to convert to int32"),
+        ("x", "float", pa.ArrowInvalid,
+         "Could not convert 'x' with type str: tried to convert to float32"),
+        (2**40, "int", pa.ArrowInvalid, "Value 1099511627776 too large to fit in C integer type"),
+        (2**70, "double", pa.ArrowInvalid, "PyLong is too large to fit int64"),
+        (2**40, "float", pa.ArrowInvalid,
+         "Integer value 1099511627776 is outside of the range exactly representable by a "
+         "IEEE 754 single precision value"),
+        (True, "int", pa.ArrowTypeError, "Expected integer, got bool"),
+        (True, "time", pa.ArrowTypeError, "Expected integer, got bool"),
+        (float("nan"), "time", ValueError, "cannot convert float NaN to integer"),
+        ("x", "interval day to second", pa.ArrowTypeError,
+         "object of type <class 'str'> cannot be converted to int"),
+        (np.timedelta64(5, "ns"), "interval day to second", pa.ArrowNotImplementedError,
+         "Expected np.timedelta64 but got: duration[ns]"),
+        ("x", "boolean", pa.ArrowInvalid,
+         "Could not convert 'x' with type str: tried to convert to boolean"),
+    ]:
+        with pytest.raises(error, match="^" + re.escape(message) + "$") as e:
+            spark.createDataFrame([(value,)], f"v {ddl}")
+        assert type(e.value) is error
+    for field_type, data_type in [(T.CharType(3), "CharType(3)"),
+                                  (T.ArrayType(T.VarcharType(2)), "VarcharType(2)")]:
+        with pytest.raises(PySparkTypeError) as e:
+            spark.createDataFrame([("x",)], T.StructType([T.StructField("v", field_type)]))
+        assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION"
+        assert e.value.getMessageParameters() == {"data_type": data_type}
 
 def test_nested_duplicate_field_names_are_deduplicated_in_the_arrow_schema(mock_connect):
     # As PySpark's _deduplicate_field_names: the Arrow schema of nested struct fields numbers
