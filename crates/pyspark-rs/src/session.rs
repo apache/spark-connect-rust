@@ -1052,6 +1052,22 @@ impl PySparkSession {
                 .import("pyspark.sql._pandas_input")?
                 .getattr("prepare_string_input")?
                 .call1((data, schema))?;
+            // Columns kept in pandas' Arrow string storage come as an Arrow table, which the
+            // importer sends, or uploads at the relation cache threshold.
+            if !ipc.is_none() && !ipc.is_instance_of::<pyo3::types::PyBytes>() {
+                let frame =
+                    crate::pyarrow_import::create_dataframe(py, &self.session, &ipc, schema)?;
+                return Ok(match &spec {
+                    Spec::Struct(fields) if !fields.is_empty() && ipc.len()? > 0 => {
+                        PyDataFrame::new(
+                            frame
+                                .dataframe
+                                .to_df(fields.iter().map(|field| field.name.as_str()).collect()),
+                        )
+                    }
+                    _ => frame,
+                });
+            }
             if !ipc.is_none() {
                 let fields = match &spec {
                     Spec::Struct(fields) => fields,
