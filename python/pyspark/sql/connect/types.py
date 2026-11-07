@@ -19,12 +19,13 @@ PySpark Connect's: ``UnparsedDataType``, a DDL string of a type that the server 
 conversions between the types and their ``spark.connect.DataType`` messages,
 ``pyspark_types_to_proto_types`` and ``proto_schema_to_pyspark_data_type``, are those of the Rust
 transport, of the messages of the generated ``pyspark.sql.connect.proto``, which needs the
-``protobuf`` package."""
+``protobuf`` package. ``parse_attr_name``, ``verify_col_name`` and ``verify_numeric_col_name`` are
+PySpark Connect's, from Apache Spark v4.3.0."""
 
-from typing import TYPE_CHECKING, Any, Dict
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from pyspark.errors import PySparkAssertionError
-from pyspark.sql.types import DataType
+from pyspark.sql.types import ArrayType, DataType, NumericType, StructType
 
 if TYPE_CHECKING:
     import pyspark.sql.connect.proto as pb2
@@ -117,6 +118,105 @@ def proto_schema_to_pyspark_data_type(schema: "pb2.DataType") -> DataType:
     from pyspark._pyspark import _data_type_of_proto
 
     return _data_type_of_proto(schema.SerializeToString())
+
+
+# The python version of org.apache.spark.sql.catalyst.util.AttributeNameParser
+def parse_attr_name(name: str) -> Optional[List[str]]:
+    name_parts: List[str] = []
+    tmp: str = ""
+
+    in_backtick = False
+    i = 0
+    n = len(name)
+    while i < n:
+        char = name[i]
+        if in_backtick:
+            if char == "`":
+                if i + 1 < n and name[i + 1] == "`":
+                    tmp += "`"
+                    i += 1
+                else:
+                    in_backtick = False
+                    if i + 1 < n and name[i + 1] != ".":
+                        return None
+            else:
+                tmp += char
+        else:
+            if char == "`":
+                if len(tmp) > 0:
+                    return None
+                in_backtick = True
+            elif char == ".":
+                if name[i - 1] == "." or i == n - 1:
+                    return None
+                name_parts.append(tmp)
+                tmp = ""
+            else:
+                tmp += char
+        i += 1
+
+    if in_backtick:
+        return None
+
+    name_parts.append(tmp)
+    return name_parts
+
+
+# Verify whether the input column name can be resolved with the given schema.
+# Note that this method can not 100% match the analyzer behavior, it is designed to
+# try the best to eliminate unnecessary validation RPCs.
+def verify_col_name(name: str, schema: StructType) -> bool:
+    parts = parse_attr_name(name)
+    if parts is None or len(parts) == 0:
+        return False
+
+    def _quick_verify(parts: List[str], dt: DataType) -> bool:
+        if len(parts) == 0:
+            return True
+
+        _schema: Optional[StructType] = None
+        if isinstance(dt, StructType):
+            _schema = dt
+        elif isinstance(dt, ArrayType) and isinstance(dt.elementType, StructType):
+            _schema = dt.elementType
+        else:
+            return False
+
+        part = parts[0]
+        for field in _schema:
+            if field.name == part:
+                return _quick_verify(parts[1:], field.dataType)
+
+        return False
+
+    return _quick_verify(parts, schema)
+
+
+def verify_numeric_col_name(name: str, schema: StructType) -> bool:
+    parts = parse_attr_name(name)
+    if parts is None or len(parts) == 0:
+        return False
+
+    def _quick_verify(parts: List[str], dt: DataType) -> bool:
+        if len(parts) == 0 and isinstance(dt, NumericType):
+            return True
+
+        _schema: Optional[StructType] = None
+        if isinstance(dt, StructType):
+            _schema = dt
+        elif isinstance(dt, ArrayType) and isinstance(dt.elementType, StructType):
+            _schema = dt.elementType
+        else:
+            return False
+
+        part = parts[0]
+        for field in _schema:
+            if field.name == part:
+                return _quick_verify(parts[1:], field.dataType)
+
+        return False
+
+    return _quick_verify(parts, schema)
 
 
 __all__ = ["UnparsedDataType"]

@@ -161,6 +161,25 @@ def test_ml_evaluators_and_tuning_as_pyspark(session):
     assert cv_model.bestModel.transform(df).count() == 8
 
 
+def test_connect_plans_run_on_the_server_as_pyspark(session):
+    # As official PySpark 4.3.0: DataFrames of the Read, Range and SQL plans of
+    # pyspark.sql.connect.plan, as pyspark.testing.connectutils builds them.
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.plan import SQL, Range, Read, SubqueryAlias
+
+    assert [r.id for r in DataFrame(Range(0, 6, 2, 2), session).collect()] == [0, 2, 4]
+    assert DataFrame(SQL("SELECT ? AS a", args=[F.lit(5)]), session).first().a == 5
+    assert DataFrame(SQL("SELECT :b AS b", named_args={"b": F.lit("x")}), session).first().b == "x"
+    views = [SubqueryAlias(Range(0, 3, 1), "v")]
+    assert DataFrame(SQL("SELECT sum(id) AS s FROM v", views=views), session).first().s == 3
+    session.range(4).createOrReplaceTempView("ml_e2e_plans")
+    try:
+        assert DataFrame(Read("ml_e2e_plans"), session).count() == 4
+    finally:
+        session.catalog.dropTempView("ml_e2e_plans")
+
+
 def test_ml_transformed_dataframes_keep_their_models_as_pyspark(session):
     # As official PySpark 4.3.0: a DataFrame of a transform keeps the model alive, and the
     # model is deleted from the cache of the server once nothing keeps it.

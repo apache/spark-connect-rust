@@ -22,15 +22,19 @@ those of ``pyspark.ml.connect.proto``: a plan of a child, of a ``plan(session)``
 ``spark.connect.Relation``, which ``DataFrame(plan, session)`` sends as it is. It has no
 ``to_proto``, ``_collect_references``, ``print`` or ``_repr_html_``, which are of the plans and the
 Columns of PySpark Connect's DataFrame, which the core builds. ``_DataFramePlan`` is the plan of a
-DataFrame of the core, its ``DataFrame._plan``. ``Read``, ``Range`` and ``SQL`` are not plans of
-this client. The messages are those of the generated ``pyspark.sql.connect.proto``, which needs
-the ``protobuf`` package.
+DataFrame of the core, its ``DataFrame._plan``. ``Read``, ``Range``, ``SQL``, ``SubqueryAlias``,
+``CachedRemoteRelation`` and ``RemoveRemoteCachedRelation`` are PySpark Connect's, which
+``pyspark.testing.connectutils`` and ``pyspark.sql.connect.conversion`` build DataFrames of. The
+messages are those of the generated ``pyspark.sql.connect.proto``, which needs the ``protobuf``
+package.
 """
 
 from threading import Lock
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import pyspark.sql.connect.proto as proto
+from pyspark.sql.column import Column
+from pyspark.sql.connect.logging import logger
 
 
 class LogicalPlan:
@@ -135,24 +139,153 @@ class _DataFramePlan(LogicalPlan):
 
 
 class Read(LogicalPlan):
-    """Not a plan of this client: the Rust core reads tables, as ``spark.read.table``."""
+    def __init__(
+        self,
+        table_name: str,
+        options: Optional[Dict[str, str]] = None,
+        is_streaming: Optional[bool] = None,
+    ) -> None:
+        super().__init__(None)
+        self.table_name = table_name
+        self.options = options or {}
+        self._is_streaming = is_streaming
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        pass
+    def plan(self, session: Any) -> "proto.Relation":
+        plan = self._create_proto_relation()
+        plan.read.named_table.unparsed_identifier = self.table_name
+        if self._is_streaming is not None:
+            plan.read.is_streaming = self._is_streaming
+        for k, v in self.options.items():
+            plan.read.named_table.options[k] = v
+        return plan
+
+    def print(self, indent: int = 0) -> str:
+        return f"{' ' * indent}<Read table_name={self.table_name}>\n"
 
 
-class Range(LogicalPlan):
-    """Not a plan of this client: the Rust core builds ranges, as ``spark.range``."""
+class CachedRemoteRelation(LogicalPlan):
+    """Logical plan object for a DataFrame reference which represents a DataFrame that's been
+    cached on the server with a given id."""
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        pass
+    def __init__(self, relation_id: str, spark_session: Any):
+        super().__init__(None)
+        self._relation_id = relation_id
+        # Needs to hold the session to make a request itself.
+        self._spark_session = spark_session
+
+    def plan(self, session: Any) -> "proto.Relation":
+        plan = self._create_proto_relation()
+        plan.cached_remote_relation.relation_id = self._relation_id
+        return plan
+
+    def __del__(self) -> None:
+        session = self._spark_session
+        # If session is already closed, all cached DataFrame should be released.
+        if session is not None and not session.client.is_closed and self._relation_id is not None:
+            try:
+                # The command of the Rust transport, as PySpark Connect's sends it.
+                command = RemoveRemoteCachedRelation(self).command(session=session.client)
+                session.client.execute_command(command)
+            except Exception as e:
+                logger.warning(f"RemoveRemoteCachedRelation failed with exception: {e}.")
+
+
+class SubqueryAlias(LogicalPlan):
+    """Alias for a relation."""
+
+    def __init__(self, child: Optional["LogicalPlan"], alias: str) -> None:
+        super().__init__(child)
+        self._alias = alias
+
+    def plan(self, session: Any) -> "proto.Relation":
+        plan = self._create_proto_relation()
+        if self._child is not None:
+            plan.subquery_alias.input.CopyFrom(self._child.plan(session))
+        plan.subquery_alias.alias = self._alias
+        return plan
 
 
 class SQL(LogicalPlan):
-    """Not a plan of this client: the Rust core builds queries, as ``spark.sql``."""
+    def __init__(
+        self,
+        query: str,
+        args: Optional[List[Column]] = None,
+        named_args: Optional[Dict[str, Column]] = None,
+        views: Optional[Sequence[SubqueryAlias]] = None,
+    ) -> None:
+        if args is not None:
+            assert isinstance(args, List)
+            assert all(isinstance(arg, Column) for arg in args)
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        pass
+        if named_args is not None:
+            assert isinstance(named_args, Dict)
+            for k, arg in named_args.items():
+                assert isinstance(k, str)
+                assert isinstance(arg, Column)
+
+        if views is not None:
+            assert isinstance(views, List)
+            assert all(isinstance(v, SubqueryAlias) for v in views)
+
+        super().__init__(None, views)
+        self._query = query
+        self._args = args
+        self._named_args = named_args
+        self._views = views
+
+    def plan(self, session: Any) -> "proto.Relation":
+        plan = self._create_proto_relation()
+        plan.sql.query = self._query
+
+        if self._args is not None and len(self._args) > 0:
+            plan.sql.pos_arguments.extend([arg.to_plan(session) for arg in self._args])
+        if self._named_args is not None and len(self._named_args) > 0:
+            for k, arg in self._named_args.items():
+                plan.sql.named_arguments[k].CopyFrom(arg.to_plan(session))
+
+        return self._with_relations(plan, session)
+
+    def command(self, session: Any) -> "proto.Command":
+        cmd = proto.Command()
+        cmd.sql_command.input.CopyFrom(self.plan(session))
+        return cmd
 
 
-__all__ = ["LogicalPlan", "Read", "Range", "SQL"]
+class Range(LogicalPlan):
+    def __init__(
+        self,
+        start: int,
+        end: int,
+        step: int,
+        num_partitions: Optional[int] = None,
+    ) -> None:
+        super().__init__(None)
+        self._start = start
+        self._end = end
+        self._step = step
+        self._num_partitions = num_partitions
+
+    def plan(self, session: Any) -> "proto.Relation":
+        plan = self._create_proto_relation()
+        plan.range.start = self._start
+        plan.range.end = self._end
+        plan.range.step = self._step
+        if self._num_partitions is not None:
+            plan.range.num_partitions = self._num_partitions
+        return plan
+
+
+class RemoveRemoteCachedRelation(LogicalPlan):
+    def __init__(self, relation: CachedRemoteRelation) -> None:
+        super().__init__(None)
+        self._relation = relation
+
+    def command(self, session: Any) -> "proto.Command":
+        plan = self._create_proto_relation()
+        plan.cached_remote_relation.relation_id = self._relation._relation_id
+        cmd = proto.Command()
+        cmd.remove_cached_remote_relation_command.relation.CopyFrom(plan.cached_remote_relation)
+        return cmd
+
+
+__all__ = ["LogicalPlan", "Read", "Range", "SQL", "SubqueryAlias", "CachedRemoteRelation"]

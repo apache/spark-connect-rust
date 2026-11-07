@@ -673,6 +673,12 @@ impl PyColumn {
         }
     }
 
+    /// The `spark.connect.Expression` of this column, as PySpark Connect's `Column.to_plan`: that
+    /// of its expression, of the generated `pyspark.sql.connect.proto`.
+    fn to_plan(&self, py: Python<'_>, session: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self._expr().to_plan(py, session)
+    }
+
     fn __str__(&self) -> String {
         let _origin = crate::origin::with_origin("__str__");
         self.__repr__()
