@@ -1273,7 +1273,9 @@ impl PySparkSession {
     }
 
     /// Register a Java UDF/UDAF by class name (used by
-    /// `UDFRegistration.registerJavaFunction` / `registerJavaUDAF`).
+    /// `UDFRegistration.registerJavaFunction` / `registerJavaUDAF`), of the return type
+    /// `return_type`, as PySpark's `JavaUDF` sends it: a DDL string unparsed, for the server
+    /// to parse, and a DataType as itself, else `UNSUPPORTED_OPERATION` of "data type ...".
     #[pyo3(name = "_registerJavaFunction", signature = (name, java_class_name, return_type=None, aggregate=false))]
     #[allow(non_snake_case)]
     fn register_java_function_py(
@@ -1281,12 +1283,32 @@ impl PySparkSession {
         py: Python<'_>,
         name: &str,
         java_class_name: &str,
-        return_type: Option<&str>,
+        return_type: Option<&Bound<'_, PyAny>>,
         aggregate: bool,
     ) -> PyResult<()> {
+        let return_type = match return_type {
+            None => None,
+            Some(ddl) if ddl.is_instance_of::<pyo3::types::PyString>() => {
+                Some(DataType::Unparsed {
+                    data_type_string: ddl.extract()?,
+                })
+            }
+            Some(data_type) if data_type.is_instance_of::<crate::types::PyDataType>() => {
+                Some(crate::types::py_to_data_type(data_type)?)
+            }
+            Some(other) => {
+                return Err(crate::column::raise_pyspark(
+                    py,
+                    "PySparkValueError",
+                    "UNSUPPORTED_OPERATION",
+                    &[("operation", &format!("data type {}", other.str()?))],
+                ))
+            }
+        };
         py.detach(|| {
             self.session
-                .register_java_function(name, java_class_name, return_type, aggregate)
+                .register_java_function_with(name, java_class_name, return_type, aggregate)
+                .map_err(Box::new)
         })
         .to_pyerr()
     }
