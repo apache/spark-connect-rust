@@ -3002,8 +3002,16 @@ impl PyDataFrameWriter {
         Ok(slf)
     }
 
-    fn format<'py>(mut slf: PyRefMut<'py, Self>, source: &str) -> PyResult<PyRefMut<'py, Self>> {
-        slf.inner = slf.inner.clone().format(source);
+    /// The format of the write. As PySpark's, None unsets it, so that the server writes its
+    /// default source.
+    fn format<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        source: Option<&str>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        slf.inner = match source {
+            Some(source) => slf.inner.clone().format(source),
+            None => slf.inner.clone().clear_format(),
+        };
         Ok(slf)
     }
 
@@ -3096,7 +3104,8 @@ impl PyDataFrameWriter {
         Ok(slf)
     }
 
-    /// Write to an external JDBC table. Connection details go through `properties`.
+    /// Write to an external JDBC table. Connection details go through `properties`, options of
+    /// any type (None skipped, bools lowercased), as PySpark's.
     #[pyo3(signature = (url, table, mode=None, properties=None))]
     fn jdbc(
         &mut self,
@@ -3104,7 +3113,7 @@ impl PyDataFrameWriter {
         url: &str,
         table: &str,
         mode: Option<&str>,
-        properties: Option<std::collections::HashMap<String, String>>,
+        properties: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
         // Same order as PySpark: format, mode, properties, then url/dbtable (which
         // win over same-named properties), all kept on the writer, then save.
@@ -3113,7 +3122,11 @@ impl PyDataFrameWriter {
             w = w.mode(m);
         }
         if let Some(props) = properties {
-            w = w.options(props);
+            for (key, value) in props.iter() {
+                if let Some(value) = crate::coerce_option_value(&value)? {
+                    w = w.option(&key.str()?.to_cow()?, &value);
+                }
+            }
         }
         w = w.option("url", url).option("dbtable", table);
         self.inner = w.clone();

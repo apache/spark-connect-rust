@@ -41,6 +41,13 @@ impl DataFrameReader {
         self
     }
 
+    /// Unset the format, so that the server reads its default source
+    /// (`spark.sql.sources.default`), as PySpark's `format(None)`.
+    pub fn clear_format(mut self) -> Self {
+        self.format = None;
+        self
+    }
+
     /// Set the schema from a DDL string or JSON string.
     pub fn schema(mut self, schema: String) -> Self {
         self.schema = schema;
@@ -277,6 +284,8 @@ pub struct DataFrameWriter {
     input_plan: Arc<LogicalPlan>,
     format: Option<String>,
     mode: SaveMode,
+    /// The last mode set when it is not a save mode, which fails the write.
+    unsupported_mode: Option<String>,
     options: HashMap<String, String>,
     partition_cols: Vec<String>,
     cluster_cols: Vec<String>,
@@ -299,6 +308,7 @@ impl DataFrameWriter {
             input_plan,
             format: None,
             mode: SaveMode::ErrorIfExists,
+            unsupported_mode: None,
             options: HashMap::new(),
             partition_cols: vec![],
             cluster_cols: vec![],
@@ -331,10 +341,16 @@ impl DataFrameWriter {
         self
     }
 
-    /// Set the save mode.
+    /// Set the save mode: `append`, `overwrite`, `error` (or `errorifexists`) or `ignore`, in
+    /// any case. As PySpark's, the write fails with `UNSUPPORTED_OPERATION` when the last mode
+    /// set is any other string.
     pub fn mode(mut self, mode: &str) -> Self {
-        if let Some(m) = SaveMode::from_str(mode) {
-            self.mode = m;
+        match SaveMode::from_str(mode) {
+            Some(m) => {
+                self.mode = m;
+                self.unsupported_mode = None;
+            }
+            None => self.unsupported_mode = Some(mode.to_string()),
         }
         self
     }
@@ -342,6 +358,13 @@ impl DataFrameWriter {
     /// Set the format/source type.
     pub fn format(mut self, source: &str) -> Self {
         self.format = Some(source.to_string());
+        self
+    }
+
+    /// Unset the format, so that the server writes its default source
+    /// (`spark.sql.sources.default`), as PySpark's `format(None)`.
+    pub fn clear_format(mut self) -> Self {
+        self.format = None;
         self
     }
 
@@ -385,6 +408,12 @@ impl DataFrameWriter {
         &self,
         save_type: Option<proto::write_operation::SaveType>,
     ) -> Result<proto::WriteOperation> {
+        if let Some(mode) = &self.unsupported_mode {
+            return Err(spark_connect_core::error::SparkError::value(
+                "UNSUPPORTED_OPERATION",
+                &[("operation", mode)],
+            ));
+        }
         let mut op = proto::WriteOperation::default();
         op.input = Some(build_input_relation(&self.input_plan, &self.session));
         op.source = self.format.clone();
@@ -666,6 +695,47 @@ mod tests {
         match op.save_type {
             Some(proto::write_operation::SaveType::Path(p)) => assert_eq!(p, "/tmp/out"),
             other => panic!("expected Path save_type, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v1_write_operation_of_an_unsupported_mode_fails() {
+        // As PySpark's: the last mode set decides, in any case, and any other string fails the
+        // write with UNSUPPORTED_OPERATION.
+        let spark = session();
+        let df = spark.range(3).unwrap();
+        let path = || {
+            Some(proto::write_operation::SaveType::Path(
+                "/tmp/out".to_string(),
+            ))
+        };
+        for mode in ["bad", "default", "", " append"] {
+            let err = df
+                .write()
+                .mode("append")
+                .mode(mode)
+                .build_write_operation(path())
+                .unwrap_err();
+            assert_eq!(
+                err.get_condition().as_deref(),
+                Some("UNSUPPORTED_OPERATION")
+            );
+            assert_eq!(err.params.get("operation").map(String::as_str), Some(mode));
+        }
+        for (mode, expected) in [
+            ("APPEND", SaveMode::Append),
+            ("Overwrite", SaveMode::Overwrite),
+            ("error", SaveMode::ErrorIfExists),
+            ("errorifexists", SaveMode::ErrorIfExists),
+            ("ignore", SaveMode::Ignore),
+        ] {
+            let op = df
+                .write()
+                .mode("bad")
+                .mode(mode)
+                .build_write_operation(path())
+                .unwrap();
+            assert_eq!(op.mode, expected.to_proto());
         }
     }
 
