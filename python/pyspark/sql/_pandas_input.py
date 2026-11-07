@@ -286,10 +286,11 @@ def timestamp_columns(frame, schema):
     buffers separately so NaT's sentinel never participates in alignment tests.
     """
     import sys
-    from types import GetSetDescriptorType, WrapperDescriptorType
+    from types import FunctionType, GetSetDescriptorType, WrapperDescriptorType
 
     import numpy as np
     import pandas as pd
+    from pandas.core import frame as frame_module, generic as generic_module
     try:
         from pandas.core.arrays.datetimes import DatetimeArray
         from pandas.core.dtypes.dtypes import DatetimeTZDtype
@@ -305,7 +306,23 @@ def timestamp_columns(frame, schema):
     from pyspark.sql import types as sql_types
 
     if (pd.DataFrame is not DataFrame or type(frame) is not DataFrame
-            or type(schema) is not NativeStructType or not len(frame)):
+            or type(schema) is not NativeStructType or not len(frame)
+            or any(name in vars(frame) for name in ("astype", "notna", "where"))):
+        return None
+    # The row path calls these normalization methods before reading cells.
+    # Preserve customized transformations and errors before any Arrow Config RPC.
+    for name, module, qualname in (
+        ("astype", generic_module, "NDFrame.astype"),
+        ("notna", frame_module, "DataFrame.notna"),
+        ("where", generic_module, "NDFrame.where"),
+    ):
+        method = getattr(DataFrame, name)
+        if (type(method) is not FunctionType or method.__name__ != name
+                or method.__qualname__ != qualname or method.__module__ != module.__name__
+                or method.__globals__ is not vars(module)):
+            return None
+    if (DataFrame.astype is not generic_module.NDFrame.astype
+            or DataFrame.where is not generic_module.NDFrame.where):
         return None
     if not _has_canonical_columns(frame.columns):
         return None

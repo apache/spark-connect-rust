@@ -2021,10 +2021,6 @@ def test_pandas_timestamp_ipc_preserves_every_microsecond(protocol, monkeypatch,
     schema = T.StructType([T.StructField("renamed_a", T.TimestampType(), True, {"source": "test"}),
                            T.StructField("b", T.TimestampType())])
 
-    def no_rows(*args, **kwargs):
-        raise AssertionError("supported timestamps must not materialize Python rows")
-
-    monkeypatch.setattr(pd.DataFrame, "astype", no_rows)
     with _arrow_input_service(protocol, capture_tables=True, **{"spark.sql.session.timeZone": zone}) as (spark, state):
         result = spark.createDataFrame(frame, schema)
         # Aware columns carry their zone: only the importer's settings are read.
@@ -2051,7 +2047,6 @@ def test_pandas_naive_timestamp_utc_ipc(protocol, monkeypatch):
     frame = pd.DataFrame({"a": pd.to_datetime(["1969-12-31 23:59:59.999999", None,
                                                "2020-01-01 00:00:00.123456"])})
     schema = T.StructType([T.StructField("a", T.TimestampType())])
-    monkeypatch.setattr(pd.DataFrame, "astype", lambda *a, **k: pytest.fail("row conversion"))
     with _arrow_input_service(protocol, capture_tables=True) as (spark, state):
         result = spark.createDataFrame(frame, schema)
         # A naive column reads the session time zone, then the importer its settings.
@@ -2140,6 +2135,75 @@ def test_timestamp_nonnullable_nat_keeps_local_error_before_config(protocol, con
         assert state["config_requests"] == []
         assert state["relations"] == []
         assert state["uploads"] == 0
+
+
+@pytest.mark.parametrize("unit,aware", [("ns", True), ("us", False)])
+@pytest.mark.parametrize("location,method", [
+    ("instance", "notna"), ("instance", "astype"),
+    ("class", "notna"), ("class", "astype"), ("class", "where"),
+])
+@pytest.mark.parametrize("behavior", ["mutate", "raise"])
+def test_timestamp_custom_normalization_hooks_keep_native_row_path(
+    protocol, monkeypatch, unit, aware, location, method, behavior
+):
+    import json
+    from types import MethodType
+    import pyspark.sql._pandas_input as helper
+
+    values = pd.to_datetime([-2000000, -1000000, 0, 1000000, None], unit="us", utc=aware)
+    frame = pd.DataFrame({"original": values.as_unit(unit)})
+    schema = T.StructType([
+        T.StructField("renamed", T.TimestampType(), True, {"source": "normalization"})
+    ])
+    original = getattr(pd.DataFrame, method)
+    calls, tables = [], []
+    expected = [None if pd.isna(value) else round(value.to_pydatetime().timestamp() * 1000000)
+                for value in frame["original"]]
+    expected[0] = None if method == "notna" else 7000000
+    message = f"custom timestamp {method} precedes configuration"
+
+    def customized(self, *args, **kwargs):
+        calls.append(method)
+        if behavior == "raise":
+            raise RuntimeError(message)
+        result = original(self, *args, **kwargs)
+        result.iat[0, 0] = (False if method == "notna"
+                            else datetime(1970, 1, 1, 0, 0, 7, tzinfo=timezone.utc))
+        return result
+
+    if location == "class":
+        monkeypatch.setattr(pd.DataFrame, method, customized)
+    else:
+        monkeypatch.setitem(vars(frame), method, MethodType(customized, frame))
+
+    # Compare with native row conversion, then restore ordinary dispatch. A failing
+    # configuration service makes any premature Arrow configuration read observable.
+    for bypass in (True, False):
+        calls.clear()
+        with monkeypatch.context() as dispatch:
+            if bypass:
+                dispatch.setattr(helper, "timestamp_columns", lambda *_: None)
+            with _arrow_input_service(protocol, config_error=True) as (spark, state):
+                if behavior == "raise":
+                    with pytest.raises(RuntimeError, match=message):
+                        spark.createDataFrame(frame, schema)
+                    assert state["relations"] == []
+                    assert state["input_tables"] == []
+                else:
+                    spark.createDataFrame(frame, schema).toArrow()
+                    assert len(state["input_tables"]) == 1
+                    table = state["input_tables"][0]
+                    assert state["column_names"] == schema.names
+                    assert table.column(0).cast(pa.int64()).to_pylist() == expected
+                    assert table.column(0).is_null().to_pylist() == [
+                        value is None for value in expected]
+                    assert json.loads(state["relations"][0].local_relation.schema) == json.loads(schema.json())
+                    tables.append(table)
+                assert calls == [method]
+                assert state["config_requests"] == []
+                assert state["uploads"] == 0
+    if behavior == "mutate":
+        assert tables[0].equals(tables[1], check_metadata=True)
 
 
 @pytest.mark.parametrize("custom", ["dtype", "array"])
@@ -2351,8 +2415,8 @@ def test_timestamp_warm_local_converter_imports_keep_columnar_route(protocol, mo
         spark.createDataFrame(pa.table({"warm": [1]})).toArrow()
         monkeypatch.setitem(sys.modules, importer.__name__, substitute)
         assert timestamp_columns(frame, schema) is not None
-        monkeypatch.setattr(pd.DataFrame, "astype", lambda *a, **k: pytest.fail("row conversion"))
         spark.createDataFrame(frame, schema).toArrow()
+        assert len(state["config_requests"]) == 2
         table = state["tables"][-1]
         assert table.column_names == ["renamed"]
         assert table.column(0).cast(pa.int64()).to_pylist() == [0, 1000, None]
@@ -2593,7 +2657,7 @@ def test_timestamp_rebound_index_data_keeps_native_read_order(protocol, monkeypa
 
 @pytest.mark.parametrize("unit", ["ns", "us"])
 @pytest.mark.parametrize("storage", ["object", "default", "python", "pyarrow", "python_nan", "pyarrow_nan"])
-def test_timestamp_canonical_columns_storage_stays_columnar(protocol, monkeypatch, unit, storage):
+def test_timestamp_canonical_columns_storage_stays_columnar(protocol, unit, storage):
     from pyspark.sql.pandas.types import to_arrow_schema
     import json
 
@@ -2606,10 +2670,6 @@ def test_timestamp_canonical_columns_storage_stays_columnar(protocol, monkeypatc
                  if storage.endswith("_nan") else pd.StringDtype(storage=kind))
         frame.columns = pd.Index(pd.array(["original"], dtype=dtype))
 
-    def no_rows(*args, **kwargs):
-        raise AssertionError("canonical timestamp labels must retain columnar construction")
-
-    monkeypatch.setattr(pd.DataFrame, "astype", no_rows)
     with _arrow_input_service(protocol) as (spark, state):
         spark.createDataFrame(frame, schema).toArrow()
         assert state["config_requests"]
