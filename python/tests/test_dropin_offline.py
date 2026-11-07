@@ -9585,6 +9585,51 @@ def offline_spark():
     return SparkSession.builder.remote("sc://localhost:1").getOrCreate()
 
 
+def test_stream_reader_checks_its_arguments_as_pyspark(offline_spark):
+    # As PySpark's DataStreamReader: name raises NOT_EXPECTED_TYPE and
+    # INVALID_STREAMING_SOURCE_NAME, load VALUE_NOT_NON_EMPTY_STR for a path that is not a
+    # non-empty str, the format readers NOT_EXPECTED_TYPE for a path that is not a str, after
+    # they set their options, and changes an AnalysisException for a reader of a schema.
+    from pyspark.errors import AnalysisException, PySparkTypeError, PySparkValueError
+
+    reader = offline_spark.readStream
+    with pytest.raises(PySparkTypeError) as e:
+        reader.name(1)
+    assert e.value.getMessageParameters() == {
+        "arg_name": "source_name",
+        "expected_type": "str",
+        "arg_type": "int",
+    }
+    for name in ("a-b", "", "a b"):
+        with pytest.raises(PySparkValueError) as e:
+            reader.name(name)
+        assert e.value.getCondition() == "INVALID_STREAMING_SOURCE_NAME"
+        assert e.value.getMessageParameters() == {"source_name": name}
+    for path in ("", "  ", 1, ["p"]):
+        with pytest.raises(PySparkValueError) as e:
+            reader.load(path)
+        assert e.value.getCondition() == "VALUE_NOT_NON_EMPTY_STR"
+        assert e.value.getMessageParameters() == {"arg_name": "path", "arg_value": str(path)}
+    for read in (reader.json, reader.csv, reader.parquet, reader.orc, reader.text, reader.xml):
+        with pytest.raises(PySparkTypeError) as e:
+            read(1)
+        assert e.value.getMessageParameters() == {
+            "arg_name": "path",
+            "expected_type": "str",
+            "arg_type": "int",
+        }
+    with pytest.raises(PySparkValueError) as e:
+        reader.json("")
+    assert e.value.getCondition() == "VALUE_NOT_NON_EMPTY_STR"
+    with pytest.raises(PySparkTypeError):
+        reader.json(1, multiLine=True)
+    assert reader._options["multiLine"] == "true"
+    with pytest.raises(AnalysisException) as e:
+        offline_spark.readStream.schema("id long").changes("t")
+    assert e.value.getCondition() == "_LEGACY_ERROR_TEMP_1189"
+    assert str(e.value).endswith("User specified schema not supported with `changes`.")
+
+
 def test_reader_setters_mutate_and_return_self(offline_spark):
     # PySpark: the setters change the reader and return it; the return value may be
     # ignored (the pattern pandas-on-Spark read_sql_table uses).

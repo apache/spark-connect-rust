@@ -351,6 +351,28 @@ def test_year_month_intervals_are_not_collected_as_pyspark(session):
         datetime.timedelta(days=1, seconds=7384))
 
 
+def test_stream_reader_checks_its_arguments_as_pyspark(session, tmp_path):
+    # As PySpark's DataStreamReader, which checks a path, a source name and the schema of
+    # changes in the client, rather than sending them to the server.
+    from pyspark.errors import PySparkTypeError, PySparkValueError
+
+    source = tmp_path / "source"
+    session.range(2).write.json(str(source))
+    assert session.readStream.schema("id long").json(str(source)).isStreaming
+    with pytest.raises(PySparkValueError) as e:
+        session.readStream.format("json").schema("id long").load("")
+    assert e.value.getCondition() == "VALUE_NOT_NON_EMPTY_STR"
+    with pytest.raises(PySparkTypeError) as e:
+        session.readStream.json([str(source)])
+    assert e.value.getCondition() == "NOT_EXPECTED_TYPE"
+    with pytest.raises(PySparkValueError) as e:
+        session.readStream.name("a-b")
+    assert e.value.getCondition() == "INVALID_STREAMING_SOURCE_NAME"
+    with pytest.raises(AnalysisException) as e:
+        session.readStream.schema("id long").changes("t")
+    assert e.value.getCondition() == "_LEGACY_ERROR_TEMP_1189"
+
+
 def test_instr_and_regexp_replace_apply_their_optional_arguments(session):
     # Column b holds "c", so the literal "b" and the column b find different positions.
     df = session.createDataFrame([("abcabc", "c", "a", "z")], ["s", "b", "p", "r"])

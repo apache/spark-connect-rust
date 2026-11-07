@@ -62,6 +62,35 @@ fn apply_stream_schema(r: DataStreamReader, v: &Bound<'_, PyAny>) -> PyResult<Da
     Ok(r.schema(crate::readwriter::reader_schema(v)?))
 }
 
+/// The path of `DataStreamReader.load`, as PySpark checks it: a non-empty str, else
+/// `VALUE_NOT_NON_EMPTY_STR` of its `str()`.
+fn load_path(path: &Bound<'_, PyAny>) -> PyResult<String> {
+    if let Ok(text) = path.cast::<pyo3::types::PyString>() {
+        let text = text.to_cow()?;
+        if !text.trim().is_empty() {
+            return Ok(text.into_owned());
+        }
+    }
+    let shown = path.str()?.to_cow()?.into_owned();
+    Err(crate::column::raise_pyspark(
+        path.py(),
+        "PySparkValueError",
+        "VALUE_NOT_NON_EMPTY_STR",
+        &[("arg_name", "path"), ("arg_value", &shown)],
+    ))
+}
+
+/// The path of a format reader of `DataStreamReader`, such as `json`, as PySpark's takes it: a
+/// str, else `NOT_EXPECTED_TYPE` of `path`, which it then loads as `load` does.
+fn format_path(path: &Bound<'_, PyAny>) -> PyResult<String> {
+    if !path.is_instance_of::<pyo3::types::PyString>() {
+        return Err(crate::stat_arguments::not_expected_type(
+            path, "path", "str",
+        ));
+    }
+    load_path(path)
+}
+
 /// Coerce a `partitionBy` argument (a single column name or a list of names) to a
 /// column-name vector, mirroring PySpark's `str | list[str]` acceptance.
 fn extract_partition_cols(v: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
@@ -189,7 +218,7 @@ impl PyDataStreamReader {
     #[pyo3(signature = (path=None, format=None, schema=None, **options))]
     fn load(
         &mut self,
-        path: Option<&str>,
+        path: Option<&Bound<'_, PyAny>>,
         format: Option<&str>,
         schema: Option<&Bound<'_, PyAny>>,
         options: Option<&Bound<'_, PyDict>>,
@@ -212,27 +241,58 @@ impl PyDataStreamReader {
         }
         // PySpark's one-shot load sets format/schema/options on the reader itself.
         self.inner = r.clone();
-        Ok(PyDataFrame::new(r.load(path)))
+        let path = path.map(load_path).transpose()?;
+        Ok(PyDataFrame::new(r.load(path.as_deref())))
     }
 
     /// Set the source name (for checkpoint stability). Mirrors `DataStreamReader.name`,
-    /// which validates the name is a non-empty `[A-Za-z0-9_]+` string.
-    fn name<'py>(mut slf: PyRefMut<'py, Self>, source_name: &str) -> PyResult<PyRefMut<'py, Self>> {
-        if source_name.is_empty()
-            || !source_name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_')
-        {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Invalid streaming source name: {source_name:?}; only ASCII letters, digits, and underscores are allowed"
-            )));
+    /// which raises `NOT_EXPECTED_TYPE` for a name that is not a str, and
+    /// `INVALID_STREAMING_SOURCE_NAME` for one of other characters than ASCII letters, digits
+    /// and underscores.
+    fn name<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        source_name: &Bound<'_, PyAny>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let Ok(name) = source_name.cast::<pyo3::types::PyString>() else {
+            return Err(crate::stat_arguments::not_expected_type(
+                source_name,
+                "source_name",
+                "str",
+            ));
+        };
+        let name = name.to_cow()?;
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return Err(crate::column::raise_pyspark(
+                source_name.py(),
+                "PySparkValueError",
+                "INVALID_STREAMING_SOURCE_NAME",
+                &[("source_name", &name)],
+            ));
         }
-        slf.inner = slf.inner.clone().name(source_name);
+        slf.inner = slf.inner.clone().name(&name);
         Ok(slf)
     }
 
-    /// Read the streaming CDC changes of a named table. Mirrors `DataStreamReader.changes`.
-    fn changes(&self, tableName: &str) -> PyResult<PyDataFrame> {
+    /// Read the streaming CDC changes of a named table. Mirrors `DataStreamReader.changes`,
+    /// which raises an `AnalysisException` of `_LEGACY_ERROR_TEMP_1189` for a reader of a
+    /// schema.
+    fn changes(&self, py: Python<'_>, tableName: &str) -> PyResult<PyDataFrame> {
+        if !self.inner.get_schema().is_empty() {
+            // Of the message of the JVM error class, which PySpark's error classes lack.
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("errorClass", "_LEGACY_ERROR_TEMP_1189")?;
+            let parameters = PyDict::new(py);
+            parameters.set_item("operation", "changes")?;
+            kwargs.set_item("messageParameters", parameters)?;
+            let exception = py
+                .import("pyspark.errors")?
+                .getattr("AnalysisException")?
+                .call(
+                    ("User specified schema not supported with `changes`.",),
+                    Some(&kwargs),
+                )?;
+            return Err(PyErr::from_value(exception));
+        }
         Ok(PyDataFrame::new(self.inner.clone().changes(tableName)))
     }
 
@@ -242,7 +302,7 @@ impl PyDataStreamReader {
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn xml(
         &mut self,
-        path: &str,
+        path: &Bound<'_, PyAny>,
         rowTag: Option<&Bound<'_, PyAny>>,
         schema: Option<&Bound<'_, PyAny>>,
         excludeAttribute: Option<&Bound<'_, PyAny>>,
@@ -287,7 +347,8 @@ impl PyDataStreamReader {
         r = set_ropt(r, "locale", locale)?;
         // Like PySpark, the options and the xml format stay on the reader.
         self.inner = r.clone();
-        Ok(PyDataFrame::new(r.load(Some(path))))
+        let path = format_path(path)?;
+        Ok(PyDataFrame::new(r.load(Some(&path))))
     }
 
     fn table(&self, tableName: &str) -> PyResult<PyDataFrame> {
@@ -299,7 +360,7 @@ impl PyDataStreamReader {
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn json(
         &mut self,
-        path: &str,
+        path: &Bound<'_, PyAny>,
         schema: Option<&Bound<'_, PyAny>>,
         primitivesAsString: Option<&Bound<'_, PyAny>>,
         prefersDecimal: Option<&Bound<'_, PyAny>>,
@@ -354,14 +415,15 @@ impl PyDataStreamReader {
         r = set_ropt(r, "useUnsafeRow", useUnsafeRow)?;
         // Like PySpark, the options and the format stay on the reader.
         self.inner = r.clone().format("json");
-        Ok(PyDataFrame::new(r.json(path)))
+        let path = format_path(path)?;
+        Ok(PyDataFrame::new(r.json(&path)))
     }
 
     #[pyo3(signature = (path, mergeSchema=None, pathGlobFilter=None, recursiveFileLookup=None, datetimeRebaseMode=None, int96RebaseMode=None))]
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn parquet(
         &mut self,
-        path: &str,
+        path: &Bound<'_, PyAny>,
         mergeSchema: Option<&Bound<'_, PyAny>>,
         pathGlobFilter: Option<&Bound<'_, PyAny>>,
         recursiveFileLookup: Option<&Bound<'_, PyAny>>,
@@ -376,14 +438,15 @@ impl PyDataStreamReader {
         r = set_ropt(r, "int96RebaseMode", int96RebaseMode)?;
         // Like PySpark, the options and the format stay on the reader.
         self.inner = r.clone().format("parquet");
-        Ok(PyDataFrame::new(r.parquet(path)))
+        let path = format_path(path)?;
+        Ok(PyDataFrame::new(r.parquet(&path)))
     }
 
     #[pyo3(signature = (path, schema=None, sep=None, encoding=None, quote=None, escape=None, comment=None, header=None, inferSchema=None, ignoreLeadingWhiteSpace=None, ignoreTrailingWhiteSpace=None, nullValue=None, nanValue=None, positiveInf=None, negativeInf=None, dateFormat=None, timestampFormat=None, maxColumns=None, maxCharsPerColumn=None, maxMalformedLogPerPartition=None, mode=None, columnNameOfCorruptRecord=None, multiLine=None, charToEscapeQuoteEscaping=None, enforceSchema=None, emptyValue=None, locale=None, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None, unescapedQuoteHandling=None))]
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn csv(
         &mut self,
-        path: &str,
+        path: &Bound<'_, PyAny>,
         schema: Option<&Bound<'_, PyAny>>,
         sep: Option<&Bound<'_, PyAny>>,
         encoding: Option<&Bound<'_, PyAny>>,
@@ -454,14 +517,15 @@ impl PyDataStreamReader {
         r = set_ropt(r, "unescapedQuoteHandling", unescapedQuoteHandling)?;
         // Like PySpark, the options and the format stay on the reader.
         self.inner = r.clone().format("csv");
-        Ok(PyDataFrame::new(r.csv(path)))
+        let path = format_path(path)?;
+        Ok(PyDataFrame::new(r.csv(&path)))
     }
 
     #[pyo3(signature = (path, mergeSchema=None, pathGlobFilter=None, recursiveFileLookup=None))]
     #[allow(non_snake_case)]
     fn orc(
         &mut self,
-        path: &str,
+        path: &Bound<'_, PyAny>,
         mergeSchema: Option<&Bound<'_, PyAny>>,
         pathGlobFilter: Option<&Bound<'_, PyAny>>,
         recursiveFileLookup: Option<&Bound<'_, PyAny>>,
@@ -472,14 +536,15 @@ impl PyDataStreamReader {
         r = set_ropt(r, "recursiveFileLookup", recursiveFileLookup)?;
         // Like PySpark, the options and the format stay on the reader.
         self.inner = r.clone().format("orc");
-        Ok(PyDataFrame::new(r.orc(path)))
+        let path = format_path(path)?;
+        Ok(PyDataFrame::new(r.orc(&path)))
     }
 
     #[pyo3(signature = (path, wholetext=None, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None))]
     #[allow(non_snake_case)]
     fn text(
         &mut self,
-        path: &str,
+        path: &Bound<'_, PyAny>,
         wholetext: Option<&Bound<'_, PyAny>>,
         lineSep: Option<&Bound<'_, PyAny>>,
         pathGlobFilter: Option<&Bound<'_, PyAny>>,
@@ -492,7 +557,8 @@ impl PyDataStreamReader {
         r = set_ropt(r, "recursiveFileLookup", recursiveFileLookup)?;
         // Like PySpark, the options and the format stay on the reader.
         self.inner = r.clone().format("text");
-        Ok(PyDataFrame::new(r.text(path)))
+        let path = format_path(path)?;
+        Ok(PyDataFrame::new(r.text(&path)))
     }
 }
 
