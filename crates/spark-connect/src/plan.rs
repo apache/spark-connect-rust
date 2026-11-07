@@ -183,10 +183,11 @@ pub enum LogicalPlan {
         column_name: String,
         metadata_json: String,
     },
-    /// WithColumnsRenamed: `df.withColumnRenamed(old, new)` or `df.withColumnsRenamed(...)`.
+    /// WithColumnsRenamed: `df.withColumnRenamed(old, new)` or `df.withColumnsRenamed(...)`,
+    /// of the renames in their order, in which the server applies them, as PySpark sends them.
     WithColumnsRenamed {
         input: Arc<LogicalPlan>,
-        renames: HashMap<String, String>,
+        renames: Vec<(String, String)>,
     },
     /// Drop: `df.drop(column_names...)`.
     Drop {
@@ -1944,14 +1945,15 @@ pub fn with_columns(
     }
 }
 
-/// Create a WithColumnsRenamed plan.
+/// Create a WithColumnsRenamed plan of `renames`, of old and new names, in their order, in
+/// which the server applies them.
 pub fn with_columns_renamed(
     input: impl Into<Arc<LogicalPlan>>,
-    renames: HashMap<String, String>,
+    renames: impl IntoIterator<Item = (String, String)>,
 ) -> LogicalPlan {
     LogicalPlan::WithColumnsRenamed {
         input: input.into(),
-        renames,
+        renames: renames.into_iter().collect(),
     }
 }
 
