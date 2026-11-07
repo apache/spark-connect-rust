@@ -2469,6 +2469,17 @@ struct ArrowValueLayout<'a> {
     decoder: ArrowValueDecoder<'a>,
 }
 
+/// The Value of a timestamp of `micros` since the epoch. Spark's Arrow types declare
+/// TIMESTAMP_NTZ without a time zone and TIMESTAMP with one (`ArrowUtils.toArrowType`), so the
+/// time zone of the Arrow type tells the two apart.
+fn timestamp_value(micros: i64, has_time_zone: bool) -> Value {
+    if has_time_zone {
+        Value::Timestamp(micros)
+    } else {
+        Value::TimestampNtz(micros)
+    }
+}
+
 enum ArrowValueDecoder<'a> {
     Null,
     Boolean(&'a arrow::array::BooleanArray),
@@ -2656,7 +2667,9 @@ impl<'a> ArrowValueLayout<'a> {
             ArrowValueDecoder::String(arr) => Ok(Value::String(arr.value(index).to_string())),
             ArrowValueDecoder::Binary(arr) => Ok(Value::Binary(arr.value(index).to_vec())),
             ArrowValueDecoder::Date32(arr) => Ok(Value::Date(arr.value(index))),
-            ArrowValueDecoder::TimestampMicrosecond(arr) => Ok(Value::Timestamp(arr.value(index))),
+            ArrowValueDecoder::TimestampMicrosecond(arr) => {
+                Ok(timestamp_value(arr.value(index), arr.timezone().is_some()))
+            }
             ArrowValueDecoder::UInt8(arr) => Ok(Value::Short(arr.value(index) as i16)),
             ArrowValueDecoder::UInt16(arr) => Ok(Value::Integer(arr.value(index) as i32)),
             ArrowValueDecoder::UInt32(arr) => Ok(Value::Long(arr.value(index) as i64)),
@@ -2680,15 +2693,18 @@ impl<'a> ArrowValueLayout<'a> {
             ArrowValueDecoder::LargeBinary(arr) => Ok(Value::Binary(arr.value(index).to_vec())),
             ArrowValueDecoder::StringView(arr) => Ok(Value::String(arr.value(index).to_string())),
             ArrowValueDecoder::BinaryView(arr) => Ok(Value::Binary(arr.value(index).to_vec())),
-            ArrowValueDecoder::TimestampSecond(arr) => {
-                Ok(Value::Timestamp(arr.value(index) * 1_000_000))
-            }
-            ArrowValueDecoder::TimestampMillisecond(arr) => {
-                Ok(Value::Timestamp(arr.value(index) * 1_000))
-            }
-            ArrowValueDecoder::TimestampNanosecond(arr) => {
-                Ok(Value::Timestamp(arr.value(index) / 1_000))
-            }
+            ArrowValueDecoder::TimestampSecond(arr) => Ok(timestamp_value(
+                arr.value(index) * 1_000_000,
+                arr.timezone().is_some(),
+            )),
+            ArrowValueDecoder::TimestampMillisecond(arr) => Ok(timestamp_value(
+                arr.value(index) * 1_000,
+                arr.timezone().is_some(),
+            )),
+            ArrowValueDecoder::TimestampNanosecond(arr) => Ok(timestamp_value(
+                arr.value(index) / 1_000,
+                arr.timezone().is_some(),
+            )),
             ArrowValueDecoder::Date64(arr) => {
                 Ok(Value::Date((arr.value(index) / 86_400_000) as i32))
             }
@@ -4539,16 +4555,25 @@ mod arrow_value_tests {
         };
         let cases: Vec<(ArrayRef, Value)> = vec![
             (
-                Arc::new(TimestampSecondArray::from(vec![-1])),
+                Arc::new(TimestampSecondArray::from(vec![-1]).with_timezone_utc()),
                 Value::Timestamp(-1_000_000),
             ),
             (
-                Arc::new(TimestampMillisecondArray::from(vec![-1])),
+                Arc::new(TimestampMillisecondArray::from(vec![-1]).with_timezone_utc()),
                 Value::Timestamp(-1_000),
             ),
             (
-                Arc::new(TimestampNanosecondArray::from(vec![-1999])),
+                Arc::new(TimestampNanosecondArray::from(vec![-1999]).with_timezone_utc()),
                 Value::Timestamp(-1),
+            ),
+            // Without a time zone, as TIMESTAMP_NTZ is declared.
+            (
+                Arc::new(TimestampSecondArray::from(vec![-1])),
+                Value::TimestampNtz(-1_000_000),
+            ),
+            (
+                Arc::new(TimestampMicrosecondArray::from(vec![-1])),
+                Value::TimestampNtz(-1),
             ),
             (
                 Arc::new(Date64Array::from(vec![-86_400_001])),
@@ -4649,6 +4674,14 @@ mod arrow_value_tests {
         ));
         assert!(matches!(
             arrow_value_at(&TimestampMicrosecondArray::from(vec![1i64]), 0).unwrap(),
+            Value::TimestampNtz(1)
+        ));
+        assert!(matches!(
+            arrow_value_at(
+                &TimestampMicrosecondArray::from(vec![1i64]).with_timezone_utc(),
+                0
+            )
+            .unwrap(),
             Value::Timestamp(1)
         ));
     }
@@ -4715,14 +4748,38 @@ mod arrow_value_tests {
     fn timestamps_and_date64() {
         assert!(matches!(
             arrow_value_at(&TimestampSecondArray::from(vec![1i64]), 0).unwrap(),
-            Value::Timestamp(_)
+            Value::TimestampNtz(_)
         ));
         assert!(matches!(
             arrow_value_at(&TimestampMillisecondArray::from(vec![1i64]), 0).unwrap(),
-            Value::Timestamp(_)
+            Value::TimestampNtz(_)
         ));
         assert!(matches!(
             arrow_value_at(&TimestampNanosecondArray::from(vec![1000i64]), 0).unwrap(),
+            Value::TimestampNtz(_)
+        ));
+        assert!(matches!(
+            arrow_value_at(
+                &TimestampSecondArray::from(vec![1i64]).with_timezone_utc(),
+                0
+            )
+            .unwrap(),
+            Value::Timestamp(_)
+        ));
+        assert!(matches!(
+            arrow_value_at(
+                &TimestampMillisecondArray::from(vec![1i64]).with_timezone_utc(),
+                0
+            )
+            .unwrap(),
+            Value::Timestamp(_)
+        ));
+        assert!(matches!(
+            arrow_value_at(
+                &TimestampNanosecondArray::from(vec![1000i64]).with_timezone_utc(),
+                0
+            )
+            .unwrap(),
             Value::Timestamp(_)
         ));
         assert!(matches!(

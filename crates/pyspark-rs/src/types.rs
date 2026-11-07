@@ -196,14 +196,18 @@ impl PyDataType {
     fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
         obj
     }
+    /// The type of the DDL string `ddl`, as PySpark's `DataType.fromDDL`, which the server of
+    /// the active session parses (`_parse_datatype_string`): the concrete type, a StructType
+    /// for a list of fields. The subclasses inherit this classmethod, so that any of them
+    /// parses DDL the same way.
     #[classmethod]
     #[pyo3(name = "fromDDL")]
     fn __obj_from_ddl(cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<Py<PyAny>> {
-        let dt = DataType::from_ddl(ddl)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        // The concrete type, as pyspark returns (a StructType for a list of fields). The
-        // subclasses inherit this classmethod, so that any of them parses DDL the same way.
-        data_type_to_py(cls.py(), &dt)
+        Ok(cls
+            .py()
+            .import("pyspark.sql.types")?
+            .call_method1("_parse_datatype_string", (ddl,))?
+            .unbind())
     }
     #[pyo3(name = "typeName")]
     fn __dt_type_name(&self) -> String {
@@ -2571,7 +2575,7 @@ impl PyGeographyType {
 /// SRID, and an integer must be an SRID that PySpark's spatial reference system mappers know,
 /// 0, 3857 and 4326 for a geometry and 4326 for a geography in PySpark 4.3.0. Anything else
 /// raises `ST_INVALID_SRID_VALUE`, as in PySpark.
-fn spatial_type_srid(srid: &Bound<'_, PyAny>, geographic: bool) -> PyResult<i32> {
+pub(crate) fn spatial_type_srid(srid: &Bound<'_, PyAny>, geographic: bool) -> PyResult<i32> {
     use pyo3::types::{PyInt, PyString};
     if let Ok(name) = srid.cast::<PyString>() {
         if name.to_cow()? == "ANY" {

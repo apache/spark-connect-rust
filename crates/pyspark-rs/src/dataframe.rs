@@ -49,6 +49,29 @@ pub struct PyDataFrame {
 }
 
 impl PyDataFrame {
+    /// `other`, a DataFrame of the session of this one, as PySpark's `_check_same_session`
+    /// takes the DataFrame of a method: else `SESSION_NOT_SAME`, as for what is not a
+    /// DataFrame.
+    pub(crate) fn same_session<'py>(
+        &self,
+        other: &Bound<'py, PyAny>,
+    ) -> PyResult<PyRef<'py, PyDataFrame>> {
+        match other.extract::<PyRef<'py, PyDataFrame>>() {
+            Ok(df)
+                if df.dataframe.spark_session().session_id()
+                    == self.dataframe.spark_session().session_id() =>
+            {
+                Ok(df)
+            }
+            _ => Err(crate::column::raise_pyspark(
+                other.py(),
+                "SessionNotSameException",
+                "SESSION_NOT_SAME",
+                &[],
+            )),
+        }
+    }
+
     /// The pandas DataFrame of the result, as `SparkConnectClient.to_pandas` makes it: the
     /// settings of the conversion first, in one request; then the Arrow result with the schema
     /// that the server sends, which `pyspark.sql.connect.client._to_pandas` converts.
@@ -475,6 +498,12 @@ impl PyDataFrame {
     /// Alias for filter (reference pyspark name is `where`).
     #[pyo3(name = "where")]
     fn where_(&self, condition: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        // As PySpark's: a Column or a str, else NOT_EXPECTED_TYPE.
+        if !(condition.is_instance_of::<PyColumn>()
+            || condition.is_instance_of::<pyo3::types::PyString>())
+        {
+            return Err(not_expected_type(condition, "condition", "Column or str"));
+        }
         Ok(PyDataFrame::new(
             self.dataframe.filter(cond_column(condition)?),
         ))
@@ -670,10 +699,11 @@ impl PyDataFrame {
     #[pyo3(signature = (other, on=None, how=None))]
     fn join(
         &self,
-        other: &PyDataFrame,
+        other: &Bound<'_, PyAny>,
         on: Option<Bound<'_, PyAny>>,
         how: Option<&str>,
     ) -> PyResult<PyDataFrame> {
+        let other = self.same_session(other)?;
         let join_type = parse_join_type(how.unwrap_or("inner"))?;
 
         // Resolve `on`: None | Column | str | list[str].
@@ -712,8 +742,11 @@ impl PyDataFrame {
     }
 
     /// Cross join.
-    fn crossJoin(&self, other: &PyDataFrame) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.cross_join(&other.dataframe))
+    fn crossJoin(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let other = self.same_session(other)?;
+        Ok(PyDataFrame::new(
+            self.dataframe.cross_join(&other.dataframe),
+        ))
     }
 
     /// Lateral (correlated) join. `on` is an optional Column condition; `how`
@@ -721,10 +754,11 @@ impl PyDataFrame {
     #[pyo3(signature = (other, on=None, how=None))]
     fn lateralJoin(
         &self,
-        other: &PyDataFrame,
+        other: &Bound<'_, PyAny>,
         on: Option<PyRef<PyColumn>>,
         how: Option<&str>,
     ) -> PyResult<PyDataFrame> {
+        let other = self.same_session(other)?;
         let join_type = parse_join_type(how.unwrap_or("inner"))?;
         let on_col = on.map(|c| c.column.clone());
         Ok(PyDataFrame::new(self.dataframe.lateral_join(
@@ -738,9 +772,21 @@ impl PyDataFrame {
     /// column. Mirrors `DataFrame.transpose(indexColumn=None)`.
     #[pyo3(signature = (indexColumn=None))]
     #[allow(non_snake_case)]
-    fn transpose(&self, indexColumn: Option<PyRef<PyColumn>>) -> PyResult<PyDataFrame> {
-        let df = match indexColumn {
-            Some(c) => self.dataframe.transpose_with_index(c.column.clone()),
+    fn transpose(&self, indexColumn: Option<&Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        // As PySpark's `F._to_col`: a Column or a column name, else NOT_EXPECTED_TYPE of `col`.
+        let index = match indexColumn {
+            None => None,
+            Some(c) => Some(if let Ok(column) = c.extract::<PyRef<'_, PyColumn>>() {
+                column.column.clone()
+            } else if c.is_instance_of::<pyo3::types::PyString>() {
+                let _origin = crate::origin::with_origin("col");
+                spark_connect::functions::col(&c.extract::<String>()?)
+            } else {
+                return Err(not_expected_type(c, "col", "Column or str"));
+            }),
+        };
+        let df = match index {
+            Some(column) => self.dataframe.transpose_with_index(column),
             None => self.dataframe.transpose(),
         }
         .to_pyerr()?;
@@ -839,40 +885,52 @@ impl PyDataFrame {
 
     /// Zip this DataFrame with another column-wise (side-by-side). Mirrors
     /// `DataFrame.zip(other)`.
-    fn zip(&self, other: &PyDataFrame) -> PyResult<PyDataFrame> {
+    fn zip(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let other = self.same_session(other)?;
         Ok(PyDataFrame::new(
             self.dataframe.zip(&other.dataframe).to_pyerr()?,
         ))
     }
 
     /// Union with another DataFrame.
-    fn union(&self, other: &PyDataFrame) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.union(&other.dataframe))
+    fn union(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let other = self.same_session(other)?;
+        Ok(PyDataFrame::new(self.dataframe.union(&other.dataframe)))
     }
 
     /// Union by name, optionally filling columns missing on one side with null.
     #[pyo3(signature = (other, allowMissingColumns=false))]
-    fn unionByName(&self, other: &PyDataFrame, allowMissingColumns: bool) -> PyDataFrame {
-        PyDataFrame::new(
+    fn unionByName(
+        &self,
+        other: &Bound<'_, PyAny>,
+        allowMissingColumns: bool,
+    ) -> PyResult<PyDataFrame> {
+        let other = self.same_session(other)?;
+        Ok(PyDataFrame::new(
             self.dataframe
                 .union_by_name_opt(&other.dataframe, allowMissingColumns),
-        )
+        ))
     }
 
     /// Intersect with another DataFrame.
-    fn intersect(&self, other: &PyDataFrame) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.intersect(&other.dataframe))
+    fn intersect(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let other = self.same_session(other)?;
+        Ok(PyDataFrame::new(self.dataframe.intersect(&other.dataframe)))
     }
 
     /// Intersect keeping duplicates (reference pyspark `intersectAll`).
     #[pyo3(name = "intersectAll")]
-    fn intersect_all(&self, other: &PyDataFrame) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.intersect_all(&other.dataframe))
+    fn intersect_all(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let other = self.same_session(other)?;
+        Ok(PyDataFrame::new(
+            self.dataframe.intersect_all(&other.dataframe),
+        ))
     }
 
     /// Subtract another DataFrame.
-    fn subtract(&self, other: &PyDataFrame) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.subtract(&other.dataframe))
+    fn subtract(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let other = self.same_session(other)?;
+        Ok(PyDataFrame::new(self.dataframe.subtract(&other.dataframe)))
     }
 
     /// Repartition. Mirrors reference `repartition(numPartitions, *cols)` where the
@@ -1034,8 +1092,13 @@ impl PyDataFrame {
 
     /// Whether this DataFrame is semantically equal to `other`.
     #[pyo3(name = "sameSemantics")]
-    fn same_semantics(&self, py: Python<'_>, other: &PyDataFrame) -> PyResult<bool> {
-        py.detach(|| self.dataframe.same_semantics(&other.dataframe))
+    fn same_semantics(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        // As PySpark's: a DataFrame, else NOT_EXPECTED_TYPE, of the same session.
+        if !other.is_instance_of::<PyDataFrame>() {
+            return Err(not_expected_type(other, "other", "DataFrame"));
+        }
+        let other = self.same_session(other)?.dataframe.clone();
+        py.detach(|| self.dataframe.same_semantics(&other))
             .to_pyerr()
     }
 
@@ -1061,8 +1124,11 @@ impl PyDataFrame {
 
     /// Except all (keeps duplicates).
     #[pyo3(name = "exceptAll")]
-    fn except_all(&self, other: &PyDataFrame) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.except_all(&other.dataframe))
+    fn except_all(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let other = self.same_session(other)?;
+        Ok(PyDataFrame::new(
+            self.dataframe.except_all(&other.dataframe),
+        ))
     }
 
     /// Rename multiple columns from an {old: new} mapping.
@@ -1084,8 +1150,14 @@ impl PyDataFrame {
     /// The columns of this DataFrame whose names match a regex, as a Column. Mirrors
     /// `DataFrame.colRegex`.
     #[pyo3(name = "colRegex")]
-    fn col_regex(&self, colName: &str) -> PyColumn {
-        PyColumn::new(self.dataframe.col_regex(colName))
+    fn col_regex(&self, colName: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
+        // As PySpark's: a str, else NOT_EXPECTED_TYPE.
+        if !colName.is_instance_of::<pyo3::types::PyString>() {
+            return Err(not_expected_type(colName, "colName", "str"));
+        }
+        Ok(PyColumn::new(
+            self.dataframe.col_regex(&colName.extract::<String>()?),
+        ))
     }
 
     /// Basic statistics for the given columns (count/mean/stddev/min/max), of column names or
@@ -1222,11 +1294,11 @@ impl PyDataFrame {
         crate::stat_arguments::fillna(&self.dataframe, value, subset)
     }
 
-    /// Statistical functions (`df.stat`).
+    /// Statistical functions (`df.stat`), of this DataFrame, their `df`, as PySpark's.
     #[getter]
     #[pyo3(name = "stat")]
-    fn stat(&self) -> crate::stat::PyStatFunctions {
-        crate::stat::PyStatFunctions::new(self.dataframe.stat())
+    fn stat(slf: &Bound<'_, Self>) -> crate::stat::PyStatFunctions {
+        crate::stat::PyStatFunctions::new(slf.borrow().dataframe.stat(), slf.clone().unbind())
     }
 
     /// `df.crosstab(col1, col2)` - pyspark exposes it on DataFrame as well as
@@ -1997,8 +2069,9 @@ impl PyDataFrame {
     }
 
     /// Additional set operation: unionAll (alias for union).
-    fn unionAll(&self, other: &PyDataFrame) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.union(&other.dataframe))
+    fn unionAll(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let other = self.same_session(other)?;
+        Ok(PyDataFrame::new(self.dataframe.union(&other.dataframe)))
     }
 
     /// The V1 writer interface (`df.write`).
@@ -2025,11 +2098,13 @@ impl PyDataFrame {
         PyDataStreamWriter::new(writer)
     }
 
-    /// Null-handling functions (`df.na.drop()/fill()/replace()`).
+    /// Null-handling functions (`df.na.drop()/fill()/replace()`), of this DataFrame, their
+    /// `df`, as PySpark's.
     #[getter]
-    fn na(&self) -> PyDataFrameNaFunctions {
+    fn na(slf: &Bound<'_, Self>) -> PyDataFrameNaFunctions {
         PyDataFrameNaFunctions {
-            df: self.dataframe.clone(),
+            df: slf.borrow().dataframe.clone(),
+            frame: slf.clone().unbind(),
         }
     }
 
@@ -2204,27 +2279,35 @@ impl PyDataFrame {
     #[pyo3(name = "nearestByJoin", signature = (other, rankingExpression, numResults = 1, mode = "brute", direction = "asc", joinType = "inner"))]
     fn nearest_by_join(
         &self,
-        other: &PyDataFrame,
+        other: &Bound<'_, PyAny>,
         rankingExpression: &PyColumn,
         numResults: i32,
         mode: &str,
         direction: &str,
         joinType: &str,
-    ) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.nearest_by_join(
+    ) -> PyResult<PyDataFrame> {
+        let other = self.same_session(other)?;
+        Ok(PyDataFrame::new(self.dataframe.nearest_by_join(
             &other.dataframe,
             rankingExpression.column.clone(),
             numResults,
             mode,
             direction,
             joinType,
-        ))
+        )))
     }
 
     /// `DataFrame.metadataColumn`.
     #[pyo3(name = "metadataColumn")]
-    fn metadata_column(&self, colName: &str) -> PyColumn {
-        PyColumn::new(self.dataframe.metadata_column(colName))
+    fn metadata_column(&self, colName: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
+        // As PySpark's: a str, else NOT_EXPECTED_TYPE.
+        if !colName.is_instance_of::<pyo3::types::PyString>() {
+            return Err(not_expected_type(colName, "colName", "str"));
+        }
+        Ok(PyColumn::new(
+            self.dataframe
+                .metadata_column(&colName.extract::<String>()?),
+        ))
     }
 }
 
@@ -2232,10 +2315,19 @@ impl PyDataFrame {
 #[pyclass(name = "DataFrameNaFunctions", module = "pyspark.sql.dataframe")]
 pub struct PyDataFrameNaFunctions {
     df: spark_connect::dataframe::DataFrame,
+    /// The DataFrame of `df.na`, as PySpark's `DataFrameNaFunctions.df`.
+    frame: Py<PyDataFrame>,
 }
 
 #[pymethods]
 impl PyDataFrameNaFunctions {
+    /// The DataFrame of these functions, as PySpark's `DataFrameNaFunctions.df`: `df.na.df` is
+    /// `df`.
+    #[getter(df)]
+    fn frame(&self, py: Python<'_>) -> Py<PyDataFrame> {
+        self.frame.clone_ref(py)
+    }
+
     /// Drop rows containing nulls, as PySpark's `DataFrameNaFunctions.drop`, which is
     /// `DataFrame.dropna`.
     #[pyo3(
@@ -2732,8 +2824,14 @@ fn apply_write_common(
 
 #[pymethods]
 impl PyDataFrameWriter {
-    fn mode<'py>(mut slf: PyRefMut<'py, Self>, saveMode: &str) -> PyResult<PyRefMut<'py, Self>> {
-        slf.inner = slf.inner.clone().mode(saveMode);
+    /// The save mode, as PySpark's: `None` keeps the default, "error".
+    fn mode<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        saveMode: Option<&str>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        if let Some(save_mode) = saveMode {
+            slf.inner = slf.inner.clone().mode(save_mode);
+        }
         Ok(slf)
     }
 
@@ -2788,33 +2886,45 @@ impl PyDataFrameWriter {
     #[pyo3(name = "bucketBy", signature = (numBuckets, col, *cols))]
     fn bucket_by<'py>(
         mut slf: PyRefMut<'py, Self>,
-        numBuckets: i32,
-        col: String,
-        cols: Vec<String>,
+        numBuckets: &Bound<'_, PyAny>,
+        col: &Bound<'_, PyAny>,
+        cols: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        let mut all = vec![col];
-        all.extend(cols);
-        slf.inner = slf.inner.clone().bucket_by(numBuckets, all);
+        let num_buckets = crate::readwriter::bucket_count(numBuckets)?;
+        let columns = crate::readwriter::writer_columns(col, &cols)?;
+        slf.inner = slf.inner.clone().bucket_by(num_buckets, columns);
         Ok(slf)
     }
 
     #[pyo3(name = "sortBy", signature = (col, *cols))]
     fn sort_by<'py>(
         mut slf: PyRefMut<'py, Self>,
-        col: String,
-        cols: Vec<String>,
+        col: &Bound<'_, PyAny>,
+        cols: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        let mut all = vec![col];
-        all.extend(cols);
-        slf.inner = slf.inner.clone().sort_by(all);
+        let columns = crate::readwriter::writer_columns(col, &cols)?;
+        slf.inner = slf.inner.clone().sort_by(columns);
         Ok(slf)
     }
 
+    /// The clustering columns, as PySpark's: column names, or a list or tuple of them, at
+    /// least one.
     #[pyo3(name = "clusterBy", signature = (*cols))]
     fn cluster_by<'py>(
         mut slf: PyRefMut<'py, Self>,
-        cols: Vec<String>,
+        cols: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<PyRefMut<'py, Self>> {
+        let cols: Vec<String> = match cols.as_slice() {
+            [only] if only.is_instance_of::<PyList>() || only.is_instance_of::<PyTuple>() => {
+                only.extract()?
+            }
+            _ => cols.iter().map(|c| c.extract()).collect::<PyResult<_>>()?,
+        };
+        if cols.is_empty() {
+            return Err(pyo3::exceptions::PyAssertionError::new_err(
+                "clusterBy needs one or more clustering columns.",
+            ));
+        }
         slf.inner = slf.inner.clone().cluster_by(cols);
         Ok(slf)
     }
@@ -3134,25 +3244,32 @@ impl PyDataFrameWriterV2 {
         Ok(slf)
     }
 
+    /// Set the table property `property` to `value`, or leave it unset for None, as PySpark's.
     #[pyo3(name = "tableProperty")]
     fn table_property<'py>(
         mut slf: PyRefMut<'py, Self>,
         property: &str,
-        value: &str,
+        value: Option<&str>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        slf.inner = slf.inner.clone().table_property(property, value);
+        slf.inner = match value {
+            Some(value) => slf.inner.clone().table_property(property, value),
+            None => slf.inner.clone().unset_table_property(property),
+        };
         Ok(slf)
     }
 
+    /// Partition by the columns, each a Column or a column name, as PySpark's `F._to_col` of
+    /// each, else `NOT_EXPECTED_TYPE` of `col`, also for a list.
     #[pyo3(name = "partitionedBy", signature = (col, *cols))]
     fn partitioned_by<'py>(
         mut slf: PyRefMut<'py, Self>,
         col: Bound<'_, PyAny>,
         cols: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        let mut all = vec![col];
-        all.extend(cols);
-        let columns = to_column_list(all)?;
+        let columns = std::iter::once(&col)
+            .chain(&cols)
+            .map(column_or_name)
+            .collect::<PyResult<Vec<_>>>()?;
         slf.inner = slf.inner.clone().partition_by(columns);
         Ok(slf)
     }
@@ -3186,11 +3303,11 @@ impl PyDataFrameWriterV2 {
         self.inner.clone().append().to_pyerr()
     }
 
-    fn overwrite(&mut self, condition: &PyColumn) -> PyResult<()> {
-        self.inner
-            .clone()
-            .overwrite(condition.column.clone())
-            .to_pyerr()
+    /// Overwrite the rows of `condition`, a Column or a column name, as PySpark's `F._to_col`,
+    /// else `NOT_EXPECTED_TYPE` of `col`.
+    fn overwrite(&mut self, condition: &Bound<'_, PyAny>) -> PyResult<()> {
+        let condition = column_or_name(condition)?;
+        self.inner.clone().overwrite(condition).to_pyerr()
     }
 
     #[pyo3(name = "overwritePartitions")]
@@ -3399,6 +3516,50 @@ fn udt_field_converters(
     Ok(Some(std::sync::Arc::new(converters.extract()?)))
 }
 
+/// Whether `data_type` holds a year-month interval, also nested in an array, a map, a struct or
+/// a user-defined type (`pyspark.sql.types._has_type`).
+fn has_year_month_interval(data_type: &spark_connect::types::DataType) -> bool {
+    use spark_connect::types::DataType;
+    match data_type {
+        DataType::YearMonthInterval { .. } => true,
+        DataType::Struct { fields } => fields
+            .iter()
+            .any(|field| has_year_month_interval(&field.data_type)),
+        DataType::Array { element_type, .. } => has_year_month_interval(element_type),
+        DataType::Map {
+            key_type,
+            value_type,
+            ..
+        } => has_year_month_interval(key_type) || has_year_month_interval(value_type),
+        DataType::Udt {
+            sql_type: Some(sql_type),
+            ..
+        } => has_year_month_interval(sql_type),
+        _ => false,
+    }
+}
+
+/// Raises as PySpark's Arrow conversion of the rows does for a result of `schema` with a
+/// year-month interval, which Spark Connect cannot collect: the error is raised even when the
+/// result has no rows.
+fn check_collectable(
+    py: Python<'_>,
+    schema: Option<&spark_connect::types::DataType>,
+) -> PyResult<()> {
+    if schema.is_some_and(has_year_month_interval) {
+        return Err(crate::column::raise_pyspark(
+            py,
+            "PySparkNotImplementedError",
+            "NOT_IMPLEMENTED",
+            &[(
+                "feature",
+                "Collecting a year-month interval value in Spark Connect",
+            )],
+        ));
+    }
+    Ok(())
+}
+
 /// The collected `rows` of a result of `schema`, whose values of user-defined types are
 /// deserialized when first read.
 fn rows_to_py(
@@ -3406,6 +3567,7 @@ fn rows_to_py(
     rows: Vec<spark_connect::row::Row>,
     schema: Option<&spark_connect::types::DataType>,
 ) -> PyResult<Vec<PyRow>> {
+    check_collectable(py, schema)?;
     let converters = udt_field_converters(py, schema)?;
     Ok(rows
         .into_iter()
@@ -3467,12 +3629,19 @@ impl PyLocalRowIterator {
             return Ok(None);
         }
         // Release the GIL while fetching from the Rust iterator (which may block on network I/O).
-        match py.detach(|| self.next_row()) {
-            Some(Ok(row)) => {
-                if self.converters.is_none() {
-                    let schema = self.iterator.as_ref().and_then(LocalRowIterator::schema);
-                    self.converters = Some(udt_field_converters(py, schema.as_ref())?);
+        let next = py.detach(|| self.next_row());
+        if self.converters.is_none() {
+            if let Some(schema) = self.iterator.as_ref().and_then(LocalRowIterator::schema) {
+                // The result is known once its first message arrives, possibly with no rows.
+                if let Err(error) = check_collectable(py, Some(&schema)) {
+                    self.finished = true;
+                    return Err(error);
                 }
+                self.converters = Some(udt_field_converters(py, Some(&schema))?);
+            }
+        }
+        match next {
+            Some(Ok(row)) => {
                 let converters = self.converters.clone().flatten();
                 Ok(Some(PyRow::with_converters(row, converters)))
             }

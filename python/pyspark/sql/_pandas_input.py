@@ -533,7 +533,8 @@ def prepare_float64_input(frame, schema):
 
 
 def prepare_string_input(frame, schema):
-    """Prepare inline IPC for explicit columns of exact strings or None.
+    """Prepare inline IPC for explicit columns of exact strings or None, or an Arrow table for
+    columns that pandas keeps in Arrow string storage (see _arrow_string_table).
 
     Inspect every object before Arrow conversion: str subclasses can override
     conversion hooks, and pandas treats several other objects as missing values.
@@ -598,9 +599,10 @@ def prepare_string_input(frame, schema):
         for field in schema.fields
     ) or len(set(schema.names)) != width:
         return None
+    dtypes = frame.dtypes
     if not all(type(dtype) is type(np.dtype("object")) and dtype == np.dtype("object")
-               for dtype in frame.dtypes):
-        return None
+               for dtype in dtypes):
+        return _arrow_string_table(frame, schema, dtypes)
     # A custom ExtensionArray may report a genuine NumPy dtype while its
     # Arrow hook emits different values from to_numpy(). Trust only pandas'
     # concrete NumPy backing array, including its name in older pandas releases.
@@ -629,6 +631,46 @@ def prepare_string_input(frame, schema):
            for array in arrays):
         return None
     return _pandas_string_ipc(arrays, schema)
+
+
+def _arrow_string_table(frame, schema, dtypes):
+    """The columns of a frame kept in pandas' Arrow string storage (string[pyarrow], and the
+    str dtype of pandas 3), as an Arrow table of the schema, or None.
+
+    For the row path, pandas converts such a column from that storage, with its missing
+    values as None, so the storage holds the same values. Only pandas' own array classes are
+    trusted to keep them there: a subclass could convert differently. The caller's guards of
+    prepare_string_input (frame, schema, names, size) have passed.
+    """
+    import pandas as pd
+    import pyarrow as pa
+    from pandas.core.arrays import string_arrow
+
+    classes = {pd.arrays.ArrowStringArray,
+               getattr(string_arrow, "ArrowStringArrayNumpySemantics", None)} - {None}
+    if not all(type(dtype) is pd.StringDtype and dtype.storage in ("pyarrow", "pyarrow_numpy")
+               for dtype in dtypes):
+        return None
+    arrays = []
+    for (_, column), field in zip(frame.items(), schema.fields):
+        array = column.array
+        if type(array) not in classes:
+            return None
+        values = pa.chunked_array(array.__arrow_array__())
+        if values.type not in (pa.string(), pa.large_string()):
+            return None
+        try:
+            # Malformed offsets or UTF-8 keep the row path and its error.
+            values.validate(full=True)
+            values = values.cast(pa.string())
+        except (pa.ArrowException, OverflowError):
+            return None
+        if not field.nullable and values.null_count:
+            return None
+        arrays.append(values)
+    # The importer applies the nullability and metadata of the schema, and uploads the table
+    # when it is at least spark.sql.session.localRelationCacheThreshold.
+    return pa.Table.from_arrays(arrays, names=schema.names)
 
 
 def prepare_date_table(frame, schema):
@@ -924,3 +966,27 @@ def prepare_pandas_table(frame, schema, timezone, safecheck, prefers_large_types
         prefers_large_types=prefers_large_types,
     )
     return table.rename_columns(schema.names).cast(arrow_schema)
+
+
+def arrow_decimal_column(values, dtype, name):
+    """The precision, scale and values of a pandas object column of Decimals and other values,
+    as Arrow types and converts it: PySpark's conversion of pandas leaves such a column to
+    Arrow, which takes ints as Decimals and raises for the others."""
+    import pyarrow as pa
+    from pyspark.errors import PySparkTypeError, PySparkValueError
+
+    message = ("Exception thrown when converting pandas.Series (%s) with name '%s' to Arrow "
+               "Array (None)." % (dtype, name))
+    try:
+        array = pa.array(values, from_pandas=True)
+    except pa.lib.ArrowException as e:
+        if isinstance(e, TypeError):
+            raise PySparkTypeError(message) from e
+        raise PySparkValueError(
+            message + " It can be caused by overflows or other unsafe conversions warned by "
+            "Arrow. Arrow safe type check can be disabled by using SQL config "
+            "`spark.sql.execution.pandas.convertToArrowArraySafely`.") from e
+    if not pa.types.is_decimal(array.type):
+        raise PySparkTypeError(message)
+    return array.type.precision, array.type.scale, array.to_pylist()
+

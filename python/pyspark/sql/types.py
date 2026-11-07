@@ -287,6 +287,16 @@ __all__ = [
 ]
 
 
+def _parse_datatype_string(s):
+    """The DataType of the DDL string `s`, as the server of the active session parses it, as
+    PySpark Connect's `_parse_datatype_string`: a schema of fields, as "a INT, b STRING", or a
+    type, as "decimal(10, 2)". It raises NO_ACTIVE_OR_DEFAULT_SESSION without a session, and
+    the errors of Spark's parser."""
+    from pyspark.sql import SparkSession
+
+    return SparkSession.active()._parse_ddl(s)
+
+
 def _parse_datatype_json_string(json_string):
     """Reconstruct a DataType from its Spark JSON (client-side; UDF workers use the
     official pyspark function of the same name). Handles the full recursive grammar:

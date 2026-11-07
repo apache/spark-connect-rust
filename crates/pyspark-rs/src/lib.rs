@@ -81,7 +81,7 @@ use session::{PyHook, PySparkSession, PySparkSessionBuilder};
 use stat::PyStatFunctions;
 use streaming::{
     PyDataStreamReader, PyDataStreamWriter, PyListenerEventStream, PyStreamingQuery,
-    PyStreamingQueryException, PyStreamingQueryManager, PyStreamingQueryStatus, PyTrigger,
+    PyStreamingQueryManager, PyTrigger,
 };
 use types::{
     PyAnsiIntervalType, PyAnyTimeType, PyArrayType, PyAtomicType, PyBinaryType, PyBooleanType,
@@ -163,8 +163,6 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDataStreamWriter>()?;
     m.add_class::<PyTrigger>()?;
     m.add_class::<PyStreamingQuery>()?;
-    m.add_class::<PyStreamingQueryStatus>()?;
-    m.add_class::<PyStreamingQueryException>()?;
     m.add_class::<PyStreamingQueryManager>()?;
     m.add_class::<PyListenerEventStream>()?;
 

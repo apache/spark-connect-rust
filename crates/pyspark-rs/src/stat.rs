@@ -9,16 +9,25 @@ use crate::dataframe::PyDataFrame;
 #[pyclass(name = "DataFrameStatFunctions", module = "pyspark.sql.dataframe")]
 pub struct PyStatFunctions {
     stat: StatFunctions,
+    /// The DataFrame of `df.stat`, as PySpark's `DataFrameStatFunctions.df`.
+    frame: Py<PyDataFrame>,
 }
 
 impl PyStatFunctions {
-    pub fn new(stat: StatFunctions) -> Self {
-        PyStatFunctions { stat }
+    pub fn new(stat: StatFunctions, frame: Py<PyDataFrame>) -> Self {
+        PyStatFunctions { stat, frame }
     }
 }
 
 #[pymethods]
 impl PyStatFunctions {
+    /// The DataFrame of these functions, as PySpark's `DataFrameStatFunctions.df`: `df.stat.df`
+    /// is `df`.
+    #[getter(df)]
+    fn frame(&self, py: Python<'_>) -> Py<PyDataFrame> {
+        self.frame.clone_ref(py)
+    }
+
     /// Pearson correlation between two numeric columns, as PySpark's, whose `method` is only
     /// "pearson".
     ///

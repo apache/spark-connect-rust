@@ -418,16 +418,42 @@ impl SparkSession {
         // Empty data -> send the schema only (no Arrow `data`); the server builds an empty
         // relation from the schema. A zero-row Arrow payload would be empty bytes, which the
         // server cannot parse ("Unexpected end of input. Missing schema.").
-        let data = if rows.is_empty() {
-            None
-        } else {
-            Some(rows_to_arrow_ipc(&rows, &schema)?)
-        };
-        let plan = LogicalPlan::LocalRelation {
+        if rows.is_empty() {
+            let plan = LogicalPlan::LocalRelation {
+                schema: Some(schema),
+                data: None,
+            };
+            return Ok(DataFrame::new(self.clone(), plan));
+        }
+        let batch = rows_to_arrow_batch(&rows, &schema)?;
+        Ok(DataFrame::new(
+            self.clone(),
+            self.local_relation(batch, schema)?,
+        ))
+    }
+
+    /// The local relation of `batch`: inline, without reading the server's configuration, when
+    /// it is smaller than [`LOCAL_RELATION_SETTINGS_BYTES`]; otherwise as the Arrow importer
+    /// sends one, which reads the server's local-relation settings and uploads the data as
+    /// cache artifacts at `spark.sql.session.localRelationCacheThreshold`, as PySpark does. A
+    /// single gRPC message cannot carry a relation beyond the server's message size limit.
+    fn local_relation(
+        &self,
+        batch: arrow::record_batch::RecordBatch,
+        schema: DataType,
+    ) -> Result<LogicalPlan> {
+        if crate::arrow_input::batch_data_size(&batch) >= LOCAL_RELATION_SETTINGS_BYTES {
+            return crate::arrow_input::create_relation(
+                &self.client,
+                vec![batch],
+                Some(schema),
+                None,
+            );
+        }
+        Ok(LogicalPlan::LocalRelation {
             schema: Some(schema),
-            data,
-        };
-        Ok(DataFrame::new(self.clone(), plan))
+            data: Some(batch_to_arrow_ipc(&batch)?),
+        })
     }
 
     /// Create an inline local relation from columns with the same encoding as local rows.
@@ -441,29 +467,39 @@ impl SparkSession {
     ) -> Result<DataFrame> {
         let arrow_schema = arrow::datatypes::Schema::new(schema_to_arrow_fields(&schema)?);
         let row_count = columns.first().map_or(0, |column| column.len());
-        let data = Some(columns_to_arrow_ipc(columns, arrow_schema, row_count)?);
-        let plan = LogicalPlan::LocalRelation {
-            schema: Some(schema),
-            data,
-        };
-        Ok(DataFrame::new(self.clone(), plan))
+        let batch = columns_to_arrow_batch(columns, arrow_schema, row_count)?;
+        Ok(DataFrame::new(
+            self.clone(),
+            self.local_relation(batch, schema)?,
+        ))
     }
 
     /// Internal binding bridge for Arrow IPC already validated and encoded from
-    /// local rows or columns. Retains the row path's inline transport policy.
+    /// local rows or columns. Retains the row path's transport policy: inline, unless the
+    /// IPC is large enough to consult the server's local-relation settings.
     #[doc(hidden)]
     pub fn create_dataframe_from_inline_arrow_ipc(
         &self,
         data: Vec<u8>,
         schema: DataType,
-    ) -> DataFrame {
-        DataFrame::new(
-            self.clone(),
+    ) -> Result<DataFrame> {
+        let plan = if data.len() >= LOCAL_RELATION_SETTINGS_BYTES {
+            let reader =
+                arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(data), None)
+                    .map_err(|e| {
+                        SparkError::connect_msg(format!("Failed to read Arrow IPC: {e}"))
+                    })?;
+            let batches = reader
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|e| SparkError::connect_msg(format!("Failed to read Arrow IPC: {e}")))?;
+            crate::arrow_input::create_relation(&self.client, batches, Some(schema), None)?
+        } else {
             LogicalPlan::LocalRelation {
                 schema: Some(schema),
                 data: Some(data),
-            },
-        )
+            }
+        };
+        Ok(DataFrame::new(self.clone(), plan))
     }
 
     /// Create a local DataFrame from Arrow batches without materializing rows.
@@ -535,10 +571,9 @@ impl SparkSession {
 
     /// Register a Java UDF/UDAF by class name, mirroring the reference
     /// `client.register_java(name, javaClassName, return_type, aggregate)` used by
-    /// `UDFRegistration.registerJavaFunction` / `registerJavaUDAF`: builds a
-    /// `CommonInlineUserDefinedFunction` carrying a `JavaUDF` and sends it as the
-    /// `RegisterFunction` command. `return_type_ddl` is only used for non-aggregate
-    /// functions (matching the reference, which omits the output type when aggregate).
+    /// `UDFRegistration.registerJavaFunction` / `registerJavaUDAF`. `return_type_ddl`, a DDL
+    /// string, is sent unparsed, for the server to parse, as PySpark sends a string: see
+    /// [`SparkSession::register_java_function_with`].
     pub fn register_java_function(
         &self,
         name: &str,
@@ -546,16 +581,35 @@ impl SparkSession {
         return_type_ddl: Option<&str>,
         aggregate: bool,
     ) -> Result<()> {
+        let return_type = return_type_ddl.map(|ddl| DataType::Unparsed {
+            data_type_string: ddl.to_string(),
+        });
+        self.register_java_function_with(name, java_class_name, return_type, aggregate)
+    }
+
+    /// Register a Java UDF/UDAF by class name, of the return type `return_type`, as PySpark's
+    /// `UDFRegistration.registerJavaFunction` / `registerJavaUDAF`: the
+    /// `CommonInlineUserDefinedFunction` of a `JavaUDF`, which is not deterministic, sent as the
+    /// `RegisterFunction` command. `aggregate` is only used without a return type (matching
+    /// the reference, which omits it for a function of an output type).
+    pub fn register_java_function_with(
+        &self,
+        name: &str,
+        java_class_name: &str,
+        return_type: Option<DataType>,
+        aggregate: bool,
+    ) -> Result<()> {
         let mut java_udf = proto::JavaUdf::default();
         java_udf.class_name = java_class_name.to_string();
-        if let Some(ddl) = return_type_ddl {
-            java_udf.output_type = Some(crate::types::DataType::from_ddl(ddl)?.to_proto());
+        if let Some(return_type) = return_type {
+            java_udf.output_type = Some(return_type.to_proto());
         } else {
             java_udf.aggregate = aggregate;
         }
         let mut fun = proto::CommonInlineUserDefinedFunction::default();
         fun.function_name = name.to_string();
-        fun.deterministic = true;
+        // As PySpark's CommonInlineUserDefinedFunction, which is not deterministic by default.
+        fun.deterministic = false;
         fun.function =
             Some(proto::common_inline_user_defined_function::Function::JavaUdf(java_udf));
         crate::dataframe::execute_command_collect(
@@ -661,7 +715,8 @@ impl SparkSession {
 
     /// Add local files, or `file:` URIs, as artifacts of the session, mirroring
     /// `pyspark.sql.SparkSession.addArtifacts(*path)`: a `.jar` is added to the classpath and
-    /// a `.class` to the classes; any other file is not supported without a flag of
+    /// a `.class` to the classes (a Rust extension: PySpark does not upload class files); any
+    /// other file is not supported without a flag of
     /// [`add_artifacts_with`](Self::add_artifacts_with).
     pub fn add_artifacts(&self, paths: &[&str]) -> Result<()> {
         self.add_artifacts_with(paths, false, false, false)
@@ -895,12 +950,17 @@ fn row_width_mismatch(row_index: usize, actual: usize, expected: usize) -> Spark
 
 /// Convert Arrow RecordBatch data to IPC bytes.
 /// Used by createDataFrame to package local data.
-fn rows_to_arrow_ipc(rows: &[Row], schema: &DataType) -> Result<Vec<u8>> {
-    use arrow::datatypes::Schema as ArrowSchema;
+/// The size of a local relation, in Arrow data, from which `createDataFrame` reads the
+/// server's local-relation settings to decide whether to upload it: half of the default
+/// `spark.sql.session.localRelationCacheThreshold`, and well below the default gRPC message
+/// size limit of the server (128 MiB). Smaller relations are sent inline without that RPC.
+const LOCAL_RELATION_SETTINGS_BYTES: usize = 32 << 20;
 
-    if rows.is_empty() {
-        return Ok(vec![]);
-    }
+fn rows_to_arrow_batch(
+    rows: &[Row],
+    schema: &DataType,
+) -> Result<arrow::record_batch::RecordBatch> {
+    use arrow::datatypes::Schema as ArrowSchema;
 
     // Convert our schema to Arrow schema
     let arrow_schema_vec = schema_to_arrow_fields(schema)?;
@@ -925,21 +985,33 @@ fn rows_to_arrow_ipc(rows: &[Row], schema: &DataType) -> Result<Vec<u8>> {
         columns.push(values_to_arrow(&column, &field.data_type)?);
     }
 
-    columns_to_arrow_ipc(columns, arrow_schema, rows.len())
+    columns_to_arrow_batch(columns, arrow_schema, rows.len())
 }
 
-fn columns_to_arrow_ipc(
+/// The Arrow IPC stream of local rows, as the server reads a local relation.
+#[cfg(test)]
+fn rows_to_arrow_ipc(rows: &[Row], schema: &DataType) -> Result<Vec<u8>> {
+    if rows.is_empty() {
+        return Ok(vec![]);
+    }
+    batch_to_arrow_ipc(&rows_to_arrow_batch(rows, schema)?)
+}
+
+fn columns_to_arrow_batch(
     columns: Vec<arrow::array::ArrayRef>,
     arrow_schema: arrow::datatypes::Schema,
     row_count: usize,
-) -> Result<Vec<u8>> {
-    use arrow::ipc::writer::StreamWriter;
+) -> Result<arrow::record_batch::RecordBatch> {
     use arrow::record_batch::RecordBatch;
 
     // Preserve the row count even for a batch without columns.
     let options = arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(row_count));
-    let batch = RecordBatch::try_new_with_options(Arc::new(arrow_schema), columns, &options)
-        .map_err(|e| SparkError::connect_msg(format!("Failed to create Arrow batch: {}", e)))?;
+    RecordBatch::try_new_with_options(Arc::new(arrow_schema), columns, &options)
+        .map_err(|e| SparkError::connect_msg(format!("Failed to create Arrow batch: {}", e)))
+}
+
+fn batch_to_arrow_ipc(batch: &arrow::record_batch::RecordBatch) -> Result<Vec<u8>> {
+    use arrow::ipc::writer::StreamWriter;
 
     // Write to IPC stream
     let mut buffer = Vec::new();
@@ -975,6 +1047,30 @@ fn schema_to_arrow_fields(schema: &DataType) -> Result<Vec<arrow::datatypes::Fie
         }
         _ => Err(SparkError::connect_msg("Schema is not a struct")),
     }
+}
+
+/// The names of nested struct fields as PySpark's `_dedup_names` gives them: a name that occurs
+/// more than once is numbered per occurrence, as `name_0`, `name_1`, and others are kept.
+fn dedup_field_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let names: Vec<&str> = names.into_iter().collect();
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for name in &names {
+        *counts.entry(*name).or_insert(0) += 1;
+    }
+    let mut next: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    names
+        .iter()
+        .map(|&name| {
+            if counts[name] > 1 {
+                let i = next.entry(name).or_insert(0);
+                let deduped = format!("{name}_{i}");
+                *i += 1;
+                deduped
+            } else {
+                name.to_string()
+            }
+        })
+        .collect()
 }
 
 /// Map a Spark `DataType` to its Arrow `DataType`, recursively (array/map/struct included).
@@ -1033,12 +1129,17 @@ fn datatype_to_arrow(dt: &DataType) -> Result<arrow::datatypes::DataType> {
                 false,
             )
         }
+        // The names of nested fields are deduplicated, as PySpark's `_deduplicate_field_names`
+        // does for the Arrow schema it sends. The server cannot read duplicate names, while the
+        // schema of the relation keeps the names of the fields.
         DataType::Struct { fields } => {
+            let names = dedup_field_names(fields.iter().map(|field| field.name.as_str()));
             let f: Fields = fields
                 .iter()
-                .map(|field| {
+                .zip(names)
+                .map(|(field, name)| {
                     Ok(Field::new(
-                        &field.name,
+                        name,
                         datatype_to_arrow(&field.data_type)?,
                         field.nullable,
                     ))
@@ -1188,7 +1289,7 @@ fn values_to_arrow(values: &[&Value], dt: &DataType) -> Result<Arc<dyn arrow::ar
                 .iter()
                 .map(|v| match *v {
                     Value::Null => Ok(None),
-                    Value::Timestamp(t) => Ok(Some(*t)),
+                    Value::Timestamp(t) | Value::TimestampNtz(t) => Ok(Some(*t)),
                     _ => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
@@ -1207,9 +1308,13 @@ fn values_to_arrow(values: &[&Value], dt: &DataType) -> Result<Arc<dyn arrow::ar
                 .iter()
                 .map(|v| match *v {
                     Value::Null => Ok(None),
-                    Value::Timestamp(t) => t.checked_mul(1_000).map(Some).ok_or_else(|| {
-                        SparkError::connect_msg("Timestamp out of range for nanosecond precision")
-                    }),
+                    Value::Timestamp(t) | Value::TimestampNtz(t) => {
+                        t.checked_mul(1_000).map(Some).ok_or_else(|| {
+                            SparkError::connect_msg(
+                                "Timestamp out of range for nanosecond precision",
+                            )
+                        })
+                    }
                     _ => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
@@ -1228,7 +1333,7 @@ fn values_to_arrow(values: &[&Value], dt: &DataType) -> Result<Arc<dyn arrow::ar
                 .map(|v| match *v {
                     Value::Null => Ok(None),
                     Value::Decimal { value, .. } => {
-                        decimal_str_to_unscaled(value, col_scale).map(Some)
+                        decimal_str_to_unscaled(value, *precision, col_scale).map(Some)
                     }
                     _ => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
@@ -1395,17 +1500,11 @@ fn values_to_arrow(values: &[&Value], dt: &DataType) -> Result<Arc<dyn arrow::ar
                 .enumerate()
                 .map(|(i, f)| values_to_arrow(&cols[i], &f.data_type))
                 .collect::<Result<_>>()?;
-            let afields: Fields = fields
-                .iter()
-                .map(|f| {
-                    Ok(Field::new(
-                        &f.name,
-                        datatype_to_arrow(&f.data_type)?,
-                        f.nullable,
-                    ))
-                })
-                .collect::<Result<Vec<_>>>()?
-                .into();
+            // The Arrow fields of the struct, with the deduplicated names of `datatype_to_arrow`,
+            // which the column's type has.
+            let arrow::datatypes::DataType::Struct(afields) = datatype_to_arrow(dt)? else {
+                unreachable!("a struct is a struct")
+            };
             // A struct without fields takes its length from the values.
             StructArray::try_new_with_length(
                 afields,
@@ -1479,37 +1578,85 @@ fn values_to_arrow(values: &[&Value], dt: &DataType) -> Result<Arc<dyn arrow::ar
     }
 }
 
-/// Parse a decimal string (e.g. "-1.50") into an unscaled `i128` at the given scale
-/// (e.g. scale 2 → -150). Pads/truncates the fractional part to `scale` digits.
-fn decimal_str_to_unscaled(s: &str, scale: i32) -> Result<i128> {
-    let s = s.trim();
-    let (neg, s) = match s.strip_prefix('-') {
+/// Converts a decimal string, in fixed-point (`-1.50`) or scientific (`1.5E-7`) notation, to
+/// its unscaled `i128` at `scale` (`-1.50` at scale 2 is -150). The value must fit
+/// `decimal(precision, scale)` exactly, as Arrow requires of the Decimals of PySpark's pandas
+/// conversion: a nonzero digit beyond the scale, or a value beyond the precision, is an error
+/// rather than truncated. The work is bounded by the length of the string, never by its
+/// exponent, so `1E+1000000000` fails at once.
+pub fn decimal_str_to_unscaled(s: &str, precision: i32, scale: i32) -> Result<i128> {
+    if !(1..=38).contains(&precision) || !(0..=precision).contains(&scale) {
+        return Err(SparkError::connect_msg(format!(
+            "unsupported decimal type decimal({precision},{scale})"
+        )));
+    }
+    let invalid = || SparkError::connect_msg(format!("invalid decimal '{s}'"));
+    let inexact = || {
+        SparkError::connect_msg(format!(
+            "decimal '{s}' does not fit decimal({precision},{scale}) exactly"
+        ))
+    };
+    let text = s.trim();
+    let (negative, unsigned) = match text.strip_prefix('-') {
         Some(rest) => (true, rest),
-        None => (false, s.strip_prefix('+').unwrap_or(s)),
+        None => (false, text.strip_prefix('+').unwrap_or(text)),
     };
-    let (int_part, frac_part) = match s.split_once('.') {
-        Some((i, f)) => (i, f),
-        None => (s, ""),
+    let (coefficient, exponent) = match unsigned.split_once(['e', 'E']) {
+        Some((coefficient, exponent)) => {
+            (coefficient, exponent.parse::<i64>().map_err(|_| invalid())?)
+        }
+        None => (unsigned, 0),
     };
-    let scale = scale.max(0) as usize;
-    let mut digits = String::with_capacity(int_part.len() + scale);
-    digits.push_str(int_part);
-    // Pad or truncate the fractional digits to exactly `scale`.
-    let frac: String = frac_part
-        .chars()
-        .chain(std::iter::repeat('0'))
-        .take(scale)
+    let mut point = false;
+    let mut fractional = 0_i128;
+    let mut digits = 0_usize;
+    for byte in coefficient.bytes() {
+        match byte {
+            b'.' if !point => point = true,
+            b'0'..=b'9' => {
+                digits += 1;
+                if point {
+                    fractional += 1;
+                }
+            }
+            _ => return Err(invalid()),
+        }
+    }
+    if digits == 0 {
+        return Err(invalid());
+    }
+    // The digits from the first nonzero one: the value is them times 10^(exponent -
+    // fractional), and the unscaled value them times 10^shift.
+    let significant: Vec<u8> = coefficient
+        .bytes()
+        .filter(|b| *b != b'.')
+        .skip_while(|b| *b == b'0')
         .collect();
-    digits.push_str(&frac);
-    let digits = digits.trim_start_matches('0');
-    let mag: i128 = if digits.is_empty() {
-        0
+    // i128 arithmetic, so that i64::MIN and i64::MAX exponents cannot overflow.
+    let shift = i128::from(scale) + i128::from(exponent) - fractional;
+    let dropped = if shift < 0 {
+        (-shift).min(significant.len() as i128) as usize
     } else {
-        digits
-            .parse::<i128>()
-            .map_err(|e| SparkError::connect_msg(format!("invalid decimal '{s}': {e}")))?
+        0
     };
-    Ok(if neg { -mag } else { mag })
+    let (kept, lost) = significant.split_at(significant.len() - dropped);
+    if lost.iter().any(|b| *b != b'0') {
+        return Err(inexact());
+    }
+    if kept.is_empty() {
+        return Ok(0);
+    }
+    if kept.len() as i128 + shift.max(0) > i128::from(precision) {
+        return Err(inexact());
+    }
+    // At most 38 digits: no overflow.
+    let mut value = kept
+        .iter()
+        .fold(0_i128, |value, digit| value * 10 + i128::from(digit - b'0'));
+    for _ in 0..shift.max(0) {
+        value *= 10;
+    }
+    Ok(if negative { -value } else { value })
 }
 
 #[cfg(test)]
@@ -1521,6 +1668,150 @@ mod tests {
     use arrow::ipc::reader::StreamReader;
     use arrow::record_batch::RecordBatch;
     use std::io::Cursor;
+
+    #[test]
+    fn decimal_strings_convert_in_fixed_point_and_scientific_notation() {
+        for (text, precision, scale, expected) in [
+            ("1E+3", 18, 7, 10_000_000_000),
+            ("1E-7", 18, 7, 1),
+            ("-1E-7", 18, 7, -1),
+            ("+1.25e+2", 38, 2, 12_500),
+            ("-1.25E-2", 38, 4, -125),
+            ("0001.2500e+2", 38, 2, 12_500),
+            ("0E+999999999", 18, 7, 0),
+            ("-0E-999999999", 18, 7, 0),
+            ("123.45", 38, 2, 12_345),
+            ("-123.450", 38, 2, -12_345),
+            (".00100E+3", 38, 2, 100),
+            ("  +1.e2  ", 38, 0, 100),
+            // Trailing zeros beyond the scale lose nothing.
+            ("1.2300E+0", 3, 2, 123),
+            ("1.2300", 3, 2, 123),
+            ("9.9E+1", 2, 0, 99),
+            ("99999999999.9999999", 18, 7, 999_999_999_999_999_999),
+            ("-99999999999.9999999", 18, 7, -999_999_999_999_999_999),
+            ("1E-38", 38, 38, 1),
+            // A long coefficient may still fit once it is scaled.
+            ("100000000000000000000000000000000000000000E-41", 38, 0, 1),
+        ] {
+            assert_eq!(
+                decimal_str_to_unscaled(text, precision, scale).unwrap(),
+                expected,
+                "{text}"
+            );
+        }
+        let max = "9".repeat(38);
+        assert_eq!(
+            decimal_str_to_unscaled(&max, 38, 0).unwrap(),
+            max.parse::<i128>().unwrap()
+        );
+        assert_eq!(
+            decimal_str_to_unscaled(&format!("-{max}"), 38, 0).unwrap(),
+            -max.parse::<i128>().unwrap()
+        );
+    }
+
+    #[test]
+    fn decimal_strings_that_do_not_fit_exactly_are_errors() {
+        for (text, precision, scale) in [
+            // A nonzero digit beyond the scale, in either notation: PySpark's Arrow
+            // conversion of a pandas column fails rather than dropping it.
+            ("1.5E-7", 18, 7),
+            ("-1.5E-7", 18, 7),
+            ("1E-8", 18, 7),
+            ("0.00000015", 18, 7),
+            ("1.235", 10, 2),
+            ("1E-9223372036854775808", 18, 7),
+            // Beyond the precision.
+            ("123456E-3", 9, 7),
+            ("1E+2", 2, 0),
+            ("-1E+2", 2, 0),
+            ("100", 2, 0),
+            ("100000000000", 18, 7),
+            ("1E+38", 38, 0),
+            ("1E+999999999", 38, 0),
+            ("1E+9223372036854775807", 38, 0),
+            ("170141183460469231731687303715884105727", 38, 0),
+        ] {
+            let error = decimal_str_to_unscaled(text, precision, scale).unwrap_err();
+            assert!(
+                error.to_string().contains("does not fit"),
+                "{text}: {error}"
+            );
+        }
+        for text in [
+            "",
+            ".",
+            "-",
+            "+",
+            "1E",
+            "E3",
+            "1E1E1",
+            "1.2.3",
+            "1E1.5",
+            "NaN",
+            "Infinity",
+            "1E 3",
+            "1_000",
+            "1E+9223372036854775808",
+        ] {
+            let error = decimal_str_to_unscaled(text, 38, 0).unwrap_err();
+            assert!(
+                error.to_string().contains("invalid decimal"),
+                "{text}: {error}"
+            );
+        }
+        // Spark has no such decimal types.
+        for (precision, scale) in [(0, 0), (39, 0), (10, -2), (10, 11), (38, i32::MAX)] {
+            assert!(decimal_str_to_unscaled("1", precision, scale).is_err());
+        }
+    }
+
+    #[test]
+    fn scientific_decimal_ipc_cells_match_fixed_point() {
+        use arrow::array::Decimal128Array;
+        let values = [
+            "1E+3",
+            "1E-7",
+            "-1E-7",
+            "-0E+3",
+            "99999999999.9999999",
+            "-99999999999.9999999",
+        ];
+        let rows: Vec<_> = values
+            .iter()
+            .map(|value| {
+                row(vec![Value::Decimal {
+                    value: value.to_string(),
+                    precision: None,
+                    scale: None,
+                }])
+            })
+            .collect();
+        let batch = read_batch(
+            &rows,
+            &schema(vec![DataType::Decimal {
+                precision: 18,
+                scale: 7,
+            }]),
+        );
+        let array = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Decimal128Array>()
+            .unwrap();
+        assert_eq!(
+            array.values().as_ref(),
+            &[
+                10_000_000_000,
+                1,
+                -1,
+                0,
+                999_999_999_999_999_999,
+                -999_999_999_999_999_999
+            ]
+        );
+    }
 
     fn struct_field(name: &str, data_type: DataType) -> crate::types::StructField {
         crate::types::StructField {
@@ -1916,6 +2207,15 @@ mod tests {
             &Int16Array::from(vec![Some(656)]),
         );
         assert_eq!(actual.column(6).null_count(), 3);
+    }
+
+    #[test]
+    fn nested_duplicate_field_names_are_numbered_per_occurrence_as_pyspark() {
+        assert_eq!(dedup_field_names(["a", "b"]), vec!["a", "b"]);
+        assert_eq!(
+            dedup_field_names(["a", "a", "b", "a"]),
+            vec!["a_0", "a_1", "b", "a_2"]
+        );
     }
 
     #[test]
