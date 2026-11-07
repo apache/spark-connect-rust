@@ -14,10 +14,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Small subset of pyspark.sql.utils needed by the drop-in and vendored modules."""
+"""Small subset of pyspark.sql.utils needed by the drop-in and vendored modules, and the
+exceptions that PySpark's re-exports from ``pyspark.errors``, of their import path before it."""
 
 from enum import Enum
 from typing import Any, Union, TYPE_CHECKING, Sequence
+
+# Re-exported, as PySpark's pyspark.sql.utils does: `from pyspark.sql.utils import
+# AnalysisException` is their import path before pyspark.errors.
+from pyspark.errors import (  # noqa: F401
+    AnalysisException,
+    ParseException,
+    IllegalArgumentException,
+    StreamingQueryException,
+    QueryExecutionException,
+    PythonException,
+    UnknownException,
+    SparkUpgradeException,
+    PySparkImportError,
+    PySparkNotImplementedError,
+    PySparkRuntimeError,
+)
+from pyspark.errors.exceptions.captured import CapturedException  # noqa: F401
 
 if TYPE_CHECKING:
     from pyspark.pandas._typing import IndexOpsLike, SeriesOrIndex

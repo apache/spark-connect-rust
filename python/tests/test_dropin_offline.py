@@ -944,6 +944,42 @@ def test_functions_exports_fresh_process():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_sql_utils_reexports_the_exceptions_of_pyspark(mock_connect):
+    # As PySpark's pyspark.sql.utils: the exceptions of pyspark.errors, of their import path
+    # before it, which the errors of the server are instances of.
+    import pyspark.errors as errors
+    import pyspark.sql.utils as utils
+    from pyspark.errors.exceptions.captured import CapturedException
+
+    for name in [
+        "AnalysisException",
+        "ParseException",
+        "IllegalArgumentException",
+        "StreamingQueryException",
+        "QueryExecutionException",
+        "PythonException",
+        "UnknownException",
+        "SparkUpgradeException",
+        "PySparkImportError",
+        "PySparkNotImplementedError",
+        "PySparkRuntimeError",
+    ]:
+        assert getattr(utils, name) is getattr(errors, name), name
+    assert utils.CapturedException is CapturedException
+
+    spark, service = mock_connect
+    classes = ["org.apache.spark.sql.AnalysisException", "java.lang.Exception"]
+    message = "[TABLE_OR_VIEW_NOT_FOUND] The table or view `t` cannot be found."
+    service.execute_error = (message, classes[0], _error_info(classes))
+    service.confs = {
+        "spark.sql.connect.serverStacktrace.enabled": "false",
+        "spark.sql.pyspark.jvmStacktrace.enabled": "false",
+    }
+    with pytest.raises(utils.AnalysisException) as error:
+        spark.range(1).collect()
+    assert "TABLE_OR_VIEW_NOT_FOUND" in str(error.value)
+
+
 def test_functions_build_columns():
     from pyspark.sql import functions as F
     c = F.col("id")
