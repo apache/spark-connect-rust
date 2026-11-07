@@ -147,7 +147,8 @@ impl LocalRowIterator {
                         if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =
                             resp.response_type
                         {
-                            return Some(decode_arrow_batch(&batch));
+                            let schema = self.schema.lock().unwrap_or_else(|p| p.into_inner());
+                            return Some(decode_arrow_batch_of(&batch, schema.as_ref()));
                         }
                         // Metrics/progress response: keep pulling for a batch.
                     }
@@ -221,7 +222,11 @@ fn spawn_prefetch(
                     if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =
                         resp.response_type
                     {
-                        match decode_arrow_batch(&batch) {
+                        let decoded = {
+                            let schema = schema.lock().unwrap_or_else(|p| p.into_inner());
+                            decode_arrow_batch_of(&batch, schema.as_ref())
+                        };
+                        match decoded {
                             Ok(rows) => {
                                 // A send error means the consumer dropped the
                                 // iterator; stop fetching.
@@ -819,7 +824,7 @@ impl DataFrame {
             if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =
                 resp.response_type
             {
-                let batch_rows = decode_arrow_batch(&batch)?;
+                let batch_rows = decode_arrow_batch_of(&batch, schema.as_ref())?;
                 rows.extend(batch_rows);
             }
         }
@@ -2318,6 +2323,26 @@ fn random_seed() -> i64 {
 pub(crate) fn decode_arrow_batch(
     batch: &proto::execute_plan_response::ArrowBatch,
 ) -> Result<Vec<Row>> {
+    decode_arrow_batch_of(batch, None)
+}
+
+/// The fields of `schema`, a struct of `columns` fields, for the columns of a batch: none of
+/// another schema, whose names the batch keeps.
+fn spark_fields(schema: Option<&DataType>, columns: usize) -> Option<&[crate::types::StructField]> {
+    match schema {
+        Some(DataType::Struct { fields }) if fields.len() == columns => Some(fields),
+        _ => None,
+    }
+}
+
+/// The rows of `batch`, of the names of `schema`, the schema of the result that the server sends
+/// before the rows, if any: as PySpark's `ArrowTableToRowsConversion` builds them by the schema,
+/// the fields of nested structs have the names of the schema, which keep the duplicate names
+/// that the Arrow data of the server numbers (`a_0`, `a_1`).
+pub(crate) fn decode_arrow_batch_of(
+    batch: &proto::execute_plan_response::ArrowBatch,
+    spark_schema: Option<&DataType>,
+) -> Result<Vec<Row>> {
     use arrow::ipc::reader::StreamReader;
     use std::io::Cursor;
 
@@ -2342,15 +2367,22 @@ pub(crate) fn decode_arrow_batch(
         if num_rows == 0 {
             continue;
         }
-        let field_names = schema
-            .fields()
-            .iter()
-            .map(|field| field.name().clone())
-            .collect::<Arc<[String]>>();
+        let fields = spark_fields(spark_schema, record_batch.num_columns());
+        let field_names = match fields {
+            Some(fields) => fields.iter().map(|field| field.name.clone()).collect(),
+            None => schema
+                .fields()
+                .iter()
+                .map(|field| field.name().clone())
+                .collect::<Arc<[String]>>(),
+        };
         let layouts = record_batch
             .columns()
             .iter()
-            .map(|column| ArrowValueLayout::new(column.as_ref()))
+            .enumerate()
+            .map(|(i, column)| {
+                ArrowValueLayout::of(column.as_ref(), fields.map(|fields| &fields[i].data_type))
+            })
             .collect::<Vec<_>>();
 
         for row_idx in 0..num_rows {
@@ -2551,8 +2583,25 @@ enum ArrowValueDecoder<'a> {
 }
 
 impl<'a> ArrowValueLayout<'a> {
+    #[cfg(test)]
     fn new(array: &'a dyn arrow::array::Array) -> Self {
+        Self::of(array, None)
+    }
+
+    /// The layout of `array`, of the Spark type `data_type` if known: the fields of its structs,
+    /// also in arrays, maps and user-defined types, have the names of the type.
+    fn of(array: &'a dyn arrow::array::Array, data_type: Option<&DataType>) -> Self {
         use arrow::array::*;
+
+        // A user-defined type is in the Arrow data of its SQL type.
+        let mut data_type = data_type;
+        while let Some(DataType::Udt {
+            sql_type: Some(sql_type),
+            ..
+        }) = data_type
+        {
+            data_type = Some(sql_type);
+        }
 
         // Resolution never fails: null parents and empty containers must not
         // reject unsupported children that are never read.
@@ -2628,9 +2677,13 @@ impl<'a> ArrowValueLayout<'a> {
         } else if let Some(array) = any.downcast_ref::<IntervalMonthDayNanoArray>() {
             ArrowValueDecoder::IntervalMonthDayNano(array)
         } else if let Some(array) = any.downcast_ref::<ListArray>() {
+            let element_type = match data_type {
+                Some(DataType::Array { element_type, .. }) => Some(element_type.as_ref()),
+                _ => None,
+            };
             ArrowValueDecoder::List {
                 array,
-                child: Box::new(Self::new(array.values().as_ref())),
+                child: Box::new(Self::of(array.values().as_ref(), element_type)),
             }
         } else if let Some(array) = any.downcast_ref::<StructArray>() {
             let fields = array.fields();
@@ -2640,12 +2693,27 @@ impl<'a> ArrowValueLayout<'a> {
                     .get("variant")
                     .is_some_and(|value| value == "true")
             });
+            let spark_fields = match data_type {
+                Some(DataType::Struct { fields: spark }) if spark.len() == fields.len() => {
+                    Some(spark)
+                }
+                _ => None,
+            };
             ArrowValueDecoder::Struct {
-                names: fields.iter().map(|field| field.name().clone()).collect(),
+                names: match spark_fields {
+                    Some(spark) => spark.iter().map(|field| field.name.clone()).collect(),
+                    None => fields.iter().map(|field| field.name().clone()).collect(),
+                },
                 children: array
                     .columns()
                     .iter()
-                    .map(|child| Self::new(child.as_ref()))
+                    .enumerate()
+                    .map(|(i, child)| {
+                        Self::of(
+                            child.as_ref(),
+                            spark_fields.map(|spark| &spark[i].data_type),
+                        )
+                    })
                     .collect(),
                 variant_fields: is_variant.then(|| {
                     (
@@ -2655,11 +2723,19 @@ impl<'a> ArrowValueLayout<'a> {
                 }),
             }
         } else if let Some(array) = any.downcast_ref::<MapArray>() {
+            let (key_type, value_type) = match data_type {
+                Some(DataType::Map {
+                    key_type,
+                    value_type,
+                    ..
+                }) => (Some(key_type.as_ref()), Some(value_type.as_ref())),
+                _ => (None, None),
+            };
             ArrowValueDecoder::Map {
                 array,
                 children: Box::new((
-                    Self::new(array.keys().as_ref()),
-                    Self::new(array.values().as_ref()),
+                    Self::of(array.keys().as_ref(), key_type),
+                    Self::of(array.values().as_ref(), value_type),
                 )),
             }
         } else {
@@ -2950,6 +3026,77 @@ mod nested_decode_tests {
         }
         // The IPC buffers and borrowed column layouts have already been dropped.
         assert_eq!(rows[2].get(1), Some(&Value::String("é\0雪".into())));
+    }
+
+    #[test]
+    fn nested_struct_fields_take_the_names_of_the_schema_of_the_result() {
+        // As PySpark's ArrowTableToRowsConversion, which builds the rows by the schema of the
+        // result: the fields of nested structs, also in arrays and maps, have the names of the
+        // schema, which keep the duplicate names that the server's Arrow data numbers.
+        use crate::types::{DataType as Spark, StructField as SparkField};
+        let field = |name: &str, data_type: Spark| SparkField {
+            name: name.to_string(),
+            data_type,
+            nullable: true,
+            metadata: Default::default(),
+        };
+        let pair = || {
+            StructArray::from(vec![
+                (
+                    Arc::new(Field::new("a_0", DataType::Int32, true)),
+                    Arc::new(Int32Array::from(vec![1])) as ArrayRef,
+                ),
+                (
+                    Arc::new(Field::new("a_1", DataType::Int32, true)),
+                    Arc::new(Int32Array::from(vec![2])) as ArrayRef,
+                ),
+            ])
+        };
+        let list = ListArray::new(
+            Arc::new(Field::new("element", pair().data_type().clone(), true)),
+            arrow::buffer::OffsetBuffer::from_lengths([1]),
+            Arc::new(pair()),
+            None,
+        );
+        let batch = encoded_batches(
+            vec![("v", Arc::new(pair()) as ArrayRef), ("w", Arc::new(list))],
+            1,
+            false,
+        );
+        let pair_type = || Spark::Struct {
+            fields: vec![field("a", Spark::Integer), field("a", Spark::Integer)],
+        };
+        let schema = Spark::Struct {
+            fields: vec![
+                field("v", pair_type()),
+                field(
+                    "w",
+                    Spark::Array {
+                        element_type: Box::new(pair_type()),
+                        contains_null: true,
+                    },
+                ),
+            ],
+        };
+        let rows = decode_arrow_batch_of(&batch, Some(&schema)).unwrap();
+        assert_eq!(rows[0].fields(), &["v", "w"]);
+        assert_eq!(as_struct(rows[0].get(0).unwrap()).fields(), &["a", "a"]);
+        let Some(Value::List(items)) = rows[0].get(1) else {
+            panic!("expected a list");
+        };
+        assert_eq!(as_struct(&items[0]).fields(), &["a", "a"]);
+        assert_eq!(
+            as_struct(&items[0]).values(),
+            &[Value::Integer(1), Value::Integer(2)]
+        );
+        // Without the schema, or of a schema of another shape, the names of the Arrow data.
+        let other = Spark::Struct {
+            fields: vec![field("v", Spark::Integer)],
+        };
+        for schema in [None, Some(&other)] {
+            let rows = decode_arrow_batch_of(&batch, schema).unwrap();
+            assert_eq!(as_struct(rows[0].get(0).unwrap()).fields(), &["a_0", "a_1"]);
+        }
     }
 
     #[test]

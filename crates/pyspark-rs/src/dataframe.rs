@@ -3727,24 +3727,56 @@ fn udt_field_converters(
 /// Whether `data_type` holds a year-month interval, also nested in an array, a map, a struct or
 /// a user-defined type (`pyspark.sql.types._has_type`).
 fn has_year_month_interval(data_type: &spark_connect::types::DataType) -> bool {
+    has_type(data_type, &|t| {
+        matches!(t, spark_connect::types::DataType::YearMonthInterval { .. })
+    })
+}
+
+/// Whether `data_type` is of `is`, also nested in an array, a map, a struct or a user-defined
+/// type.
+fn has_type(
+    data_type: &spark_connect::types::DataType,
+    is: &dyn Fn(&spark_connect::types::DataType) -> bool,
+) -> bool {
     use spark_connect::types::DataType;
+    if is(data_type) {
+        return true;
+    }
     match data_type {
-        DataType::YearMonthInterval { .. } => true,
-        DataType::Struct { fields } => fields
-            .iter()
-            .any(|field| has_year_month_interval(&field.data_type)),
-        DataType::Array { element_type, .. } => has_year_month_interval(element_type),
+        DataType::Struct { fields } => fields.iter().any(|field| has_type(&field.data_type, is)),
+        DataType::Array { element_type, .. } => has_type(element_type, is),
         DataType::Map {
             key_type,
             value_type,
             ..
-        } => has_year_month_interval(key_type) || has_year_month_interval(value_type),
+        } => has_type(key_type, is) || has_type(value_type, is),
         DataType::Udt {
             sql_type: Some(sql_type),
             ..
-        } => has_year_month_interval(sql_type),
+        } => has_type(sql_type, is),
         _ => false,
     }
+}
+
+/// Raises as PySpark's `collect` does for a result of `schema` with a calendar interval: it
+/// checks the Arrow schema of the result with `from_arrow_schema`, which has no type of the
+/// Arrow `month_day_nano_interval` of a calendar interval. Its `toLocalIterator` does not.
+fn check_arrow_schema(
+    py: Python<'_>,
+    schema: Option<&spark_connect::types::DataType>,
+) -> PyResult<()> {
+    let calendar = |t: &spark_connect::types::DataType| {
+        matches!(t, spark_connect::types::DataType::CalendarInterval)
+    };
+    if schema.is_some_and(|schema| has_type(schema, &calendar)) {
+        return Err(crate::column::raise_pyspark(
+            py,
+            "PySparkTypeError",
+            "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION",
+            &[("data_type", "month_day_nano_interval")],
+        ));
+    }
+    Ok(())
 }
 
 /// Raises as PySpark's Arrow conversion of the rows does for a result of `schema` with a
@@ -3775,6 +3807,7 @@ fn rows_to_py(
     rows: Vec<spark_connect::row::Row>,
     schema: Option<&spark_connect::types::DataType>,
 ) -> PyResult<Vec<PyRow>> {
+    check_arrow_schema(py, schema)?;
     check_collectable(py, schema)?;
     let converters = udt_field_converters(py, schema)?;
     Ok(rows
