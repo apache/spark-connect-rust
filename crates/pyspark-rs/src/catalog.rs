@@ -1,6 +1,7 @@
 //! PyO3 wrapper for spark_connect::catalog::Catalog.
 
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use spark_connect::catalog::{
     Catalog, CatalogMetadata, Column, Database, Function, Table, TablePartition,
 };
@@ -74,201 +75,96 @@ fn table_options(
     Ok(map)
 }
 
-/// `pyspark.sql.catalog.CatalogMetadata`.
-#[pyclass(name = "CatalogMetadata", module = "pyspark.sql.catalog")]
-pub struct PyCatalogMetadata {
-    inner: CatalogMetadata,
-}
-#[pymethods]
-impl PyCatalogMetadata {
-    #[getter]
-    fn name(&self) -> String {
-        self.inner.name.clone()
-    }
-    #[getter]
-    fn description(&self) -> Option<String> {
-        self.inner.description.clone()
-    }
-    fn __repr__(&self) -> String {
-        format!(
-            "CatalogMetadata(name='{}', description={:?})",
-            self.inner.name, self.inner.description
-        )
+/// The NamedTuple of `pyspark.sql.catalog` of a result of the catalog, as PySpark's `Catalog`
+/// returns: `CatalogMetadata`, `Database`, `Table`, `Column`, `Function` or `TablePartition`.
+trait NamedTuple {
+    /// The name of the NamedTuple, and its fields.
+    fn fields<'py>(&self, py: Python<'py>) -> PyResult<(&'static str, Bound<'py, PyDict>)>;
+
+    fn named_tuple(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let (name, fields) = self.fields(py)?;
+        Ok(py
+            .import("pyspark.sql.catalog")?
+            .getattr(name)?
+            .call((), Some(&fields))?
+            .unbind())
     }
 }
 
-/// `pyspark.sql.catalog.Database`.
-#[pyclass(name = "Database", module = "pyspark.sql.catalog")]
-pub struct PyDatabase {
-    inner: Database,
-}
-#[pymethods]
-impl PyDatabase {
-    #[getter]
-    fn name(&self) -> String {
-        self.inner.name.clone()
-    }
-    #[getter]
-    fn catalog(&self) -> Option<String> {
-        self.inner.catalog.clone()
-    }
-    #[getter]
-    fn description(&self) -> Option<String> {
-        self.inner.description.clone()
-    }
-    #[getter]
-    fn locationUri(&self) -> String {
-        self.inner.location_uri.clone()
-    }
-    fn __repr__(&self) -> String {
-        format!("Database(name='{}')", self.inner.name)
+impl NamedTuple for CatalogMetadata {
+    fn fields<'py>(&self, py: Python<'py>) -> PyResult<(&'static str, Bound<'py, PyDict>)> {
+        let fields = PyDict::new(py);
+        fields.set_item("name", &self.name)?;
+        fields.set_item("description", &self.description)?;
+        Ok(("CatalogMetadata", fields))
     }
 }
 
-/// `pyspark.sql.catalog.Table`.
-#[pyclass(name = "Table", module = "pyspark.sql.catalog")]
-pub struct PyTable {
-    inner: Table,
-}
-#[pymethods]
-impl PyTable {
-    #[getter]
-    fn name(&self) -> String {
-        self.inner.name.clone()
-    }
-    #[getter]
-    fn catalog(&self) -> Option<String> {
-        self.inner.catalog.clone()
-    }
-    #[getter]
-    fn namespace(&self) -> Option<Vec<String>> {
-        self.inner.namespace.clone()
-    }
-    #[getter]
-    fn description(&self) -> Option<String> {
-        self.inner.description.clone()
-    }
-    #[getter]
-    fn tableType(&self) -> String {
-        self.inner.table_type.clone()
-    }
-    #[getter]
-    fn isTemporary(&self) -> bool {
-        self.inner.is_temporary
-    }
-    /// The single-element namespace as a database name, else None (mirrors `Table.database`).
-    #[getter]
-    fn database(&self) -> Option<String> {
-        match &self.inner.namespace {
-            Some(ns) if ns.len() == 1 => Some(ns[0].clone()),
-            _ => None,
-        }
-    }
-    fn __repr__(&self) -> String {
-        format!(
-            "Table(name='{}', tableType='{}')",
-            self.inner.name, self.inner.table_type
-        )
+impl NamedTuple for Database {
+    fn fields<'py>(&self, py: Python<'py>) -> PyResult<(&'static str, Bound<'py, PyDict>)> {
+        let fields = PyDict::new(py);
+        fields.set_item("name", &self.name)?;
+        fields.set_item("catalog", &self.catalog)?;
+        fields.set_item("description", &self.description)?;
+        fields.set_item("locationUri", &self.location_uri)?;
+        Ok(("Database", fields))
     }
 }
 
-/// `pyspark.sql.catalog.Column` (exposed as `CatalogColumn` in the extension to avoid
-/// colliding with the expression `Column`; re-exported as `Column` by pyspark.sql.catalog).
-#[pyclass(name = "CatalogColumn", module = "pyspark.sql.catalog")]
-pub struct PyCatalogColumn {
-    inner: Column,
-}
-#[pymethods]
-impl PyCatalogColumn {
-    #[getter]
-    fn name(&self) -> String {
-        self.inner.name.clone()
-    }
-    #[getter]
-    fn description(&self) -> Option<String> {
-        self.inner.description.clone()
-    }
-    #[getter]
-    fn dataType(&self) -> String {
-        self.inner.data_type.clone()
-    }
-    #[getter]
-    fn nullable(&self) -> bool {
-        self.inner.nullable
-    }
-    #[getter]
-    fn isPartition(&self) -> bool {
-        self.inner.is_partition
-    }
-    #[getter]
-    fn isBucket(&self) -> bool {
-        self.inner.is_bucket
-    }
-    #[getter]
-    fn isCluster(&self) -> bool {
-        self.inner.is_cluster
-    }
-    fn __repr__(&self) -> String {
-        format!(
-            "Column(name='{}', dataType='{}')",
-            self.inner.name, self.inner.data_type
-        )
+impl NamedTuple for Table {
+    fn fields<'py>(&self, py: Python<'py>) -> PyResult<(&'static str, Bound<'py, PyDict>)> {
+        let fields = PyDict::new(py);
+        fields.set_item("name", &self.name)?;
+        fields.set_item("catalog", &self.catalog)?;
+        fields.set_item("namespace", &self.namespace)?;
+        fields.set_item("description", &self.description)?;
+        fields.set_item("tableType", &self.table_type)?;
+        fields.set_item("isTemporary", self.is_temporary)?;
+        Ok(("Table", fields))
     }
 }
 
-/// `pyspark.sql.catalog.Function`.
-#[pyclass(name = "Function", module = "pyspark.sql.catalog")]
-pub struct PyFunction {
-    inner: Function,
-}
-#[pymethods]
-impl PyFunction {
-    #[getter]
-    fn name(&self) -> String {
-        self.inner.name.clone()
-    }
-    #[getter]
-    fn catalog(&self) -> Option<String> {
-        self.inner.catalog.clone()
-    }
-    #[getter]
-    fn namespace(&self) -> Option<Vec<String>> {
-        self.inner.namespace.clone()
-    }
-    #[getter]
-    fn description(&self) -> Option<String> {
-        self.inner.description.clone()
-    }
-    #[getter]
-    fn className(&self) -> String {
-        self.inner.class_name.clone()
-    }
-    #[getter]
-    fn isTemporary(&self) -> bool {
-        self.inner.is_temporary
-    }
-    fn __repr__(&self) -> String {
-        format!(
-            "Function(name='{}', className='{}')",
-            self.inner.name, self.inner.class_name
-        )
+impl NamedTuple for Column {
+    fn fields<'py>(&self, py: Python<'py>) -> PyResult<(&'static str, Bound<'py, PyDict>)> {
+        let fields = PyDict::new(py);
+        fields.set_item("name", &self.name)?;
+        fields.set_item("description", &self.description)?;
+        fields.set_item("dataType", &self.data_type)?;
+        fields.set_item("nullable", self.nullable)?;
+        fields.set_item("isPartition", self.is_partition)?;
+        fields.set_item("isBucket", self.is_bucket)?;
+        fields.set_item("isCluster", self.is_cluster)?;
+        Ok(("Column", fields))
     }
 }
 
-/// `pyspark.sql.catalog.TablePartition`.
-#[pyclass(name = "TablePartition", module = "pyspark.sql.catalog")]
-pub struct PyTablePartition {
-    inner: TablePartition,
+impl NamedTuple for Function {
+    fn fields<'py>(&self, py: Python<'py>) -> PyResult<(&'static str, Bound<'py, PyDict>)> {
+        let fields = PyDict::new(py);
+        fields.set_item("name", &self.name)?;
+        fields.set_item("catalog", &self.catalog)?;
+        fields.set_item("namespace", &self.namespace)?;
+        fields.set_item("description", &self.description)?;
+        fields.set_item("className", &self.class_name)?;
+        fields.set_item("isTemporary", self.is_temporary)?;
+        Ok(("Function", fields))
+    }
 }
-#[pymethods]
-impl PyTablePartition {
-    #[getter]
-    fn partition(&self) -> String {
-        self.inner.partition.clone()
+
+impl NamedTuple for TablePartition {
+    fn fields<'py>(&self, py: Python<'py>) -> PyResult<(&'static str, Bound<'py, PyDict>)> {
+        let fields = PyDict::new(py);
+        fields.set_item("partition", &self.partition)?;
+        Ok(("TablePartition", fields))
     }
-    fn __repr__(&self) -> String {
-        format!("TablePartition(partition='{}')", self.inner.partition)
-    }
+}
+
+/// The NamedTuples of `results`.
+fn named_tuples<T: NamedTuple>(py: Python<'_>, results: Vec<T>) -> PyResult<Vec<Py<PyAny>>> {
+    results
+        .iter()
+        .map(|result| result.named_tuple(py))
+        .collect()
 }
 
 /// Python wrapper for Spark Catalog.
@@ -309,18 +205,13 @@ impl PyCatalog {
 
     /// List catalogs. Mirrors `Catalog.listCatalogs(pattern=None) -> List[CatalogMetadata]`.
     #[pyo3(signature = (pattern=None))]
-    fn listCatalogs(
-        &self,
-        py: Python<'_>,
-        pattern: Option<&str>,
-    ) -> PyResult<Vec<PyCatalogMetadata>> {
-        Ok(self
-            .detached(py, |catalog| {
+    fn listCatalogs(&self, py: Python<'_>, pattern: Option<&str>) -> PyResult<Vec<Py<PyAny>>> {
+        named_tuples(
+            py,
+            self.detached(py, |catalog| {
                 catalog.list_catalogs_typed(pattern).map_err(Box::new)
-            })?
-            .into_iter()
-            .map(|inner| PyCatalogMetadata { inner })
-            .collect())
+            })?,
+        )
     }
 
     /// Get current database.
@@ -337,14 +228,13 @@ impl PyCatalog {
 
     /// List databases. Mirrors `Catalog.listDatabases(pattern=None) -> List[Database]`.
     #[pyo3(signature = (pattern=None))]
-    fn listDatabases(&self, py: Python<'_>, pattern: Option<&str>) -> PyResult<Vec<PyDatabase>> {
-        Ok(self
-            .detached(py, |catalog| {
+    fn listDatabases(&self, py: Python<'_>, pattern: Option<&str>) -> PyResult<Vec<Py<PyAny>>> {
+        named_tuples(
+            py,
+            self.detached(py, |catalog| {
                 catalog.list_databases_typed(pattern).map_err(Box::new)
-            })?
-            .into_iter()
-            .map(|inner| PyDatabase { inner })
-            .collect())
+            })?,
+        )
     }
 
     /// Check if database exists.
@@ -355,12 +245,11 @@ impl PyCatalog {
     }
 
     /// Get database info. Mirrors `Catalog.getDatabase(dbName) -> Database`.
-    fn getDatabase(&self, py: Python<'_>, dbName: &str) -> PyResult<PyDatabase> {
-        Ok(PyDatabase {
-            inner: self.detached(py, |catalog| {
-                catalog.get_database_typed(dbName).map_err(Box::new)
-            })?,
-        })
+    fn getDatabase(&self, py: Python<'_>, dbName: &str) -> PyResult<Py<PyAny>> {
+        self.detached(py, |catalog| {
+            catalog.get_database_typed(dbName).map_err(Box::new)
+        })?
+        .named_tuple(py)
     }
 
     /// List tables. Mirrors `Catalog.listTables(dbName=None, pattern=None) -> List[Table]`.
@@ -371,14 +260,13 @@ impl PyCatalog {
         py: Python<'_>,
         dbName: Option<&str>,
         pattern: Option<&str>,
-    ) -> PyResult<Vec<PyTable>> {
-        Ok(self
-            .detached(py, |catalog| {
+    ) -> PyResult<Vec<Py<PyAny>>> {
+        named_tuples(
+            py,
+            self.detached(py, |catalog| {
                 catalog.list_tables_typed(dbName, pattern).map_err(Box::new)
-            })?
-            .into_iter()
-            .map(|inner| PyTable { inner })
-            .collect())
+            })?,
+        )
     }
 
     /// Check if table exists. Mirrors `Catalog.tableExists(tableName, dbName=None) -> bool`.
@@ -391,12 +279,11 @@ impl PyCatalog {
     }
 
     /// Get table info. Mirrors `Catalog.getTable(tableName) -> Table`.
-    fn getTable(&self, py: Python<'_>, tableName: &str) -> PyResult<PyTable> {
-        Ok(PyTable {
-            inner: self.detached(py, |catalog| {
-                catalog.get_table_typed(tableName).map_err(Box::new)
-            })?,
-        })
+    fn getTable(&self, py: Python<'_>, tableName: &str) -> PyResult<Py<PyAny>> {
+        self.detached(py, |catalog| {
+            catalog.get_table_typed(tableName).map_err(Box::new)
+        })?
+        .named_tuple(py)
     }
 
     /// List functions. Mirrors `Catalog.listFunctions(dbName=None, pattern=None) -> List[Function]`.
@@ -407,16 +294,15 @@ impl PyCatalog {
         py: Python<'_>,
         dbName: Option<&str>,
         pattern: Option<&str>,
-    ) -> PyResult<Vec<PyFunction>> {
-        Ok(self
-            .detached(py, |catalog| {
+    ) -> PyResult<Vec<Py<PyAny>>> {
+        named_tuples(
+            py,
+            self.detached(py, |catalog| {
                 catalog
                     .list_functions_typed(dbName, pattern)
                     .map_err(Box::new)
-            })?
-            .into_iter()
-            .map(|inner| PyFunction { inner })
-            .collect())
+            })?,
+        )
     }
 
     /// Check if function exists. Mirrors `Catalog.functionExists(functionName, dbName=None) -> bool`.
@@ -434,12 +320,11 @@ impl PyCatalog {
     }
 
     /// Get function info. Mirrors `Catalog.getFunction(functionName) -> Function`.
-    fn getFunction(&self, py: Python<'_>, functionName: &str) -> PyResult<PyFunction> {
-        Ok(PyFunction {
-            inner: self.detached(py, |catalog| {
-                catalog.get_function_typed(functionName).map_err(Box::new)
-            })?,
-        })
+    fn getFunction(&self, py: Python<'_>, functionName: &str) -> PyResult<Py<PyAny>> {
+        self.detached(py, |catalog| {
+            catalog.get_function_typed(functionName).map_err(Box::new)
+        })?
+        .named_tuple(py)
     }
 
     /// List columns of a table. Mirrors `Catalog.listColumns(tableName, dbName=None) -> List[Column]`.
@@ -450,17 +335,16 @@ impl PyCatalog {
         py: Python<'_>,
         tableName: &str,
         dbName: Option<&str>,
-    ) -> PyResult<Vec<PyCatalogColumn>> {
+    ) -> PyResult<Vec<Py<PyAny>>> {
         warn_db_name(py, "listColumns", dbName)?;
-        Ok(self
-            .detached(py, |catalog| {
+        named_tuples(
+            py,
+            self.detached(py, |catalog| {
                 catalog
                     .list_columns_typed(tableName, dbName)
                     .map_err(Box::new)
-            })?
-            .into_iter()
-            .map(|inner| PyCatalogColumn { inner })
-            .collect())
+            })?,
+        )
     }
 
     /// Cache a table. Mirrors `Catalog.cacheTable(tableName, storageLevel=None) -> None`.
@@ -602,18 +486,20 @@ impl PyCatalog {
         f: Bound<'a, PyAny>,
         returnType: Option<Bound<'a, PyAny>>,
     ) -> PyResult<Bound<'a, PyAny>> {
-        let udf_cls = py
-            .import("pyspark.sql.udf")?
-            .getattr("UserDefinedFunction")?;
-        let rt: Bound<'a, PyAny> = match returnType {
-            Some(t) => t,
-            None => py
-                .import("pyspark.sql.types")?
-                .getattr("StringType")?
-                .call0()?,
-        };
-        // UserDefinedFunction(func, returnType, evalType=100, name=name)
-        udf_cls.call1((f, rt, 100, name))
+        let warnings = py.import("warnings")?;
+        let future_warning = py.import("builtins")?.getattr("FutureWarning")?;
+        warnings.call_method1(
+            "warn",
+            (
+                "Deprecated in 2.3.0. Use spark.udf.register instead.",
+                future_warning,
+            ),
+        )?;
+        let session = crate::session::PySparkSession::new(self.catalog.spark_session().clone());
+        Py::new(py, session)?
+            .bind(py)
+            .getattr("udf")?
+            .call_method1("register", (name, f, returnType))
     }
 
     /// Create a database.
@@ -728,14 +614,13 @@ impl PyCatalog {
 
     /// List the partitions of a table. Mirrors `Catalog.listPartitions -> List[TablePartition]`.
     #[allow(non_snake_case)]
-    fn listPartitions(&self, py: Python<'_>, tableName: &str) -> PyResult<Vec<PyTablePartition>> {
-        Ok(self
-            .detached(py, |catalog| {
+    fn listPartitions(&self, py: Python<'_>, tableName: &str) -> PyResult<Vec<Py<PyAny>>> {
+        named_tuples(
+            py,
+            self.detached(py, |catalog| {
                 catalog.list_partitions_typed(tableName).map_err(Box::new)
-            })?
-            .into_iter()
-            .map(|inner| PyTablePartition { inner })
-            .collect())
+            })?,
+        )
     }
 
     /// List the views in a database. Mirrors `Catalog.listViews -> List[Table]`.
@@ -746,14 +631,13 @@ impl PyCatalog {
         py: Python<'_>,
         dbName: Option<&str>,
         pattern: Option<&str>,
-    ) -> PyResult<Vec<PyTable>> {
-        Ok(self
-            .detached(py, |catalog| {
+    ) -> PyResult<Vec<Py<PyAny>>> {
+        named_tuples(
+            py,
+            self.detached(py, |catalog| {
                 catalog.list_views_typed(dbName, pattern).map_err(Box::new)
-            })?
-            .into_iter()
-            .map(|inner| PyTable { inner })
-            .collect())
+            })?,
+        )
     }
 
     fn __repr__(&self) -> String {

@@ -2513,6 +2513,35 @@ def test_create_dataframe_converts_numpy_scalars_as_pyspark(session):
     assert [tuple(r) for r in df.collect()] == [(1, 0.5, True, 1)]
 
 
+def test_catalogs_return_the_named_tuples_of_pyspark(session):
+    # As PySpark's: the methods of the catalog return the NamedTuples of pyspark.sql.catalog,
+    # and registerFunction registers a UDF with spark.udf.register, with its FutureWarning.
+    from pyspark.sql.catalog import Column, Database, Function, Table
+
+    session.sql("drop table if exists default.catalog_tuples_t")
+    session.sql("create table default.catalog_tuples_t (a int, b string) using parquet")
+    try:
+        table = session.catalog.getTable("default.catalog_tuples_t")
+        assert isinstance(table, Table)
+        assert table == (
+            "catalog_tuples_t", "spark_catalog", ["default"], None, "MANAGED", False)
+        assert table._asdict()["tableType"] == "MANAGED" and table.database == "default"
+        assert session.catalog.listColumns("default.catalog_tuples_t") == [
+            Column("a", None, "int", True, False, False, False),
+            Column("b", None, "string", True, False, False, False),
+        ]
+        assert isinstance(session.catalog.getDatabase("default"), Database)
+        name, *_ = session.catalog.getFunction("abs")
+        assert name == "abs" and isinstance(session.catalog.getFunction("abs"), Function)
+        with pytest.warns(FutureWarning, match="Use spark.udf.register instead"):
+            session.catalog.registerFunction("catalog_tuples_plus_one", lambda x: x + 1, "int")
+        assert session.sql("select catalog_tuples_plus_one(1) as v").first().v == 2
+    finally:
+        session.sql("drop table if exists default.catalog_tuples_t")
+
+
+
+
 def test_create_dataframe_infers_by_the_session_configurations_as_pyspark(session):
     naive = datetime(2020, 1, 2, 3, 4, 5)
     cases = [
