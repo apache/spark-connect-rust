@@ -1667,6 +1667,18 @@ impl DataFrame {
         crate::group::GroupedData::new_grouping_sets(self.clone(), group_cols)
     }
 
+    /// Group by the grouping sets `grouping_sets` with the grouping columns `group_cols`,
+    /// which are the columns of the result besides the aggregations, mirroring PySpark's
+    /// `DataFrame.groupingSets(groupingSets, *cols)`: a column of the grouping columns that
+    /// a set does not hold is null in the rows of that set.
+    pub fn grouping_sets_with_columns(
+        &self,
+        grouping_sets: Vec<Vec<Column>>,
+        group_cols: Vec<Column>,
+    ) -> crate::group::GroupedData {
+        crate::group::GroupedData::new_grouping_sets_of(self.clone(), grouping_sets, group_cols)
+    }
+
     /// Sort within partitions (local sort).
     pub fn sort_within_partitions(&self, columns: Vec<Expression>) -> DataFrame {
         let plan = LogicalPlan::Sort {

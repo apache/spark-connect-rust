@@ -647,6 +647,23 @@ def test_create_dataframe_from_empty_arrow_table(session):
 _Pair = namedtuple("_Pair", ["x", "y"])
 
 
+def test_grouping_sets_return_the_rows_of_pyspark(session):
+    # As PySpark's: the grouping columns are those of `cols`, null in the rows of a set that
+    # does not hold them, and none without `cols`.
+    df = session.createDataFrame(
+        [(1, "x", 10), (1, "y", 20), (2, "x", 30)], "a int, b string, c int")
+    total = F.sum("c").alias("s")
+    with_columns = df.groupingSets([["a"], []], "a", "b").agg(total)
+    assert with_columns.columns == ["a", "b", "s"]
+    assert sorted(with_columns.collect(), key=lambda r: (r.a is None, r.a)) == [
+        Row(a=1, b=None, s=30), Row(a=2, b=None, s=30), Row(a=None, b=None, s=60)]
+    without_columns = df.groupingSets([["a"], ["b"]]).agg(total)
+    assert without_columns.columns == ["s"]
+    assert sorted(r.s for r in without_columns.collect()) == [20, 30, 30, 40]
+    # Of ordinals too.
+    assert df.groupingSets([[2]], 2).agg(total).columns == ["b", "s"]
+
+
 def test_grouped_aggregations_name_and_take_columns_as_pyspark(session):
     # As PySpark's: count is named count, the numeric aggregations of no columns aggregate
     # every numeric column, and df.agg takes a dict.

@@ -182,9 +182,19 @@ impl PyDataFrame {
         cols: Vec<Bound<'_, PyAny>>,
         arg_name: &str,
     ) -> PyResult<Vec<spark_connect::column::Column>> {
+        self.grouping_column_list(py, unwrap_sequence(cols)?, arg_name)
+    }
+
+    /// The grouping columns of `cols`, each a Column, a column name or the 1-based ordinal of
+    /// a column, as PySpark's `_to_cols` of ordinals takes the items of a sequence.
+    fn grouping_column_list(
+        &self,
+        py: Python<'_>,
+        cols: Vec<Bound<'_, PyAny>>,
+        arg_name: &str,
+    ) -> PyResult<Vec<spark_connect::column::Column>> {
         use pyo3::types::{PyBool, PyString};
-        unwrap_sequence(cols)?
-            .iter()
+        cols.iter()
             .map(|c| {
                 if let Ok(column) = c.extract::<PyRef<'_, PyColumn>>() {
                     return Ok(column.column.clone());
@@ -964,23 +974,40 @@ impl PyDataFrame {
 
     /// Grouping sets aggregation: `groupingSets([[a, b], [a], []], "a", "b")`.
     ///
-    /// `*cols` (the overall grouping columns) is accepted for signature parity with
-    /// reference pyspark; the connect core derives the grouping from the sets, so the
-    /// trailing columns are currently informational.
+    /// As PySpark's: `*cols` are the grouping columns, the columns of the result besides the
+    /// aggregations, of Columns, names and ordinals, as are those of the sets.
     #[pyo3(name = "groupingSets", signature = (groupingSets, *cols))]
-    #[allow(unused_variables)]
     fn grouping_sets(
         &self,
         py: Python<'_>,
-        groupingSets: Vec<Vec<Bound<'_, PyAny>>>,
+        groupingSets: &Bound<'_, PyAny>,
         cols: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<PyGroupedData> {
-        let mut out: Vec<Vec<spark_connect::column::Column>> =
-            Vec::with_capacity(groupingSets.len());
-        for s in groupingSets {
-            out.push(self.grouping_columns(py, s, "groupingSets")?);
+        use pyo3::types::{PyInt, PyString};
+        // As PySpark's `_to_cols(grouping_set)`: a set is a sequence of columns, or one column.
+        let mut sets = Vec::new();
+        for set in groupingSets.try_iter()? {
+            let set = set?;
+            let one = set.is_instance_of::<PyString>()
+                || set.is_instance_of::<PyInt>()
+                || set.is_instance_of::<PyColumn>();
+            let sequence = !one
+                && py
+                    .import("collections.abc")?
+                    .getattr("Sequence")
+                    .and_then(|sequence| set.is_instance(&sequence))?;
+            let items = if sequence {
+                set.try_iter()?.collect::<PyResult<Vec<_>>>()?
+            } else {
+                vec![set]
+            };
+            sets.push(self.grouping_column_list(py, items, "groupingSets")?);
         }
-        Ok(PyGroupedData::new(self.dataframe.grouping_sets(out)))
+        // As PySpark's `_to_cols(cols)`, of the columns themselves, not a list of them.
+        let columns = self.grouping_column_list(py, cols, "cols")?;
+        Ok(PyGroupedData::new(
+            self.dataframe.grouping_sets_with_columns(sets, columns),
+        ))
     }
 
     /// Drop duplicates within the event-time watermark.
