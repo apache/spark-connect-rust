@@ -244,6 +244,52 @@ mod tests {
     }
 
     #[test]
+    fn frame_boundaries_are_sent_as_pyspark_sends_them() {
+        use spark_connect_proto::expression::literal::LiteralType;
+        use spark_connect_proto::expression::window::window_frame::frame_boundary::Boundary;
+        use spark_connect_proto::expression::ExprType;
+
+        let literals = |spec: WindowSpec| {
+            let column = crate::functions::sum(crate::column::col("id")).over(spec);
+            let Some(ExprType::Window(window)) = column.expression().to_proto().expr_type else {
+                panic!("expected a window expression");
+            };
+            let frame = window.frame_spec.expect("a frame");
+            [frame.lower.unwrap(), frame.upper.unwrap()].map(|bound| match bound.boundary {
+                Some(Boundary::Value(value)) => match value.expr_type {
+                    Some(ExprType::Literal(literal)) => literal.literal_type,
+                    other => panic!("expected a literal, got {other:?}"),
+                },
+                other => panic!("expected a value, got {other:?}"),
+            })
+        };
+        // As PySpark's: the long literals of a range frame, of values out of the range of an
+        // int too, not truncated.
+        assert_eq!(
+            literals(
+                WindowSpec::new()
+                    .range_between(FrameBound::Preceding(1 << 40), FrameBound::Following(1))
+            ),
+            [
+                Some(LiteralType::Long(-(1 << 40))),
+                Some(LiteralType::Long(1))
+            ]
+        );
+        // The int literals of a row frame, and a long for a value out of the range of an int,
+        // for the server to reject.
+        assert_eq!(
+            literals(
+                WindowSpec::new()
+                    .rows_between(FrameBound::Preceding(1), FrameBound::Following(1 << 40))
+            ),
+            [
+                Some(LiteralType::Integer(-1)),
+                Some(LiteralType::Long(1 << 40))
+            ]
+        );
+    }
+
+    #[test]
     fn frame_bound_constants() {
         assert_eq!(
             Window::unbounded_preceding(),

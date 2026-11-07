@@ -9,6 +9,25 @@ use crate::dataframe::{
 };
 use crate::errors::ResultExt;
 
+/// As PySpark's `_check_same_session` of the DataFrames of grouped data: `SESSION_NOT_SAME`
+/// unless `other` is of the session of `this`.
+fn check_same_session(
+    py: Python<'_>,
+    this: &RustGroupedData,
+    other: &RustGroupedData,
+) -> PyResult<()> {
+    if this.spark_session().session_id() == other.spark_session().session_id() {
+        Ok(())
+    } else {
+        Err(crate::column::raise_pyspark(
+            py,
+            "SessionNotSameException",
+            "SESSION_NOT_SAME",
+            &[],
+        ))
+    }
+}
+
 /// Python wrapper for Spark GroupedData.
 #[pyclass(name = "GroupedData", module = "pyspark.sql.group")]
 pub struct PyGroupedData {
@@ -19,6 +38,42 @@ impl PyGroupedData {
     pub fn new(grouped_data: RustGroupedData) -> Self {
         PyGroupedData { grouped_data }
     }
+}
+
+/// The aggregates of the dict form `agg({column: function})`, one `function(column)` per entry
+/// in order, as PySpark builds them (`F._invoke_function(function, F.col(column))`). A column
+/// that is not a str raises the `AttributeError` of `F.col`, and a function that is not a str
+/// the `AssertionError` of `_invoke_function`.
+pub(crate) fn dict_aggregates(
+    dict: &Bound<'_, pyo3::types::PyDict>,
+) -> PyResult<Vec<spark_connect::expression::Expression>> {
+    let mut agg_exprs = Vec::with_capacity(dict.len());
+    for (column, function) in dict.iter() {
+        let Ok(column) = column.extract::<String>() else {
+            let typ = column
+                .get_type()
+                .name()
+                .map(|name| name.to_string())
+                .unwrap_or_default();
+            return Err(pyo3::exceptions::PyAttributeError::new_err(format!(
+                "'{typ}' object has no attribute 'endswith'"
+            )));
+        };
+        let Ok(function) = function.extract::<String>() else {
+            return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+        };
+        // As PySpark's `agg` of a dict, by `col`, of its origin.
+        let _origin = crate::origin::with_origin("col");
+        let c = spark_connect::functions::col(&column);
+        // Build func(col) as an unresolved function resolved server-side, so aggregate names
+        // (max/min/sum/avg/count/...) all work regardless of whether they are in the generated
+        // dispatch.
+        agg_exprs.push(spark_connect::expression::Expression::function(
+            function,
+            vec![c.expression().clone()],
+        ));
+    }
+    Ok(agg_exprs)
 }
 
 impl PyGroupedData {
@@ -61,22 +116,7 @@ impl PyGroupedData {
         // Dict form: {column_name: aggregate_function_name} -> func(col(name)) per entry.
         if exprs.len() == 1 {
             if let Ok(dict) = exprs[0].cast::<pyo3::types::PyDict>() {
-                let mut agg_exprs = vec![];
-                for (k, v) in dict.iter() {
-                    let col_name: String = k.extract()?;
-                    let func_name: String = v.extract()?;
-                    // As PySpark's `agg` of a dict, by `col`, of its origin.
-                    let _origin = crate::origin::with_origin("col");
-                    let c = spark_connect::functions::col(&col_name);
-                    // Build func(col) as an unresolved function resolved server-side, so
-                    // aggregate names (max/min/sum/avg/count/...) all work regardless of
-                    // whether they are in the generated dispatch.
-                    let agg_expr = spark_connect::expression::Expression::function(
-                        func_name,
-                        vec![c.expression().clone()],
-                    );
-                    agg_exprs.push(agg_expr);
-                }
+                let agg_exprs = dict_aggregates(&dict)?;
                 let df = self.grouped_data.agg(agg_exprs);
                 return Ok(PyDataFrame::new(df));
             }
@@ -101,25 +141,49 @@ impl PyGroupedData {
         Ok(PyDataFrame::new(df))
     }
 
-    /// Pivot on a column; `values=None` auto-discovers the distinct pivot values.
+    /// Pivot on a column; `values=None` auto-discovers the distinct pivot values. As PySpark's,
+    /// only the grouping of `groupBy` pivots, else `UNSUPPORTED_OPERATION`, and then the column
+    /// is a str and the values a list of bools, floats, ints and strs, else `NOT_EXPECTED_TYPE`.
     #[pyo3(signature = (pivot_col, values=None))]
     fn pivot(
         &self,
-        pivot_col: &str,
-        values: Option<Vec<Bound<'_, PyAny>>>,
+        pivot_col: &Bound<'_, PyAny>,
+        values: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyGroupedData> {
-        let pcol = spark_connect::functions::col(pivot_col);
+        use crate::stat_arguments::not_expected_type;
+        use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyString};
+        self.grouped_data.check_pivot().to_pyerr()?;
+        let Ok(name) = pivot_col.cast::<PyString>() else {
+            return Err(not_expected_type(pivot_col, "pivot_col", "str"));
+        };
         let vals = match values {
             None => None,
-            Some(vs) => {
-                let mut out = Vec::with_capacity(vs.len());
-                for v in &vs {
-                    out.push(crate::session::py_to_value(v)?);
+            Some(values) => {
+                let Ok(values) = values.cast::<PyList>() else {
+                    return Err(not_expected_type(values, "values", "list"));
+                };
+                let mut out = Vec::with_capacity(values.len());
+                for value in values.iter() {
+                    if !(value.is_instance_of::<PyBool>()
+                        || value.is_instance_of::<PyFloat>()
+                        || value.is_instance_of::<PyInt>()
+                        || value.is_instance_of::<PyString>())
+                    {
+                        return Err(not_expected_type(
+                            &value,
+                            "value",
+                            "bool, float, int or str",
+                        ));
+                    }
+                    out.push(crate::session::py_to_value(&value)?);
                 }
                 Some(out)
             }
         };
-        Ok(PyGroupedData::new(self.grouped_data.pivot(pcol, vals)))
+        let pcol = spark_connect::functions::col(&name.to_cow()?);
+        Ok(PyGroupedData::new(
+            self.grouped_data.pivot(pcol, vals).to_pyerr()?,
+        ))
     }
 
     /// Sum values in each group.
@@ -212,10 +276,11 @@ impl PyGroupedData {
 
     /// `GroupedData.cogroup`.
     #[pyo3(name = "cogroup")]
-    fn cogroup(&self, other: &PyGroupedData) -> PyCoGroupedData {
-        PyCoGroupedData {
+    fn cogroup(&self, py: Python<'_>, other: &PyGroupedData) -> PyResult<PyCoGroupedData> {
+        check_same_session(py, &self.grouped_data, &other.grouped_data)?;
+        Ok(PyCoGroupedData {
             inner: self.grouped_data.cogroup(&other.grouped_data),
-        }
+        })
     }
 
     /// `GroupedData.applyInPandasWithState` (stateful streaming).
@@ -269,6 +334,9 @@ impl PyGroupedData {
         initialState: Option<PyRef<'_, PyGroupedData>>,
         eventTimeColumnName: &str,
     ) -> PyResult<PyDataFrame> {
+        if let Some(state) = &initialState {
+            check_same_session(py, &self.grouped_data, &state.grouped_data)?;
+        }
         let (func, et) = twus_func(
             py,
             &statefulProcessor,
@@ -316,6 +384,9 @@ impl PyGroupedData {
         initialState: Option<PyRef<'_, PyGroupedData>>,
         eventTimeColumnName: &str,
     ) -> PyResult<PyDataFrame> {
+        if let Some(state) = &initialState {
+            check_same_session(py, &self.grouped_data, &state.grouped_data)?;
+        }
         let (func, et) = twus_func(
             py,
             &statefulProcessor,

@@ -54,6 +54,10 @@ VENDORED_FILES=(
   # Call sites of the JVM gateway, which pyspark.sql.pandas.conversion imports.
   "traceback_utils.py"
 
+  # The SparkConf and the TaskContext of pyspark, pure Python, which it exports.
+  "conf.py"
+  "taskcontext.py"
+
   # Logging
   "logger/__init__.py"
   "logger/logger.py"
@@ -80,6 +84,10 @@ VENDORED_FILES=(
   "pipelines/tests/local_graph_element_registry.py"
   "pipelines/tests/test_decorators.py"
   "pipelines/tests/test_graph_element_registry.py"
+
+  # The progress handlers and the progress bar of the executions of a session, whose
+  # ExecutePlanResponse is that of the message class of pyspark/sql/connect/proto.py.
+  "sql/connect/shell/progress.py"
 
   # Top-level modules
   "accumulators.py"

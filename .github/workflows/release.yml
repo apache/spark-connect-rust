@@ -283,7 +283,7 @@ jobs:
           python-version: "3.11"
       - name: Build sdist with maturin
         run: |
-          python -m pip install --upgrade maturin
+          python -m pip install --upgrade "maturin>=1.0,<2.0"
           maturin sdist --out dist
       - name: Verify declared License-File(s) exist in the sdist
         # PyPI (PEP 639) rejects an sdist whose PKG-INFO declares a `License-File`

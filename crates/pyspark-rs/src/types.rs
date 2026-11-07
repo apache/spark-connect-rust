@@ -11,7 +11,9 @@ pub(crate) fn normalize_tree_depth(depth: &Bound<'_, PyAny>) -> PyResult<i32> {
     if !depth.gt(0)? || depth.ge(i32::MAX)? {
         Ok(i32::MAX)
     } else {
-        Ok(depth.extract::<f64>()?.ceil() as i32)
+        // A positive Fraction or Decimal may underflow to zero as f64. Keep
+        // it at depth one: zero would request an unlimited tree instead.
+        Ok((depth.extract::<f64>()?.ceil() as i32).max(1))
     }
 }
 
@@ -87,32 +89,11 @@ fn py_new_struct(py: Python<'_>, fields: Vec<StructField>) -> PyResult<Py<PyStru
     )
 }
 
-/// Parse a type-JSON dict (as passed to `<Type>.fromJson`) into a core `DataType`.
-/// The dict may omit the top-level `"type"` key (each `fromJson` is a classmethod on a
-/// specific type), so inject `default_type` when it is absent before handing the object
-/// to the core JSON parser.
-fn from_json_dict(
-    py: Python<'_>,
-    json: &Bound<'_, PyAny>,
-    default_type: &str,
-) -> PyResult<DataType> {
-    use pyo3::types::PyDict;
-    let value: Bound<'_, PyAny> = if let Ok(d) = json.cast::<PyDict>() {
-        let d = d.copy()?;
-        if !d.contains("type")? {
-            d.set_item("type", default_type)?;
-        }
-        d.into_any()
-    } else {
-        json.clone()
-    };
-    let s: String = py
-        .import("json")?
-        .getattr("dumps")?
-        .call1((value,))?
-        .extract()?;
-    DataType::from_json_str(&s)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+/// The `fromJson` helper `name` of the shim `pyspark.sql.types`, which parses the nested JSON
+/// forms of the types as PySpark's: the collations of a struct field by their paths, and the
+/// Python class of a `udt`. The core's grammar parses the strings of the atomic types.
+fn shim_from_json<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
+    py.import("pyspark.sql.types")?.getattr(name)
 }
 
 /// Convert a Python `StructField` metadata dict to the core JSON-value map. Values may be any
@@ -129,6 +110,115 @@ fn py_metadata_to_map(
         .extract()?;
     serde_json::from_str(&s)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+}
+
+/// The keys of the JSON objects of the nested data types, in the order of PySpark's
+/// `jsonValue`: struct, array, map, and the UDTs of a Scala class or of a pickled Python class.
+const TYPE_JSON_KEYS: [&str; 11] = [
+    "type",
+    "fields",
+    "elementType",
+    "containsNull",
+    "keyType",
+    "valueType",
+    "valueContainsNull",
+    "class",
+    "pyClass",
+    "serializedClass",
+    "sqlType",
+];
+
+/// The keys of the JSON object of a struct field, in the order of PySpark's `jsonValue`.
+const FIELD_JSON_KEYS: [&str; 4] = ["name", "type", "nullable", "metadata"];
+
+/// The JSON text of the JSON value `v` of a data type (of a struct field, if `field`), with
+/// the keys of its objects in the order of PySpark's `jsonValue`. The core's JSON objects
+/// sort their keys, as `json()` does; the metadata of a field stays in that order.
+fn ordered_json_text(v: &serde_json::Value, field: bool) -> String {
+    let Some(object) = v.as_object() else {
+        return v.to_string();
+    };
+    let order: &[&str] = if field {
+        &FIELD_JSON_KEYS
+    } else {
+        &TYPE_JSON_KEYS
+    };
+    let keys = order
+        .iter()
+        .copied()
+        .filter(|key| object.contains_key(*key))
+        .chain(
+            object
+                .keys()
+                .map(String::as_str)
+                .filter(|key| !order.contains(key)),
+        );
+    let entries: Vec<String> = keys
+        .map(|key| {
+            let value = &object[key];
+            let text = match (field, key) {
+                (true, "type") | (false, "elementType" | "keyType" | "valueType" | "sqlType") => {
+                    ordered_json_text(value, false)
+                }
+                (false, "fields") => match value.as_array() {
+                    Some(fields) => {
+                        let fields: Vec<String> =
+                            fields.iter().map(|f| ordered_json_text(f, true)).collect();
+                        format!("[{}]", fields.join(","))
+                    }
+                    None => value.to_string(),
+                },
+                _ => value.to_string(),
+            };
+            format!("{}:{}", serde_json::Value::from(key), text)
+        })
+        .collect();
+    format!("{{{}}}", entries.join(","))
+}
+
+/// The `jsonValue` of the JSON value `v` of a data type (of a struct field, if `field`): its
+/// dicts have the keys in the order of PySpark's, as `json.dumps(t.jsonValue())` shows.
+fn py_json_value<'py>(
+    py: Python<'py>,
+    v: &serde_json::Value,
+    field: bool,
+) -> PyResult<Bound<'py, PyAny>> {
+    py.import("json")?
+        .getattr("loads")?
+        .call1((ordered_json_text(v, field),))
+}
+
+/// The `toInternal` or `fromInternal` (the `_to_internal` or `_from_internal` of the shim
+/// `pyspark.sql.types`) of `data_type`, which convert values as those of PySpark's types do.
+fn shim_conversion<'py>(
+    data_type: &Bound<'py, PyAny>,
+    conversion: &str,
+    obj: Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    data_type
+        .py()
+        .import("pyspark.sql.types")?
+        .getattr(conversion)?
+        .call1((data_type, obj))
+}
+
+/// `needConversion` of `data_type`, as PySpark's: that of a year-month interval is false with
+/// `PYSPARK_YM_INTERVAL_LEGACY=1`, with which `df.collect` returns the internal integers.
+fn need_conversion(py: Python<'_>, data_type: &DataType) -> PyResult<bool> {
+    Ok(match data_type {
+        DataType::YearMonthInterval { .. } => !py
+            .import("os")?
+            .getattr("environ")?
+            .call_method1("get", ("PYSPARK_YM_INTERVAL_LEGACY",))?
+            .eq("1")?,
+        DataType::Array { element_type, .. } => need_conversion(py, element_type)?,
+        DataType::Map {
+            key_type,
+            value_type,
+            ..
+        } => need_conversion(py, key_type)? || need_conversion(py, value_type)?,
+        other => other.need_conversion(),
+    })
 }
 
 /// Convert the core JSON-value metadata map back to a Python dict.
@@ -182,28 +272,38 @@ impl PyDataType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+        need_conversion(slf.py(), &py_to_data_type(slf.as_any())?)
     }
     #[pyo3(name = "fromInternal")]
-    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_from_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_from_internal", obj)
     }
     #[pyo3(name = "toInternal")]
-    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_to_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_to_internal", obj)
     }
+    /// The type of the DDL string `ddl`, as PySpark's `DataType.fromDDL`, which the server of
+    /// the active session parses (`_parse_datatype_string`): the concrete type, a StructType
+    /// for a list of fields. The subclasses inherit this classmethod, so that any of them
+    /// parses DDL the same way.
     #[classmethod]
     #[pyo3(name = "fromDDL")]
     fn __obj_from_ddl(cls: &Bound<'_, pyo3::types::PyType>, ddl: &str) -> PyResult<Py<PyAny>> {
-        let dt = DataType::from_ddl(ddl)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        // The concrete type, as pyspark returns (a StructType for a list of fields). The
-        // subclasses inherit this classmethod, so that any of them parses DDL the same way.
-        data_type_to_py(cls.py(), &dt)
+        Ok(cls
+            .py()
+            .import("pyspark.sql.types")?
+            .call_method1("_parse_datatype_string", (ddl,))?
+            .unbind())
     }
     #[pyo3(name = "typeName")]
     fn __dt_type_name(&self) -> String {
@@ -307,19 +407,25 @@ impl PyNullType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+        need_conversion(slf.py(), &py_to_data_type(slf.as_any())?)
     }
     #[pyo3(name = "fromInternal")]
-    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_from_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_from_internal", obj)
     }
     #[pyo3(name = "toInternal")]
-    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_to_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_to_internal", obj)
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"void\"")
@@ -357,19 +463,25 @@ impl PyBooleanType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+        need_conversion(slf.py(), &py_to_data_type(slf.as_any())?)
     }
     #[pyo3(name = "fromInternal")]
-    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_from_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_from_internal", obj)
     }
     #[pyo3(name = "toInternal")]
-    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_to_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_to_internal", obj)
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"boolean\"")
@@ -407,19 +519,25 @@ impl PyByteType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+        need_conversion(slf.py(), &py_to_data_type(slf.as_any())?)
     }
     #[pyo3(name = "fromInternal")]
-    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_from_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_from_internal", obj)
     }
     #[pyo3(name = "toInternal")]
-    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_to_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_to_internal", obj)
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"byte\"")
@@ -461,19 +579,25 @@ impl PyShortType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+        need_conversion(slf.py(), &py_to_data_type(slf.as_any())?)
     }
     #[pyo3(name = "fromInternal")]
-    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_from_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_from_internal", obj)
     }
     #[pyo3(name = "toInternal")]
-    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_to_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_to_internal", obj)
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"short\"")
@@ -515,19 +639,25 @@ impl PyIntegerType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+        need_conversion(slf.py(), &py_to_data_type(slf.as_any())?)
     }
     #[pyo3(name = "fromInternal")]
-    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_from_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_from_internal", obj)
     }
     #[pyo3(name = "toInternal")]
-    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_to_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_to_internal", obj)
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"integer\"")
@@ -569,19 +699,25 @@ impl PyLongType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+        need_conversion(slf.py(), &py_to_data_type(slf.as_any())?)
     }
     #[pyo3(name = "fromInternal")]
-    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_from_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_from_internal", obj)
     }
     #[pyo3(name = "toInternal")]
-    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_to_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_to_internal", obj)
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"long\"")
@@ -623,19 +759,25 @@ impl PyFloatType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+        need_conversion(slf.py(), &py_to_data_type(slf.as_any())?)
     }
     #[pyo3(name = "fromInternal")]
-    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_from_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_from_internal", obj)
     }
     #[pyo3(name = "toInternal")]
-    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_to_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_to_internal", obj)
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"float\"")
@@ -677,19 +819,25 @@ impl PyDoubleType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+        need_conversion(slf.py(), &py_to_data_type(slf.as_any())?)
     }
     #[pyo3(name = "fromInternal")]
-    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_from_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_from_internal", obj)
     }
     #[pyo3(name = "toInternal")]
-    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_to_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_to_internal", obj)
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"double\"")
@@ -734,19 +882,25 @@ impl PyDecimalType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+        need_conversion(slf.py(), &py_to_data_type(slf.as_any())?)
     }
     #[pyo3(name = "fromInternal")]
-    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_from_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_from_internal", obj)
     }
     #[pyo3(name = "toInternal")]
-    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_to_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_to_internal", obj)
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         let dt = DataType::Decimal {
@@ -817,19 +971,25 @@ impl PyStringType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+        need_conversion(slf.py(), &py_to_data_type(slf.as_any())?)
     }
     #[pyo3(name = "fromInternal")]
-    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_from_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_from_internal", obj)
     }
     #[pyo3(name = "toInternal")]
-    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_to_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_to_internal", obj)
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         let dt = DataType::String {
@@ -904,19 +1064,25 @@ impl PyBinaryType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+        need_conversion(slf.py(), &py_to_data_type(slf.as_any())?)
     }
     #[pyo3(name = "fromInternal")]
-    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_from_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_from_internal", obj)
     }
     #[pyo3(name = "toInternal")]
-    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_to_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_to_internal", obj)
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"binary\"")
@@ -957,19 +1123,25 @@ impl PyDateType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+        need_conversion(slf.py(), &py_to_data_type(slf.as_any())?)
     }
     #[pyo3(name = "fromInternal")]
-    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_from_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_from_internal", obj)
     }
     #[pyo3(name = "toInternal")]
-    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_to_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_to_internal", obj)
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"date\"")
@@ -1007,19 +1179,25 @@ impl PyTimestampType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+        need_conversion(slf.py(), &py_to_data_type(slf.as_any())?)
     }
     #[pyo3(name = "fromInternal")]
-    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_from_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_from_internal", obj)
     }
     #[pyo3(name = "toInternal")]
-    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_to_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_to_internal", obj)
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"timestamp\"")
@@ -1061,19 +1239,25 @@ impl PyTimestampNTZType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+        need_conversion(slf.py(), &py_to_data_type(slf.as_any())?)
     }
     #[pyo3(name = "fromInternal")]
-    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_from_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_from_internal", obj)
     }
     #[pyo3(name = "toInternal")]
-    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_to_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_to_internal", obj)
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"timestamp_ntz\"")
@@ -1129,19 +1313,25 @@ impl PyArrayType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+        need_conversion(slf.py(), &py_to_data_type(slf.as_any())?)
     }
     #[pyo3(name = "fromInternal")]
-    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_from_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_from_internal", obj)
     }
     #[pyo3(name = "toInternal")]
-    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_to_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_to_internal", obj)
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         let dt = DataType::Array {
@@ -1216,9 +1406,9 @@ impl PyArrayType {
         fieldPath: String,
         collationsMap: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let _ = (fieldPath, collationsMap);
-        let dt = from_json_dict(py, json, "array")?;
-        data_type_to_py(py, &dt)
+        Ok(shim_from_json(py, "_array_type_from_json")?
+            .call1((json, fieldPath, collationsMap))?
+            .unbind())
     }
 }
 
@@ -1258,19 +1448,25 @@ impl PyMapType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+        need_conversion(slf.py(), &py_to_data_type(slf.as_any())?)
     }
     #[pyo3(name = "fromInternal")]
-    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_from_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_from_internal", obj)
     }
     #[pyo3(name = "toInternal")]
-    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_to_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_to_internal", obj)
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         let dt = DataType::Map {
@@ -1363,9 +1559,9 @@ impl PyMapType {
         fieldPath: String,
         collationsMap: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let _ = (fieldPath, collationsMap);
-        let dt = from_json_dict(py, json, "map")?;
-        data_type_to_py(py, &dt)
+        Ok(shim_from_json(py, "_map_type_from_json")?
+            .call1((json, fieldPath, collationsMap))?
+            .unbind())
     }
 }
 
@@ -1401,19 +1597,25 @@ impl PyStructField {
     #[pyo3(name = "jsonValue")]
     fn __sf_json_value<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let v = self.field.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, true)
     }
     #[pyo3(name = "needConversion")]
-    fn __sf_need_conversion(&self) -> bool {
-        self.field.data_type.need_conversion()
+    fn __sf_need_conversion(&self, py: Python<'_>) -> PyResult<bool> {
+        need_conversion(py, &self.field.data_type)
     }
     #[pyo3(name = "fromInternal")]
-    fn __sf_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __sf_from_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_from_internal", obj)
     }
     #[pyo3(name = "toInternal")]
-    fn __sf_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __sf_to_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_to_internal", obj)
     }
     /// Collation metadata for the field (empty when the field has no collations).
     #[pyo3(name = "getCollationMetadata")]
@@ -1500,15 +1702,10 @@ impl PyStructField {
         _cls: &Bound<'_, pyo3::types::PyType>,
         py: Python<'_>,
         json: &Bound<'_, PyAny>,
-    ) -> PyResult<PyStructField> {
-        let s: String = py
-            .import("json")?
-            .getattr("dumps")?
+    ) -> PyResult<Py<PyAny>> {
+        Ok(shim_from_json(py, "_struct_field_from_json")?
             .call1((json,))?
-            .extract()?;
-        let field = StructField::from_json_str(&s)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(PyStructField { field })
+            .unbind())
     }
     #[new]
     #[pyo3(signature = (name, dataType, nullable=true, metadata=None))]
@@ -1594,19 +1791,25 @@ impl PyStructType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+        need_conversion(slf.py(), &py_to_data_type(slf.as_any())?)
     }
     #[pyo3(name = "fromInternal")]
-    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_from_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_from_internal", obj)
     }
     #[pyo3(name = "toInternal")]
-    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_to_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_to_internal", obj)
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         let dt = DataType::Struct {
@@ -1652,7 +1855,7 @@ impl PyStructType {
     }
 
     /// Append a field and return `self` (chainable, mirroring `StructType.add`):
-    /// `StructType().add("a", "int").add("b", StringType())`.
+    /// `StructType().add("a", "integer").add("b", StringType())`.
     #[pyo3(signature = (field, data_type=None, nullable=true, metadata=None))]
     fn add<'py>(
         slf: Bound<'py, Self>,
@@ -1664,12 +1867,28 @@ impl PyStructType {
         let new_field = if let Ok(sf) = field.extract::<PyRef<PyStructField>>() {
             sf.field.clone()
         } else {
+            // As PySpark's: a name takes a data type, of which a str is the JSON value of one.
+            let Some(data_type) = data_type else {
+                return Err(crate::column::raise_pyspark(
+                    field.py(),
+                    "PySparkValueError",
+                    "ARGUMENT_REQUIRED",
+                    &[
+                        ("arg_name", "data_type"),
+                        ("condition", "passing name of struct_field to create"),
+                    ],
+                ));
+            };
             let name: String = field.extract()?;
-            let dt = match data_type {
-                Some(d) => py_to_data_type(d)?,
-                None => DataType::String {
-                    collation: "UTF8_BINARY".to_string(),
-                },
+            let dt = if data_type.is_instance_of::<pyo3::types::PyString>() {
+                let parsed = field
+                    .py()
+                    .import("pyspark.sql.types")?
+                    .getattr("_parse_datatype_json_value")?
+                    .call1((data_type,))?;
+                py_to_data_type(&parsed)?
+            } else {
+                py_to_data_type(data_type)?
             };
             let md = match metadata {
                 Some(d) => py_metadata_to_map(d.py(), d)?,
@@ -1713,17 +1932,24 @@ impl PyStructType {
     }
 
     /// Index by position (`st[0]`) or by name (`st["a"]`), returning a `StructField`
-    /// (mirrors `StructType.__getitem__`; a slice yields a new `StructType`).
+    /// (mirrors `StructType.__getitem__`; a slice yields a new `StructType`), with the errors of
+    /// PySpark's: `KEY_NOT_EXISTS` of a name, `INDEX_OUT_OF_RANGE` of an index, and
+    /// `NOT_EXPECTED_TYPE` of another key.
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        if let Ok(name) = key.extract::<String>() {
+        use crate::column::raise_pyspark;
+        if let Ok(name) = key.cast::<pyo3::types::PyString>() {
+            let name = name.to_cow()?;
             for f in &self.fields {
                 if f.name == name {
                     return Ok(Py::new(py, PyStructField { field: f.clone() })?.into_any());
                 }
             }
-            return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
-                "No StructField named {name}"
-            )));
+            return Err(raise_pyspark(
+                py,
+                "PySparkKeyError",
+                "KEY_NOT_EXISTS",
+                &[("key", &name)],
+            ));
         }
         if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
             let idx = slice.indices(self.fields.len() as isize)?;
@@ -1735,25 +1961,30 @@ impl PyStructType {
             }
             return Ok(py_new_struct(py, out)?.into_any());
         }
-        let i: isize = key.extract().map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "StructType indices must be integers, slices, or field names",
-            )
-        })?;
-        let n = self.fields.len() as isize;
-        let idx = if i < 0 { i + n } else { i };
-        if idx < 0 || idx >= n {
-            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
-                "StructType index out of range",
+        if !key.is_instance_of::<pyo3::types::PyInt>() {
+            return Err(crate::stat_arguments::not_expected_type(
+                key,
+                "key",
+                "int, slice or str",
             ));
         }
-        Ok(Py::new(
-            py,
-            PyStructField {
-                field: self.fields[idx as usize].clone(),
-            },
-        )?
-        .into_any())
+        let n = self.fields.len() as isize;
+        let index = key.extract::<isize>().ok();
+        match index.map(|i| if i < 0 { i + n } else { i }) {
+            Some(i) if (0..n).contains(&i) => Ok(Py::new(
+                py,
+                PyStructField {
+                    field: self.fields[i as usize].clone(),
+                },
+            )?
+            .into_any()),
+            _ => Err(raise_pyspark(
+                py,
+                "PySparkIndexError",
+                "INDEX_OUT_OF_RANGE",
+                &[("arg_name", "StructType"), ("index", &key.str()?.to_cow()?)],
+            )),
+        }
     }
 
     fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -1788,14 +2019,39 @@ impl PyStructType {
         self.fields.iter().map(|f| f.name.clone()).collect()
     }
 
-    /// DDL string. Mirrors `StructType.toDDL()`.
-    #[pyo3(name = "toDDL")]
-    fn __st_to_ddl(&self) -> PyResult<String> {
-        DataType::Struct {
-            fields: self.fields.clone(),
+    /// Whether a field needs conversion, as PySpark's `_needSerializeAnyField`.
+    #[getter(_needSerializeAnyField)]
+    fn __st_need_serialize_any_field(&self, py: Python<'_>) -> PyResult<bool> {
+        for field in &self.fields {
+            if need_conversion(py, &field.data_type)? {
+                return Ok(true);
+            }
         }
-        .to_ddl()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+        Ok(false)
+    }
+
+    /// The `needConversion` of each field, as PySpark's `_needConversion`.
+    #[getter(_needConversion)]
+    fn __st_need_conversion_of_fields(&self, py: Python<'_>) -> PyResult<Vec<bool>> {
+        self.fields
+            .iter()
+            .map(|field| need_conversion(py, &field.data_type))
+            .collect()
+    }
+
+    /// DDL string. Mirrors `StructType.toDDL()`, which asks the server of the active session to
+    /// convert the JSON of the schema, as Spark writes DDL.
+    #[pyo3(name = "toDDL")]
+    fn __st_to_ddl(slf: &Bound<'_, Self>) -> PyResult<String> {
+        let py = slf.py();
+        let session = py
+            .import("pyspark.sql")?
+            .getattr("SparkSession")?
+            .call_method0("getActiveSession")?;
+        if session.is_none() {
+            return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+        }
+        session.call_method1("_to_ddl", (slf,))?.extract()
     }
 
     /// Tree string. Mirrors `StructType.treeString(maxDepth)`.
@@ -1836,20 +2092,10 @@ impl PyStructType {
         _cls: &Bound<'_, pyo3::types::PyType>,
         py: Python<'_>,
         json: &Bound<'_, PyAny>,
-    ) -> PyResult<Py<PyStructType>> {
-        let s: String = py
-            .import("json")?
-            .getattr("dumps")?
+    ) -> PyResult<Py<PyAny>> {
+        Ok(shim_from_json(py, "_struct_type_from_json")?
             .call1((json,))?
-            .extract()?;
-        match DataType::from_json_str(&s)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
-        {
-            DataType::Struct { fields } => py_new_struct(py, fields),
-            _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "fromJson did not produce a StructType",
-            )),
-        }
+            .unbind())
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
@@ -1889,19 +2135,25 @@ impl PyCharType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+        need_conversion(slf.py(), &py_to_data_type(slf.as_any())?)
     }
     #[pyo3(name = "fromInternal")]
-    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_from_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_from_internal", obj)
     }
     #[pyo3(name = "toInternal")]
-    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_to_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_to_internal", obj)
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         let dt = DataType::Char {
@@ -1949,19 +2201,25 @@ impl PyVarcharType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+        need_conversion(slf.py(), &py_to_data_type(slf.as_any())?)
     }
     #[pyo3(name = "fromInternal")]
-    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_from_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_from_internal", obj)
     }
     #[pyo3(name = "toInternal")]
-    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_to_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_to_internal", obj)
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         let dt = DataType::Varchar {
@@ -2009,19 +2267,25 @@ impl PyTimeType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+        need_conversion(slf.py(), &py_to_data_type(slf.as_any())?)
     }
     #[pyo3(name = "fromInternal")]
-    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_from_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_from_internal", obj)
     }
     #[pyo3(name = "toInternal")]
-    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_to_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_to_internal", obj)
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         let dt = DataType::Time {
@@ -2073,19 +2337,25 @@ impl PyTimestampNTZNanosType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+        need_conversion(slf.py(), &py_to_data_type(slf.as_any())?)
     }
     #[pyo3(name = "fromInternal")]
-    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_from_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_from_internal", obj)
     }
     #[pyo3(name = "toInternal")]
-    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_to_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_to_internal", obj)
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         let dt = DataType::TimestampNtzNanos {
@@ -2146,19 +2416,25 @@ impl PyTimestampLTZNanosType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+        need_conversion(slf.py(), &py_to_data_type(slf.as_any())?)
     }
     #[pyo3(name = "fromInternal")]
-    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_from_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_from_internal", obj)
     }
     #[pyo3(name = "toInternal")]
-    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_to_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_to_internal", obj)
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         let dt = DataType::TimestampLtzNanos {
@@ -2215,19 +2491,25 @@ impl PyCalendarIntervalType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+        need_conversion(slf.py(), &py_to_data_type(slf.as_any())?)
     }
     #[pyo3(name = "fromInternal")]
-    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_from_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_from_internal", obj)
     }
     #[pyo3(name = "toInternal")]
-    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_to_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_to_internal", obj)
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"calendarinterval\"")
@@ -2272,19 +2554,25 @@ impl PyYearMonthIntervalType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+        need_conversion(slf.py(), &py_to_data_type(slf.as_any())?)
     }
     #[pyo3(name = "fromInternal")]
-    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_from_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_from_internal", obj)
     }
     #[pyo3(name = "toInternal")]
-    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_to_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_to_internal", obj)
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         let dt = DataType::YearMonthInterval {
@@ -2352,19 +2640,25 @@ impl PyDayTimeIntervalType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+        need_conversion(slf.py(), &py_to_data_type(slf.as_any())?)
     }
     #[pyo3(name = "fromInternal")]
-    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_from_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_from_internal", obj)
     }
     #[pyo3(name = "toInternal")]
-    fn __obj_to_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_to_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_to_internal", obj)
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         let dt = DataType::DayTimeInterval {
@@ -2421,19 +2715,25 @@ impl PyVariantType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py.import("json")?.getattr("loads")?.call1((v.to_string(),))
+        py_json_value(py, &v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(py_to_data_type(slf.as_any())?.need_conversion())
+        need_conversion(slf.py(), &py_to_data_type(slf.as_any())?)
     }
     #[pyo3(name = "fromInternal")]
-    fn __obj_from_internal<'py>(&self, obj: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        obj
+    fn __obj_from_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_from_internal", obj)
     }
     #[pyo3(name = "toInternal")]
-    fn __obj_to_internal<'py>(&self, variant: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
-        variant
+    fn __obj_to_internal<'py>(
+        slf: &Bound<'py, Self>,
+        variant: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_to_internal", variant)
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, "\"variant\"")
@@ -2571,7 +2871,7 @@ impl PyGeographyType {
 /// SRID, and an integer must be an SRID that PySpark's spatial reference system mappers know,
 /// 0, 3857 and 4326 for a geometry and 4326 for a geography in PySpark 4.3.0. Anything else
 /// raises `ST_INVALID_SRID_VALUE`, as in PySpark.
-fn spatial_type_srid(srid: &Bound<'_, PyAny>, geographic: bool) -> PyResult<i32> {
+pub(crate) fn spatial_type_srid(srid: &Bound<'_, PyAny>, geographic: bool) -> PyResult<i32> {
     use pyo3::types::{PyInt, PyString};
     if let Ok(name) = srid.cast::<PyString>() {
         if name.to_cow()? == "ANY" {

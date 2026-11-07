@@ -45,4 +45,37 @@ except ImportError:
         """Placeholder for protobuf Command message."""
         pass
 
-__all__ = ["Plan", "Relation", "Command"]
+
+
+class ExecutePlanResponse:
+    """The ``ExecutePlanResponse`` of ``base.proto``, of the progress of an execution: the Rust
+    transport reads the responses of the server, of which ``ExecutionProgress`` holds the
+    fields that ``pyspark.sql.connect.shell.progress.from_proto`` reads."""
+
+    class ExecutionProgress:
+        """``ExecutePlanResponse.ExecutionProgress``: the stages of an execution, and its
+        running tasks."""
+
+        class StageInfo:
+            """``ExecutionProgress.StageInfo``: the tasks and the bytes read of a stage."""
+
+            def __init__(
+                self,
+                stage_id=0,
+                num_tasks=0,
+                num_completed_tasks=0,
+                input_bytes_read=0,
+                done=False,
+            ):
+                self.stage_id = stage_id
+                self.num_tasks = num_tasks
+                self.num_completed_tasks = num_completed_tasks
+                self.input_bytes_read = input_bytes_read
+                self.done = done
+
+        def __init__(self, stages=(), num_inflight_tasks=0):
+            self.stages = list(stages)
+            self.num_inflight_tasks = num_inflight_tasks
+
+
+__all__ = ["Plan", "Relation", "Command", "ExecutePlanResponse"]

@@ -505,8 +505,8 @@ class UDFRegistration:
     Wrapper for user-defined function registration (spark.udf.register).
     """
 
-    def __init__(self, spark_session: Any):
-        self.spark_session = spark_session
+    def __init__(self, sparkSession: Any):
+        self.sparkSession = sparkSession
 
     def register(
         self,
@@ -593,7 +593,7 @@ class UDFRegistration:
     ) -> None:
         # As PySpark's SparkConnectClient.register_udf: the PythonUDF command is the pickled
         # (function, return type).
-        self.spark_session._registerPythonUdf(
+        self.sparkSession._registerPythonUdf(
             name,
             return_type,
             eval_type,
@@ -618,15 +618,13 @@ class UDFRegistration:
         javaClassName : str
             Fully-qualified name of the Java class implementing the UDF.
         returnType : DataType or str, optional
-            Return type (a DataType or a DDL string). Defaults to the class's own type.
+            Return type: a DataType, or a DDL string, which the server parses, as PySpark
+            sends it. Defaults to the class's own type.
         """
-        rt_ddl = None
-        if returnType is not None:
-            rt_ddl = returnType if isinstance(returnType, str) else returnType.simpleString()
-        self.spark_session._registerJavaFunction(name, javaClassName, rt_ddl, False)
+        self.sparkSession._registerJavaFunction(name, javaClassName, returnType, False)
 
     def registerJavaUDAF(self, name: str, javaClassName: str) -> None:
         """Register a Java user-defined aggregate function (UDAF) by class name.
         Mirrors ``UDFRegistration.registerJavaUDAF``.
         """
-        self.spark_session._registerJavaFunction(name, javaClassName, None, True)
+        self.sparkSession._registerJavaFunction(name, javaClassName, None, True)

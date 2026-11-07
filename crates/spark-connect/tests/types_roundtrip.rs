@@ -232,6 +232,92 @@ fn special_variant_arms() {
     }
 }
 
+/// A struct field writes the collations of its strings, also in its arrays and maps, in the
+/// `__COLLATIONS` of its metadata, as Spark and PySpark do, and reads them back; a UDT reads
+/// back its JSON too.
+#[test]
+fn collations_are_in_the_metadata_of_the_json_of_a_field_as_spark() {
+    let string = |collation: &str| DataType::String {
+        collation: collation.to_string(),
+    };
+    let field = |name: &str, data_type: DataType| StructField {
+        name: name.to_string(),
+        data_type,
+        nullable: true,
+        metadata: BTreeMap::new(),
+    };
+    let st = DataType::Struct {
+        fields: vec![
+            field("s", string("UTF8_LCASE")),
+            field(
+                "m",
+                DataType::Map {
+                    key_type: Box::new(string("UTF8_LCASE")),
+                    value_type: Box::new(DataType::Array {
+                        element_type: Box::new(string("UNICODE_CI")),
+                        contains_null: false,
+                    }),
+                    value_contains_null: true,
+                },
+            ),
+            field(
+                "n",
+                DataType::Struct {
+                    fields: vec![field("t", string("UTF8_LCASE"))],
+                },
+            ),
+        ],
+    };
+    assert_eq!(
+        st.json(),
+        concat!(
+            r#"{"fields":[{"metadata":{"__COLLATIONS":{"s":"spark.UTF8_LCASE"}},"name":"s","#,
+            r#""nullable":true,"type":"string"},{"metadata":{"__COLLATIONS":{"m.key":"#,
+            r#""spark.UTF8_LCASE","m.value.element":"icu.UNICODE_CI"}},"name":"m","#,
+            r#""nullable":true,"type":{"keyType":"string","type":"map","valueContainsNull":true,"#,
+            r#""valueType":{"containsNull":false,"elementType":"string","type":"array"}}},"#,
+            r#"{"metadata":{},"name":"n","nullable":true,"type":{"fields":[{"metadata":"#,
+            r#"{"__COLLATIONS":{"t":"spark.UTF8_LCASE"}},"name":"t","nullable":true,"#,
+            r#""type":"string"}],"type":"struct"}}],"type":"struct"}"#
+        )
+    );
+    assert_eq!(DataType::from_json_str(&st.json()).unwrap(), st);
+    let DataType::Struct { fields } = &st else {
+        unreachable!()
+    };
+    assert_eq!(
+        StructField::from_json_str(&fields[1].json_value().to_string()).unwrap(),
+        fields[1]
+    );
+    // The errors of PySpark's readers: a provider of no collation, and a collation of a field
+    // that is not a string.
+    let of = |type_json: &str, collation: &str| {
+        let json = format!(
+            r#"{{"name":"f","type":{type_json},"nullable":true,"metadata":{{"__COLLATIONS":{{"f":"{collation}"}}}}}}"#
+        );
+        StructField::from_json_str(&json).unwrap_err()
+    };
+    let error = of(r#""string""#, "other.UTF8_LCASE");
+    assert_eq!(
+        error.get_error_class().as_deref(),
+        Some("COLLATION_INVALID_PROVIDER")
+    );
+    let error = of(r#""integer""#, "spark.UTF8_LCASE");
+    assert_eq!(
+        error.get_error_class().as_deref(),
+        Some("INVALID_JSON_DATA_TYPE_FOR_COLLATIONS")
+    );
+    // A UDT reads back the JSON that it writes.
+    let udt = DataType::Udt {
+        type_str: "udt".to_string(),
+        jvm_class: None,
+        python_class: Some("mymod.MyUDT".to_string()),
+        serialized_python_class: Some("<pickle>".to_string()),
+        sql_type: Some(Box::new(DataType::Integer)),
+    };
+    assert_eq!(DataType::from_json_str(&udt.json()).unwrap(), udt);
+}
+
 /// Exercise the DDL parser across the full grammar it accepts. Calling `from_ddl` on
 /// each form pins the large `parse_datatype_string` body; a few are asserted to the
 /// expected type.

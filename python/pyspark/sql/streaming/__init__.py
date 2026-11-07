@@ -23,9 +23,8 @@ from pyspark.sql.streaming.readwriter import (
 from pyspark.sql.streaming.query import (
     StreamingQuery,
     StreamingQueryManager,
-    StreamingQueryStatus,
-    StreamingQueryException,
 )
+from pyspark.errors import StreamingQueryException
 from pyspark.sql.streaming.datasource import (
     ReadLimit,
     ReadAllAvailable,
@@ -49,7 +48,6 @@ __all__ = [
     "Trigger",
     "StreamingQuery",
     "StreamingQueryManager",
-    "StreamingQueryStatus",
     "StreamingQueryException",
     "ReadLimit",
     "ReadAllAvailable",
