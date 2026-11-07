@@ -40,6 +40,42 @@ impl PyGroupedData {
     }
 }
 
+/// The aggregates of the dict form `agg({column: function})`, one `function(column)` per entry
+/// in order, as PySpark builds them (`F._invoke_function(function, F.col(column))`). A column
+/// that is not a str raises the `AttributeError` of `F.col`, and a function that is not a str
+/// the `AssertionError` of `_invoke_function`.
+pub(crate) fn dict_aggregates(
+    dict: &Bound<'_, pyo3::types::PyDict>,
+) -> PyResult<Vec<spark_connect::expression::Expression>> {
+    let mut agg_exprs = Vec::with_capacity(dict.len());
+    for (column, function) in dict.iter() {
+        let Ok(column) = column.extract::<String>() else {
+            let typ = column
+                .get_type()
+                .name()
+                .map(|name| name.to_string())
+                .unwrap_or_default();
+            return Err(pyo3::exceptions::PyAttributeError::new_err(format!(
+                "'{typ}' object has no attribute 'endswith'"
+            )));
+        };
+        let Ok(function) = function.extract::<String>() else {
+            return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+        };
+        // As PySpark's `agg` of a dict, by `col`, of its origin.
+        let _origin = crate::origin::with_origin("col");
+        let c = spark_connect::functions::col(&column);
+        // Build func(col) as an unresolved function resolved server-side, so aggregate names
+        // (max/min/sum/avg/count/...) all work regardless of whether they are in the generated
+        // dispatch.
+        agg_exprs.push(spark_connect::expression::Expression::function(
+            function,
+            vec![c.expression().clone()],
+        ));
+    }
+    Ok(agg_exprs)
+}
+
 impl PyGroupedData {
     /// `sum`, `avg`, `mean`, `min` and `max`, as PySpark's `_numeric_agg`: of column names,
     /// which it asserts, every numeric column without any, and `NOT_NUMERIC_COLUMNS` for a
@@ -80,22 +116,7 @@ impl PyGroupedData {
         // Dict form: {column_name: aggregate_function_name} -> func(col(name)) per entry.
         if exprs.len() == 1 {
             if let Ok(dict) = exprs[0].cast::<pyo3::types::PyDict>() {
-                let mut agg_exprs = vec![];
-                for (k, v) in dict.iter() {
-                    let col_name: String = k.extract()?;
-                    let func_name: String = v.extract()?;
-                    // As PySpark's `agg` of a dict, by `col`, of its origin.
-                    let _origin = crate::origin::with_origin("col");
-                    let c = spark_connect::functions::col(&col_name);
-                    // Build func(col) as an unresolved function resolved server-side, so
-                    // aggregate names (max/min/sum/avg/count/...) all work regardless of
-                    // whether they are in the generated dispatch.
-                    let agg_expr = spark_connect::expression::Expression::function(
-                        func_name,
-                        vec![c.expression().clone()],
-                    );
-                    agg_exprs.push(agg_expr);
-                }
+                let agg_exprs = dict_aggregates(&dict)?;
                 let df = self.grouped_data.agg(agg_exprs);
                 return Ok(PyDataFrame::new(df));
             }

@@ -852,6 +852,15 @@ impl PyDataStreamWriter {
     }
 }
 
+/// The progress of a query from its JSON, as PySpark's
+/// `StreamingQueryProgress.fromJson(json.loads(progress))`.
+fn progress_from_json<'py>(py: Python<'py>, json: &str) -> PyResult<Bound<'py, PyAny>> {
+    let loaded = py.import("json")?.call_method1("loads", (json,))?;
+    py.import("pyspark.sql.streaming.listener")?
+        .getattr("StreamingQueryProgress")?
+        .call_method1("fromJson", (loaded,))
+}
+
 /// The timeout of `awaitTermination` and `awaitAnyTermination`, in seconds, as PySpark's take
 /// it: an int or a float, which must be positive, else `VALUE_NOT_POSITIVE` of the name of its
 /// type.
@@ -979,14 +988,24 @@ impl PyStreamingQuery {
         self.inner.await_termination(timeout).to_pyerr()
     }
 
+    /// The last progress of the query, as PySpark's `StreamingQueryProgress`, or None.
     #[getter]
-    fn lastProgress(&self) -> PyResult<Option<String>> {
-        self.inner.last_progress().to_pyerr()
+    fn lastProgress<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        match self.inner.last_progress().to_pyerr()? {
+            Some(json) => progress_from_json(py, &json).map(Some),
+            None => Ok(None),
+        }
     }
 
+    /// The recent progress of the query, each as PySpark's `StreamingQueryProgress`.
     #[getter]
-    fn recentProgress(&self) -> PyResult<Vec<String>> {
-        self.inner.recent_progress().to_pyerr()
+    fn recentProgress<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        self.inner
+            .recent_progress()
+            .to_pyerr()?
+            .iter()
+            .map(|json| progress_from_json(py, json))
+            .collect()
     }
 
     fn processAllAvailable(&self) -> PyResult<()> {

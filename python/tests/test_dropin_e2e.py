@@ -21,6 +21,7 @@ values here are those of the reference client; the tests pass with it as well.
 """
 
 import os
+import time
 from collections import namedtuple
 from datetime import date, datetime
 
@@ -204,6 +205,49 @@ def test_repr_shows_the_rows_with_eager_evaluation_as_pyspark(session):
         for key in keys:
             session.conf.unset(key)
     assert repr(df) == "DataFrame[id: bigint]"
+
+
+def test_join_with_an_unsupported_join_type_raises_as_pyspark(session):
+    # As PySpark: the join type is checked when the join is built, which raises the
+    # AnalysisException of UNSUPPORTED_JOIN_TYPE, naming the type as it is normalized.
+    df = session.range(3)
+    with pytest.raises(AnalysisException) as error:
+        df.join(df, "id", "foo").collect()
+    assert error.value.getCondition() == "UNSUPPORTED_JOIN_TYPE"
+    assert error.value.getMessageParameters()["typ"] == "foo"
+    assert sorted(row.id for row in df.join(df, "id", "left_semi").collect()) == [0, 1, 2]
+
+
+def test_streaming_query_status_and_progress_are_as_pyspark(session):
+    # As PySpark: the status is a dict of message, isDataAvailable and isTriggerActive, and the
+    # progress is a StreamingQueryProgress, a dict, of the query.
+    from pyspark.sql.streaming.listener import StreamingQueryProgress
+
+    query = (
+        session.readStream.format("rate")
+        .load()
+        .writeStream.format("memory")
+        .queryName("fug_status_query")
+        .start()
+    )
+    try:
+        # Wait, bounded, for the first micro-batch, rather than processAllAvailable.
+        deadline = time.monotonic() + 60
+        while query.lastProgress is None and time.monotonic() < deadline:
+            time.sleep(0.5)
+        status = query.status
+        assert isinstance(status, dict)
+        assert list(status) == ["message", "isDataAvailable", "isTriggerActive"]
+        assert isinstance(status["message"], str)
+        assert isinstance(status["isDataAvailable"], bool)
+        assert isinstance(status["isTriggerActive"], bool)
+        last = query.lastProgress
+        assert isinstance(last, StreamingQueryProgress)
+        assert last["name"] == "fug_status_query"
+        recent = query.recentProgress
+        assert recent and all(isinstance(p, StreamingQueryProgress) for p in recent)
+    finally:
+        query.stop()
 
 
 def test_replace_and_unpivot_take_their_arguments_as_pyspark(session):
