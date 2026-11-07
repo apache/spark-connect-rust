@@ -406,6 +406,42 @@ def test_datatypes_usable_in_sets_and_dicts():
     assert len({fa, fa2, fb}) == 2
 
 
+def test_data_types_have_their_attributes_type_names_and_singletons_as_pyspark():
+    # As PySpark's: the attributes of the parameters of the types, typeName as a classmethod of
+    # the name of the class, INVALID_TYPENAME_CALL of StructField.typeName, and the types of
+    # DataTypeSingleton, of which every call returns the one instance.
+    from pyspark.errors import PySparkTypeError
+
+    assert T.StringType("UTF8_LCASE").collation == "UTF8_LCASE"
+    assert T.StringType().collation == "UTF8_BINARY"
+    assert (T.CharType(3).length, T.VarcharType(4).length, T.TimeType(3).precision) == (3, 4, 3)
+    interval = T.DayTimeIntervalType(T.DayTimeIntervalType.HOUR, T.DayTimeIntervalType.SECOND)
+    assert (interval.startField, interval.endField) == (1, 3)
+    assert (T.YearMonthIntervalType().startField, T.YearMonthIntervalType().endField) == (0, 1)
+    assert T.DecimalType(10, 2).hasPrecisionInfo is True
+    for cls, name in ((T.DataType, "data"), (T.AtomicType, "atomic"), (T.IntegerType, "integer"),
+                      (T.DayTimeIntervalType, "daytimeinterval"), (T.StructType, "struct"),
+                      (T.NullType, "void"), (T.TimestampNTZType, "timestamp_ntz"),
+                      (T.CalendarIntervalType, "interval")):
+        assert cls.typeName() == name
+    assert T.CharType(3).typeName() == "char"
+
+    class MyType(T.DataType):
+        pass
+
+    assert MyType.typeName() == MyType().typeName() == "my"
+    with pytest.raises(PySparkTypeError) as e:
+        T.StructField("a", T.IntegerType()).typeName()
+    assert e.value.getCondition() == "INVALID_TYPENAME_CALL"
+    for cls in (T.NullType, T.ByteType, T.IntegerType, T.LongType, T.DoubleType, T.BinaryType,
+                T.DateType, T.TimestampNTZType, T.CalendarIntervalType):
+        assert cls() is cls()
+    assert T.StringType() is not T.StringType()
+    assert T.ArrayType(T.IntegerType()).elementType is T.IntegerType()
+
+
+
+
 def test_user_defined_type_eq_and_hash():
     class PointUDT(T.UserDefinedType):
         @classmethod
