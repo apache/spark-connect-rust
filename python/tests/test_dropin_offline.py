@@ -2499,11 +2499,51 @@ def test_struct_type_introspection():
     with pytest.raises(KeyError):
         _ = st["nope"]
     # chainable add
-    st2 = T.StructType().add("x", "int").add("y", T.StringType(), False).add(
+    st2 = T.StructType().add("x", "integer").add("y", T.StringType(), False).add(
         T.StructField("z", T.IntegerType())
     )
     assert st2.fieldNames() == ["x", "y", "z"]
     assert isinstance(st2, T.StructType)
+
+
+def test_struct_types_take_their_keys_and_fields_as_pyspark():
+    # As PySpark's StructType: __getitem__ raises KEY_NOT_EXISTS of a name,
+    # INDEX_OUT_OF_RANGE of an index and NOT_EXPECTED_TYPE of another key, and add takes the
+    # JSON value of a data type as a str, and requires a data type of a name.
+    from pyspark.errors import (
+        PySparkIndexError,
+        PySparkKeyError,
+        PySparkTypeError,
+        PySparkValueError,
+    )
+    from pyspark.sql import types as T
+
+    st = T.StructType([T.StructField("a", T.IntegerType())])
+    with pytest.raises(PySparkKeyError) as e:
+        st["zz"]
+    assert e.value.getCondition() == "KEY_NOT_EXISTS"
+    assert e.value.getMessageParameters() == {"key": "zz"}
+    for index in (1, -2):
+        with pytest.raises(PySparkIndexError) as e:
+            st[index]
+        assert e.value.getMessageParameters() == {"arg_name": "StructType", "index": str(index)}
+    assert st[-1].name == "a"
+    with pytest.raises(PySparkTypeError) as e:
+        st[1.5]
+    assert e.value.getMessageParameters() == {
+        "expected_type": "int, slice or str",
+        "arg_name": "key",
+        "arg_type": "float",
+    }
+    added = T.StructType().add("a", "integer").add("b", "decimal(10,2)", False)
+    assert added.simpleString() == "struct<a:int,b:decimal(10,2)>"
+    assert added["b"].nullable is False
+    with pytest.raises(PySparkValueError) as e:
+        T.StructType().add("a", "int")
+    assert e.value.getCondition() == "CANNOT_PARSE_DATATYPE"
+    with pytest.raises(PySparkValueError) as e:
+        T.StructType().add("a")
+    assert e.value.getCondition() == "ARGUMENT_REQUIRED"
 
 
 def test_struct_field_attributes():

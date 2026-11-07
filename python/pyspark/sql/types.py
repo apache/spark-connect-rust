@@ -322,7 +322,8 @@ def _parse_datatype_json_value(v):
         try:
             return parse_datatype_json(_json.dumps(v))
         except ValueError:
-            raise ValueError(f"cannot parse datatype json: {v!r}") from None
+            # As PySpark's, of a str that is not the JSON value of a data type.
+            raise _pyspark_value_error("CANNOT_PARSE_DATATYPE", {"msg": str(v)}) from None
     elif isinstance(v, dict):
         t = v.get("type")
         if t == "struct":
@@ -349,7 +350,15 @@ def _parse_datatype_json_value(v):
             )
         elif t == "udt":
             return UserDefinedType.fromJson(v)
-    raise ValueError(f"cannot parse datatype json: {v!r}")
+        # As PySpark's, of an object of a type that is not one of a data type.
+        raise _pyspark_value_error("UNSUPPORTED_DATA_TYPE", {"data_type": str(t)})
+    raise _pyspark_value_error("CANNOT_PARSE_DATATYPE", {"msg": str(v)})
+
+
+def _pyspark_value_error(error_class, parameters):
+    from pyspark.errors import PySparkValueError
+
+    return PySparkValueError(errorClass=error_class, messageParameters=parameters)
 
 
 def _drop_metadata(d):
