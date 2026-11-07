@@ -823,9 +823,10 @@ impl PyDataStreamWriter {
     }
 
     #[pyo3(signature = (path=None, format=None, outputMode=None, partitionBy=None, queryName=None, **options))]
-    #[allow(non_snake_case)]
+    #[allow(non_snake_case, clippy::too_many_arguments)]
     fn start(
         &mut self,
+        py: Python<'_>,
         path: Option<&str>,
         format: Option<&str>,
         outputMode: Option<&str>,
@@ -835,14 +836,16 @@ impl PyDataStreamWriter {
     ) -> PyResult<PyStreamingQuery> {
         let writer = self.apply_write_opts(format, outputMode, partitionBy, queryName, options)?;
         // Memory/console/foreach sinks take no path; the core treats "" as unset.
-        let query = writer.start(path.unwrap_or("")).to_pyerr()?;
+        let query =
+            crate::dataframe::detached(py, || writer.start(path.unwrap_or("")).map_err(Box::new))?;
         Ok(PyStreamingQuery::new(query))
     }
 
     #[pyo3(signature = (tableName, format=None, outputMode=None, partitionBy=None, queryName=None, **options))]
-    #[allow(non_snake_case)]
+    #[allow(non_snake_case, clippy::too_many_arguments)]
     fn toTable(
         &mut self,
+        py: Python<'_>,
         tableName: &str,
         format: Option<&str>,
         outputMode: Option<&str>,
@@ -851,7 +854,8 @@ impl PyDataStreamWriter {
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyStreamingQuery> {
         let writer = self.apply_write_opts(format, outputMode, partitionBy, queryName, options)?;
-        let query = writer.to_table(tableName).to_pyerr()?;
+        let query =
+            crate::dataframe::detached(py, || writer.to_table(tableName).map_err(Box::new))?;
         Ok(PyStreamingQuery::new(query))
     }
 
@@ -1028,15 +1032,15 @@ impl PyStreamingQuery {
     }
 
     #[getter]
-    fn isActive(&self) -> PyResult<bool> {
-        self.inner.is_active().to_pyerr()
+    fn isActive(&self, py: Python<'_>) -> PyResult<bool> {
+        crate::dataframe::detached(py, || self.inner.is_active().map_err(Box::new))
     }
 
     /// The status of the query, as PySpark's: a dict of its `message`, `isDataAvailable` and
     /// `isTriggerActive`.
     #[getter]
     fn status<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let status = self.inner.status().to_pyerr()?;
+        let status = crate::dataframe::detached(py, || self.inner.status().map_err(Box::new))?;
         let dict = PyDict::new(py);
         dict.set_item("message", status.status_message)?;
         dict.set_item("isDataAvailable", status.is_data_available)?;
@@ -1044,20 +1048,28 @@ impl PyStreamingQuery {
         Ok(dict)
     }
 
-    fn stop(&self) -> PyResult<()> {
-        self.inner.stop().to_pyerr()
+    fn stop(&self, py: Python<'_>) -> PyResult<()> {
+        crate::dataframe::detached(py, || self.inner.stop().map_err(Box::new))
     }
 
     #[pyo3(signature = (timeout=None))]
-    fn awaitTermination(&self, timeout: Option<&Bound<'_, PyAny>>) -> PyResult<Option<bool>> {
+    fn awaitTermination(
+        &self,
+        py: Python<'_>,
+        timeout: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Option<bool>> {
         let timeout = positive_timeout(timeout)?;
-        self.inner.await_termination(timeout).to_pyerr()
+        crate::dataframe::detached(py, || {
+            self.inner.await_termination(timeout).map_err(Box::new)
+        })
     }
 
     /// The last progress of the query, as PySpark's `StreamingQueryProgress`, or None.
     #[getter]
     fn lastProgress<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
-        match self.inner.last_progress().to_pyerr()? {
+        let progress =
+            crate::dataframe::detached(py, || self.inner.last_progress().map_err(Box::new))?;
+        match progress {
             Some(json) => progress_from_json(py, &json).map(Some),
             None => Ok(None),
         }
@@ -1066,16 +1078,14 @@ impl PyStreamingQuery {
     /// The recent progress of the query, each as PySpark's `StreamingQueryProgress`.
     #[getter]
     fn recentProgress<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
-        self.inner
-            .recent_progress()
-            .to_pyerr()?
+        crate::dataframe::detached(py, || self.inner.recent_progress().map_err(Box::new))?
             .iter()
             .map(|json| progress_from_json(py, json))
             .collect()
     }
 
-    fn processAllAvailable(&self) -> PyResult<()> {
-        self.inner.process_all_available().to_pyerr()
+    fn processAllAvailable(&self, py: Python<'_>) -> PyResult<()> {
+        crate::dataframe::detached(py, || self.inner.process_all_available().map_err(Box::new))
     }
 
     /// Print the plan of the query with Python's `print`, as PySpark's
@@ -1093,7 +1103,9 @@ impl PyStreamingQuery {
     /// `pyspark.errors.exceptions.connect`, of the message of the server without the type of
     /// its Java exception, and with its JVM stack trace, and of the error class as its reason.
     fn exception(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
-        let Some(exception) = self.inner.exception().to_pyerr()? else {
+        let exception =
+            crate::dataframe::detached(py, || self.inner.exception().map_err(Box::new))?;
+        let Some(exception) = exception else {
             return Ok(None);
         };
         // The message is the `toString` of the Java StreamingQueryException: drop its type.
@@ -1128,24 +1140,30 @@ impl PyStreamingQueryManager {
 #[pymethods]
 impl PyStreamingQueryManager {
     #[getter]
-    fn active(&self) -> PyResult<Vec<PyStreamingQuery>> {
-        let queries = self.inner.active().to_pyerr()?;
+    fn active(&self, py: Python<'_>) -> PyResult<Vec<PyStreamingQuery>> {
+        let queries = crate::dataframe::detached(py, || self.inner.active().map_err(Box::new))?;
         Ok(queries.into_iter().map(PyStreamingQuery::new).collect())
     }
 
-    fn get(&self, id: &str) -> PyResult<Option<PyStreamingQuery>> {
-        let query = self.inner.get(id).to_pyerr()?;
+    fn get(&self, py: Python<'_>, id: &str) -> PyResult<Option<PyStreamingQuery>> {
+        let query = crate::dataframe::detached(py, || self.inner.get(id).map_err(Box::new))?;
         Ok(query.map(PyStreamingQuery::new))
     }
 
     #[pyo3(signature = (timeout=None))]
-    fn awaitAnyTermination(&self, timeout: Option<&Bound<'_, PyAny>>) -> PyResult<Option<bool>> {
+    fn awaitAnyTermination(
+        &self,
+        py: Python<'_>,
+        timeout: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Option<bool>> {
         let timeout = positive_timeout(timeout)?;
-        self.inner.await_any_termination(timeout).to_pyerr()
+        crate::dataframe::detached(py, || {
+            self.inner.await_any_termination(timeout).map_err(Box::new)
+        })
     }
 
-    fn resetTerminated(&self) -> PyResult<()> {
-        self.inner.reset_terminated().to_pyerr()
+    fn resetTerminated(&self, py: Python<'_>) -> PyResult<()> {
+        crate::dataframe::detached(py, || self.inner.reset_terminated().map_err(Box::new))
     }
 
     /// Register a client-side listener object (with onQueryStarted/Progress/Idle/
@@ -1156,7 +1174,8 @@ impl PyStreamingQueryManager {
         let adapter = Arc::new(PyListenerAdapter {
             listener: listener.clone_ref(py),
         });
-        let id = self.inner.add_listener(adapter).to_pyerr()?;
+        let id =
+            crate::dataframe::detached(py, || self.inner.add_listener(adapter).map_err(Box::new))?;
         listener.bind(py).setattr("_rust_listener_id", id)?;
         Ok(())
     }
@@ -1167,7 +1186,7 @@ impl PyStreamingQueryManager {
         let bound = listener.bind(py);
         if let Ok(id_obj) = bound.getattr("_rust_listener_id") {
             let id: String = id_obj.extract()?;
-            self.inner.remove_listener(&id).to_pyerr()?;
+            crate::dataframe::detached(py, || self.inner.remove_listener(&id).map_err(Box::new))?;
             let _ = bound.delattr("_rust_listener_id");
         }
         Ok(())
@@ -1175,12 +1194,14 @@ impl PyStreamingQueryManager {
 
     /// Remove all client-side listeners and stop the dispatch thread. Mirrors
     /// `StreamingQueryManager.close`.
-    fn close(&self) -> PyResult<()> {
-        self.inner.close().to_pyerr()
+    fn close(&self, py: Python<'_>) -> PyResult<()> {
+        crate::dataframe::detached(py, || self.inner.close().map_err(Box::new))
     }
 
-    fn streamListenerEvents(&self) -> PyResult<PyListenerEventStream> {
-        let stream = self.inner.listener_event_stream().to_pyerr()?;
+    fn streamListenerEvents(&self, py: Python<'_>) -> PyResult<PyListenerEventStream> {
+        let stream = crate::dataframe::detached(py, || {
+            self.inner.listener_event_stream().map_err(Box::new)
+        })?;
         Ok(PyListenerEventStream::new(stream))
     }
 }

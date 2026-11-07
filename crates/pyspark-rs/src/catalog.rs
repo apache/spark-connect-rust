@@ -5,6 +5,8 @@ use spark_connect::catalog::{
     Catalog, CatalogMetadata, Column, Database, Function, Table, TablePartition,
 };
 
+use spark_connect_core::error::SparkError;
+
 use crate::dataframe::PyDataFrame;
 use crate::errors::ResultExt;
 
@@ -279,74 +281,101 @@ impl PyCatalog {
     pub fn new(catalog: Catalog) -> Self {
         PyCatalog { catalog }
     }
+
+    /// `f` of the catalog without the GIL, as PySpark's requests to the server release it
+    /// while they wait, so that other Python threads run.
+    fn detached<T: Send>(
+        &self,
+        py: Python<'_>,
+        f: impl FnOnce(&Catalog) -> Result<T, Box<SparkError>> + Send,
+    ) -> PyResult<T> {
+        py.detach(|| f(&self.catalog)).to_pyerr()
+    }
 }
 
 #[pymethods]
 impl PyCatalog {
     /// Get the current catalog.
-    fn currentCatalog(&self) -> PyResult<String> {
-        self.catalog.current_catalog().to_pyerr()
+    fn currentCatalog(&self, py: Python<'_>) -> PyResult<String> {
+        self.detached(py, |catalog| catalog.current_catalog().map_err(Box::new))
     }
 
     /// Set the current catalog.
-    fn setCurrentCatalog(&self, catalogName: &str) -> PyResult<()> {
-        self.catalog.set_current_catalog(catalogName).to_pyerr()
+    fn setCurrentCatalog(&self, py: Python<'_>, catalogName: &str) -> PyResult<()> {
+        self.detached(py, |catalog| {
+            catalog.set_current_catalog(catalogName).map_err(Box::new)
+        })
     }
 
     /// List catalogs. Mirrors `Catalog.listCatalogs(pattern=None) -> List[CatalogMetadata]`.
     #[pyo3(signature = (pattern=None))]
-    fn listCatalogs(&self, pattern: Option<&str>) -> PyResult<Vec<PyCatalogMetadata>> {
+    fn listCatalogs(
+        &self,
+        py: Python<'_>,
+        pattern: Option<&str>,
+    ) -> PyResult<Vec<PyCatalogMetadata>> {
         Ok(self
-            .catalog
-            .list_catalogs_typed(pattern)
-            .to_pyerr()?
+            .detached(py, |catalog| {
+                catalog.list_catalogs_typed(pattern).map_err(Box::new)
+            })?
             .into_iter()
             .map(|inner| PyCatalogMetadata { inner })
             .collect())
     }
 
     /// Get current database.
-    fn currentDatabase(&self) -> PyResult<String> {
-        self.catalog.current_database().to_pyerr()
+    fn currentDatabase(&self, py: Python<'_>) -> PyResult<String> {
+        self.detached(py, |catalog| catalog.current_database().map_err(Box::new))
     }
 
     /// Set current database.
-    fn setCurrentDatabase(&self, dbName: &str) -> PyResult<()> {
-        self.catalog.set_current_database(dbName).to_pyerr()
+    fn setCurrentDatabase(&self, py: Python<'_>, dbName: &str) -> PyResult<()> {
+        self.detached(py, |catalog| {
+            catalog.set_current_database(dbName).map_err(Box::new)
+        })
     }
 
     /// List databases. Mirrors `Catalog.listDatabases(pattern=None) -> List[Database]`.
     #[pyo3(signature = (pattern=None))]
-    fn listDatabases(&self, pattern: Option<&str>) -> PyResult<Vec<PyDatabase>> {
+    fn listDatabases(&self, py: Python<'_>, pattern: Option<&str>) -> PyResult<Vec<PyDatabase>> {
         Ok(self
-            .catalog
-            .list_databases_typed(pattern)
-            .to_pyerr()?
+            .detached(py, |catalog| {
+                catalog.list_databases_typed(pattern).map_err(Box::new)
+            })?
             .into_iter()
             .map(|inner| PyDatabase { inner })
             .collect())
     }
 
     /// Check if database exists.
-    fn databaseExists(&self, dbName: &str) -> PyResult<bool> {
-        self.catalog.database_exists(dbName).to_pyerr()
+    fn databaseExists(&self, py: Python<'_>, dbName: &str) -> PyResult<bool> {
+        self.detached(py, |catalog| {
+            catalog.database_exists(dbName).map_err(Box::new)
+        })
     }
 
     /// Get database info. Mirrors `Catalog.getDatabase(dbName) -> Database`.
-    fn getDatabase(&self, dbName: &str) -> PyResult<PyDatabase> {
+    fn getDatabase(&self, py: Python<'_>, dbName: &str) -> PyResult<PyDatabase> {
         Ok(PyDatabase {
-            inner: self.catalog.get_database_typed(dbName).to_pyerr()?,
+            inner: self.detached(py, |catalog| {
+                catalog.get_database_typed(dbName).map_err(Box::new)
+            })?,
         })
     }
 
     /// List tables. Mirrors `Catalog.listTables(dbName=None, pattern=None) -> List[Table]`.
     #[pyo3(signature = (dbName=None, pattern=None))]
     #[allow(non_snake_case)]
-    fn listTables(&self, dbName: Option<&str>, pattern: Option<&str>) -> PyResult<Vec<PyTable>> {
+    fn listTables(
+        &self,
+        py: Python<'_>,
+        dbName: Option<&str>,
+        pattern: Option<&str>,
+    ) -> PyResult<Vec<PyTable>> {
         Ok(self
-            .catalog
-            .list_tables_typed(dbName, pattern)
-            .to_pyerr()?
+            .detached(py, |catalog| {
+                catalog.list_tables_typed(dbName, pattern).map_err(Box::new)
+            })?
             .into_iter()
             .map(|inner| PyTable { inner })
             .collect())
@@ -356,15 +385,17 @@ impl PyCatalog {
     #[pyo3(signature = (tableName, dbName=None))]
     fn tableExists(&self, py: Python<'_>, tableName: &str, dbName: Option<&str>) -> PyResult<bool> {
         warn_db_name(py, "tableExists", dbName)?;
-        self.catalog
-            .table_exists_with_database(tableName, dbName)
-            .to_pyerr()
+        self.detached(py, |catalog| {
+            { catalog.table_exists_with_database(tableName, dbName) }.map_err(Box::new)
+        })
     }
 
     /// Get table info. Mirrors `Catalog.getTable(tableName) -> Table`.
-    fn getTable(&self, tableName: &str) -> PyResult<PyTable> {
+    fn getTable(&self, py: Python<'_>, tableName: &str) -> PyResult<PyTable> {
         Ok(PyTable {
-            inner: self.catalog.get_table_typed(tableName).to_pyerr()?,
+            inner: self.detached(py, |catalog| {
+                catalog.get_table_typed(tableName).map_err(Box::new)
+            })?,
         })
     }
 
@@ -373,13 +404,16 @@ impl PyCatalog {
     #[allow(non_snake_case)]
     fn listFunctions(
         &self,
+        py: Python<'_>,
         dbName: Option<&str>,
         pattern: Option<&str>,
     ) -> PyResult<Vec<PyFunction>> {
         Ok(self
-            .catalog
-            .list_functions_typed(dbName, pattern)
-            .to_pyerr()?
+            .detached(py, |catalog| {
+                catalog
+                    .list_functions_typed(dbName, pattern)
+                    .map_err(Box::new)
+            })?
             .into_iter()
             .map(|inner| PyFunction { inner })
             .collect())
@@ -394,15 +428,17 @@ impl PyCatalog {
         dbName: Option<&str>,
     ) -> PyResult<bool> {
         warn_db_name(py, "functionExists", dbName)?;
-        self.catalog
-            .function_exists_with_database(functionName, dbName)
-            .to_pyerr()
+        self.detached(py, |catalog| {
+            { catalog.function_exists_with_database(functionName, dbName) }.map_err(Box::new)
+        })
     }
 
     /// Get function info. Mirrors `Catalog.getFunction(functionName) -> Function`.
-    fn getFunction(&self, functionName: &str) -> PyResult<PyFunction> {
+    fn getFunction(&self, py: Python<'_>, functionName: &str) -> PyResult<PyFunction> {
         Ok(PyFunction {
-            inner: self.catalog.get_function_typed(functionName).to_pyerr()?,
+            inner: self.detached(py, |catalog| {
+                catalog.get_function_typed(functionName).map_err(Box::new)
+            })?,
         })
     }
 
@@ -417,9 +453,11 @@ impl PyCatalog {
     ) -> PyResult<Vec<PyCatalogColumn>> {
         warn_db_name(py, "listColumns", dbName)?;
         Ok(self
-            .catalog
-            .list_columns_typed(tableName, dbName)
-            .to_pyerr()?
+            .detached(py, |catalog| {
+                catalog
+                    .list_columns_typed(tableName, dbName)
+                    .map_err(Box::new)
+            })?
             .into_iter()
             .map(|inner| PyCatalogColumn { inner })
             .collect())
@@ -431,53 +469,70 @@ impl PyCatalog {
     /// `CacheTable.storage_level` field (the same field layout `DataFrame.persist` uses);
     /// `None` leaves it unset so the server default applies.
     #[pyo3(signature = (tableName, storageLevel=None))]
-    fn cacheTable(&self, tableName: &str, storageLevel: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+    fn cacheTable(
+        &self,
+        py: Python<'_>,
+        tableName: &str,
+        storageLevel: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
         let level = storageLevel
             .map(crate::storagelevel::storage_level_proto)
             .transpose()?;
-        self.catalog
-            .cache_table_with_storage_level(tableName, level)
-            .to_pyerr()
+        self.detached(py, |catalog| {
+            { catalog.cache_table_with_storage_level(tableName, level) }.map_err(Box::new)
+        })
     }
 
     /// Uncache a table.
-    fn uncacheTable(&self, tableName: &str) -> PyResult<()> {
-        self.catalog.uncache_table(tableName).to_pyerr()
+    fn uncacheTable(&self, py: Python<'_>, tableName: &str) -> PyResult<()> {
+        self.detached(py, |catalog| {
+            catalog.uncache_table(tableName).map_err(Box::new)
+        })
     }
 
     /// Drop temporary view.
-    fn dropTempView(&self, viewName: &str) -> PyResult<bool> {
-        self.catalog.drop_temp_view(viewName).to_pyerr()
+    fn dropTempView(&self, py: Python<'_>, viewName: &str) -> PyResult<bool> {
+        self.detached(py, |catalog| {
+            catalog.drop_temp_view(viewName).map_err(Box::new)
+        })
     }
 
     /// Drop a global temporary view.
-    fn dropGlobalTempView(&self, viewName: &str) -> PyResult<bool> {
-        self.catalog.drop_global_temp_view(viewName).to_pyerr()
+    fn dropGlobalTempView(&self, py: Python<'_>, viewName: &str) -> PyResult<bool> {
+        self.detached(py, |catalog| {
+            catalog.drop_global_temp_view(viewName).map_err(Box::new)
+        })
     }
 
     /// Whether a table/view is cached.
-    fn isCached(&self, tableName: &str) -> PyResult<bool> {
-        self.catalog.is_cached(tableName).to_pyerr()
+    fn isCached(&self, py: Python<'_>, tableName: &str) -> PyResult<bool> {
+        self.detached(py, |catalog| catalog.is_cached(tableName).map_err(Box::new))
     }
 
     /// Remove all cached tables from the in-memory cache.
-    fn clearCache(&self) -> PyResult<()> {
-        self.catalog.clear_cache().to_pyerr()
+    fn clearCache(&self, py: Python<'_>) -> PyResult<()> {
+        self.detached(py, |catalog| catalog.clear_cache().map_err(Box::new))
     }
 
     /// Invalidate and refresh cached metadata for a table.
-    fn refreshTable(&self, tableName: &str) -> PyResult<()> {
-        self.catalog.refresh_table(tableName).to_pyerr()
+    fn refreshTable(&self, py: Python<'_>, tableName: &str) -> PyResult<()> {
+        self.detached(py, |catalog| {
+            catalog.refresh_table(tableName).map_err(Box::new)
+        })
     }
 
     /// Invalidate and refresh cached data for any table at a path.
-    fn refreshByPath(&self, path: &str) -> PyResult<()> {
-        self.catalog.refresh_by_path(path).to_pyerr()
+    fn refreshByPath(&self, py: Python<'_>, path: &str) -> PyResult<()> {
+        self.detached(py, |catalog| {
+            catalog.refresh_by_path(path).map_err(Box::new)
+        })
     }
 
     /// Recover all the partitions of a table.
-    fn recoverPartitions(&self, tableName: &str) -> PyResult<()> {
-        self.catalog.recover_partitions(tableName).to_pyerr()
+    fn recoverPartitions(&self, py: Python<'_>, tableName: &str) -> PyResult<()> {
+        self.detached(py, |catalog| {
+            catalog.recover_partitions(tableName).map_err(Box::new)
+        })
     }
 
     /// Create a table from a data source, as PySpark's: of a StructType `schema` and string
@@ -566,6 +621,7 @@ impl PyCatalog {
     #[allow(non_snake_case)]
     fn createDatabase(
         &self,
+        py: Python<'_>,
         dbName: &str,
         ifNotExists: bool,
         properties: Option<&Bound<'_, pyo3::types::PyDict>>,
@@ -576,56 +632,81 @@ impl PyCatalog {
                 props.insert(k.extract::<String>()?, v.extract::<String>()?);
             }
         }
-        self.catalog
-            .create_database(dbName, ifNotExists, props)
-            .to_pyerr()
+        self.detached(py, |catalog| {
+            { catalog.create_database(dbName, ifNotExists, props) }.map_err(Box::new)
+        })
     }
 
     /// Drop a database.
     #[pyo3(signature = (dbName, ifExists=false, cascade=false))]
     #[allow(non_snake_case)]
-    fn dropDatabase(&self, dbName: &str, ifExists: bool, cascade: bool) -> PyResult<()> {
-        self.catalog
-            .drop_database(dbName, ifExists, cascade)
-            .to_pyerr()
+    fn dropDatabase(
+        &self,
+        py: Python<'_>,
+        dbName: &str,
+        ifExists: bool,
+        cascade: bool,
+    ) -> PyResult<()> {
+        self.detached(py, |catalog| {
+            { catalog.drop_database(dbName, ifExists, cascade) }.map_err(Box::new)
+        })
     }
 
     /// Drop a table.
     #[pyo3(signature = (tableName, ifExists=false, purge=false))]
     #[allow(non_snake_case)]
-    fn dropTable(&self, tableName: &str, ifExists: bool, purge: bool) -> PyResult<()> {
-        self.catalog
-            .drop_table(tableName, ifExists, purge)
-            .to_pyerr()
+    fn dropTable(
+        &self,
+        py: Python<'_>,
+        tableName: &str,
+        ifExists: bool,
+        purge: bool,
+    ) -> PyResult<()> {
+        self.detached(py, |catalog| {
+            catalog
+                .drop_table(tableName, ifExists, purge)
+                .map_err(Box::new)
+        })
     }
 
     /// Drop a view.
     #[pyo3(signature = (viewName, ifExists=false))]
     #[allow(non_snake_case)]
-    fn dropView(&self, viewName: &str, ifExists: bool) -> PyResult<()> {
-        self.catalog.drop_view(viewName, ifExists).to_pyerr()
+    fn dropView(&self, py: Python<'_>, viewName: &str, ifExists: bool) -> PyResult<()> {
+        self.detached(py, |catalog| {
+            catalog.drop_view(viewName, ifExists).map_err(Box::new)
+        })
     }
 
     /// Truncate a table.
     #[allow(non_snake_case)]
-    fn truncateTable(&self, tableName: &str) -> PyResult<()> {
-        self.catalog.truncate_table(tableName).to_pyerr()
+    fn truncateTable(&self, py: Python<'_>, tableName: &str) -> PyResult<()> {
+        self.detached(py, |catalog| {
+            catalog.truncate_table(tableName).map_err(Box::new)
+        })
     }
 
     /// Recover the statistics of a table.
     #[pyo3(signature = (tableName, noScan=false))]
     #[allow(non_snake_case)]
-    fn analyzeTable(&self, tableName: &str, noScan: bool) -> PyResult<()> {
-        self.catalog.analyze_table(tableName, noScan).to_pyerr()
+    fn analyzeTable(&self, py: Python<'_>, tableName: &str, noScan: bool) -> PyResult<()> {
+        self.detached(py, |catalog| {
+            catalog.analyze_table(tableName, noScan).map_err(Box::new)
+        })
     }
 
     /// Get the `CREATE TABLE` string of a table.
     #[pyo3(signature = (tableName, asSerde=false))]
     #[allow(non_snake_case)]
-    fn getCreateTableString(&self, tableName: &str, asSerde: bool) -> PyResult<String> {
-        self.catalog
-            .get_create_table_string(tableName, asSerde)
-            .to_pyerr()
+    fn getCreateTableString(
+        &self,
+        py: Python<'_>,
+        tableName: &str,
+        asSerde: bool,
+    ) -> PyResult<String> {
+        self.detached(py, |catalog| {
+            { catalog.get_create_table_string(tableName, asSerde) }.map_err(Box::new)
+        })
     }
 
     /// Get the properties of a table as a dict.
@@ -635,7 +716,9 @@ impl PyCatalog {
         py: Python<'py>,
         tableName: &str,
     ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-        let props = self.catalog.get_table_properties(tableName).to_pyerr()?;
+        let props = self.detached(py, |catalog| {
+            catalog.get_table_properties(tableName).map_err(Box::new)
+        })?;
         let dict = pyo3::types::PyDict::new(py);
         for (k, v) in props {
             dict.set_item(k, v)?;
@@ -645,11 +728,11 @@ impl PyCatalog {
 
     /// List the partitions of a table. Mirrors `Catalog.listPartitions -> List[TablePartition]`.
     #[allow(non_snake_case)]
-    fn listPartitions(&self, tableName: &str) -> PyResult<Vec<PyTablePartition>> {
+    fn listPartitions(&self, py: Python<'_>, tableName: &str) -> PyResult<Vec<PyTablePartition>> {
         Ok(self
-            .catalog
-            .list_partitions_typed(tableName)
-            .to_pyerr()?
+            .detached(py, |catalog| {
+                catalog.list_partitions_typed(tableName).map_err(Box::new)
+            })?
             .into_iter()
             .map(|inner| PyTablePartition { inner })
             .collect())
@@ -658,11 +741,16 @@ impl PyCatalog {
     /// List the views in a database. Mirrors `Catalog.listViews -> List[Table]`.
     #[pyo3(signature = (dbName=None, pattern=None))]
     #[allow(non_snake_case)]
-    fn listViews(&self, dbName: Option<&str>, pattern: Option<&str>) -> PyResult<Vec<PyTable>> {
+    fn listViews(
+        &self,
+        py: Python<'_>,
+        dbName: Option<&str>,
+        pattern: Option<&str>,
+    ) -> PyResult<Vec<PyTable>> {
         Ok(self
-            .catalog
-            .list_views_typed(dbName, pattern)
-            .to_pyerr()?
+            .detached(py, |catalog| {
+                catalog.list_views_typed(dbName, pattern).map_err(Box::new)
+            })?
             .into_iter()
             .map(|inner| PyTable { inner })
             .collect())
