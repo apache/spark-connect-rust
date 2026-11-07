@@ -2397,3 +2397,49 @@ def test_logistic_regression_fits_the_data_and_predicts_on_new_rows(session):
     ]
     with pytest.raises(Exception):
         estimator.fit(session.range(3))
+
+
+@pytest.mark.parametrize("use_setters", [False, True], ids=["constructor", "setters"])
+def test_linear_svc_fits_the_labels_and_predicts_on_new_rows(session, use_setters):
+    try:
+        from pyspark._pyspark import LinearSVC
+    except ImportError:
+        from pyspark.ml.classification import LinearSVC
+    from pyspark.ml.connect.functions import array_to_vector
+
+    training = session.sql(
+        "SELECT array(CAST(x AS DOUBLE)) AS xs, "
+        "CAST(CASE WHEN x > 0 THEN 1 ELSE 0 END AS DOUBLE) AS target, 1.0D AS weight "
+        "FROM VALUES (-4), (-3), (-2), (-1), (1), (2), (3), (4) AS t(x)"
+    ).withColumn("input", array_to_vector("xs"))
+    held_out = session.sql(
+        "SELECT id, array(CAST(x AS DOUBLE)) AS xs "
+        "FROM VALUES (0, -3.5), (1, -1.5), (2, 1.5), (3, 3.5) AS t(id, x)"
+    ).withColumn("input", array_to_vector("xs"))
+    kwargs = dict(featuresCol="input", labelCol="target", predictionCol="pred",
+                  rawPredictionCol="margin", maxIter=50, regParam=0.1, tol=1e-6,
+                  fitIntercept=False, standardization=False, threshold=0.0,
+                  weightCol="weight", aggregationDepth=2, maxBlockSizeInMB=1.0)
+    if use_setters:
+        estimator = LinearSVC()
+        for name, value in kwargs.items():
+            setter = getattr(estimator, "set" + name[0].upper() + name[1:])
+            assert setter(value) is estimator
+    else:
+        estimator = LinearSVC(**kwargs)
+    first = estimator.fit(training)
+    second = estimator.fit(training.withColumn("target", F.lit(1.0) - F.col("target")))
+    result = first.transform(held_out)
+    assert "margin" in result.columns
+    assert [r.pred for r in result.orderBy("id").collect()] == [0.0, 0.0, 1.0, 1.0]
+    assert [r.pred for r in second.transform(held_out).orderBy("id").collect()] == [
+        1.0, 1.0, 0.0, 0.0
+    ]
+    estimator.setThreshold(1e6)
+    assert [r.pred for r in estimator.fit(training).transform(held_out).orderBy("id").collect()] == [0.0] * 4
+    with pytest.raises(Exception):
+        estimator.fit(session.range(3))
+    with pytest.raises(Exception):
+        estimator.fit(training.withColumn("target", F.lit(2.0)))
+    with pytest.raises(Exception):
+        estimator.setRegParam(-1.0).fit(training)

@@ -800,6 +800,109 @@ impl Model for MaxAbsScalerModel {
     }
 }
 
+/// Submit training data and parameters and read the fitted operator metadata.
+fn fit_via_command(
+    operator: &MlOperator,
+    params: &Params,
+    df: &DataFrame,
+) -> spark_connect_core::error::Result<proto::ml_command_result::MlOperatorInfo> {
+    let command = proto::MlCommand {
+        command: Some(proto::ml_command::Command::Fit(proto::ml_command::Fit {
+            estimator: Some(operator.to_proto()),
+            params: Some(params.to_proto()),
+            dataset: Some(df.relation()),
+        })),
+    };
+    let responses = crate::dataframe::execute_command_collect(
+        &df.session,
+        proto::command::CommandType::MlCommand(command),
+    )?;
+    for response in responses {
+        if let Some(proto::execute_plan_response::ResponseType::MlCommandResult(result)) =
+            response.response_type
+        {
+            if let Some(proto::ml_command_result::ResultType::OperatorInfo(info)) =
+                result.result_type
+            {
+                return Ok(info);
+            }
+        }
+    }
+    Err(spark_connect_core::error::SparkError::connect_msg(format!(
+        "{}.fit: server returned no fitted model",
+        operator.name
+    )))
+}
+
+/// A session-owned model reference. Keep it cached until session closure so that
+/// model clones and lazy transformed DataFrames remain usable after a model is dropped.
+#[derive(Debug, Clone)]
+struct CachedModel {
+    model_ref: proto::ObjectRef,
+    session_id: String,
+}
+
+impl CachedModel {
+    fn from_info(
+        info: &proto::ml_command_result::MlOperatorInfo,
+        session_id: &str,
+        estimator: &str,
+    ) -> spark_connect_core::error::Result<Self> {
+        match &info.r#type {
+            Some(proto::ml_command_result::ml_operator_info::Type::ObjRef(reference))
+                if !reference.id.is_empty() =>
+            {
+                Ok(Self {
+                    model_ref: reference.clone(),
+                    session_id: session_id.to_string(),
+                })
+            }
+            _ => Err(spark_connect_core::error::SparkError::connect_msg(format!(
+                "{estimator}.fit: server returned no model object reference"
+            ))),
+        }
+    }
+
+    fn build_ml_relation(&self, df: &DataFrame, params: &Params) -> proto::MlRelation {
+        proto::MlRelation {
+            ml_type: Some(proto::ml_relation::MlType::Transform(Box::new(
+                proto::ml_relation::Transform {
+                    operator: Some(proto::ml_relation::transform::Operator::ObjRef(
+                        self.model_ref.clone(),
+                    )),
+                    input: Some(Box::new(df.relation())),
+                    params: Some(params.to_proto()),
+                },
+            ))),
+            ..Default::default()
+        }
+    }
+
+    fn transform(
+        &self,
+        df: &DataFrame,
+        params: &Params,
+    ) -> spark_connect_core::error::Result<DataFrame> {
+        if df.session.session_id() != self.session_id {
+            return Err(spark_connect_core::error::SparkError::value_msg(
+                "A fitted ML model must transform data from its fitting session",
+            ));
+        }
+        let relation = proto::Relation {
+            rel_type: Some(proto::relation::RelType::MlRelation(Box::new(
+                self.build_ml_relation(df, params),
+            ))),
+            ..Default::default()
+        };
+        Ok(DataFrame::new(
+            df.session.clone(),
+            LogicalPlan::MlTransform {
+                ml_relation: relation,
+            },
+        ))
+    }
+}
+
 /// LogisticRegression Estimator: binary/multiclass classification.
 #[derive(Debug, Clone)]
 pub struct LogisticRegression {
@@ -871,18 +974,7 @@ impl LogisticRegression {
         info: proto::ml_command_result::MlOperatorInfo,
         session_id: &str,
     ) -> spark_connect_core::error::Result<LogisticRegressionModel> {
-        let model_ref = match info.r#type {
-            Some(proto::ml_command_result::ml_operator_info::Type::ObjRef(reference))
-                if !reference.id.is_empty() =>
-            {
-                reference
-            }
-            _ => {
-                return Err(spark_connect_core::error::SparkError::connect_msg(
-                    "LogisticRegression.fit: server returned no model object reference",
-                ))
-            }
-        };
+        let cached = CachedModel::from_info(&info, session_id, "LogisticRegression")?;
         Ok(LogisticRegressionModel {
             operator: MlOperator::with_uid(
                 "org.apache.spark.ml.classification.LogisticRegressionModel",
@@ -893,8 +985,7 @@ impl LogisticRegression {
             feature_col: self.feature_col.clone(),
             label_col: self.label_col.clone(),
             prediction_col: self.prediction_col.clone(),
-            model_ref,
-            session_id: session_id.to_string(),
+            cached,
         })
     }
 }
@@ -923,32 +1014,9 @@ impl Estimator for LogisticRegression {
     }
 
     fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
-        let command = proto::MlCommand {
-            command: Some(proto::ml_command::Command::Fit(proto::ml_command::Fit {
-                estimator: Some(self.operator.to_proto()),
-                params: Some(self.params.to_proto()),
-                dataset: Some(df.relation()),
-            })),
-        };
-        let responses = crate::dataframe::execute_command_collect(
-            &df.session,
-            proto::command::CommandType::MlCommand(command),
-        )?;
-        for response in responses {
-            if let Some(proto::execute_plan_response::ResponseType::MlCommandResult(result)) =
-                response.response_type
-            {
-                if let Some(proto::ml_command_result::ResultType::OperatorInfo(info)) =
-                    result.result_type
-                {
-                    return Ok(Box::new(
-                        self.model_from_info(info, df.session.session_id())?,
-                    ));
-                }
-            }
-        }
-        Err(spark_connect_core::error::SparkError::connect_msg(
-            "LogisticRegression.fit: server returned no fitted model",
+        let info = fit_via_command(&self.operator, &self.params, df)?;
+        Ok(Box::new(
+            self.model_from_info(info, df.session.session_id())?,
         ))
     }
 }
@@ -965,8 +1033,7 @@ pub struct LogisticRegressionModel {
     pub feature_col: String,
     pub label_col: String,
     pub prediction_col: String,
-    model_ref: proto::ObjectRef,
-    session_id: String,
+    cached: CachedModel,
 }
 
 impl Transformer for LogisticRegressionModel {
@@ -987,42 +1054,199 @@ impl Transformer for LogisticRegressionModel {
     }
 
     fn build_ml_relation(&self, input: &DataFrame) -> proto::MlRelation {
-        proto::MlRelation {
-            ml_type: Some(proto::ml_relation::MlType::Transform(Box::new(
-                proto::ml_relation::Transform {
-                    operator: Some(proto::ml_relation::transform::Operator::ObjRef(
-                        self.model_ref.clone(),
-                    )),
-                    input: Some(Box::new(input.relation())),
-                    params: Some(self.params.to_proto()),
-                },
-            ))),
-            ..Default::default()
-        }
+        self.cached.build_ml_relation(input, &self.params)
     }
 
     fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
-        if df.session.session_id() != self.session_id {
-            return Err(spark_connect_core::error::SparkError::value_msg(
-                "A fitted LogisticRegression model must transform data from its fitting session",
-            ));
-        }
-        let relation = proto::Relation {
-            rel_type: Some(proto::relation::RelType::MlRelation(Box::new(
-                self.build_ml_relation(df),
-            ))),
-            ..Default::default()
-        };
-        Ok(DataFrame::new(
-            df.session.clone(),
-            LogicalPlan::MlTransform {
-                ml_relation: relation,
-            },
-        ))
+        self.cached.transform(df, &self.params)
     }
 }
 
 impl Model for LogisticRegressionModel {
+    fn clone_box(&self) -> Box<dyn Model> {
+        Box::new(self.clone())
+    }
+}
+
+/// Linear support vector classifier using Spark's JVM implementation.
+///
+/// Supports binary labels (0 and 1), ML vector features and L2 regularization.
+/// Unset parameters use Spark's defaults: 100 iterations, no regularization,
+/// tolerance 1e-6, an intercept, standardization and threshold 0.
+#[derive(Debug, Clone)]
+pub struct LinearSVC {
+    operator: MlOperator,
+    params: Params,
+}
+
+impl LinearSVC {
+    pub fn new() -> Self {
+        Self {
+            operator: MlOperator::new(
+                "org.apache.spark.ml.classification.LinearSVC",
+                OperatorType::Estimator,
+            ),
+            params: Params::new(),
+        }
+    }
+
+    /// Feature vector column.
+    pub fn set_feature_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("featuresCol", value);
+        self
+    }
+
+    /// Binary label column (0 or 1).
+    pub fn set_label_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("labelCol", value);
+        self
+    }
+
+    /// Prediction output column.
+    pub fn set_prediction_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("predictionCol", value);
+        self
+    }
+
+    /// Raw margin output column.
+    pub fn set_raw_prediction_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("rawPredictionCol", value);
+        self
+    }
+
+    /// Maximum number of optimizer iterations.
+    pub fn set_max_iter(mut self, value: i64) -> Self {
+        self.params = self.params.set_param_int("maxIter", value);
+        self
+    }
+
+    /// L2 regularization strength.
+    pub fn set_reg_param(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("regParam", value);
+        self
+    }
+
+    /// Convergence tolerance.
+    pub fn set_tol(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("tol", value);
+        self
+    }
+
+    /// Whether to fit an intercept.
+    pub fn set_fit_intercept(mut self, value: bool) -> Self {
+        self.params = self.params.set_param_bool("fitIntercept", value);
+        self
+    }
+
+    /// Whether to standardize training features.
+    pub fn set_standardization(mut self, value: bool) -> Self {
+        self.params = self.params.set_param_bool("standardization", value);
+        self
+    }
+
+    /// Decision threshold applied to the model margin.
+    pub fn set_threshold(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("threshold", value);
+        self
+    }
+
+    /// Optional instance weight column.
+    pub fn set_weight_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("weightCol", value);
+        self
+    }
+
+    /// Tree aggregation depth.
+    pub fn set_aggregation_depth(mut self, value: i64) -> Self {
+        self.params = self.params.set_param_int("aggregationDepth", value);
+        self
+    }
+
+    /// Maximum size in MB of stacked input blocks.
+    pub fn set_max_block_size_in_mb(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("maxBlockSizeInMB", value);
+        self
+    }
+
+    fn model_from_info(
+        &self,
+        info: proto::ml_command_result::MlOperatorInfo,
+        session_id: &str,
+    ) -> spark_connect_core::error::Result<LinearSVCModel> {
+        let cached = CachedModel::from_info(&info, session_id, "LinearSVC")?;
+        Ok(LinearSVCModel {
+            operator: MlOperator::with_uid(
+                "org.apache.spark.ml.classification.LinearSVCModel",
+                info.uid.as_deref().unwrap_or(&self.operator.uid),
+                OperatorType::Model,
+            ),
+            params: self.params.clone(),
+            cached,
+        })
+    }
+}
+
+impl Default for LinearSVC {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Estimator for LinearSVC {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
+        let info = fit_via_command(&self.operator, &self.params, df)?;
+        Ok(Box::new(
+            self.model_from_info(info, df.session.session_id())?,
+        ))
+    }
+}
+
+/// A LinearSVC model fitted by Spark Connect and cached for its fitting session.
+/// Obtain it through [`Estimator::fit`]; prediction uses the cached model object.
+#[derive(Debug, Clone)]
+pub struct LinearSVCModel {
+    operator: MlOperator,
+    params: Params,
+    cached: CachedModel,
+}
+
+impl Transformer for LinearSVCModel {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn build_ml_relation(&self, input: &DataFrame) -> proto::MlRelation {
+        self.cached.build_ml_relation(input, &self.params)
+    }
+
+    fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
+        self.cached.transform(df, &self.params)
+    }
+}
+
+impl Model for LinearSVCModel {
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -1960,5 +2184,91 @@ mod tests {
         let mut model = fitted_logistic_regression(session.session_id());
         let other = session.new_session();
         assert!(model.transform(&other.range(3).unwrap()).is_err());
+    }
+
+    #[test]
+    fn linear_svc_parameters_use_the_spark_names_and_literal_types() {
+        use proto::expression::literal::LiteralType as L;
+        let svc = LinearSVC::new()
+            .set_feature_col("input")
+            .set_label_col("target")
+            .set_prediction_col("pred")
+            .set_raw_prediction_col("margin")
+            .set_max_iter(50)
+            .set_reg_param(0.1)
+            .set_tol(1e-5)
+            .set_fit_intercept(false)
+            .set_standardization(false)
+            .set_threshold(0.5)
+            .set_weight_col("weight")
+            .set_aggregation_depth(3)
+            .set_max_block_size_in_mb(1.0);
+        let params = svc.params().to_proto().params;
+        let expected = [
+            ("featuresCol", L::String("input".into())),
+            ("labelCol", L::String("target".into())),
+            ("predictionCol", L::String("pred".into())),
+            ("rawPredictionCol", L::String("margin".into())),
+            ("maxIter", L::Long(50)),
+            ("regParam", L::Double(0.1)),
+            ("tol", L::Double(1e-5)),
+            ("fitIntercept", L::Boolean(false)),
+            ("standardization", L::Boolean(false)),
+            ("threshold", L::Double(0.5)),
+            ("weightCol", L::String("weight".into())),
+            ("aggregationDepth", L::Long(3)),
+            ("maxBlockSizeInMB", L::Double(1.0)),
+        ];
+        assert_eq!(params.len(), expected.len());
+        for (name, literal) in expected {
+            assert_eq!(params[name].literal_type.as_ref(), Some(&literal), "{name}");
+        }
+    }
+
+    #[test]
+    fn linear_svc_model_uses_its_cached_reference_and_fitting_session() {
+        let session = offline_session();
+        let estimator = LinearSVC::default();
+        assert!(estimator.params().to_proto().params.is_empty());
+        assert_eq!(estimator.operator().op_type, OperatorType::Estimator);
+        let info = proto::ml_command_result::MlOperatorInfo {
+            r#type: Some(proto::ml_command_result::ml_operator_info::Type::ObjRef(
+                proto::ObjectRef {
+                    id: "svc-model-object".into(),
+                },
+            )),
+            ..Default::default()
+        };
+        let mut model = estimator
+            .model_from_info(info, session.session_id())
+            .unwrap();
+        assert_eq!(model.operator().uid, estimator.operator().uid);
+        assert_eq!(
+            model.operator().name,
+            "org.apache.spark.ml.classification.LinearSVCModel"
+        );
+        assert_eq!(model.operator().op_type, OperatorType::Model);
+        let df = session.range(2).unwrap();
+        let proto::ml_relation::MlType::Transform(transform) =
+            model.build_ml_relation(&df).ml_type.unwrap()
+        else {
+            panic!("expected transform");
+        };
+        assert_eq!(
+            transform.operator,
+            Some(proto::ml_relation::transform::Operator::ObjRef(
+                proto::ObjectRef {
+                    id: "svc-model-object".into()
+                },
+            ))
+        );
+        assert_eq!(*transform.input.unwrap(), df.relation());
+        assert!(model
+            .transform(&session.new_session().range(2).unwrap())
+            .is_err());
+        assert!(model.clone_box().transform(&df).is_ok());
+        assert!(estimator
+            .model_from_info(Default::default(), session.session_id())
+            .is_err());
     }
 }
