@@ -986,9 +986,10 @@ fn row_width_mismatch(row_index: usize, actual: usize, expected: usize) -> Spark
 /// Convert Arrow RecordBatch data to IPC bytes.
 /// Used by createDataFrame to package local data.
 /// The size of a local relation, in Arrow data, from which `createDataFrame` reads the
-/// server's local-relation settings to decide whether to upload it: half of the default
-/// `spark.sql.session.localRelationCacheThreshold`, and well below the default gRPC message
-/// size limit of the server (128 MiB). Smaller relations are sent inline without that RPC.
+/// server's local-relation settings to decide whether to upload it, well below the default
+/// gRPC message size limit of the server (128 MiB). Smaller relations are sent inline without
+/// that RPC, even above `spark.sql.session.localRelationCacheThreshold` (1 MiB by default),
+/// at which PySpark uploads them.
 const LOCAL_RELATION_SETTINGS_BYTES: usize = 32 << 20;
 
 fn rows_to_arrow_batch(
