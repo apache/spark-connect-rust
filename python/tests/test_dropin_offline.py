@@ -920,6 +920,69 @@ def test_show_checks_its_arguments_as_pyspark():
         df._show_string(1, n=2)
 
 
+def test_progress_handlers_are_called_with_the_progress_of_executions_as_pyspark(
+        mock_connect, capfd, monkeypatch):
+    # As PySpark Connect's: a handler is registered once, and called with the keyword arguments
+    # of ProgressHandler, of the StageInfo of each stage, for each progress of an execution that
+    # has tasks, and once more, as done, when it ends; removing a handler that is not registered
+    # raises a ValueError; an exception of a handler goes to sys.unraisablehook; and
+    # SPARK_CONNECT_PROGRESS_BAR_ENABLED prints the progress bar.
+    import sys
+
+    from pyspark.sql.connect.shell.progress import StageInfo
+
+    spark, service = mock_connect
+    # ExecutePlanResponse.execution_progress=18 -> ExecutionProgress.stages=1 (StageInfo
+    # stage_id=1, num_tasks=2, num_completed_tasks=3, input_bytes_read=4, done=5),
+    # num_inflight_tasks=2.
+    stage = (varint_field(1, 7) + varint_field(2, 4) + varint_field(3, 1)
+             + varint_field(4, 1024) + varint_field(5, 0))
+    service.execute_payload = message_field(18, message_field(1, stage) + varint_field(2, 3))
+    calls = []
+
+    def handler(**kwargs):
+        calls.append(kwargs)
+
+    assert spark.registerProgressHandler(handler) is None
+    spark.registerProgressHandler(handler)
+    spark.range(1).collect()
+    assert [call["done"] for call in calls] == [False, True]
+    assert calls[0]["stages"] == [StageInfo(
+        stage_id=7, num_tasks=4, num_completed_tasks=1, num_bytes_read=1024, done=False)]
+    assert calls[1]["stages"] == calls[0]["stages"]
+    assert calls[1]["inflight_tasks"] == calls[0]["inflight_tasks"] == 3
+    assert calls[0]["operation_id"] == calls[1]["operation_id"]
+    assert len(calls[0]["operation_id"]) == 36
+
+    unraisable = []
+    monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
+
+    def failing(**kwargs):
+        raise ZeroDivisionError("handler")
+
+    spark.registerProgressHandler(failing)
+    spark.range(1).collect()
+    assert unraisable and isinstance(unraisable[0].exc_value, ZeroDivisionError)
+    spark.removeProgressHandler(failing)
+
+    monkeypatch.setenv("SPARK_CONNECT_PROGRESS_BAR_ENABLED", "1")
+    capfd.readouterr()
+    spark.range(1).collect()
+    assert "25.00% Complete" in capfd.readouterr().out
+    monkeypatch.delenv("SPARK_CONNECT_PROGRESS_BAR_ENABLED")
+
+    spark.removeProgressHandler(handler)
+    with pytest.raises(ValueError):
+        spark.removeProgressHandler(handler)
+    calls.clear()
+    spark.registerProgressHandler(handler)
+    spark.clearProgressHandlers()
+    spark.range(1).collect()
+    assert calls == []
+
+
+
+
 def test_udfs_are_created_as_pyspark(mock_connect):
     # As PySpark's _create_py_udf: udf() without useArrow makes an Arrow-optimized UDF
     # (SQL_ARROW_BATCHED_UDF) when the active session enables

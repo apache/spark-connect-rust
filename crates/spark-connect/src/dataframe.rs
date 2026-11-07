@@ -5,7 +5,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use spark_connect_core::client::ReattachableResponseStream;
 use spark_connect_core::error::{Result, SparkError};
 use spark_connect_core::runtime::{block_on, get_runtime};
 use spark_connect_proto as proto;
@@ -13,6 +12,7 @@ use spark_connect_proto as proto;
 use crate::column::Column;
 use crate::expression::{Expression, ExpressionNode};
 use crate::plan::{AggregateGroupType, JoinType, LogicalPlan, SetOpType};
+use crate::progress::ExecutionStream;
 use crate::row::{Row, StructValue, Value};
 use crate::session::{ExecutionInfo, SparkSession};
 use crate::types::DataType;
@@ -74,7 +74,9 @@ enum RowSource {
     /// one is exhausted (`prefetchPartitions=False`).
     OnDemand {
         session: SparkSession,
-        stream: ReattachableResponseStream,
+        // Boxed: the stream, with the progress of its execution, is much larger than a
+        // receiver.
+        stream: Box<ExecutionStream>,
         execution_info: ExecutionInfo,
         execution_recorded: bool,
     },
@@ -90,7 +92,7 @@ impl LocalRowIterator {
     /// Create a new `LocalRowIterator` over an already-issued ExecutePlan stream.
     pub(crate) fn new(
         session: SparkSession,
-        stream: ReattachableResponseStream,
+        stream: ExecutionStream,
         prefetch_partitions: bool,
     ) -> Self {
         let schema = SchemaSlot::default();
@@ -101,7 +103,7 @@ impl LocalRowIterator {
         } else {
             RowSource::OnDemand {
                 session,
-                stream,
+                stream: Box::new(stream),
                 execution_info: ExecutionInfo::default(),
                 execution_recorded: false,
             }
@@ -202,7 +204,7 @@ impl Iterator for LocalRowIterator {
 /// stream ends. Backs `to_local_iterator(prefetch_partitions = true)`.
 fn spawn_prefetch(
     session: SparkSession,
-    mut stream: ReattachableResponseStream,
+    mut stream: ExecutionStream,
     schema: SchemaSlot,
 ) -> tokio::sync::mpsc::Receiver<Result<Vec<Row>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<Row>>>(1);
@@ -798,7 +800,7 @@ impl DataFrame {
     /// Unlike the Arrow schema of the rows, it has the user-defined types of the columns.
     pub fn collect_with_schema(&self) -> Result<(Vec<Row>, Option<DataType>)> {
         let request = self.build_execute_request()?;
-        let mut stream = block_on(self.session.client().execute_plan_reattachable(request))?;
+        let mut stream = self.session.execute_plan(request)?;
 
         let mut rows = vec![];
         let mut schema = None;
@@ -837,7 +839,7 @@ impl DataFrame {
     ///   fetched on demand only once the previous batch is exhausted.
     pub fn to_local_iterator(&self, prefetch_partitions: bool) -> Result<LocalRowIterator> {
         let request = self.build_execute_request()?;
-        let stream = block_on(self.session.client().execute_plan_reattachable(request))?;
+        let stream = self.session.execute_plan(request)?;
         Ok(LocalRowIterator::new(
             self.session.clone(),
             stream,
@@ -874,7 +876,7 @@ impl DataFrame {
         &self,
     ) -> Result<(Vec<arrow::record_batch::RecordBatch>, Option<DataType>)> {
         let request = self.build_execute_request()?;
-        let mut stream = block_on(self.session.client().execute_plan_reattachable(request))?;
+        let mut stream = self.session.execute_plan(request)?;
 
         let mut batches = vec![];
         let mut schema = None;
@@ -2223,7 +2225,7 @@ pub(crate) fn execute_command_with_info(
     request.tags = session.tags();
     request.plan = Some(plan);
 
-    let mut stream = block_on(session.client().execute_plan_reattachable(request))?;
+    let mut stream = session.execute_plan(request)?;
     // Drain the response stream so the command runs to completion server-side,
     // capturing any metrics/progress emitted along the way.
     let mut info = ExecutionInfo::default();
@@ -2236,9 +2238,10 @@ pub(crate) fn execute_command_with_info(
     Ok((responses, info))
 }
 
-/// Pull execution metrics/observed-metrics off a response and fire progress
-/// handlers. `metrics`/`observed_metrics` are top-level fields (not part of the
-/// `response_type` oneof), so this must run before `response_type` is consumed.
+/// Pull execution metrics/observed-metrics off a response; the `ExecutionStream` of the
+/// response updates the progress of the execution. `metrics`/`observed_metrics` are top-level
+/// fields (not part of the `response_type` oneof), so this must run before `response_type` is
+/// consumed.
 fn capture_execution(
     resp: &mut proto::ExecutePlanResponse,
     info: &mut ExecutionInfo,
@@ -2256,11 +2259,6 @@ fn capture_execution(
         // Feed observed metrics to the profiler collector
         session.profiler().accumulate_observed_metrics(&metrics);
         info.observed_metrics.extend(metrics);
-    }
-    if let Some(proto::execute_plan_response::ResponseType::ExecutionProgress(progress)) =
-        &resp.response_type
-    {
-        session.notify_progress(progress);
     }
 }
 

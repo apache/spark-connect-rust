@@ -1056,7 +1056,7 @@ impl Catalog {
         let request = self.build_execute_catalog_request(catalog)?;
         // On the reattachable path, as PySpark's client runs a catalog operation, so that an
         // error carries the operation id of the request.
-        let mut stream = block_on(self.session.client().execute_plan_reattachable(request))?;
+        let mut stream = self.session.execute_plan(request)?;
         let mut rows = vec![];
         while let Some(resp) = block_on(stream.message())? {
             if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =

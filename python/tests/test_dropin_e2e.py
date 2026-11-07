@@ -1428,6 +1428,30 @@ def test_server_errors_carry_their_condition_and_details(session):
     assert "\n\nJVM stacktrace:\norg.apache.spark.SparkArithmeticException" in str(e)
 
 
+def test_progress_handlers_receive_the_progress_of_executions_as_pyspark(session):
+    # As PySpark Connect's: a handler is called with the keyword arguments of ProgressHandler,
+    # of each execution: its stages, its running tasks, its operation, and, last, done.
+    from pyspark.sql.connect.shell.progress import StageInfo
+
+    calls = []
+
+    def handler(*, stages, inflight_tasks, operation_id, done):
+        calls.append((list(stages), inflight_tasks, operation_id, done))
+
+    session.registerProgressHandler(handler)
+    try:
+        session.range(0, 8, 1, 4).selectExpr("sum(id)").collect()
+    finally:
+        session.removeProgressHandler(handler)
+    assert calls and calls[-1][3] is True
+    assert [done for *_, done in calls].count(True) == 1
+    assert len({operation_id for _, _, operation_id, _ in calls}) == 1
+    assert all(isinstance(stage, StageInfo) for stages, *_ in calls for stage in stages)
+    assert all(isinstance(inflight, int) for _, inflight, _, _ in calls)
+
+
+
+
 def test_apply_in_pandas_with_state_runs_as_pyspark(session, tmp_path):
     import pandas as pd
 

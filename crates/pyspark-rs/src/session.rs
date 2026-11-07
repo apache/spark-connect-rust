@@ -404,6 +404,8 @@ pub struct PySparkSession {
 
 impl PySparkSession {
     pub fn new(session: SparkSession) -> Self {
+        // The progress of the session, for the progress bars of its executions.
+        Python::attach(|py| crate::progress::session_progress(py, &session));
         PySparkSession { session }
     }
 
@@ -1347,6 +1349,7 @@ impl PySparkSession {
     /// to release the session on the server is logged, not raised. Also clears the
     /// active session and the cached `SQLContext` if they belong to this session.
     fn stop(&self, py: Python<'_>) -> PyResult<()> {
+        crate::progress::forget_session(&self.session);
         if let Err(e) = py.detach(|| self.session.stop()) {
             let logger = py
                 .import("logging")?
@@ -1603,41 +1606,30 @@ impl PySparkSession {
             })
     }
 
-    /// Register a progress handler invoked on each execution-progress message.
-    /// Returns an id for `removeProgressHandler`. Mirrors `registerProgressHandler`.
+    /// Register a handler of the progress of the executions of the session, as PySpark
+    /// Connect's: once, called with the keyword arguments of `ProgressHandler` (`stages`,
+    /// `inflight_tasks`, `operation_id` and `done`) for each progress of an execution, and
+    /// once more, as done, when it ends.
     #[pyo3(name = "registerProgressHandler")]
-    fn register_progress_handler(&self, handler: Py<PyAny>) -> u64 {
-        self.session.register_progress_handler(move |progress| {
-            Python::attach(|py| {
-                let dict = pyo3::types::PyDict::new(py);
-                let _ = dict.set_item("num_inflight_tasks", progress.num_inflight_tasks);
-                let stages = PyList::empty(py);
-                for s in &progress.stages {
-                    let sd = pyo3::types::PyDict::new(py);
-                    let _ = sd.set_item("stage_id", s.stage_id);
-                    let _ = sd.set_item("num_tasks", s.num_tasks);
-                    let _ = sd.set_item("num_completed_tasks", s.num_completed_tasks);
-                    let _ = sd.set_item("input_bytes_read", s.input_bytes_read);
-                    let _ = sd.set_item("done", s.done);
-                    let _ = stages.append(sd);
-                }
-                let _ = dict.set_item("stages", stages);
-                // Best-effort: ignore handler errors so progress never breaks execution.
-                let _ = handler.call1(py, (dict,));
-            });
-        })
+    fn register_progress_handler(
+        &self,
+        py: Python<'_>,
+        handler: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        crate::progress::session_progress(py, &self.session).register(py, handler)
     }
 
-    /// Remove a progress handler by id. Mirrors `removeProgressHandler`.
+    /// Remove a progress handler, as PySpark Connect's: a `ValueError` for one that is not
+    /// registered.
     #[pyo3(name = "removeProgressHandler")]
-    fn remove_progress_handler(&self, handler: u64) {
-        self.session.remove_progress_handler(handler);
+    fn remove_progress_handler(&self, py: Python<'_>, handler: &Bound<'_, PyAny>) -> PyResult<()> {
+        crate::progress::session_progress(py, &self.session).remove(py, handler)
     }
 
     /// Remove all progress handlers. Mirrors `clearProgressHandlers`.
     #[pyo3(name = "clearProgressHandlers")]
-    fn clear_progress_handlers(&self) {
-        self.session.clear_progress_handlers();
+    fn clear_progress_handlers(&self, py: Python<'_>) -> PyResult<()> {
+        crate::progress::session_progress(py, &self.session).clear(py)
     }
 
     /// Get the profiler collector for this session.

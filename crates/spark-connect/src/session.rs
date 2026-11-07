@@ -14,13 +14,14 @@ use spark_connect_proto as proto;
 use crate::dataframe::DataFrame;
 use crate::plan::{LogicalPlan, PlanIds};
 use crate::profiler::ProfilerCollector;
+use crate::progress::{ExecutionStream, ProgressTracker, ProgressUpdate};
 use crate::row::{Row, Value};
 use crate::types::DataType;
 
-/// A progress handler invoked with each `ExecutionProgress` message received on
-/// the response stream. Mirrors `SparkSession.registerProgressHandler`.
-pub type ProgressHandler =
-    Arc<dyn Fn(&proto::execute_plan_response::ExecutionProgress) + Send + Sync>;
+/// A progress handler of the executions of a session, as PySpark's `ProgressHandler`: it is
+/// called with each progress of the server that has tasks, and once more, as done, when the
+/// execution ends. Mirrors `SparkSession.registerProgressHandler`.
+pub type ProgressHandler = Arc<dyn Fn(&ProgressUpdate) + Send + Sync>;
 
 /// Metrics captured from the last executed query. Mirrors the data behind
 /// `pyspark.sql.DataFrame.executionInfo` / `client.core.ExecutionInfo`.
@@ -83,8 +84,8 @@ pub struct SparkSession {
     /// Metrics/observed-metrics captured from the most recent execution on this
     /// session. Backs `DataFrame::execution_info` and the profiler accessor.
     last_execution: Arc<Mutex<Option<ExecutionInfo>>>,
-    /// Registered progress handlers, keyed by id (for removal). Invoked on each
-    /// `ExecutionProgress` message. Mirrors `registerProgressHandler`.
+    /// Registered progress handlers, keyed by id (for removal). Invoked with each progress of
+    /// an execution, and when it ends. Mirrors `registerProgressHandler`.
     progress_handlers: Arc<Mutex<Vec<(u64, ProgressHandler)>>>,
     /// Monotonic id source for `register_progress_handler`.
     progress_handler_id: Arc<AtomicU64>,
@@ -154,12 +155,13 @@ impl SparkSession {
         self.tags.update(Vec::clear);
     }
 
-    /// Register a handler invoked for every `ExecutionProgress` message received
-    /// during query execution. Returns an id usable with
-    /// [`SparkSession::remove_progress_handler`]. Mirrors `registerProgressHandler`.
+    /// Register a handler of the progress of the executions of this session: it is called with
+    /// each progress of the server that has tasks, and once more, as done, when the execution
+    /// ends, also of an error, as PySpark's `Progress` calls its handlers. Returns an id usable
+    /// with [`SparkSession::remove_progress_handler`]. Mirrors `registerProgressHandler`.
     pub fn register_progress_handler(
         &self,
-        handler: impl Fn(&proto::execute_plan_response::ExecutionProgress) + Send + Sync + 'static,
+        handler: impl Fn(&ProgressUpdate) + Send + Sync + 'static,
     ) -> u64 {
         let id = self.progress_handler_id.fetch_add(1, Ordering::SeqCst);
         self.progress_handlers
@@ -183,12 +185,10 @@ impl SparkSession {
         self.progress_handlers.lock().unwrap().clear();
     }
 
-    /// Invoke all registered progress handlers with a progress message. Called by
-    /// the execute loop; not part of the public API.
-    pub(crate) fn notify_progress(
-        &self,
-        progress: &proto::execute_plan_response::ExecutionProgress,
-    ) {
+    /// Invoke all registered progress handlers with the progress of an execution, which
+    /// `update` builds only when there is a handler. Called by the progress of executions; not
+    /// part of the public API.
+    pub(crate) fn notify_progress(&self, update: impl FnOnce() -> ProgressUpdate) {
         // Clone the handler `Arc`s out of the lock so a handler can't deadlock by
         // touching the session's handler list.
         let handlers: Vec<ProgressHandler> = {
@@ -199,9 +199,30 @@ impl SparkSession {
                 .map(|(_, h)| Arc::clone(h))
                 .collect()
         };
-        for h in handlers {
-            h(progress);
+        if handlers.is_empty() {
+            return;
         }
+        let update = update();
+        for h in handlers {
+            h(&update);
+        }
+    }
+
+    /// Execute `request` on the server, with the progress of the execution for the progress
+    /// handlers. Its operation ID is that of the request, or a new one, which the client
+    /// assigns before it sends the request, as PySpark's `Progress` of the request has it.
+    pub(crate) fn execute_plan(
+        &self,
+        mut request: proto::ExecutePlanRequest,
+    ) -> Result<ExecutionStream> {
+        let operation_id = request
+            .operation_id
+            .get_or_insert_with(|| uuid::Uuid::new_v4().to_string())
+            .clone();
+        // Before the request: an execution that fails to start ends, as done, too.
+        let progress = ProgressTracker::new(self, Some(operation_id));
+        let stream = block_on(self.client().execute_plan_reattachable(request))?;
+        Ok(ExecutionStream::new(stream, progress))
     }
 
     /// Store the metrics captured from the most recent execution. Called by the
