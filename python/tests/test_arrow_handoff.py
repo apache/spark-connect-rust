@@ -461,7 +461,8 @@ def _arrow_input_service(
     # The tests may queue status codes in `status_failures` and `upload_failures`: each
     # ArtifactStatus or AddArtifacts call fails with the next one, while any is left.
     state = {"cache": {}, "uploads": 0, "relations": [], "message_sizes": [],
-             "config": config, "config_requests": [], "input_tables": [], "tables": [],
+             "config": config, "config_requests": [], "config_responses": [],
+             "input_tables": [], "tables": [],
              "upload_contexts": [], "status_contexts": [],
              "status_failures": [], "upload_failures": [], "upload_attempts": 0,
              "ddl_strings": []}
@@ -488,13 +489,16 @@ def _arrow_input_service(
         state["config_requests"].append((operation, keys))
         if config_error:
             context.abort(grpc.StatusCode.UNAVAILABLE, "configuration unavailable")
+        # Injected errors abort only the next Config call.
         if error := state.pop("config_error", None):
             context.abort(error, "configuration read failed")
         # Deliberately reverse responses and omit missing keys to test key mapping.
-        return protocol("ConfigResponse", session_id=request.session_id,
-                        pairs=[dict(key=k, value=config[k]) for k in reversed(keys)
-                               if config.get(k) is not None]
-                        ).SerializeToString()
+        # A present null key leaves the optional protobuf value unset.
+        response = protocol("ConfigResponse", session_id=request.session_id,
+                            pairs=[dict(key=k, value=config[k]) for k in reversed(keys)
+                                   if k in config])
+        state["config_responses"].append(response)
+        return response.SerializeToString()
 
     def top_level_split(text):
         parts, depth, start = [], 0, 0
@@ -836,9 +840,7 @@ def test_arrow_input_schema_handoff(protocol, cached, explicit):
         assert frame.toArrow().column(0).to_pylist() == [2]
         assert state["result"] == (2, 1, 2)
         assert state["arrow_schemas"] == [table.schema]
-        assert len(state["config_requests"]) == 1
-        assert state["config_requests"][0][0] == "get"
-        assert len(state["config_requests"][0][1]) == 8
+        assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
         relation = state["relations"][0]
         if cached:
             local = relation.chunked_cached_local_relation
@@ -1062,9 +1064,9 @@ def test_arrow_input_batched_normalization_configs(protocol, timestamp_type, zon
         assert not state["relations"][0].local_relation.HasField("schema")
 
 
-@pytest.mark.parametrize("missing", _NORMALIZATION_KEYS)
+@pytest.mark.parametrize("missing", _NORMALIZATION_KEYS + _UPLOAD_KEYS)
 @pytest.mark.parametrize("present_null", [False, True])
-def test_arrow_input_missing_normalization_config(protocol, missing, present_null):
+def test_arrow_input_missing_config(protocol, missing, present_null):
     with _arrow_input_service(protocol) as (spark, state):
         if present_null:
             state["config"][missing] = None
@@ -1074,6 +1076,12 @@ def test_arrow_input_missing_normalization_config(protocol, missing, present_nul
         with pytest.raises(Exception, match="SQL_CONF_NOT_FOUND"):
             spark.createDataFrame(pa.table({"x": [1, None], "s": ["hello", None]}))
         assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+        pairs = {pair.key: pair for pair in state["config_responses"][0].pairs}
+        if present_null:
+            assert missing in pairs
+            assert not pairs[missing].HasField("value")
+        else:
+            assert missing not in pairs
         assert state["uploads"] == 0
         assert state["input_tables"] == []
 
