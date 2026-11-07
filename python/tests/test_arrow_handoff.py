@@ -1177,6 +1177,54 @@ def test_add_artifacts_names_each_artifact_as_pyspark(protocol, tmp_path):
         }
 
 
+# Local relations of at least 32 MiB read the server's local-relation settings, and are uploaded
+# as cache artifacts at its threshold, whichever path encoded them; a single gRPC message
+# cannot carry a relation beyond the server's message size limit.
+
+@pytest.mark.parametrize("path", ["local_rows", "pandas_rows", "float64", "strings"])
+def test_large_local_relations_follow_the_cache_threshold(protocol, path):
+    # (The mock service keeps gRPC's default 4 MiB message limit, so the inline variant of
+    # these inputs, below a higher threshold, can only be checked against a real server.)
+    import numpy as np
+
+    if path == "local_rows":
+        data = [("y" * 2000, i) for i in range(20_000)]
+        schema = T.StructType([T.StructField("v", T.StringType()), T.StructField("i", T.LongType())])
+        expected_rows = 20_000
+    elif path == "pandas_rows":
+        # float32 columns into DoubleType keep the row path.
+        data = pd.DataFrame(np.ones((100_000, 45), dtype=np.float32),
+                            columns=[f"c{i}" for i in range(45)])
+        schema = T.StructType([T.StructField(c, T.DoubleType()) for c in data.columns])
+        expected_rows = 100_000
+    elif path == "float64":
+        data = pd.DataFrame(np.ones((100_000, 45)), columns=[f"c{i}" for i in range(45)])
+        schema = T.StructType([T.StructField(c, T.DoubleType()) for c in data.columns])
+        expected_rows = 100_000
+    else:
+        data = pd.DataFrame({"v": ["x" * 3500] * 10_000}, dtype=object)
+        schema = T.StructType([T.StructField("v", T.StringType())])
+        expected_rows = 10_000
+    overrides = {"spark.sql.session.localRelationCacheThreshold": "1"}
+    with _arrow_input_service(protocol, **overrides) as (spark, state):
+        df = spark.createDataFrame(data, schema)
+        df.toArrow()
+        assert sum(table.num_rows for table in state["input_tables"]) == expected_rows
+        assert state["uploads"]
+        assert any("spark.sql.session.localRelationCacheThreshold" in keys
+                   for _, keys in state["config_requests"])
+
+
+def test_small_local_relations_stay_inline_without_reading_settings(protocol):
+    with _arrow_input_service(protocol) as (spark, state):
+        schema = T.StructType([T.StructField("v", T.StringType()), T.StructField("i", T.LongType())])
+        spark.createDataFrame([("y" * 100, i) for i in range(100)], schema).toArrow()
+        assert not state["uploads"]
+        assert not any("spark.sql.session.localRelationCacheThreshold" in keys
+                       for _, keys in state["config_requests"])
+        assert state["input_tables"][0].num_rows == 100
+
+
 # Signed-int64 pandas input uses the same Arrow importer and mock service.
 
 @pytest.mark.parametrize("storage", ["object", "default", "python", "pyarrow", "python_nan", "pyarrow_nan"])

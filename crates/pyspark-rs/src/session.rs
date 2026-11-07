@@ -1039,9 +1039,14 @@ impl PySparkSession {
                 let schema = DataType::Struct {
                     fields: fields.clone(),
                 };
-                let frame = self
-                    .session
-                    .create_dataframe_from_inline_arrow_ipc(ipc.extract()?, schema);
+                let ipc: Vec<u8> = ipc.extract()?;
+                let frame = py
+                    .detach(|| {
+                        self.session
+                            .create_dataframe_from_inline_arrow_ipc(ipc, schema)
+                            .map_err(Box::new)
+                    })
+                    .to_pyerr()?;
                 // Match pandas row input: explicit nonempty field names travel
                 // through toDF as well as the local relation's logical schema.
                 return Ok(PyDataFrame::new(
@@ -1080,9 +1085,14 @@ impl PySparkSession {
                 let schema = DataType::Struct {
                     fields: fields.clone(),
                 };
-                let frame = self
-                    .session
-                    .create_dataframe_from_inline_arrow_ipc(ipc.extract()?, schema);
+                let ipc: Vec<u8> = ipc.extract()?;
+                let frame = py
+                    .detach(|| {
+                        self.session
+                            .create_dataframe_from_inline_arrow_ipc(ipc, schema)
+                            .map_err(Box::new)
+                    })
+                    .to_pyerr()?;
                 // Match pandas row input: explicit nonempty field names travel
                 // through toDF as well as the local relation's logical schema.
                 return Ok(PyDataFrame::new(
