@@ -6479,7 +6479,7 @@ def test_local_input_native_numbers_inside_nested_values(mock_connect):
     assert dict(actual["mapping"]) == {"x": 2**63 - 1}
 
 
-# Exact list/tuple conversion and separate-process input IPC regressions.
+# Exact list/tuple conversion and pandas input IPC regressions.
 from datetime import date as container_input_date, datetime as container_input_datetime
 from decimal import Decimal as ContainerInputDecimal
 
@@ -6567,35 +6567,7 @@ def test_container_input_recursive_leaf_and_row_types(container_input_capture_in
     assert type(result["decimal"]) is ContainerInputDecimal
 
 
-def _container_input_fields(data):
-    """Decode only the small protobuf envelope around a local Arrow relation."""
-    def varint(pos):
-        value, shift = 0, 0
-        while True:
-            byte = data[pos]
-            pos += 1
-            value |= (byte & 127) << shift
-            if byte < 128:
-                return value, pos
-            shift += 7
-
-    result, pos = {}, 0
-    while pos < len(data):
-        tag, pos = varint(pos)
-        wire = tag & 7
-        if wire == 2:
-            length, pos = varint(pos)
-            result[tag >> 3] = data[pos:pos + length]
-            pos += length
-        elif wire == 0:
-            _, pos = varint(pos)
-        elif wire in (1, 5):
-            pos += 8 if wire == 1 else 4
-        else:
-            raise AssertionError(f"unexpected protobuf wire type: {wire}")
-    return result
-
-
+# DDL handler for the exact-date capture server below.
 def _ddl_parse(request, context):
     # As the server, of the DDL schemas that the client asks it to parse (`_parse_ddl`).
     import grpc
@@ -6606,130 +6578,34 @@ def _ddl_parse(request, context):
     return response
 
 
-def _container_input_capture_server(connection):
-    from concurrent.futures import ThreadPoolExecutor
-    import grpc
-
-    captured = []
-
-    def execute(request, context):
-        # ExecutePlanRequest.plan=3 -> Plan.root=1. Names/pandas input
-        # uses Relation.to_df=18 -> ToDF.input=1 before local_relation=11.
-        relation = _container_input_fields(
-            _container_input_fields(_container_input_fields(request)[3])[1])
-        if 18 in relation:
-            relation = _container_input_fields(_container_input_fields(relation[18])[1])
-        assert 11 in relation, relation
-        captured.append(_container_input_fields(relation[11])[1])
-        context.abort(grpc.StatusCode.INVALID_ARGUMENT, "captured container input")
-        yield b""  # Make this a streaming handler.
-
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        server = grpc.server(executor)
-        def config(request, context):
-            # Explicit-schema pandas input reads the Arrow conversion settings first.
-            request = parse_message(request)
-            keys = [key.decode() for key in
-                    parse_message(parse_message(request[3][0])[2][0]).get(1, [])]
-            defaults = {
-                "spark.sql.timestampType": "TIMESTAMP_LTZ",
-                "spark.sql.session.timeZone": "UTC",
-                "spark.sql.execution.arrow.useLargeVarTypes": "false",
-                "spark.sql.session.localRelationCacheThreshold": str(1 << 60),
-                "spark.sql.session.localRelationSizeLimit": str(1 << 60),
-                "spark.sql.session.localRelationChunkSizeRows": str(1 << 30),
-                "spark.sql.session.localRelationChunkSizeBytes": str(1 << 40),
-                "spark.sql.session.localRelationBatchOfChunksSizeBytes": str(1 << 40),
-                "spark.sql.execution.pandas.convertToArrowArraySafely": "true",
-                "spark.sql.execution.pandas.inferPandasDictAsMap": "false",
-            }
-            return message_field(1, request[1][0]) + b"".join(
-                message_field(2, message_field(1, key) + message_field(2, defaults[key]))
-                for key in keys)
-
-        server.add_generic_rpc_handlers((grpc.method_handlers_generic_handler(
-            "spark.connect.SparkConnectService", {
-                "ExecutePlan": grpc.unary_stream_rpc_method_handler(execute),
-                "AnalyzePlan": grpc.unary_unary_rpc_method_handler(_ddl_parse),
-                "Config": grpc.unary_unary_rpc_method_handler(config),
-            }),))
-        port = server.add_insecure_port("127.0.0.1:0")
-        server.start()
-        connection.send(port)
-        try:
-            while True:
-                command = connection.recv()
-                if command == "stop":
-                    break
-                assert command == "get"
-                connection.send(captured.pop(0))
-        finally:
-            server.stop(0).wait()
-
-
 @pytest.fixture
-def container_input_capture_input():
-    import multiprocessing
-    import sys
-    from pathlib import Path
+def container_input_capture_input(request):
+    # Check the optional dependency before acquiring the shared server/session.
+    pd = pytest.importorskip("pandas")
+    mock_connect = request.getfixturevalue("mock_connect")
 
-    # importlib-mode pytest does not add the tests namespace to sys.path.
-    # Spawned children need it to import this server target; append it so the
-    # installed wheel still takes precedence over the source pyspark package.
-    test_container_input_root = str(Path(__file__).resolve().parents[1])
-    if test_container_input_root not in sys.path:
-        sys.path.append(test_container_input_root)
-    pytest.importorskip("grpc")
-    from pyspark.sql import SparkSession
+    def capture(data, schema):
+        # Keep input on the pandas path (generic conversion or Arrow import).
+        # Local rows use infer.convert with different container/numeric semantics.
+        if not isinstance(data, pd.DataFrame):
+            data = pd.DataFrame(data, dtype=object)
+        return _native_number_input_table(mock_connect, data, schema)
 
-    context = multiprocessing.get_context("spawn")
-    parent, child = context.Pipe()
-    process = context.Process(target=_container_input_capture_server, args=(child,))
-    process.start()
-    try:
-        assert parent.poll(20), "capture service failed to start"
-        spark = SparkSession.builder.remote(f"sc://127.0.0.1:{parent.recv()}").getOrCreate()
-
-        def capture(data, schema):
-            import pyarrow as pa
-            pd = pytest.importorskip("pandas")
-            # The optimized converter remains the pandas/generic path. Local
-            # rows use infer.convert, with deliberately different container
-            # eligibility and numeric-protocol semantics.
-            if not isinstance(data, pd.DataFrame):
-                data = pd.DataFrame(data, dtype=object)
-            df = spark.createDataFrame(data, schema=schema)
-            with pytest.raises(Exception, match="captured container input"):
-                df.collect()
-            parent.send("get")
-            assert parent.poll(10), "capture service failed to return the IPC payload"
-            return pa.ipc.open_stream(parent.recv()).read_all()
-
-        yield capture
-    finally:
-        if process.is_alive():
-            parent.send("stop")
-        process.join(10)
-        if process.is_alive():
-            process.terminate()
-            process.join(10)
-        parent.close()
-        child.close()
+    return capture
 
 
-@pytest.mark.parametrize("source", ["pandas_from_rows", "pandas"])
+@pytest.mark.parametrize("source", ["positional_columns", "named_columns"])
 @pytest.mark.parametrize("schema_kind", ["inferred", "names", "explicit", "ddl"])
 @pytest.mark.parametrize("container", [list, tuple])
 def test_container_input_array_input_ipc(container_input_capture_input, source, schema_kind, container):
     import pyarrow as pa
-    from pyspark.sql import types as T
 
     values = [container([1, None, -3]), container(), None, container([255, 256])]
     schema = {"inferred": None, "names": ["items"], "ddl": "items array<bigint>",
               "explicit": T.StructType([T.StructField("items", T.ArrayType(T.LongType()))])}[schema_kind]
     data = [(value,) for value in values]
-    if source == "pandas":
-        pd = pytest.importorskip("pandas")
+    if source == "named_columns":
+        import pandas as pd
         data = pd.DataFrame(data, columns=["items"])
     table = container_input_capture_input(data, schema)
     assert table.column(0).type == pa.list_(pa.int64())
@@ -6737,8 +6613,6 @@ def test_container_input_array_input_ipc(container_input_capture_input, source, 
 
 
 def test_container_input_nested_array_struct_binary_ipc(container_input_capture_input):
-    from pyspark.sql import types as T
-
     schema = T.StructType([
         T.StructField("nested", T.ArrayType(T.ArrayType(T.LongType()))),
         T.StructField("record", T.StructType([
