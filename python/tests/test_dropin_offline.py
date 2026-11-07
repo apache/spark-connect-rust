@@ -9655,14 +9655,17 @@ def test_numpy_longdouble_array_matches_dtype_and_element_checks_as_pyspark():
 
 
 @pytest.mark.parametrize("name", [
-    "byte", "short", "intc", "int_", "intp", "longlong", "single", "double",
+    "byte", "short", "intc", "int_", "intp", "long", "longlong", "single", "double",
 ])
 @pytest.mark.parametrize("as_array", [False, True], ids=["scalar", "array"])
 def test_numpy_numeric_aliases_match_reference_scalar_classes(name, as_array):
     np = pytest.importorskip("numpy")
     from pyspark.sql import functions as F
 
-    scalar_type = getattr(np, name)
+    # Read real scalar exports without NumPy's deprecated builtin-alias lookup warnings.
+    scalar_type = vars(np).get(name)
+    if scalar_type is None or not issubclass(scalar_type, np.generic):
+        pytest.skip(f"numpy.{name} is not a NumPy scalar class in this NumPy")
     value = scalar_type(1.5 if np.issubdtype(scalar_type, np.floating) else 5)
     kind, size = value.dtype.kind, value.dtype.itemsize
     if kind == "i":
