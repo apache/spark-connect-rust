@@ -2984,6 +2984,19 @@ impl PyGeometryType {
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, &DataType::Geometry { srid: self.srid }.json())
     }
+    /// As PySpark's `GeometryType._from_crs(crs)`, of the JSON of a geometry type: the mixed
+    /// SRID of `SRID:ANY` of any case, or else the SRID of a CRS of `geo_utils`, and
+    /// `ST_INVALID_CRS_VALUE` of another.
+    #[classmethod]
+    fn _from_crs<'py>(
+        _cls: &Bound<'py, pyo3::types::PyType>,
+        py: Python<'py>,
+        crs: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        py.import("pyspark.sql.types")?
+            .getattr("_geometry_type_from_crs")?
+            .call1((crs,))
+    }
     fn __repr__(&self) -> String {
         match self.srid {
             -1 => "GeometryType(ANY)".to_string(),
@@ -3031,6 +3044,21 @@ impl PyGeographyType {
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, &DataType::Geography { srid: self.srid }.json())
+    }
+    /// As PySpark's `GeographyType._from_crs(crs, alg)`, of the JSON of a geography type:
+    /// `ST_INVALID_ALGORITHM_VALUE` of another algorithm than `SPHERICAL`, the mixed SRID of
+    /// `SRID:ANY` of any case, or else the SRID of a geographic CRS of `geo_utils`, and
+    /// `ST_INVALID_CRS_VALUE` of another.
+    #[classmethod]
+    fn _from_crs<'py>(
+        _cls: &Bound<'py, pyo3::types::PyType>,
+        py: Python<'py>,
+        crs: &Bound<'py, PyAny>,
+        alg: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        py.import("pyspark.sql.types")?
+            .getattr("_geography_type_from_crs")?
+            .call1((crs, alg))
     }
     fn __repr__(&self) -> String {
         match self.srid {

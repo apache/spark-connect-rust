@@ -2,6 +2,7 @@
 Minimal pyspark.sql.types module for the Spark Connect client.
 Provides DataType classes and conversion functions.
 """
+import re
 from typing import cast  # noqa: F401  (upstream leaks typing.cast from this module)
 
 # Import from _pyspark for the actual DataType implementations
@@ -341,6 +342,8 @@ def _parse_datatype_json_value(json_value, fieldPath="", collationsMap=None):
         ):
             _assert_valid_type_for_collation(fieldPath, json_value, collationsMap)
             return StringType(collationsMap[fieldPath])
+        if isinstance(json_value, str) and json_value.startswith(("geometry", "geography")):
+            return _spatial_type_from_json(json_value)
         from pyspark._pyspark import parse_datatype_json
 
         try:
@@ -363,6 +366,73 @@ def _parse_datatype_json_value(json_value, fieldPath="", collationsMap=None):
         return UserDefinedType.fromJson(json_value)
     # As PySpark's, of an object of a type that is not one of a data type.
     raise _pyspark_value_error("UNSUPPORTED_DATA_TYPE", {"data_type": str(tpe)})
+
+
+# The patterns of the JSON of the spatial types, as PySpark's.
+_GEOMETRY = re.compile(r"^geometry$")
+_GEOMETRY_CRS = re.compile(r"geometry\(\s*([\w]+:-?[\w]+)\s*\)")
+_GEOGRAPHY = re.compile(r"^geography$")
+_GEOGRAPHY_CRS = re.compile(r"geography\(\s*([\w]+:-?[\w]+)\s*\)")
+_GEOGRAPHY_CRS_ALG = re.compile(r"geography\(\s*([\w]+:-?[\w]+)\s*,\s*(\w+)\s*\)")
+_GEOGRAPHY_ALG = re.compile(r"geography\(\s*(\w+)\s*\)")
+
+
+def _spatial_type_from_json(json_value):
+    """The GeometryType or GeographyType of the JSON string ``json_value``, as PySpark's
+    ``_parse_datatype_json_value`` parses it, of its patterns: of the default CRS
+    ``OGC:CRS84`` and algorithm ``SPHERICAL`` without them, and ``CANNOT_PARSE_DATATYPE`` of
+    another form."""
+    if _GEOMETRY.match(json_value):
+        return _geometry_type_from_crs("OGC:CRS84")
+    elif _GEOMETRY_CRS.match(json_value):
+        return _geometry_type_from_crs(_GEOMETRY_CRS.match(json_value).group(1))
+    elif _GEOGRAPHY.match(json_value):
+        return _geography_type_from_crs("OGC:CRS84", "SPHERICAL")
+    elif _GEOGRAPHY_CRS.match(json_value):
+        return _geography_type_from_crs(_GEOGRAPHY_CRS.match(json_value).group(1), "SPHERICAL")
+    elif _GEOGRAPHY_CRS_ALG.match(json_value):
+        crs_alg = _GEOGRAPHY_CRS_ALG.match(json_value)
+        return _geography_type_from_crs(crs_alg.group(1), crs_alg.group(2))
+    elif _GEOGRAPHY_ALG.match(json_value):
+        return _geography_type_from_crs("OGC:CRS84", _GEOGRAPHY_ALG.match(json_value).group(1))
+    raise _pyspark_value_error("CANNOT_PARSE_DATATYPE", {"msg": str(json_value)})
+
+
+def _geometry_type_from_crs(crs):
+    """``GeometryType._from_crs`` of PySpark: the mixed SRID of the CRS ``SRID:ANY`` of any
+    case, or else the SRID of a CRS of ``geo_utils``, and ``ST_INVALID_CRS_VALUE`` of another."""
+    from pyspark.errors import IllegalArgumentException
+    from pyspark.sql.geo_utils import CartesianSpatialReferenceSystemMapper
+
+    if crs.lower() == "srid:any":
+        return GeometryType("ANY")
+    srid = CartesianSpatialReferenceSystemMapper.get_srid(crs)
+    if srid is None:
+        raise IllegalArgumentException(
+            errorClass="ST_INVALID_CRS_VALUE", messageParameters={"crs": str(crs)}
+        )
+    return GeometryType(srid)
+
+
+def _geography_type_from_crs(crs, alg):
+    """``GeographyType._from_crs`` of PySpark: ``ST_INVALID_ALGORITHM_VALUE`` of another
+    algorithm than ``SPHERICAL``, the mixed SRID of the CRS ``SRID:ANY`` of any case, or else
+    the SRID of a geographic CRS of ``geo_utils``, and ``ST_INVALID_CRS_VALUE`` of another."""
+    from pyspark.errors import IllegalArgumentException
+    from pyspark.sql.geo_utils import GeographicSpatialReferenceSystemMapper
+
+    if alg != "SPHERICAL":
+        raise IllegalArgumentException(
+            errorClass="ST_INVALID_ALGORITHM_VALUE", messageParameters={"alg": str(alg)}
+        )
+    if crs.lower() == "srid:any":
+        return GeographyType("ANY")
+    srid = GeographicSpatialReferenceSystemMapper.get_srid(crs)
+    if srid is None:
+        raise IllegalArgumentException(
+            errorClass="ST_INVALID_CRS_VALUE", messageParameters={"crs": str(crs)}
+        )
+    return GeographyType(srid)
 
 
 def _array_type_from_json(json_value, fieldPath="", collationsMap=None):
