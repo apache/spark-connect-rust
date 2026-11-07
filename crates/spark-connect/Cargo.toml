@@ -15,6 +15,7 @@ name = "spark_connect"
 spark-connect-proto = { package = "apache-spark-connect-proto", path = "../spark-connect-proto", version = "4.3.0" }
 spark-connect-core = { package = "apache-spark-connect-core", path = "../spark-connect-core", version = "4.3.0" }
 prost.workspace = true
+prost-types.workspace = true
 arrow.workspace = true
 bytes.workspace = true
 thiserror.workspace = true

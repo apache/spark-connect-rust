@@ -1847,6 +1847,57 @@ impl PySparkSession {
         self.session.session_id().to_string()
     }
 
+    /// Add the extension of the bytes of a `google.protobuf.Any`, `extension`, to the user context
+    /// of the requests of this session: of all the threads, if `is_global`, else of the current
+    /// thread. Its ID: for the user context extensions of `client`.
+    fn _add_user_context_extension(&self, extension: &[u8], is_global: bool) -> PyResult<String> {
+        use prost::Message;
+        let extension = prost_types::Any::decode(extension)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+        Ok(if is_global {
+            self.session.add_global_user_context_extension(extension)
+        } else {
+            self.session
+                .add_threadlocal_user_context_extension(extension)
+        })
+    }
+
+    /// The user context extensions of this session, the global ones if `is_global`, else those
+    /// of the current thread, as their IDs and the bytes of each `google.protobuf.Any`: for
+    /// `client`.
+    fn _user_context_extensions<'py>(
+        &self,
+        py: Python<'py>,
+        is_global: bool,
+    ) -> Vec<(String, Bound<'py, pyo3::types::PyBytes>)> {
+        use prost::Message;
+        let extensions = if is_global {
+            self.session.global_user_context_extensions()
+        } else {
+            self.session.threadlocal_user_context_extensions()
+        };
+        extensions
+            .into_iter()
+            .map(|(id, extension)| {
+                (
+                    id,
+                    pyo3::types::PyBytes::new(py, &extension.encode_to_vec()),
+                )
+            })
+            .collect()
+    }
+
+    /// Remove the user context extension of `extension_id`, for `client`.
+    fn _remove_user_context_extension(&self, extension_id: &str) {
+        self.session.remove_user_context_extension(extension_id);
+    }
+
+    /// Remove the user context extensions of the current thread and the global ones, for
+    /// `client`.
+    fn _clear_user_context_extensions(&self) {
+        self.session.clear_user_context_extensions();
+    }
+
     /// The responses of the server to `command`, the bytes of a `spark.connect.Command` built
     /// outside the client, such as the ML commands of `pyspark.ml`, as the bytes of each
     /// `ExecutePlanResponse`: for the `execute_command` of `client`.

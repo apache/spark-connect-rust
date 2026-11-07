@@ -104,6 +104,17 @@ raises an `AttributeError` that names `protobuf`.
 A DataFrame of a plan of `pyspark.ml` (`DataFrame(plan, session)`) takes the plan ID
 of this client rather than the one of the plan, which its columns refer to.
 
+## Spark Declarative Pipelines CLI
+
+The CLI of Spark Declarative Pipelines (`python -m pyspark.pipelines.cli init`, `run` and
+`dry-run`) and its modules are Apache Spark's own, vendored from v4.3.0, and Apache Spark's
+tests of them pass with this client. The CLI needs `pyyaml` and `protobuf`, which, as for
+`pyspark.ml`, are not dependencies of `pyspark-client-rust`. The user context extensions of a
+client (`spark.client.add_threadlocal_user_context_extension` and
+`add_global_user_context_extension`), which the CLI adds for the analyses of a pipeline, are
+sent with the requests of executions, analyses, configurations, error details and interrupts,
+as PySpark sends them.
+
 ## How parity is verified
 
 Two independent gates in CI cover the two halves of a Spark Connect client - plan

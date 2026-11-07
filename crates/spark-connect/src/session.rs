@@ -741,6 +741,44 @@ impl SparkSession {
         self.client.session_id()
     }
 
+    /// Add `extension` to the user context of the requests that the current thread sends from
+    /// this session, and return its ID. Mirrors PySpark's
+    /// `SparkConnectClient.add_threadlocal_user_context_extension`.
+    pub fn add_threadlocal_user_context_extension(&self, extension: prost_types::Any) -> String {
+        self.client
+            .add_threadlocal_user_context_extension(extension)
+    }
+
+    /// Add `extension` to the user context of the requests of all the threads of this session,
+    /// and return its ID. Mirrors PySpark's `add_global_user_context_extension`.
+    pub fn add_global_user_context_extension(&self, extension: prost_types::Any) -> String {
+        self.client.add_global_user_context_extension(extension)
+    }
+
+    /// Remove the user context extension of `extension_id`. Mirrors PySpark's
+    /// `remove_user_context_extension`.
+    pub fn remove_user_context_extension(&self, extension_id: &str) {
+        self.client.remove_user_context_extension(extension_id);
+    }
+
+    /// The user context extensions of the current thread, of their IDs. Mirrors PySpark's
+    /// `thread_local.user_context_extensions` of a client.
+    pub fn threadlocal_user_context_extensions(&self) -> Vec<(String, prost_types::Any)> {
+        self.client.threadlocal_user_context_extensions()
+    }
+
+    /// The global user context extensions, of their IDs. Mirrors PySpark's
+    /// `global_user_context_extensions` of a client.
+    pub fn global_user_context_extensions(&self) -> Vec<(String, prost_types::Any)> {
+        self.client.global_user_context_extensions()
+    }
+
+    /// Remove the user context extensions of the current thread and the global ones. Mirrors
+    /// PySpark's `clear_user_context_extensions`.
+    pub fn clear_user_context_extensions(&self) {
+        self.client.clear_user_context_extensions();
+    }
+
     /// Return the Spark version of the connected server.
     ///
     /// Mirrors `pyspark.sql.SparkSession.version`.

@@ -120,10 +120,20 @@ class SparkConnectClient:
     rest of the client, of the DataFrame API."""
 
     def __init__(self, session: Any) -> None:
+        import threading
+
         self._session = session
         # The thread of an ML cache RPC in flight, as SparkConnectClient's re-entrancy guard of a
         # RemoteModelRef finalizer that deletes a model.
         self._ml_cache_rpc_thread: Any = None
+        # The state of the current thread of the session, as SparkConnectClient's thread_local.
+        self.thread_local = _ThreadLocalOfClient(session)
+        self.global_user_context_extensions_lock = threading.Lock()
+
+    @property
+    def global_user_context_extensions(self) -> List[Any]:
+        """The global user context extensions, as SparkConnectClient's: of their IDs."""
+        return _extensions_of(self._session._user_context_extensions(True))
 
     @property
     def _server_session_id(self) -> str:
@@ -154,6 +164,25 @@ class SparkConnectClient:
                 if response.HasField(field):
                     properties[field] = getattr(response, field)
         return None, properties, None
+
+    def add_threadlocal_user_context_extension(self, extension: Any) -> str:
+        """Add ``extension``, a ``google.protobuf.Any``, to the user context of the requests that
+        the current thread sends, as SparkConnectClient's: its ID."""
+        return self._session._add_user_context_extension(extension.SerializeToString(), False)
+
+    def add_global_user_context_extension(self, extension: Any) -> str:
+        """Add ``extension``, a ``google.protobuf.Any``, to the user context of the requests of
+        all the threads, as SparkConnectClient's: its ID."""
+        return self._session._add_user_context_extension(extension.SerializeToString(), True)
+
+    def remove_user_context_extension(self, extension_id: str) -> None:
+        """Remove the user context extension of ``extension_id``, as SparkConnectClient's."""
+        self._session._remove_user_context_extension(extension_id)
+
+    def clear_user_context_extensions(self) -> None:
+        """Remove the user context extensions of the current thread and the global ones, as
+        SparkConnectClient's."""
+        self._session._clear_user_context_extensions()
 
     def _delete_ml_cache(self, cache_ids: List[str], evict_only: bool = False) -> List[str]:
         """Delete the cached objects of ``cache_ids`` on the server, as SparkConnectClient's: the
@@ -201,6 +230,31 @@ class SparkConnectClient:
                 self._ml_cache_rpc_thread = None
         except Exception:
             pass
+
+
+def _extensions_of(extensions: Any) -> List[Any]:
+    # The user context extensions of the Rust transport, as SparkConnectClient keeps them: the
+    # ID and the google.protobuf.Any of each.
+    from google.protobuf import any_pb2
+
+    return [(extension_id, any_pb2.Any.FromString(data)) for extension_id, data in extensions]
+
+
+class _ThreadLocalOfClient:
+    """The state of the current thread of the session of a client, as SparkConnectClient's
+    ``thread_local``: its user context extensions and its tags, which the Rust transport keeps
+    for each thread."""
+
+    def __init__(self, session: Any) -> None:
+        self._session = session
+
+    @property
+    def user_context_extensions(self) -> List[Any]:
+        return _extensions_of(self._session._user_context_extensions(False))
+
+    @property
+    def tags(self) -> Any:
+        return set(self._session.getTags())
 
 
 # The client of each session, by its ID, while it is in use.

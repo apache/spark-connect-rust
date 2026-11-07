@@ -360,6 +360,79 @@ def test_ml_vector_udt_is_sent_as_pyspark():
     assert isinstance(proto_schema_to_pyspark_data_type(message), VectorUDT)
 
 
+def test_user_context_extensions_are_sent_as_pyspark(ml_mock):
+    # As PySpark Connect's SparkConnectClient: the user context extensions of the current thread
+    # and the global ones, of the thread_local of the client, which the requests of the
+    # executions and the analyses of a thread carry, the global ones first.
+    import threading
+
+    from google.protobuf import any_pb2
+
+    spark, service = ml_mock
+    client = spark.client
+
+    def packed(graph_id):
+        extension = any_pb2.Any()
+        extension.Pack(pb2.PipelineAnalysisContext(dataflow_graph_id=graph_id))
+        return extension
+
+    local = client.add_threadlocal_user_context_extension(packed("local"))
+    shared = client.add_global_user_context_extension(packed("global"))
+    assert local.startswith("threadlocal_") and shared.startswith("global_")
+    assert client.thread_local.user_context_extensions == [(local, packed("local"))]
+    assert client.global_user_context_extensions == [(shared, packed("global"))]
+
+    command = pb2.Command()
+    command.ml_command.clean_cache.SetInParent()
+    client.execute_command(command)
+    request = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+    assert list(request.user_context.extensions) == [packed("global"), packed("local")]
+    assert spark.range(1).schema is not None
+    analysis = pb2.AnalyzePlanRequest.FromString(service.analyze_requests[-1])
+    assert list(analysis.user_context.extensions) == [packed("global"), packed("local")]
+
+    # Another thread has the global extensions only.
+    seen = []
+
+    def other():
+        seen.append(client.thread_local.user_context_extensions)
+        client.execute_command(command)
+
+    thread = threading.Thread(target=other)
+    thread.start()
+    thread.join()
+    assert seen == [[]]
+    request = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+    assert list(request.user_context.extensions) == [packed("global")]
+
+    client.remove_user_context_extension(local)
+    assert client.thread_local.user_context_extensions == []
+    client.clear_user_context_extensions()
+    assert client.global_user_context_extensions == []
+    client.execute_command(command)
+    request = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+    assert list(request.user_context.extensions) == []
+
+
+def test_pipeline_analysis_context_is_an_extension_of_its_block_as_pyspark(ml_mock):
+    # As official PySpark 4.3.0's add_pipeline_analysis_context: the PipelineAnalysisContext of
+    # the requests of its block, of the current thread.
+    from pyspark.pipelines.add_pipeline_analysis_context import add_pipeline_analysis_context
+
+    spark, service = ml_mock
+    command = pb2.Command()
+    command.ml_command.clean_cache.SetInParent()
+    with add_pipeline_analysis_context(spark, "graph-1", "flow-1"):
+        spark.client.execute_command(command)
+    spark.client.execute_command(command)
+    inside, after = [pb2.ExecutePlanRequest.FromString(r) for r in service.execute_requests]
+    (extension,) = inside.user_context.extensions
+    context = pb2.PipelineAnalysisContext()
+    assert extension.Unpack(context)
+    assert (context.dataflow_graph_id, context.flow_name) == ("graph-1", "flow-1")
+    assert list(after.user_context.extensions) == []
+
+
 def test_ml_session_client_is_one_object_of_the_session(ml_mock):
     # As PySpark Connect's SparkSession.client: one object of each session, of its session ID.
     from pyspark.sql.connect.client import SparkConnectClient
