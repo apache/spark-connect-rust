@@ -6429,6 +6429,36 @@ def test_decimal_scale_of_non_finite_values(decimal_ipc_session, text):
     assert not payload.exists()
 
 
+def test_decimal_quanta_of_each_type_and_conversion(decimal_ipc_session):
+    # Each decimal type of a conversion is quantized with its own quantum and context, which
+    # are built once per conversion, as PySpark builds them once per converter: a change of
+    # decimal.DefaultContext applies from the next createDataFrame.
+    import decimal
+    from decimal import Decimal
+    import pyarrow as pa
+
+    spark, payload = decimal_ipc_session
+    schema = T.StructType([T.StructField("a", T.DecimalType(10, 2)),
+                           T.StructField("b", T.DecimalType(5, 1)),
+                           T.StructField("c", T.DecimalType(10, 2))])
+    rows = [(Decimal("1.235"), Decimal("2.25"), Decimal("-0.005")),
+            (Decimal("1.245"), Decimal("2.35"), None)]
+    spark.createDataFrame(rows, schema).collect()
+    table = pa.ipc.open_stream(payload.read_bytes()).read_all()
+    assert table.to_pydict() == {
+        "a": [Decimal("1.24"), Decimal("1.24")],
+        "b": [Decimal("2.2"), Decimal("2.4")],
+        "c": [Decimal("-0.00"), None],
+    }
+    decimal.DefaultContext.traps[decimal.Inexact] = True
+    try:
+        with pytest.raises(decimal.Inexact):
+            spark.createDataFrame(rows, schema)
+    finally:
+        decimal.DefaultContext.traps[decimal.Inexact] = False
+    spark.createDataFrame(rows[1:], schema)
+
+
 # --------------------------------------------------------------------------- schema cache
 
 

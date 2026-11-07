@@ -24,13 +24,80 @@ use crate::errors::ResultExt;
 use crate::row::PyRow;
 use crate::values::{PyGeography, PyGeometry, PyVariantVal};
 
-static DECIMAL: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+pub(crate) static DECIMAL: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static DATE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static DATETIME: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static TIME: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static TIMEDELTA: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static ARRAY: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static SORTED: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+
+thread_local! {
+    /// The quantum and the context of each decimal type, while a [`DecimalQuanta`] lives: PySpark
+    /// builds them once for the converter of a field, rather than once per value.
+    static DECIMAL_QUANTA: std::cell::RefCell<Option<HashMap<(i32, i32), (Py<PyAny>, Py<PyAny>)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// While alive, the conversions of this thread build the quantum and the context of each decimal
+/// type once. Each conversion of rows has its own, as each `createDataFrame` of PySpark has its
+/// converters, so that its contexts take the `decimal.DefaultContext` of their time.
+pub(crate) struct DecimalQuanta;
+
+impl DecimalQuanta {
+    pub(crate) fn new() -> Self {
+        DECIMAL_QUANTA.with(|quanta| *quanta.borrow_mut() = Some(HashMap::new()));
+        DecimalQuanta
+    }
+}
+
+impl Drop for DecimalQuanta {
+    fn drop(&mut self) {
+        DECIMAL_QUANTA.with(|quanta| quanta.borrow_mut().take());
+    }
+}
+
+/// `Decimal("1E-<scale>")` and `Context(prec=<precision>, rounding=ROUND_HALF_EVEN)`, with which
+/// PySpark quantizes a value of `decimal(precision, scale)`.
+fn decimal_quantum<'py>(
+    py: Python<'py>,
+    precision: i32,
+    scale: i32,
+) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>)> {
+    let cached = DECIMAL_QUANTA.with(|quanta| {
+        quanta.borrow().as_ref().and_then(|quanta| {
+            quanta
+                .get(&(precision, scale))
+                .map(|(exp, context)| (exp.bind(py).clone(), context.bind(py).clone()))
+        })
+    });
+    if let Some(cached) = cached {
+        return Ok(cached);
+    }
+    let module = py.import(intern!(py, "decimal"))?;
+    let exp = DECIMAL
+        .import(py, "decimal", "Decimal")?
+        .call1((format!("1E-{scale}"),))?;
+    let context = module.getattr(intern!(py, "Context"))?.call(
+        (),
+        Some(
+            &[
+                ("prec", precision.into_pyobject(py)?.into_any()),
+                ("rounding", module.getattr(intern!(py, "ROUND_HALF_EVEN"))?),
+            ]
+            .into_py_dict(py)?,
+        ),
+    )?;
+    DECIMAL_QUANTA.with(|quanta| {
+        if let Some(quanta) = quanta.borrow_mut().as_mut() {
+            quanta.insert(
+                (precision, scale),
+                (exp.clone().unbind(), context.clone().unbind()),
+            );
+        }
+    });
+    Ok((exp, context))
+}
 
 /// The session configurations that inference reads, as PySpark reads them for
 /// `createDataFrame`.
@@ -954,28 +1021,11 @@ pub(crate) fn convert(obj: &Bound<'_, PyAny>, dt: &DataType, nullable: bool) -> 
                 return Ok(Value::Null);
             }
             // `value.quantize(Decimal("1E-<scale>"), context=Context(prec=<precision>,
-            // rounding=ROUND_HALF_EVEN))`, written without an exponent.
-            let module = py.import(intern!(py, "decimal"))?;
-            let exp = decimal.call1((format!("1E-{scale}"),))?;
-            let context = module.getattr(intern!(py, "Context"))?.call(
-                (),
-                Some(
-                    &[
-                        ("prec", precision.into_pyobject(py)?.into_any()),
-                        ("rounding", module.getattr(intern!(py, "ROUND_HALF_EVEN"))?),
-                    ]
-                    .into_py_dict(py)?,
-                ),
-            )?;
-            let quantized = obj.call_method(
-                intern!(py, "quantize"),
-                (exp,),
-                Some(&[("context", context)].into_py_dict(py)?),
-            )?;
-            let text =
-                PyString::new(py, "{:f}").call_method1(intern!(py, "format"), (quantized,))?;
+            // rounding=ROUND_HALF_EVEN))`, as written: the encoder parses either notation.
+            let (exp, context) = decimal_quantum(py, *precision, *scale)?;
+            let quantized = obj.call_method1(intern!(py, "quantize"), (exp, py.None(), context))?;
             Ok(Value::Decimal {
-                value: text.extract()?,
+                value: quantized.str()?.extract()?,
                 precision: Some(*precision),
                 scale: Some(*scale),
             })

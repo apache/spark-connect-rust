@@ -509,6 +509,7 @@ impl PySparkSession {
         let mut values: Vec<Vec<Value>> = (0..parts.len())
             .map(|_| Vec::with_capacity(fields.len()))
             .collect();
+        let _quanta = infer::DecimalQuanta::new();
         for (i, field) in fields.iter().enumerate() {
             for (row, out) in parts.iter().zip(values.iter_mut()) {
                 out.push(infer::convert(&row[i], &field.data_type, field.nullable)?);
@@ -1752,7 +1753,7 @@ fn pandas_decimal_type(data: &Bound<'_, PyList>, rows: &[Row], i: usize) -> PyRe
     // The digits and exponent of an exact Decimal come from the text that `py_to_value` took
     // of it, rather than from `as_tuple()`, which builds a DecimalTuple of every digit; a
     // subclass, which can override either, is asked for `as_tuple()`, as Arrow does.
-    let decimal_cls = data.py().import("decimal")?.getattr("Decimal")?;
+    let decimal_cls = crate::infer::DECIMAL.import(data.py(), "decimal", "Decimal")?;
     let (mut integer_digits, mut scale) = (0i64, 0i64);
     for (row, converted) in data.iter().zip(rows) {
         let value = row.get_item(i)?;
@@ -1760,7 +1761,7 @@ fn pandas_decimal_type(data: &Bound<'_, PyList>, rows: &[Row], i: usize) -> PyRe
             continue;
         }
         let from_text = match converted.get(i) {
-            Some(Value::Decimal { value: text, .. }) if value.get_type().is(&decimal_cls) => {
+            Some(Value::Decimal { value: text, .. }) if value.get_type().is(decimal_cls) => {
                 decimal_text_digits(text)
             }
             _ => None,
@@ -2131,19 +2132,17 @@ pub(crate) fn datetime_to_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
 /// Decimal defines `__float__`/`__int__`.
 fn decimal_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Option<Value>> {
     let py = obj.py();
-    let dec_mod = match py.import("decimal") {
-        Ok(m) => m,
-        Err(_) => return Ok(None),
-    };
-    let decimal_cls = dec_mod.getattr("Decimal")?;
-    if !obj.is_instance(&decimal_cls)? {
+    // Imported once: looking the class up per value was a module import and an attribute
+    // read of every converted value.
+    let decimal_cls = crate::infer::DECIMAL.import(py, "decimal", "Decimal")?;
+    if !obj.is_instance(decimal_cls.as_any())? {
         return Ok(None);
     }
     // As written, in scientific notation for `1E+2` or `1.5E-7`: the Arrow encoder parses
     // either notation, in work bounded by the length of the text, which a fixed-point form
     // of `1E+1000000000` would not be.
     let dec_str: String = obj.str()?.extract()?;
-    let scale = if obj.get_type().is(&decimal_cls) {
+    let scale = if obj.get_type().is(decimal_cls) {
         // Exact Decimal strings preserve the coefficient's trailing zeros and exponent.
         // Subclasses may override either __str__ or as_tuple, so keep their old path.
         decimal_string_scale(&dec_str)
