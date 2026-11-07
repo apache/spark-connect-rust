@@ -2255,6 +2255,23 @@ def test_observations_receive_the_observed_metrics_as_pyspark(session):
     assert error.value.getCondition() == "UNSUPPORTED_OPERATION"
 
 
+def test_try_cast_and_isin_raise_the_errors_of_pyspark(session):
+    # As PySpark Connect's: try_cast of an int, and isin of a tuple, raise PySpark's errors.
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+
+    df = session.range(3)
+    with pytest.raises(PySparkTypeError) as e:
+        df.select(F.col("id").try_cast(1))
+    assert e.value.getCondition() == "NOT_EXPECTED_TYPE"
+    with pytest.raises(PySparkTypeError) as e:
+        df.where(F.col("id").isin((1, 2)))
+    assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE"
+    assert df.where(F.col("id").isin([1, 2])).count() == 2
+
+
+
+
 def test_ml_vector_functions_as_pyspark(session):
     from pyspark.ml.functions import array_to_vector, vector_to_array
 

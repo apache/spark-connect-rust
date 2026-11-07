@@ -1258,6 +1258,28 @@ def test_map_functions_send_the_names_of_their_functions_as_pyspark(mock_connect
     assert sent_name(stateful, 34, 3) == "with_state"
 
 
+def test_try_cast_and_isin_take_their_arguments_as_pyspark():
+    # As PySpark Connect's: try_cast raises NOT_EXPECTED_TYPE for a type that is neither a
+    # DataType nor a str, and isin unpacks a single list or set, but not a tuple, which is a
+    # value of lit (UNSUPPORTED_DATA_TYPE).
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+
+    column = F.col("a")
+    with pytest.raises(PySparkTypeError) as e:
+        column.try_cast(1)
+    assert e.value.getMessageParameters() == {
+        "expected_type": "DataType or str", "arg_name": "dataType", "arg_type": "int"}
+    assert "TRY_CAST" in repr(column.try_cast("string")).upper()
+    column.try_cast(T.StringType())
+    assert repr(column.isin([1, 2])) == repr(column.isin({1, 2})) == repr(column.isin(1, 2))
+    with pytest.raises(PySparkTypeError) as e:
+        column.isin((1, 2))
+    assert e.value.getMessageParameters() == {"data_type": "tuple"}
+
+
+
+
 def test_map_functions_send_their_resource_profile_as_pyspark(mock_connect):
     # As PySpark's, mapInPandas and mapInArrow send the id of their resource profile, which
     # `profile.id` creates on the server, so that their stage runs with its resources.
