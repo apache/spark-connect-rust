@@ -32,6 +32,16 @@ from typing import Any, Optional, Type
 from pyspark.errors import PySparkAttributeError, PySparkTypeError
 from pyspark.serializers import CloudPickleSerializer
 
+__all__ = [
+    "AnalyzeArgument",
+    "AnalyzeResult",
+    "PartitioningColumn",
+    "OrderingColumn",
+    "SelectedColumn",
+    "SkipRestOfInputTableException",
+    "UDTFRegistration",
+]
+
 # Eval types for Python UDTFs (mirrors pyspark.util.PythonEvalType).
 SQL_TABLE_UDF = 300
 SQL_ARROW_TABLE_UDF = 301

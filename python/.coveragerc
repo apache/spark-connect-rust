@@ -58,6 +58,9 @@ omit =
     */pyspark/memory_profiler_ext.py
     */pyspark/worker_util.py
     */pyspark/instrumentation_utils.py
+    # The logger and the types of the connect import path, vendored.
+    */pyspark/sql/connect/logging.py
+    */pyspark/sql/connect/_typing.py
     */pyspark/_pyspark*
     */tests/*
 

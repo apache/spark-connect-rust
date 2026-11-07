@@ -92,6 +92,10 @@ VENDORED_FILES=(
   # ExecutePlanResponse is that of the message class of pyspark/sql/connect/proto.py.
   "sql/connect/shell/progress.py"
 
+  # The logger of Spark Connect, and the types of the connect import path.
+  "sql/connect/logging.py"
+  "sql/connect/_typing.py"
+
   # The spatial reference systems of the spatial types, and the SQLStringFormatter, of
   # pyspark.sql.
   "sql/geo_utils.py"

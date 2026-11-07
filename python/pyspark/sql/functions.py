@@ -1325,11 +1325,11 @@ del name
 # ``__init__`` re-exports them; here this module IS the implementation, so register a synthetic
 # ``builtin`` submodule mirroring it (so ``import pyspark.sql.functions.builtin`` and
 # ``from pyspark.sql.functions.builtin import col`` work like reference pyspark).
+# As PySpark's, it has every public name of the functions, also the deprecated ones that
+# ``__all__`` leaves out (such as ``countDistinct``), and no ``__all__``.
 builtin = _types.ModuleType("pyspark.sql.functions.builtin")
 builtin.__doc__ = "Built-in DataFrame functions (re-exported from pyspark.sql.functions)."
-for _bname in list(__all__):
-    _bobj = globals().get(_bname)
-    if _bobj is not None:
+for _bname, _bobj in list(globals().items()):
+    if not _bname.startswith("_") and not isinstance(_bobj, _types.ModuleType):
         setattr(builtin, _bname, _bobj)
-builtin.__all__ = list(__all__)
 _sys.modules["pyspark.sql.functions.builtin"] = builtin

@@ -912,13 +912,13 @@ def test_functions_exports_fresh_process():
             assert all(namespace[name] is getattr(F, name) for name in F.__all__)
             builtin = importlib.import_module("pyspark.sql.functions.builtin")
             assert builtin is F.builtin is sys.modules[builtin.__name__]
-            assert type(builtin.__all__) is list
-            assert builtin.__all__ == F.__all__
-            assert builtin.__all__ is not F.__all__
+            # As PySpark's, the builtin module has no __all__, and has every public function of
+            # pyspark.sql.functions, also the deprecated ones that __all__ leaves out.
+            assert not hasattr(builtin, "__all__")
             assert all(getattr(builtin, name) is getattr(F, name) for name in F.__all__)
             builtin_namespace = {}
             exec("from pyspark.sql.functions.builtin import *", builtin_namespace)
-            assert [name for name in builtin_namespace if name != "__builtins__"] == F.__all__
+            assert set(F.__all__) <= set(builtin_namespace)
             assert all(builtin_namespace[name] is getattr(F, name) for name in F.__all__)
             part = importlib.import_module("pyspark.sql.functions.partitioning")
             assert part is F.partitioning is sys.modules[part.__name__]
@@ -935,9 +935,10 @@ def test_functions_exports_fresh_process():
         expected = check_exports()
         old_all = F.__all__
         old_all.append("caller_added_name")
-        F.builtin.__all__.append("builtin_only_name")
+        F.builtin.builtin_only_name = None
         importlib.reload(F)
         assert F.__all__ is not old_all
+        assert not hasattr(F.builtin, "builtin_only_name")
         assert check_exports() == expected
     ''').replace("__OFFICIAL_FUNCTIONS_ALL__", repr(OFFICIAL_FUNCTIONS_ALL))], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -5148,6 +5149,186 @@ def test_connect_shim_imports():
     from pyspark.sql import functions as F
 
     assert repr(_invoke_function_over_columns("pandas_product", F.col("x"))) == "Column<'pandas_product(x)'>"
+
+
+def test_module_level_names_as_pyspark(monkeypatch):
+    # As official PySpark 4.3.0: the names of pyspark.util, and the __all__ of the modules of
+    # pyspark.sql, of which a star import exports only those.
+    import gc
+    import typing
+
+    import pyspark.util as util
+    from pyspark.errors import PySparkRuntimeError
+
+    assert util.__all__ == []
+    assert isinstance(util.FuncT, typing.TypeVar)
+    monkeypatch.setenv("SPARK_CONNECT_MODE", "1")
+    assert util.spark_connect_mode() == "1" and util.default_api_mode() == "connect"
+    monkeypatch.setenv("SPARK_CONNECT_MODE", "0")
+    assert util.spark_connect_mode() == "0" and util.default_api_mode() == "classic"
+
+    def stops():
+        raise StopIteration("done")
+
+    assert util.fail_on_stopiteration(lambda x: x + 1)(1) == 2
+    with pytest.raises(PySparkRuntimeError) as error:
+        util.fail_on_stopiteration(stops)()
+    assert error.value.getCondition() == "STOP_ITERATION_OCCURRED"
+    assert error.value.getMessageParameters() == {"exc": "done"}
+    enabled = gc.isenabled()
+    with util.disable_gc():
+        assert not gc.isenabled()
+    assert gc.isenabled() == enabled
+
+    for module, expected in [
+        ("pyspark.sql.udf", ["UDFRegistration"]),
+        (
+            "pyspark.sql.udtf",
+            [
+                "AnalyzeArgument",
+                "AnalyzeResult",
+                "PartitioningColumn",
+                "OrderingColumn",
+                "SelectedColumn",
+                "SkipRestOfInputTableException",
+                "UDTFRegistration",
+            ],
+        ),
+        ("pyspark.sql.avro", ["functions"]),
+        ("pyspark.sql.protobuf", ["functions"]),
+    ]:
+        namespace = {}
+        exec(f"from {module} import *", namespace)
+        assert [name for name in namespace if name != "__builtins__"] == expected, module
+
+
+def test_connect_import_path_modules_as_pyspark(mock_connect):
+    # As official PySpark 4.3.0: the modules of the connect import path, of the functions and
+    # the classes of this client, and the deprecated functions of the builtin modules.
+    import importlib
+    import logging
+
+    from pyspark.sql import functions as F
+    from pyspark.sql.avro import functions as avro
+    from pyspark.sql.datasource import DataSource
+    from pyspark.sql.functions import partitioning
+    from pyspark.sql.protobuf import functions as protobuf
+    from pyspark.sql.table_arg import TableArg
+
+    spark, service = mock_connect
+    connect_partitioning = importlib.import_module("pyspark.sql.connect.functions.partitioning")
+    assert importlib.import_module("pyspark.sql.connect.functions").partitioning is (
+        connect_partitioning
+    )
+    for name in ["years", "months", "days", "hours", "bucket"]:
+        assert getattr(connect_partitioning, name) is getattr(partitioning, name)
+    connect_avro = importlib.import_module("pyspark.sql.connect.avro.functions")
+    assert connect_avro.from_avro is avro.from_avro and connect_avro.to_avro is avro.to_avro
+    connect_protobuf = importlib.import_module("pyspark.sql.connect.protobuf.functions")
+    assert connect_protobuf.from_protobuf is protobuf.from_protobuf
+    assert connect_protobuf.to_protobuf is protobuf.to_protobuf
+    assert importlib.import_module("pyspark.sql.connect.table_arg").TableArg is TableArg
+    typing_module = importlib.import_module("pyspark.sql.connect._typing")
+    assert {"ColumnOrName", "DataTypeOrString", "LiteralType"} <= set(dir(typing_module))
+
+    connect_logging = importlib.import_module("pyspark.sql.connect.logging")
+    assert connect_logging.__all__ == ["configureLogging", "getLogLevel"]
+    assert isinstance(connect_logging.logger, logging.Logger)
+    if "SPARK_CONNECT_LOG_LEVEL" not in os.environ:
+        assert connect_logging.getLogLevel() is None
+
+    connect_builtin = importlib.import_module("pyspark.sql.connect.functions.builtin")
+    for name in [
+        "approxCountDistinct",
+        "bitwiseNOT",
+        "countDistinct",
+        "shiftLeft",
+        "shiftRight",
+        "shiftRightUnsigned",
+        "sumDistinct",
+        "toDegrees",
+        "toRadians",
+        "chr",
+        "random",
+        "uuid",
+    ]:
+        assert getattr(F.builtin, name) is getattr(F, name), name
+        assert getattr(connect_builtin, name) is getattr(F, name), name
+
+    # The registration of a data source registers it with the session.
+    from pyspark.sql.connect.datasource import DataSourceRegistration
+
+    class TestSource(DataSource):
+        @classmethod
+        def name(cls):
+            return "test_source"
+
+    DataSourceRegistration(spark).register(TestSource)
+    assert service.execute_calls == 1
+
+
+def test_connect_utils_check_the_dependencies_of_the_client(tmp_path):
+    # As PySpark Connect's pyspark.sql.connect.utils, but check_dependencies checks the
+    # dependencies of this client, which do not include gRPC. The script runs of a file: of
+    # a main module without one, check_dependencies takes it for doctests.
+    import subprocess
+    import sys
+    import textwrap
+
+    from pyspark.errors import PySparkImportError
+    from pyspark.sql.connect import utils
+
+    assert utils.get_python_ver() == "%d.%d" % sys.version_info[:2]
+    utils.check_dependencies()
+    for check in [
+        utils.require_minimum_grpc_version,
+        utils.require_minimum_grpcio_status_version,
+        utils.require_minimum_googleapis_common_protos_version,
+        utils.require_minimum_zstandard_version,
+    ]:
+        # Of the packages installed here, or not.
+        try:
+            check()
+        except PySparkImportError as error:
+            assert error.getCondition() in ("PACKAGE_NOT_INSTALLED", "UNSUPPORTED_PACKAGE_VERSION")
+    script = textwrap.dedent(
+        """
+        import importlib.abc, sys
+
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, name, path, target=None):
+                if name.split(".")[0] in ("grpc", "grpc_status", "zstandard") or name.startswith(
+                    "google.rpc"
+                ):
+                    raise ImportError("not installed: " + name)
+
+        sys.meta_path.insert(0, Block())
+        from pyspark.errors import PySparkImportError
+        from pyspark.sql.connect import utils
+
+        utils.check_dependencies()
+        for check, package in [
+            (utils.require_minimum_grpc_version, "grpcio"),
+            (utils.require_minimum_grpcio_status_version, "grpcio-status"),
+            (utils.require_minimum_googleapis_common_protos_version, "googleapis-common-protos"),
+            (utils.require_minimum_zstandard_version, "zstandard"),
+        ]:
+            try:
+                check()
+            except PySparkImportError as error:
+                assert error.getCondition() == "PACKAGE_NOT_INSTALLED"
+                assert error.getMessageParameters()["package_name"] == package
+            else:
+                raise AssertionError(package)
+        print("ok")
+        """
+    )
+    path = tmp_path / "check_dependencies.py"
+    path.write_text(script)
+    result = subprocess.run(
+        [sys.executable, str(path)], capture_output=True, text=True, timeout=120
+    )
+    assert result.returncode == 0 and result.stdout.strip() == "ok", result.stderr
 
 
 def test_is_remote_flags():
