@@ -2452,6 +2452,28 @@ def test_ml_vector_functions_as_pyspark(session):
     assert tuple(row.first()) == ([1.5, 2.0], [1.5, 2.0])
 
 
+def test_udfs_of_types_with_user_defined_types_run_on_the_server_as_pyspark(session):
+    # As PySpark's: a UDF of a return type of an array of ExamplePointUDT, whose JSON's pyClass
+    # imports no class, runs on the Python worker of the server, to which the type pickles with
+    # the user-defined type it is made of.
+    from pyspark.testing.objects import ExamplePoint, ExamplePointUDT
+
+    @F.udf(returnType=ArrayType(ExamplePointUDT()))
+    def points(d):
+        return [ExamplePoint(d + i, 10 * d + i) for i in range(2)]
+
+    @F.udf(returnType=DoubleType())
+    def last_y(es):
+        return es[-1].y
+
+    df = session.range(1).select(F.lit(1.0).alias("d"))
+    expected = [Row(p=[ExamplePoint(1.0, 10.0), ExamplePoint(2.0, 11.0)])]
+    assert df.select(points("d").alias("p")).collect() == expected
+    assert df.select(last_y(points("d")).alias("y")).collect() == [Row(y=11.0)]
+
+
+
+
 def test_udfs_return_user_defined_types_of_main_as_pyspark():
     # As PySpark's: a UDT that __main__ defines, of parameters, is a UDF return type, as
     # cloudpickle sends its class by value and its state to the worker. In a new
