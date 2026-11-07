@@ -538,6 +538,77 @@ impl PySparkSession {
         }))
     }
 
+    /// A DataFrame of a non-empty pandas DataFrame under an explicit struct schema of the
+    /// same width, converted as PySpark does: each column by its Arrow conversion (session
+    /// time zone, safe casts), then the table cast to the schema, which the importer
+    /// sends as Arrow. None when the width differs, which the row path reports.
+    fn create_from_pandas_arrow(
+        &self,
+        py: Python<'_>,
+        data: &Bound<'_, PyAny>,
+        schema: &Bound<'_, PyAny>,
+        fields: &[StructField],
+    ) -> PyResult<Option<PyDataFrame>> {
+        if fields.is_empty() || data.len()? == 0 || data.getattr("columns")?.len()? != fields.len()
+        {
+            return Ok(None);
+        }
+        // The caller's schema object is checked, before any configuration request is sent.
+        let helper = py.import("pyspark.sql._pandas_input")?;
+        if !helper
+            .getattr("accepts_pandas_table")?
+            .call1((data, schema))?
+            .is_truthy()?
+        {
+            return Ok(None);
+        }
+        let options = py.detach(|| self.session.arrow_input_options().to_pyerr())?;
+        // The option is always set, as the importer requires it.
+        let timezone = options.timezone().unwrap_or("UTC").to_owned();
+        let large = options.use_large_var_types() == Some("true");
+        let safecheck = py
+            .detach(|| {
+                self.session
+                    .conf()
+                    .get("spark.sql.execution.pandas.convertToArrowArraySafely")
+            })
+            .to_pyerr()?
+            .as_deref()
+            == Some("true");
+        // The caller's StructType, which the guard checked, is converted as given; a DDL
+        // string is parsed into the same fields.
+        let schema_py = if schema
+            .extract::<PyRef<crate::types::PyStructType>>()
+            .is_ok()
+        {
+            schema.clone().unbind()
+        } else {
+            crate::types::data_type_to_py(
+                py,
+                &DataType::Struct {
+                    fields: fields.to_vec(),
+                },
+            )?
+        };
+        let table = helper.getattr("prepare_pandas_table")?.call1((
+            data,
+            schema_py.bind(py),
+            timezone,
+            safecheck,
+            large,
+        ))?;
+        let frame = crate::pyarrow_import::create_dataframe(
+            py,
+            &self.session,
+            &table,
+            Some(schema_py.bind(py)),
+        )?;
+        // As the other pandas paths, the explicit names are applied with toDF.
+        Ok(Some(PyDataFrame::new(frame.dataframe.to_df(
+            fields.iter().map(|field| field.name.as_str()).collect(),
+        ))))
+    }
+
     /// A DataFrame of a pandas DataFrame: its rows as lists with NaN and NaT as None, typed
     /// by the first non-null value of each column, and its column labels, as strings, or the
     /// given names, applied with `toDF`.
@@ -547,6 +618,9 @@ impl PySparkSession {
         data: &Bound<'_, PyAny>,
         spec: Spec,
     ) -> PyResult<PyDataFrame> {
+        // Without a struct schema, PySpark infers the Arrow type of each column, which has
+        // no int64 for a Python int beyond the 64-bit range.
+        let inferred = !matches!(spec, Spec::Struct(_));
         let mut columns = Vec::new();
         for label in data.getattr("columns")?.try_iter()? {
             columns.push(label?.str()?.extract::<String>()?);
@@ -608,7 +682,19 @@ impl PySparkSession {
         for row in data.iter() {
             let values = row
                 .try_iter()?
-                .map(|v| py_to_value(&v?))
+                .map(|v| {
+                    let v = v?;
+                    if inferred {
+                        if let Ok(i) = v.cast_exact::<pyo3::types::PyInt>() {
+                            if i.extract::<i64>().is_err() {
+                                return Err(pyo3::exceptions::PyOverflowError::new_err(
+                                    "Python int too large to convert to C long",
+                                ));
+                            }
+                        }
+                    }
+                    py_to_value(&v)
+                })
                 .collect::<PyResult<Vec<_>>>()?;
             if values.len() != row_names.len() {
                 // As pyspark, which checks every row against the width of the schema.
@@ -1049,6 +1135,13 @@ impl PySparkSession {
                     }
                     _ => frame,
                 });
+            }
+            // An explicit struct schema converts with PySpark's Arrow conversion, which
+            // reports the same values and errors. Other schemas keep the row path.
+            if let (Spec::Struct(fields), Some(schema)) = (&spec, schema) {
+                if let Some(frame) = self.create_from_pandas_arrow(py, data, schema, fields)? {
+                    return Ok(frame);
+                }
             }
             return self.create_from_pandas(py, data, spec);
         }

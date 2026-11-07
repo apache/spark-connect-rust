@@ -4978,6 +4978,10 @@ def test_create_dataframe_rows_is_local_as_pyspark(data, schema, expected):
                                                   T.StructField("b", T.StringType())])])
 def test_create_dataframe_pandas_is_not_local_as_pyspark(schema):
     pd = pytest.importorskip("pandas")
+    if schema is not None:
+        # Explicit-schema pandas input reads the server's Arrow settings first, as PySpark
+        # does, so it needs a live server; the live-server suites cover it.
+        pytest.skip("explicit-schema pandas input reads the server configuration")
     # pyspark applies the columns, or the field names of the schema, with toDF.
     df = _local_create_dataframe(pd.DataFrame({"a": [1, 2], "b": ["x", "y"]}), schema)
     assert not df.isLocal()
@@ -5338,18 +5342,14 @@ def test_local_input_native_number_values_and_types(mock_connect, value):
         assert actual == value
 
 
-def test_pandas_input_overflow_preserves_generic_conversion_behavior(mock_connect):
-    # This checks only that the exact-int fast path leaves integers outside the int64 range
-    # to the generic path. That path converts them to a double, which is a known difference
-    # from PySpark: it raises OverflowError ("Python int too large to convert to C long").
+def test_pandas_input_overflow_raises_as_pyspark(mock_connect):
+    # Without a schema, PySpark infers the Arrow type of an object column, so an integer
+    # outside the int64 range raises OverflowError rather than becoming a double.
     pd = pytest.importorskip("pandas")
     for value in (2**63, -(2**63) - 1):
-        actual = _native_number_input_table(
-            mock_connect, [Row(value=value)], source="pandas"
-        ).column(0)[0].as_py()
-        assert type(actual) is float
-        assert actual == float(value)
-    with pytest.raises(TypeError, match="unsupported value type.*int"):
+        with pytest.raises(OverflowError, match="^Python int too large to convert to C long$"):
+            _native_number_input_table(mock_connect, [Row(value=value)], source="pandas")
+    with pytest.raises(OverflowError, match="^Python int too large to convert to C long$"):
         mock_connect[0].createDataFrame(pd.DataFrame({"value": [2**20000]}, dtype=object))
 
 
@@ -5554,10 +5554,31 @@ def _container_input_capture_server(connection):
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         server = grpc.server(executor)
+        def config(request, context):
+            # Explicit-schema pandas input reads the Arrow conversion settings first.
+            request = parse_message(request)
+            keys = [key.decode() for key in
+                    parse_message(parse_message(request[3][0])[2][0]).get(1, [])]
+            defaults = {
+                "spark.sql.timestampType": "TIMESTAMP_LTZ",
+                "spark.sql.session.timeZone": "UTC",
+                "spark.sql.execution.arrow.useLargeVarTypes": "false",
+                "spark.sql.session.localRelationCacheThreshold": str(1 << 60),
+                "spark.sql.session.localRelationSizeLimit": str(1 << 60),
+                "spark.sql.session.localRelationChunkSizeRows": str(1 << 30),
+                "spark.sql.session.localRelationChunkSizeBytes": str(1 << 40),
+                "spark.sql.session.localRelationBatchOfChunksSizeBytes": str(1 << 40),
+                "spark.sql.execution.pandas.convertToArrowArraySafely": "true",
+            }
+            return message_field(1, request[1][0]) + b"".join(
+                message_field(2, message_field(1, key) + message_field(2, defaults[key]))
+                for key in keys)
+
         server.add_generic_rpc_handlers((grpc.method_handlers_generic_handler(
             "spark.connect.SparkConnectService", {
                 "ExecutePlan": grpc.unary_stream_rpc_method_handler(execute),
                 "AnalyzePlan": grpc.unary_unary_rpc_method_handler(_ddl_parse),
+                "Config": grpc.unary_unary_rpc_method_handler(config),
             }),))
         port = server.add_insecure_port("127.0.0.1:0")
         server.start()
@@ -5832,6 +5853,7 @@ def _exact_date_capture_server(connection):
         "spark.sql.session.localRelationChunkSizeRows": str(1 << 30),
         "spark.sql.session.localRelationChunkSizeBytes": str(1 << 40),
         "spark.sql.session.localRelationBatchOfChunksSizeBytes": str(1 << 40),
+        "spark.sql.execution.pandas.convertToArrowArraySafely": "true",
     }
 
     def _exact_date_config(request, context):
