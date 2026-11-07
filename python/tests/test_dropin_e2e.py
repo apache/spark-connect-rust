@@ -1302,6 +1302,26 @@ def test_collect_reads_a_result_across_stream_ends(session):
     assert session.range(n).toArrow().num_rows == n
 
 
+def test_internal_values_of_collected_rows_are_those_of_spark_as_pyspark(session):
+    # As PySpark's: the toInternal of a collected row is the internal value of Spark that the
+    # server computes, the days and the microseconds since the epoch, and its fromInternal is
+    # the row.
+    df = session.sql(
+        "select date'2020-01-01' as d, timestamp'2020-01-01 12:30:15.123456' as ts, "
+        "timestamp_ntz'2020-01-01 12:30:15.123456' as ntz, "
+        "interval '1 02:03:04.000005' day to second as i, array(date'2020-01-02') as a, "
+        "map('k', date'2020-01-03') as m")
+    row = df.first()
+    days, micros, next_days, last_days = session.sql(
+        "select unix_date(date'2020-01-01'), unix_micros(timestamp'2020-01-01 12:30:15.123456'), "
+        "unix_date(date'2020-01-02'), unix_date(date'2020-01-03')").first()
+    internal = df.schema.toInternal(row)
+    assert internal == (days, micros, micros, 93784000005, [next_days], {"k": last_days})
+    assert df.schema.fromInternal(internal) == row
+
+
+
+
 def test_time_values_round_trip_as_pyspark(session):
     # As PySpark's: TIME values are sent, and collected, as datetime.time, when the session
     # enables the TIME type.

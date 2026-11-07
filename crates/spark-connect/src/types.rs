@@ -190,6 +190,9 @@ impl DataType {
     /// - DayTimeIntervalType: needs conversion to/from datetime.timedelta
     /// - CalendarIntervalType: needs conversion
     /// - YearMonthIntervalType: needs conversion (complex)
+    /// - VariantType: needs conversion to/from `VariantVal`
+    /// - GeometryType and GeographyType: need conversion to/from `Geometry` and `Geography`
+    /// - UserDefinedType: needs conversion to/from its Python class
     /// - ArrayType: if element type needs conversion
     /// - MapType: if key or value type needs conversion
     /// - StructType: always needs conversion
@@ -203,7 +206,11 @@ impl DataType {
             | DataType::Time { .. }
             | DataType::DayTimeInterval { .. }
             | DataType::YearMonthInterval { .. }
-            | DataType::CalendarInterval => true,
+            | DataType::CalendarInterval
+            | DataType::Variant
+            | DataType::Geometry { .. }
+            | DataType::Geography { .. }
+            | DataType::Udt { .. } => true,
             DataType::Array { element_type, .. } => element_type.need_conversion(),
             DataType::Map {
                 key_type,
@@ -2858,6 +2865,22 @@ mod tests {
         assert!(DataType::TimestampNtz.need_conversion());
         assert!(DataType::CalendarInterval.need_conversion());
         assert!(DataType::Time { precision: 6 }.need_conversion());
+        // As PySpark's: variants, spatial values and the values of UDTs, also in arrays.
+        assert!(DataType::Variant.need_conversion());
+        assert!(DataType::Geometry { srid: 4326 }.need_conversion());
+        assert!(DataType::Geography { srid: 4326 }.need_conversion());
+        let udt = DataType::Udt {
+            type_str: "udt".to_string(),
+            jvm_class: None,
+            python_class: Some("mymod.MyUDT".to_string()),
+            serialized_python_class: None,
+            sql_type: Some(Box::new(DataType::Integer)),
+        };
+        assert!(DataType::Array {
+            element_type: Box::new(udt),
+            contains_null: true,
+        }
+        .need_conversion());
 
         // Types that don't need conversion
         assert!(!DataType::Integer.need_conversion());
