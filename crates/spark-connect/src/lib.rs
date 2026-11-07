@@ -50,7 +50,6 @@ pub use expression::{
 pub use group::{CoGroupedData, GroupedData};
 pub use merge::MergeIntoWriter;
 pub use observation::Observation;
-pub use profiler::ProfilerCollector;
 pub use progress::{ProgressUpdate, StageInfo};
 pub use readwriter::{
     DataFrameReader, DataFrameWriter, DataFrameWriterV2, ReadType, SaveMode, TableSaveMethod,

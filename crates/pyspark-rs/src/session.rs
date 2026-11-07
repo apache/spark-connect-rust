@@ -12,7 +12,6 @@ use crate::catalog::PyCatalog;
 use crate::dataframe::PyDataFrame;
 use crate::datasource::PyDataSourceRegistration;
 use crate::errors::ResultExt;
-use crate::profiler::PyProfilerCollector;
 use crate::resource::PyResourceProfile;
 use crate::streaming::{PyDataStreamReader, PyStreamingQueryManager};
 
@@ -482,8 +481,14 @@ pub struct PySparkSession {
 
 impl PySparkSession {
     pub fn new(session: SparkSession) -> Self {
-        // The progress of the session, for the progress bars of its executions.
-        Python::attach(|py| crate::progress::session_progress(py, &session));
+        // The progress of the session, for the progress bars of its executions, and its
+        // profiles, which the updates of its first execution update too.
+        Python::attach(|py| {
+            crate::progress::session_progress(py, &session);
+            if let Err(error) = crate::profiler::profiler_collector(py, &session) {
+                error.write_unraisable(py, None);
+            }
+        });
         PySparkSession { session }
     }
 
@@ -1471,6 +1476,7 @@ impl PySparkSession {
     /// active session and the cached `SQLContext` if they belong to this session.
     fn stop(&self, py: Python<'_>) -> PyResult<()> {
         crate::progress::forget_session(&self.session);
+        crate::profiler::forget_session(&self.session);
         if let Err(e) = py.detach(|| self.session.stop()) {
             let logger = py
                 .import("logging")?
@@ -1753,13 +1759,22 @@ impl PySparkSession {
         crate::progress::session_progress(py, &self.session).clear(py)
     }
 
-    /// Get the profiler collector for this session.
-    ///
-    /// Mirrors `SparkSession.profile`. Profile data is accumulated across query
-    /// executions and can be shown, dumped, or cleared via the returned collector.
+    /// The UDF profiles of the session, as PySpark Connect's `spark.profile`: a `Profile` of its
+    /// `ConnectProfilerCollector`, of `show`, `dump`, `render` and `clear`.
     #[getter]
-    fn profile(&self) -> PyProfilerCollector {
-        PyProfilerCollector::new(self.session.profiler())
+    fn profile(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let collector = crate::profiler::profiler_collector(py, &self.session)?;
+        Ok(py
+            .import("pyspark.sql.profiler")?
+            .getattr("Profile")?
+            .call1((collector,))?
+            .unbind())
+    }
+
+    /// The `ConnectProfilerCollector` of the session, as PySpark Connect's.
+    #[getter(_profiler_collector)]
+    fn profiler_collector(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        crate::profiler::profiler_collector(py, &self.session)
     }
 
     /// Get the data source registration accessor.
