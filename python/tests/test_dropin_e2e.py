@@ -2185,6 +2185,21 @@ def test_maps_keep_their_entries_in_order_with_keys_of_their_type(session):
     assert list(df.first()[0].items()) == [(2, "b"), (1, "a")]
 
 
+def test_types_of_schemas_have_the_attributes_of_pyspark(session):
+    # As PySpark's: the types of a schema of the server have the attributes of their
+    # parameters.
+    schema = session.sql(
+        "select 'a' collate UTF8_LCASE as s, interval '1' hour as i, time'12:30:00' as t, "
+        "1.5bd as d").schema
+    assert schema["s"].dataType.collation == "UTF8_LCASE"
+    assert (schema["i"].dataType.startField, schema["i"].dataType.endField) == (1, 1)
+    assert schema["t"].dataType.precision == 6
+    assert schema["d"].dataType.hasPrecisionInfo is True
+    assert schema["i"].dataType.typeName() == type(schema["i"].dataType).typeName()
+
+
+
+
 def test_decimal_literals_are_of_the_types_of_pyspark(session):
     # The types of official PySpark 4.3.0: at least the precision 10 of DecimalType().
     from decimal import Decimal
