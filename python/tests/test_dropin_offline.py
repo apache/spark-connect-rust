@@ -206,6 +206,216 @@ def test_spatial_and_collated_json_forms_parse():
         assert want.json() == json.dumps(j)
 
 
+def test_private_type_helpers_are_those_of_pyspark():
+    # As PySpark's pyspark.sql.types: the inference, merging, conversion and verification of the
+    # types of Python objects, and their tables. They take the client's Row as PySpark's take
+    # theirs, a tuple.
+    from array import array
+
+    from pyspark.errors import PySparkTypeError, PySparkValueError
+    from pyspark.sql.types import (
+        JVM_INT_MAX,
+        _acceptable_types,
+        _array_type_mappings,
+        _create_converter,
+        _has_nulltype,
+        _infer_schema,
+        _infer_type,
+        _make_type_verifier,
+        _merge_type,
+    )
+
+    assert JVM_INT_MAX == 2**31 - 1
+    assert _array_type_mappings["d"] is T.DoubleType and _array_type_mappings["i"] is T.IntegerType
+    assert T.StructType in _acceptable_types and dict in _acceptable_types[T.StructType]
+    assert _infer_type(array("d", [1.0])) == T.ArrayType(T.DoubleType(), False)
+    assert _infer_type({"k": [1]}) == T.MapType(T.StringType(), T.ArrayType(T.LongType()))
+    schema = T.StructType([T.StructField("a", T.LongType()), T.StructField("b", T.StringType())])
+    assert _infer_schema(Row(a=1, b="x")) == schema
+    assert _infer_schema(Row(1, "x"), names=["a", "b"]) == schema
+    assert _has_nulltype(_infer_schema({"a": None}))
+    merged = _merge_type(schema, T.StructType([T.StructField("c", T.DoubleType())]))
+    assert merged.names == ["a", "b", "c"]
+    with pytest.raises(PySparkTypeError) as error:
+        _merge_type(T.LongType(), T.DoubleType())
+    assert error.value.getCondition() == "CANNOT_MERGE_TYPE"
+
+    verify = _make_type_verifier(T.StructType([T.StructField("a", T.IntegerType(), False)]))
+    for value in (Row(a=1), (1,), {"a": 1}):
+        verify(value)
+    with pytest.raises(PySparkValueError) as error:
+        verify(Row(a=None))
+    assert error.value.getCondition() == "FIELD_NOT_NULLABLE_WITH_NAME"
+    with pytest.raises(PySparkValueError) as error:
+        verify(Row(a=1, b=2))
+    assert error.value.getCondition() == "FIELD_STRUCT_LENGTH_MISMATCH"
+    struct = T.StructType([T.StructField("m", T.MapType(T.StringType(), T.IntegerType()))])
+    assert _create_converter(struct)(Row(m={"k": 1})) == ({"k": 1},)
+
+
+
+
+def _type_verifier_cases():
+    # The cases of Apache Spark's DataTypeVerificationTests.test_verify_type_not_nullable: the
+    # values that a type takes, and those it rejects, of the error of each.
+    import array
+    import datetime
+    import decimal
+
+    from pyspark.testing.objects import ExamplePoint, ExamplePointUDT, PythonOnlyUDT
+
+    schema = T.StructType(
+        [T.StructField("s", T.StringType(), False), T.StructField("i", T.IntegerType(), True)]
+    )
+
+    class MyObj:
+        def __init__(self, **kwargs):
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+
+    success = [
+        ("", T.StringType()), (1, T.StringType()), ([], T.StringType()), ({}, T.StringType()),
+        ("", T.StringType("UTF8_LCASE")), (1.0, T.CharType(10)), ({}, T.VarcharType(10)),
+        (ExamplePoint(1.0, 2.0), ExamplePointUDT()), (True, T.BooleanType()),
+        (-(2**7), T.ByteType()), (2**7 - 1, T.ByteType()), (-(2**15), T.ShortType()),
+        (2**15 - 1, T.ShortType()), (-(2**31), T.IntegerType()), (2**31 - 1, T.IntegerType()),
+        (-(2**63), T.LongType()), (2**63 - 1, T.LongType()), (1.0, T.FloatType()),
+        (1.0, T.DoubleType()), (decimal.Decimal("1.0"), T.DecimalType()),
+        (bytearray([1, 2]), T.BinaryType()), (datetime.date(2000, 1, 2), T.DateType()),
+        (datetime.time(1, 0, 0), T.TimeType()), (datetime.datetime(2000, 1, 2), T.DateType()),
+        (datetime.datetime(2000, 1, 2, 3, 4), T.TimestampType()),
+        ([], T.ArrayType(T.IntegerType())), (["1", None], T.ArrayType(T.StringType())),
+        ((1, 2), T.ArrayType(T.IntegerType())), (array.array("h", [1]), T.ArrayType(T.IntegerType())),
+        ({"a": 1}, T.MapType(T.StringType(), T.IntegerType())),
+        ({"a": None}, T.MapType(T.StringType(), T.IntegerType(), True)),
+        ({"s": "a", "i": None}, schema), ({"s": "a", "f": 1.0}, schema), (Row(s="a", i=1), schema),
+        (Row(s="a", i=None), schema), (["a", 1], schema), (("a", None), schema),
+        (MyObj(s="a", i=1), schema), (MyObj(s="a"), schema),
+    ]
+    failure = [
+        (None, T.StringType(), ValueError), (None, T.CharType(10), ValueError),
+        (None, T.VarcharType(10), ValueError), (ExamplePoint(1.0, 2.0), PythonOnlyUDT(), ValueError),
+        (1, T.BooleanType(), TypeError), ("True", T.BooleanType(), TypeError),
+        (-(2**7) - 1, T.ByteType(), ValueError), (2**7, T.ByteType(), ValueError),
+        ("1", T.ByteType(), TypeError), (1.0, T.ByteType(), TypeError),
+        (2**15, T.ShortType(), ValueError), (2**31, T.IntegerType(), ValueError),
+        (1, T.FloatType(), TypeError), (1, T.DoubleType(), TypeError),
+        (1.0, T.DecimalType(), TypeError), ("1.0", T.DecimalType(), TypeError),
+        (1, T.BinaryType(), TypeError), ("2000-01-02", T.DateType(), TypeError),
+        ("23:59:59", T.TimeType(), TypeError), (946811040, T.TimestampType(), TypeError),
+        (["1", None], T.ArrayType(T.StringType(), False), ValueError),
+        ([1, "2"], T.ArrayType(T.IntegerType()), TypeError),
+        ({"a": 1}, T.MapType(T.IntegerType(), T.IntegerType()), TypeError),
+        ({"a": "1"}, T.MapType(T.StringType(), T.IntegerType()), TypeError),
+        ({"a": None}, T.MapType(T.StringType(), T.IntegerType(), False), ValueError),
+        ({"s": "a", "i": "1"}, schema, TypeError), (Row(s="a"), schema, ValueError),
+        (Row(s="a", i="1"), schema, TypeError), (["a"], schema, ValueError),
+        (["a", "1"], schema, TypeError), (MyObj(s="a", i="1"), schema, TypeError),
+        (MyObj(s=None, i="1"), schema, ValueError),
+    ]
+    return success, failure
+
+
+def test_type_verifiers_take_and_reject_the_values_of_pyspark():
+    # As Apache Spark's DataTypeVerificationTests: _make_type_verifier takes the values of each
+    # type, of the client's Row too, and raises the errors of PySpark for the others, with the
+    # names of the fields.
+    from pyspark.errors import PySparkTypeError, PySparkValueError
+    from pyspark.sql.types import _make_type_verifier
+
+    success, failure = _type_verifier_cases()
+    for obj, data_type in success:
+        _make_type_verifier(data_type, nullable=False)(obj)
+    for obj, data_type, error in failure:
+        with pytest.raises(error):
+            _make_type_verifier(data_type, nullable=False)(obj)
+    for data_type in (T.IntegerType(), T.StringType(), T.StructType([])):
+        _make_type_verifier(data_type, nullable=True)(None)
+    with pytest.raises(PySparkValueError) as e:
+        _make_type_verifier(T.StringType(), nullable=False, name="test_name")(None)
+    assert e.value.getCondition() == "FIELD_NOT_NULLABLE_WITH_NAME"
+    schema = T.StructType([T.StructField("a", T.StructType([T.StructField("b", T.IntegerType())]))])
+    with pytest.raises(PySparkTypeError) as e:
+        _make_type_verifier(schema)([["data"]])
+    assert e.value.getCondition() == "FIELD_DATA_TYPE_UNACCEPTABLE_WITH_NAME"
+    assert e.value.getMessageParameters()["field_name"] == "field b in field a"
+
+
+def test_types_of_python_objects_are_inferred_merged_and_converted_as_pyspark():
+    # As PySpark's _infer_type, _infer_schema, _merge_type and _create_converter, of the
+    # values of each type, also nested, of the client's Row too.
+    import datetime
+    import decimal
+
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql.types import (
+        _create_converter,
+        _infer_schema,
+        _infer_type,
+        _merge_type,
+        _need_converter,
+    )
+
+    values = [
+        (None, T.NullType()), (True, T.BooleanType()), (1, T.LongType()), (1.5, T.DoubleType()),
+        ("s", T.StringType()), (b"b", T.BinaryType()),
+        (decimal.Decimal("1.50"), T.DecimalType(38, 18)), (datetime.date(2000, 1, 1), T.DateType()),
+        (datetime.datetime(2000, 1, 1), T.TimestampType()), (datetime.time(1, 2), T.TimeType()),
+        (datetime.timedelta(1), T.DayTimeIntervalType()),
+    ]
+    for value, data_type in values:
+        assert _infer_type(value) == data_type
+    assert _infer_type([1, None]) == T.ArrayType(T.LongType())
+    assert _infer_type([None, 1], infer_array_from_first_element=True) == T.ArrayType(
+        T.NullType()
+    )
+    assert _infer_type({"a": {"b": 1}}, infer_dict_as_struct=True) == T.StructType(
+        [T.StructField("a", T.StructType([T.StructField("b", T.LongType())]))]
+    )
+    assert _infer_type(datetime.datetime(2000, 1, 1), prefer_timestamp_ntz=True) == (
+        T.TimestampNTZType()
+    )
+    assert _infer_type(Row(a=[Row(b=1)])) == T.StructType(
+        [T.StructField("a", T.ArrayType(T.StructType([T.StructField("b", T.LongType())])))]
+    )
+
+    class Obj:
+        def __init__(self):
+            self.b, self.a = "x", 1
+
+    assert _infer_schema(Obj()).names == ["a", "b"]
+    assert _infer_schema((1, 2), names=["x"]).names == ["x", "_2"]
+    with pytest.raises(PySparkTypeError) as e:
+        _infer_schema(1)
+    assert e.value.getCondition() == "CANNOT_INFER_SCHEMA_FOR_TYPE"
+
+    a = T.StructType([T.StructField("f", T.ArrayType(T.NullType()))])
+    b = T.StructType([T.StructField("f", T.ArrayType(T.LongType()))])
+    assert _merge_type(a, b) == b and _merge_type(T.NullType(), T.LongType()) == T.LongType()
+    assert _merge_type(
+        T.MapType(T.StringType(), T.NullType()), T.MapType(T.StringType(), T.LongType())
+    ) == T.MapType(T.StringType(), T.LongType())
+    strings = T.StructType([T.StructField("f", T.ArrayType(T.StringType()))])
+    assert _merge_type(b, strings) == strings
+    with pytest.raises(PySparkTypeError) as e:
+        _merge_type(b, T.StructType([T.StructField("f", T.ArrayType(T.DateType()))]))
+    assert e.value.getCondition() == "CANNOT_MERGE_TYPE"
+
+    struct = T.StructType(
+        [T.StructField("m", T.MapType(T.StringType(), T.StringType())),
+         T.StructField("s", T.StructType([T.StructField("x", T.LongType())]))]
+    )
+    assert _need_converter(struct) and not _need_converter(T.LongType())
+    convert = _create_converter(struct)
+    assert convert(Row(m={"k": "v"}, s=Row(x=1))) == ({"k": "v"}, (1,))
+    assert convert({"m": None, "s": {"x": 2}}) == (None, (2,))
+    with pytest.raises(PySparkTypeError) as e:
+        convert(1)
+    assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE"
+
+
+
+
 def test_unparsed_datatype_pickle_roundtrip():
     # The core's JSON form of an unparsed type is the UnparsedDataType of
     # pyspark.sql.connect.types, which pickles of its DDL string, as its JSON raises.
