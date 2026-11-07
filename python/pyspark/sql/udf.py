@@ -31,6 +31,8 @@ from pyspark.sql.types import DataType, StringType, StructType
 from pyspark.serializers import CloudPickleSerializer
 from pyspark.util import PythonEvalType
 
+__all__ = ["UDFRegistration"]
+
 
 def _as_concrete_datatype(returnType: Any) -> DataType:
     """Return a concrete, picklable pyspark ``DataType``.
