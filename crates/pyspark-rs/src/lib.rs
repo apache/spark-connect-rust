@@ -74,7 +74,6 @@ use readwriter::PyDataFrameReader;
 use resource::{
     PyExecutorResourceRequests, PyResourceProfile, PyResourceProfileBuilder, PyTaskResourceRequests,
 };
-use row::PyRow;
 use session::{PyHook, PySparkSession, PySparkSessionBuilder};
 use stat::PyStatFunctions;
 use streaming::{
@@ -109,7 +108,7 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyWhenNotMatched>()?;
     m.add_class::<PyWhenNotMatchedBySource>()?;
     m.add_class::<PyColumn>()?;
-    m.add_class::<PyRow>()?;
+    row::register(m)?;
     m.add_class::<PyGroupedData>()?;
     m.add_class::<PyCoGroupedData>()?;
     m.add_class::<PyLocalRowIterator>()?;

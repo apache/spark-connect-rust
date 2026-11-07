@@ -21,10 +21,11 @@ try:
         # Spark's nanosecond timestamp types (no PySpark 4.3.0 class; not in __all__).
         TimestampNTZNanosType, TimestampLTZNanosType,
     )
-    # Row lives in the Rust core; upstream code imports it from pyspark.sql.types too.
+    # The extension exports the same tuple-backed Row as the public Python imports.
     from pyspark._pyspark import Row
 except ImportError:  # pragma: no cover - defensive fallback when the extension is absent
-    # Fallback: define minimal stubs for testing purposes
+    # Minimal DataType stubs for import-only tests. Row and runtime conversion
+    # helpers require the compiled extension.
     class DataType:
         """Base class for all data types."""
         def __init__(self):
@@ -614,12 +615,12 @@ def _udt_converter(dataType):
         fields = _udt_field_converters(dataType)
         if fields is None:
             return None
-        row = Row(*dataType.names)
+        field_names = dataType.names
 
         def convert_struct(value):
             if value is None:
                 return None
-            return row(*[v if f is None else f(v) for f, v in zip(fields, value)])
+            return _create_row(field_names, [v if f is None else f(v) for f, v in zip(fields, value)])
 
         return convert_struct
     return None
@@ -822,8 +823,7 @@ def _from_internal(dataType, obj):
 # The private helpers of PySpark's pyspark.sql.types, as of Apache Spark v4.3.0: the inference,
 # merging, conversion and verification of the types of Python objects, and their tables, which
 # PySpark Connect's modules, Apache Spark's tests and libraries import. They are PySpark's, as
-# the client's types share the classes and the attributes of PySpark's; but the client's Row is
-# not a tuple, so where PySpark takes a tuple of a Row, they take the client's Row too.
+# the client's types share the classes and attributes of PySpark's, including its tuple Row.
 import ctypes  # noqa: E402
 import datetime  # noqa: E402
 import decimal  # noqa: E402

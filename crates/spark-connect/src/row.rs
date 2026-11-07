@@ -425,6 +425,17 @@ impl Row {
         self.fields.as_slice()
     }
 
+    /// The immutable field-name allocation shared by rows of an Arrow record batch.
+    /// Language bindings use its identity to preserve per-batch field-name sharing.
+    /// Locally constructed rows may own their names instead.
+    #[doc(hidden)]
+    pub fn shared_fields(&self) -> Option<&Arc<[String]>> {
+        match &self.fields {
+            RowFields::Shared(fields) => Some(fields),
+            RowFields::Owned(_) => None,
+        }
+    }
+
     /// Get values.
     pub fn values(&self) -> &[Value] {
         &self.values

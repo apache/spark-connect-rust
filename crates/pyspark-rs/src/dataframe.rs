@@ -9,7 +9,7 @@ use spark_connect::udf::{eval_type, CommonInlineUserDefinedFunctionExpression, P
 use crate::column::PyColumn;
 use crate::errors::ResultExt;
 use crate::group::PyGroupedData;
-use crate::row::{FieldConverters, PyRow};
+use crate::row::{FieldConverters, NestedFieldNames};
 use crate::streaming::PyDataStreamWriter;
 use crate::types::PyDataType;
 
@@ -2048,12 +2048,12 @@ impl PyDataFrame {
     }
 
     /// Collect all rows into memory.
-    fn collect(&self, py: Python<'_>) -> PyResult<Vec<PyRow>> {
+    fn collect(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
         // Release the GIL across the blocking RPC so other Python threads run.
         let (rows, schema) = py
             .detach(|| self.dataframe.collect_with_schema())
             .to_pyerr()?;
-        rows_to_py(py, &self.dataframe, rows, schema.as_ref())
+        rows_to_py(py, &self.dataframe, &rows, schema.as_ref())
     }
 
     /// Return an iterator over rows without materializing the entire result in memory.
@@ -2257,12 +2257,11 @@ impl PyDataFrame {
     }
 
     /// Get the first row.
-    fn first(&self, py: Python<'_>) -> PyResult<Option<PyRow>> {
+    fn first(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         let (row, schema) = py
             .detach(|| self.dataframe.first_with_schema())
             .to_pyerr()?;
-        let rows = row.into_iter().collect();
-        Ok(rows_to_py(py, &self.dataframe, rows, schema.as_ref())?.pop())
+        Ok(rows_to_py(py, &self.dataframe, row.as_slice(), schema.as_ref())?.pop())
     }
 
     /// Alias for first.
@@ -2277,17 +2276,17 @@ impl PyDataFrame {
                 let (rows, schema) = py
                     .detach(|| self.dataframe.limit(k).collect_with_schema())
                     .to_pyerr()?;
-                rows_to_py(py, &self.dataframe, rows, schema.as_ref())?.into_py_any(py)
+                rows_to_py(py, &self.dataframe, &rows, schema.as_ref())?.into_py_any(py)
             }
         }
     }
 
     /// Get the first n rows.
-    fn take(&self, py: Python<'_>, num: usize) -> PyResult<Vec<PyRow>> {
+    fn take(&self, py: Python<'_>, num: usize) -> PyResult<Vec<Py<PyAny>>> {
         let (rows, schema) = py
             .detach(|| self.dataframe.take_with_schema(num))
             .to_pyerr()?;
-        rows_to_py(py, &self.dataframe, rows, schema.as_ref())
+        rows_to_py(py, &self.dataframe, &rows, schema.as_ref())
     }
 
     /// Column names (a property, mirroring `DataFrame.columns`).
@@ -2297,11 +2296,11 @@ impl PyDataFrame {
     }
 
     /// Get the last `num` rows as a list of Rows (eager, like pyspark `tail`).
-    fn tail(&self, py: Python<'_>, num: i32) -> PyResult<Vec<PyRow>> {
+    fn tail(&self, py: Python<'_>, num: i32) -> PyResult<Vec<Py<PyAny>>> {
         let (rows, schema) = py
             .detach(|| self.dataframe.tail(num).collect_with_schema())
             .to_pyerr()?;
-        rows_to_py(py, &self.dataframe, rows, schema.as_ref())
+        rows_to_py(py, &self.dataframe, &rows, schema.as_ref())
     }
 
     /// Sample a fraction of rows, as PySpark's `DataFrame.sample(withReplacement=None,
@@ -4103,23 +4102,36 @@ fn read_binary_as_bytes(py: Python<'_>, dataframe: &DataFrame) -> PyResult<bool>
     Ok(value.is_some_and(|value| value.eq_ignore_ascii_case("true")))
 }
 
-/// The collected `rows` of a result of `schema` of `dataframe`, whose values of user-defined
-/// types are deserialized when first read. Reads the binary result setting after execution
-/// and applies it to binary values, including when only an Arrow schema is available.
+/// The collected `rows` of a result of `schema`, with configured binary values and
+/// user-defined values materialized before constructing the tuples returned to Python.
+/// Reads the binary setting after execution, including with only an Arrow schema.
 fn rows_to_py(
     py: Python<'_>,
     dataframe: &DataFrame,
-    rows: Vec<spark_connect::row::Row>,
+    rows: &[spark_connect::row::Row],
     schema: Option<&spark_connect::types::DataType>,
-) -> PyResult<Vec<PyRow>> {
+) -> PyResult<Vec<Py<PyAny>>> {
     check_arrow_schema(py, schema)?;
     let binary_as_bytes = read_binary_as_bytes(py, dataframe)?;
     check_collectable(py, schema)?;
     let converters = udt_field_converters(py, schema)?;
-    Ok(rows
-        .into_iter()
-        .map(|row| PyRow::with_converters(row, converters.clone(), binary_as_bytes))
-        .collect())
+    let Some(first) = rows.first() else {
+        return Ok(Vec::new());
+    };
+    let fields = PyList::new(py, first.fields())?;
+    let mut nested_fields = NestedFieldNames::default();
+    rows.iter()
+        .map(|row| {
+            crate::row::row_values_to_py(
+                py,
+                &fields,
+                row.values(),
+                converters.as_ref(),
+                binary_as_bytes,
+                &mut nested_fields,
+            )
+        })
+        .collect()
 }
 
 /// Python wrapper for LocalRowIterator yielding Row objects lazily.
@@ -4138,6 +4150,10 @@ pub struct PyLocalRowIterator {
     converters: Option<Option<FieldConverters>>,
     /// Snapshotted before the first fetch, as the body of PySpark's generator does.
     binary_as_bytes: Option<bool>,
+    /// Top-level names shared only by rows of the current Arrow record batch.
+    fields: Option<(std::sync::Arc<[String]>, Py<PyList>)>,
+    /// Nested names belong to schema paths and stay shared across iterator batches.
+    nested_fields: NestedFieldNames,
 }
 
 impl PyLocalRowIterator {
@@ -4149,6 +4165,8 @@ impl PyLocalRowIterator {
             finished: false,
             converters: None,
             binary_as_bytes: None,
+            fields: None,
+            nested_fields: NestedFieldNames::default(),
         }
     }
 
@@ -4164,7 +4182,7 @@ impl PyLocalRowIterator {
     }
 
     /// Prepare and fetch one Python row; the public wrapper closes on exhaustion or error.
-    fn next_python_row(&mut self, py: Python<'_>) -> PyResult<Option<PyRow>> {
+    fn next_python_row(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         let binary_as_bytes = match self.binary_as_bytes {
             Some(value) => value,
             None => {
@@ -4184,11 +4202,34 @@ impl PyLocalRowIterator {
         match next {
             Some(Ok(row)) => {
                 let converters = self.converters.clone().flatten();
-                Ok(Some(PyRow::with_converters(
-                    row,
-                    converters,
+                let fields = match row.shared_fields() {
+                    Some(native_fields) => match self.fields.as_ref() {
+                        Some((cached, fields)) if std::sync::Arc::ptr_eq(cached, native_fields) => {
+                            fields.bind(py).clone()
+                        }
+                        _ => {
+                            let fields = PyList::new(py, row.fields())?;
+                            self.fields = Some((
+                                std::sync::Arc::clone(native_fields),
+                                fields.clone().unbind(),
+                            ));
+                            fields
+                        }
+                    },
+                    None => {
+                        self.fields = None;
+                        PyList::new(py, row.fields())?
+                    }
+                };
+                crate::row::row_values_to_py(
+                    py,
+                    &fields,
+                    row.values(),
+                    converters.as_ref(),
                     binary_as_bytes,
-                )))
+                    &mut self.nested_fields,
+                )
+                .map(Some)
             }
             Some(Err(error)) => Err(crate::errors::spark_error_to_py_exception(error)),
             None => Ok(None),
@@ -4208,6 +4249,8 @@ impl PyLocalRowIterator {
     fn close(&mut self, py: Python<'_>) {
         let iterator = self.iterator.take();
         self.finished = true;
+        self.fields = None;
+        self.nested_fields.clear();
         py.detach(move || drop(iterator));
     }
 
@@ -4215,7 +4258,7 @@ impl PyLocalRowIterator {
     ///
     /// The first call snapshots the binary result setting before starting execution.
     /// Both the Config RPC and blocking row fetch release the GIL.
-    fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<PyRow>> {
+    fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         if self.finished {
             return Ok(None);
         }

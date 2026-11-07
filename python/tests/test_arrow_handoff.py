@@ -249,6 +249,98 @@ def test_collect_reads_binary_default_with_arrow_only_schema(protocol):
     assert calls == {"execute": 1, "config": 1}
 
 
+@pytest.mark.parametrize(
+    "action",
+    ["collect", "take", "tail", "first", "head", "head_many", "iterator", "prefetch"],
+)
+def test_native_result_actions_return_tuple_rows_recursively(protocol, action):
+    from pyspark import Row
+
+    child_type = pa.struct([pa.field("value", pa.int64())])
+    batch = pa.RecordBatch.from_arrays(
+        [
+            pa.array([1, 2], type=pa.int64()),
+            pa.array([{"value": 3}, None], type=child_type),
+            pa.array([[{"value": 4}, None], []], type=pa.list_(child_type)),
+            pa.array([[("child", {"value": 5})], []], type=pa.map_(pa.string(), child_type)),
+        ],
+        names=["id", "child", "children", "by_name"],
+    )
+    with _dataframe(protocol=protocol, batches=[batch]) as (frame, _):
+        if action in ("collect", "first", "head"):
+            result = getattr(frame, action)()
+            rows = result if action == "collect" else [result]
+        elif action in ("take", "tail"):
+            rows = getattr(frame, action)(2)
+        elif action == "head_many":
+            rows = frame.head(2)
+        else:
+            rows = list(frame.toLocalIterator(prefetchPartitions=action == "prefetch"))
+
+    assert rows and all(type(row) is Row and isinstance(row, tuple) for row in rows)
+    row = rows[0]
+    assert type(row.child) is type(row.children[0]) is type(row.by_name["child"]) is Row
+    assert tuple.__getitem__(row.child, 0) == 3
+    assert row.children[1] is None
+    assert row.asDict(recursive=True) == {
+        "id": 1,
+        "child": {"value": 3},
+        "children": [{"value": 4}, None],
+        "by_name": {"child": {"value": 5}},
+    }
+    if len(rows) == 2:
+        assert rows[1] == (2, None, [], {})
+
+
+def test_native_collect_rows_share_mutable_field_names(protocol):
+    batch = pa.RecordBatch.from_arrays([pa.array([1, 2])], names=["value"])
+    with _dataframe(protocol=protocol, batches=[batch.slice(0, 1), batch.slice(1, 1)]) as (frame, _):
+        rows = frame.collect()
+
+    assert rows[0].__fields__ is rows[1].__fields__
+    rows[0].__fields__[0] = "renamed"
+    assert rows[1].renamed == 2
+    assert rows[1].asDict() == {"renamed": 2}
+
+
+@pytest.mark.parametrize("prefetch", [False, True])
+@pytest.mark.parametrize("one_response", [False, True])
+def test_native_iterator_rows_share_field_names_only_within_each_arrow_batch(
+    protocol, prefetch, one_response
+):
+    batch = pa.RecordBatch.from_arrays([pa.array([1, 2, 3, 4])], names=["value"])
+    batches = [batch.slice(0, 2), batch.slice(2, 2)]
+    payloads = None
+    if one_response:
+        sink = pa.BufferOutputStream()
+        with pa.ipc.new_stream(sink, batch.schema) as writer:
+            for part in batches:
+                writer.write_batch(part)
+        payloads = [(batch.num_rows, sink.getvalue().to_pybytes())]
+    with _dataframe(protocol=protocol, batches=batches, payloads=payloads) as (frame, _):
+        rows = list(frame.toLocalIterator(prefetchPartitions=prefetch))
+
+    assert rows[0].__fields__ is rows[1].__fields__
+    assert rows[2].__fields__ is rows[3].__fields__
+    assert rows[0].__fields__ is not rows[2].__fields__
+    rows[0].__fields__[0] = "renamed"
+    assert rows[1].renamed == 2
+    assert rows[2].value == 3
+    assert rows[3].asDict() == {"value": 4}
+
+
+def test_native_iterator_ends_after_row_materialization_fails(protocol):
+    # The first timestamp is year 10000, outside Python datetime's range.
+    batch = pa.RecordBatch.from_arrays(
+        [pa.array([253402300800000000, 0], type=pa.timestamp("us"))], names=["value"]
+    )
+    with _dataframe(protocol=protocol, batches=[batch]) as (frame, _):
+        rows = frame.toLocalIterator()
+        with pytest.raises(OverflowError):
+            next(rows)
+        assert list(rows) == []
+
+
 def test_handoff_preserves_values_metadata_and_chunks(protocol):
     batch = _mixed_batch()
     batches = [batch.slice(1, 2), batch.slice(0, 1), batch.slice(3, 1)]

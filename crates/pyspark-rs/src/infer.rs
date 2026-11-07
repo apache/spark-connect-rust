@@ -23,7 +23,6 @@ use spark_connect::types::{DataType, GeographyType, GeometryType, StructField};
 
 use crate::column::raise_pyspark;
 use crate::errors::ResultExt;
-use crate::row::PyRow;
 use crate::values::{PyGeography, PyGeometry, PyVariantVal};
 
 pub(crate) static DECIMAL: PyOnceLock<Py<PyType>> = PyOnceLock::new();
@@ -532,18 +531,6 @@ fn row_items<'py>(
     let py = row.py();
     if row.is_instance_of::<PyDict>() {
         return sorted_items(row);
-    }
-    if let Ok(pyrow) = row.cast::<PyRow>() {
-        let pyrow = pyrow.borrow();
-        let (fields, values) = pyrow.parts(py)?;
-        return Ok(match fields {
-            Some(fields) => fields
-                .iter()
-                .map(|f| PyString::new(py, f).into_any())
-                .zip(values.iter())
-                .collect(),
-            None => positional(py, values.iter().collect(), names),
-        });
     }
     if row.is_instance_of::<PyTuple>() || row.is_instance_of::<PyList>() {
         let fields = if row.hasattr(intern!(py, "__fields__"))? {
@@ -1533,10 +1520,7 @@ fn values_by_position<'py>(
 /// and another object by the names of its `__dict__`.
 fn convert_struct(obj: &Bound<'_, PyAny>, fields: &[StructField]) -> PyResult<Value> {
     let py = obj.py();
-    let values = if let Ok(row) = obj.cast::<PyRow>() {
-        let (_, values) = row.borrow().parts(py)?;
-        values_by_position(py, values.iter().collect(), fields)?
-    } else if let Ok(tuple) = obj.cast::<PyTuple>() {
+    let values = if let Ok(tuple) = obj.cast::<PyTuple>() {
         values_by_position(py, tuple.iter().collect(), fields)?
     } else if obj.is_instance_of::<PyDict>() {
         values_by_name(obj, fields)?
@@ -1591,10 +1575,6 @@ pub(crate) fn row_values<'py>(
     let py = item.py();
     if item.is_none() {
         return Ok(vec![py.None().into_bound(py); fields.len()]);
-    }
-    if let Ok(row) = item.cast::<PyRow>() {
-        let (_, values) = row.borrow().parts(py)?;
-        return values_by_position(py, values.iter().collect(), fields);
     }
     if let Ok(tuple) = item.cast::<PyTuple>() {
         return values_by_position(py, tuple.iter().collect(), fields);

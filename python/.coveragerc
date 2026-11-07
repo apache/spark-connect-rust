@@ -3,6 +3,8 @@
 # the Python glue only, excluding vendored third-party code (cloudpickle), the
 # test-support utilities, pandas-on-spark, generated wrappers, and the compiled
 # extension itself.
+# The embedded crates/pyspark-rs/src/row.py executes as pyspark/_row.py, outside
+# this source scope. Dedicated Row tests exercise it; Ruff checks its source.
 [run]
 source = pyspark
 branch = True
