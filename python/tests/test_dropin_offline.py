@@ -5656,6 +5656,42 @@ def test_container_input_nested_array_struct_binary_ipc(container_input_capture_
                                   "record": {"x": 7, "y": "row"}, "blob": b"abc"}]
 
 
+# --------------------------------------------------------------------------- pandas columns of Decimals and other values
+
+
+@pytest.mark.parametrize("values, expected", [
+    (["1.5", 2], (2, 1, ["1.5", "2.0"])),
+    ([2, "1.5"], (2, 1, ["2.0", "1.5"])),
+    (["1.5", 2.5], "PySparkTypeError"),
+    (["1.5", ("x",)], "PySparkTypeError"),
+    (["1.5", True], "PySparkValueError"),
+    (["-0.5", -3, None], "PySparkValueError"),
+])
+def test_pandas_columns_of_decimals_and_other_values_follow_arrow(decimal_ipc_session, values, expected):
+    # PySpark's conversion leaves such a column to Arrow, which types it, takes ints as
+    # Decimals and raises for the others (strings in `values` are Decimals here, and a 1-tuple
+    # holds a plain string).
+    from decimal import Decimal
+    import pyarrow as pa
+    from pyspark import errors
+
+    pd = pytest.importorskip("pandas")
+    spark, payload = decimal_ipc_session
+    cells = [Decimal(v) if isinstance(v, str) else v[0] if isinstance(v, tuple) else v
+             for v in values]
+    data = pd.DataFrame({"d": cells}, dtype=object)
+    if isinstance(expected, str):
+        with pytest.raises(getattr(errors, expected), match=r"pandas.Series \(object\) with name 'd'"):
+            spark.createDataFrame(data)
+        assert not payload.exists()
+        return
+    precision, scale, texts = expected
+    spark.createDataFrame(data).collect()
+    table = pa.ipc.open_stream(payload.read_bytes()).read_all()
+    assert table.column(0).type == pa.decimal128(precision, scale)
+    assert table.column(0).to_pylist() == [Decimal(text) for text in texts]
+
+
 # --------------------------------------------------------------------------- exact date input
 
 from datetime import (

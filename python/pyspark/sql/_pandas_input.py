@@ -769,3 +769,27 @@ def prepare_date_table(frame, schema):
         [pa.array(column, type=pa.date32(), from_pandas=False) for column in columns],
         names=schema.names,
     )
+
+
+def arrow_decimal_column(values, dtype, name):
+    """The precision, scale and values of a pandas object column of Decimals and other values,
+    as Arrow types and converts it: PySpark's conversion of pandas leaves such a column to
+    Arrow, which takes ints as Decimals and raises for the others."""
+    import pyarrow as pa
+    from pyspark.errors import PySparkTypeError, PySparkValueError
+
+    message = ("Exception thrown when converting pandas.Series (%s) with name '%s' to Arrow "
+               "Array (None)." % (dtype, name))
+    try:
+        array = pa.array(values, from_pandas=True)
+    except pa.lib.ArrowException as e:
+        if isinstance(e, TypeError):
+            raise PySparkTypeError(message) from e
+        raise PySparkValueError(
+            message + " It can be caused by overflows or other unsafe conversions warned by "
+            "Arrow. Arrow safe type check can be disabled by using SQL config "
+            "`spark.sql.execution.pandas.convertToArrowArraySafely`.") from e
+    if not pa.types.is_decimal(array.type):
+        raise PySparkTypeError(message)
+    return array.type.precision, array.type.scale, array.to_pylist()
+
