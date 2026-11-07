@@ -6162,6 +6162,115 @@ def test_decimal_rescaling_follows_pyspark(
     assert not payload.exists()
 
 
+@pytest.mark.parametrize("kind", ["tuples", "pandas"])
+@pytest.mark.parametrize("schema_mode", ["explicit", "names", "inferred"])
+@pytest.mark.parametrize("texts", [
+    ["123.4500", "-2.3400", "0.0000", "-0.0000", None],
+    ["1.2300E+2", "-2.3400E+2", "0.00", "-0.00", None],
+    ["0.001234500", "-0.000002300", "0.000000", None],
+    ["123", "-4", "0", None],
+    ["1E+3", "1E-7", "-0E-7", "1.2300E-7", None],
+])
+def test_decimal_scale_input_ipc(decimal_ipc_session, kind, schema_mode, texts):
+    # The scale of a Decimal comes from its text, not from as_tuple(): the IPC holds the same
+    # cells and types as PySpark's, which types an inferred pandas column by its values as
+    # Arrow does, and a local one as decimal(38, 18). The Decimal context of the thread,
+    # here one that would round and trap, changes nothing.
+    from decimal import Decimal, Inexact, ROUND_UP, localcontext
+    import pyarrow as pa
+
+    spark, payload = decimal_ipc_session
+    values = [None if text is None else Decimal(text) for text in texts]
+    name = "_1" if schema_mode == "inferred" and kind == "tuples" else "v"
+    data = [(value,) for value in values]
+    if kind == "pandas":
+        pd = pytest.importorskip("pandas")
+        data = pd.DataFrame({name: values}, dtype=object)
+    if schema_mode == "explicit":
+        decimal_type = pa.decimal128(18, 9)
+        schema = T.StructType([T.StructField(name, T.DecimalType(18, 9))])
+    else:
+        decimal_type = pa.decimal128(38, 18) if kind == "tuples" else pa.array(values).type
+        schema = [name] if schema_mode == "names" else None
+    with localcontext() as context:
+        context.prec = 2
+        context.rounding = ROUND_UP
+        context.traps[Inexact] = True
+        spark.createDataFrame(data, schema).collect()
+    table = pa.ipc.open_stream(payload.read_bytes()).read_all()
+    expected = pa.table({name: pa.array(values, type=decimal_type)})
+    table.validate(full=True)
+    assert table.schema == expected.schema
+    assert table.equals(expected)
+
+
+def test_decimal_scale_of_subclasses(decimal_ipc_session):
+    # A subclass can override __str__ and as_tuple, so it is still asked for both, as Arrow
+    # does; their errors are raised.
+    from decimal import Decimal
+    import pyarrow as pa
+
+    pd = pytest.importorskip("pandas")
+    spark, payload = decimal_ipc_session
+    calls = []
+
+    class Traced(Decimal):
+        def __str__(self):
+            calls.append("str")
+            return super().__str__()
+
+        def as_tuple(self):
+            calls.append("tuple")
+            return super().as_tuple()
+
+    values = [Traced("1.20"), None, Traced("-30.5")]
+    spark.createDataFrame(pd.DataFrame({"v": values}, dtype=object), ["v"]).collect()
+    assert calls.count("str") == 2 and "tuple" in calls
+    table = pa.ipc.open_stream(payload.read_bytes()).read_all()
+    expected = pa.array([Decimal("1.20"), None, Decimal("-30.5")])
+    assert table.column(0).combine_chunks().equals(expected)
+
+    for hook in ["__str__", "as_tuple"]:
+        def fail(self):
+            raise LookupError("decimal hook")
+
+        failing = type("Failing", (Decimal,), {hook: fail})
+        with pytest.raises(LookupError, match="decimal hook"):
+            spark.createDataFrame(pd.DataFrame({"v": [failing("1.5")]}, dtype=object), ["v"])
+
+
+@pytest.mark.parametrize("schema", [["v"], T.StructType([T.StructField("v", T.DecimalType(10, 4))])])
+def test_decimal_scale_avoids_coefficient_tuple(decimal_ipc_session, schema):
+    # Exact Decimals are typed and converted from their text: no DecimalTuple is built.
+    import cProfile
+    from decimal import Decimal
+
+    pd = pytest.importorskip("pandas")
+    spark, _ = decimal_ipc_session
+    tuple_constructor = type(Decimal("1.20").as_tuple()).__new__.__code__
+    values = pd.DataFrame({"v": [Decimal("123.4500"), Decimal("-2.3000"), None]}, dtype=object)
+    profile = cProfile.Profile()
+    profile.enable()
+    try:
+        spark.createDataFrame(values, schema)
+    finally:
+        profile.disable()
+    assert not any(entry.code is tuple_constructor for entry in profile.getstats())
+
+
+@pytest.mark.parametrize("text", ["Infinity", "-Infinity"])
+def test_decimal_scale_of_non_finite_values(decimal_ipc_session, text):
+    # An infinity has no precision to type a column by.
+    from decimal import Decimal
+
+    pd = pytest.importorskip("pandas")
+    spark, payload = decimal_ipc_session
+    data = pd.DataFrame({"v": [Decimal(text), Decimal("1.5")]}, dtype=object)
+    with pytest.raises(ValueError, match="has no precision to type a column by"):
+        spark.createDataFrame(data, ["v"])
+    assert not payload.exists()
+
+
 # --------------------------------------------------------------------------- schema cache
 
 
