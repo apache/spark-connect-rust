@@ -796,19 +796,31 @@ def prepare_date_table(frame, schema):
         except ImportError:
             return None
     columns = [frame.iloc[:, i] for i in range(width)]
+    arrays = []
     for column, field in zip(columns, schema.fields):
-        if type(column) is not Series or type(column.array) is not NumpyExtensionArray:
+        if type(column) is not Series:
+            return None
+        backing = column.array
+        if type(backing) is not NumpyExtensionArray:
+            return None
+        array = backing._ndarray
+        if (type(array) is not np.ndarray or array.ndim != 1
+                or type(array.dtype) is not type(np.dtype("object"))
+                or array.dtype != np.dtype("object") or len(array) != len(frame)):
             return None
         # Arrow rejects nulls in non-nullable fields; let the row path retain
         # its existing behavior for that input instead.
         if not all(type(value) is date or (value is None and field.nullable)
-                   for value in column.to_numpy(copy=False)):
+                   for value in array):
             return None
+        arrays.append(array)
 
     import pyarrow as pa
 
     return pa.Table.from_arrays(
-        [pa.array(column, type=pa.date32(), from_pandas=False) for column in columns],
+        # Series accessors can be customized independently of the DataFrame row
+        # path. Emit the same concrete storage whose cells were checked above.
+        [pa.array(array, type=pa.date32(), from_pandas=False) for array in arrays],
         names=schema.names,
     )
 
