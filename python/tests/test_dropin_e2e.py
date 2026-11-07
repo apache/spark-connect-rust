@@ -2093,6 +2093,27 @@ def test_window_order_by_a_column_sorts_nulls_first_as_pyspark(session):
         assert [(r.o, r.rn) for r in rows] == expected
 
 
+def test_create_dataframe_of_a_numpy_array_as_pyspark(session):
+    # As PySpark Connect's: a column of each column of a 1- or 2-dimensional array, named by the
+    # names, else `value` for one column, else `_1`, `_2`, ..., of the types of the array, or
+    # cast to the schema by the server.
+    import numpy as np
+
+    df = session.createDataFrame(np.array([1, 2]))
+    assert df.schema.simpleString() == "struct<value:bigint>"
+    assert sorted(df.collect()) == [Row(value=1), Row(value=2)]
+    df = session.createDataFrame(np.array([[1.5, 2.5], [3.5, 4.5]]))
+    assert df.schema.simpleString() == "struct<_1:double,_2:double>"
+    assert session.createDataFrame(np.array([[1, 2]]), "a string, b double").collect() == [
+        Row(a="1", b=2.0)]
+    assert session.createDataFrame(np.array(["x", "y"]), ["s"]).columns == ["s"]
+    with pytest.raises(PySparkValueError) as e:
+        session.createDataFrame(np.zeros((2, 2, 2)))
+    assert e.value.getCondition() == "INVALID_NDARRAY_DIMENSION"
+    with pytest.raises(PySparkValueError) as e:
+        session.createDataFrame(np.array([[1, 2]]), ["x"])
+    assert e.value.getCondition() == "AXIS_LENGTH_MISMATCH"
+
 def test_create_dataframe_takes_the_ddl_of_spark_as_pyspark(session):
     # As PySpark Connect's, which parses a DDL schema on the server: nested structs, arrays and
     # maps of them, backtick-quoted names, and NOT NULL and COMMENT clauses.

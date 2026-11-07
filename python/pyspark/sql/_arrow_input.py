@@ -91,3 +91,13 @@ def prepare_table(table, schema, timestamp_type, timezone, large_types):
     if not explicit and names is None:
         names = table.column_names
     return normalized, schema if explicit else None, names
+
+
+def ndarray_table(data, names):
+    """The Arrow table of a numpy array of 1 or 2 dimensions, of a column of each column of the
+    array, named `names`, as PySpark Connect's createDataFrame builds it."""
+    import pyarrow as pa
+
+    if data.ndim == 1:
+        return pa.Table.from_arrays([pa.array(data)], names)
+    return pa.Table.from_arrays([pa.array(data[::, i]) for i in range(0, data.shape[1])], names)
