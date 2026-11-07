@@ -2056,6 +2056,35 @@ def test_column_alias_names_every_column_and_keeps_its_metadata(session):
     assert df.schema.fields[0].metadata == {"k": 1, "n": [1, 2], "s": "v"}
 
 
+def test_to_arrow_casts_to_the_arrow_schema_of_the_schema_as_pyspark(session):
+    # As PySpark Connect's: the Arrow types of the Spark types, of UTC timestamps and of strings
+    # even of large var types, and the errors of the types that PySpark does not convert to
+    # Arrow and of duplicate names of nested fields.
+    import pyarrow as pa
+    from pyspark.errors import PySparkTypeError, UnsupportedOperationException
+
+    confs = {"spark.sql.execution.arrow.useLargeVarTypes": "true",
+             "spark.sql.session.timeZone": "America/Los_Angeles"}
+    previous = {key: session.conf.get(key) for key in confs}
+    for key, value in confs.items():
+        session.conf.set(key, value)
+    try:
+        table = session.sql("SELECT 'x' AS s, TIMESTAMP'2020-01-01 00:00:00' AS t").toArrow()
+    finally:
+        for key, value in previous.items():
+            session.conf.set(key, value)
+    assert table.schema.field("s").type == pa.string()
+    assert table.schema.field("t").type == pa.timestamp("us", tz="UTC")
+    for expr, data_type in [("INTERVAL '1-2' YEAR TO MONTH", "YearMonthIntervalType(0, 1)"),
+                            ("make_interval(1)", "CalendarIntervalType()")]:
+        with pytest.raises(PySparkTypeError) as e:
+            session.sql(f"SELECT {expr} AS v").toArrow()
+        assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION"
+        assert e.value.getMessageParameters() == {"data_type": data_type}
+    with pytest.raises(UnsupportedOperationException) as e:
+        session.sql("SELECT named_struct('a', 1, 'a', 2) AS v").toArrow()
+    assert e.value.getCondition() == "DUPLICATED_FIELD_NAME_IN_ARROW_STRUCT"
+
 def test_to_pandas_converts_the_columns_as_pyspark(session):
     # As official PySpark 4.3.0's SparkConnectClient.to_pandas: each column by its Spark type,
     # in the session time zone, with the metrics of the execution in attrs.

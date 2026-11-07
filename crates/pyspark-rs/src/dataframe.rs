@@ -1986,16 +1986,46 @@ impl PyDataFrame {
 
     /// Collect the DataFrame into a `pyarrow.Table`.
     ///
-    /// Mirrors `pyspark.sql.DataFrame.toArrow()`: the result is decoded from the
-    /// server's Arrow IPC stream and handed to `pyarrow` through arrow-rs's
-    /// reader conversion, sharing compatible decoded Arrow value buffers. Bitmap alignment
-    /// and schemas requiring the IPC compatibility fallback can still copy.
+    /// Mirrors PySpark Connect's `toArrow()`: the table of the result, cast to the Arrow schema of
+    /// its schema, `to_arrow_schema(schema, error_on_duplicated_field_names_in_struct=True,
+    /// timezone="UTC")`, which raises for a type that PySpark does not convert to Arrow: so of
+    /// the Arrow types of the Spark types, and of the names of the schema for the fields of
+    /// nested structs. The schema is the one that the server sends with the result, of the
+    /// analysis of the query, which PySpark asks for before it runs the query; the data of a
+    /// server that sends none is as it is.
+    ///
+    /// The result is decoded from the server's Arrow IPC stream and handed to `pyarrow` through
+    /// arrow-rs's reader conversion, sharing compatible decoded Arrow value buffers. Bitmap
+    /// alignment and schemas requiring the IPC compatibility fallback can still copy.
     #[pyo3(name = "toArrow")]
     fn to_arrow(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let batches = py
-            .detach(|| self.dataframe.collect_record_batches())
+        let (batches, schema) = py
+            .detach(|| {
+                self.dataframe
+                    .collect_record_batches_with_schema()
+                    .map_err(Box::new)
+            })
             .to_pyerr()?;
-        crate::pyarrow_export::record_batches_to_pyarrow(py, batches)
+        let table = crate::pyarrow_export::record_batches_to_pyarrow(py, batches)?;
+        let Some(schema) = schema else {
+            return Ok(table);
+        };
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("error_on_duplicated_field_names_in_struct", true)?;
+        kwargs.set_item("timezone", "UTC")?;
+        let arrow_schema = py
+            .import("pyspark.sql.pandas.types")?
+            .getattr("to_arrow_schema")?
+            .call(
+                (crate::types::data_type_to_py(py, &schema)?,),
+                Some(&kwargs),
+            )?;
+        let table = table.bind(py);
+        // A result without batches has no columns: the empty table of the schema.
+        if table.getattr("num_columns")?.extract::<usize>()? == 0 && arrow_schema.len()? > 0 {
+            return Ok(arrow_schema.call_method0("empty_table")?.unbind());
+        }
+        Ok(table.call_method1("cast", (arrow_schema,))?.unbind())
     }
 
     /// Collect the DataFrame into a pandas DataFrame.
