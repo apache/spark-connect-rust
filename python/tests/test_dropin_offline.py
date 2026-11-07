@@ -9398,6 +9398,72 @@ def test_stream_writer_triggers_are_checked_as_pyspark(offline_spark, kwargs, co
     assert w.trigger(processingTime=None, once=True) is w
 
 
+def test_foreach_sends_the_function_of_each_partition_as_pyspark(mock_connect):
+    # As PySpark's foreach: the command (func, None, serializer, serializer) of the function of
+    # _construct_foreach_function, which calls a function with each row of a partition;
+    # ATTRIBUTE_NOT_CALLABLE for an object without a callable process, open or close; and
+    # STREAMING_CONNECT_SERIALIZATION_ERROR for a function that does not pickle, as of
+    # foreachBatch.
+    import threading
+
+    from pyspark import cloudpickle
+    from pyspark.errors import PySparkAttributeError, PySparkPicklingError
+
+    spark, service = mock_connect
+    # ExecutePlanResponse.write_stream_operation_start_result=8: query_id=1 (id=1, run_id=2).
+    service.execute_payload = message_field(
+        8, message_field(1, message_field(1, "q") + message_field(2, "r"))
+    )
+    writer = spark.readStream.format("rate").load().writeStream
+
+    def row_function(row):
+        raise ValueError(f"the row {row}")
+
+    writer.foreach(row_function).start()
+    # ExecutePlanRequest.plan=3, Plan.command=2, Command.write_stream_operation_start=6:
+    # WriteStreamOperationStart.foreach_writer=13 of StreamingForeachFunction.python_function=1
+    # of PythonUDF.command=3.
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+    start = parse_message(parse_message(plan[2][0])[6][0])
+    udf = parse_message(parse_message(start[13][0])[1][0])
+    function, return_type, input_serializer, output_serializer = cloudpickle.loads(udf[3][0])
+    assert return_type is None and input_serializer is output_serializer
+    with pytest.raises(ValueError, match="the row 7"):
+        function(0, iter([7]))
+
+    class NoProcess:
+        pass
+
+    class Uncallable:
+        process = 1
+
+    class UncallableClose:
+        def process(self, row):
+            pass
+
+        close = 1
+
+    for writer_object, attr_name in [
+        (1, "process"),
+        (NoProcess(), "process"),
+        (Uncallable(), "process"),
+        (UncallableClose(), "close"),
+    ]:
+        with pytest.raises(PySparkAttributeError) as e:
+            writer.foreach(writer_object)
+        assert e.value.getCondition() == "ATTRIBUTE_NOT_CALLABLE"
+        assert e.value.getMessageParameters() == {"attr_name": attr_name, "obj_name": "f"}
+    lock = threading.Lock()
+    for method, name, function in [
+        (writer.foreach, "foreach", lambda row: lock),
+        (writer.foreachBatch, "foreachBatch", lambda df, batch_id: lock),
+    ]:
+        with pytest.raises(PySparkPicklingError) as e:
+            method(function)
+        assert e.value.getCondition() == "STREAMING_CONNECT_SERIALIZATION_ERROR"
+        assert e.value.getMessageParameters() == {"name": name}
+
+
 def test_stream_writer_sends_its_trigger_as_pyspark(mock_connect):
     # As PySpark's: the trigger of a WriteStreamOperationStart, an interval or duration
     # stripped, of the real-time trigger too.

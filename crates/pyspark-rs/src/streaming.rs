@@ -754,7 +754,7 @@ impl PyDataStreamWriter {
     }
 
     /// `DataStreamWriter.foreachBatch(func)`: cloudpickle the `(batch_df, batch_id)`
-    /// function (via the bundled `pyspark.cloudpickle`) and attach it as the
+    /// function (with PySpark's `CloudPickleSerializer`) and attach it as the
     /// foreach-batch sink. Pickling happens here so the Python skin can re-export this
     /// class directly rather than subclassing a (non-subclassable) PyO3 type.
     fn foreachBatch<'py>(
@@ -762,7 +762,7 @@ impl PyDataStreamWriter {
         py: Python<'_>,
         func: &Bound<'_, PyAny>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        let command = crate::dataframe::py_cloudpickle(py, func)?;
+        let command = streaming_function_command(py, func, "foreachBatch")?;
         let payload = PythonUDFPayload::new(
             spark_connect::types::DataType::Struct { fields: vec![] },
             0, // eval type is unused for the streaming foreach sinks
@@ -773,15 +773,21 @@ impl PyDataStreamWriter {
         Ok(slf)
     }
 
-    /// `DataStreamWriter.foreach(f)`: wrap the row handler as the reference client does
-    /// — `(f, None, serializer, serializer)` with `AutoBatchedSerializer(CPickleSerializer())`
-    /// — and cloudpickle it so the worker deserializes it against its own
-    /// `pyspark.serializers`. Built here to avoid a Python subclass of the PyO3 class.
+    /// `DataStreamWriter.foreach(f)`, as PySpark's: the function of the partition and the
+    /// rows of each partition of `_construct_foreach_function(f)`, which raises
+    /// `ATTRIBUTE_NOT_CALLABLE` for an object without a callable `process`, in the command
+    /// `(func, None, serializer, serializer)` of `AutoBatchedSerializer(CPickleSerializer())`,
+    /// which the worker of the server deserializes with its own `pyspark.serializers`. Built
+    /// here to avoid a Python subclass of the PyO3 class.
     fn foreach<'py>(
         mut slf: PyRefMut<'py, Self>,
         py: Python<'_>,
         f: &Bound<'_, PyAny>,
     ) -> PyResult<PyRefMut<'py, Self>> {
+        let func = py
+            .import("pyspark.sql.streaming.readwriter")?
+            .getattr("_construct_foreach_function")?
+            .call1((f,))?;
         let serializers = py.import("pyspark.serializers")?;
         let cpickle = serializers.getattr("CPickleSerializer")?.call0()?;
         let serializer = serializers
@@ -792,13 +798,13 @@ impl PyDataStreamWriter {
         let command_tuple = pyo3::types::PyTuple::new(
             py,
             [
-                f.clone(),
+                func,
                 py.None().into_bound(py),
                 serializer.clone(),
                 serializer,
             ],
         )?;
-        let command = crate::dataframe::py_cloudpickle(py, command_tuple.as_any())?;
+        let command = streaming_function_command(py, command_tuple.as_any(), "foreach")?;
         let payload = PythonUDFPayload::new(
             spark_connect::types::DataType::Struct { fields: vec![] },
             0,
@@ -850,6 +856,34 @@ impl<'a, 'py> FromPyObject<'a, 'py> for ProtoBool {
              {shown} has type {}, but expected one of: (<class 'bool'>, <class 'int'>)",
             obj.get_type().repr()?
         )))
+    }
+}
+
+/// The command of the function of `foreach` or `foreachBatch`, as PySpark's: of
+/// `CloudPickleSerializer().dumps`, which raises a `pickle.PicklingError` for an object that
+/// does not pickle, as `STREAMING_CONNECT_SERIALIZATION_ERROR` of `name`.
+fn streaming_function_command(
+    py: Python<'_>,
+    function: &Bound<'_, PyAny>,
+    name: &str,
+) -> PyResult<Vec<u8>> {
+    let serializer = py
+        .import("pyspark.serializers")?
+        .getattr("CloudPickleSerializer")?
+        .call0()?;
+    match serializer.call_method1("dumps", (function,)) {
+        Ok(command) => command.extract(),
+        Err(error) if error.matches(py, py.import("pickle")?.getattr("PicklingError")?)? => {
+            let raised = crate::column::raise_pyspark(
+                py,
+                "PySparkPicklingError",
+                "STREAMING_CONNECT_SERIALIZATION_ERROR",
+                &[("name", name)],
+            );
+            raised.set_cause(py, Some(error));
+            Err(raised)
+        }
+        Err(error) => Err(error),
     }
 }
 

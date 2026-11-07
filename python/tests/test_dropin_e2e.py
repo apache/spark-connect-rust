@@ -1874,6 +1874,51 @@ def test_create_dataframe_merges_the_types_of_every_row_as_pyspark(session):
         assert [tuple(r) for r in df.collect()] == [(text,), ("5",)]
 
 
+def test_foreach_runs_a_function_and_a_writer_of_each_row_as_pyspark(session, tmp_path):
+    # As PySpark's foreach: a function of a row, and an object of open, process and close, run
+    # on each row of each batch, here writing a file of each row on the local server.
+    from pyspark.errors import PySparkAttributeError
+
+    source, out = tmp_path / "source", tmp_path / "out"
+    session.range(3).write.json(str(source))
+    out.mkdir()
+    directory = str(out)
+
+    def write_row(row):
+        import os
+
+        open(os.path.join(directory, f"function_{row.id}"), "w").close()
+
+    class Writer:
+        def open(self, partition_id, epoch_id):
+            return True
+
+        def process(self, row):
+            import os
+
+            open(os.path.join(directory, f"writer_{row.id}"), "w").close()
+
+        def close(self, error):
+            pass
+
+    for name, function in [("function", write_row), ("writer", Writer())]:
+        query = (
+            session.readStream.schema("id long")
+            .json(str(source))
+            .writeStream.foreach(function)
+            .option("checkpointLocation", str(tmp_path / f"checkpoint_{name}"))
+            .trigger(availableNow=True)
+            .start()
+        )
+        query.awaitTermination()
+        assert query.exception() is None
+    expected = [f"{name}_{i}" for name in ("function", "writer") for i in range(3)]
+    assert sorted(path.name for path in out.iterdir()) == expected
+    with pytest.raises(PySparkAttributeError) as e:
+        session.readStream.format("rate").load().writeStream.foreach(1)
+    assert e.value.getCondition() == "ATTRIBUTE_NOT_CALLABLE"
+
+
 def test_dataframes_of_a_stream_are_streaming_as_pyspark(session):
     # As PySpark's, which asks the server: a DataFrame with a streaming source is streaming.
     stream = session.readStream.format("rate").load()
