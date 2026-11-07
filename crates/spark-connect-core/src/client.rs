@@ -1310,7 +1310,7 @@ impl SparkConnectClient {
     /// explicit user ID, the user name and the extensions are kept; raw requests are sent
     /// as given.
     fn fill_user_context(&self, context: &mut Option<UserContext>) {
-        let context = context.get_or_insert_with(UserContext::default);
+        let context = context.get_or_insert_with(|| self.new_user_context());
         if context.user_id.is_empty() {
             if let Some(user_id) = &self.user_id {
                 context.user_id.clone_from(user_id);
@@ -1318,9 +1318,9 @@ impl SparkConnectClient {
         }
     }
 
-    /// PySpark and Scala ArtifactManager both send a UserContext even when no
-    /// user ID is configured.
-    fn artifact_user_context(&self) -> UserContext {
+    /// Build a fresh request context, even when no user ID is configured.
+    /// PySpark and Scala both send a present context on artifact requests.
+    fn new_user_context(&self) -> UserContext {
         UserContext {
             user_id: self.user_id.clone().unwrap_or_default(),
             ..Default::default()
@@ -1361,7 +1361,7 @@ impl SparkConnectClient {
         &self,
         requests: impl Iterator<Item = spark_connect_proto::AddArtifactsRequest> + Send + 'static,
     ) -> std::result::Result<spark_connect_proto::AddArtifactsResponse, tonic::Status> {
-        let user_context = self.artifact_user_context();
+        let user_context = self.new_user_context();
         let client_type = self.user_agent.clone();
         let requests = requests.map(move |mut request| {
             request.user_context = Some(user_context.clone());
@@ -1397,7 +1397,7 @@ impl SparkConnectClient {
     ) -> std::result::Result<std::collections::HashMap<String, bool>, tonic::Status> {
         let mut request = ArtifactStatusesRequest::default();
         request.session_id = self.session_id.clone();
-        request.user_context = Some(self.artifact_user_context());
+        request.user_context = Some(self.new_user_context());
         request.client_type = Some(self.user_agent.clone());
         request.names = names.to_vec();
 
