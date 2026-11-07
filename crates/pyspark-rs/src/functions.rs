@@ -189,12 +189,30 @@ pub fn register_functions(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<
     Ok(())
 }
 
+/// `enum.Enum`, of whose instances a literal is of the value.
+static ENUM: pyo3::sync::PyOnceLock<Py<pyo3::types::PyType>> = pyo3::sync::PyOnceLock::new();
+
+/// The value of `obj`, the value of the value of an `Enum` while it is one, else `obj`, as
+/// PySpark's `pyspark.sql.utils.enum_to_value`, which its `lit`, Column operators and functions
+/// apply to the values that they take.
+pub(crate) fn enum_to_value<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let py = obj.py();
+    let enum_type = ENUM.import(py, "enum", "Enum")?;
+    let mut value = obj.clone();
+    while value.is_instance(enum_type)? {
+        value = value.getattr("value")?;
+    }
+    Ok(value)
+}
+
 /// Convert a Python object to a Rust Column (handles Column or scalars that become literals).
 pub fn to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
     // Try to get as PyColumn first
     if let Ok(col) = obj.extract::<Bound<'_, PyColumn>>() {
         return Ok(col.borrow().column.clone());
     }
+    // An Enum is the literal of its value, as PySpark's.
+    let obj = &enum_to_value(obj)?;
 
     // Check for None
     if obj.is_none() {
