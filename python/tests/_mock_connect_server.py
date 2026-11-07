@@ -342,6 +342,16 @@ def serve(connection):
         default_confs = {
             "spark.sql.execution.pythonUDF.arrow.enabled": "true",
             "spark.sql.execution.pythonUDTF.arrow.enabled": "true",
+            # Those that the Arrow conversion of pandas input reads, as a Spark 4.3.0 server.
+            "spark.sql.session.timeZone": "UTC",
+            "spark.sql.timestampType": "TIMESTAMP_LTZ",
+            "spark.sql.execution.arrow.useLargeVarTypes": "false",
+            "spark.sql.execution.pandas.convertToArrowArraySafely": "true",
+            "spark.sql.session.localRelationCacheThreshold": "1048576",
+            "spark.sql.session.localRelationSizeLimit": "3221225472",
+            "spark.sql.session.localRelationChunkSizeRows": "10000",
+            "spark.sql.session.localRelationChunkSizeBytes": "16777216",
+            "spark.sql.session.localRelationBatchOfChunksSizeBytes": "1073741824",
         }
         read_confs = []
         set_confs = []
