@@ -1161,6 +1161,20 @@ def test_reader_writer_and_catalog_return_the_results_of_pyspark(session, tmp_pa
         session.sql("DROP TABLE IF EXISTS e2e_external_eagerly")
 
 
+def test_table_arguments_are_those_of_pyspark_sql_table_arg(session):
+    # As the PySpark client: DataFrame.asTable() is a TableArg of pyspark.sql.table_arg, and a
+    # TableValuedFunctionArgument of pyspark.sql.tvf_argument.
+    from pyspark.sql.table_arg import TableArg
+    from pyspark.sql.tvf_argument import TableValuedFunctionArgument
+
+    table = session.range(3).asTable()
+    assert isinstance(table, TableArg)
+    assert isinstance(table, TableValuedFunctionArgument)
+    assert isinstance(table.partitionBy("id"), TableArg)
+
+
+
+
 def test_subqueries_and_table_arguments_return_the_rows_of_pyspark(session):
     # As PySpark's DataFrame.scalar(), DataFrame.exists(), Column.isin(df) and asTable():
     # scalar, correlated and IN subqueries, and the rows of a DataFrame as a UDTF argument.
