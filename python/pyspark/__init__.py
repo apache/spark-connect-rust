@@ -13,7 +13,18 @@ from pyspark.version import __version__  # noqa: F401  (tracks the Spark version
 __rust_client__: bool = True
 __engine__: str = "rust"  # native Rust core via tonic -- not grpcio/py4j
 
-from typing import Callable, TypeVar, Union
+from functools import wraps
+from typing import cast, Any, Callable, TypeVar, Union
+
+# As the PySpark client's, of a Connect-only client: the names of pyspark but those of the
+# classic SparkContext (RDD, SparkContext, SparkFiles, ...), which need a JVM.
+from pyspark.conf import SparkConf
+from pyspark.storagelevel import StorageLevel
+from pyspark.accumulators import Accumulator, AccumulatorParam
+from pyspark.serializers import MarshalSerializer, CPickleSerializer
+from pyspark.taskcontext import TaskContext, BarrierTaskContext, BarrierTaskInfo
+from pyspark.profiler import Profiler, BasicProfiler
+from pyspark._globals import _NoValue  # noqa: F401
 
 _F = TypeVar("_F", bound=Callable)
 
@@ -21,12 +32,40 @@ _F = TypeVar("_F", bound=Callable)
 def since(version: Union[str, float]) -> Callable[[_F], _F]:
     """
     A decorator that annotates a function to append the version of Spark the function was added.
-    For Connect-only clients, this is a no-op that just passes through the function.
     """
+    import re
+
+    indent_p = re.compile(r"\n( +)")
+
     def deco(f: _F) -> _F:
-        # For Connect-only, we don't modify docstrings; this is just a pass-through decorator
+        assert f.__doc__ is not None
+
+        indents = indent_p.findall(f.__doc__)
+        indent = " " * (min(len(m) for m in indents) if indents else 0)
+        f.__doc__ = f.__doc__.rstrip() + "\n\n%s.. versionadded:: %s" % (indent, version)
         return f
+
     return deco
+
+
+def keyword_only(func: _F) -> _F:
+    """
+    A decorator that forces keyword arguments in the wrapped method
+    and saves actual input keyword arguments in `_input_kwargs`.
+
+    Notes
+    -----
+    Should only be used to wrap a method where first arg is `self`
+    """
+
+    @wraps(func)
+    def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if len(args) > 0:
+            raise TypeError("Method %s forces keyword arguments." % func.__name__)
+        self._input_kwargs = kwargs
+        return func(self, **kwargs)
+
+    return cast(_F, wrapper)
 
 
 from pyspark.sql import (
@@ -35,46 +74,7 @@ from pyspark.sql import (
     Column,
     Row,
 )
-from pyspark.storagelevel import StorageLevel
-
-# For compatibility with testing harness, provide a stub SparkConf that works with
-# Spark Connect. This is imported by the testing utils but we don't need a full
-# implementation since we're connect-only.
-class SparkConf:
-    """Stub SparkConf for Spark Connect testing.
-
-    For pure Connect mode, we don't need a full SparkConf with JVM support.
-    This stub accepts configuration as upstream would.
-    """
-    def __init__(self, loadDefaults=True, _jvm=None, _jconf=None):
-        self._jconf = None
-        self.settings = {}
-
-    def set(self, key, value):
-        """Set a configuration value."""
-        self.settings[key] = value
-        return self
-
-    def get(self, key, defaultValue=None):
-        """Get a configuration value."""
-        return self.settings.get(key, defaultValue)
-
-    def remove(self, key):
-        """Remove a configuration key."""
-        if key in self.settings:
-            del self.settings[key]
-        return self
-
-    def setAll(self, settings):
-        """Set multiple configuration values."""
-        for key, value in settings.items():
-            self.set(key, value)
-        return self
-
-    def getAll(self):
-        """Get all configuration values."""
-        return list(self.settings.items())
-
+from pyspark.util import InheritableThread, inheritable_thread_target
 
 __all__ = [
     "SparkSession",
@@ -83,5 +83,16 @@ __all__ = [
     "Row",
     "SparkConf",
     "StorageLevel",
+    "Accumulator",
+    "AccumulatorParam",
+    "MarshalSerializer",
+    "CPickleSerializer",
+    "Profiler",
+    "BasicProfiler",
+    "TaskContext",
+    "BarrierTaskContext",
+    "BarrierTaskInfo",
+    "InheritableThread",
+    "inheritable_thread_target",
     "__version__",
 ]

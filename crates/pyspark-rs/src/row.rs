@@ -178,6 +178,35 @@ impl PyRow {
     }
 }
 
+/// `datetime.datetime(1970, 1, 1)`, the epoch of Spark's timestamps, without a time zone.
+fn naive_epoch(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+    py.import("datetime")?
+        .getattr("datetime")?
+        .call1((1970, 1, 1))
+}
+
+/// `datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)`, the epoch of the instants.
+fn utc_epoch(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+    let datetime = py.import("datetime")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("tzinfo", datetime.getattr("timezone")?.getattr("utc")?)?;
+    datetime
+        .getattr("datetime")?
+        .call((1970, 1, 1), Some(&kwargs))
+}
+
+/// The `datetime.timedelta` of `micros` microseconds, exact over the whole i64 range: a float
+/// of seconds would lose the microseconds of the values far from the epoch.
+fn micros_timedelta(py: Python<'_>, micros: i64) -> PyResult<Bound<'_, PyAny>> {
+    let days = micros.div_euclid(86_400_000_000);
+    let remainder = micros.rem_euclid(86_400_000_000);
+    py.import("datetime")?.getattr("timedelta")?.call1((
+        days,
+        remainder / 1_000_000,
+        remainder % 1_000_000,
+    ))
+}
+
 /// Convert a Spark `Value` into a Python object (PyO3 0.28 `IntoPyObject`).
 pub fn value_to_py<'py>(py: Python<'py>, v: &Value) -> PyResult<Bound<'py, PyAny>> {
     // Propagate conversion failures as Python exceptions with `?` rather than
@@ -202,15 +231,18 @@ pub fn value_to_py<'py>(py: Python<'py>, v: &Value) -> PyResult<Bound<'py, PyAny
             let ordinal = (*d as i64) + 719163i64;
             date_cls.call_method1("fromordinal", (ordinal,))?.into_any()
         }
+        // TIMESTAMP (with a time zone): the instant, shown in the local time zone of the client,
+        // as PySpark's Arrow conversion does (`astimezone()` of the UTC datetime, naive).
         Value::Timestamp(t) => {
-            // Convert microseconds-since-epoch (i64) to datetime.datetime
-            let datetime_mod = py.import("datetime")?;
-            let datetime_cls = datetime_mod.getattr("datetime")?;
-            let seconds = *t as f64 / 1_000_000.0;
-            datetime_cls
-                .call_method1("fromtimestamp", (seconds,))?
-                .into_any()
+            let utc = utc_epoch(py)?.add(micros_timedelta(py, *t)?)?;
+            let local = utc.call_method0("astimezone")?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("tzinfo", py.None())?;
+            local.call_method("replace", (), Some(&kwargs))?.into_any()
         }
+        // TIMESTAMP_NTZ (without a time zone): the wall clock, which no time zone shifts, as
+        // PySpark's `TimestampNTZType.fromInternal` gives it.
+        Value::TimestampNtz(t) => naive_epoch(py)?.add(micros_timedelta(py, *t)?)?,
         Value::Time(nanos) => {
             // As PySpark's `TimeType.fromInternal`: a datetime.time of the microseconds.
             let (hours, remainder) = (

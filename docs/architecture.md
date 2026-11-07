@@ -159,6 +159,10 @@ Pandas frames of at least 100,000 rows whose columns are all NumPy `float64`,
 with an explicit `StructType` of `DoubleType` fields, are encoded to Arrow IPC
 from their columns, with pandas' missing values as nulls, and sent inline as the
 row path sends them, without the importer's configuration RPC.
+Pandas frames of at least 10,000 rows whose columns are all kept in pandas' Arrow
+string storage (`string[pyarrow]`, and the `str` dtype of pandas 3), with an
+explicit `StructType` of `StringType` fields, pass that storage to this importer
+as Arrow string columns, without Python rows.
 Inputs at or above `spark.sql.session.localRelationCacheThreshold` are serialized
 into independent IPC streams and uploaded as session-scoped cache artifacts.
 The plan carries `ChunkedCachedLocalRelation` hashes instead of embedding the

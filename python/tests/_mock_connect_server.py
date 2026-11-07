@@ -274,10 +274,16 @@ def serve(connection):
             self.execute_error = None
             self.error_details = b""
             self.fetched_error_ids = []
+            # The warnings of each Set and Unset, as ConfigResponse.warnings=3, and the keys
+            # of each Unset.
+            self.config_warnings = []
+            self.unset_confs = []
             self.confs = {}
             self.read_confs = []
             self.set_confs = []
             self.clone_requests = []
+            # The DDL of the JSON of each JsonToDDL.
+            self.ddl_string = ""
 
         def analyze(self, request, context):
             self.calls += 1
@@ -301,6 +307,11 @@ def serve(connection):
                 ddl = parse_message(parse_message(request)[11][0])[1][0].decode()
                 parsed = ddl_data_type(ddl) or self.data_type
                 return message_field(9, message_field(1, parsed))
+            # base.proto: AnalyzePlanRequest.json_to_ddl=18 -> JsonToDDL.json_string=1;
+            # AnalyzePlanResponse.json_to_ddl=16 -> JsonToDDL.ddl_string=1: `ddl_string`, which
+            # a test sets.
+            if 18 in parse_message(request):
+                return message_field(16, message_field(1, self.ddl_string.encode()))
             if self.failure == "no-result":
                 return b""
             if self.failure == "missing-schema":
@@ -338,6 +349,16 @@ def serve(connection):
         default_confs = {
             "spark.sql.execution.pythonUDF.arrow.enabled": "true",
             "spark.sql.execution.pythonUDTF.arrow.enabled": "true",
+            # Those that the Arrow conversion of pandas input reads, as a Spark 4.3.0 server.
+            "spark.sql.session.timeZone": "UTC",
+            "spark.sql.timestampType": "TIMESTAMP_LTZ",
+            "spark.sql.execution.arrow.useLargeVarTypes": "false",
+            "spark.sql.execution.pandas.convertToArrowArraySafely": "true",
+            "spark.sql.session.localRelationCacheThreshold": "1048576",
+            "spark.sql.session.localRelationSizeLimit": "3221225472",
+            "spark.sql.session.localRelationChunkSizeRows": "10000",
+            "spark.sql.session.localRelationChunkSizeBytes": "16777216",
+            "spark.sql.session.localRelationBatchOfChunksSizeBytes": "1073741824",
         }
         read_confs = []
         set_confs = []
@@ -382,6 +403,10 @@ def serve(connection):
             yield header + message_field(13, "r1") + self.execute_payload
             yield header + message_field(13, "r2") + message_field(14, b"")
 
+        def warnings_fields(self):
+            # ConfigResponse.warnings=3, of `config_warnings`.
+            return b"".join(message_field(3, warning) for warning in self.config_warnings)
+
         def fetch_error_details(self, request, context):
             # FetchErrorDetailsRequest.error_id=3.
             self.fetched_error_ids.append(parse_message(request)[3][0].decode())
@@ -411,9 +436,17 @@ def serve(connection):
                 pairs = []
                 for pair in set_request.get(1, []):
                     pair = parse_message(pair)
-                    pairs.append((pair[1][0].decode(), pair[2][0].decode()))
+                    # A KeyValue of no value=2, as PySpark sends None, is recorded as None.
+                    value = pair.get(2, [None])[0]
+                    value = None if value is None else value.decode()
+                    pairs.append((pair[1][0].decode(), value))
                 self.set_confs.append((pairs, set_request.get(2, [None])[0]))
-                return message_field(1, request[1][0])
+                return message_field(1, request[1][0]) + self.warnings_fields()
+            if 6 in operation:
+                # Operation.unset=6: Unset.keys=1.
+                keys = parse_message(operation[6][0]).get(1, [])
+                self.unset_confs.append([key.decode() for key in keys])
+                return message_field(1, request[1][0]) + self.warnings_fields()
             if 3 in operation:
                 # Operation.get_with_default=3: GetWithDefault.pairs=1 (KeyValue.key=1,
                 # value=2), the default of each key that `confs` does not have.
@@ -427,7 +460,8 @@ def serve(connection):
                 return message_field(1, request[1][0]) + b"".join(pairs)
             if 2 not in operation:
                 context.abort(
-                    grpc.StatusCode.UNIMPLEMENTED, "only Get, GetWithDefault and Set are served"
+                    grpc.StatusCode.UNIMPLEMENTED,
+                    "only Get, GetWithDefault, Set and Unset are served",
                 )
             keys = [key.decode() for key in parse_message(operation[2][0]).get(1, [])]
             self.read_confs.extend(keys)

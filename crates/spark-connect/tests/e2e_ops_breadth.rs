@@ -188,6 +188,7 @@ fn aggregates_execute() {
     let _ = df
         .group_by(vec![col("id")])
         .pivot(col("name"), None)
+        .unwrap()
         .agg(vec![expr(f::sum(col("v")))])
         .collect();
     let _ = df.agg(vec![expr(f::sum(col("v")))]).collect().unwrap();

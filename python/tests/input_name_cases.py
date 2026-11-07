@@ -103,6 +103,15 @@ class InputNameTests(unittest.TestCase):
                 b"spark.sql.session.localRelationCacheThreshold": str(1 << 60).encode(),
                 b"spark.sql.connect.serverStacktrace.enabled": b"false",
                 b"spark.sql.pyspark.jvmStacktrace.enabled": b"false",
+                # Explicit-schema pandas input reads the Arrow conversion settings first.
+                b"spark.sql.timestampType": b"TIMESTAMP_LTZ",
+                b"spark.sql.session.timeZone": b"UTC",
+                b"spark.sql.execution.arrow.useLargeVarTypes": b"false",
+                b"spark.sql.session.localRelationSizeLimit": str(1 << 60).encode(),
+                b"spark.sql.session.localRelationChunkSizeRows": str(1 << 30).encode(),
+                b"spark.sql.session.localRelationChunkSizeBytes": str(1 << 40).encode(),
+                b"spark.sql.session.localRelationBatchOfChunksSizeBytes": str(1 << 40).encode(),
+                b"spark.sql.execution.pandas.convertToArrowArraySafely": b"true",
             }
             pairs = b"".join(_bytes(2, _bytes(1, key) + _bytes(2, values[key]))
                              for key in keys)
