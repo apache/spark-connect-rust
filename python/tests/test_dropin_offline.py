@@ -7915,6 +7915,36 @@ def test_arrow_input_roundtrip_live_server():
         spark.stop()
 
 
+def test_to_arrow_casts_to_the_arrow_schema_of_the_schema_as_pyspark(mock_connect):
+    # As PySpark Connect's: toArrow casts the table of the result to the Arrow schema of its
+    # schema, of string and binary even of large var types, which raises for a type that
+    # PySpark does not convert to Arrow. The data of a server that sends no schema is as it is.
+    import pyarrow as pa
+    from pyspark.errors import PySparkTypeError
+
+    spark, service = mock_connect
+    table = pa.table({"s": pa.array(["x"], pa.large_string()),
+                      "b": pa.array([b"y"], pa.large_binary())})
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    # ExecutePlanResponse.arrow_batch=2: ArrowBatch.row_count=1, data=2.
+    batch = message_field(2, varint_field(1, 1) + message_field(2, sink.getvalue().to_pybytes()))
+
+    service.execute_payload = batch
+    assert spark.range(1).toArrow().schema == table.schema
+    # ExecutePlanResponse.schema=7.
+    service.execute_payload = message_field(7, ddl_data_type("s string, b binary")) + batch
+    result = spark.range(1).toArrow()
+    assert result.schema == pa.schema([("s", pa.string()), ("b", pa.binary())])
+    assert result.to_pylist() == [{"s": "x", "b": b"y"}]
+    service.execute_payload = message_field(7, ddl_data_type("v interval year to month")) + batch
+    with pytest.raises(PySparkTypeError) as e:
+        spark.range(1).toArrow()
+    assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION"
+    assert e.value.getMessageParameters() == {"data_type": "YearMonthIntervalType(0, 1)"}
+
+
 @pytest.mark.parametrize("kind", ["slice", "dictionary", "decimal", "null", "struct", "nul"])
 def test_arrow_input_types_live_server(kind):
     import os
