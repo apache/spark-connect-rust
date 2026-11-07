@@ -1374,6 +1374,20 @@ def test_sql_runs_statements_eagerly(session):
     assert [tuple(r) for r in query.collect()] == [(1,)]
 
 
+def test_struct_types_take_their_keys_and_fields_as_pyspark(session):
+    # As PySpark's StructType: add takes the JSON value of a data type, and a missing field is
+    # KEY_NOT_EXISTS.
+    from pyspark.errors import PySparkKeyError
+    from pyspark.sql import types as T
+
+    schema = T.StructType().add("a", "long").add("b", "string")
+    df = session.createDataFrame([(1, "x")], schema)
+    assert df.schema.simpleString() == "struct<a:bigint,b:string>"
+    with pytest.raises(PySparkKeyError) as e:
+        df.schema["zz"]
+    assert e.value.getCondition() == "KEY_NOT_EXISTS"
+
+
 def test_lists_and_numpy_arrays_are_arrays_as_pyspark(session):
     np = pytest.importorskip("numpy")
 

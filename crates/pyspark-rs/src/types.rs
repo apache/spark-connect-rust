@@ -1656,7 +1656,7 @@ impl PyStructType {
     }
 
     /// Append a field and return `self` (chainable, mirroring `StructType.add`):
-    /// `StructType().add("a", "int").add("b", StringType())`.
+    /// `StructType().add("a", "integer").add("b", StringType())`.
     #[pyo3(signature = (field, data_type=None, nullable=true, metadata=None))]
     fn add<'py>(
         slf: Bound<'py, Self>,
@@ -1668,12 +1668,28 @@ impl PyStructType {
         let new_field = if let Ok(sf) = field.extract::<PyRef<PyStructField>>() {
             sf.field.clone()
         } else {
+            // As PySpark's: a name takes a data type, of which a str is the JSON value of one.
+            let Some(data_type) = data_type else {
+                return Err(crate::column::raise_pyspark(
+                    field.py(),
+                    "PySparkValueError",
+                    "ARGUMENT_REQUIRED",
+                    &[
+                        ("arg_name", "data_type"),
+                        ("condition", "passing name of struct_field to create"),
+                    ],
+                ));
+            };
             let name: String = field.extract()?;
-            let dt = match data_type {
-                Some(d) => py_to_data_type(d)?,
-                None => DataType::String {
-                    collation: "UTF8_BINARY".to_string(),
-                },
+            let dt = if data_type.is_instance_of::<pyo3::types::PyString>() {
+                let parsed = field
+                    .py()
+                    .import("pyspark.sql.types")?
+                    .getattr("_parse_datatype_json_value")?
+                    .call1((data_type,))?;
+                py_to_data_type(&parsed)?
+            } else {
+                py_to_data_type(data_type)?
             };
             let md = match metadata {
                 Some(d) => py_metadata_to_map(d.py(), d)?,
@@ -1717,17 +1733,24 @@ impl PyStructType {
     }
 
     /// Index by position (`st[0]`) or by name (`st["a"]`), returning a `StructField`
-    /// (mirrors `StructType.__getitem__`; a slice yields a new `StructType`).
+    /// (mirrors `StructType.__getitem__`; a slice yields a new `StructType`), with the errors of
+    /// PySpark's: `KEY_NOT_EXISTS` of a name, `INDEX_OUT_OF_RANGE` of an index, and
+    /// `NOT_EXPECTED_TYPE` of another key.
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        if let Ok(name) = key.extract::<String>() {
+        use crate::column::raise_pyspark;
+        if let Ok(name) = key.cast::<pyo3::types::PyString>() {
+            let name = name.to_cow()?;
             for f in &self.fields {
                 if f.name == name {
                     return Ok(Py::new(py, PyStructField { field: f.clone() })?.into_any());
                 }
             }
-            return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
-                "No StructField named {name}"
-            )));
+            return Err(raise_pyspark(
+                py,
+                "PySparkKeyError",
+                "KEY_NOT_EXISTS",
+                &[("key", &name)],
+            ));
         }
         if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
             let idx = slice.indices(self.fields.len() as isize)?;
@@ -1739,25 +1762,30 @@ impl PyStructType {
             }
             return Ok(py_new_struct(py, out)?.into_any());
         }
-        let i: isize = key.extract().map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "StructType indices must be integers, slices, or field names",
-            )
-        })?;
-        let n = self.fields.len() as isize;
-        let idx = if i < 0 { i + n } else { i };
-        if idx < 0 || idx >= n {
-            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
-                "StructType index out of range",
+        if !key.is_instance_of::<pyo3::types::PyInt>() {
+            return Err(crate::stat_arguments::not_expected_type(
+                key,
+                "key",
+                "int, slice or str",
             ));
         }
-        Ok(Py::new(
-            py,
-            PyStructField {
-                field: self.fields[idx as usize].clone(),
-            },
-        )?
-        .into_any())
+        let n = self.fields.len() as isize;
+        let index = key.extract::<isize>().ok();
+        match index.map(|i| if i < 0 { i + n } else { i }) {
+            Some(i) if (0..n).contains(&i) => Ok(Py::new(
+                py,
+                PyStructField {
+                    field: self.fields[i as usize].clone(),
+                },
+            )?
+            .into_any()),
+            _ => Err(raise_pyspark(
+                py,
+                "PySparkIndexError",
+                "INDEX_OUT_OF_RANGE",
+                &[("arg_name", "StructType"), ("index", &key.str()?.to_cow()?)],
+            )),
+        }
     }
 
     fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
