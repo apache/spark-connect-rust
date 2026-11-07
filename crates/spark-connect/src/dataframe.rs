@@ -1437,6 +1437,48 @@ impl DataFrame {
             input: Arc::clone(&self.plan),
             name: name.to_string(),
             exprs,
+            observation: None,
+        };
+        self.with_cached_schema(plan)
+    }
+
+    /// Observe the metrics of `exprs` with `observation`, mirroring
+    /// `pyspark.sql.DataFrame.observe` of an `Observation`, as `Observation._on` does: by
+    /// a `CollectMetrics` of the name of the observation, a random UUID for an unnamed one,
+    /// whose metrics each action that runs the DataFrame sets in the observation.
+    /// `REUSE_OBSERVATION` for an observation used already, and `UNSUPPORTED_OPERATION` for a
+    /// streaming DataFrame.
+    pub fn observe_with(
+        &self,
+        observation: &crate::observation::Observation,
+        exprs: Vec<Expression>,
+    ) -> Result<DataFrame> {
+        let name = observation.name_to_observe()?;
+        if self.is_streaming()? {
+            return Err(SparkError::classed(
+                spark_connect_core::error::SparkErrorKind::IllegalArgument,
+                "UNSUPPORTED_OPERATION",
+                &[("operation", "Streaming DataFrame with Observation")],
+            ));
+        }
+        Ok(self.observed_with(observation, name, exprs))
+    }
+
+    /// The DataFrame of the `CollectMetrics` of `observation`, which starts, of `exprs` by
+    /// `name`, as `observe_with` makes it once it has checked the observation and the
+    /// DataFrame.
+    pub(crate) fn observed_with(
+        &self,
+        observation: &crate::observation::Observation,
+        name: String,
+        exprs: Vec<Expression>,
+    ) -> DataFrame {
+        observation.start();
+        let plan = LogicalPlan::Observe {
+            input: Arc::clone(&self.plan),
+            name,
+            exprs,
+            observation: Some(observation.clone()),
         };
         self.with_cached_schema(plan)
     }
@@ -2210,6 +2252,7 @@ fn capture_execution(
     }
     if !resp.observed_metrics.is_empty() {
         let metrics = std::mem::take(&mut resp.observed_metrics);
+        set_observations(session, &metrics);
         // Feed observed metrics to the profiler collector
         session.profiler().accumulate_observed_metrics(&metrics);
         info.observed_metrics.extend(metrics);
@@ -2218,6 +2261,38 @@ fn capture_execution(
         &resp.response_type
     {
         session.notify_progress(progress);
+    }
+}
+
+/// Set the metrics that the server observed in the Observations of their relations, as
+/// PySpark's client sets them in the Observations of the plan: those of each relation, which
+/// the server reports by its plan ID, or the error of collecting them.
+fn set_observations(
+    session: &SparkSession,
+    metrics: &[proto::execute_plan_response::ObservedMetrics],
+) {
+    for observed in metrics {
+        let Some(node) = session.plan_ids().node_of(observed.plan_id) else {
+            continue;
+        };
+        let LogicalPlan::Observe {
+            name,
+            observation: Some(observation),
+            ..
+        } = node.as_ref()
+        else {
+            continue;
+        };
+        if *name != observed.name {
+            continue;
+        }
+        match observed.root_error_idx {
+            Some(root_error_idx) => observation.set_error(SparkError::from_observation_errors(
+                root_error_idx,
+                observed.errors.clone(),
+            )),
+            None => observation.update(&observed.keys, &observed.values),
+        }
     }
 }
 
@@ -3855,6 +3930,78 @@ mod plan_construction_tests {
         assert_ne!(ids[1], ids[2]);
         // Assigning IDs fills only the fresh protobuf, never the shared client plan.
         assert_eq!(joined.plan.to_proto(), expected);
+    }
+
+    #[test]
+    fn observed_metrics_set_the_observations_of_their_relations() {
+        use crate::observation::Observation;
+        use proto::expression::literal::LiteralType;
+        let spark = session();
+        let literal = |value: i64| proto::expression::Literal {
+            literal_type: Some(LiteralType::Long(value)),
+            ..Default::default()
+        };
+        // Two observations of one name, on two DataFrames, as PySpark allows.
+        let (first, second) = (Observation::new("m"), Observation::new("m"));
+        let count = || {
+            vec![crate::functions::count(crate::column::lit(1))
+                .expression()
+                .clone()]
+        };
+        // As observe_with, without its request of whether the DataFrame is streaming.
+        let observe = |df: DataFrame, observation: &Observation| {
+            df.observed_with(observation, observation.name_to_observe().unwrap(), count())
+        };
+        let df1 = observe(spark.range(3).unwrap(), &first);
+        let df2 = observe(spark.range(5).unwrap(), &second);
+        assert!(first.get().unwrap().is_empty() && second.get().unwrap().is_empty());
+        let err = df1.observe_with(&first, count()).err().unwrap();
+        assert_eq!(err.get_condition().as_deref(), Some("REUSE_OBSERVATION"));
+
+        let observed = |df: &DataFrame, value: i64| proto::execute_plan_response::ObservedMetrics {
+            name: "m".to_string(),
+            values: vec![literal(value)],
+            keys: vec!["c".to_string()],
+            plan_id: spark.plan_ids().id_of(&df.plan),
+            ..Default::default()
+        };
+        let mut resp = proto::ExecutePlanResponse {
+            observed_metrics: vec![observed(&df1, 3)],
+            ..Default::default()
+        };
+        let mut info = ExecutionInfo::default();
+        capture_execution(&mut resp, &mut info, &spark);
+        let value = |obs: &Observation| -> Vec<(String, Option<LiteralType>)> {
+            obs.get()
+                .unwrap()
+                .into_iter()
+                .map(|(key, value)| (key, value.literal_type))
+                .collect()
+        };
+        assert_eq!(
+            value(&first),
+            vec![("c".to_string(), Some(LiteralType::Long(3)))]
+        );
+        assert!(value(&second).is_empty());
+        // The metrics of a relation by another name, or of no relation, set nothing.
+        let mut other = observed(&df2, 5);
+        other.name = "other".to_string();
+        let mut unknown = observed(&df2, 5);
+        unknown.plan_id = -1;
+        resp.observed_metrics = vec![other, unknown];
+        capture_execution(&mut resp, &mut info, &spark);
+        assert!(value(&second).is_empty());
+        // An error of collecting the metrics is what get returns.
+        let mut failed = observed(&df2, 5);
+        failed.root_error_idx = Some(0);
+        resp.observed_metrics = vec![failed];
+        capture_execution(&mut resp, &mut info, &spark);
+        assert_eq!(
+            second.get().unwrap_err().message(),
+            "Observation error: invalid root_error_idx"
+        );
+        // That a streaming DataFrame is not observed, which the server tells, the live tests
+        // check.
     }
 
     #[test]
