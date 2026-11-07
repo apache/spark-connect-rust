@@ -5,7 +5,7 @@
 //! Spark Connect has no native "run this Rust code" UDF type. What it *does*
 //! have is the [`PythonUDF`](crate::udf) path: a cloudpickled `(callable,
 //! return_type)` tuple shipped inside a `CommonInlineUserDefinedFunction` and
-//! executed row-by-row on the Spark executors by a Python worker.
+//! executed on the Spark executors by a Python worker.
 //!
 //! This module leverages that path to run **Rust** UDFs, distributed on the
 //! cluster, without touching the Spark server:
@@ -13,21 +13,27 @@
 //! 1. The user compiles their Rust function to a WebAssembly module.
 //! 2. [`udf`] embeds the `.wasm` bytes and the signature and runs a packer script
 //!    **embedded in this crate** as `python -c` (so it executes as `__main__`),
-//!    which uses `cloudpickle` to serialize a `WasmScalarUDF` runner **by value**
+//!    which uses `cloudpickle` to serialize a runner **by value**
 //!    into the `command`. Running it as `__main__` is what makes cloudpickle embed
 //!    the runner by value, so there is no separate `pyspark_wasm_udf` pip package to
 //!    install on the client and the executors need only the `wasmtime` package.
 //! 3. On each executor the runner instantiates the module with `wasmtime` and
-//!    invokes the exported entrypoint once per input row.
+//!    invokes the exported entrypoint once per Arrow batch (with a batch
+//!    entrypoint, see [`UserDefinedFunction::with_batch_entrypoint`]) or once per
+//!    input row.
 //!
 //! # ABI
 //!
-//! Arguments and the result cross the WASM boundary as a little-endian,
-//! length-prefixed byte buffer (see [`AbiType`]): the runner encodes the row's
-//! arguments into linear memory (via the module's exported `spark_udf_alloc`),
-//! calls the entrypoint `fn(ptr, len) -> packed_ptr_len`, and decodes the
-//! result. This supports scalars, `bool`, strings, binary, arrays, and
-//! nullability — not just numbers.
+//! For a per-row entrypoint, arguments and the result cross the WASM boundary
+//! as a little-endian, length-prefixed byte buffer (see [`AbiType`]): the runner
+//! encodes the row's arguments into linear memory (via the module's exported
+//! `spark_udf_alloc`), calls the entrypoint `fn(ptr, len) -> packed_ptr_len`, and
+//! decodes the result. This supports scalars, `bool`, strings, binary, arrays,
+//! and nullability — not just numbers.
+//!
+//! A batch entrypoint, which the [`spark_wasm_udf`](https://docs.rs/apache-spark-connect-macros)
+//! macro generates for the signatures its docs list, instead takes the Arrow
+//! buffers of a whole batch and returns the result's Arrow buffers.
 //!
 //! # API
 //!
@@ -66,7 +72,7 @@ use crate::column::Column;
 use crate::expression::ExpressionNode;
 use crate::types::DataType;
 use crate::udf::{eval_type, CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
-use spark_connect_core::error::Result;
+use spark_connect_core::error::{Result, SparkError};
 
 /// The type of one WASM UDF argument or its result, describing how the value is
 /// encoded across the WASM boundary and which Spark SQL type it maps to.
@@ -161,11 +167,27 @@ impl AbiType {
             AbiType::Nullable(inner) => inner.to_spark_json(),
         }
     }
+
+    fn batch_supported(&self) -> bool {
+        match self {
+            AbiType::I32
+            | AbiType::I64
+            | AbiType::F32
+            | AbiType::F64
+            | AbiType::Bool
+            | AbiType::Str
+            | AbiType::Binary => true,
+            AbiType::Array(_) => false,
+            AbiType::Nullable(inner) => {
+                !matches!(**inner, AbiType::Array(_) | AbiType::Nullable(_))
+            }
+        }
+    }
 }
 
 /// The packer script, embedded at compile time. Run as `python -c <this>` (so it
-/// executes as `__main__`), which makes cloudpickle serialize the `WasmScalarUDF`
-/// runner by value automatically — no `pyspark_wasm_udf` pip package is needed on
+/// executes as `__main__`), which makes cloudpickle serialize the runner by value
+/// automatically — no `pyspark_wasm_udf` pip package is needed on
 /// the client (only a Python interpreter with `pyspark`) or on the executors (only
 /// `wasmtime`).
 const PACKER_SRC: &str = include_str!("wasm_packer.py");
@@ -204,7 +226,6 @@ impl PythonPacker {
     /// stdin and returning the raw `command` bytes from stdout. Running it as `-c`
     /// (i.e. `__main__`) is what lets cloudpickle embed the runner by value.
     fn run(&self, spec_json: &str) -> Result<Vec<u8>> {
-        use spark_connect_core::error::SparkError;
         let mut cmd = Command::new(&self.python_exe);
         cmd.arg("-c")
             .arg(PACKER_SRC)
@@ -280,7 +301,8 @@ fn pathsep() -> &'static str {
 ///   Spark output type.
 ///
 /// The returned [`UserDefinedFunction`] is callable on columns via
-/// [`UserDefinedFunction::call`].
+/// [`UserDefinedFunction::call`], and calls `entrypoint` once per row unless
+/// given a batch entrypoint with [`UserDefinedFunction::with_batch_entrypoint`].
 pub fn udf(
     name: impl Into<String>,
     wasm_module: impl Into<Vec<u8>>,
@@ -298,6 +320,7 @@ pub fn udf(
         // Arrow-optimized Python UDF: func is still called once per row
         // (see pyspark worker `wrap_arrow_batch_udf`), but IO is Arrow.
         eval_type: eval_type::SQL_ARROW_BATCHED_UDF,
+        batch_entrypoint: None,
         python_ver: default_python_ver(),
         packer: PythonPacker::default(),
     }
@@ -314,6 +337,7 @@ pub struct UserDefinedFunction {
     ret_type: AbiType,
     deterministic: bool,
     eval_type: i32,
+    batch_entrypoint: Option<String>,
     python_ver: String,
     packer: PythonPacker,
 }
@@ -327,9 +351,22 @@ impl UserDefinedFunction {
     }
 
     /// Override the Python evaluation type (default
-    /// [`SQL_ARROW_BATCHED_UDF`](eval_type::SQL_ARROW_BATCHED_UDF)).
+    /// [`SQL_ARROW_BATCHED_UDF`](eval_type::SQL_ARROW_BATCHED_UDF), or
+    /// [`SQL_SCALAR_ARROW_UDF`](eval_type::SQL_SCALAR_ARROW_UDF) after
+    /// [`with_batch_entrypoint`](Self::with_batch_entrypoint)). Only
+    /// `SQL_SCALAR_ARROW_UDF` uses the batch entrypoint, so setting
+    /// `SQL_ARROW_BATCHED_UDF` calls the UDF once per row.
     pub fn with_eval_type(mut self, value: i32) -> Self {
         self.eval_type = value;
+        self
+    }
+
+    /// Call `entrypoint`, a batch export generated by `#[spark_wasm_udf]`, once per
+    /// Arrow batch, by sending the UDF as a scalar Arrow UDF
+    /// ([`SQL_SCALAR_ARROW_UDF`](eval_type::SQL_SCALAR_ARROW_UDF)).
+    pub fn with_batch_entrypoint(mut self, entrypoint: impl Into<String>) -> Self {
+        self.batch_entrypoint = Some(entrypoint.into());
+        self.eval_type = eval_type::SQL_SCALAR_ARROW_UDF;
         self
     }
 
@@ -351,20 +388,48 @@ impl UserDefinedFunction {
     }
 
     /// Build the JSON spec handed to the Python packer.
-    fn build_spec(&self) -> String {
+    fn build_spec(&self) -> Result<String> {
+        let batch_entrypoint = if self.eval_type == eval_type::SQL_SCALAR_ARROW_UDF {
+            let Some(entrypoint) = &self.batch_entrypoint else {
+                return Err(SparkError::value_msg(format!(
+                    "WASM UDF '{}' has eval type SQL_SCALAR_ARROW_UDF, which needs a batch \
+                     entrypoint; set one with with_batch_entrypoint",
+                    self.name
+                )));
+            };
+            if self.arg_types.is_empty() {
+                return Err(SparkError::value_msg(format!(
+                    "WASM UDF '{}' has no arguments, so it cannot be called once per batch",
+                    self.name
+                )));
+            }
+            let mut types = self.arg_types.iter().chain([&self.ret_type]);
+            if let Some(ty) = types.find(|t| !t.batch_supported()) {
+                return Err(SparkError::value_msg(format!(
+                    "WASM UDF '{}' has type '{}', so it cannot be called once per batch; \
+                     call it per row with with_eval_type(SQL_ARROW_BATCHED_UDF)",
+                    self.name,
+                    ty.descriptor()
+                )));
+            }
+            Some(entrypoint)
+        } else {
+            None
+        };
         let spec = serde_json::json!({
             "wasm_b64": base64::engine::general_purpose::STANDARD.encode(&self.wasm_module),
             "entrypoint": self.entrypoint,
+            "batch_entrypoint": batch_entrypoint,
             "arg_types": self.arg_types.iter().map(|t| t.descriptor()).collect::<Vec<_>>(),
             "ret_type": self.ret_type.descriptor(),
             "output_type": self.ret_type.to_spark_json(),
         });
-        spec.to_string()
+        Ok(spec.to_string())
     }
 
     /// Build the cloudpickle-compatible `command` bytes by invoking the packer.
     fn build_command(&self) -> Result<Vec<u8>> {
-        self.packer.run(&self.build_spec())
+        self.packer.run(&self.build_spec()?)
     }
 
     /// Build the [`PythonUDFPayload`] carrying the pickled command.
@@ -564,15 +629,79 @@ mod tests {
         );
     }
 
+    fn spec_of(f: &UserDefinedFunction) -> serde_json::Value {
+        serde_json::from_str(&f.build_spec().unwrap()).unwrap()
+    }
+
     #[test]
     fn build_spec_encodes_signature_and_wasm() {
-        let f = sample();
-        let spec: serde_json::Value = serde_json::from_str(&f.build_spec()).unwrap();
+        let spec = spec_of(&sample());
         assert_eq!(spec["entrypoint"], "add_one");
         assert_eq!(spec["arg_types"], serde_json::json!(["i64"]));
         assert_eq!(spec["ret_type"], "i64");
         assert_eq!(spec["output_type"], "long");
         assert_eq!(spec["wasm_b64"], "AGFzbQEA");
+    }
+
+    #[test]
+    fn eval_type_decides_whether_the_spec_carries_the_batch_entrypoint() {
+        let batch = sample().with_batch_entrypoint("spark_batch_udf_add_one");
+        let per_row = batch
+            .clone()
+            .with_eval_type(eval_type::SQL_ARROW_BATCHED_UDF);
+        assert_eq!(batch.eval_type, eval_type::SQL_SCALAR_ARROW_UDF);
+        assert_eq!(
+            spec_of(&batch)["batch_entrypoint"],
+            "spark_batch_udf_add_one"
+        );
+        assert_eq!(per_row.eval_type, eval_type::SQL_ARROW_BATCHED_UDF);
+        assert_eq!(
+            spec_of(&per_row)["batch_entrypoint"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn scalar_arrow_eval_type_without_a_usable_batch_entrypoint_is_rejected() {
+        let no_entrypoint = sample().with_eval_type(eval_type::SQL_SCALAR_ARROW_UDF);
+        let no_args = udf("now", vec![0x00], "now", vec![], AbiType::I64)
+            .with_batch_entrypoint("spark_batch_udf_now");
+        let array_arg = udf(
+            "sum",
+            vec![0x00],
+            "sum",
+            vec![AbiType::Array(Box::new(AbiType::I64))],
+            AbiType::I64,
+        )
+        .with_batch_entrypoint("spark_batch_udf_sum");
+        let nested_option_ret = udf(
+            "wrap",
+            vec![0x00],
+            "wrap",
+            vec![AbiType::I64],
+            AbiType::Nullable(Box::new(AbiType::Nullable(Box::new(AbiType::I64)))),
+        )
+        .with_batch_entrypoint("spark_batch_udf_wrap");
+        let option_array_arg = udf(
+            "first",
+            vec![0x00],
+            "first",
+            vec![AbiType::Nullable(Box::new(AbiType::Array(Box::new(
+                AbiType::I64,
+            ))))],
+            AbiType::I64,
+        )
+        .with_batch_entrypoint("spark_batch_udf_first");
+        for (f, expected) in [
+            (no_entrypoint, "needs a batch entrypoint"),
+            (no_args, "has no arguments"),
+            (array_arg, "has type 'array:i64'"),
+            (nested_option_ret, "has type 'option:option:i64'"),
+            (option_array_arg, "has type 'option:array:i64'"),
+        ] {
+            let err = f.to_payload().unwrap_err().message();
+            assert!(err.contains(expected), "{err}");
+        }
     }
 
     /// End-to-end packer test. Requires only a Python interpreter with `pyspark`

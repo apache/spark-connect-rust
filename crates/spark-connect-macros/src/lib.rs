@@ -6,8 +6,8 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
-    parse_macro_input, FnArg, GenericArgument, Item, ItemFn, ItemMod, PathArguments, ReturnType,
-    Type,
+    parse_macro_input, FnArg, GenericArgument, Item, ItemFn, ItemMod, Pat, PathArguments,
+    ReturnType, Type,
 };
 
 /// Turn a module of plain Rust functions into Spark UDFs backed by WebAssembly.
@@ -24,6 +24,12 @@ use syn::{
 ///   UserDefinedFunction` for advanced configuration — both with the Spark
 ///   signature **inferred** from the Rust signature and the crate's own compiled
 ///   wasm module embedded.
+///
+/// A function whose arguments and result are all `i32`, `i64`, `f32`, `f64`,
+/// `bool`, `String`, `Vec<u8>`, or one `Option` of those also gets a batch
+/// export, and its builder sends it as a scalar Arrow UDF that Spark calls once
+/// per Arrow batch. `.with_eval_type(spark_connect::udf::eval_type::SQL_ARROW_BATCHED_UDF)`
+/// on the builder calls it once per row instead, like functions with other types.
 ///
 /// ```ignore
 /// use spark_connect_macros::spark_wasm_udf;
@@ -82,6 +88,19 @@ fn abi_type(ty: &Type) -> Result<proc_macro2::TokenStream, syn::Error> {
     ))
 }
 
+fn batch_supported(ty: &Type) -> bool {
+    if let Some(inner) = generic_inner(ty, "Option") {
+        return generic_inner(inner, "Option").is_none() && batch_supported(inner);
+    }
+    if let Some(inner) = generic_inner(ty, "Vec") {
+        return path_ident(inner).as_deref() == Some("u8");
+    }
+    matches!(
+        path_ident(ty).as_deref(),
+        Some("i32" | "i64" | "f32" | "f64" | "bool" | "String")
+    )
+}
+
 /// The last path segment ident of a plain type path (`i64`, `String`, ...).
 fn path_ident(ty: &Type) -> Option<String> {
     match ty {
@@ -109,6 +128,8 @@ fn generic_inner<'a>(ty: &'a Type, wrapper: &str) -> Option<&'a Type> {
 struct Udf {
     name: syn::Ident,
     export: syn::Ident,
+    batch_export: Option<syn::Ident>,
+    arg_names: Vec<String>,
     arg_tys: Vec<Type>,
     ret_ty: Type,
 }
@@ -127,10 +148,17 @@ fn collect_udf(func: &ItemFn) -> Result<Udf, syn::Error> {
         ));
     }
     let name = func.sig.ident.clone();
+    let mut arg_names = Vec::new();
     let mut arg_tys = Vec::new();
-    for input in &func.sig.inputs {
+    for (i, input) in func.sig.inputs.iter().enumerate() {
         match input {
-            FnArg::Typed(pt) => arg_tys.push((*pt.ty).clone()),
+            FnArg::Typed(pt) => {
+                arg_names.push(match &*pt.pat {
+                    Pat::Ident(p) => p.ident.to_string(),
+                    _ => format!("#{i}"),
+                });
+                arg_tys.push((*pt.ty).clone());
+            }
             FnArg::Receiver(r) => {
                 return Err(syn::Error::new_spanned(
                     r,
@@ -155,9 +183,16 @@ fn collect_udf(func: &ItemFn) -> Result<Udf, syn::Error> {
         }
     };
     let export = format_ident!("spark_udf_{}", name);
+    let batch_export = arg_tys
+        .iter()
+        .chain([&ret_ty])
+        .all(batch_supported)
+        .then(|| format_ident!("spark_batch_udf_{}", name));
     Ok(Udf {
         name,
         export,
+        batch_export,
+        arg_names,
         arg_tys,
         ret_ty,
     })
@@ -192,6 +227,8 @@ fn expand(mut module: ItemMod) -> Result<proc_macro2::TokenStream, syn::Error> {
         let Udf {
             name,
             export,
+            batch_export,
+            arg_names,
             arg_tys,
             ret_ty,
         } = u;
@@ -211,6 +248,30 @@ fn expand(mut module: ItemMod) -> Result<proc_macro2::TokenStream, syn::Error> {
                 crate::spark_wasm_rt::finish(__o)
             }
         });
+        if let Some(batch_export) = batch_export {
+            let vars: Vec<syn::Ident> = (0..arg_tys.len())
+                .map(|i| format_ident!("__a{i}"))
+                .collect();
+            let gets = arg_tys.iter().zip(&vars).enumerate().map(|(i, (ty, v))| {
+                quote! {
+                    let #v: #ty =
+                        <#ty as crate::spark_wasm_rt::batch::FromCol>::get(&__cols[#i], __i)
+                            .ok_or(#i)?;
+                }
+            });
+            wrappers.push(quote! {
+                #[cfg(target_arch = "wasm32")]
+                #[no_mangle]
+                pub extern "C" fn #batch_export(__desc: u32) -> u32 {
+                    crate::spark_wasm_rt::batch::run(__desc, &[#(#arg_names),*], |__cols, __i, __out| {
+                        #(#gets)*
+                        let __r: #ret_ty = #name(#(#vars),*);
+                        crate::spark_wasm_rt::batch::ToCol::push(&__r, __out);
+                        ::core::result::Result::Ok(())
+                    })
+                }
+            });
+        }
     }
     if let Some((_, content)) = &mut module.content {
         for w in wrappers {
@@ -231,14 +292,20 @@ fn expand(mut module: ItemMod) -> Result<proc_macro2::TokenStream, syn::Error> {
         let Udf {
             name,
             export,
+            batch_export,
             arg_tys,
             ret_ty,
+            ..
         } = u;
         let name_str = name.to_string();
         let export_str = export.to_string();
         let builder = format_ident!("{}_udf", name);
         let arg_abis: Vec<_> = arg_tys.iter().map(abi_type).collect::<Result<_, _>>()?;
         let ret_abi = abi_type(ret_ty)?;
+        let with_batch = batch_export.as_ref().map(|b| {
+            let b = b.to_string();
+            quote!(.with_batch_entrypoint(#b))
+        });
         let params: Vec<syn::Ident> = (0..arg_tys.len())
             .map(|i| format_ident!("__a{i}"))
             .collect();
@@ -262,6 +329,7 @@ fn expand(mut module: ItemMod) -> Result<proc_macro2::TokenStream, syn::Error> {
                     ::std::vec![#(#arg_abis),*],
                     #ret_abi,
                 )
+                #with_batch
             }
 
             #[doc = #call_doc]
@@ -290,4 +358,34 @@ fn expand(mut module: ItemMod) -> Result<proc_macro2::TokenStream, syn::Error> {
             #(#ctors)*
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::batch_supported;
+
+    #[test]
+    fn batch_supported_accepts_scalars_and_one_option_level_only() {
+        for (ty, expected) in [
+            ("i32", true),
+            ("i64", true),
+            ("f32", true),
+            ("f64", true),
+            ("bool", true),
+            ("String", true),
+            ("std::string::String", true),
+            ("Vec<u8>", true),
+            ("Option<i64>", true),
+            ("Option<String>", true),
+            ("Option<Vec<u8>>", true),
+            ("Vec<i64>", false),
+            ("Vec<String>", false),
+            ("Vec<Option<u8>>", false),
+            ("Option<Vec<i64>>", false),
+            ("Option<Option<i64>>", false),
+        ] {
+            let parsed: syn::Type = syn::parse_str(ty).unwrap();
+            assert_eq!(batch_supported(&parsed), expected, "{ty}");
+        }
+    }
 }

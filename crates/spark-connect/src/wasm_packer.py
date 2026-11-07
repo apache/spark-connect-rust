@@ -18,19 +18,22 @@
 
 The Rust client runs this source as ``python -c <this>`` (so it executes as
 ``__main__``), feeding a JSON spec on stdin and reading the raw cloudpickled
-``command`` bytes from stdout. Because the ``WasmScalarUDF`` runner is defined
-here in ``__main__``, cloudpickle serializes it **by value** automatically -- so
+``command`` bytes from stdout. Because the runners (``WasmScalarUDF``, called
+per row, and ``WasmArrowUDF``, called per Arrow batch) are defined here in
+``__main__``, cloudpickle serializes them **by value** automatically -- so
 neither a separate ``pyspark_wasm_udf`` pip package on the client nor this module
 on the executors is required. Executors need only the ``wasmtime`` package (and
-Spark's own Python worker) to unpickle and run the ``(WasmScalarUDF, return_type)``
-tuple. The only client-side requirement is a Python interpreter with ``pyspark``
-(for its vendored ``cloudpickle`` and the pure-Python type parser).
+Spark's own Python worker, with the ``pyarrow`` its Arrow UDF eval types need) to
+unpickle and run the ``(runner, return_type)`` tuple. The only client-side
+requirement is a Python interpreter with ``pyspark`` (for its vendored
+``cloudpickle`` and the pure-Python type parser).
 
 Input JSON (stdin)::
 
     {
       "wasm_b64":    "<base64 of the .wasm module>",
       "entrypoint":  "add_one",
+      "batch_entrypoint": null,                       # or the batch export
       "arg_types":   ["i64", "array:string", ...],   # ABI descriptors
       "ret_type":    "i64",
       "output_type": "long"                           # Spark type-JSON value
@@ -46,6 +49,8 @@ The binary ABI (little-endian, mirroring ``spark_connect::wasm_udf::AbiType``):
 
 The module exports ``spark_udf_alloc(len)->ptr`` / ``spark_udf_dealloc(ptr,len)``
 and each UDF as ``fn(args_ptr, args_len) -> (ptr << 32 | len)`` of the result.
+A batch entrypoint instead takes the Arrow buffers of a whole batch; its ABI is
+documented with the runtime in ``apache-spark-connect-build``.
 """
 
 import base64
@@ -242,7 +247,185 @@ class WasmScalarUDF:
         return value
 
 
-# --- packing: (WasmScalarUDF, return_type) -> cloudpickled command bytes -----
+# --- the picklable, per-batch callable ---------------------------------------
+
+
+def _arrow_type(desc: str) -> Any:
+    import pyarrow as pa
+
+    kind, inner = _split(desc)
+    return {
+        "i32": pa.int32(),
+        "i64": pa.int64(),
+        "f32": pa.float32(),
+        "f64": pa.float64(),
+        "bool": pa.bool_(),
+        "string": pa.string(),
+        "binary": pa.binary(),
+    }[inner if kind == "option" else desc]
+
+
+# Scratch offsets are passed as wasm i32s, which wasmtime wraps silently.
+_MAX_BATCH_BYTES = 2**31 - 1
+
+
+class WasmArrowUDF(WasmScalarUDF):
+    """A per-batch callable for a scalar Arrow UDF (``SQL_SCALAR_ARROW_UDF``)."""
+
+    def _ensure(self):
+        if self._rt is not None:
+            return self._rt
+        import atexit
+        import hashlib
+
+        try:
+            import wasmtime
+        except ImportError as exc:  # pragma: no cover - depends on executor env
+            raise ImportError(
+                "The 'wasmtime' package is required to run WASM UDFs on the "
+                "Spark executors. Install it in the workers' Python env."
+            ) from exc
+
+        # Lives on `sys` because this class is unpickled by value per task, so its
+        # module globals don't outlive the task, while the worker process does.
+        # Dropped at exit because wasmtime's finalizers fail during interpreter teardown.
+        if not hasattr(sys, "_spark_connect_wasm_udf_engine"):
+            sys._spark_connect_wasm_udf_engine = wasmtime.Engine()
+            sys._spark_connect_wasm_udf_modules = {}
+            atexit.register(delattr, sys, "_spark_connect_wasm_udf_engine")
+            atexit.register(delattr, sys, "_spark_connect_wasm_udf_modules")
+        engine = sys._spark_connect_wasm_udf_engine
+        modules = sys._spark_connect_wasm_udf_modules
+        key = hashlib.sha256(self.wasm).hexdigest()
+        if key not in modules:
+            modules[key] = wasmtime.Module(engine, self.wasm)
+        store = wasmtime.Store(engine)
+        exports = wasmtime.Instance(store, modules[key], []).exports(store)
+        entry = exports.get(self.entrypoint)
+        if entry is None:
+            raise ValueError(f"WASM module does not export '{self.entrypoint}'")
+        self._rt = {
+            "store": store,
+            "memory": exports["memory"],
+            "scratch": exports["spark_batch_scratch"],
+            "entry": entry,
+            "scratch_ptr": 0,
+            "scratch_len": 0,
+        }
+        return self._rt
+
+    def __call__(self, *arrays: Any) -> Any:
+        import pyarrow as pa
+
+        if len(arrays) != len(self.arg_types):
+            raise ValueError(
+                f"WASM UDF '{self.entrypoint}' expected {len(self.arg_types)} "
+                f"argument(s), got {len(arrays)}"
+            )
+        lengths = [len(a) for a in arrays]
+        if len(set(lengths)) > 1:
+            raise ValueError(
+                f"WASM UDF '{self.entrypoint}' got arguments of different lengths: {lengths}"
+            )
+        out_type = _arrow_type(self.ret_type)
+        n = lengths[0]
+        if n == 0:
+            return pa.array([], type=out_type)
+
+        cols = []
+        for desc, a in zip(self.arg_types, arrays):
+            if isinstance(a, pa.ChunkedArray):
+                a = a.combine_chunks()
+            expected = _arrow_type(desc)
+            if a.type != expected:
+                a = a.cast(expected)
+            if a.offset:
+                a = pa.concat_arrays([a])
+            bufs = a.buffers()
+            validity = bufs[0] if a.null_count else None
+            if len(bufs) == 3:
+                cols.append((validity, bufs[2], bufs[1]))
+            else:
+                cols.append((validity, bufs[1], None))
+
+        size = (8 + 20 * len(cols) + 7) & ~7
+        placed = []
+        for col in cols:
+            slots = []
+            for buf in col:
+                if buf is None or buf.size == 0:
+                    slots.append((0, None))
+                else:
+                    slots.append((size, buf))
+                    size = (size + buf.size + 7) & ~7
+            placed.append(slots)
+        if size > _MAX_BATCH_BYTES:
+            raise ValueError(
+                f"WASM UDF '{self.entrypoint}' got a batch of {size} bytes, more than "
+                f"the {_MAX_BATCH_BYTES} a WASM module can take; lower "
+                "spark.sql.execution.arrow.maxRecordsPerBatch"
+            )
+
+        rt = self._ensure()
+        import wasmtime
+
+        try:
+            return self._call(rt, n, placed, size, out_type)
+        except (wasmtime.Trap, wasmtime.WasmtimeError):
+            # A trap can leave the module's state broken (e.g. a RefCell left borrowed).
+            self._rt = None
+            raise
+
+    def _call(self, rt: dict, n: int, placed: list, size: int, out_type: Any) -> Any:
+        import ctypes
+
+        import pyarrow as pa
+
+        store, memory = rt["store"], rt["memory"]
+        if size > rt["scratch_len"]:
+            rt["scratch_ptr"] = rt["scratch"](store, size) & 0xFFFFFFFF
+            rt["scratch_len"] = size
+        sp = rt["scratch_ptr"]
+        base = ctypes.addressof(memory.data_ptr(store).contents)
+
+        words = [n, len(placed)]
+        for (vo, vb), (xo, xb), (oo, ob) in placed:
+            words += [
+                sp + vo if vb else 0,
+                sp + xo if xb else 0,
+                xb.size if xb else 0,
+                sp + oo if ob else 0,
+                ob.size if ob else 0,
+            ]
+            for o, b in ((vo, vb), (xo, xb), (oo, ob)):
+                if b is not None:
+                    ctypes.memmove(base + sp + o, b.address, b.size)
+        desc = struct.pack(f"<{len(words)}I", *words)
+        ctypes.memmove(base + sp, desc, len(desc))
+
+        out = rt["entry"](store, sp) & 0xFFFFFFFF
+        base = ctypes.addressof(memory.data_ptr(store).contents)
+        status, nulls, vp, vl, xp, xl, op, ol = struct.unpack(
+            "<8I", ctypes.string_at(base + out, 32)
+        )
+        if status != 0:
+            message = ctypes.string_at(base + vp, vl).decode("utf-8", "replace")
+            raise ValueError(f"WASM UDF '{self.entrypoint}': {message}")
+
+        def copy_out(ptr: int, size: int) -> Any:
+            buf = pa.allocate_buffer(size)
+            if size:
+                ctypes.memmove(buf.address, base + ptr, size)
+            return buf
+
+        buffers = [copy_out(vp, vl) if vp else None]
+        if out_type.num_buffers == 3:
+            buffers.append(copy_out(op, ol))
+        buffers.append(copy_out(xp, xl))
+        return pa.Array.from_buffers(out_type, n, buffers, null_count=nulls)
+
+
+# --- packing: (runner, return_type) -> cloudpickled command bytes ------------
 
 
 def build_command(spec: dict) -> bytes:
@@ -256,9 +439,11 @@ def build_command(spec: dict) -> bytes:
     from pyspark.sql.types import _parse_datatype_json_value
 
     wasm = base64.b64decode(spec["wasm_b64"])
-    runner = WasmScalarUDF(
+    batch_entrypoint = spec.get("batch_entrypoint")
+    runner_class = WasmArrowUDF if batch_entrypoint else WasmScalarUDF
+    runner = runner_class(
         wasm,
-        spec["entrypoint"],
+        batch_entrypoint or spec["entrypoint"],
         spec["arg_types"],
         spec["ret_type"],
     )
