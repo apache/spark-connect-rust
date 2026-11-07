@@ -1299,6 +1299,7 @@ def test_explain_prints_with_python_print_as_pyspark(session):
     # sys.stdout, which redirect_stdout captures, and return None.
     import contextlib
     import io
+    import time
 
     df = session.range(1)
     printed = io.StringIO()
@@ -1314,7 +1315,12 @@ def test_explain_prints_with_python_print_as_pyspark(session):
         .writeStream.format("memory").queryName("explain_prints").start()
     )
     try:
-        query.processAllAvailable()
+        # The plan of a batch of the query, after its first. processAllAvailable() would wait
+        # for a rate source to have no new rows, which a slow machine never reaches.
+        for _ in range(240):
+            if query.lastProgress is not None:
+                break
+            time.sleep(0.25)
         printed = io.StringIO()
         with contextlib.redirect_stdout(printed):
             assert query.explain(True) is None
