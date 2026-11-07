@@ -1159,22 +1159,31 @@ def test_non_arrow_input_does_not_import_pyarrow(protocol, monkeypatch, data):
         assert state["config_requests"] == []
 
 
-def test_add_artifacts_names_each_artifact_as_pyspark(protocol, tmp_path):
+def test_add_artifacts_names_each_artifact_as_pyspark(protocol, tmp_path, monkeypatch):
+    import sys
+
     for name in ["a.jar", "A.class", "m.py", "b.zip", "n.txt"]:
         (tmp_path / name).write_bytes(name.encode())
+    monkeypatch.setattr(sys, "path", list(sys.path))
     with _arrow_input_service(protocol, allow_file_artifacts=True) as (spark, state):
-        # As PySpark's ArtifactManager names them, by the flags and the file extension.
-        spark.addArtifacts(str(tmp_path / "a.jar"), str(tmp_path / "A.class"))
+        # As PySpark's ArtifactManager names them, by the flags and the file extension. A class
+        # file is uploaded only with the file flag: PySpark refuses it otherwise.
+        spark.addArtifacts(str(tmp_path / "a.jar"))
         spark.addArtifacts(str(tmp_path / "m.py"), pyfile=True)
+        spark.addArtifacts(str(tmp_path / "b.zip"), pyfile=True)
         spark.addArtifacts(str(tmp_path / "b.zip") + "#alias", archive=True)
         spark.addArtifact(str(tmp_path / "n.txt"), file=True)
+        spark.addArtifacts(str(tmp_path / "A.class"), file=True)
         assert state["cache"] == {
             "jars/a.jar": b"a.jar",
-            "classes/A.class": b"A.class",
             "pyfiles/m.py": b"m.py",
+            "pyfiles/b.zip": b"b.zip",
             "archives/b.zip#alias": b"b.zip",
             "files/n.txt": b"n.txt",
+            "files/A.class": b"A.class",
         }
+        # As PySpark's _parse_artifacts, a zip of pyfile is importable by the client.
+        assert sys.path[1] == str(tmp_path / "b.zip")
 
 
 # Signed-int64 pandas input uses the same Arrow importer and mock service.

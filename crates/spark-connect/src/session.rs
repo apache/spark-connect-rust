@@ -661,7 +661,8 @@ impl SparkSession {
 
     /// Add local files, or `file:` URIs, as artifacts of the session, mirroring
     /// `pyspark.sql.SparkSession.addArtifacts(*path)`: a `.jar` is added to the classpath and
-    /// a `.class` to the classes; any other file is not supported without a flag of
+    /// a `.class` to the classes (a Rust extension: PySpark does not upload class files); any
+    /// other file is not supported without a flag of
     /// [`add_artifacts_with`](Self::add_artifacts_with).
     pub fn add_artifacts(&self, paths: &[&str]) -> Result<()> {
         self.add_artifacts_with(paths, false, false, false)

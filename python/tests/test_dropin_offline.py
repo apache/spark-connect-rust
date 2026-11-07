@@ -8811,6 +8811,81 @@ def test_merge_into_writer_mutates_and_returns_self(offline_spark):
     assert m.whenMatched().updateAll() is m
 
 
+# --------------------------------------------------------------------------- artifact uploads that stream their chunks, and class files
+
+def test_add_artifacts_refuses_the_paths_pyspark_refuses(tmp_path):
+    # Each error is PySpark's for the path and the flags, raised before any upload.
+    import errno
+
+    from pyspark.errors import PySparkRuntimeError, PySparkValueError
+
+    for name in ["A.class", "m.py", "n.txt", "b.tar.gz", "b.zip", "b#c.zip"]:
+        (tmp_path / name).write_bytes(b"x")
+    (tmp_path / "dirx.jar").mkdir()
+    (tmp_path / "sub").mkdir()
+
+    def at(name):
+        return str(tmp_path / name)
+
+    def unsupported(name):
+        return {"operation": f"{at(name)} file format"}
+
+    cases = [
+        # A class file is refused, unless it is a file.
+        (at("A.class"), {}, PySparkRuntimeError, "UNSUPPORTED_OPERATION", unsupported("A.class")),
+        (at("A.class"), {"pyfile": True}, PySparkRuntimeError, "UNSUPPORTED_OPERATION", unsupported("A.class")),
+        (at("A.class"), {"archive": True}, PySparkRuntimeError, "UNSUPPORTED_OPERATION", unsupported("A.class")),
+        # A flag takes only its formats, and a fragment names only an archive.
+        (at("m.py"), {"archive": True}, PySparkRuntimeError, "UNSUPPORTED_OPERATION", unsupported("m.py")),
+        (at("n.txt"), {"pyfile": True}, PySparkRuntimeError, "UNSUPPORTED_OPERATION", unsupported("n.txt")),
+        (at("b.tar.gz"), {"pyfile": True}, PySparkRuntimeError, "UNSUPPORTED_OPERATION", unsupported("b.tar.gz")),
+        (at("b.zip") + "#alias", {}, PySparkRuntimeError, "UNSUPPORTED_OPERATION", unsupported("b.zip")),
+        (at("b%23c.zip") + "#alias", {"archive": True}, PySparkValueError, "VALUE_ALLOWED",
+         {"arg_name": "artifact path", "disallowed_value": "#"}),
+        # Remote URIs are refused whatever the flags.
+        ("s3://bucket/a.jar", {}, PySparkRuntimeError, "UNSUPPORTED_OPERATION", {"operation": "s3 scheme"}),
+        ("hdfs://h/a.jar", {"file": True}, PySparkRuntimeError, "UNSUPPORTED_OPERATION",
+         {"operation": "hdfs scheme"}),
+        # A path without a suffix is a format, even when it is a directory.
+        (at("sub"), {}, PySparkRuntimeError, "UNSUPPORTED_OPERATION", unsupported("sub")),
+    ]
+    spark = _offline_session()
+    for path, flags, error_type, condition, parameters in cases:
+        with pytest.raises(error_type) as error:
+            spark.addArtifacts(path, **flags)
+        assert error.value.getCondition() == condition, path
+        assert error.value.getMessageParameters() == parameters, path
+    # A file that Python cannot open is the error of open, as PySpark's LocalFile raises it.
+    for path, flags, expected in [
+        (at("sub"), {"file": True}, f"[Errno 21] Is a directory: '{at('sub')}'"),
+        (at("dirx.jar"), {"archive": True}, f"[Errno 21] Is a directory: '{at('dirx.jar')}'"),
+        (at("missing.jar"), {}, f"[Errno 2] No such file or directory: '{at('missing.jar')}'"),
+        ("file://" + at("missing.jar"), {"pyfile": True},
+         f"[Errno 2] No such file or directory: '{at('missing.jar')}'"),
+    ]:
+        with pytest.raises(OSError) as error:
+            spark.addArtifacts(path, **flags)
+        assert str(error.value) == expected, path
+        assert error.value.errno in (errno.ENOENT, errno.EISDIR), path
+
+
+def test_add_artifacts_puts_a_pyfile_zip_on_the_client_path_before_opening_it(tmp_path, monkeypatch):
+    # As PySpark's _parse_artifacts: a zip, egg or jar of pyfile is put on sys.path before its
+    # file is opened, and a Python file is not.
+    import sys
+
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    spark = _offline_session()
+    zipped = str(tmp_path / "missing.zip")
+    with pytest.raises(FileNotFoundError):
+        spark.addArtifacts(zipped, pyfile=True)
+    assert sys.path[1] == zipped
+    before = list(sys.path)
+    with pytest.raises(FileNotFoundError):
+        spark.addArtifacts(str(tmp_path / "missing.py"), pyfile=True)
+    assert sys.path == before
+
+
 # --------------------------------------------------------------------------- reader schema
 
 def _sent_read_schema(request):
