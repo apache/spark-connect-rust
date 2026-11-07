@@ -2061,9 +2061,13 @@ def test_pandas_naive_timestamp_utc_ipc(protocol, monkeypatch):
 
 @pytest.mark.parametrize("dtype", ["datetime64[ns]", "datetime64[us]", "datetime64[ms]",
                                     "datetime64[s]", "object"])
-def test_pandas_timestamp_eligibility(dtype):
+def test_pandas_timestamp_eligibility(monkeypatch, dtype):
+    import time
     from pyspark.sql import types as T
     from pyspark.sql._pandas_input import timestamp_columns
+
+    monkeypatch.setenv("TZ", "UTC")
+    monkeypatch.setattr(time, "tzname", ("UTC", "UTC"))
     frame = pd.DataFrame({"a": pd.Series([datetime(2020, 1, 1), None], dtype=dtype)})
     schema = T.StructType([T.StructField("a", T.TimestampType())])
     assert (timestamp_columns(frame, schema) is not None) == (dtype in (
@@ -2075,20 +2079,74 @@ def test_pandas_timestamp_eligibility(dtype):
 
 
 def test_pandas_timestamp_precision_and_timezone_fallback(monkeypatch):
+    import time
     from pyspark.sql import types as T
     from pyspark.sql._pandas_input import timestamp_columns, prepare_timestamp_table
+
+    monkeypatch.setenv("TZ", "UTC")
+    monkeypatch.setattr(time, "tzname", ("UTC", "UTC"))
     schema = T.StructType([T.StructField("a", T.TimestampType())])
     for nanos in (-1, 1, 1001):
         frame = pd.DataFrame({"a": pd.to_datetime([nanos, None], unit="ns")})
         assert timestamp_columns(frame, schema) is None
     frame = pd.DataFrame({"a": pd.to_datetime([0, None], unit="ns")})
     columns = timestamp_columns(frame, schema)
-    monkeypatch.setenv("TZ", "UTC")
+    assert columns is not None
     assert prepare_timestamp_table(columns, schema, "America/Los_Angeles") is None
     monkeypatch.setenv("TZ", "America/Los_Angeles")
     assert prepare_timestamp_table(columns, schema, "UTC") is None
     monkeypatch.delenv("TZ")
     assert prepare_timestamp_table(columns, schema, "UTC") is None
+
+
+@pytest.mark.parametrize("unit,mixed", [("ns", False), ("us", True)])
+@pytest.mark.parametrize("host_tz,host_names", [
+    (None, ("UTC", "UTC")),
+    ("America/Los_Angeles", ("PST", "PDT")),
+    ("UTC", ("PST", "PDT")),
+], ids=["unset-tz", "non-utc-tz", "mismatched-host-zone"])
+@pytest.mark.parametrize("config_error", [False, True])
+def test_timestamp_non_utc_host_keeps_row_path_without_config(
+    protocol, monkeypatch, unit, mixed, host_tz, host_names, config_error
+):
+    import json
+    import time
+
+    if host_tz is None:
+        monkeypatch.delenv("TZ", raising=False)
+    else:
+        monkeypatch.setenv("TZ", host_tz)
+    monkeypatch.setattr(time, "tzname", host_names)
+    micros = [-2000000, 0, 123456, None]
+    columns = {}
+    if mixed:
+        columns["aware"] = pd.to_datetime(micros, unit="us", utc=True).as_unit(unit)
+    columns["naive"] = pd.to_datetime(micros, unit="us").as_unit(unit)
+    frame = pd.DataFrame(columns)
+    schema = T.StructType([
+        T.StructField(f"renamed_{name}", T.TimestampType(), True, {"source": name})
+        for name in columns
+    ])
+    # Match the row path's naive instants using datetime.timestamp(), independently
+    # of the mocked timezone eligibility inputs above.
+    expected = [
+        [None if pd.isna(value) else round(value.to_pydatetime().timestamp() * 1000000)
+         for value in frame[name]]
+        for name in columns
+    ]
+    with _arrow_input_service(protocol, config_error=config_error) as (spark, state):
+        spark.createDataFrame(frame, schema).toArrow()
+        assert state["config_requests"] == []
+        assert state["uploads"] == 0
+        assert state["column_names"] == schema.names
+        assert len(state["input_tables"]) == 1
+        table = state["input_tables"][0]
+        assert table.num_rows == len(micros)
+        for column, values in zip(table.columns, expected):
+            assert column.type == pa.timestamp("us", tz="UTC")
+            assert column.cast(pa.int64()).to_pylist() == values
+            assert column.is_null().to_pylist() == [value is None for value in values]
+        assert json.loads(state["relations"][0].local_relation.schema) == json.loads(schema.json())
 
 
 @pytest.mark.parametrize("has_null", [False, True])
@@ -2139,7 +2197,7 @@ def test_timestamp_nonnullable_nat_keeps_local_error_before_config(protocol, con
 
 @pytest.mark.parametrize("unit,aware", [("ns", True), ("us", False)])
 @pytest.mark.parametrize("location,method", [
-    ("instance", "notna"), ("instance", "astype"),
+    ("instance", "notna"), ("instance", "astype"), ("instance", "where"),
     ("class", "notna"), ("class", "astype"), ("class", "where"),
 ])
 @pytest.mark.parametrize("behavior", ["mutate", "raise"])
@@ -2147,9 +2205,12 @@ def test_timestamp_custom_normalization_hooks_keep_native_row_path(
     protocol, monkeypatch, unit, aware, location, method, behavior
 ):
     import json
+    import time
     from types import MethodType
     import pyspark.sql._pandas_input as helper
 
+    monkeypatch.setenv("TZ", "UTC")
+    monkeypatch.setattr(time, "tzname", ("UTC", "UTC"))
     values = pd.to_datetime([-2000000, -1000000, 0, 1000000, None], unit="us", utc=aware)
     frame = pd.DataFrame({"original": values.as_unit(unit)})
     schema = T.StructType([
@@ -2157,9 +2218,12 @@ def test_timestamp_custom_normalization_hooks_keep_native_row_path(
     ])
     original = getattr(pd.DataFrame, method)
     calls, tables = [], []
+    # astype returns a new frame, so the row path never calls an instance where.
+    invokes_hook = (location, method) != ("instance", "where")
     expected = [None if pd.isna(value) else round(value.to_pydatetime().timestamp() * 1000000)
                 for value in frame["original"]]
-    expected[0] = None if method == "notna" else 7000000
+    if invokes_hook:
+        expected[0] = None if method == "notna" else 7000000
     message = f"custom timestamp {method} precedes configuration"
 
     def customized(self, *args, **kwargs):
@@ -2184,7 +2248,7 @@ def test_timestamp_custom_normalization_hooks_keep_native_row_path(
             if bypass:
                 dispatch.setattr(helper, "timestamp_columns", lambda *_: None)
             with _arrow_input_service(protocol, config_error=True) as (spark, state):
-                if behavior == "raise":
+                if behavior == "raise" and invokes_hook:
                     with pytest.raises(RuntimeError, match=message):
                         spark.createDataFrame(frame, schema)
                     assert state["relations"] == []
@@ -2199,10 +2263,10 @@ def test_timestamp_custom_normalization_hooks_keep_native_row_path(
                         value is None for value in expected]
                     assert json.loads(state["relations"][0].local_relation.schema) == json.loads(schema.json())
                     tables.append(table)
-                assert calls == [method]
+                assert calls == ([method] if invokes_hook else [])
                 assert state["config_requests"] == []
                 assert state["uploads"] == 0
-    if behavior == "mutate":
+    if behavior == "mutate" or not invokes_hook:
         assert tables[0].equals(tables[1], check_metadata=True)
 
 

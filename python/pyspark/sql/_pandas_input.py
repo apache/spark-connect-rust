@@ -407,6 +407,10 @@ def timestamp_columns(frame, schema):
         if unit == "ns" and np.any(column.array.asi8[column.notna()] % 1000):
             return None
         columns.append(column)
+    # Reject unsupported host zones before Rust queries the session time zone.
+    # Their row fallback builds a local relation without any configuration RPC.
+    if not timestamp_columns_are_aware(columns) and not _timestamp_host_is_utc():
+        return None
     return columns
 
 
@@ -417,20 +421,26 @@ def timestamp_columns_are_aware(columns):
     return all(type(column.dtype) is DatetimeTZDtype for column in columns)
 
 
+def _timestamp_host_is_utc():
+    """Require an explicit UTC host setting and an initialized UTC runtime zone."""
+    import os
+    import time
+
+    return os.environ.get("TZ") == "UTC" and time.tzname == ("UTC", "UTC")
+
+
 def prepare_timestamp_table(columns, schema, timezone):
     """Preserve instants without row materialization or a host-zone conversion.
 
     Aware columns carry their own timezone. Naive columns are deliberately
-    restricted to UTC host/session pairs: the existing row path uses the host
-    zone, unlike Python Connect's session-zone conversion (and DST fold policy).
+    restricted to literal ``TZ=UTC`` and session ``UTC``, with a UTC runtime
+    zone: the existing row path uses the host zone, unlike Python Connect's
+    session-zone conversion (and DST fold policy).
     """
-    import os
-    import time
     import pyarrow as pa
 
     if not timestamp_columns_are_aware(columns):
-        if (timezone != "UTC" or os.environ.get("TZ") != "UTC"
-                or time.tzname != ("UTC", "UTC")):
+        if timezone != "UTC" or not _timestamp_host_is_utc():
             return None
     return pa.Table.from_arrays(
         [pa.array(column, type=pa.timestamp("us", tz="UTC"), from_pandas=True)
