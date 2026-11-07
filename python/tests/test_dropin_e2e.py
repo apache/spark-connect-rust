@@ -104,6 +104,24 @@ def test_conf_get_with_a_none_default(session):
         session.conf.get(key)
 
 
+def test_user_id_of_the_connection_string_reaches_every_request_as_pyspark():
+    # The server keys a session by the user ID in each request. As in PySpark, the
+    # queries carry the user ID of the connection string, as the configs do, so a config
+    # set with spark.conf.set applies to the queries and the other way around.
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("SPARK_REMOTE is required for live-server tests")
+    remote += ";user_id=user-context-probe" if ";" in remote else "/;user_id=user-context-probe"
+    spark = SparkSession.builder.remote(remote).create()
+    try:
+        spark.conf.set("spark.sql.shuffle.partitions", "7")
+        assert spark.sql("SET spark.sql.shuffle.partitions").collect()[0][1] == "7"
+        spark.sql("SET spark.sql.shuffle.partitions=9").collect()
+        assert spark.conf.get("spark.sql.shuffle.partitions") == "9"
+    finally:
+        spark.stop()
+
+
 def test_get_or_create_returns_the_session_with_the_options_as_pyspark(session):
     # As PySpark's builder: getOrCreate() returns the active session, and sets the options
     # of the builder on it; one that fails, of a static configuration, is ignored.
@@ -627,6 +645,23 @@ def test_create_dataframe_from_empty_arrow_table(session):
 
 
 _Pair = namedtuple("_Pair", ["x", "y"])
+
+
+def test_grouping_sets_return_the_rows_of_pyspark(session):
+    # As PySpark's: the grouping columns are those of `cols`, null in the rows of a set that
+    # does not hold them, and none without `cols`.
+    df = session.createDataFrame(
+        [(1, "x", 10), (1, "y", 20), (2, "x", 30)], "a int, b string, c int")
+    total = F.sum("c").alias("s")
+    with_columns = df.groupingSets([["a"], []], "a", "b").agg(total)
+    assert with_columns.columns == ["a", "b", "s"]
+    assert sorted(with_columns.collect(), key=lambda r: (r.a is None, r.a)) == [
+        Row(a=1, b=None, s=30), Row(a=2, b=None, s=30), Row(a=None, b=None, s=60)]
+    without_columns = df.groupingSets([["a"], ["b"]]).agg(total)
+    assert without_columns.columns == ["s"]
+    assert sorted(r.s for r in without_columns.collect()) == [20, 30, 30, 40]
+    # Of ordinals too.
+    assert df.groupingSets([[2]], 2).agg(total).columns == ["b", "s"]
 
 
 def test_grouped_aggregations_name_and_take_columns_as_pyspark(session):
@@ -1457,6 +1492,40 @@ def test_decimal_literals_are_of_the_types_of_pyspark(session):
     )
 
 
+def test_observations_receive_the_observed_metrics_as_pyspark(session):
+    # As PySpark's: each action that runs a DataFrame of an observation sets in it the metrics
+    # that the server observed, for each observation of a name on its own, and get raises the
+    # error of collecting them.
+    from pyspark.errors import PySparkException
+    from pyspark.sql import Observation
+
+    first, second = Observation("m"), Observation("m")
+    df1 = session.range(3).observe(
+        first, F.count(F.lit(1)).alias("c"), F.sum("id").alias("s"), F.lit(None).alias("n")
+    )
+    df2 = session.range(5).observe(second, F.count(F.lit(1)).alias("c"))
+    assert first.get == {} and second.get == {}
+    assert df1.collect() == [Row(id=0), Row(id=1), Row(id=2)]
+    assert first.get == {"c": 3, "s": 3, "n": None} and second.get == {}
+    df2.select("*").write.format("noop").mode("overwrite").save()
+    assert second.get == {"c": 5}
+    assert df1.where("id > 0").count() == 2 and first.get["c"] == 3
+
+    failing = Observation("failing")
+    df = session.range(2).observe(failing, F.raise_error(F.lit("test error")).alias("e"))
+    assert df.collect() == [Row(id=0), Row(id=1)]
+    with pytest.raises(PySparkException, match="test error"):
+        failing.get
+
+    # A streaming DataFrame, which the server tells, is not observed.
+    from pyspark.errors import IllegalArgumentException
+
+    stream = session.readStream.format("rate").load()
+    with pytest.raises(IllegalArgumentException) as error:
+        stream.observe(Observation(), F.count(F.lit(1)).alias("c"))
+    assert error.value.getCondition() == "UNSUPPORTED_OPERATION"
+
+
 def test_ml_vector_functions_as_pyspark(session):
     from pyspark.ml.functions import array_to_vector, vector_to_array
 
@@ -1625,6 +1694,20 @@ def test_create_dataframe_raises_merge_errors_as_pyspark(session):
             session.createDataFrame(data)
         assert error.value.getCondition() == condition, data
         assert error.value.getMessageParameters() == parameters, data
+
+
+def test_persist_cache_and_unpersist_return_the_dataframe_itself_as_pyspark(session):
+    # As PySpark's: the DataFrame itself, cached at the storage level given.
+    from pyspark.storagelevel import StorageLevel
+
+    df = session.range(3)
+    try:
+        assert df.persist(StorageLevel.DISK_ONLY) is df
+        assert df.storageLevel == StorageLevel.DISK_ONLY
+        assert df.unpersist(blocking=True) is df
+        assert df.cache() is df and df.count() == 3
+    finally:
+        df.unpersist()
 
 
 def test_create_dataframe_converts_numpy_scalars_as_pyspark(session):

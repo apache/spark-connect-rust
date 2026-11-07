@@ -325,6 +325,9 @@ pub enum LogicalPlan {
         input: Arc<LogicalPlan>,
         name: String,
         exprs: Vec<Expression>,
+        /// The Observation that the metrics that the server observes for this relation set,
+        /// as PySpark's `CollectMetrics` of an `Observation`.
+        observation: Option<crate::observation::Observation>,
     },
     /// UnresolvedTableValuedFunction: a TVF like explode, inline, range.
     UnresolvedTableValuedFunction {
@@ -504,6 +507,16 @@ impl PlanIds {
         nodes.next += 1;
         nodes.ids.insert(key, (Arc::downgrade(node), id));
         id
+    }
+
+    /// The live node of the plan ID `id`, as the server reports a relation by its plan ID.
+    pub(crate) fn node_of(&self, id: i64) -> Option<Arc<LogicalPlan>> {
+        let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        nodes
+            .ids
+            .values()
+            .find(|(_, node_id)| *node_id == id)
+            .and_then(|(node, _)| node.upgrade())
     }
 
     #[cfg(test)]
@@ -1379,7 +1392,9 @@ impl LogicalPlan {
                 relation.rel_type = Some(proto::relation::RelType::SampleBy(Box::new(stat)));
             }
 
-            LogicalPlan::Observe { input, name, exprs } => {
+            LogicalPlan::Observe {
+                input, name, exprs, ..
+            } => {
                 let mut collect_metrics = proto::CollectMetrics::default();
                 collect_metrics.input = Some(Box::new(relation_of(input, plan_ids)));
                 collect_metrics.name = name.clone();

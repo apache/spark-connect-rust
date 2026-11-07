@@ -399,6 +399,19 @@ def test_checkpoints_send_their_eager_and_storage_level_as_pyspark(mock_connect)
     assert parse_message(sent()[4][0]) == {2: [1], 3: [1], 4: [1], 5: [2]}
 
 
+def test_persist_cache_and_unpersist_return_the_dataframe_itself_as_pyspark(mock_connect):
+    # As PySpark's, which persist the plan of the DataFrame and return it, not a copy.
+    from pyspark.storagelevel import StorageLevel
+
+    spark, _ = mock_connect
+    df = spark.range(1)
+    assert df.persist() is df
+    assert df.persist(StorageLevel.DISK_ONLY) is df
+    assert df.cache() is df
+    assert df.unpersist() is df
+    assert df.unpersist(blocking=True) is df
+
+
 # --------------------------------------------------------------------------- session builder
 
 def test_session_builder_chaining_offline():
@@ -4198,6 +4211,45 @@ def test_row_hash_matches_tuple():
     assert hash(Row(a=Row(b=1))) == hash(((1,),))
 
 
+def test_observations_check_their_arguments_as_pyspark(mock_connect):
+    # As PySpark's Observation and DataFrame.observe, which check their arguments on the
+    # client, and ask the server whether the DataFrame is streaming, as `df.isStreaming`.
+    from pyspark.errors import PySparkAssertionError, PySparkTypeError, PySparkValueError
+    from pyspark.sql import Observation
+    from pyspark.sql import functions as F
+
+    spark, _ = mock_connect
+    count = F.count(F.lit(1)).alias("c")
+    df = spark.range(1)
+    for call, error_type, condition, parameters in (
+        (lambda: Observation(1), PySparkTypeError, "NOT_EXPECTED_TYPE",
+         {"arg_name": "name", "expected_type": "str", "arg_type": "int"}),
+        (lambda: Observation(""), PySparkValueError, "VALUE_NOT_NON_EMPTY_STR",
+         {"arg_name": "name", "arg_value": ""}),
+        (lambda: Observation("o").get, PySparkAssertionError, "NO_OBSERVE_BEFORE_GET", {}),
+        (lambda: df.observe(Observation("o")), PySparkValueError, "CANNOT_BE_EMPTY",
+         {"item": "exprs"}),
+        (lambda: df.observe("o", "id"), PySparkTypeError, "NOT_EXPECTED_TYPE",
+         {"arg_name": "exprs", "expected_type": "list[Column]", "arg_type": "tuple"}),
+        (lambda: df.observe(1, count), PySparkTypeError, "NOT_EXPECTED_TYPE",
+         {"arg_name": "observation", "expected_type": "Observation or str", "arg_type": "int"}),
+    ):
+        with pytest.raises(error_type) as error:
+            call()
+        assert error.value.getCondition() == condition
+        assert error.value.getMessageParameters() == parameters
+    # An unnamed observation is of a random UUID once it is used, and is used once; it has no
+    # metrics until an action runs.
+    observation = Observation()
+    assert observation._name is None
+    df.observe(observation, count)
+    assert len(observation._name) == 36 and observation.get == {}
+    for observe in (lambda: df.observe(observation, count), lambda: observation._on(df, count)):
+        with pytest.raises(PySparkAssertionError) as error:
+            observe()
+        assert error.value.getCondition() == "REUSE_OBSERVATION"
+
+
 def test_row_usable_in_set_and_dict():
     """Equal Rows collapse in a set and work as dict keys."""
     from pyspark.sql import Row
@@ -5122,6 +5174,43 @@ if __name__ == "__main__":
     result = subprocess.run(
         [sys.executable, "-c", code, tests], check=True, capture_output=True, text=True)
     assert result.stdout.strip().splitlines()[-1] == str(["col"] * 6)
+
+
+def test_grouping_sets_group_by_their_grouping_columns_as_pyspark(mock_connect):
+    # As PySpark's, groupingSets(groupingSets, *cols) groups by the sets with the grouping
+    # columns `cols`: Relation.aggregate=9, Aggregate.group_type=2 (GROUPING_SETS=5),
+    # grouping_expressions=3, grouping_sets=6 (GroupingSets.grouping_set=1).
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    df = spark.range(1)
+
+    def column_names(expressions):
+        # Expression.unresolved_attribute=2, UnresolvedAttribute.unparsed_identifier=1.
+        return [parse_message(parse_message(e)[2][0])[1][0].decode() for e in expressions]
+
+    def sent(grouped):
+        grouped.agg(F.count("*")).collect()
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        aggregate = parse_message(parse_message(plan)[9][0])
+        sets = [column_names(parse_message(s).get(1, [])) for s in aggregate.get(6, [])]
+        return aggregate[2], column_names(aggregate.get(3, [])), sets
+
+    assert sent(df.groupingSets([["id"], []], "id", F.col("x"))) == (
+        [5], ["id", "x"], [["id"], []])
+    # No grouping columns, and a set of one column given alone.
+    assert sent(df.groupingSets(["id", ("x", 1)])) == ([5], [], [["id"], ["x", "id"]])
+    for call, arg_name, arg_type in (
+        (lambda: df.groupingSets([["id"]], ["id"]), "cols", "list"),
+        (lambda: df.groupingSets([[["id"]]]), "groupingSets", "list"),
+        (lambda: df.groupingSets([1.5]), "groupingSets", "float"),
+    ):
+        with pytest.raises(PySparkTypeError) as error:
+            call()
+        assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+        assert error.value.getMessageParameters() == {
+            "expected_type": "Column, int or str", "arg_name": arg_name, "arg_type": arg_type}
 
 
 def test_create_dataframe_checks_every_row_against_the_merged_schema():
@@ -6949,6 +7038,33 @@ def test_function_calls_render_as_pyspark(column, expected):
     from pyspark.sql import functions as F
 
     assert repr(column(F)) == f"Column<'{expected}'>"
+
+
+def test_count_and_sum_distinct_take_their_arguments_as_pyspark():
+    # As PySpark Connect's: a Column or a column name, else NOT_EXPECTED_TYPE; count of a star
+    # Column counts the rows, as count(1), and sumDistinct warns that it is deprecated.
+    import warnings
+
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+
+    df = _offline_session().range(1)
+    assert repr(F.count(F.col("*"))) == "Column<'count(1)'>"
+    assert repr(F.count(df["*"])) == "Column<'count(1)'>"
+    assert repr(F.count(F.col("a.*"))) == "Column<'count(1)'>"
+    assert repr(F.count("a")) == repr(F.count(F.col("a"))) == "Column<'count(a)'>"
+    # A name is the column of it: count("*") is the count of a star, as in PySpark.
+    assert repr(F.count("*")) == "Column<'count(unresolvedstar())'>"
+    assert repr(F.sum_distinct("a")) == "Column<'sum(distinct a)'>"
+    for call in (lambda: F.count(1), lambda: F.sum_distinct(1), lambda: F.sum_distinct(None)):
+        with pytest.raises(PySparkTypeError) as error:
+            call()
+        assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+        assert error.value.getMessageParameters()["expected_type"] == "Column or str"
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        assert repr(F.sumDistinct("a")) == "Column<'sum(distinct a)'>"
+    assert [str(w.message) for w in record] == ["Deprecated in 3.4, use sum_distinct instead."]
 
 
 @pytest.mark.parametrize("build,expected", [

@@ -42,12 +42,6 @@ def _to_col(obj):
     return obj
 
 
-def _col_wrapper(native):
-    """Wrap a native single-column function so it accepts a str column name too."""
-    def wrapper(col):
-        return native(_to_col(col))
-    return wrapper
-
 def _wrap(obj):
     """Wrap the result from _call_function as a Column."""
     return obj
@@ -361,7 +355,6 @@ def lit(col):
 def expr(str):
     """Parses the expression string into the column that it represents."""
     return _pyfunc_expr(str)
-count = _col_wrapper(_pyfunc_count)
 
 
 def when(condition, value):
@@ -497,6 +490,32 @@ for name in _gen_module.__all__:
 # PySpark Connect's _to_col, which raises PySparkTypeError NOT_EXPECTED_TYPE for an
 # argument that is neither a Column nor a column name.
 _column_or_name = _gen_module._to_col
+
+
+def count(col):
+    """count(col): the number of the rows of a non-null col.
+
+    Mirrors pyspark.sql.connect.functions.count: of a Column or a column name, else
+    NOT_EXPECTED_TYPE, where a star Column counts the rows, as count(1).
+    """
+    return _pyfunc_count(col)
+
+
+def sum_distinct(col):
+    """sum_distinct(col): the sum of the distinct values of col.
+
+    Mirrors pyspark.sql.connect.functions.sum_distinct: of a Column or a column name, else
+    NOT_EXPECTED_TYPE.
+    """
+    return _dispatch("sum_distinct", [_column_or_name(col)])
+
+
+def sumDistinct(col):
+    """sumDistinct(col): deprecated since 3.4, use sum_distinct."""
+    import warnings
+
+    warnings.warn("Deprecated in 3.4, use sum_distinct instead.", FutureWarning)
+    return sum_distinct(col)
 
 
 def count_distinct(col, *cols):
