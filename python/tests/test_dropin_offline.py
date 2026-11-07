@@ -9458,6 +9458,38 @@ def _repr_struct(*fields):
     return _repr_message(21, b"".join(_repr_message(1, _repr_field(name, dtype)) for name, dtype in fields))
 
 
+def test_repr_html_is_the_html_table_of_eager_evaluation_as_pyspark(mock_connect):
+    # As PySpark Connect's: _repr_html_ is None without eager evaluation, else the HTML table
+    # that the server formats of an HtmlString relation of maxNumRows rows and truncate; once
+    # it was called, __repr__ is the string of the schema.
+    import pyarrow as pa
+
+    spark, service = mock_connect
+    eager = {"spark.sql.repl.eagerEval.enabled": "false",
+             "spark.sql.repl.eagerEval.maxNumRows": "7",
+             "spark.sql.repl.eagerEval.truncate": "3"}
+    service.confs = eager
+    df = spark.range(1)
+    assert df._repr_html_() is None
+    service.confs = {**eager, "spark.sql.repl.eagerEval.enabled": "true"}
+    table = pa.table({"html_string": ["<table/>"]})
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    # ExecutePlanResponse.arrow_batch=2: ArrowBatch.row_count=1, data=2.
+    service.execute_payload = message_field(
+        2, varint_field(1, 1) + message_field(2, sink.getvalue().to_pybytes()))
+    assert df._repr_html_() == "<table/>"
+    # ExecutePlanRequest.plan=3, Plan.root=1, Relation.html_string=35: HtmlString.num_rows=2,
+    # truncate=3.
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+    html = parse_message(parse_message(plan[1][0])[35][0])
+    assert html[2] == [7] and html[3] == [3]
+    assert repr(df) == "DataFrame[id: bigint]"
+    # A DataFrame of no _repr_html_ shows the table of eager evaluation.
+    assert repr(spark.range(1)) == "<table/>"
+
+
 @pytest.mark.parametrize("schema, expected", [
     (_repr_struct(), "DataFrame[]"),
     (_repr_struct(("id", _repr_message(7, b""))), "DataFrame[id: bigint]"),

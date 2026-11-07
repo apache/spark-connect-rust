@@ -962,6 +962,25 @@ impl DataFrame {
         }
     }
 
+    /// The HTML table of the first `n` rows, values truncated to `truncate` characters (0 for
+    /// none), as the server formats it. Mirrors the table of `DataFrame._repr_html_()`.
+    pub fn html_string(&self, n: i32, truncate: i32) -> Result<String> {
+        let html = DataFrame::new(
+            self.session.clone(),
+            LogicalPlan::HtmlString {
+                input: Arc::clone(&self.plan),
+                num_rows: n,
+                truncate,
+            },
+        );
+        match html.collect()?.first().map(|row| row.values()) {
+            Some([Value::String(table)]) => Ok(table.clone()),
+            _ => Err(SparkError::connect_msg(
+                "HtmlString returned no table of one string",
+            )),
+        }
+    }
+
     /// Print the first `n` rows as the server formats them, with values truncated to 20
     /// characters. Mirrors `DataFrame.show(n)`.
     pub fn show(&self, n: usize) -> Result<()> {
