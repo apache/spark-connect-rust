@@ -1228,7 +1228,7 @@ fn values_to_arrow(values: &[&Value], dt: &DataType) -> Result<Arc<dyn arrow::ar
                 .map(|v| match *v {
                     Value::Null => Ok(None),
                     Value::Decimal { value, .. } => {
-                        decimal_str_to_unscaled(value, col_scale).map(Some)
+                        decimal_str_to_unscaled(value, *precision, col_scale).map(Some)
                     }
                     _ => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
@@ -1479,37 +1479,85 @@ fn values_to_arrow(values: &[&Value], dt: &DataType) -> Result<Arc<dyn arrow::ar
     }
 }
 
-/// Parse a decimal string (e.g. "-1.50") into an unscaled `i128` at the given scale
-/// (e.g. scale 2 → -150). Pads/truncates the fractional part to `scale` digits.
-fn decimal_str_to_unscaled(s: &str, scale: i32) -> Result<i128> {
-    let s = s.trim();
-    let (neg, s) = match s.strip_prefix('-') {
+/// Converts a decimal string, in fixed-point (`-1.50`) or scientific (`1.5E-7`) notation, to
+/// its unscaled `i128` at `scale` (`-1.50` at scale 2 is -150). The value must fit
+/// `decimal(precision, scale)` exactly, as Arrow requires of the Decimals of PySpark's pandas
+/// conversion: a nonzero digit beyond the scale, or a value beyond the precision, is an error
+/// rather than truncated. The work is bounded by the length of the string, never by its
+/// exponent, so `1E+1000000000` fails at once.
+pub fn decimal_str_to_unscaled(s: &str, precision: i32, scale: i32) -> Result<i128> {
+    if !(1..=38).contains(&precision) || !(0..=precision).contains(&scale) {
+        return Err(SparkError::connect_msg(format!(
+            "unsupported decimal type decimal({precision},{scale})"
+        )));
+    }
+    let invalid = || SparkError::connect_msg(format!("invalid decimal '{s}'"));
+    let inexact = || {
+        SparkError::connect_msg(format!(
+            "decimal '{s}' does not fit decimal({precision},{scale}) exactly"
+        ))
+    };
+    let text = s.trim();
+    let (negative, unsigned) = match text.strip_prefix('-') {
         Some(rest) => (true, rest),
-        None => (false, s.strip_prefix('+').unwrap_or(s)),
+        None => (false, text.strip_prefix('+').unwrap_or(text)),
     };
-    let (int_part, frac_part) = match s.split_once('.') {
-        Some((i, f)) => (i, f),
-        None => (s, ""),
+    let (coefficient, exponent) = match unsigned.split_once(['e', 'E']) {
+        Some((coefficient, exponent)) => {
+            (coefficient, exponent.parse::<i64>().map_err(|_| invalid())?)
+        }
+        None => (unsigned, 0),
     };
-    let scale = scale.max(0) as usize;
-    let mut digits = String::with_capacity(int_part.len() + scale);
-    digits.push_str(int_part);
-    // Pad or truncate the fractional digits to exactly `scale`.
-    let frac: String = frac_part
-        .chars()
-        .chain(std::iter::repeat('0'))
-        .take(scale)
+    let mut point = false;
+    let mut fractional = 0_i128;
+    let mut digits = 0_usize;
+    for byte in coefficient.bytes() {
+        match byte {
+            b'.' if !point => point = true,
+            b'0'..=b'9' => {
+                digits += 1;
+                if point {
+                    fractional += 1;
+                }
+            }
+            _ => return Err(invalid()),
+        }
+    }
+    if digits == 0 {
+        return Err(invalid());
+    }
+    // The digits from the first nonzero one: the value is them times 10^(exponent -
+    // fractional), and the unscaled value them times 10^shift.
+    let significant: Vec<u8> = coefficient
+        .bytes()
+        .filter(|b| *b != b'.')
+        .skip_while(|b| *b == b'0')
         .collect();
-    digits.push_str(&frac);
-    let digits = digits.trim_start_matches('0');
-    let mag: i128 = if digits.is_empty() {
-        0
+    // i128 arithmetic, so that i64::MIN and i64::MAX exponents cannot overflow.
+    let shift = i128::from(scale) + i128::from(exponent) - fractional;
+    let dropped = if shift < 0 {
+        (-shift).min(significant.len() as i128) as usize
     } else {
-        digits
-            .parse::<i128>()
-            .map_err(|e| SparkError::connect_msg(format!("invalid decimal '{s}': {e}")))?
+        0
     };
-    Ok(if neg { -mag } else { mag })
+    let (kept, lost) = significant.split_at(significant.len() - dropped);
+    if lost.iter().any(|b| *b != b'0') {
+        return Err(inexact());
+    }
+    if kept.is_empty() {
+        return Ok(0);
+    }
+    if kept.len() as i128 + shift.max(0) > i128::from(precision) {
+        return Err(inexact());
+    }
+    // At most 38 digits: no overflow.
+    let mut value = kept
+        .iter()
+        .fold(0_i128, |value, digit| value * 10 + i128::from(digit - b'0'));
+    for _ in 0..shift.max(0) {
+        value *= 10;
+    }
+    Ok(if negative { -value } else { value })
 }
 
 #[cfg(test)]
@@ -1521,6 +1569,150 @@ mod tests {
     use arrow::ipc::reader::StreamReader;
     use arrow::record_batch::RecordBatch;
     use std::io::Cursor;
+
+    #[test]
+    fn decimal_strings_convert_in_fixed_point_and_scientific_notation() {
+        for (text, precision, scale, expected) in [
+            ("1E+3", 18, 7, 10_000_000_000),
+            ("1E-7", 18, 7, 1),
+            ("-1E-7", 18, 7, -1),
+            ("+1.25e+2", 38, 2, 12_500),
+            ("-1.25E-2", 38, 4, -125),
+            ("0001.2500e+2", 38, 2, 12_500),
+            ("0E+999999999", 18, 7, 0),
+            ("-0E-999999999", 18, 7, 0),
+            ("123.45", 38, 2, 12_345),
+            ("-123.450", 38, 2, -12_345),
+            (".00100E+3", 38, 2, 100),
+            ("  +1.e2  ", 38, 0, 100),
+            // Trailing zeros beyond the scale lose nothing.
+            ("1.2300E+0", 3, 2, 123),
+            ("1.2300", 3, 2, 123),
+            ("9.9E+1", 2, 0, 99),
+            ("99999999999.9999999", 18, 7, 999_999_999_999_999_999),
+            ("-99999999999.9999999", 18, 7, -999_999_999_999_999_999),
+            ("1E-38", 38, 38, 1),
+            // A long coefficient may still fit once it is scaled.
+            ("100000000000000000000000000000000000000000E-41", 38, 0, 1),
+        ] {
+            assert_eq!(
+                decimal_str_to_unscaled(text, precision, scale).unwrap(),
+                expected,
+                "{text}"
+            );
+        }
+        let max = "9".repeat(38);
+        assert_eq!(
+            decimal_str_to_unscaled(&max, 38, 0).unwrap(),
+            max.parse::<i128>().unwrap()
+        );
+        assert_eq!(
+            decimal_str_to_unscaled(&format!("-{max}"), 38, 0).unwrap(),
+            -max.parse::<i128>().unwrap()
+        );
+    }
+
+    #[test]
+    fn decimal_strings_that_do_not_fit_exactly_are_errors() {
+        for (text, precision, scale) in [
+            // A nonzero digit beyond the scale, in either notation: PySpark's Arrow
+            // conversion of a pandas column fails rather than dropping it.
+            ("1.5E-7", 18, 7),
+            ("-1.5E-7", 18, 7),
+            ("1E-8", 18, 7),
+            ("0.00000015", 18, 7),
+            ("1.235", 10, 2),
+            ("1E-9223372036854775808", 18, 7),
+            // Beyond the precision.
+            ("123456E-3", 9, 7),
+            ("1E+2", 2, 0),
+            ("-1E+2", 2, 0),
+            ("100", 2, 0),
+            ("100000000000", 18, 7),
+            ("1E+38", 38, 0),
+            ("1E+999999999", 38, 0),
+            ("1E+9223372036854775807", 38, 0),
+            ("170141183460469231731687303715884105727", 38, 0),
+        ] {
+            let error = decimal_str_to_unscaled(text, precision, scale).unwrap_err();
+            assert!(
+                error.to_string().contains("does not fit"),
+                "{text}: {error}"
+            );
+        }
+        for text in [
+            "",
+            ".",
+            "-",
+            "+",
+            "1E",
+            "E3",
+            "1E1E1",
+            "1.2.3",
+            "1E1.5",
+            "NaN",
+            "Infinity",
+            "1E 3",
+            "1_000",
+            "1E+9223372036854775808",
+        ] {
+            let error = decimal_str_to_unscaled(text, 38, 0).unwrap_err();
+            assert!(
+                error.to_string().contains("invalid decimal"),
+                "{text}: {error}"
+            );
+        }
+        // Spark has no such decimal types.
+        for (precision, scale) in [(0, 0), (39, 0), (10, -2), (10, 11), (38, i32::MAX)] {
+            assert!(decimal_str_to_unscaled("1", precision, scale).is_err());
+        }
+    }
+
+    #[test]
+    fn scientific_decimal_ipc_cells_match_fixed_point() {
+        use arrow::array::Decimal128Array;
+        let values = [
+            "1E+3",
+            "1E-7",
+            "-1E-7",
+            "-0E+3",
+            "99999999999.9999999",
+            "-99999999999.9999999",
+        ];
+        let rows: Vec<_> = values
+            .iter()
+            .map(|value| {
+                row(vec![Value::Decimal {
+                    value: value.to_string(),
+                    precision: None,
+                    scale: None,
+                }])
+            })
+            .collect();
+        let batch = read_batch(
+            &rows,
+            &schema(vec![DataType::Decimal {
+                precision: 18,
+                scale: 7,
+            }]),
+        );
+        let array = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Decimal128Array>()
+            .unwrap();
+        assert_eq!(
+            array.values().as_ref(),
+            &[
+                10_000_000_000,
+                1,
+                -1,
+                0,
+                999_999_999_999_999_999,
+                -999_999_999_999_999_999
+            ]
+        );
+    }
 
     fn struct_field(name: &str, data_type: DataType) -> crate::types::StructField {
         crate::types::StructField {
