@@ -6265,9 +6265,10 @@ def container_input_capture_input():
     parent, child = context.Pipe()
     process = context.Process(target=_container_input_capture_server, args=(child,))
     process.start()
+    spark = None
     try:
         assert parent.poll(20), "capture service failed to start"
-        spark = SparkSession.builder.remote(f"sc://127.0.0.1:{parent.recv()}").getOrCreate()
+        spark = SparkSession.builder.remote(f"sc://127.0.0.1:{parent.recv()}").create()
 
         def capture(data, schema):
             import pyarrow as pa
@@ -6286,14 +6287,18 @@ def container_input_capture_input():
 
         yield capture
     finally:
-        if process.is_alive():
-            parent.send("stop")
-        process.join(10)
-        if process.is_alive():
-            process.terminate()
+        try:
+            if spark is not None:
+                spark.stop()
+        finally:
+            if process.is_alive():
+                parent.send("stop")
             process.join(10)
-        parent.close()
-        child.close()
+            if process.is_alive():
+                process.terminate()
+                process.join(10)
+            parent.close()
+            child.close()
 
 
 @pytest.mark.parametrize("source", ["pandas_from_rows", "pandas"])
