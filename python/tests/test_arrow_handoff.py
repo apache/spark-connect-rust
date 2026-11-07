@@ -1596,7 +1596,13 @@ def test_nul_names_keep_lossless_ipc_row_fallback(protocol, schema_kind):
         spark.createDataFrame(frame, schema).toArrow()
         assert state["result"] == (1000, 0, 999)
         payload = state["relations"][0].local_relation.data
-        assert pa.ipc.open_stream(payload).schema.names == [name]
+        if schema_kind == "explicit":
+            assert pa.ipc.open_stream(payload).schema.names == [name]
+        else:
+            # As PySpark Connect's, the Arrow conversion of a frame without a schema names its
+            # columns _0, _1, ..., which toDF names.
+            assert pa.ipc.open_stream(payload).schema.names == ["_0"]
+            assert state["column_names"] == [name]
 
 
 @pytest.mark.parametrize("nullable", [False, True])
@@ -2925,10 +2931,14 @@ def test_float64_public_fallback_preserves_every_ipc_cell(protocol, reason):
         frame.columns = ["x\x00original"]
     elif reason == "schema_nul":
         schema = expected_schema = T.StructType([T.StructField("x\x00renamed", T.DoubleType())])
+    if reason in ("inferred", "names"):
+        # As PySpark Connect's, the Arrow conversion of a frame without a schema names its
+        # columns _0, _1, ..., which toDF names.
+        expected_schema = T.StructType([T.StructField("_0", T.DoubleType())])
     with _arrow_input_service(protocol) as (spark, state):
         spark.createDataFrame(frame, schema).toArrow()
-        # Official converts explicit schemas with Arrow, reading the configuration first.
-        native = reason in ("inferred", "names", "frame_subclass", "schema_nul")
+        # Official converts pandas input with Arrow, reading the configuration first.
+        native = reason in ("frame_subclass", "schema_nul")
         assert state["config_requests"][:1] == (
             [] if native else [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)])
         _assert_float64_ipc(state["input_tables"][0], columns, expected_schema)
@@ -4663,6 +4673,57 @@ def test_pandas_explicit_nonnullable_null_raises_as_pyspark(protocol):
     assert type(error.value) is ValueError
     assert str(error.value) == "Casting field 'a' with null values to non-nullable"
     assert state["input_tables"] == []
+
+
+@pytest.mark.parametrize("schema", [None, ["p", "q"], ["p"]], ids=["inferred", "names", "fewer"])
+def test_pandas_inferred_types_are_those_of_arrow_as_pyspark(protocol, schema):
+    # As PySpark Connect's: without a schema, each column converts with PySpark's Arrow
+    # conversion, of the type that Arrow infers, and the table goes without a schema, of
+    # columns _0, _1, ..., which toDF names, by the labels, or the names and _n past them.
+    frame = pd.DataFrame({"a": np.array([1, 2], dtype=np.int8), "b": [{"k": 1}, {"k": 2}]})
+    with _arrow_input_service(protocol) as (spark, state):
+        spark.createDataFrame(frame, schema).toArrow()
+        table = state["input_tables"][0]
+        assert table.schema.names == ["_0", "_1"]
+        assert table.schema.types == [pa.int8(), pa.struct([("k", pa.int64())])]
+        assert table.column("_1").to_pylist() == [{"k": 1}, {"k": 2}]
+        assert state["spark_schema"] is None
+        assert state["column_names"] == {None: ["a", "b"], 2: ["p", "q"], 1: ["p", "_2"]}[
+            None if schema is None else len(schema)]
+
+
+def test_pandas_inferred_dicts_are_maps_of_infer_pandas_dict_as_map(protocol):
+    # As PySpark Connect's: of spark.sql.execution.pandas.inferPandasDictAsMap, a column of dicts
+    # is a map of the type of the first key, and the table takes the names of the columns.
+    frame = pd.DataFrame({"a": [{"k": 1}, {"j": 2}], "b": ["x", "y"]})
+    table = _pandas_table(protocol, frame, None, **{
+        "spark.sql.execution.pandas.inferPandasDictAsMap": "true"})
+    assert table.schema.names == ["a", "b"]
+    assert table.schema.field("a").type == pa.map_(pa.string(), pa.int64())
+    assert table.column("a").to_pylist() == [[("k", 1)], [("j", 2)]]
+
+
+@pytest.mark.parametrize("host", ["America/Los_Angeles", "UTC"])
+def test_pandas_inferred_naive_timestamp_uses_session_zone(protocol, host):
+    # As PySpark Connect's: a naive time is a time of the session zone, whatever the client's.
+    frame = pd.DataFrame({"t": [pd.Timestamp("2020-07-01 12:00")]})
+    table = _in_host_zone(host, lambda: _pandas_table(
+        protocol, frame, None, **{"spark.sql.session.timeZone": "America/Los_Angeles"}))
+    assert table.column("_0").to_pylist() == [datetime(2020, 7, 1, 19, tzinfo=timezone.utc)]
+
+
+def test_pandas_inferred_conversion_errors_are_those_of_pyspark(protocol):
+    from pyspark.errors import PySparkValueError
+
+    with _arrow_input_service(protocol) as (spark, state):
+        # As PySpark Connect's: Arrow's error of a column of values of several types.
+        with pytest.raises(PySparkValueError, match="Exception thrown when converting "
+                           "pandas.Series \\(object\\) with name 'a' to Arrow Array"):
+            spark.createDataFrame(pd.DataFrame({"a": [1, "x"]}))
+        with pytest.raises(PySparkValueError) as error:
+            spark.createDataFrame(pd.DataFrame({"a": [1]}), ["p", "q"])
+        assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
+        assert error.value.getMessageParameters() == {"expected_length": "2", "actual_length": "1"}
 
 
 @pytest.mark.parametrize("host", ["America/Los_Angeles", "UTC"])

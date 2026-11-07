@@ -1633,6 +1633,22 @@ def test_variant_spatial_and_user_defined_values_round_trip_as_pyspark(session):
     assert geometry == Geometry.fromWKB(wkb, 0)
 
 
+def test_create_dataframe_of_pandas_infers_the_types_of_arrow_as_pyspark(session):
+    # As PySpark Connect's: without a schema, the columns of a pandas DataFrame convert with
+    # PySpark's Arrow conversion, of the types that Arrow infers, and a naive datetime is a time
+    # of the session time zone.
+    import numpy as np
+    import pandas as pd
+
+    frame = pd.DataFrame({"a": np.array([1, 2], dtype=np.int8), "b": [{"k": 1}, {"k": 2}],
+                          "c": np.array([1.5, 2.5], dtype=np.float32)})
+    df = session.createDataFrame(frame)
+    assert df.schema.simpleString() == "struct<a:tinyint,b:struct<k:bigint>,c:float>"
+    assert [row.b.k for row in df.orderBy("a").collect()] == [1, 2]
+    naive = pd.DataFrame({"t": [pd.Timestamp("2020-07-01 12:00")]})
+    rows = session.createDataFrame(naive).selectExpr("CAST(t AS STRING) AS s").collect()
+    assert rows == [Row(s="2020-07-01 12:00:00")]
+
 def test_create_dataframe_types_pandas_columns_as_pyspark(session):
     from decimal import Decimal
 

@@ -712,6 +712,111 @@ impl PySparkSession {
         ))))
     }
 
+    /// A DataFrame of a pandas DataFrame without a schema, or of names, as PySpark Connect
+    /// converts one: each column by PySpark's Arrow conversion, of the type that Arrow infers
+    /// (`prepare_inferred_pandas_table`), sent without a schema, for the server to infer the
+    /// types of the Arrow data. The columns are named with `toDF`: by their labels, as strings,
+    /// or by the names, and `_n` for the n-th column past them.
+    ///
+    /// None for a frame that the row path converts: an empty one, a customized one
+    /// (`accepts_pandas_frame`), and any without pyarrow, which the row path does not need.
+    fn create_from_pandas_inferred(
+        &self,
+        py: Python<'_>,
+        data: &Bound<'_, PyAny>,
+        spec: &Spec,
+    ) -> PyResult<Option<PyDataFrame>> {
+        let names = match spec {
+            Spec::None => None,
+            Spec::Names(names) => Some(names),
+            Spec::Struct(_) | Spec::Atomic(_) => return Ok(None),
+        };
+        if data.len()? == 0 {
+            return Ok(None);
+        }
+        let helper = py.import("pyspark.sql._pandas_input")?;
+        if !helper.getattr("pyarrow_available")?.call0()?.is_truthy()?
+            || !helper
+                .getattr("accepts_pandas_frame")?
+                .call1((data,))?
+                .is_truthy()?
+        {
+            return Ok(None);
+        }
+        let width = data.getattr("columns")?.len()?;
+        let mut columns: Vec<String> = match names {
+            Some(names) => names.clone(),
+            None => {
+                let mut labels = Vec::with_capacity(width);
+                for label in data.getattr("columns")?.try_iter()? {
+                    let label = label?;
+                    labels.push(match label.cast::<pyo3::types::PyString>() {
+                        Ok(label) => label.to_cow()?.into_owned(),
+                        Err(_) => label.str()?.to_cow()?.into_owned(),
+                    });
+                }
+                if labels.is_empty() {
+                    return Err(crate::column::raise_pyspark(
+                        py,
+                        "PySparkValueError",
+                        "CANNOT_INFER_EMPTY_SCHEMA",
+                        &[],
+                    ));
+                }
+                labels
+            }
+        };
+        if columns.len() < width {
+            columns.extend((columns.len()..width).map(|i| format!("_{}", i + 1)));
+        }
+        let options = py.detach(|| self.session.arrow_input_options().to_pyerr())?;
+        let conf = |key: &'static str| {
+            py.detach(|| self.session.conf().get(key))
+                .to_pyerr()
+                .map(|value| value.as_deref() == Some("true"))
+        };
+        let safecheck = conf("spark.sql.execution.pandas.convertToArrowArraySafely")?;
+        let infer_dict_as_map =
+            names.is_none() && conf("spark.sql.execution.pandas.inferPandasDictAsMap")?;
+        let result = helper.getattr("prepare_inferred_pandas_table")?.call1((
+            data,
+            options.timezone().unwrap_or("UTC"),
+            safecheck,
+            options.use_large_var_types() == Some("true"),
+            infer_dict_as_map,
+            options.timestamp_type() == Some("TIMESTAMP_NTZ"),
+        ))?;
+        let table = result.get_item(0)?;
+        if let Some(struct_names) = result.get_item(1)?.extract::<Option<Vec<String>>>()? {
+            columns = struct_names;
+        }
+        let actual: usize = table.getattr("num_columns")?.extract()?;
+        if columns.len() != actual {
+            return Err(crate::column::raise_pyspark(
+                py,
+                "PySparkValueError",
+                "AXIS_LENGTH_MISMATCH",
+                &[
+                    ("expected_length", &columns.len().to_string()),
+                    ("actual_length", &actual.to_string()),
+                ],
+            ));
+        }
+        let batches = crate::pyarrow_import::table_batches(&table)?;
+        let df = py
+            .detach(|| {
+                self.session
+                    .create_dataframe_from_arrow_with_options(batches, None, &options)
+                    .map_err(Box::new)
+            })
+            .to_pyerr()?;
+        Ok(Some(PyDataFrame::new(if columns.is_empty() {
+            df
+        } else {
+            df.to_df(columns.iter().map(String::as_str).collect())
+        })))
+    }
+
     /// A DataFrame of a numpy array, as PySpark Connect's `createDataFrame` builds it: an Arrow
     /// table of a column of each column of the array, sent with the schema, if any, for the
     /// server to cast to. The columns are named by the given names, else `value` for a
@@ -1428,6 +1533,9 @@ impl PySparkSession {
                 if let Some(frame) = self.create_from_pandas_arrow(py, data, schema, fields)? {
                     return Ok(frame);
                 }
+            }
+            if let Some(frame) = self.create_from_pandas_inferred(py, data, &spec)? {
+                return Ok(frame);
             }
             return self.create_from_pandas(py, data, spec);
         }

@@ -865,6 +865,12 @@ def accepts_pandas_table(frame, schema):
     names by lookup, so each namespace must still hold the native classes. The schema is
     the caller's object, or a DDL string, which is parsed.
     """
+    return accepts_pandas_frame(frame) and (type(schema) is str or _canonical_struct(schema))
+
+
+def accepts_pandas_frame(frame):
+    """Whether PySpark's Arrow conversion may convert this frame, as `accepts_pandas_table`
+    checks it, but for a schema."""
     import sys
 
     import pandas as pd
@@ -929,7 +935,7 @@ def accepts_pandas_table(frame, schema):
                     and vars(importer)[name] is not getattr(converter, name, None))
             ):
                 return False
-    return type(schema) is str or _canonical_struct(schema)
+    return True
 
 
 def prepare_pandas_table(frame, schema, timezone, safecheck, prefers_large_types):
@@ -990,3 +996,94 @@ def arrow_decimal_column(values, dtype, name):
         raise PySparkTypeError(message)
     return array.type.precision, array.type.scale, array.to_pylist()
 
+
+def pyarrow_available():
+    """Whether pyarrow can be imported, checked without importing it. Without it, a frame
+    without a schema keeps the row path, which does not need it."""
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec("pyarrow") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def prepare_inferred_pandas_table(frame, timezone, safecheck, prefers_large_types,
+                                  infer_dict_as_map, prefer_timestamp_ntz):
+    """Convert a pandas frame without a schema, or of names, as PySpark Connect does.
+
+    Each column goes through PySpark's own Arrow conversion, of the type that Arrow infers,
+    except that datetimes are timestamps, of the session time zone, and timedeltas day-time
+    intervals, for the server to infer the types of the table. With `inferPandasDictAsMap`
+    (`infer_dict_as_map`), the frame converts under the struct of the types that Arrow infers,
+    where a column of dicts is a map, and the table takes the names and the Arrow types of the
+    struct. Returns the table and the names of that struct, or None. The caller checks the
+    frame with `accepts_pandas_frame`.
+    """
+    import pandas as pd
+    import pyarrow as pa
+    from pandas.api.types import is_datetime64_dtype, is_timedelta64_dtype
+
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql.pandas.conversion import create_arrow_table_from_pandas
+    from pyspark.sql.pandas.types import (
+        _deduplicate_field_names,
+        from_arrow_type,
+        to_arrow_schema,
+    )
+    from pyspark.sql.types import (
+        DayTimeIntervalType,
+        MapType,
+        StringType,
+        StructType,
+        TimestampType,
+    )
+
+    struct = None
+    if infer_dict_as_map:
+        struct = StructType()
+        for field in pa.Schema.from_pandas(frame):
+            field_type = field.type
+            if isinstance(field_type, pa.StructType):
+                if len(field_type) == 0:
+                    raise PySparkValueError(
+                        errorClass="CANNOT_INFER_EMPTY_SCHEMA",
+                        messageParameters={},
+                    )
+                spark_type = MapType(
+                    StringType(), from_arrow_type(field_type.field(0).type, prefer_timestamp_ntz)
+                )
+            else:
+                spark_type = from_arrow_type(field_type, prefer_timestamp_ntz)
+            struct = struct.add(field.name, spark_type, nullable=field.nullable)
+        deduplicated = _deduplicate_field_names(struct)
+        spark_types = [field.dataType for field in deduplicated.fields]
+    else:
+        spark_types = [
+            (
+                TimestampType()
+                if is_datetime64_dtype(t) or isinstance(t, pd.DatetimeTZDtype)
+                else DayTimeIntervalType()
+                if is_timedelta64_dtype(t)
+                else None
+            )
+            for t in frame.dtypes
+        ]
+    if len(frame.columns) == 0:
+        # pa.RecordBatch.from_pandas keeps the number of rows of a frame of no columns.
+        table = pa.Table.from_batches([pa.RecordBatch.from_pandas(frame)])
+    else:
+        table = create_arrow_table_from_pandas(
+            [(c, st) for (_, c), st in zip(frame.items(), spark_types)],
+            timezone=timezone,
+            safecheck=safecheck,
+            prefers_large_types=prefers_large_types,
+        )
+    if struct is None:
+        return table, None
+    if len(struct.fields) > 0:
+        arrow_schema = to_arrow_schema(
+            deduplicated, timezone="UTC", prefers_large_types=prefers_large_types
+        )
+        table = table.rename_columns(deduplicated.names).cast(arrow_schema)
+    return table, [str(name) for name in struct.fieldNames()]

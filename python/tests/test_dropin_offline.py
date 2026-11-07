@@ -5745,18 +5745,20 @@ for schema in schemas:
 """], check=True)
 
 
-def test_create_dataframe_types_pandas_columns_as_arrow():
+def test_create_dataframe_types_pandas_columns_as_arrow(mock_connect):
     pd = pytest.importorskip("pandas")
     np = pytest.importorskip("numpy")
     from pyspark.errors import PySparkTypeError
 
     # As PySpark, whose Arrow conversion types a column without values by its dtype, rather
-    # than raising CANNOT_DETERMINE_TYPE (the live suite checks the types).
+    # than raising CANNOT_DETERMINE_TYPE (the live suite checks the types). The conversion
+    # reads the server's Arrow settings first.
+    spark, _ = mock_connect
     for column in [[np.nan, np.nan], [None, None], pd.to_datetime([None, None])]:
-        _local_create_dataframe(pd.DataFrame({"id": [1, 2], "s": column}))
+        spark.createDataFrame(pd.DataFrame({"id": [1, 2], "s": column}))
     with pytest.raises(PySparkTypeError, match=re.escape(
             "Exception thrown when converting pandas.Series (object) with name 'm' to Arrow")):
-        _local_create_dataframe(pd.DataFrame({"m": [{None: 1}]}))
+        spark.createDataFrame(pd.DataFrame({"m": [{None: 1}]}))
 
 
 def test_timedelta_values_convert_as_pyspark():
@@ -5813,15 +5815,15 @@ def test_create_dataframe_rows_is_local_as_pyspark(data, schema, expected):
 @pytest.mark.parametrize("schema", [None, ["c", "d"], ["c"], "a long, b string",
                                     T.StructType([T.StructField("a", T.LongType()),
                                                   T.StructField("b", T.StringType())])])
-def test_create_dataframe_pandas_is_not_local_as_pyspark(schema):
+def test_create_dataframe_pandas_is_not_local_as_pyspark(mock_connect, schema):
     pd = pytest.importorskip("pandas")
-    if schema is not None:
-        # Explicit-schema pandas input reads the server's Arrow settings first, as PySpark
-        # does, so it needs a live server; the live-server suites cover it.
-        pytest.skip("explicit-schema pandas input reads the server configuration")
-    # pyspark applies the columns, or the field names of the schema, with toDF.
-    df = _local_create_dataframe(pd.DataFrame({"a": [1, 2], "b": ["x", "y"]}), schema)
-    assert not df.isLocal()
+    # pyspark applies the columns, or the field names of the schema, with toDF, so the result
+    # is not local. pandas input reads the server's Arrow settings first, as PySpark does.
+    spark, service = mock_connect
+    spark.createDataFrame(pd.DataFrame({"a": [1, 2], "b": ["x", "y"]}), schema).collect()
+    # ExecutePlanRequest.plan=3, Plan.root=1, Relation.to_df=18.
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+    assert 18 in parse_message(plan[1][0])
 
 
 def test_create_dataframe_empty_pandas_is_local_as_pyspark():
@@ -5862,9 +5864,6 @@ def test_create_dataframe_pandas_errors_as_pyspark():
             _local_create_dataframe(pdf, schema)
         assert error.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW"
         assert error.value.getMessageParameters() == {"data_type": data_type}
-    with pytest.raises(PySparkValueError) as error:
-        _local_create_dataframe(pdf, ["c", "d", "e"])
-    assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
     for data, schema in [(pd.DataFrame(index=[0, 1]), None), ([], None), ([], ["a"]),
                          (pdf.iloc[:0], None), (pdf.iloc[:0], ["a", "b"])]:
         with pytest.raises(PySparkValueError) as error:
@@ -6189,14 +6188,21 @@ def test_create_dataframe_raises_recursion_error_for_a_value_that_contains_itsel
 # py_to_value converts the cells of object-dtype pandas input, as well as the values of
 # fillna, pivot and Row conversion; local rows go through infer.convert instead, so the
 # "local" source is a control for values that the exact-number fast path must not change.
+def _RowPathFrame(pd):
+    """A subclass of pandas.DataFrame: createDataFrame converts a customized frame with its
+    row path (py_to_value), where it converts a plain one with PySpark's Arrow conversion."""
+    return type("RowPathFrame", (pd.DataFrame,), {})
+
+
 def _native_number_input_table(mock_connect, data, schema=None, *, source="local"):
     import pyarrow as pa
 
     if source == "pandas":
         pd = pytest.importorskip("pandas")
-        # Local rows now use infer.convert. Object-backed pandas input retains
-        # py_to_value, which is the generic converter optimized by this patch.
-        data = pd.DataFrame({"value": [row[0] for row in data]}, dtype=object)
+        # Local rows now use infer.convert. Object-backed pandas input of a customized frame, of
+        # a subclass, retains py_to_value, the converter of the row path optimized by this
+        # patch; a plain frame converts with PySpark's Arrow conversion.
+        data = _RowPathFrame(pd)({"value": [row[0] for row in data]}, dtype=object)
     spark, service = mock_connect
     spark.createDataFrame(data, schema).toArrow()
     request = parse_message(service.execute_requests[-1])
@@ -6454,6 +6460,7 @@ def _container_input_capture_server(connection):
                 "spark.sql.session.localRelationChunkSizeBytes": str(1 << 40),
                 "spark.sql.session.localRelationBatchOfChunksSizeBytes": str(1 << 40),
                 "spark.sql.execution.pandas.convertToArrowArraySafely": "true",
+                "spark.sql.execution.pandas.inferPandasDictAsMap": "false",
             }
             return message_field(1, request[1][0]) + b"".join(
                 message_field(2, message_field(1, key) + message_field(2, defaults[key]))
@@ -6613,9 +6620,10 @@ def _exact_date_converted_value(mock_connect, value):
 
     pd = pytest.importorskip("pandas")
     spark, service = mock_connect
-    # py_to_value remains the generic pandas converter. Local rows now use
+    # py_to_value remains the pandas converter of the row path, which a customized frame, of a
+    # subclass, keeps; a plain frame converts with PySpark's Arrow conversion. Local rows use
     # infer.convert, which intentionally has different subclass/type semantics.
-    data = pd.DataFrame({"value": [value]}, dtype=object)
+    data = _RowPathFrame(pd)({"value": [value]}, dtype=object)
     before = len(service.execute_requests)
     spark.createDataFrame(data).toArrow()
     requests = service.execute_requests
@@ -6711,11 +6719,17 @@ def test_exact_date_nested_unrelated_values(mock_connect):
     assert (actual["number"], actual["flag"], actual["label"]) == (42, True, "date")
 
 
-def test_exact_date_named_impostor_rejected():
+def test_exact_date_named_impostor_rejected(mock_connect):
     pd = pytest.importorskip("pandas")
+    from pyspark.errors import PySparkValueError
+
+    # As PySpark's Arrow conversion of a frame without a schema, which does not take an object
+    # that is not a date as one.
+    spark, _ = mock_connect
     impostor = type("date", (), {"toordinal": lambda self: 719163})
-    with pytest.raises(TypeError, match="unsupported value type"):
-        _local_create_dataframe(pd.DataFrame({"value": [impostor()]}, dtype=object))
+    with pytest.raises(PySparkValueError, match=re.escape(
+            "Exception thrown when converting pandas.Series (object) with name 'value'")):
+        spark.createDataFrame(pd.DataFrame({"value": [impostor()]}, dtype=object))
 
 
 def _exact_date_fields(data):
@@ -6775,6 +6789,7 @@ def _exact_date_capture_server(connection):
         "spark.sql.session.localRelationChunkSizeBytes": str(1 << 40),
         "spark.sql.session.localRelationBatchOfChunksSizeBytes": str(1 << 40),
         "spark.sql.execution.pandas.convertToArrowArraySafely": "true",
+        "spark.sql.execution.pandas.inferPandasDictAsMap": "false",
     }
 
     def _exact_date_config(request, context):
@@ -6902,6 +6917,7 @@ def config(raw, context):
         'spark.sql.session.localRelationBatchOfChunksSizeBytes': str(64 << 20),
         # As the default of a server.
         'spark.sql.execution.pandas.convertToArrowArraySafely': 'true',
+        'spark.sql.execution.pandas.inferPandasDictAsMap': 'false',
     }
     operation = request.operation
     if operation.HasField('get'):
@@ -7141,7 +7157,10 @@ def test_decimal_scale_input_ipc(decimal_ipc_session, kind, schema_mode, texts):
         context.traps[Inexact] = True
         spark.createDataFrame(data, schema).collect()
     table = pa.ipc.open_stream(payload.read_bytes()).read_all()
-    expected = pa.table({name: pa.array(values, type=decimal_type)})
+    # As PySpark's Arrow conversion of a pandas frame without a schema, whose table names its
+    # columns _0, _1, ..., which toDF names.
+    ipc_name = "_0" if kind == "pandas" and schema_mode != "explicit" else name
+    expected = pa.table({ipc_name: pa.array(values, type=decimal_type)})
     table.validate(full=True)
     assert table.schema == expected.schema
     assert table.equals(expected)
@@ -7191,7 +7210,9 @@ def test_decimal_scale_avoids_coefficient_tuple(decimal_ipc_session, schema):
     pd = pytest.importorskip("pandas")
     spark, _ = decimal_ipc_session
     tuple_constructor = type(Decimal("1.20").as_tuple()).__new__.__code__
-    values = pd.DataFrame({"v": [Decimal("123.4500"), Decimal("-2.3000"), None]}, dtype=object)
+    # Of the converter of the row path, which a customized frame keeps (_RowPathFrame).
+    values = _RowPathFrame(pd)(
+        {"v": [Decimal("123.4500"), Decimal("-2.3000"), None]}, dtype=object)
     profile = cProfile.Profile()
     profile.enable()
     try:
@@ -7208,7 +7229,8 @@ def test_decimal_scale_of_non_finite_values(decimal_ipc_session, text):
 
     pd = pytest.importorskip("pandas")
     spark, payload = decimal_ipc_session
-    data = pd.DataFrame({"v": [Decimal(text), Decimal("1.5")]}, dtype=object)
+    # Of the converter of the row path, which a customized frame keeps (_RowPathFrame).
+    data = _RowPathFrame(pd)({"v": [Decimal(text), Decimal("1.5")]}, dtype=object)
     with pytest.raises(ValueError, match="has no precision to type a column by"):
         spark.createDataFrame(data, ["v"])
     assert not payload.exists()
