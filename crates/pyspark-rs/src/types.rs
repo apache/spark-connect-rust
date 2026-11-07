@@ -107,13 +107,27 @@ macro_rules! init_chain {
 
 /// Construct a `StructType` Python object (with its full base chain) from fields.
 fn py_new_struct(py: Python<'_>, fields: Vec<StructField>) -> PyResult<Py<PyStructType>> {
+    let objects = std::iter::repeat_with(|| None).take(fields.len()).collect();
+    py_new_struct_of(py, fields, objects)
+}
+
+/// Construct a `StructType` Python object of `fields`, of the `StructField` objects of
+/// `objects`, where they are known, as a slice of a struct is of those of the struct.
+fn py_new_struct_of(
+    py: Python<'_>,
+    fields: Vec<StructField>,
+    objects: Vec<Option<Py<PyStructField>>>,
+) -> PyResult<Py<PyStructType>> {
     Py::new(
         py,
         init_chain!(
             DataType::Struct {
                 fields: fields.clone(),
             },
-            PyStructType { fields },
+            PyStructType {
+                fields,
+                objects: std::sync::Mutex::new(objects),
+            },
             [],
             value
         ),
@@ -1933,6 +1947,39 @@ impl PyStructField {
 #[pyclass(name = "StructType", module = "pyspark.sql.types", extends = PyDataType)]
 pub struct PyStructType {
     pub(crate) fields: Vec<StructField>,
+    /// The `StructField` objects of `fields`, by their positions: those that the struct was
+    /// made of, and the others once they are made. So a field is the same object each time,
+    /// as PySpark's `StructType`, which holds its fields, gives them. A `StructField` cannot
+    /// change, so its object is always that of its field.
+    objects: std::sync::Mutex<Vec<Option<Py<PyStructField>>>>,
+}
+
+impl PyStructType {
+    /// The `StructField` object of the field at `index`, which is in range.
+    fn field_object(&self, py: Python<'_>, index: usize) -> PyResult<Py<PyStructField>> {
+        let mut objects = self.objects.lock().unwrap_or_else(|e| e.into_inner());
+        if objects.len() < self.fields.len() {
+            objects.resize_with(self.fields.len(), || None);
+        }
+        if let Some(object) = &objects[index] {
+            return Ok(object.clone_ref(py));
+        }
+        let object = Py::new(
+            py,
+            PyStructField {
+                field: self.fields[index].clone(),
+            },
+        )?;
+        objects[index] = Some(object.clone_ref(py));
+        Ok(object)
+    }
+
+    /// The `StructField` objects of the fields, in order.
+    fn field_objects(&self, py: Python<'_>) -> PyResult<Vec<Py<PyStructField>>> {
+        (0..self.fields.len())
+            .map(|index| self.field_object(py, index))
+            .collect()
+    }
 }
 
 #[pymethods]
@@ -1975,12 +2022,7 @@ impl PyStructType {
             fields: this.fields.clone(),
         };
         reduce_with_udts(slf.get_type(), &dt, || {
-            let fields = this
-                .fields
-                .iter()
-                .map(|f| Py::new(py, PyStructField { field: f.clone() }))
-                .collect::<PyResult<Vec<_>>>()?;
-            (fields,).into_pyobject(py)
+            (this.field_objects(py)?,).into_pyobject(py)
         })
     }
     /// `StructType(fields=None)` where each field is a `StructField` (matching
@@ -1989,10 +2031,12 @@ impl PyStructType {
     #[pyo3(signature = (fields=None))]
     fn new(fields: Option<Vec<Bound<'_, PyAny>>>) -> PyResult<pyo3::PyClassInitializer<Self>> {
         let mut out = Vec::new();
+        let mut objects = Vec::new();
         if let Some(fs) = fields {
             for f in fs {
-                if let Ok(sf) = f.extract::<PyRef<PyStructField>>() {
-                    out.push(sf.field.clone());
+                if let Ok(sf) = f.cast::<PyStructField>() {
+                    out.push(sf.borrow().field.clone());
+                    objects.push(Some(sf.clone().unbind()));
                 } else if let Ok(s) = f.extract::<String>() {
                     // "name type" DDL fragment.
                     let dt = DataType::from_ddl(&format!("struct<{s}>")).map_err(|e| {
@@ -2001,6 +2045,7 @@ impl PyStructType {
                         ))
                     })?;
                     if let DataType::Struct { fields } = dt {
+                        objects.extend(fields.iter().map(|_| None));
                         out.extend(fields);
                     }
                 } else {
@@ -2014,7 +2059,10 @@ impl PyStructType {
             DataType::Struct {
                 fields: out.clone(),
             },
-            PyStructType { fields: out },
+            PyStructType {
+                fields: out,
+                objects: std::sync::Mutex::new(objects),
+            },
             [],
             value
         ))
@@ -2030,8 +2078,10 @@ impl PyStructType {
         nullable: bool,
         metadata: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<Bound<'py, Self>> {
-        let new_field = if let Ok(sf) = field.extract::<PyRef<PyStructField>>() {
-            sf.field.clone()
+        let mut object = None;
+        let new_field = if let Ok(sf) = field.cast::<PyStructField>() {
+            object = Some(sf.clone().unbind());
+            sf.borrow().field.clone()
         } else {
             // As PySpark's: a name takes a data type, of which a str is the JSON value of one.
             let Some(data_type) = data_type else {
@@ -2069,6 +2119,10 @@ impl PyStructType {
         };
         {
             let mut me = slf.borrow_mut();
+            let length = me.fields.len();
+            let objects = me.objects.get_mut().unwrap_or_else(|e| e.into_inner());
+            objects.resize_with(length, || None);
+            objects.push(object);
             me.fields.push(new_field);
             // The base `DataType` is what `str()` and the schemas of `mapInArrow` and
             // friends read, so it must follow the fields.
@@ -2081,10 +2135,7 @@ impl PyStructType {
     /// The fields as `StructField` objects (mirrors `StructType.fields`).
     #[getter]
     fn fields(&self, py: Python<'_>) -> PyResult<Vec<Py<PyStructField>>> {
-        self.fields
-            .iter()
-            .map(|f| Py::new(py, PyStructField { field: f.clone() }))
-            .collect()
+        self.field_objects(py)
     }
 
     /// The field names in order (mirrors `StructType.names`).
@@ -2105,10 +2156,8 @@ impl PyStructType {
         use crate::column::raise_pyspark;
         if let Ok(name) = key.cast::<pyo3::types::PyString>() {
             let name = name.to_cow()?;
-            for f in &self.fields {
-                if f.name == name {
-                    return Ok(Py::new(py, PyStructField { field: f.clone() })?.into_any());
-                }
+            if let Some(index) = self.fields.iter().position(|f| f.name == name) {
+                return Ok(self.field_object(py, index)?.into_any());
             }
             return Err(raise_pyspark(
                 py,
@@ -2119,13 +2168,14 @@ impl PyStructType {
         }
         if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
             let idx = slice.indices(self.fields.len() as isize)?;
-            let mut out = Vec::new();
+            let (mut out, mut objects) = (Vec::new(), Vec::new());
             let (mut i, stop, step) = (idx.start, idx.stop, idx.step);
             while (step > 0 && i < stop) || (step < 0 && i > stop) {
                 out.push(self.fields[i as usize].clone());
+                objects.push(Some(self.field_object(py, i as usize)?));
                 i += step;
             }
-            return Ok(py_new_struct(py, out)?.into_any());
+            return Ok(py_new_struct_of(py, out, objects)?.into_any());
         }
         if !key.is_instance_of::<pyo3::types::PyInt>() {
             return Err(crate::stat_arguments::not_expected_type(
@@ -2137,13 +2187,7 @@ impl PyStructType {
         let n = self.fields.len() as isize;
         let index = key.extract::<isize>().ok();
         match index.map(|i| if i < 0 { i + n } else { i }) {
-            Some(i) if (0..n).contains(&i) => Ok(Py::new(
-                py,
-                PyStructField {
-                    field: self.fields[i as usize].clone(),
-                },
-            )?
-            .into_any()),
+            Some(i) if (0..n).contains(&i) => Ok(self.field_object(py, i as usize)?.into_any()),
             _ => Err(raise_pyspark(
                 py,
                 "PySparkIndexError",
@@ -2154,12 +2198,7 @@ impl PyStructType {
     }
 
     fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let items: Vec<Py<PyStructField>> = self
-            .fields
-            .iter()
-            .map(|f| Py::new(py, PyStructField { field: f.clone() }))
-            .collect::<PyResult<_>>()?;
-        let list = pyo3::types::PyList::new(py, items)?;
+        let list = pyo3::types::PyList::new(py, self.field_objects(py)?)?;
         Ok(list.as_any().call_method0("__iter__")?.unbind())
     }
 

@@ -3218,6 +3218,26 @@ def test_util_print_exec_and_skip_env(monkeypatch):
     assert util.is_remote_only() is True
 
 
+def test_struct_types_give_back_their_struct_field_objects_as_pyspark():
+    # As PySpark's StructType, which holds its fields: the fields, the items of a name or an
+    # index, the iteration and a slice give back the StructField objects that the struct was
+    # made of or added, and the same objects of the others each time.
+    f1 = T.StructField("f1", T.StringType(), True)
+    struct = T.StructType([f1, T.StructField("f2", T.IntegerType())])
+    assert struct.fields[0] is f1 and struct["f1"] is f1 and struct[0] is f1
+    assert list(struct)[0] is f1 and struct[0:1].fields[0] is f1
+    assert struct[1] is struct["f2"] is struct.fields[1] and struct[-1] is struct.fields[1]
+    added = T.StructType().add("f1", T.StringType(), True).add("f2", T.StringType(), True, None)
+    assert added["f1"] is added.fields[0] and added[0] is added.fields[0]
+    assert added[0:1] == T.StructType(added.fields[0:1])
+    g = T.StructField("g", T.LongType())
+    assert added.add(g).fields[2] is g and added["g"] is g and added.names == ["f1", "f2", "g"]
+    parsed = T._parse_datatype_json_string(struct.json())
+    assert parsed["f1"] is parsed.fields[0] and parsed == struct
+
+
+
+
 def test_struct_type_introspection():
     """StructType.fields / names / __getitem__ / __iter__ / __len__ + chainable add."""
     st = T.StructType(
