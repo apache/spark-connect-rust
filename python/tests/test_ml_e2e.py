@@ -208,3 +208,32 @@ def test_ml_dataframes_of_plans_as_pyspark(session):
     assert [r.a for r in df.filter("a > 0").orderBy("a").collect()] == [1, 2]
     other = session.range(2)
     assert df.join(other, df["a"] == other["id"]).count() == 2
+
+
+def test_session_hooks_rewrite_the_requests_sent_to_the_server_as_pyspark(session):
+    # As official PySpark 4.3.0's SparkSession.Hook: the server runs the request that the hooks
+    # of the session return, as a message of pyspark.sql.connect.proto.
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.session import SparkSession as ConnectSparkSession
+
+    replacement = session.range(5)._plan.plan(session.client)
+    calls = []
+
+    class Replace(ConnectSparkSession.Hook):
+        def on_execute_plan(self, request):
+            assert isinstance(request, pb2.ExecutePlanRequest)
+            calls.append(request.operation_id)
+            if request.plan.HasField("root"):
+                request.plan.root.CopyFrom(replacement)
+            return request
+
+    hooked = (
+        ConnectSparkSession.builder.remote(os.environ["SPARK_REMOTE"])
+        ._registerHook(lambda s: Replace())
+        .create()
+    )
+    try:
+        assert [r.id for r in hooked.range(1).collect()] == [0, 1, 2, 3, 4]
+        assert len(calls) == 1 and calls[0]
+    finally:
+        hooked.stop()

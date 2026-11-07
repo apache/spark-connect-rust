@@ -25,6 +25,9 @@ pub struct PySparkSessionBuilder {
     remote_url: Option<String>,
     /// Runtime configs set via `.config(...)`, applied after the session connects.
     configs: Vec<(String, String)>,
+    /// The hook factories of `_registerHook`, which a new session calls with itself, as
+    /// PySpark's builder does.
+    hook_factories: Vec<std::sync::Arc<Py<PyAny>>>,
 }
 
 impl PySparkSessionBuilder {
@@ -32,6 +35,7 @@ impl PySparkSessionBuilder {
         PySparkSessionBuilder {
             remote_url: None,
             configs: Vec::new(),
+            hook_factories: Vec::new(),
         }
     }
 }
@@ -142,16 +146,16 @@ impl PySparkSessionBuilder {
         Ok(slf)
     }
 
-    /// `_registerHook` - register an execution-hook factory (mirrors pyspark's Builder).
-    /// Accepted for API parity; this native-transport client sends ExecutePlanRequests
-    /// from Rust, so registered `Hook.on_execute_plan` callbacks are not invoked (see
-    /// `PyHook`). Chainable, matching the builder pattern.
+    /// `_registerHook` - register a factory of a `SparkSession.Hook`, as PySpark's builder: a
+    /// session that the builder creates calls it with itself, and calls the `on_execute_plan`
+    /// of the hook with each `ExecutePlanRequest` of its executions before it sends it.
     #[pyo3(name = "_registerHook")]
     fn register_hook<'py>(
-        slf: PyRefMut<'py, Self>,
+        mut slf: PyRefMut<'py, Self>,
         hook_factory: &Bound<'_, PyAny>,
     ) -> PyRefMut<'py, Self> {
-        let _ = hook_factory;
+        slf.hook_factories
+            .push(std::sync::Arc::new(hook_factory.clone().unbind()));
         slf
     }
 
@@ -213,13 +217,16 @@ impl PySparkSessionBuilder {
     #[pyo3(name = "getOrCreate")]
     fn get_or_create(&self, py: Python<'_>) -> PyResult<Py<PySparkSession>> {
         let url = self.url(py)?;
-        let session = {
+        let (session, created) = {
             let _creating = session_lock();
             match active_session(py).or_else(|| default_session(py)) {
-                Some(session) => session,
-                None => new_session(py, &url)?,
+                Some(session) => (session, false),
+                None => (new_session(py, &url)?, true),
             }
         };
+        if created {
+            self.install_hooks(py, &session)?;
+        }
         self.apply_options(py, &session.borrow(py).session)?;
         log_client_banner(py);
         Ok(session)
@@ -233,6 +240,7 @@ impl PySparkSessionBuilder {
             let _creating = session_lock();
             new_session(py, &url)?
         };
+        self.install_hooks(py, &session)?;
         self.apply_options(py, &session.borrow(py).session)?;
         log_client_banner(py);
         Ok(session)
@@ -240,6 +248,33 @@ impl PySparkSessionBuilder {
 }
 
 impl PySparkSessionBuilder {
+    /// The hooks of the factories of `_registerHook` for `session`, a session that the builder
+    /// created, as PySpark's `SparkSession(hook_factories=...)` makes them: of each factory
+    /// called with the session, of whose `on_execute_plan` the session's executions send the
+    /// requests. The factories run after the lock of the creation of sessions is released, as
+    /// Python code may release the GIL that the lock is held with.
+    fn install_hooks(&self, py: Python<'_>, session: &Py<PySparkSession>) -> PyResult<()> {
+        if self.hook_factories.is_empty() {
+            return Ok(());
+        }
+        let hooks = self
+            .hook_factories
+            .iter()
+            .map(|factory| {
+                factory
+                    .bind(py)
+                    .call1((session.clone_ref(py),))
+                    .map(Bound::unbind)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let hook: spark_connect::ExecutePlanHook = std::sync::Arc::new(move |request| {
+            Python::attach(|py| call_execute_plan_hooks(py, &hooks, request))
+                .map_err(crate::errors::callback_error)
+        });
+        session.borrow(py).session.set_execute_plan_hook(Some(hook));
+        Ok(())
+    }
+
     /// Set an option, capturing `spark.remote` as the endpoint, and validate the startup URLs
     /// after it, as PySpark's `config`.
     fn set_option(&mut self, py: Python<'_>, key: &str, value: String) -> PyResult<()> {
@@ -349,6 +384,36 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// The request that `hooks` return of `request`, as PySpark's client calls its session hooks:
+/// each `on_execute_plan` with the request of the one before, as a `pb2.ExecutePlanRequest`
+/// of the generated `pyspark.sql.connect.proto`, of the operation ID of `request`.
+fn call_execute_plan_hooks(
+    py: Python<'_>,
+    hooks: &[Py<PyAny>],
+    request: spark_connect_proto::ExecutePlanRequest,
+) -> PyResult<spark_connect_proto::ExecutePlanRequest> {
+    use prost::Message;
+    let operation_id = request.operation_id.clone();
+    let mut message = py
+        .import("pyspark.sql.connect.proto")?
+        .getattr("ExecutePlanRequest")?
+        .call_method1(
+            "FromString",
+            (pyo3::types::PyBytes::new(py, &request.encode_to_vec()),),
+        )?;
+    for hook in hooks {
+        message = hook.bind(py).call_method1("on_execute_plan", (message,))?;
+        if let Some(operation_id) = &operation_id {
+            message.setattr("operation_id", operation_id)?;
+        }
+    }
+    let bytes = message.call_method0("SerializeToString")?;
+    spark_connect_proto::ExecutePlanRequest::decode(
+        bytes.cast::<pyo3::types::PyBytes>()?.as_bytes(),
+    )
+    .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
+}
+
 /// Held while a session is got or created, as PySpark's `SparkSession._lock`, so that threads
 /// get the same default session. Taken with the GIL, which is not released while it is held.
 fn session_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -438,19 +503,24 @@ fn log_client_banner(py: Python<'_>) {
     });
 }
 
-/// `SparkSession.Hook` - injects behavior around plan execution (mirrors pyspark's
-/// `SparkSession.Hook`). In pyspark, `on_execute_plan` rewrites the Python
-/// `ExecutePlanRequest` before the gRPC client sends it. This client uses a native Rust
-/// transport that builds and sends the request in Rust (there is no Python request to
-/// rewrite), so the hook is a passthrough - the same architectural reason
-/// `SparkSession.client` is absent. Exposed for API parity and subclassing.
+/// `SparkSession.Hook` - injects behavior around plan execution, as PySpark's
+/// `SparkSession.Hook`: a session calls the `on_execute_plan` of each hook of the factories of
+/// `_registerHook` with each `ExecutePlanRequest`, as a message of the generated
+/// `pyspark.sql.connect.proto`, before it sends it, and sends the request that it returns. The
+/// base hook returns the request as it is.
 #[pyclass(name = "Hook", module = "pyspark.sql.connect.session", subclass)]
 pub struct PyHook;
 
 #[pymethods]
 impl PyHook {
+    /// A hook, of the arguments of the `__init__` of a subclass, which `__new__` leaves to it,
+    /// as `object.__new__` does for PySpark's hooks.
     #[new]
-    fn new() -> Self {
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn new(
+        _args: &Bound<'_, pyo3::types::PyTuple>,
+        _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> Self {
         PyHook
     }
 
