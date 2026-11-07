@@ -421,10 +421,10 @@ def test_persist_cache_and_unpersist_return_the_dataframe_itself_as_pyspark(mock
 def test_session_builder_chaining_offline():
     from pyspark.sql import SparkSession
     b = SparkSession.builder
-    assert type(b).__name__ == "SparkSessionBuilder"
-    # Chainable, no server contacted until getOrCreate.
-    b2 = b.remote("sc://localhost:15002").appName("x").master("local").config("k", "v")
-    assert type(b2).__name__ == "SparkSessionBuilder"
+    assert type(b).__name__ == "Builder"
+    # Chainable, no server contacted until getOrCreate: each method returns the builder.
+    b2 = b.remote("sc://localhost:15002").appName("x").config("k", "v")
+    assert b2 is b
 
 
 def test_sessions_are_got_or_created_as_pyspark():
@@ -544,7 +544,7 @@ def test_builder_options_are_set_on_the_session_as_pyspark(mock_connect):
     from pyspark.sql import SparkSession
 
     spark, service = mock_connect
-    builder = SparkSession.builder.remote("sc://localhost:1").master("local[4]")
+    builder = SparkSession.builder.remote("sc://localhost:1")
     builder = builder.appName("app").config("spark.sql.shuffle.partitions", 3)
     assert builder.getOrCreate() is spark
     assert service.set_confs == [
@@ -587,10 +587,46 @@ def test_tags_are_those_of_each_thread_as_pyspark(mock_connect):
         spark.clearTags()
 
 
+def test_session_builders_set_their_options_and_validate_their_urls_as_pyspark(monkeypatch):
+    # As PySpark's SparkSession.Builder: SparkSession.builder is a new builder of each access,
+    # whose methods set their option on it and return it, and a master with a remote raises
+    # CANNOT_CONFIGURE_SPARK_CONNECT_MASTER, also of MASTER or SPARK_REMOTE.
+    from pyspark.errors import PySparkRuntimeError
+    from pyspark.sql import SparkSession
+
+    monkeypatch.delenv("SPARK_REMOTE", raising=False)
+    monkeypatch.delenv("MASTER", raising=False)
+    assert SparkSession.builder is not SparkSession.builder
+    builder = SparkSession.builder
+    assert type(builder).__qualname__ == "SparkSession.Builder"
+    assert builder.config("k", "v") is builder and builder.appName("app") is builder
+    assert builder.master("local[2]") is builder
+    for make in (lambda: SparkSession.builder.master("local").remote("sc://host:1"),
+                 lambda: SparkSession.builder.remote("sc://host:1").master("local"),
+                 lambda: SparkSession.builder.config(
+                     map={"spark.master": "local", "spark.remote": "sc://host:1"})):
+        with pytest.raises(PySparkRuntimeError) as e:
+            make()
+        assert e.value.getCondition() == "CANNOT_CONFIGURE_SPARK_CONNECT_MASTER"
+        assert e.value.getMessageParameters() == {
+            "master_url": "local", "connect_url": "sc://host:1"}
+    monkeypatch.setenv("SPARK_REMOTE", "sc://env:15002")
+    with pytest.raises(PySparkRuntimeError) as e:
+        SparkSession.builder.master("local")
+    assert e.value.getMessageParameters()["connect_url"] == "sc://env:15002"
+    monkeypatch.setenv("SPARK_LOCAL_REMOTE", "1")
+    with pytest.raises(PySparkRuntimeError) as e:
+        SparkSession.builder.remote("sc://other:1")
+    assert e.value.getCondition() == "CANNOT_CONFIGURE_SPARK_CONNECT"
+    SparkSession.builder.remote("local[2]")
+
+
+
+
 def test_session_builder_class_constructor():
     from pyspark.sql import SparkSession
     b = SparkSession.Builder()
-    assert type(b).__name__ == "SparkSessionBuilder"
+    assert type(b).__name__ == "Builder"
 
 
 def test_sessions_raise_the_errors_of_their_arguments_as_pyspark(mock_connect, tmp_path):
@@ -639,7 +675,7 @@ def test_channel_builder_uses_endpoint():
         _params = {"use_ssl": "false"}
 
     b = SparkSession.builder.channelBuilder(CB())
-    assert type(b).__name__ == "SparkSessionBuilder"
+    assert type(b).__name__ == "Builder"
     # A builder without a host is a clear error (not a silent misconfig).
     with pytest.raises(ValueError):
         SparkSession.builder.channelBuilder(object())
@@ -4124,11 +4160,11 @@ def test_session_builder_remote_url():
     from pyspark.sql import SparkSession
 
     builder = SparkSession.builder.remote("sc://localhost:15002")
-    assert type(builder).__name__ == "SparkSessionBuilder"
+    assert type(builder).__name__ == "Builder"
 
     # Test with additional config
     builder2 = builder.appName("test").config("key", "value")
-    assert type(builder2).__name__ == "SparkSessionBuilder"
+    assert builder2 is builder
 
 
 def test_session_builder_remote_takes_the_url_as_pyspark():
@@ -4486,7 +4522,7 @@ def test_session_builder_all_config_options():
                .config("key", "value")
                .config("spark.sql.shuffle.partitions", "10"))
 
-    assert type(builder).__name__ == "SparkSessionBuilder"
+    assert type(builder).__name__ == "Builder"
 
 
 def test_higher_order_function_multiple_lambdas():
