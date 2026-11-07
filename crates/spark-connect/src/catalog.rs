@@ -134,6 +134,11 @@ impl Catalog {
         Catalog { session }
     }
 
+    /// The session of this catalog, as PySpark's `Catalog._sparkSession`.
+    pub fn spark_session(&self) -> &SparkSession {
+        &self.session
+    }
+
     /// Get the current catalog.
     ///
     /// Mirrors `pyspark.sql.connect.catalog.Catalog.currentCatalog`.

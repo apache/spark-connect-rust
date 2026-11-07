@@ -58,10 +58,7 @@ mod udtf_analyze;
 mod values;
 mod window;
 
-use catalog::{
-    PyCatalog, PyCatalogColumn, PyCatalogMetadata, PyDatabase, PyFunction, PyTable,
-    PyTablePartition,
-};
+use catalog::PyCatalog;
 use column::PyColumn;
 use conf::PyRuntimeConf;
 use dataframe::{
@@ -117,12 +114,6 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<transport::ResponseStream>()?;
     m.add("RustRpcError", m.py().get_type::<transport::RustRpcError>())?;
     m.add_class::<PyCatalog>()?;
-    m.add_class::<PyCatalogMetadata>()?;
-    m.add_class::<PyDatabase>()?;
-    m.add_class::<PyTable>()?;
-    m.add_class::<PyCatalogColumn>()?;
-    m.add_class::<PyFunction>()?;
-    m.add_class::<PyTablePartition>()?;
     m.add_class::<eval_type::PyPythonEvalType>()?;
     m.add_class::<PyRuntimeConf>()?;
     m.add_class::<PyDataFrameReader>()?;

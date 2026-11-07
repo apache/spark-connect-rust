@@ -1890,17 +1890,20 @@ def test_udf_udtf_determinism_and_extras():
 
 
 def test_catalog_result_classes():
-    # The catalog metadata result classes are Rust-backed and importable; the Table
-    # `database` property derives from a single-element namespace.
+    # As PySpark's: the catalog metadata result classes are the NamedTuples of
+    # pyspark.sql.catalog, and the Table `database` property derives from a single-element
+    # namespace.
     from pyspark.sql.catalog import (
         Catalog, CatalogMetadata, Database, Table, Column, Function, TablePartition,
     )
-    import pyspark._pyspark as p
-    # Rust-backed, but reporting the reference `pyspark.sql.catalog` module path
-    # (SPARK-59117), not "builtins".
-    for cls in (CatalogMetadata, Database, Table, Function, TablePartition):
+    assert Catalog.__module__ == "pyspark.sql.catalog"
+    for cls in (CatalogMetadata, Database, Table, Column, Function, TablePartition):
         assert cls.__module__ == "pyspark.sql.catalog", f"{cls.__name__} module = {cls.__module__}"
-    assert Column is p.CatalogColumn
+        assert issubclass(cls, tuple)
+    assert Column._fields == (
+        "name", "description", "dataType", "nullable", "isPartition", "isBucket", "isCluster")
+    assert Table("t", None, ["db"], None, "MANAGED", False).database == "db"
+    assert Table("t", None, ["a", "b"], None, "MANAGED", False).database is None
 
 
 def test_udtf_analyze_result_family():
