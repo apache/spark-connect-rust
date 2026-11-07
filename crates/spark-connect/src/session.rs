@@ -331,6 +331,28 @@ impl SparkSession {
         }
     }
 
+    /// Convert the JSON of a schema to DDL on the server, mirroring PySpark Connect's
+    /// `_to_ddl`: the `JsonToDDL` of an `AnalyzePlanRequest`, as Spark writes it.
+    pub fn json_to_ddl(&self, json: &str) -> Result<String> {
+        let request = proto::AnalyzePlanRequest {
+            session_id: self.client().session_id().to_string(),
+            user_context: Some(proto::UserContext::default()),
+            analyze: Some(proto::analyze_plan_request::Analyze::JsonToDdl(
+                proto::analyze_plan_request::JsonToDdl {
+                    json_string: json.to_string(),
+                },
+            )),
+            ..Default::default()
+        };
+        let response = block_on(self.client().analyze_plan(request))?;
+        match response.result {
+            Some(proto::analyze_plan_response::Result::JsonToDdl(r)) => Ok(r.ddl_string),
+            _ => Err(SparkError::connect_msg(
+                "AnalyzePlan response did not contain a DDL string",
+            )),
+        }
+    }
+
     /// Execute a SQL statement and return a DataFrame.
     ///
     /// Mirrors `pyspark.sql.SparkSession.sql(sqlQuery)`: the statement is sent at once, so a

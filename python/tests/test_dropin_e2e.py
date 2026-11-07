@@ -2062,6 +2062,27 @@ def test_window_frames_return_the_rows_of_pyspark(session):
         sums(o.rowsBetween(-(1 << 31) - 1, 0))
 
 
+def test_struct_types_convert_to_the_ddl_of_spark_as_pyspark(session):
+    # As PySpark Connect's StructType.toDDL: the server writes the DDL of the schema, which
+    # createDataFrame parses back.
+    from pyspark.sql import types as T
+
+    st = T.StructType([
+        T.StructField("a", T.IntegerType()),
+        T.StructField("b b", T.StringType(), False),
+        T.StructField("m", T.MapType(
+            T.StringType(), T.StructType([T.StructField("x", T.DecimalType(10, 2))]))),
+        T.StructField("c", T.StringType(), metadata={"comment": "the c"}),
+    ])
+    ddl = st.toDDL()
+    assert ddl == (
+        "a INT,`b b` STRING NOT NULL,m MAP<STRING, STRUCT<x: DECIMAL(10,2)>>,"
+        "c STRING COMMENT 'the c'")
+    assert session.createDataFrame([], ddl).schema == st
+
+
+
+
 def test_maps_keep_their_entries_in_order_with_keys_of_their_type(session):
     row = session.range(1).selectExpr(
         "map(2, 'b', 1, 'a') AS ints",

@@ -1870,14 +1870,19 @@ impl PyStructType {
         self.fields.iter().map(|f| f.name.clone()).collect()
     }
 
-    /// DDL string. Mirrors `StructType.toDDL()`.
+    /// DDL string. Mirrors `StructType.toDDL()`, which asks the server of the active session to
+    /// convert the JSON of the schema, as Spark writes DDL.
     #[pyo3(name = "toDDL")]
-    fn __st_to_ddl(&self) -> PyResult<String> {
-        DataType::Struct {
-            fields: self.fields.clone(),
+    fn __st_to_ddl(slf: &Bound<'_, Self>) -> PyResult<String> {
+        let py = slf.py();
+        let session = py
+            .import("pyspark.sql")?
+            .getattr("SparkSession")?
+            .call_method0("getActiveSession")?;
+        if session.is_none() {
+            return Err(pyo3::exceptions::PyAssertionError::new_err(()));
         }
-        .to_ddl()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+        session.call_method1("_to_ddl", (slf,))?.extract()
     }
 
     /// Tree string. Mirrors `StructType.treeString(maxDepth)`.
