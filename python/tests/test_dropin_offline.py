@@ -7601,6 +7601,36 @@ def test_explain_checks_its_arguments_and_prints_with_print_as_pyspark(mock_conn
     assert modes == [4, 2]
 
 
+def test_col_regex_metadata_column_where_and_transpose_take_their_arguments_as_pyspark():
+    # As PySpark's: colRegex and metadataColumn take a str, where a Column or a str, and
+    # transpose a Column or a column name, else NOT_EXPECTED_TYPE.
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+
+    df = _offline_session().range(1)
+    for value in (1, None, ["id"], F.col("id")):
+        for call, arg_name, expected in (
+            (lambda: df.colRegex(value), "colName", "str"),
+            (lambda: df.metadataColumn(value), "colName", "str"),
+        ):
+            with pytest.raises(PySparkTypeError) as error:
+                call()
+            assert error.value.getMessageParameters() == {
+                "arg_name": arg_name, "expected_type": expected,
+                "arg_type": type(value).__name__}
+    for value in (1, 1.5, ["id"]):
+        for call, arg_name in ((lambda: df.where(value), "condition"),
+                               (lambda: df.transpose(value), "col")):
+            with pytest.raises(PySparkTypeError) as error:
+                call()
+            assert error.value.getMessageParameters() == {
+                "arg_name": arg_name, "expected_type": "Column or str",
+                "arg_type": type(value).__name__}
+    # transpose takes a column name as the column of it.
+    assert type(df.transpose("id")).__name__ == "DataFrame"
+    assert type(df.transpose(F.col("id"))).__name__ == "DataFrame"
+
+
 def test_session_context_manager_stops_session():
     spark = _offline_session()
     with spark as s:
