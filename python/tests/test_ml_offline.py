@@ -626,3 +626,76 @@ def test_ml_modules_import_without_protobuf():
     )
     assert result.returncode == 0, result.stderr
     assert "'Relation'" in result.stdout and "protobuf >= 6.33.5" in result.stdout
+
+
+def test_session_hooks_rewrite_the_requests_of_executions_as_pyspark(_ml_mock_server):
+    # As official PySpark 4.3.0's SparkSession.Hook: a session that the builder creates calls
+    # each factory of _registerHook with itself, and the on_execute_plan of each hook with each
+    # ExecutePlanRequest before it sends it, which keeps the operation ID of the request.
+    _, service = _ml_mock_server
+    service.reset()
+    created = []
+
+    class TagHook(SparkSession.Hook):
+        def __init__(self, session, tag):
+            self.session = session
+            self.tag = tag
+            self.operation_ids = []
+
+        def on_execute_plan(self, request):
+            assert isinstance(request, pb2.ExecutePlanRequest)
+            self.operation_ids.append(request.operation_id)
+            request.tags.append(self.tag)
+            request.operation_id = "replaced"
+            return request
+
+    def factory(tag):
+        def make(session):
+            hook = TagHook(session, tag)
+            created.append(hook)
+            return hook
+
+        return make
+
+    builder = SparkSession.builder.remote(service.remote)
+    spark = builder._registerHook(factory("first"))._registerHook(factory("second")).create()
+    try:
+        assert [hook.session for hook in created] == [spark, spark]
+        command = pb2.Command()
+        command.ml_command.clean_cache.SetInParent()
+        spark.client.execute_command(command)
+        request = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+        assert list(request.tags)[-2:] == ["first", "second"]
+        assert request.operation_id == created[0].operation_ids[0]
+        assert created[1].operation_ids == created[0].operation_ids
+        assert request.plan.command == command
+
+        # A session got rather than created, the active or the default one, calls no
+        # factories.
+        got = SparkSession.builder.remote(service.remote)._registerHook(factory("third"))
+        assert not got.getOrCreate().is_stopped and len(created) == 2
+    finally:
+        spark.stop()
+
+    assert SparkSession.Hook().on_execute_plan(request) is request
+
+
+def test_session_hooks_raise_their_errors_as_pyspark(_ml_mock_server):
+    # As official PySpark 4.3.0: the error of a hook is raised by the execution that calls it,
+    # as it is.
+    _, service = _ml_mock_server
+    service.reset()
+
+    class Failing(SparkSession.Hook):
+        def on_execute_plan(self, request):
+            raise ValueError("the hook failed")
+
+    spark = SparkSession.builder.remote(service.remote)._registerHook(lambda s: Failing()).create()
+    try:
+        command = pb2.Command()
+        command.ml_command.clean_cache.SetInParent()
+        with pytest.raises(ValueError, match="the hook failed"):
+            spark.client.execute_command(command)
+        assert service.execute_requests == []
+    finally:
+        spark.stop()

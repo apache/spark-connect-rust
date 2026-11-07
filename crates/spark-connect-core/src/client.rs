@@ -206,6 +206,12 @@ fn retry_exception_bound_passed(
         .is_some_and(|ms| since.elapsed() >= Duration::from_millis(ms))
 }
 
+/// A hook of the executions of a client, as PySpark's `SparkSession.Hook.on_execute_plan`: it is
+/// called with each `ExecutePlanRequest` before the client sends it, and returns the request to
+/// send, which keeps the operation ID of the original.
+pub type ExecutePlanHook =
+    std::sync::Arc<dyn Fn(ExecutePlanRequest) -> Result<ExecutePlanRequest> + Send + Sync>;
+
 /// A Spark Connect client for communicating with a remote Spark server.
 ///
 /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient`.
@@ -227,6 +233,9 @@ pub struct SparkConnectClient {
     retry_policy: RetryPolicy,
     /// The deadline of each kind of RPC.
     rpc_deadlines: RpcDeadlines,
+    /// The hook of the executions, if any, shared by the clients of the clones of the session,
+    /// as PySpark's clones keep the hooks of a session.
+    execute_plan_hook: std::sync::Arc<std::sync::RwLock<Option<ExecutePlanHook>>>,
 }
 
 impl SparkConnectClient {
@@ -316,6 +325,7 @@ impl SparkConnectClient {
             user_agent,
             retry_policy: RetryPolicy::default(),
             rpc_deadlines: RpcDeadlines::default(),
+            execute_plan_hook: Default::default(),
         })
     }
 
@@ -338,7 +348,34 @@ impl SparkConnectClient {
             user_agent: self.user_agent.clone(),
             retry_policy: self.retry_policy.clone(),
             rpc_deadlines: self.rpc_deadlines.clone(),
+            execute_plan_hook: std::sync::Arc::clone(&self.execute_plan_hook),
         }
+    }
+
+    /// Set the hook of the executions of this client and of its clones, or clear it.
+    pub fn set_execute_plan_hook(&self, hook: Option<ExecutePlanHook>) {
+        *self
+            .execute_plan_hook
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = hook;
+    }
+
+    /// `request` as the hook of the executions, if any, returns it, of the operation ID of
+    /// `request`, as PySpark's client keeps the operation ID of the request of a hook.
+    #[allow(clippy::result_large_err)] // SparkError is large; changing the type would break the API
+    fn hooked(&self, request: ExecutePlanRequest) -> Result<ExecutePlanRequest> {
+        let hook = self
+            .execute_plan_hook
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let Some(hook) = hook else {
+            return Ok(request);
+        };
+        let operation_id = request.operation_id.clone();
+        let mut request = hook(request)?;
+        request.operation_id = operation_id;
+        Ok(request)
     }
 
     /// Get the user ID, if set.
@@ -374,6 +411,7 @@ impl SparkConnectClient {
         mut request: ExecutePlanRequest,
     ) -> Result<Streaming<ExecutePlanResponse>> {
         self.fill_user_context(&mut request.user_context);
+        let request = self.hooked(request)?;
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
         match self.stub.clone().execute_plan(req).await {
@@ -541,8 +579,10 @@ impl SparkConnectClient {
         mut request: ExecutePlanRequest,
     ) -> Result<ReattachableResponseStream> {
         // Before the iterator: its ReattachExecute and ReleaseExecute requests take the
-        // user context of this request.
+        // user context of this request, and the request of the hook, as PySpark's iterator
+        // is of the request that the hooks return.
         self.fill_user_context(&mut request.user_context);
+        let request = self.hooked(request)?;
         let iter = ExecutePlanResponseReattachableIterator::new(request);
         let start = iter.request().clone();
         let deadline = self.rpc_deadlines.reattachable_execute_plan;
