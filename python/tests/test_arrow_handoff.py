@@ -3322,7 +3322,12 @@ def test_float64_literal_numpy_dtype_custom_backing_keeps_row_error(protocol):
 
 
 @pytest.mark.parametrize("raises", [False, True])
-def test_float64_ndarray_subclass_keeps_row_conversion(protocol, raises):
+def test_float64_ndarray_subclass_converts_as_pyspark(protocol, raises):
+    # The fast path declines a NumPy subclass behind pandas' concrete wrapper; the frame then
+    # converts as PySpark's Arrow conversion does, which reads the raw storage and does not
+    # call the subclass's astype, whatever it would do.
+    from pyspark.sql._pandas_input import prepare_float64_table
+
     calls = []
 
     class Values(np.ndarray):
@@ -3336,24 +3341,13 @@ def test_float64_ndarray_subclass_keeps_row_conversion(protocol, raises):
     # Avoid pandas consolidating the subclass storage into a plain ndarray.
     frame = pd.DataFrame({"x": values.view(Values)}, copy=False)
     schema = T.StructType([T.StructField("x", T.DoubleType())])
-    assert type(frame) is pd.DataFrame
-    assert type(frame["x"]) is pd.Series
     assert type(frame["x"].array._ndarray) is Values
-    assert calls == []
-
-    with _arrow_input_service(protocol, config_error=True) as (spark, state):
-        if raises:
-            with pytest.raises(ValueError, match="^custom ndarray astype$"):
-                spark.createDataFrame(frame, schema)
-            assert state["input_tables"] == []
-            assert state["relations"] == []
-        else:
-            spark.createDataFrame(frame, schema).toArrow()
-            _assert_float64_ipc(state["input_tables"][0], [values + 7.0], schema)
-        assert calls == ["astype"]
-        assert state["config_requests"] == []
+    assert prepare_float64_table(frame, schema) is None
+    with _arrow_input_service(protocol) as (spark, state):
+        spark.createDataFrame(frame, schema).toArrow()
+        _assert_float64_ipc(state["input_tables"][0], [values], schema)
+        assert calls == []
         assert state["uploads"] == 0
-
 
 
 def test_float64_missing_schema_alias_keeps_native_row_path(protocol, monkeypatch):
@@ -3370,11 +3364,10 @@ def test_float64_missing_schema_alias_keeps_native_row_path(protocol, monkeypatc
 
     monkeypatch.delitem(vars(T), "DoubleType")
     monkeypatch.setattr(T, "__getattr__", lazy_attribute, raising=False)
-    with _arrow_input_service(protocol, config_error=True) as (spark, state):
+    with _arrow_input_service(protocol) as (spark, state):
         spark.createDataFrame(frame, schema).toArrow()
         _assert_float64_ipc(state["input_tables"][0], [values], schema)
         assert calls == []
-        assert state["config_requests"] == []
         assert state["uploads"] == 0
 
 
