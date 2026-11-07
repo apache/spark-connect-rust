@@ -6173,7 +6173,9 @@ def test_decimal_quanta_of_each_type_and_conversion(decimal_ipc_session):
     import pyarrow as pa
 
     spark, payload = decimal_ipc_session
-    schema = "a decimal(10, 2), b decimal(5, 1), c decimal(10, 2)"
+    schema = T.StructType([T.StructField("a", T.DecimalType(10, 2)),
+                           T.StructField("b", T.DecimalType(5, 1)),
+                           T.StructField("c", T.DecimalType(10, 2))])
     rows = [(Decimal("1.235"), Decimal("2.25"), Decimal("-0.005")),
             (Decimal("1.245"), Decimal("2.35"), None)]
     spark.createDataFrame(rows, schema).collect()
