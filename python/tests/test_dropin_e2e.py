@@ -1297,6 +1297,27 @@ def test_errors_carry_the_dataframe_query_contexts_of_pyspark(session):
     ]
 
 
+def test_sessions_raise_the_errors_of_tags_tables_and_jvm_attributes_as_pyspark(session):
+    # As PySpark Connect's: the errors of a tag of a comma, of an empty tag, of a name of a
+    # table that is not a str, and of the SparkContext of a classic session.
+    from pyspark.errors import PySparkAttributeError, PySparkTypeError, PySparkValueError
+
+    with pytest.raises(PySparkValueError) as e:
+        session.addTag("a,b")
+    assert e.value.getCondition() == "VALUE_ALLOWED"
+    with pytest.raises(PySparkValueError) as e:
+        session.removeTag("")
+    assert e.value.getCondition() == "VALUE_NOT_NON_EMPTY_STR"
+    with pytest.raises(PySparkTypeError) as e:
+        session.table(1)
+    assert e.value.getCondition() == "NOT_EXPECTED_TYPE"
+    with pytest.raises(PySparkAttributeError) as e:
+        session.sparkContext
+    assert e.value.getCondition() == "JVM_ATTRIBUTE_NOT_SUPPORTED"
+
+
+
+
 def test_server_errors_carry_their_condition_and_details(session):
     from pyspark.errors import AnalysisException, ArithmeticException, ParseException
     from pyspark.errors.exceptions.connect import SparkConnectGrpcException, SQLQueryContext

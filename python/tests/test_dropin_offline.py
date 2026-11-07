@@ -592,6 +592,41 @@ def test_session_builder_class_constructor():
     assert type(b).__name__ == "SparkSessionBuilder"
 
 
+def test_sessions_raise_the_errors_of_their_arguments_as_pyspark(mock_connect, tmp_path):
+    # As PySpark Connect's: the errors of the tags of addTag and removeTag, of the name of
+    # table, of the paths of copyFromLocalToFs, and of the JVM attributes of a classic session.
+    from pyspark.errors import PySparkAttributeError, PySparkTypeError, PySparkValueError
+
+    spark, _ = mock_connect
+    for method in (spark.addTag, spark.removeTag):
+        for tag, condition in (("", "VALUE_NOT_NON_EMPTY_STR"), ("a,b", "VALUE_ALLOWED"),
+                               (None, "CANNOT_BE_NONE")):
+            with pytest.raises(PySparkValueError) as e:
+                method(tag)
+            assert e.value.getCondition() == condition
+            assert e.value.getMessageParameters()["arg_name"] == "Spark Connect tag"
+    spark.removeTag("absent")
+    with pytest.raises(PySparkTypeError) as e:
+        spark.table(1)
+    assert e.value.getMessageParameters() == {
+        "arg_name": "tableName", "expected_type": "str", "arg_type": "int"}
+    local = tmp_path / "local.txt"
+    local.write_text("x")
+    with pytest.raises(PySparkValueError) as e:
+        spark.copyFromLocalToFs(str(local), "hdfs://host/dest")
+    assert e.value.getCondition() == "NO_SCHEMA_AND_DRIVER_DEFAULT_SCHEME"
+    for path in (tmp_path / "missing.txt", tmp_path):
+        with pytest.raises(AssertionError, match="local path must be a file path."):
+            spark.copyFromLocalToFs(str(path), "/dest")
+    for name in ("_jsc", "_jconf", "_jvm", "_jsparkSession", "sparkContext"):
+        with pytest.raises(PySparkAttributeError) as e:
+            getattr(spark, name)
+        assert e.value.getMessageParameters() == {"attr_name": name}
+    assert getattr(spark, "no_such_attribute", "default") == "default"
+
+
+
+
 def test_channel_builder_uses_endpoint():
     # channelBuilder reconstructs an sc:// URL from the builder's host/port (+ params)
     # for the native transport, returning a configured Builder (no longer raises).

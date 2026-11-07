@@ -117,25 +117,33 @@ impl SparkSession {
     /// this session.
     ///
     /// Mirrors `SparkSession.addTag`, whose tags are those of the current thread. Tags cannot
-    /// be empty or contain a comma.
+    /// be empty or contain a comma (see [`SparkSession::check_tag`]).
     pub fn add_tag(&self, tag: &str) -> Result<()> {
-        if tag.is_empty() {
-            return Err(SparkError::value(
-                "INVALID_TAG",
-                &[("detail", "Tag cannot be empty")],
-            ));
-        }
-        if tag.contains(',') {
-            return Err(SparkError::value(
-                "INVALID_TAG",
-                &[("detail", "Tag cannot contain ','")],
-            ));
-        }
+        Self::check_tag(tag)?;
         self.tags.update(|tags| {
             if !tags.iter().any(|t| t == tag) {
                 tags.push(tag.to_string());
             }
         });
+        Ok(())
+    }
+
+    /// The errors of a tag, as PySpark Connect's `_throw_if_invalid_tag`: `VALUE_ALLOWED` for a
+    /// tag of a comma, which separates the tags of Spark jobs, and `VALUE_NOT_NON_EMPTY_STR` for
+    /// an empty tag. `add_tag` checks them, as does the `removeTag` of the Python client.
+    pub fn check_tag(tag: &str) -> Result<()> {
+        if tag.contains(',') {
+            return Err(SparkError::value(
+                "VALUE_ALLOWED",
+                &[("arg_name", "Spark Connect tag"), ("disallowed_value", ",")],
+            ));
+        }
+        if tag.is_empty() {
+            return Err(SparkError::value(
+                "VALUE_NOT_NON_EMPTY_STR",
+                &[("arg_name", "Spark Connect tag"), ("arg_value", "")],
+            ));
+        }
         Ok(())
     }
 
@@ -2555,6 +2563,24 @@ mod tests {
         spark.remove_tag("test_tag");
         let tags = spark.get_tags();
         assert!(!tags.contains(&"test_tag".to_string()));
+    }
+
+    #[test]
+    fn tags_have_the_errors_of_pyspark() {
+        // As PySpark Connect's `_throw_if_invalid_tag`: a comma, then an empty tag.
+        for (tag, error_class) in [
+            (",", "VALUE_ALLOWED"),
+            ("a,b", "VALUE_ALLOWED"),
+            ("", "VALUE_NOT_NON_EMPTY_STR"),
+        ] {
+            let error = SparkSession::check_tag(tag).unwrap_err();
+            assert_eq!(error.get_error_class().as_deref(), Some(error_class));
+            assert_eq!(
+                error.get_message_parameters().unwrap()["arg_name"],
+                "Spark Connect tag"
+            );
+        }
+        assert!(SparkSession::check_tag("ok").is_ok());
     }
 
     #[test]
