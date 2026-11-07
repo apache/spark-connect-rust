@@ -1595,7 +1595,6 @@ def test_structtype_object_model():
     ])
     assert st.typeName() == "struct"
     assert st.fieldNames() == ["a", "b"]
-    assert st.toDDL() == "a int,b string NOT NULL"
     assert "root" in st.treeString() and "a: integer (nullable = true)" in st.treeString()
     # toNullable makes every field nullable.
     assert st.toNullable().simpleString() == "struct<a:int,b:string>"
@@ -3220,17 +3219,32 @@ def test_typed_columns_exist():
     assert type(F.current_date()).__name__ == "Column"
 
 
+def test_struct_types_convert_to_ddl_on_the_server_of_the_active_session_as_pyspark(mock_connect):
+    # As PySpark Connect's StructType.toDDL: the server of the active session converts the JSON
+    # of the schema (AnalyzePlanRequest.json_to_ddl=18 -> JsonToDDL.json_string=1), and there
+    # is no DDL without an active session.
+    spark, service = mock_connect
+    service.ddl_string = "a INT,`b b` STRING NOT NULL"
+    st = T.StructType([
+        T.StructField("a", T.IntegerType()),
+        T.StructField("b b", T.StringType(), False),
+    ])
+    assert st.toDDL() == "a INT,`b b` STRING NOT NULL"
+    request = parse_message(service.analyze_requests[-1])
+    assert parse_message(request[18][0])[1][0].decode() == st.json()
+    spark.stop()
+    with pytest.raises(AssertionError):
+        st.toDDL()
+
+
+
+
 def test_struct_type_schema_methods():
     """Test StructType schema introspection methods."""
     st = T.StructType([
         T.StructField("name", T.StringType(), False),
         T.StructField("age", T.IntegerType(), True),
     ])
-
-    # Test toDDL
-    ddl = st.toDDL()
-    assert "name" in ddl
-    assert "age" in ddl
 
     # Test treeString
     tree = st.treeString()

@@ -1729,6 +1729,16 @@ impl PySparkSession {
         set_default_and_active(py, &session);
     }
 
+    /// The DDL of the schema `struct`, as PySpark Connect's `_to_ddl`: the server converts
+    /// its JSON.
+    #[pyo3(name = "_to_ddl")]
+    fn to_ddl(&self, py: Python<'_>, r#struct: &Bound<'_, PyAny>) -> PyResult<String> {
+        let json: String = r#struct.call_method0("json")?.extract()?;
+        let session = self.session.clone();
+        py.detach(|| session.json_to_ddl(&json).map_err(Box::new))
+            .to_pyerr()
+    }
+
     /// The tags of the current thread, a set, as PySpark's `getTags`.
     #[pyo3(name = "getTags")]
     fn get_tags<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PySet>> {

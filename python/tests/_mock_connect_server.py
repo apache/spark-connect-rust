@@ -282,6 +282,8 @@ def serve(connection):
             self.read_confs = []
             self.set_confs = []
             self.clone_requests = []
+            # The DDL of the JSON of each JsonToDDL.
+            self.ddl_string = ""
 
         def analyze(self, request, context):
             self.calls += 1
@@ -305,6 +307,11 @@ def serve(connection):
                 ddl = parse_message(parse_message(request)[11][0])[1][0].decode()
                 parsed = ddl_data_type(ddl) or self.data_type
                 return message_field(9, message_field(1, parsed))
+            # base.proto: AnalyzePlanRequest.json_to_ddl=18 -> JsonToDDL.json_string=1;
+            # AnalyzePlanResponse.json_to_ddl=16 -> JsonToDDL.ddl_string=1: `ddl_string`, which
+            # a test sets.
+            if 18 in parse_message(request):
+                return message_field(16, message_field(1, self.ddl_string.encode()))
             if self.failure == "no-result":
                 return b""
             if self.failure == "missing-schema":

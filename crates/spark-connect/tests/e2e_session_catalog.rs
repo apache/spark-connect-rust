@@ -380,3 +380,41 @@ fn parse_ddl_parses_on_the_server() {
     assert_eq!(error.error_class, "PARSE_SYNTAX_ERROR");
     let _ = spark.stop();
 }
+
+/// `json_to_ddl` converts the JSON of a schema to DDL on the server, as PySpark Connect's
+/// `_to_ddl`: the DDL of Spark, with its quoted names, NOT NULL and COMMENT.
+#[test]
+fn json_to_ddl_converts_on_the_server() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::types::{DataType, StructField};
+    let spark = session();
+    let field = |name: &str, data_type: DataType, nullable: bool| StructField {
+        name: name.to_string(),
+        data_type,
+        nullable,
+        metadata: Default::default(),
+    };
+    let mut commented = field("c", DataType::Long, true);
+    commented.metadata.insert(
+        "comment".to_string(),
+        serde_json::Value::String("the c".to_string()),
+    );
+    let schema = DataType::Struct {
+        fields: vec![
+            field("a", DataType::Integer, true),
+            field(
+                "b b",
+                DataType::String {
+                    collation: "UTF8_BINARY".to_string(),
+                },
+                false,
+            ),
+            commented,
+        ],
+    };
+    let ddl = spark.json_to_ddl(&schema.json()).expect("ddl");
+    assert_eq!(ddl, "a INT,`b b` STRING NOT NULL,c BIGINT COMMENT 'the c'");
+    let _ = spark.stop();
+}
