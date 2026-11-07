@@ -333,9 +333,10 @@ fn numpy_ndarray_ndim(obj: &Bound<'_, PyAny>) -> PyResult<Option<usize>> {
 /// The literal of a NumPy scalar, typed as PySpark's `LiteralExpression._infer_type` types it: a
 /// bool, a signed int of 8 to 64 bits (tinyint to bigint), or a float32 or float64. A str or bytes
 /// scalar is `None`, for the string and binary conversions to take. Any other NumPy scalar (an
-/// unsigned int, float16, longdouble, complex, datetime64 or timedelta64) is
-/// UNSUPPORTED_DATA_TYPE, named by its Python type. NumPy is looked up in `sys.modules`, as a
-/// NumPy scalar exists only when NumPy is imported.
+/// unsigned int, float16, complex, datetime64 or timedelta64) is UNSUPPORTED_DATA_TYPE,
+/// named by its Python type. A distinct longdouble scalar whose dtype maps to double fails the
+/// reference's scalar-class assertion. NumPy is looked up in `sys.modules`, as a NumPy
+/// scalar exists only when NumPy is imported.
 fn numpy_scalar_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<LiteralExpression>> {
     let py = obj.py();
     let modules = py.import("sys")?.getattr("modules")?;
@@ -359,7 +360,18 @@ fn numpy_scalar_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<LiteralExpres
         ("i", 4) => LiteralExpression::Integer(obj.extract::<i64>()? as i32),
         ("i", 8) => LiteralExpression::Long(obj.extract::<i64>()?),
         ("f", 4) => LiteralExpression::Float(obj.extract::<f64>()? as f32),
-        ("f", 8) => LiteralExpression::Double(obj.extract::<f64>()?),
+        ("f", 8) => {
+            // On some platforms longdouble has an eight-byte dtype equal to float64, but
+            // remains a distinct scalar class. PySpark infers DoubleType then asserts the
+            // accepted classes before converting its value to float.
+            if !obj.is_instance_of::<pyo3::types::PyFloat>()
+                && !obj.is_instance(&numpy.getattr("float32")?)?
+                && !obj.is_instance(&numpy.getattr("float64")?)?
+            {
+                return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+            }
+            LiteralExpression::Double(obj.extract::<f64>()?)
+        }
         _ => {
             let type_name = obj
                 .get_type()

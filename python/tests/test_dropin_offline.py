@@ -9596,7 +9596,6 @@ def test_numpy_scalars_of_other_types_are_unsupported_as_pyspark(mock_connect):
         (np.uint8(5), "uint8"),
         (np.uint64(5), "uint64"),
         (np.float16(1.5), "float16"),
-        (np.longdouble(1.5), "longdouble"),
         (np.complex128(1 + 2j), "complex128"),
         (np.datetime64("2020-01-01"), "datetime64"),
         (np.timedelta64(1, "D"), "timedelta64"),
@@ -9609,6 +9608,51 @@ def test_numpy_scalars_of_other_types_are_unsupported_as_pyspark(mock_connect):
         F.lit(np.array([1], dtype=np.uint8))
     assert error.value.getCondition() == "UNSUPPORTED_NUMPY_ARRAY_SCALAR"
     assert error.value.getMessageParameters() == {"dtype": "uint8"}
+
+
+def test_numpy_longdouble_scalar_matches_dtype_and_class_checks_as_pyspark():
+    np = pytest.importorskip("numpy")
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+
+    value = np.longdouble(1.5)
+    if value.dtype == np.dtype("float64"):
+        # A dtype mapping to DoubleType does not suffice: PySpark also asserts that its
+        # scalar is a float, np.float32 or np.float64. Distinct eight-byte longdouble
+        # classes (such as on macOS arm64) fail that assertion without a message.
+        if isinstance(value, (float, np.float32, np.float64)):
+            assert repr(F.lit(value)) == "Column<'1.5'>"
+        else:
+            with pytest.raises(AssertionError) as error:
+                F.lit(value)
+            assert error.value.args == ()
+    else:
+        # Wider longdouble dtypes do not map to a Spark type at all.
+        with pytest.raises(PySparkTypeError) as error:
+            F.lit(value)
+        assert error.value.getCondition() == "UNSUPPORTED_DATA_TYPE"
+        assert error.value.getMessageParameters() == {"data_type": type(value).__name__}
+
+
+def test_numpy_longdouble_array_matches_dtype_and_element_checks_as_pyspark():
+    np = pytest.importorskip("numpy")
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+
+    value = np.array([1.5], dtype=np.longdouble)
+    if value.dtype == np.dtype("float64"):
+        if isinstance(value[0], (float, np.float32, np.float64)):
+            assert repr(F.lit(value)).lower() == "column<'cast(array(1.5) as array<double>)'>"
+        else:
+            # A mapped array dtype still builds its literals through each scalar's checks.
+            with pytest.raises(AssertionError) as error:
+                F.lit(value)
+            assert error.value.args == ()
+    else:
+        with pytest.raises(PySparkTypeError) as error:
+            F.lit(value)
+        assert error.value.getCondition() == "UNSUPPORTED_NUMPY_ARRAY_SCALAR"
+        assert error.value.getMessageParameters() == {"dtype": value.dtype.name}
 
 
 # --------------------------------------------------------------------------- 4.3.0 gaps
@@ -9988,6 +10032,7 @@ def test_lit_of_a_numpy_array_is_an_array_of_its_type_as_pyspark():
     for value, expected in (
         (np.array([1, 2]), "cast(array(1, 2) as array<bigint>)"),
         (np.array([1.5], dtype=np.float32), "cast(array(1.5) as array<float>)"),
+        (np.array([1.5], dtype=np.float64), "cast(array(1.5) as array<double>)"),
         (np.array(["x"]), "cast(array(x) as array<string>)"),
     ):
         assert repr(F.lit(value)).lower() == f"column<'{expected}'>"
