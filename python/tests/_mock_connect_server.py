@@ -354,6 +354,7 @@ def serve(connection):
             "spark.sql.timestampType": "TIMESTAMP_LTZ",
             "spark.sql.execution.arrow.useLargeVarTypes": "false",
             "spark.sql.execution.pandas.convertToArrowArraySafely": "true",
+            "spark.sql.execution.pandas.inferPandasDictAsMap": "false",
             "spark.sql.session.localRelationCacheThreshold": "1048576",
             "spark.sql.session.localRelationSizeLimit": "3221225472",
             "spark.sql.session.localRelationChunkSizeRows": "10000",
