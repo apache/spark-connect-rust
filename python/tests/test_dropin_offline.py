@@ -20,6 +20,8 @@ from threading import Barrier
 import pytest
 
 from _mock_connect_server import (
+    ddl_json,
+    ddl_parse_response,
     message_field,
     mock_connect_session,
     parse_message,
@@ -395,6 +397,19 @@ def test_checkpoints_send_their_eager_and_storage_level_as_pyspark(mock_connect)
     assert parse_message(sent()[4][0]) == {1: [1], 5: [1]}
     df.localCheckpoint(True, StorageLevel(False, True, True, True, 2))
     assert parse_message(sent()[4][0]) == {2: [1], 3: [1], 4: [1], 5: [2]}
+
+
+def test_persist_cache_and_unpersist_return_the_dataframe_itself_as_pyspark(mock_connect):
+    # As PySpark's, which persist the plan of the DataFrame and return it, not a copy.
+    from pyspark.storagelevel import StorageLevel
+
+    spark, _ = mock_connect
+    df = spark.range(1)
+    assert df.persist() is df
+    assert df.persist(StorageLevel.DISK_ONLY) is df
+    assert df.cache() is df
+    assert df.unpersist() is df
+    assert df.unpersist(blocking=True) is df
 
 
 # --------------------------------------------------------------------------- session builder
@@ -4196,6 +4211,45 @@ def test_row_hash_matches_tuple():
     assert hash(Row(a=Row(b=1))) == hash(((1,),))
 
 
+def test_observations_check_their_arguments_as_pyspark(mock_connect):
+    # As PySpark's Observation and DataFrame.observe, which check their arguments on the
+    # client, and ask the server whether the DataFrame is streaming, as `df.isStreaming`.
+    from pyspark.errors import PySparkAssertionError, PySparkTypeError, PySparkValueError
+    from pyspark.sql import Observation
+    from pyspark.sql import functions as F
+
+    spark, _ = mock_connect
+    count = F.count(F.lit(1)).alias("c")
+    df = spark.range(1)
+    for call, error_type, condition, parameters in (
+        (lambda: Observation(1), PySparkTypeError, "NOT_EXPECTED_TYPE",
+         {"arg_name": "name", "expected_type": "str", "arg_type": "int"}),
+        (lambda: Observation(""), PySparkValueError, "VALUE_NOT_NON_EMPTY_STR",
+         {"arg_name": "name", "arg_value": ""}),
+        (lambda: Observation("o").get, PySparkAssertionError, "NO_OBSERVE_BEFORE_GET", {}),
+        (lambda: df.observe(Observation("o")), PySparkValueError, "CANNOT_BE_EMPTY",
+         {"item": "exprs"}),
+        (lambda: df.observe("o", "id"), PySparkTypeError, "NOT_EXPECTED_TYPE",
+         {"arg_name": "exprs", "expected_type": "list[Column]", "arg_type": "tuple"}),
+        (lambda: df.observe(1, count), PySparkTypeError, "NOT_EXPECTED_TYPE",
+         {"arg_name": "observation", "expected_type": "Observation or str", "arg_type": "int"}),
+    ):
+        with pytest.raises(error_type) as error:
+            call()
+        assert error.value.getCondition() == condition
+        assert error.value.getMessageParameters() == parameters
+    # An unnamed observation is of a random UUID once it is used, and is used once; it has no
+    # metrics until an action runs.
+    observation = Observation()
+    assert observation._name is None
+    df.observe(observation, count)
+    assert len(observation._name) == 36 and observation.get == {}
+    for observe in (lambda: df.observe(observation, count), lambda: observation._on(df, count)):
+        with pytest.raises(PySparkAssertionError) as error:
+            observe()
+        assert error.value.getCondition() == "REUSE_OBSERVATION"
+
+
 def test_row_usable_in_set_and_dict():
     """Equal Rows collapse in a set and work as dict keys."""
     from pyspark.sql import Row
@@ -4892,7 +4946,11 @@ def test_timedelta_values_convert_as_pyspark():
 
 
 def _local_create_dataframe(*args):
-    # The local relation and its toDF are built without a server.
+    # The local relation and its toDF are built without a server; a DDL schema, which PySpark
+    # asks the server to parse, is parsed as the server would.
+    args = list(args)
+    if len(args) > 1 and isinstance(args[1], str) and ddl_json(args[1]) is not None:
+        args[1] = T._parse_datatype_json_string(json.dumps(ddl_json(args[1])))
     return _offline_session().createDataFrame(*args)
 
 
@@ -5116,6 +5174,43 @@ if __name__ == "__main__":
     result = subprocess.run(
         [sys.executable, "-c", code, tests], check=True, capture_output=True, text=True)
     assert result.stdout.strip().splitlines()[-1] == str(["col"] * 6)
+
+
+def test_grouping_sets_group_by_their_grouping_columns_as_pyspark(mock_connect):
+    # As PySpark's, groupingSets(groupingSets, *cols) groups by the sets with the grouping
+    # columns `cols`: Relation.aggregate=9, Aggregate.group_type=2 (GROUPING_SETS=5),
+    # grouping_expressions=3, grouping_sets=6 (GroupingSets.grouping_set=1).
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    df = spark.range(1)
+
+    def column_names(expressions):
+        # Expression.unresolved_attribute=2, UnresolvedAttribute.unparsed_identifier=1.
+        return [parse_message(parse_message(e)[2][0])[1][0].decode() for e in expressions]
+
+    def sent(grouped):
+        grouped.agg(F.count("*")).collect()
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        aggregate = parse_message(parse_message(plan)[9][0])
+        sets = [column_names(parse_message(s).get(1, [])) for s in aggregate.get(6, [])]
+        return aggregate[2], column_names(aggregate.get(3, [])), sets
+
+    assert sent(df.groupingSets([["id"], []], "id", F.col("x"))) == (
+        [5], ["id", "x"], [["id"], []])
+    # No grouping columns, and a set of one column given alone.
+    assert sent(df.groupingSets(["id", ("x", 1)])) == ([5], [], [["id"], ["x", "id"]])
+    for call, arg_name, arg_type in (
+        (lambda: df.groupingSets([["id"]], ["id"]), "cols", "list"),
+        (lambda: df.groupingSets([[["id"]]]), "groupingSets", "list"),
+        (lambda: df.groupingSets([1.5]), "groupingSets", "float"),
+    ):
+        with pytest.raises(PySparkTypeError) as error:
+            call()
+        assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+        assert error.value.getMessageParameters() == {
+            "expected_type": "Column, int or str", "arg_name": arg_name, "arg_type": arg_type}
 
 
 def test_create_dataframe_checks_every_row_against_the_merged_schema():
@@ -5429,6 +5524,16 @@ def _container_input_fields(data):
     return result
 
 
+def _ddl_parse(request, context):
+    # As the server, of the DDL schemas that the client asks it to parse (`_parse_ddl`).
+    import grpc
+
+    response = ddl_parse_response(request)
+    if response is None:
+        context.abort(grpc.StatusCode.UNIMPLEMENTED, "Method not found!")
+    return response
+
+
 def _container_input_capture_server(connection):
     from concurrent.futures import ThreadPoolExecutor
     import grpc
@@ -5452,6 +5557,7 @@ def _container_input_capture_server(connection):
         server.add_generic_rpc_handlers((grpc.method_handlers_generic_handler(
             "spark.connect.SparkConnectService", {
                 "ExecutePlan": grpc.unary_stream_rpc_method_handler(execute),
+                "AnalyzePlan": grpc.unary_unary_rpc_method_handler(_ddl_parse),
             }),))
         port = server.add_insecure_port("127.0.0.1:0")
         server.start()
@@ -5744,6 +5850,7 @@ def _exact_date_capture_server(connection):
             "spark.connect.SparkConnectService", {
                 "ExecutePlan": grpc.unary_stream_rpc_method_handler(_exact_date_execute),
                 "Config": grpc.unary_unary_rpc_method_handler(_exact_date_config),
+                "AnalyzePlan": grpc.unary_unary_rpc_method_handler(_ddl_parse),
             }),))
         port = server.add_insecure_port("127.0.0.1:0")
         server.start()
@@ -6995,6 +7102,43 @@ def test_completion_matches_python_connect(completion_analyzed, names):
     assert df.schema.fieldNames() == names
 
 
+def test_ddl_schemas_are_parsed_on_the_server_as_pyspark(mock_connect):
+    # As PySpark Connect's `_parse_ddl`, which asks the server to parse a DDL schema, of
+    # createDataFrame and of the map functions; a type is sent as it is.
+    spark, service = mock_connect
+
+    def ddl_requests():
+        # base.proto: AnalyzePlanRequest.ddl_parse=11, DDLParse.ddl_string=1.
+        return [parse_message(parse_message(request)[11][0])[1][0].decode()
+                for request in service.analyze_requests if 11 in parse_message(request)]
+
+    def sent_local_schema():
+        # The LocalRelation of the type that the server parsed: AnalyzePlanRequest.schema=4 ->
+        # plan=1 -> root=1 -> (Relation.to_df=18 -> input=1 ->) local_relation=11 -> schema=2.
+        relation = parse_message(parse_message(parse_message(
+            parse_message(service.analyze_requests[-1])[4][0])[1][0])[1][0])
+        while 18 in relation:
+            relation = parse_message(parse_message(relation[18][0])[1][0])
+        return T._parse_datatype_json_string(parse_message(relation[11][0])[2][0].decode())
+
+    spark.createDataFrame([], "id long").columns
+    assert sent_local_schema().simpleString() == "struct<id:bigint>"
+    nested = "id struct<a:int,b:double> NOT NULL"
+    spark.createDataFrame([], nested).columns
+    assert sent_local_schema() == T.StructType([T.StructField("id", T.StructType([
+        T.StructField("a", T.IntegerType()), T.StructField("b", T.DoubleType())]), False)])
+    assert ddl_requests() == ["id long", nested]
+    df = spark.range(1)
+    df.mapInPandas(lambda it: it, "id long NOT NULL")
+    df.mapInArrow(lambda it: it, "id long COMMENT 'c'")
+    df.groupBy("id").applyInPandas(lambda pdf: pdf, "`id` long")
+    df.groupBy("id").cogroup(df.groupBy("id")).applyInArrow(lambda l, r: l, "id: long")
+    assert ddl_requests()[2:] == [
+        "id long NOT NULL", "id long COMMENT 'c'", "`id` long", "id: long"]
+    df.mapInPandas(lambda it: it, T.StructType([T.StructField("id", T.LongType())]))
+    assert len(ddl_requests()) == 6
+
+
 def test_completion_lists_are_independent(completion_analyzed):
     spark, service = completion_analyzed
     df = spark.range(10)
@@ -7265,6 +7409,33 @@ def test_function_calls_render_as_pyspark(column, expected):
     from pyspark.sql import functions as F
 
     assert repr(column(F)) == f"Column<'{expected}'>"
+
+
+def test_count_and_sum_distinct_take_their_arguments_as_pyspark():
+    # As PySpark Connect's: a Column or a column name, else NOT_EXPECTED_TYPE; count of a star
+    # Column counts the rows, as count(1), and sumDistinct warns that it is deprecated.
+    import warnings
+
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+
+    df = _offline_session().range(1)
+    assert repr(F.count(F.col("*"))) == "Column<'count(1)'>"
+    assert repr(F.count(df["*"])) == "Column<'count(1)'>"
+    assert repr(F.count(F.col("a.*"))) == "Column<'count(1)'>"
+    assert repr(F.count("a")) == repr(F.count(F.col("a"))) == "Column<'count(a)'>"
+    # A name is the column of it: count("*") is the count of a star, as in PySpark.
+    assert repr(F.count("*")) == "Column<'count(unresolvedstar())'>"
+    assert repr(F.sum_distinct("a")) == "Column<'sum(distinct a)'>"
+    for call in (lambda: F.count(1), lambda: F.sum_distinct(1), lambda: F.sum_distinct(None)):
+        with pytest.raises(PySparkTypeError) as error:
+            call()
+        assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+        assert error.value.getMessageParameters()["expected_type"] == "Column or str"
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        assert repr(F.sumDistinct("a")) == "Column<'sum(distinct a)'>"
+    assert [str(w.message) for w in record] == ["Deprecated in 3.4, use sum_distinct instead."]
 
 
 @pytest.mark.parametrize("build,expected", [
@@ -9072,6 +9243,12 @@ def version_cache_serve(connection, request_started, response_waiting, response_
             self.releases += 1
             return b""
 
+        def clone(self, request, context):
+            # CloneSessionResponse.new_session_id=3, of a new session.
+            import uuid
+
+            return message_field(3, str(uuid.uuid4()))
+
     service = Service()
     with version_cache_ThreadPoolExecutor(max_workers=4) as executor:
         server = grpc.server(executor)
@@ -9079,6 +9256,7 @@ def version_cache_serve(connection, request_started, response_waiting, response_
             "spark.connect.SparkConnectService", {
                 "AnalyzePlan": grpc.unary_unary_rpc_method_handler(service.analyze),
                 "ReleaseSession": grpc.unary_unary_rpc_method_handler(service.release),
+                "CloneSession": grpc.unary_unary_rpc_method_handler(service.clone),
             }),))
         port = server.add_insecure_port("127.0.0.1:0")
         server.start()
@@ -9193,6 +9371,23 @@ def test_version_cache_new_sessions_have_independent_caches(version_cache_sessio
         assert other.version == "other"
     assert service.calls == 3
     assert spark.version == "4.3.0"
+
+
+def test_clone_session_clones_the_session_on_the_server_as_pyspark(mock_connect):
+    # As PySpark's cloneSession, a CloneSession of the session (CloneSessionRequest
+    # .session_id=1), of the new session id given (new_session_id=4), whose clone has the id of
+    # the response.
+    import uuid
+
+    spark, service = mock_connect
+    clone = spark.cloneSession()
+    request = parse_message(service.clone_requests[-1])
+    assert request[1] == [spark.session_id.encode()] and 4 not in request
+    assert clone.session_id == service.cloned_session_id != spark.session_id
+    new_id = str(uuid.uuid4())
+    assert spark.cloneSession(new_id).session_id == new_id
+    assert parse_message(service.clone_requests[-1])[4] == [new_id.encode()]
+    assert len(service.clone_requests) == 2
 
 
 def test_version_cache_success_remains_cached_after_stop(version_cache_session):

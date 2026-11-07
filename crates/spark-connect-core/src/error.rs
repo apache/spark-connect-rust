@@ -465,6 +465,45 @@ impl SparkError {
         err
     }
 
+    /// The error of collecting the metrics of an Observation, which the server reports in
+    /// its `ObservedMetrics`, as PySpark's `convert_observation_errors` makes it: the root
+    /// error of `errors`, as a server error of the details of `FetchErrorDetails`.
+    pub fn from_observation_errors(
+        root_error_idx: i32,
+        errors: Vec<spark_connect_proto::fetch_error_details_response::Error>,
+    ) -> Self {
+        let Some(root) = usize::try_from(root_error_idx)
+            .ok()
+            .and_then(|index| errors.get(index))
+        else {
+            return Self::connect_msg("Observation error: invalid root_error_idx");
+        };
+        let throwable = root.spark_throwable.clone().unwrap_or_default();
+        let mut err = Self {
+            kind: SparkErrorKind::Unknown,
+            error_class: throwable.error_class.clone().unwrap_or_default(),
+            params: BTreeMap::new(),
+            message: root.message.clone(),
+            sql_state: throwable.sql_state.clone(),
+            contexts: Vec::new(),
+            server_stacktrace: None,
+            grpc_code: None,
+            grpc_details: None,
+            operation_id: None,
+            server: Some(Box::new(ServerErrorInfo {
+                classes: root.error_type_hierarchy.clone(),
+                ..Default::default()
+            })),
+        };
+        err.kind = err.server_kind();
+        let details = spark_connect_proto::FetchErrorDetailsResponse {
+            root_error_idx: Some(root_error_idx),
+            errors,
+            ..Default::default()
+        };
+        err.with_details(Some(details), false)
+    }
+
     /// Completes an error that the server raised, as
     /// `pyspark.errors.exceptions.connect._convert_exception` does: with the error's details
     /// as `FetchErrorDetails` returned them, if it did, and whether the message shows the
@@ -943,6 +982,41 @@ mod tests {
         assert_eq!(err.operation_id.as_deref(), Some("op-123"));
         let from_status = SparkError::from_grpc_status(Status::internal("x"));
         assert_eq!(from_status.operation_id, None);
+    }
+
+    #[test]
+    fn observation_errors_are_their_root_errors_as_pyspark() {
+        use spark_connect_proto::fetch_error_details_response::{Error, SparkThrowable};
+        let error = |message: &str, class: &str| Error {
+            error_type_hierarchy: vec![class.to_string(), "java.lang.Throwable".to_string()],
+            message: message.to_string(),
+            spark_throwable: Some(SparkThrowable {
+                error_class: Some("USER_RAISED_EXCEPTION".to_string()),
+                sql_state: Some("P0001".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let errors = vec![
+            error("cause", "java.lang.Exception"),
+            error(
+                "[USER_RAISED_EXCEPTION] test error",
+                "org.apache.spark.SparkRuntimeException",
+            ),
+        ];
+        let err = SparkError::from_observation_errors(1, errors.clone());
+        assert_eq!(err.kind, SparkErrorKind::SparkRuntime);
+        assert_eq!(
+            err.get_condition().as_deref(),
+            Some("USER_RAISED_EXCEPTION")
+        );
+        assert_eq!(err.get_sql_state().as_deref(), Some("P0001"));
+        assert!(err.message().contains("test error"));
+        // As PySpark's convert_observation_errors, of an index out of the errors.
+        for index in [-1, 2] {
+            let err = SparkError::from_observation_errors(index, errors.clone());
+            assert_eq!(err.message(), "Observation error: invalid root_error_idx");
+        }
     }
 
     #[test]

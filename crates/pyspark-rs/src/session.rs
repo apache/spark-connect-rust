@@ -754,7 +754,11 @@ enum Spec {
 
 /// The schema argument of `createDataFrame`: None, a list or tuple of names, or a struct or
 /// atomic type, given as a type or a DDL string. Other types raise `NOT_EXPECTED_TYPE`.
-fn schema_spec(py: Python<'_>, schema: Option<&Bound<'_, PyAny>>) -> PyResult<Spec> {
+fn schema_spec(
+    py: Python<'_>,
+    session: &spark_connect::session::SparkSession,
+    schema: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Spec> {
     let Some(schema) = schema.filter(|s| !s.is_none()) else {
         return Ok(Spec::None);
     };
@@ -787,7 +791,7 @@ fn schema_spec(py: Python<'_>, schema: Option<&Bound<'_, PyAny>>) -> PyResult<Sp
     {
         return Err(not_expected(&crate::infer::type_name(schema)?));
     }
-    Ok(match crate::types::py_to_data_type(schema)? {
+    Ok(match crate::types::schema_data_type(py, session, schema)? {
         DataType::Struct { fields } => Spec::Struct(fields),
         atomic if crate::infer::is_atomic(&atomic) => Spec::Atomic(atomic),
         other => return Err(not_expected(&crate::infer::class_name(&other))),
@@ -959,7 +963,7 @@ impl PySparkSession {
         if is_loaded_instance(py, data, "pyarrow", "Table")? {
             return crate::pyarrow_import::create_dataframe(py, &self.session, data, schema);
         }
-        let spec = schema_spec(py, schema)?;
+        let spec = schema_spec(py, &self.session, schema)?;
         if is_loaded_instance(py, data, "pandas", "DataFrame")? {
             // Guarded integer columns share the existing Arrow importer. Schema
             // validation above and unsupported pandas conversions keep master's
@@ -1607,13 +1611,24 @@ impl PySparkSession {
         PySparkSession::new(self.session.new_session())
     }
 
-    // Reference: cloneSession(new_session_id=None). The optional id is accepted for
-    // signature parity; the Rust core assigns the cloned session's id itself and does not
-    // support overriding it. See PARITY_GAP_ANALYSIS.md.
+    /// Clone this session on the server, as PySpark's `cloneSession(new_session_id=None)`: a
+    /// session of a copy of the server-side state of this one, its SQL configurations,
+    /// temporary views, registered functions and catalog state, of the id `new_session_id`,
+    /// a UUID, if one is given.
     #[pyo3(name = "cloneSession", signature = (new_session_id=None))]
-    fn clone_session(&self, new_session_id: Option<String>) -> PySparkSession {
-        let _ = new_session_id;
-        PySparkSession::new(self.session.clone_session())
+    fn clone_session(
+        &self,
+        py: Python<'_>,
+        new_session_id: Option<String>,
+    ) -> PyResult<PySparkSession> {
+        let session = py
+            .detach(|| {
+                self.session
+                    .clone_session_with_id(new_session_id.as_deref())
+                    .map_err(Box::new)
+            })
+            .to_pyerr()?;
+        Ok(PySparkSession::new(session))
     }
 }
 

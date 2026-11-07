@@ -376,9 +376,38 @@ fn pyfunc_sum(col: &PyColumn) -> PyColumn {
     PyColumn::new(spark_funcs::sum(col.column.clone()))
 }
 
+/// `count(col)`, as PySpark Connect's: of a Column or a column name, else NOT_EXPECTED_TYPE,
+/// as its `_to_col`; a star Column, as `col("*")` or `df["*"]`, counts the rows, as
+/// `count(1)`, while a name is the column of it, so that `count("*")` is the count of a star.
 #[pyfunction]
-fn pyfunc_count(col: &PyColumn) -> PyColumn {
-    PyColumn::new(spark_funcs::count(col.column.clone()))
+fn pyfunc_count(col: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
+    let column = if let Ok(column) = col.extract::<PyRef<'_, PyColumn>>() {
+        if matches!(
+            column.column.expression().node(),
+            ExpressionNode::UnresolvedStar(..)
+        ) {
+            spark_connect::column::lit(1)
+        } else {
+            column.column.clone()
+        }
+    } else if col.is_instance_of::<pyo3::types::PyString>() {
+        // As PySpark's `_to_col`, by `col`, of its origin.
+        let _origin = crate::origin::with_origin("col");
+        spark_funcs::col(&col.extract::<String>()?)
+    } else {
+        let type_name = col.get_type().name()?.to_string();
+        return Err(crate::column::raise_pyspark(
+            col.py(),
+            "PySparkTypeError",
+            "NOT_EXPECTED_TYPE",
+            &[
+                ("expected_type", "Column or str"),
+                ("arg_name", "col"),
+                ("arg_type", &type_name),
+            ],
+        ));
+    };
+    Ok(PyColumn::new(spark_funcs::count(column)))
 }
 
 #[pyfunction]

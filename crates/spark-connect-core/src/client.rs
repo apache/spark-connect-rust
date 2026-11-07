@@ -12,10 +12,11 @@ use uuid::Uuid;
 
 use spark_connect_proto::spark_connect_service_client::SparkConnectServiceClient;
 use spark_connect_proto::{
-    AnalyzePlanRequest, AnalyzePlanResponse, ArtifactStatusesRequest, ConfigRequest,
-    ConfigResponse, ExecutePlanRequest, ExecutePlanResponse, FetchErrorDetailsRequest,
-    FetchErrorDetailsResponse, InterruptRequest, InterruptResponse, ReattachExecuteRequest,
-    ReleaseExecuteRequest, ReleaseExecuteResponse, ReleaseSessionRequest, UserContext,
+    AnalyzePlanRequest, AnalyzePlanResponse, ArtifactStatusesRequest, CloneSessionRequest,
+    ConfigRequest, ConfigResponse, ExecutePlanRequest, ExecutePlanResponse,
+    FetchErrorDetailsRequest, FetchErrorDetailsResponse, InterruptRequest, InterruptResponse,
+    ReattachExecuteRequest, ReleaseExecuteRequest, ReleaseExecuteResponse, ReleaseSessionRequest,
+    UserContext,
 };
 
 use crate::artifact::{
@@ -111,6 +112,7 @@ pub struct RpcDeadlines {
     pub release_session: Option<Duration>,
     pub artifact_status: Option<Duration>,
     pub fetch_error_details: Option<Duration>,
+    pub clone_session: Option<Duration>,
 }
 
 impl Default for RpcDeadlines {
@@ -127,6 +129,7 @@ impl Default for RpcDeadlines {
             release_session: minutes(10),
             artifact_status: minutes(10),
             fetch_error_details: minutes(10),
+            clone_session: minutes(10),
         }
     }
 }
@@ -144,6 +147,7 @@ impl RpcDeadlines {
             release_session: None,
             artifact_status: None,
             fetch_error_details: None,
+            clone_session: None,
         }
     }
 }
@@ -321,8 +325,9 @@ impl SparkConnectClient {
     /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.execute_plan`.
     pub async fn execute_plan(
         &self,
-        request: ExecutePlanRequest,
+        mut request: ExecutePlanRequest,
     ) -> Result<Streaming<ExecutePlanResponse>> {
+        self.fill_user_context(&mut request.user_context);
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
         match self.stub.clone().execute_plan(req).await {
@@ -376,8 +381,9 @@ impl SparkConnectClient {
     /// Mirrors the `ReattachExecute` RPC used by the reattachable execute path.
     pub async fn reattach_execute(
         &self,
-        request: ReattachExecuteRequest,
+        mut request: ReattachExecuteRequest,
     ) -> Result<Streaming<ExecutePlanResponse>> {
+        self.fill_user_context(&mut request.user_context);
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
         match self.stub.clone().reattach_execute(req).await {
@@ -391,8 +397,9 @@ impl SparkConnectClient {
     /// Mirrors the `ReleaseExecute` RPC used by the reattachable execute path.
     pub async fn release_execute(
         &self,
-        request: ReleaseExecuteRequest,
+        mut request: ReleaseExecuteRequest,
     ) -> Result<ReleaseExecuteResponse> {
+        self.fill_user_context(&mut request.user_context);
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
         match self.stub.clone().release_execute(req).await {
@@ -428,7 +435,11 @@ impl SparkConnectClient {
     /// Analyze a plan and return metadata about it.
     ///
     /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.analyze_plan`.
-    pub async fn analyze_plan(&self, request: AnalyzePlanRequest) -> Result<AnalyzePlanResponse> {
+    pub async fn analyze_plan(
+        &self,
+        mut request: AnalyzePlanRequest,
+    ) -> Result<AnalyzePlanResponse> {
+        self.fill_user_context(&mut request.user_context);
         self.with_retry(|| {
             let mut req = with_deadline(
                 Request::new(request.clone()),
@@ -476,8 +487,11 @@ impl SparkConnectClient {
     /// Mirrors the reference reattachable execute path.
     pub async fn execute_plan_reattachable(
         &self,
-        request: ExecutePlanRequest,
+        mut request: ExecutePlanRequest,
     ) -> Result<ReattachableResponseStream> {
+        // Before the iterator: its ReattachExecute and ReleaseExecute requests take the
+        // user context of this request.
+        self.fill_user_context(&mut request.user_context);
         let iter = ExecutePlanResponseReattachableIterator::new(request);
         let start = iter.request().clone();
         let deadline = self.rpc_deadlines.reattachable_execute_plan;
@@ -522,8 +536,9 @@ impl SparkConnectClient {
     /// server-side exception message (e.g. wrapped worker errors).
     pub async fn fetch_error_details(
         &self,
-        request: FetchErrorDetailsRequest,
+        mut request: FetchErrorDetailsRequest,
     ) -> Result<FetchErrorDetailsResponse> {
+        self.fill_user_context(&mut request.user_context);
         let mut req = with_deadline(
             Request::new(request),
             self.rpc_deadlines.fetch_error_details,
@@ -617,7 +632,8 @@ impl SparkConnectClient {
     /// Update or fetch configurations.
     ///
     /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.config`.
-    pub async fn config(&self, request: ConfigRequest) -> Result<ConfigResponse> {
+    pub async fn config(&self, mut request: ConfigRequest) -> Result<ConfigResponse> {
+        self.fill_user_context(&mut request.user_context);
         self.with_retry(|| {
             let mut req = with_deadline(Request::new(request.clone()), self.rpc_deadlines.config);
             self._attach_metadata(&mut req);
@@ -630,7 +646,8 @@ impl SparkConnectClient {
     /// Interrupt running operations on this session.
     ///
     /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.interrupt`.
-    pub async fn interrupt(&self, request: InterruptRequest) -> Result<InterruptResponse> {
+    pub async fn interrupt(&self, mut request: InterruptRequest) -> Result<InterruptResponse> {
+        self.fill_user_context(&mut request.user_context);
         self.with_retry(|| {
             let mut req =
                 with_deadline(Request::new(request.clone()), self.rpc_deadlines.interrupt);
@@ -922,6 +939,46 @@ impl SparkConnectClient {
     /// Release this session and all its resources on the server.
     ///
     /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.release_session`.
+    /// Clone this client's session on the server, mirroring PySpark's
+    /// `SparkConnectClient.clone(new_session_id)`: a `CloneSession` RPC copies the server-side
+    /// state of the session, its SQL configurations, temporary views, registered functions
+    /// and catalog state, into a new session, of the id `new_session_id` if one is given. The
+    /// returned client, of the same channel, is of that session.
+    pub async fn clone_session(&self, new_session_id: Option<&str>) -> Result<Self> {
+        let request = CloneSessionRequest {
+            session_id: self.session_id.clone(),
+            user_context: Some(UserContext {
+                user_id: self.user_id.clone().unwrap_or_default(),
+                ..Default::default()
+            }),
+            client_type: Some(self.user_agent.clone()),
+            new_session_id: new_session_id.map(str::to_string),
+            ..Default::default()
+        };
+        let response = self
+            .with_retry(|| {
+                let mut req = with_deadline(
+                    Request::new(request.clone()),
+                    self.rpc_deadlines.clone_session,
+                );
+                self._attach_metadata(&mut req);
+                let mut stub = self.stub.clone();
+                async move { stub.clone_session(req).await.map(Response::into_inner) }
+            })
+            .await?;
+        if let Some(requested) = new_session_id {
+            if response.new_session_id != requested {
+                return Err(SparkError::connect_msg(format!(
+                    "Returned session ID '{}' does not match requested ID '{requested}'",
+                    response.new_session_id
+                )));
+            }
+        }
+        let mut cloned = self.with_new_session_id();
+        cloned.session_id = response.new_session_id;
+        Ok(cloned)
+    }
+
     pub async fn release_session(&self) -> Result<()> {
         let mut request = ReleaseSessionRequest::default();
         request.session_id = self.session_id.clone();
@@ -1022,6 +1079,22 @@ impl SparkConnectClient {
             check_artifact_upload(response, Some(&expected))?;
         }
         Ok(hashes)
+    }
+
+    /// The identity of a typed request that the caller built: adds the user context when it
+    /// is missing, and takes a missing user ID from the connection (`user_id` of the
+    /// channel), as the reference client sets `user_context.user_id` on the requests it
+    /// builds. The server keys a session by the user ID of each request, so without it the
+    /// request would reach another session than the RPCs this client builds itself. An
+    /// explicit user ID, the user name and the extensions are kept; raw requests are sent
+    /// as given.
+    fn fill_user_context(&self, context: &mut Option<UserContext>) {
+        let context = context.get_or_insert_with(UserContext::default);
+        if context.user_id.is_empty() {
+            if let Some(user_id) = &self.user_id {
+                context.user_id.clone_from(user_id);
+            }
+        }
     }
 
     /// PySpark and Scala ArtifactManager both send a UserContext even when no
