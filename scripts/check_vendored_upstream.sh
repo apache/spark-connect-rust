@@ -95,6 +95,8 @@ VENDORED_FILES=(
   # The logger of Spark Connect, and the types of the connect import path.
   "sql/connect/logging.py"
   "sql/connect/_typing.py"
+  # The conversions of the storage levels and the cached relations of their messages.
+  "sql/connect/conversion.py"
 
   # The spatial reference systems of the spatial types, and the SQLStringFormatter, of
   # pyspark.sql.

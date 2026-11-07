@@ -61,6 +61,7 @@ omit =
     # The logger and the types of the connect import path, vendored.
     */pyspark/sql/connect/logging.py
     */pyspark/sql/connect/_typing.py
+    */pyspark/sql/connect/conversion.py
     */pyspark/_pyspark*
     */tests/*
 

@@ -48,6 +48,7 @@ from google.protobuf import text_format  # noqa: E402
 
 from pyspark.errors import PySparkTypeError, PySparkValueError  # noqa: E402
 from pyspark.sql import SparkSession  # noqa: E402
+from pyspark.sql import functions as F  # noqa: E402
 from pyspark.sql import types as T  # noqa: E402
 
 
@@ -348,6 +349,131 @@ def test_ml_data_types_are_those_of_pyspark(data_type, expected):
     assert isinstance(message, pb2.DataType)
     assert _text(message) == expected
     assert proto_schema_to_pyspark_data_type(message) == data_type
+
+
+@pytest.mark.parametrize(
+    "build, expected",
+    [
+        (
+            lambda P: P.Read("db.t", {"k": "v"}, True),
+            'read { named_table { unparsed_identifier: "db.t" options { key: "k" value: "v" } } '
+            "is_streaming: true }",
+        ),
+        (lambda P: P.Range(0, 3, 1, 2), "range { start: 0 end: 3 step: 1 num_partitions: 2 }"),
+        (lambda P: P.Range(5, 9, 2), "range { start: 5 end: 9 step: 2 }"),
+        (
+            lambda P: P.SQL("SELECT ?", args=[F.lit(1)]),
+            'sql { query: "SELECT ?" pos_arguments { literal { integer: 1 } } }',
+        ),
+        (
+            lambda P: P.SQL("SELECT :a", named_args={"a": F.lit("x")}),
+            'sql { query: "SELECT :a" named_arguments { key: "a" value { literal { string: "x" } } } }',
+        ),
+        (
+            lambda P: P.SQL("SELECT * FROM v", views=[P.SubqueryAlias(P.Range(0, 1, 1), "v")]),
+            'with_relations { root { sql { query: "SELECT * FROM v" } } references { subquery_alias '
+            '{ input { range { start: 0 end: 1 step: 1 } } alias: "v" } } }',
+        ),
+        (
+            lambda P: P.SubqueryAlias(P.Read("t"), "x"),
+            'subquery_alias { input { read { named_table { unparsed_identifier: "t" } } } alias: "x" }',
+        ),
+    ],
+)
+def test_connect_plans_build_the_relations_of_pyspark(build, expected):
+    # As official PySpark 4.3.0's plans of pyspark.sql.connect.plan, of which
+    # pyspark.testing.connectutils builds DataFrames: their relations, of their own plan IDs.
+    import re
+
+    import pyspark.sql.connect.plan as P
+
+    plan = build(P)
+    relation = plan.plan(None)
+    assert relation.common.plan_id == plan._plan_id
+    assert re.sub(r"common \{ plan_id: \d+ \} ?", "", _text(relation)) == expected
+
+
+def test_connect_sql_plans_as_pyspark():
+    # As official PySpark 4.3.0: the command of a SQL plan, its print, and its arguments, which
+    # are Columns.
+    import pyspark.sql.connect.plan as P
+
+    command = P.SQL("SELECT 1").command(None)
+    assert command.sql_command.input.sql.query == "SELECT 1"
+    assert P.Read("t").print(2) == "  <Read table_name=t>\n"
+    with pytest.raises(AssertionError):
+        P.SQL("SELECT ?", args=[1])
+    with pytest.raises(AssertionError):
+        P.SQL("SELECT 1", views=[P.Range(0, 1, 1)])
+
+
+def test_column_to_plan_as_pyspark():
+    # As PySpark Connect's Column.to_plan: the spark.connect.Expression of the column.
+    from pyspark.sql import functions as F
+
+    assert _text(F.col("a").to_plan(None)) == (
+        'unresolved_attribute { unparsed_identifier: "a" is_metadata_column: false }'
+    )
+    column = F.lit(1) + F.col("b")
+    assert column.to_plan(None) == column._expr.to_plan(None)
+    assert column.to_plan(None).unresolved_function.function_name == "+"
+
+
+def test_connect_type_helpers_as_pyspark():
+    # As official PySpark 4.3.0's helpers of pyspark.sql.connect.types.
+    from pyspark.sql.connect.types import (
+        parse_attr_name,
+        verify_col_name,
+        verify_numeric_col_name,
+    )
+
+    assert parse_attr_name("a.`b.c`.d") == ["a", "b.c", "d"]
+    assert parse_attr_name("`a``b`") == ["a`b"]
+    assert parse_attr_name("a..b") is None and parse_attr_name("`a`b") is None
+    assert parse_attr_name("a.") is None and parse_attr_name("`a") is None
+    schema = T.StructType(
+        [
+            T.StructField("n", T.IntegerType()),
+            T.StructField("s", T.StringType()),
+            T.StructField(
+                "st", T.StructType([T.StructField("x", T.DoubleType()), T.StructField("y", T.StringType())])
+            ),
+            T.StructField("arr", T.ArrayType(T.StructType([T.StructField("z", T.LongType())]))),
+        ]
+    )
+    assert verify_col_name("st.x", schema) and verify_col_name("arr.z", schema)
+    assert not verify_col_name("st.w", schema) and not verify_col_name("a..b", schema)
+    assert verify_numeric_col_name("n", schema) and verify_numeric_col_name("st.x", schema)
+    assert verify_numeric_col_name("arr.z", schema)
+    assert not verify_numeric_col_name("s", schema) and not verify_numeric_col_name("st.y", schema)
+
+
+def test_connect_conversions_as_pyspark(ml_mock):
+    # As official PySpark 4.3.0's pyspark.sql.connect.conversion: the storage levels of their
+    # messages, and the DataFrame of a relation cached on the server, which removes the relation
+    # from the server once it is collected.
+    from pyspark.sql.connect.conversion import (
+        proto_to_remote_cached_dataframe,
+        proto_to_storage_level,
+        storage_level_to_proto,
+    )
+    from pyspark.storagelevel import StorageLevel
+
+    spark, service = ml_mock
+    level = StorageLevel(True, True, False, False, 2)
+    message = storage_level_to_proto(level)
+    assert message == pb2.StorageLevel(
+        use_disk=True, use_memory=True, use_off_heap=False, deserialized=False, replication=2
+    )
+    assert proto_to_storage_level(message) == level
+
+    df = proto_to_remote_cached_dataframe(pb2.CachedRemoteRelation(relation_id="r1"))
+    assert df._plan.plan(spark.client).cached_remote_relation.relation_id == "r1"
+    assert service.execute_requests == []
+    del df
+    gc.collect()
+    (command,) = _commands(service)
+    assert command.remove_cached_remote_relation_command.relation.relation_id == "r1"
 
 
 def test_ml_vector_udt_is_sent_as_pyspark():

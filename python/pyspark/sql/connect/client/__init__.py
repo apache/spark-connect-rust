@@ -129,6 +129,12 @@ class SparkConnectClient:
     def _server_session_id(self) -> str:
         return self._session.session_id
 
+    @property
+    def is_closed(self) -> bool:
+        """Whether the session of the client is stopped, as SparkConnectClient's ``is_closed``,
+        whether its channel is closed."""
+        return self._session.is_stopped
+
     def execute_command(self, command: Any, observations: Any = None) -> Any:
         """Execute ``command``, a ``spark.connect.Command``, as SparkConnectClient's
         ``execute_command``: no data, the properties of the results of the responses, of their
