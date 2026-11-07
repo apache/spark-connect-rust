@@ -85,6 +85,10 @@ VENDORED_FILES=(
   "pipelines/tests/test_decorators.py"
   "pipelines/tests/test_graph_element_registry.py"
 
+  # The progress handlers and the progress bar of the executions of a session, whose
+  # ExecutePlanResponse is that of the message class of pyspark/sql/connect/proto.py.
+  "sql/connect/shell/progress.py"
+
   # Top-level modules
   "accumulators.py"
   "memory_profiler_ext.py"

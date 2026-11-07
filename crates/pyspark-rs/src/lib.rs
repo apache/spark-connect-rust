@@ -40,6 +40,7 @@ mod origin;
 mod pandas_input;
 mod pipelines;
 mod profiler;
+mod progress;
 mod pyarrow_export;
 mod pyarrow_import;
 mod readwriter;
