@@ -2573,22 +2573,79 @@ impl PyDataFrame {
         Ok(())
     }
 
-    /// `DataFrame.nearestByJoin`.
-    #[pyo3(name = "nearestByJoin", signature = (other, rankingExpression, numResults = 1, mode = "brute", direction = "asc", joinType = "inner"))]
+    /// `DataFrame.nearestByJoin(other, rankingExpression, numResults, mode, direction, *,
+    /// joinType="inner")`, as PySpark's, which checks its arguments as the Scala
+    /// `Dataset.validateNearestByJoinArgs` does: an `AnalysisException` of
+    /// `NEAREST_BY_JOIN.NUM_RESULTS_OUT_OF_RANGE`, `UNSUPPORTED_JOIN_TYPE`, `UNSUPPORTED_MODE` or
+    /// `UNSUPPORTED_DIRECTION`.
+    #[pyo3(name = "nearestByJoin", signature = (other, rankingExpression, numResults, mode, direction, *, joinType = "inner"))]
+    #[allow(clippy::too_many_arguments)]
     fn nearest_by_join(
         &self,
+        py: Python<'_>,
         other: &Bound<'_, PyAny>,
         rankingExpression: &PyColumn,
-        numResults: i32,
+        numResults: &Bound<'_, PyAny>,
         mode: &str,
         direction: &str,
         joinType: &str,
     ) -> PyResult<PyDataFrame> {
+        const MAX_NUM_RESULTS: i64 = 100_000;
+        const MODES: [&str; 2] = ["approx", "exact"];
+        const DIRECTIONS: [&str; 2] = ["distance", "similarity"];
         let other = self.same_session(other)?;
+        // As PySpark's `int(numResults)`.
+        let num_results = py
+            .import("builtins")?
+            .getattr("int")?
+            .call1((numResults,))?;
+        let analysis = |class: &str, params: &[(&str, &str)]| {
+            crate::column::raise_pyspark(py, "AnalysisException", class, params)
+        };
+        let in_range = num_results
+            .extract::<i64>()
+            .is_ok_and(|n| (1..=MAX_NUM_RESULTS).contains(&n));
+        if !in_range {
+            return Err(analysis(
+                "NEAREST_BY_JOIN.NUM_RESULTS_OUT_OF_RANGE",
+                &[
+                    ("numResults", &num_results.str()?.to_cow()?),
+                    ("min", "1"),
+                    ("max", &MAX_NUM_RESULTS.to_string()),
+                ],
+            ));
+        }
+        if !["inner", "leftouter", "left"]
+            .contains(&joinType.to_lowercase().replace('_', "").as_str())
+        {
+            return Err(analysis(
+                "NEAREST_BY_JOIN.UNSUPPORTED_JOIN_TYPE",
+                &[
+                    ("joinType", joinType),
+                    ("supported", "'INNER', 'LEFT OUTER'"),
+                ],
+            ));
+        }
+        let supported = |values: &[&str]| format!("'{}'", values.join("', '"));
+        if !MODES.contains(&mode.to_lowercase().as_str()) {
+            return Err(analysis(
+                "NEAREST_BY_JOIN.UNSUPPORTED_MODE",
+                &[("mode", mode), ("supported", &supported(&MODES))],
+            ));
+        }
+        if !DIRECTIONS.contains(&direction.to_lowercase().as_str()) {
+            return Err(analysis(
+                "NEAREST_BY_JOIN.UNSUPPORTED_DIRECTION",
+                &[
+                    ("direction", direction),
+                    ("supported", &supported(&DIRECTIONS)),
+                ],
+            ));
+        }
         Ok(PyDataFrame::new(self.dataframe.nearest_by_join(
             &other.dataframe,
             rankingExpression.column.clone(),
-            numResults,
+            num_results.extract::<i32>()?,
             mode,
             direction,
             joinType,

@@ -9147,6 +9147,37 @@ def _offline_session():
     return SparkSession.builder.remote("sc://localhost:1").getOrCreate()
 
 
+def test_nearest_by_join_checks_its_arguments_as_pyspark():
+    # As PySpark's nearestByJoin, as the Scala Dataset.validateNearestByJoinArgs: an
+    # AnalysisException of NEAREST_BY_JOIN of the number of results, the join type, the mode and
+    # the direction, before the plan; numResults, mode and direction have no defaults, and
+    # joinType is keyword-only.
+    from pyspark.errors import AnalysisException
+    from pyspark.sql import functions as F
+
+    spark = _offline_session()
+    a, b = spark.range(1), spark.range(1)
+    ranking = F.lit(1)
+    for kwargs, condition, params in [
+        (dict(numResults=0), "NUM_RESULTS_OUT_OF_RANGE", {"numResults": "0", "min": "1", "max": "100000"}),
+        (dict(numResults=100001), "NUM_RESULTS_OUT_OF_RANGE", {"numResults": "100001", "min": "1", "max": "100000"}),
+        (dict(joinType="right"), "UNSUPPORTED_JOIN_TYPE", {"joinType": "right", "supported": "'INNER', 'LEFT OUTER'"}),
+        (dict(mode="brute"), "UNSUPPORTED_MODE", {"mode": "brute", "supported": "'approx', 'exact'"}),
+        (dict(direction="asc"), "UNSUPPORTED_DIRECTION", {"direction": "asc", "supported": "'distance', 'similarity'"}),
+    ]:
+        args = {"numResults": 1, "mode": "approx", "direction": "distance", **kwargs}
+        with pytest.raises(AnalysisException) as error:
+            a.nearestByJoin(b, ranking, **args)
+        assert error.value.getCondition() == "NEAREST_BY_JOIN." + condition
+        assert error.value.getMessageParameters() == params
+    for join_type in ["inner", "LEFT_OUTER", "left", "leftouter"]:
+        a.nearestByJoin(b, ranking, "2", "EXACT", "Similarity", joinType=join_type)
+    with pytest.raises(TypeError):
+        a.nearestByJoin(b, ranking)
+    with pytest.raises(TypeError):
+        a.nearestByJoin(b, ranking, 1, "approx", "distance", "inner")
+
+
 def test_dataframes_of_other_sessions_raise_session_not_same_as_pyspark():
     # As PySpark's `_check_same_session`, of the DataFrames that the methods take, before any
     # request: SESSION_NOT_SAME for a DataFrame of another session, and for what is not one.
@@ -9159,7 +9190,8 @@ def test_dataframes_of_other_sessions_raise_session_not_same_as_pyspark():
         lambda: a.join(b), lambda: a.crossJoin(b), lambda: a.lateralJoin(b),
         lambda: a.union(b), lambda: a.unionAll(b), lambda: a.unionByName(b),
         lambda: a.intersect(b), lambda: a.intersectAll(b), lambda: a.subtract(b),
-        lambda: a.exceptAll(b), lambda: a.zip(b), lambda: a.nearestByJoin(b, F.lit(1)),
+        lambda: a.exceptAll(b), lambda: a.zip(b),
+        lambda: a.nearestByJoin(b, F.lit(1), 1, "approx", "distance"),
         lambda: a.sameSemantics(b), lambda: a.union(1), lambda: a.join("id"),
         lambda: a.groupBy("id").cogroup(b.groupBy("id")),
     ):
