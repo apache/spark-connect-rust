@@ -175,6 +175,19 @@ def test_get_or_create_returns_the_session_with_the_options_as_pyspark(session):
         session.conf.set(key, previous)
 
 
+def test_nested_duplicate_field_names_of_local_rows_reach_the_server(session):
+    # As PySpark: the server reads the Arrow data of nested fields with deduplicated names,
+    # and the schema of the relation keeps the names, so the rows come back as they were.
+    R = Row("a", "a")
+    df = session.createDataFrame([(R(1, 2),)])
+    assert df.schema.simpleString() == "struct<_1:struct<a:bigint,a:bigint>>"
+    assert tuple(df.collect()[0]._1) == (1, 2)
+    df = session.createDataFrame([((1, 2),)], "s struct<a:bigint,a:bigint>")
+    assert tuple(df.collect()[0].s) == (1, 2)
+    df = session.createDataFrame([([(1, 2)],)], "s array<struct<a:bigint,a:bigint>>")
+    assert [tuple(item) for item in df.collect()[0].s] == [(1, 2)]
+
+
 def test_repr_shows_the_rows_with_eager_evaluation_as_pyspark(session):
     df = session.range(3)
     assert repr(df) == "DataFrame[id: bigint]"

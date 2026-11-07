@@ -1048,6 +1048,30 @@ fn schema_to_arrow_fields(schema: &DataType) -> Result<Vec<arrow::datatypes::Fie
     }
 }
 
+/// The names of nested struct fields as PySpark's `_dedup_names` gives them: a name that occurs
+/// more than once is numbered per occurrence, as `name_0`, `name_1`, and others are kept.
+fn dedup_field_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let names: Vec<&str> = names.into_iter().collect();
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for name in &names {
+        *counts.entry(*name).or_insert(0) += 1;
+    }
+    let mut next: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    names
+        .iter()
+        .map(|&name| {
+            if counts[name] > 1 {
+                let i = next.entry(name).or_insert(0);
+                let deduped = format!("{name}_{i}");
+                *i += 1;
+                deduped
+            } else {
+                name.to_string()
+            }
+        })
+        .collect()
+}
+
 /// Map a Spark `DataType` to its Arrow `DataType`, recursively (array/map/struct included).
 fn datatype_to_arrow(dt: &DataType) -> Result<arrow::datatypes::DataType> {
     use arrow::datatypes::{DataType as A, Field, Fields, TimeUnit};
@@ -1104,12 +1128,17 @@ fn datatype_to_arrow(dt: &DataType) -> Result<arrow::datatypes::DataType> {
                 false,
             )
         }
+        // The names of nested fields are deduplicated, as PySpark's `_deduplicate_field_names`
+        // does for the Arrow schema it sends. The server cannot read duplicate names, while the
+        // schema of the relation keeps the names of the fields.
         DataType::Struct { fields } => {
+            let names = dedup_field_names(fields.iter().map(|field| field.name.as_str()));
             let f: Fields = fields
                 .iter()
-                .map(|field| {
+                .zip(names)
+                .map(|(field, name)| {
                     Ok(Field::new(
-                        &field.name,
+                        name,
                         datatype_to_arrow(&field.data_type)?,
                         field.nullable,
                     ))
@@ -1466,17 +1495,11 @@ fn values_to_arrow(values: &[&Value], dt: &DataType) -> Result<Arc<dyn arrow::ar
                 .enumerate()
                 .map(|(i, f)| values_to_arrow(&cols[i], &f.data_type))
                 .collect::<Result<_>>()?;
-            let afields: Fields = fields
-                .iter()
-                .map(|f| {
-                    Ok(Field::new(
-                        &f.name,
-                        datatype_to_arrow(&f.data_type)?,
-                        f.nullable,
-                    ))
-                })
-                .collect::<Result<Vec<_>>>()?
-                .into();
+            // The Arrow fields of the struct, with the deduplicated names of `datatype_to_arrow`,
+            // which the column's type has.
+            let arrow::datatypes::DataType::Struct(afields) = datatype_to_arrow(dt)? else {
+                unreachable!("a struct is a struct")
+            };
             // A struct without fields takes its length from the values.
             StructArray::try_new_with_length(
                 afields,
@@ -2179,6 +2202,15 @@ mod tests {
             &Int16Array::from(vec![Some(656)]),
         );
         assert_eq!(actual.column(6).null_count(), 3);
+    }
+
+    #[test]
+    fn nested_duplicate_field_names_are_numbered_per_occurrence_as_pyspark() {
+        assert_eq!(dedup_field_names(["a", "b"]), vec!["a", "b"]);
+        assert_eq!(
+            dedup_field_names(["a", "a", "b", "a"]),
+            vec!["a_0", "a_1", "b", "a_2"]
+        );
     }
 
     #[test]

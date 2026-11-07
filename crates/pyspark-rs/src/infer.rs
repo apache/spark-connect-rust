@@ -836,6 +836,15 @@ fn arrow_type_name(obj: &Bound<'_, PyAny>) -> PyResult<String> {
     })
 }
 
+/// An error of PyArrow, of `class` with `message`, as its conversions raise it.
+fn pyarrow_error(py: Python<'_>, class: &str, message: String) -> PyResult<PyErr> {
+    let error = py
+        .import(intern!(py, "pyarrow"))?
+        .getattr(class)?
+        .call1((message,))?;
+    Ok(PyErr::from_value(error))
+}
+
 /// The error of a value that PyArrow cannot convert to the type it is named by.
 fn arrow_invalid(obj: &Bound<'_, PyAny>, arrow_type: &str) -> PyResult<PyErr> {
     Ok(PyValueError::new_err(format!(
@@ -960,12 +969,28 @@ pub(crate) fn convert(obj: &Bound<'_, PyAny>, dt: &DataType, nullable: bool) -> 
             element_type,
             contains_null,
         } => {
-            if !obj.is_instance_of::<PyList>()
-                && !obj.is_instance(ARRAY.import(py, "array", "array")?.as_any())?
-            {
-                return Err(assertion());
+            // As PySpark: an array whose elements need a converter takes a list or an
+            // array.array, and another array is taken as it is, by PyArrow, which takes any
+            // sequence, such as a tuple or a NumPy array of numbers or bools.
+            if needs_converter(dt, nullable) {
+                if !obj.is_instance_of::<PyList>()
+                    && !obj.is_instance(ARRAY.import(py, "array", "array")?.as_any())?
+                {
+                    return Err(assertion());
+                }
+            } else if obj.is_instance_of::<PyDict>() || obj.try_iter().is_err() {
+                return Err(pyarrow_error(
+                    py,
+                    "ArrowTypeError",
+                    format!(
+                        "Could not convert {} with type {}: was not a sequence or recognized \
+                         null for conversion to list type",
+                        obj.repr()?,
+                        arrow_type_name(obj)?
+                    ),
+                )?);
             }
-            let mut items = Vec::with_capacity(obj.len()?);
+            let mut items = Vec::with_capacity(obj.len().unwrap_or(0));
             for item in obj.try_iter()? {
                 items.push(convert(&item?, element_type, *contains_null)?);
             }
@@ -1093,14 +1118,7 @@ pub(crate) fn convert(obj: &Bound<'_, PyAny>, dt: &DataType, nullable: bool) -> 
             })
         }
         DataType::DayTimeInterval { .. } => Ok(Value::DayTimeInterval(duration_micros(obj)?)),
-        DataType::Date => {
-            // PyArrow takes a date, or the date of a datetime.
-            if !obj.is_instance(DATE.import(py, "datetime", "date")?.as_any())? {
-                return Err(arrow_invalid(obj, "date32")?);
-            }
-            let ordinal: i64 = obj.call_method0(intern!(py, "toordinal"))?.extract()?;
-            Ok(Value::Date((ordinal - 719_163) as i32))
-        }
+        DataType::Date => Ok(Value::Date(date_days(obj)?)),
         // As PyArrow's `time64[ns]`, to which PySpark passes the value as it is: a time, and
         // the nanoseconds of an int, or of a float, truncated.
         DataType::Time { .. } => {
@@ -1175,6 +1193,101 @@ pub(crate) fn convert(obj: &Bound<'_, PyAny>, dt: &DataType, nullable: bool) -> 
             convert(&serialized, sql_type, nullable)
         }
         _ => Err(unsupported(obj)?),
+    }
+}
+
+/// The days since the epoch of a value of a date column, as PyArrow converts it to date32: a
+/// date, or the date of a datetime; an int, or a float truncated, as days; and a NumPy bool or
+/// number as the value it stands for. Another value raises PyArrow's error.
+fn date_days(obj: &Bound<'_, PyAny>) -> PyResult<i32> {
+    let py = obj.py();
+    if obj.is_instance(DATE.import(py, "datetime", "date")?.as_any())? {
+        let ordinal: i64 = obj.call_method0(intern!(py, "toordinal"))?.extract()?;
+        return Ok((ordinal - 719_163) as i32);
+    }
+    if obj.is_instance_of::<PyBool>() {
+        return Err(pyarrow_error(
+            py,
+            "ArrowTypeError",
+            "Expected integer, got bool".into(),
+        )?);
+    }
+    let kind = if obj.is_instance_of::<PyInt>() {
+        Some(NumpyScalar::Integer)
+    } else if obj.is_instance_of::<PyFloat>() {
+        Some(NumpyScalar::Floating)
+    } else {
+        numpy_scalar(obj)?
+    };
+    let days: i64 = match kind {
+        Some(NumpyScalar::Bool) => i64::from(obj.is_truthy()?),
+        Some(NumpyScalar::Integer) => obj.extract()?,
+        Some(NumpyScalar::Floating) => {
+            let value: f64 = obj.extract()?;
+            if value.is_nan() {
+                return Err(PyValueError::new_err("cannot convert float NaN to integer"));
+            }
+            if value.is_infinite() {
+                return Err(PyOverflowError::new_err(
+                    "cannot convert float infinity to integer",
+                ));
+            }
+            let truncated = value.trunc();
+            if !(-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&truncated) {
+                return Err(PyOverflowError::new_err(
+                    "Python int too large to convert to C long",
+                ));
+            }
+            truncated as i64
+        }
+        None => {
+            return Err(pyarrow_error(
+                py,
+                "ArrowTypeError",
+                format!(
+                    "object of type {} cannot be converted to int",
+                    obj.get_type().repr()?
+                ),
+            )?)
+        }
+    };
+    // The days of PyArrow's dates: from 0001-01-01 to 9999-12-31, and a larger magnitude is
+    // out of the range of a Python timedelta.
+    if days.unsigned_abs() > 999_999_999 {
+        return Err(PyOverflowError::new_err(format!(
+            "days={days}; must have magnitude <= 999999999"
+        )));
+    }
+    if !(-719_162..=2_932_896).contains(&days) {
+        return Err(PyOverflowError::new_err("date value out of range"));
+    }
+    Ok(days as i32)
+}
+
+/// Whether PySpark's `LocalDataToArrowConversion._need_converter` gives a value of `dt` a
+/// converter, for a value of `nullable`: the values that PyArrow takes as they are do not.
+fn needs_converter(dt: &DataType, nullable: bool) -> bool {
+    if !nullable {
+        return true;
+    }
+    match dt {
+        DataType::Null
+        | DataType::Struct { .. }
+        | DataType::Map { .. }
+        | DataType::Binary
+        | DataType::Timestamp
+        | DataType::TimestampNtz
+        | DataType::Decimal { .. }
+        | DataType::String { .. }
+        | DataType::Udt { .. }
+        | DataType::Variant
+        | DataType::Geometry { .. }
+        | DataType::Geography { .. } => true,
+        DataType::Array {
+            element_type,
+            contains_null,
+        } => needs_converter(element_type, *contains_null),
+        _ => false,
     }
 }
 
@@ -1258,15 +1371,9 @@ fn duration_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
     if obj.is_instance(TIMEDELTA.import(py, "datetime", "timedelta")?.as_any())? {
         return timedelta_micros(obj);
     }
-    let pyarrow_error = |class: &str, message: String| -> PyResult<PyErr> {
-        let error = py
-            .import(intern!(py, "pyarrow"))?
-            .getattr(class)?
-            .call1((message,))?;
-        Ok(PyErr::from_value(error))
-    };
     if obj.is_instance_of::<PyBool>() {
         return Err(pyarrow_error(
+            py,
             "ArrowTypeError",
             "Expected integer, got bool".into(),
         )?);
@@ -1277,6 +1384,7 @@ fn duration_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
             (obj.getattr(intern!(py, "dtype"))?,),
         )?;
         return Err(pyarrow_error(
+            py,
             "ArrowNotImplementedError",
             format!("Expected np.timedelta64 but got: {}", arrow_type.str()?),
         )?);
@@ -1302,6 +1410,7 @@ fn duration_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
         return Ok(truncated as i64);
     }
     Err(pyarrow_error(
+        py,
         "ArrowTypeError",
         format!(
             "object of type {} cannot be converted to int",

@@ -7151,6 +7151,120 @@ def test_arrow_input_large_upload_live_server():
         spark.stop()
 
 
+# --------------------------------------------------------------------------- local rows of NumPy arrays, ints for dates and nested duplicate names
+
+def _local_rows_relation_of(service, df):
+    # The LocalRelation of a DataFrame of local rows, as the server receives it: its Arrow IPC
+    # data (LocalRelation.data=1), and its schema JSON (LocalRelation.schema=2).
+    import pyarrow as pa
+
+    df.toArrow()
+    request = parse_message(service.execute_requests[-1])
+    relation = parse_message(parse_message(request[3][0])[1][0])
+    while 18 in relation:  # Relation.to_df -> ToDF.input.
+        relation = parse_message(parse_message(relation[18][0])[1][0])
+    local = parse_message(relation[11][0])
+    return pa.ipc.open_stream(local[1][0]).read_all(), json.loads(local[2][0])
+
+
+def test_numpy_arrays_in_array_fields_convert_as_pyspark(mock_connect):
+    # As PySpark: an array whose elements need no converter (numbers and bools) is taken as
+    # PyArrow takes it, so a NumPy array is an array of its values. An array whose elements
+    # need one (strings) must be a list or an array.array, or PySpark asserts.
+    from pyspark.sql import types as T
+
+    np = pytest.importorskip("numpy")
+    spark, service = mock_connect
+    table, _ = _local_rows_relation_of(
+        service, spark.createDataFrame(
+            [(np.array([1, 2]), np.array([1.5, 2.0]), np.array([True, False]))],
+            "a array<bigint>, b array<double>, c array<boolean>"))
+    assert table.column("a").to_pylist() == [[1, 2]]
+    assert table.column("b").to_pylist() == [[1.5, 2.0]]
+    assert table.column("c").to_pylist() == [[True, False]]
+
+    long_array = T.StructType([T.StructField("a", T.ArrayType(T.LongType()))])
+    table, _ = _local_rows_relation_of(
+        service, spark.createDataFrame([(np.array([1, 2]),)], long_array))
+    assert table.column("a").to_pylist() == [[1, 2]]
+    table, _ = _local_rows_relation_of(
+        service, spark.createDataFrame([((np.array([1, 2]),),)], "s struct<a:array<bigint>>"))
+    assert table.column("s").to_pylist() == [{"a": [1, 2]}]
+
+    for data, schema in [
+        ([(np.array(["a", "b"]),)], "a array<string>"),
+        ([(("a", "b"),)], "a array<string>"),
+        ([(np.array([1, 2]),)], T.StructType([T.StructField(
+            "a", T.ArrayType(T.LongType(), containsNull=False))])),
+    ]:
+        # PySpark's assertion, which has no message.
+        with pytest.raises(AssertionError) as error:
+            spark.createDataFrame(data, schema)
+        assert str(error.value) == ""
+
+
+def test_ints_of_date_fields_convert_as_pyarrow(mock_connect):
+    # As PySpark: PyArrow takes an int, or a float truncated, as days since the epoch, and a
+    # NumPy bool or number as the value it stands for. A Python bool, a string and the days
+    # out of the calendar range raise PyArrow's errors.
+    import re
+
+    import pyarrow as pa
+
+    np = pytest.importorskip("numpy")
+    spark, service = mock_connect
+    table, _ = _local_rows_relation_of(
+        service, spark.createDataFrame([(1,), (-1,), (None,)], "a date"))
+    assert table.schema.field(0).type == pa.date32()
+    assert table.column(0).cast(pa.int32()).to_pylist() == [1, -1, None]
+    table, _ = _local_rows_relation_of(service, spark.createDataFrame(
+        [(np.int64(3),), (1.5,), (-1.5,), (np.bool_(True),), (2932896,), (-719162,)], "a date"))
+    assert table.column(0).cast(pa.int32()).to_pylist() == [3, 1, -1, 1, 2932896, -719162]
+
+    for value, error, message in (
+        (True, pa.ArrowTypeError, "Expected integer, got bool"),
+        ("x", pa.ArrowTypeError, "object of type <class 'str'> cannot be converted to int"),
+        (float("nan"), ValueError, "cannot convert float NaN to integer"),
+        (2932897, OverflowError, "date value out of range"),
+        (-719163, OverflowError, "date value out of range"),
+        (10**9, OverflowError, "days=1000000000; must have magnitude <= 999999999"),
+        (2**70, OverflowError, "Python int too large to convert to C long"),
+    ):
+        with pytest.raises(error, match="^" + re.escape(message) + "$"):
+            spark.createDataFrame([(value,)], "a date")
+
+
+def test_nested_duplicate_field_names_are_deduplicated_in_the_arrow_schema(mock_connect):
+    # As PySpark's _deduplicate_field_names: the Arrow schema of nested struct fields numbers
+    # duplicate names, which the server cannot read, while the schema of the relation keeps
+    # the names. A top-level duplicate name is not renamed.
+    import pyarrow as pa
+    from pyspark.sql import Row
+    from pyspark.sql import types as T
+
+    spark, service = mock_connect
+    R = Row("a", "a")
+    table, schema = _local_rows_relation_of(service, spark.createDataFrame([(R(1, 2),)]))
+    assert table.schema.field(0).type == pa.struct([("a_0", pa.int64()), ("a_1", pa.int64())])
+    assert table.column(0).to_pylist() == [{"a_0": 1, "a_1": 2}]
+    assert [f["name"] for f in schema["fields"][0]["type"]["fields"]] == ["a", "a"]
+
+    explicit = T.StructType([T.StructField("s", T.StructType([
+        T.StructField("a", T.LongType()), T.StructField("a", T.LongType())]))])
+    table, schema = _local_rows_relation_of(service, spark.createDataFrame([((1, 2),)], explicit))
+    assert table.column("s").to_pylist() == [{"a_0": 1, "a_1": 2}]
+    assert [f["name"] for f in schema["fields"][0]["type"]["fields"]] == ["a", "a"]
+
+    table, _ = _local_rows_relation_of(service, spark.createDataFrame(
+        [([(1, 2)],)], "s array<struct<a:bigint,a:bigint>>"))
+    assert table.column("s").to_pylist() == [[{"a_0": 1, "a_1": 2}]]
+
+    table, _ = _local_rows_relation_of(service, spark.createDataFrame(
+        [(1, 2)], "a bigint, a bigint"))
+    assert table.schema.names == ["a", "a"]
+    assert table.column(1).to_pylist() == [2]
+
+
 # ------------------------------------------------------- DataFrame completion
 
 def _completion_varint(value):
