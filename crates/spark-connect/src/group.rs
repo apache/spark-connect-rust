@@ -50,6 +50,21 @@ pub struct GroupedData {
 }
 
 impl GroupedData {
+    /// The grouping columns, as PySpark Connect's `GroupedData._grouping_cols`.
+    pub fn grouping_columns(&self) -> &[Column] {
+        &self.group_cols
+    }
+
+    /// The type of the grouping, as PySpark Connect's `GroupedData._group_type`.
+    pub fn group_type(&self) -> AggregateGroupType {
+        self.group_type
+    }
+
+    /// The DataFrame that is grouped, as PySpark Connect's `GroupedData._df`.
+    pub fn dataframe(&self) -> &DataFrame {
+        &self.dataframe
+    }
+
     /// Create a new GroupedData.
     pub(crate) fn new(
         dataframe: DataFrame,

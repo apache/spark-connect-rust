@@ -3526,6 +3526,25 @@ def test_functions_substring():
     assert type(F.substr(str_col, F.lit(1), F.lit(5))).__name__ == "Column"
 
 
+def test_grouped_data_are_represented_as_pyspark(mock_connect):
+    # As PySpark Connect's: the repr of a GroupedData names its grouping expressions, the
+    # columns of its DataFrame and their types, and the type of the grouping.
+    from pyspark.sql import functions as F
+
+    spark, _ = mock_connect
+    df = spark.range(3)
+    value = ", ".join("%s: %s" % column for column in df.dtypes)
+    for grouped, expressions, kind in (
+            (df.groupBy("id"), "id", "GroupBy"), (df.rollup("id"), "id", "RollUp"),
+            (df.cube(F.col("id") + 1), "+(id, 1)", "Cube"),
+            (df.groupingSets([["id"]], "id"), "id", "GroupingSets"),
+            (df.groupBy("id").pivot("id"), "id", "Pivot"), (df.groupBy(), "", "GroupBy")):
+        assert repr(grouped) == (
+            f"GroupedData[grouping expressions: [{expressions}], value: [{value}], type: {kind}]")
+
+
+
+
 def test_pivot_pivots_only_a_group_by_and_checks_its_arguments_as_pyspark():
     # As PySpark's GroupedData.pivot: only the grouping of groupBy pivots, which it checks
     # first, and then the column is a str and the values a list of bools, floats, ints and
