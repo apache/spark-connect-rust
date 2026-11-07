@@ -9875,6 +9875,34 @@ def test_stream_writer_sends_its_trigger_as_pyspark(mock_connect):
     assert sent(realTime=" 5 seconds ") == {100: [b"5 seconds"]}
 
 
+def test_stream_writer_takes_its_query_name_and_columns_as_pyspark(offline_spark):
+    # As PySpark's DataStreamWriter: queryName, also of start and toTable, raises
+    # VALUE_NOT_NON_EMPTY_STR for a name that is not a non-empty str, and partitionBy and
+    # clusterBy take a list or a tuple of column names alone.
+    from pyspark.errors import PySparkValueError
+
+    writer = offline_spark.readStream.format("rate").load().writeStream
+    calls = [writer.queryName, lambda name: writer.start(queryName=name)]
+    calls.append(lambda name: writer.toTable("t", queryName=name))
+    for name in ("", "  ", 1):
+        for call in calls:
+            with pytest.raises(PySparkValueError) as e:
+                call(name)
+            assert e.value.getCondition() == "VALUE_NOT_NON_EMPTY_STR"
+            assert e.value.getMessageParameters() == {
+                "arg_name": "queryName",
+                "arg_value": str(name),
+            }
+    with pytest.raises(PySparkValueError):
+        writer.queryName(None)
+    for columns in (["a", "b"], ("a", "b")):
+        assert writer.partitionBy(columns) is writer
+        assert writer.clusterBy(columns) is writer
+    assert writer.partitionBy("a", "b") is writer
+    with pytest.raises(TypeError):
+        writer.partitionBy(["a"], "b")
+
+
 def test_merge_into_writer_mutates_and_returns_self(offline_spark):
     # PySpark: withSchemaEvolution and every clause action change the writer and
     # return that same writer; a clause object can be used more than once.

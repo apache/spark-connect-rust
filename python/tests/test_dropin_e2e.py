@@ -1498,6 +1498,33 @@ def test_lists_and_numpy_arrays_are_arrays_as_pyspark(session):
         ([1, 2], [1, 2], [1.5], ["x"], True, [0, 0], Row(id=0), [3])]
 
 
+def test_stream_writer_takes_its_query_name_and_columns_as_pyspark(session, tmp_path):
+    # As PySpark's DataStreamWriter: partitionBy takes a list of column names, and queryName
+    # raises VALUE_NOT_NON_EMPTY_STR for an empty name.
+    from pyspark.errors import PySparkValueError
+
+    source, sink = tmp_path / "source", tmp_path / "sink"
+    session.createDataFrame([(0, "a"), (1, "b")], "id long, k string").write.json(str(source))
+    query = (
+        session.readStream.schema("id long, k string")
+        .json(str(source))
+        .writeStream.format("parquet")
+        .partitionBy(["k"])
+        .option("checkpointLocation", str(tmp_path / "checkpoint"))
+        .trigger(availableNow=True)
+        .start(str(sink))
+    )
+    query.awaitTermination()
+    assert query.exception() is None
+    assert sorted(path.name for path in sink.iterdir() if path.name.startswith("k=")) == [
+        "k=a",
+        "k=b",
+    ]
+    with pytest.raises(PySparkValueError) as e:
+        session.readStream.format("rate").load().writeStream.queryName("")
+    assert e.value.getCondition() == "VALUE_NOT_NON_EMPTY_STR"
+
+
 def test_sql_fails_at_a_statement_that_does_not_parse(session):
     with pytest.raises(AnalysisException, match="PARSE_SYNTAX_ERROR"):
         session.sql("SELEC 1")
