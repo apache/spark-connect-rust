@@ -1294,11 +1294,11 @@ impl PyDataFrame {
         crate::stat_arguments::fillna(&self.dataframe, value, subset)
     }
 
-    /// Statistical functions (`df.stat`).
+    /// Statistical functions (`df.stat`), of this DataFrame, their `df`, as PySpark's.
     #[getter]
     #[pyo3(name = "stat")]
-    fn stat(&self) -> crate::stat::PyStatFunctions {
-        crate::stat::PyStatFunctions::new(self.dataframe.stat())
+    fn stat(slf: &Bound<'_, Self>) -> crate::stat::PyStatFunctions {
+        crate::stat::PyStatFunctions::new(slf.borrow().dataframe.stat(), slf.clone().unbind())
     }
 
     /// `df.crosstab(col1, col2)` - pyspark exposes it on DataFrame as well as
@@ -2098,11 +2098,13 @@ impl PyDataFrame {
         PyDataStreamWriter::new(writer)
     }
 
-    /// Null-handling functions (`df.na.drop()/fill()/replace()`).
+    /// Null-handling functions (`df.na.drop()/fill()/replace()`), of this DataFrame, their
+    /// `df`, as PySpark's.
     #[getter]
-    fn na(&self) -> PyDataFrameNaFunctions {
+    fn na(slf: &Bound<'_, Self>) -> PyDataFrameNaFunctions {
         PyDataFrameNaFunctions {
-            df: self.dataframe.clone(),
+            df: slf.borrow().dataframe.clone(),
+            frame: slf.clone().unbind(),
         }
     }
 
@@ -2313,10 +2315,19 @@ impl PyDataFrame {
 #[pyclass(name = "DataFrameNaFunctions", module = "pyspark.sql.dataframe")]
 pub struct PyDataFrameNaFunctions {
     df: spark_connect::dataframe::DataFrame,
+    /// The DataFrame of `df.na`, as PySpark's `DataFrameNaFunctions.df`.
+    frame: Py<PyDataFrame>,
 }
 
 #[pymethods]
 impl PyDataFrameNaFunctions {
+    /// The DataFrame of these functions, as PySpark's `DataFrameNaFunctions.df`: `df.na.df` is
+    /// `df`.
+    #[getter(df)]
+    fn frame(&self, py: Python<'_>) -> Py<PyDataFrame> {
+        self.frame.clone_ref(py)
+    }
+
     /// Drop rows containing nulls, as PySpark's `DataFrameNaFunctions.drop`, which is
     /// `DataFrame.dropna`.
     #[pyo3(

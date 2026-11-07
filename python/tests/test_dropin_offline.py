@@ -2835,6 +2835,19 @@ def test_functions_null_and_misc():
     assert type(F.covar_samp(c, c)).__name__ == "Column"
 
 
+def test_na_and_stat_functions_are_of_their_dataframe_as_pyspark():
+    # As PySpark's DataFrameNaFunctions and DataFrameStatFunctions, whose df is the DataFrame
+    # of df.na and df.stat itself.
+    from pyspark.sql import DataFrameNaFunctions, DataFrameStatFunctions
+
+    df = _offline_session().range(1)
+    assert isinstance(df.na, DataFrameNaFunctions)
+    assert isinstance(df.stat, DataFrameStatFunctions)
+    assert df.na.df is df
+    assert df.stat.df is df
+    assert df.na.df.stat.df is df
+
+
 def test_sample_by_checks_its_arguments_as_pyspark():
     # As PySpark's sampleBy: a column name or a Column, a dict of fractions, and strata of
     # floats, ints and strings.
