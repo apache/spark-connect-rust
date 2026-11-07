@@ -656,10 +656,48 @@ impl PySparkSession {
                         .iter()
                         .filter_map(|row| row.get(i))
                         .find(|value| !matches!(value, Value::Null));
-                    let data_type = match first {
-                        Some(Value::Decimal { .. }) => pandas_decimal_type(&data, &rows, i)?,
-                        Some(value) => value_to_datatype(value),
-                        None => pandas_dtype_type(dtypes.get(i).map_or("object", String::as_str)),
+                    let cells = || rows.iter().filter_map(|row| row.get(i));
+                    let data_type = if !cells().any(|v| matches!(v, Value::Decimal { .. })) {
+                        match first {
+                            Some(value) => value_to_datatype(value),
+                            None => {
+                                pandas_dtype_type(dtypes.get(i).map_or("object", String::as_str))
+                            }
+                        }
+                    } else if cells().all(|v| matches!(v, Value::Decimal { .. } | Value::Null)) {
+                        pandas_decimal_type(&data, &rows, i)?
+                    } else {
+                        // Decimals with other values, which PySpark's conversion leaves to
+                        // Arrow: it types the column, takes ints as Decimals and raises for
+                        // the others, so the column is typed and converted by Arrow here too.
+                        let column = data
+                            .iter()
+                            .map(|row| row.get_item(i))
+                            .collect::<PyResult<Vec<_>>>()?;
+                        let typed = py
+                            .import("pyspark.sql._pandas_input")?
+                            .getattr("arrow_decimal_column")?
+                            .call1((
+                                column,
+                                dtypes.get(i).map_or("object", String::as_str),
+                                labels.get(i).unwrap_or(name),
+                            ))?;
+                        let (precision, scale, values): (i32, i32, Vec<Bound<'_, PyAny>>) =
+                            typed.extract()?;
+                        let values = values
+                            .iter()
+                            .map(|v| Ok(py_to_value(v)?))
+                            .collect::<PyResult<Vec<Value>>>()?;
+                        rows = std::mem::take(&mut rows)
+                            .into_iter()
+                            .zip(values)
+                            .map(|(row, value)| {
+                                let mut cells = row.into_values();
+                                cells[i] = value;
+                                StructValue::new(row_names.clone(), cells).into()
+                            })
+                            .collect();
+                        DataType::Decimal { precision, scale }
                     };
                     fields.push(StructField {
                         name: name.clone(),
