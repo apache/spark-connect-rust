@@ -1,7 +1,7 @@
 //! PyO3 wrappers for Structured Streaming.
 
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyTuple};
 use spark_connect::streaming::{
     DataStreamReader, DataStreamWriter, ListenerEventStream, StreamingQuery,
     StreamingQueryException, StreamingQueryListener, StreamingQueryListenerEvent,
@@ -70,6 +70,36 @@ fn extract_partition_cols(v: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
         return Ok(vec![s]);
     }
     v.extract::<Vec<String>>()
+}
+
+/// The column names of `partitionBy(*cols)` and `clusterBy(*cols)`, as PySpark's take them:
+/// the names, or a list or tuple of them alone.
+fn column_names(cols: &Bound<'_, PyTuple>) -> PyResult<Vec<String>> {
+    if cols.len() == 1 {
+        let only = cols.get_item(0)?;
+        if only.is_instance_of::<pyo3::types::PyList>() || only.is_instance_of::<PyTuple>() {
+            return only.extract();
+        }
+    }
+    cols.extract()
+}
+
+/// The name of a query, as PySpark's `queryName` checks it: a non-empty str, else
+/// `VALUE_NOT_NON_EMPTY_STR` of its `str()`.
+fn query_name_of(name: &Bound<'_, PyAny>) -> PyResult<String> {
+    if let Ok(text) = name.cast::<pyo3::types::PyString>() {
+        let text = text.to_cow()?;
+        if !text.trim().is_empty() {
+            return Ok(text.into_owned());
+        }
+    }
+    let shown = name.str()?.to_cow()?.into_owned();
+    Err(crate::column::raise_pyspark(
+        name.py(),
+        "PySparkValueError",
+        "VALUE_NOT_NON_EMPTY_STR",
+        &[("arg_name", "queryName"), ("arg_value", &shown)],
+    ))
 }
 
 /// Python wrapper for DataStreamReader.
@@ -530,7 +560,7 @@ impl PyDataStreamWriter {
         format: Option<&str>,
         output_mode: Option<&str>,
         partition_by: Option<&Bound<'_, PyAny>>,
-        query_name: Option<&str>,
+        query_name: Option<&Bound<'_, PyAny>>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<DataStreamWriter> {
         let mut w = self.inner.clone();
@@ -546,7 +576,7 @@ impl PyDataStreamWriter {
             w = w.partition_by(refs);
         }
         if let Some(qn) = query_name {
-            w = w.query_name(qn);
+            w = w.query_name(&query_name_of(qn)?);
         }
         if let Some(options) = options {
             let mut opts = HashMap::new();
@@ -612,31 +642,37 @@ impl PyDataStreamWriter {
         Ok(slf)
     }
 
+    /// Partition by the column names, or a list or tuple of them alone, as PySpark's.
     #[pyo3(signature = (*cols))]
     fn partitionBy<'py>(
         mut slf: PyRefMut<'py, Self>,
-        cols: Vec<String>,
+        cols: &Bound<'_, PyTuple>,
     ) -> PyResult<PyRefMut<'py, Self>> {
+        let cols = column_names(cols)?;
         let col_refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
         slf.inner = slf.inner.clone().partition_by(col_refs);
         Ok(slf)
     }
 
+    /// Cluster by the column names, or a list or tuple of them alone, as PySpark's.
     #[pyo3(signature = (*cols))]
     fn clusterBy<'py>(
         mut slf: PyRefMut<'py, Self>,
-        cols: Vec<String>,
+        cols: &Bound<'_, PyTuple>,
     ) -> PyResult<PyRefMut<'py, Self>> {
+        let cols = column_names(cols)?;
         let col_refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
         slf.inner = slf.inner.clone().cluster_by(col_refs);
         Ok(slf)
     }
 
+    /// Name the query, a non-empty str, else `VALUE_NOT_NON_EMPTY_STR`, as PySpark's.
     fn queryName<'py>(
         mut slf: PyRefMut<'py, Self>,
-        queryName: &str,
+        queryName: &Bound<'_, PyAny>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        slf.inner = slf.inner.clone().query_name(queryName);
+        let name = query_name_of(queryName)?;
+        slf.inner = slf.inner.clone().query_name(&name);
         Ok(slf)
     }
 
@@ -729,7 +765,7 @@ impl PyDataStreamWriter {
         format: Option<&str>,
         outputMode: Option<&str>,
         partitionBy: Option<&Bound<'_, PyAny>>,
-        queryName: Option<&str>,
+        queryName: Option<&Bound<'_, PyAny>>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyStreamingQuery> {
         let writer = self.apply_write_opts(format, outputMode, partitionBy, queryName, options)?;
@@ -746,7 +782,7 @@ impl PyDataStreamWriter {
         format: Option<&str>,
         outputMode: Option<&str>,
         partitionBy: Option<&Bound<'_, PyAny>>,
-        queryName: Option<&str>,
+        queryName: Option<&Bound<'_, PyAny>>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyStreamingQuery> {
         let writer = self.apply_write_opts(format, outputMode, partitionBy, queryName, options)?;
