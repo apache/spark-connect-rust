@@ -1780,6 +1780,8 @@ impl DataFrame {
     }
 
     /// Print the schema of this DataFrame.
+    ///
+    /// The output ends with a blank line, matching Scala and Python.
     pub fn print_schema(&self) -> Result<()> {
         let schema = self.schema()?;
         println!("{}", schema.tree_string()?);
@@ -3368,6 +3370,78 @@ mod nested_decode_tests {
 mod cache_tests {
     use super::*;
     use prost::Message;
+
+    #[test]
+    fn print_schema_includes_final_blank_line() {
+        const CHILD: &str = "SPARK_CONNECT_PRINT_SCHEMA_STDOUT_CHILD";
+        const BEGIN: &str = "__PRINT_SCHEMA_BEGIN__\n";
+        const END: &str = "__PRINT_SCHEMA_END__";
+        if std::env::var_os(CHILD).is_some() {
+            // A cache regression must fail promptly instead of waiting on an RPC.
+            let _watchdog = std::thread::spawn(|| {
+                std::thread::sleep(std::time::Duration::from_secs(30));
+                eprintln!("print_schema stdout child timed out");
+                std::process::exit(1);
+            });
+            let spark = SparkSession::builder()
+                .remote("sc://localhost:1")
+                .get_or_create()
+                .unwrap();
+            let nested = DataType::from_json(&serde_json::json!({
+                "type": "struct",
+                "fields": [{"name": "outer", "type": {
+                    "type": "struct",
+                    "fields": [{"name": "inner", "type": "integer", "nullable": false, "metadata": {}}]
+                }, "nullable": true, "metadata": {}}]
+            }))
+            .unwrap();
+            print!("{BEGIN}");
+            for schema in [nested, DataType::Struct { fields: vec![] }] {
+                let df = spark.range(0).unwrap();
+                *df.schema_cache.lock().unwrap() = Some(Arc::new(schema));
+                df.print_schema().unwrap();
+            }
+            println!("{END}");
+            return;
+        }
+
+        // A separate process exposes real stdout without changing global capture
+        // or sharing it with the other parallel tests in this process.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "dataframe::cache_tests::print_schema_includes_final_blank_line",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let printed = stdout
+            .split_once(BEGIN)
+            .expect("child must run the schema print test")
+            .1
+            .split_once(END)
+            .expect("child must finish printing schemas")
+            .0;
+        assert_eq!(
+            printed,
+            concat!(
+                "root\n",
+                " |-- outer: struct (nullable = true)\n",
+                " |    |-- inner: integer (nullable = false)\n",
+                "\n",
+                "root\n",
+                "\n",
+            ),
+        );
+    }
 
     #[test]
     fn schema_cache_shares_exact_clones_but_not_changed_plans_or_new_sources() {
