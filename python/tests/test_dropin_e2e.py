@@ -104,6 +104,15 @@ def test_conf_get_with_a_none_default(session):
         session.conf.get(key)
 
 
+def test_numpy_scalar_literals_have_the_types_of_their_dtypes_as_pyspark(session):
+    np = pytest.importorskip("numpy")
+    from pyspark.sql import functions as F
+
+    # As PySpark: a NumPy scalar's literal is typed by its dtype, as the server reports it.
+    df = session.range(1).select(F.lit(np.int64(5)), F.lit(np.float32(1.5)), F.lit(np.int8(5)))
+    assert [f.dataType.simpleString() for f in df.schema.fields] == ["bigint", "float", "tinyint"]
+
+
 def test_user_id_of_the_connection_string_reaches_every_request_as_pyspark():
     # The server keys a session by the user ID in each request. As in PySpark, the
     # queries carry the user ID of the connection string, as the configs do, so a config
