@@ -4505,6 +4505,44 @@ def test_spark_conf_chain_operations():
     assert len(conf.getAll()) == 4
 
 
+def test_inheritable_threads_inherit_the_tags_of_the_session_as_pyspark(mock_connect):
+    # As PySpark's of Spark Connect: InheritableThread takes the tags of its session of the
+    # thread that starts it, and inheritable_thread_target those of the thread that wraps the
+    # function, with the session as the active one of the thread; a plain thread has none.
+    import threading
+
+    from pyspark import InheritableThread, inheritable_thread_target
+    from pyspark.sql import SparkSession
+
+    spark, _ = mock_connect
+    spark.addTag("parent")
+    seen = {}
+
+    def child(key):
+        seen[key] = (spark.getTags(), SparkSession.getActiveSession() is spark)
+
+    try:
+        for thread in [
+            threading.Thread(target=child, args=("plain",)),
+            InheritableThread(target=child, args=("inheritable",), session=spark),
+            threading.Thread(target=inheritable_thread_target(spark)(child), args=("target",)),
+        ]:
+            thread.start()
+            thread.join()
+        assert seen == {
+            "plain": (set(), False),
+            "inheritable": ({"parent"}, False),
+            "target": ({"parent"}, True),
+        }
+        assert spark.getTags() == {"parent"}
+    finally:
+        spark.clearTags()
+    with pytest.raises(AssertionError, match="Spark Connect must be provided"):
+        InheritableThread(target=child)
+    with pytest.raises(AssertionError, match="f is expected to be SparkSession"):
+        inheritable_thread_target(child)(child)
+
+
 def test_row_asdict():
     """Test Row.asDict() method."""
     from pyspark.sql import Row
