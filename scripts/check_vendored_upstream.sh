@@ -58,6 +58,9 @@ VENDORED_FILES=(
   "conf.py"
   "taskcontext.py"
 
+  # The Arrow C stream of a DataFrame, of DataFrame.__arrow_c_stream__.
+  "sql/interchange.py"
+
   # Logging
   "logger/__init__.py"
   "logger/logger.py"

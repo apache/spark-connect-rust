@@ -2074,6 +2074,24 @@ impl PyDataFrame {
         Ok(table.call_method1("cast", (arrow_schema,))?.unbind())
     }
 
+    /// The Arrow C stream of the DataFrame, of the Arrow PyCapsule interface, as PySpark's
+    /// `__arrow_c_stream__`: `pyspark.sql.interchange.SparkArrowCStreamer`, which reads the rows of
+    /// one partition at a time, of the Arrow schema of the schema, and `requested_schema`, a
+    /// PyCapsule of a schema, if any, which the stream is cast to as far as Arrow can.
+    #[pyo3(signature = (requested_schema=None))]
+    fn __arrow_c_stream__(
+        slf: &Bound<'_, Self>,
+        requested_schema: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        Ok(py
+            .import("pyspark.sql.interchange")?
+            .getattr("SparkArrowCStreamer")?
+            .call1((slf,))?
+            .call_method1("__arrow_c_stream__", (requested_schema,))?
+            .unbind())
+    }
+
     /// Collect the DataFrame into a pandas DataFrame.
     ///
     /// Mirrors `pyspark.sql.DataFrame.toPandas()`, as `SparkConnectClient.to_pandas` converts
