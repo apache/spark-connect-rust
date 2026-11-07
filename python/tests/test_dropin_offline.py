@@ -663,6 +663,43 @@ def test_builder_options_are_set_on_the_session_as_pyspark(mock_connect):
     assert len(service.set_confs) == 1
 
 
+def test_collected_rows_take_the_names_of_the_schema_of_the_result_as_pyspark(mock_connect):
+    # As PySpark Connect's, which builds the rows by the schema of the result: the fields of
+    # nested structs have the names of the schema, which keep the duplicate names that the
+    # server's Arrow data numbers; collect raises for a calendar interval, whose Arrow type
+    # from_arrow_schema does not convert, while toLocalIterator does not check it.
+    import pyarrow as pa
+    from _mock_connect_server import data_type_proto
+    from pyspark.errors import PySparkTypeError
+
+    spark, service = mock_connect
+
+    def respond(schema, table):
+        sink = pa.BufferOutputStream()
+        with pa.ipc.new_stream(sink, table.schema) as writer:
+            writer.write_table(table)
+        # ExecutePlanResponse.schema=7 and arrow_batch=2: ArrowBatch.row_count=1, data=2.
+        service.execute_payload = message_field(7, schema) + message_field(
+            2, varint_field(1, table.num_rows) + message_field(2, sink.getvalue().to_pybytes()))
+
+    field = {"name": "a", "type": "integer", "nullable": True, "metadata": {}}
+    pair = {"type": "struct", "fields": [field, field]}
+    respond(data_type_proto({"type": "struct", "fields": [
+        {"name": "v", "type": pair, "nullable": True, "metadata": {}}]}),
+        pa.table({"v": pa.array([{"a_0": 1, "a_1": 2}])}))
+    for rows in (spark.range(1).collect(), list(spark.range(1).toLocalIterator())):
+        assert rows[0].v.__fields__ == ["a", "a"]
+        assert tuple(rows[0].v) == (1, 2)
+    # Struct.fields=1, StructField: name=1, data_type=2 (DataType.calendar_interval=17).
+    respond(message_field(21, message_field(1, message_field(1, "v") + message_field(
+        2, message_field(17, b"")))),
+        pa.table({"v": pa.array([(1, 2, 3)], pa.month_day_nano_interval())}))
+    with pytest.raises(PySparkTypeError) as e:
+        spark.range(1).collect()
+    assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION"
+    assert e.value.getMessageParameters() == {"data_type": "month_day_nano_interval"}
+    assert len(list(spark.range(1).toLocalIterator())) == 1
+
 def test_tags_are_those_of_each_thread_as_pyspark(mock_connect):
     # As PySpark's: the tags of addTag are those of the current thread, of a set of getTags,
     # which the operations that the thread starts carry; a new thread starts without tags.

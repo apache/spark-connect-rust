@@ -1355,6 +1355,23 @@ def test_writer_v2_takes_its_arguments_as_pyspark(session):
         session.sql(f"DROP TABLE IF EXISTS {name}")
 
 
+def test_collected_rows_take_the_names_of_the_schema_of_the_result_as_pyspark(session):
+    # As PySpark Connect's: the fields of nested structs have the names of the schema, which keep
+    # duplicate names, and collect raises for a calendar interval.
+    from pyspark.errors import PySparkTypeError
+
+    df = session.sql(
+        "SELECT named_struct('a', 1, 'a', 2) AS v, array(named_struct('b', 1, 'b', 'x')) AS w")
+    row = df.collect()[0]
+    assert row.v.__fields__ == ["a", "a"] and tuple(row.v) == (1, 2) and row.v.a == 1
+    assert row.w[0].__fields__ == ["b", "b"]
+    assert row.asDict(recursive=True) == {"v": {"a": 2}, "w": [{"b": "x"}]}
+    assert next(df.toLocalIterator()).v.__fields__ == ["a", "a"]
+    with pytest.raises(PySparkTypeError) as e:
+        session.sql("SELECT make_interval(1) AS v").collect()
+    assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION"
+    assert e.value.getMessageParameters() == {"data_type": "month_day_nano_interval"}
+
 def test_collect_reads_a_result_across_stream_ends(session):
     # Takes several response streams when the server's senderMaxStreamSize is small.
     n = 300_000
