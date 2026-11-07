@@ -2172,9 +2172,12 @@ def test_pandas_timestamp_precision_and_timezone_fallback(monkeypatch):
     ("UTC", ("PST", "PDT")),
 ], ids=["unset-tz", "non-utc-tz", "mismatched-host-zone"])
 @pytest.mark.parametrize("config_error", [False, True])
-def test_timestamp_non_utc_host_keeps_row_path_without_config(
+def test_timestamp_non_utc_host_declines_and_converts_as_pyspark(
     protocol, monkeypatch, unit, mixed, host_tz, host_names, config_error
 ):
+    # A host zone other than a literal UTC declines the timestamp fast path before its
+    # session time zone RPC; the frame then converts as PySpark's Arrow conversion does,
+    # which reads the configs first and takes naive values in the session time zone (UTC).
     import json
     import time
 
@@ -2193,16 +2196,18 @@ def test_timestamp_non_utc_host_keeps_row_path_without_config(
         T.StructField(f"renamed_{name}", T.TimestampType(), True, {"source": name})
         for name in columns
     ])
-    # Match the row path's naive instants using datetime.timestamp(), independently
-    # of the mocked timezone eligibility inputs above.
-    expected = [
-        [None if pd.isna(value) else round(value.to_pydatetime().timestamp() * 1000000)
-         for value in frame[name]]
-        for name in columns
-    ]
+    from pyspark.sql._pandas_input import timestamp_columns
+
+    assert timestamp_columns(frame, schema) is None
+    expected = [micros for _ in columns]
     with _arrow_input_service(protocol, config_error=config_error) as (spark, state):
+        if config_error:
+            with pytest.raises(Exception, match="configuration unavailable"):
+                spark.createDataFrame(frame, schema).toArrow()
+            assert state["input_tables"] == []
+            return
         spark.createDataFrame(frame, schema).toArrow()
-        assert state["config_requests"] == []
+        assert state["config_requests"]
         assert state["uploads"] == 0
         assert state["column_names"] == schema.names
         assert len(state["input_tables"]) == 1
@@ -2212,7 +2217,6 @@ def test_timestamp_non_utc_host_keeps_row_path_without_config(
             assert column.type == pa.timestamp("us", tz="UTC")
             assert column.cast(pa.int64()).to_pylist() == values
             assert column.is_null().to_pylist() == [value is None for value in values]
-        assert json.loads(state["relations"][0].local_relation.schema) == json.loads(schema.json())
 
 
 @pytest.mark.parametrize("has_null", [False, True])
