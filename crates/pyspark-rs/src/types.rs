@@ -28,6 +28,36 @@ fn type_reduce(py: Python<'_>, json: &str) -> PyResult<(Py<PyAny>, (String,))> {
     Ok((f.unbind(), (json.to_string(),)))
 }
 
+/// The `__reduce__` of a type of `data_type`, whose class is `cls`: by its JSON, as
+/// [`type_reduce`], unless it has a user-defined type, whose JSON need not import its class.
+/// Such a type pickles of the type objects it is made of, `args()`, as PySpark's types do; the
+/// class is that of `pyspark.sql.types`, also on the Python workers of the server.
+fn reduce_with_udts<'py>(
+    cls: Bound<'py, pyo3::types::PyType>,
+    data_type: &DataType,
+    args: impl FnOnce() -> PyResult<Bound<'py, pyo3::types::PyTuple>>,
+) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
+    let py = cls.py();
+    if has_udt(data_type) {
+        return Ok((cls.into_any().unbind(), args()?.into_any().unbind()));
+    }
+    let (f, args) = type_reduce(py, &data_type.json())?;
+    Ok((f, args.into_pyobject(py)?.into_any().unbind()))
+}
+
+/// The user-defined types that the client lowered into core types, by the JSON of their core
+/// types. PySpark's `ArrayType`, `MapType`, `StructField` and `StructType` hold the type
+/// objects they are made of; so a core type gives back the user-defined type it was made of,
+/// rather than one of its JSON. The `pyClass` of the JSON need not name the module of the class,
+/// as for Apache Spark's `ExamplePointUDT`, of `pyspark.sql.tests.ExamplePointUDT`.
+static LOWERED_UDTS: PyOnceLock<Py<pyo3::types::PyDict>> = PyOnceLock::new();
+
+fn lowered_udts(py: Python<'_>) -> &Bound<'_, pyo3::types::PyDict> {
+    LOWERED_UDTS
+        .get_or_init(py, || pyo3::types::PyDict::new(py).unbind())
+        .bind(py)
+}
+
 /// Python wrapper for any DataType. This is the base of the type-class hierarchy
 /// (mirroring pyspark's `DataType`); concrete type classes extend it (directly or via
 /// the intermediate abstract bases below), so `isinstance(dt, DataType)` and the object
@@ -1434,12 +1464,17 @@ impl PyArrayType {
     ) -> PyResult<Bound<'py, PyAny>> {
         shim_conversion(slf.as_any(), "_to_internal", obj)
     }
-    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
+        let py = slf.py();
+        let this = slf.borrow();
         let dt = DataType::Array {
-            element_type: Box::new(self.element_type.clone()),
-            contains_null: self.contains_null,
+            element_type: Box::new(this.element_type.clone()),
+            contains_null: this.contains_null,
         };
-        type_reduce(py, &dt.json())
+        reduce_with_udts(slf.get_type(), &dt, || {
+            let element_type = data_type_to_py(py, &this.element_type)?;
+            (element_type, this.contains_null).into_pyobject(py)
+        })
     }
     // Kwargs mirror the reference: ArrayType(elementType, containsNull=True).
     #[new]
@@ -1565,13 +1600,19 @@ impl PyMapType {
     ) -> PyResult<Bound<'py, PyAny>> {
         shim_conversion(slf.as_any(), "_to_internal", obj)
     }
-    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
+        let py = slf.py();
+        let this = slf.borrow();
         let dt = DataType::Map {
-            key_type: Box::new(self.key_type.clone()),
-            value_type: Box::new(self.value_type.clone()),
-            value_contains_null: self.value_contains_null,
+            key_type: Box::new(this.key_type.clone()),
+            value_type: Box::new(this.value_type.clone()),
+            value_contains_null: this.value_contains_null,
         };
-        type_reduce(py, &dt.json())
+        reduce_with_udts(slf.get_type(), &dt, || {
+            let key_type = data_type_to_py(py, &this.key_type)?;
+            let value_type = data_type_to_py(py, &this.value_type)?;
+            (key_type, value_type, this.value_contains_null).into_pyobject(py)
+        })
     }
     // Kwargs mirror the reference: MapType(keyType, valueType, valueContainsNull=True).
     #[new]
@@ -1868,6 +1909,25 @@ impl PyStructField {
     fn __hash__(slf: &Bound<'_, Self>) -> PyResult<isize> {
         slf.str()?.hash()
     }
+    /// A field pickles, as PySpark's does: of its name, type, nullability and metadata, with
+    /// the class of `pyspark.sql.types`, also on the Python workers of the server.
+    fn __reduce__<'py>(
+        slf: &Bound<'py, Self>,
+    ) -> PyResult<(
+        Bound<'py, pyo3::types::PyType>,
+        Bound<'py, pyo3::types::PyTuple>,
+    )> {
+        let py = slf.py();
+        let this = slf.borrow();
+        let args = (
+            this.field.name.clone(),
+            data_type_to_py(py, &this.field.data_type)?,
+            this.field.nullable,
+            metadata_map_to_py(py, &this.field.metadata)?,
+        )
+            .into_pyobject(py)?;
+        Ok((slf.get_type(), args))
+    }
 }
 
 #[pyclass(name = "StructType", module = "pyspark.sql.types", extends = PyDataType)]
@@ -1908,11 +1968,20 @@ impl PyStructType {
     ) -> PyResult<Bound<'py, PyAny>> {
         shim_conversion(slf.as_any(), "_to_internal", obj)
     }
-    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
+        let py = slf.py();
+        let this = slf.borrow();
         let dt = DataType::Struct {
-            fields: self.fields.clone(),
+            fields: this.fields.clone(),
         };
-        type_reduce(py, &dt.json())
+        reduce_with_udts(slf.get_type(), &dt, || {
+            let fields = this
+                .fields
+                .iter()
+                .map(|f| Py::new(py, PyStructField { field: f.clone() }))
+                .collect::<PyResult<Vec<_>>>()?;
+            (fields,).into_pyobject(py)
+        })
     }
     /// `StructType(fields=None)` where each field is a `StructField` (matching
     /// pyspark). A list of DDL field strings is also accepted for convenience.
@@ -3292,12 +3361,17 @@ pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAn
             .call1((data_type_string,))?
             .unbind(),
         DataType::Udt { .. } => {
-            // A UDT reconstructs by re-importing its Python class; delegate to the Python
-            // parser.
-            py.import("pyspark.sql.types")?
-                .getattr("_parse_datatype_json_string")?
-                .call1((dt.json(),))?
-                .unbind()
+            // The user-defined type that the client lowered into `dt`; or else, as of the
+            // schema of the server, one that re-imports its Python class, of the Python parser.
+            let json = dt.json();
+            match lowered_udts(py).get_item(&json)? {
+                Some(udt) => udt.unbind(),
+                None => py
+                    .import("pyspark.sql.types")?
+                    .getattr("_parse_datatype_json_string")?
+                    .call1((json,))?
+                    .unbind(),
+            }
         }
     };
     Ok(o)
@@ -3450,13 +3524,15 @@ pub(crate) fn py_to_data_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
                 }
             };
             let sql_type = py_to_data_type(&obj.call_method0("sqlType")?)?;
-            return Ok(DataType::Udt {
+            let udt = DataType::Udt {
                 type_str: "udt".to_string(),
                 jvm_class: get("class")?,
                 python_class: get("pyClass")?,
                 serialized_python_class: get("serializedClass")?,
                 sql_type: Some(Box::new(sql_type)),
-            });
+            };
+            lowered_udts(obj.py()).set_item(udt.json(), obj)?;
+            return Ok(udt);
         }
     }
     // `UnparsedDataType` of `pyspark.sql.connect.types`, a pure-Python subclass of the base, is

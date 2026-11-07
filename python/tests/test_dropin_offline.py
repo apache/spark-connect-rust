@@ -1747,6 +1747,52 @@ sys.stdout.buffer.write(CloudPickleSerializer().dumps(MainPointUDT(2.5)))
     assert main_udt.sqlType() == T.ArrayType(T.DoubleType())
 
 
+def test_types_give_back_and_pickle_their_user_defined_types_as_pyspark():
+    # As PySpark's ArrayType, MapType, StructField and StructType, which hold the type objects
+    # they are made of: each gives back its user-defined type, also nested, though the pyClass
+    # of the JSON of ExamplePointUDT, pyspark.sql.tests.ExamplePointUDT, imports no class. They
+    # pickle with it, and so does a StructField of any type.
+    import pickle
+
+    from pyspark.serializers import CloudPickleSerializer
+    from pyspark.testing.objects import ExamplePointUDT
+
+    udt = ExamplePointUDT()
+    assert udt.jsonValue()["pyClass"] == "pyspark.sql.tests.ExamplePointUDT"
+    nested = T.MapType(T.StringType(), T.StructType([T.StructField("p", udt)]))
+    assert T.ArrayType(udt).elementType is udt
+    assert T.MapType(udt, T.StringType()).keyType is udt
+    assert T.MapType(T.StringType(), udt).valueType is udt
+    assert T.StructField("p", udt).dataType is udt
+    assert T.StructType([T.StructField("p", udt)]).fields[0].dataType is udt
+    assert T.StructType().add("p", udt)["p"].dataType is udt
+    assert T.ArrayType(T.ArrayType(udt)).elementType.elementType is udt
+    assert nested.valueType["p"].dataType is udt
+    assert repr(T.ArrayType(udt)) == "ArrayType(ExamplePointUDT(), True)"
+    assert T.StructType([T.StructField("p", udt)]).simpleString() == "struct<p:udt>"
+
+    serializer = CloudPickleSerializer()
+    for t in [
+        T.ArrayType(udt, False),
+        T.MapType(T.StringType(), udt, False),
+        T.StructType([T.StructField("p", udt, False, {"k": "v"})]),
+        nested,
+        T.StructField("p", udt, True, {"k": 1}),
+        T.StructField("i", T.IntegerType(), False, {"k": "v"}),
+        T.StructType([T.StructField("i", T.IntegerType())]),
+    ]:
+        for copied in (pickle.loads(pickle.dumps(t)), serializer.loads(serializer.dumps(t))):
+            assert type(copied) is type(t) and copied == t and repr(copied) == repr(t)
+    field = pickle.loads(pickle.dumps(T.StructField("p", udt, True, {"k": 1})))
+    assert type(field.dataType) is ExamplePointUDT and field.metadata == {"k": 1}
+    # A type with a user-defined type pickles of the class of pyspark.sql.types and the type
+    # objects, which the Python workers of the server rebuild; one without, by its JSON.
+    assert T.ArrayType(udt).__reduce__() == (T.ArrayType, (udt, True))
+    assert T.ArrayType(T.IntegerType()).__reduce__()[0] is T._parse_datatype_json_string
+
+
+
+
 def test_collected_values_of_user_defined_types_are_deserialized_as_pyspark():
     # The converters that the client applies to collected rows: the values of user-defined
     # types, in arrays, maps and structs too, are deserialized by their UDTs, as PySpark's
