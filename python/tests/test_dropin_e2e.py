@@ -1418,6 +1418,23 @@ def test_create_dataframe_types_pandas_columns_as_pyspark(session):
         assert [tuple(r) for r in df.collect()] == rows, data
 
 
+def test_session_builders_keep_the_options_set_on_them_as_pyspark(session):
+    # As PySpark's: the methods of a builder set their option on it, so an option set without
+    # chaining is set on the session of getOrCreate.
+    import os
+
+    from pyspark.sql import SparkSession
+
+    builder = SparkSession.builder.remote(os.environ["SPARK_REMOTE"])
+    builder.config("spark.connect.rust.test.builder", "kept")
+    try:
+        assert builder.getOrCreate().conf.get("spark.connect.rust.test.builder") == "kept"
+    finally:
+        session.conf.unset("spark.connect.rust.test.builder")
+
+
+
+
 def test_collected_rows_behave_as_pyspark_rows(session):
     import pickle
 
