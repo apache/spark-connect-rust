@@ -79,6 +79,18 @@ VENDORED_FILES=(
   "pipelines/__init__.py"
   "pipelines/flow.py"
   "pipelines/output.py"
+  # The CLI of Spark Declarative Pipelines (spark-pipelines), and the official tests of it, which
+  # run through this client against a server.
+  "pipelines/cli.py"
+  "pipelines/init_cli.py"
+  "pipelines/add_pipeline_analysis_context.py"
+  "pipelines/block_session_mutations.py"
+  "pipelines/tests/test_cli.py"
+  "pipelines/tests/test_init_cli.py"
+  "pipelines/tests/test_add_pipeline_analysis_context.py"
+  "pipelines/tests/test_block_session_mutations.py"
+  "pipelines/tests/test_spark_connect.py"
+  "pipelines/tests/test_auto_cdc_flow.py"
   "pipelines/source_code_location.py"
   "pipelines/graph_element_registry.py"
   "pipelines/type_error_utils.py"
