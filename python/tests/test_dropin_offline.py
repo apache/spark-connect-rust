@@ -7151,6 +7151,56 @@ def test_schema_cache_set_operations_require_equal_warm_schemas(mock_connect, op
     assert left.columns == ["id"]
 
 
+def test_dataframes_take_their_arguments_and_attributes_as_pyspark(mock_connect, monkeypatch):
+    # As PySpark Connect's: the errors of randomSplit, withMetadata and withWatermark, and the
+    # attributes of a DataFrame: a column of any name but a dunder one, which must be a column,
+    # and JVM_ATTRIBUTE_NOT_SUPPORTED of those of a classic DataFrame.
+    from pyspark.errors import (
+        PySparkAttributeError,
+        PySparkNotImplementedError,
+        PySparkTypeError,
+        PySparkValueError,
+    )
+
+    spark, _ = mock_connect
+    df = spark.range(3)
+    for weights, arg_name, arg_value in (([1.0, -1.0], "weights", "-1.0"),
+                                          ([0, 0], "sum(weights)", "0")):
+        with pytest.raises(PySparkValueError) as e:
+            df.randomSplit(weights)
+        assert e.value.getCondition() == "VALUE_NOT_POSITIVE"
+        assert e.value.getMessageParameters() == {"arg_name": arg_name, "arg_value": arg_value}
+    with pytest.raises(PySparkTypeError) as e:
+        df.withMetadata("id", 1)
+    assert e.value.getMessageParameters() == {
+        "expected_type": "dict", "arg_name": "metadata", "arg_type": "int"}
+    df.withMetadata("id", {"k": 1, "l": [1, 2]})
+    for event_time, delay, arg_name, arg_type in ((1, "1 minute", "eventTime", "int"),
+                                                  ("", "1 minute", "eventTime", "str"),
+                                                  ("id", None, "delayThreshold", "NoneType")):
+        with pytest.raises(PySparkTypeError) as e:
+            df.withWatermark(event_time, delay)
+        assert e.value.getMessageParameters() == {
+            "arg_name": arg_name, "expected_type": "str", "arg_type": arg_type}
+    assert type(df._not_a_dunder).__name__ == "Column"
+    for name in ("_jseq", "_jdf", "_jmap", "_jcols"):
+        with pytest.raises(PySparkAttributeError) as e:
+            getattr(df, name)
+        assert e.value.getCondition() == "JVM_ATTRIBUTE_NOT_SUPPORTED"
+    with pytest.raises(PySparkNotImplementedError) as e:
+        df.rdd
+    assert e.value.getMessageParameters() == {"feature": "rdd"}
+    with pytest.raises(PySparkAttributeError) as e:
+        df.__not_a_column__
+    assert e.value.getCondition() == "ATTRIBUTE_NOT_SUPPORTED"
+    monkeypatch.setenv("PYSPARK_VALIDATE_COLUMN_NAME_LEGACY", "1")
+    with pytest.raises(PySparkAttributeError) as e:
+        df.not_a_column
+    assert e.value.getMessageParameters() == {"attr_name": "not_a_column"}
+
+
+
+
 def test_schema_cache_to_uses_supplied_struct_schema(mock_connect):
     spark, service = mock_connect
     df = spark.range(10)

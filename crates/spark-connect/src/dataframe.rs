@@ -756,7 +756,8 @@ impl DataFrame {
         Ok(())
     }
 
-    /// Sample rows.
+    /// Sample rows. Without a seed, the client chooses a random one, as PySpark's, so that every
+    /// execution of the sample returns the same rows.
     pub fn sample(&self, fraction: f64, seed: Option<i64>) -> DataFrame {
         self.sample_opt(fraction, false, seed)
     }
@@ -774,7 +775,8 @@ impl DataFrame {
             lower_bound: 0.0,
             upper_bound: fraction,
             with_replacement,
-            seed,
+            seed: Some(seed.unwrap_or_else(random_seed)),
+            deterministic_order: false,
         };
         self.with_cached_schema(plan)
     }
@@ -1757,6 +1759,9 @@ impl DataFrame {
 
     /// Randomly split this DataFrame into multiple parts.
     pub fn random_split(&self, weights: Vec<f64>, seed: Option<i64>) -> Vec<DataFrame> {
+        // As PySpark's: one seed of every split, of the client without a seed, and the input
+        // in a deterministic order, so that the splits are disjoint and have every row.
+        let seed = Some(seed.unwrap_or_else(random_seed));
         let total: f64 = weights.iter().sum();
         let normalized: Vec<f64> = weights.iter().map(|w| w / total).collect();
 
@@ -1771,6 +1776,7 @@ impl DataFrame {
                 upper_bound: upper,
                 with_replacement: false,
                 seed,
+                deterministic_order: true,
             };
             results.push(self.with_cached_schema(plan));
             cumulative = upper;
@@ -1960,10 +1966,16 @@ impl DataFrame {
     /// re-selected with the given metadata attached (serialized to a JSON map).
     pub fn with_metadata(&self, column_name: &str, metadata: HashMap<String, String>) -> DataFrame {
         let metadata_json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
+        self.with_metadata_json(column_name, &metadata_json)
+    }
+
+    /// Set the metadata of a column of its JSON, of any JSON values, as PySpark's
+    /// `withMetadata` sends `json.dumps(metadata)`.
+    pub fn with_metadata_json(&self, column_name: &str, metadata_json: &str) -> DataFrame {
         let plan = LogicalPlan::WithColumnMetadata {
             input: Arc::clone(&self.plan),
             column_name: column_name.to_string(),
-            metadata_json,
+            metadata_json: metadata_json.to_string(),
         };
         DataFrame::new(self.session.clone(), plan)
     }
@@ -2296,6 +2308,12 @@ fn set_observations(
             None => observation.update(&observed.keys, &observed.values),
         }
     }
+}
+
+/// A random seed of a sample without one, as PySpark's `random.randint(0, sys.maxsize)`: the
+/// client chooses it, so that every execution of the sample returns the same rows.
+fn random_seed() -> i64 {
+    (uuid::Uuid::new_v4().as_u128() >> 65) as i64
 }
 
 /// Decode an Arrow batch into rows.
@@ -4180,6 +4198,37 @@ mod plan_construction_tests {
                 assert!(!metadata_json.is_empty());
             }
             _ => panic!("expected WithColumnMetadata plan"),
+        }
+    }
+
+    /// As PySpark's: without a seed, the client takes one, of every split of `random_split`,
+    /// whose input is in a deterministic order, and of a sample.
+    #[test]
+    fn samples_take_a_seed_of_the_client() {
+        let spark = session();
+        let df = spark.range(10).unwrap();
+        let seeds: Vec<(Option<i64>, bool)> = df
+            .random_split(vec![0.5, 0.5], None)
+            .iter()
+            .map(|split| match split.plan.as_ref() {
+                LogicalPlan::Sample {
+                    seed,
+                    deterministic_order,
+                    ..
+                } => (*seed, *deterministic_order),
+                other => panic!("expected a Sample plan, got {other:?}"),
+            })
+            .collect();
+        assert!(seeds[0].0.is_some_and(|seed| seed >= 0));
+        assert_eq!(seeds[0], seeds[1]);
+        assert!(seeds[0].1);
+        match df.sample(0.5, None).plan.as_ref() {
+            LogicalPlan::Sample {
+                seed: Some(_),
+                deterministic_order: false,
+                ..
+            } => {}
+            other => panic!("expected a Sample plan of a seed, got {other:?}"),
         }
     }
 

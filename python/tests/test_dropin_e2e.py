@@ -2447,6 +2447,22 @@ def test_create_dataframe_raises_merge_errors_as_pyspark(session):
         assert error.value.getMessageParameters() == parameters, data
 
 
+def test_samples_and_splits_take_a_seed_of_the_client_as_pyspark(session):
+    # As PySpark's: without a seed, the client takes one, so every action of a sample returns
+    # the same rows, and the splits of randomSplit are disjoint and have every row; and the
+    # metadata of withMetadata takes any JSON value.
+    df = session.range(0, 2000, 1, 8)
+    sample = df.sample(0.5)
+    assert sorted(row.id for row in sample.collect()) == sorted(row.id for row in sample.collect())
+    first, second = df.randomSplit([0.5, 0.5])
+    assert first.count() + second.count() == 2000
+    assert first.intersect(second).count() == 0
+    metadata = {"k": 1, "l": [1, 2], "s": "v"}
+    assert df.withMetadata("id", metadata).schema["id"].metadata == metadata
+
+
+
+
 def test_persist_cache_and_unpersist_return_the_dataframe_itself_as_pyspark(session):
     # As PySpark's: the DataFrame itself, cached at the storage level given.
     from pyspark.storagelevel import StorageLevel
