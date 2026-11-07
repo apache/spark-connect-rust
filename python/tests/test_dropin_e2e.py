@@ -104,6 +104,15 @@ def test_conf_get_with_a_none_default(session):
         session.conf.get(key)
 
 
+def test_numpy_scalar_literals_have_the_types_of_their_dtypes_as_pyspark(session):
+    np = pytest.importorskip("numpy")
+    from pyspark.sql import functions as F
+
+    # As PySpark: a NumPy scalar's literal is typed by its dtype, as the server reports it.
+    df = session.range(1).select(F.lit(np.int64(5)), F.lit(np.float32(1.5)), F.lit(np.int8(5)))
+    assert [f.dataType.simpleString() for f in df.schema.fields] == ["bigint", "float", "tinyint"]
+
+
 def test_user_id_of_the_connection_string_reaches_every_request_as_pyspark():
     # The server keys a session by the user ID in each request. As in PySpark, the
     # queries carry the user ID of the connection string, as the configs do, so a config
@@ -1118,6 +1127,30 @@ def test_collected_rows_behave_as_pyspark_rows(session):
     assert repr(pickle.loads(pickle.dumps(duplicate))) == "Row(a=1, a=2)"
 
 
+def test_pivot_pivots_only_a_group_by_as_pyspark(session):
+    # As PySpark's: the pivot of a rollup, a cube, grouping sets or a pivot raises
+    # UNSUPPORTED_OPERATION, rather than pivoting as a groupBy, which pivots.
+    from pyspark.errors import PySparkNotImplementedError, PySparkTypeError
+
+    df = session.createDataFrame(
+        [(1, 10, "a"), (1, 20, "b"), (2, 30, "a")], "k int, v int, s string"
+    )
+    for grouped in [
+        df.rollup("k"),
+        df.cube("k"),
+        df.groupingSets([["k"]], "k"),
+        df.groupBy("k").pivot("s"),
+    ]:
+        with pytest.raises(PySparkNotImplementedError) as e:
+            grouped.pivot("s")
+        assert e.value.getCondition() == "UNSUPPORTED_OPERATION"
+    rows = df.groupBy("k").pivot("s", ["a", "b"]).sum("v").orderBy("k").collect()
+    assert [tuple(row) for row in rows] == [(1, 10, 20), (2, 30, None)]
+    with pytest.raises(PySparkTypeError) as e:
+        df.groupBy("k").pivot("s", ("a",))
+    assert e.value.getCondition() == "NOT_EXPECTED_TYPE"
+
+
 def test_sample_sort_group_by_drop_and_select_expr_as_pyspark(session):
     # As PySpark's: sample takes a fraction and a seed positionally, sort and groupBy take the
     # 1-based ordinals of columns, drop takes Columns, and selectExpr a list of expressions.
@@ -1158,6 +1191,14 @@ def test_collected_rows_keep_their_values_as_pyspark(session):
     # Rows of VARIANT values pickle, as in PySpark.
     rows = pickle.loads(pickle.dumps(session.sql("SELECT parse_json('1') v, 2 n").collect()))
     assert (rows[0].v.toJson(), rows[0].n) == ("1", 2)
+
+
+def test_transpose_takes_a_column_name_as_pyspark(session):
+    # As PySpark's transpose, of a Column or a column name as the index column.
+    df = session.createDataFrame([("a", 1, 2), ("b", 3, 4)], "k string, x int, y int")
+    by_name = df.transpose("k")
+    assert by_name.columns == ["key", "a", "b"]
+    assert by_name.collect() == df.transpose(F.col("k")).collect()
 
 
 def test_getitem_indexes_filters_and_selects_as_pyspark(session):
@@ -1449,6 +1490,28 @@ def test_functions_send_their_optional_arguments_as_pyspark(session):
     assert row.bround == 2.0
     nulls = session.sql("SELECT * FROM VALUES (1, NULL), (1, 5) AS t(g, v)")
     assert nulls.groupBy("g").agg(F.first("v", ignorenulls=True)).first()[1] == 5
+
+
+def test_window_frames_return_the_rows_of_pyspark(session):
+    # As PySpark's: a range frame of a boundary out of the range of an int, which was
+    # truncated, and the frames of the bounds of -sys.maxsize and sys.maxsize, unbounded.
+    import sys
+
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql import Window
+
+    df = session.range(4)
+    o = Window.orderBy("id")
+
+    def sums(window):
+        return sorted(r.s for r in df.select(F.sum("id").over(window).alias("s")).collect())
+
+    assert sums(o.rangeBetween(-(1 << 40), 0)) == [0, 1, 3, 6]
+    assert sums(o.rangeBetween(0, 1 << 40)) == [3, 5, 6, 6]
+    assert sums(o.rowsBetween(-sys.maxsize, sys.maxsize)) == [6, 6, 6, 6]
+    assert sums(o.rangeBetween(-sys.maxsize, sys.maxsize)) == [6, 6, 6, 6]
+    with pytest.raises(PySparkValueError, match="VALUE_NOT_BETWEEN"):
+        sums(o.rowsBetween(-(1 << 31) - 1, 0))
 
 
 def test_maps_keep_their_entries_in_order_with_keys_of_their_type(session):

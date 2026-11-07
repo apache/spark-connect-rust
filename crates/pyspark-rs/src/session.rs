@@ -653,7 +653,7 @@ impl PySparkSession {
                         .filter_map(|row| row.get(i))
                         .find(|value| !matches!(value, Value::Null));
                     let data_type = match first {
-                        Some(Value::Decimal { .. }) => pandas_decimal_type(&data, i)?,
+                        Some(Value::Decimal { .. }) => pandas_decimal_type(&data, &rows, i)?,
                         Some(value) => value_to_datatype(value),
                         None => pandas_dtype_type(dtypes.get(i).map_or("object", String::as_str)),
                     };
@@ -1040,9 +1040,14 @@ impl PySparkSession {
                 let schema = DataType::Struct {
                     fields: fields.clone(),
                 };
-                let frame = self
-                    .session
-                    .create_dataframe_from_inline_arrow_ipc(ipc.extract()?, schema);
+                let ipc: Vec<u8> = ipc.extract()?;
+                let frame = py
+                    .detach(|| {
+                        self.session
+                            .create_dataframe_from_inline_arrow_ipc(ipc, schema)
+                            .map_err(Box::new)
+                    })
+                    .to_pyerr()?;
                 // Match pandas row input: explicit nonempty field names travel
                 // through toDF as well as the local relation's logical schema.
                 return Ok(PyDataFrame::new(
@@ -1053,6 +1058,22 @@ impl PySparkSession {
                 .import("pyspark.sql._pandas_input")?
                 .getattr("prepare_string_input")?
                 .call1((data, schema))?;
+            // Columns kept in pandas' Arrow string storage come as an Arrow table, which the
+            // importer sends, or uploads at the relation cache threshold.
+            if !ipc.is_none() && !ipc.is_instance_of::<pyo3::types::PyBytes>() {
+                let frame =
+                    crate::pyarrow_import::create_dataframe(py, &self.session, &ipc, schema)?;
+                return Ok(match &spec {
+                    Spec::Struct(fields) if !fields.is_empty() && ipc.len()? > 0 => {
+                        PyDataFrame::new(
+                            frame
+                                .dataframe
+                                .to_df(fields.iter().map(|field| field.name.as_str()).collect()),
+                        )
+                    }
+                    _ => frame,
+                });
+            }
             if !ipc.is_none() {
                 let fields = match &spec {
                     Spec::Struct(fields) => fields,
@@ -1065,9 +1086,14 @@ impl PySparkSession {
                 let schema = DataType::Struct {
                     fields: fields.clone(),
                 };
-                let frame = self
-                    .session
-                    .create_dataframe_from_inline_arrow_ipc(ipc.extract()?, schema);
+                let ipc: Vec<u8> = ipc.extract()?;
+                let frame = py
+                    .detach(|| {
+                        self.session
+                            .create_dataframe_from_inline_arrow_ipc(ipc, schema)
+                            .map_err(Box::new)
+                    })
+                    .to_pyerr()?;
                 // Match pandas row input: explicit nonempty field names travel
                 // through toDF as well as the local relation's logical schema.
                 return Ok(PyDataFrame::new(
@@ -1726,21 +1752,37 @@ fn pandas_dtype_type(dtype: &str) -> DataType {
 
 /// The decimal type of column `i` of pandas rows, as Arrow infers it from all its Decimals:
 /// the most integer digits and the largest scale of the values.
-fn pandas_decimal_type(rows: &Bound<'_, PyList>, i: usize) -> PyResult<DataType> {
+fn pandas_decimal_type(data: &Bound<'_, PyList>, rows: &[Row], i: usize) -> PyResult<DataType> {
+    // The digits and exponent of an exact Decimal come from the text that `py_to_value` took
+    // of it, rather than from `as_tuple()`, which builds a DecimalTuple of every digit; a
+    // subclass, which can override either, is asked for `as_tuple()`, as Arrow does.
+    let decimal_cls = data.py().import("decimal")?.getattr("Decimal")?;
     let (mut integer_digits, mut scale) = (0i64, 0i64);
-    for row in rows.iter() {
+    for (row, converted) in data.iter().zip(rows) {
         let value = row.get_item(i)?;
         if value.is_none() {
             continue;
         }
-        let parts = value.call_method0("as_tuple")?;
-        let digits = parts.getattr("digits")?.len()? as i64;
-        // NaN and infinities have no exponent of digits, which Arrow cannot type either.
-        let Ok(exponent) = parts.getattr("exponent")?.extract::<i64>() else {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Decimal {} has no precision to type a column by",
-                value.str()?
-            )));
+        let from_text = match converted.get(i) {
+            Some(Value::Decimal { value: text, .. }) if value.get_type().is(&decimal_cls) => {
+                decimal_text_digits(text)
+            }
+            _ => None,
+        };
+        let (digits, exponent) = match from_text {
+            Some(parts) => parts,
+            None => {
+                let parts = value.call_method0("as_tuple")?;
+                let digits = parts.getattr("digits")?.len()? as i64;
+                // NaN and infinities have no exponent of digits, which Arrow cannot type either.
+                let Ok(exponent) = parts.getattr("exponent")?.extract::<i64>() else {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "Decimal {} has no precision to type a column by",
+                        value.str()?
+                    )));
+                };
+                (digits, exponent)
+            }
         };
         let (precision, value_scale) = if exponent < 0 {
             (digits.max(-exponent), -exponent)
@@ -2089,7 +2131,7 @@ pub(crate) fn datetime_to_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
 }
 
 /// If `obj` is a `decimal.Decimal`, return it as a `Value::Decimal` (string value + scale
-/// from `as_tuple()`); otherwise `None`. Checked before int/float in `py_to_value` because
+/// from its exponent); otherwise `None`. Checked before int/float in `py_to_value` because
 /// Decimal defines `__float__`/`__int__`.
 fn decimal_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Option<Value>> {
     let py = obj.py();
@@ -2105,20 +2147,60 @@ fn decimal_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Option<Value>> {
     // either notation, in work bounded by the length of the text, which a fixed-point form
     // of `1E+1000000000` would not be.
     let dec_str: String = obj.str()?.extract()?;
-    let as_tuple = obj.call_method0("as_tuple")?;
-    let mut scale: Option<i32> = None;
-    if let Ok(exp_obj) = as_tuple.get_item(2) {
-        if !exp_obj.is_none() {
-            if let Ok(exp) = exp_obj.extract::<i64>() {
-                if exp <= 0 {
-                    scale = Some((-exp) as i32);
+    let scale = if obj.get_type().is(&decimal_cls) {
+        // Exact Decimal strings preserve the coefficient's trailing zeros and exponent.
+        // Subclasses may override either __str__ or as_tuple, so keep their old path.
+        decimal_string_scale(&dec_str)
+    } else {
+        let as_tuple = obj.call_method0("as_tuple")?;
+        let mut scale = None;
+        if let Ok(exp_obj) = as_tuple.get_item(2) {
+            if !exp_obj.is_none() {
+                if let Ok(exp) = exp_obj.extract::<i64>() {
+                    if exp <= 0 {
+                        scale = Some((-exp) as i32);
+                    }
                 }
             }
         }
-    }
+        scale
+    };
     Ok(Some(Value::Decimal {
         value: dec_str,
         precision: None,
         scale,
     }))
+}
+
+/// The scale of `Decimal.as_tuple()`, from the text of an exact Decimal: the negated exponent,
+/// or `None` for a positive exponent and for NaN and the infinities.
+fn decimal_string_scale(value: &str) -> Option<i32> {
+    let (_, exponent) = decimal_text_digits(value)?;
+    // As the scale of `as_tuple()`, including its i32 cast.
+    (exponent <= 0).then(|| (-exponent) as i32)
+}
+
+/// The number of digits and the exponent of `Decimal.as_tuple()`, from the text (`str()`) of
+/// an exact Decimal, which keeps every digit of its coefficient and its exponent: `123.4500`
+/// has 7 digits and the exponent -4, `1E+3` 1 and 3, `0.000` 1 and -3. `None` for NaN and the
+/// infinities, which have no such exponent.
+fn decimal_text_digits(value: &str) -> Option<(i64, i64)> {
+    let unsigned = value.trim_start_matches(['-', '+']);
+    if !unsigned.as_bytes().first()?.is_ascii_digit() {
+        return None;
+    }
+    let (coefficient, exponent) = match unsigned.split_once(['E', 'e']) {
+        Some((coefficient, exponent)) => (coefficient, exponent.parse::<i64>().ok()?),
+        None => (unsigned, 0),
+    };
+    let (integer, fraction) = coefficient.split_once('.').unwrap_or((coefficient, ""));
+    // The digits from the first nonzero one; zero has the single digit 0.
+    let leading_zeros = integer.len() - integer.trim_start_matches('0').len();
+    let leading_zeros = if leading_zeros == integer.len() {
+        leading_zeros + (fraction.len() - fraction.trim_start_matches('0').len())
+    } else {
+        leading_zeros
+    };
+    let digits = (integer.len() + fraction.len() - leading_zeros).max(1) as i64;
+    Some((digits, exponent - fraction.len() as i64))
 }

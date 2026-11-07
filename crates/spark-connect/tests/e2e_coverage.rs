@@ -394,6 +394,7 @@ fn agg_na_stat_reshape_surface() {
     let _ = df
         .group_by(vec![col("id")])
         .pivot(col("name"), None)
+        .unwrap()
         .count()
         .collect();
 

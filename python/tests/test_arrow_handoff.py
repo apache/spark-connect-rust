@@ -1186,6 +1186,54 @@ def test_add_artifacts_names_each_artifact_as_pyspark(protocol, tmp_path, monkey
         assert sys.path[1] == str(tmp_path / "b.zip")
 
 
+# Local relations of at least 32 MiB read the server's local-relation settings, and are uploaded
+# as cache artifacts at its threshold, whichever path encoded them; a single gRPC message
+# cannot carry a relation beyond the server's message size limit.
+
+@pytest.mark.parametrize("path", ["local_rows", "pandas_rows", "float64", "strings"])
+def test_large_local_relations_follow_the_cache_threshold(protocol, path):
+    # (The mock service keeps gRPC's default 4 MiB message limit, so the inline variant of
+    # these inputs, below a higher threshold, can only be checked against a real server.)
+    import numpy as np
+
+    if path == "local_rows":
+        data = [("y" * 2000, i) for i in range(20_000)]
+        schema = T.StructType([T.StructField("v", T.StringType()), T.StructField("i", T.LongType())])
+        expected_rows = 20_000
+    elif path == "pandas_rows":
+        # float32 columns into DoubleType keep the row path.
+        data = pd.DataFrame(np.ones((100_000, 45), dtype=np.float32),
+                            columns=[f"c{i}" for i in range(45)])
+        schema = T.StructType([T.StructField(c, T.DoubleType()) for c in data.columns])
+        expected_rows = 100_000
+    elif path == "float64":
+        data = pd.DataFrame(np.ones((100_000, 45)), columns=[f"c{i}" for i in range(45)])
+        schema = T.StructType([T.StructField(c, T.DoubleType()) for c in data.columns])
+        expected_rows = 100_000
+    else:
+        data = pd.DataFrame({"v": ["x" * 3500] * 10_000}, dtype=object)
+        schema = T.StructType([T.StructField("v", T.StringType())])
+        expected_rows = 10_000
+    overrides = {"spark.sql.session.localRelationCacheThreshold": "1"}
+    with _arrow_input_service(protocol, **overrides) as (spark, state):
+        df = spark.createDataFrame(data, schema)
+        df.toArrow()
+        assert sum(table.num_rows for table in state["input_tables"]) == expected_rows
+        assert state["uploads"]
+        assert any("spark.sql.session.localRelationCacheThreshold" in keys
+                   for _, keys in state["config_requests"])
+
+
+def test_small_local_relations_stay_inline_without_reading_settings(protocol):
+    with _arrow_input_service(protocol) as (spark, state):
+        schema = T.StructType([T.StructField("v", T.StringType()), T.StructField("i", T.LongType())])
+        spark.createDataFrame([("y" * 100, i) for i in range(100)], schema).toArrow()
+        assert not state["uploads"]
+        assert not any("spark.sql.session.localRelationCacheThreshold" in keys
+                       for _, keys in state["config_requests"])
+        assert state["input_tables"][0].num_rows == 100
+
+
 # Signed-int64 pandas input uses the same Arrow importer and mock service.
 
 @pytest.mark.parametrize("storage", ["object", "default", "python", "pyarrow", "python_nan", "pyarrow_nan"])
@@ -3977,8 +4025,113 @@ def test_string_column_guard_preserves_row_fallback(reason):
         frame.iat[-1, -1] = value
         if reason in ("late_unsupported", "late_surrogate"):
             assert frame.iat[-1, -1] is value
-    assert prepare_string_input(frame, schema) is None
+    result = prepare_string_input(frame, schema)
+    if reason == "arrow_string_dtype":
+        # Arrow string storage has a path of its own, which returns an Arrow table.
+        assert type(result) is pa.Table
+    else:
+        assert result is None
 
+
+
+# Columns kept in pandas' Arrow string storage reach the importer as Arrow, without Python rows.
+
+def _arrow_string_column(texts, storage):
+    import pyarrow as pa
+    if storage == "numpy_semantics":
+        try:
+            dtype = pd.StringDtype("pyarrow", na_value=float("nan"))
+        except TypeError:  # pandas 2.2
+            dtype = pd.StringDtype("pyarrow_numpy")
+        return pd.array(texts, dtype=dtype)
+    if storage == "large_string":
+        return pd.arrays.ArrowStringArray(pa.chunked_array(
+            [pa.array(texts[:7], pa.large_string()), pa.array(texts[7:], pa.large_string())]))
+    return pd.array(texts, dtype="string[pyarrow]")
+
+
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize("storage", ["pyarrow", "numpy_semantics", "large_string", "sliced"])
+def test_arrow_string_columns_preserve_every_ipc_cell(protocol, monkeypatch, cached, storage):
+    from pyspark.sql.pandas.types import from_arrow_metadata
+
+    texts = ["", "a", "\x00", "café", "中文", "\U0001f600", "é", None] * 2000
+    other = [None if i % 3 == 0 else str(i) for i in range(len(texts))]
+    frame = pd.DataFrame({
+        "original": _arrow_string_column(texts, storage),
+        "b": _arrow_string_column(other, storage),
+        "c": _arrow_string_column([None] * len(texts), storage),
+    })
+    expected = [texts, other, [None] * len(texts)]
+    if storage == "sliced":
+        frame = frame.iloc[3:-5]
+        expected = [values[3:-5] for values in expected]
+    schema = T.StructType([
+        T.StructField("renamed.`text", T.StringType(), True, {"source": "string"}),
+        T.StructField("other", T.StringType()),
+        T.StructField("all_null", T.StringType()),
+    ])
+
+    def no_rows(*args, **kwargs):
+        raise AssertionError("Arrow string storage must not materialize Python rows")
+
+    for method in ("to_numpy", "iterrows", "itertuples"):
+        monkeypatch.setattr(pd.DataFrame, method, no_rows)
+    monkeypatch.setattr(pd.DataFrame, "values", property(no_rows))
+    monkeypatch.setattr(pd.Series, "tolist", no_rows)
+    overrides = {"spark.sql.session.localRelationCacheThreshold": "1" if cached else "999999999"}
+    with _arrow_input_service(protocol, **overrides) as (spark, state):
+        df = spark.createDataFrame(frame, schema)
+        df.toArrow()
+        assert state["column_names"] == schema.names
+        table = state["input_tables"][0]
+        assert table.schema.names == schema.names
+        for column, values, field in zip(table.columns, expected, schema.fields):
+            assert column.type == pa.string()
+            assert column.to_pylist() == values
+            actual_field = table.schema.field(field.name)
+            assert actual_field.nullable == field.nullable
+            assert from_arrow_metadata(actual_field.metadata) == (field.metadata or None)
+        assert bool(state["uploads"]) == cached
+
+
+@pytest.mark.parametrize("reason", [
+    "python_storage", "mixed", "nonnullable_null", "subclass", "small", "atomic_schema",
+])
+def test_arrow_string_columns_keep_the_row_path(reason):
+    from pyspark.sql._pandas_input import prepare_string_input
+
+    texts = ["a", None, "b"] * 4000
+    columns = {"a": _arrow_string_column(texts, "pyarrow"), "b": _arrow_string_column(texts, "pyarrow")}
+    fields = [T.StructField("a", T.StringType()), T.StructField("b", T.StringType())]
+    if reason == "python_storage":
+        columns["b"] = pd.array(texts, dtype="string[python]")
+    elif reason == "mixed":
+        columns["b"] = pd.Series(texts, dtype=object)
+    elif reason == "nonnullable_null":
+        fields[1] = T.StructField("b", T.StringType(), False)
+    elif reason == "subclass":
+        class Custom(pd.arrays.ArrowStringArray):
+            pass
+
+        columns["b"] = Custom(pa.chunked_array([pa.array(texts)]))
+    elif reason == "small":
+        columns = {name: values[:9999] for name, values in columns.items()}
+    elif reason == "atomic_schema":
+        fields[1] = T.StructField("b", T.IntegerType())
+    frame = pd.DataFrame(columns)
+    assert prepare_string_input(frame, T.StructType(fields)) is None
+
+
+def test_arrow_string_columns_match_the_row_path(protocol):
+    texts = ["x" * (i % 5) if i % 4 else None for i in range(12000)]
+    schema = T.StructType([T.StructField("v", T.StringType())])
+    tables = []
+    for dtype in ("string[pyarrow]", object):
+        with _arrow_input_service(protocol) as (spark, state):
+            spark.createDataFrame(pd.DataFrame({"v": pd.array(texts, dtype=dtype)}), schema).toArrow()
+            tables.append(state["input_tables"][0])
+    assert tables[0].equals(tables[1])
 
 
 @pytest.mark.parametrize("reason", [
