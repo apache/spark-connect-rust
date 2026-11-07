@@ -811,6 +811,15 @@ impl PyDataStreamWriter {
     }
 }
 
+/// The progress of a query from its JSON, as PySpark's
+/// `StreamingQueryProgress.fromJson(json.loads(progress))`.
+fn progress_from_json<'py>(py: Python<'py>, json: &str) -> PyResult<Bound<'py, PyAny>> {
+    let loaded = py.import("json")?.call_method1("loads", (json,))?;
+    py.import("pyspark.sql.streaming.listener")?
+        .getattr("StreamingQueryProgress")?
+        .call_method1("fromJson", (loaded,))
+}
+
 /// Python wrapper for StreamingQueryStatus.
 #[pyclass(
     name = "StreamingQueryStatus",
@@ -915,10 +924,16 @@ impl PyStreamingQuery {
         self.inner.is_active().to_pyerr()
     }
 
+    /// The status as PySpark's `StreamingQuery.status`: a dict of `message`,
+    /// `isDataAvailable` and `isTriggerActive`.
     #[getter]
-    fn status(&self) -> PyResult<PyStreamingQueryStatus> {
+    fn status<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let status = self.inner.status().to_pyerr()?;
-        Ok(PyStreamingQueryStatus::new(status))
+        let dict = PyDict::new(py);
+        dict.set_item("message", status.status_message)?;
+        dict.set_item("isDataAvailable", status.is_data_available)?;
+        dict.set_item("isTriggerActive", status.is_trigger_active)?;
+        Ok(dict)
     }
 
     fn stop(&self) -> PyResult<()> {
@@ -930,14 +945,24 @@ impl PyStreamingQuery {
         self.inner.await_termination(timeout).to_pyerr()
     }
 
+    /// The last progress of the query, as PySpark's `StreamingQueryProgress`, or None.
     #[getter]
-    fn lastProgress(&self) -> PyResult<Option<String>> {
-        self.inner.last_progress().to_pyerr()
+    fn lastProgress<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        match self.inner.last_progress().to_pyerr()? {
+            Some(json) => progress_from_json(py, &json).map(Some),
+            None => Ok(None),
+        }
     }
 
+    /// The recent progress of the query, each as PySpark's `StreamingQueryProgress`.
     #[getter]
-    fn recentProgress(&self) -> PyResult<Vec<String>> {
-        self.inner.recent_progress().to_pyerr()
+    fn recentProgress<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        self.inner
+            .recent_progress()
+            .to_pyerr()?
+            .iter()
+            .map(|json| progress_from_json(py, json))
+            .collect()
     }
 
     fn processAllAvailable(&self) -> PyResult<()> {

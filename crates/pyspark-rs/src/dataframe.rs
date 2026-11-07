@@ -403,22 +403,71 @@ pub(crate) fn to_column_list(
     Ok(cols)
 }
 
-/// Map a pyspark `how` string to a JoinType (shared by join / lateralJoin).
-fn parse_join_type(how: &str) -> PyResult<JoinType> {
-    Ok(match how.to_lowercase().as_str() {
-        "inner" => JoinType::Inner,
-        "left" | "leftouter" | "left_outer" => JoinType::LeftOuter,
-        "right" | "rightouter" | "right_outer" => JoinType::RightOuter,
-        "outer" | "full" | "fullouter" | "full_outer" => JoinType::FullOuter,
-        "cross" => JoinType::Cross,
-        "left_semi" | "leftsemi" | "semi" => JoinType::LeftSemi,
-        "left_anti" | "leftanti" | "anti" => JoinType::LeftAnti,
-        other => {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "Invalid join type: {other}"
-            )))
-        }
-    })
+/// The join types that `DataFrame.join` accepts, as the message of its `UNSUPPORTED_JOIN_TYPE`.
+const JOIN_TYPES_SUPPORTED: &str = "'inner', 'outer', 'full', 'fullouter', 'full_outer', 'leftouter', 'left', 'left_outer', 'rightouter', 'right', 'right_outer', 'leftsemi', 'left_semi', 'semi', 'leftanti', 'left_anti', 'anti', 'cross'";
+
+/// The join types that `DataFrame.lateralJoin` accepts, as the message of its
+/// `UNSUPPORTED_JOIN_TYPE`.
+const LATERAL_JOIN_TYPES_SUPPORTED: &str = "'inner', 'leftouter', 'left', 'left_outer', 'cross'";
+
+/// Map a pyspark `how` to a JoinType, as the connect client's `plan.Join` (or `plan.LateralJoin`
+/// when `lateral`) maps it. The `how` is lowercased with its underscores removed, and no `how`
+/// is an inner join. One that is not accepted raises the `AnalysisException` of
+/// `UNSUPPORTED_JOIN_TYPE` that PySpark raises locally, naming the normalized `how` (or the
+/// `str()` of a `how` that is not a str).
+fn parse_join_type(
+    py: Python<'_>,
+    how: Option<&Bound<'_, PyAny>>,
+    lateral: bool,
+) -> PyResult<JoinType> {
+    let Some(how) = how.filter(|how| !how.is_none()) else {
+        return Ok(JoinType::Inner);
+    };
+    let normalized = how
+        .extract::<String>()
+        .ok()
+        .map(|how| how.to_lowercase().replace('_', ""));
+    let join_type = match normalized.as_deref() {
+        Some("inner") => Some(JoinType::Inner),
+        Some("cross") => Some(JoinType::Cross),
+        Some("left" | "leftouter") => Some(JoinType::LeftOuter),
+        Some("right" | "rightouter") if !lateral => Some(JoinType::RightOuter),
+        Some("outer" | "full" | "fullouter") if !lateral => Some(JoinType::FullOuter),
+        Some("leftsemi" | "semi") if !lateral => Some(JoinType::LeftSemi),
+        Some("leftanti" | "anti") if !lateral => Some(JoinType::LeftAnti),
+        _ => None,
+    };
+    if let Some(join_type) = join_type {
+        return Ok(join_type);
+    }
+    let typ = match normalized {
+        Some(normalized) => normalized,
+        None => how.str()?.to_string(),
+    };
+    let supported = if lateral {
+        LATERAL_JOIN_TYPES_SUPPORTED
+    } else {
+        JOIN_TYPES_SUPPORTED
+    };
+    Err(crate::column::raise_pyspark(
+        py,
+        "AnalysisException",
+        "UNSUPPORTED_JOIN_TYPE",
+        &[("typ", typ.as_str()), ("supported", supported)],
+    ))
+}
+
+/// The `AttributeError` that PySpark's join raises for an `on` that is neither a name, a
+/// condition nor a list of them: the plan reads `to_plan` of it.
+fn no_to_plan(obj: &Bound<'_, PyAny>) -> PyErr {
+    let typ = obj
+        .get_type()
+        .name()
+        .map(|name| name.to_string())
+        .unwrap_or_default();
+    pyo3::exceptions::PyAttributeError::new_err(format!(
+        "'{typ}' object has no attribute 'to_plan'"
+    ))
 }
 
 /// Resolve a filter/where condition: a Column, or a SQL string parsed via `expr`.
@@ -664,51 +713,81 @@ impl PyDataFrame {
 
     /// Join with another DataFrame.
     ///
-    /// `on` accepts a Column condition, a column-name string, or a list of
-    /// column-name strings (name-based "using" join), mirroring
-    /// `pyspark.sql.DataFrame.join(other, on=None, how=None)` (default inner).
+    /// `on` is a Column condition, a column name, or a list of column names (a "using"
+    /// join) or of Column conditions (joined on their conjunction), as the connect client's
+    /// `plan.Join` takes it. Mirrors `pyspark.sql.DataFrame.join(other, on=None, how=None)`
+    /// (default inner), including its errors.
     #[pyo3(signature = (other, on=None, how=None))]
     fn join(
         &self,
+        py: Python<'_>,
         other: &PyDataFrame,
         on: Option<Bound<'_, PyAny>>,
-        how: Option<&str>,
+        how: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let join_type = parse_join_type(how.unwrap_or("inner"))?;
-
-        // Resolve `on`: None | Column | str | list[str].
-        if let Some(bound) = on {
-            if let Ok(col) = bound.extract::<PyRef<PyColumn>>() {
-                let on_col = Some(col.column.clone());
+        // As PySpark's `plan.Join`, `on` is iterated before `how` is checked, so an `on`
+        // that is not iterable is the error that is raised first.
+        if let Some(on) = &on {
+            if !on.is_instance_of::<PyColumn>() && !on.is_instance_of::<pyo3::types::PyString>() {
+                on.try_iter()?;
+            }
+        }
+        let join_type = parse_join_type(py, how.as_ref(), false)?;
+        let Some(on) = on else {
+            return Ok(PyDataFrame::new(self.dataframe.join(
+                &other.dataframe,
+                None,
+                join_type,
+            )));
+        };
+        if let Ok(col) = on.extract::<PyRef<PyColumn>>() {
+            return Ok(PyDataFrame::new(self.dataframe.join(
+                &other.dataframe,
+                Some(col.column.clone()),
+                join_type,
+            )));
+        }
+        if let Ok(name) = on.extract::<String>() {
+            return Ok(PyDataFrame::new(self.dataframe.join_using(
+                &other.dataframe,
+                vec![name],
+                join_type,
+            )));
+        }
+        if let Ok(list) = on.cast::<PyList>() {
+            // An empty list is no condition at all.
+            let Some(first) = list.iter().next() else {
                 return Ok(PyDataFrame::new(self.dataframe.join(
                     &other.dataframe,
-                    on_col,
+                    None,
                     join_type,
                 )));
-            }
-            if let Ok(name) = bound.extract::<String>() {
-                return Ok(PyDataFrame::new(self.dataframe.join_using(
-                    &other.dataframe,
-                    vec![name],
-                    join_type,
-                )));
-            }
-            if let Ok(names) = bound.extract::<Vec<String>>() {
+            };
+            if first.is_instance_of::<pyo3::types::PyString>() {
+                let names = list.extract::<Vec<String>>()?;
                 return Ok(PyDataFrame::new(self.dataframe.join_using(
                     &other.dataframe,
                     names,
                     join_type,
                 )));
             }
-            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "join 'on' must be a Column, a str, or a list of str",
-            ));
+            let mut condition: Option<spark_connect::column::Column> = None;
+            for item in list.iter() {
+                let Ok(col) = item.extract::<PyRef<PyColumn>>() else {
+                    return Err(no_to_plan(&item));
+                };
+                condition = Some(match condition {
+                    None => col.column.clone(),
+                    Some(left) => left.and(col.column.clone()),
+                });
+            }
+            return Ok(PyDataFrame::new(self.dataframe.join(
+                &other.dataframe,
+                condition,
+                join_type,
+            )));
         }
-        Ok(PyDataFrame::new(self.dataframe.join(
-            &other.dataframe,
-            None,
-            join_type,
-        )))
+        Err(no_to_plan(&on))
     }
 
     /// Cross join.
@@ -716,16 +795,17 @@ impl PyDataFrame {
         PyDataFrame::new(self.dataframe.cross_join(&other.dataframe))
     }
 
-    /// Lateral (correlated) join. `on` is an optional Column condition; `how`
-    /// mirrors `join` (default inner). Mirrors `DataFrame.lateralJoin`.
+    /// Lateral (correlated) join. `on` is an optional Column condition; `how` is inner by
+    /// default and takes the join types of a lateral join. Mirrors `DataFrame.lateralJoin`.
     #[pyo3(signature = (other, on=None, how=None))]
     fn lateralJoin(
         &self,
+        py: Python<'_>,
         other: &PyDataFrame,
         on: Option<PyRef<PyColumn>>,
-        how: Option<&str>,
+        how: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let join_type = parse_join_type(how.unwrap_or("inner"))?;
+        let join_type = parse_join_type(py, how.as_ref(), true)?;
         let on_col = on.map(|c| c.column.clone());
         Ok(PyDataFrame::new(self.dataframe.lateral_join(
             &other.dataframe,
@@ -1676,14 +1756,14 @@ impl PyDataFrame {
         // `groupBy().agg`, else Columns, which it asserts.
         if let [only] = exprs.as_slice() {
             if let Ok(dict) = only.cast::<PyDict>() {
-                let mut expressions = Vec::with_capacity(dict.len());
-                for (column, function) in dict.iter() {
-                    let column = spark_connect::functions::col(&column.extract::<String>()?);
-                    expressions.push(spark_connect::expression::Expression::function(
-                        function.extract::<String>()?,
-                        vec![column.expression().clone()],
+                // As PySpark's, whose `groupBy().agg()` of none of the entries asserts that
+                // it has expressions.
+                if dict.is_empty() {
+                    return Err(pyo3::exceptions::PyAssertionError::new_err(
+                        "exprs should not be empty",
                     ));
                 }
+                let expressions = crate::group::dict_aggregates(&dict)?;
                 return Ok(PyDataFrame::new(self.dataframe.agg(expressions)));
             }
         }

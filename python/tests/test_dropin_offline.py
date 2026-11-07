@@ -8510,6 +8510,117 @@ def test_positional_indexing_positional_propagates_schema_failure(positional_ind
     assert service.calls == 1
 
 
+# --------------------------------------------------------------------------- join types, empty aggregations and the status of a streaming query
+
+@pytest.mark.parametrize(("how", "join_type"), [
+    (None, 1), ("inner", 1), ("INNER", 1), ("in_ner", 1),
+    ("outer", 2), ("full", 2), ("fullouter", 2), ("full_outer", 2), ("FULL_OUTER", 2),
+    ("leftouter", 3), ("left", 3), ("left_outer", 3),
+    ("rightouter", 4), ("right", 4), ("right_outer", 4),
+    ("leftanti", 5), ("left_anti", 5), ("anti", 5),
+    ("leftsemi", 6), ("left_semi", 6), ("semi", 6),
+    ("cross", 7),
+])
+def test_join_types_are_sent_as_pyspark_join_types(mock_connect, how, join_type):
+    # As PySpark's plan.Join: how is lowercased without its underscores, and no how is inner.
+    spark, service = mock_connect
+    df = spark.range(2)
+    df.join(df, "id", how).collect()
+    # ExecutePlanRequest.plan=3, Plan.root=1, Relation.join=5, Join.join_type=4.
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+    assert parse_message(parse_message(plan)[5][0])[4] == [join_type]
+
+
+def test_join_on_lists_join_on_their_conjunction_or_names_as_pyspark(mock_connect):
+    # As PySpark's plan.Join: a list of conditions joins on their conjunction, a list of names
+    # is a using join, and an empty list is no condition at all.
+    spark, service = mock_connect
+    left, right = spark.range(2), spark.range(3)
+
+    def sent_join():
+        # ExecutePlanRequest.plan=3, Plan.root=1, Relation.join=5.
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        return parse_message(parse_message(plan)[5][0])
+
+    left.join(right, [left.id == right.id, right.id > 0]).collect()
+    join = sent_join()
+    # Join.join_condition=3 is the conjunction: an UnresolvedFunction "and" (Expression=3).
+    assert 5 not in join
+    assert parse_message(parse_message(join[3][0])[3][0])[1] == [b"and"]
+
+    left.join(right, ["id"]).collect()
+    join = sent_join()
+    # Join.using_columns=5.
+    assert 3 not in join and join[5] == [b"id"]
+
+    left.join(right, []).collect()
+    join = sent_join()
+    assert 3 not in join and 5 not in join
+
+
+@pytest.mark.parametrize(("how", "typ"), [
+    ("foo", "foo"), ("", ""), ("left semi", "left semi"), ("LEFT_SEMI_X", "leftsemix"), (1, "1"),
+])
+def test_join_types_that_are_not_accepted_raise_as_pyspark(offline_spark, how, typ):
+    # As PySpark's plan.Join: the AnalysisException of UNSUPPORTED_JOIN_TYPE, raised locally,
+    # which names the type as it is normalized (or its str() when it is not a str).
+    from pyspark.errors import AnalysisException
+
+    df = offline_spark.range(3)
+    with pytest.raises(AnalysisException) as error:
+        df.join(df, "id", how)
+    assert error.value.getCondition() == "UNSUPPORTED_JOIN_TYPE"
+    assert error.value.getMessageParameters()["typ"] == typ
+
+
+@pytest.mark.parametrize("how", ["full", "rightouter", "semi", "outer", "foo"])
+def test_lateral_join_types_that_are_not_accepted_raise_as_pyspark(offline_spark, how):
+    # As PySpark's plan.LateralJoin, which accepts inner, leftouter, left and cross only.
+    from pyspark.errors import AnalysisException
+
+    df = offline_spark.range(3)
+    with pytest.raises(AnalysisException) as error:
+        df.lateralJoin(df, None, how)
+    assert error.value.getCondition() == "UNSUPPORTED_JOIN_TYPE"
+    assert error.value.getMessageParameters()["typ"] == how
+    assert df.lateralJoin(df, None, "left_outer") is not None
+
+
+def test_join_on_arguments_that_are_neither_names_nor_conditions_raise_as_pyspark(offline_spark):
+    # As PySpark's plan.Join: an on that is not iterable is a TypeError when the join is built;
+    # one that is iterable, but not a name, a condition or a list of them, fails on reading
+    # the to_plan of it.
+    df = offline_spark.range(3)
+    with pytest.raises(TypeError, match="'int' object is not iterable"):
+        df.join(df, 1)
+    with pytest.raises(AttributeError, match="'dict' object has no attribute 'to_plan'"):
+        df.join(df, {"id": 1}).collect()
+    with pytest.raises(AttributeError, match="'tuple' object has no attribute 'to_plan'"):
+        df.join(df, ("id",)).collect()
+
+
+def test_dict_aggregations_that_are_empty_or_not_str_raise_as_pyspark(offline_spark):
+    # As PySpark's DataFrame.agg: a dict with no entries is the aggregation of no expressions,
+    # which asserts it has some. GroupedData.agg takes the same dict as no aggregation at all.
+    # A column that is not a str is the AttributeError of F.col, and a function that is not a
+    # str the AssertionError of _invoke_function, which has no message.
+    df = offline_spark.range(3)
+    with pytest.raises(AssertionError) as error:
+        df.agg({})
+    assert str(error.value) == "exprs should not be empty"
+    assert df.groupBy().agg({}) is not None
+    for call in (lambda: df.agg({"id": ["max"]}), lambda: df.agg({"id": None}),
+                 lambda: df.agg({"x": 1}), lambda: df.groupBy().agg({"id": ["max"]}),
+                 lambda: df.groupBy().agg({"id": None})):
+        with pytest.raises(AssertionError) as error:
+            call()
+        assert str(error.value) == ""
+    with pytest.raises(AttributeError, match="'int' object has no attribute 'endswith'"):
+        df.agg({1: "max"})
+    with pytest.raises(AttributeError, match="'NoneType' object has no attribute 'endswith'"):
+        df.groupBy().agg({None: "max"})
+
+
 # ------------------------------------------------- reader/writer in-place setters
 
 @pytest.fixture
