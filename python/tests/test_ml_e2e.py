@@ -112,6 +112,40 @@ def test_ml_pipelines_save_and_load_as_pyspark(session, tmp_path):
     assert len(Pipeline.load(estimator_path).getStages()) == 3
 
 
+def test_ml_tuning_caches_its_dataset_of_a_dfs_path_as_pyspark(session, tmp_path, monkeypatch):
+    # As official PySpark 4.3.0: of SPARKML_TEMP_DFS_PATH, CrossValidator caches its dataset in
+    # a directory there, of the session of the dataset, DataFrame._session. And the resources of
+    # the cluster are those of the client of the session, SparkSession._client.
+    from pyspark.ml.classification import LogisticRegression
+    from pyspark.ml.evaluation import BinaryClassificationEvaluator
+    from pyspark.ml.tuning import CrossValidator, ParamGridBuilder
+
+    monkeypatch.setenv("SPARKML_TEMP_DFS_PATH", str(tmp_path))
+    df = _labeled(session)
+    lr = LogisticRegression(maxIter=5)
+    cv = CrossValidator(
+        estimator=lr,
+        estimatorParamMaps=ParamGridBuilder().addGrid(lr.regParam, [0.1, 0.01]).build(),
+        evaluator=BinaryClassificationEvaluator(),
+        numFolds=2,
+        seed=1,
+    )
+    assert len(cv.fit(df).avgMetrics) == 2
+    assert isinstance(session._client._resources(), dict)
+
+
+def test_session_clients_release_and_close_as_pyspark(session):
+    # As PySpark Connect's SparkConnectClient.release_session and close: the session is released
+    # on the server, and the client is closed, of a session that is then stopped.
+    other = SparkSession.builder.remote(os.environ["SPARK_REMOTE"]).create()
+    client = other.client
+    assert not client.is_closed
+    assert other.range(1).count() == 1
+    client.release_session()
+    client.close()
+    assert client.is_closed and other.is_stopped
+
+
 def test_ml_feature_transformers_as_pyspark(session):
     from pyspark.ml.feature import IDF, HashingTF, MinMaxScaler, Tokenizer
 

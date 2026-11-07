@@ -576,6 +576,66 @@ def test_ml_session_client_is_one_object_of_the_session(ml_mock):
         other.stop()
 
 
+def test_dataframe_session_and_session_client_as_pyspark(ml_mock):
+    # As PySpark Connect's DataFrame._session and SparkSession._client, which the modules of
+    # PySpark read, such as pyspark.ml, pyspark.sql.plot and pyspark.pandas.
+    spark, _ = ml_mock
+    session = spark.range(1)._session
+    assert isinstance(session, SparkSession)
+    assert session.session_id == spark.session_id
+    assert spark._client is spark.client
+
+
+def test_execute_command_converts_the_results_of_pyspark(ml_mock):
+    # As PySpark Connect's SparkConnectClient.execute_command: the resources of a
+    # GetResourcesCommand, as _resources returns them, the profile ID of a resource profile, the
+    # DataFrame of the relation of a checkpoint, and the event of a pipeline.
+    from pyspark.resource.information import ResourceInformation
+
+    spark, service = ml_mock
+    client = spark.client
+    resources = pb2.GetResourcesCommandResult()
+    resources.resources["gpu"].name = "gpu"
+    resources.resources["gpu"].addresses.extend(["0", "1"])
+    service.execute_payload = pb2.ExecutePlanResponse(
+        get_resources_command_result=resources
+    ).SerializeToString()
+    gpu = client._resources()["gpu"]
+    assert isinstance(gpu, ResourceInformation)
+    assert (gpu.name, gpu.addresses) == ("gpu", ["0", "1"])
+    (command,) = _commands(service)
+    assert command.HasField("get_resources_command")
+
+    service.execute_payload = pb2.ExecutePlanResponse(
+        create_resource_profile_command_result=pb2.CreateResourceProfileCommandResult(profile_id=7)
+    ).SerializeToString()
+    assert client.execute_command(command)[1] == {"create_resource_profile_command_result": 7}
+
+    service.execute_payload = pb2.ExecutePlanResponse(
+        pipeline_event_result=pb2.PipelineEventResult(event=pb2.PipelineEvent(message="m"))
+    ).SerializeToString()
+    assert client.execute_command(command)[1]["pipeline_event_result"].event.message == "m"
+
+    service.execute_payload = pb2.ExecutePlanResponse(
+        checkpoint_command_result=pb2.CheckpointCommandResult(
+            relation=pb2.CachedRemoteRelation(relation_id="r9")
+        )
+    ).SerializeToString()
+    df = client.execute_command(command)[1]["checkpoint_command_result"]
+    assert df._plan.plan(client).cached_remote_relation.relation_id == "r9"
+    # The relation is removed from the server once the DataFrame is collected, of a command
+    # whose responses are ignored, as PySpark's: so the checkpoint that the mock server answers
+    # with makes no other relation to remove.
+    del df
+    gc.collect()
+    removed = [
+        command.remove_cached_remote_relation_command.relation.relation_id
+        for command in _commands(service)
+        if command.HasField("remove_cached_remote_relation_command")
+    ]
+    assert removed == ["r9"]
+
+
 def test_ml_execute_command_returns_the_results_of_pyspark(ml_mock):
     # As PySpark Connect's SparkSession.client.execute_command: no data, the results of the
     # responses by their fields, and no execution information.

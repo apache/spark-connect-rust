@@ -148,7 +148,9 @@ class SparkConnectClient:
     def execute_command(self, command: Any, observations: Any = None) -> Any:
         """Execute ``command``, a ``spark.connect.Command``, as SparkConnectClient's
         ``execute_command``: no data, the properties of the results of the responses, of their
-        field names, and no execution information."""
+        field names, as SparkConnectClient converts them (the resources of a
+        GetResourcesCommand, the profile ID of a resource profile, and the DataFrame of a
+        checkpoint), and no execution information."""
         import pyspark.sql.connect.proto as pb2
 
         properties: Dict[str, Any] = {}
@@ -163,12 +165,29 @@ class SparkConnectClient:
                 "streaming_query_command_result",
                 "streaming_query_manager_command_result",
                 "streaming_query_listener_events_result",
-                "get_resources_command_result",
-                "ml_command_result",
                 "pipeline_command_result",
+                "pipeline_event_result",
+                "ml_command_result",
             ):
                 if response.HasField(field):
                     properties[field] = getattr(response, field)
+            if response.HasField("get_resources_command_result"):
+                from pyspark.resource.information import ResourceInformation
+
+                properties["get_resources_command_result"] = {
+                    key: ResourceInformation(resource.name, list(resource.addresses))
+                    for key, resource in response.get_resources_command_result.resources.items()
+                }
+            if response.HasField("create_resource_profile_command_result"):
+                properties["create_resource_profile_command_result"] = (
+                    response.create_resource_profile_command_result.profile_id
+                )
+            if response.HasField("checkpoint_command_result"):
+                from pyspark.sql.connect.conversion import proto_to_remote_cached_dataframe
+
+                properties["checkpoint_command_result"] = proto_to_remote_cached_dataframe(
+                    response.checkpoint_command_result.relation
+                )
         return None, properties, None
 
     def add_threadlocal_user_context_extension(self, extension: Any) -> str:
@@ -189,6 +208,25 @@ class SparkConnectClient:
         """Remove the user context extensions of the current thread and the global ones, as
         SparkConnectClient's."""
         self._session._clear_user_context_extensions()
+
+    def release_session(self) -> None:
+        """Release the session on the server, as SparkConnectClient's: its state there."""
+        self._session._release_session()
+
+    def close(self) -> None:
+        """Close the client, as SparkConnectClient's: of a session that ``is_closed``, and is
+        not released on the server."""
+        self._session._close()
+
+    def _resources(self) -> Dict[str, Any]:
+        """The resources of the cluster, as SparkConnectClient's: of a GetResourcesCommand, by
+        their names."""
+        import pyspark.sql.connect.proto as pb2
+
+        command = pb2.Command()
+        command.get_resources_command.SetInParent()
+        _, properties, _ = self.execute_command(command)
+        return properties["get_resources_command_result"]
 
     def _delete_ml_cache(self, cache_ids: List[str], evict_only: bool = False) -> List[str]:
         """Delete the cached objects of ``cache_ids`` on the server, as SparkConnectClient's: the

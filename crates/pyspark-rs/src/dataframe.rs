@@ -1808,6 +1808,13 @@ impl PyDataFrame {
         crate::session::PySparkSession::new(self.dataframe.spark_session())
     }
 
+    /// The SparkSession of this DataFrame, as PySpark Connect's `DataFrame._session`, which the
+    /// modules of PySpark read, such as `pyspark.ml`, `pyspark.sql.plot` and `pyspark.pandas`.
+    #[getter]
+    fn _session(&self) -> crate::session::PySparkSession {
+        self.spark_session()
+    }
+
     /// Not supported on Spark Connect, as PySpark Connect's: `NOT_IMPLEMENTED` of `rdd`, which
     /// needs the RDD API of a classic session.
     #[getter]
