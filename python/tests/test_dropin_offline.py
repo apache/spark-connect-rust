@@ -1550,6 +1550,36 @@ def test_subqueries_are_sent_with_the_plans_they_refer_to_as_pyspark(mock_connec
     assert len(options[1]) == 1 and len(options[2]) == 1 and 3 not in options
 
 
+def test_udtf_handlers_are_pickled_when_used_as_pyspark(mock_connect, tmp_path):
+    # As PySpark Connect's PythonUDTF: the handler is pickled when the UDTF is used, so a
+    # handler that does not pickle raises there, a PySparkPicklingError of
+    # UDTF_SERIALIZATION_ERROR of its PicklingError.
+    from pyspark.errors import PySparkPicklingError
+    from pyspark.sql.functions import udtf
+
+    spark, _ = mock_connect
+    file_obj = open(tmp_path / "file.txt", "w")
+    try:
+
+        @udtf(returnType="x: int")
+        class Unpicklable:
+            def eval(self):
+                file_obj
+                yield (1,)
+
+        for use in (lambda: Unpicklable(), lambda: spark.udtf.register("unpicklable", Unpicklable)):
+            with pytest.raises(PySparkPicklingError) as error:
+                use()
+            assert error.value.getCondition() == "UDTF_SERIALIZATION_ERROR"
+            assert error.value.getMessageParameters() == {
+                "name": "Unpicklable",
+                "message": "Please check the stack trace and make sure the function is "
+                "serializable.",
+            }
+    finally:
+        file_obj.close()
+
+
 def test_udtfs_are_created_as_pyspark(mock_connect):
     # As PySpark's _create_py_udtf and _create_pyarrow_udtf: a UDTF is not deterministic
     # unless asDeterministic() marks it so, in place; arrow_udtf() makes a PyArrow-native
