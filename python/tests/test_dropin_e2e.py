@@ -1118,6 +1118,30 @@ def test_collected_rows_behave_as_pyspark_rows(session):
     assert repr(pickle.loads(pickle.dumps(duplicate))) == "Row(a=1, a=2)"
 
 
+def test_pivot_pivots_only_a_group_by_as_pyspark(session):
+    # As PySpark's: the pivot of a rollup, a cube, grouping sets or a pivot raises
+    # UNSUPPORTED_OPERATION, rather than pivoting as a groupBy, which pivots.
+    from pyspark.errors import PySparkNotImplementedError, PySparkTypeError
+
+    df = session.createDataFrame(
+        [(1, 10, "a"), (1, 20, "b"), (2, 30, "a")], "k int, v int, s string"
+    )
+    for grouped in [
+        df.rollup("k"),
+        df.cube("k"),
+        df.groupingSets([["k"]], "k"),
+        df.groupBy("k").pivot("s"),
+    ]:
+        with pytest.raises(PySparkNotImplementedError) as e:
+            grouped.pivot("s")
+        assert e.value.getCondition() == "UNSUPPORTED_OPERATION"
+    rows = df.groupBy("k").pivot("s", ["a", "b"]).sum("v").orderBy("k").collect()
+    assert [tuple(row) for row in rows] == [(1, 10, 20), (2, 30, None)]
+    with pytest.raises(PySparkTypeError) as e:
+        df.groupBy("k").pivot("s", ("a",))
+    assert e.value.getCondition() == "NOT_EXPECTED_TYPE"
+
+
 def test_sample_sort_group_by_drop_and_select_expr_as_pyspark(session):
     # As PySpark's: sample takes a fraction and a seed positionally, sort and groupBy take the
     # 1-based ordinals of columns, drop takes Columns, and selectExpr a list of expressions.
