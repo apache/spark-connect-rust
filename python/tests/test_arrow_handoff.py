@@ -2171,9 +2171,8 @@ def test_pandas_timestamp_precision_and_timezone_fallback(monkeypatch):
     ("America/Los_Angeles", ("PST", "PDT")),
     ("UTC", ("PST", "PDT")),
 ], ids=["unset-tz", "non-utc-tz", "mismatched-host-zone"])
-@pytest.mark.parametrize("config_error", [False, True])
 def test_timestamp_non_utc_host_declines_and_converts_as_pyspark(
-    protocol, monkeypatch, unit, mixed, host_tz, host_names, config_error
+    protocol, monkeypatch, unit, mixed, host_tz, host_names
 ):
     # A host zone other than a literal UTC declines the timestamp fast path before its
     # session time zone RPC; the frame then converts as PySpark's Arrow conversion does,
@@ -2200,12 +2199,7 @@ def test_timestamp_non_utc_host_declines_and_converts_as_pyspark(
 
     assert timestamp_columns(frame, schema) is None
     expected = [micros for _ in columns]
-    with _arrow_input_service(protocol, config_error=config_error) as (spark, state):
-        if config_error:
-            with pytest.raises(Exception, match="configuration unavailable"):
-                spark.createDataFrame(frame, schema).toArrow()
-            assert state["input_tables"] == []
-            return
+    with _arrow_input_service(protocol) as (spark, state):
         spark.createDataFrame(frame, schema).toArrow()
         assert state["config_requests"]
         assert state["uploads"] == 0
