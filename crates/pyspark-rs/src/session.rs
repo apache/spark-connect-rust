@@ -1622,9 +1622,10 @@ impl PySparkSession {
         self.session.remove_tag(tag)
     }
 
+    /// The tags of the current thread, a set, as PySpark's `getTags`.
     #[pyo3(name = "getTags")]
-    fn get_tags(&self) -> Vec<String> {
-        self.session.get_tags()
+    fn get_tags<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PySet>> {
+        pyo3::types::PySet::new(py, self.session.get_tags())
     }
 
     #[pyo3(name = "clearTags")]
