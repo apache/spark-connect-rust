@@ -2495,7 +2495,13 @@ fn decode_arrow_record_batches(
 /// Extract a value at a specific index from an Arrow array.
 /// Format an unscaled `i128` and scale as a decimal string (e.g. 150, scale 2 -> "1.50").
 fn i128_to_decimal_string(unscaled: i128, scale: i32) -> String {
-    if scale <= 0 {
+    if scale < 0 {
+        // A negative scale, of spark.sql.legacy.allowNegativeScaleOfDecimal: the unscaled value
+        // times ten to the negated scale, in scientific notation, as PyArrow's Decimal of it,
+        // which PySpark collects: Decimal("1E+1") of 1 at the scale -1.
+        return format!("{unscaled}E+{}", -i64::from(scale));
+    }
+    if scale == 0 {
         return unscaled.to_string();
     }
     let scale = scale as usize;
@@ -5221,6 +5227,9 @@ mod arrow_value_tests {
         assert_eq!(i128_to_decimal_string(12345, 2), "123.45");
         assert_eq!(i128_to_decimal_string(5, 4), "0.0005");
         assert_eq!(i128_to_decimal_string(-5, 4), "-0.0005");
+        assert_eq!(i128_to_decimal_string(1, -1), "1E+1");
+        assert_eq!(i128_to_decimal_string(0, -1), "0E+1");
+        assert_eq!(i128_to_decimal_string(-123, -2), "-123E+2");
     }
 }
 

@@ -2435,6 +2435,30 @@ def test_types_of_schemas_have_the_attributes_of_pyspark(session):
 
 
 
+def test_decimals_of_a_negative_scale_are_collected_as_pyspark(session):
+    # As PySpark's, of Arrow: with spark.sql.legacy.allowNegativeScaleOfDecimal, a decimal of a
+    # negative scale is collected as the Decimal of its unscaled value times ten to the negated
+    # scale, in scientific notation: Decimal("1E+1") of 1 at the scale -1.
+    from decimal import Decimal
+
+    from pyspark.sql.types import DecimalType
+
+    key = "spark.sql.legacy.allowNegativeScaleOfDecimal"
+    session.conf.set(key, "true")
+    try:
+        df = session.createDataFrame([(1,), (11,)], ["value"])
+        rows = df.select(F.col("value").cast(DecimalType(1, -1)).alias("d")).collect()
+        assert [int(r.d) for r in rows] == [0, 10]
+        assert rows[1].d == Decimal("10") and str(rows[1].d) == "1E+1"
+        df = session.createDataFrame([(-123,), (49,), (51,)], ["value"])
+        rows = df.select(F.col("value").cast(DecimalType(3, -2)).alias("d")).collect()
+        assert [str(r.d) for r in rows] == ["-1E+2", "0E+2", "1E+2"]
+    finally:
+        session.conf.unset(key)
+
+
+
+
 def test_decimal_literals_are_of_the_types_of_pyspark(session):
     # The types of official PySpark 4.3.0: at least the precision 10 of DecimalType().
     from decimal import Decimal
