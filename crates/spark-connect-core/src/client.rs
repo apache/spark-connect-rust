@@ -60,7 +60,8 @@ const ARTIFACT_HASH_INLINE_MAX_BYTES: usize = 256 * 1024;
 /// Bound per-blob digest and encoding work even when every blob is empty.
 const ARTIFACT_HASH_INLINE_MAX_BLOBS: usize = 128;
 
-/// Hash up to 128 blobs totaling at most 256 KiB inline; offload larger batches.
+/// Hash batches inline up to [`ARTIFACT_HASH_INLINE_MAX_BLOBS`] blobs and
+/// [`ARTIFACT_HASH_INLINE_MAX_BYTES`] total bytes; offload larger batches.
 /// Returns the original buffers for upload framing. If the caller is dropped after
 /// blocking hashing starts, the task retains the blob buffers until it finishes.
 async fn hash_artifact_blobs(blobs: Vec<Vec<u8>>) -> Result<(Vec<Vec<u8>>, Vec<String>)> {

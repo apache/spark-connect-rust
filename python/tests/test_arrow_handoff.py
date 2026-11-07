@@ -759,7 +759,8 @@ def test_file_upload_attribution_on_every_frame(
         payloads = {context["payload"] for context in state["upload_contexts"]}
         assert payloads == {"batch", "begin_chunk", "chunk"}, (
             f"Expected all artifact frame kinds, got {payloads}. "
-            "This fixture assumes a 32 KiB CHUNK_SIZE; adjust its sizes if CHUNK_SIZE changes."
+            f"This fixture assumes a {chunk_size}-byte CHUNK_SIZE; "
+            "adjust its sizes if CHUNK_SIZE changes."
         )
         assert state["cache"][artifact_names[0]] == small.read_bytes()
         assert state["cache"][artifact_names[1]] == large.read_bytes()
