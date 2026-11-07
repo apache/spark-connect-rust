@@ -89,6 +89,11 @@ VENDORED_FILES=(
   # ExecutePlanResponse is that of the message class of pyspark/sql/connect/proto.py.
   "sql/connect/shell/progress.py"
 
+  # The spatial reference systems of the spatial types, and the SQLStringFormatter, of
+  # pyspark.sql.
+  "sql/geo_utils.py"
+  "sql/sql_formatter.py"
+
   # Top-level modules
   "accumulators.py"
   "memory_profiler_ext.py"

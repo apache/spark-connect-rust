@@ -781,6 +781,31 @@ def test_functions_udtf_and_arrow_decorators():
 
 # --------------------------------------------------------------------------- functions / columns
 
+def test_sql_modules_are_those_of_the_pyspark_client():
+    # As the PySpark client: pyspark.sql has the modules geo_utils, sql_formatter, table_arg and
+    # tvf_argument, of which a Column and a TableArg are TableValuedFunctionArguments, and
+    # `import pyspark.sql` imports its submodules of conf, profiler, streaming and variant_utils.
+    import pyspark.sql
+    from pyspark.sql import functions as F
+    from pyspark.sql.geo_utils import (
+        CartesianSpatialReferenceSystemMapper,
+        GeographicSpatialReferenceSystemMapper,
+    )
+    from pyspark.sql.sql_formatter import SQLStringFormatter
+    from pyspark.sql.table_arg import TableArg
+    from pyspark.sql.tvf_argument import TableValuedFunctionArgument
+
+    for name in ("conf", "geo_utils", "profiler", "sql_formatter", "streaming", "table_arg",
+                 "tvf_argument", "variant_utils"):
+        assert hasattr(pyspark.sql, name), name
+    assert isinstance(F.col("a"), TableValuedFunctionArgument)
+    assert issubclass(TableArg, TableValuedFunctionArgument)
+    assert CartesianSpatialReferenceSystemMapper and GeographicSpatialReferenceSystemMapper
+    assert SQLStringFormatter.__module__ == "pyspark.sql.sql_formatter"
+
+
+
+
 def test_functions_exports_fresh_process():
     import subprocess
     import sys
