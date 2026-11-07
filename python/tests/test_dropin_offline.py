@@ -5953,6 +5953,54 @@ def test_create_dataframe_schema_is_names_a_struct_or_an_atomic_type(schema, arg
         "arg_name": "schema", "expected_type": "list, None or StructType", "arg_type": arg_type}
 
 
+def test_create_dataframe_of_a_numpy_array_as_pyspark(mock_connect):
+    # As PySpark Connect's: an Arrow table of a column of each column of a 1- or 2-dimensional
+    # array, named by the names, else `value` for one column, else `_1`, `_2`, ..., sent with
+    # the schema, if any, for the server to cast to.
+    import numpy as np
+    import pyarrow as pa
+    from pyspark.errors import PySparkValueError
+
+    spark, service = mock_connect
+
+    def sent(df):
+        df.columns
+        # Relation.local_relation=11: data=1, an Arrow IPC stream, and schema=2.
+        relation = _sent_relation(service.analyze_requests[-1], 11)
+        table = pa.ipc.open_stream(relation[1][0]).read_all()
+        return table.to_pydict(), [json.loads(s) for s in relation.get(2, [])]
+
+    assert sent(spark.createDataFrame(np.array([1, 2]))) == ({"value": [1, 2]}, [])
+    assert sent(spark.createDataFrame(np.array([[1, 2], [3, 4]]))) == (
+        {"_1": [1, 3], "_2": [2, 4]}, [])
+    assert sent(spark.createDataFrame(np.array([[1], [2]]), ("x",))) == ({"x": [1, 2]}, [])
+    schema = T.StructType().add("a", T.IntegerType()).add("b", T.StringType())
+    assert sent(spark.createDataFrame(np.array([[1, 2]]), schema)) == (
+        {"_1": [1], "_2": [2]}, [json.loads(schema.json())])
+    assert sent(spark.createDataFrame(np.array([1.5]), T.DoubleType())) == (
+        {"value": [1.5]}, ["double"])
+    for data, schema, expected, actual in [
+        (np.array([1, 2]), ["x", "y"], "2", "1"),
+        (np.array([1, 2]), [], "0", "1"),
+        (np.array([[1, 2]]), ["x"], "1", "2"),
+        (np.array([[1, 2]]), T.IntegerType(), "1", "2"),
+        (np.array([1, 2]), T.StructType().add("a", T.IntegerType()).add("b", T.LongType()),
+         "2", "1"),
+    ]:
+        with pytest.raises(PySparkValueError) as e:
+            spark.createDataFrame(data, schema)
+        assert e.value.getCondition() == "AXIS_LENGTH_MISMATCH"
+        assert e.value.getMessageParameters() == {
+            "expected_length": expected, "actual_length": actual}
+    for data in (np.zeros((2, 2, 2)), np.array(5)):
+        with pytest.raises(PySparkValueError) as e:
+            spark.createDataFrame(data)
+        assert e.value.getCondition() == "INVALID_NDARRAY_DIMENSION"
+        assert e.value.getMessageParameters() == {"dimensions": "1 or 2"}
+    with pytest.raises(PySparkValueError) as e:
+        spark.createDataFrame(np.array([]))
+    assert e.value.getCondition() == "CANNOT_INFER_EMPTY_SCHEMA"
+
 def test_create_dataframe_of_a_dataframe_raises_as_pyspark():
     from pyspark.errors import PySparkTypeError
 

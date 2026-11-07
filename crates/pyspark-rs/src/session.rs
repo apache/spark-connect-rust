@@ -706,6 +706,83 @@ impl PySparkSession {
         ))))
     }
 
+    /// A DataFrame of a numpy array, as PySpark Connect's `createDataFrame` builds it: an Arrow
+    /// table of a column of each column of the array, sent with the schema, if any, for the
+    /// server to cast to. The columns are named by the given names, else `value` for a
+    /// 1-dimensional array or an array of one column, else `_1`, `_2`, ...
+    ///
+    /// It raises `INVALID_NDARRAY_DIMENSION` for an array of another dimension, and
+    /// `AXIS_LENGTH_MISMATCH` for names, or a schema, of another number of columns. An empty
+    /// array is empty data, of the schema, if any.
+    fn create_from_ndarray(
+        &self,
+        py: Python<'_>,
+        data: &Bound<'_, PyAny>,
+        spec: Spec,
+    ) -> PyResult<PyDataFrame> {
+        let ndim: usize = data.getattr("ndim")?.extract()?;
+        if ndim != 1 && ndim != 2 {
+            return Err(crate::column::raise_pyspark(
+                py,
+                "PySparkValueError",
+                "INVALID_NDARRAY_DIMENSION",
+                &[("dimensions", "1 or 2")],
+            ));
+        }
+        if data.len()? == 0 {
+            return self.create_from_local(py, PyList::empty(py).as_any(), spec);
+        }
+        let width: usize = if ndim == 1 {
+            1
+        } else {
+            data.getattr("shape")?.get_item(1)?.extract()?
+        };
+        let (names, num_cols, schema) = match spec {
+            Spec::Names(names) => (Some(names), None, None),
+            Spec::Struct(fields) => (None, Some(fields.len()), Some(DataType::Struct { fields })),
+            Spec::Atomic(atomic) => (None, Some(1), Some(atomic)),
+            Spec::None => (None, None, None),
+        };
+        let names = names.unwrap_or_else(|| {
+            if width == 1 {
+                vec!["value".to_string()]
+            } else {
+                (1..=width).map(|i| format!("_{i}")).collect()
+            }
+        });
+        let axis_length_mismatch = |expected: usize| {
+            crate::column::raise_pyspark(
+                py,
+                "PySparkValueError",
+                "AXIS_LENGTH_MISMATCH",
+                &[
+                    ("expected_length", &expected.to_string()),
+                    ("actual_length", &width.to_string()),
+                ],
+            )
+        };
+        if names.len() != width {
+            return Err(axis_length_mismatch(names.len()));
+        }
+        let table = py
+            .import("pyspark.sql._arrow_input")?
+            .getattr("ndarray_table")?
+            .call1((data, names))?;
+        if let Some(expected) = num_cols.filter(|&expected| expected != width) {
+            return Err(axis_length_mismatch(expected));
+        }
+        let batches = crate::pyarrow_import::table_batches(&table)?;
+        let options = py.detach(|| self.session.arrow_input_options().to_pyerr())?;
+        let df = py
+            .detach(|| {
+                self.session
+                    .create_dataframe_from_arrow_with_options(batches, schema, &options)
+                    .map_err(Box::new)
+            })
+            .to_pyerr()?;
+        Ok(PyDataFrame::new(df))
+    }
+
     /// A DataFrame of a pandas DataFrame: its rows as lists with NaN and NaT as None, typed
     /// by the first non-null value of each column, and its column labels, as strings, or the
     /// given names, applied with `toDF`.
@@ -1182,6 +1259,9 @@ impl PySparkSession {
             return crate::pyarrow_import::create_dataframe(py, &self.session, data, schema);
         }
         let spec = schema_spec(py, &self.session, schema)?;
+        if is_loaded_instance(py, data, "numpy", "ndarray")? {
+            return self.create_from_ndarray(py, data, spec);
+        }
         if is_loaded_instance(py, data, "pandas", "DataFrame")? {
             // Guarded integer columns share the existing Arrow importer. Schema
             // validation above and unsupported pandas conversions keep master's
