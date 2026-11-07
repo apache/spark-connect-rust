@@ -854,22 +854,20 @@ impl PySparkSession {
     ///
     /// Mirrors `pyspark.sql.SparkSession.range(start, end=None, step=1, numPartitions=None)`:
     /// called with a single positional arg it means `range(0, start)`.
-    #[pyo3(signature = (start, end=None, step=1, numPartitions=None))]
+    /// Each argument is taken by its `int()`, as PySpark's `range` takes them.
+    #[pyo3(signature = (start, end=None, step=RangeStep::Omitted, numPartitions=None))]
     #[allow(non_snake_case)]
     fn range(
         &self,
-        start: i64,
-        end: Option<i64>,
-        step: i64,
-        numPartitions: Option<i32>,
+        start: &Bound<'_, PyAny>,
+        end: Option<&Bound<'_, PyAny>>,
+        step: RangeStep,
+        numPartitions: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let (start, end) = match end {
-            Some(e) => (start, e),
-            None => (0, start),
-        };
+        let (start, end, step, num_partitions) = range_arguments(start, end, step, numPartitions)?;
         let df = self
             .session
-            .range_full(start, end, step, numPartitions)
+            .range_full(start, end, step, num_partitions)
             .to_pyerr()?;
         Ok(PyDataFrame::new(df))
     }
@@ -2276,4 +2274,58 @@ fn decimal_text_digits(value: &str) -> Option<(i64, i64)> {
     };
     let digits = (integer.len() + fraction.len() - leading_zeros).max(1) as i64;
     Some((digits, exponent - fraction.len() as i64))
+}
+
+/// The `step` of `range`, which PySpark defaults to 1, told apart from None, whose `int()`
+/// raises.
+pub(crate) enum RangeStep {
+    Omitted,
+    Given(Py<PyAny>),
+}
+
+impl<'a, 'py> FromPyObject<'a, 'py> for RangeStep {
+    type Error = PyErr;
+
+    fn extract(obj: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        Ok(RangeStep::Given(obj.to_owned().unbind()))
+    }
+}
+
+/// The start, end, step and number of partitions of `spark.range` and `spark.tvf.range`, as
+/// PySpark's `range` takes them: the `int()` of each, of the number of partitions first, with
+/// `range(n)` from 0 to `n`. A value out of the range of its proto field is the `ValueError` of
+/// protobuf.
+pub(crate) fn range_arguments(
+    start: &Bound<'_, PyAny>,
+    end: Option<&Bound<'_, PyAny>>,
+    step: RangeStep,
+    num_partitions: Option<&Bound<'_, PyAny>>,
+) -> PyResult<(i64, i64, i64, Option<i32>)> {
+    let py = start.py();
+    let int = |value: &Bound<'_, PyAny>| -> PyResult<i64> {
+        let int = py.get_type::<pyo3::types::PyInt>().call1((value,))?;
+        int.extract::<i64>().map_err(|_| value_out_of_range(&int))
+    };
+    let num_partitions = match num_partitions {
+        None => None,
+        Some(value) => {
+            let int = py.get_type::<pyo3::types::PyInt>().call1((value,))?;
+            Some(int.extract::<i32>().map_err(|_| value_out_of_range(&int))?)
+        }
+    };
+    let (start, end) = match end {
+        Some(end) => (int(start)?, int(end)?),
+        None => (0, int(start)?),
+    };
+    let step = match step {
+        RangeStep::Omitted => 1,
+        RangeStep::Given(step) => int(step.bind(py))?,
+    };
+    Ok((start, end, step, num_partitions))
+}
+
+/// The `ValueError` of protobuf for an int out of the range of its field.
+fn value_out_of_range(int: &Bound<'_, PyAny>) -> PyErr {
+    let shown = int.str().map(|text| text.to_string()).unwrap_or_default();
+    pyo3::exceptions::PyValueError::new_err(format!("Value out of range: {shown}"))
 }
