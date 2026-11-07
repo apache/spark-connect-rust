@@ -126,6 +126,9 @@ pub enum LogicalPlan {
         upper_bound: f64,
         with_replacement: bool,
         seed: Option<i64>,
+        /// Whether the input is sorted, or cached, to be in a deterministic order, as the
+        /// splits of `randomSplit` are, so that they are disjoint.
+        deterministic_order: bool,
     },
     /// Repartition: `df.repartition(num_partitions)`.
     Repartition {
@@ -921,6 +924,7 @@ impl LogicalPlan {
                 upper_bound,
                 with_replacement,
                 seed,
+                deterministic_order,
             } => {
                 let mut sample = proto::Sample::default();
                 sample.input = Some(Box::new(relation_of(input, plan_ids)));
@@ -930,6 +934,7 @@ impl LogicalPlan {
                 if let Some(s) = seed {
                     sample.seed = Some(*s);
                 }
+                sample.deterministic_order = *deterministic_order;
                 relation.rel_type = Some(proto::relation::RelType::Sample(Box::new(sample)));
             }
 
@@ -1841,6 +1846,7 @@ pub fn sample(
         upper_bound,
         with_replacement,
         seed,
+        deterministic_order: false,
     }
 }
 
