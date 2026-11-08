@@ -2812,8 +2812,8 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
             .iter()
             .map(|item| py_to_value(&item))
             .collect::<PyResult<Vec<_>>>()?;
-        // Named Rows are tuple subclasses. Keep their struct identity when they are
-        // nested in local data instead of treating them as plain arrays.
+        // Named Rows (tuple subclasses with `__fields__`) become structs on the generic
+        // object path, e.g. customized pandas object columns. Unnamed tuples stay arrays.
         match obj.getattr("__fields__") {
             Ok(fields) => {
                 let mut fields: Vec<String> = fields.extract()?;

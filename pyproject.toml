@@ -45,9 +45,9 @@ Repository = "https://github.com/apache/spark-connect-rust"
 
 [tool.ruff]
 # Lint our authored tooling/scripts and the embedded Row implementation.
-# The python/pyspark tree is largely vendored
-# from Apache Spark (pandas-on-Spark, the drop-in skin) and must stay
-# byte-compatible with upstream, so it is intentionally excluded from our linter.
+# The python/pyspark tree is largely vendored from Apache Spark (pandas-on-Spark
+# and the drop-in skin). It must stay byte-compatible with upstream and is excluded
+# from this linter.
 line-length = 100
 target-version = "py39"
 extend-exclude = ["python/pyspark", "target", ".claude"]

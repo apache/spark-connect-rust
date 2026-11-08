@@ -12,21 +12,16 @@ use spark_connect::row::{StructValue, Value};
 pub(crate) type FieldConverters = Arc<Vec<Option<Py<PyAny>>>>;
 
 static CREATE_ROW: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+const ROW_SOURCE: &std::ffi::CStr = pyo3::ffi::c_str!(include_str!("row.py"));
 
-/// Register the same tuple subclass under the extension and public Python imports.
+/// Expose the embedded tuple `Row` as `pyspark._pyspark.Row`, re-exported by the Python shims.
 /// Its source imports PySpark modules only inside methods, avoiding import cycles
 /// while `pyspark.sql.types` is importing this extension.
 /// The synthetic filename avoids embedding a build-machine path in distributed wheels;
 /// the source is compiled into the extension and need not be installed separately.
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    let source = std::ffi::CString::new(include_str!("row.py"))
-        .expect("the embedded Row source contains no NUL");
-    let row_module = PyModule::from_code(
-        module.py(),
-        source.as_c_str(),
-        c"pyspark/_row.py",
-        c"pyspark._row",
-    )?;
+    let row_module =
+        PyModule::from_code(module.py(), ROW_SOURCE, c"pyspark/_row.py", c"pyspark._row")?;
     module.add("Row", row_module.getattr("Row")?)
 }
 
@@ -67,7 +62,11 @@ impl NestedFieldNames {
         result
     }
 
-    fn fields<'py>(&mut self, py: Python<'py>, row: &StructValue) -> PyResult<Bound<'py, PyList>> {
+    fn names_at_path<'py>(
+        &mut self,
+        py: Python<'py>,
+        row: &StructValue,
+    ) -> PyResult<Bound<'py, PyList>> {
         if let Some(fields) = self.fields.get(&self.path) {
             return Ok(fields.bind(py).clone());
         }
@@ -258,7 +257,7 @@ pub(crate) fn value_to_py<'py>(
         }
         Value::Struct(row) => {
             // A struct value materializes as a Row with the mutable names of its schema path.
-            let fields = nested_fields.fields(py, row)?;
+            let fields = nested_fields.names_at_path(py, row)?;
             row_values_to_py(
                 py,
                 &fields,

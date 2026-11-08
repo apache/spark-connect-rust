@@ -502,6 +502,18 @@ mod tests {
     }
 
     #[test]
+    fn shared_fields_exposes_only_shared_name_storage() {
+        let fields: Arc<[String]> = vec!["id".to_string()].into();
+        let row = Row::with_shared_fields(Arc::clone(&fields), vec![Value::Long(1)]);
+        let cloned = row.clone();
+
+        assert!(Arc::ptr_eq(row.shared_fields().unwrap(), &fields));
+        assert!(Arc::ptr_eq(cloned.shared_fields().unwrap(), &fields));
+        let owned = Row::new(vec!["id".to_string()], vec![Value::Long(1)]);
+        assert!(owned.shared_fields().is_none());
+    }
+
+    #[test]
     fn shared_field_names_preserve_order_duplicates_equality_and_debug() {
         let names = vec![
             "second".to_string(),
