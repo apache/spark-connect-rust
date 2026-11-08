@@ -4726,6 +4726,7 @@ def test_arrow_string_custom_row_hooks_keep_native_errors(
             with _arrow_input_service(protocol, config_error=True) as (spark, state):
                 try:
                     result = spark.createDataFrame(frame, input_schema)
+                    result.toArrow()
                 except HookError as error:
                     assert type(error) is HookError
                     assert str(error) == f"{method} sentinel"
@@ -4738,7 +4739,6 @@ def test_arrow_string_custom_row_hooks_keep_native_errors(
                 else:
                     # pandas versions use different subset-construction helpers.
                     assert method in ("__init__", "_from_pyarrow_array", "__new__")
-                    result.toArrow()
                     assert len(state["input_tables"]) == 1
                     table = state["input_tables"][0]
                     assert table.column(0).to_pylist() == texts
@@ -4782,6 +4782,135 @@ def test_arrow_string_class_descriptors_decline_without_binding(monkeypatch, met
     assert not _pandas_input._arrow_string_class_is_canonical(array_class)
     assert not _pandas_input._has_canonical_arrow_string_array(array)
     assert calls == []
+
+
+@pytest.mark.parametrize("method", [
+    "__getattribute__", "tolist", "__iter__", "fillna", "to_numpy", "isna", "_hasna",
+    "dtype", "na_value",
+])
+def test_arrow_string_label_descriptors_decline_without_binding(monkeypatch, method):
+    import importlib
+
+    _pandas_input = importlib.import_module("pyspark.sql._pandas_input")
+    # Concrete object data isolates the Arrow-string class used by the labels.
+    frame = pd.DataFrame({"v": pd.Series(["original", None] * 5000, dtype=object)})
+    frame.columns = pd.Index(pd.array(["v"], dtype="string[pyarrow]"))
+    array_class = type(frame.columns._values)
+    schema = T.StructType([T.StructField("v", T.StringType())])
+    assert _pandas_input.prepare_string_input(frame, schema) is not None
+    assert _pandas_input.accepts_pandas_table(frame, schema)
+    assert _pandas_input.accepts_pandas_frame(frame)
+    calls = []
+
+    class HookError(Exception):
+        pass
+
+    class CustomizedDescriptor:
+        def __get__(self, receiver, owner):
+            calls.append((receiver, owner))
+            raise HookError(f"label {method} descriptor sentinel")
+
+    owner = pd.StringDtype if method == "na_value" else array_class
+    monkeypatch.setattr(owner, method, CustomizedDescriptor())
+    assert _pandas_input.prepare_string_input(frame, schema) is None
+    assert not _pandas_input.accepts_pandas_table(frame, schema)
+    assert not _pandas_input.accepts_pandas_frame(frame)
+    assert calls == []
+
+
+@pytest.mark.parametrize("storage_kind", ["plain_array", "nonstring", "invalid_utf8", "bad_storage"])
+def test_arrow_string_storage_normalization_and_fallback(protocol, monkeypatch, storage_kind):
+    import importlib
+    import struct
+
+    _pandas_input = importlib.import_module("pyspark.sql._pandas_input")
+    texts = ["é", None]
+    frame = pd.DataFrame({"v": pd.array(texts, dtype="string[pyarrow]")})
+    schema = T.StructType([T.StructField("v", T.StringType())])
+    # Capture pandas metadata before intentionally replacing its Arrow storage.
+    dtypes = frame.dtypes
+    array = frame.iloc[:, 0].array
+    if storage_kind == "plain_array":
+        storage = pa.array(texts, type=pa.string())
+        assert isinstance(storage, pa.Array)
+    elif storage_kind == "nonstring":
+        storage = pa.chunked_array([pa.array([1, None], type=pa.int64())])
+    elif storage_kind == "invalid_utf8":
+        invalid = pa.Array.from_buffers(pa.string(), 2, [
+            None, pa.py_buffer(struct.pack("<iii", 0, 5, 6)), pa.py_buffer(b"valid\xff"),
+        ])
+        storage = pa.chunked_array([invalid])
+        with pytest.raises(pa.ArrowInvalid):
+            storage.validate(full=True)
+    else:
+        class UnsupportedStorage:
+            # pandas' column boxing reads length before the storage-type guard.
+            def __len__(self):
+                return len(texts)
+
+        storage = UnsupportedStorage()
+        assert not isinstance(storage, (pa.Array, pa.ChunkedArray))
+    monkeypatch.setattr(array, "_pa_array", storage)
+    with _arrow_input_service(protocol, config_error=True) as (_spark, state):
+        result = _pandas_input._arrow_string_table(frame, schema, dtypes)
+        if storage_kind == "plain_array":
+            assert type(result) is pa.Table
+            result.validate(full=True)
+            assert result.schema.names == ["v"]
+            assert result.column(0).type == pa.string()
+            assert result.column(0).to_pylist() == texts
+        else:
+            assert result is None
+        assert state["config_requests"] == []
+        assert state["uploads"] == 0
+        assert state["input_tables"] == []
+
+
+@pytest.mark.parametrize("error_kind", ["arrow", "overflow"])
+def test_arrow_string_simulated_cast_failures_decline(protocol, monkeypatch, error_kind):
+    """Exercise exception handling without allocating a greater-than-2-GiB column."""
+    import importlib
+    import sys
+    from types import ModuleType
+
+    _pandas_input = importlib.import_module("pyspark.sql._pandas_input")
+    frame = pd.DataFrame({"v": pd.array(["original", None], dtype="string[pyarrow]")})
+    schema = T.StructType([T.StructField("v", T.StringType())])
+    dtypes = frame.dtypes
+    array = frame.iloc[:, 0].array
+    values = array.__arrow_array__()
+    error_class = pa.ArrowInvalid if error_kind == "arrow" else OverflowError
+    calls = []
+
+    class SimulatedCastFailure:
+        type = values.type
+
+        def __len__(self):
+            return len(values)
+
+        def validate(self, *, full):
+            calls.append(("validate", full))
+            values.validate(full=full)
+
+        def cast(self, target):
+            assert target == pa.string()
+            calls.append(("cast", target))
+            raise error_class("simulated Arrow-string cast failure")
+
+    # PyArrow extension types are immutable. This local module proxy recognizes
+    # the wrapper only for the simulated cast branch; real capacity is untested.
+    proxy = ModuleType("pyarrow")
+    vars(proxy).update(vars(pa))
+    proxy.ChunkedArray = (pa.ChunkedArray, SimulatedCastFailure)
+    with _arrow_input_service(protocol, config_error=True) as (_spark, state):
+        with monkeypatch.context() as simulated:
+            simulated.setattr(array, "_pa_array", SimulatedCastFailure())
+            simulated.setitem(sys.modules, "pyarrow", proxy)
+            assert _pandas_input._arrow_string_table(frame, schema, dtypes) is None
+        assert calls == [("validate", True), ("cast", pa.string())]
+        assert state["config_requests"] == []
+        assert state["uploads"] == 0
+        assert state["input_tables"] == []
 
 
 def test_arrow_string_object_labels_dtype_error_matches_native_rows(protocol, monkeypatch):

@@ -121,11 +121,13 @@ column labels, a specialized guard may first read `frame.dtypes`, matching the
 native row path's dtype read before cell normalization. A customized dtype
 property can therefore raise before the later array-class check, with the same
 local error and no configuration or upload request.
-The bounded Arrow-string class checks inspect raw MRO dictionaries for the
-conversion hooks, dtype/missing-value properties and null-subarray constructor,
-optional factory and allocator used by supported pandas layouts. This avoids
-binding customized descriptors during those checks. It does not establish a
-general invariant for arbitrary mutations of pandas internals.
+The bounded Arrow-string class checks for data and labels inspect raw MRO
+dictionaries for conversion and label-iteration methods, dtype/missing-value
+properties and the null-subarray constructor, optional factory and allocator
+used by supported pandas layouts. The label checks authenticate the class before
+inspecting its other methods, which also use the raw lookup. This avoids binding
+customized descriptors during those checks. It does not establish a general
+invariant for arbitrary mutations of pandas internals.
 
 ## UDF strategy (full compatibility)
 

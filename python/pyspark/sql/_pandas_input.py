@@ -33,6 +33,16 @@ def _defined_in(method, name, *modules):
                     and method.__globals__ is vars(module) for module in modules))
 
 
+def _raw_class_attribute(cls, name, start=0):
+    """Return the defining class and raw attribute, or (None, None) if absent."""
+    if cls is not None:
+        for base in cls.__mro__[start:]:
+            namespace = vars(base)
+            if name in namespace:
+                return base, namespace[name]
+    return None, None
+
+
 def _has_canonical_arrow_string_astype(cls):
     """Authenticate the object-cast method invoked by ArrowStringArray's super()."""
     from pandas.core.arrays import base as array_base_module, string_arrow
@@ -41,13 +51,9 @@ def _has_canonical_arrow_string_astype(cls):
         start = cls.__mro__.index(string_arrow.ArrowStringArray) + 1
     except ValueError:
         return False
-    # Inspect the defining class dictionaries without invoking a custom descriptor.
-    for base in cls.__mro__[start:]:
-        if "astype" in vars(base):
-            method = vars(base)["astype"]
-            return (base is array_base_module.ExtensionArray
-                    and _defined_in(method, "astype", array_base_module))
-    return False
+    owner, method = _raw_class_attribute(cls, "astype", start)
+    return (owner is array_base_module.ExtensionArray
+            and _defined_in(method, "astype", array_base_module))
 
 
 def _arrow_string_class_is_canonical(cls):
@@ -65,45 +71,33 @@ def _arrow_string_class_is_canonical(cls):
             or pd.StringDtype is not string_module.StringDtype):
         return False
 
-    missing = object()
-
-    def raw_attribute(owner, name):
-        # Resolve the class attribute without binding an arbitrary descriptor.
-        for base in owner.__mro__:
-            namespace = vars(base)
-            if name in namespace:
-                return namespace[name]
-        return missing
-
     # Authenticate row/Arrow conversion hooks and __len__, which sizes the table.
     # to_numpy indexes the non-null portion through __getitem__ before reading storage.
     # Inspect these conversion hooks here. A caller may already have read
     # frame.dtypes, mirroring the native row path's first dtype read.
     # pandas 2.2's NumPy-semantics variant has its own string-method accessor.
-    access = raw_attribute(cls, "__getattribute__")
+    access = _raw_class_attribute(cls, "__getattribute__")[1]
     canonical_access = (access is object.__getattribute__
                         or (cls is numpy_semantics and _defined_in(
                             access, "__getattribute__", string_arrow)))
     if (not canonical_access
-            or any(not _defined_in(raw_attribute(cls, name), name,
+            or any(not _defined_in(_raw_class_attribute(cls, name)[1], name,
                                   string_arrow, arrow_module) for name in _ARROW_STRING_HOOKS)
-            or not _defined_in(raw_attribute(cls, "astype"), "astype", string_arrow)
+            or not _defined_in(_raw_class_attribute(cls, "astype")[1], "astype", string_arrow)
             or not _has_canonical_arrow_string_astype(cls)):
         return False
     # Null-subarray conversion may construct another array. Older pandas versions
     # have no _from_pyarrow_array helper; a present custom descriptor must decline.
-    for name in _ARROW_STRING_CONSTRUCTION_HOOKS:
-        method = raw_attribute(cls, name)
-        if method is missing and name == "_from_pyarrow_array":
-            continue
-        if name == "__new__":
-            if method is not object.__new__:
-                return False
-        elif not _defined_in(method, name, string_arrow):
-            return False
-    dtype = raw_attribute(cls, "dtype")
-    hasna = raw_attribute(cls, "_hasna")
-    missing_value = raw_attribute(string_module.StringDtype, "na_value")
+    if not _defined_in(_raw_class_attribute(cls, "__init__")[1], "__init__", string_arrow):
+        return False
+    factory_owner, factory = _raw_class_attribute(cls, "_from_pyarrow_array")
+    if factory_owner is not None and not _defined_in(factory, "_from_pyarrow_array", string_arrow):
+        return False
+    if _raw_class_attribute(cls, "__new__")[1] is not object.__new__:
+        return False
+    dtype = _raw_class_attribute(cls, "dtype")[1]
+    hasna = _raw_class_attribute(cls, "_hasna")[1]
+    missing_value = _raw_class_attribute(string_module.StringDtype, "na_value")[1]
     return (type(dtype) is property
             and _defined_in(dtype.fget, "dtype", string_arrow, arrow_module)
             and type(hasna) is property
@@ -180,15 +174,25 @@ def _has_canonical_columns(columns):
     cls = type(backing)
     if not any(cls is candidate for candidate in python_strings + arrow_strings):
         return False
+    arrow_backed = any(cls is candidate for candidate in arrow_strings)
+    if arrow_backed and not _arrow_string_class_is_canonical(cls):
+        return False
+
+    def class_attribute(owner, name):
+        # Arrow labels share the raw lookup; retain the Python-string policy.
+        if arrow_backed:
+            return _raw_class_attribute(owner, name)[1]
+        return getattr(owner, name, None)
+
     # Instance shadows deliberately include descriptors and special names too.
-    if (cls.__getattribute__ is not object.__getattribute__
+    if (class_attribute(cls, "__getattribute__") is not object.__getattribute__
             or any(name in vars(backing) for name in
                    ("__iter__", "__getitem__", "__len__", "__array__", "_box_func",
                     "tolist", "to_numpy", "isna", "fillna", "_hasna")
                    + _ARROW_STRING_CONSTRUCTION_HOOKS)
-            or getattr(cls, "tolist", None) is not getattr(
-                vars(string_module).get("BaseStringArray"), "tolist", None)
-            or not _defined_in(getattr(cls, "tolist", None), "tolist", string_module)):
+            or class_attribute(cls, "tolist") is not class_attribute(
+                vars(string_module).get("BaseStringArray"), "tolist")
+            or not _defined_in(class_attribute(cls, "tolist"), "tolist", string_module)):
         return False
     if any(cls is candidate for candidate in python_strings):
         owner, module = vars(numpy_module).get("NumpyExtensionArray"), numpy_module
@@ -220,29 +224,28 @@ def _has_canonical_columns(columns):
         # pandas builds an Arrow string Index's uniqueness engine with astype(object).
         # Authenticate the full object-cast chain before is_unique, including
         # dtype and missing-value properties that a label cast can read.
-        if ("astype" in vars(backing)
-                or not _arrow_string_class_is_canonical(cls)):
+        if "astype" in vars(backing):
             return False
         try:
             storage = object.__getattribute__(backing, "_pa_array")
         except AttributeError:
             return False
         if (type(storage) is not pa.ChunkedArray
-                or not _defined_in(getattr(cls, "__iter__", None), "__iter__", module)):
+                or not _defined_in(class_attribute(cls, "__iter__"), "__iter__", module)):
             return False
-        isna, isna_module = getattr(owner, "isna", None), module
-        hasna = getattr(cls, "_hasna", None)
+        isna, isna_module = class_attribute(owner, "isna"), module
+        hasna = class_attribute(cls, "_hasna")
         if (type(hasna) is not property
                 or not _defined_in(hasna.fget, "_hasna", module)
-                or getattr(cls, "fillna", None) is not getattr(owner, "fillna", None)
-                or not _defined_in(getattr(cls, "fillna", None), "fillna", module)):
+                or class_attribute(cls, "fillna") is not class_attribute(owner, "fillna")
+                or not _defined_in(class_attribute(cls, "fillna"), "fillna", module)):
             return False
     # Keep the existing storage/conversion authentication as well as the
     # iterator hooks: these objects also supply labels to pandas normalization.
-    return (getattr(cls, "to_numpy", None) is getattr(owner, "to_numpy", None)
-            and _defined_in(getattr(cls, "to_numpy", None), "to_numpy", module)
-            and getattr(cls, "isna", None) is isna
-            and _defined_in(getattr(cls, "isna", None), "isna", isna_module))
+    return (class_attribute(cls, "to_numpy") is class_attribute(owner, "to_numpy")
+            and _defined_in(class_attribute(cls, "to_numpy"), "to_numpy", module)
+            and class_attribute(cls, "isna") is isna
+            and _defined_in(class_attribute(cls, "isna"), "isna", isna_module))
 
 
 def prepare_int64_table(frame, schema):
@@ -819,6 +822,7 @@ def _arrow_string_table(frame, schema, dtypes):
             values.validate(full=True)
             # Check normal-string capacity before configuration/upload RPCs. The importer
             # may widen back to large_string when useLargeVarTypes is enabled.
+            # pandas 3 uses large_string storage, so this narrowing copies its offsets.
             values = values.cast(pa.string())
         except (pa.ArrowException, OverflowError):
             return None
