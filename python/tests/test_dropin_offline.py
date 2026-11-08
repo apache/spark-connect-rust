@@ -7578,13 +7578,38 @@ def test_plain_pandas_tuple_rows_keep_arrow_array_inference(mock_connect, value)
     import pandas as pd
     import pyarrow as pa
 
-    spark, service = mock_connect
-    table, _ = _local_rows_relation_of(
-        service, spark.createDataFrame(pd.DataFrame({"value": [value]}, dtype=object)))
+    table = _native_number_input_table(
+        mock_connect, pd.DataFrame({"value": [value]}, dtype=object))
+    table.validate(full=True)
+    assert (table.num_rows, table.num_columns) == (1, 1)
+    assert table.column_names == ["value"]
     column = table.column(0)
     assert pa.types.is_list(column.type) or pa.types.is_large_list(column.type)
     assert column.type.value_type == pa.int64()
     assert column[0].as_py() == [1, 2]
+
+
+def test_customized_pandas_exact_nested_tuple_rows_remain_arrays(mock_connect):
+    import pyarrow as pa
+
+    values = [
+        ((1, None, -3), (), None, (2**63 - 1, -(2**63))),
+        (),
+        None,
+        ((4,), (5, 6)),
+    ]
+    table = _native_number_input_table(
+        mock_connect, [(value,) for value in values], source="pandas")
+    table.validate(full=True)
+    assert (table.num_rows, table.num_columns) == (4, 1)
+    assert table.column_names == ["value"]
+    assert table.column(0).type == pa.list_(pa.list_(pa.int64()))
+    assert table.column(0).to_pylist() == [
+        [[1, None, -3], [], None, [2**63 - 1, -(2**63)]],
+        [],
+        None,
+        [[4], [5, 6]],
+    ]
 
 
 def test_pandas_tuple_field_lookup_propagates_errors(mock_connect):

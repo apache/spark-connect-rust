@@ -25,7 +25,8 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("Row", row_module.getattr("Row")?)
 }
 
-/// A schema path: all elements of an array or map use the same nested converter.
+/// One step of a nested schema path. Array elements and map keys/values carry no
+/// index, so all of them share the names at their path.
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 enum NestedFieldPath {
     Field(usize),
@@ -49,6 +50,7 @@ impl NestedFieldNames {
         self.fields.clear();
     }
 
+    /// Convert one schema step below this path, restoring it even if conversion fails.
     fn value_at<'py>(
         &mut self,
         py: Python<'py>,
@@ -62,6 +64,7 @@ impl NestedFieldNames {
         result
     }
 
+    /// Get mutable names for this path, using the first struct seen to initialize them.
     fn names_at_path<'py>(
         &mut self,
         py: Python<'py>,

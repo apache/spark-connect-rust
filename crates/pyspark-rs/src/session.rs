@@ -2814,18 +2814,21 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
             .collect::<PyResult<Vec<_>>>()?;
         // Named Rows (tuple subclasses with `__fields__`) become structs on the generic
         // object path, e.g. customized pandas object columns. Unnamed tuples stay arrays.
-        match obj.getattr("__fields__") {
-            Ok(fields) => {
-                let mut fields: Vec<String> = fields.extract()?;
-                // Row factories may receive fewer values than names, and __fields__
-                // is mutable. Pair them as schema inference does, without panicking
-                // in the native Row constructor when their lengths differ.
-                fields.truncate(items.len());
-                items.truncate(fields.len());
-                return Ok(Value::Struct(Row::new(fields, items).into()));
+        if !obj.is_exact_instance_of::<pyo3::types::PyTuple>() {
+            match obj.getattr("__fields__") {
+                Ok(fields) => {
+                    let mut fields: Vec<String> = fields.extract()?;
+                    // Row factories may receive fewer values than names, and __fields__
+                    // is mutable. Pair them as schema inference does, without panicking
+                    // in the native Row constructor when their lengths differ.
+                    fields.truncate(items.len());
+                    items.truncate(fields.len());
+                    return Ok(Value::Struct(Row::new(fields, items).into()));
+                }
+                Err(error)
+                    if error.is_instance_of::<pyo3::exceptions::PyAttributeError>(obj.py()) => {}
+                Err(error) => return Err(error),
             }
-            Err(error) if error.is_instance_of::<pyo3::exceptions::PyAttributeError>(obj.py()) => {}
-            Err(error) => return Err(error),
         }
         return Ok(Value::List(items));
     }
