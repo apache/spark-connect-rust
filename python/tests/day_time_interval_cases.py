@@ -62,7 +62,8 @@ def _messages():
         pool.Add(file)
     names = ["DataType", "ExecutePlanRequest", "ExecutePlanResponse",
              "AnalyzePlanRequest", "AnalyzePlanResponse", "ReleaseExecuteRequest",
-             "ReleaseExecuteResponse", "ReleaseSessionRequest", "ReleaseSessionResponse"]
+             "ReleaseExecuteResponse", "ReleaseSessionRequest", "ReleaseSessionResponse",
+             "ConfigRequest", "ConfigResponse"]
     return {name: message_factory.GetMessageClass(
         pool.FindMessageTypeByName(f"spark.connect.{name}")) for name in names}
 
@@ -164,6 +165,14 @@ class DayTimeIntervalTests(unittest.TestCase):
             return self.messages["ReleaseSessionResponse"](
                 session_id=request.session_id).SerializeToString()
 
+        def configure(raw, context):
+            request = self.messages["ConfigRequest"].FromString(raw)
+            self.assertEqual(request.operation.WhichOneof("op_type"), "get_with_default")
+            return self.messages["ConfigResponse"](
+                session_id=request.session_id,
+                pairs=list(request.operation.get_with_default.pairs),
+            ).SerializeToString()
+
         with ThreadPoolExecutor(max_workers=2) as pool:
             server = grpc.server(pool)
             server.add_generic_rpc_handlers([grpc.method_handlers_generic_handler(
@@ -172,6 +181,7 @@ class DayTimeIntervalTests(unittest.TestCase):
                     "AnalyzePlan": grpc.unary_unary_rpc_method_handler(analyze),
                     "ReleaseExecute": grpc.unary_unary_rpc_method_handler(release_execute),
                     "ReleaseSession": grpc.unary_unary_rpc_method_handler(release_session),
+                    "Config": grpc.unary_unary_rpc_method_handler(configure),
                 }
             )])
             port = server.add_insecure_port("127.0.0.1:0")

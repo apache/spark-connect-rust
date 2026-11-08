@@ -269,6 +269,7 @@ def serve(connection):
             self.block_execute = False
             self.analyze_requests = []
             self.execute_requests = []
+            self.release_execute_requests = []
             self.execute_payload = b""
             self.execute_failure = None
             self.execute_error = None
@@ -280,6 +281,10 @@ def serve(connection):
             self.unset_confs = []
             self.confs = {}
             self.read_confs = []
+            self.config_requests = []
+            self.config_failure = None
+            self.block_config = False
+            self.rpc_events = []
             self.set_confs = []
             self.clone_requests = []
             # The DDL of the JSON of each JsonToDDL.
@@ -331,6 +336,7 @@ def serve(connection):
         # with the status code name and message of a tuple. Responses echo the request's
         # operation id, as the server does.
         execute_requests = []
+        release_execute_requests = []
         execute_payload = b""
         execute_failure = None
         # With `execute_error` set to (message, reason, metadata), ExecutePlan fails as the
@@ -362,11 +368,16 @@ def serve(connection):
             "spark.sql.session.localRelationBatchOfChunksSizeBytes": "1073741824",
         }
         read_confs = []
+        config_requests = []
+        config_failure = None
+        block_config = False
+        rpc_events = []
         set_confs = []
 
         def execute(self, request, context):
             self.execute_calls += 1
             self.execute_requests.append(request)
+            self.rpc_events.append("execute")
             if self.block_execute and not self.response_gate.wait(5):
                 context.abort(
                     grpc.StatusCode.DEADLINE_EXCEEDED,
@@ -408,6 +419,10 @@ def serve(connection):
             # ConfigResponse.warnings=3, of `config_warnings`.
             return b"".join(message_field(3, warning) for warning in self.config_warnings)
 
+        def release_execute(self, request, context):
+            self.release_execute_requests.append(request)
+            return b""
+
         def fetch_error_details(self, request, context):
             # FetchErrorDetailsRequest.error_id=3.
             self.fetched_error_ids.append(parse_message(request)[3][0].decode())
@@ -429,6 +444,15 @@ def serve(connection):
         def config(self, request, context):
             # ConfigRequest.session_id=1, operation=3, Operation.get=2, Get.keys=1;
             # ConfigResponse.session_id=1, pairs=2, KeyValue.key=1, value=2.
+            self.config_requests.append(request)
+            self.rpc_events.append("config")
+            if self.block_config and not self.response_gate.wait(5):
+                context.abort(
+                    grpc.StatusCode.DEADLINE_EXCEEDED,
+                    "Python thread could not run while configuration lookup waited",
+                )
+            if self.config_failure:
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT, self.config_failure)
             request = parse_message(request)
             operation = parse_message(request[3][0])
             if 1 in operation:
@@ -457,7 +481,10 @@ def serve(connection):
                     key = pair[1][0].decode()
                     self.read_confs.append(key)
                     value = self.confs.get(key, pair.get(2, [b""])[0].decode())
-                    pairs.append(message_field(2, message_field(1, key) + message_field(2, value)))
+                    encoded = message_field(1, key)
+                    if value is not None:
+                        encoded += message_field(2, value)
+                    pairs.append(message_field(2, encoded))
                 return message_field(1, request[1][0]) + b"".join(pairs)
             if 2 not in operation:
                 context.abort(
@@ -485,7 +512,7 @@ def serve(connection):
             "ReattachExecute": grpc.unary_stream_rpc_method_handler(
                 lambda request, context: iter([message_field(14, b"")])
             ),
-            "ReleaseExecute": grpc.unary_unary_rpc_method_handler(lambda request, context: b""),
+            "ReleaseExecute": grpc.unary_unary_rpc_method_handler(service.release_execute),
             "FetchErrorDetails": grpc.unary_unary_rpc_method_handler(service.fetch_error_details),
             "Config": grpc.unary_unary_rpc_method_handler(service.config),
             "CloneSession": grpc.unary_unary_rpc_method_handler(service.clone_session),
