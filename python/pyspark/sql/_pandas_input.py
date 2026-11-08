@@ -75,8 +75,6 @@ def _arrow_string_class_is_canonical(cls):
         # A rebound optional NumPy-semantics class alias may lack that ancestry.
         return False
 
-    # Authenticate row/Arrow conversion hooks and __len__, which sizes the table.
-    # to_numpy indexes the non-null portion through __getitem__ before reading storage.
     # pandas 2.2's NumPy-semantics variant has its own string-method accessor.
     access = _raw_class_attribute(cls, "__getattribute__")[1]
     if access is not object.__getattribute__:
@@ -98,6 +96,8 @@ def _arrow_string_class_is_canonical(cls):
                 or any(name not in _ARROW_STRING_MIXIN_ALLOWED_NAMES
                        and not name.startswith("_str_") for name in vars(mixin))):
             return False
+    # Authenticate row/Arrow conversion hooks and __len__, which sizes the table.
+    # to_numpy indexes the non-null portion through __getitem__ before reading storage.
     if (any(not _defined_in(_raw_class_attribute(cls, name)[1], name,
                            string_arrow, arrow_module) for name in _ARROW_STRING_HOOKS)
             or not _defined_in(_raw_class_attribute(cls, "astype")[1], "astype", string_arrow)

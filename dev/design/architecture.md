@@ -101,7 +101,7 @@ against its live server and built native extension. Official parity tests
 exercise the Rust transport with official PySpark; the separate native smoke
 step covers the drop-in `toArrow()` path.
 
-The pandas Arrow-string input guard recognizes pandas 2.2 and pandas 3 storage
+The pandas Arrow-string input guard recognizes pandas 2.2 through 3.x storage
 layouts. The Python Connect and pandas parity workflows pin `pandas>=2.2,<3.0`;
 coverage and pipelines parity install unpinned pandas. CI has no explicit
 pandas-version matrix. The inherited `pandas>=1.0.0` package declaration is
@@ -134,8 +134,10 @@ NumPy-semantics accessor also dispatches through a mixin before ordinary MRO
 lookup; its mixin and partial-function aliases are checked, and its namespace is
 limited to string-method names, initializer/storage declarations and class
 metadata. Its mixin initializer remains allowed because construction uses the
-class slots authenticated above. These checks do not establish a general
-invariant for arbitrary mutations of pandas internals.
+class slots authenticated above. Class data read by these methods, such as
+`_storage` and `_na_value`, and module globals are outside these checks. These
+checks do not establish a general invariant for arbitrary mutations of pandas
+internals.
 
 ## UDF strategy (full compatibility)
 
