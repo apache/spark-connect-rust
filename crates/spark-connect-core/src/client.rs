@@ -27,6 +27,7 @@ use crate::channel::{ChannelBuilder, GRPC_MAX_MESSAGE_LENGTH_DEFAULT};
 use crate::error::{Result, SparkError, SparkErrorKind};
 use crate::reattach::ExecutePlanResponseReattachableIterator;
 use crate::retries::{RetryPolicy, RetryPolicyState};
+use crate::thread_entries::forget_when_thread_ends;
 
 /// How long to wait for the lazy gRPC channel to become ready before surfacing a
 /// retriable `UNAVAILABLE`. tonic's lazy channel waits indefinitely for an unreachable
@@ -266,6 +267,12 @@ struct UserContextExtensions {
     by_thread: std::collections::HashMap<std::thread::ThreadId, Vec<(String, prost_types::Any)>>,
 }
 
+/// Forget the extensions of a thread that ends, as PySpark's `thread_local` is freed with its
+/// thread.
+fn forget_thread_extensions(extensions: &mut UserContextExtensions, thread: std::thread::ThreadId) {
+    extensions.by_thread.remove(&thread);
+}
+
 impl SparkConnectClient {
     /// Create a new SparkConnectClient from a ChannelBuilder.
     ///
@@ -445,11 +452,17 @@ impl SparkConnectClient {
     /// and return its ID, as PySpark's `add_threadlocal_user_context_extension`.
     pub fn add_threadlocal_user_context_extension(&self, extension: prost_types::Any) -> String {
         let id = format!("threadlocal_{}", Uuid::new_v4());
-        self.user_context_extensions
+        let mut extensions = self
+            .user_context_extensions
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|e| e.into_inner());
+        let thread = std::thread::current().id();
+        if !extensions.by_thread.contains_key(&thread) {
+            forget_when_thread_ends(&self.user_context_extensions, forget_thread_extensions);
+        }
+        extensions
             .by_thread
-            .entry(std::thread::current().id())
+            .entry(thread)
             .or_default()
             .push((id.clone(), extension));
         id
@@ -2175,5 +2188,62 @@ mod tests {
             ("spark.sql.adaptive.enabled", None),
         ];
         let _result = client.get_config_with_defaults(&pairs);
+    }
+
+    #[tokio::test]
+    async fn threadlocal_user_context_extensions_of_finished_threads_are_forgotten() {
+        let builder = ChannelBuilder::parse("sc://localhost").unwrap();
+        let client = std::sync::Arc::new(SparkConnectClient::connect(&builder).await.unwrap());
+        for _ in 0..1000 {
+            let client = client.clone();
+            std::thread::spawn(move || {
+                client.add_threadlocal_user_context_extension(prost_types::Any::default());
+            })
+            .join()
+            .unwrap();
+        }
+        let entries = client
+            .user_context_extensions
+            .lock()
+            .unwrap()
+            .by_thread
+            .len();
+        assert_eq!(entries, 0);
+    }
+
+    #[tokio::test]
+    async fn threadlocal_user_context_extensions_of_a_living_thread_stay_until_it_ends() {
+        let builder = ChannelBuilder::parse("sc://localhost").unwrap();
+        let client = std::sync::Arc::new(SparkConnectClient::connect(&builder).await.unwrap());
+        let (added_tx, added_rx) = std::sync::mpsc::channel();
+        let (end_tx, end_rx) = std::sync::mpsc::channel::<()>();
+        let child = {
+            let client = client.clone();
+            std::thread::spawn(move || {
+                client.add_threadlocal_user_context_extension(prost_types::Any::default());
+                added_tx
+                    .send(client.threadlocal_user_context_extensions().len())
+                    .unwrap();
+                end_rx.recv().unwrap();
+            })
+        };
+        assert_eq!(added_rx.recv().unwrap(), 1);
+        assert_eq!(
+            client
+                .user_context_extensions
+                .lock()
+                .unwrap()
+                .by_thread
+                .len(),
+            1
+        );
+        end_tx.send(()).unwrap();
+        child.join().unwrap();
+        assert!(client
+            .user_context_extensions
+            .lock()
+            .unwrap()
+            .by_thread
+            .is_empty());
     }
 }

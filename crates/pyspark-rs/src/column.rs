@@ -78,7 +78,7 @@ pub(crate) fn column_reference_name(column: PyRef<'_, PyColumn>) -> Option<Strin
 }
 
 /// Python wrapper for a Spark Column.
-#[pyclass(name = "Column", module = "pyspark.sql.connect.column")]
+#[pyclass(name = "Column", module = "pyspark.sql.connect.column", weakref, dict)]
 pub struct PyColumn {
     pub(crate) column: Column,
 }
@@ -591,6 +591,14 @@ impl PyColumn {
         Ok(PyColumn::new(self.column.clone().div(other_col)))
     }
 
+    /// Division (/), of the name of Python 2, as PySpark's Column has it, which pandas-on-Spark
+    /// calls: as `__truediv__`.
+    fn __div__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
+        let _origin = crate::origin::with_origin("__div__");
+        let other_col = to_column(&other.bind(py))?;
+        Ok(PyColumn::new(self.column.clone().div(other_col)))
+    }
+
     /// Modulo (%)
     fn __mod__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("__mod__");
@@ -679,6 +687,37 @@ impl PyColumn {
         self._expr().to_plan(py, session)
     }
 
+    /// A Column pickles, as PySpark Connect's, which pickles its expression: of the bytes of the
+    /// `spark.connect.Expression` of this column and of its rendering, of which the function of
+    /// `pyspark.sql.connect.column._reduce_column` gives back the Column, also on a Python worker
+    /// of the server, such as that of a `foreachBatch` function, as PySpark Connect's Column.
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        use prost::Message;
+        let expression = pyo3::types::PyBytes::new(py, &self.column.to_proto().encode_to_vec());
+        py.import("pyspark.sql.connect.column")?
+            .getattr("_reduce_column")?
+            .call1((expression, self.column.expression().render()))
+    }
+
+    /// The Column of `expression`, the bytes of a `spark.connect.Expression`, and of its
+    /// `rendered` rendering, as a pickled Column unpickles: it sends the expression as it is.
+    #[staticmethod]
+    fn _of_expression(expression: &[u8], rendered: String) -> PyResult<PyColumn> {
+        use prost::Message;
+        let expression = spark_connect_proto::Expression::decode(expression)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+        Ok(PyColumn::new(Column::new(
+            spark_connect::expression::Expression::new(
+                spark_connect::expression::ExpressionNode::Sent(Box::new(
+                    spark_connect::expression::SentExpression {
+                        expression,
+                        rendered,
+                    },
+                )),
+            ),
+        )))
+    }
+
     fn __str__(&self) -> String {
         let _origin = crate::origin::with_origin("__str__");
         self.__repr__()
@@ -687,6 +726,12 @@ impl PyColumn {
     // --- reverse arithmetic/logical dunders (operand order swapped) ---
     fn __rtruediv__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("__rtruediv__");
+        let o = to_column(&other.bind(py))?;
+        Ok(PyColumn::new(o.div(self.column.clone())))
+    }
+    /// Reverse division, of the name of Python 2, as PySpark's Column has it: as `__rtruediv__`.
+    fn __rdiv__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
+        let _origin = crate::origin::with_origin("__rdiv__");
         let o = to_column(&other.bind(py))?;
         Ok(PyColumn::new(o.div(self.column.clone())))
     }
@@ -760,6 +805,16 @@ impl PyColumn {
             "CANNOT_CONVERT_COLUMN_INTO_BOOL",
             &[("column", &self.column.expression().render())],
         ))
+    }
+
+    /// `__bool__` of the name of Python 2, as PySpark's Column has it.
+    fn __nonzero__(&self, py: Python<'_>) -> PyResult<bool> {
+        self.__bool__(py)
+    }
+
+    /// The arguments of `__new__` of this column, as PySpark Connect's: its expression.
+    fn __getnewargs__(&self) -> (PyColumnExpression,) {
+        (self._expr(),)
     }
 
     // --- named Column methods (PySpark camelCase) ---
