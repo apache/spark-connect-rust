@@ -1257,6 +1257,22 @@ def test_subqueries_and_table_arguments_return_the_rows_of_pyspark(session):
         session.range(1).asTable().orderBy("id")
 
 
+def test_columns_of_another_session_do_not_resolve_in_this_one(session):
+    # As PySpark's, plan IDs come from one counter of the process, so a column of a DataFrame of
+    # another session names no node of this one: CANNOT_RESOLVE_DATAFRAME_COLUMN, not the
+    # column of the same name.
+    other = session.newSession()
+    a = session.createDataFrame([(1,)], "id int")
+    b = other.createDataFrame([(2,)], "id int")
+    with pytest.raises(AnalysisException) as e:
+        a.select(b.id).collect()
+    assert e.value.getCondition() == "CANNOT_RESOLVE_DATAFRAME_COLUMN"
+    with pytest.raises(AnalysisException) as e:
+        a.filter(b.id == 2).count()
+    assert e.value.getCondition() == "CANNOT_RESOLVE_DATAFRAME_COLUMN"
+    assert a.select(a.id).collect() == [Row(id=1)]
+
+
 def test_tags_are_those_of_each_thread_as_pyspark(session):
     # As PySpark's: the tags of a thread are on its operations only, so interruptTag of the tag
     # of one thread interrupts its operation, but not that of another thread.
