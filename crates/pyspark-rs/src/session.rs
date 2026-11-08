@@ -561,7 +561,7 @@ fn tag_of(py: Python<'_>, tag: &Bound<'_, PyAny>) -> PyResult<String> {
     tag.extract()
 }
 
-#[pyclass(name = "SparkSession", module = "pyspark.sql.session")]
+#[pyclass(name = "SparkSession", module = "pyspark.sql.session", weakref, dict)]
 pub struct PySparkSession {
     pub(crate) session: SparkSession,
     /// The `StreamingQueryManager` of `spark.streams`, made at its first access.

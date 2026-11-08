@@ -43,7 +43,13 @@ fn flatten_str_cols(cols: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<String>> {
 }
 
 /// Python wrapper for a Spark DataFrame.
-#[pyclass(name = "DataFrame", module = "pyspark.sql.connect.dataframe", subclass)]
+#[pyclass(
+    name = "DataFrame",
+    module = "pyspark.sql.connect.dataframe",
+    subclass,
+    weakref,
+    dict
+)]
 pub struct PyDataFrame {
     pub(crate) dataframe: DataFrame,
     /// Whether `_repr_html_` was called, as PySpark's `_support_repr_html`: then `__repr__` is
@@ -2721,7 +2727,12 @@ impl PyDataFrame {
 }
 
 /// Python wrapper for `DataFrameNaFunctions` (`df.na`).
-#[pyclass(name = "DataFrameNaFunctions", module = "pyspark.sql.dataframe")]
+#[pyclass(
+    name = "DataFrameNaFunctions",
+    module = "pyspark.sql.dataframe",
+    weakref,
+    dict
+)]
 pub struct PyDataFrameNaFunctions {
     df: spark_connect::dataframe::DataFrame,
     /// The DataFrame of `df.na`, as PySpark's `DataFrameNaFunctions.df`.
@@ -3002,7 +3013,7 @@ pub(crate) fn column_or_name(col: &Bound<'_, PyAny>) -> PyResult<spark_connect::
 /// (`whenMatched().updateAll()`, ...) change this object and return it, and `merge`
 /// leaves it usable. The core writer is a consuming builder, so the wrapped value is
 /// replaced in place and `merge` runs on a clone.
-#[pyclass(name = "MergeIntoWriter", module = "pyspark.sql.merge")]
+#[pyclass(name = "MergeIntoWriter", module = "pyspark.sql.merge", weakref, dict)]
 pub struct PyMergeIntoWriter {
     inner: WriterState<spark_connect::MergeIntoWriter>,
 }
@@ -3186,7 +3197,12 @@ impl PyWhenNotMatchedBySource {
 }
 
 /// Python wrapper for the V1 `DataFrameWriter` (`df.write`).
-#[pyclass(name = "DataFrameWriter", module = "pyspark.sql.readwriter")]
+#[pyclass(
+    name = "DataFrameWriter",
+    module = "pyspark.sql.readwriter",
+    weakref,
+    dict
+)]
 pub struct PyDataFrameWriter {
     inner: WriterState<spark_connect::readwriter::DataFrameWriter>,
 }
@@ -3627,7 +3643,12 @@ impl PyDataFrameWriter {
 }
 
 /// Python wrapper for the V2 `DataFrameWriter` (`df.writeTo`).
-#[pyclass(name = "DataFrameWriterV2", module = "pyspark.sql.readwriter")]
+#[pyclass(
+    name = "DataFrameWriterV2",
+    module = "pyspark.sql.readwriter",
+    weakref,
+    dict
+)]
 pub struct PyDataFrameWriterV2 {
     inner: WriterState<spark_connect::readwriter::DataFrameWriterV2>,
 }

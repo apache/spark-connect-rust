@@ -15,7 +15,12 @@ use crate::errors::ResultExt;
 /// and return it, and a reader can be used again after a read. The core reader is a
 /// consuming builder, so the setters replace the wrapped value in place and return
 /// the same Python object, and the terminal reads build their DataFrame from a clone.
-#[pyclass(name = "DataFrameReader", module = "pyspark.sql.readwriter")]
+#[pyclass(
+    name = "DataFrameReader",
+    module = "pyspark.sql.readwriter",
+    weakref,
+    dict
+)]
 pub struct PyDataFrameReader {
     inner: DataFrameReader,
 }

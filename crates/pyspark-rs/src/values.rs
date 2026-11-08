@@ -6,7 +6,7 @@ use pyo3::types::PyBytes;
 
 /// A Variant value (the `value`/`metadata` binary components). Mirrors
 /// `pyspark.sql.types.VariantVal`.
-#[pyclass(name = "VariantVal", module = "pyspark.sql.types")]
+#[pyclass(name = "VariantVal", module = "pyspark.sql.types", weakref, dict)]
 pub struct PyVariantVal {
     pub(crate) value: Vec<u8>,
     pub(crate) metadata: Vec<u8>,
@@ -91,7 +91,7 @@ impl PyVariantVal {
 }
 
 /// A Geography value (WKB bytes + SRID). Mirrors `pyspark.sql.types.Geography`.
-#[pyclass(name = "Geography", module = "pyspark.sql.types")]
+#[pyclass(name = "Geography", module = "pyspark.sql.types", weakref, dict)]
 pub struct PyGeography {
     pub(crate) wkb: Vec<u8>,
     pub(crate) srid: i32,
@@ -135,7 +135,7 @@ impl PyGeography {
 }
 
 /// A Geometry value (WKB bytes + SRID). Mirrors `pyspark.sql.types.Geometry`.
-#[pyclass(name = "Geometry", module = "pyspark.sql.types")]
+#[pyclass(name = "Geometry", module = "pyspark.sql.types", weakref, dict)]
 pub struct PyGeometry {
     pub(crate) wkb: Vec<u8>,
     pub(crate) srid: i32,
