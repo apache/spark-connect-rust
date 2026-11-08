@@ -102,8 +102,9 @@ exercise the Rust transport with official PySpark; the separate native smoke
 step covers the drop-in `toArrow()` path.
 
 The pandas Arrow-string input guard recognizes pandas 2.2 and pandas 3 storage
-layouts. Compatibility with pandas 3 is checked by local matrix runs; CI currently
-pins `pandas>=2.2,<3.0`, so those local checks do not provide a pandas 3 CI lane.
+layouts, checked by local matrix runs. The Python Connect and pandas parity
+workflows pin `pandas>=2.2,<3.0`; coverage and pipelines parity install unpinned
+pandas. CI has no explicit pandas-version matrix.
 The inherited `pandas>=1.0.0` package declaration is below the runtime utilities'
 `>=2.2` requirement. Aligning the package metadata is a separate packaging
 follow-up; neither that declaration nor the Arrow-string checks establish support
