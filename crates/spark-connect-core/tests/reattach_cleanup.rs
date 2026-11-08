@@ -159,7 +159,8 @@ impl Fixture {
                 .unwrap();
         });
         let builder = ChannelBuilder::parse(&format!(
-            "sc://{address}/;user_id=transport-user;token=fixture-token;x-cleanup=fixture-value;session_id=00000000-0000-4000-8000-000000000001"
+            "sc://localhost:{}/;user_id=transport-user;token=fixture-token;x-cleanup=fixture-value;session_id=00000000-0000-4000-8000-000000000001",
+            address.port()
         ))
         .unwrap();
         let mut client = bounded(SparkConnectClient::connect(&builder))
