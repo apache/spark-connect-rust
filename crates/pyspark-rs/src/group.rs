@@ -276,13 +276,34 @@ impl PyGroupedData {
 
     /// Deprecated grouped-map apply: `apply(udf)` where `udf` is a
     /// `SQL_GROUPED_MAP_PANDAS_UDF` pandas UDF. Delegates to `applyInPandas` with the
-    /// UDF's wrapped function and return type (mirrors the official Connect API).
+    /// UDF's wrapped function and return type, as PySpark Connect's: anything else, such as a
+    /// Column, a function or a UDF of another eval type, raises `PySparkTypeError`
+    /// `INVALID_UDF_EVAL_TYPE`, and it warns to prefer `applyInPandas`.
     fn apply(&self, py: Python<'_>, udf: Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        let func = udf.getattr("func").map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "apply() expects a pandas_udf of type SQL_GROUPED_MAP_PANDAS_UDF",
-            )
-        })?;
+        // A Column has any attribute, of its field of that name, so it is checked first.
+        let grouped_map = !udf.is_instance_of::<crate::column::PyColumn>()
+            && udf.hasattr("func")?
+            && udf
+                .getattr("evalType")?
+                .eq(eval_type::SQL_GROUPED_MAP_PANDAS_UDF)?;
+        if !grouped_map {
+            return Err(crate::column::raise_pyspark(
+                py,
+                "PySparkTypeError",
+                "INVALID_UDF_EVAL_TYPE",
+                &[("eval_type", "SQL_GROUPED_MAP_PANDAS_UDF")],
+            ));
+        }
+        let warnings = py.import("warnings")?;
+        warnings.call_method1(
+            "warn",
+            (
+                "It is preferred to use 'applyInPandas' over this API. This API will be deprecated in the \
+                 future releases. See SPARK-28264 for more details.",
+                py.get_type::<pyo3::exceptions::PyUserWarning>(),
+            ),
+        )?;
+        let func = udf.getattr("func")?;
         let schema = udf.getattr("returnType")?;
         self.apply_in_pandas(py, func, schema)
     }

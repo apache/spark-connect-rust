@@ -12759,6 +12759,41 @@ def test_grouped_map_functions_warn_when_their_type_hints_cannot_be_inferred(
     assert _sent_group_map_eval_type(service.execute_requests[-1]) == eval_type
 
 
+def test_grouped_apply_takes_only_grouped_map_pandas_udfs_as_pyspark(mock_connect):
+    # As PySpark Connect's GroupedData.apply: anything but a pandas_udf of
+    # SQL_GROUPED_MAP_PANDAS_UDF raises INVALID_UDF_EVAL_TYPE, also a Column, which has any
+    # attribute; such a UDF is applied with applyInPandas, with the warning to prefer that.
+    import warnings
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+    from pyspark.sql.functions import PandasUDFType, pandas_udf
+
+    spark, service = mock_connect
+    df = spark.range(3)
+    grouped = df.groupBy("id")
+    for wrong in (
+        lambda x: x,
+        F.udf(lambda x: x, T.DoubleType()),
+        F.sum(df.id),
+        df.id + 1,
+        pandas_udf(lambda x, y: x, T.DoubleType()),
+        pandas_udf(lambda x, y: x, T.DoubleType(), PandasUDFType.SCALAR),
+    ):
+        with pytest.raises(PySparkTypeError) as error:
+            grouped.apply(wrong)
+        assert error.value.getCondition() == "INVALID_UDF_EVAL_TYPE"
+        assert error.value.getMessageParameters() == {"eval_type": "SQL_GROUPED_MAP_PANDAS_UDF"}
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        identity = pandas_udf(lambda pdf: pdf, _ID_SCHEMA, PandasUDFType.GROUPED_MAP)
+        grouped.apply(identity).collect()
+    assert (
+        "It is preferred to use 'applyInPandas' over this API. This API will be deprecated in "
+        "the future releases. See SPARK-28264 for more details."
+    ) in [str(w.message) for w in caught if w.category is UserWarning]
+    assert _sent_group_map_eval_type(service.execute_requests[-1]) == 201
+
+
 @pytest.mark.parametrize("build,detail", [
     (lambda df: df.groupBy("id").applyInPandas(lambda a, b, c: a, _ID_SCHEMA),
      "pandas_udfs with function type GROUPED_MAP or the function in groupby.applyInPandas "
