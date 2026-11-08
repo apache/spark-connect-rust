@@ -5,6 +5,7 @@
 
 use spark_connect_proto as proto;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use crate::column::Column;
@@ -486,6 +487,11 @@ pub enum SetOpType {
     Except,
 }
 
+/// The plan ID of the next new node, of all the sessions of the process: as PySpark's
+/// `LogicalPlan._nextPlanId`, one counter, so that a column of a DataFrame of another session
+/// names no node of this session's plan.
+static NEXT_PLAN_ID: AtomicI64 = AtomicI64::new(1);
+
 /// Plan IDs that stay the same each time a plan node is serialized, as PySpark assigns
 /// them once per plan. The server caches resolved plans keyed by the whole relation, so
 /// re-executing a DataFrame, or building on one it already resolved, reuses that work.
@@ -501,7 +507,6 @@ pub(crate) struct PlanIds {
 /// The state of `PlanIds`, all guarded by its one lock.
 #[derive(Debug)]
 struct PlanIdNodes {
-    next: i64,
     ids: HashMap<usize, (Weak<LogicalPlan>, i64)>,
     prune_at: usize,
 }
@@ -512,7 +517,6 @@ impl PlanIds {
     pub(crate) fn new() -> Self {
         PlanIds {
             nodes: Mutex::new(PlanIdNodes {
-                next: 1,
                 ids: HashMap::new(),
                 prune_at: Self::MIN_PRUNE_AT,
             }),
@@ -543,8 +547,7 @@ impl PlanIds {
             nodes.ids.retain(|_, (node, _)| node.strong_count() > 0);
             nodes.prune_at = (nodes.ids.len() * 2).max(Self::MIN_PRUNE_AT);
         }
-        let id = nodes.next;
-        nodes.next += 1;
+        let id = NEXT_PLAN_ID.fetch_add(1, Ordering::Relaxed);
         nodes.ids.insert(key, (Arc::downgrade(node), id));
         id
     }
@@ -552,8 +555,8 @@ impl PlanIds {
     /// Give `node` the plan ID `id`, of a relation that this session sent: so a DataFrame of the
     /// relation, such as one that was pickled, keeps the plan ID of the DataFrame it was of.
     pub(crate) fn assign(&self, node: &Arc<LogicalPlan>, id: i64) {
+        NEXT_PLAN_ID.fetch_max(id.saturating_add(1), Ordering::Relaxed);
         let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
-        nodes.next = nodes.next.max(id.saturating_add(1));
         nodes
             .ids
             .insert(Arc::as_ptr(node) as usize, (Arc::downgrade(node), id));

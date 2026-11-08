@@ -4086,7 +4086,7 @@ mod plan_construction_tests {
     #[test]
     fn a_relation_the_server_returned_is_sent_back_with_its_own_plan_id() {
         use proto::relation::RelType;
-        // A session of its own, whose plan IDs start at 1.
+        // A session of its own.
         let spark = session().new_session();
         let returned = |rel_type: RelType| {
             let relation = proto::Relation {
@@ -4115,7 +4115,10 @@ mod plan_construction_tests {
             Some(RelType::Sql(sql)) => assert_eq!(sql.query, "SELECT 1"),
             other => panic!("expected the returned SQL relation, got {other:?}"),
         }
-        assert_eq!(relation.common.and_then(|common| common.plan_id), Some(1));
+        assert_eq!(
+            relation.common.and_then(|common| common.plan_id),
+            Some(spark.plan_ids().id_of(&query.plan))
+        );
     }
 
     #[test]
@@ -4378,13 +4381,20 @@ mod plan_construction_tests {
     }
 
     #[test]
-    fn a_new_session_numbers_its_own_plans() {
+    fn the_sessions_of_a_process_never_hand_out_the_same_plan_id() {
+        // As PySpark's one counter of the process: a plan of one session never has the plan ID
+        // of a plan of another, so a column of another session names no node of this plan.
         let spark = session();
         let (one, two) = (spark.new_session(), spark.new_session());
-        assert_eq!(plan_ids_of(&one.range(1).unwrap().relation()), vec![1]);
-        assert_eq!(plan_ids_of(&one.range(2).unwrap().relation()), vec![2]);
-        // The plans of one session do not advance the numbering of another.
-        assert_eq!(plan_ids_of(&two.range(1).unwrap().relation()), vec![1]);
+        let mut seen = std::collections::HashSet::new();
+        for end in 0..10 {
+            for plans in [&one, &two] {
+                for id in plan_ids_of(&plans.range(end).unwrap().relation()) {
+                    assert!(seen.insert(id), "plan ID {id} was assigned twice");
+                }
+            }
+        }
+        assert_eq!(seen.len(), 20);
     }
 
     #[test]
