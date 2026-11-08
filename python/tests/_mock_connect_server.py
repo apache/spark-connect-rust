@@ -255,6 +255,10 @@ def serve(connection):
         response_gate = Event()
         # With `block_execute` set, ExecutePlan waits for the gate too, as AnalyzePlan does.
         block_execute = False
+        # Hold r2 after the first Arrow batch so cleanup tests cannot confuse an
+        # execution released by close with one released by normal completion.
+        block_result_complete = False
+        result_complete_operations = []
 
         # Each AnalyzePlanRequest, recorded.
         analyze_requests = []
@@ -271,8 +275,11 @@ def serve(connection):
             self.failure = None
             self.block_response = False
             self.block_execute = False
+            self.block_result_complete = False
+            self.result_complete_operations = []
             self.analyze_requests = []
             self.execute_requests = []
+            self.release_execute_requests = []
             self.execute_payload = b""
             self.execute_failure = None
             self.execute_error = None
@@ -284,6 +291,10 @@ def serve(connection):
             self.unset_confs = []
             self.confs = {}
             self.read_confs = []
+            self.config_requests = []
+            self.config_failure = None
+            self.block_config = False
+            self.rpc_events = []
             self.set_confs = []
             self.clone_requests = []
             # The DDL of the JSON of each JsonToDDL.
@@ -319,6 +330,12 @@ def serve(connection):
             self.release_session_calls = 0
 
         def analyze(self, request, context):
+            # AnalyzePlanRequest.session_id=1, echoed as AnalyzePlanResponse.session_id=1, as the
+            # server does: the client checks it.
+            session_id = parse_message(request).get(1, [b""])[0]
+            return message_field(1, session_id) + self._analyze(request, context)
+
+        def _analyze(self, request, context):
             self.calls += 1
             self.analyze_requests.append(request)
             with self.listener_condition:
@@ -367,6 +384,7 @@ def serve(connection):
         # with the status code name and message of a tuple. Responses echo the request's
         # operation id, as the server does.
         execute_requests = []
+        release_execute_requests = []
         execute_payload = b""
         execute_failure = None
         # With `execute_error` set to (message, reason, metadata), ExecutePlan fails as the
@@ -398,6 +416,10 @@ def serve(connection):
             "spark.sql.session.localRelationBatchOfChunksSizeBytes": "1073741824",
         }
         read_confs = []
+        config_requests = []
+        config_failure = None
+        block_config = False
+        rpc_events = []
         set_confs = []
 
         def release_session(self, request, context):
@@ -440,8 +462,13 @@ def serve(connection):
 
         def execute(self, request, context):
             with self.listener_condition:
-                self.execute_calls += 1
+                # Capture these before yielding: an earlier call can resume after reset.
+                block_result_complete = self.block_result_complete
+                result_complete_operations = self.result_complete_operations
+                # Counter waiters on another thread must see both records when ready.
                 self.execute_requests.append(request)
+                self.rpc_events.append("execute")
+                self.execute_calls += 1
                 execute_epoch = self.listener_epoch
                 response_gate = self.response_gate
                 blocked = self.block_execute
@@ -566,13 +593,26 @@ def serve(connection):
             # ExecutePlanRequest.operation_id=6; ExecutePlanResponse.operation_id=12,
             # response_id=13, result_complete=14.
             operation_id = parse_message(request).get(6, [b""])[0]
-            header = message_field(12, operation_id)
+            # ExecutePlanRequest.session_id=1, echoed as ExecutePlanResponse.session_id=1.
+            header = message_field(1, parse_message(request).get(1, [b""])[0]) + message_field(
+                12, operation_id
+            )
             yield header + message_field(13, "r1") + self.execute_payload
+            if block_result_complete and not response_gate.wait(30):
+                context.abort(
+                    grpc.StatusCode.DEADLINE_EXCEEDED,
+                    "ResultComplete was not released by the test",
+                )
+            result_complete_operations.append(operation_id)
             yield header + message_field(13, "r2") + message_field(14, b"")
 
         def warnings_fields(self):
             # ConfigResponse.warnings=3, of `config_warnings`.
             return b"".join(message_field(3, warning) for warning in self.config_warnings)
+
+        def release_execute(self, request, context):
+            self.release_execute_requests.append(request)
+            return b""
 
         def fetch_error_details(self, request, context):
             # FetchErrorDetailsRequest.error_id=3.
@@ -595,6 +635,15 @@ def serve(connection):
         def config(self, request, context):
             # ConfigRequest.session_id=1, operation=3, Operation.get=2, Get.keys=1;
             # ConfigResponse.session_id=1, pairs=2, KeyValue.key=1, value=2.
+            self.config_requests.append(request)
+            self.rpc_events.append("config")
+            if self.block_config and not self.response_gate.wait(5):
+                context.abort(
+                    grpc.StatusCode.DEADLINE_EXCEEDED,
+                    "Python thread could not run while configuration lookup waited",
+                )
+            if self.config_failure:
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT, self.config_failure)
             request = parse_message(request)
             operation = parse_message(request[3][0])
             if 1 in operation:
@@ -616,14 +665,20 @@ def serve(connection):
                 return message_field(1, request[1][0]) + self.warnings_fields()
             if 3 in operation:
                 # Operation.get_with_default=3: GetWithDefault.pairs=1 (KeyValue.key=1,
-                # value=2), the default of each key that `confs` does not have.
+                # value=2), the default of each key that `confs` does not have. A missing
+                # default stays unset in the response.
                 pairs = []
                 for pair in parse_message(operation[3][0]).get(1, []):
                     pair = parse_message(pair)
                     key = pair[1][0].decode()
                     self.read_confs.append(key)
-                    value = self.confs.get(key, pair.get(2, [b""])[0].decode())
-                    pairs.append(message_field(2, message_field(1, key) + message_field(2, value)))
+                    default = pair.get(2, [None])[0]
+                    default = None if default is None else default.decode()
+                    value = self.confs.get(key, default)
+                    encoded = message_field(1, key)
+                    if value is not None:
+                        encoded += message_field(2, value)
+                    pairs.append(message_field(2, encoded))
                 return message_field(1, request[1][0]) + b"".join(pairs)
             if 2 not in operation:
                 context.abort(
@@ -652,7 +707,7 @@ def serve(connection):
             "ReattachExecute": grpc.unary_stream_rpc_method_handler(
                 lambda request, context: iter([message_field(14, b"")])
             ),
-            "ReleaseExecute": grpc.unary_unary_rpc_method_handler(lambda request, context: b""),
+            "ReleaseExecute": grpc.unary_unary_rpc_method_handler(service.release_execute),
             "FetchErrorDetails": grpc.unary_unary_rpc_method_handler(service.fetch_error_details),
             "Config": grpc.unary_unary_rpc_method_handler(service.config),
             "CloneSession": grpc.unary_unary_rpc_method_handler(service.clone_session),

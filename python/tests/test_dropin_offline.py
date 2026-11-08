@@ -35,6 +35,7 @@ from _mock_connect_server import (
 from pyspark.sql import Row, SparkSession, types as T
 
 # Collected here so the existing offline CI suite exercises real Arrow results.
+from binary_configuration_cases import TestBinaryConfiguration  # noqa: F401
 from day_time_interval_cases import DayTimeIntervalTests  # noqa: F401
 from interval_input_cases import IntervalInputConversionTests  # noqa: F401
 from streaming_listener_cases import TestStreamingListenerLifecycle  # noqa: F401
@@ -1840,8 +1841,9 @@ def test_udfs_are_created_as_pyspark(mock_connect):
         assert F.udf(plus_one, "int", useArrow=True).evalType == 101
     finally:
         service.confs = {}
-    # Only udf() without useArrow reads the configuration.
-    assert service.read_confs == [arrow_conf] * 4
+    # Only udf() without useArrow reads its Arrow setting; every collect reads the result setting.
+    binary_conf = "spark.sql.execution.pyspark.binaryAsBytes"
+    assert service.read_confs == [arrow_conf, binary_conf, binary_conf] + [arrow_conf, binary_conf] * 3
 
 
 def test_map_functions_send_the_names_of_their_functions_as_pyspark(mock_connect):
@@ -2132,8 +2134,9 @@ def test_udtfs_are_created_as_pyspark(mock_connect):
         assert sent(F.udtf(Echo, returnType="a int", useArrow=True)) == (False, 301)
     finally:
         service.confs = {}
-    # Only udtf() without useArrow reads the configuration.
-    assert service.read_confs == [arrow_conf, arrow_conf]
+    # Only udtf() without useArrow reads its Arrow setting; every collect reads the result setting.
+    binary_conf = "spark.sql.execution.pyspark.binaryAsBytes"
+    assert service.read_confs == [arrow_conf] + [binary_conf] * 5 + [arrow_conf] + [binary_conf] * 2
 
 
 def test_time_values_are_sent_as_pyspark(mock_connect):
@@ -14100,10 +14103,14 @@ def version_cache_serve(connection, request_started, response_waiting, response_
                     )
             if self.failure == "rpc":
                 context.abort(grpc.StatusCode.INVALID_ARGUMENT, "version unavailable")
+            # AnalyzePlanRequest.session_id=1, echoed as AnalyzePlanResponse.session_id=1.
+            session_id = parse_message(request).get(1, [b""])[0]
             if self.failure == "no-result":
-                return b""
+                return message_field(1, session_id)
             # AnalyzePlanResponse.spark_version=8, SparkVersion.version=1.
-            return version_cache_message(8, version_cache_message(1, self.version))
+            return message_field(1, session_id) + version_cache_message(
+                8, version_cache_message(1, self.version)
+            )
 
         def release(self, request, context):
             self.releases += 1
@@ -14113,7 +14120,10 @@ def version_cache_serve(connection, request_started, response_waiting, response_
             # CloneSessionResponse.new_session_id=3, of a new session.
             import uuid
 
-            return message_field(3, str(uuid.uuid4()))
+            # CloneSessionRequest.session_id=1, echoed as CloneSessionResponse.session_id=1.
+            return message_field(1, parse_message(request).get(1, [b""])[0]) + message_field(
+                3, str(uuid.uuid4())
+            )
 
     service = Service()
     with version_cache_ThreadPoolExecutor(max_workers=4) as executor:

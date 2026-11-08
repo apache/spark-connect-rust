@@ -240,10 +240,11 @@ impl Iterator for LocalRowIterator {
     }
 }
 
-/// Spawn a background task that drains the response stream and forwards decoded
-/// batches over a bounded (capacity-1) channel, keeping one batch buffered ahead
-/// of the consumer. Execution metrics are recorded on the session once the
-/// stream ends. Backs `to_local_iterator(prefetch_partitions = true)`.
+/// Spawn a background task that forwards decoded response batches over a bounded
+/// (capacity-1) channel, keeping one batch buffered ahead of the consumer.
+/// Closing the receiver stops the task even while it awaits a response; dropping
+/// the stream releases the execution. Metrics received so far are recorded on the
+/// session when the task stops. Backs `to_local_iterator(prefetch_partitions = true)`.
 fn spawn_prefetch(
     session: SparkSession,
     mut stream: ExecutionStream,
@@ -253,7 +254,13 @@ fn spawn_prefetch(
     get_runtime().spawn(async move {
         let mut execution_info = ExecutionInfo::default();
         loop {
-            match stream.message().await {
+            // Closing the consumer must release the execution even while the server has
+            // not produced another response. Dropping this task's stream releases it.
+            let response = tokio::select! {
+                _ = tx.closed() => break,
+                response = stream.message() => response,
+            };
+            match response {
                 Ok(Some(mut resp)) => {
                     capture_execution(&mut resp, &mut execution_info, &session);
                     if let Err(e) = keep_schema(&mut resp, &schema) {
