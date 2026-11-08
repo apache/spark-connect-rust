@@ -5288,14 +5288,18 @@ def test_arrow_string_super_row_hooks_keep_native_errors(
     from pandas.core.arrays.arrow.array import ArrowExtensionArray
 
     _pandas_input = importlib.import_module("pyspark.sql._pandas_input")
-    frame = pd.DataFrame({"v": _arrow_string_column(["original", None] * 5000, storage)})
-    frame.columns = pd.Index(["v"], dtype=object) if label_storage == "object" else pd.Index(
-        pd.array(["v"], dtype="string[pyarrow]"))
+    frames = []
+    for _ in range(2):
+        frame = pd.DataFrame({"v": _arrow_string_column(["original", None] * 5000, storage)})
+        frame.columns = pd.Index(["v"], dtype=object) if label_storage == "object" else pd.Index(
+            pd.array(["v"], dtype="string[pyarrow]"))
+        frames.append(frame)
     schema = T.StructType([T.StructField("v", T.StringType())])
     calls = []
-    assert _pandas_input.prepare_string_input(frame, schema) is not None
-    assert _pandas_input.accepts_pandas_table(frame, schema)
-    assert _pandas_input.accepts_pandas_frame(frame)
+    for frame in frames:
+        assert _pandas_input.prepare_string_input(frame, schema) is not None
+        assert _pandas_input.accepts_pandas_table(frame, schema)
+        assert _pandas_input.accepts_pandas_frame(frame)
 
     class HookError(Exception):
         pass
@@ -5312,15 +5316,16 @@ def test_arrow_string_super_row_hooks_keep_native_errors(
         raise HookError(f"super {method} sentinel")
 
     monkeypatch.setattr(ArrowExtensionArray, method, customized)
-    assert _pandas_input.prepare_string_input(frame, schema) is None
-    assert not _pandas_input.accepts_pandas_table(frame, schema)
-    assert not _pandas_input.accepts_pandas_frame(frame)
+    for frame in frames:
+        assert _pandas_input.prepare_string_input(frame, schema) is None
+        assert not _pandas_input.accepts_pandas_table(frame, schema)
+        assert not _pandas_input.accepts_pandas_frame(frame)
     assert calls == []
     outcomes = []
     tables = []
     # The native control determines whether this pandas layout calls __init__.
     # pandas 3.1's null-subarray factory instead allocates through __new__.
-    for row_control in (True, False):
+    for row_control, frame in zip((True, False), frames):
         calls.clear()
         with monkeypatch.context() as control:
             if row_control:

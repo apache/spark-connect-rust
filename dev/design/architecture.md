@@ -136,8 +136,8 @@ limited to string-method names, initializer/storage declarations and class
 metadata. Its mixin initializer remains allowed because construction uses the
 class slots authenticated above. Class data read by the authenticated methods,
 such as `_storage` and `_na_value`, and module globals other than the explicitly
-checked aliases are outside these checks. These checks do not establish a general
-invariant for arbitrary mutations of pandas internals.
+checked aliases are outside these checks. These checks do not establish a
+general invariant for arbitrary mutations of pandas internals.
 
 ## UDF strategy (full compatibility)
 
