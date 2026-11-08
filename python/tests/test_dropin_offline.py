@@ -7086,6 +7086,30 @@ def test_local_input_native_number_values_and_types(mock_connect, value):
         assert actual == value
 
 
+def test_pandas_frames_of_duplicate_nested_field_names_are_sent_as_pyspark(mock_connect):
+    # As PySpark Connect: a pandas frame under a schema whose structs repeat field names is sent
+    # as the Arrow table of the deduplicated names (x_0, x_1), with the schema as given, which
+    # the server applies. Before, the client raised DUPLICATED_FIELD_NAME_IN_ARROW_STRUCT.
+    pd = pytest.importorskip("pandas")
+    pa = pytest.importorskip("pyarrow")
+
+    spark, service = mock_connect
+    schema = T.StructType().add(
+        "s", T.StructType().add("x", T.StringType()).add("x", T.IntegerType())
+    )
+    frame = pd.DataFrame.from_records([(Row("a", 1),), (Row("b", None),)], columns=schema.names)
+    spark.createDataFrame(frame, schema).toArrow()
+    relation = parse_message(parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0])
+    while 18 in relation:  # Relation.to_df -> ToDF.input.
+        relation = parse_message(parse_message(relation[18][0])[1][0])
+    # Relation.local_relation=11 -> LocalRelation.data=1, schema=2.
+    local = parse_message(relation[11][0])
+    table = pa.ipc.open_stream(local[1][0]).read_all()
+    assert table.schema.field("s").type == pa.struct([("x_0", pa.string()), ("x_1", pa.int32())])
+    assert table.to_pylist() == [{"s": {"x_0": "a", "x_1": 1}}, {"s": {"x_0": "b", "x_1": None}}]
+    assert T.StructType.fromJson(json.loads(local[2][0])) == schema
+
+
 def test_pandas_input_overflow_raises_as_pyspark(mock_connect):
     # Without a schema, PySpark infers the Arrow type of an object column, so an integer
     # outside the int64 range raises OverflowError rather than becoming a double.

@@ -145,8 +145,9 @@ class IntegerTupleTests(unittest.TestCase):
         frame = self.spark.createDataFrame(data, schema)
         self.assertEqual(len(self.captured), before)  # construction remains offline
         # Explicit-schema pandas input reads the Arrow conversion settings during
-        # construction, as PySpark does: the normalization and safe-cast configuration.
-        expected = 3 if isinstance(data, pd.DataFrame) else 0
+        # construction, as PySpark does: the Arrow input settings and the safe-cast
+        # configuration, once each.
+        expected = 2 if isinstance(data, pd.DataFrame) else 0
         self.assertEqual(self.config_calls - config_before, expected)
         config_before = self.config_calls
         frame.toArrow()

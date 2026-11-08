@@ -794,14 +794,21 @@ impl PySparkSession {
             safecheck,
             large,
         ))?;
-        let frame = crate::pyarrow_import::create_dataframe(
-            py,
-            &self.session,
-            &table,
-            Some(schema_py.bind(py)),
-        )?;
+        // As PySpark Connect, the table, cast to the Arrow types of the schema of deduplicated
+        // nested field names, is sent with the schema as given, which the server applies. It is
+        // not normalized again as an Arrow table of the caller, which may not repeat the names
+        // of the fields of a struct (DUPLICATED_FIELD_NAME_IN_ARROW_STRUCT).
+        let spark_schema = crate::types::py_to_data_type(schema_py.bind(py))?;
+        let batches = crate::pyarrow_import::table_batches(&table)?;
+        let df = py
+            .detach(|| {
+                self.session
+                    .create_dataframe_from_arrow_with_options(batches, Some(spark_schema), &options)
+                    .map_err(Box::new)
+            })
+            .to_pyerr()?;
         // As the other pandas paths, the explicit names are applied with toDF.
-        Ok(Some(PyDataFrame::new(frame.dataframe.to_df(
+        Ok(Some(PyDataFrame::new(df.to_df(
             fields.iter().map(|field| field.name.as_str()).collect(),
         ))))
     }

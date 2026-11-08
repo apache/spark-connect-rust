@@ -2637,6 +2637,33 @@ def test_struct_types_convert_to_the_ddl_of_spark_as_pyspark(session):
 
 
 
+def test_pandas_frames_of_duplicate_nested_field_names_are_created_as_pyspark(session):
+    # As PySpark's test_createDataFrame_pandas_duplicate_field_names: the structs of the schema
+    # repeat field names, with Arrow and without.
+    import pandas as pd
+    from pyspark.sql.types import StructType
+
+    schema = (
+        StructType()
+        .add("struct", StructType().add("x", StringType()).add("x", IntegerType()))
+        .add(
+            "struct",
+            StructType().add("a", IntegerType()).add("x", IntegerType()).add("x", StringType()),
+        )
+    )
+    data = [Row(Row("a", 1), Row(2, 3, "b")), Row(Row("x", None), Row(7, 8, None))]
+    frame = pd.DataFrame.from_records(data, columns=schema.names)
+    try:
+        for arrow in ("true", "false"):
+            session.conf.set("spark.sql.execution.arrow.pyspark.enabled", arrow)
+            df = session.createDataFrame(frame, schema)
+            assert df.schema == schema and df.collect() == data, arrow
+    finally:
+        session.conf.unset("spark.sql.execution.arrow.pyspark.enabled")
+
+
+
+
 def test_maps_keep_their_entries_in_order_with_keys_of_their_type(session):
     row = session.range(1).selectExpr(
         "map(2, 'b', 1, 'a') AS ints",
