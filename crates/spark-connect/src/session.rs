@@ -9,6 +9,7 @@ use spark_connect_core::channel::ChannelBuilder;
 use spark_connect_core::client::{ExecutePlanHook, SparkConnectClient};
 use spark_connect_core::error::{Result, SparkError};
 use spark_connect_core::runtime::block_on;
+use spark_connect_core::thread_entries::forget_when_thread_ends;
 use spark_connect_proto as proto;
 
 use crate::dataframe::DataFrame;
@@ -46,7 +47,15 @@ pub struct ExecutionInfo {
 /// the set of tags that it copied.
 #[derive(Default)]
 pub(crate) struct ThreadTags {
-    by_thread: Mutex<std::collections::HashMap<std::thread::ThreadId, SharedTags>>,
+    by_thread: Arc<Mutex<std::collections::HashMap<std::thread::ThreadId, SharedTags>>>,
+}
+
+/// Forget the tags of a thread that ends, as PySpark's `thread_local` is freed with its thread.
+fn forget_thread_tags(
+    by_thread: &mut std::collections::HashMap<std::thread::ThreadId, SharedTags>,
+    thread: std::thread::ThreadId,
+) {
+    by_thread.remove(&thread);
 }
 
 /// A set of operation tags of threads: a copy of the tags of a thread, of
@@ -76,6 +85,9 @@ impl ThreadTags {
     fn update(&self, change: impl FnOnce(&mut Vec<String>)) {
         let mut by_thread = self.by_thread.lock().unwrap_or_else(|e| e.into_inner());
         let thread = std::thread::current().id();
+        if !by_thread.contains_key(&thread) {
+            forget_when_thread_ends(&self.by_thread, forget_thread_tags);
+        }
         let shared = by_thread.entry(thread).or_default().clone();
         let mut tags = shared.0.lock().unwrap_or_else(|e| e.into_inner());
         change(&mut tags);
@@ -102,10 +114,12 @@ impl ThreadTags {
 
     /// Make `tags` those of the current thread.
     fn share(&self, tags: &SharedTags) {
-        self.by_thread
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(std::thread::current().id(), tags.clone());
+        let mut by_thread = self.by_thread.lock().unwrap_or_else(|e| e.into_inner());
+        let thread = std::thread::current().id();
+        if !by_thread.contains_key(&thread) {
+            forget_when_thread_ends(&self.by_thread, forget_thread_tags);
+        }
+        by_thread.insert(thread, tags.clone());
     }
 }
 
@@ -2703,6 +2717,49 @@ mod tests {
         };
         assert_eq!(cleared, vec!["d"]);
         assert_eq!(run(copy, "e"), vec!["a", "b", "e"]);
+    }
+
+    #[test]
+    fn finished_threads_leave_no_tags() {
+        // The threads that share a copy of the tags are forgotten when they end, as PySpark's
+        // thread_local is freed with its thread: 1000 short threads leave no entry.
+        let spark = session();
+        let copy = spark.copy_thread_tags();
+        for _ in 0..1000 {
+            let spark = spark.clone();
+            let copy = copy.clone();
+            std::thread::spawn(move || {
+                spark.share_thread_tags(&copy);
+                spark.add_tag("task").unwrap();
+            })
+            .join()
+            .unwrap();
+        }
+        assert!(spark.tags.by_thread.lock().unwrap().is_empty());
+        assert!(spark.get_tags().is_empty());
+    }
+
+    #[test]
+    fn a_living_thread_keeps_its_tags_until_it_ends() {
+        let spark = session();
+        let copy = spark.copy_thread_tags();
+        let (tags_tx, tags_rx) = std::sync::mpsc::channel();
+        let (end_tx, end_rx) = std::sync::mpsc::channel::<()>();
+        let child = {
+            let spark = spark.clone();
+            std::thread::spawn(move || {
+                spark.share_thread_tags(&copy);
+                spark.add_tag("a").unwrap();
+                tags_tx.send(spark.get_tags()).unwrap();
+                end_rx.recv().unwrap();
+                spark.get_tags()
+            })
+        };
+        assert_eq!(tags_rx.recv().unwrap(), vec!["a"]);
+        assert_eq!(spark.tags.by_thread.lock().unwrap().len(), 1);
+        end_tx.send(()).unwrap();
+        assert_eq!(child.join().unwrap(), vec!["a"]);
+        assert!(spark.tags.by_thread.lock().unwrap().is_empty());
     }
 
     #[test]
