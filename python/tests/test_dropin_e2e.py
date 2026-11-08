@@ -2938,6 +2938,28 @@ def test_create_dataframe_merges_the_types_of_every_row_as_pyspark(session):
         assert [tuple(r) for r in df.collect()] == [(text,), ("5",)]
 
 
+def test_foreach_batch_functions_that_capture_dataframes_run_as_pyspark(session, tmp_path):
+    # As PySpark's: a DataFrame that a foreachBatch function captures unpickles on the Python
+    # worker of the server, of the session of the query there, with its plan, whose columns refer
+    # to it by its plan ID.
+    (tmp_path / "input.txt").write_text("a\nb\n")
+    captured = session.createDataFrame([("you", "can"), ("serialize", "dataframe")])
+    kept = captured.filter(captured["_1"] == "you")
+    name = "foreach_batch_captured_dataframe"
+
+    def func(df, batch_id):
+        kept.createOrReplaceTempView(name)
+
+    query = session.readStream.format("text").load(str(tmp_path)).writeStream.foreachBatch(func)
+    query = query.start()
+    try:
+        query.processAllAvailable()
+        assert session.table(name).collect() == [Row(_1="you", _2="can")]
+    finally:
+        query.stop()
+        session.catalog.dropTempView(name)
+
+
 def test_foreach_runs_a_function_and_a_writer_of_each_row_as_pyspark(session, tmp_path):
     # As PySpark's foreach: a function of a row, and an object of open, process and close, run
     # on each row of each batch, here writing a file of each row on the local server.
