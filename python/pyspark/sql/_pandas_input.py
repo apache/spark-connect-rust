@@ -24,8 +24,7 @@ _ARROW_STRING_HOOKS = ("__arrow_array__", "__array__", "__getitem__", "isna",
 _ARROW_STRING_CONSTRUCTION_HOOKS = ("__init__", "_from_pyarrow_array", "__new__")
 _ARROW_STRING_MIXIN_ALLOWED_NAMES = (
     "__module__", "__qualname__", "__doc__", "__dict__", "__weakref__",
-    "__annotations__", "__firstlineno__", "__static_attributes__", "__annotate__",
-    "__type_params__", "_pa_array", "__init__",
+    "__firstlineno__", "__static_attributes__", "_pa_array", "__init__",
 )
 
 
@@ -89,8 +88,8 @@ def _arrow_string_class_is_canonical(cls):
 
         mixin = string_mixins.ArrowStringArrayMixin
         # This accessor dispatches through the mixin before the ordinary MRO.
-        # Authenticate its globals and allow only string-method names, class metadata,
-        # and the initializer/storage declarations in its namespace.
+        # Check the mixin/partial aliases and allow only string-method names, class
+        # metadata, and initializer/storage declarations in the mixin namespace.
         # Construction itself uses class slots, checked separately below;
         # the mixin's canonical __init__ is not an instance conversion hook.
         if (not any(base is mixin for base in cls.__mro__)

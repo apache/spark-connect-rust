@@ -4540,11 +4540,12 @@ def test_arrow_string_custom_arrow_hook_keeps_native_row_values(
 @pytest.mark.parametrize("customization", [
     "mixin_hook", "mixin_alias", "partial_alias", "mixin_storage", "mixin_dtype",
 ])
-def test_arrow_string_numpy_semantics_accessor_keeps_native_values(
+def test_arrow_string_numpy_semantics_accessor_keeps_native_outcomes(
     protocol, monkeypatch, customization, schema_kind
 ):
     import importlib
     import json
+    import traceback
     from pandas.core.arrays import _arrow_string_mixins as string_mixins, string_arrow
     from pyspark.sql.pandas.types import from_arrow_schema
 
@@ -4612,6 +4613,11 @@ def test_arrow_string_numpy_semantics_accessor_keeps_native_values(
                     reply = spark.createDataFrame(frame, input_schema).toArrow()
                 except Exception as error:
                     assert dynamic_accessor and customization in ("mixin_storage", "mixin_dtype")
+                    assert not isinstance(error, AssertionError)
+                    assert any(
+                        frame.f_globals.get("__name__", "").startswith("pandas.core.arrays.")
+                        for frame, _ in traceback.walk_tb(error.__traceback__)
+                    )
                     assert state["input_tables"] == []
                     assert state["config_requests"] == []
                     assert state["uploads"] == 0
@@ -4648,6 +4654,8 @@ def test_arrow_string_numpy_semantics_accessor_keeps_native_values(
                 logical_tables.append(renamed.cast(pa.schema([pa.field("v", pa.string())])))
     assert calls == []
     assert outcomes[0] == outcomes[1]
+    if dynamic_accessor and customization in ("mixin_storage", "mixin_dtype"):
+        assert outcomes[0] is not None
     if logical_tables:
         assert len(logical_tables) == 2
         assert logical_tables[0].equals(logical_tables[1], check_metadata=True)
