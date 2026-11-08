@@ -519,10 +519,11 @@ def _arrow_input_service(
             context.abort(error, "configuration read failed")
         # Deliberately reverse responses; Get omits missing keys to test key mapping.
         # A present null key leaves the optional protobuf value unset.
-        response = protocol("ConfigResponse", session_id=request.session_id,
-                            pairs=[dict(key=k, value=config.get(k, defaults[k]) if defaults is not None
-                                        else config[k]) for k in reversed(keys)
-                                   if k in config or defaults is not None])
+        if defaults is None:
+            pairs = [dict(key=k, value=config[k]) for k in reversed(keys) if k in config]
+        else:
+            pairs = [dict(key=k, value=config.get(k, defaults[k])) for k in reversed(keys)]
+        response = protocol("ConfigResponse", session_id=request.session_id, pairs=pairs)
         state["config_responses"].append(response)
         return response.SerializeToString()
 

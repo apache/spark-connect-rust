@@ -4104,7 +4104,8 @@ fn read_binary_as_bytes(py: Python<'_>, dataframe: &DataFrame) -> PyResult<bool>
 }
 
 /// The collected `rows` of a result of `schema` of `dataframe`, whose values of user-defined
-/// types are deserialized when first read.
+/// types are deserialized when first read. Reads the binary result setting after execution
+/// and applies it to binary values, including when only an Arrow schema is available.
 fn rows_to_py(
     py: Python<'_>,
     dataframe: &DataFrame,
@@ -4161,6 +4162,38 @@ impl PyLocalRowIterator {
         }
         self.iterator.as_mut()?.next()
     }
+
+    /// Prepare and fetch one Python row; the public wrapper closes on exhaustion or error.
+    fn next_python_row(&mut self, py: Python<'_>) -> PyResult<Option<PyRow>> {
+        let binary_as_bytes = match self.binary_as_bytes {
+            Some(value) => value,
+            None => {
+                let value = read_binary_as_bytes(py, &self.dataframe)?;
+                self.binary_as_bytes = Some(value);
+                value
+            }
+        };
+        let next = py.detach(|| self.next_row());
+        if self.converters.is_none() {
+            if let Some(schema) = self.iterator.as_ref().and_then(LocalRowIterator::schema) {
+                // The result is known once its first message arrives, possibly with no rows.
+                check_collectable(py, Some(&schema))?;
+                self.converters = Some(udt_field_converters(py, Some(&schema))?);
+            }
+        }
+        match next {
+            Some(Ok(row)) => {
+                let converters = self.converters.clone().flatten();
+                Ok(Some(PyRow::with_converters(
+                    row,
+                    converters,
+                    binary_as_bytes,
+                )))
+            }
+            Some(Err(error)) => Err(crate::errors::spark_error_to_py_exception(error)),
+            None => Ok(None),
+        }
+    }
 }
 
 #[pymethods]
@@ -4180,59 +4213,17 @@ impl PyLocalRowIterator {
 
     /// Fetch the next row from the iterator.
     ///
-    /// Releases the GIL during the blocking fetch to allow other threads to run.
+    /// The first call snapshots the binary result setting before starting execution.
+    /// Both the Config RPC and blocking row fetch release the GIL.
     fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<PyRow>> {
         if self.finished {
             return Ok(None);
         }
-        let binary_as_bytes = match self.binary_as_bytes {
-            Some(value) => value,
-            None => match read_binary_as_bytes(py, &self.dataframe) {
-                Ok(value) => {
-                    self.binary_as_bytes = Some(value);
-                    value
-                }
-                Err(error) => {
-                    self.close(py);
-                    return Err(error);
-                }
-            },
-        };
-        // Release the GIL while fetching from the Rust iterator (which may block on network I/O).
-        let next = py.detach(|| self.next_row());
-        if self.converters.is_none() {
-            if let Some(schema) = self.iterator.as_ref().and_then(LocalRowIterator::schema) {
-                // The result is known once its first message arrives, possibly with no rows.
-                if let Err(error) = check_collectable(py, Some(&schema)) {
-                    self.close(py);
-                    return Err(error);
-                }
-                match udt_field_converters(py, Some(&schema)) {
-                    Ok(converters) => self.converters = Some(converters),
-                    Err(error) => {
-                        self.close(py);
-                        return Err(error);
-                    }
-                }
-            }
-        }
-        match next {
-            Some(Ok(row)) => {
-                let converters = self.converters.clone().flatten();
-                Ok(Some(PyRow::with_converters(
-                    row,
-                    converters,
-                    binary_as_bytes,
-                )))
-            }
-            // As PySpark raises the error of the execution, which ends the iteration.
-            Some(Err(error)) => {
+        match self.next_python_row(py) {
+            Ok(Some(row)) => Ok(Some(row)),
+            result => {
                 self.close(py);
-                Err(crate::errors::spark_error_to_py_exception(error))
-            }
-            None => {
-                self.close(py);
-                Ok(None)
+                result
             }
         }
     }

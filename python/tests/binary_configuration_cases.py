@@ -17,16 +17,54 @@
 """Binary result configuration through native actions and the mock transport."""
 
 from concurrent.futures import ThreadPoolExecutor
+import subprocess
+import sys
 import time
 
 import pytest
 
 from _mock_connect_server import data_type_proto, message_field, parse_message, varint_field
+from pyspark.errors import PySparkException
 from pyspark.sql import types as T
 
 
 _BINARY_CONF = "spark.sql.execution.pyspark.binaryAsBytes"
-_ACTIONS = ["collect", "first", "head", "head_n", "take", "tail", "iterator", "prefetch"]
+_EAGER_ACTIONS = ["collect", "first", "head", "head_n", "take", "tail"]
+_ACTIONS = _EAGER_ACTIONS + ["iterator", "prefetch"]
+
+
+_ITERATOR_RELEASE_CHILD = r"""
+import sys
+import pytest
+from pyspark.sql import SparkSession, types as T
+
+spark = SparkSession.builder.remote(sys.argv[1]).getOrCreate()
+reason = sys.argv[3]
+original = T._udt_field_converters
+
+def fail(schema):
+    raise LookupError("converter initialization failed")
+
+if reason == "converter_failure":
+    T._udt_field_converters = fail
+iterator = spark.range(2).toLocalIterator(sys.argv[2] == "True")
+try:
+    if reason == "converter_failure":
+        with pytest.raises(LookupError, match="converter initialization failed"):
+            next(iterator)
+        T._udt_field_converters = original
+    else:
+        assert next(iterator).b == b"x"
+        iterator.close()
+    with pytest.raises(StopIteration):
+        next(iterator)
+    # Keep the process and its runtime alive until the parent verifies ReleaseAll.
+    assert sys.stdin.readline() == "finish\n"
+finally:
+    T._udt_field_converters = original
+    iterator.close()
+    spark.stop()
+"""
 
 
 def _results(service, batch, schema=None):
@@ -53,8 +91,8 @@ def _action(frame, method):
     return list(frame.toLocalIterator(method == "prefetch"))
 
 
-def _wait_for(predicate):
-    deadline = time.monotonic() + 5
+def _wait_for(predicate, timeout=5):
+    deadline = time.monotonic() + timeout
     while not predicate():
         if time.monotonic() >= deadline:
             raise AssertionError("mock RPC did not arrive")
@@ -170,13 +208,13 @@ class TestBinaryConfiguration:
             assert type(pending.result(timeout=10)[0].b) is bytes
         assert service.rpc_events == ["execute", "config"]
 
-    @pytest.mark.parametrize("method", _ACTIONS[:6])
+    @pytest.mark.parametrize("method", _EAGER_ACTIONS)
     def test_eager_configuration_failure_follows_execution(self, mock_connect, method):
         pa = pytest.importorskip("pyarrow")
         spark, service = mock_connect
         _results(service, pa.RecordBatch.from_arrays([pa.array([b"x"])], names=["b"]))
         service.config_failure = "binary setting unavailable"
-        with pytest.raises(Exception, match="binary setting unavailable"):
+        with pytest.raises(PySparkException, match="binary setting unavailable"):
             _action(spark.range(1), method)
         assert service.rpc_events == ["execute", "config"]
         assert service.execute_calls == 1 and len(service.config_requests) == 1
@@ -185,7 +223,7 @@ class TestBinaryConfiguration:
         spark, service = mock_connect
         service.execute_failure = "execution failed"
         service.config_failure = "binary setting unavailable"
-        with pytest.raises(Exception, match="execution failed"):
+        with pytest.raises(PySparkException, match="execution failed"):
             spark.range(1).collect()
         assert service.rpc_events == ["execute"] and service.config_requests == []
 
@@ -195,7 +233,7 @@ class TestBinaryConfiguration:
         service.config_failure = "binary setting unavailable"
         iterator = spark.range(2).toLocalIterator(prefetch)
         assert service.rpc_events == []
-        with pytest.raises(Exception, match="binary setting unavailable"):
+        with pytest.raises(PySparkException, match="binary setting unavailable"):
             next(iterator)
         service.config_failure = None
         with pytest.raises(StopIteration):
@@ -205,37 +243,53 @@ class TestBinaryConfiguration:
         assert service.execute_calls == 0
 
     @pytest.mark.parametrize("prefetch", [False, True])
-    def test_iterator_converter_initialization_failure_closes_execution(
-        self, mock_connect, monkeypatch, prefetch
+    @pytest.mark.parametrize("reason", ["explicit", "converter_failure"])
+    def test_iterator_close_releases_execution_before_completion(
+        self, mock_connect, prefetch, reason
     ):
         pa = pytest.importorskip("pyarrow")
-        spark, service = mock_connect
-        spatial = pa.struct([("wkb", pa.binary()), ("srid", pa.int32())])
-        batch = pa.RecordBatch.from_arrays([
-            pa.array([{"wkb": b"x", "srid": 4326}] * 2, type=spatial),
-        ], names=["g"])
-        _results(service, batch, T.StructType([T.StructField("g", T.GeometryType(4326))]))
-        original = T._udt_field_converters
-
-        def fail(schema):
-            raise LookupError("converter initialization failed")
-
-        monkeypatch.setattr(T, "_udt_field_converters", fail)
-        iterator = spark.range(2).toLocalIterator(prefetch)
+        _, service = mock_connect
+        if reason == "converter_failure":
+            spatial = pa.struct([("wkb", pa.binary()), ("srid", pa.int32())])
+            batch = pa.RecordBatch.from_arrays([
+                pa.array([{"wkb": b"x", "srid": 4326}] * 2, type=spatial),
+            ], names=["g"])
+            schema = T.StructType([T.StructField("g", T.GeometryType(4326))])
+        else:
+            batch = pa.RecordBatch.from_arrays([pa.array([b"x", b"y"])], names=["b"])
+            schema = None
+        _results(service, batch, schema)
+        service.block_result_complete = True
+        # Isolate the native close/failure path: retaining the GIL or waiting forever in
+        # close must fail this bounded test without hanging the pytest interpreter.
+        child = subprocess.Popen(
+            [sys.executable, "-c", _ITERATOR_RELEASE_CHILD, service.remote, str(prefetch), reason],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
         try:
-            with pytest.raises(LookupError, match="converter initialization failed"):
-                next(iterator)
-            monkeypatch.setattr(T, "_udt_field_converters", original)
-            with pytest.raises(StopIteration):
-                next(iterator)
+            _wait_for(lambda: bool(service.execute_requests) or child.poll() is not None, timeout=20)
+            assert service.execute_requests, "Iterator did not start an execution"
             operation_id = parse_message(service.execute_requests[0])[6]
-            # ReleaseExecuteRequest.release_all=5; a closed iterator keeps no server execution.
-            _wait_for(lambda: any(
-                5 in fields and fields.get(3) == operation_id
-                for fields in map(parse_message, service.release_execute_requests)
-            ))
+
+            def released():
+                # ReleaseExecuteRequest.release_all=5 and operation_id=3.
+                return any(
+                    5 in fields and fields.get(3) == operation_id
+                    for fields in map(parse_message, service.release_execute_requests)
+                )
+
+            _wait_for(lambda: released() or child.poll() is not None)
+            assert released(), "Closing the iterator did not release its execution"
+            # ResultComplete cannot have caused this release while r2 is still held.
+            assert service.block_result_complete
+            assert not service.result_complete_sent
+            stdout, stderr = child.communicate("finish\n", timeout=10)
+            assert child.returncode == 0, stdout + stderr
         finally:
-            iterator.close()
+            service.release_response()
+            if child.poll() is None:
+                child.kill()
+            child.communicate(timeout=10)
         assert service.rpc_events == ["config", "execute"]
 
     @pytest.mark.parametrize("prefetch", [False, True])
@@ -245,6 +299,8 @@ class TestBinaryConfiguration:
         iterator.close()
         assert list(iterator) == []
         assert service.rpc_events == []
+        assert service.calls == 0
+        assert service.release_execute_requests == []
 
     @pytest.mark.parametrize("iterator", [False, True])
     def test_configuration_wait_releases_gil(self, mock_connect, iterator):

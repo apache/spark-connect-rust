@@ -254,6 +254,11 @@ def serve(connection):
         response_gate = Event()
         # With `block_execute` set, ExecutePlan waits for the gate too, as AnalyzePlan does.
         block_execute = False
+        # Hold r2 after the first Arrow batch so cleanup tests cannot confuse an
+        # execution released by close with one released by normal completion.
+        block_result_complete = False
+        result_complete_waiting = False
+        result_complete_sent = False
 
         # Each AnalyzePlanRequest, recorded.
         analyze_requests = []
@@ -267,6 +272,9 @@ def serve(connection):
             self.block_response = False
             self.response_gate.clear()
             self.block_execute = False
+            self.block_result_complete = False
+            self.result_complete_waiting = False
+            self.result_complete_sent = False
             self.analyze_requests = []
             self.execute_requests = []
             self.release_execute_requests = []
@@ -413,6 +421,17 @@ def serve(connection):
             operation_id = parse_message(request).get(6, [b""])[0]
             header = message_field(12, operation_id)
             yield header + message_field(13, "r1") + self.execute_payload
+            if self.block_result_complete:
+                self.result_complete_waiting = True
+                try:
+                    if not self.response_gate.wait(30):
+                        context.abort(
+                            grpc.StatusCode.DEADLINE_EXCEEDED,
+                            "ResultComplete was not released by the test",
+                        )
+                finally:
+                    self.result_complete_waiting = False
+            self.result_complete_sent = True
             yield header + message_field(13, "r2") + message_field(14, b"")
 
         def warnings_fields(self):

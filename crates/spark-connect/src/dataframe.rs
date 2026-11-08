@@ -212,7 +212,13 @@ fn spawn_prefetch(
     get_runtime().spawn(async move {
         let mut execution_info = ExecutionInfo::default();
         loop {
-            match stream.message().await {
+            // Closing the consumer must release the execution even while the server has
+            // not produced another response. Dropping this task's stream releases it.
+            let response = tokio::select! {
+                _ = tx.closed() => break,
+                response = stream.message() => response,
+            };
+            match response {
                 Ok(Some(mut resp)) => {
                     capture_execution(&mut resp, &mut execution_info, &session);
                     if let Err(e) = keep_schema(&mut resp, &schema) {

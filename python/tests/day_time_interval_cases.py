@@ -167,7 +167,9 @@ class DayTimeIntervalTests(unittest.TestCase):
 
         def configure(raw, context):
             request = self.messages["ConfigRequest"].FromString(raw)
-            self.assertEqual(request.operation.WhichOneof("op_type"), "get_with_default")
+            operation = request.operation.WhichOneof("op_type")
+            if operation != "get_with_default":
+                context.abort(grpc.StatusCode.UNIMPLEMENTED, f"unexpected Config operation {operation}")
             return self.messages["ConfigResponse"](
                 session_id=request.session_id,
                 pairs=list(request.operation.get_with_default.pairs),
