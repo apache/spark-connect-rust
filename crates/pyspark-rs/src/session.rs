@@ -700,7 +700,8 @@ impl PySparkSession {
                 out.push(infer::convert(&row[i], &field.data_type, field.nullable)?);
             }
         }
-        // Then, as PySpark, the schema converts to Arrow, which has no char or varchar type.
+        // Then, as PySpark, the schema converts to Arrow, which has no char, varchar, year-month or
+        // calendar interval type.
         for field in &fields {
             if let Some(err) = infer::unsupported_arrow_type(py, &field.data_type)? {
                 return Err(err);

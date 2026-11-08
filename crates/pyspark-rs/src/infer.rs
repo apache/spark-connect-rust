@@ -1161,7 +1161,10 @@ pub(crate) fn convert(obj: &Bound<'_, PyAny>, dt: &DataType, nullable: bool) -> 
         }
         // As PySpark, which has no converter of these types: the value goes as it is to
         // `to_arrow_schema`, which raises for the type (`unsupported_arrow_type`).
-        DataType::Char { .. } | DataType::Varchar { .. } => Ok(Value::Null),
+        DataType::Char { .. }
+        | DataType::Varchar { .. }
+        | DataType::YearMonthInterval { .. }
+        | DataType::CalendarInterval => Ok(Value::Null),
         DataType::Boolean => {
             if obj.is_instance_of::<PyBool>() || numpy_scalar(obj)? == Some(NumpyScalar::Bool) {
                 Ok(Value::Bool(obj.is_truthy()?))
@@ -1286,29 +1289,34 @@ fn date_days(obj: &Bound<'_, PyAny>) -> PyResult<i32> {
     Ok(c_int_from_python(obj, 32, Some("Integer too large for date32"))? as i32)
 }
 
-/// The `UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION` of the first char or varchar type of `dt`,
-/// depth first, which PySpark's `to_arrow_schema` raises when it converts the schema of local
-/// rows to Arrow: it has no Arrow type of these types.
+/// The `UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION` of the first char, varchar, year-month or
+/// calendar interval type of `dt`, depth first, which PySpark's `to_arrow_schema` raises when it
+/// converts the schema of local rows to Arrow: it has no Arrow type of these types.
 pub(crate) fn unsupported_arrow_type(py: Python<'_>, dt: &DataType) -> PyResult<Option<PyErr>> {
-    fn first_char(dt: &DataType) -> Option<&DataType> {
+    fn first_unsupported(dt: &DataType) -> Option<&DataType> {
         match dt {
-            DataType::Char { .. } | DataType::Varchar { .. } => Some(dt),
-            DataType::Struct { fields } => fields.iter().find_map(|f| first_char(&f.data_type)),
-            DataType::Array { element_type, .. } => first_char(element_type),
+            DataType::Char { .. }
+            | DataType::Varchar { .. }
+            | DataType::YearMonthInterval { .. }
+            | DataType::CalendarInterval => Some(dt),
+            DataType::Struct { fields } => {
+                fields.iter().find_map(|f| first_unsupported(&f.data_type))
+            }
+            DataType::Array { element_type, .. } => first_unsupported(element_type),
             DataType::Map {
                 key_type,
                 value_type,
                 ..
-            } => first_char(key_type).or_else(|| first_char(value_type)),
+            } => first_unsupported(key_type).or_else(|| first_unsupported(value_type)),
             _ => None,
         }
     }
-    Ok(match first_char(dt) {
-        Some(char_type) => Some(raise_pyspark(
+    Ok(match first_unsupported(dt) {
+        Some(unsupported) => Some(raise_pyspark(
             py,
             "PySparkTypeError",
             "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION",
-            &[("data_type", &data_type_str(py, char_type)?)],
+            &[("data_type", &data_type_str(py, unsupported)?)],
         )),
         None => None,
     })

@@ -7586,6 +7586,36 @@ def exact_date_capture_input():
         child.close()
 
 
+def test_year_month_and_calendar_intervals_raise_as_pyspark_for_local_rows(mock_connect):
+    # As PySpark's to_arrow_schema, which has no Arrow type of these intervals: the values
+    # and the None values of such a column raise UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION,
+    # top-level, nested and atomic alike, rather than a TypeError or a Rust error text.
+    from pyspark.errors import PySparkTypeError
+
+    spark, _ = mock_connect
+    cases = [
+        ([(None,)], "a interval year to month", "YearMonthIntervalType(0, 1)"),
+        ([(1,)], "a interval year to month", "YearMonthIntervalType(0, 1)"),
+        ([(None,)], T.StructType([T.StructField("a", T.CalendarIntervalType())]),
+         "CalendarIntervalType()"),
+        ([(1,)], T.StructType([T.StructField("a", T.CalendarIntervalType())]),
+         "CalendarIntervalType()"),
+        ([(None,)], T.StructType([T.StructField("a", T.StructType(
+            [T.StructField("x", T.CalendarIntervalType())]))]), "CalendarIntervalType()"),
+        ([([1],)], T.StructType([T.StructField("a", T.ArrayType(T.CalendarIntervalType()))]),
+         "CalendarIntervalType()"),
+        ([(None,)], T.StructType([T.StructField("a", T.YearMonthIntervalType())]),
+         "YearMonthIntervalType(0, 1)"),
+        ([([None],)], "a array<interval year to month>", "YearMonthIntervalType(0, 1)"),
+        ([1], T.YearMonthIntervalType(), "YearMonthIntervalType(0, 1)"),
+        ([None], T.YearMonthIntervalType(), "YearMonthIntervalType(0, 1)"),
+    ]
+    for data, schema, data_type in cases:
+        with pytest.raises(PySparkTypeError) as e:
+            spark.createDataFrame(data, schema)
+        assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION"
+        assert e.value.getMessageParameters() == {"data_type": data_type}
+
 @pytest.mark.parametrize("source", ["tuples", "pandas"])
 @pytest.mark.parametrize("schema_kind", ["inferred", "names", "explicit", "ddl"])
 def test_exact_date_ipc_calendar_range(exact_date_capture_input, source, schema_kind):
