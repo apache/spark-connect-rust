@@ -2815,7 +2815,7 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
         // Named Rows (tuple subclasses with `__fields__`) become structs on the generic
         // object path, e.g. customized pandas object columns. Unnamed tuples stay arrays.
         if !obj.is_exact_instance_of::<pyo3::types::PyTuple>() {
-            match obj.getattr("__fields__") {
+            match obj.getattr(pyo3::intern!(obj.py(), "__fields__")) {
                 Ok(fields) => {
                     let mut fields: Vec<String> = fields.extract()?;
                     // Row factories may receive fewer values than names, and __fields__

@@ -7402,9 +7402,9 @@ def test_create_dataframe_raises_recursion_error_for_a_value_that_contains_itsel
             _local_create_dataframe([(value,)])
 
 
-# py_to_value converts the cells of object-dtype pandas input, as well as the values of
-# fillna, pivot and Row conversion; local rows go through infer.convert instead, so the
-# "local" source is a control for values that the exact-number fast path must not change.
+# py_to_value converts object-dtype cells of customized pandas frames, plus fillna
+# and pivot values; local rows use infer.convert. The "local" source below is a
+# control for values that the exact-number fast path must not change.
 def _RowPathFrame(pd):
     """A subclass of pandas.DataFrame: createDataFrame converts a customized frame with its
     row path (py_to_value), where it converts a plain one with PySpark's Arrow conversion."""
@@ -7578,6 +7578,7 @@ def test_plain_pandas_tuple_rows_keep_arrow_array_inference(mock_connect, value)
     import pandas as pd
     import pyarrow as pa
 
+    # The default branch preserves this plain frame and its Arrow conversion route.
     table = _native_number_input_table(
         mock_connect, pd.DataFrame({"value": [value]}, dtype=object))
     table.validate(full=True)
