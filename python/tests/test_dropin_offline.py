@@ -6453,6 +6453,50 @@ def test_types_all_exports_spatial_and_variant():
         assert name in T.__all__, name
 
 
+def test_streaming_progress_and_listeners_are_those_of_pyspark():
+    # As PySpark's: the server leaves the totals of the rows out of the JSON of a progress, of
+    # which the progress sums those of its sources; and a listener has a session.
+    from pyspark.sql.streaming import listener as listener_module
+    from pyspark.sql.streaming.listener import (
+        QueryProgressEvent,
+        StreamingQueryListener,
+        StreamingQueryProgress,
+    )
+
+    source = {
+        "description": "RateStreamV2[rowsPerSecond=10, rampUpTimeSeconds=0, numPartitions=default",
+        "startOffset": "0", "endOffset": "1", "latestOffset": "1", "numInputRows": 10,
+        "inputRowsPerSecond": 666.5, "processedRowsPerSecond": 30.5, "metrics": {},
+    }
+    progress = {
+        "id": "74482783-456e-4ea8-ba81-a85565c714a3",
+        "runId": "1615bcbd-7213-4d70-b9a3-094da5d810d7", "name": None,
+        "timestamp": "2026-11-08T02:52:01.261Z", "batchId": 1, "batchDuration": 324,
+        "durationMs": {"triggerExecution": 324}, "eventTime": {}, "stateOperators": [],
+        "sources": [source, dict(source, numInputRows=5, inputRowsPerSecond=1.0)],
+        "sink": {"description": "NoopTable", "numOutputRows": 15, "metrics": {}},
+        "observedMetrics": {},
+    }
+    parsed = StreamingQueryProgress.fromJson(progress)
+    assert parsed.numInputRows == 15 and parsed.inputRowsPerSecond == 667.5
+    assert parsed.processedRowsPerSecond == 61.0 and parsed["numInputRows"] is None
+    assert [s.numInputRows for s in parsed.sources] == [10, 5] and parsed.sink.numOutputRows == 15
+    event = QueryProgressEvent.fromJson({"progress": progress})
+    assert event.progress.numInputRows == 15 and event.progress.batchId == 1
+    assert listener_module.__all__ == ["StreamingQueryListener"]
+
+    class Listener(StreamingQueryListener):
+        def onQueryStarted(self, event): ...
+        def onQueryProgress(self, event): ...
+        def onQueryIdle(self, event): ...
+        def onQueryTerminated(self, event): ...
+
+    listener = Listener()
+    assert listener.spark is None
+    listener._set_spark_session("session")
+    assert listener.spark == "session"
+
+
 def test_streaming_exports_the_stateful_processor_and_tws_tester():
     import pandas as pd
 
