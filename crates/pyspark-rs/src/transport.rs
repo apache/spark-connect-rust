@@ -170,6 +170,9 @@ impl RustConnectStub {
         // policy - a `max_retries=0` client would otherwise hit our 15-retry backoff and
         // hang against an unreachable server instead of failing fast with UNAVAILABLE.
         client.set_retry_policy(RetryPolicy::no_retries());
+        // The requests are of the reference client's session, which tracks its server-side
+        // session itself; its grpcio stub does no tracking.
+        client.set_session_tracking(false);
         Ok(Self {
             client,
             cancel: Arc::new(Notify::new()),

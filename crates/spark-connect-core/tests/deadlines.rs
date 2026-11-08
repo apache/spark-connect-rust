@@ -155,7 +155,7 @@ impl Fixture {
                 .unwrap();
         });
         let builder = ChannelBuilder::parse(&format!(
-            "sc://{address}/;user_id=transport-user;token=fixture-token"
+            "sc://{address}/;user_id=transport-user;token=fixture-token;session_id=00000000-0000-4000-8000-000000000001"
         ))
         .unwrap();
         let mut client = bounded(SparkConnectClient::connect(&builder))
@@ -211,6 +211,8 @@ fn execute_request() -> ExecutePlanRequest {
 
 fn response(id: &str, complete: bool) -> ExecutePlanResponse {
     ExecutePlanResponse {
+        // The server echoes the session ID of the request.
+        session_id: execute_request().session_id,
         response_id: id.into(),
         response_type: complete.then_some(ResponseType::ResultComplete(ResultComplete {})),
         ..Default::default()

@@ -13922,10 +13922,14 @@ def version_cache_serve(connection, request_started, response_waiting, response_
                     )
             if self.failure == "rpc":
                 context.abort(grpc.StatusCode.INVALID_ARGUMENT, "version unavailable")
+            # AnalyzePlanRequest.session_id=1, echoed as AnalyzePlanResponse.session_id=1.
+            session_id = parse_message(request).get(1, [b""])[0]
             if self.failure == "no-result":
-                return b""
+                return message_field(1, session_id)
             # AnalyzePlanResponse.spark_version=8, SparkVersion.version=1.
-            return version_cache_message(8, version_cache_message(1, self.version))
+            return message_field(1, session_id) + version_cache_message(
+                8, version_cache_message(1, self.version)
+            )
 
         def release(self, request, context):
             self.releases += 1
@@ -13935,7 +13939,10 @@ def version_cache_serve(connection, request_started, response_waiting, response_
             # CloneSessionResponse.new_session_id=3, of a new session.
             import uuid
 
-            return message_field(3, str(uuid.uuid4()))
+            # CloneSessionRequest.session_id=1, echoed as CloneSessionResponse.session_id=1.
+            return message_field(1, parse_message(request).get(1, [b""])[0]) + message_field(
+                3, str(uuid.uuid4())
+            )
 
     service = Service()
     with version_cache_ThreadPoolExecutor(max_workers=4) as executor:

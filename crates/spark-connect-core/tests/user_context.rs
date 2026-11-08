@@ -32,8 +32,9 @@ use spark_connect_core::{ChannelBuilder, RetryPolicy, SparkConnectClient};
 use spark_connect_proto::execute_plan_response::{ResponseType, ResultComplete};
 use spark_connect_proto::release_execute_request::Release;
 use spark_connect_proto::{
-    AnalyzePlanRequest, ConfigRequest, ExecutePlanRequest, ExecutePlanResponse,
-    FetchErrorDetailsRequest, InterruptRequest, ReattachExecuteRequest, ReleaseExecuteRequest,
+    AnalyzePlanRequest, AnalyzePlanResponse, ConfigRequest, ConfigResponse, ExecutePlanRequest,
+    ExecutePlanResponse, FetchErrorDetailsRequest, FetchErrorDetailsResponse, InterruptRequest,
+    InterruptResponse, ReattachExecuteRequest, ReleaseExecuteRequest, ReleaseExecuteResponse,
     UserContext,
 };
 use tokio::net::TcpListener;
@@ -172,8 +173,10 @@ impl Drop for Fixture {
     }
 }
 
-fn response(id: &str, complete: bool) -> Vec<u8> {
+fn response(session_id: &str, id: &str, complete: bool) -> Vec<u8> {
     ExecutePlanResponse {
+        // The server echoes the session ID of the request.
+        session_id: session_id.into(),
         response_id: id.into(),
         response_type: complete.then_some(ResponseType::ResultComplete(ResultComplete {})),
         ..Default::default()
@@ -222,18 +225,22 @@ impl ServerStreamingService<Vec<u8>> for Streamed {
     type Future = BoxFuture<Response<Frames>, Status>;
 
     fn call(&mut self, request: Request<Vec<u8>>) -> Self::Future {
-        self.0.record(&self.1, request.into_inner());
+        let bytes = request.into_inner();
+        let session_id = session_of(&self.1, &bytes);
+        self.0.record(&self.1, bytes);
         let execution = match self.1.as_str() {
             "ExecutePlan" => self.0.executions.lock().unwrap().pop_front(),
             _ => None,
         };
         let frames: Frames = match execution.unwrap_or(Execution::Complete) {
-            Execution::Complete => Box::pin(stream::iter([Ok(response("complete", true))])),
-            Execution::Open => {
-                Box::pin(stream::iter([Ok(response("first", false))]).chain(stream::pending()))
+            Execution::Complete => {
+                Box::pin(stream::iter([Ok(response(&session_id, "complete", true))]))
             }
+            Execution::Open => Box::pin(
+                stream::iter([Ok(response(&session_id, "first", false))]).chain(stream::pending()),
+            ),
             Execution::Disconnect => Box::pin(stream::iter([
-                Ok(response("first", false)),
+                Ok(response(&session_id, "first", false)),
                 Err(Status::unavailable("stream disconnected")),
             ])),
         };
@@ -249,8 +256,58 @@ impl UnaryService<Vec<u8>> for Unary {
     type Future = BoxFuture<Response<Vec<u8>>, Status>;
 
     fn call(&mut self, request: Request<Vec<u8>>) -> Self::Future {
-        self.0.record(&self.1, request.into_inner());
-        Box::pin(async { Ok(Response::new(Vec::new())) })
+        let bytes = request.into_inner();
+        let body = echo_response(&self.1, &bytes);
+        self.0.record(&self.1, bytes);
+        Box::pin(async { Ok(Response::new(body)) })
+    }
+}
+
+/// The session ID of a request of `method`, which the server echoes in its response.
+fn session_of(method: &str, bytes: &[u8]) -> String {
+    match method {
+        "ExecutePlan" => ExecutePlanRequest::decode(bytes).unwrap().session_id,
+        "ReattachExecute" => ReattachExecuteRequest::decode(bytes).unwrap().session_id,
+        "AnalyzePlan" => AnalyzePlanRequest::decode(bytes).unwrap().session_id,
+        "Config" => ConfigRequest::decode(bytes).unwrap().session_id,
+        "Interrupt" => InterruptRequest::decode(bytes).unwrap().session_id,
+        "FetchErrorDetails" => FetchErrorDetailsRequest::decode(bytes).unwrap().session_id,
+        "ReleaseExecute" => ReleaseExecuteRequest::decode(bytes).unwrap().session_id,
+        _ => String::new(),
+    }
+}
+
+/// The response of a unary RPC, which echoes the session ID of its request; the other fields
+/// are empty.
+fn echo_response(method: &str, bytes: &[u8]) -> Vec<u8> {
+    let session_id = session_of(method, bytes);
+    match method {
+        "AnalyzePlan" => AnalyzePlanResponse {
+            session_id,
+            ..Default::default()
+        }
+        .encode_to_vec(),
+        "Config" => ConfigResponse {
+            session_id,
+            ..Default::default()
+        }
+        .encode_to_vec(),
+        "Interrupt" => InterruptResponse {
+            session_id,
+            ..Default::default()
+        }
+        .encode_to_vec(),
+        "FetchErrorDetails" => FetchErrorDetailsResponse {
+            session_id,
+            ..Default::default()
+        }
+        .encode_to_vec(),
+        "ReleaseExecute" => ReleaseExecuteResponse {
+            session_id,
+            ..Default::default()
+        }
+        .encode_to_vec(),
+        _ => Vec::new(),
     }
 }
 
@@ -283,6 +340,7 @@ async fn send_typed_requests(
     while stream.message().await.unwrap().is_some() {}
     client
         .analyze_plan(AnalyzePlanRequest {
+            session_id: client.session_id().to_string(),
             user_context: context.clone(),
             ..Default::default()
         })
@@ -290,6 +348,7 @@ async fn send_typed_requests(
         .unwrap();
     client
         .config(ConfigRequest {
+            session_id: client.session_id().to_string(),
             user_context: context.clone(),
             ..Default::default()
         })
@@ -297,6 +356,7 @@ async fn send_typed_requests(
         .unwrap();
     client
         .interrupt(InterruptRequest {
+            session_id: client.session_id().to_string(),
             user_context: context.clone(),
             ..Default::default()
         })
@@ -304,6 +364,7 @@ async fn send_typed_requests(
         .unwrap();
     client
         .fetch_error_details(FetchErrorDetailsRequest {
+            session_id: client.session_id().to_string(),
             user_context: context.clone(),
             ..Default::default()
         })
@@ -311,6 +372,7 @@ async fn send_typed_requests(
         .unwrap();
     let mut stream = client
         .reattach_execute(ReattachExecuteRequest {
+            session_id: client.session_id().to_string(),
             user_context: context.clone(),
             operation_id: "typed-operation".into(),
             ..Default::default()
@@ -320,6 +382,7 @@ async fn send_typed_requests(
     while stream.message().await.unwrap().is_some() {}
     client
         .release_execute(ReleaseExecuteRequest {
+            session_id: client.session_id().to_string(),
             user_context: context.clone(),
             operation_id: "typed-operation".into(),
             ..Default::default()
@@ -461,7 +524,10 @@ async fn reattach_and_release_take_the_user_context_of_the_execution() {
     let fixture = Fixture::start([Execution::Disconnect]).await;
     let client = fixture.client(Some("configured")).await;
     let mut stream = client
-        .execute_plan_reattachable(ExecutePlanRequest::default())
+        .execute_plan_reattachable(ExecutePlanRequest {
+            session_id: client.session_id().to_string(),
+            ..Default::default()
+        })
         .await
         .unwrap();
     let mut ids = Vec::new();
@@ -496,7 +562,10 @@ async fn reattach_and_release_take_the_user_context_of_the_execution() {
     let fixture = Fixture::start([Execution::Open]).await;
     let client = fixture.client(Some("configured")).await;
     let mut stream = client
-        .execute_plan_reattachable(ExecutePlanRequest::default())
+        .execute_plan_reattachable(ExecutePlanRequest {
+            session_id: client.session_id().to_string(),
+            ..Default::default()
+        })
         .await
         .unwrap();
     assert_eq!(
