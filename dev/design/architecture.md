@@ -101,6 +101,44 @@ against its live server and built native extension. Official parity tests
 exercise the Rust transport with official PySpark; the separate native smoke
 step covers the drop-in `toArrow()` path.
 
+The pandas Arrow-string input guard recognizes pandas 2.2 through 3.x storage
+layouts. The Python Connect and pandas parity workflows pin `pandas>=2.2,<3.0`;
+coverage and pipelines parity install unpinned pandas. CI has no explicit
+pandas-version matrix. The inherited `pandas>=1.0.0` package declaration is
+below the runtime utilities' `>=2.2` requirement. Aligning the package metadata
+is a separate packaging follow-up; neither that declaration nor the Arrow-string
+checks establish support for older pandas versions.
+
+Arrow-string input eligibility checks both array instances and canonical
+classes' row/Arrow conversion methods and label casting, including inherited
+methods, on the specialized, generic explicit-schema and inferred-schema routes.
+Other pandas array classes on the generic routes retain the existing
+module-origin policy, which does not authenticate mutations of their canonical
+classes' conversion hooks. The generic routes identify Arrow-string classes
+through their loaded defining module in `sys.modules`. Removing or replacing
+`pandas.core.arrays.string_arrow` there while retaining instances from the old
+module is outside these checks.
+
+Authentication occurs when the concrete array is inspected. With NumPy-backed
+column labels, a specialized guard may first read `frame.dtypes`, matching the
+native row path's dtype read before cell normalization. A customized dtype
+property can therefore raise before the later array-class check, with the same
+local error and no configuration or upload request. The bounded Arrow-string
+class checks for data and labels inspect raw MRO dictionaries for conversion and
+label-iteration methods, dtype/missing-value properties and the null-subarray
+constructor (including its immediate super-constructor), optional factory and
+allocator used by supported pandas layouts. The label checks authenticate the
+class before inspecting its other methods, which also use the raw lookup. This
+avoids binding customized descriptors during those checks. The pandas 2.2
+NumPy-semantics accessor also dispatches through a mixin before ordinary MRO
+lookup; its mixin and partial-function aliases are checked, and its namespace is
+limited to string-method names, initializer/storage declarations and class
+metadata. Its mixin initializer remains allowed because construction uses the
+class slots authenticated above. Class data read by the authenticated methods,
+such as `_storage` and `_na_value`, and module globals other than the explicitly
+checked aliases are outside these checks. These checks do not establish a
+general invariant for arbitrary mutations of pandas internals.
+
 ## UDF strategy (full compatibility)
 
 Python/pandas UDFs are **serialized, not executed** on the client:
