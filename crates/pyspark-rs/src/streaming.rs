@@ -1279,8 +1279,9 @@ impl PyStreamingQueryManager {
     /// the bus of the session, the first one that the bus has (as the bus removes the first
     /// occurrence), and the others, which are of other buses, stay. Should the server fail to
     /// remove its listener, this warns, and the listener stays, as PySpark Connect's does.
-    /// A callback coalesced with another caller's close keeps its ids so a failed close can be
-    /// retried. Only a completed removal consumes one matching id from this session's bus.
+    /// A callback coalesced with another caller's in-progress last-listener removal or close
+    /// keeps its ids so a failed operation can be retried. Only a completed removal consumes
+    /// one matching id from this session's bus.
     fn removeListener(&self, py: Python<'_>, listener: Py<PyAny>) -> PyResult<()> {
         let bound = listener.bind(py);
         let Ok(ids) = bound.getattr("_rust_listener_ids") else {
