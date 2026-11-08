@@ -2722,6 +2722,19 @@ assert df.select(F.to_json(F.struct("p"))).collect()[1][0] == '{"p":[10.0,20.0]}
 """, remote], check=True)
 
 
+def test_create_dataframe_schema_keeps_metadata_edited_in_place(session):
+    # As PySpark: the schema of a DataFrame is the StructType it is created with, so a metadata
+    # edited in place of one of its fields is in df.schema.
+    from pyspark.sql import types as T
+
+    st = T.StructType([T.StructField("a", T.IntegerType()), T.StructField("b", T.StringType())])
+    st["a"].metadata["comment"] = "the a"
+    df = session.createDataFrame([(1, "x")], st)
+    assert df.schema["a"].metadata == {"comment": "the a"}
+    assert df.schema.jsonValue()["fields"][0]["metadata"] == {"comment": "the a"}
+    assert df.collect() == [Row(a=1, b="x")]
+
+
 def test_collected_values_of_user_defined_types_are_deserialized_as_pyspark(session):
     # As official PySpark 4.3.0: a collected value of a UDT is its deserialized object, and
     # dtypes names the UDT by its simpleString(), in every way that rows are collected.
