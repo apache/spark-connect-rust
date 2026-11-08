@@ -386,9 +386,9 @@ def serve(connection):
             response_gate = self.response_gate
             block_result_complete = self.block_result_complete
             result_complete_operations = self.result_complete_operations
-            self.execute_calls += 1
             self.execute_requests.append(request)
             self.rpc_events.append("execute")
+            self.execute_calls += 1
             if self.block_execute and not response_gate.wait(5):
                 context.abort(
                     grpc.StatusCode.DEADLINE_EXCEEDED,
