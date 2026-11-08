@@ -1011,13 +1011,14 @@ impl PyDataFrame {
                     &[("item", "cols")],
                 ));
             }
-            (n, cols)
+            (Some(n), cols)
         } else if numPartitions.is_instance_of::<pyo3::types::PyString>()
             || numPartitions.extract::<PyRef<'_, PyColumn>>().is_ok()
         {
+            // No partition count is sent, so the server picks it, as PySpark's.
             let mut all = vec![numPartitions];
             all.extend(cols);
-            (0, all)
+            (None, all)
         } else {
             return Err(not_expected_type(
                 &numPartitions,
@@ -1033,7 +1034,8 @@ impl PyDataFrame {
             })
             .collect();
         Ok(PyDataFrame::new(
-            self.dataframe.repartition_by_range(num_partitions, exprs),
+            self.dataframe
+                .repartition_by_range_opt(num_partitions, exprs),
         ))
     }
 

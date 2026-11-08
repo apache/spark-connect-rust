@@ -413,6 +413,15 @@ def test_year_month_intervals_are_not_collected_as_pyspark(session):
         datetime.timedelta(days=1, seconds=7384))
 
 
+def test_repartition_by_range_without_a_count_lets_the_server_pick_it(session):
+    # As PySpark's: the str/Column forms send no partition count, so the server picks it
+    # and returns the rows.
+    df = session.range(5)
+    for repartitioned in (df.repartitionByRange("id"), df.repartitionByRange(F.col("id")),
+                          df.repartitionByRange("id", "id")):
+        assert sorted(row.id for row in repartitioned.collect()) == [0, 1, 2, 3, 4]
+
+
 def test_stream_reader_checks_its_arguments_as_pyspark(session, tmp_path):
     # As PySpark's DataStreamReader, which checks a path, a source name and the schema of
     # changes in the client, rather than sending them to the server.

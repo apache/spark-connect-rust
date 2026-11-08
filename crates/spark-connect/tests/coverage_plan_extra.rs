@@ -115,6 +115,27 @@ fn repartition_by_range_to_proto() {
     assert!(p.to_proto().rel_type.is_some());
 }
 
+/// `RepartitionByRange` without a partition count (`repartitionByRange(col)` as PySpark sends
+/// it) sends `num_partitions` unset, so the server picks the count; `Some(n)` sends it.
+#[test]
+fn repartition_by_range_without_a_count_sends_none() {
+    use spark_connect_proto::relation::RelType;
+
+    let count_of = |num_partitions: Option<i32>| {
+        let p = LogicalPlan::RepartitionByRange {
+            input: Arc::new(base()),
+            num_partitions,
+            partition_exprs: vec![],
+        };
+        match p.to_proto().rel_type {
+            Some(RelType::RepartitionByExpression(r)) => r.num_partitions,
+            other => panic!("unexpected relation {other:?}"),
+        }
+    };
+    assert_eq!(count_of(None), None);
+    assert_eq!(count_of(Some(4)), Some(4));
+}
+
 /// `Read::to_proto` for the DataSource read type with format/schema/source_name set.
 #[test]
 fn read_datasource_to_proto() {

@@ -1432,9 +1432,20 @@ impl DataFrame {
 
     /// Repartition this DataFrame by range.
     pub fn repartition_by_range(&self, num_partitions: i32, columns: Vec<Expression>) -> DataFrame {
+        self.repartition_by_range_opt(Some(num_partitions), columns)
+    }
+
+    /// Repartition by range on the given columns, with the partition count optional: `None`
+    /// sends no count, so the server picks it. Mirrors `DataFrame.repartitionByRange(col)`
+    /// and `repartitionByRange(col, *cols)`, which PySpark sends with `numPartitions=None`.
+    pub fn repartition_by_range_opt(
+        &self,
+        num_partitions: Option<i32>,
+        columns: Vec<Expression>,
+    ) -> DataFrame {
         let plan = LogicalPlan::RepartitionByRange {
             input: Arc::clone(&self.plan),
-            num_partitions: Some(num_partitions),
+            num_partitions,
             partition_exprs: columns,
         };
         self.with_cached_schema(plan)

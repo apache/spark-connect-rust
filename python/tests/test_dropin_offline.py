@@ -1031,6 +1031,28 @@ def test_sessions_raise_the_errors_of_their_arguments_as_pyspark(mock_connect, t
 
 
 
+def test_repartition_by_range_without_a_count_sends_none_as_pyspark(mock_connect):
+    # As PySpark's repartitionByRange(col) and repartitionByRange(col, *cols): a
+    # RepartitionByExpression with num_partitions unset, so the server picks the count;
+    # repartitionByRange(n, *cols) sends n.
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    df = spark.range(1)
+
+    def sent(dataframe):
+        dataframe.collect()
+        # ExecutePlanRequest.plan=3, Plan.root=1; Relation.repartition_by_expression=27,
+        # RepartitionByExpression.num_partitions=3, which is absent when unset.
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        return parse_message(parse_message(plan)[27][0]).get(3)
+
+    assert sent(df.repartitionByRange("id")) is None
+    assert sent(df.repartitionByRange(F.col("id"))) is None
+    assert sent(df.repartitionByRange("id", "id")) is None
+    assert sent(df.repartitionByRange(2, "id")) == [2]
+
+
 def test_channel_builder_uses_endpoint():
     # channelBuilder reconstructs an sc:// URL from the builder's host/port (+ params)
     # for the native transport, returning a configured Builder (no longer raises).
