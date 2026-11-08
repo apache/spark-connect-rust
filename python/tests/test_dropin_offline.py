@@ -6044,6 +6044,47 @@ def test_udt_not_implemented_defaults():
         udt.deserialize(1)
 
 
+def test_struct_field_metadata_is_the_stored_dict():
+    # As PySpark's StructField, which keeps its metadata dict: an edit in place shows in the
+    # field, its JSON, its equality and its pickle, and in the StructType that holds the field.
+    f = _SF("a", _IT())
+    f.metadata["comment"] = "x"
+    assert f.metadata == {"comment": "x"} and f.metadata is f.metadata
+    assert f.jsonValue()["metadata"] == {"comment": "x"}
+    assert json.loads(f.json())["metadata"] == {"comment": "x"}
+    assert f == _SF("a", _IT(), True, {"comment": "x"})
+    assert pickle.loads(pickle.dumps(f)).metadata == {"comment": "x"}
+    # A non-empty dict passed in is stored as is; an empty or no dict gives a new one.
+    d = {"k": 1}
+    g = _SF("a", _IT(), True, d)
+    assert g.metadata is d
+    d["k"] = 2
+    assert g.jsonValue()["metadata"] == {"k": 2}
+    empty = {}
+    h = _SF("a", _IT(), True, empty)
+    assert h.metadata == {} and h.metadata is not empty
+    a, b = _SF("a", _IT()), _SF("a", _IT())
+    assert a.metadata is not b.metadata
+    # The edits show in the StructType that holds the field, whether the struct is made of
+    # the field, the field is added, or the field is taken from the struct.
+    f2 = _SF("b", _IT())
+    st = _StT([f2])
+    f2.metadata["k"] = "v"
+    assert st.jsonValue()["fields"][0]["metadata"] == {"k": "v"}
+    st2 = _StT()
+    f3 = _SF("c", _IT())
+    st2.add(f3)
+    f3.metadata["k"] = "w"
+    assert st2.jsonValue()["fields"][0]["metadata"] == {"k": "w"}
+    st3 = _StT([_SF("a", _IT()), _SF("b", _AT(_IT()))])
+    st3["a"].metadata["comment"] = "x"
+    assert st3.jsonValue()["fields"][0]["metadata"] == {"comment": "x"}
+    assert st3["a"].metadata is st3.fields[0].metadata
+    assert json.loads(st3.json())["fields"][0]["metadata"] == {"comment": "x"}
+    assert _StT.fromJson(st3.jsonValue()) == st3
+    assert pickle.loads(pickle.dumps(st3)).jsonValue() == st3.jsonValue()
+
+
 def test_struct_field_metadata_any_values():
     # StructField metadata accepts arbitrary JSON values (Dict[str, Any]), not just str,
     # and round-trips through json.

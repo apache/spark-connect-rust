@@ -202,7 +202,7 @@ pub(crate) fn reader_schema(schema: &Bound<'_, PyAny>) -> PyResult<String> {
     }
     if let Ok(st) = schema.extract::<PyRef<crate::types::PyStructType>>() {
         return Ok(spark_connect::types::DataType::Struct {
-            fields: st.fields.clone(),
+            fields: st.current_fields(schema.py())?,
         }
         .json());
     }

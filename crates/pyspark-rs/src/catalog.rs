@@ -37,7 +37,7 @@ fn table_schema(
     };
     if let Ok(st) = schema.extract::<PyRef<'_, crate::types::PyStructType>>() {
         return Ok(Some(spark_connect::types::DataType::Struct {
-            fields: st.fields.clone(),
+            fields: st.current_fields(schema.py())?,
         }));
     }
     let type_name = schema.get_type().name()?.to_string();
