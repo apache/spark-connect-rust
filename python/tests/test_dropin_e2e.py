@@ -306,6 +306,66 @@ def test_renames_are_applied_in_their_order_as_pyspark(session):
 
 
 
+def test_join_as_of_and_merge_asof_give_the_rows_of_pyspark(session):
+    # As PySpark: _joinAsOf matches each row of the left DataFrame with the nearest row of the
+    # right one on the as-of column, as the direction, exact matches and tolerance say, and
+    # pandas-on-Spark's merge_asof, which calls it, gives the same rows.
+    import math
+
+    pytest.importorskip("pandas")
+    import pyspark.pandas as ps
+    from pyspark.sql import functions as F
+
+    def rows(values):
+        return sorted(
+            tuple("nan" if isinstance(v, float) and math.isnan(v) else v for v in row)
+            for row in values
+        )
+
+    left = session.createDataFrame(
+        [(1, 1.0, "a"), (3, 3.0, "c"), (5, 5.0, "b")], "t int, x double, k string")
+    right = session.createDataFrame(
+        [(2, 2.0, "x"), (3, 3.5, "c"), (4, 4.0, "y")], "t int, y double, k string")
+    joined = rows(left._joinAsOf(right, "t", "t", how="left").collect())
+    assert joined == [
+        (1, 1.0, "a", None, None, None), (3, 3.0, "c", 3, 3.5, "c"), (5, 5.0, "b", 4, 4.0, "y")]
+    assert rows(left._joinAsOf(right, "t", "t", how="left", allowExactMatches=False).collect()) == [
+        (1, 1.0, "a", None, None, None), (3, 3.0, "c", 2, 2.0, "x"), (5, 5.0, "b", 4, 4.0, "y")]
+    assert rows(left._joinAsOf(right, "t", "t", how="left", direction="forward").collect()) == [
+        (1, 1.0, "a", 2, 2.0, "x"), (3, 3.0, "c", 3, 3.5, "c"), (5, 5.0, "b", None, None, None)]
+    assert rows(left._joinAsOf(right, "t", "t", how="left", direction="nearest").collect()) == [
+        (1, 1.0, "a", 2, 2.0, "x"), (3, 3.0, "c", 3, 3.5, "c"), (5, 5.0, "b", 4, 4.0, "y")]
+    assert rows(left._joinAsOf(
+        right, "t", "t", how="left", tolerance=F.lit(1)).collect()) == [
+        (1, 1.0, "a", None, None, None), (3, 3.0, "c", 3, 3.5, "c"), (5, 5.0, "b", 4, 4.0, "y")]
+    assert rows(left._joinAsOf(right, "t", "t", on=["k"], how="left").collect()) == [
+        (1, 1.0, "a", None, None, None),
+        (3, 3.0, "c", 3, 3.5, "c"),
+        (5, 5.0, "b", None, None, None),
+    ]
+    assert rows(left._joinAsOf(right, "t", "t").collect()) == [
+        (3, 3.0, "c", 3, 3.5, "c"), (5, 5.0, "b", 4, 4.0, "y")]
+
+    # pandas-on-Spark's ANSI check is off for the merges, as in the tests of PySpark.
+    key = "spark.sql.ansi.enabled"
+    session.conf.set(key, "false")
+    try:
+        def merged(**kwargs):
+            frame = ps.merge_asof(ps.DataFrame(left), ps.DataFrame(right), **kwargs)
+            return rows(frame.to_pandas().values.tolist())
+
+        assert merged(on="t") == [
+            (1, 1.0, "a", "nan", None), (3, 3.0, "c", 3.5, "c"), (5, 5.0, "b", 4.0, "y")]
+        assert merged(on="t", by="k", direction="forward") == [
+            (1, 1.0, "a", "nan"), (3, 3.0, "c", 3.5), (5, 5.0, "b", "nan")]
+        assert merged(on="t", tolerance=1, allow_exact_matches=False) == [
+            (1, 1.0, "a", "nan", None), (3, 3.0, "c", "nan", None), (5, 5.0, "b", "nan", None)]
+        assert merged(left_on="t", right_on="t", left_by="k", right_by="k") == [
+            (1, 1.0, "a", "nan"), (3, 3.0, "c", 3.5), (5, 5.0, "b", "nan")]
+    finally:
+        session.conf.unset(key)
+
+
 def test_join_with_an_unsupported_join_type_raises_as_pyspark(session):
     # As PySpark: the join type is checked when the join is built, which raises the
     # AnalysisException of UNSUPPORTED_JOIN_TYPE, naming the type as it is normalized.
@@ -1439,6 +1499,42 @@ def test_reader_schema_keeps_field_metadata(session, tmp_path, ddl):
     stream = session.readStream.schema(schema).csv(str(tmp_path))
     assert stream.isStreaming
     assert stream.schema.fields[0].metadata == {"comment": "the key"}
+
+
+def test_reader_none_unsets_an_option_and_external_description_is_the_comment(session, tmp_path):
+    # As PySpark's: DataFrameReader.option, options and load unset an option given None, while
+    # the format methods skip None and keep it. createExternalTable's description is the
+    # comment of createTable, not a property.
+    import warnings
+
+    (tmp_path / "t.csv").write_text("a,b\n1,2\n")
+    path = str(tmp_path / "t.csv")
+    assert session.read.option("header", "true").csv(path).columns == ["a", "b"]
+    unset = session.read.option("header", "true").option("header", None)
+    assert unset.format("csv").load(path).columns == ["_c0", "_c1"]
+    unset = session.read.option("header", "true").options(header=None)
+    assert unset.format("csv").load(path).columns == ["_c0", "_c1"]
+    unset = session.read.option("header", "true").format("csv")
+    assert unset.load(path, header=None).columns == ["_c0", "_c1"]
+    kept = session.read.option("header", "true")
+    assert kept.csv(path, header=None).columns == ["a", "b"]
+    assert kept.format("csv").load(path).columns == ["a", "b"]
+    session.range(2).write.mode("overwrite").parquet(str(tmp_path / "ext"))
+    session.sql("DROP TABLE IF EXISTS i3_described_external")
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FutureWarning)
+            session.catalog.createExternalTable(
+                "i3_described_external", path=str(tmp_path / "ext"), source="parquet",
+                description="the table")
+        assert session.catalog.getTable("i3_described_external").description == "the table"
+        comments = session.sql("DESCRIBE TABLE EXTENDED i3_described_external").filter(
+            "col_name = 'Comment'").collect()
+        assert [tuple(r)[:2] for r in comments] == [("Comment", "the table")]
+        keys = [r.key for r in session.sql("SHOW TBLPROPERTIES i3_described_external").collect()]
+        assert not any("description" in key for key in keys)
+    finally:
+        session.sql("DROP TABLE IF EXISTS i3_described_external")
 
 
 def test_reader_writer_and_catalog_return_the_results_of_pyspark(session, tmp_path):

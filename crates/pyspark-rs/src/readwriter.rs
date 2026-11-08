@@ -33,15 +33,7 @@ impl PyDataFrameReader {
     /// A copy of the current reader with per-call `**options` applied (skipping
     /// None, lowercasing bools), for a format-specific read.
     fn with_opts(&self, options: Option<&Bound<'_, PyDict>>) -> PyResult<DataFrameReader> {
-        let mut r = self.inner.clone();
-        if let Some(opts) = options {
-            for (k, v) in opts.iter() {
-                if let Some(val) = crate::coerce_option_value(&v)? {
-                    r = r.option(&k.str()?.to_string(), &val);
-                }
-            }
-        }
-        Ok(r)
+        apply_options(self.inner.clone(), options, false)
     }
 
     /// Keep the options of a format-specific read on this reader, as PySpark does
@@ -183,6 +175,27 @@ pub(crate) fn bucket_count(num_buckets: &Bound<'_, PyAny>) -> PyResult<i32> {
     }
 }
 
+/// The reader `r` with the `options` of a call, lowercasing bools. A None value unsets its
+/// option when `unset_none`, as PySpark's `DataFrameReader.option`, `options` and `load` do,
+/// and is skipped otherwise, as the `_set_opts` of its format methods does.
+fn apply_options(
+    mut r: DataFrameReader,
+    options: Option<&Bound<'_, PyDict>>,
+    unset_none: bool,
+) -> PyResult<DataFrameReader> {
+    if let Some(opts) = options {
+        for (k, v) in opts.iter() {
+            let key = k.str()?.to_string();
+            match crate::coerce_option_value(&v)? {
+                Some(val) => r = r.option(&key, &val),
+                None if unset_none => r = r.unset_option(&key),
+                None => {}
+            }
+        }
+    }
+    Ok(r)
+}
+
 /// Apply a single reader option (skipping None; bool->"true"/"false").
 fn set_opt(
     r: DataFrameReader,
@@ -306,35 +319,28 @@ impl PyDataFrameReader {
         Ok(slf)
     }
 
-    /// Set a single read option. `None` leaves the option unset (not the string
-    /// "None"); booleans lowercase to "true"/"false" (reference `to_str` semantics).
+    /// Set a single read option. `None` unsets the option, as PySpark's does (not the
+    /// string "None"); booleans lowercase to "true"/"false" (reference `to_str` semantics).
     fn option<'py>(
         mut slf: PyRefMut<'py, Self>,
         key: &str,
         value: &Bound<'_, PyAny>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        if let Some(v) = crate::coerce_option_value(value)? {
-            slf.inner = slf.inner.clone().option(key, &v);
-        }
+        slf.inner = match crate::coerce_option_value(value)? {
+            Some(v) => slf.inner.clone().option(key, &v),
+            None => slf.inner.clone().unset_option(key),
+        };
         Ok(slf)
     }
 
     /// Set multiple read options. Mirrors reference `DataFrameReader.options(**options)`
-    /// - keyword args; `None` values are skipped and booleans lowercased.
+    /// - keyword args; a `None` value unsets the option and booleans lowercase.
     #[pyo3(signature = (**options))]
     fn options<'py>(
         mut slf: PyRefMut<'py, Self>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        let mut map = HashMap::new();
-        if let Some(options) = options {
-            for (k, v) in options.iter() {
-                if let Some(val) = crate::coerce_option_value(&v)? {
-                    map.insert(k.str()?.to_string(), val);
-                }
-            }
-        }
-        slf.inner = slf.inner.clone().options(map);
+        slf.inner = apply_options(slf.inner.clone(), options, true)?;
         Ok(slf)
     }
 
@@ -380,7 +386,7 @@ impl PyDataFrameReader {
         schema: Option<&Bound<'_, PyAny>>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
-        let mut r = self.with_opts(options)?;
+        let mut r = apply_options(self.inner.clone(), options, true)?;
         if let Some(f) = format {
             r = r.format(f);
         }

@@ -2,7 +2,7 @@
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyInt, PyList, PyTuple};
-use spark_connect::dataframe::{DataFrame, LocalRowIterator};
+use spark_connect::dataframe::{AsOfJoinOptions, DataFrame, LocalRowIterator};
 use spark_connect::plan::JoinType;
 use spark_connect::udf::{eval_type, CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
 
@@ -526,6 +526,83 @@ fn no_to_plan(obj: &Bound<'_, PyAny>) -> PyErr {
     ))
 }
 
+/// The `TypeError` of protobuf for a name that is not a string, which the plan of PySpark's
+/// `_joinAsOf` raises for a name in `on` or an as-of column that is not a string.
+fn proto_string_type_error(value: &Bound<'_, PyAny>) -> PyErr {
+    let repr = value
+        .repr()
+        .map(|repr| repr.to_string())
+        .unwrap_or_default();
+    let typ = value
+        .get_type()
+        .repr()
+        .map(|typ| typ.to_string())
+        .unwrap_or_default();
+    pyo3::exceptions::PyTypeError::new_err(format!(
+        "{repr} has type {typ}, but expected one of: (<class 'bytes'>, <class 'str'>)"
+    ))
+}
+
+/// The join condition of `_joinAsOf` for its `on`, as PySpark's `AsOfJoin` plan sends it: a
+/// name or a list of names (`using_columns`), or a Column or a list of Columns, which are
+/// joined on their conjunction (`join_expr`).
+fn as_of_join_condition(
+    on: &Bound<'_, PyAny>,
+) -> PyResult<(Option<spark_connect::column::Column>, Vec<String>)> {
+    if let Ok(column) = on.extract::<PyRef<PyColumn>>() {
+        return Ok((Some(column.column.clone()), Vec::new()));
+    }
+    if on.is_instance_of::<pyo3::types::PyString>() {
+        return Ok((None, vec![on.extract::<String>()?]));
+    }
+    // As PySpark's `_collect_references`, which iterates `on` first, and then its `to_plan`.
+    if !on.is_instance_of::<PyList>() {
+        on.try_iter()?;
+        return Err(no_to_plan(on));
+    }
+    let list = on.cast::<PyList>()?;
+    // An empty list is no condition at all.
+    let Some(first) = list.iter().next() else {
+        return Ok((None, Vec::new()));
+    };
+    if first.is_instance_of::<pyo3::types::PyString>() {
+        let names = list
+            .iter()
+            .map(|item| {
+                item.extract::<String>()
+                    .map_err(|_| proto_string_type_error(&item))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        return Ok((None, names));
+    }
+    let mut condition: Option<spark_connect::column::Column> = None;
+    for item in list.iter() {
+        let Ok(col) = item.extract::<PyRef<PyColumn>>() else {
+            return Err(no_to_plan(&item));
+        };
+        condition = Some(match condition {
+            None => col.column.clone(),
+            Some(left) => left.and(col.column.clone()),
+        });
+    }
+    Ok((condition, Vec::new()))
+}
+
+/// The as-of column of `_joinAsOf` of `df`: a Column as it is, or the column of `df` that
+/// has this name, as PySpark's `df._col(name)`.
+fn as_of_column(
+    df: &DataFrame,
+    column: &Bound<'_, PyAny>,
+) -> PyResult<spark_connect::column::Column> {
+    if let Ok(column) = column.extract::<PyRef<PyColumn>>() {
+        return Ok(column.column.clone());
+    }
+    let name = column
+        .extract::<String>()
+        .map_err(|_| proto_string_type_error(column))?;
+    Ok(df.col(&name))
+}
+
 /// Resolve a filter/where condition: a Column, or a SQL string parsed via `expr`.
 fn cond_column(condition: &Bound<'_, PyAny>) -> PyResult<spark_connect::column::Column> {
     if let Ok(c) = condition.extract::<PyRef<PyColumn>>() {
@@ -593,7 +670,7 @@ impl PyDataFrame {
         let this = slf.borrow();
         py.import("pyspark.sql.connect.dataframe")?
             .getattr("_reduce_dataframe")?
-            .call1((this.spark_session(), this._relation_bytes(py)))
+            .call1((this.spark_session(py)?, this._relation_bytes(py)))
     }
 
     /// The DataFrame of `relation`, the bytes of a relation of `session`, as a pickled DataFrame
@@ -939,6 +1016,62 @@ impl PyDataFrame {
             )));
         }
         Err(no_to_plan(&on))
+    }
+
+    /// `DataFrame._joinAsOf(other, leftAsOfColumn, rightAsOfColumn, on=None, how=None, *,
+    /// tolerance=None, allowExactMatches=True, direction="backward")`, the as-of join of
+    /// pandas-on-Spark's `merge_asof`, as PySpark's. The as-of columns are Columns, or names of
+    /// their DataFrame. `on` is a name, a Column condition, or a list of either. `how` (inner by
+    /// default) and `direction` are sent as they are, and the server checks them.
+    #[pyo3(name = "_joinAsOf", signature = (other, leftAsOfColumn, rightAsOfColumn, on=None, how=None, *, tolerance=None, allowExactMatches=true, direction="backward"))]
+    #[allow(non_snake_case, clippy::too_many_arguments)]
+    fn join_as_of(
+        &self,
+        other: &Bound<'_, PyAny>,
+        leftAsOfColumn: &Bound<'_, PyAny>,
+        rightAsOfColumn: &Bound<'_, PyAny>,
+        on: Option<Bound<'_, PyAny>>,
+        how: Option<Bound<'_, PyAny>>,
+        tolerance: Option<Bound<'_, PyAny>>,
+        allowExactMatches: bool,
+        direction: &str,
+    ) -> PyResult<PyDataFrame> {
+        // As PySpark's `_check_same_session`, first.
+        let other = self.same_session(other)?;
+        let join_type = match how.filter(|how| !how.is_none()) {
+            None => "inner".to_string(),
+            Some(how) => how.extract::<String>().map_err(|_| {
+                pyo3::exceptions::PyAssertionError::new_err("how should be a string")
+            })?,
+        };
+        let tolerance = match tolerance.filter(|tolerance| !tolerance.is_none()) {
+            None => None,
+            Some(tolerance) => {
+                let column = tolerance.extract::<PyRef<PyColumn>>().map_err(|_| {
+                    pyo3::exceptions::PyAssertionError::new_err("tolerance should be Column")
+                })?;
+                Some(column.column.clone())
+            }
+        };
+        let (on, using_columns) = match on.filter(|on| !on.is_none()) {
+            None => (None, Vec::new()),
+            Some(on) => as_of_join_condition(&on)?,
+        };
+        let options = AsOfJoinOptions {
+            left_as_of: as_of_column(&self.dataframe, leftAsOfColumn)?,
+            right_as_of: as_of_column(&other.dataframe, rightAsOfColumn)?,
+            on,
+            using_columns,
+            join_type,
+            tolerance,
+            allow_exact_matches: allowExactMatches,
+            direction: direction.to_string(),
+        };
+        let df = self
+            .dataframe
+            .as_of_join(&other.dataframe, options)
+            .to_pyerr()?;
+        Ok(PyDataFrame::new(df))
     }
 
     /// Cross join.
@@ -1840,15 +1973,15 @@ impl PyDataFrame {
     /// The SparkSession that created this DataFrame.
     #[pyo3(name = "sparkSession")]
     #[getter]
-    fn spark_session(&self) -> crate::session::PySparkSession {
-        crate::session::PySparkSession::new(self.dataframe.spark_session())
+    fn spark_session(&self, py: Python<'_>) -> PyResult<Py<crate::session::PySparkSession>> {
+        crate::session::session_object(py, &self.dataframe.spark_session())
     }
 
     /// The SparkSession of this DataFrame, as PySpark Connect's `DataFrame._session`, which the
     /// modules of PySpark read, such as `pyspark.ml`, `pyspark.sql.plot` and `pyspark.pandas`.
     #[getter]
-    fn _session(&self) -> crate::session::PySparkSession {
-        self.spark_session()
+    fn _session(&self, py: Python<'_>) -> PyResult<Py<crate::session::PySparkSession>> {
+        self.spark_session(py)
     }
 
     /// Not supported on Spark Connect, as PySpark Connect's: `NOT_IMPLEMENTED` of `rdd`, which

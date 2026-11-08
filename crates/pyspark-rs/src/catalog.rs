@@ -453,8 +453,8 @@ impl PyCatalog {
 
     /// Create an external table from a data source: deprecated, as PySpark's, which warns and
     /// creates the table as `createTable` does.
-    #[pyo3(signature = (tableName, path=None, source=None, schema=None, **options))]
-    #[allow(non_snake_case)]
+    #[pyo3(signature = (tableName, path=None, source=None, schema=None, description=None, **options))]
+    #[allow(non_snake_case, clippy::too_many_arguments)]
     fn createExternalTable(
         &self,
         py: Python<'_>,
@@ -462,6 +462,7 @@ impl PyCatalog {
         path: Option<&str>,
         source: Option<&str>,
         schema: Option<&Bound<'_, PyAny>>,
+        description: Option<&str>,
         options: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<PyDataFrame> {
         py.import("warnings")?.call_method1(
@@ -472,7 +473,7 @@ impl PyCatalog {
                 py.get_type::<pyo3::exceptions::PyFutureWarning>(),
             ),
         )?;
-        self.createTable(py, tableName, path, source, schema, None, options)
+        self.createTable(py, tableName, path, source, schema, description, options)
     }
 
     /// Register a Python function as a UDF, returning the registered UDF. Deprecated
@@ -495,8 +496,8 @@ impl PyCatalog {
                 future_warning,
             ),
         )?;
-        let session = crate::session::PySparkSession::new(self.catalog.spark_session().clone());
-        Py::new(py, session)?
+        let session = crate::session::session_object(py, self.catalog.spark_session())?;
+        session
             .bind(py)
             .getattr("udf")?
             .call_method1("register", (name, f, returnType))

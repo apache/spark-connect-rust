@@ -1245,7 +1245,7 @@ impl PyStreamingQueryManager {
     /// listener added twice is in the bus twice. Should the server fail to add its listener, this
     /// warns, as PySpark Connect's does.
     fn addListener(&self, py: Python<'_>, listener: Py<PyAny>) -> PyResult<()> {
-        let session = crate::session::PySparkSession::new(self.session.clone());
+        let session = crate::session::session_object(py, &self.session)?;
         listener
             .bind(py)
             .call_method1("_set_spark_session", (session,))?;
