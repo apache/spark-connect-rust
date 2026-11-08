@@ -10609,6 +10609,23 @@ def test_execution_info_decodes_observed_metrics_and_operation_id(mock_connect):
     assert pairs["dt"] == datetime.timedelta(microseconds=90_061_000_001)
 
 
+def test_connect_functions_package_exports_the_deprecated_functions_as_pyspark():
+    # As PySpark Connect's functions package, which star-imports its builtin module (which has
+    # no __all__): the functions that pyspark.sql.functions no longer lists are attributes of
+    # it too, as the Connect tests use them through their CF alias.
+    import random
+
+    import pyspark.sql.connect.functions as connect_functions
+    from pyspark.sql.connect.functions import builtin
+
+    for name in ("countDistinct", "sumDistinct", "approxCountDistinct", "chr", "toDegrees",
+                 "toRadians", "shiftLeft", "shiftRight", "shiftRightUnsigned", "bitwiseNOT",
+                 "random", "uuid"):
+        assert getattr(connect_functions, name) is getattr(builtin, name)
+    assert connect_functions.py_random is random
+    assert connect_functions.bitwiseNOT(connect_functions.col("id")) is not None
+
+
 def test_execution_info_unsupported_literal_raises_on_flows(mock_connect):
     from pyspark.errors import PySparkTypeError
 

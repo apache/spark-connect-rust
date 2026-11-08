@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 """Re-export of ``pyspark.sql.functions`` under the Connect import path."""
+import random as py_random  # noqa: F401
 from typing import TYPE_CHECKING
 
 # Every public name of pyspark.sql.functions.builtin, also the deprecated functions that
