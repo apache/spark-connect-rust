@@ -43,20 +43,18 @@ impl ExecutePlanResponseReattachableIterator {
 
         request.operation_id = Some(operation_id.clone());
 
-        // Ensure reattachable options are set
-        if !request.request_options.iter().any(|opt| {
-            matches!(
-                &opt.request_option,
-                Some(spark_connect_proto::execute_plan_request::request_option::RequestOption::ReattachOptions(_))
-            )
-        }) {
-            let mut req_opt = spark_connect_proto::execute_plan_request::RequestOption::default();
-            req_opt.request_option =
-                Some(spark_connect_proto::execute_plan_request::request_option::RequestOption::ReattachOptions(
-                    spark_connect_proto::ReattachOptions { reattachable: true },
-                ));
-            request.request_options.push(req_opt);
-        }
+        // Always append the reattachable option, as PySpark does: a hook may have added one
+        // with `reattachable = False`, which the server takes as not reattachable only when no
+        // option says true.
+        request
+            .request_options
+            .push(spark_connect_proto::execute_plan_request::RequestOption {
+                request_option: Some(
+                    spark_connect_proto::execute_plan_request::request_option::RequestOption::ReattachOptions(
+                        spark_connect_proto::ReattachOptions { reattachable: true },
+                    ),
+                ),
+            });
 
         Self {
             operation_id,
@@ -243,6 +241,38 @@ mod tests {
                 if ro.reattachable
             )
         }));
+    }
+
+    #[tokio::test]
+    async fn test_reattach_options_set_after_a_hook_added_a_false_one() {
+        // A session hook appends `reattachable = False`; the execution still ends up with an
+        // option that says true, as PySpark's iterator appends its own after the hooks ran.
+        let request = ExecutePlanRequest {
+            session_id: "session-123".to_string(),
+            request_options: vec![spark_connect_proto::execute_plan_request::RequestOption {
+                request_option: Some(
+                    spark_connect_proto::execute_plan_request::request_option::RequestOption::ReattachOptions(
+                        spark_connect_proto::ReattachOptions {
+                            reattachable: false,
+                        },
+                    ),
+                ),
+            }],
+            ..Default::default()
+        };
+
+        let iter = ExecutePlanResponseReattachableIterator::new(request);
+
+        let reattachable: Vec<bool> = iter
+            .request()
+            .request_options
+            .iter()
+            .filter_map(|opt| match &opt.request_option {
+                Some(spark_connect_proto::execute_plan_request::request_option::RequestOption::ReattachOptions(ro)) => Some(ro.reattachable),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reattachable, vec![false, true]);
     }
 
     #[tokio::test]

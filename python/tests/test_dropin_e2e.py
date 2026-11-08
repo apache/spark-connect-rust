@@ -926,6 +926,76 @@ def test_foreach_foreach_partition_and_to_json_as_pyspark(session):
     assert json.collect() == [Row(value='{"id":1,"name":"a","bin":"eA=="}'), Row(value='{"id":2}')]
 
 
+def test_progress_handler_runs_a_query_of_its_own_as_pyspark(session):
+    # As PySpark's: a handler runs while the execution runs, and a query of the handler runs
+    # too, the progress of the execution having no effect on it.
+    nested = []
+    started = []
+
+    def handler(*, stages, inflight_tasks, operation_id, done):
+        # The first call, while the result is read, of the progress or of its end.
+        if not started:
+            started.append(True)
+            nested.append(session.range(4).count())
+
+    session.registerProgressHandler(handler)
+    try:
+        total = (
+            session.range(0, 2000000, 1, 4)
+            .groupBy((F.col("id") % 97).alias("k"))
+            .agg(F.sum("id").alias("s"))
+            .selectExpr("sum(s) as t")
+            .collect()
+        )
+    finally:
+        session.removeProgressHandler(handler)
+    assert nested == [4]
+    assert total == [Row(t=1999999000000)]
+
+
+def test_hook_runs_a_query_of_its_own_as_pyspark(session):
+    # As PySpark's: an on_execute_plan hook runs a query, which runs without the hook.
+    remote = os.environ["SPARK_REMOTE"]
+    nested = []
+    started = []
+
+    class QueryHook(SparkSession.Hook):
+        def on_execute_plan(self, request):
+            if not started:
+                started.append(True)
+                nested.append(session.range(2).count())
+            return request
+
+    builder = SparkSession.builder.remote(remote)
+    builder._registerHook(lambda _: QueryHook())
+    spark = builder.create()
+    try:
+        assert spark.range(3).count() == 3
+    finally:
+        spark.stop()
+    assert nested == [2]
+
+
+def test_hook_appending_a_non_reattachable_option_keeps_the_execution_reattachable(session):
+    # As PySpark's: the iterator appends its own reattachable option after the hooks ran, so
+    # an option of a hook that says false does not make the execution non-reattachable.
+    remote = os.environ["SPARK_REMOTE"]
+
+    class NotReattachableHook(SparkSession.Hook):
+        def on_execute_plan(self, request):
+            request.request_options.add().reattach_options.reattachable = False
+            return request
+
+    builder = SparkSession.builder.remote(remote)
+    builder._registerHook(lambda _: NotReattachableHook())
+    spark = builder.create()
+    try:
+        assert spark.range(2).count() == 2
+        assert spark.sql("select 1 as x").collect() == [Row(x=1)]
+    finally:
+        spark.stop()
+
+
 def test_clone_session_copies_the_state_of_the_session_as_pyspark(session):
     # As PySpark's: the clone has the configurations and the temporary views of the session,
     # of an id of its own or of the one given, and changes to either do not show in the other.

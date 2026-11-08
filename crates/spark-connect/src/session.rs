@@ -2673,10 +2673,14 @@ mod tests {
     fn version_cache_recovers_after_lookup_panics() {
         let spark = session();
         let handle = spark.clone();
-        // Like other synchronous RPC helpers, version() cannot run inside Tokio.
-        // That caller's panic must not permanently break this session's cache.
+        // Like other synchronous RPC helpers, version() cannot run inside a current-thread
+        // Tokio runtime, which cannot block in place. That caller's panic must not
+        // permanently break this session's cache.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            block_on(async { spark.version() })
+            runtime.block_on(async { spark.version() })
         }));
         assert!(result.is_err());
         assert!(spark.server_version.is_poisoned());

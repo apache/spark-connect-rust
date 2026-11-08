@@ -27,8 +27,19 @@ pub fn get_runtime() -> &'static Runtime {
 /// Allows synchronous code (e.g., from PyO3) to execute an async function
 /// and wait for its result. This should be called with the GIL released
 /// in a Python context.
+///
+/// Also called from a callback that runs inside the runtime (a progress handler, or a
+/// session hook of the executions), which may run a query itself: as PySpark does, the
+/// nested query runs. The thread is then in the runtime's context, which `block_in_place`
+/// leaves for the nested `block_on`. A `current_thread` runtime cannot block in place, so the
+/// call keeps failing there.
 pub fn block_on<F: std::future::Future>(f: F) -> F::Output {
-    get_runtime().block_on(f)
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| get_runtime().block_on(f))
+        }
+        _ => get_runtime().block_on(f),
+    }
 }
 
 #[cfg(test)]
@@ -47,6 +58,20 @@ mod tests {
     fn test_block_on_works() {
         let result = block_on(async { 42 });
         assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn test_block_on_nested_in_block_on() {
+        // A callback of a running execution blocks on a nested query, from within the runtime.
+        let result = block_on(async { block_on(async { 7 }) + 1 });
+        assert_eq!(result, 8);
+    }
+
+    #[test]
+    fn test_block_on_nested_on_a_worker_thread() {
+        let result =
+            block_on(async { tokio::spawn(async { block_on(async { 5 }) }).await.unwrap() });
+        assert_eq!(result, 5);
     }
 
     #[test]
