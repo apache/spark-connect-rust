@@ -8,10 +8,12 @@
 
 use spark_connect_proto as proto;
 use std::collections::HashMap;
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::dataframe::DataFrame;
-use crate::plan::LogicalPlan;
+use crate::plan::{LogicalPlan, RelationOwner};
+use crate::session::SparkSession;
 
 /// ML parameter handling: stores name -> literal value mappings.
 ///
@@ -458,6 +460,8 @@ impl Transformer for StandardScalerModel {
         // Wrap the built MlRelation as the plan; its `to_proto` emits the relation as-is.
         let plan = LogicalPlan::MlTransform {
             ml_relation: relation,
+            input: df.plan.clone(),
+            owner: None,
         };
 
         Ok(DataFrame::new(df.session.clone(), plan))
@@ -545,6 +549,8 @@ impl Transformer for VectorAssembler {
         relation.rel_type = Some(proto::relation::RelType::MlRelation(Box::new(ml_relation)));
         let plan = LogicalPlan::MlTransform {
             ml_relation: relation,
+            input: df.plan.clone(),
+            owner: None,
         };
         Ok(DataFrame::new(df.session.clone(), plan))
     }
@@ -664,6 +670,8 @@ impl Transformer for StringIndexerModel {
         relation.rel_type = Some(proto::relation::RelType::MlRelation(Box::new(ml_relation)));
         let plan = LogicalPlan::MlTransform {
             ml_relation: relation,
+            input: df.plan.clone(),
+            owner: None,
         };
         Ok(DataFrame::new(df.session.clone(), plan))
     }
@@ -789,6 +797,8 @@ impl Transformer for MaxAbsScalerModel {
         relation.rel_type = Some(proto::relation::RelType::MlRelation(Box::new(ml_relation)));
         let plan = LogicalPlan::MlTransform {
             ml_relation: relation,
+            input: df.plan.clone(),
+            owner: None,
         };
         Ok(DataFrame::new(df.session.clone(), plan))
     }
@@ -834,28 +844,48 @@ fn fit_via_command(
     )))
 }
 
-/// A session-owned model reference. Keep it cached until session closure so that
-/// model clones and lazy transformed DataFrames remain usable after a model is dropped.
+/// The server's cached model, shared by a model, its clones and every DataFrame that it
+/// transforms (through the [`RelationOwner`] of their plans). The last owner to drop deletes
+/// the cached object on the server, as PySpark's `RemoteModelRef` does.
 #[derive(Debug, Clone)]
-struct CachedModel {
+struct CachedModel(Arc<CachedModelRef>);
+
+struct CachedModelRef {
     model_ref: proto::ObjectRef,
-    session_id: String,
+    session: SparkSession,
+}
+
+impl std::fmt::Debug for CachedModelRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CachedModelRef")
+            .field("model_ref", &self.model_ref)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for CachedModelRef {
+    fn drop(&mut self) {
+        // Sent without waiting, and its errors (a stopped session, a closed channel) are
+        // ignored, as PySpark ignores them when it releases a model.
+        self.session
+            .release_ml_objects(vec![self.model_ref.clone()]);
+    }
 }
 
 impl CachedModel {
     fn from_info(
         info: &proto::ml_command_result::MlOperatorInfo,
-        session_id: &str,
+        session: &SparkSession,
         estimator: &str,
     ) -> spark_connect_core::error::Result<Self> {
         match &info.r#type {
             Some(proto::ml_command_result::ml_operator_info::Type::ObjRef(reference))
                 if !reference.id.is_empty() =>
             {
-                Ok(Self {
+                Ok(Self(Arc::new(CachedModelRef {
                     model_ref: reference.clone(),
-                    session_id: session_id.to_string(),
-                })
+                    session: session.clone(),
+                })))
             }
             _ => Err(spark_connect_core::error::SparkError::connect_msg(format!(
                 "{estimator}.fit: server returned no model object reference"
@@ -868,7 +898,7 @@ impl CachedModel {
             ml_type: Some(proto::ml_relation::MlType::Transform(Box::new(
                 proto::ml_relation::Transform {
                     operator: Some(proto::ml_relation::transform::Operator::ObjRef(
-                        self.model_ref.clone(),
+                        self.0.model_ref.clone(),
                     )),
                     input: Some(Box::new(df.relation())),
                     params: Some(params.to_proto()),
@@ -883,7 +913,7 @@ impl CachedModel {
         df: &DataFrame,
         params: &Params,
     ) -> spark_connect_core::error::Result<DataFrame> {
-        if df.session.session_id() != self.session_id {
+        if df.session.session_id() != self.0.session.session_id() {
             return Err(spark_connect_core::error::SparkError::value_msg(
                 "A fitted ML model must transform data from its fitting session",
             ));
@@ -894,10 +924,13 @@ impl CachedModel {
             ))),
             ..Default::default()
         };
+        // The DataFrame keeps this model, and the plan of its input, alive.
         Ok(DataFrame::new(
             df.session.clone(),
             LogicalPlan::MlTransform {
                 ml_relation: relation,
+                input: df.plan.clone(),
+                owner: Some(RelationOwner(self.0.clone())),
             },
         ))
     }
@@ -972,9 +1005,9 @@ impl LogisticRegression {
     fn model_from_info(
         &self,
         info: proto::ml_command_result::MlOperatorInfo,
-        session_id: &str,
+        session: &SparkSession,
     ) -> spark_connect_core::error::Result<LogisticRegressionModel> {
-        let cached = CachedModel::from_info(&info, session_id, "LogisticRegression")?;
+        let cached = CachedModel::from_info(&info, session, "LogisticRegression")?;
         Ok(LogisticRegressionModel {
             operator: MlOperator::with_uid(
                 "org.apache.spark.ml.classification.LogisticRegressionModel",
@@ -1015,9 +1048,7 @@ impl Estimator for LogisticRegression {
 
     fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
         let info = fit_via_command(&self.operator, &self.params, df)?;
-        Ok(Box::new(
-            self.model_from_info(info, df.session.session_id())?,
-        ))
+        Ok(Box::new(self.model_from_info(info, &df.session)?))
     }
 }
 
@@ -1025,7 +1056,8 @@ impl Estimator for LogisticRegression {
 ///
 /// Obtain this model through [`Estimator::fit`]. Its cached object reference is
 /// distinct from its operator UID and belongs to the session used for fitting.
-/// The server keeps the cached model for that session's lifetime.
+/// The server keeps the cached model while a model, a clone of it, or a DataFrame
+/// it transformed is alive, then deletes it.
 #[derive(Debug, Clone)]
 pub struct LogisticRegressionModel {
     pub operator: MlOperator,
@@ -1171,9 +1203,9 @@ impl LinearSVC {
     fn model_from_info(
         &self,
         info: proto::ml_command_result::MlOperatorInfo,
-        session_id: &str,
+        session: &SparkSession,
     ) -> spark_connect_core::error::Result<LinearSVCModel> {
-        let cached = CachedModel::from_info(&info, session_id, "LinearSVC")?;
+        let cached = CachedModel::from_info(&info, session, "LinearSVC")?;
         Ok(LinearSVCModel {
             operator: MlOperator::with_uid(
                 "org.apache.spark.ml.classification.LinearSVCModel",
@@ -1208,14 +1240,13 @@ impl Estimator for LinearSVC {
 
     fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
         let info = fit_via_command(&self.operator, &self.params, df)?;
-        Ok(Box::new(
-            self.model_from_info(info, df.session.session_id())?,
-        ))
+        Ok(Box::new(self.model_from_info(info, &df.session)?))
     }
 }
 
 /// A LinearSVC model fitted by Spark Connect and cached for its fitting session.
-/// Obtain it through [`Estimator::fit`]; prediction uses the cached model object.
+/// Obtain it through [`Estimator::fit`]; prediction uses the cached model object,
+/// which the server deletes once no model, clone or transformed DataFrame refers to it.
 #[derive(Debug, Clone)]
 pub struct LinearSVCModel {
     operator: MlOperator,
@@ -1501,6 +1532,8 @@ impl Transformer for PipelineModel {
         relation.rel_type = Some(proto::relation::RelType::MlRelation(Box::new(ml_relation)));
         let plan = LogicalPlan::MlTransform {
             ml_relation: relation,
+            input: df.plan.clone(),
+            owner: None,
         };
         Ok(DataFrame::new(df.session.clone(), plan))
     }
@@ -1690,6 +1723,8 @@ impl Transformer for CrossValidatorModel {
         relation.rel_type = Some(proto::relation::RelType::MlRelation(Box::new(ml_relation)));
         let plan = LogicalPlan::MlTransform {
             ml_relation: relation,
+            input: df.plan.clone(),
+            owner: None,
         };
         Ok(DataFrame::new(df.session.clone(), plan))
     }
@@ -2108,7 +2143,7 @@ mod tests {
         let _ = va.transform(&df).unwrap();
     }
 
-    fn fitted_logistic_regression(session_id: &str) -> LogisticRegressionModel {
+    fn fitted_logistic_regression(session: &SparkSession) -> LogisticRegressionModel {
         let estimator = LogisticRegression::new().set_prediction_col("pred");
         estimator
             .model_from_info(
@@ -2121,7 +2156,7 @@ mod tests {
                     uid: Some("operator-uid".to_string()),
                     ..Default::default()
                 },
-                session_id,
+                session,
             )
             .unwrap()
     }
@@ -2129,7 +2164,7 @@ mod tests {
     #[test]
     fn logistic_regression_transform_uses_the_fitted_object_reference() {
         let session = offline_session();
-        let mut model = fitted_logistic_regression(session.session_id());
+        let mut model = fitted_logistic_regression(&session);
         assert_eq!(model.operator.uid, "operator-uid");
         assert_eq!(model.operator.op_type, OperatorType::Model);
         let data = session.range(3).unwrap();
@@ -2161,6 +2196,7 @@ mod tests {
     #[test]
     fn logistic_regression_fit_requires_a_nonempty_model_reference() {
         let estimator = LogisticRegression::new();
+        let session = offline_session();
         for kind in [
             None,
             Some(proto::ml_command_result::ml_operator_info::Type::Name(
@@ -2174,14 +2210,14 @@ mod tests {
                 r#type: kind,
                 ..Default::default()
             };
-            assert!(estimator.model_from_info(info, "session").is_err());
+            assert!(estimator.model_from_info(info, &session).is_err());
         }
     }
 
     #[test]
     fn logistic_regression_rejects_a_different_session() {
         let session = offline_session();
-        let mut model = fitted_logistic_regression(session.session_id());
+        let mut model = fitted_logistic_regression(&session);
         let other = session.new_session();
         assert!(model.transform(&other.range(3).unwrap()).is_err());
     }
@@ -2239,9 +2275,7 @@ mod tests {
             )),
             ..Default::default()
         };
-        let mut model = estimator
-            .model_from_info(info, session.session_id())
-            .unwrap();
+        let mut model = estimator.model_from_info(info, &session).unwrap();
         assert_eq!(model.operator().uid, estimator.operator().uid);
         assert_eq!(
             model.operator().name,
@@ -2268,7 +2302,7 @@ mod tests {
             .is_err());
         assert!(model.clone_box().transform(&df).is_ok());
         assert!(estimator
-            .model_from_info(Default::default(), session.session_id())
+            .model_from_info(Default::default(), &session)
             .is_err());
     }
 }

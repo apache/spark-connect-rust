@@ -70,8 +70,11 @@ and PyTorch training.
 Fitting returns a server-cached model. Prediction uses that model's object
 reference and must use the same Spark session. Models are obtained through
 `Estimator::fit`; direct struct construction of `LogisticRegressionModel` is no
-longer supported. The cached model remains available until the session is closed,
-including when a model is cloned or a transformed DataFrame is executed later.
+longer supported. The cached model stays available while the model, a clone of
+it, or a DataFrame that it transformed is alive, including when such a DataFrame is
+executed later. When the last of them is dropped, the cached model is deleted on the
+server, as `pyspark.ml` does, without waiting for the server; a fit that is dropped
+at once leaves nothing cached.
 
 ## Native LinearSVC
 
@@ -84,7 +87,9 @@ and `pyspark.ml.connect.LinearSVC`, with the upstream keyword-only constructor
 parameters and mutating `setFeaturesCol`, `setRegParam`, etc. methods.
 
 `fit` returns a server-cached model; `transform` must use the fitting session.
-Clones and lazy prediction DataFrames remain usable until that session closes.
+Clones and lazy prediction DataFrames keep the cached model usable while they are
+alive. When the last of the model, its clones and the DataFrames it transformed is
+dropped, the server deletes the cached model, as `pyspark.ml` does.
 The Python model uses the existing `MLModel.transform` interface. Model inspection
 (coefficients, intercept and summaries), single-vector prediction and model
 persistence are not exposed by this addition.
