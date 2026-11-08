@@ -374,24 +374,20 @@ impl DataFrame {
 
     /// Rename a column.
     pub fn with_column_renamed(&self, existing: &str, new: &str) -> DataFrame {
-        let mut renames = HashMap::new();
-        renames.insert(existing.to_string(), new.to_string());
         let plan = LogicalPlan::WithColumnsRenamed {
             input: Arc::clone(&self.plan),
-            renames,
+            renames: vec![(existing.to_string(), new.to_string())],
         };
         DataFrame::new(self.session.clone(), plan)
     }
 
-    /// Rename multiple columns.
+    /// Rename multiple columns, of old and new names in their order, in which the server
+    /// applies them, as PySpark's `withColumnsRenamed` of a dict sends them: so
+    /// `[("id", "a"), ("a", "b")]` renames `id` to `b`.
     pub fn with_columns_renamed(&self, renames: Vec<(String, String)>) -> DataFrame {
-        let mut rename_map = HashMap::new();
-        for (old, new) in renames {
-            rename_map.insert(old, new);
-        }
         let plan = LogicalPlan::WithColumnsRenamed {
             input: Arc::clone(&self.plan),
-            renames: rename_map,
+            renames,
         };
         DataFrame::new(self.session.clone(), plan)
     }

@@ -118,6 +118,33 @@ fn local_and_cached_relations_serialize() {
 }
 
 #[test]
+fn renames_are_sent_in_their_order() {
+    // As PySpark's withColumnsRenamed of a dict: the renames in their order, in which the server
+    // applies them, so that ("id", "a") then ("a", "b") renames `id` to `b`.
+    let renames = |plan: LogicalPlan| match plan.to_proto().rel_type {
+        Some(proto::relation::RelType::WithColumnsRenamed(wcr)) => wcr
+            .renames
+            .iter()
+            .map(|r| (r.col_name.clone(), r.new_col_name.clone()))
+            .collect::<Vec<_>>(),
+        other => panic!("expected a WithColumnsRenamed, got {other:?}"),
+    };
+    let pairs: Vec<(String, String)> = ["id", "a", "b", "c", "d", "e", "f", "g"]
+        .windows(2)
+        .map(|w| (w[0].to_string(), w[1].to_string()))
+        .collect();
+    assert_eq!(
+        renames(plan::with_columns_renamed(base(), pairs.clone())),
+        pairs
+    );
+    let reversed: Vec<_> = pairs.iter().rev().cloned().collect();
+    assert_eq!(
+        renames(plan::with_columns_renamed(base(), reversed.clone())),
+        reversed
+    );
+}
+
+#[test]
 fn relation_changes_maps_to_correct_proto() {
     use std::collections::HashMap;
     let mut options = HashMap::new();

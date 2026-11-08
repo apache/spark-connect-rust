@@ -269,6 +269,17 @@ def test_udtfs_and_udfs_of_a_dataframe_or_the_session_raise_no_active_session_as
 
 
 
+def test_renames_are_applied_in_their_order_as_pyspark(session):
+    # As PySpark's withColumnsRenamed of a dict, whose renames the server applies in their order.
+    df = session.range(10)
+    assert df.withColumnsRenamed({"id": "a", "a": "b"}).columns == ["b"]
+    assert df.withColumnsRenamed({"a": "b", "id": "a"}).columns == ["a"]
+    renames = {"id": "c1", "c1": "c2", "c2": "c3", "c3": "c4", "c4": "c5", "c5": "c6"}
+    assert df.withColumnsRenamed(renames).columns == ["c6"]
+
+
+
+
 def test_join_with_an_unsupported_join_type_raises_as_pyspark(session):
     # As PySpark: the join type is checked when the join is built, which raises the
     # AnalysisException of UNSUPPORTED_JOIN_TYPE, naming the type as it is normalized.
