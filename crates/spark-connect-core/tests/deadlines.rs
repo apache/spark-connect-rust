@@ -791,3 +791,34 @@ impl UnaryService<ConfigRequest> for Config {
         })
     }
 }
+
+#[tokio::test]
+async fn reattach_of_a_stream_whose_client_was_closed_raises_no_active_session() {
+    // As the reference: an execution that is still read when its session is stopped, and that
+    // needs a reattach, raises NO_ACTIVE_SESSION from the stub of the closed client, instead of
+    // reattaching. The stream ends with that error, and the server gets no reattach.
+    let fixture = Fixture::start(
+        vec![streamed(vec![response("r1", false)])],
+        vec![streamed(vec![response("r2", true)])],
+        quick_retries(),
+    )
+    .await;
+    let mut stream = bounded(fixture.client.execute_plan_reattachable(execute_request()))
+        .await
+        .unwrap();
+    let first = bounded(stream.message()).await.unwrap().unwrap();
+    assert_eq!(first.response_id, "r1");
+
+    // The stream ends after r1, so the next read reattaches, which the closed client refuses.
+    fixture.client.close();
+    let error = bounded(stream.message()).await.unwrap_err();
+    assert_eq!(
+        error.get_condition().as_deref(),
+        Some("NO_ACTIVE_SESSION"),
+        "{error:?}"
+    );
+    assert!(bounded(stream.message()).await.unwrap().is_none());
+
+    assert!(fixture.state.reattaches.lock().unwrap().is_empty());
+    assert_eq!(*fixture.state.executes.lock().unwrap(), 1);
+}

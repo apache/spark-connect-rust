@@ -1725,6 +1725,11 @@ impl ReattachableResponseStream {
         retry_exception_since: &mut Option<std::time::Instant>,
     ) -> Result<()> {
         loop {
+            // As the reference's `_stub`: once the client is closed (its session stopped), the
+            // reattach and the ExecutePlan sent again raise NO_ACTIVE_SESSION, and the stream ends.
+            if let Err(error) = self.client.ensure_open() {
+                return Err(self.fail(error));
+            }
             let opened = if self.execute_again {
                 self.open_execute_plan_again().await
             } else {
