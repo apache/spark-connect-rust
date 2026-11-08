@@ -157,14 +157,28 @@ pub(crate) fn fillna(
     if let Some(dict) = dict {
         let mut pairs = Vec::with_capacity(dict.len());
         for (column, fill) in dict.iter() {
-            pairs.push((column.extract()?, crate::session::py_to_value(&fill)?));
+            pairs.push((column.extract()?, fill_value(&fill)?));
         }
         return Ok(PyDataFrame::new(df.fillna_map(pairs)));
     }
-    Ok(PyDataFrame::new(df.fillna_value(
-        crate::session::py_to_value(value)?,
-        column_refs(&columns),
-    )))
+    Ok(PyDataFrame::new(
+        df.fillna_value(fill_value(value)?, column_refs(&columns)),
+    ))
+}
+
+/// The value of a fill. As PySpark sends it as a proto literal, an int beyond a long is out of
+/// range for the proto, which raises `ValueError`, not the error of a literal.
+fn fill_value(value: &Bound<'_, PyAny>) -> PyResult<spark_connect::row::Value> {
+    if value.is_instance_of::<PyInt>()
+        && !value.is_instance_of::<pyo3::types::PyBool>()
+        && value.extract::<i64>().is_err()
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Value out of range: {}",
+            value.str()?
+        )));
+    }
+    crate::session::py_to_value(value)
 }
 
 /// The columns of `df.describe(*cols)`, as PySpark's: column names, or a list of them.
