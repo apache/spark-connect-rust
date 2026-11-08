@@ -151,6 +151,34 @@ impl PyRuntimeConf {
     }
 
     /// Whether the given configuration key is modifiable at runtime.
+    /// The values of the configurations `keys`, in one request, as PySpark Connect's
+    /// `SparkConnectClient.get_configs`, which `SparkConnectClient` of the connect import path
+    /// gives.
+    fn _get_many(&self, py: Python<'_>, keys: Vec<String>) -> PyResult<Vec<Option<String>>> {
+        py.detach(|| {
+            let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+            self.conf.get_many(&keys).map_err(Box::new)
+        })
+        .to_pyerr()
+    }
+
+    /// The values of the configurations of `pairs` of a key and its default, in one request, as
+    /// PySpark Connect's `SparkConnectClient.get_config_with_defaults`.
+    fn _get_with_defaults(
+        &self,
+        py: Python<'_>,
+        pairs: Vec<(String, Option<String>)>,
+    ) -> PyResult<Vec<Option<String>>> {
+        py.detach(|| {
+            let pairs: Vec<(&str, Option<&str>)> = pairs
+                .iter()
+                .map(|(key, default)| (key.as_str(), default.as_deref()))
+                .collect();
+            self.conf.get_with_defaults(&pairs).map_err(Box::new)
+        })
+        .to_pyerr()
+    }
+
     #[pyo3(name = "isModifiable")]
     fn is_modifiable(&self, py: Python<'_>, key: &str) -> PyResult<bool> {
         py.detach(|| self.conf.is_modifiable(key)).to_pyerr()
