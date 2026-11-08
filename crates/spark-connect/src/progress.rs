@@ -2,11 +2,14 @@
 //! `pyspark.sql.connect.shell.progress`: the progress handlers of the session are called with
 //! each progress of the server that has tasks, and once more, as done, when the execution ends.
 
+use std::sync::Arc;
+
 use spark_connect_core::client::ReattachableResponseStream;
 use spark_connect_core::error::Result;
+use spark_connect_core::runtime::CallbackGuard;
 use spark_connect_proto as proto;
 
-use crate::session::SparkSession;
+use crate::session::{ProgressHandler, ProgressHandlers, SparkSession};
 
 /// The progress of a stage of an execution, as PySpark's `StageInfo`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,7 +47,7 @@ pub struct ProgressUpdate {
 
 /// The progress of one execution, as PySpark's `Progress` of the execution of a request.
 pub(crate) struct ProgressTracker {
-    session: SparkSession,
+    handlers: ProgressHandlers,
     operation_id: Option<String>,
     stages: Vec<StageInfo>,
     inflight_tasks: i64,
@@ -53,7 +56,7 @@ pub(crate) struct ProgressTracker {
 impl ProgressTracker {
     pub(crate) fn new(session: &SparkSession, operation_id: Option<String>) -> Self {
         ProgressTracker {
-            session: session.clone(),
+            handlers: session.progress_handlers(),
             operation_id,
             stages: Vec::new(),
             inflight_tasks: 0,
@@ -80,12 +83,29 @@ impl ProgressTracker {
     }
 
     fn notify(&self, done: bool) {
-        self.session.notify_progress(|| ProgressUpdate {
+        // Clone handlers out of the registry lock so callbacks can add or remove handlers.
+        let handlers: Vec<ProgressHandler> = self
+            .handlers
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, handler)| Arc::clone(handler))
+            .collect();
+        if handlers.is_empty() {
+            return;
+        }
+        let update = ProgressUpdate {
             stages: self.stages.clone(),
             inflight_tasks: self.inflight_tasks,
             operation_id: self.operation_id.clone(),
             done,
-        });
+        };
+        // A handler may run a query whose progress calls the handlers again. Preserve the
+        // execution callback-depth guard without retaining the session or its listener bus.
+        let _callback = CallbackGuard::enter();
+        for handler in handlers {
+            handler(&update);
+        }
     }
 }
 
@@ -124,6 +144,7 @@ impl ExecutionStream {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use super::*;
@@ -185,5 +206,51 @@ mod tests {
             }
         );
         session.remove_progress_handler(id);
+    }
+
+    #[test]
+    fn detached_progress_registry_preserves_the_execution_recursion_bound() {
+        use spark_connect_core::error::SparkErrorKind;
+        use spark_connect_core::runtime::{check_callback_depth, MAX_CALLBACK_DEPTH};
+
+        let session = SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .expect("session");
+        let handlers = Arc::downgrade(&session.progress_handlers());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let failures = Arc::new(AtomicUsize::new(0));
+        let seen_calls = Arc::clone(&calls);
+        let seen_failures = Arc::clone(&failures);
+        session.register_progress_handler(move |update| {
+            if update.done {
+                return;
+            }
+            let call = seen_calls.fetch_add(1, Ordering::SeqCst);
+            match check_callback_depth() {
+                Err(error) => {
+                    assert_eq!(error.kind, SparkErrorKind::RecursionError);
+                    seen_failures.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(()) => {
+                    // Bound this test even if the guard regresses; no network execution or
+                    // unbounded native recursion is needed to observe the missing guard.
+                    assert!(call < MAX_CALLBACK_DEPTH);
+                    let nested = ProgressTracker {
+                        handlers: handlers.upgrade().expect("registry is alive"),
+                        operation_id: Some("nested".to_string()),
+                        stages: Vec::new(),
+                        inflight_tasks: 0,
+                    };
+                    nested.notify(false);
+                }
+            }
+        });
+        let tracker = ProgressTracker::new(&session, None);
+        tracker.notify(false);
+        assert_eq!(calls.load(Ordering::SeqCst), MAX_CALLBACK_DEPTH);
+        assert_eq!(failures.load(Ordering::SeqCst), 1);
+        assert!(check_callback_depth().is_ok());
+        session.clear_progress_handlers();
     }
 }

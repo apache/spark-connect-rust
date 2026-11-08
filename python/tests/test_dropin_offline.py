@@ -37,6 +37,7 @@ from pyspark.sql import Row, SparkSession, types as T
 # Collected here so the existing offline CI suite exercises real Arrow results.
 from day_time_interval_cases import DayTimeIntervalTests  # noqa: F401
 from interval_input_cases import IntervalInputConversionTests  # noqa: F401
+from streaming_listener_cases import TestStreamingListenerLifecycle  # noqa: F401
 
 
 def test_create_dataframe_input_names_offline():

@@ -21,7 +21,8 @@ import multiprocessing
 import re
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from threading import Event
+from queue import Empty, Queue
+from threading import Condition, Event
 
 
 # The drop-in package does not ship generated service protobuf classes, so these
@@ -258,6 +259,10 @@ def serve(connection):
         # Each AnalyzePlanRequest, recorded.
         analyze_requests = []
 
+        def __init__(self):
+            self.listener_condition = Condition()
+            self.listener_epoch = 0
+
         def reset(self):
             # Back to the state of a new server: the tests of a module share one.
             self.calls = 0
@@ -265,7 +270,6 @@ def serve(connection):
             self.data_type = struct_schema()
             self.failure = None
             self.block_response = False
-            self.response_gate.clear()
             self.block_execute = False
             self.analyze_requests = []
             self.execute_requests = []
@@ -284,16 +288,48 @@ def serve(connection):
             self.clone_requests = []
             # The DDL of the JSON of each JsonToDDL.
             self.ddl_string = ""
+            with self.listener_condition:
+                # Late completion of an old RPC must not count towards the next test.
+                self.listener_epoch += 1
+                # Release old waiters without opening the next test's response gate.
+                self.response_gate.set()
+                self.response_gate = Event()
+                self.execute_started = 0
+                self.execute_gate_timeouts = 0
+                self.release_session_unblocks_execute = False
+                for queue in getattr(self, "listener_queues", {}).values():
+                    queue.put(None)
+                self.listener_queues = {}
+                self.listener_subscriptions = 0
+                self.listener_removals = 0
+                self.listener_streams_finished = 0
+                self.listener_condition.notify_all()
+            for name in ("listener_register_gate", "listener_remove_gate"):
+                gate = getattr(self, name, None)
+                if gate is not None:
+                    gate.set()
+            self.listener_bus_enabled = False
+            self.listener_register_failure = False
+            self.listener_register_blocked = False
+            self.listener_register_gate = Event()
+            self.listener_remove_failure = False
+            self.listener_remove_blocked = False
+            self.listener_remove_gate = Event()
+            self.release_session_failure = False
+            self.release_session_calls = 0
 
         def analyze(self, request, context):
             self.calls += 1
             self.analyze_requests.append(request)
+            with self.listener_condition:
+                response_gate = self.response_gate
+                blocked = self.block_response
             # base.proto: AnalyzePlanRequest.is_streaming=8; AnalyzePlanResponse.is_streaming=6,
             # IsStreaming.is_streaming=1, of `streaming`, which a test sets.
             if 8 in parse_message(request):
                 streaming = getattr(self, "streaming", False)
                 return message_field(6, varint_field(1, 1) if streaming else b"")
-            if self.block_response and not self.response_gate.wait(5):
+            if blocked and not response_gate.wait(5):
                 context.abort(
                     grpc.StatusCode.DEADLINE_EXCEEDED,
                     "Python thread could not run while metadata lookup waited",
@@ -364,14 +400,144 @@ def serve(connection):
         read_confs = []
         set_confs = []
 
-        def execute(self, request, context):
-            self.execute_calls += 1
-            self.execute_requests.append(request)
-            if self.block_execute and not self.response_gate.wait(5):
-                context.abort(
-                    grpc.StatusCode.DEADLINE_EXCEEDED,
-                    "Python thread could not run while the statement ran",
+        def release_session(self, request, context):
+            with self.listener_condition:
+                self.release_session_calls += 1
+                # Opt in only for the terminal callback-RPC regression. Ordinary tests
+                # retain independent response and session-release behavior.
+                if self.release_session_unblocks_execute:
+                    self.response_gate.set()
+            if self.release_session_failure:
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT, "session release failed")
+            return b""
+
+        def finish_listener_stream(self, epoch, session_id, queue):
+            with self.listener_condition:
+                if epoch != self.listener_epoch:
+                    return
+                if self.listener_queues.get(session_id) is queue:
+                    self.listener_queues.pop(session_id)
+                self.listener_streams_finished += 1
+                self.listener_condition.notify_all()
+
+        def wait_listener_calls(self, counter, count, timeout):
+            with self.listener_condition:
+                return self.listener_condition.wait_for(
+                    lambda: getattr(self, counter) >= count, timeout=timeout
                 )
+
+        def wait_listener_streams_finished(self, count, timeout):
+            return self.wait_listener_calls("listener_streams_finished", count, timeout)
+
+        def wait_execute_started(self, count, timeout):
+            with self.listener_condition:
+                epoch = self.listener_epoch
+                reached = self.listener_condition.wait_for(
+                    lambda: epoch != self.listener_epoch or self.execute_started >= count,
+                    timeout=timeout,
+                )
+                return reached and epoch == self.listener_epoch and self.execute_started >= count
+
+        def execute(self, request, context):
+            with self.listener_condition:
+                self.execute_calls += 1
+                self.execute_requests.append(request)
+                execute_epoch = self.listener_epoch
+                response_gate = self.response_gate
+                blocked = self.block_execute
+            fields = parse_message(request)
+            plan = parse_message(fields.get(3, [b""])[0])
+            command = parse_message(plan.get(2, [b""])[0])
+            listener = parse_message(command.get(11, [b""])[0])
+            if self.listener_bus_enabled and listener:
+                session_id = fields[1][0].decode()
+                header = message_field(12, fields.get(6, [b""])[0])
+                if 1 in listener:
+                    queue = Queue()
+                    with self.listener_condition:
+                        epoch = self.listener_epoch
+                        self.listener_subscriptions += 1
+                        registration_failed = self.listener_register_failure
+                        if not registration_failed:
+                            self.listener_queues[session_id] = queue
+                        self.listener_condition.notify_all()
+                    if registration_failed:
+                        context.abort(
+                            grpc.StatusCode.INVALID_ARGUMENT, "listener registration failed"
+                        )
+                    counted = False
+                    try:
+                        if self.listener_register_blocked:
+                            gate = self.listener_register_gate
+                            # Force an established-stream/pre-acknowledgement window with
+                            # early headers, which real servers seldom expose. An RPC still
+                            # being established follows its transport deadline/retry policy.
+                            context.send_initial_metadata(())
+                            context.add_callback(gate.set)
+                            if not gate.wait(15):
+                                context.abort(
+                                    grpc.StatusCode.INVALID_ARGUMENT,
+                                    "listener registration gate was not released",
+                                )
+                            if not context.is_active():
+                                return
+                        yield (header + message_field(13, "registered")
+                               + message_field(16, varint_field(2, 1)))
+                        sequence = 0
+                        while context.is_active():
+                            try:
+                                event = queue.get(timeout=0.1)
+                            except Empty:
+                                continue
+                            if event is None:
+                                break
+                            event_type, event_json = event
+                            if event_type is None:
+                                context.abort(grpc.StatusCode.INVALID_ARGUMENT, event_json)
+                            sequence += 1
+                            payload = message_field(1, event_json) + varint_field(2, event_type)
+                            yield (header + message_field(13, f"event-{sequence}")
+                                   + message_field(16, message_field(1, payload)))
+                        # The client returns at ResultComplete, before server-side EOF/finally.
+                        self.finish_listener_stream(epoch, session_id, queue)
+                        counted = True
+                        yield header + message_field(13, "finished") + message_field(14, b"")
+                    finally:
+                        if not counted:
+                            self.finish_listener_stream(epoch, session_id, queue)
+                    return
+                with self.listener_condition:
+                    self.listener_removals += 1
+                    # Keep an old, gated removal from closing a queue created after reset.
+                    queue = self.listener_queues.get(session_id)
+                    gate = self.listener_remove_gate
+                    blocked = self.listener_remove_blocked
+                    removal_failed = self.listener_remove_failure
+                    self.listener_condition.notify_all()
+                if blocked and not gate.wait(15):
+                    context.abort(
+                        grpc.StatusCode.INVALID_ARGUMENT, "listener removal gate was not released"
+                    )
+                if removal_failed:
+                    context.abort(grpc.StatusCode.INVALID_ARGUMENT, "listener removal failed")
+                if queue is not None:
+                    queue.put(None)
+                yield header + message_field(13, "removed") + message_field(14, b"")
+                return
+            if blocked:
+                with self.listener_condition:
+                    if execute_epoch == self.listener_epoch:
+                        self.execute_started += 1
+                        self.listener_condition.notify_all()
+                if not response_gate.wait(5):
+                    with self.listener_condition:
+                        if execute_epoch == self.listener_epoch:
+                            self.execute_gate_timeouts += 1
+                            self.listener_condition.notify_all()
+                    context.abort(
+                        grpc.StatusCode.DEADLINE_EXCEEDED,
+                        "Python thread could not run while the statement ran",
+                    )
             if self.execute_failure:
                 code, message = (
                     self.execute_failure
@@ -476,11 +642,12 @@ def serve(connection):
             )
 
     service = Service()
+    service.reset()
     with ThreadPoolExecutor(max_workers=4) as executor:
         server = grpc.server(executor)
         handlers = {
             "AnalyzePlan": grpc.unary_unary_rpc_method_handler(service.analyze),
-            "ReleaseSession": grpc.unary_unary_rpc_method_handler(lambda request, context: b""),
+            "ReleaseSession": grpc.unary_unary_rpc_method_handler(service.release_session),
             "ExecutePlan": grpc.unary_stream_rpc_method_handler(service.execute),
             "ReattachExecute": grpc.unary_stream_rpc_method_handler(
                 lambda request, context: iter([message_field(14, b"")])
@@ -512,6 +679,36 @@ def serve(connection):
                 elif command[0] == "reset":
                     service.reset()
                     connection.send(None)
+                elif command[0] == "listener_event":
+                    _, session_id, event_type, event_json = command
+                    with service.listener_condition:
+                        queue = service.listener_queues.get(session_id)
+                    if queue is not None:
+                        queue.put((event_type, event_json))
+                    connection.send(None)
+                elif command[0] == "end_listener_stream":
+                    _, session_id, failure = command
+                    with service.listener_condition:
+                        queue = service.listener_queues.get(session_id)
+                    if queue is not None:
+                        queue.put((None, "listener event stream failed") if failure else None)
+                    connection.send(queue is not None)
+                elif command[0] == "wait_listener_removal":
+                    connection.send(service.wait_listener_calls("listener_removals", *command[1:]))
+                elif command[0] == "wait_listener_registration":
+                    connection.send(service.wait_listener_calls(
+                        "listener_subscriptions", *command[1:]
+                    ))
+                elif command[0] == "wait_listener_streams_finished":
+                    connection.send(service.wait_listener_streams_finished(*command[1:]))
+                elif command[0] == "wait_execute_started":
+                    connection.send(service.wait_execute_started(*command[1:]))
+                elif command[0] == "release_listener_registration":
+                    service.listener_register_gate.set()
+                    connection.send(None)
+                elif command[0] == "release_listener_removal":
+                    service.listener_remove_gate.set()
+                    connection.send(None)
         finally:
             server.stop(0).wait()
 
@@ -537,6 +734,46 @@ class RemoteService:
 
     def reset(self):
         self.connection.send(("reset",))
+        assert self.connection.poll(10), "Mock server did not respond"
+        self.connection.recv()
+
+    def listener_event(self, session_id, event_type, event_json):
+        self.connection.send(("listener_event", session_id, event_type, json.dumps(event_json)))
+        assert self.connection.poll(10), "Mock server did not respond"
+        self.connection.recv()
+
+    def end_listener_stream(self, session_id, failure=False):
+        self.connection.send(("end_listener_stream", session_id, failure))
+        assert self.connection.poll(10), "Mock server did not respond"
+        return self.connection.recv()
+
+    def wait_listener_removal(self, count=1, timeout=5):
+        self.connection.send(("wait_listener_removal", count, timeout))
+        assert self.connection.poll(timeout + 5), "Mock server did not respond"
+        return self.connection.recv()
+
+    def wait_listener_registration(self, count=1, timeout=5):
+        self.connection.send(("wait_listener_registration", count, timeout))
+        assert self.connection.poll(timeout + 5), "Mock server did not respond"
+        return self.connection.recv()
+
+    def wait_listener_streams_finished(self, count, timeout=5):
+        self.connection.send(("wait_listener_streams_finished", count, timeout))
+        assert self.connection.poll(timeout + 5), "Mock server did not respond"
+        return self.connection.recv()
+
+    def wait_execute_started(self, count=1, timeout=5):
+        self.connection.send(("wait_execute_started", count, timeout))
+        assert self.connection.poll(timeout + 5), "Mock server did not respond"
+        return self.connection.recv()
+
+    def release_listener_registration(self):
+        self.connection.send(("release_listener_registration",))
+        assert self.connection.poll(10), "Mock server did not respond"
+        self.connection.recv()
+
+    def release_listener_removal(self):
+        self.connection.send(("release_listener_removal",))
         assert self.connection.poll(10), "Mock server did not respond"
         self.connection.recv()
 

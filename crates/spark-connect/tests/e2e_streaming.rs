@@ -238,3 +238,75 @@ fn streaming_listeners_are_those_of_the_session() {
     assert!(events.contains(&QUERY_PROGRESS_EVENT), "{events:?}");
     assert_eq!(events.len(), seen, "{events:?}");
 }
+
+/// Exercise the real event reader before dropping every native session/manager owner.
+/// After the probe query terminates the subscription is quiet; its worker must not keep
+/// the bus, its listener, or its cancellation sender alive by retaining a strong bus Arc.
+#[test]
+fn streaming_last_native_owner_drop_cancels_a_quiet_listener_worker() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::streaming::{
+        StreamingQueryListener, StreamingQueryListenerEvent, QUERY_TERMINATED_EVENT,
+    };
+    use std::sync::{mpsc, Arc};
+    use std::time::Duration;
+
+    struct DropObservedListener {
+        terminated: mpsc::Sender<()>,
+        dropped: mpsc::Sender<()>,
+    }
+    impl StreamingQueryListener for DropObservedListener {
+        fn on_event(&self, event: &StreamingQueryListenerEvent) {
+            if event.event_type == QUERY_TERMINATED_EVENT {
+                let _ = self.terminated.send(());
+            }
+        }
+    }
+    impl Drop for DropObservedListener {
+        fn drop(&mut self) {
+            let _ = self.dropped.send(());
+        }
+    }
+
+    let spark = session();
+    let manager = spark.streams();
+    let (terminated, observed_termination) = mpsc::channel();
+    let (dropped, observed_drop) = mpsc::channel();
+    let listener = Arc::new(DropObservedListener {
+        terminated,
+        dropped,
+    });
+    manager
+        .add_listener(listener.clone())
+        .expect("register the native ownership listener");
+    let query = spark
+        .read_stream()
+        .format("rate")
+        .option("rowsPerSecond", "1")
+        .load(None)
+        .write_stream()
+        .format("noop")
+        .query_name("e2e_last_native_listener_owner")
+        .start("")
+        .expect("start the ownership probe query");
+    query.stop().expect("stop the ownership probe query");
+    // A started callback is synchronous. This asynchronous bus event proves that
+    // the real worker entered its loop before the test drops any of its owners.
+    observed_termination
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the real listener worker receives the query termination");
+    assert_eq!(manager.listeners().len(), 1);
+
+    // The listener stores only channels, so it cannot retain a session or manager.
+    // Do not remove the listener or close/stop the session: cancellation must follow
+    // the last owner's drop, rather than explicit cleanup.
+    drop(query);
+    drop(listener);
+    drop(manager);
+    drop(spark);
+    observed_drop
+        .recv_timeout(Duration::from_secs(5))
+        .expect("dropping every native owner releases the listener of the quiet real worker");
+}
