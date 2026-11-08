@@ -72,6 +72,13 @@ fn operation_not_found() -> Status {
     ))
 }
 
+fn session_not_found() -> Status {
+    // As the server reports a session it does not know, with the same shape.
+    Status::internal(
+        "[INVALID_HANDLE.SESSION_NOT_FOUND] Session not found: 00000000-0000-4000-8000-000000000001",
+    )
+}
+
 #[derive(Clone)]
 struct CapturedRelease {
     request: ReleaseExecuteRequest,
@@ -452,12 +459,184 @@ async fn operation_not_found_after_a_response_is_the_error_and_is_not_resent() {
         "r1"
     );
     let error = bounded(stream.message()).await.unwrap_err();
-    assert!(
-        error.message.contains("INVALID_HANDLE.OPERATION_NOT_FOUND"),
-        "{error:?}"
-    );
+    assert_response_already_received(&error, "INVALID_HANDLE.OPERATION_NOT_FOUND");
     assert_eq!(*fixture.state.executes.lock().unwrap(), 1);
     fixture.assert_release_all_count(1).await;
+}
+
+/// The error of a reattach to an execution that the server does not know after a response was
+/// read, as the reference: `RESPONSE_ALREADY_RECEIVED` of a `PySparkRuntimeError`.
+fn assert_response_already_received(error: &spark_connect_core::SparkError, error_type: &str) {
+    assert_eq!(
+        error.kind,
+        spark_connect_core::error::SparkErrorKind::RuntimeError,
+        "{error:?}"
+    );
+    assert_eq!(error.error_class, "RESPONSE_ALREADY_RECEIVED", "{error:?}");
+    assert_eq!(
+        error.params.get("error_type").map(String::as_str),
+        Some(error_type),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn session_not_found_before_any_response_resends_the_execute_plan() {
+    // As the reference, which reads SESSION_NOT_FOUND as OPERATION_NOT_FOUND: no response was
+    // read, so the ExecutePlan is sent again, and its results are returned.
+    let fixture = Fixture::start(
+        vec![
+            streamed(vec![]),
+            streamed(vec![response("r1", false), response("r2", true)]),
+        ],
+        vec![Step::Stream(vec![Err(session_not_found())])],
+        quick_retries(),
+    )
+    .await;
+    let mut stream = bounded(fixture.client.execute_plan_reattachable(execute_request()))
+        .await
+        .unwrap();
+    let ids = drain(&mut stream).await.unwrap();
+    assert_eq!(ids, ["r1", "r2"]);
+
+    assert_eq!(*fixture.state.executes.lock().unwrap(), 2);
+    assert_eq!(fixture.state.reattaches.lock().unwrap().len(), 1);
+    fixture.assert_release_all_count(1).await;
+}
+
+#[tokio::test]
+async fn session_not_found_after_a_response_is_response_already_received() {
+    // As the reference: once a response was read, SESSION_NOT_FOUND is the error of the reattach,
+    // not a reason to send the execution again.
+    let fixture = Fixture::start(
+        vec![streamed(vec![response("r1", false)])],
+        vec![Step::Stream(vec![Err(session_not_found())])],
+        quick_retries(),
+    )
+    .await;
+    let mut stream = bounded(fixture.client.execute_plan_reattachable(execute_request()))
+        .await
+        .unwrap();
+    assert_eq!(
+        bounded(stream.message())
+            .await
+            .unwrap()
+            .unwrap()
+            .response_id,
+        "r1"
+    );
+    let error = bounded(stream.message()).await.unwrap_err();
+    assert_response_already_received(&error, "INVALID_HANDLE.SESSION_NOT_FOUND");
+    assert_eq!(*fixture.state.executes.lock().unwrap(), 1);
+    fixture.assert_release_all_count(1).await;
+}
+
+#[tokio::test]
+async fn session_not_found_in_the_reattach_call_after_a_response_is_response_already_received() {
+    // As the reference, for the reattach call itself failing with SESSION_NOT_FOUND.
+    let fixture = Fixture::start(
+        vec![streamed(vec![response("r1", false)])],
+        vec![Step::Fail(session_not_found())],
+        quick_retries(),
+    )
+    .await;
+    let mut stream = bounded(fixture.client.execute_plan_reattachable(execute_request()))
+        .await
+        .unwrap();
+    assert_eq!(
+        bounded(stream.message())
+            .await
+            .unwrap()
+            .unwrap()
+            .response_id,
+        "r1"
+    );
+    let error = bounded(stream.message()).await.unwrap_err();
+    assert_response_already_received(&error, "INVALID_HANDLE.SESSION_NOT_FOUND");
+    assert_eq!(*fixture.state.executes.lock().unwrap(), 1);
+    fixture.assert_release_all_count(1).await;
+}
+
+#[tokio::test]
+async fn policy_retry_of_a_reattach_is_not_cut_by_the_retry_exception_bound() {
+    // As the reference's RetryPolicyState: the elapsed bound of the RetryExceptions (here 0, as
+    // if an hour had passed) does not cut a retry of the policy. The reattach call fails with
+    // UNAVAILABLE, and it is retried with the policy's attempts, here reattaching with success.
+    let fixture = Fixture::start(
+        vec![streamed(vec![response("r1", false)])],
+        vec![Step::Fail(Status::unavailable("server restarting"))],
+        RetryPolicy {
+            max_retry_exception_elapsed_time_ms: Some(0),
+            ..quick_retries()
+        },
+    )
+    .await;
+    let mut stream = bounded(fixture.client.execute_plan_reattachable(execute_request()))
+        .await
+        .unwrap();
+    let ids = drain(&mut stream).await.unwrap();
+    assert_eq!(ids, ["r1", "complete"]);
+
+    let reattaches = fixture.state.reattaches.lock().unwrap().clone();
+    assert_eq!(reattaches.len(), 2);
+    assert!(reattaches
+        .iter()
+        .all(|r| r.last_response_id.as_deref() == Some("r1")));
+    assert_eq!(*fixture.state.executes.lock().unwrap(), 1);
+    fixture.assert_release_all_count(1).await;
+}
+
+#[tokio::test]
+async fn error_of_a_server_with_details_bounds_the_config_read() {
+    // As the reference: the stack trace of an error is shown as its config says, read with the
+    // config deadline. A config that never answers is not waited for, and the error is raised.
+    let fixture = Fixture::start(vec![], vec![], quick_retries()).await;
+    let status = Status::with_details(Code::Internal, "boom", error_info_details().into());
+    let error = bounded(fixture.client.error_from_status(status)).await;
+    assert!(error.message.contains("boom"), "{error:?}");
+
+    let timeouts = fixture.state.timeouts.lock().unwrap().clone();
+    assert!(
+        timeouts
+            .iter()
+            .any(|(call, timeout)| *call == "Config" && timeout.is_some()),
+        "{timeouts:?}"
+    );
+}
+
+/// A `google.rpc.Status` with an `ErrorInfo` detail, as the server sends the errors it raises.
+fn error_info_details() -> Vec<u8> {
+    use prost::Message;
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct ErrorInfo {
+        #[prost(string, tag = "1")]
+        reason: String,
+        #[prost(string, tag = "2")]
+        domain: String,
+    }
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct RpcStatus {
+        #[prost(int32, tag = "1")]
+        code: i32,
+        #[prost(string, tag = "2")]
+        message: String,
+        #[prost(message, repeated, tag = "3")]
+        details: Vec<prost_types::Any>,
+    }
+    RpcStatus {
+        code: Code::Internal as i32,
+        message: "boom".into(),
+        details: vec![prost_types::Any {
+            type_url: "type.googleapis.com/google.rpc.ErrorInfo".into(),
+            value: ErrorInfo {
+                reason: "BOOM".into(),
+                domain: "org.apache.spark".into(),
+            }
+            .encode_to_vec(),
+        }],
+    }
+    .encode_to_vec()
 }
 
 /// The loopback service: ExecutePlan, ReattachExecute, ReleaseExecute and Config.

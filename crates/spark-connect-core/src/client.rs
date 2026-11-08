@@ -24,7 +24,7 @@ use crate::artifact::{
     FileArtifact, NamedArtifact,
 };
 use crate::channel::{ChannelBuilder, GRPC_MAX_MESSAGE_LENGTH_DEFAULT};
-use crate::error::{Result, SparkError};
+use crate::error::{Result, SparkError, SparkErrorKind};
 use crate::reattach::ExecutePlanResponseReattachableIterator;
 use crate::retries::{RetryPolicy, RetryPolicyState};
 
@@ -186,12 +186,26 @@ async fn within_deadline<T>(
     }
 }
 
-/// Whether `status` says that the server does not know the operation of a reattach, which
-/// the reference reads as the initial ExecutePlan never having reached the server.
-fn is_operation_not_found(status: &tonic::Status) -> bool {
-    status
-        .message()
-        .contains("INVALID_HANDLE.OPERATION_NOT_FOUND")
+/// The error class of `status` when the server does not know the operation of a reattach, or
+/// its session, which the reference reads alike: the initial ExecutePlan never reached the
+/// server, unless a response was read already.
+fn unknown_operation(status: &tonic::Status) -> Option<&'static str> {
+    [
+        "INVALID_HANDLE.OPERATION_NOT_FOUND",
+        "INVALID_HANDLE.SESSION_NOT_FOUND",
+    ]
+    .into_iter()
+    .find(|error| status.message().contains(error))
+}
+
+/// The error of a reattach to an operation that the server does not know, once a response was
+/// read: `RESPONSE_ALREADY_RECEIVED`, with the error class of the server as `error_type`.
+fn response_already_received(error_type: &str) -> SparkError {
+    SparkError::classed(
+        SparkErrorKind::RuntimeError,
+        "RESPONSE_ALREADY_RECEIVED",
+        &[("error_type", error_type)],
+    )
 }
 
 /// Whether the retries that the reference makes as `RetryException`s have run for the policy's
@@ -871,9 +885,13 @@ impl SparkConnectClient {
             }),
             ..Default::default()
         };
-        let mut req = Request::new(request);
+        let deadline = self.rpc_deadlines.config;
+        let mut req = with_deadline(Request::new(request), deadline);
         self._attach_metadata(&mut req);
-        let response = self.stub.clone().config(req).await.ok()?.into_inner();
+        let response = within_deadline(deadline, self.stub.clone().config(req))
+            .await
+            .ok()?
+            .into_inner();
         response.pairs.into_iter().next()?.value
     }
 
@@ -1655,14 +1673,16 @@ impl ReattachableResponseStream {
                     }
                     self.stream = None;
                 }
-                // As the reference iterator: the server does not know the execution, so the
-                // initial ExecutePlan never reached it, and it is sent again, if no response was
-                // read yet.
+                // As the reference iterator: the server does not know the execution (or its
+                // session), so the initial ExecutePlan never reached it, and it is sent again,
+                // if no response was read yet. Once one was, the reference raises an error.
                 Err(status)
-                    if is_operation_not_found(&status)
-                        && self.iter.last_response_id().await.is_none()
-                        && !self.iter.is_completed().await =>
+                    if unknown_operation(&status).is_some() && !self.iter.is_completed().await =>
                 {
+                    if self.iter.last_response_id().await.is_some() {
+                        let error_type = unknown_operation(&status).unwrap_or_default();
+                        return Err(self.fail(response_already_received(error_type)));
+                    }
                     if retry_exception_bound_passed(&self.retry_policy, &mut retry_exception_since)
                     {
                         return Err(self.fail_with_status(status).await);
@@ -1705,7 +1725,10 @@ impl ReattachableResponseStream {
                 }
                 Err(status) => status,
             };
-            if is_operation_not_found(&status) && self.iter.last_response_id().await.is_none() {
+            if let Some(error_type) = unknown_operation(&status) {
+                if self.iter.last_response_id().await.is_some() {
+                    return Err(self.fail(response_already_received(error_type)));
+                }
                 if retry_exception_bound_passed(&self.retry_policy, retry_exception_since) {
                     return Err(self.fail_with_status(status).await);
                 }
