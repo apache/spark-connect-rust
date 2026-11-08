@@ -7894,7 +7894,7 @@ def decimal_ipc_protocol(tmp_path_factory):
     protoc = shutil.which(os.environ.get("PROTOC", "protoc"))
     if protoc is None:
         message = "Decimal IPC transport tests require protoc"
-        if os.environ.get("CI"):
+        if os.environ.get("CI", "").strip().lower() in {"1", "true", "yes"}:
             pytest.fail(message)
         pytest.skip(message)
     proto_root = Path(__file__).resolve().parents[2] / "crates/spark-connect-proto/proto"
@@ -8263,7 +8263,10 @@ def test_decimal_scale_rebound_subclass_keeps_tuple_hook(
     # A subclass rebound as decimal.Decimal is still a subclass, not the immutable C type.
     # Both conversion and inferred pandas typing must retain its as_tuple hook.
     import decimal
+    from unittest.mock import Mock
+
     import pyarrow as pa
+    from pyspark.sql import _pandas_input
 
     pd = pytest.importorskip("pandas")
     original = decimal.Decimal
@@ -8284,24 +8287,24 @@ def test_decimal_scale_rebound_subclass_keeps_tuple_hook(
     # Canonical-looking metadata must not make a Python heap type eligible either.
     Rebound.__name__ = "Decimal"
     Rebound.__module__ = "decimal"
-    frame = pd.DataFrame({"v": [Rebound("1.20"), None]}, dtype=object)
+    frame = _RowPathFrame(pd)({"v": [Rebound("1.20"), None]}, dtype=object)
     schema = T.StructType([T.StructField("v", T.DecimalType(10, 2))])
     if schema_mode != "explicit":
         schema = ["v"] if schema_mode == "names" else None
     spark, payload = decimal_ipc_session
+    explicit_arrow = Mock(side_effect=AssertionError("native Decimal test reached explicit Arrow"))
+    inferred_arrow = Mock(side_effect=AssertionError("native Decimal test reached inferred Arrow"))
     with monkeypatch.context() as alias:
         alias.setattr(decimal, "Decimal", Rebound)
-        if schema_mode == "explicit":
-            # Exercise the native scalar fallback. Ordinary explicit-schema frames now
-            # use Arrow conversion, whose subclass hook behavior is a separate contract.
-            from pyspark.sql import _pandas_input
-
-            alias.setattr(_pandas_input, "accepts_pandas_table", lambda frame, schema: False)
+        alias.setattr(_pandas_input, "prepare_pandas_table", explicit_arrow)
+        alias.setattr(_pandas_input, "prepare_inferred_pandas_table", inferred_arrow)
         if hook_behavior == "error":
             with pytest.raises(LookupError, match="^rebound Decimal tuple hook$"):
                 spark.createDataFrame(frame, schema)
         else:
             spark.createDataFrame(frame, schema).collect()
+    explicit_arrow.assert_not_called()
+    inferred_arrow.assert_not_called()
     if hook_behavior == "error":
         assert calls == ["str", "tuple"]
         assert not payload.exists()
@@ -8549,7 +8552,7 @@ def test_pandas_nested_decimals_use_every_observed_scale(mock_connect, layout, s
     assert actual.equals(expected)
 
 
-@pytest.mark.parametrize("scale", [38, 39, 50, 128])
+@pytest.mark.parametrize("scale", [38, 39, 50, 128, 5_000_000_000])
 def test_pandas_nested_decimal_scale_bounds(decimal_ipc_session, scale):
     from decimal import Decimal
     import pyarrow as pa
@@ -8561,7 +8564,7 @@ def test_pandas_nested_decimal_scale_bounds(decimal_ipc_session, scale):
     if scale > 38:
         with pytest.raises(
             ValueError,
-            match=rf"^Decimal scale {scale} is out of the range of DecimalType, up to 38$",
+            match=r"^Decimal scale is out of the range of DecimalType, up to 38$",
         ):
             spark.createDataFrame(frame)
         assert not payload.exists()

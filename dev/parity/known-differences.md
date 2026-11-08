@@ -46,7 +46,6 @@ difference is intentional or tracked for a fix.
   implementations of that class on other interpreters are not covered. This can differ
   from PySpark when an application rebinds the public class alias during the process.
 
-
 ## `DataFrame`
 
 - **A subclass of `DataFrame` created with `object.__new__`** (intentional, a PyO3 limit).

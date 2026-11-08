@@ -49,7 +49,7 @@ pub(crate) fn c_decimal_type(py: Python<'_>) -> PyResult<Option<&Bound<'_, PyTyp
 
 /// Keep the cached conversion class independent of a rebound public alias when C Decimal
 /// is available. Pure-Python decimal keeps its established fallback conversion.
-pub(crate) fn decimal_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
+fn decimal_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
     match c_decimal_type(py)? {
         Some(decimal) => Ok(decimal),
         None => public_decimal_type(py),
@@ -89,8 +89,8 @@ enum QuantizeCallArgs<'py> {
     },
 }
 
-/// A cache hit either supplies a call or needs a keyword dict built outside its borrow.
-enum QuantizeCacheHit<'py> {
+/// A cache entry's arguments: a ready call, or a keyword dict to build outside the borrow.
+enum QuantizeLookup<'py> {
     Call(QuantizeCallArgs<'py>),
     Keywords {
         exp: Bound<'py, PyAny>,
@@ -100,19 +100,19 @@ enum QuantizeCacheHit<'py> {
 
 impl QuantizeArgs {
     /// Clone only the pair needed by the selected call form, without running Python.
-    fn call_args<'py>(&self, py: Python<'py>, exact_c: bool) -> QuantizeCacheHit<'py> {
+    fn call_args<'py>(&self, py: Python<'py>, exact_c: bool) -> QuantizeLookup<'py> {
         if exact_c {
-            QuantizeCacheHit::Call(QuantizeCallArgs::Positional {
+            QuantizeLookup::Call(QuantizeCallArgs::Positional {
                 exp: self.exp.bind(py).clone(),
                 context: self.context.bind(py).clone(),
             })
         } else if let Some(kwargs) = &self.kwargs {
-            QuantizeCacheHit::Call(QuantizeCallArgs::Keyword {
+            QuantizeLookup::Call(QuantizeCallArgs::Keyword {
                 exp: self.exp.bind(py).clone(),
                 kwargs: kwargs.bind(py).clone(),
             })
         } else {
-            QuantizeCacheHit::Keywords {
+            QuantizeLookup::Keywords {
                 exp: self.exp.bind(py).clone(),
                 context: self.context.bind(py).clone(),
             }
@@ -195,8 +195,8 @@ fn decimal_quantum<'py>(
         }
     };
     match cached {
-        QuantizeCacheHit::Call(args) => Ok(args),
-        QuantizeCacheHit::Keywords { exp, context } => {
+        QuantizeLookup::Call(args) => Ok(args),
+        QuantizeLookup::Keywords { exp, context } => {
             // Dict allocation may run GC callbacks: release the cache borrow first, and
             // share the context already used by positional calls of this Decimal type.
             let kwargs = [("context", context)].into_py_dict(py)?;
