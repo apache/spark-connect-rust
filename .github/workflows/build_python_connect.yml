@@ -391,7 +391,7 @@ jobs:
         run: |
           cargo test -p apache-spark-connect \
             --test e2e_functions --test e2e_columns --test e2e_dataframe \
-            --test e2e_coverage --test e2e_linear_svc --test e2e_integration \
+            --test e2e_coverage --test e2e_linear_svc --test e2e_linear_regression --test e2e_integration \
             -- --test-threads=1
 
       - name: Rust WASM UDF e2e test (against the live server)

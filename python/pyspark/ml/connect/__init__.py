@@ -12,6 +12,7 @@ from pyspark.ml.connect.feature import (
     VectorAssembler,
 )
 from pyspark.ml.connect.classification import LinearSVC, LogisticRegression
+from pyspark.ml.connect.regression import LinearRegression
 from pyspark.ml.connect.evaluation import (
     RegressionEvaluator,
     BinaryClassificationEvaluator,
@@ -44,6 +45,7 @@ __all__ = [
     "VectorAssembler",
     "LogisticRegression",
     "LinearSVC",
+    "LinearRegression",
     "RegressionEvaluator",
     "BinaryClassificationEvaluator",
     "MulticlassClassificationEvaluator",

@@ -76,6 +76,23 @@ executed later. When the last of them is dropped, the cached model is deleted on
 server, as `pyspark.ml` does, without waiting for the server; a fit that is dropped
 at once leaves nothing cached.
 
+## Native LinearRegression
+
+`spark_connect::ml::LinearRegression` fits Spark's JVM linear regression estimator
+through the Connect ML protocol, with ML vector features and numeric labels.
+Rust builder setters cover all 15 constructor parameters, including regularization,
+instance weights, solver selection and squared-error or Huber loss. Unset parameters
+use Spark's defaults.
+
+The native Python binding is available as
+`pyspark.ml.connect.regression.LinearRegression` and `pyspark.ml.connect.LinearRegression`.
+Its keyword-only constructor matches the JVM PySpark estimator's parameter names
+and defaults, with mutating `setFeaturesCol`, `setRegParam`, etc. methods.
+Fitted models expose `transform` on DataFrames from the fitting session. The model,
+its clones and transformed DataFrames keep the cached server model alive until
+the last owner is dropped. Model inspection (coefficients, intercept and summaries),
+single-vector prediction and persistence are not exposed by this native addition.
+
 ## Native LinearSVC
 
 `spark_connect::ml::LinearSVC` trains Spark's JVM binary linear support vector

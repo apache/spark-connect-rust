@@ -7,9 +7,9 @@
 
 use pyo3::prelude::*;
 use spark_connect::ml::{
-    BinaryClassificationEvaluator, CrossValidator, Estimator, Evaluator, LinearSVC,
-    LogisticRegression, MaxAbsScaler, Model, MulticlassClassificationEvaluator, Pipeline,
-    RegressionEvaluator, StandardScaler, StringIndexer, Transformer, VectorAssembler,
+    BinaryClassificationEvaluator, CrossValidator, Estimator, Evaluator, LinearRegression,
+    LinearSVC, LogisticRegression, MaxAbsScaler, Model, MulticlassClassificationEvaluator,
+    Pipeline, RegressionEvaluator, StandardScaler, StringIndexer, Transformer, VectorAssembler,
 };
 
 use crate::dataframe::PyDataFrame;
@@ -376,6 +376,154 @@ impl PyLinearSVC {
     #[pyo3(name = "setAggregationDepth")]
     fn set_aggregation_depth(mut slf: PyRefMut<'_, Self>, value: i64) -> PyRefMut<'_, Self> {
         slf.inner = slf.inner.clone().set_aggregation_depth(value);
+        slf
+    }
+
+    #[pyo3(name = "setMaxBlockSizeInMB")]
+    fn set_max_block_size_in_mb(mut slf: PyRefMut<'_, Self>, value: f64) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_max_block_size_in_mb(value);
+        slf
+    }
+
+    fn fit(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<PyMLModel> {
+        let mut estimator = self.inner.clone();
+        let model = py
+            .detach(|| estimator.fit(&df.dataframe).map_err(Box::new))
+            .to_pyerr()?;
+        Ok(PyMLModel { model })
+    }
+}
+
+/// Linear regression backed by Spark Connect's JVM ML API.
+#[pyclass(name = "LinearRegression", module = "pyspark.ml.connect.regression")]
+pub struct PyLinearRegression {
+    inner: LinearRegression,
+}
+
+#[pymethods]
+impl PyLinearRegression {
+    #[new]
+    #[pyo3(signature = (*, featuresCol="features", labelCol="label", predictionCol="prediction", maxIter=100, regParam=0.0, elasticNetParam=0.0, tol=1e-6, fitIntercept=true, standardization=true, solver="auto", weightCol=None, aggregationDepth=2, loss="squaredError", epsilon=1.35, maxBlockSizeInMB=0.0))]
+    #[allow(non_snake_case, clippy::too_many_arguments)]
+    fn new(
+        featuresCol: &str,
+        labelCol: &str,
+        predictionCol: &str,
+        maxIter: i32,
+        regParam: f64,
+        elasticNetParam: f64,
+        tol: f64,
+        fitIntercept: bool,
+        standardization: bool,
+        solver: &str,
+        weightCol: Option<&str>,
+        aggregationDepth: i32,
+        loss: &str,
+        epsilon: f64,
+        maxBlockSizeInMB: f64,
+    ) -> Self {
+        let mut inner = LinearRegression::new()
+            .set_feature_col(featuresCol)
+            .set_label_col(labelCol)
+            .set_prediction_col(predictionCol)
+            .set_max_iter(maxIter)
+            .set_reg_param(regParam)
+            .set_elastic_net_param(elasticNetParam)
+            .set_tol(tol)
+            .set_fit_intercept(fitIntercept)
+            .set_standardization(standardization)
+            .set_solver(solver)
+            .set_aggregation_depth(aggregationDepth)
+            .set_loss(loss)
+            .set_epsilon(epsilon)
+            .set_max_block_size_in_mb(maxBlockSizeInMB);
+        if let Some(col) = weightCol {
+            inner = inner.set_weight_col(col);
+        }
+        Self { inner }
+    }
+
+    #[pyo3(name = "setFeaturesCol")]
+    fn set_feature_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_feature_col(value);
+        slf
+    }
+
+    #[pyo3(name = "setLabelCol")]
+    fn set_label_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_label_col(value);
+        slf
+    }
+
+    #[pyo3(name = "setPredictionCol")]
+    fn set_prediction_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_prediction_col(value);
+        slf
+    }
+
+    #[pyo3(name = "setMaxIter")]
+    fn set_max_iter(mut slf: PyRefMut<'_, Self>, value: i32) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_max_iter(value);
+        slf
+    }
+
+    #[pyo3(name = "setRegParam")]
+    fn set_reg_param(mut slf: PyRefMut<'_, Self>, value: f64) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_reg_param(value);
+        slf
+    }
+
+    #[pyo3(name = "setElasticNetParam")]
+    fn set_elastic_net_param(mut slf: PyRefMut<'_, Self>, value: f64) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_elastic_net_param(value);
+        slf
+    }
+
+    #[pyo3(name = "setTol")]
+    fn set_tol(mut slf: PyRefMut<'_, Self>, value: f64) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_tol(value);
+        slf
+    }
+
+    #[pyo3(name = "setFitIntercept")]
+    fn set_fit_intercept(mut slf: PyRefMut<'_, Self>, value: bool) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_fit_intercept(value);
+        slf
+    }
+
+    #[pyo3(name = "setStandardization")]
+    fn set_standardization(mut slf: PyRefMut<'_, Self>, value: bool) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_standardization(value);
+        slf
+    }
+
+    #[pyo3(name = "setSolver")]
+    fn set_solver<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_solver(value);
+        slf
+    }
+
+    #[pyo3(name = "setWeightCol")]
+    fn set_weight_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_weight_col(value);
+        slf
+    }
+
+    #[pyo3(name = "setAggregationDepth")]
+    fn set_aggregation_depth(mut slf: PyRefMut<'_, Self>, value: i32) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_aggregation_depth(value);
+        slf
+    }
+
+    #[pyo3(name = "setLoss")]
+    fn set_loss<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_loss(value);
+        slf
+    }
+
+    #[pyo3(name = "setEpsilon")]
+    fn set_epsilon(mut slf: PyRefMut<'_, Self>, value: f64) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_epsilon(value);
         slf
     }
 
