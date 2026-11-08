@@ -1131,6 +1131,29 @@ def test_repartition_by_range_without_a_count_sends_none_as_pyspark(mock_connect
     assert sent(df.repartitionByRange(2, "id")) == [2]
 
 
+def test_session_id_of_any_uuid_version_and_the_user_id_of_the_requests(monkeypatch, mock_connect):
+    # A session_id is any UUID, as uuid.UUID(session_id, version=4) takes it, and is sent as
+    # given. The user ID of each request is SPARK_USER, else USER, as PySpark sets it.
+    from pyspark.sql import SparkSession
+
+    _, service = mock_connect
+    session_id = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"  # a version 1 UUID
+    for name, environment in (("SPARK_USER", "hook-user"), ("USER", "hook-os-user")):
+        monkeypatch.delenv("SPARK_USER", raising=False)
+        monkeypatch.delenv("USER", raising=False)
+        monkeypatch.setenv(name, environment)
+        other = SparkSession.builder.remote(f"{service.remote}/;session_id={session_id}").create()
+        try:
+            assert other.session_id == session_id
+            other.range(1).collect()
+            # ExecutePlanRequest.session_id=1, user_context=2; UserContext.user_id=1.
+            request = parse_message(service.execute_requests[-1])
+            assert request[1][0].decode() == session_id
+            assert parse_message(request[2][0])[1][0].decode() == environment
+        finally:
+            other.stop()
+
+
 def test_channel_builder_uses_endpoint():
     # channelBuilder reconstructs an sc:// URL from the builder's host/port (+ params)
     # for the native transport, returning a configured Builder (no longer raises).
