@@ -989,15 +989,22 @@ impl StreamingQueryManager {
     /// remove its listener, which ends its stream, and this returns once the thread has posted
     /// the events left. Should that request fail, the listener stays, and the error is returned.
     pub fn remove_listener(&self, id: &str) -> Result<()> {
+        self.remove_listener_found(id).map(|_| ())
+    }
+
+    /// As [`remove_listener`](Self::remove_listener), which returns whether the listener of `id`
+    /// was in this bus (and so is removed now), for a client that keeps the ids of its listeners
+    /// per bus, as the ids of another session's bus are not in this one.
+    pub fn remove_listener_found(&self, id: &str) -> Result<bool> {
         let _ops = self.bus.ops.lock().unwrap();
         {
             let mut state = self.bus.state.lock().unwrap();
             let Some(index) = state.listeners.iter().position(|(lid, _)| lid == id) else {
-                return Ok(());
+                return Ok(false);
             };
             if state.listeners.len() > 1 {
                 state.listeners.remove(index);
-                return Ok(());
+                return Ok(true);
             }
         }
         self.remove_server_listener()?;
@@ -1008,7 +1015,7 @@ impl StreamingQueryManager {
             .unwrap()
             .listeners
             .retain(|(lid, _)| lid != id);
-        Ok(())
+        Ok(true)
     }
 
     /// Remove all client-side listeners and stop the dispatch thread. Mirrors
@@ -1470,5 +1477,13 @@ mod tests {
         opts.insert("key2".to_string(), "val2".to_string());
         let writer = writer.options(opts);
         assert_eq!(writer.options.get("key2"), Some(&"val2".to_string()));
+    }
+
+    #[test]
+    fn remove_listener_of_an_id_the_bus_does_not_have_is_not_found() {
+        let spark = session();
+        let streams = spark.streams();
+        assert!(!streams.remove_listener_found("no-such-id").unwrap());
+        streams.remove_listener("no-such-id").unwrap();
     }
 }

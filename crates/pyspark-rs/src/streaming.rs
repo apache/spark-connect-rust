@@ -1241,8 +1241,9 @@ impl PyStreamingQueryManager {
     /// Register a client-side listener object (with onQueryStarted/Progress/Idle/
     /// Terminated callbacks). Mirrors `StreamingQueryManager.addListener`: the listener gets the
     /// session as its `spark`, and the native Rust bus of the session dispatches its events to
-    /// it; the assigned id is stashed on the listener so `removeListener` can find it. Should the
-    /// server fail to add its listener, this warns, as PySpark Connect's does.
+    /// it. The id of each registration is appended to the listener's `_rust_listener_ids`, as a
+    /// listener added twice is in the bus twice. Should the server fail to add its listener, this
+    /// warns, as PySpark Connect's does.
     fn addListener(&self, py: Python<'_>, listener: Py<PyAny>) -> PyResult<()> {
         let session = crate::session::PySparkSession::new(self.session.clone());
         listener
@@ -1253,7 +1254,13 @@ impl PyStreamingQueryManager {
         });
         match crate::dataframe::detached(py, || self.inner.add_listener(adapter).map_err(Box::new))
         {
-            Ok(id) => listener.bind(py).setattr("_rust_listener_id", id),
+            Ok(id) => {
+                let bound = listener.bind(py);
+                match bound.getattr("_rust_listener_ids") {
+                    Ok(ids) => ids.call_method1("append", (id,)).map(|_| ()),
+                    Err(_) => bound.setattr("_rust_listener_ids", vec![id]),
+                }
+            }
             Err(error) => warn(
                 py,
                 format!(
@@ -1266,25 +1273,39 @@ impl PyStreamingQueryManager {
     }
 
     /// Remove a previously-added client-side listener object. Mirrors
-    /// `StreamingQueryManager.removeListener`: should the server fail to remove its listener,
-    /// this warns, and the listener stays, as PySpark Connect's does.
+    /// `StreamingQueryManager.removeListener`: one registration of the listener is removed from
+    /// the bus of the session, the first one that the bus has (as the bus removes the first
+    /// occurrence), and the others, which are of other buses, stay. Should the server fail to
+    /// remove its listener, this warns, and the listener stays, as PySpark Connect's does.
     fn removeListener(&self, py: Python<'_>, listener: Py<PyAny>) -> PyResult<()> {
         let bound = listener.bind(py);
-        if let Ok(id_obj) = bound.getattr("_rust_listener_id") {
-            let id: String = id_obj.extract()?;
-            if let Err(error) =
-                crate::dataframe::detached(py, || self.inner.remove_listener(&id).map_err(Box::new))
-            {
-                return warn(
-                    py,
-                    format!(
-                        "Failed to remove the listener because of exception: {}\n\
-                         The listener is not removed, please remove it again.",
-                        error.value(py)
-                    ),
-                );
+        let Ok(ids) = bound.getattr("_rust_listener_ids") else {
+            return Ok(());
+        };
+        let registered: Vec<String> = ids.extract()?;
+        for id in registered {
+            match crate::dataframe::detached(py, || {
+                self.inner.remove_listener_found(&id).map_err(Box::new)
+            }) {
+                Ok(false) => continue,
+                Ok(true) => {
+                    ids.call_method1("remove", (&id,))?;
+                    if ids.len()? == 0 {
+                        let _ = bound.delattr("_rust_listener_ids");
+                    }
+                    return Ok(());
+                }
+                Err(error) => {
+                    return warn(
+                        py,
+                        format!(
+                            "Failed to remove the listener because of exception: {}\n\
+                             The listener is not removed, please remove it again.",
+                            error.value(py)
+                        ),
+                    );
+                }
             }
-            let _ = bound.delattr("_rust_listener_id");
         }
         Ok(())
     }
