@@ -2782,6 +2782,36 @@ def test_streaming_queries_return_the_status_and_the_exception_of_pyspark(sessio
         failed.stop()
 
 
+def test_builder_config_none_leaves_the_key_unset_as_pyspark(session):
+    # As PySpark's `_set_all`: an option of None, of config or of map, leaves its key unset on
+    # the session, while the other options of the builder are set.
+    built = (SparkSession.builder.remote(os.environ["SPARK_REMOTE"])
+             .config("spark.r12.none", None)
+             .config("spark.r12.kept", "v")
+             .config(map={"spark.r12.map": None})
+             .getOrCreate())
+    assert built.session_id == session.session_id
+    assert session.conf.get("spark.r12.kept") == "v"
+    assert session.conf.get("spark.r12.none", "unset") == "unset"
+    assert session.conf.get("spark.r12.map", "unset") == "unset"
+    assert "spark.r12.none" not in session.conf.getAll
+    with pytest.raises(Exception) as e:
+        session.conf.get("spark.r12.none")
+    assert e.value.getCondition() == "SQL_CONF_NOT_FOUND"
+
+
+def test_stopped_session_raises_no_active_session_while_the_others_work(session):
+    from pyspark.errors.exceptions.connect import SparkConnectException
+
+    other = session.newSession()
+    other.stop()
+    assert other.is_stopped
+    with pytest.raises(SparkConnectException) as e:
+        other.range(2).count()
+    assert e.value.getCondition() == "NO_ACTIVE_SESSION"
+    assert session.range(3).count() == 3
+
+
 def test_stream_writer_starts_a_query_of_its_real_time_trigger_as_pyspark(session):
     # As PySpark's, the real-time trigger reaches the server, which runs real-time mode for
     # some sinks only, not the memory sink.

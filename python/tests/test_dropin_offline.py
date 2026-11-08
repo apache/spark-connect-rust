@@ -10927,6 +10927,38 @@ def test_positional_indexing_integer_subclass_and_string_lookup(positional_index
     assert service.calls == before
 
 
+def test_copy_from_local_to_fs_requires_an_absolute_destination(mock_connect, tmp_path):
+    # As PySpark Connect's `_parse_forward_to_fs_artifacts`: the destination must be an absolute
+    # path, which is checked before any request, so the server never sees a relative one.
+    spark, _ = mock_connect
+    local = tmp_path / "local.txt"
+    local.write_text("x")
+    with pytest.raises(AssertionError, match="destination FS path must be an absolute path."):
+        spark.copyFromLocalToFs(str(local), "relative/out.txt")
+
+
+def test_requests_of_a_stopped_session_raise_no_active_session_as_pyspark():
+    # As PySpark's closed client: stop() releases the session and closes the client, so each
+    # request of the stopped session, and of its DataFrames, raises NO_ACTIVE_SESSION.
+    from pyspark.errors.exceptions.connect import SparkConnectException
+
+    spark = _offline_session()
+    other = spark.newSession()
+    other.stop()
+    assert other.is_stopped
+    requests = [
+        lambda: other.range(2).count(),
+        lambda: other.sql("select 1").collect(),
+        lambda: other.conf.get("spark.sql.shuffle.partitions"),
+        lambda: other.version,
+    ]
+    for request in requests:
+        with pytest.raises(SparkConnectException) as e:
+            request()
+        assert e.value.getCondition() == "NO_ACTIVE_SESSION"
+    spark.stop()
+
+
 def test_positional_indexing_invalid_index_types_do_not_analyze(positional_indexing_analyzed):
     from pyspark.errors import PySparkTypeError
 
@@ -12546,13 +12578,15 @@ def test_version_cache_active_session_handle_shares_cache(version_cache_session)
 
 
 def test_version_cache_stop_before_first_lookup_keeps_rpc_behavior(version_cache_session):
+    # As PySpark's closed client, a lookup after stop() raises NO_ACTIVE_SESSION without a request.
     spark, service = version_cache_session
     spark.stop()
     assert service.calls == 0
     service.failure = "rpc"
-    with pytest.raises(Exception):
+    with pytest.raises(Exception) as e:
         _ = spark.version
-    assert service.calls == 1
+    assert e.value.getCondition() == "NO_ACTIVE_SESSION"
+    assert service.calls == 0
 
 
 # --------------------------------------------------------------------------- printSchema

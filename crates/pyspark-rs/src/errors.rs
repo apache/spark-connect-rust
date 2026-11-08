@@ -217,8 +217,16 @@ pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
             }
         };
 
+        // A classed Connect error, such as `NO_ACTIVE_SESSION`, is a `SparkConnectException`, as
+        // the reference client raises it.
+        let exc_class = if err.kind == SparkErrorKind::Connect && !err.error_class.is_empty() {
+            py.import("pyspark.errors.exceptions.connect")
+                .and_then(|module| module.getattr("SparkConnectException"))
+        } else {
+            errors_module.getattr(class_name)
+        };
         // Get the exception class from the module
-        match errors_module.getattr(class_name) {
+        match exc_class {
             Ok(exc_class) => {
                 // Instantiate the exception class: of the error class and message parameters
                 // of an error of a PySpark error class, otherwise of the message.

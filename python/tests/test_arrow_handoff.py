@@ -760,7 +760,8 @@ def test_file_upload_attribution_on_every_frame(
             destinations = ["/wire/small.txt", "/wire/large.txt"]
             for path, destination in zip([small, large], destinations):
                 spark.copyFromLocalToFs(str(path), destination)
-            artifact_names = ["forward_to_fs/" + destination for destination in destinations]
+            # As PySpark's FORWARD_TO_FS_PREFIX + dest_path: the path is absolute, so no separator.
+            artifact_names = ["forward_to_fs" + destination for destination in destinations]
         payloads = {context["payload"] for context in state["upload_contexts"]}
         assert payloads == {"batch", "begin_chunk", "chunk"}, (
             f"Expected all artifact frame kinds, got {payloads}. "

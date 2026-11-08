@@ -903,10 +903,13 @@ impl SparkSession {
     /// Copy a local file to the driver's filesystem at `dest_path`.
     ///
     /// Mirrors `pyspark.sql.SparkSession.copyFromLocalToFs`: uploads the file as a
-    /// `forward_to_fs/<dest_path>` artifact, which the server writes to `dest_path`.
+    /// `forward_to_fs<dest_path>` artifact, which the server writes to `dest_path`. As the
+    /// reference, `dest_path` is an absolute path, so the name is the prefix and the path.
     pub fn copy_from_local_to_fs(&self, local_path: &str, dest_path: &str) -> Result<()> {
-        let name = format!("forward_to_fs/{}", dest_path);
-        block_on(self.client.add_named_artifact(&name, local_path))
+        block_on(
+            self.client
+                .add_named_artifact(&forward_to_fs_artifact_name(dest_path), local_path),
+        )
     }
 
     /// Register a user-defined function on the session so it can be referenced by
@@ -1026,7 +1029,11 @@ impl SparkSession {
         if self.stopped.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
-        block_on(self.client.release_session())
+        // As PySpark's `stop()`, the client is closed after the session is released, so that
+        // its requests raise `NO_ACTIVE_SESSION` from now on.
+        let released = block_on(self.client.release_session());
+        self.client.close();
+        released
     }
 
     /// Release the session on the server, as `SparkConnectClient.release_session`: its state
@@ -1039,6 +1046,7 @@ impl SparkSession {
     /// closes its channel: it is stopped, and `stop()` does nothing more.
     pub fn close(&self) {
         self.stopped.store(true, Ordering::SeqCst);
+        self.client.close();
     }
 
     /// Whether `stop()` has been called on this session. Mirrors
@@ -1046,6 +1054,12 @@ impl SparkSession {
     pub fn is_stopped(&self) -> bool {
         self.stopped.load(Ordering::SeqCst)
     }
+}
+
+/// The name of the artifact that copies a file to `dest_path`, as the reference's
+/// `FORWARD_TO_FS_PREFIX + dest_path`: the prefix is followed by the absolute path itself.
+fn forward_to_fs_artifact_name(dest_path: &str) -> String {
+    format!("forward_to_fs{}", dest_path)
 }
 
 impl Clone for SparkSession {
@@ -2616,6 +2630,28 @@ mod tests {
         assert!(spark.is_stopped());
         assert!(other.is_stopped(), "stopped flag is shared across clones");
         assert!(spark.stop().is_ok());
+    }
+
+    #[test]
+    fn requests_of_a_stopped_session_raise_no_active_session() {
+        // Port 1: nothing listens, so a request that reached the wire would fail differently.
+        // As PySpark's closed client, the stopped session raises before it sends anything.
+        let spark = SparkSession::builder()
+            .remote("sc://localhost:1")
+            .get_or_create()
+            .expect("failed to build session");
+        let _ = spark.stop();
+        let err = spark
+            .conf()
+            .get("spark.sql.shuffle.partitions")
+            .expect_err("a request of a stopped session must fail");
+        assert_eq!(err.get_condition().as_deref(), Some("NO_ACTIVE_SESSION"));
+    }
+
+    #[test]
+    fn forward_to_fs_artifact_name_is_the_prefix_and_the_absolute_path() {
+        // As the reference's `FORWARD_TO_FS_PREFIX + dest_path`, with no separator added.
+        assert_eq!(forward_to_fs_artifact_name("/tmp/x"), "forward_to_fs/tmp/x");
     }
 
     #[test]
