@@ -2,6 +2,7 @@
 
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
+use pyo3::types::PyList;
 use spark_connect::types::{DataType, StructField};
 use std::collections::BTreeMap;
 
@@ -185,33 +186,106 @@ macro_rules! init_chain {
     };
 }
 
-/// Construct a `StructType` Python object (with its full base chain) from fields.
-fn py_new_struct(py: Python<'_>, fields: Vec<StructField>) -> PyResult<Py<PyStructType>> {
-    let objects = std::iter::repeat_with(|| None).take(fields.len()).collect();
-    py_new_struct_of(py, fields, objects)
+/// A child type that a type keeps as a Python object, as PySpark keeps its attributes
+/// (`StructField.dataType`, `ArrayType.elementType`, `MapType.keyType` and `valueType`): the
+/// object given to the constructor or setter, or else one made from the core type on first
+/// access. Once there, the object is the child, so its edits, in place or as a whole, are the
+/// child's, and the core type of the child is read from the object (`live`).
+#[derive(Default)]
+pub(crate) struct KeptType(std::sync::Mutex<Option<Py<PyAny>>>);
+
+impl KeptType {
+    /// Keep `obj` if it is a data type object: a DDL string, or another value, is not kept.
+    fn of(obj: &Bound<'_, PyAny>) -> Self {
+        if obj.is_instance_of::<PyDataType>() {
+            KeptType(std::sync::Mutex::new(Some(obj.clone().unbind())))
+        } else {
+            Self::default()
+        }
+    }
+
+    fn kept(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|object| object.clone_ref(py))
+    }
+
+    /// The object of the child, made from `snapshot` and kept on the first access.
+    fn object(&self, py: Python<'_>, snapshot: &DataType) -> PyResult<Py<PyAny>> {
+        if let Some(object) = self.kept(py) {
+            return Ok(object);
+        }
+        let made = data_type_to_py(py, snapshot)?;
+        let mut kept = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(kept.get_or_insert(made).clone_ref(py))
+    }
+
+    /// The core type of the child, as it is now: read from its object when it has one.
+    fn live(&self, py: Python<'_>, snapshot: &DataType) -> PyResult<DataType> {
+        match self.kept(py) {
+            Some(object) => py_to_data_type(object.bind(py)),
+            None => Ok(snapshot.clone()),
+        }
+    }
 }
 
-/// Construct a `StructType` Python object of `fields`, of the `StructField` objects of
-/// `objects`, where they are known, as a slice of a struct is of those of the struct.
-fn py_new_struct_of(
-    py: Python<'_>,
-    fields: Vec<StructField>,
-    objects: Vec<Option<Py<PyStructField>>>,
-) -> PyResult<Py<PyStructType>> {
-    Py::new(
-        py,
-        init_chain!(
-            DataType::Struct {
-                fields: fields.clone(),
-            },
-            PyStructType {
-                fields,
-                objects: std::sync::Mutex::new(objects),
-            },
-            [],
-            value
-        ),
-    )
+/// Construct a `StructType` Python object (with its full base chain) from core fields.
+fn py_new_struct(py: Python<'_>, fields: Vec<StructField>) -> PyResult<Py<PyStructType>> {
+    let objects = fields
+        .into_iter()
+        .map(|field| Py::new(py, PyStructField::from_field(py, field)?))
+        .collect::<PyResult<Vec<_>>>()?;
+    struct_of_list(py, PyList::new(py, objects)?)
+}
+
+/// The `StructType` of the list `fields` of `StructField` objects, which the struct holds as its
+/// `fields`, as PySpark's `__init__` does: the list is the struct's own, not a copy of it.
+fn struct_of_list(py: Python<'_>, fields: Bound<'_, PyList>) -> PyResult<Py<PyStructType>> {
+    let (base, parts) = struct_parts(py, fields)?;
+    Py::new(py, init_chain!(base, parts, [], value))
+}
+
+/// The base core type and the parts of a `StructType` of the list `fields` of `StructField`
+/// objects. Its `names` are the names of the fields as they are now.
+fn struct_parts(py: Python<'_>, fields: Bound<'_, PyList>) -> PyResult<(DataType, PyStructType)> {
+    let names = PyList::empty(py);
+    let mut base_fields = Vec::with_capacity(fields.len());
+    for item in fields.iter() {
+        let object = as_struct_field(&item)?;
+        names.append(object.borrow().field.name.as_str())?;
+        base_fields.push(object.borrow().current_field(py)?);
+    }
+    let need_conversion = need_conversion_of(py, &base_fields)?;
+    let parts = PyStructType {
+        fields: fields.unbind(),
+        names: names.unbind(),
+        need_conversion,
+    };
+    Ok((
+        DataType::Struct {
+            fields: base_fields,
+        },
+        parts,
+    ))
+}
+
+/// The `needConversion` of each of `fields`, as PySpark's `_needConversion`.
+fn need_conversion_of(py: Python<'_>, fields: &[StructField]) -> PyResult<Vec<bool>> {
+    fields
+        .iter()
+        .map(|field| need_conversion(py, &field.data_type))
+        .collect()
+}
+
+/// The `StructField` object of `item`, which a `StructType` holds in its `fields`.
+fn as_struct_field<'py>(item: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyStructField>> {
+    item.cast::<PyStructField>().cloned().map_err(|_| {
+        PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "StructType fields must be StructField objects",
+        )
+    })
 }
 
 /// The `fromJson` helper `name` of the shim `pyspark.sql.types`, which parses the nested JSON
@@ -462,14 +536,24 @@ impl PyDataType {
 
     /// As pyspark's `simpleString()`. An array, map or struct of a user-defined type names it
     /// by the `simpleString()` of its Python class, such as `array<vector>`.
-    fn simpleString(&self, py: Python<'_>) -> PyResult<String> {
-        match &self.inner {
+    fn simpleString(slf: &Bound<'_, Self>) -> PyResult<String> {
+        let py = slf.py();
+        // A struct, array or map reads its live type, as its own `simpleString` does: the base
+        // method is also called on them directly, as `DataType.simpleString(st)`.
+        if slf.is_instance_of::<PyStructType>()
+            || slf.is_instance_of::<PyArrayType>()
+            || slf.is_instance_of::<PyMapType>()
+        {
+            return simple_string_with_udts(py, &py_to_data_type(slf.as_any())?);
+        }
+        let this = slf.borrow();
+        match &this.inner {
             DataType::Array { .. } | DataType::Map { .. } | DataType::Struct { .. }
-                if has_udt(&self.inner) =>
+                if has_udt(&this.inner) =>
             {
-                simple_string_with_udts(py, &self.inner)
+                simple_string_with_udts(py, &this.inner)
             }
-            _ => Ok(self.inner.simple_string()),
+            _ => Ok(this.inner.simple_string()),
         }
     }
 
@@ -528,6 +612,17 @@ fn data_type_eq(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<bool> {
         return Ok(a_udt
             && b.is_instance(&a.get_type())?
             && a.getattr("__dict__")?.eq(b.getattr("__dict__")?)?);
+    }
+    // A struct also compares its `names`, which PySpark's `__dict__` comparison does too.
+    if let (Ok(sa), Ok(sb)) = (a.cast::<PyStructType>(), b.cast::<PyStructType>()) {
+        if !sa
+            .borrow()
+            .names
+            .bind(a.py())
+            .eq(sb.borrow().names.bind(b.py()))?
+        {
+            return Ok(false);
+        }
     }
     Ok(py_to_data_type(a)? == py_to_data_type(b)?)
 }
@@ -1584,6 +1679,7 @@ impl PyTimestampNTZType {
 pub struct PyArrayType {
     pub element_type: DataType,
     pub contains_null: bool,
+    element_object: KeptType,
 }
 
 #[pymethods]
@@ -1591,7 +1687,7 @@ impl PyArrayType {
     /// `ArrayType.elementType` attribute (the element DataType).
     #[getter]
     fn elementType(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        data_type_to_py(py, &self.element_type)
+        self.element_object.object(py, &self.element_type)
     }
     /// `ArrayType.containsNull` attribute.
     #[getter]
@@ -1634,11 +1730,11 @@ impl PyArrayType {
         let py = slf.py();
         let this = slf.borrow();
         let dt = DataType::Array {
-            element_type: Box::new(this.element_type.clone()),
+            element_type: Box::new(this.element_object.live(py, &this.element_type)?),
             contains_null: this.contains_null,
         };
         reduce_with_udts(slf.get_type(), &dt, || {
-            let element_type = data_type_to_py(py, &this.element_type)?;
+            let element_type = this.element_object.object(py, &this.element_type)?;
             (element_type, this.contains_null).into_pyobject(py)
         })
     }
@@ -1659,6 +1755,7 @@ impl PyArrayType {
             PyArrayType {
                 element_type: et,
                 contains_null: containsNull,
+                element_object: KeptType::of(elementType),
             },
             [],
             value
@@ -1666,7 +1763,7 @@ impl PyArrayType {
     }
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         // Mirror pyspark: ArrayType(<elementType repr>, <containsNull>).
-        let el = data_type_to_py(py, &self.element_type)?;
+        let el = self.element_object.object(py, &self.element_type)?;
         let el_repr: String = el.bind(py).repr()?.extract()?;
         Ok(format!(
             "ArrayType({}, {})",
@@ -1678,7 +1775,7 @@ impl PyArrayType {
     fn simple_string(&self, py: Python<'_>) -> PyResult<String> {
         Ok(format!(
             "array<{}>",
-            simple_string_with_udts(py, &self.element_type)?
+            simple_string_with_udts(py, &self.element_object.live(py, &self.element_type)?)?
         ))
     }
 
@@ -1686,7 +1783,7 @@ impl PyArrayType {
     #[pyo3(name = "toNullable")]
     fn __at_to_nullable(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let dt = (DataType::Array {
-            element_type: Box::new(self.element_type.clone()),
+            element_type: Box::new(self.element_object.live(py, &self.element_type)?),
             contains_null: self.contains_null,
         })
         .to_nullable();
@@ -1715,6 +1812,8 @@ pub struct PyMapType {
     pub key_type: DataType,
     pub value_type: DataType,
     pub value_contains_null: bool,
+    key_object: KeptType,
+    value_object: KeptType,
 }
 
 #[pymethods]
@@ -1722,12 +1821,12 @@ impl PyMapType {
     /// `MapType.keyType` attribute.
     #[getter]
     fn keyType(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        data_type_to_py(py, &self.key_type)
+        self.key_object.object(py, &self.key_type)
     }
     /// `MapType.valueType` attribute.
     #[getter]
     fn valueType(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        data_type_to_py(py, &self.value_type)
+        self.value_object.object(py, &self.value_type)
     }
     /// `MapType.valueContainsNull` attribute.
     #[getter]
@@ -1770,13 +1869,13 @@ impl PyMapType {
         let py = slf.py();
         let this = slf.borrow();
         let dt = DataType::Map {
-            key_type: Box::new(this.key_type.clone()),
-            value_type: Box::new(this.value_type.clone()),
+            key_type: Box::new(this.key_object.live(py, &this.key_type)?),
+            value_type: Box::new(this.value_object.live(py, &this.value_type)?),
             value_contains_null: this.value_contains_null,
         };
         reduce_with_udts(slf.get_type(), &dt, || {
-            let key_type = data_type_to_py(py, &this.key_type)?;
-            let value_type = data_type_to_py(py, &this.value_type)?;
+            let key_type = this.key_object.object(py, &this.key_type)?;
+            let value_type = this.value_object.object(py, &this.value_type)?;
             (key_type, value_type, this.value_contains_null).into_pyobject(py)
         })
     }
@@ -1801,6 +1900,8 @@ impl PyMapType {
                 key_type: kt,
                 value_type: vt,
                 value_contains_null: valueContainsNull,
+                key_object: KeptType::of(keyType),
+                value_object: KeptType::of(valueType),
             },
             [],
             value
@@ -1808,11 +1909,15 @@ impl PyMapType {
     }
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         // Mirror pyspark: MapType(<keyType repr>, <valueType repr>, <valueContainsNull>).
-        let k: String = data_type_to_py(py, &self.key_type)?
+        let k: String = self
+            .key_object
+            .object(py, &self.key_type)?
             .bind(py)
             .repr()?
             .extract()?;
-        let v: String = data_type_to_py(py, &self.value_type)?
+        let v: String = self
+            .value_object
+            .object(py, &self.value_type)?
             .bind(py)
             .repr()?
             .extract()?;
@@ -1831,8 +1936,8 @@ impl PyMapType {
     fn simple_string(&self, py: Python<'_>) -> PyResult<String> {
         Ok(format!(
             "map<{},{}>",
-            simple_string_with_udts(py, &self.key_type)?,
-            simple_string_with_udts(py, &self.value_type)?
+            simple_string_with_udts(py, &self.key_object.live(py, &self.key_type)?)?,
+            simple_string_with_udts(py, &self.value_object.live(py, &self.value_type)?)?
         ))
     }
 
@@ -1840,8 +1945,8 @@ impl PyMapType {
     #[pyo3(name = "toNullable")]
     fn __mt_to_nullable(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let dt = (DataType::Map {
-            key_type: Box::new(self.key_type.clone()),
-            value_type: Box::new(self.value_type.clone()),
+            key_type: Box::new(self.key_object.live(py, &self.key_type)?),
+            value_type: Box::new(self.value_object.live(py, &self.value_type)?),
             value_contains_null: self.value_contains_null,
         })
         .to_nullable();
@@ -1867,6 +1972,8 @@ impl PyMapType {
 
 #[pyclass(name = "StructField", module = "pyspark.sql.types", weakref, dict)]
 pub struct PyStructField {
+    /// The data type object, which is the field's `dataType` once it is kept (see `KeptType`).
+    data_type_object: KeptType,
     pub(crate) field: StructField,
     /// The metadata dict, which PySpark's `StructField` keeps as it is: an edit of it in place
     /// is the metadata of the field. `field.metadata` is only its snapshot at the time it was
@@ -1878,12 +1985,37 @@ impl PyStructField {
     /// A field of a core field, with a metadata dict of its metadata.
     pub(crate) fn from_field(py: Python<'_>, field: StructField) -> PyResult<Self> {
         let metadata = metadata_map_to_py(py, &field.metadata)?.unbind();
-        Ok(PyStructField { field, metadata })
+        Ok(PyStructField {
+            field,
+            metadata,
+            data_type_object: KeptType::default(),
+        })
+    }
+
+    /// A field of the given parts, as PySpark's `StructField(name, dataType, nullable, metadata)`:
+    /// a non-empty metadata dict is kept as it is, so that an edit of it shows in the field; an
+    /// empty or no dict gives a new one (`metadata or {}`).
+    fn build(
+        py: Python<'_>,
+        field: StructField,
+        metadata: Option<&Bound<'_, pyo3::types::PyDict>>,
+        data_type_object: KeptType,
+    ) -> PyResult<Self> {
+        let metadata = match metadata {
+            Some(d) if !d.is_empty() => d.clone().unbind(),
+            _ => pyo3::types::PyDict::new(py).unbind(),
+        };
+        Ok(PyStructField {
+            field,
+            metadata,
+            data_type_object,
+        })
     }
 
     /// The core field, with the metadata of the dict as it is now.
     pub(crate) fn current_field(&self, py: Python<'_>) -> PyResult<StructField> {
         let mut field = self.field.clone();
+        field.data_type = self.data_type_object.live(py, &self.field.data_type)?;
         let metadata = self.metadata.bind(py);
         field.metadata = if metadata.is_empty() {
             BTreeMap::new()
@@ -1904,7 +2036,7 @@ impl PyStructField {
         Ok(format!(
             "{}:{}",
             self.field.name,
-            simple_string_with_udts(py, &self.field.data_type)?
+            simple_string_with_udts(py, &self.data_type_object.live(py, &self.field.data_type)?)?
         ))
     }
     /// As PySpark's, `StructField.typeName` raises `INVALID_TYPENAME_CALL`: a field has no type
@@ -1929,7 +2061,7 @@ impl PyStructField {
     }
     #[pyo3(name = "needConversion")]
     fn __sf_need_conversion(&self, py: Python<'_>) -> PyResult<bool> {
-        need_conversion(py, &self.field.data_type)
+        need_conversion(py, &self.data_type_object.live(py, &self.field.data_type)?)
     }
     #[pyo3(name = "fromInternal")]
     fn __sf_from_internal<'py>(
@@ -2054,44 +2186,63 @@ impl PyStructField {
             Some(d) => py_metadata_to_map(py, d)?,
             None => BTreeMap::new(),
         };
-        // As PySpark's `metadata or {}`: a non-empty dict is kept as it is, so that an edit of
-        // it shows in the field; an empty or no dict gives a new one.
-        let metadata = match metadata {
-            Some(d) if !d.is_empty() => d.clone().unbind(),
-            _ => pyo3::types::PyDict::new(py).unbind(),
+        let field = StructField {
+            name,
+            data_type: py_to_data_type(dataType)?,
+            nullable,
+            metadata: md,
         };
-        Ok(PyStructField {
-            field: StructField {
-                name,
-                data_type: py_to_data_type(dataType)?,
-                nullable,
-                metadata: md,
-            },
-            metadata,
-        })
+        Self::build(py, field, metadata, KeptType::of(dataType))
     }
+    // The attributes are plain ones, as PySpark's `StructField`: an assignment of them is the
+    // field's, and of the `StructType` the field is in.
     #[getter]
     fn name(&self) -> String {
         self.field.name.clone()
+    }
+    #[setter]
+    fn set_name(&mut self, name: String) {
+        self.field.name = name;
     }
     #[getter]
     fn nullable(&self) -> bool {
         self.field.nullable
     }
+    #[setter]
+    fn set_nullable(&mut self, nullable: bool) {
+        self.field.nullable = nullable;
+    }
     /// The field's data type as its concrete Python type object (mirrors `StructField.dataType`).
     #[getter]
     #[pyo3(name = "dataType")]
     fn data_type(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        data_type_to_py(py, &self.field.data_type)
+        self.data_type_object.object(py, &self.field.data_type)
+    }
+    #[setter]
+    #[pyo3(name = "dataType")]
+    fn set_data_type(&mut self, dataType: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.field.data_type = py_to_data_type(dataType)?;
+        self.data_type_object = KeptType::of(dataType);
+        Ok(())
     }
     /// The field's metadata dict (mirrors `StructField.metadata`; values may be any type).
     #[getter]
     fn metadata<'py>(&self, py: Python<'py>) -> Bound<'py, pyo3::types::PyDict> {
         self.metadata.bind(py).clone()
     }
+    #[setter]
+    fn set_metadata(
+        &mut self,
+        py: Python<'_>,
+        metadata: &Bound<'_, pyo3::types::PyDict>,
+    ) -> PyResult<()> {
+        self.field.metadata = py_metadata_to_map(py, metadata)?;
+        self.metadata = metadata.clone().unbind();
+        Ok(())
+    }
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         // Mirror pyspark: StructField('name', <DataType repr>, nullable).
-        let dt = data_type_to_py(py, &self.field.data_type)?;
+        let dt = self.data_type_object.object(py, &self.field.data_type)?;
         let dt_repr: String = dt.bind(py).repr()?.extract()?;
         Ok(format!(
             "StructField('{}', {}, {})",
@@ -2124,7 +2275,7 @@ impl PyStructField {
         let this = slf.borrow();
         let args = (
             this.field.name.clone(),
-            data_type_to_py(py, &this.field.data_type)?,
+            this.data_type_object.object(py, &this.field.data_type)?,
             this.field.nullable,
             this.metadata.clone_ref(py),
         )
@@ -2135,62 +2286,34 @@ impl PyStructField {
 
 #[pyclass(name = "StructType", module = "pyspark.sql.types", extends = PyDataType)]
 pub struct PyStructType {
-    /// The core fields. Where a field has its `StructField` object, its metadata may have been
-    /// edited since, so the metadata that counts is `current_fields`.
-    pub(crate) fields: Vec<StructField>,
-    /// The `StructField` objects of `fields`, by their positions: those that the struct was
-    /// made of, and the others once they are made. So a field is the same object each time,
-    /// as PySpark's `StructType`, which holds its fields, gives them. The name and the type of
-    /// a field cannot change, so only its metadata can differ from `fields`.
-    objects: std::sync::Mutex<Vec<Option<Py<PyStructField>>>>,
+    /// The `StructField` objects, as PySpark's `StructType.fields` list holds them. The list is
+    /// the struct's own: an edit of it (append, `[i] = `, pop, sort, ...) is an edit of the
+    /// struct, so the fields are read from it each time.
+    fields: Py<PyList>,
+    /// The names, as PySpark's `StructType.names` list holds them, which is kept apart from
+    /// `fields`: `__init__` and `add` set it, and nothing else does.
+    names: Py<PyList>,
+    /// The `needConversion` of each field, as PySpark's `_needConversion`. Like PySpark's, it is
+    /// computed by `__init__` and `add`, so an edit of a field's type does not change it.
+    need_conversion: Vec<bool>,
 }
 
 impl PyStructType {
-    /// The `StructField` object of the field at `index`, which is in range.
-    fn field_object(&self, py: Python<'_>, index: usize) -> PyResult<Py<PyStructField>> {
-        let mut objects = self.objects.lock().unwrap_or_else(|e| e.into_inner());
-        if objects.len() < self.fields.len() {
-            objects.resize_with(self.fields.len(), || None);
-        }
-        if let Some(object) = &objects[index] {
-            return Ok(object.clone_ref(py));
-        }
-        let object = Py::new(
-            py,
-            PyStructField::from_field(py, self.fields[index].clone())?,
-        )?;
-        objects[index] = Some(object.clone_ref(py));
-        Ok(object)
-    }
-
-    /// The `StructField` objects of the fields, in order.
-    fn field_objects(&self, py: Python<'_>) -> PyResult<Vec<Py<PyStructField>>> {
-        (0..self.fields.len())
-            .map(|index| self.field_object(py, index))
-            .collect()
-    }
-
-    /// The core fields with their metadata as it is now: a field that has its object takes its
-    /// metadata from the object, where an edit in place is kept, as PySpark's fields do. Those
-    /// without an object are as they are in `fields`.
+    /// The core fields, as they are now: each field's metadata is read from its object, where an
+    /// edit in place is kept, as in PySpark.
     pub(crate) fn current_fields(&self, py: Python<'_>) -> PyResult<Vec<StructField>> {
-        let objects: Vec<Option<Py<PyStructField>>> = {
-            let objects = self.objects.lock().unwrap_or_else(|e| e.into_inner());
-            objects
-                .iter()
-                .map(|object| object.as_ref().map(|object| object.clone_ref(py)))
-                .collect()
-        };
         self.fields
+            .bind(py)
             .iter()
-            .enumerate()
-            .map(
-                |(index, field)| match objects.get(index).and_then(Option::as_ref) {
-                    Some(object) => object.bind(py).borrow().current_field(py),
-                    None => Ok(field.clone()),
-                },
-            )
+            .map(|item| as_struct_field(&item)?.borrow().current_field(py))
             .collect()
+    }
+
+    /// The core type of the struct, as it is now.
+    fn current_data_type(&self, py: Python<'_>) -> PyResult<DataType> {
+        Ok(DataType::Struct {
+            fields: self.current_fields(py)?,
+        })
     }
 }
 
@@ -2230,58 +2353,65 @@ impl PyStructType {
     fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
         let py = slf.py();
         let this = slf.borrow();
-        let dt = DataType::Struct {
-            fields: this.current_fields(py)?,
-        };
+        let dt = this.current_data_type(py)?;
         reduce_with_udts(slf.get_type(), &dt, || {
-            (this.field_objects(py)?,).into_pyobject(py)
+            let objects = PyList::new(py, this.fields.bind(py).iter())?;
+            (objects,).into_pyobject(py)
         })
     }
     /// `StructType(fields=None)` where each field is a `StructField` (matching
     /// pyspark). A list of DDL field strings is also accepted for convenience.
     #[new]
     #[pyo3(signature = (fields=None))]
-    fn new(fields: Option<Vec<Bound<'_, PyAny>>>) -> PyResult<pyo3::PyClassInitializer<Self>> {
-        let mut out = Vec::new();
-        let mut objects = Vec::new();
-        if let Some(fs) = fields {
-            for f in fs {
-                if let Ok(sf) = f.cast::<PyStructField>() {
-                    out.push(sf.borrow().current_field(f.py())?);
-                    objects.push(Some(sf.clone().unbind()));
-                } else if let Ok(s) = f.extract::<String>() {
-                    // "name type" DDL fragment.
-                    let dt = DataType::from_ddl(&format!("struct<{s}>")).map_err(|e| {
-                        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                            "invalid struct field '{s}': {e:?}"
-                        ))
-                    })?;
-                    if let DataType::Struct { fields } = dt {
-                        objects.extend(fields.iter().map(|_| None));
-                        out.extend(fields);
-                    }
-                } else {
-                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                        "StructType fields must be StructField objects or DDL strings",
-                    ));
-                }
+    fn new(
+        py: Python<'_>,
+        fields: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<pyo3::PyClassInitializer<Self>> {
+        // As PySpark's `if not fields`: no fields, or none given, is a new empty list.
+        let Some(fields) = fields.filter(|fs| fs.is_truthy().unwrap_or(false)) else {
+            let (base, parts) = struct_parts(py, PyList::empty(py))?;
+            return Ok(init_chain!(base, parts, [], value));
+        };
+        // A list of `StructField` objects is the struct's own list, as in PySpark.
+        if let Ok(list) = fields.cast::<PyList>() {
+            if list
+                .iter()
+                .all(|item| item.is_instance_of::<PyStructField>())
+            {
+                let (base, parts) = struct_parts(py, list.clone())?;
+                return Ok(init_chain!(base, parts, [], value));
             }
         }
-        Ok(init_chain!(
-            DataType::Struct {
-                fields: out.clone(),
-            },
-            PyStructType {
-                fields: out,
-                objects: std::sync::Mutex::new(objects),
-            },
-            [],
-            value
-        ))
+        let mut objects = Vec::new();
+        for f in fields.extract::<Vec<Bound<'_, PyAny>>>()? {
+            if let Ok(sf) = f.cast::<PyStructField>() {
+                objects.push(sf.clone().into_any());
+            } else if let Ok(s) = f.extract::<String>() {
+                // "name type" DDL fragment.
+                let dt = DataType::from_ddl(&format!("struct<{s}>")).map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "invalid struct field '{s}': {e:?}"
+                    ))
+                })?;
+                if let DataType::Struct { fields } = dt {
+                    for field in fields {
+                        let object = Py::new(py, PyStructField::from_field(py, field)?)?;
+                        objects.push(object.into_bound(py).into_any());
+                    }
+                }
+            } else {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "StructType fields must be StructField objects or DDL strings",
+                ));
+            }
+        }
+        let (base, parts) = struct_parts(py, PyList::new(py, objects)?)?;
+        Ok(init_chain!(base, parts, [], value))
     }
 
     /// Append a field and return `self` (chainable, mirroring `StructType.add`):
-    /// `StructType().add("a", "integer").add("b", StringType())`.
+    /// `StructType().add("a", "integer").add("b", StringType())`. The field goes to `fields` and
+    /// its name to `names`, as PySpark's `add` does them.
     #[pyo3(signature = (field, data_type=None, nullable=true, metadata=None))]
     fn add<'py>(
         slf: Bound<'py, Self>,
@@ -2290,15 +2420,14 @@ impl PyStructType {
         nullable: bool,
         metadata: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<Bound<'py, Self>> {
-        let mut object = None;
-        let new_field = if let Ok(sf) = field.cast::<PyStructField>() {
-            object = Some(sf.clone().unbind());
-            sf.borrow().current_field(field.py())?
+        let py = field.py();
+        let (object, name) = if let Ok(sf) = field.cast::<PyStructField>() {
+            (sf.clone().into_any(), sf.borrow().field.name.clone())
         } else {
             // As PySpark's: a name takes a data type, of which a str is the JSON value of one.
             let Some(data_type) = data_type else {
                 return Err(crate::column::raise_pyspark(
-                    field.py(),
+                    py,
                     "PySparkValueError",
                     "ARGUMENT_REQUIRED",
                     &[
@@ -2308,68 +2437,76 @@ impl PyStructType {
                 ));
             };
             let name: String = field.extract()?;
-            let dt = if data_type.is_instance_of::<pyo3::types::PyString>() {
-                let parsed = field
-                    .py()
-                    .import("pyspark.sql.types")?
+            let type_object = if data_type.is_instance_of::<pyo3::types::PyString>() {
+                py.import("pyspark.sql.types")?
                     .getattr("_parse_datatype_json_value")?
-                    .call1((data_type,))?;
-                py_to_data_type(&parsed)?
+                    .call1((data_type,))?
             } else {
-                py_to_data_type(data_type)?
+                data_type.clone()
             };
+            let dt = py_to_data_type(&type_object)?;
             let md = match metadata {
-                Some(d) => py_metadata_to_map(d.py(), d)?,
+                Some(d) => py_metadata_to_map(py, d)?,
                 None => BTreeMap::new(),
             };
-            StructField {
-                name,
+            let new_field = StructField {
+                name: name.clone(),
                 data_type: dt,
                 nullable,
                 metadata: md,
-            }
+            };
+            let object = Py::new(
+                py,
+                PyStructField::build(py, new_field, metadata, KeptType::of(&type_object))?,
+            )?;
+            (object.into_bound(py).into_any(), name)
         };
         {
-            let mut me = slf.borrow_mut();
-            let length = me.fields.len();
-            let objects = me.objects.get_mut().unwrap_or_else(|e| e.into_inner());
-            objects.resize_with(length, || None);
-            objects.push(object);
-            me.fields.push(new_field);
-            // The base `DataType` is what `str()` and the schemas of `mapInArrow` and
-            // friends read, so it must follow the fields.
-            let fields = me.fields.clone();
-            me.as_super().inner = DataType::Struct { fields };
+            let me = slf.borrow();
+            me.fields.bind(py).append(object)?;
+            me.names.bind(py).append(name)?;
         }
+        // The base `DataType` is what `resolve_datatype` reads for the schemas of `mapInArrow`
+        // and friends, so it must follow the fields too.
+        let fields = slf.borrow().current_fields(py)?;
+        let need_conversion = need_conversion_of(py, &fields)?;
+        let mut me = slf.borrow_mut();
+        me.as_super().inner = DataType::Struct { fields };
+        me.need_conversion = need_conversion;
+        drop(me);
         Ok(slf)
     }
 
-    /// The fields as `StructField` objects (mirrors `StructType.fields`).
+    /// The fields as `StructField` objects, in the list that is the struct's own (mirrors
+    /// `StructType.fields`): the same list each time, so an edit of it is an edit of the struct.
     #[getter]
-    fn fields(&self, py: Python<'_>) -> PyResult<Vec<Py<PyStructField>>> {
-        self.field_objects(py)
+    fn fields(&self, py: Python<'_>) -> Py<PyList> {
+        self.fields.clone_ref(py)
     }
 
-    /// The field names in order (mirrors `StructType.names`).
+    /// The field names, in the list that is the struct's own (mirrors `StructType.names`).
     #[getter]
-    fn names(&self) -> Vec<String> {
-        self.fields.iter().map(|f| f.name.clone()).collect()
+    fn names(&self, py: Python<'_>) -> Py<PyList> {
+        self.names.clone_ref(py)
     }
 
-    fn __len__(&self) -> usize {
-        self.fields.len()
+    fn __len__(&self, py: Python<'_>) -> usize {
+        self.fields.bind(py).len()
     }
 
     /// Index by position (`st[0]`) or by name (`st["a"]`), returning a `StructField`
     /// (mirrors `StructType.__getitem__`; a slice yields a new `StructType`), with the errors of
     /// PySpark's: `KEY_NOT_EXISTS` of a name, `INDEX_OUT_OF_RANGE` of an index, and
-    /// `NOT_EXPECTED_TYPE` of another key.
+    /// `NOT_EXPECTED_TYPE` of another key. A name is looked up in the fields, as PySpark does.
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         use crate::column::raise_pyspark;
+        let fields = self.fields.bind(py);
         if let Ok(name) = key.cast::<pyo3::types::PyString>() {
             let name = name.to_cow()?;
-            if let Some(index) = self.fields.iter().position(|f| f.name == name) {
-                return Ok(self.field_object(py, index)?.into_any());
+            for item in fields.iter() {
+                if as_struct_field(&item)?.borrow().field.name == *name {
+                    return Ok(item.unbind());
+                }
             }
             return Err(raise_pyspark(
                 py,
@@ -2378,16 +2515,10 @@ impl PyStructType {
                 &[("key", &name)],
             ));
         }
-        if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
-            let idx = slice.indices(self.fields.len() as isize)?;
-            let (mut out, mut objects) = (Vec::new(), Vec::new());
-            let (mut i, stop, step) = (idx.start, idx.stop, idx.step);
-            while (step > 0 && i < stop) || (step < 0 && i > stop) {
-                out.push(self.fields[i as usize].clone());
-                objects.push(Some(self.field_object(py, i as usize)?));
-                i += step;
-            }
-            return Ok(py_new_struct_of(py, out, objects)?.into_any());
+        if key.is_instance_of::<pyo3::types::PySlice>() {
+            // As PySpark's `StructType(self.fields[key])`: a new struct of the same fields.
+            let sliced = fields.as_any().get_item(key)?.cast_into::<PyList>()?;
+            return Ok(struct_of_list(py, sliced)?.into_any());
         }
         if !key.is_instance_of::<pyo3::types::PyInt>() {
             return Err(crate::stat_arguments::not_expected_type(
@@ -2396,10 +2527,10 @@ impl PyStructType {
                 "int, slice or str",
             ));
         }
-        let n = self.fields.len() as isize;
+        let n = fields.len() as isize;
         let index = key.extract::<isize>().ok();
         match index.map(|i| if i < 0 { i + n } else { i }) {
-            Some(i) if (0..n).contains(&i) => Ok(self.field_object(py, i as usize)?.into_any()),
+            Some(i) if (0..n).contains(&i) => Ok(fields.get_item(i as usize)?.unbind()),
             _ => Err(raise_pyspark(
                 py,
                 "PySparkIndexError",
@@ -2410,46 +2541,33 @@ impl PyStructType {
     }
 
     fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let list = pyo3::types::PyList::new(py, self.field_objects(py)?)?;
-        Ok(list.as_any().call_method0("__iter__")?.unbind())
+        Ok(self.fields.bind(py).call_method0("__iter__")?.unbind())
     }
 
     #[pyo3(name = "simpleString")]
     fn simple_string(&self, py: Python<'_>) -> PyResult<String> {
-        simple_string_with_udts(
-            py,
-            &DataType::Struct {
-                fields: self.fields.clone(),
-            },
-        )
+        simple_string_with_udts(py, &self.current_data_type(py)?)
     }
 
     /// `StructType.typeName()` == "struct".
 
-    /// Field names in order. Mirrors `StructType.fieldNames()`.
+    /// Field names, as a copy of the `names` list. Mirrors `StructType.fieldNames()`, which is
+    /// `list(self.names)`: it does not follow an edit of `fields`.
     #[pyo3(name = "fieldNames")]
-    fn __st_field_names(&self) -> Vec<String> {
-        self.fields.iter().map(|f| f.name.clone()).collect()
+    fn __st_field_names<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.names.bind(py).call_method0("copy")
     }
 
     /// Whether a field needs conversion, as PySpark's `_needSerializeAnyField`.
     #[getter(_needSerializeAnyField)]
-    fn __st_need_serialize_any_field(&self, py: Python<'_>) -> PyResult<bool> {
-        for field in &self.fields {
-            if need_conversion(py, &field.data_type)? {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+    fn __st_need_serialize_any_field(&self) -> bool {
+        self.need_conversion.iter().any(|&need| need)
     }
 
     /// The `needConversion` of each field, as PySpark's `_needConversion`.
     #[getter(_needConversion)]
-    fn __st_need_conversion_of_fields(&self, py: Python<'_>) -> PyResult<Vec<bool>> {
-        self.fields
-            .iter()
-            .map(|field| need_conversion(py, &field.data_type))
-            .collect()
+    fn __st_need_conversion_of_fields(&self) -> Vec<bool> {
+        self.need_conversion.clone()
     }
 
     /// DDL string. Mirrors `StructType.toDDL()`, which asks the server of the active session to
@@ -2477,23 +2595,17 @@ impl PyStructType {
     )]
     fn __st_tree_string(&self, py: Python<'_>, maxDepth: Py<PyAny>) -> PyResult<String> {
         let depth = normalize_tree_depth(maxDepth.bind(py))?;
-        DataType::Struct {
-            fields: self.fields.clone(),
-        }
-        .tree_string_with_depth(depth)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+        self.current_data_type(py)?
+            .tree_string_with_depth(depth)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
     }
 
     /// A copy with all fields made nullable (recursively). Mirrors `StructType.toNullable()`.
     #[pyo3(name = "toNullable")]
     fn __st_to_nullable(&self, py: Python<'_>) -> PyResult<Py<PyStructType>> {
-        let fields = match (DataType::Struct {
-            fields: self.current_fields(py)?,
-        })
-        .to_nullable()
-        {
+        let fields = match self.current_data_type(py)?.to_nullable() {
             DataType::Struct { fields } => fields,
-            _ => self.fields.clone(),
+            _ => self.current_fields(py)?,
         };
         py_new_struct(py, fields)
     }
@@ -2513,8 +2625,8 @@ impl PyStructType {
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         // Mirror pyspark: StructType([StructField('n', <dt repr>, nullable), ...]).
-        let mut parts = Vec::with_capacity(self.fields.len());
-        for f in &self.fields {
+        let mut parts = Vec::with_capacity(self.fields.bind(py).len());
+        for f in self.current_fields(py)? {
             let dt_repr: String = data_type_to_py(py, &f.data_type)?
                 .bind(py)
                 .repr()?
@@ -3523,6 +3635,7 @@ pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAn
                 PyArrayType {
                     element_type: et,
                     contains_null,
+                    element_object: KeptType::default(),
                 },
                 [],
                 value
@@ -3548,6 +3661,8 @@ pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAn
                     key_type: kt,
                     value_type: vt,
                     value_contains_null,
+                    key_object: KeptType::default(),
+                    value_object: KeptType::default(),
                 },
                 [],
                 value
@@ -3769,14 +3884,14 @@ pub(crate) fn py_to_data_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
     }
     if let Ok(a) = obj.extract::<PyRef<PyArrayType>>() {
         return Ok(DataType::Array {
-            element_type: Box::new(a.element_type.clone()),
+            element_type: Box::new(a.element_object.live(obj.py(), &a.element_type)?),
             contains_null: a.contains_null,
         });
     }
     if let Ok(m) = obj.extract::<PyRef<PyMapType>>() {
         return Ok(DataType::Map {
-            key_type: Box::new(m.key_type.clone()),
-            value_type: Box::new(m.value_type.clone()),
+            key_type: Box::new(m.key_object.live(obj.py(), &m.key_type)?),
+            value_type: Box::new(m.value_object.live(obj.py(), &m.value_type)?),
             value_contains_null: m.value_contains_null,
         });
     }
