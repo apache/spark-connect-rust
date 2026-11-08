@@ -425,21 +425,22 @@ async fn typed_requests_take_a_missing_user_id_from_the_connection() {
 }
 
 #[tokio::test]
-async fn typed_requests_keep_their_user_context_without_a_configured_user_id() {
+async fn typed_requests_keep_their_user_context_with_an_empty_user_id() {
     let explicit = UserContext {
         user_id: "explicit".into(),
         user_name: "name".into(),
         extensions: vec![extension()],
     };
     for (given, expected) in [
-        // The message is still sent, as for every RPC that the client builds itself.
+        // The message is still sent, as for every RPC that the client builds itself. An
+        // empty `user_id` in the connection string is no user, whatever SPARK_USER or USER is.
         (None, UserContext::default()),
         (Some(UserContext::default()), UserContext::default()),
         (Some(explicit.clone()), explicit),
     ] {
         let fixture = Fixture::start([Execution::Complete, Execution::Complete]).await;
-        let client = fixture.client(None).await;
-        assert_eq!(client.user_id(), None);
+        let client = fixture.client(Some("")).await;
+        assert_eq!(client.user_id(), Some(""));
         for (method, context) in send_typed_requests(&fixture, &client, &given).await {
             assert_eq!(context.as_ref(), Some(&expected), "{method} for {given:?}");
         }

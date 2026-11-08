@@ -717,6 +717,8 @@ def test_cached_arrow_upload_attribution_on_every_frame(protocol, monkeypatch, u
 
     # Exercise ChannelBuilder's default prefix when no URL or environment value is set.
     monkeypatch.delenv("SPARK_CONNECT_USER_AGENT", raising=False)
+    # Without a user_id in the URL, the user ID is SPARK_USER, as PySpark's.
+    monkeypatch.setenv("SPARK_USER", "env-user")
     table = pa.table({"id": range(10_000)})
     schema = T.StructType([T.StructField("id", T.LongType())])
     with _arrow_input_service(protocol, user_id=user_id, user_agent=user_agent, **{
@@ -731,7 +733,7 @@ def test_cached_arrow_upload_attribution_on_every_frame(protocol, monkeypatch, u
         _assert_artifact_contexts(
             state["upload_contexts"] + state["status_contexts"],
             session_id=spark.session_id,
-            user_id=user_id or "",
+            user_id=user_id or "env-user",
             user_agent=user_agent or "_SPARK_CONNECT_PYTHON",
         )
 
@@ -745,6 +747,8 @@ def test_file_upload_attribution_on_every_frame(
     protocol, monkeypatch, tmp_path, user_id, user_agent, upload
 ):
     monkeypatch.delenv("SPARK_CONNECT_USER_AGENT", raising=False)
+    # Without a user_id in the URL, the user ID is SPARK_USER, as PySpark's.
+    monkeypatch.setenv("SPARK_USER", "env-user")
     small, large = tmp_path / "small.txt", tmp_path / "large.txt"
     small.write_bytes(b"small artifact")
     chunk_size = 32 * 1024  # Mirrors CHUNK_SIZE in crates/spark-connect-core/src/artifact.rs.
@@ -776,7 +780,7 @@ def test_file_upload_attribution_on_every_frame(
         _assert_artifact_contexts(
             state["upload_contexts"],
             session_id=spark.session_id,
-            user_id=user_id or "",
+            user_id=user_id or "env-user",
             user_agent=user_agent or "_SPARK_CONNECT_PYTHON",
         )
 
