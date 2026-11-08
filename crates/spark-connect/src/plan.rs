@@ -2724,20 +2724,31 @@ mod placeholder_tests {
 
     #[test]
     fn a_placeholder_is_shallow_and_stands_for_the_relation_of_its_node() {
-        let ids = Arc::new(PlanIds::new());
-        let mut node = Arc::new(range(0, 3, 1));
-        for _ in 0..200 {
-            node = Arc::new(LogicalPlan::Limit {
-                input: node,
-                limit: 3,
-            });
-        }
-        let relation = relation_with_ids(&node, &ids);
-        let shallow = placeholder(&node, &ids);
-        assert!(shallow.encoded_len() < 128, "{}", shallow.encoded_len());
-        let mut resolved = transform_of(shallow.clone());
-        resolve_relation(&mut resolved).unwrap();
-        assert_eq!(resolved, transform_of(relation));
+        // The plan is converted recursively, so a plan of 200 levels takes more than the 2 MiB
+        // stack of a test thread in a debug build, whose frames are much larger than those of a
+        // release build.
+        let run = || {
+            let ids = Arc::new(PlanIds::new());
+            let mut node = Arc::new(range(0, 3, 1));
+            for _ in 0..200 {
+                node = Arc::new(LogicalPlan::Limit {
+                    input: node,
+                    limit: 3,
+                });
+            }
+            let relation = relation_with_ids(&node, &ids);
+            let shallow = placeholder(&node, &ids);
+            assert!(shallow.encoded_len() < 128, "{}", shallow.encoded_len());
+            let mut resolved = transform_of(shallow.clone());
+            resolve_relation(&mut resolved).unwrap();
+            assert_eq!(resolved, transform_of(relation));
+        };
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(run)
+            .unwrap()
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
     }
 
     #[test]

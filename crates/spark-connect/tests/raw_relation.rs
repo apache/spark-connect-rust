@@ -44,6 +44,18 @@ fn live() -> Option<SparkSession> {
     )
 }
 
+/// Runs `f` on a thread with a stack of 64 MiB. A plan is converted recursively, so a deep plan
+/// takes more than the 2 MiB stack of a test thread in a debug build, whose frames are much
+/// larger than those of a release build.
+fn on_a_large_stack(f: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(f)
+        .unwrap()
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+}
+
 fn sql_relation(query: &str) -> proto::Relation {
     proto::Relation {
         common: Some(proto::RelationCommon {
@@ -122,44 +134,47 @@ fn sent_relations_keep_the_plan_ids_of_the_dataframes_they_were_of() {
 
 #[test]
 fn placeholders_of_a_dataframe_are_replaced_by_its_relation() {
-    // As the plans of pyspark.ml over the DataFrames that they take as input: a relation over
-    // the placeholder of a DataFrame, which is replaced by that DataFrame's relation.
-    let session = offline();
-    let mut df = session.range(3).unwrap();
-    for i in 0..120 {
-        df = df.with_column(&format!("c{i}"), col("id").add(lit(i)));
-    }
-    let placeholder = df.placeholder_relation();
-    // Shallow: the placeholder of a DataFrame of 120 levels is a few bytes.
-    assert!(prost::Message::encoded_len(&placeholder) < 128);
-    let input = DataFrame::from_relation(
-        session.clone(),
-        proto::Relation {
-            common: None,
-            rel_type: Some(proto::relation::RelType::WithRelations(Box::new(
-                proto::WithRelations {
-                    root: Some(Box::new(placeholder.clone())),
-                    references: vec![placeholder.clone()],
-                },
-            ))),
-        },
-        None,
-    )
-    .unwrap();
-    let Some(proto::relation::RelType::WithRelations(with)) = input.to_relation().rel_type else {
-        panic!("expected WithRelations");
-    };
-    assert_eq!(with.root.as_deref(), Some(&df.to_relation()));
-    assert_eq!(with.references, vec![df.to_relation()]);
-    // The same placeholder gives the same relation.
-    assert_eq!(df.placeholder_relation(), placeholder);
-    // The DataFrame of the placeholder is a node of its own, whose relation is that of `df`.
-    let single = DataFrame::from_relation(session.clone(), placeholder.clone(), None).unwrap();
-    assert_eq!(single.to_relation().rel_type, df.to_relation().rel_type);
-    // A placeholder of a DataFrame of another session is the relation of that DataFrame too.
-    let other = offline();
-    let copy = DataFrame::from_relation(other, placeholder, None).unwrap();
-    assert_eq!(copy.to_relation().rel_type, df.to_relation().rel_type);
+    on_a_large_stack(|| {
+        // As the plans of pyspark.ml over the DataFrames that they take as input: a relation over
+        // the placeholder of a DataFrame, which is replaced by that DataFrame's relation.
+        let session = offline();
+        let mut df = session.range(3).unwrap();
+        for i in 0..120 {
+            df = df.with_column(&format!("c{i}"), col("id").add(lit(i)));
+        }
+        let placeholder = df.placeholder_relation();
+        // Shallow: the placeholder of a DataFrame of 120 levels is a few bytes.
+        assert!(prost::Message::encoded_len(&placeholder) < 128);
+        let input = DataFrame::from_relation(
+            session.clone(),
+            proto::Relation {
+                common: None,
+                rel_type: Some(proto::relation::RelType::WithRelations(Box::new(
+                    proto::WithRelations {
+                        root: Some(Box::new(placeholder.clone())),
+                        references: vec![placeholder.clone()],
+                    },
+                ))),
+            },
+            None,
+        )
+        .unwrap();
+        let Some(proto::relation::RelType::WithRelations(with)) = input.to_relation().rel_type
+        else {
+            panic!("expected WithRelations");
+        };
+        assert_eq!(with.root.as_deref(), Some(&df.to_relation()));
+        assert_eq!(with.references, vec![df.to_relation()]);
+        // The same placeholder gives the same relation.
+        assert_eq!(df.placeholder_relation(), placeholder);
+        // The DataFrame of the placeholder is a node of its own, whose relation is that of `df`.
+        let single = DataFrame::from_relation(session.clone(), placeholder.clone(), None).unwrap();
+        assert_eq!(single.to_relation().rel_type, df.to_relation().rel_type);
+        // A placeholder of a DataFrame of another session is the relation of that DataFrame too.
+        let other = offline();
+        let copy = DataFrame::from_relation(other, placeholder, None).unwrap();
+        assert_eq!(copy.to_relation().rel_type, df.to_relation().rel_type);
+    });
 }
 
 #[test]
@@ -176,29 +191,31 @@ fn placeholders_of_dropped_dataframes_are_errors() {
 
 #[test]
 fn a_deep_placeholder_runs_on_the_server() {
-    let Some(session) = live() else {
-        return;
-    };
-    let mut df = session.range(3).unwrap();
-    for i in 0..120 {
-        df = df.with_column(&format!("c{i}"), col("id").add(lit(i)));
-    }
-    let wrapped = DataFrame::from_relation(
-        session.clone(),
-        proto::Relation {
-            common: None,
-            rel_type: Some(proto::relation::RelType::WithRelations(Box::new(
-                proto::WithRelations {
-                    root: Some(Box::new(df.placeholder_relation())),
-                    references: vec![],
-                },
-            ))),
-        },
-        None,
-    )
-    .unwrap();
-    assert_eq!(wrapped.count().unwrap(), 3);
-    assert_eq!(wrapped.columns().unwrap().len(), 121);
+    on_a_large_stack(|| {
+        let Some(session) = live() else {
+            return;
+        };
+        let mut df = session.range(3).unwrap();
+        for i in 0..120 {
+            df = df.with_column(&format!("c{i}"), col("id").add(lit(i)));
+        }
+        let wrapped = DataFrame::from_relation(
+            session.clone(),
+            proto::Relation {
+                common: None,
+                rel_type: Some(proto::relation::RelType::WithRelations(Box::new(
+                    proto::WithRelations {
+                        root: Some(Box::new(df.placeholder_relation())),
+                        references: vec![],
+                    },
+                ))),
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(wrapped.count().unwrap(), 3);
+        assert_eq!(wrapped.columns().unwrap().len(), 121);
+    });
 }
 
 #[test]
