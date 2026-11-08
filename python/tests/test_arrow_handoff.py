@@ -4615,8 +4615,8 @@ def test_arrow_string_numpy_semantics_accessor_keeps_native_outcomes(
                     assert dynamic_accessor and customization in ("mixin_storage", "mixin_dtype")
                     assert not isinstance(error, AssertionError)
                     assert any(
-                        frame.f_globals.get("__name__", "").startswith("pandas.core.arrays.")
-                        for frame, _ in traceback.walk_tb(error.__traceback__)
+                        trace_frame.f_globals.get("__name__", "").startswith("pandas.core.arrays.")
+                        for trace_frame, _ in traceback.walk_tb(error.__traceback__)
                     )
                     assert state["input_tables"] == []
                     assert state["config_requests"] == []
