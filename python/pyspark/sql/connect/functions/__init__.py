@@ -15,6 +15,6 @@
 # limitations under the License.
 #
 """Re-export of ``pyspark.sql.functions`` under the Connect import path."""
-from pyspark.sql.functions import *  # noqa: F401,F403
+from pyspark.sql.connect.functions.builtin import *  # noqa: F401,F403
 from pyspark.sql.functions import col, expr  # noqa: F401
 from pyspark.sql.connect.functions import partitioning  # noqa: F401
