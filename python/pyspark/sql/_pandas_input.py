@@ -19,10 +19,117 @@
 """Conservative columnar pandas input; unsupported conversions use the row path."""
 
 
+_ARROW_STRING_HOOKS = ("__arrow_array__", "__array__", "__getitem__", "isna",
+                       "to_numpy", "__len__")
+_ARROW_STRING_CONSTRUCTION_HOOKS = ("__init__", "_from_pyarrow_array", "__new__")
+
+
+def _defined_in(method, name, *modules):
+    """Whether a plain function named `name` has a given module's name and globals."""
+    from types import FunctionType
+
+    return (type(method) is FunctionType and method.__name__ == name
+            and any(method.__module__ == module.__name__
+                    and method.__globals__ is vars(module) for module in modules))
+
+
+def _has_canonical_arrow_string_astype(cls):
+    """Authenticate the object-cast method invoked by ArrowStringArray's super()."""
+    from pandas.core.arrays import base as array_base_module, string_arrow
+
+    try:
+        start = cls.__mro__.index(string_arrow.ArrowStringArray) + 1
+    except ValueError:
+        return False
+    # Inspect the defining class dictionaries without invoking a custom descriptor.
+    for base in cls.__mro__[start:]:
+        if "astype" in vars(base):
+            method = vars(base)["astype"]
+            return (base is array_base_module.ExtensionArray
+                    and _defined_in(method, "astype", array_base_module))
+    return False
+
+
+def _arrow_string_class_is_canonical(cls):
+    """Authenticate the shared row/Arrow conversion hooks of a concrete pandas class."""
+    import pandas as pd
+    from pandas.core.arrays import string_ as string_module, string_arrow
+    from pandas.core.arrays.arrow import array as arrow_module
+
+    numpy_semantics = getattr(string_arrow, "ArrowStringArrayNumpySemantics", None)
+    # Reject subclasses by identity before inspecting them. In particular, do not
+    # hash an untrusted class whose metaclass could customize __hash__.
+    if (not any(cls is candidate for candidate in
+                (string_arrow.ArrowStringArray, numpy_semantics))
+            or pd.arrays.ArrowStringArray is not string_arrow.ArrowStringArray
+            or pd.StringDtype is not string_module.StringDtype):
+        return False
+
+    missing = object()
+
+    def raw_attribute(owner, name):
+        # Resolve the class attribute without binding an arbitrary descriptor.
+        for base in owner.__mro__:
+            namespace = vars(base)
+            if name in namespace:
+                return namespace[name]
+        return missing
+
+    # Authenticate row/Arrow conversion hooks and __len__, which sizes the table.
+    # to_numpy indexes the non-null portion through __getitem__ before reading storage.
+    # Inspect these conversion hooks here. A caller may already have read
+    # frame.dtypes, mirroring the native row path's first dtype read.
+    # pandas 2.2's NumPy-semantics variant has its own string-method accessor.
+    access = raw_attribute(cls, "__getattribute__")
+    canonical_access = (access is object.__getattribute__
+                        or (cls is numpy_semantics and _defined_in(
+                            access, "__getattribute__", string_arrow)))
+    if (not canonical_access
+            or any(not _defined_in(raw_attribute(cls, name), name,
+                                  string_arrow, arrow_module) for name in _ARROW_STRING_HOOKS)
+            or not _defined_in(raw_attribute(cls, "astype"), "astype", string_arrow)
+            or not _has_canonical_arrow_string_astype(cls)):
+        return False
+    # Null-subarray conversion may construct another array. Older pandas versions
+    # have no _from_pyarrow_array helper; a present custom descriptor must decline.
+    for name in _ARROW_STRING_CONSTRUCTION_HOOKS:
+        method = raw_attribute(cls, name)
+        if method is missing and name == "_from_pyarrow_array":
+            continue
+        if name == "__new__":
+            if method is not object.__new__:
+                return False
+        elif not _defined_in(method, name, string_arrow):
+            return False
+    dtype = raw_attribute(cls, "dtype")
+    hasna = raw_attribute(cls, "_hasna")
+    missing_value = raw_attribute(string_module.StringDtype, "na_value")
+    return (type(dtype) is property
+            and _defined_in(dtype.fget, "dtype", string_arrow, arrow_module)
+            and type(hasna) is property
+            and _defined_in(hasna.fget, "_hasna", arrow_module)
+            and type(missing_value) is property
+            and _defined_in(missing_value.fget, "na_value", string_module))
+
+
+def _has_canonical_arrow_string_array(array):
+    """Authenticate a column at this point without caching mutable hooks.
+
+    Callers may already have read frame.dtypes, as the native row path does.
+    """
+    # Column lookup can run customized pandas accessors between these checks.
+    # An earlier column authenticates neither the next instance nor its class.
+    if not _arrow_string_class_is_canonical(type(array)):
+        return False
+    # Deliberately include descriptors and special names for future explicit lookups.
+    return not any(name in vars(array) for name in
+                   _ARROW_STRING_HOOKS + _ARROW_STRING_CONSTRUCTION_HOOKS
+                   + ("astype", "dtype", "_hasna"))
+
+
 def _has_canonical_columns(columns):
     """Decline label containers whose row-path iteration can run custom hooks."""
     import sys
-    from types import FunctionType
 
     import numpy as np
     import pandas as pd
@@ -35,19 +142,14 @@ def _has_canonical_columns(columns):
             or "__iter__" in vars(columns)):
         return False
 
-    def ordinary(method, name, module):
-        return (type(method) is FunctionType and method.__name__ == name
-                and method.__module__ == module.__name__
-                and method.__globals__ is vars(module))
-
     # The native row path iterates columns before normalizing any cells.
     # Decline overrides without invoking them, so fallback preserves that order.
     if (Index.__iter__ is not base_module.IndexOpsMixin.__iter__
-            or not ordinary(Index.__iter__, "__iter__", base_module)):
+            or not _defined_in(Index.__iter__, "__iter__", base_module)):
         return False
     values = vars(Index).get("_values")
     if (type(values) is not property
-            or not ordinary(values.fget, "_values", index_module)):
+            or not _defined_in(values.fget, "_values", index_module)):
         return False
     if any("_data" in vars(base) for base in Index.__mro__):
         return False
@@ -78,13 +180,15 @@ def _has_canonical_columns(columns):
     cls = type(backing)
     if not any(cls is candidate for candidate in python_strings + arrow_strings):
         return False
+    # Instance shadows deliberately include descriptors and special names too.
     if (cls.__getattribute__ is not object.__getattribute__
             or any(name in vars(backing) for name in
-                   ("__iter__", "__getitem__", "__len__", "_box_func",
-                    "tolist", "to_numpy", "isna", "fillna", "_hasna"))
+                   ("__iter__", "__getitem__", "__len__", "__array__", "_box_func",
+                    "tolist", "to_numpy", "isna", "fillna", "_hasna")
+                   + _ARROW_STRING_CONSTRUCTION_HOOKS)
             or getattr(cls, "tolist", None) is not getattr(
                 vars(string_module).get("BaseStringArray"), "tolist", None)
-            or not ordinary(getattr(cls, "tolist", None), "tolist", string_module)):
+            or not _defined_in(getattr(cls, "tolist", None), "tolist", string_module)):
         return False
     if any(cls is candidate for candidate in python_strings):
         owner, module = vars(numpy_module).get("NumpyExtensionArray"), numpy_module
@@ -100,7 +204,7 @@ def _has_canonical_columns(columns):
         # ExtensionArray iteration dispatches through len and indexed boxing.
         for name, hook_module in (("__iter__", array_base_module),
                                   ("__getitem__", mixins_module), ("_box_func", mixins_module)):
-            if not ordinary(getattr(cls, name, None), name, hook_module):
+            if not _defined_in(getattr(cls, name, None), name, hook_module):
                 return False
         if (getattr(cls, "__len__", None) is not NDArrayBacked.__len__
                 or getattr(cls, "ndim", None) is not NDArrayBacked.ndim
@@ -113,26 +217,32 @@ def _has_canonical_columns(columns):
         owner, module = vars(arrow_module).get("ArrowExtensionArray"), arrow_module
         if owner is None:
             return False
+        # pandas builds an Arrow string Index's uniqueness engine with astype(object).
+        # Authenticate the full object-cast chain before is_unique, including
+        # dtype and missing-value properties that a label cast can read.
+        if ("astype" in vars(backing)
+                or not _arrow_string_class_is_canonical(cls)):
+            return False
         try:
             storage = object.__getattribute__(backing, "_pa_array")
         except AttributeError:
             return False
         if (type(storage) is not pa.ChunkedArray
-                or not ordinary(getattr(cls, "__iter__", None), "__iter__", module)):
+                or not _defined_in(getattr(cls, "__iter__", None), "__iter__", module)):
             return False
         isna, isna_module = getattr(owner, "isna", None), module
         hasna = getattr(cls, "_hasna", None)
         if (type(hasna) is not property
-                or not ordinary(hasna.fget, "_hasna", module)
+                or not _defined_in(hasna.fget, "_hasna", module)
                 or getattr(cls, "fillna", None) is not getattr(owner, "fillna", None)
-                or not ordinary(getattr(cls, "fillna", None), "fillna", module)):
+                or not _defined_in(getattr(cls, "fillna", None), "fillna", module)):
             return False
     # Keep the existing storage/conversion authentication as well as the
     # iterator hooks: these objects also supply labels to pandas normalization.
     return (getattr(cls, "to_numpy", None) is getattr(owner, "to_numpy", None)
-            and ordinary(getattr(cls, "to_numpy", None), "to_numpy", module)
+            and _defined_in(getattr(cls, "to_numpy", None), "to_numpy", module)
             and getattr(cls, "isna", None) is isna
-            and ordinary(getattr(cls, "isna", None), "isna", isna_module))
+            and _defined_in(getattr(cls, "isna", None), "isna", isna_module))
 
 
 def prepare_int64_table(frame, schema):
@@ -577,7 +687,7 @@ def prepare_string_input(frame, schema):
     from pandas.core import frame as frame_module, generic as generic_module
     from pandas.core.frame import DataFrame
     from pandas.core.series import Series
-    from types import FunctionType, GetSetDescriptorType, MethodDescriptorType, WrapperDescriptorType
+    from types import GetSetDescriptorType, MethodDescriptorType, WrapperDescriptorType
 
     from pyspark._pyspark import StringType, StructField, StructType as NativeStructType
     from pyspark.sql import types as sql_types
@@ -592,8 +702,7 @@ def prepare_string_input(frame, schema):
     for name, module in (("astype", generic_module), ("notna", frame_module),
                          ("where", generic_module)):
         method = getattr(DataFrame, name)
-        if (type(method) is not FunctionType or method.__name__ != name
-                or method.__module__ != module.__name__ or method.__globals__ is not vars(module)):
+        if not _defined_in(method, name, module):
             return None
     if (DataFrame.astype is not generic_module.NDFrame.astype
             or DataFrame.where is not generic_module.NDFrame.where):
@@ -671,29 +780,45 @@ def _arrow_string_table(frame, schema, dtypes):
 
     For the row path, pandas converts such a column from that storage, with its missing
     values as None, so the storage holds the same values. Only pandas' own array classes are
-    trusted to keep them there: a subclass could convert differently. The caller's guards of
-    prepare_string_input (frame, schema, names, size) have passed.
+    trusted with their original conversion hooks: customization could convert differently.
+    The caller's guards of prepare_string_input (frame, schema, names, size) have passed.
     """
-    import pandas as pd
-    import pyarrow as pa
-    from pandas.core.arrays import string_arrow
+    from pandas.core.arrays import string_ as string_module
 
-    classes = {pd.arrays.ArrowStringArray,
-               getattr(string_arrow, "ArrowStringArrayNumpySemantics", None)} - {None}
-    if not all(type(dtype) is pd.StringDtype and dtype.storage in ("pyarrow", "pyarrow_numpy")
+    if not all(type(dtype) is string_module.StringDtype
+               and dtype.storage in ("pyarrow", "pyarrow_numpy")
                for dtype in dtypes):
         return None
+    # The importer uses mutable public/captured schema names. Decline a rebound
+    # namespace before conversion or configuration/upload RPCs, as the generic route does.
+    if not _converter_namespaces_intact():
+        return None
+
+    import pyarrow as pa
+    from pandas.core.series import Series
+
     arrays = []
-    for (_, column), field in zip(frame.items(), schema.fields):
-        array = column.array
-        if type(array) not in classes:
+    for index, field in enumerate(schema.fields):
+        column = frame.iloc[:, index]
+        if type(column) is not Series:
             return None
-        values = pa.chunked_array(array.__arrow_array__())
+        array = column.array
+        if not _has_canonical_arrow_string_array(array):
+            return None
+        values = array.__arrow_array__()
+        # pandas returns a ChunkedArray; normalize a plain Array defensively if
+        # an instance's _pa_array storage was replaced.
+        if isinstance(values, pa.Array):
+            values = pa.chunked_array([values])
+        elif not isinstance(values, pa.ChunkedArray):
+            return None
         if values.type not in (pa.string(), pa.large_string()):
             return None
         try:
             # Malformed offsets or UTF-8 keep the row path and its error.
             values.validate(full=True)
+            # Check normal-string capacity before configuration/upload RPCs. The importer
+            # may widen back to large_string when useLargeVarTypes is enabled.
             values = values.cast(pa.string())
         except (pa.ArrowException, OverflowError):
             return None
@@ -868,6 +993,45 @@ def _native_names_intact(namespace):
     )
 
 
+def _converter_namespaces_intact():
+    """Whether loaded schema converters/importers still resolve native type names."""
+    import sys
+
+    from pyspark.sql import types as sql_types
+
+    if sys.modules.get("pyspark.sql.types") is not sql_types or not _native_names_intact(
+        vars(sql_types)
+    ):
+        return False
+    for name in ("pyspark.sql.pandas.types", "pyspark.sql._arrow_input"):
+        module = sys.modules.get(name)
+        if module is not None and not _native_names_intact(vars(module)):
+            return False
+    # The importer resolves its schema classes by name, and its conversion functions may
+    # keep the globals of an older type module.
+    importer = sys.modules.get("pyspark.sql._arrow_input")
+    if importer is not None:
+        from pyspark._pyspark import AtomicType, StructType
+
+        if any(vars(importer).get(name) is not cls
+               for name, cls in (("StructType", StructType), ("AtomicType", AtomicType))):
+            return False
+        for function in list(vars(importer).values()):
+            namespace = getattr(function, "__globals__", None)
+            if type(namespace) is dict and not _native_names_intact(namespace):
+                return False
+        # The importer calls its converters by these names, which must still be functions.
+        converter = sys.modules.get("pyspark.sql.pandas.types")
+        for name in ("to_arrow_schema", "from_arrow_schema"):
+            if name in vars(importer) and (
+                getattr(vars(importer)[name], "__globals__", None) is None
+                or (converter is not None
+                    and vars(importer)[name] is not getattr(converter, name, None))
+            ):
+                return False
+    return True
+
+
 def _canonical_struct(schema):
     """Whether a native struct schema and its fields keep their own classes' behavior.
 
@@ -904,39 +1068,55 @@ def _canonical_struct(schema):
 def accepts_pandas_table(frame, schema):
     """Whether `prepare_pandas_table` may convert this frame under this schema.
 
-    Customized frames, columns, schema classes and rebound type names keep the row path,
-    which reads them in its own order. The conversion and the importer resolve the type
-    names by lookup, so each namespace must still hold the native classes. The schema is
-    the caller's object, or a DDL string, which is parsed.
+    Customized frames, column labels, schema classes and rebound type names keep the row
+    path, which reads them in its own order. Conversion-hook authentication covers Arrow
+    string storage, including inherited hooks. Other pandas arrays retain the existing
+    module-origin checks; rebinding their canonical classes' hooks is not covered here.
+    The conversion and importer resolve type names by lookup, so each namespace must hold
+    the native classes. The schema is the caller's object or a DDL string, which is parsed.
     """
     return accepts_pandas_frame(frame) and (type(schema) is str or _canonical_struct(schema))
 
 
 def accepts_pandas_frame(frame):
-    """Whether PySpark's Arrow conversion may convert this frame, as `accepts_pandas_table`
-    checks it, but for a schema."""
+    """Check frame eligibility for explicit or inferred Arrow schema conversion."""
     import sys
 
     import pandas as pd
     from pandas.core.frame import DataFrame
 
-    from pyspark.sql import types as sql_types
-
     if pd.DataFrame is not DataFrame or type(frame) is not DataFrame:
         return False
     if not _has_canonical_columns(frame.columns):
         return False
-    # Custom extension arrays and dtypes keep the row path: Arrow would call their own
-    # `__arrow_array__`, and their dtype may impersonate a NumPy type.
+    # Custom extension-array/dtype classes outside pandas and NumPy keep the row path.
+    # Canonical non-string array classes retain the inherited module-origin policy.
+    # Arrow string storage already loads its defining module; do not import optional
+    # Arrow dependencies merely to inspect unrelated pandas columns.
+    string_arrow = sys.modules.get("pandas.core.arrays.string_arrow")
+    arrow_strings = () if string_arrow is None else tuple(
+        vars(string_arrow).get(name)
+        for name in ("ArrowStringArray", "ArrowStringArrayNumpySemantics")
+    )
+    # Direct type checks bypass __subclasscheck__ and __mro__ metaclass callbacks.
+    # Use the real type: isinstance can also consult a custom __class__ property.
+    # Non-class aliases cannot own array storage.
+    arrow_strings = tuple(cls for cls in arrow_strings
+                          if type.__subclasscheck__(type, type(cls)))
     for i in range(len(frame.columns)):
         column = frame.iloc[:, i]
+        array = column.array
+        # A canonical class can still have customized hooks. Generic explicit and inferred
+        # schema routes must preserve the specialized routes' row fallback.
+        if (any(type.__subclasscheck__(cls, type(array)) for cls in arrow_strings)
+                and not _has_canonical_arrow_string_array(array)):
+            return False
         if not all(type(value).__module__.split(".")[0] in ("pandas", "numpy")
-                   for value in (column.array, column.dtype)):
+                   for value in (array, column.dtype)):
             return False
     # The native row path normalizes cells through these methods, which a customized class
     # or instance keeps on the row path.
     from pandas.core import frame as frame_module, generic as generic_module
-    from types import FunctionType
 
     if any(name in vars(frame) for name in ("astype", "notna", "where")):
         return False
@@ -946,39 +1126,10 @@ def accepts_pandas_frame(frame):
         ("where", generic_module, "NDFrame.where"),
     ):
         method = getattr(DataFrame, name)
-        if (type(method) is not FunctionType or method.__qualname__ != qualname
-                or method.__module__ != module.__name__ or method.__globals__ is not vars(module)):
+        if not _defined_in(method, name, module) or method.__qualname__ != qualname:
             return False
-    if sys.modules.get("pyspark.sql.types") is not sql_types or not _native_names_intact(
-        vars(sql_types)
-    ):
+    if not _converter_namespaces_intact():
         return False
-    for name in ("pyspark.sql.pandas.types", "pyspark.sql._arrow_input"):
-        module = sys.modules.get(name)
-        if module is not None and not _native_names_intact(vars(module)):
-            return False
-    # The importer resolves its schema classes by name, and its conversion functions may
-    # keep the globals of an older type module.
-    importer = sys.modules.get("pyspark.sql._arrow_input")
-    if importer is not None:
-        from pyspark._pyspark import AtomicType, StructType
-
-        if any(vars(importer).get(name) is not cls
-               for name, cls in (("StructType", StructType), ("AtomicType", AtomicType))):
-            return False
-        for function in list(vars(importer).values()):
-            namespace = getattr(function, "__globals__", None)
-            if type(namespace) is dict and not _native_names_intact(namespace):
-                return False
-        # The importer calls its converters by these names, which must still be functions.
-        converter = sys.modules.get("pyspark.sql.pandas.types")
-        for name in ("to_arrow_schema", "from_arrow_schema"):
-            if name in vars(importer) and (
-                getattr(vars(importer)[name], "__globals__", None) is None
-                or (converter is not None
-                    and vars(importer)[name] is not getattr(converter, name, None))
-            ):
-                return False
     return True
 
 
