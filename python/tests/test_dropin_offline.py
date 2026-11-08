@@ -7583,7 +7583,13 @@ def test_plain_pandas_tuple_rows_keep_arrow_array_inference(mock_connect, value)
         mock_connect, pd.DataFrame({"value": [value]}, dtype=object))
     table.validate(full=True)
     assert (table.num_rows, table.num_columns) == (1, 1)
-    assert table.column_names == ["value"]
+    # IPC keeps temporary names; the enclosing ToDF applies the public label.
+    assert table.column_names == ["_0"]
+    _, service = mock_connect
+    request = parse_message(service.execute_requests[-1])
+    relation = parse_message(parse_message(request[3][0])[1][0])
+    rename = parse_message(relation[18][0])
+    assert [name.decode() for name in rename[2]] == ["value"]
     column = table.column(0)
     assert pa.types.is_list(column.type) or pa.types.is_large_list(column.type)
     assert column.type.value_type == pa.int64()
