@@ -22,6 +22,11 @@
 _ARROW_STRING_HOOKS = ("__arrow_array__", "__array__", "__getitem__", "isna",
                        "to_numpy", "__len__")
 _ARROW_STRING_CONSTRUCTION_HOOKS = ("__init__", "_from_pyarrow_array", "__new__")
+_ARROW_STRING_MIXIN_ALLOWED_NAMES = (
+    "__module__", "__qualname__", "__doc__", "__dict__", "__weakref__",
+    "__annotations__", "__firstlineno__", "__static_attributes__", "__annotate__",
+    "__type_params__", "_pa_array", "__init__",
+)
 
 
 def _defined_in(method, name, *modules):
@@ -84,15 +89,15 @@ def _arrow_string_class_is_canonical(cls):
 
         mixin = string_mixins.ArrowStringArrayMixin
         # This accessor dispatches through the mixin before the ordinary MRO.
-        # Authenticate its globals and reject intercepted conversion names.
+        # Authenticate its globals and allow only string-method names, class metadata,
+        # and the initializer/storage declarations in its namespace.
         # Construction itself uses class slots, checked separately below;
         # the mixin's canonical __init__ is not an instance conversion hook.
         if (not any(base is mixin for base in cls.__mro__)
                 or vars(string_arrow).get("ArrowStringArrayMixin") is not mixin
                 or vars(string_arrow).get("partial") is not partial
-                or any(name in vars(mixin) for name in
-                       _ARROW_STRING_HOOKS + ("astype", "dtype", "_hasna", "fillna",
-                                              "_from_pyarrow_array", "__new__"))):
+                or any(name not in _ARROW_STRING_MIXIN_ALLOWED_NAMES
+                       and not name.startswith("_str_") for name in vars(mixin))):
             return False
     if (any(not _defined_in(_raw_class_attribute(cls, name)[1], name,
                            string_arrow, arrow_module) for name in _ARROW_STRING_HOOKS)

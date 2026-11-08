@@ -131,11 +131,11 @@ allocator used by supported pandas layouts. The label checks authenticate the
 class before inspecting its other methods, which also use the raw lookup. This
 avoids binding customized descriptors during those checks. The pandas 2.2
 NumPy-semantics accessor also dispatches through a mixin before ordinary MRO
-lookup; its mixin and partial-function aliases and the bounded intercepted
-conversion names are checked separately. Its canonical mixin initializer remains
-allowed because construction uses the class slots authenticated above. These
-checks do not establish a general invariant for arbitrary mutations of pandas
-internals.
+lookup; its mixin and partial-function aliases are checked, and its namespace is
+limited to string-method names, initializer/storage declarations and class
+metadata. Its mixin initializer remains allowed because construction uses the
+class slots authenticated above. These checks do not establish a general
+invariant for arbitrary mutations of pandas internals.
 
 ## UDF strategy (full compatibility)
 

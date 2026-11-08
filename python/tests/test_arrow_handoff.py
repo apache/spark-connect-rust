@@ -4537,7 +4537,9 @@ def test_arrow_string_custom_arrow_hook_keeps_native_row_values(
 
 
 @pytest.mark.parametrize("schema_kind", ["explicit", "inferred", "names"])
-@pytest.mark.parametrize("customization", ["mixin_hook", "mixin_alias", "partial_alias"])
+@pytest.mark.parametrize("customization", [
+    "mixin_hook", "mixin_alias", "partial_alias", "mixin_storage", "mixin_dtype",
+])
 def test_arrow_string_numpy_semantics_accessor_keeps_native_values(
     protocol, monkeypatch, customization, schema_kind
 ):
@@ -4557,6 +4559,8 @@ def test_arrow_string_numpy_semantics_accessor_keeps_native_values(
     array_class = type(frames[0].iloc[:, 0].array)
     dynamic_accessor = (helper._raw_class_attribute(array_class, "__getattribute__")[1]
                         is not object.__getattribute__)
+    # These warm-ups populate Block.dtype so mixin_dtype reaches class authentication
+    # instead of raising during the earlier native-compatible frame.dtypes read.
     for frame in frames:
         assert helper.prepare_string_input(frame, schema) is not None
         assert helper.accepts_pandas_table(frame, schema)
@@ -4571,6 +4575,10 @@ def test_arrow_string_numpy_semantics_accessor_keeps_native_values(
         calls.append("partial")
         raise AssertionError("eligibility must not invoke the rebound partial alias")
 
+    def changed_attribute(*args, **kwargs):
+        calls.append(customization)
+        raise AssertionError("the mixin state callback must not be called")
+
     if customization == "mixin_hook":
         monkeypatch.setattr(string_mixins.ArrowStringArrayMixin, "__arrow_array__",
                             changed_arrow, raising=False)
@@ -4579,6 +4587,10 @@ def test_arrow_string_numpy_semantics_accessor_keeps_native_values(
             __arrow_array__ = changed_arrow
 
         monkeypatch.setattr(string_arrow, "ArrowStringArrayMixin", ChangedMixin, raising=False)
+    elif customization in ("mixin_storage", "mixin_dtype"):
+        name = {"mixin_storage": "_storage", "mixin_dtype": "_dtype"}[customization]
+        monkeypatch.setattr(string_mixins.ArrowStringArrayMixin, name,
+                            changed_attribute, raising=False)
     else:
         monkeypatch.setattr(string_arrow, "partial", changed_partial, raising=False)
     for frame in frames:
@@ -4589,13 +4601,23 @@ def test_arrow_string_numpy_semantics_accessor_keeps_native_values(
         assert helper.accepts_pandas_frame(frame) == (not dynamic_accessor)
         assert calls == []
     logical_tables = []
+    outcomes = []
     for row_control, frame in zip((True, False), frames):
         with monkeypatch.context() as control:
             if row_control:
                 _force_native_pandas_rows(control)
             with _arrow_input_service(protocol, config_error=dynamic_accessor) as (spark, state):
                 # The mock returns only a row count, not the uploaded data or resolved schema.
-                reply = spark.createDataFrame(frame, input_schema).toArrow()
+                try:
+                    reply = spark.createDataFrame(frame, input_schema).toArrow()
+                except Exception as error:
+                    assert dynamic_accessor and customization in ("mixin_storage", "mixin_dtype")
+                    assert state["input_tables"] == []
+                    assert state["config_requests"] == []
+                    assert state["uploads"] == 0
+                    outcomes.append((type(error), str(error)))
+                    continue
+                outcomes.append(None)
                 assert reply.to_pydict() == {"rows": [len(texts)]}
                 assert len(state["input_tables"]) == 1
                 uploaded = state["input_tables"][0]
@@ -4625,7 +4647,10 @@ def test_arrow_string_numpy_semantics_accessor_keeps_native_values(
                 assert from_arrow_schema(renamed.schema) == schema
                 logical_tables.append(renamed.cast(pa.schema([pa.field("v", pa.string())])))
     assert calls == []
-    assert logical_tables[0].equals(logical_tables[1], check_metadata=True)
+    assert outcomes[0] == outcomes[1]
+    if logical_tables:
+        assert len(logical_tables) == 2
+        assert logical_tables[0].equals(logical_tables[1], check_metadata=True)
 
 
 @pytest.mark.parametrize("route", ["specialized", "generic", "inferred"])
