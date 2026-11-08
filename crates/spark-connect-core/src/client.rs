@@ -437,7 +437,10 @@ impl SparkConnectClient {
         let Some(hook) = hook else {
             return Ok(request);
         };
+        crate::runtime::check_callback_depth()?;
         let operation_id = request.operation_id.clone();
+        // The hook may run a query of its own, which runs the hooks too.
+        let _callback = crate::runtime::CallbackGuard::enter();
         let mut request = hook(request)?;
         request.operation_id = operation_id;
         Ok(request)

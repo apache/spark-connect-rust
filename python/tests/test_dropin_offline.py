@@ -8579,6 +8579,36 @@ def test_udf_profiles_are_collected_from_the_python_accumulators_as_pyspark(
 
 
 
+def test_progress_handler_that_runs_queries_without_end_is_bounded(mock_connect, monkeypatch):
+    # A handler that runs a query for each progress of an execution nests the executions past
+    # the bound of nested callbacks: the query past it fails with a RecursionError, which the
+    # handler's exception goes to sys.unraisablehook with, instead of the native stack
+    # overflowing, and the outer query returns.
+    import sys
+
+    spark, service = mock_connect
+    # ExecutePlanResponse.execution_progress=18 -> one stage that is not done.
+    stage = (varint_field(1, 7) + varint_field(2, 4) + varint_field(3, 1)
+             + varint_field(4, 1024) + varint_field(5, 0))
+    service.execute_payload = message_field(18, message_field(1, stage) + varint_field(2, 3))
+    unraisable = []
+    monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
+    calls = []
+
+    def handler(**kwargs):
+        calls.append(kwargs["done"])
+        if not kwargs["done"]:
+            spark.range(1).collect()
+
+    spark.registerProgressHandler(handler)
+    try:
+        spark.range(1).collect()
+    finally:
+        spark.removeProgressHandler(handler)
+    assert calls == [False, False, True, True]
+    assert [type(error.exc_value) for error in unraisable] == [RecursionError]
+
+
 def test_schema_cache_cold_children_keep_independent_caches(mock_connect):
     spark, service = mock_connect
     df = spark.range(10)

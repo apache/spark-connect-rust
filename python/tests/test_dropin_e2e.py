@@ -984,6 +984,29 @@ def test_foreach_foreach_partition_and_to_json_as_pyspark(session):
     assert json.collect() == [Row(value='{"id":1,"name":"a","bin":"eA=="}'), Row(value='{"id":2}')]
 
 
+def test_progress_handler_that_runs_queries_without_end_raises_recursion_error():
+    # The unguarded handler of SPARK-61153 runs a query for each progress of the queries it
+    # runs. Past the bound of nested callbacks, the query fails with a RecursionError, which the
+    # handler's exception goes out with, instead of the native stack overflowing and the process
+    # crashing (SIGSEGV). The outer query returns its result, as the handler's exceptions do.
+    import subprocess
+    import sys
+
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("SPARK_REMOTE is required for live-server tests")
+    result = subprocess.run([sys.executable, "-c", """
+import sys
+from pyspark.sql import SparkSession
+spark = SparkSession.builder.remote(%r).getOrCreate()
+spark.registerProgressHandler(lambda **kw: spark.range(4).count() if not kw["done"] else None)
+print(spark.range(2000000).selectExpr("sum(id) as t").collect())
+""" % remote], env=dict(os.environ, TZ="UTC"), capture_output=True, text=True, timeout=300)
+    assert result.returncode == 0, result.stderr
+    assert "[Row(t=1999999000000)]" in result.stdout
+    assert "RecursionError" in result.stderr
+
+
 def test_progress_handler_runs_a_query_of_its_own_as_pyspark(session):
     # As PySpark's: a handler runs while the execution runs, and a query of the handler runs
     # too, the progress of the execution having no effect on it.
