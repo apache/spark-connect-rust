@@ -9100,6 +9100,40 @@ def completion_analyzed():
         child.close()
 
 
+def test_int_literals_beyond_a_long_raise_value_not_between_as_pyspark():
+    # As PySpark's LiteralExpression._infer_type: an int beyond the range of a long is an error,
+    # not a double, which would make `col == 2**63` match the rows of the longs next to it. The
+    # maximum is JVM_SHORT_MAX, as PySpark writes it. fillna sends the value as a proto literal,
+    # which raises ValueError for it.
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql import functions as F
+
+    spark = _offline_session()
+    df = spark.range(1)
+    for case in (
+        lambda: F.lit(2**70),
+        lambda: F.lit(-(2**63) - 1),
+        lambda: F.col("id") == 2**63,
+        lambda: F.col("id") > 2**70,
+        lambda: F.col("id").isin([1, 2**70]),
+        lambda: F.col("id").between(1, 2**70),
+        lambda: F.when(F.col("id") > 0, 2**70),
+        lambda: F.array(F.lit(1), F.lit(2**70)),
+        lambda: F.lit([2**70]),
+    ):
+        with pytest.raises(PySparkValueError) as e:
+            case()
+        assert e.value.getCondition() == "VALUE_NOT_BETWEEN"
+        assert e.value.getMessageParameters() == {
+            "arg_name": "value", "min": "-9223372036854775808", "max": "32767"}
+    with pytest.raises(ValueError, match="Value out of range: 1180591620717411303424"):
+        df.fillna(2**70)
+    # The bounds of a long, and a float beyond them, are fine.
+    assert F.lit(2**63 - 1) is not None and F.lit(-(2**63)) is not None
+    assert F.lit(2.0**70) is not None
+    spark.stop()
+
+
 @pytest.mark.parametrize("names", [
     ["z", "a"],
     ["with space", "a.b", "with`tick", "", "123", "class", "雪", "_private"],

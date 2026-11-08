@@ -2754,6 +2754,10 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     if let Ok(i) = obj.extract::<i64>() {
         return Ok(Value::Long(i));
     }
+    // An int beyond a long is not a double, as PySpark's literal of it: it is an error.
+    if obj.is_instance_of::<pyo3::types::PyInt>() {
+        return Err(crate::functions::value_not_between(obj.py()));
+    }
 
     // Check for float
     if let Ok(f) = obj.extract::<f64>() {

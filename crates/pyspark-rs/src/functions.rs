@@ -205,6 +205,21 @@ pub(crate) fn enum_to_value<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py,
     Ok(value)
 }
 
+/// The error of a Python int beyond the range of a long, as PySpark's `LiteralExpression`
+/// raises it: `VALUE_NOT_BETWEEN`, whose maximum is `JVM_SHORT_MAX`, as PySpark writes it.
+pub(crate) fn value_not_between(py: Python<'_>) -> PyErr {
+    crate::column::raise_pyspark(
+        py,
+        "PySparkValueError",
+        "VALUE_NOT_BETWEEN",
+        &[
+            ("arg_name", "value"),
+            ("min", "-9223372036854775808"),
+            ("max", "32767"),
+        ],
+    )
+}
+
 /// Convert a Python object to a Rust Column (handles Column or scalars that become literals).
 pub fn to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
     // Try to get as PyColumn first
@@ -270,6 +285,10 @@ pub fn to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
                 LiteralExpression::long(i)
             },
         )));
+    }
+    // An int beyond a long is not a double, as PySpark's literal of it: it is an error.
+    if obj.is_instance_of::<pyo3::types::PyInt>() {
+        return Err(value_not_between(obj.py()));
     }
 
     if let Ok(f) = obj.extract::<f64>() {
