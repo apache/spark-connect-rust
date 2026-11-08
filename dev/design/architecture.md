@@ -115,6 +115,9 @@ row/Arrow conversion methods and label casting, including inherited methods, on
 the specialized, generic explicit-schema and inferred-schema routes. Other pandas
 array classes on the generic routes retain the existing module-origin policy, which does not
 authenticate mutations of their canonical classes' conversion hooks.
+The generic routes identify Arrow-string classes through their loaded defining module
+in `sys.modules`. Removing or replacing `pandas.core.arrays.string_arrow` there while
+retaining instances from the old module is outside these checks.
 
 Authentication occurs when the concrete array is inspected. With NumPy-backed
 column labels, a specialized guard may first read `frame.dtypes`, matching the
@@ -123,7 +126,8 @@ property can therefore raise before the later array-class check, with the same
 local error and no configuration or upload request.
 The bounded Arrow-string class checks for data and labels inspect raw MRO
 dictionaries for conversion and label-iteration methods, dtype/missing-value
-properties and the null-subarray constructor, optional factory and allocator
+properties and the null-subarray constructor (including its immediate
+super-constructor), optional factory and allocator
 used by supported pandas layouts. The label checks authenticate the class before
 inspecting its other methods, which also use the raw lookup. This avoids binding
 customized descriptors during those checks. The pandas 2.2 NumPy-semantics

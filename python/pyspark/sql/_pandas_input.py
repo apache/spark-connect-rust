@@ -25,7 +25,9 @@ _ARROW_STRING_CONSTRUCTION_HOOKS = ("__init__", "_from_pyarrow_array", "__new__"
 
 
 def _defined_in(method, name, *modules):
-    """Whether a plain function named `name` has a given module's name and globals."""
+    """Whether `method` is a plain function named `name` whose module name and
+    globals belong to one of `modules`.
+    """
     from types import FunctionType
 
     return (type(method) is FunctionType and method.__name__ == name
@@ -43,23 +45,22 @@ def _raw_class_attribute(cls, name, start=0):
     return None, None
 
 
-def _has_canonical_arrow_string_astype(cls):
-    """Authenticate the object-cast method invoked by ArrowStringArray's super()."""
-    from pandas.core.arrays import base as array_base_module, string_arrow
+def _has_canonical_arrow_string_super_method(cls, name, owner, module):
+    """Authenticate the immediate method reached through ArrowStringArray's super()."""
+    from pandas.core.arrays import string_arrow
 
     try:
         start = cls.__mro__.index(string_arrow.ArrowStringArray) + 1
     except ValueError:
         return False
-    owner, method = _raw_class_attribute(cls, "astype", start)
-    return (owner is array_base_module.ExtensionArray
-            and _defined_in(method, "astype", array_base_module))
+    actual_owner, method = _raw_class_attribute(cls, name, start)
+    return actual_owner is owner and _defined_in(method, name, module)
 
 
 def _arrow_string_class_is_canonical(cls):
     """Authenticate the shared row/Arrow conversion hooks of a concrete pandas class."""
     import pandas as pd
-    from pandas.core.arrays import string_ as string_module, string_arrow
+    from pandas.core.arrays import base as array_base_module, string_ as string_module, string_arrow
     from pandas.core.arrays.arrow import array as arrow_module
 
     numpy_semantics = getattr(string_arrow, "ArrowStringArrayNumpySemantics", None)
@@ -97,11 +98,14 @@ def _arrow_string_class_is_canonical(cls):
     if (any(not _defined_in(_raw_class_attribute(cls, name)[1], name,
                            string_arrow, arrow_module) for name in _ARROW_STRING_HOOKS)
             or not _defined_in(_raw_class_attribute(cls, "astype")[1], "astype", string_arrow)
-            or not _has_canonical_arrow_string_astype(cls)):
+            or not _has_canonical_arrow_string_super_method(
+                cls, "astype", array_base_module.ExtensionArray, array_base_module)):
         return False
     # Null-subarray conversion may construct another array. Older pandas versions
     # have no _from_pyarrow_array helper; a present custom descriptor must decline.
-    if not _defined_in(_raw_class_attribute(cls, "__init__")[1], "__init__", string_arrow):
+    if (not _defined_in(_raw_class_attribute(cls, "__init__")[1], "__init__", string_arrow)
+            or not _has_canonical_arrow_string_super_method(
+                cls, "__init__", arrow_module.ArrowExtensionArray, arrow_module)):
         return False
     factory_owner, factory = _raw_class_attribute(cls, "_from_pyarrow_array")
     if factory_owner is not None and not _defined_in(factory, "_from_pyarrow_array", string_arrow):
@@ -192,12 +196,13 @@ def _has_canonical_columns(columns):
         return False
 
     def class_attribute(owner, name):
-        # Arrow labels share the raw lookup; retain the Python-string policy.
+        # Arrow labels share the raw lookup; Python-string class lookup stays unchanged.
         if arrow_backed:
             return _raw_class_attribute(owner, name)[1]
         return getattr(owner, name, None)
 
-    # Instance shadows deliberately include descriptors and special names too.
+    # The shared instance-shadow list conservatively includes descriptors and special
+    # names for both Arrow-backed and Python-backed string labels.
     if (class_attribute(cls, "__getattribute__") is not object.__getattribute__
             or any(name in vars(backing) for name in
                    ("__iter__", "__getitem__", "__len__", "__array__", "_box_func",
@@ -235,8 +240,8 @@ def _has_canonical_columns(columns):
         if owner is None:
             return False
         # pandas builds an Arrow string Index's uniqueness engine with astype(object).
-        # Authenticate the full object-cast chain before is_unique, including
-        # dtype and missing-value properties that a label cast can read.
+        # Authenticate the recognized object-cast methods and dtype/missing-value
+        # properties before is_unique. This is a bounded check of pandas internals.
         if "astype" in vars(backing):
             return False
         try:
@@ -1110,6 +1115,8 @@ def accepts_pandas_frame(frame):
     # Canonical non-string array classes retain the inherited module-origin policy.
     # Arrow string storage already loads its defining module; do not import optional
     # Arrow dependencies merely to inspect unrelated pandas columns.
+    # The generic routes assume this sys.modules entry still defines live arrays;
+    # removing or replacing that module while keeping old instances is not covered.
     string_arrow = sys.modules.get("pandas.core.arrays.string_arrow")
     arrow_strings = () if string_arrow is None else tuple(
         vars(string_arrow).get(name)

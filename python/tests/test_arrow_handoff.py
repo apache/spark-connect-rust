@@ -4441,6 +4441,7 @@ import sys
 import tempfile
 from pathlib import Path
 import pandas as pd
+import pytest
 from pyspark import _pyspark as native
 from pyspark.sql import types as T
 
@@ -4473,21 +4474,16 @@ class Factory:
         return Path(tempfile.mkdtemp(prefix=name))
 protocol = capture.protocol.__wrapped__(Factory())
 tables = []
-helpers = ("prepare_int64_table", "timestamp_columns", "prepare_float64_input",
-           "prepare_string_input", "prepare_date_table", "accepts_pandas_table")
-originals = {name: getattr(_pandas_input, name) for name in helpers}
 for row_control in (False, True):
-    if row_control:
-        for name in helpers:
-            setattr(_pandas_input, name, lambda *_: None)
-    with capture._arrow_input_service(protocol) as (spark, state):
-        spark.createDataFrame(frame, schema).toArrow()
-        assert state["config_requests"] == []
-        assert state["uploads"] == 0
-        assert json.loads(state["spark_schema"]) == json.loads(schema.json())
-        tables.append(state["input_tables"][0])
-for name, helper in originals.items():
-    setattr(_pandas_input, name, helper)
+    with pytest.MonkeyPatch.context() as control:
+        if row_control:
+            capture._force_native_pandas_rows(control)
+        with capture._arrow_input_service(protocol) as (spark, state):
+            spark.createDataFrame(frame, schema).toArrow()
+            assert state["config_requests"] == []
+            assert state["uploads"] == 0
+            assert json.loads(state["spark_schema"]) == json.loads(schema.json())
+            tables.append(state["input_tables"][0])
 assert tables[0].column(0).to_pylist() == texts
 assert tables[0].equals(tables[1], check_metadata=True)
 '''
@@ -5046,6 +5042,7 @@ def test_arrow_string_storage_normalization_and_fallback(monkeypatch, storage_ki
         assert isinstance(storage, pa.Array)
         assert not issubclass(type(storage), pa.Array)
     monkeypatch.setattr(array, "_pa_array", storage)
+    assert object.__getattribute__(frame.iloc[:, 0].array, "_pa_array") is storage
     result = _pandas_input._arrow_string_table(frame, schema, dtypes)
     if storage_kind == "plain_array":
         assert type(result) is pa.Table
@@ -5248,7 +5245,7 @@ def test_arrow_string_null_labels_decline_without_getitem_callback(protocol, mon
 
 
 @pytest.mark.parametrize("label_storage", ["object", "pyarrow"])
-@pytest.mark.parametrize("method", ["astype", "__array__", "__getitem__"])
+@pytest.mark.parametrize("method", ["astype", "__array__", "__getitem__", "__init__"])
 def test_arrow_string_super_row_hooks_keep_native_errors(
     protocol, monkeypatch, label_storage, method
 ):
@@ -5262,38 +5259,67 @@ def test_arrow_string_super_row_hooks_keep_native_errors(
     frame.columns = pd.Index(["v"], dtype=object) if label_storage == "object" else pd.Index(
         pd.array(["v"], dtype="string[pyarrow]"))
     schema = T.StructType([T.StructField("v", T.StringType())])
-    array = frame.iloc[:, 0].array
     calls = []
     assert _pandas_input.prepare_string_input(frame, schema) is not None
     assert _pandas_input.accepts_pandas_table(frame, schema)
+    assert _pandas_input.accepts_pandas_frame(frame)
 
     class HookError(Exception):
         pass
 
     def customized(self, *args, **kwargs):
-        assert len(self) == 10000  # Labels have length one; preflight must not cast them.
+        if method == "__init__":
+            # The receiver has no storage yet. Null-subarray construction passes
+            # the 5,000 non-null data values; labels have only one value.
+            values = args[0]
+            assert values.to_pylist() == ["original"] * 5000
+        else:
+            assert len(self) == 10000  # Preflight must not cast the length-one labels.
         calls.append(method)
         raise HookError(f"super {method} sentinel")
 
     monkeypatch.setattr(ArrowExtensionArray, method, customized)
     assert _pandas_input.prepare_string_input(frame, schema) is None
     assert not _pandas_input.accepts_pandas_table(frame, schema)
+    assert not _pandas_input.accepts_pandas_frame(frame)
     assert calls == []
-    errors = []
-    for row_control in (False, True):
+    outcomes = []
+    tables = []
+    # The native control determines whether this pandas layout calls __init__.
+    # pandas 3.1's null-subarray factory instead allocates through __new__.
+    for row_control in (True, False):
         calls.clear()
         with monkeypatch.context() as control:
             if row_control:
                 _force_native_pandas_rows(control)
             with _arrow_input_service(protocol, config_error=True) as (spark, state):
-                with pytest.raises(HookError, match=f"^super {method} sentinel$") as error:
-                    spark.createDataFrame(frame, schema)
-                errors.append((type(error.value), str(error.value)))
+                try:
+                    spark.createDataFrame(frame, schema).toArrow()
+                except HookError as error:
+                    assert type(error) is HookError
+                    assert str(error) == f"super {method} sentinel"
+                    assert calls == [method]
+                    assert state["input_tables"] == []
+                    outcome = (type(error), str(error))
+                else:
+                    assert method == "__init__"
+                    assert calls == []
+                    assert len(state["input_tables"]) == 1
+                    table = state["input_tables"][0]
+                    table.validate(full=True)
+                    assert table.to_pydict() == {"v": ["original", None] * 5000}
+                    assert table.schema.names == ["v"]
+                    assert table.schema.field(0).type == pa.string()
+                    assert table.schema.field(0).nullable
+                    tables.append(table)
+                    outcome = None
+                outcomes.append((outcome, tuple(calls)))
                 assert state["config_requests"] == []
                 assert state["uploads"] == 0
-                assert state["input_tables"] == []
-        assert calls == [method]
-    assert errors[0] == errors[1]
+    assert outcomes[0] == outcomes[1]
+    if tables:
+        assert len(tables) == 2
+        assert tables[0].equals(tables[1], check_metadata=True)
 
 
 @pytest.mark.parametrize("reason", [
