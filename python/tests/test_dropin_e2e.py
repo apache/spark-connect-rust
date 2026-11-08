@@ -3071,6 +3071,57 @@ def test_dataframes_of_a_stream_are_streaming_as_pyspark(session):
     assert session.range(1).isStreaming is False
 
 
+def test_streaming_listeners_are_those_of_the_session_as_pyspark(session):
+    # As PySpark Connect's spark.streams: one manager, of the listener bus of the session, whose
+    # listeners get the session, are listed by _sqlb, get the started event of a query before
+    # start returns, and get no events once removed.
+    from pyspark.sql.streaming import StreamingQueryListener
+
+    class Listener(StreamingQueryListener):
+        def __init__(self):
+            self.events = []
+
+        def onQueryStarted(self, event):
+            self.events.append(("started", str(event.id)))
+
+        def onQueryProgress(self, event):
+            self.events.append(("progress", str(event.progress.id)))
+
+        def onQueryIdle(self, event):
+            pass
+
+        def onQueryTerminated(self, event):
+            self.events.append(("terminated", str(event.id)))
+
+    assert session.streams is session.streams
+    first, second = Listener(), Listener()
+    session.streams.addListener(first)
+    session.streams.addListener(second)
+    query = None
+    try:
+        assert first.spark.range(3).count() == 3
+        assert session.streams._sqlb._listener_bus == [first, second]
+        query = session.readStream.format("rate").load().writeStream.format("noop").start()
+        assert first.events[:1] == second.events[:1] == [("started", query.id)]
+        deadline = time.time() + 60
+        while ("progress", query.id) not in first.events and time.time() < deadline:
+            time.sleep(0.5)
+        session.streams.removeListener(first)
+        assert session.streams._sqlb._listener_bus == [second]
+        seen = list(first.events)
+        query.stop()
+        deadline = time.time() + 30
+        while ("terminated", query.id) not in second.events and time.time() < deadline:
+            time.sleep(0.5)
+        assert ("progress", query.id) in seen and first.events == seen
+        assert ("terminated", query.id) in second.events
+    finally:
+        for listener in session.streams._sqlb._listener_bus:
+            session.streams.removeListener(listener)
+        if query is not None:
+            query.stop()
+
+
 def test_streaming_queries_return_the_status_and_the_exception_of_pyspark(session):
     # As PySpark's: the status of a query is a dict, and the exception of a failed query is
     # the StreamingQueryException of pyspark.errors, of the message of the server and its JVM

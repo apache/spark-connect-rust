@@ -96,6 +96,10 @@ pub struct SparkSession {
     stopped: Arc<AtomicBool>,
     /// Successful server version, shared by handles for this session only.
     server_version: Arc<Mutex<Option<String>>>,
+    /// The client-side listener bus of the streaming queries of this session (shared across
+    /// clones), which each of its `StreamingQueryManager`s adds to, removes from and posts to,
+    /// as the one `StreamingQueryListenerBus` of PySpark Connect's `spark.streams`.
+    listener_bus: Arc<crate::streaming::ListenerBus>,
 }
 
 impl SparkSession {
@@ -111,6 +115,7 @@ impl SparkSession {
             python_accumulators: PythonAccumulators::default(),
             stopped: Arc::new(AtomicBool::new(false)),
             server_version: Arc::new(Mutex::new(None)),
+            listener_bus: Arc::default(),
         }
     }
 
@@ -276,6 +281,7 @@ impl SparkSession {
             python_accumulators: PythonAccumulators::default(),
             stopped: Arc::new(AtomicBool::new(false)),
             server_version: Arc::new(Mutex::new(None)),
+            listener_bus: Arc::default(),
         }
     }
 
@@ -654,6 +660,11 @@ impl SparkSession {
     /// Mirrors `pyspark.sql.SparkSession.streams`.
     pub fn streams(&self) -> crate::streaming::StreamingQueryManager {
         crate::streaming::StreamingQueryManager::new(self.clone())
+    }
+
+    /// The client-side listener bus of the streaming queries of this session.
+    pub(crate) fn listener_bus(&self) -> Arc<crate::streaming::ListenerBus> {
+        Arc::clone(&self.listener_bus)
     }
 
     /// Get the catalog for this session.
@@ -1106,6 +1117,7 @@ impl Clone for SparkSession {
             python_accumulators: self.python_accumulators.clone(),
             stopped: Arc::clone(&self.stopped),
             server_version: Arc::clone(&self.server_version),
+            listener_bus: Arc::clone(&self.listener_bus),
         }
     }
 }

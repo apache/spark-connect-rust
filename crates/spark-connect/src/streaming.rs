@@ -465,6 +465,7 @@ impl DataStreamWriter {
         let mut query_id = String::new();
         let mut run_id = String::new();
         let mut name = self.query_name.clone();
+        let mut started_event = None;
         for resp in responses {
             if let Some(
                 proto::execute_plan_response::ResponseType::WriteStreamOperationStartResult(res),
@@ -477,12 +478,24 @@ impl DataStreamWriter {
                 if !res.name.is_empty() {
                     name = Some(res.name);
                 }
+                started_event = res.query_started_event_json;
             }
         }
         if query_id.is_empty() {
             return Err(SparkError::connect_msg(
                 "writeStream.start: server returned no WriteStreamOperationStartResult",
             ));
+        }
+        // As PySpark Connect's DataStreamWriter: the server sends the started event of the query
+        // with the result of its start, as the session has client-side listeners, and the client
+        // posts it to them before it gives back the query.
+        if let Some(event_json) = started_event {
+            self.session
+                .streams()
+                .post_to_all(&StreamingQueryListenerEvent {
+                    event_type: QUERY_STARTED_EVENT,
+                    event_json,
+                });
         }
 
         Ok(StreamingQuery {
@@ -744,6 +757,46 @@ pub struct ListenerEventStream {
     done: bool,
 }
 
+impl ListenerEventStream {
+    /// Read the responses of the server until the one that tells that it added the listener of
+    /// the session (`listener_bus_listener_added`), keeping the events of them, which the
+    /// iterator gives first, as PySpark Connect's `_register_server_side_listener` waits for it.
+    fn wait_until_listener_added(&mut self) -> Result<()> {
+        loop {
+            match block_on(self.stream.message()) {
+                Ok(Some(resp)) => {
+                    if let Some(
+                        proto::execute_plan_response::ResponseType::StreamingQueryListenerEventsResult(res),
+                    ) = resp.response_type
+                    {
+                        if !res.events.is_empty() {
+                            let mut events: Vec<(i32, String)> =
+                                std::mem::take(&mut self.buffered_events).collect();
+                            events.extend(
+                                res.events
+                                    .into_iter()
+                                    .map(|event| (event.event_type, event.event_json)),
+                            );
+                            self.buffered_events = events.into_iter();
+                        }
+                        if res.listener_bus_listener_added.is_some() {
+                            return Ok(());
+                        }
+                    }
+                }
+                Ok(None) => {
+                    self.done = true;
+                    return Ok(());
+                }
+                Err(e) => {
+                    self.done = true;
+                    return Err(e);
+                }
+            }
+        }
+    }
+}
+
 impl Iterator for ListenerEventStream {
     type Item = Result<(i32, String)>;
 
@@ -796,10 +849,18 @@ pub const QUERY_PROGRESS_EVENT: i32 = 1;
 pub const QUERY_TERMINATED_EVENT: i32 = 2;
 pub const QUERY_IDLE_EVENT: i32 = 3;
 
+/// The started event of a query. The server sends it with the result of the start of the query
+/// (`query_started_event_json`), when the session has a client-side listener, rather than on the
+/// listener bus, and the client posts it to its listeners as the query starts, as PySpark
+/// Connect's `DataStreamWriter.start` does: so it is not of the server's
+/// `StreamingQueryEventType`.
+pub const QUERY_STARTED_EVENT: i32 = -1;
+
 /// A streaming-query listener event delivered by the client-side listener bus.
 ///
 /// `event_json` is the server-provided JSON for the event; `event_type` is one of
-/// [`QUERY_PROGRESS_EVENT`], [`QUERY_TERMINATED_EVENT`], [`QUERY_IDLE_EVENT`].
+/// [`QUERY_STARTED_EVENT`], [`QUERY_PROGRESS_EVENT`], [`QUERY_TERMINATED_EVENT`],
+/// [`QUERY_IDLE_EVENT`].
 #[derive(Debug, Clone)]
 pub struct StreamingQueryListenerEvent {
     pub event_type: i32,
@@ -811,43 +872,64 @@ pub struct StreamingQueryListenerEvent {
 /// runs a background bus that streams events from the server and dispatches them here.
 pub trait StreamingQueryListener: Send + Sync {
     fn on_event(&self, event: &StreamingQueryListenerEvent);
+
+    /// This listener as `Any`, for a client that wraps its own listeners to find them among
+    /// [`StreamingQueryManager::listeners`]. `None` by default.
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
 }
 
-/// Shared state of the client-side listener bus: the registered listeners and the
-/// background dispatch thread (started with the first listener, stopped with the last).
+/// The client-side listener bus of the streaming queries of a session, which all of its
+/// `StreamingQueryManager`s share, as PySpark Connect's `StreamingQueryListenerBus` of
+/// `spark.streams`: the registered listeners, in their order, and the thread that posts the
+/// events of the server to them, from the first listener to the removal of the last. `ops`
+/// serializes the additions and removals, which talk to the server, while the thread takes
+/// `state` only to read the listeners, and calls them without any lock.
+#[derive(Default)]
+pub(crate) struct ListenerBus {
+    ops: Mutex<()>,
+    state: Mutex<ListenerBusState>,
+}
+
 #[derive(Default)]
 struct ListenerBusState {
     listeners: Vec<(String, Arc<dyn StreamingQueryListener>)>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
-/// The background dispatch loop: opens the server event stream and forwards each event
-/// to every currently-registered listener. Ends when the stream closes (the server was
-/// asked to stop via `RemoveListenerBusListener`) or all listeners are removed.
-fn run_listener_event_loop(session: SparkSession, bus: Arc<Mutex<ListenerBusState>>) {
-    let stream = match StreamingQueryManager::new(session).listener_event_stream() {
-        Ok(s) => s,
-        Err(_) => return,
-    };
+impl ListenerBus {
+    /// Post `event` to every listener, as PySpark Connect's `post_to_all`.
+    fn post_to_all(&self, event: &StreamingQueryListenerEvent) {
+        let listeners: Vec<Arc<dyn StreamingQueryListener>> = self
+            .state
+            .lock()
+            .unwrap()
+            .listeners
+            .iter()
+            .map(|(_, listener)| Arc::clone(listener))
+            .collect();
+        for listener in &listeners {
+            listener.on_event(event);
+        }
+    }
+}
+
+/// The background dispatch loop: posts each event of the stream of the server, on which the
+/// server has added the listener of the session, to the listeners. It ends when the stream does,
+/// as when the server was asked to remove its listener (`RemoveListenerBusListener`). An error
+/// of the stream removes all the listeners, as PySpark Connect's handler thread does.
+fn run_listener_event_loop(stream: ListenerEventStream, bus: Arc<ListenerBus>) {
     for item in stream {
-        let listeners: Vec<Arc<dyn StreamingQueryListener>> = {
-            let st = bus.lock().unwrap();
-            if st.listeners.is_empty() {
-                break;
-            }
-            st.listeners.iter().map(|(_, l)| l.clone()).collect()
-        };
         match item {
-            Ok((event_type, event_json)) => {
-                let ev = StreamingQueryListenerEvent {
-                    event_type,
-                    event_json,
-                };
-                for l in &listeners {
-                    l.on_event(&ev);
-                }
+            Ok((event_type, event_json)) => bus.post_to_all(&StreamingQueryListenerEvent {
+                event_type,
+                event_json,
+            }),
+            Err(_) => {
+                bus.state.lock().unwrap().listeners.clear();
+                return;
             }
-            Err(_) => break,
         }
     }
 }
@@ -855,81 +937,136 @@ fn run_listener_event_loop(session: SparkSession, bus: Arc<Mutex<ListenerBusStat
 /// Manager for active streaming queries.
 ///
 /// Mirrors `pyspark.sql.connect.streaming.StreamingQueryManager`, including a native
-/// client-side listener bus (so Rust clients get the listener feature too).
+/// client-side listener bus (so Rust clients get the listener feature too), which is that of
+/// its session.
 pub struct StreamingQueryManager {
     session: SparkSession,
-    bus: Arc<Mutex<ListenerBusState>>,
+    bus: Arc<ListenerBus>,
 }
 
 impl StreamingQueryManager {
-    /// Create a new StreamingQueryManager.
+    /// Create a new StreamingQueryManager, of the listener bus of `session`.
     pub(crate) fn new(session: SparkSession) -> Self {
-        StreamingQueryManager {
-            session,
-            bus: Arc::new(Mutex::new(ListenerBusState::default())),
-        }
+        let bus = session.listener_bus();
+        StreamingQueryManager { session, bus }
     }
 
     /// Register a client-side listener. Returns an id that can be passed to
-    /// [`StreamingQueryManager::remove_listener`]. Starts the background dispatch
-    /// thread when it is the first listener. Mirrors `StreamingQueryManager.addListener`.
+    /// [`StreamingQueryManager::remove_listener`]. Mirrors `StreamingQueryManager.addListener`:
+    /// for the first listener of the session, the server adds its listener before this returns,
+    /// so that the queries started then send their started events, and a thread posts the events
+    /// of the server to the listeners. Should the server fail to add it, the listener is not
+    /// added.
     pub fn add_listener(&self, listener: Arc<dyn StreamingQueryListener>) -> Result<String> {
         let id = uuid::Uuid::new_v4().to_string();
-        let mut st = self.bus.lock().unwrap();
-        st.listeners.push((id.clone(), listener));
-        if st.listeners.len() == 1 {
-            let session = self.session.clone();
-            let bus = self.bus.clone();
-            st.thread = Some(std::thread::spawn(move || {
-                run_listener_event_loop(session, bus);
-            }));
+        let _ops = self.bus.ops.lock().unwrap();
+        let first = {
+            let mut state = self.bus.state.lock().unwrap();
+            state.listeners.push((id.clone(), listener));
+            state.listeners.len() == 1
+        };
+        if first {
+            let registered = self.listener_event_stream().and_then(|mut stream| {
+                stream.wait_until_listener_added()?;
+                Ok(stream)
+            });
+            let stream = match registered {
+                Ok(stream) => stream,
+                Err(e) => {
+                    self.bus.state.lock().unwrap().listeners.clear();
+                    return Err(e);
+                }
+            };
+            let bus = Arc::clone(&self.bus);
+            let thread = std::thread::spawn(move || run_listener_event_loop(stream, bus));
+            self.bus.state.lock().unwrap().thread = Some(thread);
         }
         Ok(id)
     }
 
-    /// Remove a client-side listener by id. Stops the background dispatch thread when
-    /// the last listener is removed. Mirrors `StreamingQueryManager.removeListener`.
+    /// Remove a client-side listener by id, which does nothing for an id of no listener. Mirrors
+    /// `StreamingQueryManager.removeListener`: for the last listener, the server is asked to
+    /// remove its listener, which ends its stream, and this returns once the thread has posted
+    /// the events left. Should that request fail, the listener stays, and the error is returned.
     pub fn remove_listener(&self, id: &str) -> Result<()> {
-        let now_empty = {
-            let mut st = self.bus.lock().unwrap();
-            st.listeners.retain(|(lid, _)| lid != id);
-            st.listeners.is_empty()
-        };
-        if now_empty {
-            self.stop_listener_bus();
+        let _ops = self.bus.ops.lock().unwrap();
+        {
+            let mut state = self.bus.state.lock().unwrap();
+            let Some(index) = state.listeners.iter().position(|(lid, _)| lid == id) else {
+                return Ok(());
+            };
+            if state.listeners.len() > 1 {
+                state.listeners.remove(index);
+                return Ok(());
+            }
         }
+        self.remove_server_listener()?;
+        self.join_listener_thread();
+        self.bus
+            .state
+            .lock()
+            .unwrap()
+            .listeners
+            .retain(|(lid, _)| lid != id);
         Ok(())
     }
 
     /// Remove all client-side listeners and stop the dispatch thread. Mirrors
-    /// `StreamingQueryManager.close`.
+    /// `StreamingQueryManager.close`. Should the server fail to remove its listener, the thread
+    /// is left to end with its stream.
     pub fn close(&self) -> Result<()> {
-        let had_listeners = {
-            let mut st = self.bus.lock().unwrap();
-            let had = !st.listeners.is_empty();
-            st.listeners.clear();
-            had
-        };
-        if had_listeners {
-            self.stop_listener_bus();
+        let _ops = self.bus.ops.lock().unwrap();
+        if self.bus.state.lock().unwrap().listeners.is_empty() {
+            return Ok(());
         }
+        if self.remove_server_listener().is_ok() {
+            self.join_listener_thread();
+        }
+        let mut state = self.bus.state.lock().unwrap();
+        state.listeners.clear();
+        state.thread = None;
         Ok(())
     }
 
-    /// Ask the server to stop streaming listener events (which ends the background
-    /// thread's stream), then join the thread.
-    fn stop_listener_bus(&self) {
+    /// The client-side listeners of the session, in the order that they were added, as the
+    /// `_listener_bus` of PySpark Connect's `StreamingQueryListenerBus`.
+    pub fn listeners(&self) -> Vec<Arc<dyn StreamingQueryListener>> {
+        self.bus
+            .state
+            .lock()
+            .unwrap()
+            .listeners
+            .iter()
+            .map(|(_, listener)| Arc::clone(listener))
+            .collect()
+    }
+
+    /// Post `event` to the client-side listeners of the session.
+    pub(crate) fn post_to_all(&self, event: &StreamingQueryListenerEvent) {
+        self.bus.post_to_all(event);
+    }
+
+    /// Ask the server to remove the listener of the session, which ends its stream of events.
+    fn remove_server_listener(&self) -> Result<()> {
         let mut lb = proto::StreamingQueryListenerBusCommand::default();
         lb.command = Some(
             proto::streaming_query_listener_bus_command::Command::RemoveListenerBusListener(true),
         );
-        let _ = crate::dataframe::execute_command_collect(
+        crate::dataframe::execute_command_collect(
             &self.session,
             proto::command::CommandType::StreamingQueryListenerBusCommand(lb),
-        );
-        let handle = self.bus.lock().unwrap().thread.take();
-        if let Some(h) = handle {
-            let _ = h.join();
+        )
+        .map(|_| ())
+    }
+
+    /// Wait for the dispatch thread to post the events left of its ended stream, unless this is
+    /// that thread, as when a listener removes the last listener.
+    fn join_listener_thread(&self) {
+        let thread = self.bus.state.lock().unwrap().thread.take();
+        if let Some(thread) = thread {
+            if thread.thread().id() != std::thread::current().id() {
+                let _ = thread.join();
+            }
         }
     }
 

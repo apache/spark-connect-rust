@@ -564,6 +564,8 @@ fn tag_of(py: Python<'_>, tag: &Bound<'_, PyAny>) -> PyResult<String> {
 #[pyclass(name = "SparkSession", module = "pyspark.sql.session")]
 pub struct PySparkSession {
     pub(crate) session: SparkSession,
+    /// The `StreamingQueryManager` of `spark.streams`, made at its first access.
+    streams: std::sync::OnceLock<Py<PyStreamingQueryManager>>,
 }
 
 impl PySparkSession {
@@ -576,7 +578,10 @@ impl PySparkSession {
                 error.write_unraisable(py, None);
             }
         });
-        PySparkSession { session }
+        PySparkSession {
+            session,
+            streams: std::sync::OnceLock::new(),
+        }
     }
 
     /// A DataFrame of local rows, as PySpark Connect creates one: the schema is given, or
@@ -1768,14 +1773,23 @@ impl PySparkSession {
         PyDataStreamReader::new(reader)
     }
 
-    /// Get the StreamingQueryManager for managing active streaming queries (`spark.streams`).
+    /// Get the StreamingQueryManager for managing active streaming queries (`spark.streams`):
+    /// the same object at each access, as PySpark Connect's.
     ///
-    /// The native manager owns a Rust-side listener bus, so `addListener`/`removeListener`/
-    /// `close` are implemented in the core (Rust clients get the feature too).
+    /// The native manager is of the Rust-side listener bus of the session, so
+    /// `addListener`/`removeListener`/`close` are implemented in the core (Rust clients get the
+    /// feature too).
     #[getter]
     #[pyo3(name = "streams")]
-    fn streams(&self) -> PyStreamingQueryManager {
-        PyStreamingQueryManager::new(self.session.streams())
+    fn streams(&self, py: Python<'_>) -> PyResult<Py<PyStreamingQueryManager>> {
+        if let Some(manager) = self.streams.get() {
+            return Ok(manager.clone_ref(py));
+        }
+        let manager = Py::new(
+            py,
+            PyStreamingQueryManager::new(self.session.streams(), self.session.clone()),
+        )?;
+        Ok(self.streams.get_or_init(|| manager).clone_ref(py))
     }
 
     /// Stop this Spark session. Best-effort and idempotent, mirroring pyspark: a failure
