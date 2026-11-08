@@ -45,14 +45,8 @@ def _raw_class_attribute(cls, name, start=0):
     return None, None
 
 
-def _has_canonical_arrow_string_super_method(cls, name, owner, module):
+def _has_canonical_arrow_string_super_method(cls, start, name, owner, module):
     """Authenticate the immediate method reached through ArrowStringArray's super()."""
-    from pandas.core.arrays import string_arrow
-
-    try:
-        start = cls.__mro__.index(string_arrow.ArrowStringArray) + 1
-    except ValueError:
-        return False
     actual_owner, method = _raw_class_attribute(cls, name, start)
     return actual_owner is owner and _defined_in(method, name, module)
 
@@ -70,6 +64,10 @@ def _arrow_string_class_is_canonical(cls):
                 (string_arrow.ArrowStringArray, numpy_semantics))
             or pd.arrays.ArrowStringArray is not string_arrow.ArrowStringArray
             or pd.StringDtype is not string_module.StringDtype):
+        return False
+    try:
+        super_start = cls.__mro__.index(string_arrow.ArrowStringArray) + 1
+    except ValueError:
         return False
 
     # Authenticate row/Arrow conversion hooks and __len__, which sizes the table.
@@ -99,13 +97,13 @@ def _arrow_string_class_is_canonical(cls):
                            string_arrow, arrow_module) for name in _ARROW_STRING_HOOKS)
             or not _defined_in(_raw_class_attribute(cls, "astype")[1], "astype", string_arrow)
             or not _has_canonical_arrow_string_super_method(
-                cls, "astype", array_base_module.ExtensionArray, array_base_module)):
+                cls, super_start, "astype", array_base_module.ExtensionArray, array_base_module)):
         return False
     # Null-subarray conversion may construct another array. Older pandas versions
     # have no _from_pyarrow_array helper; a present custom descriptor must decline.
     if (not _defined_in(_raw_class_attribute(cls, "__init__")[1], "__init__", string_arrow)
             or not _has_canonical_arrow_string_super_method(
-                cls, "__init__", arrow_module.ArrowExtensionArray, arrow_module)):
+                cls, super_start, "__init__", arrow_module.ArrowExtensionArray, arrow_module)):
         return False
     factory_owner, factory = _raw_class_attribute(cls, "_from_pyarrow_array")
     if factory_owner is not None and not _defined_in(factory, "_from_pyarrow_array", string_arrow):

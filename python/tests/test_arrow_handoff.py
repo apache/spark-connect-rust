@@ -5246,16 +5246,16 @@ def test_arrow_string_null_labels_decline_without_getitem_callback(protocol, mon
 
 @pytest.mark.parametrize("label_storage", ["object", "pyarrow"])
 @pytest.mark.parametrize("method", ["astype", "__array__", "__getitem__", "__init__"])
+@pytest.mark.parametrize("storage", ["pyarrow", "numpy_semantics"])
 def test_arrow_string_super_row_hooks_keep_native_errors(
-    protocol, monkeypatch, label_storage, method
+    protocol, monkeypatch, label_storage, method, storage
 ):
     import importlib
 
     from pandas.core.arrays.arrow.array import ArrowExtensionArray
 
     _pandas_input = importlib.import_module("pyspark.sql._pandas_input")
-    frame = pd.DataFrame({"v": pd.array(["original", None] * 5000,
-                                      dtype="string[pyarrow]")})
+    frame = pd.DataFrame({"v": _arrow_string_column(["original", None] * 5000, storage)})
     frame.columns = pd.Index(["v"], dtype=object) if label_storage == "object" else pd.Index(
         pd.array(["v"], dtype="string[pyarrow]"))
     schema = T.StructType([T.StructField("v", T.StringType())])
