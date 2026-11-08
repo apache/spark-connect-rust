@@ -699,10 +699,12 @@ impl PySparkSession {
         let mut values: Vec<Vec<Value>> = (0..parts.len())
             .map(|_| Vec::with_capacity(fields.len()))
             .collect();
-        let _quanta = infer::DecimalQuanta::new();
-        for (i, field) in fields.iter().enumerate() {
-            for (row, out) in parts.iter().zip(values.iter_mut()) {
-                out.push(infer::convert(&row[i], &field.data_type, field.nullable)?);
+        {
+            let _quanta = infer::DecimalQuanta::new();
+            for (i, field) in fields.iter().enumerate() {
+                for (row, out) in parts.iter().zip(values.iter_mut()) {
+                    out.push(infer::convert(&row[i], &field.data_type, field.nullable)?);
+                }
             }
         }
         // Then, as PySpark, the schema converts to Arrow, which has no char, varchar, year-month or
@@ -1131,7 +1133,14 @@ impl PySparkSession {
                     let cells = || rows.iter().filter_map(|row| row.get(i));
                     let data_type = if !cells().any(|v| matches!(v, Value::Decimal { .. })) {
                         match first {
-                            Some(value) => value_to_datatype(value),
+                            Some(value) => {
+                                let mut data_type = value_to_datatype(value);
+                                if has_decimal_type(&data_type) {
+                                    let column: Vec<&Value> = cells().collect();
+                                    widen_pandas_decimal_scales(&mut data_type, &column)?;
+                                }
+                                data_type
+                            }
                             None => {
                                 pandas_dtype_type(dtypes.get(i).map_or("object", String::as_str))
                             }
@@ -2530,15 +2539,17 @@ fn pandas_decimal_type(data: &Bound<'_, PyList>, rows: &[Row], i: usize) -> PyRe
     // The digits and exponent of an exact Decimal come from the text that `py_to_value` took
     // of it, rather than from `as_tuple()`, which builds a DecimalTuple of every digit; a
     // subclass, which can override either, is asked for `as_tuple()`, as Arrow does.
-    let decimal_cls = crate::infer::DECIMAL.import(data.py(), "decimal", "Decimal")?;
     let (mut integer_digits, mut scale) = (0i64, 0i64);
+    let c_decimal = crate::infer::c_decimal_type(data.py())?;
     for (row, converted) in data.iter().zip(rows) {
         let value = row.get_item(i)?;
         if value.is_none() {
             continue;
         }
         let from_text = match converted.get(i) {
-            Some(Value::Decimal { value: text, .. }) if value.get_type().is(decimal_cls) => {
+            Some(Value::Decimal { value: text, .. })
+                if crate::infer::is_exact_c_decimal(&value, c_decimal) =>
+            {
                 decimal_text_digits(text)
             }
             _ => None,
@@ -2576,6 +2587,138 @@ fn pandas_decimal_type(data: &Bound<'_, PyList>, rows: &[Row], i: usize) -> PyRe
         precision: precision.max(1) as i32,
         scale: scale as i32,
     })
+}
+
+/// Whether a type contains Decimal, to prune unrelated nested inference subtrees.
+fn has_decimal_type(data_type: &DataType) -> bool {
+    match data_type {
+        DataType::Decimal { .. } => true,
+        DataType::Array { element_type, .. } => has_decimal_type(element_type),
+        DataType::Struct { fields } => fields
+            .iter()
+            .any(|field| has_decimal_type(&field.data_type)),
+        DataType::Map {
+            key_type,
+            value_type,
+            ..
+        } => has_decimal_type(key_type) || has_decimal_type(value_type),
+        _ => false,
+    }
+}
+
+/// Preserve the existing nested shape and precision, but use every observed Decimal's
+/// scale. Choosing only the first scale would make the exact encoder reject a later value
+/// such as 1.25 after 1.5. This pass uses already converted values and invokes no Python hooks.
+/// Callers prune types without Decimal before allocating child references.
+fn widen_pandas_decimal_scales(data_type: &mut DataType, values: &[&Value]) -> PyResult<()> {
+    match data_type {
+        DataType::Decimal { precision, scale } => {
+            let initial_scale = *scale;
+            for value in values {
+                if let Value::Decimal {
+                    scale: Some(observed),
+                    ..
+                } = value
+                {
+                    *scale = (*scale).max(*observed);
+                }
+            }
+            // Reject invalid types introduced by widening before the encoder can cast the
+            // scale to i8. Keep the inherited handling of an already-invalid first value.
+            if *scale > *precision && *scale > initial_scale {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Decimal scale {scale} is out of the range of DecimalType, up to {precision}"
+                )));
+            }
+        }
+        DataType::Array { element_type, .. } => {
+            let children = values
+                .iter()
+                .filter_map(|value| match value {
+                    Value::List(items) => Some(items.iter()),
+                    _ => None,
+                })
+                .flatten()
+                .collect::<Vec<_>>();
+            widen_pandas_decimal_scales(element_type, &children)?;
+        }
+        DataType::Struct { fields } => {
+            let in_order = values
+                .iter()
+                .map(|value| match value {
+                    Value::Struct(row) => {
+                        row.len() == fields.len()
+                            && row
+                                .fields()
+                                .iter()
+                                .zip(fields.iter())
+                                .all(|(name, field)| *name == field.name)
+                    }
+                    _ => false,
+                })
+                .collect::<Vec<_>>();
+            for (index, field) in fields.iter_mut().enumerate() {
+                if !has_decimal_type(&field.data_type) {
+                    continue;
+                }
+                let children = values
+                    .iter()
+                    .zip(&in_order)
+                    .filter_map(|(value, &in_order)| match value {
+                        Value::Struct(row) => {
+                            if in_order {
+                                row.get(index)
+                            } else {
+                                // Match the encoder: by field name, else by position,
+                                // so widening inspects the same value it will encode.
+                                row.get_by_name(&field.name).or_else(|| row.get(index))
+                            }
+                        }
+                        // An earlier Row can establish the Struct type while a later
+                        // dict in the same pandas column is converted to Value::Map.
+                        Value::Map(entries) => entries.iter().find_map(|(key, value)| match key {
+                            Value::String(name) if *name == field.name => Some(value),
+                            _ => None,
+                        }),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                widen_pandas_decimal_scales(&mut field.data_type, &children)?;
+            }
+        }
+        DataType::Map {
+            key_type,
+            value_type,
+            ..
+        } => {
+            if has_decimal_type(key_type) {
+                let keys = values
+                    .iter()
+                    .filter_map(|value| match value {
+                        Value::Map(entries) => Some(entries.iter()),
+                        _ => None,
+                    })
+                    .flatten()
+                    .map(|(key, _)| key)
+                    .collect::<Vec<_>>();
+                widen_pandas_decimal_scales(key_type, &keys)?;
+            }
+            if has_decimal_type(value_type) {
+                let children = values
+                    .iter()
+                    .filter_map(|value| match value {
+                        Value::Map(entries) => Some(entries.iter()),
+                        _ => None,
+                    })
+                    .flatten()
+                    .map(|(_, value)| value)
+                    .collect::<Vec<_>>();
+                widen_pandas_decimal_scales(value_type, &children)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// Infer the Spark `DataType` for a `createDataFrame` column from its (first) value.
@@ -2914,9 +3057,13 @@ pub(crate) fn datetime_to_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
 /// Decimal defines `__float__`/`__int__`.
 fn decimal_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Option<Value>> {
     let py = obj.py();
-    // Imported once: looking the class up per value was a module import and an attribute
-    // read of every converted value.
-    let decimal_cls = crate::infer::DECIMAL.import(py, "decimal", "Decimal")?;
+    // Cache the accelerator class or its absence. Interpreters without it use the
+    // public Python class, whose exact instances retain the as_tuple hook path.
+    let c_decimal = crate::infer::c_decimal_type(py)?;
+    let decimal_cls = match c_decimal {
+        Some(decimal) => decimal,
+        None => crate::infer::public_decimal_type(py)?,
+    };
     if !obj.is_instance(decimal_cls.as_any())? {
         return Ok(None);
     }
@@ -2924,7 +3071,7 @@ fn decimal_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Option<Value>> {
     // either notation, in work bounded by the length of the text, which a fixed-point form
     // of `1E+1000000000` would not be.
     let dec_str: String = obj.str()?.extract()?;
-    let scale = if obj.get_type().is(decimal_cls) {
+    let scale = if crate::infer::is_exact_c_decimal(obj, c_decimal) {
         // Exact Decimal strings preserve the coefficient's trailing zeros and exponent.
         // Subclasses may override either __str__ or as_tuple, so keep their old path.
         decimal_string_scale(&dec_str)
@@ -3034,4 +3181,52 @@ pub(crate) fn range_arguments(
 fn value_out_of_range(int: &Bound<'_, PyAny>) -> PyErr {
     let shown = int.str().map(|text| text.to_string()).unwrap_or_default();
     pyo3::exceptions::PyValueError::new_err(format!("Value out of range: {shown}"))
+}
+
+#[cfg(test)]
+mod decimal_text_tests {
+    use super::{decimal_string_scale, decimal_text_digits};
+
+    #[test]
+    fn coefficient_digits_and_exponent_match_decimal_tuple() {
+        for (text, digits, exponent) in [
+            ("0", 1, 0),
+            ("0.000", 1, -3),
+            ("-0E-7", 1, -7),
+            ("1E+3", 1, 3),
+            ("1.0E+4", 2, 3),
+            ("123.4500", 7, -4),
+            ("0.001234500", 7, -9),
+            ("1.5E-7", 2, -8),
+        ] {
+            assert_eq!(
+                decimal_text_digits(text),
+                Some((digits, exponent)),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn scale_preserves_trailing_zeros_and_nonpositive_exponents() {
+        for (text, scale) in [
+            ("0", Some(0)),
+            ("0.000", Some(3)),
+            ("-0E-7", Some(7)),
+            ("123.4500", Some(4)),
+            ("1.5E-7", Some(8)),
+            ("1E+3", None),
+            ("1.0E+4", None),
+        ] {
+            assert_eq!(decimal_string_scale(text), scale, "{text}");
+        }
+    }
+
+    #[test]
+    fn nonfinite_values_have_no_numeric_exponent() {
+        for text in ["NaN", "sNaN", "Infinity", "-Infinity"] {
+            assert_eq!(decimal_text_digits(text), None, "{text}");
+            assert_eq!(decimal_string_scale(text), None, "{text}");
+        }
+    }
 }

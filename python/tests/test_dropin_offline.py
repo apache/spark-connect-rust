@@ -7893,7 +7893,10 @@ def decimal_ipc_protocol(tmp_path_factory):
     pytest.importorskip("pyarrow")
     protoc = shutil.which(os.environ.get("PROTOC", "protoc"))
     if protoc is None:
-        pytest.skip("Decimal IPC transport tests require protoc")
+        message = "Decimal IPC transport tests require protoc"
+        if os.environ.get("CI"):
+            pytest.fail(message)
+        pytest.skip(message)
     proto_root = Path(__file__).resolve().parents[2] / "crates/spark-connect-proto/proto"
     descriptor = tmp_path_factory.mktemp("decimal-proto") / "connect.pb"
     command = [protoc, f"-I{proto_root}"]
@@ -7927,6 +7930,149 @@ def decimal_ipc_session(decimal_ipc_protocol, tmp_path):
         finally:
             process.communicate("stop\n", timeout=20)
             assert process.returncode == 0
+
+
+def test_decimal_missing_c_accelerator_is_cached_and_keeps_hooks(decimal_ipc_protocol, tmp_path):
+    # The extension's type cache belongs to the process, so reset decimal's modules and
+    # hide the accelerator before importing pyspark. Count only conversion lookups.
+    pytest.importorskip("pandas")
+    import subprocess
+    import sys
+
+    script = r'''
+import sys
+# Exercise startup hooks that preload decimal before configuring the fallback.
+import decimal
+sys.modules.pop("decimal", None)
+sys.modules.pop("_pydecimal", None)
+sys.modules["_decimal"] = None
+import decimal
+import _pydecimal
+assert decimal.Decimal is _pydecimal.Decimal
+import builtins
+import contextlib
+from pathlib import Path
+import subprocess
+import pandas as pd
+import pyarrow as pa
+import pytest
+from pyspark.sql import SparkSession
+from pyspark.sql import types as T
+
+class RowPathFrame(pd.DataFrame):
+    pass
+
+@contextlib.contextmanager
+def session():
+    payload = Path(sys.argv[3]) / "input.arrow"
+    process = subprocess.Popen(
+        [sys.executable, "-u", "-c", sys.argv[1], sys.argv[2], str(payload)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+    )
+    spark = None
+    try:
+        port = int(process.stdout.readline())
+        spark = SparkSession.builder.remote(f"sc://127.0.0.1:{port}").create()
+        yield spark, payload
+    finally:
+        try:
+            if spark is not None:
+                spark.stop()
+        finally:
+            try:
+                process.communicate("stop\n", timeout=20)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate()
+                raise
+            assert process.returncode == 0
+
+original_import = builtins.__import__
+imports = []
+conversion_import_counts = []
+
+def tracked_import(name, *args, **kwargs):
+    if name == "_decimal":
+        imports.append(name)
+    return original_import(name, *args, **kwargs)
+
+def build(spark, data, schema=None):
+    before = len(imports)
+    builtins.__import__ = tracked_import
+    try:
+        return spark.createDataFrame(data, schema)
+    finally:
+        builtins.__import__ = original_import
+        conversion_import_counts.append(len(imports) - before)
+
+def assert_decimal_cells(payload, precision, scale, unscaled):
+    # Compare raw signed Decimal128 cells without constructing expected Arrow Decimals
+    # or relying on the client's result decoder to validate its own uploaded payload.
+    table = pa.ipc.open_stream(payload.read_bytes()).read_all()
+    table.validate(full=True)
+    assert table.schema == pa.schema([pa.field("v", pa.decimal128(precision, scale))])
+    column = table.column("v").combine_chunks()
+    assert column.is_valid().to_pylist() == [value is not None for value in unscaled]
+    cells = column.buffers()[1].to_pybytes()
+    assert len(column) == len(unscaled)
+    for index, value in enumerate(unscaled):
+        if value is not None:
+            assert cells[index * 16:(index + 1) * 16] == value.to_bytes(
+                16, "little", signed=True
+            )
+
+with session() as (spark, payload):
+    schema = T.StructType([T.StructField("v", T.DecimalType(10, 2))])
+    rows = [(decimal.Decimal("1.235"),), (None,), (decimal.Decimal("-2.345"),)]
+    build(spark, rows, schema).collect()
+    assert_decimal_cells(payload, 10, 2, [124, None, -234])
+
+    calls = []
+    class Traced(decimal.Decimal):
+        def __str__(self):
+            calls.append("str")
+            return super().__str__()
+
+        def as_tuple(self):
+            calls.append("tuple")
+            return super().as_tuple()
+
+    frame = RowPathFrame({"v": [Traced("1.20"), None, Traced("-30.5"),
+                              decimal.Decimal("1E+3")]}, dtype=object)
+    # Customized frames retain the native conversion path and its Decimal hooks.
+    build(spark, frame).collect()
+    assert calls == ["str", "tuple", "str", "tuple", "tuple", "tuple"], calls
+    assert_decimal_cells(payload, 6, 2, [120, None, -3050, 100000])
+
+    class Broken(decimal.Decimal):
+        def as_tuple(self):
+            raise LookupError("pure Decimal tuple hook")
+
+    failing = RowPathFrame({"v": [Broken("1.25")]}, dtype=object)
+    payload.unlink()
+    with pytest.raises(LookupError, match="^pure Decimal tuple hook$"):
+        build(spark, failing)
+    assert not payload.exists()
+    assert imports == ["_decimal"], imports
+    assert conversion_import_counts == [1, 0, 0], conversion_import_counts
+'''
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script, _DECIMAL_IPC_SERVER,
+             str(decimal_ipc_protocol), str(tmp_path)],
+            capture_output=True, text=True, timeout=180,
+        )
+    except subprocess.TimeoutExpired as error:
+        output = []
+        for name, value in (("stdout", error.stdout), ("stderr", error.stderr)):
+            if isinstance(value, bytes):
+                value = value.decode(errors="replace")
+            output.append(f"{name}:\n{value or ''}")
+        pytest.fail(
+            "Decimal fallback child exceeded 180 seconds.\n" + "\n".join(output),
+            pytrace=False,
+        )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize("kind", ["tuples", "pandas"])
@@ -7965,11 +8111,13 @@ def test_decimal_scientific_local_input_ipc(decimal_ipc_session, kind, precision
 
 @pytest.mark.parametrize("text", ["1E+1000000000", "-1E+1000000000"])
 def test_decimal_scientific_local_input_overflow(decimal_ipc_session, text):
-    from decimal import Decimal
+    from decimal import Decimal, InvalidOperation
 
     spark, payload = decimal_ipc_session
     schema = T.StructType([T.StructField("v", T.DecimalType(38, 0))])
-    with pytest.raises((ArithmeticError, RuntimeError)):
+    # Trap-mutating tests restore DefaultContext; its normal InvalidOperation trap
+    # makes quantize reject this overflow before any IPC relation is uploaded.
+    with pytest.raises(InvalidOperation):
         spark.createDataFrame([(Decimal(text),)], schema).collect()
     assert not payload.exists()
 
@@ -8034,6 +8182,7 @@ def test_decimal_rescaling_follows_pyspark(
     ["0.001234500", "-0.000002300", "0.000000", None],
     ["123", "-4", "0", None],
     ["1E+3", "1E-7", "-0E-7", "1.2300E-7", None],
+    ["1.0E+4", "-2.00E+3", "-0E-7", None],
 ])
 def test_decimal_scale_input_ipc(decimal_ipc_session, kind, schema_mode, texts):
     # The scale of a Decimal comes from its text, not from as_tuple(): the IPC holds the same
@@ -8106,14 +8255,78 @@ def test_decimal_scale_of_subclasses(decimal_ipc_session):
             spark.createDataFrame(pd.DataFrame({"v": [failing("1.5")]}, dtype=object), ["v"])
 
 
+@pytest.mark.parametrize("schema_mode", ["explicit", "names", "inferred"])
+@pytest.mark.parametrize("hook_behavior", ["error", "scale"])
+def test_decimal_scale_rebound_subclass_keeps_tuple_hook(
+    decimal_ipc_session, monkeypatch, schema_mode, hook_behavior
+):
+    # A subclass rebound as decimal.Decimal is still a subclass, not the immutable C type.
+    # Both conversion and inferred pandas typing must retain its as_tuple hook.
+    import decimal
+    import pyarrow as pa
+
+    pd = pytest.importorskip("pandas")
+    original = decimal.Decimal
+    calls = []
+    parts = original("123.45000").as_tuple()
+
+    class Rebound(original):
+        def __str__(self):
+            calls.append("str")
+            return "1.20"
+
+        def as_tuple(self):
+            calls.append("tuple")
+            if hook_behavior == "error":
+                raise LookupError("rebound Decimal tuple hook")
+            return parts
+
+    # Canonical-looking metadata must not make a Python heap type eligible either.
+    Rebound.__name__ = "Decimal"
+    Rebound.__module__ = "decimal"
+    frame = pd.DataFrame({"v": [Rebound("1.20"), None]}, dtype=object)
+    schema = T.StructType([T.StructField("v", T.DecimalType(10, 2))])
+    if schema_mode != "explicit":
+        schema = ["v"] if schema_mode == "names" else None
+    spark, payload = decimal_ipc_session
+    with monkeypatch.context() as alias:
+        alias.setattr(decimal, "Decimal", Rebound)
+        if schema_mode == "explicit":
+            # Exercise the native scalar fallback. Ordinary explicit-schema frames now
+            # use Arrow conversion, whose subclass hook behavior is a separate contract.
+            from pyspark.sql import _pandas_input
+
+            alias.setattr(_pandas_input, "accepts_pandas_table", lambda frame, schema: False)
+        if hook_behavior == "error":
+            with pytest.raises(LookupError, match="^rebound Decimal tuple hook$"):
+                spark.createDataFrame(frame, schema)
+        else:
+            spark.createDataFrame(frame, schema).collect()
+    if hook_behavior == "error":
+        assert calls == ["str", "tuple"]
+        assert not payload.exists()
+    else:
+        assert calls == ["str", "tuple"] + ([] if schema_mode == "explicit" else ["tuple"])
+        table = pa.ipc.open_stream(payload.read_bytes()).read_all()
+        expected_type = pa.decimal128(10, 2) if schema_mode == "explicit" else pa.decimal128(8, 5)
+        assert table.schema.field("v").type == expected_type
+        assert table.column(0).to_pylist() == [original("1.20"), None]
+
+
 @pytest.mark.parametrize("schema", [["v"], T.StructType([T.StructField("v", T.DecimalType(10, 4))])])
-def test_decimal_scale_avoids_coefficient_tuple(decimal_ipc_session, schema):
+def test_decimal_scale_avoids_coefficient_tuple(decimal_ipc_session, monkeypatch, schema):
     # Exact Decimals are typed and converted from their text: no DecimalTuple is built.
     import cProfile
     from decimal import Decimal
 
     pd = pytest.importorskip("pandas")
     spark, _ = decimal_ipc_session
+    if isinstance(schema, T.StructType):
+        # This allocation regression concerns the native row converter, including its
+        # explicit-schema fallback; normal explicit pandas IPC tests keep the Arrow path.
+        from pyspark.sql import _pandas_input
+
+        monkeypatch.setattr(_pandas_input, "accepts_pandas_table", lambda frame, schema: False)
     tuple_constructor = type(Decimal("1.20").as_tuple()).__new__.__code__
     # Of the converter of the row path, which a customized frame keeps (_RowPathFrame).
     values = _RowPathFrame(pd)(
@@ -8125,6 +8338,32 @@ def test_decimal_scale_avoids_coefficient_tuple(decimal_ipc_session, schema):
     finally:
         profile.disable()
     assert not any(entry.code is tuple_constructor for entry in profile.getstats())
+
+
+def test_decimal_explicit_pandas_schema_uses_arrow_conversion(decimal_ipc_session, monkeypatch):
+    from decimal import Decimal
+    import pyarrow as pa
+    from pyspark.sql import _pandas_input
+
+    pd = pytest.importorskip("pandas")
+    spark, payload = decimal_ipc_session
+    prepare = _pandas_input.prepare_pandas_table
+    calls = []
+
+    def prepare_table(*args):
+        calls.append(True)
+        return prepare(*args)
+
+    monkeypatch.setattr(_pandas_input, "prepare_pandas_table", prepare_table)
+    values = [Decimal("1.20"), None, Decimal("-30.5")]
+    schema = T.StructType([T.StructField("v", T.DecimalType(10, 2))])
+    spark.createDataFrame(pd.DataFrame({"v": values}, dtype=object), schema).collect()
+    assert calls == [True]
+    table = pa.ipc.open_stream(payload.read_bytes()).read_all()
+    expected = pa.table({"v": pa.array(values, type=pa.decimal128(10, 2))})
+    table.validate(full=True)
+    assert table.schema == expected.schema
+    assert table.equals(expected)
 
 
 @pytest.mark.parametrize("text", ["Infinity", "-Infinity"])
@@ -8141,7 +8380,7 @@ def test_decimal_scale_of_non_finite_values(decimal_ipc_session, text):
     assert not payload.exists()
 
 
-def test_decimal_quanta_of_each_type_and_conversion(decimal_ipc_session):
+def test_decimal_quanta_of_each_type_and_conversion(decimal_ipc_session, monkeypatch):
     # Each decimal type of a conversion is quantized with its own quantum and context, which
     # are built once per conversion, as PySpark builds them once per converter: a change of
     # decimal.DefaultContext applies from the next createDataFrame.
@@ -8150,25 +8389,220 @@ def test_decimal_quanta_of_each_type_and_conversion(decimal_ipc_session):
     import pyarrow as pa
 
     spark, payload = decimal_ipc_session
-    schema = T.StructType([T.StructField("a", T.DecimalType(10, 2)),
-                           T.StructField("b", T.DecimalType(5, 1)),
-                           T.StructField("c", T.DecimalType(10, 2))])
+    schema = T.StructType([
+        T.StructField("a", T.DecimalType(10, 2)),
+        T.StructField("b", T.DecimalType(5, 1)),
+        T.StructField("c", T.DecimalType(10, 2)),
+    ])
+    context_type = decimal.Context
+    constructions = []
+
+    def context(*args, **kwargs):
+        constructions.append(kwargs["prec"])
+        return context_type(*args, **kwargs)
+
+    monkeypatch.setattr(decimal, "Context", context)
     rows = [(Decimal("1.235"), Decimal("2.25"), Decimal("-0.005")),
             (Decimal("1.245"), Decimal("2.35"), None)]
     spark.createDataFrame(rows, schema).collect()
+    assert constructions == [10, 5]
     table = pa.ipc.open_stream(payload.read_bytes()).read_all()
     assert table.to_pydict() == {
         "a": [Decimal("1.24"), Decimal("1.24")],
         "b": [Decimal("2.2"), Decimal("2.4")],
         "c": [Decimal("-0.00"), None],
     }
+    previous_trap = decimal.DefaultContext.traps[decimal.Inexact]
     decimal.DefaultContext.traps[decimal.Inexact] = True
     try:
         with pytest.raises(decimal.Inexact):
             spark.createDataFrame(rows, schema)
     finally:
-        decimal.DefaultContext.traps[decimal.Inexact] = False
+        decimal.DefaultContext.traps[decimal.Inexact] = previous_trap
+    assert constructions == [10, 5, 10]
     spark.createDataFrame(rows[1:], schema)
+    assert constructions == [10, 5, 10, 10, 5]
+
+
+@pytest.mark.parametrize("prefix_exact", [False, True])
+def test_decimal_quanta_preserve_keyword_quantize_overrides(
+    decimal_ipc_session, monkeypatch, prefix_exact
+):
+    import decimal
+    import pyarrow as pa
+
+    spark, payload = decimal_ipc_session
+    schema = T.StructType([T.StructField("v", T.DecimalType(10, 2))])
+    calls = []
+    contexts = []
+    context_type = decimal.Context
+    constructions = []
+
+    def context(*args, **kwargs):
+        created = context_type(*args, **kwargs)
+        constructions.append(created)
+        return created
+
+    monkeypatch.setattr(decimal, "Context", context)
+
+    class KeywordContext(decimal.Decimal):
+        # PySpark passes context by keyword; this valid override has no rounding argument.
+        def quantize(self, exp, context=None):
+            calls.append((str(exp), context.prec, context.rounding))
+            contexts.append(context)
+            return super().quantize(exp, context=context)
+
+    rows = [(KeywordContext("1.235"),), (KeywordContext("1.245"),)]
+    if prefix_exact:
+        # Build the positional cache first: its later lazy keyword dict must share the
+        # existing context rather than creating one at the first subclass value.
+        rows.insert(0, (decimal.Decimal("1.235"),))
+    spark.createDataFrame(rows, schema).collect()
+    assert calls == [("0.01", 10, decimal.ROUND_HALF_EVEN)] * 2
+    assert len(constructions) == 1
+    assert all(value is constructions[0] for value in contexts)
+    assert pa.ipc.open_stream(payload.read_bytes()).read_all().column(0).to_pylist() == [
+        decimal.Decimal("1.24"),
+    ] * len(rows)
+
+
+def test_decimal_quanta_restore_outer_conversion_after_reentry(decimal_ipc_session):
+    import decimal
+    import pyarrow as pa
+
+    spark, payload = decimal_ipc_session
+    schema = T.StructType([T.StructField("v", T.DecimalType(10, 2))])
+    previous_trap = decimal.DefaultContext.traps[decimal.Inexact]
+    calls = []
+
+    class Reentrant(decimal.Decimal):
+        def quantize(self, exp, rounding=None, context=None):
+            calls.append(context.traps[decimal.Inexact])
+            if len(calls) == 1:
+                spark.createDataFrame([(decimal.Decimal("1.23"),)], schema).collect()
+                decimal.DefaultContext.traps[decimal.Inexact] = True
+            return super().quantize(exp, rounding, context)
+
+    try:
+        decimal.DefaultContext.traps[decimal.Inexact] = False
+        rows = [(Reentrant("1.235"),), (Reentrant("1.245"),)]
+        spark.createDataFrame(rows, schema).collect()
+    finally:
+        decimal.DefaultContext.traps[decimal.Inexact] = previous_trap
+    assert calls == [False, False]
+    assert pa.ipc.open_stream(payload.read_bytes()).read_all().column(0).to_pylist() == [
+        decimal.Decimal("1.24"), decimal.Decimal("1.24"),
+    ]
+
+
+@pytest.mark.parametrize("schema_kind", ["inferred", "names"])
+@pytest.mark.parametrize("layout", [
+    "array", "nested_array", "struct", "mixed_struct", "array_struct", "map_values", "map_keys",
+])
+def test_pandas_nested_decimals_use_every_observed_scale(mock_connect, layout, schema_kind):
+    from decimal import Decimal
+    import pyarrow as pa
+
+    decimals = [Decimal("1.5"), Decimal("1.25"), Decimal("0.003"), Decimal("1E+3")]
+    # Nested inferred precision remains 38 (SPARK-60696; see dev/parity/known-differences.md).
+    # Widen only the scale to preserve all values without changing the inherited container
+    # or non-Decimal type inference.
+    decimal_type = pa.decimal128(38, 3)
+    if layout == "array":
+        values = [[decimals[0], decimals[1]], None, [], decimals[2:]]
+        expected_values = values
+        expected_type = pa.list_(decimal_type)
+    elif layout == "nested_array":
+        values = [[[decimals[0]], []], None, [[decimals[1]], decimals[2:]]]
+        expected_values = values
+        expected_type = pa.list_(pa.list_(decimal_type))
+    elif layout in ("struct", "mixed_struct", "array_struct"):
+        values = [Row(d=value, keep=index) for index, value in enumerate(decimals)]
+        expected_values = [{"d": value, "keep": index} for index, value in enumerate(decimals)]
+        expected_type = pa.struct([pa.field("d", decimal_type), pa.field("keep", pa.int64())])
+        if layout == "mixed_struct":
+            values = [values[0], *expected_values[1:]]
+        if layout == "array_struct":
+            values = [[values[0]], None, values[1:]]
+            expected_values = [[expected_values[0]], None, expected_values[1:]]
+            expected_type = pa.list_(expected_type)
+    elif layout == "map_values":
+        values = [
+            {"a": decimals[0]}, None, {"a": decimals[1], "b": decimals[2], "c": decimals[3]},
+        ]
+        expected_values = values
+        expected_type = pa.map_(pa.string(), decimal_type)
+    else:
+        values = [
+            {decimals[0]: "a"}, None, {decimals[1]: "b", decimals[2]: "c", decimals[3]: "d"},
+        ]
+        expected_values = values
+        expected_type = pa.map_(decimal_type, pa.string())
+    names = ["renamed"] if schema_kind == "names" else None
+    actual = _native_number_input_table(
+        mock_connect, [(value,) for value in values], names, source="pandas"
+    )
+    name = "renamed" if names else "value"
+    expected = pa.table({name: pa.array(expected_values, type=expected_type)})
+    actual.validate(full=True)
+    assert actual.schema == expected.schema
+    assert actual.equals(expected)
+
+
+@pytest.mark.parametrize("scale", [38, 39, 50, 128])
+def test_pandas_nested_decimal_scale_bounds(decimal_ipc_session, scale):
+    from decimal import Decimal
+    import pyarrow as pa
+
+    pd = pytest.importorskip("pandas")
+    spark, payload = decimal_ipc_session
+    values = [[Decimal("0.1")], [Decimal(f"1E-{scale}")]]
+    frame = _RowPathFrame(pd)({"v": values}, dtype=object)
+    if scale > 38:
+        with pytest.raises(
+            ValueError,
+            match=rf"^Decimal scale {scale} is out of the range of DecimalType, up to 38$",
+        ):
+            spark.createDataFrame(frame)
+        assert not payload.exists()
+    else:
+        spark.createDataFrame(frame).collect()
+        actual = pa.ipc.open_stream(payload.read_bytes()).read_all()
+        expected = pa.table({"v": pa.array(values, type=pa.list_(pa.decimal128(38, 38)))})
+        actual.validate(full=True)
+        assert actual.schema == expected.schema
+        assert actual.equals(expected)
+
+
+def test_pandas_nested_decimal_trailing_zeros_preserve_values(mock_connect):
+    from decimal import Decimal
+    import pyarrow as pa
+
+    # The second value's trailing zeros increase the scale even though it represents 1.
+    values = [[Decimal("9" * 30 + ".0")], [Decimal("1.0000000")]]
+    actual = _native_number_input_table(
+        mock_connect, [(value,) for value in values], source="pandas"
+    )
+    expected = pa.table({"value": pa.array(values, type=pa.list_(pa.decimal128(38, 7)))})
+    actual.validate(full=True)
+    assert actual.schema == expected.schema
+    assert actual.equals(expected)
+
+
+def test_pandas_nested_decimal_scale_widening_can_overflow_precision(decimal_ipc_session):
+    from decimal import Decimal
+    from pyspark.errors import PySparkRuntimeError
+
+    pd = pytest.importorskip("pandas")
+    spark, payload = decimal_ipc_session
+    # With only the first scale (1), both values fit: the second discards six zero digits.
+    # Preserving every observed scale (7) requires 44 digits for the first value, beyond
+    # the native fallback's inherited precision of 38. See known-differences.md.
+    values = [[Decimal("9" * 37 + ".0")], [Decimal("1.0000000")]]
+    frame = _RowPathFrame(pd)({"v": values}, dtype=object)
+    with pytest.raises(PySparkRuntimeError, match=r"does not fit decimal\(38,7\) exactly"):
+        spark.createDataFrame(frame)
+    assert not payload.exists()
 
 
 # --------------------------------------------------------------------------- schema cache

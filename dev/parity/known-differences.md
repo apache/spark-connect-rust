@@ -12,6 +12,40 @@ difference is intentional or tracked for a fix.
   raises PyArrow's `ArrowInvalid`. This client raises `AXIS_LENGTH_MISMATCH` for both
   rather than drop data.
 - **NumPy ndarray input** (tracked by SPARK-60772). Not accepted yet.
+- **Nested pandas Decimal inference and failures** (intentional; related change:
+  SPARK-60696). On the native row fallback, inferred nested Decimal fields keep
+  precision 38 and the greatest observed scale; PySpark infers the smallest precision
+  that covers the values. Increasing scale can make a large value exceed precision 38
+  even when the first value's scale could encode every value by discarding only trailing
+  zeros. A later value that increases the scale beyond 38 raises `ValueError` before
+  upload. Existing container and non-Decimal inference rules are unchanged. With an
+  explicit schema, a nested Decimal that does not fit raises `PySparkRuntimeError` only
+  on the native row fallback, for frames rejected by `accepts_pandas_table`. Ordinary
+  frames use PySpark's Arrow conversion and raise its errors. Both paths reject an
+  explicit-schema value that does not fit before a relation is sent.
+- **Multiple invalid pandas columns with an explicit Decimal field** (intentional,
+  SPARK-60696). On native row fallback, Decimal exactness is checked before the encoder
+  converts other fields. If an earlier non-Decimal column and a later Decimal column are
+  both invalid, this client reports the Decimal column first; PySpark reports the first
+  invalid column in schema order. Both reject the input before a relation is sent.
+- **Decimal context hooks during local-row conversion** (intentional, SPARK-60704).
+  Quantum and context objects are shared by Decimal type within one conversion and built
+  when its first non-null, non-NaN value is converted. PySpark constructs a context for
+  each field's converter before converting values. A custom hook that changes
+  `decimal.DefaultContext` or mutates its supplied context during a conversion can
+  observe different timing or sharing. Changes between `createDataFrame` calls apply to
+  the next conversion.
+- **Decimal class rebinding** (intentional, SPARK-60704). Native Decimal conversion and
+  inference for local rows and pandas input recognize the cached C `_decimal.Decimal`
+  class, falling back to the cached public `decimal.Decimal` when the accelerator is
+  unavailable; accelerator absence is cached too. If `_decimal` is importable at first
+  resolution, its class takes precedence even when the public `decimal.Decimal` is the
+  pure-Python class. Values of that pure-Python class are then not recognized as
+  Decimals, so conversion or inference can fail where PySpark succeeds. The text
+  shortcut assumes `_decimal.Decimal` is immutable, as on CPython; mutable
+  implementations of that class on other interpreters are not covered. This can differ
+  from PySpark when an application rebinds the public class alias during the process.
+
 
 ## `DataFrame`
 
