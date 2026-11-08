@@ -5723,6 +5723,45 @@ def test_inheritable_threads_inherit_the_tags_of_the_session_as_pyspark(mock_con
         inheritable_thread_target(child)(child)
 
 
+def test_threads_of_inheritable_thread_targets_share_their_tags_as_pyspark(mock_connect):
+    # As PySpark Connect's inheritable_thread_target, as Apache Spark's
+    # test_inheritable_tags_with_deco: the threads of the function share the copy of the tags of
+    # the thread that decorated it, of then, so a thread that the function starts sees the tags
+    # that the thread that started it added, while the decorating thread keeps its own.
+    import threading
+
+    from pyspark import inheritable_thread_target
+
+    spark, _ = mock_connect
+    spark.addTag("a")
+    try:
+        @inheritable_thread_target(spark)
+        def func(target):
+            return target()
+
+        spark.addTag("later")
+        first, second = set(), set()
+
+        def inner():
+            spark.addTag("c")
+            second.update(spark.getTags())
+
+        def outer():
+            spark.addTag("b")
+            first.update(spark.getTags())
+            nested = threading.Thread(target=func, args=(inner,))
+            nested.start()
+            nested.join()
+
+        thread = threading.Thread(target=func, args=(outer,))
+        thread.start()
+        thread.join()
+        assert spark.getTags() == {"a", "later"}
+        assert first == {"a", "b"} and second == {"a", "b", "c"}
+    finally:
+        spark.clearTags()
+
+
 def test_row_asdict():
     """Test Row.asDict() method."""
     from pyspark.sql import Row

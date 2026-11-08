@@ -41,31 +41,71 @@ pub struct ExecutionInfo {
 
 /// The operation tags of a session, per thread, as PySpark Connect keeps them in the
 /// `thread_local` of its client: those that a thread added, which the operations that it
-/// starts carry. A new thread has none.
+/// starts carry. A new thread has none. The tags of a thread are a set that it may share with
+/// other threads ([`SharedTags`]), as the threads of PySpark's `inheritable_thread_target` share
+/// the set of tags that it copied.
 #[derive(Default)]
 pub(crate) struct ThreadTags {
-    by_thread: Mutex<std::collections::HashMap<std::thread::ThreadId, Vec<String>>>,
+    by_thread: Mutex<std::collections::HashMap<std::thread::ThreadId, SharedTags>>,
 }
+
+/// A set of operation tags of threads: a copy of the tags of a thread, of
+/// [`SparkSession::copy_thread_tags`], which the threads given it by
+/// [`SparkSession::share_thread_tags`] share, as the threads of PySpark's
+/// `inheritable_thread_target` share the copy of the `thread_local` of the client of the thread
+/// that decorated their function. The tags that one of them adds or removes are those of all.
+#[derive(Clone, Default)]
+pub struct SharedTags(Arc<Mutex<Vec<String>>>);
 
 impl ThreadTags {
     /// The tags of the current thread.
     fn current(&self) -> Vec<String> {
-        let by_thread = self.by_thread.lock().unwrap_or_else(|e| e.into_inner());
-        by_thread
+        let shared = self
+            .by_thread
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .get(&std::thread::current().id())
-            .cloned()
+            .cloned();
+        shared
+            .map(|tags| tags.0.lock().unwrap_or_else(|e| e.into_inner()).clone())
             .unwrap_or_default()
     }
 
-    /// Change the tags of the current thread, and forget a thread without tags.
+    /// Change the tags of the current thread, and forget a thread without tags that it shares
+    /// with no other.
     fn update(&self, change: impl FnOnce(&mut Vec<String>)) {
         let mut by_thread = self.by_thread.lock().unwrap_or_else(|e| e.into_inner());
         let thread = std::thread::current().id();
-        let tags = by_thread.entry(thread).or_default();
-        change(tags);
-        if tags.is_empty() {
+        let shared = by_thread.entry(thread).or_default().clone();
+        let mut tags = shared.0.lock().unwrap_or_else(|e| e.into_inner());
+        change(&mut tags);
+        // The set is held by the map and here only: no other thread or copy shares it.
+        if tags.is_empty() && Arc::strong_count(&shared.0) == 2 {
+            drop(tags);
             by_thread.remove(&thread);
         }
+    }
+
+    /// A new empty set of tags of the current thread, which shares no tags with another, as
+    /// PySpark Connect's `clearTags` sets the tags of the `thread_local` to a new set.
+    fn clear(&self) {
+        self.by_thread
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&std::thread::current().id());
+    }
+
+    /// A copy of the tags of the current thread.
+    fn copy(&self) -> SharedTags {
+        SharedTags(Arc::new(Mutex::new(self.current())))
+    }
+
+    /// Make `tags` those of the current thread.
+    fn share(&self, tags: &SharedTags) {
+        self.by_thread
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(std::thread::current().id(), tags.clone());
     }
 }
 
@@ -163,9 +203,25 @@ impl SparkSession {
         self.tags.current()
     }
 
-    /// Clear the tags that this thread set on this session. Mirrors `SparkSession.clearTags`.
+    /// Clear the tags that this thread set on this session. Mirrors `SparkSession.clearTags`:
+    /// the thread gets a new empty set of tags, which it shares with no other thread.
     pub fn clear_tags(&self) {
-        self.tags.update(Vec::clear);
+        self.tags.clear();
+    }
+
+    /// A copy of the tags of the current thread, as of now, which the threads that are given it
+    /// with [`SparkSession::share_thread_tags`] share. Mirrors how PySpark's
+    /// `inheritable_thread_target(session)` copies the tags of the thread that decorates a
+    /// function, which every thread that runs the function then has.
+    pub fn copy_thread_tags(&self) -> SharedTags {
+        self.tags.copy()
+    }
+
+    /// Make `tags` the tags of the current thread, which it shares with the other threads given
+    /// them: a tag that one of them adds or removes is added or removed for all, until a thread
+    /// clears its tags.
+    pub fn share_thread_tags(&self, tags: &SharedTags) {
+        self.tags.share(tags);
     }
 
     /// Register a handler of the progress of the executions of this session: it is called with
@@ -2609,6 +2665,44 @@ mod tests {
         spark.clear_tags();
         assert!(spark.get_tags().is_empty());
         assert!(spark.tags.by_thread.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn threads_given_a_copy_of_tags_share_it() {
+        // As the threads of PySpark's inheritable_thread_target: they share the copy of the tags
+        // of the thread that decorated their function, of then, until one clears its tags.
+        let spark = session();
+        spark.add_tag("a").unwrap();
+        let copy = spark.copy_thread_tags();
+        spark.add_tag("later").unwrap();
+        let run = |copy: SharedTags, tag: &'static str| {
+            let spark = spark.clone();
+            std::thread::spawn(move || {
+                spark.share_thread_tags(&copy);
+                spark.add_tag(tag).unwrap();
+                spark.get_tags()
+            })
+            .join()
+            .unwrap()
+        };
+        assert_eq!(run(copy.clone(), "b"), vec!["a", "b"]);
+        assert_eq!(run(copy.clone(), "c"), vec!["a", "b", "c"]);
+        assert_eq!(spark.get_tags(), vec!["a", "later"]);
+        let cleared = {
+            let spark = spark.clone();
+            let copy = copy.clone();
+            std::thread::spawn(move || {
+                spark.share_thread_tags(&copy);
+                spark.remove_tag("c");
+                spark.clear_tags();
+                spark.add_tag("d").unwrap();
+                spark.get_tags()
+            })
+            .join()
+            .unwrap()
+        };
+        assert_eq!(cleared, vec!["d"]);
+        assert_eq!(run(copy, "e"), vec!["a", "b", "e"]);
     }
 
     #[test]

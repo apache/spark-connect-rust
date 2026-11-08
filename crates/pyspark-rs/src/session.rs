@@ -548,6 +548,11 @@ impl PyHook {
 }
 
 /// Python wrapper for a Spark session.
+/// A copy of the tags of a thread, which the threads that `_share_thread_tags` gives it share,
+/// for `pyspark.util.inheritable_thread_target`.
+#[pyclass(name = "_SharedTags", module = "pyspark.sql.session", frozen)]
+pub struct PySharedTags(spark_connect::session::SharedTags);
+
 /// A tag of `addTag` or `removeTag`: `CANNOT_BE_NONE` for None, as PySpark Connect's.
 fn tag_of(py: Python<'_>, tag: &Bound<'_, PyAny>) -> PyResult<String> {
     if tag.is_none() {
@@ -2352,6 +2357,20 @@ impl PySparkSession {
     #[pyo3(name = "clearTags")]
     fn clear_tags(&self) {
         self.session.clear_tags()
+    }
+
+    /// A copy of the tags of the current thread, which `pyspark.util.inheritable_thread_target`
+    /// makes when it decorates a function, as PySpark Connect's copies the `thread_local` of the
+    /// client.
+    fn _copy_thread_tags(&self) -> PySharedTags {
+        PySharedTags(self.session.copy_thread_tags())
+    }
+
+    /// Make `tags` those of the current thread, which shares them with the other threads given
+    /// them, as `pyspark.util.inheritable_thread_target` gives every thread that runs its
+    /// function the copy of the `thread_local` of the client of PySpark Connect.
+    fn _share_thread_tags(&self, tags: &PySharedTags) {
+        self.session.share_thread_tags(&tags.0)
     }
 
     /// Add local files, or `file:` URIs, as artifacts of the session, as PySpark's
