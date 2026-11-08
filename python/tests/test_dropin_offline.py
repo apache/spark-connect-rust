@@ -602,6 +602,45 @@ def test_data_types_convert_values_to_and_from_internal_as_pyspark(monkeypatch):
 
 
 
+def test_map_schemas_keep_the_metadata_edited_in_place_as_pyspark(mock_connect):
+    # As PySpark's, the schema that mapInPandas, mapInArrow and applyInPandas send is the
+    # StructType with the metadata of its fields as they are when the call is made, including
+    # an edit in place (st["a"].metadata[...] = ...) after the struct was built.
+    spark, service = mock_connect
+
+    def sent_fields(dataframe, relation_field, func_field):
+        # ExecutePlanRequest.plan=3, Plan.root=1; Relation.map_partitions=28 (MapPartitions.func
+        # =2) or group_map=31 (GroupMap.func=3); CommonInlineUserDefinedFunction.python_udf=4,
+        # PythonUDF.output_type=1, DataType.struct=21, Struct.fields=1, StructField.name=1 and
+        # metadata=4.
+        dataframe.collect()
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        relation = parse_message(parse_message(plan)[relation_field][0])
+        udf = parse_message(parse_message(relation[func_field][0])[4][0])
+        struct = parse_message(parse_message(udf[1][0])[21][0])
+        fields = [parse_message(field) for field in struct[1]]
+        return [(f[1][0].decode(), json.loads(f[4][0]) if 4 in f else {}) for f in fields]
+
+    def edited():
+        st = T.StructType([T.StructField("a", T.IntegerType()), T.StructField("b", T.StringType())])
+        st["a"].metadata["comment"] = "the a"
+        return st
+
+    def added():
+        st = T.StructType().add("a", T.IntegerType()).add("b", T.StringType())
+        st["a"].metadata["comment"] = "the a"
+        return st
+
+    df = spark.range(1)
+    expected = [("a", {"comment": "the a"}), ("b", {})]
+    assert sent_fields(df.mapInPandas(lambda it: it, edited()), 28, 2) == expected
+    assert sent_fields(df.mapInArrow(lambda it: it, edited()), 28, 2) == expected
+    grouped = df.groupBy("id")
+    assert sent_fields(grouped.applyInPandas(lambda pdf: pdf, edited()), 31, 3) == expected
+    assert sent_fields(df.mapInPandas(lambda it: it, added()), 28, 2) == expected
+    assert sent_fields(grouped.applyInPandas(lambda pdf: pdf, added()), 31, 3) == expected
+
+
 def test_datatype_eq_and_hash_match_pyspark():
     cases = _eq_cases()
     left = [f() for f in cases]
