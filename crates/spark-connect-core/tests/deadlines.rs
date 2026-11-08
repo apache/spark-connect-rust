@@ -155,7 +155,7 @@ impl Fixture {
                 .unwrap();
         });
         let builder = ChannelBuilder::parse(&format!(
-            "sc://{address}/;user_id=transport-user;token=fixture-token"
+            "sc://{address}/;user_id=transport-user;token=fixture-token;session_id=00000000-0000-4000-8000-000000000001"
         ))
         .unwrap();
         let mut client = bounded(SparkConnectClient::connect(&builder))
@@ -211,6 +211,8 @@ fn execute_request() -> ExecutePlanRequest {
 
 fn response(id: &str, complete: bool) -> ExecutePlanResponse {
     ExecutePlanResponse {
+        // The server echoes the session ID of the request.
+        session_id: execute_request().session_id,
         response_id: id.into(),
         response_type: complete.then_some(ResponseType::ResultComplete(ResultComplete {})),
         ..Default::default()
@@ -790,4 +792,35 @@ impl UnaryService<ConfigRequest> for Config {
             unreachable!("a stalled call never completes")
         })
     }
+}
+
+#[tokio::test]
+async fn reattach_of_a_stream_whose_client_was_closed_raises_no_active_session() {
+    // As the reference: an execution that is still read when its session is stopped, and that
+    // needs a reattach, raises NO_ACTIVE_SESSION from the stub of the closed client, instead of
+    // reattaching. The stream ends with that error, and the server gets no reattach.
+    let fixture = Fixture::start(
+        vec![streamed(vec![response("r1", false)])],
+        vec![streamed(vec![response("r2", true)])],
+        quick_retries(),
+    )
+    .await;
+    let mut stream = bounded(fixture.client.execute_plan_reattachable(execute_request()))
+        .await
+        .unwrap();
+    let first = bounded(stream.message()).await.unwrap().unwrap();
+    assert_eq!(first.response_id, "r1");
+
+    // The stream ends after r1, so the next read reattaches, which the closed client refuses.
+    fixture.client.close();
+    let error = bounded(stream.message()).await.unwrap_err();
+    assert_eq!(
+        error.get_condition().as_deref(),
+        Some("NO_ACTIVE_SESSION"),
+        "{error:?}"
+    );
+    assert!(bounded(stream.message()).await.unwrap().is_none());
+
+    assert!(fixture.state.reattaches.lock().unwrap().is_empty());
+    assert_eq!(*fixture.state.executes.lock().unwrap(), 1);
 }

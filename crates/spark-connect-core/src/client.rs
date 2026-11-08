@@ -27,6 +27,7 @@ use crate::channel::{ChannelBuilder, GRPC_MAX_MESSAGE_LENGTH_DEFAULT};
 use crate::error::{Result, SparkError, SparkErrorKind};
 use crate::reattach::ExecutePlanResponseReattachableIterator;
 use crate::retries::{RetryPolicy, RetryPolicyState};
+use crate::thread_entries::forget_when_thread_ends;
 
 /// How long to wait for the lazy gRPC channel to become ready before surfacing a
 /// retriable `UNAVAILABLE`. tonic's lazy channel waits indefinitely for an unreachable
@@ -186,6 +187,20 @@ async fn within_deadline<T>(
     }
 }
 
+/// The server-side session ID observed by a client, from its shared slot.
+fn observed_of(slot: &std::sync::Mutex<Option<String>>) -> Option<String> {
+    slot.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// The error of a response that does not match this session, as PySpark's
+/// `PySparkAssertionError`, which has no error class.
+fn assertion_error(message: String) -> SparkError {
+    SparkError {
+        kind: SparkErrorKind::AssertionError,
+        ..SparkError::connect_msg(message)
+    }
+}
+
 /// The error class of `status` when the server does not know the operation of a reattach, or
 /// its session, which the reference reads alike: the initial ExecutePlan never reached the
 /// server, unless a response was read already.
@@ -255,6 +270,14 @@ pub struct SparkConnectClient {
     /// Whether the client is closed, shared by its clones: its RPCs then raise
     /// `NO_ACTIVE_SESSION`, as PySpark's `SparkConnectClient._stub` does once it is closed.
     closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The server-side session ID that the first response carried, shared by the clones of the
+    /// client, as PySpark's `_server_session_id`. Each request sends it as the observed ID, and
+    /// each response is checked against it.
+    server_session_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// Whether the client tracks its server-side session: the observed ID of its requests, the
+    /// check of the IDs of its responses, and its close when the server reports that the session
+    /// changed. See [`SparkConnectClient::set_session_tracking`].
+    session_tracking: bool,
 }
 
 /// The user context extensions of a client, as PySpark's `SparkConnectClient` keeps them: those
@@ -264,6 +287,12 @@ pub struct SparkConnectClient {
 struct UserContextExtensions {
     global: Vec<(String, prost_types::Any)>,
     by_thread: std::collections::HashMap<std::thread::ThreadId, Vec<(String, prost_types::Any)>>,
+}
+
+/// Forget the extensions of a thread that ends, as PySpark's `thread_local` is freed with its
+/// thread.
+fn forget_thread_extensions(extensions: &mut UserContextExtensions, thread: std::thread::ThreadId) {
+    extensions.by_thread.remove(&thread);
 }
 
 impl SparkConnectClient {
@@ -286,7 +315,7 @@ impl SparkConnectClient {
         // client can be constructed without a live server (e.g. in unit tests that only
         // build request protos).
         let endpoint = builder.endpoint();
-        let channel = if builder.use_ssl() {
+        let channel = if builder.secure() {
             // TLS connection with native root certificates
             // `with_native_roots()` is required: tonic >=0.11 does NOT load a trust store
             // from the `tls-native-roots` feature alone, so without this the TLS handshake
@@ -323,24 +352,9 @@ impl SparkConnectClient {
         // excluded from `metadata()`, so attach it explicitly here; this then propagates
         // to every request via `_attach_metadata` and the reattach stream.
         if let Some(tok) = builder.token() {
-            // Never send the bearer token in cleartext. The scheme above is chosen from
-            // `use_ssl()` alone, so without this guard `sc://host/;token=SECRET` (no
-            // `use_ssl`) would ship `Authorization: Bearer SECRET` over plain HTTP. The
-            // reference client cannot reach that state: `toChannel` sends a token only
-            // over `ssl_channel_credentials()` or, for `localhost`, the loopback
-            // `local_channel_credentials()`, and grpcio refuses call credentials on an
-            // insecure channel outright. Mirror that by requiring TLS for a token unless
-            // the endpoint is loopback; fail loudly rather than downgrade silently.
-            if !builder.use_ssl() && !builder.is_loopback() {
-                // A misconfigured connection string is a value error (surfaces as
-                // `PySparkValueError`), not a generic runtime failure.
-                return Err(SparkError::value_msg(format!(
-                    "Refusing to send the authentication token to '{}' over an insecure \
-                     connection. Set 'use_ssl=true' in the connection string to enable TLS \
-                     (a token is only allowed without TLS when connecting to localhost).",
-                    builder.host()
-                )));
-            }
+            // The token is sent over TLS, or over plaintext only on a loopback host: the
+            // scheme above is `builder.secure()`, which is TLS for a token on any other
+            // host, as the reference client does.
             metadata.push((AUTHORIZATION_HEADER.to_string(), format!("Bearer {}", tok)));
         }
 
@@ -348,7 +362,7 @@ impl SparkConnectClient {
             channel,
             stub,
             session_id,
-            user_id: builder.user_id().map(String::from),
+            user_id: builder.user_id().map(String::from).or_else(default_user_id),
             metadata,
             user_agent,
             user_context_extensions: Default::default(),
@@ -356,6 +370,8 @@ impl SparkConnectClient {
             rpc_deadlines: RpcDeadlines::default(),
             execute_plan_hook: Default::default(),
             closed: Default::default(),
+            server_session_id: Default::default(),
+            session_tracking: true,
         })
     }
 
@@ -382,6 +398,8 @@ impl SparkConnectClient {
             rpc_deadlines: self.rpc_deadlines.clone(),
             execute_plan_hook: std::sync::Arc::clone(&self.execute_plan_hook),
             closed: Default::default(),
+            server_session_id: Default::default(),
+            session_tracking: self.session_tracking,
         }
     }
 
@@ -410,6 +428,74 @@ impl SparkConnectClient {
         Ok(())
     }
 
+    /// The server-side session ID that the responses have carried, if one has.
+    fn observed_server_session_id(&self) -> Option<String> {
+        observed_of(&self.server_session_id)
+    }
+
+    /// Sets the observed server-side session ID of a request, once a response has set it, as
+    /// PySpark's requests do.
+    fn observe_on(&self, observed: &mut Option<String>) {
+        if !self.session_tracking {
+            return;
+        }
+        if let Some(id) = self.observed_server_session_id() {
+            *observed = Some(id);
+        }
+    }
+
+    /// Checks the IDs of a response, as PySpark's `_verify_response_integrity`: the session ID
+    /// must be this session's. The first non-empty server-side session ID that a response
+    /// carries is observed; a later one that differs closes the client, as the server restarted,
+    /// and is an error. An empty ID is neither observed nor checked. PySpark keeps an empty
+    /// first ID and then raises for a later non-empty one.
+    #[allow(clippy::result_large_err)] // SparkError is large; changing the type would break the API
+    fn verify_response(&self, session_id: &str, server_side_session_id: &str) -> Result<()> {
+        if !self.session_tracking {
+            return Ok(());
+        }
+        // An empty session ID is none: the server leaves both IDs unset in some responses, such
+        // as those of FetchErrorDetails, so only another session's ID is a mismatch.
+        if !session_id.is_empty() && session_id != self.session_id {
+            return Err(assertion_error(format!(
+                "Received incorrect session identifier for request:{session_id} != {}",
+                self.session_id
+            )));
+        }
+        let mut observed = self
+            .server_session_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match observed.clone() {
+            None if !server_side_session_id.is_empty() => {
+                *observed = Some(server_side_session_id.to_string());
+            }
+            None => {}
+            Some(old) if !server_side_session_id.is_empty() && server_side_session_id != old => {
+                drop(observed);
+                self.close();
+                return Err(assertion_error(format!(
+                    "Received incorrect server side session identifier for request. Please \
+                     create a new Spark Session to reconnect. ({server_side_session_id} != {old})"
+                )));
+            }
+            Some(_) => {}
+        }
+        Ok(())
+    }
+
+    /// A gRPC failure as a [`SparkError`], which closes the client when the server reports that
+    /// the session changed, as PySpark's `_handle_rpc_error` does.
+    fn grpc_error(&self, status: tonic::Status) -> SparkError {
+        let error = SparkError::from_grpc_status(status);
+        if self.session_tracking
+            && error.get_condition().as_deref() == Some("INVALID_HANDLE.SESSION_CHANGED")
+        {
+            self.close();
+        }
+        error
+    }
+
     /// Set the hook of the executions of this client and of its clones, or clear it.
     pub fn set_execute_plan_hook(&self, hook: Option<ExecutePlanHook>) {
         *self
@@ -430,7 +516,10 @@ impl SparkConnectClient {
         let Some(hook) = hook else {
             return Ok(request);
         };
+        crate::runtime::check_callback_depth()?;
         let operation_id = request.operation_id.clone();
+        // The hook may run a query of its own, which runs the hooks too.
+        let _callback = crate::runtime::CallbackGuard::enter();
         let mut request = hook(request)?;
         request.operation_id = operation_id;
         Ok(request)
@@ -445,11 +534,17 @@ impl SparkConnectClient {
     /// and return its ID, as PySpark's `add_threadlocal_user_context_extension`.
     pub fn add_threadlocal_user_context_extension(&self, extension: prost_types::Any) -> String {
         let id = format!("threadlocal_{}", Uuid::new_v4());
-        self.user_context_extensions
+        let mut extensions = self
+            .user_context_extensions
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|e| e.into_inner());
+        let thread = std::thread::current().id();
+        if !extensions.by_thread.contains_key(&thread) {
+            forget_when_thread_ends(&self.user_context_extensions, forget_thread_extensions);
+        }
+        extensions
             .by_thread
-            .entry(std::thread::current().id())
+            .entry(thread)
             .or_default()
             .push((id.clone(), extension));
         id
@@ -547,6 +642,19 @@ impl SparkConnectClient {
         self.retry_policy = policy;
     }
 
+    /// Turn the tracking of the server-side session on (the default) or off. With it on, the
+    /// requests carry the server-side session ID observed in the responses, each response must
+    /// be of this session and of that server-side session, and an
+    /// `INVALID_HANDLE.SESSION_CHANGED` error closes the client, as PySpark's
+    /// `SparkConnectClient` does.
+    ///
+    /// The transport-injection stub turns it off. The requests that it sends are of the
+    /// reference client's session, not of its own, and that client tracks its session itself,
+    /// over the grpcio stub that does no tracking.
+    pub fn set_session_tracking(&mut self, enabled: bool) {
+        self.session_tracking = enabled;
+    }
+
     /// Override the per-RPC deadlines of this client's calls, as the `rpc_deadlines` of
     /// PySpark's `SparkConnectClient`.
     pub fn set_rpc_deadlines(&mut self, deadlines: RpcDeadlines) {
@@ -568,6 +676,7 @@ impl SparkConnectClient {
         self.ensure_open()?;
         self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
+        self.observe_on(&mut request.client_observed_server_side_session_id);
         let request = self.hooked(request)?;
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
@@ -628,6 +737,7 @@ impl SparkConnectClient {
     ) -> Result<Streaming<ExecutePlanResponse>> {
         self.ensure_open()?;
         self.fill_user_context(&mut request.user_context);
+        self.observe_on(&mut request.client_observed_server_side_session_id);
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
         match self.stub.clone().reattach_execute(req).await {
@@ -645,10 +755,15 @@ impl SparkConnectClient {
     ) -> Result<ReleaseExecuteResponse> {
         self.ensure_open()?;
         self.fill_user_context(&mut request.user_context);
+        self.observe_on(&mut request.client_observed_server_side_session_id);
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
         match self.stub.clone().release_execute(req).await {
-            Ok(response) => Ok(response.into_inner()),
+            Ok(response) => {
+                let response = response.into_inner();
+                self.verify_response(&response.session_id, &response.server_side_session_id)?;
+                Ok(response)
+            }
             Err(status) => Err(self.error_from_status(status).await),
         }
     }
@@ -691,18 +806,23 @@ impl SparkConnectClient {
         self.ensure_open()?;
         self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
-        self.with_retry(|| {
-            let deadline = self.rpc_deadlines.analyze_plan;
-            let mut req = with_deadline(Request::new(request.clone()), deadline);
-            self._attach_metadata(&mut req);
-            let mut stub = self.stub.clone();
-            async move {
-                within_deadline(deadline, stub.analyze_plan(req))
-                    .await
-                    .map(Response::into_inner)
-            }
-        })
-        .await
+        let response = self
+            .with_retry(|| {
+                let deadline = self.rpc_deadlines.analyze_plan;
+                let mut request = request.clone();
+                self.observe_on(&mut request.client_observed_server_side_session_id);
+                let mut req = with_deadline(Request::new(request), deadline);
+                self._attach_metadata(&mut req);
+                let mut stub = self.stub.clone();
+                async move {
+                    within_deadline(deadline, stub.analyze_plan(req))
+                        .await
+                        .map(Response::into_inner)
+                }
+            })
+            .await?;
+        self.verify_response(&response.session_id, &response.server_side_session_id)?;
+        Ok(response)
     }
 
     /// Run a unary RPC closure with exponential-backoff retry on transient failures.
@@ -748,6 +868,7 @@ impl SparkConnectClient {
         // user context of this request, and the request of the hook, as PySpark's iterator
         // is of the request that the hooks return.
         self.fill_user_context(&mut request.user_context);
+        self.observe_on(&mut request.client_observed_server_side_session_id);
         let request = self.hooked(request)?;
         let iter = ExecutePlanResponseReattachableIterator::new(request);
         let start = iter.request().clone();
@@ -803,12 +924,16 @@ impl SparkConnectClient {
         self.ensure_open()?;
         self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
+        self.observe_on(&mut request.client_observed_server_side_session_id);
         let deadline = self.rpc_deadlines.fetch_error_details;
         let mut req = with_deadline(Request::new(request), deadline);
         self._attach_metadata(&mut req);
         let resp = within_deadline(deadline, self.stub.clone().fetch_error_details(req)).await;
-        resp.map(Response::into_inner)
-            .map_err(SparkError::from_grpc_status)
+        let response = resp
+            .map(Response::into_inner)
+            .map_err(|status| self.grpc_error(status))?;
+        self.verify_response(&response.session_id, &response.server_side_session_id)?;
+        Ok(response)
     }
 
     /// The error for a failed RPC, as `SparkConnectClient._handle_rpc_error` raises it. An
@@ -817,7 +942,7 @@ impl SparkConnectClient {
     /// `spark.sql.connect.serverStacktrace.enabled` or `spark.sql.pyspark.jvmStacktrace.enabled`
     /// is true. As the error is raised either way, failing to read those is not.
     pub async fn error_from_status(&self, status: tonic::Status) -> SparkError {
-        let error = SparkError::from_grpc_status(status);
+        let error = self.grpc_error(status);
         let Some(server) = &error.server else {
             return error;
         };
@@ -842,13 +967,18 @@ impl SparkConnectClient {
             }),
             ..Default::default()
         };
+        let mut request = request;
+        self.observe_on(&mut request.client_observed_server_side_session_id);
         let deadline = self.rpc_deadlines.fetch_error_details;
         let mut req = with_deadline(Request::new(request), deadline);
         self._attach_metadata(&mut req);
         let response = within_deadline(deadline, self.stub.clone().fetch_error_details(req))
             .await
+            .ok()?
+            .into_inner();
+        self.verify_response(&response.session_id, &response.server_side_session_id)
             .ok()?;
-        Some(response.into_inner())
+        Some(response)
     }
 
     /// Whether the message of an error that the server raised shows the server's stack
@@ -885,6 +1015,8 @@ impl SparkConnectClient {
             }),
             ..Default::default()
         };
+        let mut request = request;
+        self.observe_on(&mut request.client_observed_server_side_session_id);
         let deadline = self.rpc_deadlines.config;
         let mut req = with_deadline(Request::new(request), deadline);
         self._attach_metadata(&mut req);
@@ -892,6 +1024,8 @@ impl SparkConnectClient {
             .await
             .ok()?
             .into_inner();
+        self.verify_response(&response.session_id, &response.server_side_session_id)
+            .ok()?;
         response.pairs.into_iter().next()?.value
     }
 
@@ -902,18 +1036,23 @@ impl SparkConnectClient {
         self.ensure_open()?;
         self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
-        self.with_retry(|| {
-            let deadline = self.rpc_deadlines.config;
-            let mut req = with_deadline(Request::new(request.clone()), deadline);
-            self._attach_metadata(&mut req);
-            let mut stub = self.stub.clone();
-            async move {
-                within_deadline(deadline, stub.config(req))
-                    .await
-                    .map(Response::into_inner)
-            }
-        })
-        .await
+        let response = self
+            .with_retry(|| {
+                let deadline = self.rpc_deadlines.config;
+                let mut request = request.clone();
+                self.observe_on(&mut request.client_observed_server_side_session_id);
+                let mut req = with_deadline(Request::new(request), deadline);
+                self._attach_metadata(&mut req);
+                let mut stub = self.stub.clone();
+                async move {
+                    within_deadline(deadline, stub.config(req))
+                        .await
+                        .map(Response::into_inner)
+                }
+            })
+            .await?;
+        self.verify_response(&response.session_id, &response.server_side_session_id)?;
+        Ok(response)
     }
 
     /// Interrupt running operations on this session.
@@ -923,18 +1062,23 @@ impl SparkConnectClient {
         self.ensure_open()?;
         self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
-        self.with_retry(|| {
-            let deadline = self.rpc_deadlines.interrupt;
-            let mut req = with_deadline(Request::new(request.clone()), deadline);
-            self._attach_metadata(&mut req);
-            let mut stub = self.stub.clone();
-            async move {
-                within_deadline(deadline, stub.interrupt(req))
-                    .await
-                    .map(Response::into_inner)
-            }
-        })
-        .await
+        let response = self
+            .with_retry(|| {
+                let deadline = self.rpc_deadlines.interrupt;
+                let mut request = request.clone();
+                self.observe_on(&mut request.client_observed_server_side_session_id);
+                let mut req = with_deadline(Request::new(request), deadline);
+                self._attach_metadata(&mut req);
+                let mut stub = self.stub.clone();
+                async move {
+                    within_deadline(deadline, stub.interrupt(req))
+                        .await
+                        .map(Response::into_inner)
+                }
+            })
+            .await?;
+        self.verify_response(&response.session_id, &response.server_side_session_id)?;
+        Ok(response)
     }
 
     /// Get configuration values from the session.
@@ -1240,7 +1384,9 @@ impl SparkConnectClient {
         let response = self
             .with_retry(|| {
                 let deadline = self.rpc_deadlines.clone_session;
-                let mut req = with_deadline(Request::new(request.clone()), deadline);
+                let mut request = request.clone();
+                self.observe_on(&mut request.client_observed_server_side_session_id);
+                let mut req = with_deadline(Request::new(request), deadline);
                 self._attach_metadata(&mut req);
                 let mut stub = self.stub.clone();
                 async move {
@@ -1250,6 +1396,7 @@ impl SparkConnectClient {
                 }
             })
             .await?;
+        self.verify_response(&response.session_id, &response.server_side_session_id)?;
         if let Some(requested) = new_session_id {
             if response.new_session_id != requested {
                 return Err(SparkError::connect_msg(format!(
@@ -1275,7 +1422,10 @@ impl SparkConnectClient {
         let mut req = with_deadline(Request::new(request), deadline);
         self._attach_metadata(&mut req);
         match within_deadline(deadline, self.stub.clone().release_session(req)).await {
-            Ok(_) => Ok(()),
+            Ok(response) => {
+                let response = response.into_inner();
+                self.verify_response(&response.session_id, &response.server_side_session_id)
+            }
             Err(status) => Err(self.error_from_status(status).await),
         }
     }
@@ -1339,9 +1489,19 @@ impl SparkConnectClient {
             .cloned()
             .collect();
         let (blobs, names, unique) = (&blobs, &names, &unique);
-        let uploaded = self
+        // The IDs of the status response, checked once the retries are done, as its own.
+        let (status_ids, uploaded) = self
             .with_retry(|| async move {
-                let cached = self.artifact_status_rpc(unique).await?;
+                let status = self.artifact_status_rpc(unique).await?;
+                let status_ids = (
+                    status.session_id.clone(),
+                    status.server_side_session_id.clone(),
+                );
+                let cached: std::collections::HashMap<String, bool> = status
+                    .statuses
+                    .into_iter()
+                    .map(|(name, status)| (name, status.exists))
+                    .collect();
                 let mut seen = HashSet::new();
                 let mut artifacts = Vec::new();
                 for (blob, name) in blobs.iter().zip(names) {
@@ -1350,16 +1510,18 @@ impl SparkConnectClient {
                     }
                 }
                 if artifacts.is_empty() {
-                    return Ok(None);
+                    return Ok((status_ids, None));
                 }
                 let expected: HashSet<String> =
                     artifacts.iter().map(|(name, _)| name.clone()).collect();
                 let requests = cache_artifact_requests(self.session_id.clone(), artifacts);
                 let response = self.add_artifacts_rpc(requests).await?;
-                Ok(Some((response, expected)))
+                Ok((status_ids, Some((response, expected))))
             })
             .await?;
+        self.verify_response(&status_ids.0, &status_ids.1)?;
         if let Some((response, expected)) = uploaded {
+            self.verify_response(&response.session_id, &response.server_side_session_id)?;
             check_artifact_upload(response, Some(&expected))?;
         }
         Ok(hashes)
@@ -1404,7 +1566,10 @@ impl SparkConnectClient {
             // A read that failed ended the frames early, whatever the RPC answered.
             take_frame_failure(&failure)?;
             match result {
-                Ok(response) => return check_artifact_upload(response, None),
+                Ok(response) => {
+                    self.verify_response(&response.session_id, &response.server_side_session_id)?;
+                    return check_artifact_upload(response, None);
+                }
                 Err(status) => {
                     if self.retry_policy.can_retry(&status) {
                         if let Some(wait_ms) = state.next_attempt(None) {
@@ -1426,9 +1591,11 @@ impl SparkConnectClient {
     ) -> std::result::Result<spark_connect_proto::AddArtifactsResponse, tonic::Status> {
         let user_context = self.new_user_context();
         let client_type = self.user_agent.clone();
+        let observed = std::sync::Arc::clone(&self.server_session_id);
         let requests = requests.map(move |mut request| {
             request.user_context = Some(user_context.clone());
             request.client_type = Some(client_type.clone());
+            request.client_observed_server_side_session_id = observed_of(&observed);
             request
         });
         let deadline = self.rpc_deadlines.add_artifacts;
@@ -1449,33 +1616,37 @@ impl SparkConnectClient {
         self.ensure_open()?;
         let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
         match self.artifact_status_rpc(&names).await {
-            Ok(statuses) => Ok(statuses),
+            Ok(response) => {
+                self.verify_response(&response.session_id, &response.server_side_session_id)?;
+                Ok(response
+                    .statuses
+                    .into_iter()
+                    .map(|(name, status)| (name, status.exists))
+                    .collect())
+            }
             Err(status) => Err(self.error_from_status(status).await),
         }
     }
 
-    /// The ArtifactStatus call of `names`, once: whether each artifact exists.
+    /// The ArtifactStatus call of `names`, once: the response, which says whether each artifact
+    /// exists.
     async fn artifact_status_rpc(
         &self,
         names: &[String],
-    ) -> std::result::Result<std::collections::HashMap<String, bool>, tonic::Status> {
+    ) -> std::result::Result<spark_connect_proto::ArtifactStatusesResponse, tonic::Status> {
         let mut request = ArtifactStatusesRequest::default();
         request.session_id = self.session_id.clone();
         request.user_context = Some(self.new_user_context());
         request.client_type = Some(self.user_agent.clone());
         request.names = names.to_vec();
+        self.observe_on(&mut request.client_observed_server_side_session_id);
 
         let deadline = self.rpc_deadlines.artifact_status;
         let mut req = with_deadline(Request::new(request), deadline);
         self._attach_metadata(&mut req);
-        let response = within_deadline(deadline, self.stub.clone().artifact_status(req))
-            .await?
-            .into_inner();
-        Ok(response
-            .statuses
-            .into_iter()
-            .map(|(name, status)| (name, status.exists))
-            .collect())
+        within_deadline(deadline, self.stub.clone().artifact_status(req))
+            .await
+            .map(Response::into_inner)
     }
 
     /// Attach metadata headers to a request.
@@ -1536,6 +1707,21 @@ pub struct ReattachableResponseStream {
     released: bool,
 }
 
+/// The user ID of a connection string that does not set one: `SPARK_USER`, else `USER`, as
+/// `SparkConnectClient.__init__` in PySpark takes it.
+fn default_user_id() -> Option<String> {
+    user_id_from_env(std::env::var("SPARK_USER"), std::env::var("USER"))
+}
+
+/// The user ID from the environment, as `os.getenv("SPARK_USER", os.getenv("USER"))`: `USER`
+/// is only read when `SPARK_USER` is unset. An empty value is no user ID.
+fn user_id_from_env(
+    spark_user: std::result::Result<String, std::env::VarError>,
+    user: std::result::Result<String, std::env::VarError>,
+) -> Option<String> {
+    spark_user.or(user).ok().filter(|u| !u.is_empty())
+}
+
 impl SparkConnectClient {
     /// The gRPC metadata of every request about an execution.
     fn execution_metadata(&self) -> MetadataMap {
@@ -1562,7 +1748,8 @@ impl SparkConnectClient {
     /// client's retry policy. Like the reference client, a failure is only logged: the server
     /// removes an execution that is never released once it has been detached for
     /// `spark.connect.execute.manager.detachedTimeout`.
-    fn spawn_release(&self, metadata: MetadataMap, request: ReleaseExecuteRequest) {
+    fn spawn_release(&self, metadata: MetadataMap, mut request: ReleaseExecuteRequest) {
+        self.observe_on(&mut request.client_observed_server_side_session_id);
         let mut stub = self.stub.clone();
         let policy = self.retry_policy.clone();
         let release = async move {
@@ -1644,6 +1831,12 @@ impl ReattachableResponseStream {
             };
             match next {
                 Ok(Some(resp)) => {
+                    if let Err(error) = self
+                        .client
+                        .verify_response(&resp.session_id, &resp.server_side_session_id)
+                    {
+                        return Err(self.fail(error));
+                    }
                     self.iter.set_last_response_id(&resp).await;
                     if self.iter.is_completed().await {
                         self.done = true;
@@ -1712,6 +1905,11 @@ impl ReattachableResponseStream {
         retry_exception_since: &mut Option<std::time::Instant>,
     ) -> Result<()> {
         loop {
+            // As the reference's `_stub`: once the client is closed (its session stopped), the
+            // reattach and the ExecutePlan sent again raise NO_ACTIVE_SESSION, and the stream ends.
+            if let Err(error) = self.client.ensure_open() {
+                return Err(self.fail(error));
+            }
             let opened = if self.execute_again {
                 self.open_execute_plan_again().await
             } else {
@@ -2051,18 +2249,96 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_token_without_ssl_to_remote_host_is_rejected() {
-        // A token over a non-loopback host without `use_ssl=true` would ship the bearer
-        // credential in cleartext; the client must refuse rather than downgrade silently.
-        let builder = ChannelBuilder::parse("sc://example.com/;token=SECRET").unwrap();
-        match SparkConnectClient::connect(&builder).await {
-            Ok(_) => panic!("expected a token over cleartext to a remote host to be rejected"),
-            Err(e) => assert!(
-                e.to_string().contains("use_ssl=true"),
-                "expected the error to point at use_ssl=true, got: {e}"
-            ),
+    /// Connects a client on a runtime of its own, for the tests that set the environment.
+    /// The channel is lazy, so no server is dialed.
+    fn connect_blocking(url: &str) -> SparkConnectClient {
+        let builder = ChannelBuilder::parse(url).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime
+            .block_on(SparkConnectClient::connect(&builder))
+            .unwrap_or_else(|e| panic!("{url} should connect, got: {e}"))
+    }
+
+    fn has_bearer(client: &SparkConnectClient, token: &str) -> bool {
+        let bearer = format!("Bearer {token}");
+        client
+            .metadata
+            .iter()
+            .any(|(k, v)| k == "authorization" && *v == bearer)
+    }
+
+    #[test]
+    fn test_token_without_ssl_to_remote_host_is_sent_over_tls() {
+        // A token over a remote host is not refused: its channel is TLS, which the
+        // reference client also uses for a token on any host but localhost.
+        let _env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+        for url in [
+            "sc://example.com/;token=SECRET",
+            "sc://10.0.0.1:443/;token=SECRET",
+        ] {
+            assert!(ChannelBuilder::parse(url).unwrap().secure(), "{url}");
+            let client = connect_blocking(url);
+            assert!(
+                has_bearer(&client, "SECRET"),
+                "{url}: {:?}",
+                client.metadata
+            );
         }
+    }
+
+    #[test]
+    fn test_token_of_the_environment_to_remote_host_is_sent_over_tls() {
+        let env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", Some("ENV"))]);
+        assert!(ChannelBuilder::parse("sc://example.com").unwrap().secure());
+        let client = connect_blocking("sc://example.com");
+        assert!(has_bearer(&client, "ENV"), "{:?}", client.metadata);
+        drop(env);
+        // Without a token, nothing is attached.
+        let _none = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+        let client = connect_blocking("sc://example.com");
+        assert!(!has_bearer(&client, "ENV"), "{:?}", client.metadata);
+    }
+
+    #[test]
+    fn test_user_id_from_the_environment_as_pyspark() {
+        let some = |s: &str| Ok::<String, std::env::VarError>(s.to_string());
+        let unset = || Err::<String, std::env::VarError>(std::env::VarError::NotPresent);
+        assert_eq!(
+            user_id_from_env(some("alice"), some("bob")),
+            Some("alice".into())
+        );
+        assert_eq!(user_id_from_env(unset(), some("bob")), Some("bob".into()));
+        // A `SPARK_USER` that is set to an empty string is the user ID, so `USER` is not read.
+        assert_eq!(user_id_from_env(some(""), some("bob")), None);
+        assert_eq!(user_id_from_env(unset(), some("")), None);
+        assert_eq!(user_id_from_env(unset(), unset()), None);
+    }
+
+    #[test]
+    fn test_user_id_of_the_connection_then_the_environment() {
+        // The connection string's user_id, else SPARK_USER, else USER, as PySpark does.
+        let user_id = |url: &str, spark_user: Option<&str>, user: Option<&str>| {
+            let _env = crate::channel::set_env(&[("SPARK_USER", spark_user), ("USER", user)]);
+            let client = connect_blocking(url);
+            let id = client.user_id().map(String::from);
+            id
+        };
+        assert_eq!(
+            user_id("sc://localhost/;user_id=url", Some("alice"), Some("bob")).as_deref(),
+            Some("url")
+        );
+        assert_eq!(
+            user_id("sc://localhost", Some("alice"), Some("bob")).as_deref(),
+            Some("alice")
+        );
+        assert_eq!(
+            user_id("sc://localhost", None, Some("bob")).as_deref(),
+            Some("bob")
+        );
+        assert_eq!(user_id("sc://localhost", None, None), None);
     }
 
     #[tokio::test]
@@ -2175,5 +2451,62 @@ mod tests {
             ("spark.sql.adaptive.enabled", None),
         ];
         let _result = client.get_config_with_defaults(&pairs);
+    }
+
+    #[tokio::test]
+    async fn threadlocal_user_context_extensions_of_finished_threads_are_forgotten() {
+        let builder = ChannelBuilder::parse("sc://localhost").unwrap();
+        let client = std::sync::Arc::new(SparkConnectClient::connect(&builder).await.unwrap());
+        for _ in 0..1000 {
+            let client = client.clone();
+            std::thread::spawn(move || {
+                client.add_threadlocal_user_context_extension(prost_types::Any::default());
+            })
+            .join()
+            .unwrap();
+        }
+        let entries = client
+            .user_context_extensions
+            .lock()
+            .unwrap()
+            .by_thread
+            .len();
+        assert_eq!(entries, 0);
+    }
+
+    #[tokio::test]
+    async fn threadlocal_user_context_extensions_of_a_living_thread_stay_until_it_ends() {
+        let builder = ChannelBuilder::parse("sc://localhost").unwrap();
+        let client = std::sync::Arc::new(SparkConnectClient::connect(&builder).await.unwrap());
+        let (added_tx, added_rx) = std::sync::mpsc::channel();
+        let (end_tx, end_rx) = std::sync::mpsc::channel::<()>();
+        let child = {
+            let client = client.clone();
+            std::thread::spawn(move || {
+                client.add_threadlocal_user_context_extension(prost_types::Any::default());
+                added_tx
+                    .send(client.threadlocal_user_context_extensions().len())
+                    .unwrap();
+                end_rx.recv().unwrap();
+            })
+        };
+        assert_eq!(added_rx.recv().unwrap(), 1);
+        assert_eq!(
+            client
+                .user_context_extensions
+                .lock()
+                .unwrap()
+                .by_thread
+                .len(),
+            1
+        );
+        end_tx.send(()).unwrap();
+        child.join().unwrap();
+        assert!(client
+            .user_context_extensions
+            .lock()
+            .unwrap()
+            .by_thread
+            .is_empty());
     }
 }

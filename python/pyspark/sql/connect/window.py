@@ -15,6 +15,10 @@
 # limitations under the License.
 #
 """Window / WindowSpec under the connect import path."""
+from pyspark import cloudpickle as _cloudpickle
+from pyspark.sql.connect import _window_reduce
 from pyspark.sql.window import Window, WindowSpec
 
 __all__ = ["Window", "WindowSpec"]
+
+_cloudpickle.register_pickle_by_value(_window_reduce)

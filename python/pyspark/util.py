@@ -141,7 +141,9 @@ def inheritable_thread_target(f: Union[Callable, "SparkSession"]) -> Callable:
     >>> Thread(target=inheritable_thread_target(session)(target_func)).start()  # doctest: +SKIP
     """
     # As PySpark's of Spark Connect, the only mode of this client: `f` is the session, whose
-    # tags, those of this thread, the thread inherits, with the session as its active one.
+    # tags, those of this thread when the function is decorated, the threads of the function
+    # inherit, with the session as their active one. As PySpark's, which gives each thread the
+    # one copy of the `thread_local` of the client, the threads share that copy of the tags.
     from pyspark.sql import SparkSession
 
     session = f
@@ -150,7 +152,7 @@ def inheritable_thread_target(f: Union[Callable, "SparkSession"]) -> Callable:
         assert isinstance(session, SparkSession), (
             "f is expected to be SparkSession for spark connect"
         )
-        tags = set(session.getTags())
+        tags = session._copy_thread_tags()
 
         @functools.wraps(ff)
         def inner(*args: Any, **kwargs: Any) -> Any:
@@ -161,9 +163,7 @@ def inheritable_thread_target(f: Union[Callable, "SparkSession"]) -> Callable:
 
             SparkSession._set_default_and_active_session(session)
             # Set the tags of the session in the child thread.
-            session.clearTags()
-            for tag in tags:
-                session.addTag(tag)
+            session._share_thread_tags(tags)
             return ff(*args, **kwargs)
 
         return inner

@@ -140,7 +140,12 @@ fn query_name_of(name: &Bound<'_, PyAny>) -> PyResult<String> {
 /// Like PySpark's reader, the setters change this object and return it, and the
 /// reader can be used again after a read: the core reader is a consuming builder, so
 /// the setters replace the wrapped value in place and the reads work on a clone.
-#[pyclass(name = "DataStreamReader", module = "pyspark.sql.streaming.readwriter")]
+#[pyclass(
+    name = "DataStreamReader",
+    module = "pyspark.sql.streaming.readwriter",
+    weakref,
+    dict
+)]
 pub struct PyDataStreamReader {
     inner: DataStreamReader,
 }
@@ -153,6 +158,17 @@ impl PyDataStreamReader {
 
 #[pymethods]
 impl PyDataStreamReader {
+    /// Set the schema, if any, and the options of `options` that are not None, through its own
+    /// `schema` and `option`, as PySpark's `OptionUtils._set_opts`, which pandas-on-Spark calls.
+    #[pyo3(signature = (schema=None, **options))]
+    fn _set_opts(
+        slf: &Bound<'_, Self>,
+        schema: Option<Bound<'_, PyAny>>,
+        options: Option<Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<()> {
+        crate::readwriter::set_opts(slf.as_any(), schema.as_ref(), options.as_ref())
+    }
+
     /// Set the source format. As PySpark's, None unsets it, so that the server reads its
     /// default source.
     fn format<'py>(
@@ -607,7 +623,12 @@ impl PyTrigger {
 }
 
 /// Python wrapper for DataStreamWriter.
-#[pyclass(name = "DataStreamWriter", module = "pyspark.sql.streaming.readwriter")]
+#[pyclass(
+    name = "DataStreamWriter",
+    module = "pyspark.sql.streaming.readwriter",
+    weakref,
+    dict
+)]
 pub struct PyDataStreamWriter {
     inner: WriterState<DataStreamWriter>,
 }
@@ -1002,7 +1023,12 @@ fn streaming_function_command(
 }
 
 /// Python wrapper for StreamingQuery.
-#[pyclass(name = "StreamingQuery", module = "pyspark.sql.streaming.query")]
+#[pyclass(
+    name = "StreamingQuery",
+    module = "pyspark.sql.streaming.query",
+    weakref,
+    dict
+)]
 pub struct PyStreamingQuery {
     inner: StreamingQuery,
 }
@@ -1125,7 +1151,12 @@ impl PyStreamingQuery {
 }
 
 /// Python wrapper for StreamingQueryManager, of the listener bus of its session.
-#[pyclass(name = "StreamingQueryManager", module = "pyspark.sql.streaming.query")]
+#[pyclass(
+    name = "StreamingQueryManager",
+    module = "pyspark.sql.streaming.query",
+    weakref,
+    dict
+)]
 pub struct PyStreamingQueryManager {
     inner: StreamingQueryManager,
     /// The session, which the listeners get as their `spark`.
@@ -1210,10 +1241,11 @@ impl PyStreamingQueryManager {
     /// Register a client-side listener object (with onQueryStarted/Progress/Idle/
     /// Terminated callbacks). Mirrors `StreamingQueryManager.addListener`: the listener gets the
     /// session as its `spark`, and the native Rust bus of the session dispatches its events to
-    /// it; the assigned id is stashed on the listener so `removeListener` can find it. Should the
-    /// server fail to add its listener, this warns, as PySpark Connect's does.
+    /// it. The id of each registration is appended to the listener's `_rust_listener_ids`, as a
+    /// listener added twice is in the bus twice. Should the server fail to add its listener, this
+    /// warns, as PySpark Connect's does.
     fn addListener(&self, py: Python<'_>, listener: Py<PyAny>) -> PyResult<()> {
-        let session = crate::session::PySparkSession::new(self.session.clone());
+        let session = crate::session::session_object(py, &self.session)?;
         listener
             .bind(py)
             .call_method1("_set_spark_session", (session,))?;
@@ -1222,7 +1254,13 @@ impl PyStreamingQueryManager {
         });
         match crate::dataframe::detached(py, || self.inner.add_listener(adapter).map_err(Box::new))
         {
-            Ok(id) => listener.bind(py).setattr("_rust_listener_id", id),
+            Ok(id) => {
+                let bound = listener.bind(py);
+                match bound.getattr("_rust_listener_ids") {
+                    Ok(ids) => ids.call_method1("append", (id,)).map(|_| ()),
+                    Err(_) => bound.setattr("_rust_listener_ids", vec![id]),
+                }
+            }
             Err(error) => warn(
                 py,
                 format!(
@@ -1235,25 +1273,39 @@ impl PyStreamingQueryManager {
     }
 
     /// Remove a previously-added client-side listener object. Mirrors
-    /// `StreamingQueryManager.removeListener`: should the server fail to remove its listener,
-    /// this warns, and the listener stays, as PySpark Connect's does.
+    /// `StreamingQueryManager.removeListener`: one registration of the listener is removed from
+    /// the bus of the session, the first one that the bus has (as the bus removes the first
+    /// occurrence), and the others, which are of other buses, stay. Should the server fail to
+    /// remove its listener, this warns, and the listener stays, as PySpark Connect's does.
     fn removeListener(&self, py: Python<'_>, listener: Py<PyAny>) -> PyResult<()> {
         let bound = listener.bind(py);
-        if let Ok(id_obj) = bound.getattr("_rust_listener_id") {
-            let id: String = id_obj.extract()?;
-            if let Err(error) =
-                crate::dataframe::detached(py, || self.inner.remove_listener(&id).map_err(Box::new))
-            {
-                return warn(
-                    py,
-                    format!(
-                        "Failed to remove the listener because of exception: {}\n\
-                         The listener is not removed, please remove it again.",
-                        error.value(py)
-                    ),
-                );
+        let Ok(ids) = bound.getattr("_rust_listener_ids") else {
+            return Ok(());
+        };
+        let registered: Vec<String> = ids.extract()?;
+        for id in registered {
+            match crate::dataframe::detached(py, || {
+                self.inner.remove_listener_found(&id).map_err(Box::new)
+            }) {
+                Ok(false) => continue,
+                Ok(true) => {
+                    ids.call_method1("remove", (&id,))?;
+                    if ids.len()? == 0 {
+                        let _ = bound.delattr("_rust_listener_ids");
+                    }
+                    return Ok(());
+                }
+                Err(error) => {
+                    return warn(
+                        py,
+                        format!(
+                            "Failed to remove the listener because of exception: {}\n\
+                             The listener is not removed, please remove it again.",
+                            error.value(py)
+                        ),
+                    );
+                }
             }
-            let _ = bound.delattr("_rust_listener_id");
         }
         Ok(())
     }

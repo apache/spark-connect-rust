@@ -298,6 +298,12 @@ def serve(connection):
             self.ddl_string = ""
 
         def analyze(self, request, context):
+            # AnalyzePlanRequest.session_id=1, echoed as AnalyzePlanResponse.session_id=1, as the
+            # server does: the client checks it.
+            session_id = parse_message(request).get(1, [b""])[0]
+            return message_field(1, session_id) + self._analyze(request, context)
+
+        def _analyze(self, request, context):
             self.calls += 1
             self.analyze_requests.append(request)
             # base.proto: AnalyzePlanRequest.is_streaming=8; AnalyzePlanResponse.is_streaming=6,
@@ -423,7 +429,10 @@ def serve(connection):
             # ExecutePlanRequest.operation_id=6; ExecutePlanResponse.operation_id=12,
             # response_id=13, result_complete=14.
             operation_id = parse_message(request).get(6, [b""])[0]
-            header = message_field(12, operation_id)
+            # ExecutePlanRequest.session_id=1, echoed as ExecutePlanResponse.session_id=1.
+            header = message_field(1, parse_message(request).get(1, [b""])[0]) + message_field(
+                12, operation_id
+            )
             yield header + message_field(13, "r1") + self.execute_payload
             if block_result_complete and not response_gate.wait(30):
                 context.abort(

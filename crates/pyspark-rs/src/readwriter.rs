@@ -15,7 +15,12 @@ use crate::errors::ResultExt;
 /// and return it, and a reader can be used again after a read. The core reader is a
 /// consuming builder, so the setters replace the wrapped value in place and return
 /// the same Python object, and the terminal reads build their DataFrame from a clone.
-#[pyclass(name = "DataFrameReader", module = "pyspark.sql.readwriter")]
+#[pyclass(
+    name = "DataFrameReader",
+    module = "pyspark.sql.readwriter",
+    weakref,
+    dict
+)]
 pub struct PyDataFrameReader {
     inner: DataFrameReader,
 }
@@ -28,15 +33,7 @@ impl PyDataFrameReader {
     /// A copy of the current reader with per-call `**options` applied (skipping
     /// None, lowercasing bools), for a format-specific read.
     fn with_opts(&self, options: Option<&Bound<'_, PyDict>>) -> PyResult<DataFrameReader> {
-        let mut r = self.inner.clone();
-        if let Some(opts) = options {
-            for (k, v) in opts.iter() {
-                if let Some(val) = crate::coerce_option_value(&v)? {
-                    r = r.option(&k.str()?.to_string(), &val);
-                }
-            }
-        }
-        Ok(r)
+        apply_options(self.inner.clone(), options, false)
     }
 
     /// Keep the options of a format-specific read on this reader, as PySpark does
@@ -178,6 +175,27 @@ pub(crate) fn bucket_count(num_buckets: &Bound<'_, PyAny>) -> PyResult<i32> {
     }
 }
 
+/// The reader `r` with the `options` of a call, lowercasing bools. A None value unsets its
+/// option when `unset_none`, as PySpark's `DataFrameReader.option`, `options` and `load` do,
+/// and is skipped otherwise, as the `_set_opts` of its format methods does.
+fn apply_options(
+    mut r: DataFrameReader,
+    options: Option<&Bound<'_, PyDict>>,
+    unset_none: bool,
+) -> PyResult<DataFrameReader> {
+    if let Some(opts) = options {
+        for (k, v) in opts.iter() {
+            let key = k.str()?.to_string();
+            match crate::coerce_option_value(&v)? {
+                Some(val) => r = r.option(&key, &val),
+                None if unset_none => r = r.unset_option(&key),
+                None => {}
+            }
+        }
+    }
+    Ok(r)
+}
+
 /// Apply a single reader option (skipping None; bool->"true"/"false").
 fn set_opt(
     r: DataFrameReader,
@@ -247,8 +265,40 @@ fn apply_reader_schema(r: DataFrameReader, v: &Bound<'_, PyAny>) -> PyResult<Dat
     Ok(r.schema(reader_schema(v)?))
 }
 
+/// The `_set_opts` of the readers and writers, as PySpark's `OptionUtils._set_opts`: the schema of
+/// `slf`, if any, and its options of `options` that are not None, through its own `schema` and
+/// `option`, which convert them and raise their errors.
+pub(crate) fn set_opts(
+    slf: &Bound<'_, PyAny>,
+    schema: Option<&Bound<'_, PyAny>>,
+    options: Option<&Bound<'_, pyo3::types::PyDict>>,
+) -> PyResult<()> {
+    if let Some(schema) = schema.filter(|schema| !schema.is_none()) {
+        slf.call_method1("schema", (schema,))?;
+    }
+    if let Some(options) = options {
+        for (key, value) in options.iter() {
+            if !value.is_none() {
+                slf.call_method1("option", (key, value))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[pymethods]
 impl PyDataFrameReader {
+    /// Set the schema, if any, and the options of `options` that are not None, through its own
+    /// `schema` and `option`, as PySpark's `OptionUtils._set_opts`, which pandas-on-Spark calls.
+    #[pyo3(signature = (schema=None, **options))]
+    fn _set_opts(
+        slf: &Bound<'_, Self>,
+        schema: Option<Bound<'_, PyAny>>,
+        options: Option<Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<()> {
+        crate::readwriter::set_opts(slf.as_any(), schema.as_ref(), options.as_ref())
+    }
+
     /// Set the source format (e.g. "parquet", "json", "csv"). As PySpark's, None unsets it, so
     /// that the server reads its default source.
     fn format<'py>(mut slf: PyRefMut<'py, Self>, source: Option<&str>) -> PyRefMut<'py, Self> {
@@ -269,35 +319,28 @@ impl PyDataFrameReader {
         Ok(slf)
     }
 
-    /// Set a single read option. `None` leaves the option unset (not the string
-    /// "None"); booleans lowercase to "true"/"false" (reference `to_str` semantics).
+    /// Set a single read option. `None` unsets the option, as PySpark's does (not the
+    /// string "None"); booleans lowercase to "true"/"false" (reference `to_str` semantics).
     fn option<'py>(
         mut slf: PyRefMut<'py, Self>,
         key: &str,
         value: &Bound<'_, PyAny>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        if let Some(v) = crate::coerce_option_value(value)? {
-            slf.inner = slf.inner.clone().option(key, &v);
-        }
+        slf.inner = match crate::coerce_option_value(value)? {
+            Some(v) => slf.inner.clone().option(key, &v),
+            None => slf.inner.clone().unset_option(key),
+        };
         Ok(slf)
     }
 
     /// Set multiple read options. Mirrors reference `DataFrameReader.options(**options)`
-    /// - keyword args; `None` values are skipped and booleans lowercased.
+    /// - keyword args; a `None` value unsets the option and booleans lowercase.
     #[pyo3(signature = (**options))]
     fn options<'py>(
         mut slf: PyRefMut<'py, Self>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        let mut map = HashMap::new();
-        if let Some(options) = options {
-            for (k, v) in options.iter() {
-                if let Some(val) = crate::coerce_option_value(&v)? {
-                    map.insert(k.str()?.to_string(), val);
-                }
-            }
-        }
-        slf.inner = slf.inner.clone().options(map);
+        slf.inner = apply_options(slf.inner.clone(), options, true)?;
         Ok(slf)
     }
 
@@ -343,7 +386,7 @@ impl PyDataFrameReader {
         schema: Option<&Bound<'_, PyAny>>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
-        let mut r = self.with_opts(options)?;
+        let mut r = apply_options(self.inner.clone(), options, true)?;
         if let Some(f) = format {
             r = r.format(f);
         }

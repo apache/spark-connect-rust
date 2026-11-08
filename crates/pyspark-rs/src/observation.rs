@@ -9,7 +9,12 @@ use crate::dataframe::PyDataFrame;
 use crate::errors::ResultExt;
 
 /// Python wrapper for an Observation of metrics, as PySpark Connect's `Observation`.
-#[pyclass(name = "Observation", module = "pyspark.sql.observation")]
+#[pyclass(
+    name = "Observation",
+    module = "pyspark.sql.observation",
+    weakref,
+    dict
+)]
 pub struct PyObservation {
     pub(crate) inner: Observation,
 }

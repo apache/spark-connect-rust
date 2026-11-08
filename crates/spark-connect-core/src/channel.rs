@@ -154,14 +154,15 @@ impl ChannelBuilder {
             .or_else(|| std::env::var("SPARK_CONNECT_AUTHENTICATE_TOKEN").ok())
     }
 
-    /// Mirrors the reference client's `secure` property (`use_ssl` OR a token is
-    /// present). NOTE: this does NOT gate the transport. It reads like a security
-    /// check but grants none: the token half was the source of the cleartext-token
-    /// bug, since a token alone reports "secure" while the scheme stays plaintext.
-    /// The real gate on sending the token is `use_ssl() && !is_loopback()` in
-    /// `SparkConnectClient::connect`; this method is kept only for parity/inspection.
+    /// Whether the channel uses TLS, which is the scheme `SparkConnectClient::connect` dials.
+    ///
+    /// The reference client (`core.py` `ChannelBuilder.secure`) is TLS when `use_ssl` is set
+    /// or a token is present. A token on a loopback host stays plaintext here, as a
+    /// documented leniency for local development; the reference client uses local channel
+    /// credentials for `localhost` in that case. A token is therefore never sent in
+    /// cleartext to a remote host.
     pub fn secure(&self) -> bool {
-        self.use_ssl() || self.token().is_some()
+        self.use_ssl() || (self.token().is_some() && !self.is_loopback())
     }
 
     /// Whether the endpoint is a loopback address.
@@ -169,7 +170,7 @@ impl ChannelBuilder {
     /// The reference client (`core.py` `toChannel`) permits a token over an
     /// unencrypted channel only for `host == "localhost"` (via
     /// `grpc.local_channel_credentials()`); every other host is forced onto TLS.
-    /// We treat the IPv4/IPv6 loopback literals as equivalent to `localhost` so
+    /// We treat the IPv4/IPv6 loopback literals as equivalent to `localhost`, so
     /// local development keeps working without `use_ssl=true`.
     pub fn is_loopback(&self) -> bool {
         matches!(self.host.as_str(), "localhost" | "127.0.0.1" | "[::1]")
@@ -179,13 +180,14 @@ impl ChannelBuilder {
         self.get(PARAM_USER_ID)
     }
 
-    /// Validates the `session_id` param is a v4 UUID (mirrors the Python check).
+    /// Validates the `session_id` param is a UUID of any version, and returns it as given.
+    /// As `uuid.UUID(session_id, version=4)` in PySpark, which does not check the version.
     pub fn session_id(&self) -> Result<Option<String>> {
         match self.params.get(PARAM_SESSION_ID) {
             None => Ok(None),
             Some(s) => match uuid::Uuid::parse_str(s) {
-                Ok(u) if u.get_version_num() == 4 => Ok(Some(s.clone())),
-                Ok(_) | Err(_) => Err(SparkError::value(
+                Ok(_) => Ok(Some(s.clone())),
+                Err(_) => Err(SparkError::value(
                     "INVALID_SESSION_UUID_ID",
                     &[("arg_name", "session_id"), ("origin", "invalid UUID")],
                 )),
@@ -360,12 +362,52 @@ fn quote_len(s: &str) -> usize {
     s.bytes().map(|b| if unreserved(b) { 1 } else { 3 }).sum()
 }
 
+/// Serializes the tests that set or read the environment variables that the channel reads,
+/// since the test threads share one environment.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Sets environment variables for one test, under `ENV_LOCK`, and restores them on drop.
+/// A `None` value removes the variable.
+#[cfg(test)]
+pub(crate) struct EnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+#[cfg(test)]
+pub(crate) fn set_env(vars: &[(&'static str, Option<&str>)]) -> EnvGuard {
+    let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut saved = Vec::new();
+    for (key, value) in vars {
+        saved.push((*key, std::env::var_os(key)));
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+    EnvGuard { _lock: lock, saved }
+}
+
+#[cfg(test)]
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        for (key, value) in self.saved.iter().rev() {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn basic_host_default_port() {
+        let _env = set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
         let c = ChannelBuilder::parse("sc://localhost").unwrap();
         assert_eq!(c.endpoint(), "localhost:15002");
         assert!(!c.secure());
@@ -396,10 +438,40 @@ mod tests {
     }
 
     #[test]
-    fn token_implies_secure() {
-        let c = ChannelBuilder::parse("sc://localhost/;token=xyz").unwrap();
-        assert!(c.secure());
-        assert!(!c.use_ssl());
+    fn scheme_is_tls_for_a_token_on_a_remote_host() {
+        let _env = set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+        // (url, TLS). A token goes over TLS to any host but a loopback one.
+        for (url, tls) in [
+            ("sc://example.com", false),
+            ("sc://example.com/;use_ssl=true", true),
+            ("sc://example.com/;token=T", true),
+            ("sc://example.com/;use_ssl=false;token=T", true),
+            ("sc://10.0.0.1:443/;token=T", true),
+            ("sc://localhost/;token=T", false),
+            ("sc://localhost/;use_ssl=true", true),
+            ("sc://localhost/;use_ssl=true;token=T", true),
+            ("sc://127.0.0.1/;token=T", false),
+            ("sc://127.0.0.1/;use_ssl=true", true),
+            ("sc://[::1]:15002/;token=T", false),
+            ("sc://[::1]:15002/;use_ssl=true", true),
+        ] {
+            let c = ChannelBuilder::parse(url).unwrap();
+            assert_eq!(c.secure(), tls, "{url}");
+        }
+    }
+
+    #[test]
+    fn scheme_uses_the_token_of_the_environment() {
+        let _env = set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", Some("ENV"))]);
+        let remote = ChannelBuilder::parse("sc://example.com").unwrap();
+        assert_eq!(remote.token().as_deref(), Some("ENV"));
+        assert!(remote.secure());
+        let local = ChannelBuilder::parse("sc://localhost").unwrap();
+        assert_eq!(local.token().as_deref(), Some("ENV"));
+        assert!(!local.secure());
+        // The token of the connection string wins over the environment.
+        let explicit = ChannelBuilder::parse("sc://example.com/;token=T").unwrap();
+        assert_eq!(explicit.token().as_deref(), Some("T"));
     }
 
     #[test]
@@ -447,13 +519,27 @@ mod tests {
     }
 
     #[test]
-    fn session_id_must_be_uuid4() {
-        let c = ChannelBuilder::parse(
-            "sc://localhost/;session_id=550e8400-e29b-41d4-a716-446655440000",
-        )
-        .unwrap();
-        assert!(c.session_id().is_ok());
-        let bad = ChannelBuilder::parse("sc://localhost/;session_id=not-a-uuid").unwrap();
-        assert!(bad.session_id().is_err());
+    fn session_id_accepts_a_uuid_of_any_version_as_given() {
+        // Versions 1, 4, 7 and the nil UUID, as `uuid.UUID(session_id, version=4)` accepts.
+        for id in [
+            "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "018f0b8e-0000-7000-8000-000000000000",
+            "00000000-0000-0000-0000-000000000000",
+        ] {
+            let c = ChannelBuilder::parse(&format!("sc://localhost/;session_id={id}")).unwrap();
+            assert_eq!(c.session_id().unwrap().as_deref(), Some(id));
+        }
+        let none = ChannelBuilder::parse("sc://localhost").unwrap();
+        assert_eq!(none.session_id().unwrap(), None);
+    }
+
+    #[test]
+    fn session_id_rejects_a_malformed_uuid() {
+        for id in ["not-a-uuid", "550e8400-e29b-41d4-a716-44665544000", "x"] {
+            let c = ChannelBuilder::parse(&format!("sc://localhost/;session_id={id}")).unwrap();
+            let e = c.session_id().unwrap_err();
+            assert_eq!(e.error_class, "INVALID_SESSION_UUID_ID", "{id}");
+        }
     }
 }

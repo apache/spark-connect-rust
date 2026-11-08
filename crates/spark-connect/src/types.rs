@@ -920,20 +920,19 @@ impl DataType {
     }
 
     /// DDL string for a StructType, mirroring `StructType.toDDL()`:
-    /// comma-separated `name type[ NOT NULL][ COMMENT '...']` per field.
+    /// comma-separated `name type[ NOT NULL][ COMMENT '...']` per field. The names are quoted
+    /// and the types written as `DataType.sql`, so the server parses the DDL back.
     pub fn to_ddl(&self) -> Result<String> {
         match self {
             DataType::Struct { fields } => Ok(fields
                 .iter()
                 .map(|f| {
-                    let mut s = format!("{} {}", f.name, f.data_type.simple_string());
-                    if !f.nullable {
-                        s.push_str(" NOT NULL");
-                    }
-                    if let Some(comment) = f.metadata.get("comment").and_then(|c| c.as_str()) {
-                        s.push_str(&format!(" COMMENT '{}'", comment.replace('\'', "\\'")));
-                    }
-                    s
+                    format!(
+                        "{} {}{}",
+                        quote_if_needed(&f.name),
+                        f.data_type.sql_type(),
+                        field_ddl_suffix(f)
+                    )
                 })
                 .collect::<Vec<_>>()
                 .join(",")),
@@ -941,6 +940,39 @@ impl DataType {
                 "INVALID_TYPE",
                 &[("detail", "toDDL() can only be called on StructType")],
             )),
+        }
+    }
+
+    /// The SQL form of a type, mirroring `DataType.sql`: `INT`, `STRING COLLATE UTF8_LCASE`,
+    /// `ARRAY<...>`, `MAP<K, V>` and `STRUCT<name: TYPE, ...>`, the form `toDDL` writes.
+    fn sql_type(&self) -> String {
+        match self {
+            DataType::Struct { fields } => {
+                let fields: Vec<String> = fields
+                    .iter()
+                    .map(|f| {
+                        format!(
+                            "{}: {}{}",
+                            quote_if_needed(&f.name),
+                            f.data_type.sql_type(),
+                            field_ddl_suffix(f)
+                        )
+                    })
+                    .collect();
+                format!("STRUCT<{}>", fields.join(", "))
+            }
+            DataType::Array { element_type, .. } => format!("ARRAY<{}>", element_type.sql_type()),
+            DataType::Map {
+                key_type,
+                value_type,
+                ..
+            } => format!("MAP<{}, {}>", key_type.sql_type(), value_type.sql_type()),
+            DataType::String { collation }
+                if !(collation.is_empty() || collation == "UTF8_BINARY") =>
+            {
+                format!("STRING COLLATE {}", collation.to_uppercase())
+            }
+            _ => self.simple_string().to_uppercase(),
         }
     }
 
@@ -1174,6 +1206,32 @@ fn interval_string(start_field: i32, end_field: i32, fields: &[(&str, i32)]) -> 
     } else {
         "interval".to_string()
     }
+}
+
+/// Quotes a field name with backticks, as Spark's `QuotingUtils.quoteIfNeeded` does: a name
+/// that is not `[a-zA-Z_][a-zA-Z0-9_]*` is quoted, and each backtick in it is doubled.
+fn quote_if_needed(name: &str) -> String {
+    let mut chars = name.chars();
+    let plain = matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric());
+    if plain {
+        name.to_string()
+    } else {
+        format!("`{}`", name.replace('`', "``"))
+    }
+}
+
+/// The ` NOT NULL` and ` COMMENT '...'` suffix of a field, as `StructField.toDDL` writes it. The
+/// single quotes of the comment are escaped as Spark's `escapeSingleQuotedString` does.
+fn field_ddl_suffix(field: &StructField) -> String {
+    let mut s = String::new();
+    if !field.nullable {
+        s.push_str(" NOT NULL");
+    }
+    if let Some(comment) = field.metadata.get("comment").and_then(|c| c.as_str()) {
+        s.push_str(&format!(" COMMENT '{}'", comment.replace('\'', "\\'")));
+    }
+    s
 }
 
 /// The key of the metadata of a struct field of the collations of its strings, as Spark's.
@@ -1907,6 +1965,35 @@ fn split_top_level_comma(s: &str) -> Vec<&str> {
     result
 }
 
+/// The canonical form of a collation name, as Spark's server gives it. A `UTF8_*` or `UNICODE*`
+/// name is in upper case. An ICU locale name, `language[_Script][_COUNTRY][_SPECIFIERS]`, has a
+/// lower-case language, a title-case script (a four-letter part) and upper-case other parts, such
+/// as `sr_Cyrl_SRB_CI_AI`. Collation names are case-insensitive, so any case is accepted.
+fn canonical_collation_name(name: &str) -> String {
+    let provider = name.split('_').next().unwrap_or_default();
+    if provider.eq_ignore_ascii_case("UTF8") || provider.eq_ignore_ascii_case("UNICODE") {
+        return name.to_uppercase();
+    }
+    name.split('_')
+        .enumerate()
+        .map(|(i, part)| {
+            if i == 0 {
+                part.to_lowercase()
+            } else if part.len() == 4 && part.chars().all(|c| c.is_ascii_alphabetic()) {
+                let mut chars = part.chars();
+                let first = chars.next().map(|c| c.to_ascii_uppercase());
+                first
+                    .into_iter()
+                    .chain(chars.map(|c| c.to_ascii_lowercase()))
+                    .collect()
+            } else {
+                part.to_uppercase()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("_")
+}
+
 /// Parse a single type (primitive or complex)
 fn parse_single_type(input: &str) -> Result<DataType> {
     let trimmed = input.trim().to_lowercase();
@@ -1959,12 +2046,15 @@ fn parse_single_type(input: &str) -> Result<DataType> {
             } else if trimmed.starts_with("interval") {
                 parse_interval_string(&trimmed)
             } else if trimmed.starts_with("string collate") {
-                let collation = trimmed
-                    .trim_start_matches("string")
-                    .trim_start_matches("collate")
-                    .trim()
-                    .to_string();
-                Ok(DataType::String { collation })
+                // The name is taken from the input, not from `trimmed`, which is lowercased.
+                let collation = input
+                    .split_whitespace()
+                    .skip(2)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                Ok(DataType::String {
+                    collation: canonical_collation_name(&collation),
+                })
             } else if trimmed.starts_with("geometry(") {
                 parse_geometry(&trimmed)
             } else if trimmed.starts_with("geography(") {
