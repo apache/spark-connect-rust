@@ -500,6 +500,31 @@ def test_udtf_takes_a_ddl_or_struct_return_type_as_pyspark(session):
     assert error.value.getCondition() == "PARSE_SYNTAX_ERROR"
 
 
+def test_udtf_passes_custom_analyze_result_to_handler(session):
+    from dataclasses import dataclass
+    from pyspark.sql.udtf import AnalyzeResult
+
+    @dataclass
+    class ResultWithBuffer(AnalyzeResult):
+        buffer: str = ""
+
+    @F.udtf(useArrow=False)
+    class Echo:
+        def __init__(self, analyze_result):
+            self.buffer = analyze_result.buffer
+
+        @staticmethod
+        def analyze(argument):
+            return ResultWithBuffer(
+                StructType([StructField("buffer", StringType())]), buffer=argument.value
+            )
+
+        def eval(self, value):
+            yield (self.buffer,)
+
+    assert Echo(F.lit("kept")).collect() == [Row(buffer="kept")]
+
+
 def test_arrow_udtf_takes_and_returns_arrow_data_as_pyspark(session):
     # As PySpark's arrow_udtf(), a PyArrow-native UDTF: eval() takes a pyarrow array of the
     # argument, and returns pyarrow tables.
