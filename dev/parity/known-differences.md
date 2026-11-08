@@ -25,12 +25,13 @@ difference is intentional or tracked for a fix.
   precision 44, maximum 38). This client's native fallback instead raises
   `PySparkRuntimeError` during construction, before sending a relation. The rejection
   stage and error class differ. A later value that increases the scale beyond 38 raises
-  `ValueError` before upload. Existing container and non-Decimal inference rules are
-  unchanged. With an explicit schema, a nested Decimal that does not fit raises
-  `PySparkRuntimeError` only on the native row fallback, for frames rejected by
-  `accepts_pandas_table`. Ordinary frames use PySpark's Arrow conversion and raise its
-  errors. Both paths reject an explicit-schema value that does not fit before a relation
-  is sent.
+  `ValueError` before upload. This can reject later zero or trailing-zero values that the
+  previous native fallback accepted at the first value's scale. Existing container and
+  non-Decimal inference rules are unchanged. With an explicit schema, a nested Decimal
+  that does not fit raises `PySparkRuntimeError` only on the native row fallback, for
+  frames rejected by `accepts_pandas_table`. Ordinary frames use PySpark's Arrow conversion
+  and raise its errors. Both paths reject an explicit-schema value that does not fit
+  before a relation is sent.
 - **Multiple invalid pandas columns with an explicit Decimal field** (intentional,
   SPARK-60696). On native row fallback, Decimal exactness is checked before the encoder
   converts other fields. If an earlier non-Decimal column and a later Decimal column are

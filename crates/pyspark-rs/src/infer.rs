@@ -155,6 +155,8 @@ impl Drop for DecimalQuanta {
 
 /// Cache the quantum, context and context keyword dict for `decimal(precision, scale)`.
 /// Return only the arguments needed by the selected call form, sharing the same context.
+/// `decimal` must be the effective class from [`decimal_classes`]: the C class when
+/// available, otherwise the cached public alias.
 fn decimal_quantum<'py>(
     py: Python<'py>,
     decimal: &Bound<'py, PyType>,
