@@ -545,6 +545,27 @@ def test_udtf_passes_custom_analyze_result_to_handler(session):
     assert Echo(F.lit("kept")).collect() == [Row(buffer="kept")]
 
 
+def test_udtf_handlers_that_capture_analysis_columns_run_as_pyspark(session):
+    # As PySpark's test_udtf_with_scalar_analyze_returning_wrong_result: a handler that captures
+    # the result of its analysis, of partitioning columns, pickles, and the Python worker of the
+    # server, which unpickles them as PySpark's, raises its error of them.
+    from pyspark.sql.udtf import AnalyzeResult, PartitioningColumn
+
+    result = AnalyzeResult(StructType().add("a", StringType()), partitionBy=[PartitioningColumn("a")])
+
+    @F.udtf
+    class Partitioned:
+        @staticmethod
+        def analyze(**kwargs):
+            return result
+
+        def eval(self, **kwargs):
+            yield (1,)
+
+    with pytest.raises(AnalysisException, match="partitionBy"):
+        Partitioned().collect()
+
+
 def test_arrow_udtf_takes_and_returns_arrow_data_as_pyspark(session):
     # As PySpark's arrow_udtf(), a PyArrow-native UDTF: eval() takes a pyarrow array of the
     # argument, and returns pyarrow tables.

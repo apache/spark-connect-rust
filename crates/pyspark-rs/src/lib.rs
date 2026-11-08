@@ -223,11 +223,6 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Register TVF + Observation
     m.add_class::<tvf::PyTableValuedFunction>()?;
     m.add_class::<tablearg::PyTableArg>()?;
-    m.add_class::<udtf_analyze::PyAnalyzeArgument>()?;
-    m.add_class::<udtf_analyze::PyPartitioningColumn>()?;
-    m.add_class::<udtf_analyze::PyOrderingColumn>()?;
-    m.add_class::<udtf_analyze::PySelectedColumn>()?;
-    m.add_class::<udtf_analyze::PyAnalyzeResult>()?;
     m.add(
         "SkipRestOfInputTableException",
         m.py()
