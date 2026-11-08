@@ -437,6 +437,11 @@ fn acknowledge(frames: &[AddArtifactsRequest], corrupt: bool) -> AddArtifactsRes
         }
     }
     AddArtifactsResponse {
+        // The server echoes the session ID of the request.
+        session_id: frames
+            .first()
+            .map(|f| f.session_id.clone())
+            .unwrap_or_default(),
         artifacts: artifacts
             .into_iter()
             .map(|(name, good)| ArtifactSummary {
