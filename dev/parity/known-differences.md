@@ -56,9 +56,11 @@ difference is intentional or tracked for a fix.
   unavailable; accelerator absence is cached too. If `_decimal` is importable at first
   resolution, its class takes precedence even when the public `decimal.Decimal` is the
   pure-Python class. Values of that pure-Python class are then not recognized as
-  Decimals: local-row Decimal conversion and inference fail, while native pandas input
-  without a schema or with names only reads them as doubles through `__float__`,
-  potentially losing precision. Quantization also uses a quantum of the selected C
+  Decimals: local-row Decimal conversion raises `AssertionError` and inference raises
+  `CANNOT_INFER_TYPE_FOR_FIELD`, while the native row fallback of pandas input (frames
+  that the Arrow path does not take) without a schema or with names only reads them as
+  doubles through `__float__`, potentially losing precision. Pandas frames on the Arrow
+  path convert them as PySpark does. Quantization also uses a quantum of the selected C
   class, even when the public alias is rebound. The context factory and rounding mode
   still come from the public `decimal` module at first use; mixing its pure-Python
   context with explicit C Decimal values is unsupported. The text shortcut assumes
