@@ -238,6 +238,9 @@ pub struct SparkConnectClient {
     /// The hook of the executions, if any, shared by the clients of the clones of the session,
     /// as PySpark's clones keep the hooks of a session.
     execute_plan_hook: std::sync::Arc<std::sync::RwLock<Option<ExecutePlanHook>>>,
+    /// Whether the client is closed, shared by its clones: its RPCs then raise
+    /// `NO_ACTIVE_SESSION`, as PySpark's `SparkConnectClient._stub` does once it is closed.
+    closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// The user context extensions of a client, as PySpark's `SparkConnectClient` keeps them: those
@@ -338,6 +341,7 @@ impl SparkConnectClient {
             retry_policy: RetryPolicy::default(),
             rpc_deadlines: RpcDeadlines::default(),
             execute_plan_hook: Default::default(),
+            closed: Default::default(),
         })
     }
 
@@ -363,7 +367,33 @@ impl SparkConnectClient {
             retry_policy: self.retry_policy.clone(),
             rpc_deadlines: self.rpc_deadlines.clone(),
             execute_plan_hook: std::sync::Arc::clone(&self.execute_plan_hook),
+            closed: Default::default(),
         }
+    }
+
+    /// Close this client, as PySpark's `SparkConnectClient.close` closes its channel: its RPCs
+    /// raise `NO_ACTIVE_SESSION` from now on, and its clones with them. `release_session` is
+    /// still sent, as `stop()` sends it before it closes the client.
+    pub fn close(&self) {
+        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether the client is closed. See [`SparkConnectClient::close`].
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The error of an RPC of a closed client, as PySpark's `SparkConnectClient._stub` raises it.
+    #[allow(clippy::result_large_err)] // SparkError is large; changing the type would break the API
+    fn ensure_open(&self) -> Result<()> {
+        if self.is_closed() {
+            return Err(SparkError::classed(
+                crate::error::SparkErrorKind::Connect,
+                "NO_ACTIVE_SESSION",
+                &[],
+            ));
+        }
+        Ok(())
     }
 
     /// Set the hook of the executions of this client and of its clones, or clear it.
@@ -521,6 +551,7 @@ impl SparkConnectClient {
         &self,
         mut request: ExecutePlanRequest,
     ) -> Result<Streaming<ExecutePlanResponse>> {
+        self.ensure_open()?;
         self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
         let request = self.hooked(request)?;
@@ -538,6 +569,7 @@ impl SparkConnectClient {
     /// and deep plans don't hit the recursion limit - the server sees exactly the bytes
     /// the reference client built.
     pub async fn execute_plan_raw(&self, request: Vec<u8>) -> Result<Streaming<Vec<u8>>> {
+        self.ensure_open()?;
         let mut grpc = tonic::client::Grpc::new(self.channel.clone())
             .max_decoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT)
             .max_encoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT);
@@ -556,6 +588,7 @@ impl SparkConnectClient {
 
     /// ReattachExecute, byte-exact passthrough returning a raw response stream.
     pub async fn reattach_execute_raw(&self, request: Vec<u8>) -> Result<Streaming<Vec<u8>>> {
+        self.ensure_open()?;
         let mut grpc = tonic::client::Grpc::new(self.channel.clone())
             .max_decoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT)
             .max_encoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT);
@@ -579,6 +612,7 @@ impl SparkConnectClient {
         &self,
         mut request: ReattachExecuteRequest,
     ) -> Result<Streaming<ExecutePlanResponse>> {
+        self.ensure_open()?;
         self.fill_user_context(&mut request.user_context);
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
@@ -595,6 +629,7 @@ impl SparkConnectClient {
         &self,
         mut request: ReleaseExecuteRequest,
     ) -> Result<ReleaseExecuteResponse> {
+        self.ensure_open()?;
         self.fill_user_context(&mut request.user_context);
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
@@ -612,6 +647,7 @@ impl SparkConnectClient {
     /// returns the raw response bytes, avoiding the client-side limit (matching the
     /// reference client, which never re-decodes the request it built).
     pub async fn analyze_plan_raw(&self, request: Vec<u8>) -> Result<Vec<u8>> {
+        self.ensure_open()?;
         let mut grpc = tonic::client::Grpc::new(self.channel.clone())
             .max_decoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT)
             .max_encoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT);
@@ -638,6 +674,7 @@ impl SparkConnectClient {
         &self,
         mut request: AnalyzePlanRequest,
     ) -> Result<AnalyzePlanResponse> {
+        self.ensure_open()?;
         self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
         self.with_retry(|| {
@@ -691,6 +728,7 @@ impl SparkConnectClient {
         &self,
         mut request: ExecutePlanRequest,
     ) -> Result<ReattachableResponseStream> {
+        self.ensure_open()?;
         self.extend_user_context(&mut request.user_context);
         // Before the iterator: its ReattachExecute and ReleaseExecute requests take the
         // user context of this request, and the request of the hook, as PySpark's iterator
@@ -748,6 +786,7 @@ impl SparkConnectClient {
         &self,
         mut request: FetchErrorDetailsRequest,
     ) -> Result<FetchErrorDetailsResponse> {
+        self.ensure_open()?;
         self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
         let deadline = self.rpc_deadlines.fetch_error_details;
@@ -842,6 +881,7 @@ impl SparkConnectClient {
     ///
     /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.config`.
     pub async fn config(&self, mut request: ConfigRequest) -> Result<ConfigResponse> {
+        self.ensure_open()?;
         self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
         self.with_retry(|| {
@@ -862,6 +902,7 @@ impl SparkConnectClient {
     ///
     /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.interrupt`.
     pub async fn interrupt(&self, mut request: InterruptRequest) -> Result<InterruptResponse> {
+        self.ensure_open()?;
         self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
         self.with_retry(|| {
@@ -1167,6 +1208,7 @@ impl SparkConnectClient {
     /// and catalog state, into a new session, of the id `new_session_id` if one is given. The
     /// returned client, of the same channel, is of that session.
     pub async fn clone_session(&self, new_session_id: Option<&str>) -> Result<Self> {
+        self.ensure_open()?;
         let request = CloneSessionRequest {
             session_id: self.session_id.clone(),
             user_context: Some(UserContext {
@@ -1232,6 +1274,7 @@ impl SparkConnectClient {
         archive: bool,
         file: bool,
     ) -> Result<()> {
+        self.ensure_open()?;
         // Each path is named as PySpark's ArtifactManager names it, by the flags and its file
         // extension (see `parse_artifact`).
         for path in paths {
@@ -1249,6 +1292,7 @@ impl SparkConnectClient {
     /// Used by `SparkSession::copy_from_local_to_fs`, which names the artifact
     /// `forward_to_fs/<dest>` so the server writes it to the target filesystem path.
     pub async fn add_named_artifact(&self, name: &str, local_path: &str) -> Result<()> {
+        self.ensure_open()?;
         let artifact =
             NamedArtifact::new(name.to_string(), Box::new(FileArtifact::new(local_path)));
         self.upload_artifact(&artifact).await
@@ -1260,6 +1304,7 @@ impl SparkConnectClient {
     /// As `SparkConnectClient.cache_artifacts`, the status check and the upload are one
     /// attempt under the retry policy, so a transient failure of either retries both.
     pub async fn cache_artifacts(&self, blobs: Vec<Vec<u8>>) -> Result<Vec<String>> {
+        self.ensure_open()?;
         use bytes::Bytes;
         use std::collections::HashSet;
 
@@ -1383,6 +1428,7 @@ impl SparkConnectClient {
         &self,
         names: &[&str],
     ) -> Result<std::collections::HashMap<String, bool>> {
+        self.ensure_open()?;
         let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
         match self.artifact_status_rpc(&names).await {
             Ok(statuses) => Ok(statuses),

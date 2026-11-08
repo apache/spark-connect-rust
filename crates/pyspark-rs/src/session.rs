@@ -24,7 +24,7 @@ use crate::streaming::{PyDataStreamReader, PyStreamingQueryManager};
 pub struct PySparkSessionBuilder {
     remote_url: Option<String>,
     /// Runtime configs set via `.config(...)`, applied after the session connects.
-    configs: Vec<(String, String)>,
+    configs: Vec<(String, Option<String>)>,
     /// The hook factories of `_registerHook`, which a new session calls with itself, as
     /// PySpark's builder does.
     hook_factories: Vec<std::sync::Arc<Py<PyAny>>>,
@@ -104,16 +104,16 @@ impl PySparkSessionBuilder {
         let py = slf.py();
         if let Some(k) = key {
             let v = match value {
-                Some(v) => crate::coerce_option_value(v)?.unwrap_or_default(),
-                None => String::new(),
+                Some(v) => crate::coerce_option_value(v)?,
+                None => None,
             };
-            slf.set_option(py, k, v)?;
+            slf.set_option_value(py, k, v)?;
         }
         if let Some(m) = map {
             for (k, v) in m.iter() {
                 let ks = k.str()?.to_string();
-                let vs = crate::coerce_option_value(&v)?.unwrap_or_default();
-                slf.set_option(py, &ks, vs)?;
+                let vs = crate::coerce_option_value(&v)?;
+                slf.set_option_value(py, &ks, vs)?;
             }
         }
         if let Some(c) = conf {
@@ -278,8 +278,19 @@ impl PySparkSessionBuilder {
     /// Set an option, capturing `spark.remote` as the endpoint, and validate the startup URLs
     /// after it, as PySpark's `config`.
     fn set_option(&mut self, py: Python<'_>, key: &str, value: String) -> PyResult<()> {
+        self.set_option_value(py, key, Some(value))
+    }
+
+    /// Set an option whose value may be None, which PySpark keeps in its options: such a key is
+    /// not set on the session, as `_set_all` sends it without a value.
+    fn set_option_value(
+        &mut self,
+        py: Python<'_>,
+        key: &str,
+        value: Option<String>,
+    ) -> PyResult<()> {
         if key == "spark.remote" {
-            self.remote_url = Some(value);
+            self.remote_url = value;
         } else {
             self.configs.push((key.to_string(), value));
         }
@@ -296,7 +307,7 @@ impl PySparkSessionBuilder {
             .iter()
             .rev()
             .find(|(key, _)| key == "spark.master")
-            .map(|(_, value)| value.clone())
+            .and_then(|(_, value)| value.clone())
             .or_else(|| std::env::var("MASTER").ok());
         let remote = self
             .remote_url
@@ -351,18 +362,24 @@ impl PySparkSessionBuilder {
     // SparkError is large, as the core crate allows for its API.
     #[allow(clippy::result_large_err)]
     fn apply_options(&self, py: Python<'_>, session: &SparkSession) -> PyResult<()> {
-        let options: Vec<(String, String)> = self
-            .configs
-            .iter()
-            .filter(|(key, _)| key != "spark.master")
-            .cloned()
-            .collect();
+        // A later value of a key replaces an earlier one, as the options of PySpark's builder do.
+        let mut options: Vec<(String, Option<String>)> = Vec::new();
+        for (key, value) in self.configs.iter().filter(|(key, _)| key != "spark.master") {
+            match options.iter_mut().find(|(k, _)| k == key) {
+                Some(entry) => entry.1 = value.clone(),
+                None => options.push((key.clone(), value.clone())),
+            }
+        }
         if options.is_empty() {
             return Ok(());
         }
+        let pairs: Vec<(&str, Option<&str>)> = options
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_deref()))
+            .collect();
         let conf = session.conf();
         let warnings = py
-            .detach(|| conf.set_all(&options, true).map_err(Box::new))
+            .detach(|| conf.set_pairs(&pairs, Some(true)).map_err(Box::new))
             .to_pyerr()?;
         // As PySpark's `_set_all`, which warns each warning of the server.
         crate::conf::warn_all(py, &warnings)
@@ -1663,7 +1680,8 @@ impl PySparkSession {
 
     /// Copy a local file to the Spark-managed filesystem (`copyFromLocalToFs`), with the errors
     /// of PySpark Connect's: `NO_SCHEMA_AND_DRIVER_DEFAULT_SCHEME` for a destination of a scheme,
-    /// and an `AssertionError` for a local path that is not a file.
+    /// an `AssertionError` for a local path that is not a file, and for a destination that is
+    /// not an absolute path.
     #[pyo3(name = "copyFromLocalToFs")]
     fn copy_from_local_to_fs(
         &self,
@@ -1694,6 +1712,17 @@ impl PySparkSession {
         if !is_file {
             return Err(pyo3::exceptions::PyAssertionError::new_err(
                 "local path must be a file path.",
+            ));
+        }
+        let is_absolute: bool = py
+            .import("pathlib")?
+            .getattr("Path")?
+            .call1((dest_path,))?
+            .call_method0("is_absolute")?
+            .extract()?;
+        if !is_absolute {
+            return Err(pyo3::exceptions::PyAssertionError::new_err(
+                "destination FS path must be an absolute path.",
             ));
         }
         py.detach(|| self.session.copy_from_local_to_fs(local_path, dest_path))
