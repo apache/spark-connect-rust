@@ -3922,6 +3922,35 @@ def test_decimal_type_methods():
     assert d.typeName() == "decimal"
 
 
+def test_columns_pickle_as_their_expressions_as_pyspark():
+    # As PySpark Connect's Columns, which pickle their expressions: pickle, cloudpickle and
+    # deepcopy give back a Column of the expression as it was sent, of its repr, and the
+    # expressions over it are those over the original.
+    import copy
+    from pyspark.serializers import CloudPickleSerializer
+    from pyspark.sql import functions as F
+
+    serializer = CloudPickleSerializer()
+    for column in [
+        F.col("a"),
+        (F.col("a") + 1).alias("b"),
+        F.lit(1.5),
+        F.when(F.col("a") > 1, "x").otherwise("y"),
+        F.struct("a", "b").getField("a"),
+        F.col("a").desc(),
+    ]:
+        for restored in (
+            pickle.loads(pickle.dumps(column)),
+            serializer.loads(serializer.dumps(column)),
+            copy.deepcopy(column),
+        ):
+            assert repr(restored) == repr(column)
+            assert restored.to_plan(None) == column.to_plan(None)
+            over, over_original = F.coalesce(restored, F.lit(0)), F.coalesce(column, F.lit(0))
+            assert repr(over) == repr(over_original)
+            assert over.to_plan(None) == over_original.to_plan(None)
+
+
 def test_column_repr_and_operations():
     """Test Column repr and various operations."""
     from pyspark.sql import functions as F

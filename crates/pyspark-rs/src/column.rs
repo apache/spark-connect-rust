@@ -679,6 +679,37 @@ impl PyColumn {
         self._expr().to_plan(py, session)
     }
 
+    /// A Column pickles, as PySpark Connect's, which pickles its expression: of the bytes of the
+    /// `spark.connect.Expression` of this column and of its rendering, of which the function of
+    /// `pyspark.sql.connect.column._reduce_column` gives back the Column, also on a Python worker
+    /// of the server, such as that of a `foreachBatch` function, as PySpark Connect's Column.
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        use prost::Message;
+        let expression = pyo3::types::PyBytes::new(py, &self.column.to_proto().encode_to_vec());
+        py.import("pyspark.sql.connect.column")?
+            .getattr("_reduce_column")?
+            .call1((expression, self.column.expression().render()))
+    }
+
+    /// The Column of `expression`, the bytes of a `spark.connect.Expression`, and of its
+    /// `rendered` rendering, as a pickled Column unpickles: it sends the expression as it is.
+    #[staticmethod]
+    fn _of_expression(expression: &[u8], rendered: String) -> PyResult<PyColumn> {
+        use prost::Message;
+        let expression = spark_connect_proto::Expression::decode(expression)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+        Ok(PyColumn::new(Column::new(
+            spark_connect::expression::Expression::new(
+                spark_connect::expression::ExpressionNode::Sent(Box::new(
+                    spark_connect::expression::SentExpression {
+                        expression,
+                        rendered,
+                    },
+                )),
+            ),
+        )))
+    }
+
     fn __str__(&self) -> String {
         let _origin = crate::origin::with_origin("__str__");
         self.__repr__()

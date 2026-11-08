@@ -103,6 +103,17 @@ pub enum ExpressionNode {
     /// `pyspark.sql.connect.expressions.SubqueryExpression` - a scalar, EXISTS or IN
     /// subquery of a DataFrame, or a table argument of a table-valued function.
     Subquery(Box<SubqueryExpression>),
+    /// An expression as it was sent, of its `spark.connect.Expression` and its rendering, as a
+    /// pickled Column unpickles: the client sends the expression as it is.
+    Sent(Box<SentExpression>),
+}
+
+/// An expression of [`ExpressionNode::Sent`]: the `spark.connect.Expression` of a Column as it
+/// was sent, and its rendering, as `Column<'...'>` shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SentExpression {
+    pub expression: proto::Expression,
+    pub rendered: String,
 }
 
 /// The type of a [`SubqueryExpression`]. Mirrors the `subquery_type` of
@@ -404,6 +415,7 @@ impl Expression {
             // As `NamedArgumentExpression.__repr__`.
             ExpressionNode::NamedArgument(arg) => format!("{} => {}", arg.key, arg.value.render()),
             ExpressionNode::Subquery(subquery) => subquery.render(),
+            ExpressionNode::Sent(sent) => sent.rendered.clone(),
         }
     }
 
@@ -492,6 +504,7 @@ impl Expression {
                 ..Default::default()
             },
             ExpressionNode::Subquery(subquery) => subquery.to_proto(),
+            ExpressionNode::Sent(sent) => sent.expression.clone(),
         }
     }
 }
@@ -1654,6 +1667,27 @@ mod tests {
         } else {
             panic!("Expected literal expression type");
         }
+    }
+
+    #[test]
+    fn sent_expressions_are_sent_and_rendered_as_they_were() {
+        // As a pickled Column unpickles: the expression as it was sent, of its rendering, which
+        // the expressions over it send and render.
+        let sum = Expression::function(
+            "+",
+            vec![col("a"), Expression::literal(LiteralExpression::Long(1))],
+        );
+        let original = Expression::new(ExpressionNode::Alias(Box::new(Alias::new(sum, "b"))));
+        let sent = Expression::new(ExpressionNode::Sent(Box::new(SentExpression {
+            expression: original.to_proto(),
+            rendered: original.render(),
+        })));
+        assert_eq!(sent.to_proto(), original.to_proto());
+        assert_eq!(sent.render(), "+(a, 1) AS b");
+        let over = Expression::function("abs", vec![sent]);
+        let over_original = Expression::function("abs", vec![original]);
+        assert_eq!(over.to_proto(), over_original.to_proto());
+        assert_eq!(over.render(), over_original.render());
     }
 
     // Additional tests for expression render() methods and uncovered branches
