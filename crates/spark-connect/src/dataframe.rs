@@ -3049,6 +3049,51 @@ mod nested_decode_tests {
     }
 
     #[test]
+    fn batches_compressed_with_zstd_or_lz4_decode_as_uncompressed_ones() {
+        // As PyArrow reads them: the server compresses the Arrow batches of the results with
+        // the codec of spark.sql.execution.arrow.compression.codec, zstd or lz4.
+        use arrow::ipc::writer::IpcWriteOptions;
+        use arrow::ipc::CompressionType;
+
+        let ids: ArrayRef = Arc::new(Int64Array::from_iter((0..2000).map(Some)));
+        let names: ArrayRef = Arc::new(StringArray::from_iter(
+            (0..2000).map(|i| (i % 3 != 0).then(|| format!("name {}", i % 7))),
+        ));
+        let plain = encoded_batches(vec![("id", ids.clone()), ("name", names.clone())], 2, false);
+        let rows = decode_arrow_batch(&plain).unwrap();
+        assert_eq!(rows.len(), 4000);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, true),
+            Field::new("name", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![ids, names]).unwrap();
+        for codec in [CompressionType::ZSTD, CompressionType::LZ4_FRAME] {
+            let options = IpcWriteOptions::default()
+                .try_with_compression(Some(codec))
+                .unwrap();
+            let mut data = vec![];
+            {
+                let mut writer =
+                    StreamWriter::try_new_with_options(&mut data, &schema, options).unwrap();
+                writer.write(&batch).unwrap();
+                writer.write(&batch).unwrap();
+                writer.finish().unwrap();
+            }
+            assert!(data.len() < plain.data.len(), "{codec:?} compresses");
+            let compressed = proto::execute_plan_response::ArrowBatch {
+                data: data.into(),
+                ..Default::default()
+            };
+            assert_eq!(decode_arrow_batch(&compressed).unwrap(), rows, "{codec:?}");
+            assert_eq!(
+                decode_arrow_record_batches(&compressed).unwrap(),
+                decode_arrow_record_batches(&plain).unwrap(),
+                "{codec:?}"
+            );
+        }
+    }
+
+    #[test]
     fn mixed_nullable_slices_decode_across_empty_and_repeated_batches() {
         let columns: Vec<(&str, ArrayRef)> = vec![
             (

@@ -2083,6 +2083,21 @@ def test_collected_rows_keep_their_values_as_pyspark(session):
     assert (rows[0].v.toJson(), rows[0].n) == ("1", 2)
 
 
+def test_results_compressed_by_the_server_decode_as_pyspark(session):
+    # As PySpark's: the server compresses the Arrow batches of the results with the codec of
+    # spark.sql.execution.arrow.compression.codec, zstd or lz4, which the client decodes.
+    df = session.range(0, 20000, 1, 2).selectExpr("id", "CAST(id % 7 AS STRING) AS s")
+    rows, table, frame = df.collect(), df.toArrow(), df.toPandas()
+    try:
+        for codec in ("zstd", "lz4", "none"):
+            session.conf.set("spark.sql.execution.arrow.compression.codec", codec)
+            assert df.collect() == rows, codec
+            assert df.toArrow().equals(table), codec
+            assert df.toPandas().equals(frame), codec
+    finally:
+        session.conf.unset("spark.sql.execution.arrow.compression.codec")
+
+
 def test_transpose_takes_a_column_name_as_pyspark(session):
     # As PySpark's transpose, of a Column or a column name as the index column.
     df = session.createDataFrame([("a", 1, 2), ("b", 3, 4)], "k string, x int, y int")
