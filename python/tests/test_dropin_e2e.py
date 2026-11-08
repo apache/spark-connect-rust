@@ -875,6 +875,39 @@ ARROW_TABLE_ROWS = [
 ]
 
 
+def test_pickled_when_columns_chain_on_the_server_as_pyspark(session, tmp_path):
+    # As PySpark's: a pickled when() Column keeps its CASE WHEN, so it collects as the chain
+    # built without the pickling, and a foreachBatch function that captures it chains on it on
+    # the Python worker of the server.
+    import pickle
+
+    (tmp_path / "input.txt").write_text("hello\nthis\nother\n")
+    df = session.createDataFrame([(1,), (2,), (3,)], "a int")
+    chain = F.when(F.col("a") > 2, "big").when(F.col("a") > 1, "mid").otherwise("small")
+    assert df.select(pickle.loads(pickle.dumps(chain)).alias("r")).collect() == (
+        df.select(chain.alias("r")).collect()
+    )
+    assert [row.r for row in df.select(pickle.loads(pickle.dumps(chain)).alias("r")).collect()] == [
+        "small", "mid", "big"]
+
+    captured = F.when(F.col("value") == "hello", "h")
+    table = "foreach_batch_captured_when"
+
+    def func(batch, batch_id):
+        batch.select(
+            captured.when(F.col("value") == "this", "t").otherwise("x").alias("result")
+        ).write.mode("append").saveAsTable(table)
+
+    query = session.readStream.format("text").load(str(tmp_path)).writeStream.foreachBatch(func)
+    query = query.start()
+    try:
+        query.processAllAvailable()
+        assert sorted(row.result for row in session.table(table).collect()) == ["h", "t", "x"]
+    finally:
+        query.stop()
+        session.sql(f"DROP TABLE IF EXISTS {table}").collect()
+
+
 @pytest.mark.parametrize(
     "schema, expected",
     [

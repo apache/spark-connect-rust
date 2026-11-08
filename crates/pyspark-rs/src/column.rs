@@ -691,18 +691,71 @@ impl PyColumn {
     /// `spark.connect.Expression` of this column and of its rendering, of which the function of
     /// `pyspark.sql.connect.column._reduce_column` gives back the Column, also on a Python worker
     /// of the server, such as that of a `foreachBatch` function, as PySpark Connect's Column.
+    /// A CASE WHEN also pickles its branches and else value, as PySpark's CaseWhen keeps them, so
+    /// that `when` and `otherwise` chain on the unpickled Column.
     fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         use prost::Message;
         let expression = pyo3::types::PyBytes::new(py, &self.column.to_proto().encode_to_vec());
+        let column = |expr: &spark_connect::expression::Expression| -> PyResult<Py<PyColumn>> {
+            Py::new(py, PyColumn::new(Column::new(expr.clone())))
+        };
+        let (branches, else_value) = match self.column.expression().node() {
+            ExpressionNode::CaseWhen(case_when) => {
+                let branches = case_when
+                    .branches
+                    .iter()
+                    .map(|(condition, value)| Ok((column(condition)?, column(value)?)))
+                    .collect::<PyResult<Vec<_>>>()?;
+                let else_value = case_when
+                    .else_expr
+                    .as_ref()
+                    .map(|else_expr| column(else_expr))
+                    .transpose()?;
+                (Some(branches), else_value)
+            }
+            _ => (None, None),
+        };
         py.import("pyspark.sql.connect.column")?
             .getattr("_reduce_column")?
-            .call1((expression, self.column.expression().render()))
+            .call1((
+                expression,
+                self.column.expression().render(),
+                branches,
+                else_value,
+            ))
     }
 
     /// The Column of `expression`, the bytes of a `spark.connect.Expression`, and of its
     /// `rendered` rendering, as a pickled Column unpickles: it sends the expression as it is.
+    /// The CASE WHEN of `branches` and `else_value`, the Columns of its parts, is built as it was.
     #[staticmethod]
-    fn _of_expression(expression: &[u8], rendered: String) -> PyResult<PyColumn> {
+    #[pyo3(signature = (expression, rendered, branches=None, else_value=None))]
+    fn _of_expression(
+        expression: &[u8],
+        rendered: String,
+        branches: Option<Vec<(PyRef<'_, PyColumn>, PyRef<'_, PyColumn>)>>,
+        else_value: Option<PyRef<'_, PyColumn>>,
+    ) -> PyResult<PyColumn> {
+        if let Some(branches) = branches {
+            let branches = branches
+                .iter()
+                .map(|(condition, value)| {
+                    (
+                        condition.column.expression().clone(),
+                        value.column.expression().clone(),
+                    )
+                })
+                .collect();
+            let mut case_when = spark_connect::expression::CaseWhen::new(branches);
+            if let Some(else_value) = else_value {
+                case_when = case_when.with_else(else_value.column.expression().clone());
+            }
+            return Ok(PyColumn::new(Column::new(
+                spark_connect::expression::Expression::new(ExpressionNode::CaseWhen(Box::new(
+                    case_when,
+                ))),
+            )));
+        }
         use prost::Message;
         let expression = spark_connect_proto::Expression::decode(expression)
             .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
