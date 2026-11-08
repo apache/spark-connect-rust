@@ -11653,6 +11653,34 @@ def test_add_artifacts_refuses_the_paths_pyspark_refuses(tmp_path):
         assert error.value.errno in (errno.ENOENT, errno.EISDIR), path
 
 
+def test_column_origins_capture_their_call_site_without_importing_per_call(mock_connect, monkeypatch):
+    # As PySpark's `_with_origin`: a Column operation carries the call site of its user code,
+    # which `_capture_call_site` gives, but the capture does not import IPython and ipykernel
+    # on every call, where ipykernel is missing.
+    import builtins
+
+    import pyspark.errors.utils as errors_utils
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    monkeypatch.setattr(errors_utils, "_enable_debugging_cache", True)
+    column = F.col("id") + 1; expected = errors_utils._capture_call_site(1)
+    imports = []
+    real_import = builtins.__import__
+
+    def counting_import(name, *args, **kwargs):
+        if name in ("IPython", "ipykernel"):
+            imports.append(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", counting_import)
+    for _ in range(200):
+        F.col("id") + 1
+    assert len(imports) <= 1
+    spark.range(1).select(column).collect()
+    assert expected.encode() in service.execute_requests[-1]
+
+
 def test_add_artifacts_puts_a_pyfile_zip_on_the_client_path_before_opening_it(tmp_path, monkeypatch):
     # As PySpark's _parse_artifacts: a zip, egg or jar of pyfile is put on sys.path before its
     # file is opened, and a Python file is not.
