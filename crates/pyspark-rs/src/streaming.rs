@@ -10,7 +10,7 @@ use spark_connect::udf::PythonUDFPayload;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::dataframe::PyDataFrame;
+use crate::dataframe::{PyDataFrame, WriterState};
 use crate::errors::ResultExt;
 
 /// Adapts a Python `StreamingQueryListener` to the native Rust listener trait: on each
@@ -604,26 +604,28 @@ impl PyTrigger {
 /// Python wrapper for DataStreamWriter.
 #[pyclass(name = "DataStreamWriter", module = "pyspark.sql.streaming.readwriter")]
 pub struct PyDataStreamWriter {
-    inner: DataStreamWriter,
+    inner: WriterState<DataStreamWriter>,
 }
 
 impl PyDataStreamWriter {
     pub fn new(writer: DataStreamWriter) -> Self {
-        PyDataStreamWriter { inner: writer }
+        PyDataStreamWriter {
+            inner: WriterState::new(writer),
+        }
     }
 
     /// Apply the one-shot writer options accepted by `start`/`toTable`
     /// (`format`, `outputMode`, `partitionBy`, `queryName`, `**options`) before
     /// terminating the stream. Mirrors the reference, where these are keyword args.
     fn apply_write_opts(
-        &mut self,
+        &self,
         format: Option<&str>,
         output_mode: Option<&str>,
         partition_by: Option<&Bound<'_, PyAny>>,
         query_name: Option<&Bound<'_, PyAny>>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<DataStreamWriter> {
-        let mut w = self.inner.clone();
+        let mut w = self.inner.get();
         if let Some(fmt) = format {
             w = w.format(fmt);
         }
@@ -648,38 +650,35 @@ impl PyDataStreamWriter {
             w = w.options(opts);
         }
         // PySpark's start/toTable set these on the writer itself before starting.
-        self.inner = w.clone();
+        self.inner.set(w.clone());
         Ok(w)
     }
 }
 
 #[pymethods]
 impl PyDataStreamWriter {
-    fn outputMode<'py>(
-        mut slf: PyRefMut<'py, Self>,
-        outputMode: &str,
-    ) -> PyResult<PyRefMut<'py, Self>> {
-        slf.inner = slf.inner.clone().output_mode(outputMode);
-        Ok(slf)
+    fn outputMode<'py>(slf: &Bound<'py, Self>, outputMode: &str) -> PyResult<Bound<'py, Self>> {
+        slf.borrow().inner.update(|w| w.output_mode(outputMode));
+        Ok(slf.clone())
     }
 
-    fn format<'py>(mut slf: PyRefMut<'py, Self>, source: &str) -> PyResult<PyRefMut<'py, Self>> {
-        slf.inner = slf.inner.clone().format(source);
-        Ok(slf)
+    fn format<'py>(slf: &Bound<'py, Self>, source: &str) -> PyResult<Bound<'py, Self>> {
+        slf.borrow().inner.update(|w| w.format(source));
+        Ok(slf.clone())
     }
 
     fn option<'py>(
-        mut slf: PyRefMut<'py, Self>,
+        slf: &Bound<'py, Self>,
         key: &str,
         value: &Bound<'_, PyAny>,
-    ) -> PyResult<PyRefMut<'py, Self>> {
+    ) -> PyResult<Bound<'py, Self>> {
         // None -> option left unset; bools -> "true"/"false" (reference `to_str`).
         match crate::coerce_option_value(value)? {
             Some(v) => {
-                slf.inner = slf.inner.clone().option(key, &v);
-                Ok(slf)
+                slf.borrow().inner.update(|w| w.option(key, &v));
+                Ok(slf.clone())
             }
-            None => Ok(slf),
+            None => Ok(slf.clone()),
         }
     }
 
@@ -687,9 +686,9 @@ impl PyDataStreamWriter {
     // skipped, booleans lowercased.
     #[pyo3(signature = (**options))]
     fn options<'py>(
-        mut slf: PyRefMut<'py, Self>,
+        slf: &Bound<'py, Self>,
         options: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyRefMut<'py, Self>> {
+    ) -> PyResult<Bound<'py, Self>> {
         let mut opts = HashMap::new();
         if let Some(options) = options {
             for (k, v) in options.iter() {
@@ -698,42 +697,42 @@ impl PyDataStreamWriter {
                 }
             }
         }
-        slf.inner = slf.inner.clone().options(opts);
-        Ok(slf)
+        slf.borrow().inner.update(|w| w.options(opts));
+        Ok(slf.clone())
     }
 
     /// Partition by the column names, or a list or tuple of them alone, as PySpark's.
     #[pyo3(signature = (*cols))]
     fn partitionBy<'py>(
-        mut slf: PyRefMut<'py, Self>,
+        slf: &Bound<'py, Self>,
         cols: &Bound<'_, PyTuple>,
-    ) -> PyResult<PyRefMut<'py, Self>> {
+    ) -> PyResult<Bound<'py, Self>> {
         let cols = column_names(cols)?;
         let col_refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
-        slf.inner = slf.inner.clone().partition_by(col_refs);
-        Ok(slf)
+        slf.borrow().inner.update(|w| w.partition_by(col_refs));
+        Ok(slf.clone())
     }
 
     /// Cluster by the column names, or a list or tuple of them alone, as PySpark's.
     #[pyo3(signature = (*cols))]
     fn clusterBy<'py>(
-        mut slf: PyRefMut<'py, Self>,
+        slf: &Bound<'py, Self>,
         cols: &Bound<'_, PyTuple>,
-    ) -> PyResult<PyRefMut<'py, Self>> {
+    ) -> PyResult<Bound<'py, Self>> {
         let cols = column_names(cols)?;
         let col_refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
-        slf.inner = slf.inner.clone().cluster_by(col_refs);
-        Ok(slf)
+        slf.borrow().inner.update(|w| w.cluster_by(col_refs));
+        Ok(slf.clone())
     }
 
     /// Name the query, a non-empty str, else `VALUE_NOT_NON_EMPTY_STR`, as PySpark's.
     fn queryName<'py>(
-        mut slf: PyRefMut<'py, Self>,
+        slf: &Bound<'py, Self>,
         queryName: &Bound<'_, PyAny>,
-    ) -> PyResult<PyRefMut<'py, Self>> {
+    ) -> PyResult<Bound<'py, Self>> {
         let name = query_name_of(queryName)?;
-        slf.inner = slf.inner.clone().query_name(&name);
-        Ok(slf)
+        slf.borrow().inner.update(|w| w.query_name(&name));
+        Ok(slf.clone())
     }
 
     /// `DataStreamWriter.trigger(...)`, as PySpark's: exactly one of `processingTime`, `once`,
@@ -743,13 +742,13 @@ impl PyDataStreamWriter {
     /// `VALUE_NOT_ALLOWED`.
     #[pyo3(signature = (*, processingTime=None, once=None, continuous=None, availableNow=None, realTime=None))]
     fn trigger<'py>(
-        mut slf: PyRefMut<'py, Self>,
+        slf: &Bound<'py, Self>,
         processingTime: Option<Bound<'py, PyAny>>,
         once: Option<Bound<'py, PyAny>>,
         continuous: Option<Bound<'py, PyAny>>,
         availableNow: Option<Bound<'py, PyAny>>,
         realTime: Option<Bound<'py, PyAny>>,
-    ) -> PyResult<PyRefMut<'py, Self>> {
+    ) -> PyResult<Bound<'py, Self>> {
         use crate::column::raise_pyspark;
         let py = slf.py();
         let given = [
@@ -813,14 +812,14 @@ impl PyDataStreamWriter {
             }
             Trigger::AvailableNow
         };
-        slf.inner = slf.inner.clone().trigger(trigger);
-        Ok(slf)
+        slf.borrow().inner.update(|w| w.trigger(trigger));
+        Ok(slf.clone())
     }
 
     #[pyo3(signature = (path=None, format=None, outputMode=None, partitionBy=None, queryName=None, **options))]
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn start(
-        &mut self,
+        &self,
         py: Python<'_>,
         path: Option<&str>,
         format: Option<&str>,
@@ -839,7 +838,7 @@ impl PyDataStreamWriter {
     #[pyo3(signature = (tableName, format=None, outputMode=None, partitionBy=None, queryName=None, **options))]
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn toTable(
-        &mut self,
+        &self,
         py: Python<'_>,
         tableName: &str,
         format: Option<&str>,
@@ -859,10 +858,10 @@ impl PyDataStreamWriter {
     /// foreach-batch sink. Pickling happens here so the Python skin can re-export this
     /// class directly rather than subclassing a (non-subclassable) PyO3 type.
     fn foreachBatch<'py>(
-        mut slf: PyRefMut<'py, Self>,
+        slf: &Bound<'py, Self>,
         py: Python<'_>,
         func: &Bound<'_, PyAny>,
-    ) -> PyResult<PyRefMut<'py, Self>> {
+    ) -> PyResult<Bound<'py, Self>> {
         let command = streaming_function_command(py, func, "foreachBatch")?;
         let payload = PythonUDFPayload::new(
             spark_connect::types::DataType::Struct { fields: vec![] },
@@ -870,8 +869,8 @@ impl PyDataStreamWriter {
             command,
             crate::dataframe::py_version(py),
         );
-        slf.inner = slf.inner.clone().foreach_batch(payload);
-        Ok(slf)
+        slf.borrow().inner.update(|w| w.foreach_batch(payload));
+        Ok(slf.clone())
     }
 
     /// `DataStreamWriter.foreach(f)`, as PySpark's: the function of the partition and the
@@ -881,10 +880,10 @@ impl PyDataStreamWriter {
     /// which the worker of the server deserializes with its own `pyspark.serializers`. Built
     /// here to avoid a Python subclass of the PyO3 class.
     fn foreach<'py>(
-        mut slf: PyRefMut<'py, Self>,
+        slf: &Bound<'py, Self>,
         py: Python<'_>,
         f: &Bound<'_, PyAny>,
-    ) -> PyResult<PyRefMut<'py, Self>> {
+    ) -> PyResult<Bound<'py, Self>> {
         let func = py
             .import("pyspark.sql.streaming.readwriter")?
             .getattr("_construct_foreach_function")?
@@ -912,8 +911,8 @@ impl PyDataStreamWriter {
             command,
             crate::dataframe::py_version(py),
         );
-        slf.inner = slf.inner.clone().foreach(payload);
-        Ok(slf)
+        slf.borrow().inner.update(|w| w.foreach(payload));
+        Ok(slf.clone())
     }
 }
 
