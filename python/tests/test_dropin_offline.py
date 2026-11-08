@@ -698,6 +698,24 @@ def test_datatypes_usable_in_sets_and_dicts():
     assert len({fa, fa2, fb}) == 2
 
 
+def test_sql_functions_is_an_attribute_once_pyspark_sql_is_imported():
+    # As PySpark's, whose modules import pyspark.sql.functions, `functions` is an attribute of
+    # pyspark.sql after `import pyspark.sql` alone, and of pyspark.sql through pyspark. A new
+    # process keeps the modules that this test process has imported from hiding a missing one.
+    import subprocess
+    import sys
+    import textwrap
+
+    result = subprocess.run([sys.executable, "-c", textwrap.dedent("""
+        import pyspark
+        assert "functions" in dir(pyspark.sql), sorted(dir(pyspark.sql))
+        assert pyspark.sql.functions.__name__ == "pyspark.sql.functions"
+        print(repr(pyspark.sql.functions.col("a")))
+    """)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip() == "Column<'a'>", result.stdout
+
+
 def test_data_types_have_their_attributes_type_names_and_singletons_as_pyspark():
     # As PySpark's: the attributes of the parameters of the types, typeName as a classmethod of
     # the name of the class, INVALID_TYPENAME_CALL of StructField.typeName, and the types of

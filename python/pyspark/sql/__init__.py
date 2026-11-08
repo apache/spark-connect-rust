@@ -96,6 +96,7 @@ if Geometry is not None:
 # attributes of pyspark.sql.
 from pyspark.sql import (  # noqa: E402,F401
     conf,
+    functions,
     geo_utils,
     profiler,
     sql_formatter,
