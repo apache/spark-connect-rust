@@ -246,6 +246,9 @@ VENDORED_FILES=(
 
   # SQL: streaming. TwsTester runs a StatefulProcessor locally - pure upstream.
   "sql/streaming/tws_tester.py"
+  # The listener and its events and progress classes, which the client builds of the JSON of
+  # the server - pure upstream.
+  "sql/streaming/listener.py"
 
   # Streaming (excluding adapted context, dstream, util)
   "streaming/__init__.py"

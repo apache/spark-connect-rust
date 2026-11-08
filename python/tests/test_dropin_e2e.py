@@ -2983,6 +2983,24 @@ def test_foreach_runs_a_function_and_a_writer_of_each_row_as_pyspark(session, tm
     assert e.value.getCondition() == "ATTRIBUTE_NOT_CALLABLE"
 
 
+def test_progress_of_queries_sums_the_rows_of_their_sources_as_pyspark(session):
+    # As PySpark's: the server leaves the total of the rows of a progress out of its JSON, of
+    # which the progress sums those of its sources.
+    query = (
+        session.readStream.format("rate").option("rowsPerSecond", 10).load()
+        .writeStream.format("noop").start()
+    )
+    try:
+        deadline = time.time() + 60
+        while not any(p.numInputRows for p in query.recentProgress) and time.time() < deadline:
+            time.sleep(0.5)
+        progress = next(p for p in query.recentProgress if p.numInputRows)
+        assert progress.numInputRows == sum(s.numInputRows for s in progress.sources) > 0
+        assert progress.inputRowsPerSecond == sum(s.inputRowsPerSecond for s in progress.sources)
+    finally:
+        query.stop()
+
+
 def test_dataframes_of_a_stream_are_streaming_as_pyspark(session):
     # As PySpark's, which asks the server: a DataFrame with a streaming source is streaming.
     stream = session.readStream.format("rate").load()
