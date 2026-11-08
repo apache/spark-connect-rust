@@ -1635,6 +1635,62 @@ def test_writer_v2_takes_its_arguments_as_pyspark(session):
         session.sql(f"DROP TABLE IF EXISTS {name}")
 
 
+def test_streaming_listeners_are_removed_once_per_registration_as_pyspark(session):
+    # As PySpark's StreamingQueryManager: a listener added twice is in the bus twice, and each
+    # removeListener removes one of its registrations; a removal through another session, whose
+    # bus does not have the listener, leaves it in this bus. Once removed, it gets no events.
+    from pyspark.sql.streaming import StreamingQueryListener
+
+    class Listener(StreamingQueryListener):
+        def __init__(self):
+            self.events = []
+
+        def onQueryStarted(self, event):
+            self.events.append("started")
+
+        def onQueryProgress(self, event):
+            self.events.append("progress")
+
+        def onQueryIdle(self, event):
+            pass
+
+        def onQueryTerminated(self, event):
+            self.events.append("terminated")
+
+    listener = Listener()
+    other = session.newSession()
+    try:
+        session.streams.addListener(listener)
+        session.streams.addListener(listener)
+        assert session.streams._sqlb._listener_bus == [listener, listener]
+        session.streams.removeListener(listener)
+        assert session.streams._sqlb._listener_bus == [listener]
+        session.streams.removeListener(listener)
+        assert session.streams._sqlb._listener_bus == []
+        session.streams.removeListener(listener)
+        assert session.streams._sqlb._listener_bus == []
+
+        session.streams.addListener(listener)
+        other.streams.removeListener(listener)
+        assert session.streams._sqlb._listener_bus == [listener]
+        assert other.streams._sqlb._listener_bus == []
+        session.streams.removeListener(listener)
+        assert session.streams._sqlb._listener_bus == []
+
+        query = session.readStream.format("rate").load().writeStream.format("noop")
+        query = query.trigger(processingTime="200 milliseconds").start()
+        try:
+            time.sleep(2)
+        finally:
+            query.stop()
+        time.sleep(1)
+        assert listener.events == []
+    finally:
+        for registered in list(session.streams._sqlb._listener_bus):
+            session.streams.removeListener(registered)
+        other.stop()
+
+
 def test_collected_rows_take_the_names_of_the_schema_of_the_result_as_pyspark(session):
     # As PySpark Connect's: the fields of nested structs have the names of the schema, which keep
     # duplicate names, and collect raises for a calendar interval.
