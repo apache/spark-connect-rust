@@ -140,7 +140,12 @@ fn query_name_of(name: &Bound<'_, PyAny>) -> PyResult<String> {
 /// Like PySpark's reader, the setters change this object and return it, and the
 /// reader can be used again after a read: the core reader is a consuming builder, so
 /// the setters replace the wrapped value in place and the reads work on a clone.
-#[pyclass(name = "DataStreamReader", module = "pyspark.sql.streaming.readwriter")]
+#[pyclass(
+    name = "DataStreamReader",
+    module = "pyspark.sql.streaming.readwriter",
+    weakref,
+    dict
+)]
 pub struct PyDataStreamReader {
     inner: DataStreamReader,
 }
@@ -607,7 +612,12 @@ impl PyTrigger {
 }
 
 /// Python wrapper for DataStreamWriter.
-#[pyclass(name = "DataStreamWriter", module = "pyspark.sql.streaming.readwriter")]
+#[pyclass(
+    name = "DataStreamWriter",
+    module = "pyspark.sql.streaming.readwriter",
+    weakref,
+    dict
+)]
 pub struct PyDataStreamWriter {
     inner: WriterState<DataStreamWriter>,
 }
@@ -1002,7 +1012,12 @@ fn streaming_function_command(
 }
 
 /// Python wrapper for StreamingQuery.
-#[pyclass(name = "StreamingQuery", module = "pyspark.sql.streaming.query")]
+#[pyclass(
+    name = "StreamingQuery",
+    module = "pyspark.sql.streaming.query",
+    weakref,
+    dict
+)]
 pub struct PyStreamingQuery {
     inner: StreamingQuery,
 }
@@ -1125,7 +1140,12 @@ impl PyStreamingQuery {
 }
 
 /// Python wrapper for StreamingQueryManager, of the listener bus of its session.
-#[pyclass(name = "StreamingQueryManager", module = "pyspark.sql.streaming.query")]
+#[pyclass(
+    name = "StreamingQueryManager",
+    module = "pyspark.sql.streaming.query",
+    weakref,
+    dict
+)]
 pub struct PyStreamingQueryManager {
     inner: StreamingQueryManager,
     /// The session, which the listeners get as their `spark`.

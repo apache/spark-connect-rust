@@ -62,7 +62,13 @@ fn lowered_udts(py: Python<'_>) -> &Bound<'_, pyo3::types::PyDict> {
 /// (mirroring pyspark's `DataType`); concrete type classes extend it (directly or via
 /// the intermediate abstract bases below), so `isinstance(dt, DataType)` and the object
 /// model (simpleString/typeName/json/...) are inherited from here via `self.inner`.
-#[pyclass(subclass, name = "DataType", module = "pyspark.sql.types")]
+#[pyclass(
+    subclass,
+    name = "DataType",
+    module = "pyspark.sql.types",
+    weakref,
+    dict
+)]
 pub struct PyDataType {
     pub(crate) inner: DataType,
 }
@@ -1859,7 +1865,7 @@ impl PyMapType {
     }
 }
 
-#[pyclass(name = "StructField", module = "pyspark.sql.types")]
+#[pyclass(name = "StructField", module = "pyspark.sql.types", weakref, dict)]
 pub struct PyStructField {
     pub(crate) field: StructField,
     /// The metadata dict, which PySpark's `StructField` keeps as it is: an edit of it in place

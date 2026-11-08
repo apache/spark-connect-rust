@@ -29,7 +29,7 @@ fn check_same_session(
 }
 
 /// Python wrapper for Spark GroupedData.
-#[pyclass(name = "GroupedData", module = "pyspark.sql.group")]
+#[pyclass(name = "GroupedData", module = "pyspark.sql.group", weakref, dict)]
 pub struct PyGroupedData {
     pub(crate) grouped_data: RustGroupedData,
 }
@@ -501,7 +501,12 @@ fn twus_func<'py>(
 }
 
 /// Python wrapper for cogrouped pandas/arrow ops (`pyspark.sql.group.PandasCogroupedOps`).
-#[pyclass(name = "PandasCogroupedOps", module = "pyspark.sql.pandas.group_ops")]
+#[pyclass(
+    name = "PandasCogroupedOps",
+    module = "pyspark.sql.pandas.group_ops",
+    weakref,
+    dict
+)]
 pub struct PyCoGroupedData {
     pub(crate) inner: RustCoGroupedData,
 }

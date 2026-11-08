@@ -8,7 +8,12 @@ use crate::dataframe::PyDataFrame;
 use crate::errors::ResultExt;
 
 /// Python wrapper for the table-valued-function namespace (`spark.tvf`).
-#[pyclass(name = "TableValuedFunction", module = "pyspark.sql.tvf")]
+#[pyclass(
+    name = "TableValuedFunction",
+    module = "pyspark.sql.tvf",
+    weakref,
+    dict
+)]
 pub struct PyTableValuedFunction {
     inner: TableValuedFunction,
 }

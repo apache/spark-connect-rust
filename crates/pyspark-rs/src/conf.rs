@@ -6,7 +6,12 @@ use spark_connect::conf::RuntimeConf;
 use crate::errors::ResultExt;
 
 /// Python wrapper for the session runtime configuration.
-#[pyclass(name = "RuntimeConf", module = "pyspark.sql.connect.conf")]
+#[pyclass(
+    name = "RuntimeConf",
+    module = "pyspark.sql.connect.conf",
+    weakref,
+    dict
+)]
 pub struct PyRuntimeConf {
     conf: RuntimeConf,
 }

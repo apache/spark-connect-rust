@@ -7869,6 +7869,31 @@ def exact_date_capture_input():
         child.close()
 
 
+def test_the_objects_of_the_client_take_weak_references_and_attributes_as_pyspark(mock_connect):
+    # As PySpark's, whose classes are Python classes: the objects of the client can be referred
+    # to weakly and take attributes of their own, as libraries that cache by weak reference or
+    # tag a DataFrame do.
+    import weakref
+
+    from pyspark.sql import Observation, Window
+    from pyspark.sql import functions as F
+
+    spark, _ = mock_connect
+    df = spark.range(3)
+    for obj in [
+        spark, df, F.col("a"), df.groupBy("id"), Window.partitionBy("id"), spark.read, df.write,
+        df.writeTo("t"), df.mergeInto("t", F.lit(True)), spark.readStream, df.na, df.stat,
+        spark.catalog, spark.conf, spark.tvf, spark.dataSource, Observation("o"),
+        T.StructType([T.StructField("a", T.LongType())]), T.StructField("a", T.LongType()),
+        T.LongType(), T.ArrayType(T.StringType()), T.DecimalType(5, 2),
+    ]:
+        reference = weakref.ref(obj)
+        assert reference() is obj, type(obj)
+        obj._tagged_by_test = type(obj).__name__
+        assert obj._tagged_by_test == type(obj).__name__
+        del obj._tagged_by_test
+
+
 def test_year_month_and_calendar_intervals_raise_as_pyspark_for_local_rows(mock_connect):
     # As PySpark's to_arrow_schema, which has no Arrow type of these intervals: the values
     # and the None values of such a column raise UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION,

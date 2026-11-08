@@ -78,7 +78,7 @@ pub(crate) fn column_reference_name(column: PyRef<'_, PyColumn>) -> Option<Strin
 }
 
 /// Python wrapper for a Spark Column.
-#[pyclass(name = "Column", module = "pyspark.sql.connect.column")]
+#[pyclass(name = "Column", module = "pyspark.sql.connect.column", weakref, dict)]
 pub struct PyColumn {
     pub(crate) column: Column,
 }
