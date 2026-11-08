@@ -248,8 +248,7 @@ def test_spatial_and_collated_json_forms_parse():
 
 def test_private_type_helpers_are_those_of_pyspark():
     # As PySpark's pyspark.sql.types: the inference, merging, conversion and verification of the
-    # types of Python objects, and their tables. They take the client's Row as PySpark's take
-    # theirs, a tuple.
+    # types of Python objects and their tables, including tuple-based Rows.
     from array import array
 
     from pyspark.errors import PySparkTypeError, PySparkValueError
@@ -358,8 +357,7 @@ def _type_verifier_cases():
 
 def test_type_verifiers_take_and_reject_the_values_of_pyspark():
     # As Apache Spark's DataTypeVerificationTests: _make_type_verifier takes the values of each
-    # type, of the client's Row too, and raises the errors of PySpark for the others, with the
-    # names of the fields.
+    # type, including Rows, and raises the errors of PySpark for the others with field names.
     from pyspark.errors import PySparkTypeError, PySparkValueError
     from pyspark.sql.types import _make_type_verifier
 
@@ -383,7 +381,7 @@ def test_type_verifiers_take_and_reject_the_values_of_pyspark():
 
 def test_types_of_python_objects_are_inferred_merged_and_converted_as_pyspark():
     # As PySpark's _infer_type, _infer_schema, _merge_type and _create_converter, of the
-    # values of each type, also nested, of the client's Row too.
+    # values of each type, including nested Rows.
     import datetime
     import decimal
 
