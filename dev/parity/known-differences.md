@@ -13,25 +13,31 @@ difference is intentional or tracked for a fix.
   rather than drop data.
 - **NumPy ndarray input** (tracked by SPARK-60772). Not accepted yet.
 - **Nested pandas Decimal inference and failures** (intentional; related change:
-  SPARK-60696). On the native row fallback, inferred nested Decimal fields keep
-  precision 38 and the greatest observed scale; PySpark infers the smallest precision
-  that covers the values. Increasing scale can make a large value exceed precision 38
-  even when the first value's scale could encode every value by discarding only trailing
-  zeros. For example, with `[Decimal("9" * 37 + ".0")]` followed by
-  `[Decimal("1.0000000")]`, the first value would need 44 digits at scale 7, beyond
-  precision 38; the previous native fallback accepted both at scale 1. PySpark Connect
-  4.3.0 constructs a DataFrame for this example, but requesting its schema or collecting
-  results raises `ArithmeticException` (`DECIMAL_PRECISION_EXCEEDS_MAX_PRECISION`,
-  precision 44, maximum 38). This client's native fallback instead raises
-  `PySparkRuntimeError` during construction, before sending a relation. The rejection
-  stage and error class differ. A later value that increases the scale beyond 38 raises
-  `ValueError` before upload. This can reject later zero or trailing-zero values that the
-  previous native fallback accepted at the first value's scale. Existing container and
-  non-Decimal inference rules are unchanged. With an explicit schema, a nested Decimal
-  that does not fit raises `PySparkRuntimeError` only on the native row fallback, for
-  frames rejected by `accepts_pandas_table`. Ordinary frames use PySpark's Arrow conversion
-  and raise its errors. Both paths reject an explicit-schema value that does not fit
-  before a relation is sent.
+  SPARK-60696).
+
+  - **Inferred precision and scale.** On the native row fallback, inferred nested
+    Decimal fields keep precision 38 and the greatest observed scale; PySpark infers the
+    smallest precision that covers the values. Increasing scale can make a large value
+    exceed precision 38 even when the first value's scale could encode every value by
+    discarding only trailing zeros. For example, with `[Decimal("9" * 37 + ".0")]`
+    followed by `[Decimal("1.0000000")]`, the first value would need 44 digits at scale
+    7, beyond precision 38; the previous native fallback accepted both at scale 1.
+    PySpark Connect 4.3.0 constructs a DataFrame for this example, but requesting its
+    schema or collecting results raises `ArithmeticException`
+    (`DECIMAL_PRECISION_EXCEEDS_MAX_PRECISION`, precision 44, maximum 38). This client's
+    native fallback instead raises `PySparkRuntimeError` during construction, before
+    sending a relation. The rejection stage and error class differ.
+
+  - **Scale beyond 38.** A later value that increases the scale beyond 38 raises
+    `ValueError` before upload. This can reject later zero or trailing-zero values that
+    the previous native fallback accepted at the first value's scale. Existing container
+    and non-Decimal inference rules are unchanged.
+
+  - **Explicit schema.** With an explicit schema, a nested Decimal that does not fit
+    raises `PySparkRuntimeError` only on the native row fallback, for frames rejected by
+    `accepts_pandas_table`. Ordinary frames use PySpark's Arrow conversion and raise its
+    errors. Both paths reject an explicit-schema value that does not fit before a
+    relation is sent.
 - **Multiple invalid pandas columns with an explicit Decimal field** (intentional,
   SPARK-60696). On native row fallback, Decimal exactness is checked before the encoder
   converts other fields. If an earlier non-Decimal column and a later Decimal column are

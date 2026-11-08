@@ -47,8 +47,8 @@ pub(crate) fn c_decimal_type(py: Python<'_>) -> PyResult<Option<&Bound<'_, PyTyp
     Ok(decimal.as_ref().map(|decimal| decimal.bind(py)))
 }
 
-/// Keep the cached conversion class independent of a rebound public alias when C Decimal
-/// is available. Pure-Python decimal keeps its established fallback conversion.
+/// The effective Decimal class from [`decimal_classes`]: C `_decimal.Decimal` when
+/// available, otherwise the cached public alias.
 fn decimal_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
     Ok(decimal_classes(py)?.1)
 }
