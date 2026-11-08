@@ -9364,6 +9364,39 @@ def test_numpy_scalars_of_other_types_are_unsupported_as_pyspark(mock_connect):
 # --------------------------------------------------------------------------- 4.3.0 gaps
 
 
+def test_functions_are_of_the_builtin_module_and_pickle_by_reference_as_pyspark():
+    # As PySpark's, the functions are of pyspark.sql.functions.builtin, but pandas_udf and
+    # arrow_udf, so they pickle by reference, by that name, which PySpark's workers import.
+    import inspect
+    from pyspark.serializers import CloudPickleSerializer
+    from pyspark.sql import functions as F
+    import pyspark.sql.functions.builtin as builtin
+
+    functions = [getattr(F, name) for name in F.__all__ if inspect.isfunction(getattr(F, name))]
+    assert len(functions) > 500
+    for function in functions:
+        expected = (
+            "pyspark.sql.pandas.functions"
+            if function.__name__ in ("pandas_udf", "arrow_udf")
+            else "pyspark.sql.functions.builtin"
+        )
+        assert function.__module__ == expected, function.__name__
+        assert pickle.loads(pickle.dumps(function)) is function
+    assert F.countDistinct.__module__ == "pyspark.sql.functions.builtin"
+    assert builtin.array_sort is F.array_sort
+
+    # A function that captures some, as a UDF or a foreachBatch function does, pickles them by
+    # their names: before, cloudpickle pickled them by value, and failed.
+    sort, col, udf = F.array_sort, F.col, F.udf
+
+    def captures(df):
+        return sort, col, udf, F.abs
+
+    payload = CloudPickleSerializer().dumps(captures)
+    assert b"pyspark.sql.functions.builtin" in payload and b"pyfunc_" not in payload
+    assert CloudPickleSerializer().loads(payload)(None) == (sort, col, udf, F.abs)
+
+
 def test_timestamp_nanos_types_roundtrip_and_pickle():
     # Spark's TimestampNTZNanosType/TimestampLTZNanosType (precision 7..9) materialize as
     # their own types, not as TimeType / a microsecond TimestampType.
