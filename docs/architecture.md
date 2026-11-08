@@ -166,8 +166,8 @@ Pandas frames of at least 10,000 rows whose columns are all kept in pandas' Arro
 string storage (`string[pyarrow]` in pandas 2.2 and later, and the `str` dtype of
 pandas 3), with an explicit `StructType` of `StringType` fields, pass that storage
 to this importer as Arrow string columns, without Python rows.
-Frames with customized conversion methods on pandas' Arrow string arrays or
-column labels use the existing row conversion path.
+The guards recognize changes to selected conversion methods on pandas' Arrow
+string arrays or column labels and keep those frames on the existing row conversion path.
 Inputs at or above `spark.sql.session.localRelationCacheThreshold` are serialized
 into independent IPC streams and uploaded as session-scoped cache artifacts.
 The plan carries `ChunkedCachedLocalRelation` hashes instead of embedding the

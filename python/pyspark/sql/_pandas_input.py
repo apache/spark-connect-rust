@@ -826,7 +826,7 @@ def _arrow_string_table(frame, schema, dtypes):
         # an instance's _pa_array storage was replaced.
         if issubclass(type(values), pa.Array):
             values = pa.chunked_array([values])
-        elif not issubclass(type(values), pa.ChunkedArray):
+        elif type(values) is not pa.ChunkedArray:
             return None
         if values.type not in (pa.string(), pa.large_string()):
             return None

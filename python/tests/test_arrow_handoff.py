@@ -4546,7 +4546,9 @@ def test_arrow_string_numpy_semantics_accessor_keeps_native_values(
     protocol, monkeypatch, customization, schema_kind
 ):
     import importlib
+    import json
     from pandas.core.arrays import _arrow_string_mixins as string_mixins, string_arrow
+    from pyspark.sql.pandas.types import from_arrow_schema
 
     helper = importlib.import_module("pyspark.sql._pandas_input")
     texts = ["original", None] * 5000
@@ -4590,20 +4592,44 @@ def test_arrow_string_numpy_semantics_accessor_keeps_native_values(
         assert helper.accepts_pandas_table(frame, schema) == (not dynamic_accessor)
         assert helper.accepts_pandas_frame(frame) == (not dynamic_accessor)
         assert calls == []
-    tables = []
+    logical_tables = []
     for row_control, frame in zip((True, False), frames):
         with monkeypatch.context() as control:
             if row_control:
                 _force_native_pandas_rows(control)
             with _arrow_input_service(protocol, config_error=dynamic_accessor) as (spark, state):
-                spark.createDataFrame(frame, input_schema).toArrow()
-                tables.append(state["input_tables"][0])
-                if dynamic_accessor:
+                # The mock returns only a row count, not the uploaded data or resolved schema.
+                reply = spark.createDataFrame(frame, input_schema).toArrow()
+                assert reply.to_pydict() == {"rows": [len(texts)]}
+                assert len(state["input_tables"]) == 1
+                uploaded = state["input_tables"][0]
+                assert uploaded.num_rows == len(texts)
+                assert uploaded.num_columns == 1
+                assert uploaded.column(0).to_pylist() == texts
+                assert uploaded.column(0).is_null().to_pylist() == [False, True] * 5000
+                assert state["column_names"] == ["v"]
+                if row_control or dynamic_accessor or schema_kind == "explicit":
+                    expected_wire = pa.schema([pa.field("v", pa.string())])
+                    assert json.loads(state["spark_schema"]) == json.loads(schema.json())
+                else:
+                    # Inherited inferred Arrow conversion sends _n fields without a
+                    # declared schema; Spark infers large_string as StringType and toDF
+                    # applies the actual captured column names above.
+                    expected_wire = pa.schema([pa.field("_0", pa.large_string())])
+                    assert state["spark_schema"] is None
+                assert uploaded.schema.equals(expected_wire, check_metadata=True)
+                if row_control or dynamic_accessor:
                     assert state["config_requests"] == []
                     assert state["uploads"] == 0
+                else:
+                    assert state["config_requests"]
+                # Compare logical uploaded data only after checking the exact wire
+                # schema and rename plan. This is not a real server schema assertion.
+                renamed = uploaded.rename_columns(state["column_names"])
+                assert from_arrow_schema(renamed.schema) == schema
+                logical_tables.append(renamed.cast(pa.schema([pa.field("v", pa.string())])))
     assert calls == []
-    assert tables[0].column(0).to_pylist() == texts
-    assert tables[0].equals(tables[1], check_metadata=True)
+    assert logical_tables[0].equals(logical_tables[1], check_metadata=True)
 
 
 @pytest.mark.parametrize("route", ["specialized", "generic", "inferred"])
@@ -4749,13 +4775,20 @@ with pytest.MonkeyPatch.context() as control:
         stdout, stderr = process.communicate(timeout=60)
     except subprocess.TimeoutExpired:
         terminate_child()
-        stdout, stderr = process.communicate(timeout=5)
+        try:
+            stdout, stderr = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = "", ""
         pytest.fail("Arrow-string allocator child timed out\n" + stdout + stderr)
     except BaseException:
         terminate_child()
-        process.communicate(timeout=5)
+        try:
+            process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
         raise
     assert process.returncode == 0, stdout + stderr
+    # Guard against accidentally reintroducing in-process allocator mutation.
     healthy = pd.array(["original", None], dtype="string[pyarrow]")
     assert healthy.__arrow_array__().to_pylist() == ["original", None]
 
@@ -4770,6 +4803,7 @@ def test_arrow_string_custom_row_hooks_keep_native_errors(
     protocol, monkeypatch, method, schema_kind, storage
 ):
     if method == "__new__":
+        # Other hooks use this shared fixture signature; the child needs its own protocol.
         _arrow_string_allocator_process("row", schema_kind, storage)
     else:
         _check_arrow_string_custom_row_hook(protocol, monkeypatch, method, schema_kind, storage)
@@ -4786,8 +4820,9 @@ def _check_arrow_string_custom_row_hook(
     frames = []
     for _ in range(2):
         frame = pd.DataFrame({"v": _arrow_string_column(texts, storage)})
-        # Object labels isolate the data-class checks for these additional hooks.
-        # Arrow labels exercise the earlier label-cast checks for the other cases.
+        # Object labels isolate the additional construction/_hasna data hooks.
+        # The other Arrow labels exercise earlier checks when they share the data
+        # class (pyarrow storage); a separate NumPy-semantics class is checked later.
         frame.columns = pd.Index(["v"], dtype=object) if method in (
             "_hasna", "__init__", "_from_pyarrow_array", "__new__",
         ) else pd.Index(
@@ -4797,8 +4832,10 @@ def _check_arrow_string_custom_row_hook(
     input_schema = {"explicit": schema, "inferred": None, "names": ["v"]}[schema_kind]
     array_class = type(frames[0].iloc[:, 0].array)
     calls = []
-    # Warm both routes before rebinding: class authentication must not be cached
-    # across calls, even when this exact class was previously accepted.
+    # Warm all guards before rebinding: class authentication must not be cached
+    # across calls, even when this exact class was previously accepted. This also
+    # populates pandas' Block.dtype cache, so a customized data dtype reaches the
+    # class check; the separate cold-dtype test covers its earlier native error.
     for frame in frames:
         assert _pandas_input.prepare_string_input(frame, schema) is not None
         assert _pandas_input.accepts_pandas_table(frame, schema)
@@ -5051,11 +5088,12 @@ def test_arrow_string_simulated_cast_failures_decline(monkeypatch, error_kind):
             calls.append(("cast", target))
             raise error_class("simulated Arrow-string cast failure")
 
-    # PyArrow extension types are immutable. This local module proxy recognizes
-    # the wrapper only for the simulated cast branch; real capacity is untested.
+    # PyArrow extension types are immutable. This local module proxy substitutes
+    # the exact recognized storage class only for this simulated cast branch;
+    # no real ChunkedArray subclass or capacity behavior is being tested.
     proxy = ModuleType("pyarrow")
     vars(proxy).update(vars(pa))
-    proxy.ChunkedArray = (pa.ChunkedArray, SimulatedCastFailure)
+    proxy.ChunkedArray = SimulatedCastFailure
     with monkeypatch.context() as simulated:
         simulated.setattr(array, "_pa_array", SimulatedCastFailure())
         simulated.setitem(sys.modules, "pyarrow", proxy)
