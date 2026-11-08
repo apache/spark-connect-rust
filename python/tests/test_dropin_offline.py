@@ -104,6 +104,45 @@ def test_decimal_precision_scale():
     assert d.precision == 10 and d.scale == 2
 
 
+def test_type_constructors_check_their_arguments_as_pyspark():
+    # As PySpark's: DayTimeIntervalType and YearMonthIntervalType take the fields of their
+    # types, both of the defaults without any and the start field for the end without one, and
+    # raise INVALID_INTERVAL_CASTING of the str of each for another; the types without
+    # parameters, singletons of DataTypeSingleton, raise its TypeError of an argument.
+    from pyspark.errors import PySparkRuntimeError
+
+    D, Y = T.DayTimeIntervalType, T.YearMonthIntervalType
+    assert D().simpleString() == "interval day to second"
+    assert D(D.HOUR).simpleString() == "interval hour"
+    assert D(D.MINUTE, D.HOUR).simpleString() == "interval minute to hour"
+    assert D(1.0).simpleString() == "interval hour"
+    assert Y().simpleString() == "interval year to month"
+    assert Y(Y.MONTH).simpleString() == "interval month"
+    for make, params in [
+        (lambda: D(endField=D.SECOND), ("None", "3")),
+        (lambda: D(123), ("123", "123")),
+        (lambda: D("a"), ("a", "a")),
+        (lambda: Y(endField=3), ("None", "3")),
+        (lambda: Y(Y.YEAR, 5), ("0", "5")),
+    ]:
+        with pytest.raises(PySparkRuntimeError) as e:
+            make()
+        assert e.value.getCondition() == "INVALID_INTERVAL_CASTING"
+        assert e.value.getMessageParameters() == {"start_field": params[0], "end_field": params[1]}
+
+    assert T.CalendarIntervalType() is T.CalendarIntervalType()
+    for make, message in [
+        (lambda: T.CalendarIntervalType(3), "takes 1 positional argument but 2 were given"),
+        (lambda: T.IntegerType(1, 2), "takes 1 positional argument but 3 were given"),
+        (lambda: T.NullType(x=1), "got an unexpected keyword argument 'x'"),
+        (lambda: T.LongType(1, y=2), "got an unexpected keyword argument 'y'"),
+    ]:
+        with pytest.raises(TypeError, match=r"^DataTypeSingleton\.__call__\(\) " + message):
+            make()
+
+
+
+
 def test_nested_types_pickle_roundtrip():
     nested = [
         T.ArrayType(T.IntegerType()),

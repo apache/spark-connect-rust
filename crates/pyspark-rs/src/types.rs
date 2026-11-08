@@ -67,6 +67,80 @@ pub struct PyDataType {
     pub(crate) inner: DataType,
 }
 
+/// What PySpark's `DataTypeSingleton.__call__(cls)` raises, as Python does, for the arguments
+/// of a call of a type without parameters: a `TypeError` of the first keyword argument, or else
+/// of the positional ones.
+fn singleton_arguments(
+    args: &Bound<'_, pyo3::types::PyTuple>,
+    kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+) -> PyResult<()> {
+    if let Some((key, _)) = kwargs.and_then(|kwargs| kwargs.iter().next()) {
+        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "DataTypeSingleton.__call__() got an unexpected keyword argument '{}'",
+            key.str()?
+        )));
+    }
+    if !args.is_empty() {
+        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "DataTypeSingleton.__call__() takes 1 positional argument but {} were given",
+            args.len() + 1
+        )));
+    }
+    Ok(())
+}
+
+/// The fields of an interval type, as PySpark's `DayTimeIntervalType` and
+/// `YearMonthIntervalType` take them: both of `default` without any, the start field for the
+/// end without one, and a `PySparkRuntimeError` of `INVALID_INTERVAL_CASTING` for a field that
+/// is not one of the type, of the `str` of each.
+fn interval_fields(
+    py: Python<'_>,
+    start: Option<&Bound<'_, PyAny>>,
+    end: Option<&Bound<'_, PyAny>>,
+    default: (i32, i32),
+    last: i32,
+) -> PyResult<(i32, i32)> {
+    let field = |value: Option<&Bound<'_, PyAny>>| -> Option<i32> {
+        let value = value?;
+        if value.is_instance_of::<pyo3::types::PyFloat>() {
+            // `1.0 in {0, 1}` of PySpark, of a float that equals a field.
+            let float: f64 = value.extract().ok()?;
+            return (float.fract() == 0.0 && (0.0..=f64::from(last)).contains(&float))
+                .then_some(float as i32);
+        }
+        value
+            .extract::<i64>()
+            .ok()
+            .filter(|field| (0..=i64::from(last)).contains(field))
+            .map(|field| field as i32)
+    };
+    let (start, end) = match (start, end) {
+        (None, None) => return Ok(default),
+        (Some(start), None) => (Some(start), Some(start)),
+        (start, end) => (start, end),
+    };
+    match (field(start), field(end)) {
+        (Some(start), Some(end)) => Ok((start, end)),
+        _ => {
+            let text = |value: Option<&Bound<'_, PyAny>>| -> PyResult<String> {
+                Ok(match value {
+                    Some(value) => value.str()?.to_string(),
+                    None => "None".to_string(),
+                })
+            };
+            Err(crate::column::raise_pyspark(
+                py,
+                "PySparkRuntimeError",
+                "INVALID_INTERVAL_CASTING",
+                &[
+                    ("start_field", text(start)?.as_str()),
+                    ("end_field", text(end)?.as_str()),
+                ],
+            ))
+        }
+    }
+}
+
 /// The abstract intermediate base classes of the type hierarchy (mirror pyspark's
 /// AtomicType/NumericType/IntegralType/... ). They carry no data — a concrete type's
 /// `__new__` builds the initializer chain `PyDataType{inner} -> ... -> Concrete` — but
@@ -479,9 +553,15 @@ impl PyNullType {
         type_reduce(py, "\"void\"")
     }
     /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
-    /// returns it.
+    /// returns it, and raises its `TypeError` of an argument.
     #[new]
-    fn new(py: Python<'_>) -> PyResult<Py<Self>> {
+    #[pyo3(signature = (*args, **kwargs))]
+    fn new(
+        py: Python<'_>,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<Py<Self>> {
+        singleton_arguments(args, kwargs)?;
         static INSTANCE: PyOnceLock<Py<PyNullType>> = PyOnceLock::new();
         INSTANCE
             .get_or_try_init(py, || {
@@ -544,9 +624,15 @@ impl PyBooleanType {
         type_reduce(py, "\"boolean\"")
     }
     /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
-    /// returns it.
+    /// returns it, and raises its `TypeError` of an argument.
     #[new]
-    fn new(py: Python<'_>) -> PyResult<Py<Self>> {
+    #[pyo3(signature = (*args, **kwargs))]
+    fn new(
+        py: Python<'_>,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<Py<Self>> {
+        singleton_arguments(args, kwargs)?;
         static INSTANCE: PyOnceLock<Py<PyBooleanType>> = PyOnceLock::new();
         INSTANCE
             .get_or_try_init(py, || {
@@ -606,9 +692,15 @@ impl PyByteType {
         type_reduce(py, "\"byte\"")
     }
     /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
-    /// returns it.
+    /// returns it, and raises its `TypeError` of an argument.
     #[new]
-    fn new(py: Python<'_>) -> PyResult<Py<Self>> {
+    #[pyo3(signature = (*args, **kwargs))]
+    fn new(
+        py: Python<'_>,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<Py<Self>> {
+        singleton_arguments(args, kwargs)?;
         static INSTANCE: PyOnceLock<Py<PyByteType>> = PyOnceLock::new();
         INSTANCE
             .get_or_try_init(py, || {
@@ -672,9 +764,15 @@ impl PyShortType {
         type_reduce(py, "\"short\"")
     }
     /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
-    /// returns it.
+    /// returns it, and raises its `TypeError` of an argument.
     #[new]
-    fn new(py: Python<'_>) -> PyResult<Py<Self>> {
+    #[pyo3(signature = (*args, **kwargs))]
+    fn new(
+        py: Python<'_>,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<Py<Self>> {
+        singleton_arguments(args, kwargs)?;
         static INSTANCE: PyOnceLock<Py<PyShortType>> = PyOnceLock::new();
         INSTANCE
             .get_or_try_init(py, || {
@@ -738,9 +836,15 @@ impl PyIntegerType {
         type_reduce(py, "\"integer\"")
     }
     /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
-    /// returns it.
+    /// returns it, and raises its `TypeError` of an argument.
     #[new]
-    fn new(py: Python<'_>) -> PyResult<Py<Self>> {
+    #[pyo3(signature = (*args, **kwargs))]
+    fn new(
+        py: Python<'_>,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<Py<Self>> {
+        singleton_arguments(args, kwargs)?;
         static INSTANCE: PyOnceLock<Py<PyIntegerType>> = PyOnceLock::new();
         INSTANCE
             .get_or_try_init(py, || {
@@ -804,9 +908,15 @@ impl PyLongType {
         type_reduce(py, "\"long\"")
     }
     /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
-    /// returns it.
+    /// returns it, and raises its `TypeError` of an argument.
     #[new]
-    fn new(py: Python<'_>) -> PyResult<Py<Self>> {
+    #[pyo3(signature = (*args, **kwargs))]
+    fn new(
+        py: Python<'_>,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<Py<Self>> {
+        singleton_arguments(args, kwargs)?;
         static INSTANCE: PyOnceLock<Py<PyLongType>> = PyOnceLock::new();
         INSTANCE
             .get_or_try_init(py, || {
@@ -870,9 +980,15 @@ impl PyFloatType {
         type_reduce(py, "\"float\"")
     }
     /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
-    /// returns it.
+    /// returns it, and raises its `TypeError` of an argument.
     #[new]
-    fn new(py: Python<'_>) -> PyResult<Py<Self>> {
+    #[pyo3(signature = (*args, **kwargs))]
+    fn new(
+        py: Python<'_>,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<Py<Self>> {
+        singleton_arguments(args, kwargs)?;
         static INSTANCE: PyOnceLock<Py<PyFloatType>> = PyOnceLock::new();
         INSTANCE
             .get_or_try_init(py, || {
@@ -936,9 +1052,15 @@ impl PyDoubleType {
         type_reduce(py, "\"double\"")
     }
     /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
-    /// returns it.
+    /// returns it, and raises its `TypeError` of an argument.
     #[new]
-    fn new(py: Python<'_>) -> PyResult<Py<Self>> {
+    #[pyo3(signature = (*args, **kwargs))]
+    fn new(
+        py: Python<'_>,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<Py<Self>> {
+        singleton_arguments(args, kwargs)?;
         static INSTANCE: PyOnceLock<Py<PyDoubleType>> = PyOnceLock::new();
         INSTANCE
             .get_or_try_init(py, || {
@@ -1189,9 +1311,15 @@ impl PyBinaryType {
         type_reduce(py, "\"binary\"")
     }
     /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
-    /// returns it.
+    /// returns it, and raises its `TypeError` of an argument.
     #[new]
-    fn new(py: Python<'_>) -> PyResult<Py<Self>> {
+    #[pyo3(signature = (*args, **kwargs))]
+    fn new(
+        py: Python<'_>,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<Py<Self>> {
+        singleton_arguments(args, kwargs)?;
         static INSTANCE: PyOnceLock<Py<PyBinaryType>> = PyOnceLock::new();
         INSTANCE
             .get_or_try_init(py, || {
@@ -1254,9 +1382,15 @@ impl PyDateType {
         type_reduce(py, "\"date\"")
     }
     /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
-    /// returns it.
+    /// returns it, and raises its `TypeError` of an argument.
     #[new]
-    fn new(py: Python<'_>) -> PyResult<Py<Self>> {
+    #[pyo3(signature = (*args, **kwargs))]
+    fn new(
+        py: Python<'_>,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<Py<Self>> {
+        singleton_arguments(args, kwargs)?;
         static INSTANCE: PyOnceLock<Py<PyDateType>> = PyOnceLock::new();
         INSTANCE
             .get_or_try_init(py, || {
@@ -1316,9 +1450,15 @@ impl PyTimestampType {
         type_reduce(py, "\"timestamp\"")
     }
     /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
-    /// returns it.
+    /// returns it, and raises its `TypeError` of an argument.
     #[new]
-    fn new(py: Python<'_>) -> PyResult<Py<Self>> {
+    #[pyo3(signature = (*args, **kwargs))]
+    fn new(
+        py: Python<'_>,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<Py<Self>> {
+        singleton_arguments(args, kwargs)?;
         static INSTANCE: PyOnceLock<Py<PyTimestampType>> = PyOnceLock::new();
         INSTANCE
             .get_or_try_init(py, || {
@@ -1382,9 +1522,15 @@ impl PyTimestampNTZType {
         type_reduce(py, "\"timestamp_ntz\"")
     }
     /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
-    /// returns it.
+    /// returns it, and raises its `TypeError` of an argument.
     #[new]
-    fn new(py: Python<'_>) -> PyResult<Py<Self>> {
+    #[pyo3(signature = (*args, **kwargs))]
+    fn new(
+        py: Python<'_>,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<Py<Self>> {
+        singleton_arguments(args, kwargs)?;
         static INSTANCE: PyOnceLock<Py<PyTimestampNTZType>> = PyOnceLock::new();
         INSTANCE
             .get_or_try_init(py, || {
@@ -2680,9 +2826,15 @@ impl PyCalendarIntervalType {
         type_reduce(py, "\"calendarinterval\"")
     }
     /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
-    /// returns it.
+    /// returns it, and raises its `TypeError` of an argument.
     #[new]
-    fn new(py: Python<'_>) -> PyResult<Py<Self>> {
+    #[pyo3(signature = (*args, **kwargs))]
+    fn new(
+        py: Python<'_>,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<Py<Self>> {
+        singleton_arguments(args, kwargs)?;
         static INSTANCE: PyOnceLock<Py<PyCalendarIntervalType>> = PyOnceLock::new();
         INSTANCE
             .get_or_try_init(py, || {
@@ -2769,13 +2921,18 @@ impl PyYearMonthIntervalType {
         type_reduce(py, &dt.json())
     }
     /// Fields: YEAR=0, MONTH=1. Defaults to the full YEAR..MONTH range.
+    /// As PySpark's `YearMonthIntervalType(startField=None, endField=None)`, of the fields YEAR
+    /// and MONTH: `INVALID_INTERVAL_CASTING` for another.
     #[new]
     #[pyo3(signature = (startField=None, endField=None))]
     #[allow(non_snake_case)]
-    fn new(startField: Option<i32>, endField: Option<i32>) -> pyo3::PyClassInitializer<Self> {
-        let start = startField.unwrap_or(0);
-        let end = endField.unwrap_or(if startField.is_some() { start } else { 1 });
-        init_chain!(
+    fn new(
+        py: Python<'_>,
+        startField: Option<&Bound<'_, PyAny>>,
+        endField: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<pyo3::PyClassInitializer<Self>> {
+        let (start, end) = interval_fields(py, startField, endField, (0, 1), 1)?;
+        Ok(init_chain!(
             DataType::YearMonthInterval {
                 start_field: start,
                 end_field: end,
@@ -2786,7 +2943,7 @@ impl PyYearMonthIntervalType {
             },
             [PyAtomicType, PyAnsiIntervalType],
             value
-        )
+        ))
     }
     fn __repr__(&self) -> String {
         format!(
@@ -2861,13 +3018,18 @@ impl PyDayTimeIntervalType {
         type_reduce(py, &dt.json())
     }
     /// Fields: DAY=0, HOUR=1, MINUTE=2, SECOND=3. Defaults to the full DAY..SECOND range.
+    /// As PySpark's `DayTimeIntervalType(startField=None, endField=None)`, of the fields DAY,
+    /// HOUR, MINUTE and SECOND: `INVALID_INTERVAL_CASTING` for another.
     #[new]
     #[pyo3(signature = (startField=None, endField=None))]
     #[allow(non_snake_case)]
-    fn new(startField: Option<i32>, endField: Option<i32>) -> pyo3::PyClassInitializer<Self> {
-        let start = startField.unwrap_or(0);
-        let end = endField.unwrap_or(if startField.is_some() { start } else { 3 });
-        init_chain!(
+    fn new(
+        py: Python<'_>,
+        startField: Option<&Bound<'_, PyAny>>,
+        endField: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<pyo3::PyClassInitializer<Self>> {
+        let (start, end) = interval_fields(py, startField, endField, (0, 3), 3)?;
+        Ok(init_chain!(
             DataType::DayTimeInterval {
                 start_field: start,
                 end_field: end,
@@ -2878,7 +3040,7 @@ impl PyDayTimeIntervalType {
             },
             [PyAtomicType, PyAnsiIntervalType],
             value
-        )
+        ))
     }
     fn __repr__(&self) -> String {
         format!(
@@ -3172,14 +3334,20 @@ pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAn
         };
     }
     let o = match dt {
-        DataType::Null => PyNullType::new(py)?.into_any(),
-        DataType::Boolean => PyBooleanType::new(py)?.into_any(),
-        DataType::Byte => PyByteType::new(py)?.into_any(),
-        DataType::Short => PyShortType::new(py)?.into_any(),
-        DataType::Integer => PyIntegerType::new(py)?.into_any(),
-        DataType::Long => PyLongType::new(py)?.into_any(),
-        DataType::Float => PyFloatType::new(py)?.into_any(),
-        DataType::Double => PyDoubleType::new(py)?.into_any(),
+        DataType::Null => PyNullType::new(py, &pyo3::types::PyTuple::empty(py), None)?.into_any(),
+        DataType::Boolean => {
+            PyBooleanType::new(py, &pyo3::types::PyTuple::empty(py), None)?.into_any()
+        }
+        DataType::Byte => PyByteType::new(py, &pyo3::types::PyTuple::empty(py), None)?.into_any(),
+        DataType::Short => PyShortType::new(py, &pyo3::types::PyTuple::empty(py), None)?.into_any(),
+        DataType::Integer => {
+            PyIntegerType::new(py, &pyo3::types::PyTuple::empty(py), None)?.into_any()
+        }
+        DataType::Long => PyLongType::new(py, &pyo3::types::PyTuple::empty(py), None)?.into_any(),
+        DataType::Float => PyFloatType::new(py, &pyo3::types::PyTuple::empty(py), None)?.into_any(),
+        DataType::Double => {
+            PyDoubleType::new(py, &pyo3::types::PyTuple::empty(py), None)?.into_any()
+        }
         DataType::Decimal { precision, scale } => {
             let (precision, scale) = (*precision, *scale);
             obj!(init_chain!(
@@ -3199,10 +3367,16 @@ pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAn
             [PyAtomicType],
             value
         )),
-        DataType::Binary => PyBinaryType::new(py)?.into_any(),
-        DataType::Date => PyDateType::new(py)?.into_any(),
-        DataType::Timestamp => PyTimestampType::new(py)?.into_any(),
-        DataType::TimestampNtz => PyTimestampNTZType::new(py)?.into_any(),
+        DataType::Binary => {
+            PyBinaryType::new(py, &pyo3::types::PyTuple::empty(py), None)?.into_any()
+        }
+        DataType::Date => PyDateType::new(py, &pyo3::types::PyTuple::empty(py), None)?.into_any(),
+        DataType::Timestamp => {
+            PyTimestampType::new(py, &pyo3::types::PyTuple::empty(py), None)?.into_any()
+        }
+        DataType::TimestampNtz => {
+            PyTimestampNTZType::new(py, &pyo3::types::PyTuple::empty(py), None)?.into_any()
+        }
         DataType::Array {
             element_type,
             contains_null,
@@ -3292,7 +3466,9 @@ pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAn
                 value
             ))
         }
-        DataType::CalendarInterval => PyCalendarIntervalType::new(py)?.into_any(),
+        DataType::CalendarInterval => {
+            PyCalendarIntervalType::new(py, &pyo3::types::PyTuple::empty(py), None)?.into_any()
+        }
         DataType::YearMonthInterval {
             start_field,
             end_field,
