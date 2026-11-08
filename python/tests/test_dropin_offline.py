@@ -1428,6 +1428,54 @@ def test_sql_utils_reexports_the_exceptions_of_pyspark(mock_connect):
     assert "TABLE_OR_VIEW_NOT_FOUND" in str(error.value)
 
 
+def test_pickled_sort_columns_are_sort_orders_as_pyspark(mock_connect):
+    # As PySpark's SortOrder: a pickled, cloudpickled or deep-copied sort Column is a sort order
+    # again, so orderBy, Window.orderBy and repartitionByRange send it as the Column built
+    # without the pickling, not wrapped in another ASC NULLS FIRST.
+    import copy
+
+    import cloudpickle
+    from pyspark.sql import functions as F
+    from pyspark.sql.window import Window
+
+    spark, service = mock_connect
+    df = spark.range(1)
+
+    def sent_relation(dataframe):
+        # ExecutePlanRequest.plan=3, Plan.root=1.
+        dataframe.collect()
+        return parse_message(parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0])
+
+    def sort_orders(column):
+        # Relation.sort=7, Sort.order=2.
+        return parse_message(sent_relation(df.orderBy(column))[7][0])[2]
+
+    def range_partitioning(column):
+        # Relation.repartition_by_expression=27, RepartitionByExpression.partition_exprs=2.
+        return parse_message(sent_relation(df.repartitionByRange(2, column))[27][0])[2]
+
+    def window_expression(column):
+        # Relation.project=3, Project.expressions=3.
+        over = F.row_number().over(Window.orderBy(column)).alias("r")
+        return parse_message(sent_relation(df.select(over))[3][0])[3]
+
+    for direct in (F.col("id").asc(), F.col("id").desc(), F.col("id").asc_nulls_last(),
+                   F.col("id").desc_nulls_first(), F.desc("id")):
+        for copied in (pickle.loads(pickle.dumps(direct)),
+                       cloudpickle.loads(cloudpickle.dumps(direct)),
+                       copy.deepcopy(direct)):
+            assert repr(copied) == repr(direct)
+            assert repr(Window.orderBy(copied)) == repr(Window.orderBy(direct))
+            assert sort_orders(copied) == sort_orders(direct)
+            assert range_partitioning(copied) == range_partitioning(direct)
+            assert window_expression(copied) == window_expression(direct)
+    # A sort order of an expression, and one pickled twice.
+    direct = (F.col("id") + 1).desc()
+    twice = pickle.loads(pickle.dumps(pickle.loads(pickle.dumps(direct))))
+    assert repr(twice) == repr(direct)
+    assert sort_orders(twice) == sort_orders(direct)
+
+
 def test_pickled_when_columns_chain_as_pyspark(mock_connect):
     # As PySpark's CaseWhen: a pickled, cloudpickled or deep-copied when() Column keeps its CASE
     # WHEN, so when() and otherwise() chain on it, and the chain sends the plan of the chain

@@ -3,7 +3,7 @@
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use spark_connect::column::Column;
-use spark_connect::expression::{Alias, ExpressionNode};
+use spark_connect::expression::{Alias, ExpressionNode, NullOrdering};
 
 use crate::functions::to_column;
 
@@ -692,7 +692,9 @@ impl PyColumn {
     /// `pyspark.sql.connect.column._reduce_column` gives back the Column, also on a Python worker
     /// of the server, such as that of a `foreachBatch` function, as PySpark Connect's Column.
     /// A CASE WHEN also pickles its branches and else value, as PySpark's CaseWhen keeps them, so
-    /// that `when` and `otherwise` chain on the unpickled Column.
+    /// that `when` and `otherwise` chain on the unpickled Column. A sort order pickles its child
+    /// Column and its sort method, as PySpark's SortOrder keeps its child and direction, so that
+    /// the unpickled Column is a sort order of `orderBy`, `Window.orderBy` and the others.
     fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         use prost::Message;
         let expression = pyo3::types::PyBytes::new(py, &self.column.to_proto().encode_to_vec());
@@ -715,6 +717,18 @@ impl PyColumn {
             }
             _ => (None, None),
         };
+        let sort = match self.column.expression().node() {
+            ExpressionNode::SortOrder(sort) => {
+                let method = match (sort.ascending, sort.null_ordering) {
+                    (true, NullOrdering::First) => "asc_nulls_first",
+                    (true, NullOrdering::Last) => "asc_nulls_last",
+                    (false, NullOrdering::First) => "desc_nulls_first",
+                    (false, NullOrdering::Last) => "desc_nulls_last",
+                };
+                Some((column(&sort.child)?, method))
+            }
+            _ => None,
+        };
         py.import("pyspark.sql.connect.column")?
             .getattr("_reduce_column")?
             .call1((
@@ -722,6 +736,7 @@ impl PyColumn {
                 self.column.expression().render(),
                 branches,
                 else_value,
+                sort,
             ))
     }
 
