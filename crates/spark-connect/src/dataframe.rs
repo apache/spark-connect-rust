@@ -2898,12 +2898,12 @@ impl<'a> ArrowValueLayout<'a> {
             }
             // Intervals likewise have no dedicated Value variant, so render as strings.
             ArrowValueDecoder::IntervalYearMonth(arr) => {
-                let months = arr.value(index);
-                Ok(Value::String(format!(
-                    "{}-{}",
-                    months / 12,
-                    (months % 12).abs()
-                )))
+                // The sign goes on the years, as Spark's `toYearMonthIntervalString`
+                // does, so -1 month is "-0-1" and not "0-1".
+                let months = arr.value(index) as i64;
+                let sign = if months < 0 { "-" } else { "" };
+                let abs = months.abs();
+                Ok(Value::String(format!("{sign}{}-{}", abs / 12, abs % 12)))
             }
             ArrowValueDecoder::IntervalDayTime(arr) => {
                 let v = arr.value(index);
@@ -5221,6 +5221,47 @@ mod arrow_value_tests {
         assert!(matches!(arrow_value_at(&dt, 0).unwrap(), Value::String(_)));
         let mdn = IntervalMonthDayNanoArray::from(vec![IntervalMonthDayNano::new(1, 2, 3)]);
         assert!(matches!(arrow_value_at(&mdn, 0).unwrap(), Value::String(_)));
+    }
+
+    #[test]
+    fn year_month_interval_keeps_sign() {
+        let months = [
+            0,
+            1,
+            -1,
+            11,
+            -11,
+            12,
+            -12,
+            13,
+            -13,
+            24,
+            -24,
+            i32::MAX,
+            i32::MIN,
+        ];
+        let expected = [
+            "0-0",
+            "0-1",
+            "-0-1",
+            "0-11",
+            "-0-11",
+            "1-0",
+            "-1-0",
+            "1-1",
+            "-1-1",
+            "2-0",
+            "-2-0",
+            "178956970-7",
+            "-178956970-8",
+        ];
+        for (m, want) in months.into_iter().zip(expected) {
+            assert_eq!(
+                arrow_value_at(&IntervalYearMonthArray::from(vec![m]), 0).unwrap(),
+                Value::String(want.to_string()),
+                "months = {m}"
+            );
+        }
     }
 
     #[test]
