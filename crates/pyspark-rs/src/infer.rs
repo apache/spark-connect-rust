@@ -50,15 +50,19 @@ pub(crate) fn c_decimal_type(py: Python<'_>) -> PyResult<Option<&Bound<'_, PyTyp
 /// Keep the cached conversion class independent of a rebound public alias when C Decimal
 /// is available. Pure-Python decimal keeps its established fallback conversion.
 fn decimal_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
-    match c_decimal_type(py)? {
-        Some(decimal) => Ok(decimal),
-        None => public_decimal_type(py),
-    }
+    Ok(decimal_classes(py)?.1)
 }
 
-/// Resolve the public fallback after the caller has established accelerator absence.
-pub(crate) fn public_decimal_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
-    DECIMAL.import(py, "decimal", "Decimal")
+/// Resolve the accelerator once and return it with the effective conversion class.
+pub(crate) fn decimal_classes(
+    py: Python<'_>,
+) -> PyResult<(Option<&Bound<'_, PyType>>, &Bound<'_, PyType>)> {
+    let c_decimal = c_decimal_type(py)?;
+    let decimal = match c_decimal {
+        Some(decimal) => decimal,
+        None => DECIMAL.import(py, "decimal", "Decimal")?,
+    };
+    Ok((c_decimal, decimal))
 }
 
 /// Whether an object has the exact accelerator Decimal type. The shortcuts assume
@@ -186,11 +190,12 @@ fn decimal_quantum<'py>(
                 kwargs: None,
             };
             let cached = args.call_args(py, exact_c);
-            DECIMAL_QUANTA.with(|quanta| {
-                if let Some(quanta) = quanta.borrow_mut().as_mut() {
-                    quanta.insert((precision, scale), args);
-                }
+            let discarded = DECIMAL_QUANTA.with(|quanta| match quanta.borrow_mut().as_mut() {
+                Some(quanta) => quanta.insert((precision, scale), args),
+                None => Some(args),
             });
+            // Release displaced or uncached Python objects only after the borrow ends.
+            drop(discarded);
             cached
         }
     };
@@ -1243,11 +1248,7 @@ pub(crate) fn convert(obj: &Bound<'_, PyAny>, dt: &DataType, nullable: bool) -> 
             Ok(Value::Timestamp(wall_clock_micros(obj)?))
         }
         DataType::Decimal { precision, scale } => {
-            let c_decimal = c_decimal_type(py)?;
-            let decimal = match c_decimal {
-                Some(decimal) => decimal,
-                None => public_decimal_type(py)?,
-            };
+            let (c_decimal, decimal) = decimal_classes(py)?;
             if !obj.is_instance(decimal.as_any())? {
                 return Err(assertion());
             }

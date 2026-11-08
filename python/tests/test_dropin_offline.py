@@ -8075,6 +8075,56 @@ with session() as (spark, payload):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_decimal_public_pure_python_alias_native_pandas_uses_float():
+    # Type caches are process-local: set the public alias before the extension is loaded,
+    # while leaving the C accelerator available. Inspect the inline IPC without an RPC.
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    pytest.importorskip("pandas")
+    pytest.importorskip("pyarrow")
+    script = r'''
+import sys
+import decimal
+import _decimal
+import _pydecimal
+assert "pyspark._pyspark" not in sys.modules
+assert _decimal.Decimal is not _pydecimal.Decimal
+decimal.Decimal = _pydecimal.Decimal
+import pandas as pd
+import pyarrow as pa
+assert "pyspark._pyspark" not in sys.modules
+sys.path.insert(0, sys.argv[1])
+from _mock_connect_server import parse_message
+from pyspark.sql import SparkSession
+assert decimal.Decimal is _pydecimal.Decimal
+
+class RowPathFrame(pd.DataFrame):
+    pass
+
+values = [_pydecimal.Decimal("1.0000000000000000000001"), None,
+          _pydecimal.Decimal("9007199254740993")]
+spark = SparkSession.builder.remote("sc://localhost:1").create()
+for schema in (None, ["v"]):
+    frame = RowPathFrame({"v": values}, dtype=object)
+    relation = parse_message(spark.createDataFrame(frame, schema)._relation_bytes())
+    while 18 in relation:
+        relation = parse_message(parse_message(relation[18][0])[1][0])
+    local = parse_message(relation[11][0])
+    actual = pa.ipc.open_stream(local[1][0]).read_all()
+    expected = pa.table({"v": pa.array([1.0, None, 9007199254740992.0], type=pa.float64())})
+    actual.validate(full=True)
+    assert actual.schema == expected.schema
+    assert actual.equals(expected)
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(Path(__file__).resolve().parent)],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 @pytest.mark.parametrize("kind", ["tuples", "pandas"])
 @pytest.mark.parametrize("precision, scale, texts", [
     (18, 7, ["1E+3", "1E-7", "-1E-7", "+1.25E+2", "-1.25E-2", "0E+3", "-0E-7", None]),
@@ -8317,19 +8367,13 @@ def test_decimal_scale_rebound_subclass_keeps_tuple_hook(
 
 
 @pytest.mark.parametrize("schema", [["v"], T.StructType([T.StructField("v", T.DecimalType(10, 4))])])
-def test_decimal_scale_avoids_coefficient_tuple(decimal_ipc_session, monkeypatch, schema):
+def test_decimal_scale_avoids_coefficient_tuple(decimal_ipc_session, schema):
     # Exact Decimals are typed and converted from their text: no DecimalTuple is built.
     import cProfile
     from decimal import Decimal
 
     pd = pytest.importorskip("pandas")
     spark, _ = decimal_ipc_session
-    if isinstance(schema, T.StructType):
-        # This allocation regression concerns the native row converter, including its
-        # explicit-schema fallback; normal explicit pandas IPC tests keep the Arrow path.
-        from pyspark.sql import _pandas_input
-
-        monkeypatch.setattr(_pandas_input, "accepts_pandas_table", lambda frame, schema: False)
     tuple_constructor = type(Decimal("1.20").as_tuple()).__new__.__code__
     # Of the converter of the row path, which a customized frame keeps (_RowPathFrame).
     values = _RowPathFrame(pd)(
@@ -8553,25 +8597,26 @@ def test_pandas_nested_decimals_use_every_observed_scale(mock_connect, layout, s
 
 
 @pytest.mark.parametrize("scale", [38, 39, 50, 128, 5_000_000_000])
-def test_pandas_nested_decimal_scale_bounds(decimal_ipc_session, scale):
+def test_pandas_nested_decimal_scale_bounds(mock_connect, scale):
     from decimal import Decimal
     import pyarrow as pa
 
     pd = pytest.importorskip("pandas")
-    spark, payload = decimal_ipc_session
+    spark, service = mock_connect
     values = [[Decimal("0.1")], [Decimal(f"1E-{scale}")]]
-    frame = _RowPathFrame(pd)({"v": values}, dtype=object)
+    frame = _RowPathFrame(pd)({"value": values}, dtype=object)
     if scale > 38:
         with pytest.raises(
             ValueError,
             match=r"^Decimal scale is out of the range of DecimalType, up to 38$",
         ):
             spark.createDataFrame(frame)
-        assert not payload.exists()
+        assert not service.execute_requests
     else:
-        spark.createDataFrame(frame).collect()
-        actual = pa.ipc.open_stream(payload.read_bytes()).read_all()
-        expected = pa.table({"v": pa.array(values, type=pa.list_(pa.decimal128(38, 38)))})
+        actual = _native_number_input_table(
+            mock_connect, [(value,) for value in values], source="pandas"
+        )
+        expected = pa.table({"value": pa.array(values, type=pa.list_(pa.decimal128(38, 38)))})
         actual.validate(full=True)
         assert actual.schema == expected.schema
         assert actual.equals(expected)

@@ -2536,9 +2536,9 @@ fn pandas_dtype_type(dtype: &str) -> DataType {
 /// The decimal type of column `i` of pandas rows, as Arrow infers it from all its Decimals:
 /// the most integer digits and the largest scale of the values.
 fn pandas_decimal_type(data: &Bound<'_, PyList>, rows: &[Row], i: usize) -> PyResult<DataType> {
-    // The digits and exponent of an exact Decimal come from the text that `py_to_value` took
-    // of it, rather than from `as_tuple()`, which builds a DecimalTuple of every digit; a
-    // subclass, which can override either, is asked for `as_tuple()`, as Arrow does.
+    // The digits and exponent of an exact C Decimal come from the text that `py_to_value`
+    // took of it, rather than from `as_tuple()`, which builds a DecimalTuple of every digit.
+    // Subclasses and pure-Python Decimals can override either, so keep their `as_tuple()`.
     let (mut integer_digits, mut scale) = (0i64, 0i64);
     let c_decimal = crate::infer::c_decimal_type(data.py())?;
     for (row, converted) in data.iter().zip(rows) {
@@ -3059,11 +3059,7 @@ fn decimal_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Option<Value>> {
     let py = obj.py();
     // Cache the accelerator class or its absence. Interpreters without it use the
     // public Python class, whose exact instances retain the as_tuple hook path.
-    let c_decimal = crate::infer::c_decimal_type(py)?;
-    let decimal_cls = match c_decimal {
-        Some(decimal) => decimal,
-        None => crate::infer::public_decimal_type(py)?,
-    };
+    let (c_decimal, decimal_cls) = crate::infer::decimal_classes(py)?;
     if !obj.is_instance(decimal_cls.as_any())? {
         return Ok(None);
     }
