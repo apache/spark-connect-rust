@@ -1333,3 +1333,21 @@ for _bname, _bobj in list(globals().items()):
     if not _bname.startswith("_") and not isinstance(_bobj, _types.ModuleType):
         setattr(builtin, _bname, _bobj)
 _sys.modules["pyspark.sql.functions.builtin"] = builtin
+
+# As PySpark's, the functions are of the module ``pyspark.sql.functions.builtin``, where
+# PySpark defines all of them but pandas_udf and arrow_udf (of pyspark.sql.pandas.functions).
+# So pickle, and cloudpickle, pickle them by reference, by that name: a UDF or a foreachBatch
+# function that captures one, such as ``array_sort``, pickles, and the Python worker of the
+# server imports PySpark's. Of the module of the generated functions, which is not importable,
+# cloudpickle would pickle them by value, and fail on the Rust functions that they call.
+for _bname in dir(builtin):
+    _bobj = getattr(builtin, _bname)
+    if (
+        not _bname.startswith("_")
+        and _inspect.isfunction(_bobj)
+        and _bobj.__module__
+        in ("functions_generated", __name__, "pyspark.sql.udf", "pyspark.sql.udtf")
+        and getattr(builtin, _bobj.__qualname__, None) is _bobj
+    ):
+        _bobj.__module__ = builtin.__name__
+del _bname, _bobj

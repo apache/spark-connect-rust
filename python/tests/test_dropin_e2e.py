@@ -1008,6 +1008,20 @@ def test_catalog_and_stream_start_errors_carry_their_operation_id(session):
         assert isinstance(error.value.operation_id, str) and error.value.operation_id
 
 
+def test_udfs_that_capture_functions_pickle_them_by_name_as_pyspark(session):
+    # As PySpark's, the functions are of pyspark.sql.functions.builtin: a UDF that captures one
+    # pickles it by its name, of which the Python worker of the server imports PySpark's.
+    sort = F.array_sort
+
+    @F.udf("string")
+    def name_of(value):
+        return f"{sort.__module__}.{sort.__name__}"
+
+    assert session.range(1).select(name_of("id")).first()[0] == (
+        "pyspark.sql.functions.builtin.array_sort"
+    )
+
+
 def test_create_dataframe_from_empty_arrow_table(session):
     empty = pa.table({"a": pa.array([], pa.int64()), "b": pa.array([], pa.string())})
     df = session.createDataFrame(empty, "a long, b string")
