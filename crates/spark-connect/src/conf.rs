@@ -93,6 +93,13 @@ impl RuntimeConf {
         Ok(results.into_iter().next().flatten())
     }
 
+    /// Get the values of configurations, each of a default, in one request, of the server's
+    /// `GetWithDefault` operation: the default of a key that is not set. Mirrors PySpark
+    /// Connect's `SparkConnectClient.get_config_with_defaults`.
+    pub fn get_with_defaults(&self, pairs: &[(&str, Option<&str>)]) -> Result<Vec<Option<String>>> {
+        block_on(self.client.get_config_with_defaults(pairs))
+    }
+
     /// Get all configuration values as a HashMap.
     ///
     /// # Example

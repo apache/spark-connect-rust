@@ -1226,6 +1226,55 @@ def test_functions_exports_fresh_process():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_query_context_loggers_log_the_grpc_error_of_the_call_as_pyspark():
+    # As PySpark Connect, which builds the exception of an error of the server, of a DataFrame
+    # query context, as it handles the gRPC error of the call: the DataFrameQueryContextLogger
+    # logs that error as the exception, and the exception is raised from it (from None).
+    import io
+    import logging
+
+    from pyspark.errors import ArithmeticException
+    from pyspark.errors.exceptions.connect import _convert_server_error
+    from pyspark.logger import PySparkLogger
+    from pyspark.logger.logger import JSONFormatter
+
+    logger = PySparkLogger.getLogger("DataFrameQueryContextLogger")
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(JSONFormatter())
+    logger.addHandler(handler)
+    context = {
+        "context_type": "DataFrame", "object_type": "", "object_name": "", "start_index": -1,
+        "stop_index": -1, "fragment": "__truediv__", "call_site": "app.py:3", "summary": "",
+    }
+    try:
+        error = _convert_server_error(
+            classes=["org.apache.spark.SparkArithmeticException", "java.lang.ArithmeticException"],
+            sql_state="22012",
+            error_class="DIVIDE_BY_ZERO", reason=None,
+            message="[DIVIDE_BY_ZERO] Division by zero. SQLSTATE: 22012",
+            message_parameters={"config": '"spark.sql.ansi.enabled"'}, stacktrace=None,
+            display_server_stacktrace=False, contexts=[context], grpc_status_code=13,
+            breaking_change_info=None,
+        )
+    finally:
+        logger.removeHandler(handler)
+    assert isinstance(error, ArithmeticException)
+    record = json.loads(stream.getvalue().strip().splitlines()[-1])
+    assert record["context"] == {
+        "file": "app.py", "line": "3", "fragment": "__truediv__", "errorClass": "DIVIDE_BY_ZERO",
+    }
+    exception = record["exception"]
+    assert exception["class"] == "_MultiThreadedRendezvous"
+    assert exception["msg"].startswith(
+        "<_MultiThreadedRendezvous of RPC that terminated with:\n\tstatus = StatusCode.INTERNAL\n"
+        '\tdetails = "[DIVIDE_BY_ZERO] Division by zero. SQLSTATE: 22012"\n'
+    )
+    assert set(exception["stacktrace"][0]) == {"class", "method", "file", "line"}
+    assert type(error.__context__).__name__ == "_MultiThreadedRendezvous"
+    assert error.__suppress_context__
+
+
 def test_sql_utils_reexports_the_exceptions_of_pyspark(mock_connect):
     # As PySpark's pyspark.sql.utils: the exceptions of pyspark.errors, of their import path
     # before it, which the errors of the server are instances of.
@@ -3961,6 +4010,35 @@ def test_decimal_type_methods():
     assert d.typeName() == "decimal"
 
 
+def test_columns_pickle_as_their_expressions_as_pyspark():
+    # As PySpark Connect's Columns, which pickle their expressions: pickle, cloudpickle and
+    # deepcopy give back a Column of the expression as it was sent, of its repr, and the
+    # expressions over it are those over the original.
+    import copy
+    from pyspark.serializers import CloudPickleSerializer
+    from pyspark.sql import functions as F
+
+    serializer = CloudPickleSerializer()
+    for column in [
+        F.col("a"),
+        (F.col("a") + 1).alias("b"),
+        F.lit(1.5),
+        F.when(F.col("a") > 1, "x").otherwise("y"),
+        F.struct("a", "b").getField("a"),
+        F.col("a").desc(),
+    ]:
+        for restored in (
+            pickle.loads(pickle.dumps(column)),
+            serializer.loads(serializer.dumps(column)),
+            copy.deepcopy(column),
+        ):
+            assert repr(restored) == repr(column)
+            assert restored.to_plan(None) == column.to_plan(None)
+            over, over_original = F.coalesce(restored, F.lit(0)), F.coalesce(column, F.lit(0))
+            assert repr(over) == repr(over_original)
+            assert over.to_plan(None) == over_original.to_plan(None)
+
+
 def test_column_repr_and_operations():
     """Test Column repr and various operations."""
     from pyspark.sql import functions as F
@@ -4170,6 +4248,24 @@ def test_udtf_variants():
 
     # As PySpark's, a UDTF is not deterministic unless asDeterministic() marks it so.
     assert SimpleUDTF.deterministic is False
+
+
+def test_columns_have_the_python_2_operators_of_pyspark():
+    # As PySpark's Column: __div__ and __rdiv__ divide, as __truediv__ and __rtruediv__, which
+    # pandas-on-Spark calls, __nonzero__ is __bool__, and __getnewargs__ gives the expression.
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql import functions as F
+
+    column = F.col("a")
+    assert repr(column.__div__(2)) == repr(column / 2) == "Column<'/(a, 2)'>"
+    assert repr(column.__rdiv__(2)) == repr(2 / column) == "Column<'/(2, a)'>"
+    plan = column.__div__(2).to_plan(None)
+    assert plan.unresolved_function.function_name == "/"
+    assert [a.literal.integer for a in plan.unresolved_function.arguments[1:]] == [2]
+    with pytest.raises(PySparkValueError) as error:
+        column.__nonzero__()
+    assert error.value.getCondition() == "CANNOT_CONVERT_COLUMN_INTO_BOOL"
+    assert [repr(e) for e in (column + 1).__getnewargs__()] == ["+(a, 1)"]
 
 
 def test_column_with_alias_chain():
@@ -5692,6 +5788,45 @@ def test_inheritable_threads_inherit_the_tags_of_the_session_as_pyspark(mock_con
         InheritableThread(target=child)
     with pytest.raises(AssertionError, match="f is expected to be SparkSession"):
         inheritable_thread_target(child)(child)
+
+
+def test_threads_of_inheritable_thread_targets_share_their_tags_as_pyspark(mock_connect):
+    # As PySpark Connect's inheritable_thread_target, as Apache Spark's
+    # test_inheritable_tags_with_deco: the threads of the function share the copy of the tags of
+    # the thread that decorated it, of then, so a thread that the function starts sees the tags
+    # that the thread that started it added, while the decorating thread keeps its own.
+    import threading
+
+    from pyspark import inheritable_thread_target
+
+    spark, _ = mock_connect
+    spark.addTag("a")
+    try:
+        @inheritable_thread_target(spark)
+        def func(target):
+            return target()
+
+        spark.addTag("later")
+        first, second = set(), set()
+
+        def inner():
+            spark.addTag("c")
+            second.update(spark.getTags())
+
+        def outer():
+            spark.addTag("b")
+            first.update(spark.getTags())
+            nested = threading.Thread(target=func, args=(inner,))
+            nested.start()
+            nested.join()
+
+        thread = threading.Thread(target=func, args=(outer,))
+        thread.start()
+        thread.join()
+        assert spark.getTags() == {"a", "later"}
+        assert first == {"a", "b"} and second == {"a", "b", "c"}
+    finally:
+        spark.clearTags()
 
 
 def test_row_asdict():
@@ -7732,6 +7867,31 @@ def exact_date_capture_input():
             process.join(10)
         parent.close()
         child.close()
+
+
+def test_the_objects_of_the_client_take_weak_references_and_attributes_as_pyspark(mock_connect):
+    # As PySpark's, whose classes are Python classes: the objects of the client can be referred
+    # to weakly and take attributes of their own, as libraries that cache by weak reference or
+    # tag a DataFrame do.
+    import weakref
+
+    from pyspark.sql import Observation, Window
+    from pyspark.sql import functions as F
+
+    spark, _ = mock_connect
+    df = spark.range(3)
+    for obj in [
+        spark, df, F.col("a"), df.groupBy("id"), Window.partitionBy("id"), spark.read, df.write,
+        df.writeTo("t"), df.mergeInto("t", F.lit(True)), spark.readStream, df.na, df.stat,
+        spark.catalog, spark.conf, spark.tvf, spark.dataSource, Observation("o"),
+        T.StructType([T.StructField("a", T.LongType())]), T.StructField("a", T.LongType()),
+        T.LongType(), T.ArrayType(T.StringType()), T.DecimalType(5, 2),
+    ]:
+        reference = weakref.ref(obj)
+        assert reference() is obj, type(obj)
+        obj._tagged_by_test = type(obj).__name__
+        assert obj._tagged_by_test == type(obj).__name__
+        del obj._tagged_by_test
 
 
 def test_year_month_and_calendar_intervals_raise_as_pyspark_for_local_rows(mock_connect):

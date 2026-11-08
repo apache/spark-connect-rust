@@ -166,7 +166,13 @@ impl PyFrameBound {
 }
 
 /// Python wrapper for a WindowSpec.
-#[pyclass(name = "WindowSpec", module = "pyspark.sql.window", from_py_object)]
+#[pyclass(
+    name = "WindowSpec",
+    module = "pyspark.sql.window",
+    from_py_object,
+    weakref,
+    dict
+)]
 #[derive(Clone)]
 pub struct PyWindowSpec {
     pub(crate) spec: WindowSpec,

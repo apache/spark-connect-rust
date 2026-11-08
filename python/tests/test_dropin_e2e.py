@@ -165,6 +165,32 @@ def test_conf_get_with_a_none_default(session):
         session.conf.get(key)
 
 
+def test_client_reads_configurations_as_pyspark(session):
+    # As PySpark Connect's SparkConnectClient, of which pandas-on-Spark reads its ANSI mode: the
+    # values of keys, by keys, and of keys of defaults, which a key that is not set takes.
+    from pyspark.errors import SparkNoSuchElementException
+
+    client = session.client
+    key, unset = "spark.connect.rust.test.client.set", "spark.connect.rust.test.client.unset"
+    session.conf.set(key, "value")
+    try:
+        assert client.get_config_with_defaults(
+            (key, None), (unset, "default"), (unset + ".none", None)
+        ) == ("value", "default", None)
+        assert client.get_configs(key) == ("value",)
+        assert client.get_config_dict(key) == {key: "value"}
+    finally:
+        session.conf.unset(key)
+    with pytest.raises(SparkNoSuchElementException) as error:
+        client.get_configs(unset)
+    assert error.value.getCondition() == "SQL_CONF_NOT_FOUND"
+    # pandas-on-Spark reads its ANSI mode so to show a Series.
+    pd = pytest.importorskip("pandas")
+    import pyspark.pandas as ps
+
+    assert repr(ps.Series([1, 2, 3], name="x")) == repr(pd.Series([1, 2, 3], name="x"))
+
+
 def test_numpy_scalar_literals_have_the_types_of_their_dtypes_as_pyspark(session):
     np = pytest.importorskip("numpy")
     from pyspark.sql import functions as F
@@ -1561,6 +1587,28 @@ def test_reader_and_writer_check_their_arguments_as_pyspark(session, tmp_path):
     assert e.value.getCondition() == "JVM_ATTRIBUTE_NOT_SUPPORTED"
     assert session.read.text(None).count() == 0
 
+
+def test_readers_and_writers_set_their_options_of_set_opts_as_pyspark(session, tmp_path):
+    # As PySpark's OptionUtils._set_opts, which pandas-on-Spark's to_csv and to_json call: the
+    # schema of a reader, and the options that are not None.
+    df = session.createDataFrame([(1, "a"), (2, None)], ["x", "y"])
+    writer = df.write.mode("overwrite")
+    assert writer._set_opts(sep="|", header=True, nullValue="NA", quote=None) is None
+    writer.format("csv").save(str(tmp_path / "out"))
+    lines = sorted(
+        line for path in (tmp_path / "out").glob("*.csv") for line in path.read_text().splitlines()
+    )
+    assert lines == ["1|a", "2|NA", "x|y", "x|y"]
+    reader = session.read
+    reader._set_opts(schema="x INT, y STRING", sep="|", header=True, nullValue="NA", mode=None)
+    assert sorted(reader.format("csv").load(str(tmp_path / "out")).collect()) == [
+        Row(x=1, y="a"), Row(x=2, y=None),
+    ]
+    with pytest.raises(AttributeError):
+        df.write._set_opts(schema="x INT")
+    assert callable(session.readStream._set_opts) and callable(df.writeTo("t")._set_opts)
+
+
 def test_writer_v2_takes_its_arguments_as_pyspark(session):
     # As PySpark's DataFrameWriterV2: tableProperty(property, None) leaves the property unset,
     # partitionedBy raises NOT_EXPECTED_TYPE of col for a list, and overwrite takes a column
@@ -1585,6 +1633,62 @@ def test_writer_v2_takes_its_arguments_as_pyspark(session):
             df.writeTo(name).overwrite("flag")
     finally:
         session.sql(f"DROP TABLE IF EXISTS {name}")
+
+
+def test_streaming_listeners_are_removed_once_per_registration_as_pyspark(session):
+    # As PySpark's StreamingQueryManager: a listener added twice is in the bus twice, and each
+    # removeListener removes one of its registrations; a removal through another session, whose
+    # bus does not have the listener, leaves it in this bus. Once removed, it gets no events.
+    from pyspark.sql.streaming import StreamingQueryListener
+
+    class Listener(StreamingQueryListener):
+        def __init__(self):
+            self.events = []
+
+        def onQueryStarted(self, event):
+            self.events.append("started")
+
+        def onQueryProgress(self, event):
+            self.events.append("progress")
+
+        def onQueryIdle(self, event):
+            pass
+
+        def onQueryTerminated(self, event):
+            self.events.append("terminated")
+
+    listener = Listener()
+    other = session.newSession()
+    try:
+        session.streams.addListener(listener)
+        session.streams.addListener(listener)
+        assert session.streams._sqlb._listener_bus == [listener, listener]
+        session.streams.removeListener(listener)
+        assert session.streams._sqlb._listener_bus == [listener]
+        session.streams.removeListener(listener)
+        assert session.streams._sqlb._listener_bus == []
+        session.streams.removeListener(listener)
+        assert session.streams._sqlb._listener_bus == []
+
+        session.streams.addListener(listener)
+        other.streams.removeListener(listener)
+        assert session.streams._sqlb._listener_bus == [listener]
+        assert other.streams._sqlb._listener_bus == []
+        session.streams.removeListener(listener)
+        assert session.streams._sqlb._listener_bus == []
+
+        query = session.readStream.format("rate").load().writeStream.format("noop")
+        query = query.trigger(processingTime="200 milliseconds").start()
+        try:
+            time.sleep(2)
+        finally:
+            query.stop()
+        time.sleep(1)
+        assert listener.events == []
+    finally:
+        for registered in list(session.streams._sqlb._listener_bus):
+            session.streams.removeListener(registered)
+        other.stop()
 
 
 def test_collected_rows_take_the_names_of_the_schema_of_the_result_as_pyspark(session):
@@ -2992,6 +3096,27 @@ def test_foreach_batch_functions_that_capture_dataframes_run_as_pyspark(session,
     finally:
         query.stop()
         session.catalog.dropTempView(name)
+
+
+def test_foreach_batch_functions_that_capture_columns_run_as_pyspark(session, tmp_path):
+    # As PySpark's test_streaming_foreach_batch_external_column: a Column that a foreachBatch
+    # function captures unpickles on the Python worker of the server as PySpark Connect's, of
+    # the expression as it was sent.
+    (tmp_path / "input.txt").write_text("hello\nthis\n")
+    captured = F.upper(F.col("value"))
+    table = "foreach_batch_captured_column"
+
+    def func(df, batch_id):
+        df.select(captured.alias("result")).write.mode("append").saveAsTable(table)
+
+    query = session.readStream.format("text").load(str(tmp_path)).writeStream.foreachBatch(func)
+    query = query.start()
+    try:
+        query.processAllAvailable()
+        assert sorted(row.result for row in session.table(table).collect()) == ["HELLO", "THIS"]
+    finally:
+        query.stop()
+        session.sql(f"DROP TABLE IF EXISTS {table}").collect()
 
 
 def test_foreach_runs_a_function_and_a_writer_of_each_row_as_pyspark(session, tmp_path):
