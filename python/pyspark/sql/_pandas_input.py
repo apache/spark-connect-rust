@@ -56,7 +56,11 @@ def _has_canonical_arrow_string_super_method(cls, start, name, owner, module):
 
 
 def _arrow_string_class_is_canonical(cls):
-    """Authenticate the shared row/Arrow conversion hooks of a concrete pandas class."""
+    """Check the identity and supported hooks of a concrete pandas Arrow-string class.
+
+    Authenticate conversion, construction and allocation, dtype/missing-value
+    properties, and NumPy-semantics accessor dispatch using raw MRO lookups.
+    """
     import pandas as pd
     from pandas.core.arrays import base as array_base_module, string_ as string_module, string_arrow
     from pandas.core.arrays.arrow import array as arrow_module

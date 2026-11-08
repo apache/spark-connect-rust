@@ -134,10 +134,10 @@ NumPy-semantics accessor also dispatches through a mixin before ordinary MRO
 lookup; its mixin and partial-function aliases are checked, and its namespace is
 limited to string-method names, initializer/storage declarations and class
 metadata. Its mixin initializer remains allowed because construction uses the
-class slots authenticated above. Class data read by these methods, such as
-`_storage` and `_na_value`, and module globals are outside these checks. These
-checks do not establish a general invariant for arbitrary mutations of pandas
-internals.
+class slots authenticated above. Class data read by the authenticated methods,
+such as `_storage` and `_na_value`, and module globals other than the explicitly
+checked aliases are outside these checks. These checks do not establish a general
+invariant for arbitrary mutations of pandas internals.
 
 ## UDF strategy (full compatibility)
 
