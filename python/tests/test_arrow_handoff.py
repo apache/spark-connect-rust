@@ -130,7 +130,7 @@ def _dataframe(batches, *, protocol, payloads=None, calls=None):
         ).SerializeToString()
 
     def config(request, context):
-        # The settings that toPandas reads first, as SparkConnectClient.to_pandas does.
+        # The settings that toPandas reads first, and the defaults that row collection reads.
         if calls is not None:
             calls["config"] = calls.get("config", 0) + 1
         request = protocol("ConfigRequest").FromString(request)
@@ -139,11 +139,23 @@ def _dataframe(batches, *, protocol, payloads=None, calls=None):
             "spark.sql.execution.pandas.structHandlingMode": "legacy",
             "spark.sql.execution.arrow.pyspark.selfDestruct.enabled": "false",
         }
+        operation = request.operation.WhichOneof("op_type")
+        if operation == "get_with_default":
+            pairs = []
+            for pair in request.operation.get_with_default.pairs:
+                default = pair.value if pair.HasField("value") else None
+                value = settings.get(pair.key, default)
+                pairs.append(dict(key=pair.key, **({"value": value} if value is not None else {})))
+        else:
+            if operation != "get":
+                context.abort(grpc.StatusCode.UNIMPLEMENTED,
+                              f"unexpected Config operation {operation}")
+            pairs = [dict(key=key, value=settings[key]) for key in request.operation.get.keys]
         return protocol(
             "ConfigResponse",
             session_id=request.session_id,
             server_side_session_id=server_id,
-            pairs=[dict(key=key, value=settings[key]) for key in request.operation.get.keys],
+            pairs=pairs,
         ).SerializeToString()
 
     def release_session(request, context):
@@ -225,6 +237,16 @@ def _mixed_batch():
     ]
     schema = pa.schema(fields, metadata={b"schema": b"preserved"})
     return pa.RecordBatch.from_arrays(arrays, schema=schema)
+
+
+def test_collect_reads_binary_default_with_arrow_only_schema(protocol):
+    batch = pa.RecordBatch.from_arrays([pa.array([b"value", None], type=pa.binary())], names=["b"])
+    calls = {}
+    with _dataframe(protocol=protocol, batches=[batch], calls=calls) as (frame, _):
+        rows = frame.collect()
+    assert type(rows[0].b) is bytes and rows[0].b == b"value"
+    assert rows[1].b is None
+    assert calls == {"execute": 1, "config": 1}
 
 
 def test_handoff_preserves_values_metadata_and_chunks(protocol):
@@ -486,18 +508,29 @@ def _arrow_input_service(
     def configure(raw, context):
         request = protocol("ConfigRequest").FromString(raw)
         operation = request.operation.WhichOneof("op_type")
-        keys = list(getattr(request.operation, operation).keys)
+        defaults = None
+        if operation == "get_with_default":
+            defaults = {pair.key: pair.value if pair.HasField("value") else None
+                        for pair in request.operation.get_with_default.pairs}
+            keys = list(defaults)
+        else:
+            if operation != "get":
+                context.abort(grpc.StatusCode.UNIMPLEMENTED,
+                              f"unexpected Config operation {operation}")
+            keys = list(request.operation.get.keys)
         state["config_requests"].append((operation, keys))
         if config_error:
             context.abort(grpc.StatusCode.UNAVAILABLE, "configuration unavailable")
         # Injected errors abort only the next Config call.
         if error := state.pop("config_error", None):
             context.abort(error, "configuration read failed")
-        # Deliberately reverse responses and omit missing keys to test key mapping.
+        # Deliberately reverse responses; Get omits missing keys to test key mapping.
         # A present null key leaves the optional protobuf value unset.
-        response = protocol("ConfigResponse", session_id=request.session_id,
-                            pairs=[dict(key=k, value=config[k]) for k in reversed(keys)
-                                   if k in config])
+        if defaults is None:
+            pairs = [dict(key=k, value=config[k]) for k in reversed(keys) if k in config]
+        else:
+            pairs = [dict(key=k, value=config.get(k, defaults[k])) for k in reversed(keys)]
+        response = protocol("ConfigResponse", session_id=request.session_id, pairs=pairs)
         state["config_responses"].append(response)
         return response.SerializeToString()
 
@@ -1038,6 +1071,7 @@ _UPLOAD_KEYS = [
     "spark.sql.session.localRelationChunkSizeBytes",
     "spark.sql.session.localRelationBatchOfChunksSizeBytes",
 ]
+_BINARY_RESULT_CONFIG = ("get_with_default", ["spark.sql.execution.pyspark.binaryAsBytes"])
 
 
 @pytest.mark.parametrize("timestamp_type", ["TIMESTAMP_LTZ", "TIMESTAMP_NTZ"])
@@ -1054,6 +1088,8 @@ def test_arrow_input_batched_normalization_configs(protocol, timestamp_type, zon
         frame = spark.createDataFrame(table)
         assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
         frame.collect()
+        assert state["config_requests"] == [
+            ("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS), _BINARY_RESULT_CONFIG]
         expected_time = (value if timestamp_type == "TIMESTAMP_NTZ" else
                          value.replace(tzinfo=ZoneInfo(zone)).astimezone(timezone.utc))
         expected = pa.table({
@@ -1104,7 +1140,7 @@ def test_arrow_input_normalization_config_failure_then_fresh_read(protocol):
         spark.createDataFrame(table).collect()
         assert state["config_requests"] == [
             ("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS),
-            ("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+            ("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS), _BINARY_RESULT_CONFIG]
         assert state["input_tables"][0].to_pydict() == {"x": [1]}
 
 
@@ -1114,7 +1150,7 @@ def test_arrow_input_normalization_config_transient_retry(protocol):
         spark.createDataFrame(pa.table({"x": [1]})).collect()
         assert state["config_requests"] == [
             ("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS),
-            ("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+            ("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS), _BINARY_RESULT_CONFIG]
         assert state["input_tables"][0].to_pydict() == {"x": [1]}
 
 
@@ -1129,7 +1165,8 @@ def test_arrow_input_normalization_configs_are_fresh(protocol):
         state["config"].update(dict(zip(_NORMALIZATION_KEYS, [
             "TIMESTAMP_LTZ", "America/Los_Angeles", "false"])))
         spark.createDataFrame(table).collect()
-        assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)] * 3
+        assert state["config_requests"] == [
+            ("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS), _BINARY_RESULT_CONFIG] * 3
         tables = state["input_tables"]
         assert [t.column("t")[0].as_py() for t in tables] == [
             value.replace(tzinfo=timezone.utc), value,
