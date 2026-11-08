@@ -2610,6 +2610,8 @@ fn has_decimal_type(data_type: &DataType) -> bool {
 /// scale. Choosing only the first scale would make the exact encoder reject a later value
 /// such as 1.25 after 1.5. This pass uses already converted values and invokes no Python hooks.
 /// Callers prune types without Decimal before allocating child references.
+/// Raises `ValueError` when widening increases a scale beyond its precision; an
+/// unchanged, already-invalid first scale is left to the encoder.
 fn widen_pandas_decimal_scales(data_type: &mut DataType, values: &[&Value]) -> PyResult<()> {
     match data_type {
         DataType::Decimal { precision, scale } => {
