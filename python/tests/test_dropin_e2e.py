@@ -2266,6 +2266,18 @@ def test_create_dataframe_of_a_numpy_array_as_pyspark(session):
         session.createDataFrame(np.array([[1, 2]]), ["x"])
     assert e.value.getCondition() == "AXIS_LENGTH_MISMATCH"
 
+def test_local_iterator_closes_as_a_generator_as_pyspark(session):
+    # As PySpark's generator: contextlib.closing ends the iteration early, so the rows that are
+    # left are not fetched; the iterator then ends, and closing it again does nothing.
+    import contextlib
+
+    df = session.range(1000, numPartitions=10)
+    with contextlib.closing(df.toLocalIterator()) as rows:
+        assert next(rows).id == 0
+    assert list(rows) == []
+    rows.close()
+
+
 def test_create_dataframe_takes_the_ddl_of_spark_as_pyspark(session):
     # As PySpark Connect's, which parses a DDL schema on the server: nested structs, arrays and
     # maps of them, backtick-quoted names, and NOT NULL and COMMENT clauses.

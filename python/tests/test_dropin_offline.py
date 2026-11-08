@@ -9541,6 +9541,23 @@ def test_nearest_by_join_checks_its_arguments_as_pyspark():
         a.nearestByJoin(b, ranking, 1, "approx", "distance", "inner")
 
 
+def test_local_iterator_close_ends_it_before_it_runs_as_pyspark(mock_connect):
+    # As PySpark's generator: a toLocalIterator closed before its first row ends, and it
+    # never sends the query.
+    import contextlib
+
+    spark, service = mock_connect
+    df = spark.range(3)
+    rows = df.toLocalIterator()
+    rows.close()
+    rows.close()
+    assert list(rows) == []
+    with contextlib.closing(df.toLocalIterator()) as rows:
+        pass
+    assert list(rows) == []
+    assert service.execute_requests == []
+
+
 def test_dataframes_of_other_sessions_raise_session_not_same_as_pyspark():
     # As PySpark's `_check_same_session`, of the DataFrames that the methods take, before any
     # request: SESSION_NOT_SAME for a DataFrame of another session, and for what is not one.
