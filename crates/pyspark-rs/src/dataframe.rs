@@ -4181,6 +4181,14 @@ impl PyLocalRowIterator {
         slf
     }
 
+    /// Close the iterator, as a generator does: the rows that are left are not fetched, so the
+    /// execution of the query is released, and the iteration ends. Closing it again does nothing.
+    fn close(&mut self, py: Python<'_>) {
+        let iterator = self.iterator.take();
+        self.finished = true;
+        py.detach(move || drop(iterator));
+    }
+
     /// Fetch the next row from the iterator.
     ///
     /// Releases the GIL during the blocking fetch to allow other threads to run.
