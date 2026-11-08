@@ -1,8 +1,12 @@
 //! PyO3 wrappers for window functions and specifications.
 
 use pyo3::prelude::*;
-use spark_connect::expression::{Expression, ExpressionNode, SortOrder};
-use spark_connect::window::{FrameBound, WindowSpec};
+use pyo3::types::PyTuple;
+use spark_connect::column::Column;
+use spark_connect::expression::{Expression, ExpressionNode, NullOrdering, SortOrder};
+use spark_connect::window::{FrameBound, FrameType, WindowSpec};
+
+use crate::column::PyColumn;
 
 /// The columns of `Window.partitionBy` and `orderBy`, as PySpark Connect's `_to_cols`: a single
 /// list is the columns, each a Column or a column name (not a literal), else
@@ -166,7 +170,13 @@ impl PyFrameBound {
 }
 
 /// Python wrapper for a WindowSpec.
-#[pyclass(name = "WindowSpec", module = "pyspark.sql.window", from_py_object)]
+#[pyclass(
+    name = "WindowSpec",
+    module = "pyspark.sql.window",
+    from_py_object,
+    weakref,
+    dict
+)]
 #[derive(Clone)]
 pub struct PyWindowSpec {
     pub(crate) spec: WindowSpec,
@@ -222,6 +232,56 @@ impl PyWindowSpec {
     /// As `WindowSpec.__repr__` of PySpark Connect.
     fn __repr__(&self) -> String {
         self.spec.repr()
+    }
+
+    /// A WindowSpec pickles as the partition and sort Columns and the frame of it, which the
+    /// function `pyspark.sql.connect._window_reduce.window_of` gives back as a WindowSpec built
+    /// through `Window`, also on a Python worker of the server, as PySpark's WindowSpec pickles
+    /// the Columns it holds. A sort order is given as the Column of its child and the method of
+    /// its direction and nulls, as an unpickled Column is not a sort order of its own.
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let column = |expr: &Expression| Py::new(py, PyColumn::new(Column::new(expr.clone())));
+        let partition = self
+            .spec
+            .partition_spec
+            .iter()
+            .map(column)
+            .collect::<PyResult<Vec<_>>>()?;
+        let order = self
+            .spec
+            .order_spec
+            .iter()
+            .map(|sort| {
+                let method = match (sort.ascending, sort.null_ordering) {
+                    (true, NullOrdering::First) => "asc_nulls_first",
+                    (true, NullOrdering::Last) => "asc_nulls_last",
+                    (false, NullOrdering::First) => "desc_nulls_first",
+                    (false, NullOrdering::Last) => "desc_nulls_last",
+                };
+                Ok((column(&sort.child)?, method))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        // The frame as its ROWS flag and its start and end, as the ints of `Window`.
+        let bound = |bound: &FrameBound| match bound {
+            FrameBound::UnboundedPreceding => UNBOUNDED_PRECEDING,
+            FrameBound::Preceding(n) => -n,
+            FrameBound::CurrentRow => 0,
+            FrameBound::Following(n) => *n,
+            FrameBound::UnboundedFollowing => UNBOUNDED_FOLLOWING,
+        };
+        let frame = self
+            .spec
+            .frame_spec
+            .as_ref()
+            .map(|(frame_type, start, end)| {
+                (*frame_type == FrameType::Row, bound(start), bound(end))
+            });
+        let window_of = py
+            .import("pyspark.sql.connect.window")?
+            .getattr("_window_reduce")?
+            .getattr("window_of")?;
+        let args = (partition, order, frame).into_pyobject(py)?;
+        Ok(PyTuple::new(py, [window_of, args.into_any()])?.into_any())
     }
 }
 

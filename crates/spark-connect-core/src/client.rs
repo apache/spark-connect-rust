@@ -27,6 +27,7 @@ use crate::channel::{ChannelBuilder, GRPC_MAX_MESSAGE_LENGTH_DEFAULT};
 use crate::error::{Result, SparkError, SparkErrorKind};
 use crate::reattach::ExecutePlanResponseReattachableIterator;
 use crate::retries::{RetryPolicy, RetryPolicyState};
+use crate::thread_entries::forget_when_thread_ends;
 
 /// How long to wait for the lazy gRPC channel to become ready before surfacing a
 /// retriable `UNAVAILABLE`. tonic's lazy channel waits indefinitely for an unreachable
@@ -266,6 +267,12 @@ struct UserContextExtensions {
     by_thread: std::collections::HashMap<std::thread::ThreadId, Vec<(String, prost_types::Any)>>,
 }
 
+/// Forget the extensions of a thread that ends, as PySpark's `thread_local` is freed with its
+/// thread.
+fn forget_thread_extensions(extensions: &mut UserContextExtensions, thread: std::thread::ThreadId) {
+    extensions.by_thread.remove(&thread);
+}
+
 impl SparkConnectClient {
     /// Create a new SparkConnectClient from a ChannelBuilder.
     ///
@@ -286,7 +293,7 @@ impl SparkConnectClient {
         // client can be constructed without a live server (e.g. in unit tests that only
         // build request protos).
         let endpoint = builder.endpoint();
-        let channel = if builder.use_ssl() {
+        let channel = if builder.secure() {
             // TLS connection with native root certificates
             // `with_native_roots()` is required: tonic >=0.11 does NOT load a trust store
             // from the `tls-native-roots` feature alone, so without this the TLS handshake
@@ -323,24 +330,9 @@ impl SparkConnectClient {
         // excluded from `metadata()`, so attach it explicitly here; this then propagates
         // to every request via `_attach_metadata` and the reattach stream.
         if let Some(tok) = builder.token() {
-            // Never send the bearer token in cleartext. The scheme above is chosen from
-            // `use_ssl()` alone, so without this guard `sc://host/;token=SECRET` (no
-            // `use_ssl`) would ship `Authorization: Bearer SECRET` over plain HTTP. The
-            // reference client cannot reach that state: `toChannel` sends a token only
-            // over `ssl_channel_credentials()` or, for `localhost`, the loopback
-            // `local_channel_credentials()`, and grpcio refuses call credentials on an
-            // insecure channel outright. Mirror that by requiring TLS for a token unless
-            // the endpoint is loopback; fail loudly rather than downgrade silently.
-            if !builder.use_ssl() && !builder.is_loopback() {
-                // A misconfigured connection string is a value error (surfaces as
-                // `PySparkValueError`), not a generic runtime failure.
-                return Err(SparkError::value_msg(format!(
-                    "Refusing to send the authentication token to '{}' over an insecure \
-                     connection. Set 'use_ssl=true' in the connection string to enable TLS \
-                     (a token is only allowed without TLS when connecting to localhost).",
-                    builder.host()
-                )));
-            }
+            // The token is sent over TLS, or over plaintext only on a loopback host: the
+            // scheme above is `builder.secure()`, which is TLS for a token on any other
+            // host, as the reference client does.
             metadata.push((AUTHORIZATION_HEADER.to_string(), format!("Bearer {}", tok)));
         }
 
@@ -348,7 +340,7 @@ impl SparkConnectClient {
             channel,
             stub,
             session_id,
-            user_id: builder.user_id().map(String::from),
+            user_id: builder.user_id().map(String::from).or_else(default_user_id),
             metadata,
             user_agent,
             user_context_extensions: Default::default(),
@@ -430,7 +422,10 @@ impl SparkConnectClient {
         let Some(hook) = hook else {
             return Ok(request);
         };
+        crate::runtime::check_callback_depth()?;
         let operation_id = request.operation_id.clone();
+        // The hook may run a query of its own, which runs the hooks too.
+        let _callback = crate::runtime::CallbackGuard::enter();
         let mut request = hook(request)?;
         request.operation_id = operation_id;
         Ok(request)
@@ -445,11 +440,17 @@ impl SparkConnectClient {
     /// and return its ID, as PySpark's `add_threadlocal_user_context_extension`.
     pub fn add_threadlocal_user_context_extension(&self, extension: prost_types::Any) -> String {
         let id = format!("threadlocal_{}", Uuid::new_v4());
-        self.user_context_extensions
+        let mut extensions = self
+            .user_context_extensions
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|e| e.into_inner());
+        let thread = std::thread::current().id();
+        if !extensions.by_thread.contains_key(&thread) {
+            forget_when_thread_ends(&self.user_context_extensions, forget_thread_extensions);
+        }
+        extensions
             .by_thread
-            .entry(std::thread::current().id())
+            .entry(thread)
             .or_default()
             .push((id.clone(), extension));
         id
@@ -1536,6 +1537,21 @@ pub struct ReattachableResponseStream {
     released: bool,
 }
 
+/// The user ID of a connection string that does not set one: `SPARK_USER`, else `USER`, as
+/// `SparkConnectClient.__init__` in PySpark takes it.
+fn default_user_id() -> Option<String> {
+    user_id_from_env(std::env::var("SPARK_USER"), std::env::var("USER"))
+}
+
+/// The user ID from the environment, as `os.getenv("SPARK_USER", os.getenv("USER"))`: `USER`
+/// is only read when `SPARK_USER` is unset. An empty value is no user ID.
+fn user_id_from_env(
+    spark_user: std::result::Result<String, std::env::VarError>,
+    user: std::result::Result<String, std::env::VarError>,
+) -> Option<String> {
+    spark_user.or(user).ok().filter(|u| !u.is_empty())
+}
+
 impl SparkConnectClient {
     /// The gRPC metadata of every request about an execution.
     fn execution_metadata(&self) -> MetadataMap {
@@ -1712,6 +1728,11 @@ impl ReattachableResponseStream {
         retry_exception_since: &mut Option<std::time::Instant>,
     ) -> Result<()> {
         loop {
+            // As the reference's `_stub`: once the client is closed (its session stopped), the
+            // reattach and the ExecutePlan sent again raise NO_ACTIVE_SESSION, and the stream ends.
+            if let Err(error) = self.client.ensure_open() {
+                return Err(self.fail(error));
+            }
             let opened = if self.execute_again {
                 self.open_execute_plan_again().await
             } else {
@@ -2051,18 +2072,96 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_token_without_ssl_to_remote_host_is_rejected() {
-        // A token over a non-loopback host without `use_ssl=true` would ship the bearer
-        // credential in cleartext; the client must refuse rather than downgrade silently.
-        let builder = ChannelBuilder::parse("sc://example.com/;token=SECRET").unwrap();
-        match SparkConnectClient::connect(&builder).await {
-            Ok(_) => panic!("expected a token over cleartext to a remote host to be rejected"),
-            Err(e) => assert!(
-                e.to_string().contains("use_ssl=true"),
-                "expected the error to point at use_ssl=true, got: {e}"
-            ),
+    /// Connects a client on a runtime of its own, for the tests that set the environment.
+    /// The channel is lazy, so no server is dialed.
+    fn connect_blocking(url: &str) -> SparkConnectClient {
+        let builder = ChannelBuilder::parse(url).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime
+            .block_on(SparkConnectClient::connect(&builder))
+            .unwrap_or_else(|e| panic!("{url} should connect, got: {e}"))
+    }
+
+    fn has_bearer(client: &SparkConnectClient, token: &str) -> bool {
+        let bearer = format!("Bearer {token}");
+        client
+            .metadata
+            .iter()
+            .any(|(k, v)| k == "authorization" && *v == bearer)
+    }
+
+    #[test]
+    fn test_token_without_ssl_to_remote_host_is_sent_over_tls() {
+        // A token over a remote host is not refused: its channel is TLS, which the
+        // reference client also uses for a token on any host but localhost.
+        let _env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+        for url in [
+            "sc://example.com/;token=SECRET",
+            "sc://10.0.0.1:443/;token=SECRET",
+        ] {
+            assert!(ChannelBuilder::parse(url).unwrap().secure(), "{url}");
+            let client = connect_blocking(url);
+            assert!(
+                has_bearer(&client, "SECRET"),
+                "{url}: {:?}",
+                client.metadata
+            );
         }
+    }
+
+    #[test]
+    fn test_token_of_the_environment_to_remote_host_is_sent_over_tls() {
+        let env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", Some("ENV"))]);
+        assert!(ChannelBuilder::parse("sc://example.com").unwrap().secure());
+        let client = connect_blocking("sc://example.com");
+        assert!(has_bearer(&client, "ENV"), "{:?}", client.metadata);
+        drop(env);
+        // Without a token, nothing is attached.
+        let _none = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+        let client = connect_blocking("sc://example.com");
+        assert!(!has_bearer(&client, "ENV"), "{:?}", client.metadata);
+    }
+
+    #[test]
+    fn test_user_id_from_the_environment_as_pyspark() {
+        let some = |s: &str| Ok::<String, std::env::VarError>(s.to_string());
+        let unset = || Err::<String, std::env::VarError>(std::env::VarError::NotPresent);
+        assert_eq!(
+            user_id_from_env(some("alice"), some("bob")),
+            Some("alice".into())
+        );
+        assert_eq!(user_id_from_env(unset(), some("bob")), Some("bob".into()));
+        // A `SPARK_USER` that is set to an empty string is the user ID, so `USER` is not read.
+        assert_eq!(user_id_from_env(some(""), some("bob")), None);
+        assert_eq!(user_id_from_env(unset(), some("")), None);
+        assert_eq!(user_id_from_env(unset(), unset()), None);
+    }
+
+    #[test]
+    fn test_user_id_of_the_connection_then_the_environment() {
+        // The connection string's user_id, else SPARK_USER, else USER, as PySpark does.
+        let user_id = |url: &str, spark_user: Option<&str>, user: Option<&str>| {
+            let _env = crate::channel::set_env(&[("SPARK_USER", spark_user), ("USER", user)]);
+            let client = connect_blocking(url);
+            let id = client.user_id().map(String::from);
+            id
+        };
+        assert_eq!(
+            user_id("sc://localhost/;user_id=url", Some("alice"), Some("bob")).as_deref(),
+            Some("url")
+        );
+        assert_eq!(
+            user_id("sc://localhost", Some("alice"), Some("bob")).as_deref(),
+            Some("alice")
+        );
+        assert_eq!(
+            user_id("sc://localhost", None, Some("bob")).as_deref(),
+            Some("bob")
+        );
+        assert_eq!(user_id("sc://localhost", None, None), None);
     }
 
     #[tokio::test]
@@ -2175,5 +2274,62 @@ mod tests {
             ("spark.sql.adaptive.enabled", None),
         ];
         let _result = client.get_config_with_defaults(&pairs);
+    }
+
+    #[tokio::test]
+    async fn threadlocal_user_context_extensions_of_finished_threads_are_forgotten() {
+        let builder = ChannelBuilder::parse("sc://localhost").unwrap();
+        let client = std::sync::Arc::new(SparkConnectClient::connect(&builder).await.unwrap());
+        for _ in 0..1000 {
+            let client = client.clone();
+            std::thread::spawn(move || {
+                client.add_threadlocal_user_context_extension(prost_types::Any::default());
+            })
+            .join()
+            .unwrap();
+        }
+        let entries = client
+            .user_context_extensions
+            .lock()
+            .unwrap()
+            .by_thread
+            .len();
+        assert_eq!(entries, 0);
+    }
+
+    #[tokio::test]
+    async fn threadlocal_user_context_extensions_of_a_living_thread_stay_until_it_ends() {
+        let builder = ChannelBuilder::parse("sc://localhost").unwrap();
+        let client = std::sync::Arc::new(SparkConnectClient::connect(&builder).await.unwrap());
+        let (added_tx, added_rx) = std::sync::mpsc::channel();
+        let (end_tx, end_rx) = std::sync::mpsc::channel::<()>();
+        let child = {
+            let client = client.clone();
+            std::thread::spawn(move || {
+                client.add_threadlocal_user_context_extension(prost_types::Any::default());
+                added_tx
+                    .send(client.threadlocal_user_context_extensions().len())
+                    .unwrap();
+                end_rx.recv().unwrap();
+            })
+        };
+        assert_eq!(added_rx.recv().unwrap(), 1);
+        assert_eq!(
+            client
+                .user_context_extensions
+                .lock()
+                .unwrap()
+                .by_thread
+                .len(),
+            1
+        );
+        end_tx.send(()).unwrap();
+        child.join().unwrap();
+        assert!(client
+            .user_context_extensions
+            .lock()
+            .unwrap()
+            .by_thread
+            .is_empty());
     }
 }

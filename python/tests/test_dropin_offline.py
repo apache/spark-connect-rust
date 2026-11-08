@@ -603,6 +603,45 @@ def test_data_types_convert_values_to_and_from_internal_as_pyspark(monkeypatch):
 
 
 
+def test_map_schemas_keep_the_metadata_edited_in_place_as_pyspark(mock_connect):
+    # As PySpark's, the schema that mapInPandas, mapInArrow and applyInPandas send is the
+    # StructType with the metadata of its fields as they are when the call is made, including
+    # an edit in place (st["a"].metadata[...] = ...) after the struct was built.
+    spark, service = mock_connect
+
+    def sent_fields(dataframe, relation_field, func_field):
+        # ExecutePlanRequest.plan=3, Plan.root=1; Relation.map_partitions=28 (MapPartitions.func
+        # =2) or group_map=31 (GroupMap.func=3); CommonInlineUserDefinedFunction.python_udf=4,
+        # PythonUDF.output_type=1, DataType.struct=21, Struct.fields=1, StructField.name=1 and
+        # metadata=4.
+        dataframe.collect()
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        relation = parse_message(parse_message(plan)[relation_field][0])
+        udf = parse_message(parse_message(relation[func_field][0])[4][0])
+        struct = parse_message(parse_message(udf[1][0])[21][0])
+        fields = [parse_message(field) for field in struct[1]]
+        return [(f[1][0].decode(), json.loads(f[4][0]) if 4 in f else {}) for f in fields]
+
+    def edited():
+        st = T.StructType([T.StructField("a", T.IntegerType()), T.StructField("b", T.StringType())])
+        st["a"].metadata["comment"] = "the a"
+        return st
+
+    def added():
+        st = T.StructType().add("a", T.IntegerType()).add("b", T.StringType())
+        st["a"].metadata["comment"] = "the a"
+        return st
+
+    df = spark.range(1)
+    expected = [("a", {"comment": "the a"}), ("b", {})]
+    assert sent_fields(df.mapInPandas(lambda it: it, edited()), 28, 2) == expected
+    assert sent_fields(df.mapInArrow(lambda it: it, edited()), 28, 2) == expected
+    grouped = df.groupBy("id")
+    assert sent_fields(grouped.applyInPandas(lambda pdf: pdf, edited()), 31, 3) == expected
+    assert sent_fields(df.mapInPandas(lambda it: it, added()), 28, 2) == expected
+    assert sent_fields(grouped.applyInPandas(lambda pdf: pdf, added()), 31, 3) == expected
+
+
 def test_datatype_eq_and_hash_match_pyspark():
     cases = _eq_cases()
     left = [f() for f in cases]
@@ -1030,6 +1069,61 @@ def test_session_builders_set_their_options_and_validate_their_urls_as_pyspark(m
 
 
 
+def test_dataframes_give_back_their_session_object_as_pyspark(offline_spark):
+    # As PySpark: the DataFrames of a session, its streams and its client give back the session
+    # object itself, and two sessions do not mix. The registry holds the session objects
+    # weakly, so a session that is dropped is freed.
+    import gc
+    import weakref
+
+    def check(actual, expected):
+        # Not an assert: pytest reprs a DataFrame in a failed assert, which asks the server.
+        if actual is not expected:
+            raise AssertionError("not the session object that PySpark gives back")
+
+    spark = offline_spark
+    df = spark.range(2)
+    check(df.sparkSession, spark)
+    check(df._session, spark)
+    check(df.select("id").sparkSession, spark)
+    check(df.groupBy("id").count().sparkSession, spark)
+    check(df.na.drop().sparkSession, spark)
+    check(spark.read.format("rate").load().sparkSession, spark)
+    check(spark.udf.sparkSession, spark)
+    check(spark.udtf.sparkSession, spark)
+    check(spark.dataSource.sparkSession, spark)
+    assert df.sparkSession == spark
+    check(df.sparkSession.streams, spark.streams)
+    check(df.sparkSession.client, spark.client)
+    other = spark.newSession()
+    check(other.range(1).sparkSession, other)
+    if other.range(1).sparkSession is spark:
+        raise AssertionError("two sessions mixed")
+    check(other.range(1).sparkSession.streams, other.streams)
+    if other.streams is spark.streams:
+        raise AssertionError("two sessions share their streams")
+    ref = weakref.ref(other)
+    del other
+    gc.collect()
+    assert ref() is None
+    check(df.sparkSession, spark)
+    # Two sessions made apart, of the same session ID, are two objects, each that of its own
+    # DataFrames. create() sets the default session, so this runs in a process of its own.
+    import subprocess
+    import sys
+
+    subprocess.run([sys.executable, "-c", """
+import uuid
+from pyspark.sql import SparkSession
+url = f"sc://localhost:1/;session_id={uuid.uuid4()}"
+first = SparkSession.builder.remote(url).create()
+second = SparkSession.builder.remote(url).create()
+assert first is not second
+assert first.range(1).sparkSession is first
+assert second.range(1).sparkSession is second
+"""], check=True)
+
+
 def test_session_builder_class_constructor():
     from pyspark.sql import SparkSession
     b = SparkSession.Builder()
@@ -1091,6 +1185,29 @@ def test_repartition_by_range_without_a_count_sends_none_as_pyspark(mock_connect
     assert sent(df.repartitionByRange(F.col("id"))) is None
     assert sent(df.repartitionByRange("id", "id")) is None
     assert sent(df.repartitionByRange(2, "id")) == [2]
+
+
+def test_session_id_of_any_uuid_version_and_the_user_id_of_the_requests(monkeypatch, mock_connect):
+    # A session_id is any UUID, as uuid.UUID(session_id, version=4) takes it, and is sent as
+    # given. The user ID of each request is SPARK_USER, else USER, as PySpark sets it.
+    from pyspark.sql import SparkSession
+
+    _, service = mock_connect
+    session_id = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"  # a version 1 UUID
+    for name, environment in (("SPARK_USER", "hook-user"), ("USER", "hook-os-user")):
+        monkeypatch.delenv("SPARK_USER", raising=False)
+        monkeypatch.delenv("USER", raising=False)
+        monkeypatch.setenv(name, environment)
+        other = SparkSession.builder.remote(f"{service.remote}/;session_id={session_id}").create()
+        try:
+            assert other.session_id == session_id
+            other.range(1).collect()
+            # ExecutePlanRequest.session_id=1, user_context=2; UserContext.user_id=1.
+            request = parse_message(service.execute_requests[-1])
+            assert request[1][0].decode() == session_id
+            assert parse_message(request[2][0])[1][0].decode() == environment
+        finally:
+            other.stop()
 
 
 def test_channel_builder_uses_endpoint():
@@ -1227,6 +1344,55 @@ def test_functions_exports_fresh_process():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_query_context_loggers_log_the_grpc_error_of_the_call_as_pyspark():
+    # As PySpark Connect, which builds the exception of an error of the server, of a DataFrame
+    # query context, as it handles the gRPC error of the call: the DataFrameQueryContextLogger
+    # logs that error as the exception, and the exception is raised from it (from None).
+    import io
+    import logging
+
+    from pyspark.errors import ArithmeticException
+    from pyspark.errors.exceptions.connect import _convert_server_error
+    from pyspark.logger import PySparkLogger
+    from pyspark.logger.logger import JSONFormatter
+
+    logger = PySparkLogger.getLogger("DataFrameQueryContextLogger")
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(JSONFormatter())
+    logger.addHandler(handler)
+    context = {
+        "context_type": "DataFrame", "object_type": "", "object_name": "", "start_index": -1,
+        "stop_index": -1, "fragment": "__truediv__", "call_site": "app.py:3", "summary": "",
+    }
+    try:
+        error = _convert_server_error(
+            classes=["org.apache.spark.SparkArithmeticException", "java.lang.ArithmeticException"],
+            sql_state="22012",
+            error_class="DIVIDE_BY_ZERO", reason=None,
+            message="[DIVIDE_BY_ZERO] Division by zero. SQLSTATE: 22012",
+            message_parameters={"config": '"spark.sql.ansi.enabled"'}, stacktrace=None,
+            display_server_stacktrace=False, contexts=[context], grpc_status_code=13,
+            breaking_change_info=None,
+        )
+    finally:
+        logger.removeHandler(handler)
+    assert isinstance(error, ArithmeticException)
+    record = json.loads(stream.getvalue().strip().splitlines()[-1])
+    assert record["context"] == {
+        "file": "app.py", "line": "3", "fragment": "__truediv__", "errorClass": "DIVIDE_BY_ZERO",
+    }
+    exception = record["exception"]
+    assert exception["class"] == "_MultiThreadedRendezvous"
+    assert exception["msg"].startswith(
+        "<_MultiThreadedRendezvous of RPC that terminated with:\n\tstatus = StatusCode.INTERNAL\n"
+        '\tdetails = "[DIVIDE_BY_ZERO] Division by zero. SQLSTATE: 22012"\n'
+    )
+    assert set(exception["stacktrace"][0]) == {"class", "method", "file", "line"}
+    assert type(error.__context__).__name__ == "_MultiThreadedRendezvous"
+    assert error.__suppress_context__
+
+
 def test_sql_utils_reexports_the_exceptions_of_pyspark(mock_connect):
     # As PySpark's pyspark.sql.utils: the exceptions of pyspark.errors, of their import path
     # before it, which the errors of the server are instances of.
@@ -1261,6 +1427,42 @@ def test_sql_utils_reexports_the_exceptions_of_pyspark(mock_connect):
     with pytest.raises(utils.AnalysisException) as error:
         spark.range(1).collect()
     assert "TABLE_OR_VIEW_NOT_FOUND" in str(error.value)
+
+
+def test_pickled_when_columns_chain_as_pyspark(mock_connect):
+    # As PySpark's CaseWhen: a pickled, cloudpickled or deep-copied when() Column keeps its CASE
+    # WHEN, so when() and otherwise() chain on it, and the chain sends the plan of the chain
+    # built without the pickling.
+    import copy
+
+    import cloudpickle
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    df = spark.range(1)
+
+    def sent_expression(dataframe):
+        # ExecutePlanRequest.plan=3, Plan.root=1, Relation.project=3, Project.expressions=3.
+        dataframe.collect()
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        return parse_message(parse_message(parse_message(plan)[3][0])[3][0])
+
+    def chain(when):
+        return when.when(F.col("id") > 5, "huge").otherwise("small")
+
+    direct = F.when(F.col("id") > 0, "big")
+    expected = sent_expression(df.select(chain(direct).alias("x")))
+    for copied in (pickle.loads(pickle.dumps(direct)),
+                   cloudpickle.loads(cloudpickle.dumps(direct)),
+                   copy.deepcopy(direct)):
+        assert repr(chain(copied)) == repr(chain(direct))
+        assert sent_expression(df.select(chain(copied).alias("x"))) == expected
+        # otherwise() of a pickled when(), and a when() after the chain, which PySpark rejects.
+        assert repr(copied.otherwise("n")) == repr(direct.otherwise("n"))
+        with pytest.raises(PySparkTypeError) as error:
+            copied.otherwise("n").when(F.col("id") > 0, "p")
+        assert error.value.getCondition() == "INVALID_WHEN_USAGE"
 
 
 def test_functions_build_columns():
@@ -1977,6 +2179,42 @@ def test_time_values_are_sent_as_pyspark(mock_connect):
     plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
     expression = parse_message(parse_message(parse_message(plan)[3][0])[3][0])
     assert parse_message(parse_message(expression[1][0])[26][0]) == {1: [nanos], 2: [6]}
+
+
+def test_window_specs_pickle_as_pyspark(mock_connect):
+    # As PySpark's WindowSpec, which pickles its partition, order and frame: a pickled, cloudpickled
+    # or copied WindowSpec has the repr of the spec and sends the window of the spec, so a UDF or
+    # foreachBatch function can capture a window.
+    import copy
+
+    import cloudpickle
+    from pyspark.sql import Window
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    df = spark.range(1)
+
+    def sent_expression(dataframe):
+        # ExecutePlanRequest.plan=3, Plan.root=1, Relation.project=3, Project.expressions=3.
+        dataframe.collect()
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        return parse_message(parse_message(parse_message(plan)[3][0])[3][0])
+
+    specs = [
+        Window.partitionBy("k").orderBy(F.col("x").desc()),
+        Window.partitionBy(F.col("k"), "v").orderBy("x", F.col("v").asc_nulls_last())
+        .rowsBetween(-1, Window.unboundedFollowing),
+        Window.orderBy("x").rangeBetween(Window.unboundedPreceding, 0),
+        Window.orderBy(F.col("x").desc_nulls_first()).rowsBetween(Window.currentRow, 2),
+        Window.partitionBy(),
+    ]
+    for spec in specs:
+        expected = sent_expression(df.select(F.sum("id").over(spec).alias("s")))
+        for copied in (pickle.loads(pickle.dumps(spec)),
+                       cloudpickle.loads(cloudpickle.dumps(spec)),
+                       copy.copy(spec)):
+            assert repr(copied) == repr(spec)
+            assert sent_expression(df.select(F.sum("id").over(copied).alias("s"))) == expected
 
 
 def test_time_types_parse_as_pyspark(mock_connect):
@@ -3462,6 +3700,141 @@ def test_struct_types_give_back_their_struct_field_objects_as_pyspark():
 
 
 
+def test_struct_type_fields_is_the_live_list_of_the_struct():
+    # As PySpark's StructType, whose `fields` is a list attribute that the struct keeps: the
+    # same list each time, and an edit of it (append, item, pop, sort, del) is an edit of the
+    # struct, which its simpleString, json, len, iteration and indexing show.
+    st = T.StructType([T.StructField("a", T.IntegerType()), T.StructField("b", T.StringType())])
+    fields = st.fields
+    assert st.fields is fields
+    fields.append(T.StructField("c", T.LongType(), False))
+    assert st.simpleString() == "struct<a:int,b:string,c:bigint>"
+    assert len(st) == 3 and [f.name for f in st] == ["a", "b", "c"]
+    assert st[2].nullable is False and '"nullable":false' in st.json()
+    fields[0] = T.StructField("z", T.DateType())
+    assert st.simpleString() == "struct<z:date,b:string,c:bigint>"
+    assert st["z"] is fields[0] and st[0] is fields[0]
+    assert fields.pop().name == "c" and st.simpleString() == "struct<z:date,b:string>"
+    fields.sort(key=lambda f: f.name, reverse=True)
+    assert [f.name for f in st] == ["z", "b"]
+    del fields[0]
+    assert st.simpleString() == "struct<b:string>" and len(st) == 1
+
+
+def test_struct_type_add_keeps_the_fields_list():
+    # As PySpark's add, which appends to the list the struct keeps, so a list kept before
+    # add sees the new field, and a field appended to the list is seen by add's struct.
+    st = T.StructType([T.StructField("a", T.IntegerType())])
+    fields = st.fields
+    st.add("b", T.StringType())
+    assert st.fields is fields and len(fields) == 2 and fields[1].name == "b"
+    fields.append(T.StructField("c", T.LongType()))
+    st.add(T.StructField("d", T.LongType()))
+    assert [f.name for f in fields] == ["a", "b", "c", "d"]
+    assert st.simpleString() == "struct<a:int,b:string,c:bigint,d:bigint>"
+
+
+def test_struct_type_names_are_apart_from_fields():
+    # As PySpark's StructType: `names` is a list of its own, which __init__ and add set and
+    # nothing else sets. So fieldNames() (a copy of names) does not follow an edit of fields,
+    # while simpleString, json, len and the fields do; and a rename of a field is not a name.
+    st = T.StructType([T.StructField("a", T.IntegerType())])
+    assert st.names is st.names and st.fieldNames() is not st.names
+    st.fields.append(T.StructField("b", T.StringType()))
+    assert st.fieldNames() == ["a"] and st.names == ["a"]
+    assert st.simpleString() == "struct<a:int,b:string>" and len(st) == 2
+    st.add("c", T.LongType())
+    assert st.fieldNames() == ["a", "c"] and st.names == ["a", "c"]
+    st.names.append("n")
+    assert st.fieldNames() == ["a", "c", "n"]
+    st.fieldNames().append("m")
+    assert st.fieldNames() == ["a", "c", "n"]
+    st.fields[0].name = "renamed"
+    assert st.fieldNames() == ["a", "c", "n"] and st.names == ["a", "c", "n"]
+    assert st[0].name == "renamed" and st["renamed"] is st.fields[0]
+    assert st != T.StructType(list(st.fields))
+
+
+def test_struct_field_attributes_are_assignable():
+    # As PySpark's StructField, whose name, dataType, nullable and metadata are plain
+    # attributes: an assignment of them is the field's, and so is the struct's the field is in.
+    # This is how the nullability of a schema is changed in place.
+    f = T.StructField("n", T.IntegerType())
+    st = T.StructType([f])
+    f.nullable = False
+    assert st.simpleString() == "struct<n:int>" and st[0].nullable is False
+    assert st.json() == T.StructType([T.StructField("n", T.IntegerType(), False)]).json()
+    f.name = "m"
+    assert st.simpleString() == "struct<m:int>" and st.fieldNames() == ["n"]
+    f.dataType = T.StringType()
+    assert st.simpleString() == "struct<m:string>" and f.simpleString() == "m:string"
+    f.metadata = {"k": "v"}
+    assert '"metadata":{"k":"v"}' in st.json() and st.fields[0].metadata == {"k": "v"}
+    fresh = T.StructType([T.StructField("m", T.StringType(), False, {"k": "v"})])
+    assert T.StructType([f]) == fresh and st.json() == fresh.json()
+    assert T.StructType([f]) != T.StructType([T.StructField("m", T.StringType(), True)])
+    parsed = pickle.loads(pickle.dumps(T.StructType([f])))
+    assert parsed.json() == fresh.json() and parsed.simpleString() == "struct<m:string>"
+    assert pickle.loads(pickle.dumps(f)) == fresh[0]
+
+
+def test_struct_type_edits_reach_its_core_type():
+    # The live view: a UDF's return type and the JSON of a struct read the fields as they are
+    # now, after edits of the list and of the fields in place.
+    from pyspark.sql import functions as F
+
+    st = T.StructType([T.StructField("a", T.LongType())])
+    st.fields.append(T.StructField("b", T.DoubleType(), False))
+    st.fields[0].nullable = False
+    wrapper = F.udf(lambda x: x, returnType=st)
+    assert wrapper.returnType.simpleString() == "struct<a:bigint,b:double>"
+    assert wrapper.returnType.fields[0].nullable is False
+    assert T._parse_datatype_json_string(st.json()).simpleString() == "struct<a:bigint,b:double>"
+    assert st.toNullable().simpleString() == "struct<a:bigint,b:double>"
+    assert st.toNullable().fields[1].nullable is True
+    assert st[1:].simpleString() == "struct<b:double>"
+
+
+def test_struct_type_nested_types_are_kept_as_pyspark_keeps_them():
+    # As PySpark's attributes: dataType, elementType, keyType and valueType are the same object
+    # each time, and an edit of a nested type, in place or through its parent, is seen by the
+    # outer type: its json, simpleString, equality and pickling, and a walk of its fields.
+    def nested():
+        return T.StructType([
+            T.StructField("s", T.StructType([T.StructField("x", T.IntegerType())])),
+            T.StructField("a", T.ArrayType(T.StructType([T.StructField("y", T.IntegerType())]))),
+            T.StructField("m", T.MapType(
+                T.StringType(), T.StructType([T.StructField("z", T.IntegerType())]))),
+        ])
+
+    st = nested()
+    assert st["s"].dataType is st["s"].dataType
+    assert st["a"].dataType.elementType is st["a"].dataType.elementType
+    assert st["m"].dataType.valueType is st["m"].dataType.valueType
+    element = T.StringType()
+    assert T.ArrayType(element).elementType is element
+    assert T.MapType(element, element).keyType is element
+
+    def walk(schema, nullable):
+        for field in schema.fields:
+            field.nullable = nullable
+            if isinstance(field.dataType, T.StructType):
+                walk(field.dataType, nullable)
+
+    walked = nested()
+    walk(walked, False)
+    assert walked.json().count('"nullable":false') == 4
+    assert walked.simpleString() == "struct<s:struct<x:int>,a:array<struct<y:int>>,m:map<string,struct<z:int>>>"
+
+    edited = nested()
+    edited["a"].dataType.elementType.fields[0].nullable = False
+    edited["m"].dataType.valueType.fields[0].nullable = False
+    assert edited.json().count('"nullable":false') == 2
+    assert edited == T.StructType(list(edited.fields))
+    assert pickle.loads(pickle.dumps(edited)).json() == edited.json()
+    assert hash(edited) == hash(T.StructType(list(edited.fields)))
+
+
 def test_struct_type_introspection():
     """StructType.fields / names / __getitem__ / __iter__ / __len__ + chainable add."""
     st = T.StructType(
@@ -3964,6 +4337,35 @@ def test_decimal_type_methods():
     assert d.typeName() == "decimal"
 
 
+def test_columns_pickle_as_their_expressions_as_pyspark():
+    # As PySpark Connect's Columns, which pickle their expressions: pickle, cloudpickle and
+    # deepcopy give back a Column of the expression as it was sent, of its repr, and the
+    # expressions over it are those over the original.
+    import copy
+    from pyspark.serializers import CloudPickleSerializer
+    from pyspark.sql import functions as F
+
+    serializer = CloudPickleSerializer()
+    for column in [
+        F.col("a"),
+        (F.col("a") + 1).alias("b"),
+        F.lit(1.5),
+        F.when(F.col("a") > 1, "x").otherwise("y"),
+        F.struct("a", "b").getField("a"),
+        F.col("a").desc(),
+    ]:
+        for restored in (
+            pickle.loads(pickle.dumps(column)),
+            serializer.loads(serializer.dumps(column)),
+            copy.deepcopy(column),
+        ):
+            assert repr(restored) == repr(column)
+            assert restored.to_plan(None) == column.to_plan(None)
+            over, over_original = F.coalesce(restored, F.lit(0)), F.coalesce(column, F.lit(0))
+            assert repr(over) == repr(over_original)
+            assert over.to_plan(None) == over_original.to_plan(None)
+
+
 def test_column_repr_and_operations():
     """Test Column repr and various operations."""
     from pyspark.sql import functions as F
@@ -4173,6 +4575,24 @@ def test_udtf_variants():
 
     # As PySpark's, a UDTF is not deterministic unless asDeterministic() marks it so.
     assert SimpleUDTF.deterministic is False
+
+
+def test_columns_have_the_python_2_operators_of_pyspark():
+    # As PySpark's Column: __div__ and __rdiv__ divide, as __truediv__ and __rtruediv__, which
+    # pandas-on-Spark calls, __nonzero__ is __bool__, and __getnewargs__ gives the expression.
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql import functions as F
+
+    column = F.col("a")
+    assert repr(column.__div__(2)) == repr(column / 2) == "Column<'/(a, 2)'>"
+    assert repr(column.__rdiv__(2)) == repr(2 / column) == "Column<'/(2, a)'>"
+    plan = column.__div__(2).to_plan(None)
+    assert plan.unresolved_function.function_name == "/"
+    assert [a.literal.integer for a in plan.unresolved_function.arguments[1:]] == [2]
+    with pytest.raises(PySparkValueError) as error:
+        column.__nonzero__()
+    assert error.value.getCondition() == "CANNOT_CONVERT_COLUMN_INTO_BOOL"
+    assert [repr(e) for e in (column + 1).__getnewargs__()] == ["+(a, 1)"]
 
 
 def test_column_with_alias_chain():
@@ -5697,6 +6117,45 @@ def test_inheritable_threads_inherit_the_tags_of_the_session_as_pyspark(mock_con
         inheritable_thread_target(child)(child)
 
 
+def test_threads_of_inheritable_thread_targets_share_their_tags_as_pyspark(mock_connect):
+    # As PySpark Connect's inheritable_thread_target, as Apache Spark's
+    # test_inheritable_tags_with_deco: the threads of the function share the copy of the tags of
+    # the thread that decorated it, of then, so a thread that the function starts sees the tags
+    # that the thread that started it added, while the decorating thread keeps its own.
+    import threading
+
+    from pyspark import inheritable_thread_target
+
+    spark, _ = mock_connect
+    spark.addTag("a")
+    try:
+        @inheritable_thread_target(spark)
+        def func(target):
+            return target()
+
+        spark.addTag("later")
+        first, second = set(), set()
+
+        def inner():
+            spark.addTag("c")
+            second.update(spark.getTags())
+
+        def outer():
+            spark.addTag("b")
+            first.update(spark.getTags())
+            nested = threading.Thread(target=func, args=(inner,))
+            nested.start()
+            nested.join()
+
+        thread = threading.Thread(target=func, args=(outer,))
+        thread.start()
+        thread.join()
+        assert spark.getTags() == {"a", "later"}
+        assert first == {"a", "b"} and second == {"a", "b", "c"}
+    finally:
+        spark.clearTags()
+
+
 def test_row_asdict():
     """Test Row.asDict() method."""
     from pyspark.sql import Row
@@ -6996,6 +7455,44 @@ if __name__ == "__main__":
     assert result.stdout.strip().splitlines()[-1] == str(["col"] * 6)
 
 
+def test_join_as_of_sends_the_as_of_join_as_pyspark(mock_connect):
+    # As PySpark's plan.AsOfJoin: Relation.as_of_join=39, with left=1, right=2, left_as_of=3,
+    # right_as_of=4, join_expr=5, using_columns=6, join_type=7, tolerance=8,
+    # allow_exact_matches=9 and direction=10. The as-of columns are the columns of their
+    # DataFrames, and `on` is a condition, or names when it is a name or a list of names.
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    left, right = spark.range(2), spark.range(3)
+
+    def sent_as_of_join(joined):
+        joined.collect()
+        # ExecutePlanRequest.plan=3, Plan.root=1, Relation.as_of_join=39.
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        return parse_message(parse_message(plan)[39][0])
+
+    def attribute(expression):
+        # Expression.unresolved_attribute=2, UnresolvedAttribute.unparsed_identifier=1.
+        return parse_message(parse_message(expression)[2][0])[1][0].decode()
+
+    join = sent_as_of_join(left._joinAsOf(
+        right, "id", "id", on=["id"], how="left", tolerance=F.lit(1),
+        allowExactMatches=False, direction="forward"))
+    assert attribute(join[3][0]) == "id" and attribute(join[4][0]) == "id"
+    assert 1 in join and 2 in join and 5 not in join and join[6] == [b"id"]
+    assert join[7] == [b"left"] and 8 in join
+    assert join.get(9, [0]) == [0] and join[10] == [b"forward"]
+
+    join = sent_as_of_join(left._joinAsOf(right, "id", "id"))
+    assert 5 not in join and 6 not in join and 8 not in join
+    assert join[7] == [b"inner"] and join[9] == [1] and join[10] == [b"backward"]
+
+    join = sent_as_of_join(left._joinAsOf(
+        right, left.id, right.id, on=left.id == right.id, how="left"))
+    assert attribute(join[3][0]) == "id" and 5 in join and 6 not in join
+    assert join[7] == [b"left"] and join[10] == [b"backward"]
+
+
 def test_grouping_sets_group_by_their_grouping_columns_as_pyspark(mock_connect):
     # As PySpark's, groupingSets(groupingSets, *cols) groups by the sets with the grouping
     # columns `cols`: Relation.aggregate=9, Aggregate.group_type=2 (GROUPING_SETS=5),
@@ -7737,6 +8234,31 @@ def exact_date_capture_input():
         child.close()
 
 
+def test_the_objects_of_the_client_take_weak_references_and_attributes_as_pyspark(mock_connect):
+    # As PySpark's, whose classes are Python classes: the objects of the client can be referred
+    # to weakly and take attributes of their own, as libraries that cache by weak reference or
+    # tag a DataFrame do.
+    import weakref
+
+    from pyspark.sql import Observation, Window
+    from pyspark.sql import functions as F
+
+    spark, _ = mock_connect
+    df = spark.range(3)
+    for obj in [
+        spark, df, F.col("a"), df.groupBy("id"), Window.partitionBy("id"), spark.read, df.write,
+        df.writeTo("t"), df.mergeInto("t", F.lit(True)), spark.readStream, df.na, df.stat,
+        spark.catalog, spark.conf, spark.tvf, spark.dataSource, Observation("o"),
+        T.StructType([T.StructField("a", T.LongType())]), T.StructField("a", T.LongType()),
+        T.LongType(), T.ArrayType(T.StringType()), T.DecimalType(5, 2),
+    ]:
+        reference = weakref.ref(obj)
+        assert reference() is obj, type(obj)
+        obj._tagged_by_test = type(obj).__name__
+        assert obj._tagged_by_test == type(obj).__name__
+        del obj._tagged_by_test
+
+
 def test_year_month_and_calendar_intervals_raise_as_pyspark_for_local_rows(mock_connect):
     # As PySpark's to_arrow_schema, which has no Arrow type of these intervals: the values
     # and the None values of such a column raise UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION,
@@ -7896,7 +8418,10 @@ def decimal_ipc_protocol(tmp_path_factory):
     pytest.importorskip("pyarrow")
     protoc = shutil.which(os.environ.get("PROTOC", "protoc"))
     if protoc is None:
-        pytest.skip("Decimal IPC transport tests require protoc")
+        message = "Decimal IPC transport tests require protoc"
+        if os.environ.get("CI", "").strip().lower() in {"1", "true", "yes"}:
+            pytest.fail(message)
+        pytest.skip(message)
     proto_root = Path(__file__).resolve().parents[2] / "crates/spark-connect-proto/proto"
     descriptor = tmp_path_factory.mktemp("decimal-proto") / "connect.pb"
     command = [protoc, f"-I{proto_root}"]
@@ -7930,6 +8455,213 @@ def decimal_ipc_session(decimal_ipc_protocol, tmp_path):
         finally:
             process.communicate("stop\n", timeout=20)
             assert process.returncode == 0
+
+
+def test_decimal_missing_c_accelerator_is_cached_and_keeps_hooks(decimal_ipc_protocol, tmp_path):
+    # The extension's type cache belongs to the process, so reset decimal's modules and
+    # hide the accelerator before importing pyspark. Count only conversion lookups.
+    pytest.importorskip("pandas")
+    import subprocess
+    import sys
+
+    script = r'''
+import sys
+# Exercise startup hooks that preload decimal before configuring the fallback.
+import decimal
+sys.modules.pop("decimal", None)
+sys.modules.pop("_pydecimal", None)
+sys.modules["_decimal"] = None
+import decimal
+import _pydecimal
+assert decimal.Decimal is _pydecimal.Decimal
+import builtins
+import contextlib
+from pathlib import Path
+import subprocess
+import pandas as pd
+import pyarrow as pa
+import pytest
+from pyspark.sql import SparkSession
+from pyspark.sql import types as T
+
+class RowPathFrame(pd.DataFrame):
+    pass
+
+@contextlib.contextmanager
+def session():
+    payload = Path(sys.argv[3]) / "input.arrow"
+    process = subprocess.Popen(
+        [sys.executable, "-u", "-c", sys.argv[1], sys.argv[2], str(payload)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+    )
+    spark = None
+    try:
+        port = int(process.stdout.readline())
+        spark = SparkSession.builder.remote(f"sc://127.0.0.1:{port}").create()
+        yield spark, payload
+    finally:
+        try:
+            if spark is not None:
+                spark.stop()
+        finally:
+            try:
+                process.communicate("stop\n", timeout=20)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate()
+                raise
+            assert process.returncode == 0
+
+original_import = builtins.__import__
+imports = []
+conversion_import_counts = []
+
+def tracked_import(name, *args, **kwargs):
+    if name == "_decimal":
+        imports.append(name)
+    return original_import(name, *args, **kwargs)
+
+def build(spark, data, schema=None):
+    before = len(imports)
+    builtins.__import__ = tracked_import
+    try:
+        return spark.createDataFrame(data, schema)
+    finally:
+        builtins.__import__ = original_import
+        conversion_import_counts.append(len(imports) - before)
+
+def assert_decimal_cells(payload, precision, scale, unscaled):
+    # Compare raw signed Decimal128 cells without constructing expected Arrow Decimals
+    # or relying on the client's result decoder to validate its own uploaded payload.
+    table = pa.ipc.open_stream(payload.read_bytes()).read_all()
+    table.validate(full=True)
+    assert table.schema == pa.schema([pa.field("v", pa.decimal128(precision, scale))])
+    column = table.column("v").combine_chunks()
+    assert column.is_valid().to_pylist() == [value is not None for value in unscaled]
+    cells = column.buffers()[1].to_pybytes()
+    assert len(column) == len(unscaled)
+    for index, value in enumerate(unscaled):
+        if value is not None:
+            assert cells[index * 16:(index + 1) * 16] == value.to_bytes(
+                16, "little", signed=True
+            )
+
+with session() as (spark, payload):
+    schema = T.StructType([T.StructField("v", T.DecimalType(10, 2))])
+    rows = [(decimal.Decimal("1.235"),), (None,), (decimal.Decimal("-2.345"),)]
+    build(spark, rows, schema).collect()
+    assert_decimal_cells(payload, 10, 2, [124, None, -234])
+
+    calls = []
+    class Traced(decimal.Decimal):
+        def __str__(self):
+            calls.append("str")
+            return super().__str__()
+
+        def as_tuple(self):
+            calls.append("tuple")
+            return super().as_tuple()
+
+    frame = RowPathFrame({"v": [Traced("1.20"), None, Traced("-30.5"),
+                              decimal.Decimal("1E+3")]}, dtype=object)
+    # Customized frames retain the native conversion path and its Decimal hooks.
+    build(spark, frame).collect()
+    assert calls == ["str", "tuple", "str", "tuple", "tuple", "tuple"], calls
+    assert_decimal_cells(payload, 6, 2, [120, None, -3050, 100000])
+
+    class Broken(decimal.Decimal):
+        def as_tuple(self):
+            raise LookupError("pure Decimal tuple hook")
+
+    failing = RowPathFrame({"v": [Broken("1.25")]}, dtype=object)
+    payload.unlink()
+    with pytest.raises(LookupError, match="^pure Decimal tuple hook$"):
+        build(spark, failing)
+    assert not payload.exists()
+    assert imports == ["_decimal"], imports
+    assert conversion_import_counts == [1, 0, 0], conversion_import_counts
+'''
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script, _DECIMAL_IPC_SERVER,
+             str(decimal_ipc_protocol), str(tmp_path)],
+            capture_output=True, text=True, timeout=180,
+        )
+    except subprocess.TimeoutExpired as error:
+        output = []
+        for name, value in (("stdout", error.stdout), ("stderr", error.stderr)):
+            if isinstance(value, bytes):
+                value = value.decode(errors="replace")
+            output.append(f"{name}:\n{value or ''}")
+        pytest.fail(
+            "Decimal fallback child exceeded 180 seconds.\n" + "\n".join(output),
+            pytrace=False,
+        )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_decimal_public_pure_python_alias_native_pandas_uses_float():
+    # Type caches are process-local: set the public alias before the extension is loaded,
+    # while leaving the C accelerator available. Inspect the inline IPC without an RPC.
+    # This pins "Decimal class rebinding" in dev/parity/known-differences.md; update the
+    # expected lossy values if pure-Python alias values become recognized as Decimals.
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    pytest.importorskip("_decimal")
+    pytest.importorskip("pandas")
+    pytest.importorskip("pyarrow")
+    script = r'''
+import sys
+import decimal
+import _decimal
+import _pydecimal
+assert "pyspark._pyspark" not in sys.modules
+assert _decimal.Decimal is not _pydecimal.Decimal
+decimal.Decimal = _pydecimal.Decimal
+import pandas as pd
+import pyarrow as pa
+assert "pyspark._pyspark" not in sys.modules
+sys.path.insert(0, sys.argv[1])
+from _mock_connect_server import parse_message
+from pyspark.sql import SparkSession
+assert decimal.Decimal is _pydecimal.Decimal
+
+class RowPathFrame(pd.DataFrame):
+    pass
+
+values = [_pydecimal.Decimal("1.0000000000000000000001"), None,
+          _pydecimal.Decimal("9007199254740993")]
+spark = SparkSession.builder.remote("sc://localhost:1").create()
+for schema in (None, ["v"]):
+    frame = RowPathFrame({"v": values}, dtype=object)
+    relation = parse_message(spark.createDataFrame(frame, schema)._relation_bytes())
+    while 18 in relation:
+        relation = parse_message(parse_message(relation[18][0])[1][0])
+    local = parse_message(relation[11][0])
+    actual = pa.ipc.open_stream(local[1][0]).read_all()
+    expected = pa.table({"v": pa.array([1.0, None, 9007199254740992.0], type=pa.float64())})
+    actual.validate(full=True)
+    assert actual.schema == expected.schema
+    assert actual.equals(expected)
+'''
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(Path(__file__).resolve().parent)],
+            capture_output=True, text=True, timeout=60,
+        )
+    except subprocess.TimeoutExpired as error:
+        output = []
+        for name, value in (("stdout", error.stdout), ("stderr", error.stderr)):
+            if isinstance(value, bytes):
+                value = value.decode(errors="replace")
+            output.append(f"{name}:\n{value or ''}")
+        pytest.fail(
+            "Decimal public-alias child exceeded 60 seconds.\n" + "\n".join(output),
+            pytrace=False,
+        )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize("kind", ["tuples", "pandas"])
@@ -7968,11 +8700,13 @@ def test_decimal_scientific_local_input_ipc(decimal_ipc_session, kind, precision
 
 @pytest.mark.parametrize("text", ["1E+1000000000", "-1E+1000000000"])
 def test_decimal_scientific_local_input_overflow(decimal_ipc_session, text):
-    from decimal import Decimal
+    from decimal import Decimal, InvalidOperation
 
     spark, payload = decimal_ipc_session
     schema = T.StructType([T.StructField("v", T.DecimalType(38, 0))])
-    with pytest.raises((ArithmeticError, RuntimeError)):
+    # Trap-mutating tests restore DefaultContext; its normal InvalidOperation trap
+    # makes quantize reject this overflow before any IPC relation is uploaded.
+    with pytest.raises(InvalidOperation):
         spark.createDataFrame([(Decimal(text),)], schema).collect()
     assert not payload.exists()
 
@@ -8037,6 +8771,7 @@ def test_decimal_rescaling_follows_pyspark(
     ["0.001234500", "-0.000002300", "0.000000", None],
     ["123", "-4", "0", None],
     ["1E+3", "1E-7", "-0E-7", "1.2300E-7", None],
+    ["1.0E+4", "-2.00E+3", "-0E-7", None],
 ])
 def test_decimal_scale_input_ipc(decimal_ipc_session, kind, schema_mode, texts):
     # The scale of a Decimal comes from its text, not from as_tuple(): the IPC holds the same
@@ -8109,6 +8844,67 @@ def test_decimal_scale_of_subclasses(decimal_ipc_session):
             spark.createDataFrame(pd.DataFrame({"v": [failing("1.5")]}, dtype=object), ["v"])
 
 
+@pytest.mark.parametrize("schema_mode", ["explicit", "names", "inferred"])
+@pytest.mark.parametrize("hook_behavior", ["error", "scale"])
+def test_decimal_scale_rebound_subclass_keeps_tuple_hook(
+    decimal_ipc_session, monkeypatch, schema_mode, hook_behavior
+):
+    # A subclass rebound as decimal.Decimal is still a subclass, not the immutable C type.
+    # Both conversion and inferred pandas typing must retain its as_tuple hook.
+    import decimal
+    from unittest.mock import Mock
+
+    import pyarrow as pa
+    from pyspark.sql import _pandas_input
+
+    pd = pytest.importorskip("pandas")
+    original = decimal.Decimal
+    calls = []
+    parts = original("123.45000").as_tuple()
+
+    class Rebound(original):
+        def __str__(self):
+            calls.append("str")
+            return "1.20"
+
+        def as_tuple(self):
+            calls.append("tuple")
+            if hook_behavior == "error":
+                raise LookupError("rebound Decimal tuple hook")
+            return parts
+
+    # Canonical-looking metadata must not make a Python heap type eligible either.
+    Rebound.__name__ = "Decimal"
+    Rebound.__module__ = "decimal"
+    frame = _RowPathFrame(pd)({"v": [Rebound("1.20"), None]}, dtype=object)
+    schema = T.StructType([T.StructField("v", T.DecimalType(10, 2))])
+    if schema_mode != "explicit":
+        schema = ["v"] if schema_mode == "names" else None
+    spark, payload = decimal_ipc_session
+    explicit_arrow = Mock(side_effect=AssertionError("native Decimal test reached explicit Arrow"))
+    inferred_arrow = Mock(side_effect=AssertionError("native Decimal test reached inferred Arrow"))
+    with monkeypatch.context() as alias:
+        alias.setattr(decimal, "Decimal", Rebound)
+        alias.setattr(_pandas_input, "prepare_pandas_table", explicit_arrow)
+        alias.setattr(_pandas_input, "prepare_inferred_pandas_table", inferred_arrow)
+        if hook_behavior == "error":
+            with pytest.raises(LookupError, match="^rebound Decimal tuple hook$"):
+                spark.createDataFrame(frame, schema)
+        else:
+            spark.createDataFrame(frame, schema).collect()
+    explicit_arrow.assert_not_called()
+    inferred_arrow.assert_not_called()
+    if hook_behavior == "error":
+        assert calls == ["str", "tuple"]
+        assert not payload.exists()
+    else:
+        assert calls == ["str", "tuple"] + ([] if schema_mode == "explicit" else ["tuple"])
+        table = pa.ipc.open_stream(payload.read_bytes()).read_all()
+        expected_type = pa.decimal128(10, 2) if schema_mode == "explicit" else pa.decimal128(8, 5)
+        assert table.schema.field("v").type == expected_type
+        assert table.column(0).to_pylist() == [original("1.20"), None]
+
+
 @pytest.mark.parametrize("schema", [["v"], T.StructType([T.StructField("v", T.DecimalType(10, 4))])])
 def test_decimal_scale_avoids_coefficient_tuple(decimal_ipc_session, schema):
     # Exact Decimals are typed and converted from their text: no DecimalTuple is built.
@@ -8130,6 +8926,32 @@ def test_decimal_scale_avoids_coefficient_tuple(decimal_ipc_session, schema):
     assert not any(entry.code is tuple_constructor for entry in profile.getstats())
 
 
+def test_decimal_explicit_pandas_schema_uses_arrow_conversion(decimal_ipc_session, monkeypatch):
+    from decimal import Decimal
+    import pyarrow as pa
+    from pyspark.sql import _pandas_input
+
+    pd = pytest.importorskip("pandas")
+    spark, payload = decimal_ipc_session
+    prepare = _pandas_input.prepare_pandas_table
+    calls = []
+
+    def prepare_table(*args):
+        calls.append(True)
+        return prepare(*args)
+
+    monkeypatch.setattr(_pandas_input, "prepare_pandas_table", prepare_table)
+    values = [Decimal("1.20"), None, Decimal("-30.5")]
+    schema = T.StructType([T.StructField("v", T.DecimalType(10, 2))])
+    spark.createDataFrame(pd.DataFrame({"v": values}, dtype=object), schema).collect()
+    assert calls == [True]
+    table = pa.ipc.open_stream(payload.read_bytes()).read_all()
+    expected = pa.table({"v": pa.array(values, type=pa.decimal128(10, 2))})
+    table.validate(full=True)
+    assert table.schema == expected.schema
+    assert table.equals(expected)
+
+
 @pytest.mark.parametrize("text", ["Infinity", "-Infinity"])
 def test_decimal_scale_of_non_finite_values(decimal_ipc_session, text):
     # An infinity has no precision to type a column by.
@@ -8144,7 +8966,7 @@ def test_decimal_scale_of_non_finite_values(decimal_ipc_session, text):
     assert not payload.exists()
 
 
-def test_decimal_quanta_of_each_type_and_conversion(decimal_ipc_session):
+def test_decimal_quanta_of_each_type_and_conversion(decimal_ipc_session, monkeypatch):
     # Each decimal type of a conversion is quantized with its own quantum and context, which
     # are built once per conversion, as PySpark builds them once per converter: a change of
     # decimal.DefaultContext applies from the next createDataFrame.
@@ -8153,25 +8975,221 @@ def test_decimal_quanta_of_each_type_and_conversion(decimal_ipc_session):
     import pyarrow as pa
 
     spark, payload = decimal_ipc_session
-    schema = T.StructType([T.StructField("a", T.DecimalType(10, 2)),
-                           T.StructField("b", T.DecimalType(5, 1)),
-                           T.StructField("c", T.DecimalType(10, 2))])
+    schema = T.StructType([
+        T.StructField("a", T.DecimalType(10, 2)),
+        T.StructField("b", T.DecimalType(5, 1)),
+        T.StructField("c", T.DecimalType(10, 2)),
+    ])
+    context_type = decimal.Context
+    constructions = []
+
+    def context(*args, **kwargs):
+        constructions.append(kwargs["prec"])
+        return context_type(*args, **kwargs)
+
+    monkeypatch.setattr(decimal, "Context", context)
     rows = [(Decimal("1.235"), Decimal("2.25"), Decimal("-0.005")),
             (Decimal("1.245"), Decimal("2.35"), None)]
     spark.createDataFrame(rows, schema).collect()
+    assert constructions == [10, 5]
     table = pa.ipc.open_stream(payload.read_bytes()).read_all()
     assert table.to_pydict() == {
         "a": [Decimal("1.24"), Decimal("1.24")],
         "b": [Decimal("2.2"), Decimal("2.4")],
         "c": [Decimal("-0.00"), None],
     }
+    previous_trap = decimal.DefaultContext.traps[decimal.Inexact]
     decimal.DefaultContext.traps[decimal.Inexact] = True
     try:
         with pytest.raises(decimal.Inexact):
             spark.createDataFrame(rows, schema)
     finally:
-        decimal.DefaultContext.traps[decimal.Inexact] = False
+        decimal.DefaultContext.traps[decimal.Inexact] = previous_trap
+    assert constructions == [10, 5, 10]
     spark.createDataFrame(rows[1:], schema)
+    assert constructions == [10, 5, 10, 10, 5]
+
+
+@pytest.mark.parametrize("prefix_exact", [False, True])
+def test_decimal_quanta_preserve_keyword_quantize_overrides(
+    decimal_ipc_session, monkeypatch, prefix_exact
+):
+    import decimal
+    import pyarrow as pa
+
+    spark, payload = decimal_ipc_session
+    schema = T.StructType([T.StructField("v", T.DecimalType(10, 2))])
+    calls = []
+    contexts = []
+    context_type = decimal.Context
+    constructions = []
+
+    def context(*args, **kwargs):
+        created = context_type(*args, **kwargs)
+        constructions.append(created)
+        return created
+
+    monkeypatch.setattr(decimal, "Context", context)
+
+    class KeywordContext(decimal.Decimal):
+        # PySpark passes context by keyword; this valid override has no rounding argument.
+        def quantize(self, exp, context=None):
+            calls.append((str(exp), context.prec, context.rounding))
+            contexts.append(context)
+            return super().quantize(exp, context=context)
+
+    rows = [(KeywordContext("1.235"),), (KeywordContext("1.245"),)]
+    if prefix_exact:
+        # Build the positional cache first: its later lazy keyword dict must share the
+        # existing context rather than creating one at the first subclass value.
+        rows.insert(0, (decimal.Decimal("1.235"),))
+    spark.createDataFrame(rows, schema).collect()
+    assert calls == [("0.01", 10, decimal.ROUND_HALF_EVEN)] * 2
+    assert len(constructions) == 1
+    assert all(value is constructions[0] for value in contexts)
+    assert pa.ipc.open_stream(payload.read_bytes()).read_all().column(0).to_pylist() == [
+        decimal.Decimal("1.24"),
+    ] * len(rows)
+
+
+def test_decimal_quanta_restore_outer_conversion_after_reentry(decimal_ipc_session):
+    import decimal
+    import pyarrow as pa
+
+    spark, payload = decimal_ipc_session
+    schema = T.StructType([T.StructField("v", T.DecimalType(10, 2))])
+    previous_trap = decimal.DefaultContext.traps[decimal.Inexact]
+    calls = []
+
+    class Reentrant(decimal.Decimal):
+        def quantize(self, exp, rounding=None, context=None):
+            calls.append(context.traps[decimal.Inexact])
+            if len(calls) == 1:
+                spark.createDataFrame([(decimal.Decimal("1.23"),)], schema).collect()
+                decimal.DefaultContext.traps[decimal.Inexact] = True
+            return super().quantize(exp, rounding, context)
+
+    try:
+        decimal.DefaultContext.traps[decimal.Inexact] = False
+        rows = [(Reentrant("1.235"),), (Reentrant("1.245"),)]
+        spark.createDataFrame(rows, schema).collect()
+    finally:
+        decimal.DefaultContext.traps[decimal.Inexact] = previous_trap
+    assert calls == [False, False]
+    assert pa.ipc.open_stream(payload.read_bytes()).read_all().column(0).to_pylist() == [
+        decimal.Decimal("1.24"), decimal.Decimal("1.24"),
+    ]
+
+
+@pytest.mark.parametrize("schema_kind", ["inferred", "names"])
+@pytest.mark.parametrize("layout", [
+    "array", "nested_array", "struct", "mixed_struct", "array_struct", "map_values", "map_keys",
+])
+def test_pandas_nested_decimals_use_every_observed_scale(mock_connect, layout, schema_kind):
+    from decimal import Decimal
+    import pyarrow as pa
+
+    decimals = [Decimal("1.5"), Decimal("1.25"), Decimal("0.003"), Decimal("1E+3")]
+    # Nested inferred precision remains 38 (SPARK-60696; see dev/parity/known-differences.md).
+    # Widen only the scale to preserve all values without changing the inherited container
+    # or non-Decimal type inference.
+    decimal_type = pa.decimal128(38, 3)
+    if layout == "array":
+        values = [[decimals[0], decimals[1]], None, [], decimals[2:]]
+        expected_values = values
+        expected_type = pa.list_(decimal_type)
+    elif layout == "nested_array":
+        values = [[[decimals[0]], []], None, [[decimals[1]], decimals[2:]]]
+        expected_values = values
+        expected_type = pa.list_(pa.list_(decimal_type))
+    elif layout in ("struct", "mixed_struct", "array_struct"):
+        values = [Row(d=value, keep=index) for index, value in enumerate(decimals)]
+        expected_values = [{"d": value, "keep": index} for index, value in enumerate(decimals)]
+        expected_type = pa.struct([pa.field("d", decimal_type), pa.field("keep", pa.int64())])
+        if layout == "mixed_struct":
+            values = [values[0], *expected_values[1:]]
+        if layout == "array_struct":
+            values = [[values[0]], None, values[1:]]
+            expected_values = [[expected_values[0]], None, expected_values[1:]]
+            expected_type = pa.list_(expected_type)
+    elif layout == "map_values":
+        values = [
+            {"a": decimals[0]}, None, {"a": decimals[1], "b": decimals[2], "c": decimals[3]},
+        ]
+        expected_values = values
+        expected_type = pa.map_(pa.string(), decimal_type)
+    else:
+        values = [
+            {decimals[0]: "a"}, None, {decimals[1]: "b", decimals[2]: "c", decimals[3]: "d"},
+        ]
+        expected_values = values
+        expected_type = pa.map_(decimal_type, pa.string())
+    names = ["renamed"] if schema_kind == "names" else None
+    actual = _native_number_input_table(
+        mock_connect, [(value,) for value in values], names, source="pandas"
+    )
+    name = "renamed" if names else "value"
+    expected = pa.table({name: pa.array(expected_values, type=expected_type)})
+    actual.validate(full=True)
+    assert actual.schema == expected.schema
+    assert actual.equals(expected)
+
+
+@pytest.mark.parametrize("scale", [38, 39, 50, 128, 5_000_000_000])
+def test_pandas_nested_decimal_scale_bounds(mock_connect, scale):
+    from decimal import Decimal
+    import pyarrow as pa
+
+    spark, service = mock_connect
+    values = [[Decimal("0.1")], [Decimal(f"1E-{scale}")]]
+    if scale > 38:
+        pd = pytest.importorskip("pandas")
+        frame = _RowPathFrame(pd)({"value": values}, dtype=object)
+        with pytest.raises(
+            ValueError,
+            match=r"^Decimal scale is out of the range of DecimalType, up to 38$",
+        ):
+            spark.createDataFrame(frame)
+        assert not service.execute_requests
+    else:
+        actual = _native_number_input_table(
+            mock_connect, [(value,) for value in values], source="pandas"
+        )
+        expected = pa.table({"value": pa.array(values, type=pa.list_(pa.decimal128(38, 38)))})
+        actual.validate(full=True)
+        assert actual.schema == expected.schema
+        assert actual.equals(expected)
+
+
+def test_pandas_nested_decimal_trailing_zeros_preserve_values(mock_connect):
+    from decimal import Decimal
+    import pyarrow as pa
+
+    # The second value's trailing zeros increase the scale even though it represents 1.
+    values = [[Decimal("9" * 30 + ".0")], [Decimal("1.0000000")]]
+    actual = _native_number_input_table(
+        mock_connect, [(value,) for value in values], source="pandas"
+    )
+    expected = pa.table({"value": pa.array(values, type=pa.list_(pa.decimal128(38, 7)))})
+    actual.validate(full=True)
+    assert actual.schema == expected.schema
+    assert actual.equals(expected)
+
+
+def test_pandas_nested_decimal_scale_widening_can_overflow_precision(decimal_ipc_session):
+    from decimal import Decimal
+    from pyspark.errors import PySparkRuntimeError
+
+    pd = pytest.importorskip("pandas")
+    spark, payload = decimal_ipc_session
+    # With only the first scale (1), both values fit: the second discards six zero digits.
+    # Preserving every observed scale (7) requires 44 digits for the first value, beyond
+    # the native fallback's inherited precision of 38. See known-differences.md.
+    values = [[Decimal("9" * 37 + ".0")], [Decimal("1.0000000")]]
+    frame = _RowPathFrame(pd)({"v": values}, dtype=object)
+    with pytest.raises(PySparkRuntimeError, match=r"does not fit decimal\(38,7\) exactly"):
+        spark.createDataFrame(frame)
+    assert not payload.exists()
 
 
 # --------------------------------------------------------------------------- schema cache
@@ -8420,6 +9438,36 @@ def test_udf_profiles_are_collected_from_the_python_accumulators_as_pyspark(
     assert spark._profiler_collector._profile_results == {}
 
 
+
+
+def test_progress_handler_that_runs_queries_without_end_is_bounded(mock_connect, monkeypatch):
+    # A handler that runs a query for each progress of an execution nests the executions past
+    # the bound of nested callbacks: the query past it fails with a RecursionError, which the
+    # handler's exception goes to sys.unraisablehook with, instead of the native stack
+    # overflowing, and the outer query returns.
+    import sys
+
+    spark, service = mock_connect
+    # ExecutePlanResponse.execution_progress=18 -> one stage that is not done.
+    stage = (varint_field(1, 7) + varint_field(2, 4) + varint_field(3, 1)
+             + varint_field(4, 1024) + varint_field(5, 0))
+    service.execute_payload = message_field(18, message_field(1, stage) + varint_field(2, 3))
+    unraisable = []
+    monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
+    calls = []
+
+    def handler(**kwargs):
+        calls.append(kwargs["done"])
+        if not kwargs["done"]:
+            spark.range(1).collect()
+
+    spark.registerProgressHandler(handler)
+    try:
+        spark.range(1).collect()
+    finally:
+        spark.removeProgressHandler(handler)
+    assert calls == [False, False, True, True]
+    assert [type(error.exc_value) for error in unraisable] == [RecursionError]
 
 
 def test_schema_cache_cold_children_keep_independent_caches(mock_connect):

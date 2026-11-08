@@ -12,6 +12,9 @@ pub mod error;
 pub mod reattach;
 pub mod retries;
 pub mod runtime;
+// Shared with `apache-spark-connect`, whose session keeps per-thread tags the same way.
+#[doc(hidden)]
+pub mod thread_entries;
 
 pub use artifact::{
     build_artifact_request_stream, compute_crc32, ArtifactData, FileArtifact, InMemoryArtifact,

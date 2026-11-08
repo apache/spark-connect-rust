@@ -273,6 +273,8 @@ pub enum SparkErrorKind {
     QueryExecution,
     /// ``pyspark.errors.exceptions.base.PythonException``
     Python,
+    /// ``RecursionError``, a Python builtin: the executions nested in callbacks are too deep.
+    RecursionError,
     /// ``pyspark.errors.exceptions.base.SparkRuntimeException``
     SparkRuntime,
     /// ``pyspark.errors.exceptions.base.SparkUpgradeException``
@@ -321,6 +323,23 @@ impl SparkError {
     pub fn value_msg(message: impl Into<String>) -> Self {
         Self {
             kind: SparkErrorKind::ValueError,
+            error_class: String::new(),
+            params: BTreeMap::new(),
+            message: message.into(),
+            sql_state: None,
+            contexts: Vec::new(),
+            server_stacktrace: None,
+            grpc_code: None,
+            grpc_details: None,
+            operation_id: None,
+            server: None,
+        }
+    }
+
+    /// Create a RecursionError-kind error with a plain message (no error class).
+    pub fn recursion_msg(message: impl Into<String>) -> Self {
+        Self {
+            kind: SparkErrorKind::RecursionError,
             error_class: String::new(),
             params: BTreeMap::new(),
             message: message.into(),

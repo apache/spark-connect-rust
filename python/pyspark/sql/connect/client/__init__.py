@@ -22,7 +22,7 @@ __all__ = ["SparkConnectClient"]
 
 
 import weakref
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from pyspark.sql.metrics import ObservedMetrics
 
@@ -144,6 +144,24 @@ class SparkConnectClient:
         """Whether the session of the client is stopped, as SparkConnectClient's ``is_closed``,
         whether its channel is closed."""
         return self._session.is_stopped
+
+    def get_configs(self, *keys: str) -> Tuple[Optional[str], ...]:
+        """The values of the configurations ``keys``, in one request, as SparkConnectClient's
+        ``get_configs``."""
+        return tuple(self._session.conf._get_many(list(keys)))
+
+    def get_config_dict(self, *keys: str) -> Mapping[str, Optional[str]]:
+        """The values of the configurations ``keys`` by their keys, in one request, as
+        SparkConnectClient's ``get_config_dict``."""
+        return dict(zip(keys, self.get_configs(*keys)))
+
+    def get_config_with_defaults(
+        self, *pairs: Tuple[str, Optional[str]]
+    ) -> Tuple[Optional[str], ...]:
+        """The values of the configurations of ``pairs`` of a key and its default, the default of
+        a key that is not set, in one request, as SparkConnectClient's
+        ``get_config_with_defaults``, of which pandas-on-Spark reads its ANSI mode."""
+        return tuple(self._session.conf._get_with_defaults(list(pairs)))
 
     def execute_command(self, command: Any, observations: Any = None) -> Any:
         """Execute ``command``, a ``spark.connect.Command``, as SparkConnectClient's

@@ -6,7 +6,12 @@ use spark_connect::group::StatFunctions;
 use crate::dataframe::PyDataFrame;
 
 /// Python wrapper for DataFrame statistical functions.
-#[pyclass(name = "DataFrameStatFunctions", module = "pyspark.sql.dataframe")]
+#[pyclass(
+    name = "DataFrameStatFunctions",
+    module = "pyspark.sql.dataframe",
+    weakref,
+    dict
+)]
 pub struct PyStatFunctions {
     stat: StatFunctions,
     /// The DataFrame of `df.stat`, as PySpark's `DataFrameStatFunctions.df`.

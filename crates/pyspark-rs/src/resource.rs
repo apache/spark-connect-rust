@@ -6,7 +6,12 @@ use spark_connect::resource::{
 };
 
 /// Python wrapper for ExecutorResourceRequests.
-#[pyclass(name = "ExecutorResourceRequests", module = "pyspark.resource.profile")]
+#[pyclass(
+    name = "ExecutorResourceRequests",
+    module = "pyspark.resource.profile",
+    weakref,
+    dict
+)]
 pub struct PyExecutorResourceRequests {
     pub(crate) inner: ExecutorResourceRequests,
 }
@@ -61,7 +66,12 @@ impl PyExecutorResourceRequests {
 }
 
 /// Python wrapper for TaskResourceRequests.
-#[pyclass(name = "TaskResourceRequests", module = "pyspark.resource.profile")]
+#[pyclass(
+    name = "TaskResourceRequests",
+    module = "pyspark.resource.profile",
+    weakref,
+    dict
+)]
 pub struct PyTaskResourceRequests {
     pub(crate) inner: TaskResourceRequests,
 }
@@ -92,7 +102,12 @@ impl PyTaskResourceRequests {
 }
 
 /// Python wrapper for ResourceProfileBuilder.
-#[pyclass(name = "ResourceProfileBuilder", module = "pyspark.resource.profile")]
+#[pyclass(
+    name = "ResourceProfileBuilder",
+    module = "pyspark.resource.profile",
+    weakref,
+    dict
+)]
 pub struct PyResourceProfileBuilder {
     pub(crate) inner: ResourceProfileBuilder,
 }
@@ -133,7 +148,12 @@ impl PyResourceProfileBuilder {
 }
 
 /// Python wrapper for ResourceProfile.
-#[pyclass(name = "ResourceProfile", module = "pyspark.resource.profile")]
+#[pyclass(
+    name = "ResourceProfile",
+    module = "pyspark.resource.profile",
+    weakref,
+    dict
+)]
 pub struct PyResourceProfile {
     pub(crate) inner: ResourceProfile,
 }

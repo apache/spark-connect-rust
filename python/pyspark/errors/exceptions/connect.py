@@ -24,6 +24,7 @@ upstream ``_convert_exception`` does. ``grpc`` is optional: without it, ``Status
 enum with the members and values of ``grpc.StatusCode``.
 """
 import enum
+import json
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
@@ -79,6 +80,34 @@ from pyspark.errors.exceptions.base import (
 
 # Exported here too, as this module did before it had the classes of upstream pyspark.
 from pyspark.errors.exceptions.base import TempTableAlreadyExistsException  # noqa: F401
+
+
+class _MultiThreadedRendezvous(Exception):
+    """The gRPC error of a call that the server ended with an error, as the ``grpc`` package's
+    ``_MultiThreadedRendezvous``, of its status code and details: PySpark Connect builds its
+    exception of an error of the server as it handles it, so the DataFrame and SQL query context
+    loggers log it as the exception, of its class, its ``str`` and its traceback."""
+
+    def __init__(self, code: Any, details: str) -> None:
+        super().__init__(code, details)
+        self._code = code
+        self._details = details
+
+    def __str__(self) -> str:
+        grpc_status = self._code.value[0] if isinstance(self._code.value, tuple) else self._code
+        debug = "UNKNOWN:Error received from peer {grpc_message:%s, grpc_status:%s}" % (
+            json.dumps(self._details),
+            grpc_status,
+        )
+        return (
+            "<_MultiThreadedRendezvous of RPC that terminated with:\n"
+            "\tstatus = %s\n"
+            '\tdetails = "%s"\n'
+            '\tdebug_error_string = "%s"\n'
+            ">" % (self._code, self._details, debug)
+        )
+
+    __repr__ = __str__
 
 
 class SparkConnectException(PySparkException):
@@ -141,7 +170,18 @@ class SparkConnectGrpcException(SparkConnectException):
         self._contexts: List[BaseQueryContext] = contexts
         self._grpc_status_code = grpc_status_code
         self._breaking_change_info: Optional[Dict[str, Any]] = breaking_change_info
-        self._log_exception()
+        if self._contexts:
+            # PySpark Connect builds this exception as it handles the gRPC error of the call,
+            # which its query context loggers log as the exception. The Rust transport has no
+            # such error in Python, so its stand-in is handled as this logs.
+            try:
+                raise _MultiThreadedRendezvous(self._grpc_status_code, self._message)
+            except _MultiThreadedRendezvous as rpc_error:
+                self._log_exception()
+                rpc_error.__traceback__ = None
+                # As PySpark Connect raises this exception from None, as it handles that error.
+                self.__context__ = rpc_error
+                self.__suppress_context__ = True
 
     def getSqlState(self) -> Optional[str]:
         if self._sql_state is not None:

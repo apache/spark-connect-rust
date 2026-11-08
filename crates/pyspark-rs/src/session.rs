@@ -470,9 +470,81 @@ fn new_session(py: Python<'_>, url: &str) -> PyResult<Py<PySparkSession>> {
         .remote(url)
         .get_or_create()
         .to_pyerr()?;
-    let session = Py::new(py, PySparkSession::new(session))?;
+    let session = session_object(py, &session)?;
     set_default_and_active(py, &session);
     Ok(session)
+}
+
+/// The Python session objects by session ID, held weakly, so that the registry keeps none
+/// alive. Sessions made apart may share a session ID, such as two of an explicit `session_id`,
+/// so an ID has a list of them.
+type SessionObjects = std::collections::HashMap<String, Vec<Py<PyAny>>>;
+
+/// The registry of the Python session objects.
+fn session_objects() -> &'static std::sync::Mutex<SessionObjects> {
+    static OBJECTS: std::sync::OnceLock<std::sync::Mutex<SessionObjects>> =
+        std::sync::OnceLock::new();
+    OBJECTS.get_or_init(|| std::sync::Mutex::new(SessionObjects::new()))
+}
+
+/// The session object that the weak reference `weak` refers to, unless it was dropped.
+fn live_session_object(py: Python<'_>, weak: &Py<PyAny>) -> Option<Py<PySparkSession>> {
+    let object = weak.bind(py).call0().ok()?;
+    let session = object.cast::<PySparkSession>().ok()?;
+    Some(session.clone().unbind())
+}
+
+/// The live object of `session` itself in `registry`, if any, and not that of another session
+/// of its session ID.
+fn registered_session_object(
+    py: Python<'_>,
+    registry: &SessionObjects,
+    session: &SparkSession,
+) -> Option<Py<PySparkSession>> {
+    registry
+        .get(session.session_id())?
+        .iter()
+        .filter_map(|weak| live_session_object(py, weak))
+        .find(|object| {
+            object
+                .bind(py)
+                .try_borrow()
+                .is_ok_and(|object| object.session.is_same_session(session))
+        })
+}
+
+/// The Python object of `session`, one per session as PySpark has them: its live object, or
+/// else a new one, which the registry holds weakly. So the DataFrames, the streams and the
+/// clients of a session give back the session's object, as PySpark's do.
+pub(crate) fn session_object(
+    py: Python<'_>,
+    session: &SparkSession,
+) -> PyResult<Py<PySparkSession>> {
+    {
+        let registry = session_objects().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(object) = registered_session_object(py, &registry, session) {
+            return Ok(object);
+        }
+    }
+    let object = Py::new(py, PySparkSession::new(session.clone()))?;
+    let weak = py
+        .import("weakref")?
+        .call_method1("ref", (&object,))?
+        .unbind();
+    let mut registry = session_objects().lock().unwrap_or_else(|e| e.into_inner());
+    // Another thread may have made the object of this session meanwhile; then it is that one.
+    if let Some(existing) = registered_session_object(py, &registry, session) {
+        return Ok(existing);
+    }
+    registry.retain(|_, objects| {
+        objects.retain(|weak| live_session_object(py, weak).is_some());
+        !objects.is_empty()
+    });
+    registry
+        .entry(session.session_id().to_string())
+        .or_default()
+        .push(weak);
+    Ok(object)
 }
 
 /// Make `session` the default session, and the active session of this thread, when they are
@@ -548,6 +620,11 @@ impl PyHook {
 }
 
 /// Python wrapper for a Spark session.
+/// A copy of the tags of a thread, which the threads that `_share_thread_tags` gives it share,
+/// for `pyspark.util.inheritable_thread_target`.
+#[pyclass(name = "_SharedTags", module = "pyspark.sql.session", frozen)]
+pub struct PySharedTags(spark_connect::session::SharedTags);
+
 /// A tag of `addTag` or `removeTag`: `CANNOT_BE_NONE` for None, as PySpark Connect's.
 fn tag_of(py: Python<'_>, tag: &Bound<'_, PyAny>) -> PyResult<String> {
     if tag.is_none() {
@@ -561,7 +638,7 @@ fn tag_of(py: Python<'_>, tag: &Bound<'_, PyAny>) -> PyResult<String> {
     tag.extract()
 }
 
-#[pyclass(name = "SparkSession", module = "pyspark.sql.session")]
+#[pyclass(name = "SparkSession", module = "pyspark.sql.session", weakref, dict)]
 pub struct PySparkSession {
     pub(crate) session: SparkSession,
     /// The `StreamingQueryManager` of `spark.streams`, made at its first access.
@@ -699,10 +776,12 @@ impl PySparkSession {
         let mut values: Vec<Vec<Value>> = (0..parts.len())
             .map(|_| Vec::with_capacity(fields.len()))
             .collect();
-        let _quanta = infer::DecimalQuanta::new();
-        for (i, field) in fields.iter().enumerate() {
-            for (row, out) in parts.iter().zip(values.iter_mut()) {
-                out.push(infer::convert(&row[i], &field.data_type, field.nullable)?);
+        {
+            let _quanta = infer::DecimalQuanta::new();
+            for (i, field) in fields.iter().enumerate() {
+                for (row, out) in parts.iter().zip(values.iter_mut()) {
+                    out.push(infer::convert(&row[i], &field.data_type, field.nullable)?);
+                }
             }
         }
         // Then, as PySpark, the schema converts to Arrow, which has no char, varchar, year-month or
@@ -1131,7 +1210,14 @@ impl PySparkSession {
                     let cells = || rows.iter().filter_map(|row| row.get(i));
                     let data_type = if !cells().any(|v| matches!(v, Value::Decimal { .. })) {
                         match first {
-                            Some(value) => value_to_datatype(value),
+                            Some(value) => {
+                                let mut data_type = value_to_datatype(value);
+                                if has_decimal_type(&data_type) {
+                                    let column: Vec<&Value> = cells().collect();
+                                    widen_pandas_decimal_scales(&mut data_type, &column)?;
+                                }
+                                data_type
+                            }
                             None => {
                                 pandas_dtype_type(dtypes.get(i).map_or("object", String::as_str))
                             }
@@ -2239,8 +2325,11 @@ impl PySparkSession {
     ///
     /// Mirrors `SparkSession.dataSource.register`. Used to register custom data sources.
     #[getter]
-    fn dataSource(&self) -> PyDataSourceRegistration {
-        PyDataSourceRegistration::new(PySparkSession::new(self.session.clone()))
+    fn dataSource(&self, py: Python<'_>) -> PyResult<PyDataSourceRegistration> {
+        Ok(PyDataSourceRegistration::new(session_object(
+            py,
+            &self.session,
+        )?))
     }
 
     /// Build and register a resource profile with the server.
@@ -2354,6 +2443,20 @@ impl PySparkSession {
         self.session.clear_tags()
     }
 
+    /// A copy of the tags of the current thread, which `pyspark.util.inheritable_thread_target`
+    /// makes when it decorates a function, as PySpark Connect's copies the `thread_local` of the
+    /// client.
+    fn _copy_thread_tags(&self) -> PySharedTags {
+        PySharedTags(self.session.copy_thread_tags())
+    }
+
+    /// Make `tags` those of the current thread, which shares them with the other threads given
+    /// them, as `pyspark.util.inheritable_thread_target` gives every thread that runs its
+    /// function the copy of the `thread_local` of the client of PySpark Connect.
+    fn _share_thread_tags(&self, tags: &PySharedTags) {
+        self.session.share_thread_tags(&tags.0)
+    }
+
     /// Add local files, or `file:` URIs, as artifacts of the session, as PySpark's
     /// `addArtifacts(*path, pyfile=False, archive=False, file=False)`: each path is named by
     /// the flags and its extension, and the errors for a path that is not supported are
@@ -2415,8 +2518,8 @@ impl PySparkSession {
     }
 
     #[pyo3(name = "newSession")]
-    fn new_session(&self) -> PySparkSession {
-        PySparkSession::new(self.session.new_session())
+    fn new_session(&self, py: Python<'_>) -> PyResult<Py<PySparkSession>> {
+        session_object(py, &self.session.new_session())
     }
 
     /// Clone this session on the server, as PySpark's `cloneSession(new_session_id=None)`: a
@@ -2428,7 +2531,7 @@ impl PySparkSession {
         &self,
         py: Python<'_>,
         new_session_id: Option<String>,
-    ) -> PyResult<PySparkSession> {
+    ) -> PyResult<Py<PySparkSession>> {
         let session = py
             .detach(|| {
                 self.session
@@ -2436,7 +2539,7 @@ impl PySparkSession {
                     .map_err(Box::new)
             })
             .to_pyerr()?;
-        Ok(PySparkSession::new(session))
+        session_object(py, &session)
     }
 }
 
@@ -2527,18 +2630,20 @@ fn pandas_dtype_type(dtype: &str) -> DataType {
 /// The decimal type of column `i` of pandas rows, as Arrow infers it from all its Decimals:
 /// the most integer digits and the largest scale of the values.
 fn pandas_decimal_type(data: &Bound<'_, PyList>, rows: &[Row], i: usize) -> PyResult<DataType> {
-    // The digits and exponent of an exact Decimal come from the text that `py_to_value` took
-    // of it, rather than from `as_tuple()`, which builds a DecimalTuple of every digit; a
-    // subclass, which can override either, is asked for `as_tuple()`, as Arrow does.
-    let decimal_cls = crate::infer::DECIMAL.import(data.py(), "decimal", "Decimal")?;
+    // The digits and exponent of an exact C Decimal come from the text that `py_to_value`
+    // took of it, rather than from `as_tuple()`, which builds a DecimalTuple of every digit.
+    // Subclasses and pure-Python Decimals can override either, so keep their `as_tuple()`.
     let (mut integer_digits, mut scale) = (0i64, 0i64);
+    let c_decimal = crate::infer::c_decimal_type(data.py())?;
     for (row, converted) in data.iter().zip(rows) {
         let value = row.get_item(i)?;
         if value.is_none() {
             continue;
         }
         let from_text = match converted.get(i) {
-            Some(Value::Decimal { value: text, .. }) if value.get_type().is(decimal_cls) => {
+            Some(Value::Decimal { value: text, .. })
+                if crate::infer::is_exact_c_decimal(&value, c_decimal) =>
+            {
                 decimal_text_digits(text)
             }
             _ => None,
@@ -2576,6 +2681,140 @@ fn pandas_decimal_type(data: &Bound<'_, PyList>, rows: &[Row], i: usize) -> PyRe
         precision: precision.max(1) as i32,
         scale: scale as i32,
     })
+}
+
+/// Whether a type contains Decimal, to prune unrelated nested inference subtrees.
+fn has_decimal_type(data_type: &DataType) -> bool {
+    match data_type {
+        DataType::Decimal { .. } => true,
+        DataType::Array { element_type, .. } => has_decimal_type(element_type),
+        DataType::Struct { fields } => fields
+            .iter()
+            .any(|field| has_decimal_type(&field.data_type)),
+        DataType::Map {
+            key_type,
+            value_type,
+            ..
+        } => has_decimal_type(key_type) || has_decimal_type(value_type),
+        _ => false,
+    }
+}
+
+/// Preserve the existing nested shape and precision, but use every observed Decimal's
+/// scale. Choosing only the first scale would make the exact encoder reject a later value
+/// such as 1.25 after 1.5. This pass uses already converted values and invokes no Python hooks.
+/// Callers prune types without Decimal before allocating child references.
+/// Raises `ValueError` when widening increases a scale beyond its precision; an
+/// unchanged, already-invalid first scale is left to the encoder.
+fn widen_pandas_decimal_scales(data_type: &mut DataType, values: &[&Value]) -> PyResult<()> {
+    match data_type {
+        DataType::Decimal { precision, scale } => {
+            let initial_scale = *scale;
+            for value in values {
+                if let Value::Decimal {
+                    scale: Some(observed),
+                    ..
+                } = value
+                {
+                    *scale = (*scale).max(*observed);
+                }
+            }
+            // Reject invalid types introduced by widening before the encoder can cast the
+            // scale to i8. Keep the inherited handling of an already-invalid first value.
+            if *scale > *precision && *scale > initial_scale {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Decimal scale is out of the range of DecimalType, up to {precision}"
+                )));
+            }
+        }
+        DataType::Array { element_type, .. } => {
+            let children = values
+                .iter()
+                .filter_map(|value| match value {
+                    Value::List(items) => Some(items.iter()),
+                    _ => None,
+                })
+                .flatten()
+                .collect::<Vec<_>>();
+            widen_pandas_decimal_scales(element_type, &children)?;
+        }
+        DataType::Struct { fields } => {
+            let in_order = values
+                .iter()
+                .map(|value| match value {
+                    Value::Struct(row) => {
+                        row.len() == fields.len()
+                            && row
+                                .fields()
+                                .iter()
+                                .zip(fields.iter())
+                                .all(|(name, field)| *name == field.name)
+                    }
+                    _ => false,
+                })
+                .collect::<Vec<_>>();
+            for (index, field) in fields.iter_mut().enumerate() {
+                if !has_decimal_type(&field.data_type) {
+                    continue;
+                }
+                let children = values
+                    .iter()
+                    .zip(&in_order)
+                    .filter_map(|(value, &in_order)| match value {
+                        Value::Struct(row) => {
+                            if in_order {
+                                row.get(index)
+                            } else {
+                                // Match the encoder: by field name, else by position,
+                                // so widening inspects the same value it will encode.
+                                row.get_by_name(&field.name).or_else(|| row.get(index))
+                            }
+                        }
+                        // An earlier Row can establish the Struct type while a later
+                        // dict in the same pandas column is converted to Value::Map.
+                        Value::Map(entries) => entries.iter().find_map(|(key, value)| match key {
+                            Value::String(name) if *name == field.name => Some(value),
+                            _ => None,
+                        }),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                widen_pandas_decimal_scales(&mut field.data_type, &children)?;
+            }
+        }
+        DataType::Map {
+            key_type,
+            value_type,
+            ..
+        } => {
+            if has_decimal_type(key_type) {
+                let keys = values
+                    .iter()
+                    .filter_map(|value| match value {
+                        Value::Map(entries) => Some(entries.iter()),
+                        _ => None,
+                    })
+                    .flatten()
+                    .map(|(key, _)| key)
+                    .collect::<Vec<_>>();
+                widen_pandas_decimal_scales(key_type, &keys)?;
+            }
+            if has_decimal_type(value_type) {
+                let children = values
+                    .iter()
+                    .filter_map(|value| match value {
+                        Value::Map(entries) => Some(entries.iter()),
+                        _ => None,
+                    })
+                    .flatten()
+                    .map(|(_, value)| value)
+                    .collect::<Vec<_>>();
+                widen_pandas_decimal_scales(value_type, &children)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// Infer the Spark `DataType` for a `createDataFrame` column from its (first) value.
@@ -2909,14 +3148,16 @@ pub(crate) fn datetime_to_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
     Ok((timestamp_f64 * 1_000_000.0).round() as i64)
 }
 
-/// If `obj` is a `decimal.Decimal`, return it as a `Value::Decimal` (string value + scale
-/// from its exponent); otherwise `None`. Checked before int/float in `py_to_value` because
+/// If `obj` is an instance of the cached Decimal class (C `_decimal.Decimal`, else the
+/// public fallback), return it as a `Value::Decimal` (string value + scale from its
+/// exponent); otherwise `None`. See the class-rebinding entry in
+/// `dev/parity/known-differences.md`. Checked before int/float in `py_to_value` because
 /// Decimal defines `__float__`/`__int__`.
 fn decimal_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Option<Value>> {
     let py = obj.py();
-    // Imported once: looking the class up per value was a module import and an attribute
-    // read of every converted value.
-    let decimal_cls = crate::infer::DECIMAL.import(py, "decimal", "Decimal")?;
+    // Cache the accelerator class or its absence. Interpreters without it use the
+    // public Python class, whose exact instances retain the as_tuple hook path.
+    let (c_decimal, decimal_cls) = crate::infer::decimal_classes(py)?;
     if !obj.is_instance(decimal_cls.as_any())? {
         return Ok(None);
     }
@@ -2924,9 +3165,10 @@ fn decimal_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Option<Value>> {
     // either notation, in work bounded by the length of the text, which a fixed-point form
     // of `1E+1000000000` would not be.
     let dec_str: String = obj.str()?.extract()?;
-    let scale = if obj.get_type().is(decimal_cls) {
-        // Exact Decimal strings preserve the coefficient's trailing zeros and exponent.
-        // Subclasses may override either __str__ or as_tuple, so keep their old path.
+    let scale = if crate::infer::is_exact_c_decimal(obj, c_decimal) {
+        // Exact C Decimal strings preserve the coefficient's trailing zeros and exponent.
+        // Subclasses and pure-Python Decimals can override __str__ or as_tuple, so keep
+        // their tuple hooks.
         decimal_string_scale(&dec_str)
     } else {
         let as_tuple = obj.call_method0("as_tuple")?;
@@ -3034,4 +3276,52 @@ pub(crate) fn range_arguments(
 fn value_out_of_range(int: &Bound<'_, PyAny>) -> PyErr {
     let shown = int.str().map(|text| text.to_string()).unwrap_or_default();
     pyo3::exceptions::PyValueError::new_err(format!("Value out of range: {shown}"))
+}
+
+#[cfg(test)]
+mod decimal_text_tests {
+    use super::{decimal_string_scale, decimal_text_digits};
+
+    #[test]
+    fn coefficient_digits_and_exponent_match_decimal_tuple() {
+        for (text, digits, exponent) in [
+            ("0", 1, 0),
+            ("0.000", 1, -3),
+            ("-0E-7", 1, -7),
+            ("1E+3", 1, 3),
+            ("1.0E+4", 2, 3),
+            ("123.4500", 7, -4),
+            ("0.001234500", 7, -9),
+            ("1.5E-7", 2, -8),
+        ] {
+            assert_eq!(
+                decimal_text_digits(text),
+                Some((digits, exponent)),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn scale_preserves_trailing_zeros_and_nonpositive_exponents() {
+        for (text, scale) in [
+            ("0", Some(0)),
+            ("0.000", Some(3)),
+            ("-0E-7", Some(7)),
+            ("123.4500", Some(4)),
+            ("1.5E-7", Some(8)),
+            ("1E+3", None),
+            ("1.0E+4", None),
+        ] {
+            assert_eq!(decimal_string_scale(text), scale, "{text}");
+        }
+    }
+
+    #[test]
+    fn nonfinite_values_have_no_numeric_exponent() {
+        for text in ["NaN", "sNaN", "Infinity", "-Infinity"] {
+            assert_eq!(decimal_text_digits(text), None, "{text}");
+            assert_eq!(decimal_string_scale(text), None, "{text}");
+        }
+    }
 }
