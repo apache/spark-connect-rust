@@ -2994,6 +2994,27 @@ def test_foreach_batch_functions_that_capture_dataframes_run_as_pyspark(session,
         session.catalog.dropTempView(name)
 
 
+def test_foreach_batch_functions_that_capture_columns_run_as_pyspark(session, tmp_path):
+    # As PySpark's test_streaming_foreach_batch_external_column: a Column that a foreachBatch
+    # function captures unpickles on the Python worker of the server as PySpark Connect's, of
+    # the expression as it was sent.
+    (tmp_path / "input.txt").write_text("hello\nthis\n")
+    captured = F.upper(F.col("value"))
+    table = "foreach_batch_captured_column"
+
+    def func(df, batch_id):
+        df.select(captured.alias("result")).write.mode("append").saveAsTable(table)
+
+    query = session.readStream.format("text").load(str(tmp_path)).writeStream.foreachBatch(func)
+    query = query.start()
+    try:
+        query.processAllAvailable()
+        assert sorted(row.result for row in session.table(table).collect()) == ["HELLO", "THIS"]
+    finally:
+        query.stop()
+        session.sql(f"DROP TABLE IF EXISTS {table}").collect()
+
+
 def test_foreach_runs_a_function_and_a_writer_of_each_row_as_pyspark(session, tmp_path):
     # As PySpark's foreach: a function of a row, and an object of open, process and close, run
     # on each row of each batch, here writing a file of each row on the local server.
