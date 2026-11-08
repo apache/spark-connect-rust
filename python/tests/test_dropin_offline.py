@@ -7128,6 +7128,44 @@ if __name__ == "__main__":
     assert result.stdout.strip().splitlines()[-1] == str(["col"] * 6)
 
 
+def test_join_as_of_sends_the_as_of_join_as_pyspark(mock_connect):
+    # As PySpark's plan.AsOfJoin: Relation.as_of_join=39, with left=1, right=2, left_as_of=3,
+    # right_as_of=4, join_expr=5, using_columns=6, join_type=7, tolerance=8,
+    # allow_exact_matches=9 and direction=10. The as-of columns are the columns of their
+    # DataFrames, and `on` is a condition, or names when it is a name or a list of names.
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    left, right = spark.range(2), spark.range(3)
+
+    def sent_as_of_join(joined):
+        joined.collect()
+        # ExecutePlanRequest.plan=3, Plan.root=1, Relation.as_of_join=39.
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        return parse_message(parse_message(plan)[39][0])
+
+    def attribute(expression):
+        # Expression.unresolved_attribute=2, UnresolvedAttribute.unparsed_identifier=1.
+        return parse_message(parse_message(expression)[2][0])[1][0].decode()
+
+    join = sent_as_of_join(left._joinAsOf(
+        right, "id", "id", on=["id"], how="left", tolerance=F.lit(1),
+        allowExactMatches=False, direction="forward"))
+    assert attribute(join[3][0]) == "id" and attribute(join[4][0]) == "id"
+    assert 1 in join and 2 in join and 5 not in join and join[6] == [b"id"]
+    assert join[7] == [b"left"] and 8 in join
+    assert join.get(9, [0]) == [0] and join[10] == [b"forward"]
+
+    join = sent_as_of_join(left._joinAsOf(right, "id", "id"))
+    assert 5 not in join and 6 not in join and 8 not in join
+    assert join[7] == [b"inner"] and join[9] == [1] and join[10] == [b"backward"]
+
+    join = sent_as_of_join(left._joinAsOf(
+        right, left.id, right.id, on=left.id == right.id, how="left"))
+    assert attribute(join[3][0]) == "id" and 5 in join and 6 not in join
+    assert join[7] == [b"left"] and join[10] == [b"backward"]
+
+
 def test_grouping_sets_group_by_their_grouping_columns_as_pyspark(mock_connect):
     # As PySpark's, groupingSets(groupingSets, *cols) groups by the sets with the grouping
     # columns `cols`: Relation.aggregate=9, Aggregate.group_type=2 (GROUPING_SETS=5),
