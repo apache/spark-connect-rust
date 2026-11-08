@@ -68,6 +68,7 @@ def _arrow_string_class_is_canonical(cls):
     try:
         super_start = cls.__mro__.index(string_arrow.ArrowStringArray) + 1
     except ValueError:
+        # A rebound optional NumPy-semantics class alias may lack that ancestry.
         return False
 
     # Authenticate row/Arrow conversion hooks and __len__, which sizes the table.
