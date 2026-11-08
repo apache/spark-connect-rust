@@ -491,13 +491,16 @@ def serve(connection):
                 return message_field(1, request[1][0]) + self.warnings_fields()
             if 3 in operation:
                 # Operation.get_with_default=3: GetWithDefault.pairs=1 (KeyValue.key=1,
-                # value=2), the default of each key that `confs` does not have.
+                # value=2), the default of each key that `confs` does not have. A missing
+                # default stays unset in the response.
                 pairs = []
                 for pair in parse_message(operation[3][0]).get(1, []):
                     pair = parse_message(pair)
                     key = pair[1][0].decode()
                     self.read_confs.append(key)
-                    value = self.confs.get(key, pair.get(2, [b""])[0].decode())
+                    default = pair.get(2, [None])[0]
+                    default = None if default is None else default.decode()
+                    value = self.confs.get(key, default)
                     encoded = message_field(1, key)
                     if value is not None:
                         encoded += message_field(2, value)

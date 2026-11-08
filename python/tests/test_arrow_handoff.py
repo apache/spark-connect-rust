@@ -147,7 +147,9 @@ def _dataframe(batches, *, protocol, payloads=None, calls=None):
                 value = settings.get(pair.key, default)
                 pairs.append(dict(key=pair.key, **({"value": value} if value is not None else {})))
         else:
-            assert operation == "get"
+            if operation != "get":
+                context.abort(grpc.StatusCode.UNIMPLEMENTED,
+                              f"unexpected Config operation {operation}")
             pairs = [dict(key=key, value=settings[key]) for key in request.operation.get.keys]
         return protocol(
             "ConfigResponse",
@@ -512,7 +514,9 @@ def _arrow_input_service(
                         for pair in request.operation.get_with_default.pairs}
             keys = list(defaults)
         else:
-            assert operation == "get"
+            if operation != "get":
+                context.abort(grpc.StatusCode.UNIMPLEMENTED,
+                              f"unexpected Config operation {operation}")
             keys = list(request.operation.get.keys)
         state["config_requests"].append((operation, keys))
         if config_error:
