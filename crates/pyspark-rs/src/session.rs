@@ -470,9 +470,81 @@ fn new_session(py: Python<'_>, url: &str) -> PyResult<Py<PySparkSession>> {
         .remote(url)
         .get_or_create()
         .to_pyerr()?;
-    let session = Py::new(py, PySparkSession::new(session))?;
+    let session = session_object(py, &session)?;
     set_default_and_active(py, &session);
     Ok(session)
+}
+
+/// The Python session objects by session ID, held weakly, so that the registry keeps none
+/// alive. Sessions made apart may share a session ID, such as two of an explicit `session_id`,
+/// so an ID has a list of them.
+type SessionObjects = std::collections::HashMap<String, Vec<Py<PyAny>>>;
+
+/// The registry of the Python session objects.
+fn session_objects() -> &'static std::sync::Mutex<SessionObjects> {
+    static OBJECTS: std::sync::OnceLock<std::sync::Mutex<SessionObjects>> =
+        std::sync::OnceLock::new();
+    OBJECTS.get_or_init(|| std::sync::Mutex::new(SessionObjects::new()))
+}
+
+/// The session object that the weak reference `weak` refers to, unless it was dropped.
+fn live_session_object(py: Python<'_>, weak: &Py<PyAny>) -> Option<Py<PySparkSession>> {
+    let object = weak.bind(py).call0().ok()?;
+    let session = object.cast::<PySparkSession>().ok()?;
+    Some(session.clone().unbind())
+}
+
+/// The live object of `session` itself in `registry`, if any, and not that of another session
+/// of its session ID.
+fn registered_session_object(
+    py: Python<'_>,
+    registry: &SessionObjects,
+    session: &SparkSession,
+) -> Option<Py<PySparkSession>> {
+    registry
+        .get(session.session_id())?
+        .iter()
+        .filter_map(|weak| live_session_object(py, weak))
+        .find(|object| {
+            object
+                .bind(py)
+                .try_borrow()
+                .is_ok_and(|object| object.session.is_same_session(session))
+        })
+}
+
+/// The Python object of `session`, one per session as PySpark has them: its live object, or
+/// else a new one, which the registry holds weakly. So the DataFrames, the streams and the
+/// clients of a session give back the session's object, as PySpark's do.
+pub(crate) fn session_object(
+    py: Python<'_>,
+    session: &SparkSession,
+) -> PyResult<Py<PySparkSession>> {
+    {
+        let registry = session_objects().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(object) = registered_session_object(py, &registry, session) {
+            return Ok(object);
+        }
+    }
+    let object = Py::new(py, PySparkSession::new(session.clone()))?;
+    let weak = py
+        .import("weakref")?
+        .call_method1("ref", (&object,))?
+        .unbind();
+    let mut registry = session_objects().lock().unwrap_or_else(|e| e.into_inner());
+    // Another thread may have made the object of this session meanwhile; then it is that one.
+    if let Some(existing) = registered_session_object(py, &registry, session) {
+        return Ok(existing);
+    }
+    registry.retain(|_, objects| {
+        objects.retain(|weak| live_session_object(py, weak).is_some());
+        !objects.is_empty()
+    });
+    registry
+        .entry(session.session_id().to_string())
+        .or_default()
+        .push(weak);
+    Ok(object)
 }
 
 /// Make `session` the default session, and the active session of this thread, when they are
@@ -2253,8 +2325,11 @@ impl PySparkSession {
     ///
     /// Mirrors `SparkSession.dataSource.register`. Used to register custom data sources.
     #[getter]
-    fn dataSource(&self) -> PyDataSourceRegistration {
-        PyDataSourceRegistration::new(PySparkSession::new(self.session.clone()))
+    fn dataSource(&self, py: Python<'_>) -> PyResult<PyDataSourceRegistration> {
+        Ok(PyDataSourceRegistration::new(session_object(
+            py,
+            &self.session,
+        )?))
     }
 
     /// Build and register a resource profile with the server.
@@ -2443,8 +2518,8 @@ impl PySparkSession {
     }
 
     #[pyo3(name = "newSession")]
-    fn new_session(&self) -> PySparkSession {
-        PySparkSession::new(self.session.new_session())
+    fn new_session(&self, py: Python<'_>) -> PyResult<Py<PySparkSession>> {
+        session_object(py, &self.session.new_session())
     }
 
     /// Clone this session on the server, as PySpark's `cloneSession(new_session_id=None)`: a
@@ -2456,7 +2531,7 @@ impl PySparkSession {
         &self,
         py: Python<'_>,
         new_session_id: Option<String>,
-    ) -> PyResult<PySparkSession> {
+    ) -> PyResult<Py<PySparkSession>> {
         let session = py
             .detach(|| {
                 self.session
@@ -2464,7 +2539,7 @@ impl PySparkSession {
                     .map_err(Box::new)
             })
             .to_pyerr()?;
-        Ok(PySparkSession::new(session))
+        session_object(py, &session)
     }
 }
 

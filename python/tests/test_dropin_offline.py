@@ -1068,6 +1068,61 @@ def test_session_builders_set_their_options_and_validate_their_urls_as_pyspark(m
 
 
 
+def test_dataframes_give_back_their_session_object_as_pyspark(offline_spark):
+    # As PySpark: the DataFrames of a session, its streams and its client give back the session
+    # object itself, and two sessions do not mix. The registry holds the session objects
+    # weakly, so a session that is dropped is freed.
+    import gc
+    import weakref
+
+    def check(actual, expected):
+        # Not an assert: pytest reprs a DataFrame in a failed assert, which asks the server.
+        if actual is not expected:
+            raise AssertionError("not the session object that PySpark gives back")
+
+    spark = offline_spark
+    df = spark.range(2)
+    check(df.sparkSession, spark)
+    check(df._session, spark)
+    check(df.select("id").sparkSession, spark)
+    check(df.groupBy("id").count().sparkSession, spark)
+    check(df.na.drop().sparkSession, spark)
+    check(spark.read.format("rate").load().sparkSession, spark)
+    check(spark.udf.sparkSession, spark)
+    check(spark.udtf.sparkSession, spark)
+    check(spark.dataSource.sparkSession, spark)
+    assert df.sparkSession == spark
+    check(df.sparkSession.streams, spark.streams)
+    check(df.sparkSession.client, spark.client)
+    other = spark.newSession()
+    check(other.range(1).sparkSession, other)
+    if other.range(1).sparkSession is spark:
+        raise AssertionError("two sessions mixed")
+    check(other.range(1).sparkSession.streams, other.streams)
+    if other.streams is spark.streams:
+        raise AssertionError("two sessions share their streams")
+    ref = weakref.ref(other)
+    del other
+    gc.collect()
+    assert ref() is None
+    check(df.sparkSession, spark)
+    # Two sessions made apart, of the same session ID, are two objects, each that of its own
+    # DataFrames. create() sets the default session, so this runs in a process of its own.
+    import subprocess
+    import sys
+
+    subprocess.run([sys.executable, "-c", """
+import uuid
+from pyspark.sql import SparkSession
+url = f"sc://localhost:1/;session_id={uuid.uuid4()}"
+first = SparkSession.builder.remote(url).create()
+second = SparkSession.builder.remote(url).create()
+assert first is not second
+assert first.range(1).sparkSession is first
+assert second.range(1).sparkSession is second
+"""], check=True)
+
+
 def test_session_builder_class_constructor():
     from pyspark.sql import SparkSession
     b = SparkSession.Builder()

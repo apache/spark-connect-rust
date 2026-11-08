@@ -670,7 +670,7 @@ impl PyDataFrame {
         let this = slf.borrow();
         py.import("pyspark.sql.connect.dataframe")?
             .getattr("_reduce_dataframe")?
-            .call1((this.spark_session(), this._relation_bytes(py)))
+            .call1((this.spark_session(py)?, this._relation_bytes(py)))
     }
 
     /// The DataFrame of `relation`, the bytes of a relation of `session`, as a pickled DataFrame
@@ -1973,15 +1973,15 @@ impl PyDataFrame {
     /// The SparkSession that created this DataFrame.
     #[pyo3(name = "sparkSession")]
     #[getter]
-    fn spark_session(&self) -> crate::session::PySparkSession {
-        crate::session::PySparkSession::new(self.dataframe.spark_session())
+    fn spark_session(&self, py: Python<'_>) -> PyResult<Py<crate::session::PySparkSession>> {
+        crate::session::session_object(py, &self.dataframe.spark_session())
     }
 
     /// The SparkSession of this DataFrame, as PySpark Connect's `DataFrame._session`, which the
     /// modules of PySpark read, such as `pyspark.ml`, `pyspark.sql.plot` and `pyspark.pandas`.
     #[getter]
-    fn _session(&self) -> crate::session::PySparkSession {
-        self.spark_session()
+    fn _session(&self, py: Python<'_>) -> PyResult<Py<crate::session::PySparkSession>> {
+        self.spark_session(py)
     }
 
     /// Not supported on Spark Connect, as PySpark Connect's: `NOT_IMPLEMENTED` of `rdd`, which
