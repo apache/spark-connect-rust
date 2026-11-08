@@ -73,16 +73,29 @@ def _arrow_string_class_is_canonical(cls):
 
     # Authenticate row/Arrow conversion hooks and __len__, which sizes the table.
     # to_numpy indexes the non-null portion through __getitem__ before reading storage.
-    # Inspect these conversion hooks here. A caller may already have read
-    # frame.dtypes, mirroring the native row path's first dtype read.
     # pandas 2.2's NumPy-semantics variant has its own string-method accessor.
     access = _raw_class_attribute(cls, "__getattribute__")[1]
-    canonical_access = (access is object.__getattribute__
-                        or (cls is numpy_semantics and _defined_in(
-                            access, "__getattribute__", string_arrow)))
-    if (not canonical_access
-            or any(not _defined_in(_raw_class_attribute(cls, name)[1], name,
-                                  string_arrow, arrow_module) for name in _ARROW_STRING_HOOKS)
+    if access is not object.__getattribute__:
+        if cls is not numpy_semantics or not _defined_in(
+                access, "__getattribute__", string_arrow):
+            return False
+        from functools import partial
+        from pandas.core.arrays import _arrow_string_mixins as string_mixins
+
+        mixin = string_mixins.ArrowStringArrayMixin
+        # This accessor dispatches through the mixin before the ordinary MRO.
+        # Authenticate its globals and reject intercepted conversion names.
+        # Construction itself uses class slots, checked separately below;
+        # the mixin's canonical __init__ is not an instance conversion hook.
+        if (not any(base is mixin for base in cls.__mro__)
+                or vars(string_arrow).get("ArrowStringArrayMixin") is not mixin
+                or vars(string_arrow).get("partial") is not partial
+                or any(name in vars(mixin) for name in
+                       _ARROW_STRING_HOOKS + ("astype", "dtype", "_hasna", "fillna",
+                                              "_from_pyarrow_array", "__new__"))):
+            return False
+    if (any(not _defined_in(_raw_class_attribute(cls, name)[1], name,
+                           string_arrow, arrow_module) for name in _ARROW_STRING_HOOKS)
             or not _defined_in(_raw_class_attribute(cls, "astype")[1], "astype", string_arrow)
             or not _has_canonical_arrow_string_astype(cls)):
         return False
@@ -811,9 +824,9 @@ def _arrow_string_table(frame, schema, dtypes):
         values = array.__arrow_array__()
         # pandas returns a ChunkedArray; normalize a plain Array defensively if
         # an instance's _pa_array storage was replaced.
-        if isinstance(values, pa.Array):
+        if issubclass(type(values), pa.Array):
             values = pa.chunked_array([values])
-        elif not isinstance(values, pa.ChunkedArray):
+        elif not issubclass(type(values), pa.ChunkedArray):
             return None
         if values.type not in (pa.string(), pa.large_string()):
             return None
@@ -822,7 +835,7 @@ def _arrow_string_table(frame, schema, dtypes):
             values.validate(full=True)
             # Check normal-string capacity before configuration/upload RPCs. The importer
             # may widen back to large_string when useLargeVarTypes is enabled.
-            # pandas 3 uses large_string storage, so this narrowing copies its offsets.
+            # pandas 2.2+ stores large_string, so this narrowing copies each column's offsets.
             values = values.cast(pa.string())
         except (pa.ArrowException, OverflowError):
             return None

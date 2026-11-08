@@ -2051,7 +2051,6 @@ def test_integer_rebound_index_data_keeps_native_read_order(
         # times, and extension-backed _values twice, before normalization.
         with monkeypatch.context() as baseline:
             baseline.setattr(helper, "prepare_int64_table", lambda *_: None)
-            baseline.setattr(helper, "accepts_pandas_table", lambda *_: False)
             spark.createDataFrame(frame, schema).toArrow()
         baseline_calls = calls.copy()
         allowed_reads = baseline_calls.count("_data")
@@ -2785,7 +2784,6 @@ def test_timestamp_rebound_index_data_keeps_native_read_order(protocol, monkeypa
     with monkeypatch.context() as baseline:
         baseline.setattr(helper, "prepare_int64_table", lambda *_: None)
         baseline.setattr(helper, "timestamp_columns", lambda *_: None)
-        baseline.setattr(helper, "accepts_pandas_table", lambda *_: False)
         with _arrow_input_service(protocol) as (spark, state):
             spark.createDataFrame(frame, schema).toArrow()
             _assert_timestamp_columns_row_input(state, values, schema)
@@ -3781,7 +3779,6 @@ def test_float64_rebound_index_data_keeps_native_read_order(protocol, monkeypatc
         # former tolist path's single-read contract.
         with monkeypatch.context() as baseline:
             baseline.setattr(helper, "prepare_float64_input", lambda *_: None)
-            baseline.setattr(helper, "accepts_pandas_table", lambda *_: False)
             spark.createDataFrame(frame, schema).toArrow()
         baseline_calls = calls.copy()
         allowed_reads = baseline_calls.count("_data")
@@ -4042,7 +4039,6 @@ def test_string_rebound_index_data_keeps_native_read_order(protocol, monkeypatch
         # former tolist path's single-read contract.
         with monkeypatch.context() as baseline:
             baseline.setattr(helper, "prepare_string_input", lambda *_: None)
-            baseline.setattr(helper, "accepts_pandas_table", lambda *_: False)
             spark.createDataFrame(frame, schema).toArrow()
         baseline_calls = calls.copy()
         allowed_reads = baseline_calls.count("_data")
@@ -4278,7 +4274,7 @@ def _arrow_string_column(texts, storage):
         except TypeError:  # pandas 2.2
             dtype = pd.StringDtype("pyarrow_numpy")
         return pd.array(texts, dtype=dtype)
-    if storage == "large_string":
+    if storage == "chunked":
         return pd.arrays.ArrowStringArray(pa.chunked_array(
             [pa.array(texts[:7], pa.large_string()), pa.array(texts[7:], pa.large_string())]))
     # The sliced case uses this storage, then slices the constructed frame below.
@@ -4299,7 +4295,7 @@ def _force_native_pandas_rows(monkeypatch):
 
 
 @pytest.mark.parametrize("cached", [False, True])
-@pytest.mark.parametrize("storage", ["pyarrow", "numpy_semantics", "large_string", "sliced"])
+@pytest.mark.parametrize("storage", ["pyarrow", "numpy_semantics", "chunked", "sliced"])
 def test_arrow_string_columns_preserve_every_ipc_cell(protocol, monkeypatch, cached, storage):
     from pyspark.sql.pandas.types import from_arrow_metadata
 
@@ -4500,10 +4496,11 @@ assert tables[0].equals(tables[1], check_metadata=True)
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+@pytest.mark.parametrize("storage", ["pyarrow", "numpy_semantics"])
 @pytest.mark.parametrize("schema_kind", ["explicit", "inferred", "names"])
 @pytest.mark.parametrize("instance_hook", [False, True])
 def test_arrow_string_custom_arrow_hook_keeps_native_row_values(
-    protocol, monkeypatch, instance_hook, schema_kind
+    protocol, monkeypatch, instance_hook, schema_kind, storage
 ):
     import importlib
 
@@ -4512,7 +4509,7 @@ def test_arrow_string_custom_arrow_hook_keeps_native_row_values(
     texts = ["original", None] * 5000
     # The first column authenticates this class before the second instance's
     # override is checked; every instance must still be inspected.
-    frame = pd.DataFrame({name: pd.array(texts, dtype="string[pyarrow]")
+    frame = pd.DataFrame({name: _arrow_string_column(texts, storage)
                           for name in ("first", "v")})
     schema = T.StructType([T.StructField(name, T.StringType()) for name in ("first", "v")])
     input_schema = {"explicit": schema, "inferred": None, "names": ["first", "v"]}[schema_kind]
@@ -4540,6 +4537,72 @@ def test_arrow_string_custom_arrow_hook_keeps_native_row_values(
                 assert state["uploads"] == 0
     assert calls == []
     assert tables[0].to_pydict() == {"first": texts, "v": texts}
+    assert tables[0].equals(tables[1], check_metadata=True)
+
+
+@pytest.mark.parametrize("schema_kind", ["explicit", "inferred", "names"])
+@pytest.mark.parametrize("customization", ["mixin_hook", "mixin_alias", "partial_alias"])
+def test_arrow_string_numpy_semantics_accessor_keeps_native_values(
+    protocol, monkeypatch, customization, schema_kind
+):
+    import importlib
+    from pandas.core.arrays import _arrow_string_mixins as string_mixins, string_arrow
+
+    helper = importlib.import_module("pyspark.sql._pandas_input")
+    texts = ["original", None] * 5000
+    frames = [pd.DataFrame({"v": _arrow_string_column(texts, "numpy_semantics")})
+              for _ in range(2)]
+    for frame in frames:
+        frame.columns = pd.Index(["v"], dtype=object)
+    schema = T.StructType([T.StructField("v", T.StringType())])
+    input_schema = {"explicit": schema, "inferred": None, "names": ["v"]}[schema_kind]
+    array_class = type(frames[0].iloc[:, 0].array)
+    dynamic_accessor = (helper._raw_class_attribute(array_class, "__getattribute__")[1]
+                        is not object.__getattribute__)
+    for frame in frames:
+        assert helper.prepare_string_input(frame, schema) is not None
+        assert helper.accepts_pandas_table(frame, schema)
+        assert helper.accepts_pandas_frame(frame)
+    calls = []
+
+    def changed_arrow(*args, **kwargs):
+        calls.append("arrow")
+        return pa.array(["changed"] * len(texts), type=pa.string())
+
+    def changed_partial(*args, **kwargs):
+        calls.append("partial")
+        raise AssertionError("eligibility must not invoke the rebound partial alias")
+
+    if customization == "mixin_hook":
+        monkeypatch.setattr(string_mixins.ArrowStringArrayMixin, "__arrow_array__",
+                            changed_arrow, raising=False)
+    elif customization == "mixin_alias":
+        class ChangedMixin:
+            __arrow_array__ = changed_arrow
+
+        monkeypatch.setattr(string_arrow, "ArrowStringArrayMixin", ChangedMixin, raising=False)
+    else:
+        monkeypatch.setattr(string_arrow, "partial", changed_partial, raising=False)
+    for frame in frames:
+        # pandas 2.2 dispatches instance lookups through these mutable aliases.
+        # Later layouts use object access and remain unaffected by these changes.
+        assert (helper.prepare_string_input(frame, schema) is None) == dynamic_accessor
+        assert helper.accepts_pandas_table(frame, schema) == (not dynamic_accessor)
+        assert helper.accepts_pandas_frame(frame) == (not dynamic_accessor)
+        assert calls == []
+    tables = []
+    for row_control, frame in zip((True, False), frames):
+        with monkeypatch.context() as control:
+            if row_control:
+                _force_native_pandas_rows(control)
+            with _arrow_input_service(protocol, config_error=dynamic_accessor) as (spark, state):
+                spark.createDataFrame(frame, input_schema).toArrow()
+                tables.append(state["input_tables"][0])
+                if dynamic_accessor:
+                    assert state["config_requests"] == []
+                    assert state["uploads"] == 0
+    assert calls == []
+    assert tables[0].column(0).to_pylist() == texts
     assert tables[0].equals(tables[1], check_metadata=True)
 
 
@@ -4633,13 +4696,87 @@ def test_arrow_string_generic_subclass_guard_does_not_read_custom_mro():
     assert calls == []
 
 
+def _arrow_string_allocator_process(case, schema_kind="explicit", storage="pyarrow"):
+    """Keep CPython allocator-slot changes out of the main pytest interpreter."""
+    import signal
+    import sys
+
+    script = r'''
+import importlib.util
+import sys
+import tempfile
+from pathlib import Path
+import pytest
+
+spec = importlib.util.spec_from_file_location("arrow_string_allocator_capture", sys.argv[4])
+capture = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = capture
+spec.loader.exec_module(capture)
+case, schema_kind, storage = sys.argv[1:4]
+with pytest.MonkeyPatch.context() as control:
+    if case == "row":
+        with tempfile.TemporaryDirectory(prefix="arrow-string-allocator-") as directory:
+            class Factory:
+                def mktemp(self, name):
+                    path = Path(directory) / name
+                    path.mkdir()
+                    return path
+            protocol = capture.protocol.__wrapped__(Factory())
+            capture._check_arrow_string_custom_row_hook(
+                protocol, control, "__new__", schema_kind, storage)
+    else:
+        assert case == "descriptor"
+        capture._check_arrow_string_class_descriptor(control, "__new__")
+'''
+    owned_group = os.name == "posix"
+    process = subprocess.Popen(
+        [sys.executable, "-c", script, case, schema_kind, storage, str(Path(__file__).resolve())],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=owned_group,
+    )
+
+    def terminate_child():
+        try:
+            if owned_group:
+                # protoc inherits this session, so a timeout also cleans up that child.
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+        except ProcessLookupError:
+            pass
+
+    try:
+        stdout, stderr = process.communicate(timeout=60)
+    except subprocess.TimeoutExpired:
+        terminate_child()
+        stdout, stderr = process.communicate(timeout=5)
+        pytest.fail("Arrow-string allocator child timed out\n" + stdout + stderr)
+    except BaseException:
+        terminate_child()
+        process.communicate(timeout=5)
+        raise
+    assert process.returncode == 0, stdout + stderr
+    healthy = pd.array(["original", None], dtype="string[pyarrow]")
+    assert healthy.__arrow_array__().to_pylist() == ["original", None]
+
+
+@pytest.mark.parametrize("storage", ["pyarrow", "numpy_semantics"])
 @pytest.mark.parametrize("schema_kind", ["explicit", "inferred", "names"])
 @pytest.mark.parametrize("method", [
     "astype", "isna", "to_numpy", "__getitem__", "dtype", "na_value", "_hasna", "__init__",
     "_from_pyarrow_array", "__new__",
 ])
 def test_arrow_string_custom_row_hooks_keep_native_errors(
-    protocol, monkeypatch, method, schema_kind
+    protocol, monkeypatch, method, schema_kind, storage
+):
+    if method == "__new__":
+        _arrow_string_allocator_process("row", schema_kind, storage)
+    else:
+        _check_arrow_string_custom_row_hook(protocol, monkeypatch, method, schema_kind, storage)
+
+
+def _check_arrow_string_custom_row_hook(
+    protocol, monkeypatch, method, schema_kind, storage
 ):
     import importlib
 
@@ -4648,7 +4785,7 @@ def test_arrow_string_custom_row_hooks_keep_native_errors(
     texts = ["original", None] * 5000
     frames = []
     for _ in range(2):
-        frame = pd.DataFrame({"v": pd.array(texts, dtype="string[pyarrow]")})
+        frame = pd.DataFrame({"v": _arrow_string_column(texts, storage)})
         # Object labels isolate the data-class checks for these additional hooks.
         # Arrow labels exercise the earlier label-cast checks for the other cases.
         frame.columns = pd.Index(["v"], dtype=object) if method in (
@@ -4758,6 +4895,13 @@ def test_arrow_string_custom_row_hooks_keep_native_errors(
     "__init__", "_from_pyarrow_array", "__new__", "__getattribute__", "dtype", "_hasna", "na_value",
 ])
 def test_arrow_string_class_descriptors_decline_without_binding(monkeypatch, method):
+    if method == "__new__":
+        _arrow_string_allocator_process("descriptor")
+    else:
+        _check_arrow_string_class_descriptor(monkeypatch, method)
+
+
+def _check_arrow_string_class_descriptor(monkeypatch, method):
     import importlib
 
     _pandas_input = importlib.import_module("pyspark.sql._pandas_input")
@@ -4818,8 +4962,10 @@ def test_arrow_string_label_descriptors_decline_without_binding(monkeypatch, met
     assert calls == []
 
 
-@pytest.mark.parametrize("storage_kind", ["plain_array", "nonstring", "invalid_utf8", "bad_storage"])
-def test_arrow_string_storage_normalization_and_fallback(protocol, monkeypatch, storage_kind):
+@pytest.mark.parametrize("storage_kind", [
+    "plain_array", "nonstring", "invalid_utf8", "bad_storage", "spoofed_array",
+])
+def test_arrow_string_storage_normalization_and_fallback(monkeypatch, storage_kind):
     import importlib
     import struct
 
@@ -4842,7 +4988,7 @@ def test_arrow_string_storage_normalization_and_fallback(protocol, monkeypatch, 
         storage = pa.chunked_array([invalid])
         with pytest.raises(pa.ArrowInvalid):
             storage.validate(full=True)
-    else:
+    elif storage_kind == "bad_storage":
         class UnsupportedStorage:
             # pandas' column boxing reads length before the storage-type guard.
             def __len__(self):
@@ -4850,24 +4996,32 @@ def test_arrow_string_storage_normalization_and_fallback(protocol, monkeypatch, 
 
         storage = UnsupportedStorage()
         assert not isinstance(storage, (pa.Array, pa.ChunkedArray))
+    else:
+        class SpoofedArray:
+            @property
+            def __class__(self):
+                return pa.Array
+
+            def __len__(self):
+                return len(texts)
+
+        storage = SpoofedArray()
+        assert isinstance(storage, pa.Array)
+        assert not issubclass(type(storage), pa.Array)
     monkeypatch.setattr(array, "_pa_array", storage)
-    with _arrow_input_service(protocol, config_error=True) as (_spark, state):
-        result = _pandas_input._arrow_string_table(frame, schema, dtypes)
-        if storage_kind == "plain_array":
-            assert type(result) is pa.Table
-            result.validate(full=True)
-            assert result.schema.names == ["v"]
-            assert result.column(0).type == pa.string()
-            assert result.column(0).to_pylist() == texts
-        else:
-            assert result is None
-        assert state["config_requests"] == []
-        assert state["uploads"] == 0
-        assert state["input_tables"] == []
+    result = _pandas_input._arrow_string_table(frame, schema, dtypes)
+    if storage_kind == "plain_array":
+        assert type(result) is pa.Table
+        result.validate(full=True)
+        assert result.schema.names == ["v"]
+        assert result.column(0).type == pa.string()
+        assert result.column(0).to_pylist() == texts
+    else:
+        assert result is None
 
 
 @pytest.mark.parametrize("error_kind", ["arrow", "overflow"])
-def test_arrow_string_simulated_cast_failures_decline(protocol, monkeypatch, error_kind):
+def test_arrow_string_simulated_cast_failures_decline(monkeypatch, error_kind):
     """Exercise exception handling without allocating a greater-than-2-GiB column."""
     import importlib
     import sys
@@ -4902,15 +5056,11 @@ def test_arrow_string_simulated_cast_failures_decline(protocol, monkeypatch, err
     proxy = ModuleType("pyarrow")
     vars(proxy).update(vars(pa))
     proxy.ChunkedArray = (pa.ChunkedArray, SimulatedCastFailure)
-    with _arrow_input_service(protocol, config_error=True) as (_spark, state):
-        with monkeypatch.context() as simulated:
-            simulated.setattr(array, "_pa_array", SimulatedCastFailure())
-            simulated.setitem(sys.modules, "pyarrow", proxy)
-            assert _pandas_input._arrow_string_table(frame, schema, dtypes) is None
-        assert calls == [("validate", True), ("cast", pa.string())]
-        assert state["config_requests"] == []
-        assert state["uploads"] == 0
-        assert state["input_tables"] == []
+    with monkeypatch.context() as simulated:
+        simulated.setattr(array, "_pa_array", SimulatedCastFailure())
+        simulated.setitem(sys.modules, "pyarrow", proxy)
+        assert _pandas_input._arrow_string_table(frame, schema, dtypes) is None
+    assert calls == [("validate", True), ("cast", pa.string())]
 
 
 def test_arrow_string_object_labels_dtype_error_matches_native_rows(protocol, monkeypatch):
@@ -6567,7 +6717,6 @@ def test_date_rebound_index_data_keeps_native_read_order(protocol, monkeypatch, 
     with monkeypatch.context() as baseline:
         baseline.setattr(helper, "prepare_int64_table", lambda *_: None)
         baseline.setattr(helper, "prepare_date_table", lambda *_: None)
-        baseline.setattr(helper, "accepts_pandas_table", lambda *_: False)
         with _arrow_input_service(protocol) as (spark, state):
             spark.createDataFrame(frame, schema).toArrow()
             _assert_date_columns_guard_payload(state, schema, values, row_path=True)

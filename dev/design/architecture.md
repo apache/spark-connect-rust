@@ -102,7 +102,7 @@ exercise the Rust transport with official PySpark; the separate native smoke
 step covers the drop-in `toArrow()` path.
 
 The pandas Arrow-string input guard recognizes pandas 2.2 and pandas 3 storage
-layouts, checked by local matrix runs. The Python Connect and pandas parity
+layouts. The Python Connect and pandas parity
 workflows pin `pandas>=2.2,<3.0`; coverage and pipelines parity install unpinned
 pandas. CI has no explicit pandas-version matrix.
 The inherited `pandas>=1.0.0` package declaration is below the runtime utilities'
@@ -126,7 +126,11 @@ dictionaries for conversion and label-iteration methods, dtype/missing-value
 properties and the null-subarray constructor, optional factory and allocator
 used by supported pandas layouts. The label checks authenticate the class before
 inspecting its other methods, which also use the raw lookup. This avoids binding
-customized descriptors during those checks. It does not establish a general
+customized descriptors during those checks. The pandas 2.2 NumPy-semantics
+accessor also dispatches through a mixin before ordinary MRO lookup; its mixin and
+partial-function aliases and the bounded intercepted conversion names are checked
+separately. Its canonical mixin initializer remains allowed because construction
+uses the class slots authenticated above. These checks do not establish a general
 invariant for arbitrary mutations of pandas internals.
 
 ## UDF strategy (full compatibility)
