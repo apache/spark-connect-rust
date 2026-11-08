@@ -3037,6 +3037,69 @@ def test_logistic_regression_fits_the_data_and_predicts_on_new_rows(session):
         estimator.fit(session.range(3))
 
 
+def test_linear_svc_releases_its_cached_model_once_the_last_owner_is_gone(session):
+    # As pyspark.ml does, the server deletes a fitted model's cached object once no model,
+    # copy or DataFrame that the model transformed is left in Python.
+    import gc
+
+    import pyspark.sql.connect.proto as pb2
+
+    try:
+        from pyspark._pyspark import LinearSVC
+    except ImportError:
+        from pyspark.ml.classification import LinearSVC
+    from pyspark.ml.connect.functions import array_to_vector
+
+    # A session of its own: the ML cache is per session, so the models of the other tests,
+    # whose releases may still be on their way, do not change the counts below.
+    spark = session.newSession()
+
+    def cached_models():
+        cmd = pb2.Command()
+        cmd.ml_command.get_cache_info.SetInParent()
+        _, props, _ = spark.client.execute_command(cmd)
+        return len(props.get("ml_command_result").param.array.elements)
+
+    def wait_for_cached_models(expected):
+        # The release is sent without waiting for the server, so poll for it to land.
+        deadline = time.time() + 30
+        while cached_models() != expected and time.time() < deadline:
+            time.sleep(0.05)
+        return cached_models()
+
+    try:
+        training = spark.sql(
+            "SELECT array(CAST(x AS DOUBLE)) AS xs, "
+            "CAST(CASE WHEN x > 0 THEN 1 ELSE 0 END AS DOUBLE) AS target "
+            "FROM VALUES (-4), (-3), (-2), (-1), (1), (2), (3), (4) AS t(x)"
+        ).withColumn("input", array_to_vector("xs"))
+        held_out = spark.sql(
+            "SELECT id, array(CAST(x AS DOUBLE)) AS xs "
+            "FROM VALUES (0, -3.5), (1, -1.5), (2, 1.5), (3, 3.5) AS t(id, x)"
+        ).withColumn("input", array_to_vector("xs"))
+        assert cached_models() == 0
+        for _ in range(10):
+            model = LinearSVC(featuresCol="input", labelCol="target", maxIter=2).fit(training)
+            del model
+        gc.collect()
+        assert wait_for_cached_models(0) == 0
+
+        model = LinearSVC(featuresCol="input", labelCol="target", predictionCol="pred",
+                          maxIter=50).fit(training)
+        lazy = model.transform(held_out)
+        del model
+        gc.collect()
+        assert cached_models() == 1
+        rows = lazy.orderBy("id").collect()
+        assert [r.id for r in rows] == [0, 1, 2, 3]
+        assert all(r.pred in (0.0, 1.0) for r in rows)
+        del lazy
+        gc.collect()
+        assert wait_for_cached_models(0) == 0
+    finally:
+        spark.stop()
+
+
 @pytest.mark.parametrize("use_setters", [False, True], ids=["constructor", "setters"])
 def test_linear_svc_fits_the_labels_and_predicts_on_new_rows(session, use_setters):
     try:

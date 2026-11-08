@@ -377,8 +377,14 @@ pub enum LogicalPlan {
         left: Arc<LogicalPlan>,
         right: Arc<LogicalPlan>,
     },
-    /// ML Transformation: wraps an MlRelation proto directly.
-    MlTransform { ml_relation: proto::Relation },
+    /// ML Transformation: wraps an MlRelation proto directly. The proto carries the input
+    /// inline, so `input` keeps the input plan, and the owners in it, alive; `owner` keeps
+    /// the cached model that the relation refers to alive, if any.
+    MlTransform {
+        ml_relation: proto::Relation,
+        input: Arc<LogicalPlan>,
+        owner: Option<RelationOwner>,
+    },
     /// A catalog operation exposed as a relation (e.g. `listTables`, `listColumns`),
     /// evaluated lazily so `.collect()` returns the server's rows - including zero
     /// rows for an empty database, which must not be an error.
@@ -1505,7 +1511,7 @@ impl LogicalPlan {
                 relation.rel_type = Some(proto::relation::RelType::Zip(Box::new(zip)));
             }
 
-            LogicalPlan::MlTransform { ml_relation } => {
+            LogicalPlan::MlTransform { ml_relation, .. } => {
                 return ml_relation.clone();
             }
             LogicalPlan::Catalog { catalog } => {

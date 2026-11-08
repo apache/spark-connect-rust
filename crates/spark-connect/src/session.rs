@@ -728,6 +728,38 @@ impl SparkSession {
         Ok(responses)
     }
 
+    /// Delete the ML cached objects `refs` on the server, as PySpark's `RemoteModelRef` does
+    /// when the last reference to a model goes. It does not wait for the server: the request
+    /// runs on the shared runtime, and its errors (a stopped session, a closed channel) are
+    /// ignored. Safe to call from `Drop`.
+    pub(crate) fn release_ml_objects(&self, refs: Vec<proto::ObjectRef>) {
+        let command = proto::Command {
+            command_type: Some(proto::command::CommandType::MlCommand(proto::MlCommand {
+                command: Some(proto::ml_command::Command::Delete(
+                    proto::ml_command::Delete {
+                        obj_refs: refs,
+                        evict_only: None,
+                    },
+                )),
+            })),
+        };
+        let mut plan = proto::Plan::default();
+        plan.op_type = Some(proto::plan::OpType::Command(command));
+        let request = proto::ExecutePlanRequest {
+            session_id: self.client.session_id().to_string(),
+            user_context: Some(proto::UserContext::default()),
+            operation_id: Some(uuid::Uuid::new_v4().to_string()),
+            plan: Some(plan),
+            ..Default::default()
+        };
+        let client = Arc::clone(&self.client);
+        spark_connect_core::runtime::get_runtime().spawn(async move {
+            if let Ok(mut stream) = client.execute_plan_reattachable(request).await {
+                while let Ok(Some(_)) = stream.message().await {}
+            }
+        });
+    }
+
     /// Get the runtime configuration for this session.
     ///
     /// Mirrors `pyspark.sql.SparkSession.conf`.
