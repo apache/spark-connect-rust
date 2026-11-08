@@ -4250,6 +4250,24 @@ def test_udtf_variants():
     assert SimpleUDTF.deterministic is False
 
 
+def test_columns_have_the_python_2_operators_of_pyspark():
+    # As PySpark's Column: __div__ and __rdiv__ divide, as __truediv__ and __rtruediv__, which
+    # pandas-on-Spark calls, __nonzero__ is __bool__, and __getnewargs__ gives the expression.
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql import functions as F
+
+    column = F.col("a")
+    assert repr(column.__div__(2)) == repr(column / 2) == "Column<'/(a, 2)'>"
+    assert repr(column.__rdiv__(2)) == repr(2 / column) == "Column<'/(2, a)'>"
+    plan = column.__div__(2).to_plan(None)
+    assert plan.unresolved_function.function_name == "/"
+    assert [a.literal.integer for a in plan.unresolved_function.arguments[1:]] == [2]
+    with pytest.raises(PySparkValueError) as error:
+        column.__nonzero__()
+    assert error.value.getCondition() == "CANNOT_CONVERT_COLUMN_INTO_BOOL"
+    assert [repr(e) for e in (column + 1).__getnewargs__()] == ["+(a, 1)"]
+
+
 def test_column_with_alias_chain():
     """Test chaining column methods."""
     from pyspark.sql import functions as F
