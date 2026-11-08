@@ -1455,6 +1455,19 @@ def test_binary_values_of_collected_rows_follow_binary_as_bytes_as_pyspark(sessi
 
 
 
+def test_with_metadata_and_pivot_of_a_missing_column_are_dataframe_errors_as_pyspark(session):
+    # As PySpark's: withMetadata and pivot refer to the column through the DataFrame, so a
+    # missing column is CANNOT_RESOLVE_DATAFRAME_COLUMN, not UNRESOLVED_COLUMN.
+    df = session.createDataFrame([("a", 1)], "k string, v int")
+    with pytest.raises(AnalysisException) as error:
+        df.withMetadata("nope", {"a": "b"}).collect()
+    assert error.value.getCondition() == "CANNOT_RESOLVE_DATAFRAME_COLUMN"
+    with pytest.raises(AnalysisException) as error:
+        df.groupBy("k").pivot("nope").count().collect()
+    assert error.value.getCondition() == "CANNOT_RESOLVE_DATAFRAME_COLUMN"
+    assert df.withMetadata("v", {"a": "b"}).schema["v"].metadata == {"a": "b"}
+
+
 def test_internal_values_of_collected_rows_are_those_of_spark_as_pyspark(session):
     # As PySpark's: the toInternal of a collected row is the internal value of Spark that the
     # server computes, the days and the microseconds since the epoch, and its fromInternal is

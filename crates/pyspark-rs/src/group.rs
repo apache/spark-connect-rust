@@ -214,7 +214,9 @@ impl PyGroupedData {
                 Some(out)
             }
         };
-        let pcol = spark_connect::functions::col(&name.to_cow()?);
+        // As PySpark's `self._df[pivot_col]`: a column of the DataFrame that is grouped, by its
+        // plan ID.
+        let pcol = self.grouped_data.dataframe().col(&name.to_cow()?);
         Ok(PyGroupedData::new(
             self.grouped_data.pivot(pcol, vals).to_pyerr()?,
         ))
