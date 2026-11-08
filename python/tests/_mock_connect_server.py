@@ -386,6 +386,7 @@ def serve(connection):
             response_gate = self.response_gate
             block_result_complete = self.block_result_complete
             result_complete_operations = self.result_complete_operations
+            # Counter waiters on another thread must see both records when ready.
             self.execute_requests.append(request)
             self.rpc_events.append("execute")
             self.execute_calls += 1
