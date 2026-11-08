@@ -168,3 +168,73 @@ fn streaming_native_listener_bus() {
         "expected at least one native listener event, got {got}"
     );
 }
+
+/// As PySpark Connect's `spark.streams`: the managers of a session share its listener bus, the
+/// started event of a query reaches the listeners before `start` returns, and a listener removed
+/// through another manager of the session gets no more events.
+#[test]
+fn streaming_listeners_are_those_of_the_session() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::streaming::{
+        StreamingQueryListener, StreamingQueryListenerEvent, QUERY_PROGRESS_EVENT,
+        QUERY_STARTED_EVENT,
+    };
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    struct Recording {
+        events: Mutex<Vec<i32>>,
+    }
+    impl StreamingQueryListener for Recording {
+        fn on_event(&self, event: &StreamingQueryListenerEvent) {
+            self.events.lock().unwrap().push(event.event_type);
+        }
+    }
+
+    let spark = session();
+    let listener = Arc::new(Recording {
+        events: Mutex::new(Vec::new()),
+    });
+    let id = spark
+        .streams()
+        .add_listener(listener.clone())
+        .expect("add_listener");
+    assert_eq!(spark.streams().listeners().len(), 1);
+    let query = spark
+        .read_stream()
+        .format("rate")
+        .load(None)
+        .write_stream()
+        .format("noop")
+        .query_name("e2e_session_listener_bus")
+        .start("")
+        .expect("start streaming query");
+    assert_eq!(
+        listener.events.lock().unwrap().first(),
+        Some(&QUERY_STARTED_EVENT)
+    );
+    for _ in 0..60 {
+        if listener
+            .events
+            .lock()
+            .unwrap()
+            .contains(&QUERY_PROGRESS_EVENT)
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    spark
+        .streams()
+        .remove_listener(&id)
+        .expect("remove_listener");
+    assert!(spark.streams().listeners().is_empty());
+    let seen = listener.events.lock().unwrap().len();
+    std::thread::sleep(Duration::from_secs(2));
+    query.stop().expect("stop");
+    let events = listener.events.lock().unwrap();
+    assert!(events.contains(&QUERY_PROGRESS_EVENT), "{events:?}");
+    assert_eq!(events.len(), seen, "{events:?}");
+}

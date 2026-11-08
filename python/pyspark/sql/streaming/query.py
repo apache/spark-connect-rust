@@ -48,7 +48,10 @@ if TYPE_CHECKING:
     from pyspark.sql.session import SparkSession
 
 # StreamingQueryEventType values (spark.connect.StreamingQueryEventType); the Rust
-# listener stream yields these as the event_type int alongside each event's JSON.
+# listener stream yields these as the event_type int alongside each event's JSON. The started
+# event of a query comes with the result of its start, which the Rust core posts as
+# spark_connect::streaming::QUERY_STARTED_EVENT, of no StreamingQueryEventType.
+_QUERY_STARTED_EVENT = -1
 _QUERY_PROGRESS_EVENT = 1
 _QUERY_TERMINATED_EVENT = 2
 _QUERY_IDLE_EVENT = 3
@@ -61,20 +64,22 @@ def _dispatch_listener_event(listener, event_type, event_json):
     """Deserialize a listener event and invoke the matching callback on ``listener``.
 
     Called from the native (Rust) listener bus for each event. Mirrors the reference
-    ``StreamingQueryListenerBus`` dispatch: build the typed event and route it to
-    onQueryProgress / onQueryIdle / onQueryTerminated. Callback exceptions are surfaced
-    as warnings so one listener cannot break the dispatch thread.
+    ``StreamingQueryListenerBus.post_to_all``: build the typed event and route it to
+    onQueryStarted / onQueryProgress / onQueryIdle / onQueryTerminated. Callback exceptions
+    are surfaced as warnings, as PySpark's, so one listener cannot break the dispatch thread.
     """
     try:
         j = json.loads(event_json)
-        if event_type == _QUERY_PROGRESS_EVENT:
+        if event_type == _QUERY_STARTED_EVENT:
+            listener.onQueryStarted(QueryStartedEvent.fromJson(j))
+        elif event_type == _QUERY_PROGRESS_EVENT:
             listener.onQueryProgress(QueryProgressEvent.fromJson(j))
         elif event_type == _QUERY_IDLE_EVENT:
             listener.onQueryIdle(QueryIdleEvent.fromJson(j))
         elif event_type == _QUERY_TERMINATED_EVENT:
             listener.onQueryTerminated(QueryTerminatedEvent.fromJson(j))
     except Exception as e:  # noqa: BLE001
-        warnings.warn(f"Listener callback raised exception: {e}")
+        warnings.warn(f"Listener {str(listener)} threw an exception\n{e}")
 
 
 # ``spark.streams`` returns the native (Rust) StreamingQueryManager, which owns the

@@ -37,6 +37,11 @@ impl StreamingQueryListener for PyListenerAdapter {
             }
         });
     }
+
+    /// The adapter, of which `StreamingQueryManager._sqlb` gives back the Python listener.
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
 }
 
 /// Apply a named read option to a streaming reader when supplied (mirrors the batch
@@ -1119,15 +1124,57 @@ impl PyStreamingQuery {
     }
 }
 
-/// Python wrapper for StreamingQueryManager.
+/// Python wrapper for StreamingQueryManager, of the listener bus of its session.
 #[pyclass(name = "StreamingQueryManager", module = "pyspark.sql.streaming.query")]
 pub struct PyStreamingQueryManager {
     inner: StreamingQueryManager,
+    /// The session, which the listeners get as their `spark`.
+    session: spark_connect::session::SparkSession,
 }
 
 impl PyStreamingQueryManager {
-    pub fn new(manager: StreamingQueryManager) -> Self {
-        PyStreamingQueryManager { inner: manager }
+    pub fn new(
+        manager: StreamingQueryManager,
+        session: spark_connect::session::SparkSession,
+    ) -> Self {
+        PyStreamingQueryManager {
+            inner: manager,
+            session,
+        }
+    }
+}
+
+/// Warn of `message`, as PySpark Connect's listener bus warns of a failure to add or remove a
+/// listener, rather than raising.
+fn warn(py: Python<'_>, message: String) -> PyResult<()> {
+    py.import("warnings")?.call_method1("warn", (message,))?;
+    Ok(())
+}
+
+/// `StreamingQueryManager._sqlb`, as PySpark Connect's `StreamingQueryListenerBus`, of its
+/// `_listener_bus`: the client-side listeners of the session, in the order that they were added,
+/// which Apache Spark's tests read to remove them.
+#[pyclass(
+    name = "StreamingQueryListenerBus",
+    module = "pyspark.sql.streaming.query",
+    frozen
+)]
+pub struct PyStreamingQueryListenerBus {
+    manager: StreamingQueryManager,
+}
+
+#[pymethods]
+impl PyStreamingQueryListenerBus {
+    #[getter]
+    fn _listener_bus(&self, py: Python<'_>) -> Vec<Py<PyAny>> {
+        self.manager
+            .listeners()
+            .iter()
+            .filter_map(|listener| {
+                let adapter = listener.as_any()?.downcast_ref::<PyListenerAdapter>()?;
+                Some(adapter.listener.clone_ref(py))
+            })
+            .collect()
     }
 }
 
@@ -1161,29 +1208,62 @@ impl PyStreamingQueryManager {
     }
 
     /// Register a client-side listener object (with onQueryStarted/Progress/Idle/
-    /// Terminated callbacks). Mirrors `StreamingQueryManager.addListener`. The native
-    /// Rust bus streams events and dispatches to this listener; the assigned id is
-    /// stashed on the listener so `removeListener` can find it.
+    /// Terminated callbacks). Mirrors `StreamingQueryManager.addListener`: the listener gets the
+    /// session as its `spark`, and the native Rust bus of the session dispatches its events to
+    /// it; the assigned id is stashed on the listener so `removeListener` can find it. Should the
+    /// server fail to add its listener, this warns, as PySpark Connect's does.
     fn addListener(&self, py: Python<'_>, listener: Py<PyAny>) -> PyResult<()> {
+        let session = crate::session::PySparkSession::new(self.session.clone());
+        listener
+            .bind(py)
+            .call_method1("_set_spark_session", (session,))?;
         let adapter = Arc::new(PyListenerAdapter {
             listener: listener.clone_ref(py),
         });
-        let id =
-            crate::dataframe::detached(py, || self.inner.add_listener(adapter).map_err(Box::new))?;
-        listener.bind(py).setattr("_rust_listener_id", id)?;
-        Ok(())
+        match crate::dataframe::detached(py, || self.inner.add_listener(adapter).map_err(Box::new))
+        {
+            Ok(id) => listener.bind(py).setattr("_rust_listener_id", id),
+            Err(error) => warn(
+                py,
+                format!(
+                    "Failed to add the listener because of exception: {}\n\
+                     The listener is not added, please add it again.",
+                    error.value(py)
+                ),
+            ),
+        }
     }
 
     /// Remove a previously-added client-side listener object. Mirrors
-    /// `StreamingQueryManager.removeListener`.
+    /// `StreamingQueryManager.removeListener`: should the server fail to remove its listener,
+    /// this warns, and the listener stays, as PySpark Connect's does.
     fn removeListener(&self, py: Python<'_>, listener: Py<PyAny>) -> PyResult<()> {
         let bound = listener.bind(py);
         if let Ok(id_obj) = bound.getattr("_rust_listener_id") {
             let id: String = id_obj.extract()?;
-            crate::dataframe::detached(py, || self.inner.remove_listener(&id).map_err(Box::new))?;
+            if let Err(error) =
+                crate::dataframe::detached(py, || self.inner.remove_listener(&id).map_err(Box::new))
+            {
+                return warn(
+                    py,
+                    format!(
+                        "Failed to remove the listener because of exception: {}\n\
+                         The listener is not removed, please remove it again.",
+                        error.value(py)
+                    ),
+                );
+            }
             let _ = bound.delattr("_rust_listener_id");
         }
         Ok(())
+    }
+
+    /// The listener bus of the session, as PySpark Connect's `_sqlb`.
+    #[getter]
+    fn _sqlb(&self) -> PyStreamingQueryListenerBus {
+        PyStreamingQueryListenerBus {
+            manager: self.session.streams(),
+        }
     }
 
     /// Remove all client-side listeners and stop the dispatch thread. Mirrors
