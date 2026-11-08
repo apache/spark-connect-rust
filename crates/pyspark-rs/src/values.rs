@@ -83,6 +83,11 @@ impl PyVariantVal {
     fn __repr__(&self, py: Python<'_>) -> String {
         format!("VariantVal({:?}, {:?})", self.value(py), self.metadata(py))
     }
+    /// The JSON of the value, as PySpark's `VariantVal.__str__`: `VariantUtils.to_json` of it,
+    /// in UTC, as `toJson()`.
+    fn __str__(&self, py: Python<'_>) -> PyResult<String> {
+        self.toJson(py, "UTC")
+    }
 }
 
 /// A Geography value (WKB bytes + SRID). Mirrors `pyspark.sql.types.Geography`.
