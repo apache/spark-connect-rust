@@ -495,8 +495,8 @@ impl PyCatalog {
                 future_warning,
             ),
         )?;
-        let session = crate::session::PySparkSession::new(self.catalog.spark_session().clone());
-        Py::new(py, session)?
+        let session = crate::session::session_object(py, self.catalog.spark_session())?;
+        session
             .bind(py)
             .getattr("udf")?
             .call_method1("register", (name, f, returnType))

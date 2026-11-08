@@ -19,17 +19,23 @@ use crate::session::PySparkSession;
     dict
 )]
 pub struct PyDataSourceRegistration {
-    pub(crate) session: PySparkSession,
+    pub(crate) session: Py<PySparkSession>,
 }
 
 impl PyDataSourceRegistration {
-    pub fn new(session: PySparkSession) -> Self {
+    pub fn new(session: Py<PySparkSession>) -> Self {
         PyDataSourceRegistration { session }
     }
 }
 
 #[pymethods]
 impl PyDataSourceRegistration {
+    /// The session of the registration, as PySpark's `DataSourceRegistration.sparkSession`.
+    #[getter(sparkSession)]
+    fn spark_session(&self, py: Python<'_>) -> Py<PySparkSession> {
+        self.session.clone_ref(py)
+    }
+
     /// Register a custom data source class.
     ///
     /// Mirrors `pyspark.sql.SparkSession.dataSource.register`.
@@ -48,7 +54,8 @@ impl PyDataSourceRegistration {
         let expr = CommonInlineUserDefinedDataSourceExpression::new(name, payload);
 
         // Register with the session (release GIL during the RPC)
-        py.detach(|| self.session.session.register_data_source(expr))
+        let session = self.session.borrow(py).session.clone();
+        py.detach(|| session.register_data_source(expr))
             .to_pyerr()?;
 
         Ok(())
