@@ -26,10 +26,39 @@ __all__ = ["DataFrame", "DataFrameNaFunctions", "DataFrameStatFunctions"]
 def _reduce_dataframe(session: Any, relation: bytes) -> Tuple[Callable[..., Any], Tuple[Any, ...]]:
     """The ``__reduce__`` of a DataFrame of ``session`` and the bytes of its ``relation``, as
     PySpark Connect's, of its session and its plan: a function, which cloudpickle pickles by
-    value, of the session, which unpickles first, and of the relation."""
+    value, of the session, which unpickles first, and of the relation.
 
-    def creator(session: Any, relation: bytes) -> "DataFrame":
-        from pyspark import _pyspark
+    On a Python worker of the server, whose PySpark has no Rust client, such as the worker of a
+    ``foreachBatch`` function, which has the active session of the query, the function gives
+    back PySpark Connect's DataFrame of the relation, as PySpark's DataFrame of its plan unpickles
+    there. So everything that it calls there is of PySpark, which the worker has."""
+
+    def creator(session: Any, relation: bytes) -> Any:
+        try:
+            from pyspark import _pyspark
+        except ImportError:
+            from pyspark.sql.connect import proto
+            from pyspark.sql.connect.dataframe import DataFrame as ConnectDataFrame
+            from pyspark.sql.connect.plan import LogicalPlan
+
+            # Without annotations: the class body looks its names up by name, which cloudpickle
+            # does not pickle with the function.
+            class Relation(LogicalPlan):
+                """The plan of a relation as it was sent, of its plan ID, which the columns
+                that refer to it by that ID resolve against."""
+
+                def __init__(self, relation):  # type: ignore[no-untyped-def]
+                    super().__init__(None)
+                    self._relation = relation
+                    if relation.common.HasField("plan_id"):
+                        self._root_plan_id = relation.common.plan_id
+
+                def plan(self, session):  # type: ignore[no-untyped-def]
+                    sent = proto.Relation()
+                    sent.CopyFrom(self._relation)
+                    return sent
+
+            return ConnectDataFrame(Relation(proto.Relation.FromString(relation)), session)
 
         return _pyspark.DataFrame._of_relation(session, relation)
 
