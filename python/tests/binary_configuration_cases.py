@@ -269,20 +269,19 @@ class TestBinaryConfiguration:
         try:
             _wait_for(lambda: bool(service.execute_requests) or child.poll() is not None, timeout=20)
             assert service.execute_requests, "Iterator did not start an execution"
-            operation_id = parse_message(service.execute_requests[0])[6]
+            operation_id = parse_message(service.execute_requests[0])[6][0]
 
             def released():
                 # ReleaseExecuteRequest.release_all=5 and operation_id=3.
                 return any(
-                    5 in fields and fields.get(3) == operation_id
+                    5 in fields and fields.get(3) == [operation_id]
                     for fields in map(parse_message, service.release_execute_requests)
                 )
 
             _wait_for(lambda: released() or child.poll() is not None)
             assert released(), "Closing the iterator did not release its execution"
             # ResultComplete cannot have caused this release while r2 is still held.
-            assert service.block_result_complete
-            assert not service.result_complete_sent
+            assert operation_id not in service.result_complete_operations
             stdout, stderr = child.communicate("finish\n", timeout=10)
             assert child.returncode == 0, stdout + stderr
         finally:

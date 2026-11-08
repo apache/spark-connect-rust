@@ -199,10 +199,11 @@ impl Iterator for LocalRowIterator {
     }
 }
 
-/// Spawn a background task that drains the response stream and forwards decoded
-/// batches over a bounded (capacity-1) channel, keeping one batch buffered ahead
-/// of the consumer. Execution metrics are recorded on the session once the
-/// stream ends. Backs `to_local_iterator(prefetch_partitions = true)`.
+/// Spawn a background task that forwards decoded response batches over a bounded
+/// (capacity-1) channel, keeping one batch buffered ahead of the consumer.
+/// Closing the receiver stops the task even while it awaits a response; dropping
+/// the stream releases the execution. Metrics received so far are recorded on the
+/// session when the task stops. Backs `to_local_iterator(prefetch_partitions = true)`.
 fn spawn_prefetch(
     session: SparkSession,
     mut stream: ExecutionStream,

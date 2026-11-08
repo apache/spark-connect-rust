@@ -257,8 +257,7 @@ def serve(connection):
         # Hold r2 after the first Arrow batch so cleanup tests cannot confuse an
         # execution released by close with one released by normal completion.
         block_result_complete = False
-        result_complete_waiting = False
-        result_complete_sent = False
+        result_complete_operations = []
 
         # Each AnalyzePlanRequest, recorded.
         analyze_requests = []
@@ -270,11 +269,11 @@ def serve(connection):
             self.data_type = struct_schema()
             self.failure = None
             self.block_response = False
-            self.response_gate.clear()
+            # An old ExecutePlan generator keeps its own gate across test resets.
+            self.response_gate = Event()
             self.block_execute = False
             self.block_result_complete = False
-            self.result_complete_waiting = False
-            self.result_complete_sent = False
+            self.result_complete_operations = []
             self.analyze_requests = []
             self.execute_requests = []
             self.release_execute_requests = []
@@ -383,10 +382,14 @@ def serve(connection):
         set_confs = []
 
         def execute(self, request, context):
+            # Capture these before yielding: an earlier call can resume after reset.
+            response_gate = self.response_gate
+            block_result_complete = self.block_result_complete
+            result_complete_operations = self.result_complete_operations
             self.execute_calls += 1
             self.execute_requests.append(request)
             self.rpc_events.append("execute")
-            if self.block_execute and not self.response_gate.wait(5):
+            if self.block_execute and not response_gate.wait(5):
                 context.abort(
                     grpc.StatusCode.DEADLINE_EXCEEDED,
                     "Python thread could not run while the statement ran",
@@ -421,17 +424,12 @@ def serve(connection):
             operation_id = parse_message(request).get(6, [b""])[0]
             header = message_field(12, operation_id)
             yield header + message_field(13, "r1") + self.execute_payload
-            if self.block_result_complete:
-                self.result_complete_waiting = True
-                try:
-                    if not self.response_gate.wait(30):
-                        context.abort(
-                            grpc.StatusCode.DEADLINE_EXCEEDED,
-                            "ResultComplete was not released by the test",
-                        )
-                finally:
-                    self.result_complete_waiting = False
-            self.result_complete_sent = True
+            if block_result_complete and not response_gate.wait(30):
+                context.abort(
+                    grpc.StatusCode.DEADLINE_EXCEEDED,
+                    "ResultComplete was not released by the test",
+                )
+            result_complete_operations.append(operation_id)
             yield header + message_field(13, "r2") + message_field(14, b"")
 
         def warnings_fields(self):
