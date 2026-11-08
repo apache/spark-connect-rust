@@ -240,6 +240,36 @@ def test_ml_transformed_dataframes_keep_their_models_as_pyspark(session):
     assert error.value.getCondition() == "CONNECT_ML.CACHE_INVALID"
 
 
+def test_ml_deep_dataframes_fit_and_transform_as_pyspark(session):
+    # As PySpark: a DataFrame of 120 chained withColumn calls, nested deeper than a protobuf
+    # decoder parses, is fitted and transformed, and so is OneVsRest over 12 classes, whose
+    # transform adds a layer per class. Their predictions are those of the shallow DataFrames.
+    from pyspark.ml.classification import LogisticRegression, OneVsRest
+    from pyspark.ml.linalg import Vectors
+    from pyspark.sql import functions as F
+
+    rows = [(float(i % 2), Vectors.dense([float(i % 7), float(i % 5)])) for i in range(40)]
+    base = session.createDataFrame(rows, ["label", "features"])
+    deep = base
+    for i in range(120):
+        deep = deep.withColumn(f"c{i}", F.lit(i))
+    model = LogisticRegression(maxIter=2).fit(deep)
+    assert model.coefficients == LogisticRegression(maxIter=2).fit(base).coefficients
+    predictions = sorted(r.prediction for r in model.transform(deep).collect())
+    assert len(predictions) == 40
+    assert predictions == sorted(r.prediction for r in model.transform(base).collect())
+
+    rows12 = [(float(i % 12), Vectors.dense([float(i % 7), float(i % 5)])) for i in range(60)]
+    base12 = session.createDataFrame(rows12, ["label", "features"])
+    deep12 = base12
+    for i in range(120):
+        deep12 = deep12.withColumn(f"c{i}", F.lit(i))
+    ovr = OneVsRest(classifier=LogisticRegression(maxIter=2)).fit(base12)
+    shallow = sorted(r.prediction for r in ovr.transform(base12).collect())
+    assert sorted(r.prediction for r in ovr.transform(deep12).collect()) == shallow
+    assert len(shallow) == 60
+
+
 def test_ml_dataframes_of_plans_as_pyspark(session):
     # As PySpark Connect's DataFrame(plan, session): a DataFrame of the relation of a plan,
     # which further transformations take as input.
@@ -269,7 +299,9 @@ def test_session_hooks_rewrite_the_requests_sent_to_the_server_as_pyspark(sessio
     import pyspark.sql.connect.proto as pb2
     from pyspark.sql.connect.session import SparkSession as ConnectSparkSession
 
-    replacement = session.range(5)._plan.plan(session.client)
+    # The placeholder of a plan is valid while its DataFrame lives, so the DataFrame is kept.
+    source = session.range(5)
+    replacement = source._plan.plan(session.client)
     calls = []
 
     class Replace(ConnectSparkSession.Hook):

@@ -425,10 +425,14 @@ fn call_execute_plan_hooks(
         }
     }
     let bytes = message.call_method0("SerializeToString")?;
-    spark_connect_proto::ExecutePlanRequest::decode(
+    let mut request = spark_connect_proto::ExecutePlanRequest::decode(
         bytes.cast::<pyo3::types::PyBytes>()?.as_bytes(),
     )
-    .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
+    .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    // A hook may put in the plan of a DataFrame, which the Python plan sends as a placeholder.
+    spark_connect::plan::resolve_request(&mut request)
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    Ok(request)
 }
 
 /// Held while a session is got or created, as PySpark's `SparkSession._lock`, so that threads

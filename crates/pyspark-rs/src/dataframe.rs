@@ -648,17 +648,24 @@ impl PyDataFrame {
         // objects on the server the relation refers to (`__source_instance__`).
         let owner: std::sync::Arc<dyn std::any::Any + Send + Sync> =
             std::sync::Arc::new(plan.clone().unbind());
-        Ok(PyDataFrame::new(DataFrame::from_relation(
-            session.borrow().session.clone(),
-            relation,
-            Some(owner),
-        )))
+        Ok(PyDataFrame::new(
+            DataFrame::from_relation(session.borrow().session.clone(), relation, Some(owner))
+                .to_pyerr()?,
+        ))
     }
 
     /// The bytes of the relation of this DataFrame as it is sent, for the plan of `_plan`.
     fn _relation_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, pyo3::types::PyBytes> {
         use prost::Message;
         pyo3::types::PyBytes::new(py, &self.dataframe.to_relation().encode_to_vec())
+    }
+
+    /// The bytes of the placeholder of the relation of this DataFrame, which the plan of `_plan`
+    /// sends in its place: shallow, whatever the depth of the DataFrame, and replaced by the
+    /// core with that relation when the plan reaches it.
+    fn _relation_placeholder<'py>(&self, py: Python<'py>) -> Bound<'py, pyo3::types::PyBytes> {
+        use prost::Message;
+        pyo3::types::PyBytes::new(py, &self.dataframe.placeholder_relation().encode_to_vec())
     }
 
     /// A DataFrame pickles, as PySpark Connect's, of its session, which gives back the active

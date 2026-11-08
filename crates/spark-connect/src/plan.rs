@@ -6,7 +6,9 @@
 use spark_connect_proto as proto;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
+
+use spark_connect_core::error::{Result, SparkError};
 
 use crate::column::Column;
 use crate::expression::{Expression, ExpressionNode, LiteralExpression};
@@ -595,6 +597,175 @@ impl PlanIds {
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.nodes.lock().unwrap().ids.len()
+    }
+}
+
+/// The `Any` type of a placeholder: the relation that stands for the relation of a DataFrame, in a
+/// relation that is built outside the core, such as a plan of `pyspark.ml`, which the Python
+/// client builds over the placeholder of each DataFrame it takes as input. The value of a
+/// placeholder is its marker. The core replaces it by the relation of its DataFrame when the
+/// relation or the command that holds it reaches the core, so the nesting of a deep DataFrame is
+/// never decoded: a protobuf decoder limits the depth of what it decodes.
+const PLACEHOLDER_TYPE_URL: &str = "type.googleapis.com/spark.connect.rust.DataFramePlaceholder";
+
+/// The placeholders of all the sessions, by the addresses of their plan node and of their
+/// session's plan IDs, each with its marker. Both are held weakly, as `PlanIds` holds its nodes,
+/// so an entry goes with its DataFrame, and its address is not reused while the entry exists.
+#[derive(Default)]
+struct Placeholders {
+    entries: HashMap<(usize, usize), Placeholder>,
+    prune_at: usize,
+}
+
+struct Placeholder {
+    marker: i64,
+    node: Weak<LogicalPlan>,
+    ids: Weak<PlanIds>,
+}
+
+static PLACEHOLDERS: LazyLock<Mutex<Placeholders>> =
+    LazyLock::new(|| Mutex::new(Placeholders::default()));
+
+/// The placeholder of the relation of `node`, a DataFrame of the session of `ids`: the same
+/// marker each time the DataFrame gives it.
+fn placeholder_marker(node: &Arc<LogicalPlan>, ids: &Arc<PlanIds>) -> i64 {
+    const MIN_PRUNE_AT: usize = 1024;
+    let mut placeholders = PLACEHOLDERS.lock().unwrap_or_else(|e| e.into_inner());
+    // The entry's `Weak`s keep both allocations from being freed, so the node and the session
+    // of an entry at these addresses are those of this call.
+    let key = (Arc::as_ptr(node) as usize, Arc::as_ptr(ids) as usize);
+    if let Some(entry) = placeholders.entries.get(&key) {
+        return entry.marker;
+    }
+    if placeholders.entries.len() >= placeholders.prune_at.max(MIN_PRUNE_AT) {
+        placeholders
+            .entries
+            .retain(|_, entry| entry.node.strong_count() > 0 && entry.ids.strong_count() > 0);
+        placeholders.prune_at = placeholders.entries.len() * 2;
+    }
+    let marker = NEXT_PLAN_ID.fetch_add(1, Ordering::Relaxed);
+    placeholders.entries.insert(
+        key,
+        Placeholder {
+            marker,
+            node: Arc::downgrade(node),
+            ids: Arc::downgrade(ids),
+        },
+    );
+    marker
+}
+
+/// The node and the plan IDs of the placeholder `marker`, if its DataFrame is still alive.
+fn placeholder_target(marker: i64) -> Option<(Arc<LogicalPlan>, Arc<PlanIds>)> {
+    let placeholders = PLACEHOLDERS.lock().unwrap_or_else(|e| e.into_inner());
+    placeholders
+        .entries
+        .values()
+        .find(|entry| entry.marker == marker)
+        .and_then(|entry| Some((entry.node.upgrade()?, entry.ids.upgrade()?)))
+}
+
+/// The placeholder of the relation of `node`, a DataFrame of the session of `ids`, as the
+/// relation that the Python client sends in its place.
+pub(crate) fn placeholder_relation(node: &Arc<LogicalPlan>, ids: &Arc<PlanIds>) -> proto::Relation {
+    let marker = placeholder_marker(node, ids);
+    proto::Relation {
+        common: None,
+        rel_type: Some(proto::relation::RelType::Extension(prost_types::Any {
+            type_url: PLACEHOLDER_TYPE_URL.to_string(),
+            value: marker.to_le_bytes().to_vec(),
+        })),
+    }
+}
+
+/// Replace the placeholders of `relation` by the relations of their DataFrames, and of the
+/// relations that the plans of `pyspark.ml` take as input (their `ml_relation`, `with_relations`
+/// and fetched arguments). Each replacement is the relation of a DataFrame of the core, which has
+/// no placeholder.
+pub(crate) fn resolve_relation(relation: &mut proto::Relation) -> Result<()> {
+    if let Some(proto::relation::RelType::Extension(any)) = &relation.rel_type {
+        if any.type_url == PLACEHOLDER_TYPE_URL {
+            let marker = i64::from_le_bytes(
+                any.value
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| SparkError::value_msg("a placeholder of no marker"))?,
+            );
+            let (node, ids) = placeholder_target(marker).ok_or_else(|| {
+                SparkError::value_msg("a placeholder of a DataFrame that no longer exists")
+            })?;
+            *relation = relation_with_ids(&node, &ids);
+            return Ok(());
+        }
+    }
+    match relation.rel_type.as_mut() {
+        Some(proto::relation::RelType::MlRelation(ml)) => {
+            if let Some(summary) = ml.model_summary_dataset.as_mut() {
+                resolve_relation(summary)?;
+            }
+            match ml.ml_type.as_mut() {
+                Some(proto::ml_relation::MlType::Transform(transform)) => {
+                    if let Some(input) = transform.input.as_mut() {
+                        resolve_relation(input)?;
+                    }
+                }
+                Some(proto::ml_relation::MlType::Fetch(fetch)) => resolve_fetch(fetch)?,
+                None => {}
+            }
+        }
+        Some(proto::relation::RelType::WithRelations(with)) => {
+            if let Some(root) = with.root.as_mut() {
+                resolve_relation(root)?;
+            }
+            for reference in with.references.iter_mut() {
+                resolve_relation(reference)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Replace the placeholders of the relations of the ML command `command`, as `resolve_relation`.
+pub(crate) fn resolve_command(command: &mut proto::Command) -> Result<()> {
+    let Some(proto::command::CommandType::MlCommand(ml)) = command.command_type.as_mut() else {
+        return Ok(());
+    };
+    let dataset = match ml.command.as_mut() {
+        Some(proto::ml_command::Command::Fit(fit)) => fit.dataset.as_mut(),
+        Some(proto::ml_command::Command::Evaluate(evaluate)) => evaluate.dataset.as_mut(),
+        Some(proto::ml_command::Command::CreateSummary(summary)) => summary.dataset.as_mut(),
+        Some(proto::ml_command::Command::Fetch(fetch)) => return resolve_fetch(fetch),
+        _ => None,
+    };
+    match dataset {
+        Some(dataset) => resolve_relation(dataset),
+        None => Ok(()),
+    }
+}
+
+/// Replace the placeholders of the relations that a fetch of `fetch` takes as arguments.
+fn resolve_fetch(fetch: &mut proto::Fetch) -> Result<()> {
+    for method in fetch.methods.iter_mut() {
+        for args in method.args.iter_mut() {
+            if let Some(proto::fetch::method::args::ArgsType::Input(input)) =
+                args.args_type.as_mut()
+            {
+                resolve_relation(input)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Replace the placeholders of the relation or of the command of `request`, a request that a
+/// session hook built in Python, as `DataFrame::from_relation` does. Not a stable API.
+#[doc(hidden)]
+pub fn resolve_request(request: &mut proto::ExecutePlanRequest) -> Result<()> {
+    match request.plan.as_mut().and_then(|plan| plan.op_type.as_mut()) {
+        Some(proto::plan::OpType::Root(relation)) => resolve_relation(relation),
+        Some(proto::plan::OpType::Command(command)) => resolve_command(command),
+        _ => Ok(()),
     }
 }
 
@@ -2517,5 +2688,273 @@ mod inline_udtf_tests {
             panic!("expected a PythonUDTF");
         };
         assert_eq!(udtf.return_type, None);
+    }
+}
+
+#[cfg(test)]
+mod placeholder_tests {
+    use super::*;
+    use prost::Message;
+    use spark_connect_proto as proto;
+
+    /// The placeholder of `node`, of the session of `ids`, as the relation that the plans of
+    /// `pyspark.ml` send in its place.
+    fn placeholder(node: &Arc<LogicalPlan>, ids: &Arc<PlanIds>) -> proto::Relation {
+        placeholder_relation(node, ids)
+    }
+
+    /// The `ml_relation` of a transform of `input`, as `pyspark.ml.connect.proto` builds it.
+    fn transform_of(input: proto::Relation) -> proto::Relation {
+        proto::Relation {
+            common: None,
+            rel_type: Some(proto::relation::RelType::MlRelation(Box::new(
+                proto::MlRelation {
+                    model_summary_dataset: None,
+                    ml_type: Some(proto::ml_relation::MlType::Transform(Box::new(
+                        proto::ml_relation::Transform {
+                            input: Some(Box::new(input)),
+                            params: None,
+                            operator: None,
+                        },
+                    ))),
+                },
+            ))),
+        }
+    }
+
+    #[test]
+    fn a_placeholder_is_shallow_and_stands_for_the_relation_of_its_node() {
+        let ids = Arc::new(PlanIds::new());
+        let mut node = Arc::new(range(0, 3, 1));
+        for _ in 0..200 {
+            node = Arc::new(LogicalPlan::Limit {
+                input: node,
+                limit: 3,
+            });
+        }
+        let relation = relation_with_ids(&node, &ids);
+        let shallow = placeholder(&node, &ids);
+        assert!(shallow.encoded_len() < 128, "{}", shallow.encoded_len());
+        let mut resolved = transform_of(shallow.clone());
+        resolve_relation(&mut resolved).unwrap();
+        assert_eq!(resolved, transform_of(relation));
+    }
+
+    #[test]
+    fn a_placeholder_is_the_same_for_the_same_node_and_session() {
+        let ids = Arc::new(PlanIds::new());
+        let node = Arc::new(range(0, 3, 1));
+        assert_eq!(placeholder(&node, &ids), placeholder(&node, &ids));
+        let other = Arc::new(PlanIds::new());
+        assert_ne!(placeholder(&node, &ids), placeholder(&node, &other));
+        let different = Arc::new(range(0, 4, 1));
+        assert_ne!(placeholder(&node, &ids), placeholder(&different, &ids));
+    }
+
+    #[test]
+    fn placeholders_resolve_in_every_position_that_the_ml_plans_build_over_their_inputs() {
+        let ids = Arc::new(PlanIds::new());
+        let node = Arc::new(range(0, 3, 1));
+        let relation = relation_with_ids(&node, &ids);
+        let shallow = placeholder(&node, &ids);
+        let fetch = || proto::Fetch {
+            obj_ref: None,
+            methods: vec![proto::fetch::Method {
+                method: "transform".to_string(),
+                args: vec![proto::fetch::method::Args {
+                    args_type: Some(proto::fetch::method::args::ArgsType::Input(shallow.clone())),
+                }],
+            }],
+        };
+        let mut relations = vec![
+            // An ML summary of a model, over its dataset.
+            proto::Relation {
+                common: None,
+                rel_type: Some(proto::relation::RelType::MlRelation(Box::new(
+                    proto::MlRelation {
+                        model_summary_dataset: Some(Box::new(shallow.clone())),
+                        ml_type: None,
+                    },
+                ))),
+            },
+            // A fetch of a summary, whose argument is a dataset.
+            proto::Relation {
+                common: None,
+                rel_type: Some(proto::relation::RelType::MlRelation(Box::new(
+                    proto::MlRelation {
+                        model_summary_dataset: None,
+                        ml_type: Some(proto::ml_relation::MlType::Fetch(fetch())),
+                    },
+                ))),
+            },
+            // Two transforms, one over the other, over the input of the second.
+            transform_of(transform_of(shallow.clone())),
+            // The references of a relation with its subqueries.
+            proto::Relation {
+                common: None,
+                rel_type: Some(proto::relation::RelType::WithRelations(Box::new(
+                    proto::WithRelations {
+                        root: Some(Box::new(shallow.clone())),
+                        references: vec![shallow.clone()],
+                    },
+                ))),
+            },
+        ];
+        for relation_with_placeholder in relations.iter_mut() {
+            resolve_relation(relation_with_placeholder).unwrap();
+        }
+        // The placeholders are replaced by the relation of the node, everywhere they were.
+        let expected = [
+            proto::Relation {
+                common: None,
+                rel_type: Some(proto::relation::RelType::MlRelation(Box::new(
+                    proto::MlRelation {
+                        model_summary_dataset: Some(Box::new(relation.clone())),
+                        ml_type: None,
+                    },
+                ))),
+            },
+            proto::Relation {
+                common: None,
+                rel_type: Some(proto::relation::RelType::MlRelation(Box::new(
+                    proto::MlRelation {
+                        model_summary_dataset: None,
+                        ml_type: Some(proto::ml_relation::MlType::Fetch(proto::Fetch {
+                            obj_ref: None,
+                            methods: vec![proto::fetch::Method {
+                                method: "transform".to_string(),
+                                args: vec![proto::fetch::method::Args {
+                                    args_type: Some(proto::fetch::method::args::ArgsType::Input(
+                                        relation.clone(),
+                                    )),
+                                }],
+                            }],
+                        })),
+                    },
+                ))),
+            },
+            transform_of(transform_of(relation.clone())),
+            proto::Relation {
+                common: None,
+                rel_type: Some(proto::relation::RelType::WithRelations(Box::new(
+                    proto::WithRelations {
+                        root: Some(Box::new(relation.clone())),
+                        references: vec![relation.clone()],
+                    },
+                ))),
+            },
+        ];
+        assert_eq!(relations, expected);
+    }
+
+    #[test]
+    fn the_ml_commands_resolve_their_datasets_and_fetched_arguments() {
+        let ids = Arc::new(PlanIds::new());
+        let node = Arc::new(range(0, 3, 1));
+        let relation = relation_with_ids(&node, &ids);
+        let shallow = placeholder(&node, &ids);
+        let command = |ml_command: proto::ml_command::Command| proto::Command {
+            command_type: Some(proto::command::CommandType::MlCommand(proto::MlCommand {
+                command: Some(ml_command),
+            })),
+        };
+        let fit = |dataset: proto::Relation| {
+            command(proto::ml_command::Command::Fit(proto::ml_command::Fit {
+                estimator: None,
+                params: None,
+                dataset: Some(dataset),
+            }))
+        };
+        let mut fitted = fit(shallow.clone());
+        resolve_command(&mut fitted).unwrap();
+        assert_eq!(fitted, fit(relation.clone()));
+
+        let mut evaluated = command(proto::ml_command::Command::Evaluate(
+            proto::ml_command::Evaluate {
+                evaluator: None,
+                params: None,
+                dataset: Some(shallow.clone()),
+            },
+        ));
+        resolve_command(&mut evaluated).unwrap();
+        assert_eq!(
+            evaluated,
+            command(proto::ml_command::Command::Evaluate(
+                proto::ml_command::Evaluate {
+                    evaluator: None,
+                    params: None,
+                    dataset: Some(relation.clone()),
+                },
+            ))
+        );
+
+        let mut summary = command(proto::ml_command::Command::CreateSummary(
+            proto::ml_command::CreateSummary {
+                model_ref: None,
+                dataset: Some(shallow.clone()),
+            },
+        ));
+        resolve_command(&mut summary).unwrap();
+        assert_eq!(
+            summary,
+            command(proto::ml_command::Command::CreateSummary(
+                proto::ml_command::CreateSummary {
+                    model_ref: None,
+                    dataset: Some(relation.clone()),
+                },
+            ))
+        );
+
+        // A request of a session hook: the root of its plan, or its command.
+        let mut root = proto::ExecutePlanRequest {
+            plan: Some(proto::Plan {
+                op_type: Some(proto::plan::OpType::Root(transform_of(shallow.clone()))),
+            }),
+            ..Default::default()
+        };
+        resolve_request(&mut root).unwrap();
+        assert_eq!(
+            root.plan.unwrap().op_type,
+            Some(proto::plan::OpType::Root(transform_of(relation)))
+        );
+    }
+
+    #[test]
+    fn relations_without_placeholders_are_left_as_they_are() {
+        let ids = Arc::new(PlanIds::new());
+        let node = Arc::new(range(0, 3, 1));
+        let mut relation = relation_with_ids(&node, &ids);
+        let before = relation.clone();
+        resolve_relation(&mut relation).unwrap();
+        assert_eq!(relation, before);
+        let mut command = proto::Command::default();
+        resolve_command(&mut command).unwrap();
+        assert_eq!(command, proto::Command::default());
+    }
+
+    #[test]
+    fn a_placeholder_of_a_dropped_node_is_an_error_and_keeps_nothing_alive() {
+        let ids = Arc::new(PlanIds::new());
+        let node = Arc::new(range(0, 3, 1));
+        let alive = Arc::downgrade(&node);
+        let shallow = placeholder(&node, &ids);
+        std::mem::drop(node);
+        assert!(alive.upgrade().is_none());
+        let mut relation = transform_of(shallow);
+        let error = resolve_relation(&mut relation).unwrap_err();
+        assert!(error.to_string().contains("no longer exists"), "{error}");
+    }
+
+    #[test]
+    fn a_malformed_placeholder_is_an_error() {
+        let mut relation = proto::Relation {
+            common: None,
+            rel_type: Some(proto::relation::RelType::Extension(prost_types::Any {
+                type_url: PLACEHOLDER_TYPE_URL.to_string(),
+                value: vec![1, 2, 3],
+            })),
+        };
+        let error = resolve_relation(&mut relation).unwrap_err();
+        assert!(error.to_string().contains("no marker"), "{error}");
     }
 }

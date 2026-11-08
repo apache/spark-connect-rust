@@ -109,6 +109,12 @@ def _commands(service):
     return [pb2.ExecutePlanRequest.FromString(r).plan.command for r in service.execute_requests]
 
 
+def _relation(df):
+    # The relation of a DataFrame, as the core sends it: the relation that the plans of pyspark.ml
+    # send in place of its placeholder, which the core replaces with it.
+    return pb2.Relation.FromString(df._relation_bytes())
+
+
 class _Color(enum.Enum):
     RED = 1
 
@@ -468,7 +474,7 @@ def test_connect_conversions_as_pyspark(ml_mock):
     assert proto_to_storage_level(message) == level
 
     df = proto_to_remote_cached_dataframe(pb2.CachedRemoteRelation(relation_id="r1"))
-    assert df._plan.plan(spark.client).cached_remote_relation.relation_id == "r1"
+    assert _relation(df).cached_remote_relation.relation_id == "r1"
     assert service.execute_requests == []
     del df
     gc.collect()
@@ -622,7 +628,7 @@ def test_execute_command_converts_the_results_of_pyspark(ml_mock):
         )
     ).SerializeToString()
     df = client.execute_command(command)[1]["checkpoint_command_result"]
-    assert df._plan.plan(client).cached_remote_relation.relation_id == "r9"
+    assert _relation(df).cached_remote_relation.relation_id == "r9"
     # The relation is removed from the server once the DataFrame is collected, of a command
     # whose responses are ignored, as PySpark's: so the checkpoint that the mock server answers
     # with makes no other relation to remove.
@@ -702,20 +708,20 @@ def test_ml_fit_and_transform_send_the_messages_of_pyspark(ml_mock):
         "inputCol": pb2.Expression.Literal(string="words"),
         "outputCol": pb2.Expression.Literal(string="counts"),
     }
-    assert fit.dataset == df._plan.plan(spark.client)
+    assert fit.dataset == _relation(df)
     assert fit.dataset.HasField("project")
 
     assert str(model._java_obj) == "model-1"
     assert model.uid == estimator.uid and model.getVocabSize() == 5
 
     predictions = model.transform(df)
-    relation = predictions._plan.plan(spark.client)
+    relation = _relation(predictions)
     transform = relation.ml_relation.transform
     assert transform.obj_ref.id == "model-1"
     assert transform.input == fit.dataset
     assert transform.params.params["vocabSize"] == pb2.Expression.Literal(integer=5)
 
-    selected = predictions.select("counts")._plan.plan(spark.client)
+    selected = _relation(predictions.select("counts"))
     assert selected.project.input == relation
     # A column of the transformed DataFrame refers to the plan ID of its relation.
     reference = predictions["counts"]._expr.to_plan(None).unresolved_attribute
@@ -731,12 +737,12 @@ def test_ml_transformers_send_the_relation_of_pyspark(ml_mock):
     spark, service = ml_mock
     df = spark.range(1).selectExpr("'a b' AS text")
     tokenizer = Tokenizer(inputCol="text", outputCol="words")
-    transform = tokenizer.transform(df)._plan.plan(spark.client).ml_relation.transform
+    transform = _relation(tokenizer.transform(df)).ml_relation.transform
     assert transform.transformer.name == "org.apache.spark.ml.feature.Tokenizer"
     assert transform.transformer.uid == tokenizer.uid
     assert transform.transformer.type == pb2.MlOperator.OPERATOR_TYPE_TRANSFORMER
     assert transform.params.params["inputCol"] == pb2.Expression.Literal(string="text")
-    assert transform.input == df._plan.plan(spark.client)
+    assert transform.input == _relation(df)
     assert service.execute_requests == []
 
 
@@ -761,14 +767,14 @@ def test_ml_dataframes_of_plans_keep_their_plans(ml_mock):
     plan = SQLPlan()
     alive = weakref.ref(plan)
     df = DataFrame(plan=plan, session=spark)
-    relation = df._plan.plan(spark.client)
+    relation = _relation(df)
     assert relation.sql.query == "SELECT 1 AS a"
     assert df["a"]._expr.to_plan(None).unresolved_attribute.plan_id == relation.common.plan_id
     derived = df.filter("a > 0")
     del plan, df
     gc.collect()
     assert alive() is not None
-    assert derived._plan.plan(spark.client).filter.input == relation
+    assert _relation(derived).filter.input == relation
     del derived
     gc.collect()
     assert alive() is None
