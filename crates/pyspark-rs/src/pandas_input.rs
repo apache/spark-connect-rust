@@ -37,13 +37,14 @@ pub(crate) fn _pandas_string_ipc<'py>(
     columns: Vec<Bound<'py, PyAny>>,
     schema: PyRef<'py, PyStructType>,
 ) -> PyResult<Option<Bound<'py, PyBytes>>> {
-    if columns.len() != schema.fields.len() {
+    let schema_fields = schema.current_fields(py)?;
+    if columns.len() != schema_fields.len() {
         return Ok(None);
     }
     // Reject unsupported objects before copying any string data. Otherwise a
     // late subclass would pay for most of an Arrow build before the row path.
     // Keep this pass to exact type/null checks; UTF-8 extraction stays below.
-    for (column, field) in columns.iter().zip(&schema.fields) {
+    for (column, field) in columns.iter().zip(&schema_fields) {
         if !matches!(&field.data_type, spark_connect::types::DataType::String { collation }
             if collation == "UTF8_BINARY")
         {
@@ -61,7 +62,7 @@ pub(crate) fn _pandas_string_ipc<'py>(
     // above keeps a late subclass from paying for the build.
     let mut arrays: Vec<ArrayRef> = Vec::with_capacity(columns.len());
     let mut fields = Vec::with_capacity(columns.len());
-    for (column, field) in columns.iter().zip(&schema.fields) {
+    for (column, field) in columns.iter().zip(&schema_fields) {
         let mut builder = StringBuilder::with_capacity(column.len()?, column.len()? * 8);
         for value in column.try_iter()? {
             let value = value?;

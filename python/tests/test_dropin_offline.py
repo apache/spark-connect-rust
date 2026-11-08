@@ -3642,6 +3642,141 @@ def test_struct_types_give_back_their_struct_field_objects_as_pyspark():
 
 
 
+def test_struct_type_fields_is_the_live_list_of_the_struct():
+    # As PySpark's StructType, whose `fields` is a list attribute that the struct keeps: the
+    # same list each time, and an edit of it (append, item, pop, sort, del) is an edit of the
+    # struct, which its simpleString, json, len, iteration and indexing show.
+    st = T.StructType([T.StructField("a", T.IntegerType()), T.StructField("b", T.StringType())])
+    fields = st.fields
+    assert st.fields is fields
+    fields.append(T.StructField("c", T.LongType(), False))
+    assert st.simpleString() == "struct<a:int,b:string,c:bigint>"
+    assert len(st) == 3 and [f.name for f in st] == ["a", "b", "c"]
+    assert st[2].nullable is False and '"nullable":false' in st.json()
+    fields[0] = T.StructField("z", T.DateType())
+    assert st.simpleString() == "struct<z:date,b:string,c:bigint>"
+    assert st["z"] is fields[0] and st[0] is fields[0]
+    assert fields.pop().name == "c" and st.simpleString() == "struct<z:date,b:string>"
+    fields.sort(key=lambda f: f.name, reverse=True)
+    assert [f.name for f in st] == ["z", "b"]
+    del fields[0]
+    assert st.simpleString() == "struct<b:string>" and len(st) == 1
+
+
+def test_struct_type_add_keeps_the_fields_list():
+    # As PySpark's add, which appends to the list the struct keeps, so a list kept before
+    # add sees the new field, and a field appended to the list is seen by add's struct.
+    st = T.StructType([T.StructField("a", T.IntegerType())])
+    fields = st.fields
+    st.add("b", T.StringType())
+    assert st.fields is fields and len(fields) == 2 and fields[1].name == "b"
+    fields.append(T.StructField("c", T.LongType()))
+    st.add(T.StructField("d", T.LongType()))
+    assert [f.name for f in fields] == ["a", "b", "c", "d"]
+    assert st.simpleString() == "struct<a:int,b:string,c:bigint,d:bigint>"
+
+
+def test_struct_type_names_are_apart_from_fields():
+    # As PySpark's StructType: `names` is a list of its own, which __init__ and add set and
+    # nothing else sets. So fieldNames() (a copy of names) does not follow an edit of fields,
+    # while simpleString, json, len and the fields do; and a rename of a field is not a name.
+    st = T.StructType([T.StructField("a", T.IntegerType())])
+    assert st.names is st.names and st.fieldNames() is not st.names
+    st.fields.append(T.StructField("b", T.StringType()))
+    assert st.fieldNames() == ["a"] and st.names == ["a"]
+    assert st.simpleString() == "struct<a:int,b:string>" and len(st) == 2
+    st.add("c", T.LongType())
+    assert st.fieldNames() == ["a", "c"] and st.names == ["a", "c"]
+    st.names.append("n")
+    assert st.fieldNames() == ["a", "c", "n"]
+    st.fieldNames().append("m")
+    assert st.fieldNames() == ["a", "c", "n"]
+    st.fields[0].name = "renamed"
+    assert st.fieldNames() == ["a", "c", "n"] and st.names == ["a", "c", "n"]
+    assert st[0].name == "renamed" and st["renamed"] is st.fields[0]
+    assert st != T.StructType(list(st.fields))
+
+
+def test_struct_field_attributes_are_assignable():
+    # As PySpark's StructField, whose name, dataType, nullable and metadata are plain
+    # attributes: an assignment of them is the field's, and so is the struct's the field is in.
+    # This is how the nullability of a schema is changed in place.
+    f = T.StructField("n", T.IntegerType())
+    st = T.StructType([f])
+    f.nullable = False
+    assert st.simpleString() == "struct<n:int>" and st[0].nullable is False
+    assert st.json() == T.StructType([T.StructField("n", T.IntegerType(), False)]).json()
+    f.name = "m"
+    assert st.simpleString() == "struct<m:int>" and st.fieldNames() == ["n"]
+    f.dataType = T.StringType()
+    assert st.simpleString() == "struct<m:string>" and f.simpleString() == "m:string"
+    f.metadata = {"k": "v"}
+    assert '"metadata":{"k":"v"}' in st.json() and st.fields[0].metadata == {"k": "v"}
+    fresh = T.StructType([T.StructField("m", T.StringType(), False, {"k": "v"})])
+    assert T.StructType([f]) == fresh and st.json() == fresh.json()
+    assert T.StructType([f]) != T.StructType([T.StructField("m", T.StringType(), True)])
+    parsed = pickle.loads(pickle.dumps(T.StructType([f])))
+    assert parsed.json() == fresh.json() and parsed.simpleString() == "struct<m:string>"
+    assert pickle.loads(pickle.dumps(f)) == fresh[0]
+
+
+def test_struct_type_edits_reach_its_core_type():
+    # The live view: a UDF's return type and the JSON of a struct read the fields as they are
+    # now, after edits of the list and of the fields in place.
+    from pyspark.sql import functions as F
+
+    st = T.StructType([T.StructField("a", T.LongType())])
+    st.fields.append(T.StructField("b", T.DoubleType(), False))
+    st.fields[0].nullable = False
+    wrapper = F.udf(lambda x: x, returnType=st)
+    assert wrapper.returnType.simpleString() == "struct<a:bigint,b:double>"
+    assert wrapper.returnType.fields[0].nullable is False
+    assert T._parse_datatype_json_string(st.json()).simpleString() == "struct<a:bigint,b:double>"
+    assert st.toNullable().simpleString() == "struct<a:bigint,b:double>"
+    assert st.toNullable().fields[1].nullable is True
+    assert st[1:].simpleString() == "struct<b:double>"
+
+
+def test_struct_type_nested_types_are_kept_as_pyspark_keeps_them():
+    # As PySpark's attributes: dataType, elementType, keyType and valueType are the same object
+    # each time, and an edit of a nested type, in place or through its parent, is seen by the
+    # outer type: its json, simpleString, equality and pickling, and a walk of its fields.
+    def nested():
+        return T.StructType([
+            T.StructField("s", T.StructType([T.StructField("x", T.IntegerType())])),
+            T.StructField("a", T.ArrayType(T.StructType([T.StructField("y", T.IntegerType())]))),
+            T.StructField("m", T.MapType(
+                T.StringType(), T.StructType([T.StructField("z", T.IntegerType())]))),
+        ])
+
+    st = nested()
+    assert st["s"].dataType is st["s"].dataType
+    assert st["a"].dataType.elementType is st["a"].dataType.elementType
+    assert st["m"].dataType.valueType is st["m"].dataType.valueType
+    element = T.StringType()
+    assert T.ArrayType(element).elementType is element
+    assert T.MapType(element, element).keyType is element
+
+    def walk(schema, nullable):
+        for field in schema.fields:
+            field.nullable = nullable
+            if isinstance(field.dataType, T.StructType):
+                walk(field.dataType, nullable)
+
+    walked = nested()
+    walk(walked, False)
+    assert walked.json().count('"nullable":false') == 4
+    assert walked.simpleString() == "struct<s:struct<x:int>,a:array<struct<y:int>>,m:map<string,struct<z:int>>>"
+
+    edited = nested()
+    edited["a"].dataType.elementType.fields[0].nullable = False
+    edited["m"].dataType.valueType.fields[0].nullable = False
+    assert edited.json().count('"nullable":false') == 2
+    assert edited == T.StructType(list(edited.fields))
+    assert pickle.loads(pickle.dumps(edited)).json() == edited.json()
+    assert hash(edited) == hash(T.StructType(list(edited.fields)))
+
+
 def test_struct_type_introspection():
     """StructType.fields / names / __getitem__ / __iter__ / __len__ + chainable add."""
     st = T.StructType(

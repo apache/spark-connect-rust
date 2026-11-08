@@ -1276,6 +1276,21 @@ def test_udfs_that_capture_functions_pickle_them_by_name_as_pyspark(session):
     )
 
 
+def test_create_dataframe_with_a_schema_edited_in_place(session):
+    # As PySpark: the nullable of the fields of a StructType is set in place, and a field is
+    # added with add(), which keeps the names in step; the DataFrame has the schema of the struct.
+    from pyspark.sql.types import DoubleType, LongType, StringType, StructField, StructType
+
+    schema = StructType([StructField("a", LongType()), StructField("b", StringType())])
+    for field in schema.fields:
+        field.nullable = False
+    schema.add("c", DoubleType(), False)
+    df = session.createDataFrame([(1, "x", 2.0)], schema)
+    assert df.schema.simpleString() == "struct<a:bigint,b:string,c:double>"
+    assert [f.nullable for f in df.schema.fields] == [False, False, False]
+    assert df.collect() == [Row(a=1, b="x", c=2.0)]
+
+
 def test_create_dataframe_from_empty_arrow_table(session):
     empty = pa.table({"a": pa.array([], pa.int64()), "b": pa.array([], pa.string())})
     df = session.createDataFrame(empty, "a long, b string")
