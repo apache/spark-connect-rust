@@ -65,8 +65,10 @@ omit =
     */pyspark/sql/connect/logging.py
     */pyspark/sql/connect/_typing.py
     */pyspark/sql/connect/conversion.py
+    # The native extension and its embedded Row source, which has a synthetic filename.
     */pyspark/_pyspark*
     */pyspark/_row.py
+    # Test helpers.
     */tests/*
 
 [report]
