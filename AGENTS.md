@@ -244,8 +244,8 @@ Vendor the ones we don't have a Rust implementation for.
   and server-gated `tests/e2e_*.rs` (they check `std::env::var("SPARK_REMOTE")`).
 - **Python drop-in**: `python/.coveragerc` scopes to the hand-written shim
   (omits vendored/generated/Rust-only). The embedded `crates/pyspark-rs/src/row.py`
-  executes under a synthetic filename outside this coverage scope; its behavior is
-  exercised by the Row tests and its source is included in Ruff. Run:
+  runs as `pyspark/_row.py` without a file at that path and is explicitly omitted;
+  Row tests exercise its behavior and Ruff checks its source. Run:
   ```
   cd python && PYTHONPATH=$(pwd) python -m coverage run --rcfile=.coveragerc \
     -m pytest tests/test_dropin_offline.py && python -m coverage report --rcfile=.coveragerc
