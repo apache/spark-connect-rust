@@ -1684,6 +1684,22 @@ def test_apply_in_pandas_with_state_runs_as_pyspark(session, tmp_path):
         session.conf.unset("spark.sql.shuffle.partitions")
 
 
+def test_map_functions_reject_a_non_struct_return_type_before_the_server(session):
+    # As PySpark's, a map or group function whose return type is not a struct raises on the
+    # client when it is built, so the server never sees the plan.
+    from pyspark.errors import PySparkTypeError
+
+    df = session.range(2)
+    with pytest.raises(PySparkTypeError) as e:
+        df.mapInPandas(lambda frames: frames, "long")
+    assert e.value.getCondition() == "INVALID_RETURN_TYPE_FOR_PANDAS_UDF"
+    with pytest.raises(PySparkTypeError) as e:
+        df.groupBy("id").applyInArrow(lambda table: table, "long")
+    assert e.value.getCondition() == "INVALID_RETURN_TYPE_FOR_ARROW_UDF"
+    assert e.value.getMessageParameters()["return_type"] == "LongType()"
+    assert df.mapInPandas(lambda frames: frames, "id long").collect() == [Row(id=0), Row(id=1)]
+
+
 def test_variant_spatial_and_user_defined_values_round_trip_as_pyspark(session):
     # As PySpark's: createDataFrame sends a VariantVal, a Geometry, a Geography and a value of
     # a user-defined type, and collects them as they are.
