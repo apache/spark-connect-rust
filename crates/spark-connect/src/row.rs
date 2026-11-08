@@ -42,7 +42,10 @@ pub enum Value {
     /// representable by Python's datetime.timedelta without nanosecond conversion.
     /// Display uses raw microseconds, like Date and Timestamp use their raw units.
     DayTimeInterval(i64),
-    /// Decimal (string value with optional precision and scale)
+    /// Decimal text in fixed-point or scientific notation, with optional precision and scale.
+    /// Text passed to `create_dataframe` must fit the declared precision and scale exactly.
+    /// Callers that rescale, such as Python local-row conversion, do so before building
+    /// this value.
     Decimal {
         value: String,
         precision: Option<i32>,
