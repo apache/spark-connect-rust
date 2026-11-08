@@ -7625,7 +7625,7 @@ def test_pandas_tuple_field_lookup_propagates_errors(mock_connect):
         )
 
 
-# Exact list/tuple conversion and separate-process input IPC regressions.
+# Exact list/tuple conversion and pandas input IPC regressions.
 from datetime import date as container_input_date, datetime as container_input_datetime
 from decimal import Decimal as ContainerInputDecimal
 
