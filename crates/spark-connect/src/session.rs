@@ -596,9 +596,9 @@ impl SparkSession {
 
     /// The local relation of `batch`: inline, without reading the server's configuration, when
     /// it is smaller than [`LOCAL_RELATION_SETTINGS_BYTES`]; otherwise as the Arrow importer
-    /// sends one, which reads the server's local-relation settings and uploads the data as
-    /// cache artifacts at `spark.sql.session.localRelationCacheThreshold`, as PySpark does. A
-    /// single gRPC message cannot carry a relation beyond the server's message size limit.
+    /// sends one, which reads the server's local-relation settings and applies the cache
+    /// threshold and the size limit, as PySpark does. A single gRPC message cannot carry a
+    /// relation beyond the server's message size limit.
     fn local_relation(
         &self,
         batch: arrow::record_batch::RecordBatch,
@@ -1243,11 +1243,13 @@ fn row_width_mismatch(row_index: usize, actual: usize, expected: usize) -> Spark
 /// Convert Arrow RecordBatch data to IPC bytes.
 /// Used by createDataFrame to package local data.
 /// The size of a local relation, in Arrow data, from which `createDataFrame` reads the
-/// server's local-relation settings to decide whether to upload it, well below the default
-/// gRPC message size limit of the server (128 MiB). Smaller relations are sent inline without
-/// that RPC, even above `spark.sql.session.localRelationCacheThreshold` (1 MiB by default),
-/// at which PySpark uploads them.
-const LOCAL_RELATION_SETTINGS_BYTES: usize = 32 << 20;
+/// server's local-relation settings and sends the relation as the Arrow importer does: inline
+/// below `spark.sql.session.localRelationCacheThreshold`, uploaded at it, and failing past
+/// `spark.sql.session.localRelationSizeLimit`, as PySpark does. Smaller relations are sent
+/// inline without that RPC: 64 KiB is far below the server's gRPC message size limit (128 MiB
+/// by default), so a relation this small cannot be too large to send, and the RPC would cost
+/// more than the transfer.
+const LOCAL_RELATION_SETTINGS_BYTES: usize = 64 << 10;
 
 fn rows_to_arrow_batch(
     rows: &[Row],

@@ -541,6 +541,33 @@ def test_stream_reader_checks_its_arguments_as_pyspark(session, tmp_path):
     assert e.value.getCondition() == "_LEGACY_ERROR_TEMP_1189"
 
 
+def test_local_relations_of_64_kib_follow_the_size_limit_as_pyspark(session):
+    # Local rows and pandas frames of 64 KiB or more read the local-relation settings of a
+    # session, so they fail past its size limit, as PySpark does, whichever schema form.
+    import numpy as np
+    import pandas as pd
+
+    rows = [("y" * 100, i) for i in range(1000)]
+    frame = pd.DataFrame({"v": ["y" * 100] * 1000, "i": np.arange(1000, dtype=np.int64)})
+    schema = StructType([StructField("v", StringType()), StructField("i", LongType())])
+    ddl = "v string, i long"
+    spark = session.newSession()
+    try:
+        spark.conf.set("spark.sql.session.localRelationCacheThreshold", "1")
+        spark.conf.set("spark.sql.session.localRelationSizeLimit", "100")
+        for data in (rows, frame):
+            for form in (schema, ddl):
+                with pytest.raises(AnalysisException) as e:
+                    spark.createDataFrame(data, form)
+                assert e.value.getCondition() == "LOCAL_RELATION_SIZE_LIMIT_EXCEEDED"
+    finally:
+        spark.stop()
+    # The same data works with the default settings.
+    for data in (rows, frame):
+        for form in (schema, ddl):
+            assert session.createDataFrame(data, form).count() == 1000
+
+
 def test_instr_and_regexp_replace_apply_their_optional_arguments(session):
     # Column b holds "c", so the literal "b" and the column b find different positions.
     df = session.createDataFrame([("abcabc", "c", "a", "z")], ["s", "b", "p", "r"])
