@@ -1587,6 +1587,28 @@ def test_reader_and_writer_check_their_arguments_as_pyspark(session, tmp_path):
     assert e.value.getCondition() == "JVM_ATTRIBUTE_NOT_SUPPORTED"
     assert session.read.text(None).count() == 0
 
+
+def test_readers_and_writers_set_their_options_of_set_opts_as_pyspark(session, tmp_path):
+    # As PySpark's OptionUtils._set_opts, which pandas-on-Spark's to_csv and to_json call: the
+    # schema of a reader, and the options that are not None.
+    df = session.createDataFrame([(1, "a"), (2, None)], ["x", "y"])
+    writer = df.write.mode("overwrite")
+    assert writer._set_opts(sep="|", header=True, nullValue="NA", quote=None) is None
+    writer.format("csv").save(str(tmp_path / "out"))
+    lines = sorted(
+        line for path in (tmp_path / "out").glob("*.csv") for line in path.read_text().splitlines()
+    )
+    assert lines == ["1|a", "2|NA", "x|y", "x|y"]
+    reader = session.read
+    reader._set_opts(schema="x INT, y STRING", sep="|", header=True, nullValue="NA", mode=None)
+    assert sorted(reader.format("csv").load(str(tmp_path / "out")).collect()) == [
+        Row(x=1, y="a"), Row(x=2, y=None),
+    ]
+    with pytest.raises(AttributeError):
+        df.write._set_opts(schema="x INT")
+    assert callable(session.readStream._set_opts) and callable(df.writeTo("t")._set_opts)
+
+
 def test_writer_v2_takes_its_arguments_as_pyspark(session):
     # As PySpark's DataFrameWriterV2: tableProperty(property, None) leaves the property unset,
     # partitionedBy raises NOT_EXPECTED_TYPE of col for a list, and overwrite takes a column

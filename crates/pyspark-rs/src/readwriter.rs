@@ -252,8 +252,40 @@ fn apply_reader_schema(r: DataFrameReader, v: &Bound<'_, PyAny>) -> PyResult<Dat
     Ok(r.schema(reader_schema(v)?))
 }
 
+/// The `_set_opts` of the readers and writers, as PySpark's `OptionUtils._set_opts`: the schema of
+/// `slf`, if any, and its options of `options` that are not None, through its own `schema` and
+/// `option`, which convert them and raise their errors.
+pub(crate) fn set_opts(
+    slf: &Bound<'_, PyAny>,
+    schema: Option<&Bound<'_, PyAny>>,
+    options: Option<&Bound<'_, pyo3::types::PyDict>>,
+) -> PyResult<()> {
+    if let Some(schema) = schema.filter(|schema| !schema.is_none()) {
+        slf.call_method1("schema", (schema,))?;
+    }
+    if let Some(options) = options {
+        for (key, value) in options.iter() {
+            if !value.is_none() {
+                slf.call_method1("option", (key, value))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[pymethods]
 impl PyDataFrameReader {
+    /// Set the schema, if any, and the options of `options` that are not None, through its own
+    /// `schema` and `option`, as PySpark's `OptionUtils._set_opts`, which pandas-on-Spark calls.
+    #[pyo3(signature = (schema=None, **options))]
+    fn _set_opts(
+        slf: &Bound<'_, Self>,
+        schema: Option<Bound<'_, PyAny>>,
+        options: Option<Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<()> {
+        crate::readwriter::set_opts(slf.as_any(), schema.as_ref(), options.as_ref())
+    }
+
     /// Set the source format (e.g. "parquet", "json", "csv"). As PySpark's, None unsets it, so
     /// that the server reads its default source.
     fn format<'py>(mut slf: PyRefMut<'py, Self>, source: Option<&str>) -> PyRefMut<'py, Self> {
