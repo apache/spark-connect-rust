@@ -8610,11 +8610,8 @@ def test_pandas_nested_decimals_use_every_observed_scale(mock_connect, layout, s
     assert actual.equals(expected)
 
 
-@pytest.mark.parametrize(
-    "scale, expected_scale",
-    [(38, 38), (39, 39), (50, 50), (128, 128), (5_000_000_000, 705_032_704)],
-)
-def test_pandas_nested_decimal_scale_bounds(mock_connect, scale, expected_scale):
+@pytest.mark.parametrize("scale", [38, 39, 50, 128, 5_000_000_000])
+def test_pandas_nested_decimal_scale_bounds(mock_connect, scale):
     from decimal import Decimal
     import pyarrow as pa
 
@@ -8623,10 +8620,9 @@ def test_pandas_nested_decimal_scale_bounds(mock_connect, scale, expected_scale)
     if scale > 38:
         pd = pytest.importorskip("pandas")
         frame = _RowPathFrame(pd)({"value": values}, dtype=object)
-        # Wide exponents retain the native fallback's inherited i32 scale representation.
         with pytest.raises(
             ValueError,
-            match=rf"^Decimal scale {expected_scale} is out of the range of DecimalType, up to 38$",
+            match=r"^Decimal scale is out of the range of DecimalType, up to 38$",
         ):
             spark.createDataFrame(frame)
         assert not service.execute_requests

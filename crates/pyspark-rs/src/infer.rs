@@ -157,6 +157,7 @@ impl Drop for DecimalQuanta {
 /// Return only the arguments needed by the selected call form, sharing the same context.
 fn decimal_quantum<'py>(
     py: Python<'py>,
+    decimal: &Bound<'py, PyType>,
     precision: i32,
     scale: i32,
     exact_c: bool,
@@ -172,7 +173,7 @@ fn decimal_quantum<'py>(
         Some(cached) => cached,
         None => {
             let module = py.import(intern!(py, "decimal"))?;
-            let exp = decimal_type(py)?.call1((format!("1E-{scale}"),))?;
+            let exp = decimal.call1((format!("1E-{scale}"),))?;
             // Read Context at construction time, so each conversion observes the current factory.
             let context = module.getattr(intern!(py, "Context"))?.call(
                 (),
@@ -1261,7 +1262,7 @@ pub(crate) fn convert(obj: &Bound<'_, PyAny>, dt: &DataType, nullable: bool) -> 
             // Exact C Decimals accept positional context; other values keep PySpark's
             // keyword call so subclass overrides and the pure-Python fallback retain it.
             let exact_c = is_exact_c_decimal(obj, c_decimal);
-            let quantized = match decimal_quantum(py, *precision, *scale, exact_c)? {
+            let quantized = match decimal_quantum(py, decimal, *precision, *scale, exact_c)? {
                 QuantizeCallArgs::Positional { exp, context } => {
                     obj.call_method1(intern!(py, "quantize"), (exp, py.None(), context))?
                 }
