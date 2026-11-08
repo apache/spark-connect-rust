@@ -3807,7 +3807,11 @@ mod cache_tests {
             .unwrap();
         let df = spark.range(3).unwrap();
         let cloned = df.clone();
-        let runtime = tokio::runtime::Runtime::new().unwrap();
+        // A current-thread runtime: the synchronous API cannot block in place in it.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
 
         // Calling the synchronous API inside a runtime panics during analysis.
         // A clone must still attempt analysis afterward, rather than returning
