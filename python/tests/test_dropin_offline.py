@@ -1311,6 +1311,42 @@ def test_sql_utils_reexports_the_exceptions_of_pyspark(mock_connect):
     assert "TABLE_OR_VIEW_NOT_FOUND" in str(error.value)
 
 
+def test_pickled_when_columns_chain_as_pyspark(mock_connect):
+    # As PySpark's CaseWhen: a pickled, cloudpickled or deep-copied when() Column keeps its CASE
+    # WHEN, so when() and otherwise() chain on it, and the chain sends the plan of the chain
+    # built without the pickling.
+    import copy
+
+    import cloudpickle
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    df = spark.range(1)
+
+    def sent_expression(dataframe):
+        # ExecutePlanRequest.plan=3, Plan.root=1, Relation.project=3, Project.expressions=3.
+        dataframe.collect()
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        return parse_message(parse_message(parse_message(plan)[3][0])[3][0])
+
+    def chain(when):
+        return when.when(F.col("id") > 5, "huge").otherwise("small")
+
+    direct = F.when(F.col("id") > 0, "big")
+    expected = sent_expression(df.select(chain(direct).alias("x")))
+    for copied in (pickle.loads(pickle.dumps(direct)),
+                   cloudpickle.loads(cloudpickle.dumps(direct)),
+                   copy.deepcopy(direct)):
+        assert repr(chain(copied)) == repr(chain(direct))
+        assert sent_expression(df.select(chain(copied).alias("x"))) == expected
+        # otherwise() of a pickled when(), and a when() after the chain, which PySpark rejects.
+        assert repr(copied.otherwise("n")) == repr(direct.otherwise("n"))
+        with pytest.raises(PySparkTypeError) as error:
+            copied.otherwise("n").when(F.col("id") > 0, "p")
+        assert error.value.getCondition() == "INVALID_WHEN_USAGE"
+
+
 def test_functions_build_columns():
     from pyspark.sql import functions as F
     c = F.col("id")

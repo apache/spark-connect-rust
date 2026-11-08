@@ -21,20 +21,36 @@ Column that a UDF or a ``foreachBatch`` function captures unpickles on a Python 
 server, whose PySpark has no Rust client, while ``pickle`` pickles the function by reference, of
 this module, on the client.
 """
-from typing import Any
+from typing import Any, List, Optional, Tuple
 
 
-def column_of(expression: bytes, rendered: str) -> Any:
+def column_of(
+    expression: bytes,
+    rendered: str,
+    branches: Optional[List[Tuple[Any, Any]]] = None,
+    else_value: Any = None,
+) -> Any:
     """The Column of ``expression``, the bytes of a ``spark.connect.Expression``, and of its
     rendering ``rendered``, which sends the expression as it is: of the Rust client, or, on a
     Python worker of the server, PySpark Connect's Column of the expression, as PySpark Connect's
-    Column of its expression unpickles there, so everything that it calls there is of PySpark."""
+    Column of its expression unpickles there, so everything that it calls there is of PySpark.
+    For a CASE WHEN, ``branches`` are the (condition, value) Columns of its branches and
+    ``else_value`` the Column of its else value, so that it is a CASE WHEN again."""
     try:
         from pyspark import _pyspark
     except ImportError:
         from pyspark.sql.connect import proto
         from pyspark.sql.connect.column import Column as ConnectColumn
-        from pyspark.sql.connect.expressions import Expression
+        from pyspark.sql.connect.expressions import CaseWhen, Expression
+
+        if branches is not None:
+            # As PySpark's CaseWhen of its branches and else value.
+            return ConnectColumn(
+                CaseWhen(
+                    [(condition._expr, value._expr) for condition, value in branches],
+                    None if else_value is None else else_value._expr,
+                )
+            )
 
         # Without annotations: the class body looks its names up by name, which cloudpickle
         # does not pickle with the function.
@@ -56,4 +72,4 @@ def column_of(expression: bytes, rendered: str) -> Any:
 
         return ConnectColumn(Sent(proto.Expression.FromString(expression), rendered))
 
-    return _pyspark.Column._of_expression(expression, rendered)
+    return _pyspark.Column._of_expression(expression, rendered, branches, else_value)
