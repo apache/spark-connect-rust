@@ -2862,6 +2862,57 @@ def test_collected_spatial_values_are_their_objects_as_pyspark():
     assert g(None) is None
 
 
+def test_spatial_types_are_parsed_of_their_json_as_pyspark():
+    # As PySpark's _parse_datatype_json_value, of the patterns of the JSON of the spatial types:
+    # the default CRS OGC:CRS84 and algorithm SPHERICAL without them, the CRSs of geo_utils and
+    # SRID:ANY of any case, and the errors of PySpark of the other forms.
+    from pyspark.errors import IllegalArgumentException, PySparkValueError
+    from pyspark.sql.types import _parse_datatype_json_string, _parse_datatype_json_value
+
+    valid = [
+        ("geometry", T.GeometryType(4326)),
+        ("geometry(OGC:CRS84)", T.GeometryType(4326)),
+        ("geometry(EPSG:3857)", T.GeometryType(3857)),
+        ("geometry(SRID:0)", T.GeometryType(0)),
+        ("geometry(srid:any)", T.GeometryType("ANY")),
+        ("geography", T.GeographyType(4326)),
+        ("geography(SPHERICAL)", T.GeographyType(4326)),
+        ("geography(OGC:CRS84, SPHERICAL)", T.GeographyType(4326)),
+        ("geography(SRID:ANY)", T.GeographyType("ANY")),
+    ]
+    for json, expected in valid:
+        assert _parse_datatype_json_value(json) == expected
+        assert _parse_datatype_json_string(expected.json()) == expected
+    invalid = [
+        ("geometry(4326)", PySparkValueError, "CANNOT_PARSE_DATATYPE"),
+        ("geometry()", PySparkValueError, "CANNOT_PARSE_DATATYPE"),
+        ("geometry(SRID:1)", IllegalArgumentException, "ST_INVALID_CRS_VALUE"),
+        ("geometry(ocg:crs84)", IllegalArgumentException, "ST_INVALID_CRS_VALUE"),
+        ("geography(4326)", IllegalArgumentException, "ST_INVALID_ALGORITHM_VALUE"),
+        ("geography(EPSG:3857)", IllegalArgumentException, "ST_INVALID_CRS_VALUE"),
+        ("geography(OGC:CRS84, spherical)", IllegalArgumentException, "ST_INVALID_ALGORITHM_VALUE"),
+        ("geography(SRID:0,)", PySparkValueError, "CANNOT_PARSE_DATATYPE"),
+    ]
+    for json, error, condition in invalid:
+        with pytest.raises(error) as e:
+            _parse_datatype_json_value(json)
+        assert e.value.getCondition() == condition
+    # Of the classmethods `_from_crs` of the types, of which PySpark's JSON parses them.
+    assert T.GeometryType._from_crs("EPSG:3857") == T.GeometryType(3857)
+    assert T.GeometryType._from_crs("srid:ANY") == T.GeometryType("ANY")
+    assert T.GeographyType._from_crs("OGC:CRS84", "SPHERICAL") == T.GeographyType(4326)
+    for make, condition in [
+        (lambda: T.GeometryType._from_crs("EPSG:4326"), "ST_INVALID_CRS_VALUE"),
+        (lambda: T.GeographyType._from_crs("SRID:0", "SPHERICAL"), "ST_INVALID_CRS_VALUE"),
+        (lambda: T.GeographyType._from_crs("OGC:CRS84", "PLANAR"), "ST_INVALID_ALGORITHM_VALUE"),
+    ]:
+        with pytest.raises(IllegalArgumentException) as e:
+            make()
+        assert e.value.getCondition() == condition
+
+
+
+
 def test_variant_and_geo_values():
     from pyspark.sql.types import VariantVal, Geometry, Geography
     v = VariantVal.parseJson('{"a": 1, "b": [2, 3]}')
