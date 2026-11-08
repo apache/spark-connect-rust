@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use spark_connect_core::error::{Result, SparkError};
+use spark_connect_core::error::{Result, SparkError, SparkErrorKind};
 use spark_connect_core::runtime::{block_on, get_runtime};
 use spark_connect_proto as proto;
 
@@ -41,6 +41,47 @@ pub(crate) type ExecutionSlot = Arc<Mutex<Option<ExecutionInfo>>>;
 
 /// Iterator over rows from a DataFrame, yielded lazily as the server streams results.
 ///
+/// The options of an as-of join, as `DataFrame._joinAsOf` takes them.
+///
+/// `on` and `using_columns` are the join condition: a condition, or names that both sides
+/// share. PySpark sets at most one of them. The defaults are those of PySpark: an inner join,
+/// exact matches allowed, and the `"backward"` direction.
+#[derive(Debug, Clone)]
+pub struct AsOfJoinOptions {
+    /// The as-of column of this DataFrame.
+    pub left_as_of: Column,
+    /// The as-of column of the other DataFrame.
+    pub right_as_of: Column,
+    /// The join condition, sent as `join_expr`.
+    pub on: Option<Column>,
+    /// Column names that both sides share, sent as `using_columns`.
+    pub using_columns: Vec<String>,
+    /// The join type, such as `"inner"` or `"left"`, sent as it is.
+    pub join_type: String,
+    /// The as-of tolerance: the largest distance a match may have.
+    pub tolerance: Option<Column>,
+    /// Whether a row may match a row with the same as-of value.
+    pub allow_exact_matches: bool,
+    /// `"backward"`, `"forward"` or `"nearest"`, sent as it is.
+    pub direction: String,
+}
+
+impl AsOfJoinOptions {
+    /// Options joining on `left_as_of` and `right_as_of`, with the defaults of PySpark.
+    pub fn new(left_as_of: Column, right_as_of: Column) -> Self {
+        Self {
+            left_as_of,
+            right_as_of,
+            on: None,
+            using_columns: Vec::new(),
+            join_type: "inner".to_string(),
+            tolerance: None,
+            allow_exact_matches: true,
+            direction: "backward".to_string(),
+        }
+    }
+}
+
 /// Returned by `DataFrame::to_local_iterator()`, this iterator consumes the ExecutePlan
 /// response stream incrementally and yields Row objects without buffering the entire result.
 pub struct LocalRowIterator {
@@ -530,6 +571,35 @@ impl DataFrame {
             direction: direction.to_string(),
         };
         DataFrame::new(self.session.clone(), plan)
+    }
+
+    /// As-of join with another DataFrame: each row of this DataFrame is matched with the
+    /// nearest row of `right` on the as-of columns, as `DataFrame._joinAsOf` does.
+    ///
+    /// Errors with `SESSION_NOT_SAME` when `right` is of another session. The join type and
+    /// the direction are sent as they are; the server checks them.
+    pub fn as_of_join(&self, right: &DataFrame, options: AsOfJoinOptions) -> Result<DataFrame> {
+        // As PySpark's `_check_same_session`.
+        if self.session.client().session_id() != right.session.client().session_id() {
+            return Err(SparkError::classed(
+                SparkErrorKind::SessionNotSame,
+                "SESSION_NOT_SAME",
+                &[],
+            ));
+        }
+        let plan = LogicalPlan::AsOfJoin {
+            left: Arc::clone(&self.plan),
+            right: Arc::clone(&right.plan),
+            left_as_of: options.left_as_of,
+            right_as_of: options.right_as_of,
+            on: options.on,
+            using_columns: options.using_columns,
+            join_type: options.join_type,
+            tolerance: options.tolerance,
+            allow_exact_matches: options.allow_exact_matches,
+            direction: options.direction,
+        };
+        Ok(DataFrame::new(self.session.clone(), plan))
     }
 
     /// Cross join.
@@ -2898,12 +2968,12 @@ impl<'a> ArrowValueLayout<'a> {
             }
             // Intervals likewise have no dedicated Value variant, so render as strings.
             ArrowValueDecoder::IntervalYearMonth(arr) => {
-                let months = arr.value(index);
-                Ok(Value::String(format!(
-                    "{}-{}",
-                    months / 12,
-                    (months % 12).abs()
-                )))
+                // The sign goes on the years, as Spark's `toYearMonthIntervalString`
+                // does, so -1 month is "-0-1" and not "0-1".
+                let months = arr.value(index) as i64;
+                let sign = if months < 0 { "-" } else { "" };
+                let abs = months.abs();
+                Ok(Value::String(format!("{sign}{}-{}", abs / 12, abs % 12)))
             }
             ArrowValueDecoder::IntervalDayTime(arr) => {
                 let v = arr.value(index);
@@ -4312,6 +4382,82 @@ mod plan_construction_tests {
         assert_eq!(joined.plan.to_proto(), expected);
     }
 
+    /// As PySpark's `AsOfJoin` plan: the as-of columns, the names, the join type, the tolerance,
+    /// whether exact matches are allowed, and the direction are each sent.
+    #[test]
+    fn as_of_join_sends_every_field_of_the_as_of_join() {
+        use crate::functions::col;
+        use proto::relation::RelType;
+
+        let spark = session();
+        let left = spark.range(3).unwrap();
+        let right = spark.range(4).unwrap();
+        let options = AsOfJoinOptions {
+            using_columns: vec!["id".to_string()],
+            join_type: "left".to_string(),
+            tolerance: Some(crate::column::lit(1)),
+            allow_exact_matches: false,
+            direction: "forward".to_string(),
+            ..AsOfJoinOptions::new(col("id"), col("id"))
+        };
+        let joined = left.as_of_join(&right, options).unwrap();
+        let relation = joined.plan.to_proto();
+        let Some(RelType::AsOfJoin(as_of)) = &relation.rel_type else {
+            panic!("expected AsOfJoin: {relation:?}");
+        };
+        assert_eq!(as_of.left.as_deref(), Some(&left.plan.to_proto()));
+        assert_eq!(as_of.right.as_deref(), Some(&right.plan.to_proto()));
+        assert_eq!(as_of.left_as_of, Some(col("id").to_proto()));
+        assert_eq!(as_of.right_as_of, Some(col("id").to_proto()));
+        assert_eq!(as_of.join_expr, None);
+        assert_eq!(as_of.using_columns, vec!["id".to_string()]);
+        assert_eq!(as_of.join_type, "left");
+        assert_eq!(as_of.tolerance, Some(crate::column::lit(1).to_proto()));
+        assert!(!as_of.allow_exact_matches);
+        assert_eq!(as_of.direction, "forward");
+    }
+
+    /// The defaults of PySpark's `_joinAsOf` (inner, exact matches, backward), and a condition
+    /// sent as `join_expr` instead of names.
+    #[test]
+    fn as_of_join_defaults_and_sends_a_condition_as_join_expr() {
+        let spark = session();
+        let left = spark.range(3).unwrap();
+        let right = spark.range(4).unwrap();
+        let condition = left.col("id").eq(right.col("id"));
+        let options = AsOfJoinOptions {
+            on: Some(condition.clone()),
+            ..AsOfJoinOptions::new(left.col("id"), right.col("id"))
+        };
+        let joined = left.as_of_join(&right, options).unwrap();
+        let relation = joined.plan.to_proto();
+        let Some(proto::relation::RelType::AsOfJoin(as_of)) = &relation.rel_type else {
+            panic!("expected AsOfJoin: {relation:?}");
+        };
+        assert_eq!(as_of.join_expr, Some(condition.to_proto()));
+        assert!(as_of.using_columns.is_empty());
+        assert_eq!(as_of.join_type, "inner");
+        assert_eq!(as_of.tolerance, None);
+        assert!(as_of.allow_exact_matches);
+        assert_eq!(as_of.direction, "backward");
+    }
+
+    /// As PySpark's `_check_same_session`: a DataFrame of another session is not joined.
+    #[test]
+    fn as_of_join_rejects_a_dataframe_of_another_session() {
+        use crate::functions::col;
+
+        let spark = session();
+        let left = spark.range(3).unwrap();
+        let right = spark.new_session().range(3).unwrap();
+        let options = AsOfJoinOptions::new(col("id"), col("id"));
+        let error = left
+            .as_of_join(&right, options)
+            .err()
+            .expect("a session mismatch");
+        assert_eq!(error.get_error_class().as_deref(), Some("SESSION_NOT_SAME"));
+    }
+
     #[test]
     fn observed_metrics_set_the_observations_of_their_relations() {
         use crate::observation::Observation;
@@ -5221,6 +5367,47 @@ mod arrow_value_tests {
         assert!(matches!(arrow_value_at(&dt, 0).unwrap(), Value::String(_)));
         let mdn = IntervalMonthDayNanoArray::from(vec![IntervalMonthDayNano::new(1, 2, 3)]);
         assert!(matches!(arrow_value_at(&mdn, 0).unwrap(), Value::String(_)));
+    }
+
+    #[test]
+    fn year_month_interval_keeps_sign() {
+        let months = [
+            0,
+            1,
+            -1,
+            11,
+            -11,
+            12,
+            -12,
+            13,
+            -13,
+            24,
+            -24,
+            i32::MAX,
+            i32::MIN,
+        ];
+        let expected = [
+            "0-0",
+            "0-1",
+            "-0-1",
+            "0-11",
+            "-0-11",
+            "1-0",
+            "-1-0",
+            "1-1",
+            "-1-1",
+            "2-0",
+            "-2-0",
+            "178956970-7",
+            "-178956970-8",
+        ];
+        for (m, want) in months.into_iter().zip(expected) {
+            assert_eq!(
+                arrow_value_at(&IntervalYearMonthArray::from(vec![m]), 0).unwrap(),
+                Value::String(want.to_string()),
+                "months = {m}"
+            );
+        }
     }
 
     #[test]

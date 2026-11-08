@@ -277,7 +277,7 @@ fn struct_to_ddl_tree_and_nullable() {
             },
         ],
     };
-    assert_eq!(st.to_ddl().unwrap(), "a int,b string NOT NULL");
+    assert_eq!(st.to_ddl().unwrap(), "a INT,b STRING NOT NULL");
     let tree = st.tree_string().unwrap();
     assert!(tree.starts_with("root\n"));
     assert!(tree.contains("a: integer (nullable = true)"));
@@ -291,6 +291,229 @@ fn struct_to_ddl_tree_and_nullable() {
     // to_ddl / tree_string reject non-structs.
     assert!(DataType::Integer.to_ddl().is_err());
     assert!(DataType::Integer.tree_string().is_err());
+}
+
+/// The expected strings are the output of `StructType.toDDL()` of PySpark 4.3.0 on a server.
+#[test]
+fn struct_to_ddl_quotes_names_and_writes_sql_types() {
+    use spark_connect::types::StructField;
+    use std::collections::BTreeMap;
+
+    fn field(name: &str, data_type: DataType, nullable: bool) -> StructField {
+        StructField {
+            name: name.to_string(),
+            data_type,
+            nullable,
+            metadata: BTreeMap::new(),
+        }
+    }
+    fn commented(name: &str, data_type: DataType, nullable: bool, comment: &str) -> StructField {
+        let mut f = field(name, data_type, nullable);
+        f.metadata
+            .insert("comment".to_string(), serde_json::json!(comment));
+        f
+    }
+    fn ddl(fields: Vec<StructField>) -> String {
+        DataType::Struct { fields }.to_ddl().unwrap()
+    }
+    let int = || DataType::Integer;
+    let string = || DataType::String {
+        collation: "UTF8_BINARY".to_string(),
+    };
+
+    // Names are quoted unless they are `[a-zA-Z_][a-zA-Z0-9_]*`; a backtick is doubled.
+    assert_eq!(
+        ddl(vec![
+            field("my col", int(), true),
+            field("a`b", int(), true),
+            field("a.b", int(), true),
+            field("1abc", int(), true),
+            field("123", int(), true),
+            field("_x", int(), true),
+            field("ünï", int(), true),
+        ]),
+        "`my col` INT,`a``b` INT,`a.b` INT,`1abc` INT,`123` INT,_x INT,`ünï` INT"
+    );
+    assert_eq!(
+        ddl(vec![commented("x", int(), false, "it's")]),
+        "x INT NOT NULL COMMENT 'it\\'s'"
+    );
+    // Nested struct fields are written as `name: TYPE`, with the same quoting and suffixes.
+    assert_eq!(
+        ddl(vec![field(
+            "s",
+            DataType::Struct {
+                fields: vec![commented("my col", int(), false, "c")],
+            },
+            true,
+        )]),
+        "s STRUCT<`my col`: INT NOT NULL COMMENT 'c'>"
+    );
+    assert_eq!(
+        ddl(vec![field(
+            "arr",
+            DataType::Array {
+                element_type: Box::new(DataType::Struct {
+                    fields: vec![field("a b", int(), true)],
+                }),
+                contains_null: true,
+            },
+            true,
+        )]),
+        "arr ARRAY<STRUCT<`a b`: INT>>"
+    );
+    assert_eq!(
+        ddl(vec![field(
+            "m",
+            DataType::Map {
+                key_type: Box::new(string()),
+                value_type: Box::new(DataType::Struct {
+                    fields: vec![field("k`v", DataType::Long, false)],
+                }),
+                value_contains_null: true,
+            },
+            true,
+        )]),
+        "m MAP<STRING, STRUCT<`k``v`: BIGINT NOT NULL>>"
+    );
+    assert_eq!(
+        ddl(vec![field(
+            "a",
+            DataType::Array {
+                element_type: Box::new(DataType::Struct {
+                    fields: vec![commented("q", string(), true, "x'y")],
+                }),
+                contains_null: true,
+            },
+            true,
+        )]),
+        "a ARRAY<STRUCT<q: STRING COMMENT 'x\\'y'>>"
+    );
+    // Atomic types are written as `DataType.sql`.
+    assert_eq!(
+        ddl(vec![
+            field(
+                "d",
+                DataType::Decimal {
+                    precision: 10,
+                    scale: 2
+                },
+                true
+            ),
+            field("ntz", DataType::TimestampNtz, true),
+            field(
+                "ym",
+                DataType::YearMonthInterval {
+                    start_field: 0,
+                    end_field: 1
+                },
+                true
+            ),
+            field(
+                "dt",
+                DataType::DayTimeInterval {
+                    start_field: 0,
+                    end_field: 3
+                },
+                true
+            ),
+            field("ch", DataType::Char { length: 3 }, true),
+            field("vc", DataType::Varchar { length: 4 }, true),
+            field("tm", DataType::Time { precision: 3 }, true),
+            field("bin", DataType::Binary, true),
+            field("b", DataType::Boolean, true),
+            field("v", DataType::Variant, true),
+        ]),
+        "d DECIMAL(10,2),ntz TIMESTAMP_NTZ,ym INTERVAL YEAR TO MONTH,dt INTERVAL DAY TO SECOND,\
+         ch CHAR(3),vc VARCHAR(4),tm TIME(3),bin BINARY,b BOOLEAN,v VARIANT"
+    );
+    // A non-default collation is written as `STRING COLLATE <name>`.
+    assert_eq!(
+        ddl(vec![field(
+            "c",
+            DataType::String {
+                collation: "UTF8_LCASE".to_string(),
+            },
+            true,
+        )]),
+        "c STRING COLLATE UTF8_LCASE"
+    );
+    assert_eq!(
+        ddl(vec![field(
+            "s",
+            DataType::Struct {
+                fields: vec![field(
+                    "c d",
+                    DataType::String {
+                        collation: "UNICODE_CI".to_string(),
+                    },
+                    true,
+                )],
+            },
+            true,
+        )]),
+        "s STRUCT<`c d`: STRING COLLATE UNICODE_CI>"
+    );
+}
+
+#[test]
+fn from_ddl_canonicalizes_the_collation_name() {
+    // The canonical names of the server of PySpark 4.3.0, from `createDataFrame([], "c STRING
+    // COLLATE <name>")`. `en_us` is rejected by the server (COLLATION_INVALID_NAME), so `from_ddl`
+    // only canonicalizes its case, `en_US`.
+    let cases = [
+        ("utf8_lcase", "UTF8_LCASE"),
+        ("Unicode_Ci_Ai", "UNICODE_CI_AI"),
+        ("unicode_rtrim", "UNICODE_RTRIM"),
+        ("utf8_lcase_rtrim", "UTF8_LCASE_RTRIM"),
+        ("sr_ci_ai", "sr_CI_AI"),
+        ("SR_CI_AI", "sr_CI_AI"),
+        ("sr_CI_AI", "sr_CI_AI"),
+        ("EN", "en"),
+        ("de_ci", "de_CI"),
+        ("zh_hant_hkg", "zh_Hant_HKG"),
+        ("SR_CYRL_SRB_CI_AI", "sr_Cyrl_SRB_CI_AI"),
+        ("en_us", "en_US"),
+    ];
+    for (written, canonical) in cases {
+        assert_eq!(
+            DataType::from_ddl(&format!("STRING COLLATE {written}")).unwrap(),
+            DataType::String {
+                collation: canonical.to_string(),
+            },
+            "STRING COLLATE {written}"
+        );
+    }
+    match DataType::from_ddl("a STRING COLLATE UTF8_LCASE").unwrap() {
+        DataType::Struct { fields } => assert_eq!(
+            fields[0].data_type,
+            DataType::String {
+                collation: "UTF8_LCASE".to_string(),
+            }
+        ),
+        other => panic!("expected struct, got {other:?}"),
+    }
+    assert_eq!(
+        DataType::from_ddl("array<string collate UNICODE_CI>").unwrap(),
+        DataType::Array {
+            element_type: Box::new(DataType::String {
+                collation: "UNICODE_CI".to_string(),
+            }),
+            contains_null: true,
+        }
+    );
+    // The DDL written by `to_ddl` parses back to the same collation.
+    let st = DataType::Struct {
+        fields: vec![spark_connect::types::StructField {
+            name: "a".to_string(),
+            data_type: DataType::String {
+                collation: "UTF8_LCASE".to_string(),
+            },
+            nullable: true,
+            metadata: Default::default(),
+        }],
+    };
+    assert_eq!(DataType::from_ddl(&st.to_ddl().unwrap()).unwrap(), st);
 }
 
 #[test]

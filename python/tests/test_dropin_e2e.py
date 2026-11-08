@@ -306,6 +306,66 @@ def test_renames_are_applied_in_their_order_as_pyspark(session):
 
 
 
+def test_join_as_of_and_merge_asof_give_the_rows_of_pyspark(session):
+    # As PySpark: _joinAsOf matches each row of the left DataFrame with the nearest row of the
+    # right one on the as-of column, as the direction, exact matches and tolerance say, and
+    # pandas-on-Spark's merge_asof, which calls it, gives the same rows.
+    import math
+
+    pytest.importorskip("pandas")
+    import pyspark.pandas as ps
+    from pyspark.sql import functions as F
+
+    def rows(values):
+        return sorted(
+            tuple("nan" if isinstance(v, float) and math.isnan(v) else v for v in row)
+            for row in values
+        )
+
+    left = session.createDataFrame(
+        [(1, 1.0, "a"), (3, 3.0, "c"), (5, 5.0, "b")], "t int, x double, k string")
+    right = session.createDataFrame(
+        [(2, 2.0, "x"), (3, 3.5, "c"), (4, 4.0, "y")], "t int, y double, k string")
+    joined = rows(left._joinAsOf(right, "t", "t", how="left").collect())
+    assert joined == [
+        (1, 1.0, "a", None, None, None), (3, 3.0, "c", 3, 3.5, "c"), (5, 5.0, "b", 4, 4.0, "y")]
+    assert rows(left._joinAsOf(right, "t", "t", how="left", allowExactMatches=False).collect()) == [
+        (1, 1.0, "a", None, None, None), (3, 3.0, "c", 2, 2.0, "x"), (5, 5.0, "b", 4, 4.0, "y")]
+    assert rows(left._joinAsOf(right, "t", "t", how="left", direction="forward").collect()) == [
+        (1, 1.0, "a", 2, 2.0, "x"), (3, 3.0, "c", 3, 3.5, "c"), (5, 5.0, "b", None, None, None)]
+    assert rows(left._joinAsOf(right, "t", "t", how="left", direction="nearest").collect()) == [
+        (1, 1.0, "a", 2, 2.0, "x"), (3, 3.0, "c", 3, 3.5, "c"), (5, 5.0, "b", 4, 4.0, "y")]
+    assert rows(left._joinAsOf(
+        right, "t", "t", how="left", tolerance=F.lit(1)).collect()) == [
+        (1, 1.0, "a", None, None, None), (3, 3.0, "c", 3, 3.5, "c"), (5, 5.0, "b", 4, 4.0, "y")]
+    assert rows(left._joinAsOf(right, "t", "t", on=["k"], how="left").collect()) == [
+        (1, 1.0, "a", None, None, None),
+        (3, 3.0, "c", 3, 3.5, "c"),
+        (5, 5.0, "b", None, None, None),
+    ]
+    assert rows(left._joinAsOf(right, "t", "t").collect()) == [
+        (3, 3.0, "c", 3, 3.5, "c"), (5, 5.0, "b", 4, 4.0, "y")]
+
+    # pandas-on-Spark's ANSI check is off for the merges, as in the tests of PySpark.
+    key = "spark.sql.ansi.enabled"
+    session.conf.set(key, "false")
+    try:
+        def merged(**kwargs):
+            frame = ps.merge_asof(ps.DataFrame(left), ps.DataFrame(right), **kwargs)
+            return rows(frame.to_pandas().values.tolist())
+
+        assert merged(on="t") == [
+            (1, 1.0, "a", "nan", None), (3, 3.0, "c", 3.5, "c"), (5, 5.0, "b", 4.0, "y")]
+        assert merged(on="t", by="k", direction="forward") == [
+            (1, 1.0, "a", "nan"), (3, 3.0, "c", 3.5), (5, 5.0, "b", "nan")]
+        assert merged(on="t", tolerance=1, allow_exact_matches=False) == [
+            (1, 1.0, "a", "nan", None), (3, 3.0, "c", "nan", None), (5, 5.0, "b", "nan", None)]
+        assert merged(left_on="t", right_on="t", left_by="k", right_by="k") == [
+            (1, 1.0, "a", "nan"), (3, 3.0, "c", 3.5), (5, 5.0, "b", "nan")]
+    finally:
+        session.conf.unset(key)
+
+
 def test_join_with_an_unsupported_join_type_raises_as_pyspark(session):
     # As PySpark: the join type is checked when the join is built, which raises the
     # AnalysisException of UNSUPPORTED_JOIN_TYPE, naming the type as it is normalized.
@@ -592,6 +652,19 @@ def test_udtf_handlers_that_capture_analysis_columns_run_as_pyspark(session):
         Partitioned().collect()
 
 
+def test_map_schemas_keep_the_metadata_edited_in_place_on_the_server_as_pyspark(session):
+    # As PySpark's: the schema of mapInPandas, mapInArrow and applyInPandas is the StructType
+    # with the metadata edited in place after it was built, so the result has it.
+    st = StructType([StructField("a", IntegerType()), StructField("b", StringType())])
+    st["a"].metadata["comment"] = "the a"
+    df = session.createDataFrame([(1, "x")], "a int, b string")
+    assert df.mapInPandas(lambda it: it, st).schema["a"].metadata == {"comment": "the a"}
+    assert df.mapInArrow(lambda it: it, st).schema["a"].metadata == {"comment": "the a"}
+    grouped = df.groupBy("a")
+    assert grouped.applyInPandas(lambda pdf: pdf, st).schema["a"].metadata == {
+        "comment": "the a"}
+
+
 def test_arrow_udtf_takes_and_returns_arrow_data_as_pyspark(session):
     # As PySpark's arrow_udtf(), a PyArrow-native UDTF: eval() takes a pyarrow array of the
     # argument, and returns pyarrow tables.
@@ -860,6 +933,39 @@ ARROW_TABLE_ROWS = [
     (2, None, None, None, None, None, None),
     (None, "z", "2021-06-01 00:00:00", "2021-06-01 00:00:00", date(2021, 1, 1), 2.5, []),
 ]
+
+
+def test_pickled_when_columns_chain_on_the_server_as_pyspark(session, tmp_path):
+    # As PySpark's: a pickled when() Column keeps its CASE WHEN, so it collects as the chain
+    # built without the pickling, and a foreachBatch function that captures it chains on it on
+    # the Python worker of the server.
+    import pickle
+
+    (tmp_path / "input.txt").write_text("hello\nthis\nother\n")
+    df = session.createDataFrame([(1,), (2,), (3,)], "a int")
+    chain = F.when(F.col("a") > 2, "big").when(F.col("a") > 1, "mid").otherwise("small")
+    assert df.select(pickle.loads(pickle.dumps(chain)).alias("r")).collect() == (
+        df.select(chain.alias("r")).collect()
+    )
+    assert [row.r for row in df.select(pickle.loads(pickle.dumps(chain)).alias("r")).collect()] == [
+        "small", "mid", "big"]
+
+    captured = F.when(F.col("value") == "hello", "h")
+    table = "foreach_batch_captured_when"
+
+    def func(batch, batch_id):
+        batch.select(
+            captured.when(F.col("value") == "this", "t").otherwise("x").alias("result")
+        ).write.mode("append").saveAsTable(table)
+
+    query = session.readStream.format("text").load(str(tmp_path)).writeStream.foreachBatch(func)
+    query = query.start()
+    try:
+        query.processAllAvailable()
+        assert sorted(row.result for row in session.table(table).collect()) == ["h", "t", "x"]
+    finally:
+        query.stop()
+        session.sql(f"DROP TABLE IF EXISTS {table}").collect()
 
 
 @pytest.mark.parametrize(
@@ -1230,6 +1336,21 @@ def test_udfs_that_capture_functions_pickle_them_by_name_as_pyspark(session):
     )
 
 
+def test_create_dataframe_with_a_schema_edited_in_place(session):
+    # As PySpark: the nullable of the fields of a StructType is set in place, and a field is
+    # added with add(), which keeps the names in step; the DataFrame has the schema of the struct.
+    from pyspark.sql.types import DoubleType, LongType, StringType, StructField, StructType
+
+    schema = StructType([StructField("a", LongType()), StructField("b", StringType())])
+    for field in schema.fields:
+        field.nullable = False
+    schema.add("c", DoubleType(), False)
+    df = session.createDataFrame([(1, "x", 2.0)], schema)
+    assert df.schema.simpleString() == "struct<a:bigint,b:string,c:double>"
+    assert [f.nullable for f in df.schema.fields] == [False, False, False]
+    assert df.collect() == [Row(a=1, b="x", c=2.0)]
+
+
 def test_create_dataframe_from_empty_arrow_table(session):
     empty = pa.table({"a": pa.array([], pa.int64()), "b": pa.array([], pa.string())})
     df = session.createDataFrame(empty, "a long, b string")
@@ -1380,6 +1501,42 @@ def test_reader_schema_keeps_field_metadata(session, tmp_path, ddl):
     assert stream.schema.fields[0].metadata == {"comment": "the key"}
 
 
+def test_reader_none_unsets_an_option_and_external_description_is_the_comment(session, tmp_path):
+    # As PySpark's: DataFrameReader.option, options and load unset an option given None, while
+    # the format methods skip None and keep it. createExternalTable's description is the
+    # comment of createTable, not a property.
+    import warnings
+
+    (tmp_path / "t.csv").write_text("a,b\n1,2\n")
+    path = str(tmp_path / "t.csv")
+    assert session.read.option("header", "true").csv(path).columns == ["a", "b"]
+    unset = session.read.option("header", "true").option("header", None)
+    assert unset.format("csv").load(path).columns == ["_c0", "_c1"]
+    unset = session.read.option("header", "true").options(header=None)
+    assert unset.format("csv").load(path).columns == ["_c0", "_c1"]
+    unset = session.read.option("header", "true").format("csv")
+    assert unset.load(path, header=None).columns == ["_c0", "_c1"]
+    kept = session.read.option("header", "true")
+    assert kept.csv(path, header=None).columns == ["a", "b"]
+    assert kept.format("csv").load(path).columns == ["a", "b"]
+    session.range(2).write.mode("overwrite").parquet(str(tmp_path / "ext"))
+    session.sql("DROP TABLE IF EXISTS i3_described_external")
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FutureWarning)
+            session.catalog.createExternalTable(
+                "i3_described_external", path=str(tmp_path / "ext"), source="parquet",
+                description="the table")
+        assert session.catalog.getTable("i3_described_external").description == "the table"
+        comments = session.sql("DESCRIBE TABLE EXTENDED i3_described_external").filter(
+            "col_name = 'Comment'").collect()
+        assert [tuple(r)[:2] for r in comments] == [("Comment", "the table")]
+        keys = [r.key for r in session.sql("SHOW TBLPROPERTIES i3_described_external").collect()]
+        assert not any("description" in key for key in keys)
+    finally:
+        session.sql("DROP TABLE IF EXISTS i3_described_external")
+
+
 def test_reader_writer_and_catalog_return_the_results_of_pyspark(session, tmp_path):
     # As PySpark's: csv, json and xml of a DataFrame of strings parse them, the readers load
     # every path, and createTable creates the table on the call, of its schema and options.
@@ -1424,6 +1581,35 @@ def test_reader_writer_and_catalog_return_the_results_of_pyspark(session, tmp_pa
         assert [w.category for w in record] == [FutureWarning, FutureWarning]
     finally:
         session.sql("DROP TABLE IF EXISTS e2e_external_eagerly")
+
+
+def test_window_specs_captured_by_foreach_batch_functions_run_as_pyspark(session, tmp_path):
+    # As PySpark's: a WindowSpec that a foreachBatch function captures unpickles on the Python
+    # worker of the server, which computes the window with it.
+    from pyspark.sql import Window
+
+    (tmp_path / "input.txt").write_text("hello\nthis\n")
+    window = (
+        Window.partitionBy()
+        .orderBy(F.col("value").desc())
+        .rowsBetween(Window.unboundedPreceding, Window.currentRow)
+    )
+    table = "foreach_batch_captured_window"
+
+    def func(df, batch_id):
+        df.select("value", F.row_number().over(window).alias("r")).write.mode(
+            "append"
+        ).saveAsTable(table)
+
+    query = session.readStream.format("text").load(str(tmp_path)).writeStream.foreachBatch(func)
+    query = query.start()
+    try:
+        query.processAllAvailable()
+        rows = session.table(table).collect()
+        assert sorted((row.value, row.r) for row in rows) == [("hello", 2), ("this", 1)]
+    finally:
+        query.stop()
+        session.sql(f"DROP TABLE IF EXISTS {table}").collect()
 
 
 def test_table_arguments_are_those_of_pyspark_sql_table_arg(session):

@@ -377,6 +377,12 @@ impl SparkSession {
         &self.client
     }
 
+    /// Whether `other` is this session or a clone of it, which shares its client. Two sessions
+    /// made apart are not the same session, even of the same session ID.
+    pub fn is_same_session(&self, other: &SparkSession) -> bool {
+        Arc::ptr_eq(&self.client, &other.client)
+    }
+
     /// Create a builder for a new SparkSession.
     pub fn builder() -> SparkSessionBuilder {
         SparkSessionBuilder::new()

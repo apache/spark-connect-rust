@@ -8,7 +8,7 @@ Connection strings follow the format `sc://host:port/;param=value`. Parameters a
 
 | Parameter | Purpose | Example |
 | --- | --- | --- |
-| `token` | Authentication token | `sc://host:15002/;token=abc123` |
+| `token` | Authentication token, sent over TLS to any host but localhost | `sc://host:15002/;token=abc123` |
 | `user_id` | User identity | `sc://host:15002/;user_id=alice` |
 | `session_id` | Session identifier | `sc://host:15002/;session_id=sess_xyz` |
 | `use_ssl` | Enable TLS | `sc://host:15002/;use_ssl=true` |
@@ -71,12 +71,12 @@ let spark = SparkSessionBuilder::default()
     .get_or_create()?;
 ```
 
-Replace `spark.example.com`, the port, and authentication parameters as needed. If TLS is required:
+Replace `spark.example.com`, the port, and authentication parameters as needed. As in PySpark, a token implies TLS, so this connects over TLS. A token of the `SPARK_CONNECT_AUTHENTICATE_TOKEN` environment variable does the same. Only to `localhost`, `127.0.0.1` and `[::1]` is a token sent without TLS, for local development. Without a token, `use_ssl=true` turns TLS on:
 
 ```rust
 use spark_connect::SparkSessionBuilder;
 
 let spark = SparkSessionBuilder::default()
-    .remote("sc://spark.example.com:15002/;use_ssl=true;token=YOUR_TOKEN")
+    .remote("sc://spark.example.com:15002/;use_ssl=true")
     .get_or_create()?;
 ```
