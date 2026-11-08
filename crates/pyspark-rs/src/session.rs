@@ -2627,7 +2627,7 @@ fn widen_pandas_decimal_scales(data_type: &mut DataType, values: &[&Value]) -> P
             // scale to i8. Keep the inherited handling of an already-invalid first value.
             if *scale > *precision && *scale > initial_scale {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "Decimal scale is out of the range of DecimalType, up to {precision}"
+                    "Decimal scale {scale} is out of the range of DecimalType, up to {precision}"
                 )));
             }
         }
