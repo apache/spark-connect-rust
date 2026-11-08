@@ -1472,6 +1472,35 @@ def test_reader_writer_and_catalog_return_the_results_of_pyspark(session, tmp_pa
         session.sql("DROP TABLE IF EXISTS e2e_external_eagerly")
 
 
+def test_window_specs_captured_by_foreach_batch_functions_run_as_pyspark(session, tmp_path):
+    # As PySpark's: a WindowSpec that a foreachBatch function captures unpickles on the Python
+    # worker of the server, which computes the window with it.
+    from pyspark.sql import Window
+
+    (tmp_path / "input.txt").write_text("hello\nthis\n")
+    window = (
+        Window.partitionBy()
+        .orderBy(F.col("value").desc())
+        .rowsBetween(Window.unboundedPreceding, Window.currentRow)
+    )
+    table = "foreach_batch_captured_window"
+
+    def func(df, batch_id):
+        df.select("value", F.row_number().over(window).alias("r")).write.mode(
+            "append"
+        ).saveAsTable(table)
+
+    query = session.readStream.format("text").load(str(tmp_path)).writeStream.foreachBatch(func)
+    query = query.start()
+    try:
+        query.processAllAvailable()
+        rows = session.table(table).collect()
+        assert sorted((row.value, row.r) for row in rows) == [("hello", 2), ("this", 1)]
+    finally:
+        query.stop()
+        session.sql(f"DROP TABLE IF EXISTS {table}").collect()
+
+
 def test_table_arguments_are_those_of_pyspark_sql_table_arg(session):
     # As the PySpark client: DataFrame.asTable() is a TableArg of pyspark.sql.table_arg, and a
     # TableValuedFunctionArgument of pyspark.sql.tvf_argument.

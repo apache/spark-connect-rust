@@ -2100,6 +2100,42 @@ def test_time_values_are_sent_as_pyspark(mock_connect):
     assert parse_message(parse_message(expression[1][0])[26][0]) == {1: [nanos], 2: [6]}
 
 
+def test_window_specs_pickle_as_pyspark(mock_connect):
+    # As PySpark's WindowSpec, which pickles its partition, order and frame: a pickled, cloudpickled
+    # or copied WindowSpec has the repr of the spec and sends the window of the spec, so a UDF or
+    # foreachBatch function can capture a window.
+    import copy
+
+    import cloudpickle
+    from pyspark.sql import Window
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    df = spark.range(1)
+
+    def sent_expression(dataframe):
+        # ExecutePlanRequest.plan=3, Plan.root=1, Relation.project=3, Project.expressions=3.
+        dataframe.collect()
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        return parse_message(parse_message(parse_message(plan)[3][0])[3][0])
+
+    specs = [
+        Window.partitionBy("k").orderBy(F.col("x").desc()),
+        Window.partitionBy(F.col("k"), "v").orderBy("x", F.col("v").asc_nulls_last())
+        .rowsBetween(-1, Window.unboundedFollowing),
+        Window.orderBy("x").rangeBetween(Window.unboundedPreceding, 0),
+        Window.orderBy(F.col("x").desc_nulls_first()).rowsBetween(Window.currentRow, 2),
+        Window.partitionBy(),
+    ]
+    for spec in specs:
+        expected = sent_expression(df.select(F.sum("id").over(spec).alias("s")))
+        for copied in (pickle.loads(pickle.dumps(spec)),
+                       cloudpickle.loads(cloudpickle.dumps(spec)),
+                       copy.copy(spec)):
+            assert repr(copied) == repr(spec)
+            assert sent_expression(df.select(F.sum("id").over(copied).alias("s"))) == expected
+
+
 def test_time_types_parse_as_pyspark(mock_connect):
     # As PySpark's: a bare time is TimeType(), of the default precision 6, in a DDL string and
     # in the JSON of a type.
