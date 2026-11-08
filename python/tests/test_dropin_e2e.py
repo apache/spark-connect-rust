@@ -165,6 +165,32 @@ def test_conf_get_with_a_none_default(session):
         session.conf.get(key)
 
 
+def test_client_reads_configurations_as_pyspark(session):
+    # As PySpark Connect's SparkConnectClient, of which pandas-on-Spark reads its ANSI mode: the
+    # values of keys, by keys, and of keys of defaults, which a key that is not set takes.
+    from pyspark.errors import SparkNoSuchElementException
+
+    client = session.client
+    key, unset = "spark.connect.rust.test.client.set", "spark.connect.rust.test.client.unset"
+    session.conf.set(key, "value")
+    try:
+        assert client.get_config_with_defaults(
+            (key, None), (unset, "default"), (unset + ".none", None)
+        ) == ("value", "default", None)
+        assert client.get_configs(key) == ("value",)
+        assert client.get_config_dict(key) == {key: "value"}
+    finally:
+        session.conf.unset(key)
+    with pytest.raises(SparkNoSuchElementException) as error:
+        client.get_configs(unset)
+    assert error.value.getCondition() == "SQL_CONF_NOT_FOUND"
+    # pandas-on-Spark reads its ANSI mode so to show a Series.
+    pd = pytest.importorskip("pandas")
+    import pyspark.pandas as ps
+
+    assert repr(ps.Series([1, 2, 3], name="x")) == repr(pd.Series([1, 2, 3], name="x"))
+
+
 def test_numpy_scalar_literals_have_the_types_of_their_dtypes_as_pyspark(session):
     np = pytest.importorskip("numpy")
     from pyspark.sql import functions as F
