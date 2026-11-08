@@ -141,8 +141,11 @@ def _dataframe(batches, *, protocol, payloads=None, calls=None):
         }
         operation = request.operation.WhichOneof("op_type")
         if operation == "get_with_default":
-            pairs = [dict(key=pair.key, value=settings.get(pair.key, pair.value))
-                     for pair in request.operation.get_with_default.pairs]
+            pairs = []
+            for pair in request.operation.get_with_default.pairs:
+                default = pair.value if pair.HasField("value") else None
+                value = settings.get(pair.key, default)
+                pairs.append(dict(key=pair.key, **({"value": value} if value is not None else {})))
         else:
             assert operation == "get"
             pairs = [dict(key=key, value=settings[key]) for key in request.operation.get.keys]
