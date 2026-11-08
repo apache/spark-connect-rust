@@ -181,6 +181,8 @@ pub enum LogicalPlan {
     WithColumnMetadata {
         input: Arc<LogicalPlan>,
         column_name: String,
+        /// The column as a reference to the input's plan ID, as PySpark's `self[columnName]`.
+        column: Expression,
         metadata_json: String,
     },
     /// WithColumnsRenamed: `df.withColumnRenamed(old, new)` or `df.withColumnsRenamed(...)`.
@@ -1048,16 +1050,16 @@ impl LogicalPlan {
             LogicalPlan::WithColumnMetadata {
                 input,
                 column_name,
+                column,
                 metadata_json,
             } => {
                 let mut wc = proto::WithColumns::default();
                 wc.input = Some(Box::new(relation_of(input, plan_ids)));
-                let col_expr = crate::expression::Expression::column(column_name.clone());
-                let mut alias = proto::expression::Alias::default();
-                alias.expr = Some(Box::new(col_expr.to_proto()));
-                alias.name = vec![column_name.clone()];
-                alias.metadata = Some(metadata_json.clone());
-                wc.aliases.push(alias);
+                wc.aliases.push(proto::expression::Alias {
+                    expr: Some(Box::new(column.to_proto())),
+                    name: vec![column_name.clone()],
+                    metadata: Some(metadata_json.clone()),
+                });
                 relation.rel_type = Some(proto::relation::RelType::WithColumns(Box::new(wc)));
             }
 

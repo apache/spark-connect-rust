@@ -2054,6 +2054,7 @@ impl DataFrame {
         let plan = LogicalPlan::WithColumnMetadata {
             input: Arc::clone(&self.plan),
             column_name: column_name.to_string(),
+            column: self.col(column_name).expression().clone(),
             metadata_json: metadata_json.to_string(),
         };
         DataFrame::new(self.session.clone(), plan)

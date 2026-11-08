@@ -6677,6 +6677,39 @@ def test_sample_sort_group_by_and_drop_take_their_arguments_as_pyspark(mock_conn
         assert error.value.getMessageParameters() == parameters
 
 
+def test_with_metadata_and_pivot_refer_to_their_column_through_the_dataframe_as_pyspark(
+        mock_connect):
+    # As PySpark's withMetadata (self[columnName]) and pivot (self._df[pivot_col]): the column
+    # is an UnresolvedAttribute with the plan ID of the DataFrame, which is that of its input.
+    spark, service = mock_connect
+    df = spark.range(2)
+
+    def root(dataframe):
+        dataframe.collect()
+        # ExecutePlanRequest.plan=3, Plan.root=1.
+        return parse_message(parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0])
+
+    def attribute_and_input_plan_ids(input_relation, expression):
+        # Relation.common=1, RelationCommon.plan_id=2; Expression.unresolved_attribute=2,
+        # UnresolvedAttribute.plan_id=2.
+        return (parse_message(parse_message(input_relation)[1][0])[2][0],
+                parse_message(parse_message(expression)[2][0])[2][0])
+
+    # Relation.with_columns=23: WithColumns.input=1, aliases=2; Alias.expr=1.
+    with_columns = parse_message(root(df.withMetadata("id", {"a": "b"}))[23][0])
+    alias = parse_message(with_columns[2][0])
+    input_plan_id, attribute_plan_id = attribute_and_input_plan_ids(
+        with_columns[1][0], alias[1][0])
+    assert attribute_plan_id == input_plan_id
+
+    # Relation.aggregate=9: Aggregate.input=1, pivot=5, Pivot.col=1.
+    aggregate = parse_message(root(df.groupBy("id").pivot("id").count())[9][0])
+    pivot = parse_message(aggregate[5][0])
+    input_plan_id, attribute_plan_id = attribute_and_input_plan_ids(
+        aggregate[1][0], pivot[1][0])
+    assert attribute_plan_id == input_plan_id
+
+
 def test_ordinals_and_names_of_columns_carry_the_origin_of_col_as_pyspark():
     # As PySpark's, `df[ordinal]`, and the columns of sort and groupBy of an ordinal or a
     # name, are of `F.col`, whose origin they carry. In a new interpreter, whose first column
