@@ -73,7 +73,7 @@ tokio-stream = "0.1"
 futures = "0.3"
 
 # Arrow (result decoding).
-arrow = { version = "58", default-features = false, features = ["ipc", "prettyprint"] }
+arrow = { version = "58", default-features = false, features = ["ipc", "ipc_compression", "prettyprint"] }
 
 # DataFusion for the optional to_datafusion() conversion.
 # Pinned to 53 for arrow 58 compatibility.
