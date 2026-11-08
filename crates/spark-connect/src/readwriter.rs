@@ -60,6 +60,12 @@ impl DataFrameReader {
         self
     }
 
+    /// Unset a read option, as PySpark's `DataFrameReader.option(key, None)` does.
+    pub fn unset_option(mut self, key: &str) -> Self {
+        self.options.remove(key);
+        self
+    }
+
     /// Set multiple options.
     pub fn options(mut self, options: HashMap<String, String>) -> Self {
         self.options.extend(options);

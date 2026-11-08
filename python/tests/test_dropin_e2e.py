@@ -1501,6 +1501,42 @@ def test_reader_schema_keeps_field_metadata(session, tmp_path, ddl):
     assert stream.schema.fields[0].metadata == {"comment": "the key"}
 
 
+def test_reader_none_unsets_an_option_and_external_description_is_the_comment(session, tmp_path):
+    # As PySpark's: DataFrameReader.option, options and load unset an option given None, while
+    # the format methods skip None and keep it. createExternalTable's description is the
+    # comment of createTable, not a property.
+    import warnings
+
+    (tmp_path / "t.csv").write_text("a,b\n1,2\n")
+    path = str(tmp_path / "t.csv")
+    assert session.read.option("header", "true").csv(path).columns == ["a", "b"]
+    unset = session.read.option("header", "true").option("header", None)
+    assert unset.format("csv").load(path).columns == ["_c0", "_c1"]
+    unset = session.read.option("header", "true").options(header=None)
+    assert unset.format("csv").load(path).columns == ["_c0", "_c1"]
+    unset = session.read.option("header", "true").format("csv")
+    assert unset.load(path, header=None).columns == ["_c0", "_c1"]
+    kept = session.read.option("header", "true")
+    assert kept.csv(path, header=None).columns == ["a", "b"]
+    assert kept.format("csv").load(path).columns == ["a", "b"]
+    session.range(2).write.mode("overwrite").parquet(str(tmp_path / "ext"))
+    session.sql("DROP TABLE IF EXISTS i3_described_external")
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FutureWarning)
+            session.catalog.createExternalTable(
+                "i3_described_external", path=str(tmp_path / "ext"), source="parquet",
+                description="the table")
+        assert session.catalog.getTable("i3_described_external").description == "the table"
+        comments = session.sql("DESCRIBE TABLE EXTENDED i3_described_external").filter(
+            "col_name = 'Comment'").collect()
+        assert [tuple(r)[:2] for r in comments] == [("Comment", "the table")]
+        keys = [r.key for r in session.sql("SHOW TBLPROPERTIES i3_described_external").collect()]
+        assert not any("description" in key for key in keys)
+    finally:
+        session.sql("DROP TABLE IF EXISTS i3_described_external")
+
+
 def test_reader_writer_and_catalog_return_the_results_of_pyspark(session, tmp_path):
     # As PySpark's: csv, json and xml of a DataFrame of strings parse them, the readers load
     # every path, and createTable creates the table on the call, of its schema and options.
