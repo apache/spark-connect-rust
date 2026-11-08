@@ -306,6 +306,66 @@ def test_renames_are_applied_in_their_order_as_pyspark(session):
 
 
 
+def test_join_as_of_and_merge_asof_give_the_rows_of_pyspark(session):
+    # As PySpark: _joinAsOf matches each row of the left DataFrame with the nearest row of the
+    # right one on the as-of column, as the direction, exact matches and tolerance say, and
+    # pandas-on-Spark's merge_asof, which calls it, gives the same rows.
+    import math
+
+    pytest.importorskip("pandas")
+    import pyspark.pandas as ps
+    from pyspark.sql import functions as F
+
+    def rows(values):
+        return sorted(
+            tuple("nan" if isinstance(v, float) and math.isnan(v) else v for v in row)
+            for row in values
+        )
+
+    left = session.createDataFrame(
+        [(1, 1.0, "a"), (3, 3.0, "c"), (5, 5.0, "b")], "t int, x double, k string")
+    right = session.createDataFrame(
+        [(2, 2.0, "x"), (3, 3.5, "c"), (4, 4.0, "y")], "t int, y double, k string")
+    joined = rows(left._joinAsOf(right, "t", "t", how="left").collect())
+    assert joined == [
+        (1, 1.0, "a", None, None, None), (3, 3.0, "c", 3, 3.5, "c"), (5, 5.0, "b", 4, 4.0, "y")]
+    assert rows(left._joinAsOf(right, "t", "t", how="left", allowExactMatches=False).collect()) == [
+        (1, 1.0, "a", None, None, None), (3, 3.0, "c", 2, 2.0, "x"), (5, 5.0, "b", 4, 4.0, "y")]
+    assert rows(left._joinAsOf(right, "t", "t", how="left", direction="forward").collect()) == [
+        (1, 1.0, "a", 2, 2.0, "x"), (3, 3.0, "c", 3, 3.5, "c"), (5, 5.0, "b", None, None, None)]
+    assert rows(left._joinAsOf(right, "t", "t", how="left", direction="nearest").collect()) == [
+        (1, 1.0, "a", 2, 2.0, "x"), (3, 3.0, "c", 3, 3.5, "c"), (5, 5.0, "b", 4, 4.0, "y")]
+    assert rows(left._joinAsOf(
+        right, "t", "t", how="left", tolerance=F.lit(1)).collect()) == [
+        (1, 1.0, "a", None, None, None), (3, 3.0, "c", 3, 3.5, "c"), (5, 5.0, "b", 4, 4.0, "y")]
+    assert rows(left._joinAsOf(right, "t", "t", on=["k"], how="left").collect()) == [
+        (1, 1.0, "a", None, None, None),
+        (3, 3.0, "c", 3, 3.5, "c"),
+        (5, 5.0, "b", None, None, None),
+    ]
+    assert rows(left._joinAsOf(right, "t", "t").collect()) == [
+        (3, 3.0, "c", 3, 3.5, "c"), (5, 5.0, "b", 4, 4.0, "y")]
+
+    # pandas-on-Spark's ANSI check is off for the merges, as in the tests of PySpark.
+    key = "spark.sql.ansi.enabled"
+    session.conf.set(key, "false")
+    try:
+        def merged(**kwargs):
+            frame = ps.merge_asof(ps.DataFrame(left), ps.DataFrame(right), **kwargs)
+            return rows(frame.to_pandas().values.tolist())
+
+        assert merged(on="t") == [
+            (1, 1.0, "a", "nan", None), (3, 3.0, "c", 3.5, "c"), (5, 5.0, "b", 4.0, "y")]
+        assert merged(on="t", by="k", direction="forward") == [
+            (1, 1.0, "a", "nan"), (3, 3.0, "c", 3.5), (5, 5.0, "b", "nan")]
+        assert merged(on="t", tolerance=1, allow_exact_matches=False) == [
+            (1, 1.0, "a", "nan", None), (3, 3.0, "c", "nan", None), (5, 5.0, "b", "nan", None)]
+        assert merged(left_on="t", right_on="t", left_by="k", right_by="k") == [
+            (1, 1.0, "a", "nan"), (3, 3.0, "c", 3.5), (5, 5.0, "b", "nan")]
+    finally:
+        session.conf.unset(key)
+
+
 def test_join_with_an_unsupported_join_type_raises_as_pyspark(session):
     # As PySpark: the join type is checked when the join is built, which raises the
     # AnalysisException of UNSUPPORTED_JOIN_TYPE, naming the type as it is normalized.

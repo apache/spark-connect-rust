@@ -442,6 +442,19 @@ pub enum LogicalPlan {
         other_grouping_expressions: Vec<Expression>,
         func: CommonInlineUserDefinedFunctionExpression,
     },
+    /// AsOfJoin: `DataFrame._joinAsOf`, which pandas-on-Spark's `merge_asof` calls.
+    AsOfJoin {
+        left: Arc<LogicalPlan>,
+        right: Arc<LogicalPlan>,
+        left_as_of: Column,
+        right_as_of: Column,
+        on: Option<Column>,
+        using_columns: Vec<String>,
+        join_type: String,
+        tolerance: Option<Column>,
+        allow_exact_matches: bool,
+        direction: String,
+    },
     /// NearestByJoin: `DataFrame.nearestByJoin`.
     NearestByJoin {
         left: Arc<LogicalPlan>,
@@ -819,6 +832,33 @@ impl LogicalPlan {
                 }
                 join.using_columns.extend(using_columns.clone());
                 relation.rel_type = Some(proto::relation::RelType::Join(Box::new(join)));
+            }
+
+            LogicalPlan::AsOfJoin {
+                left,
+                right,
+                left_as_of,
+                right_as_of,
+                on,
+                using_columns,
+                join_type,
+                tolerance,
+                allow_exact_matches,
+                direction,
+            } => {
+                let aj = proto::AsOfJoin {
+                    left: Some(Box::new(relation_of(left, plan_ids))),
+                    right: Some(Box::new(relation_of(right, plan_ids))),
+                    left_as_of: Some(left_as_of.to_proto()),
+                    right_as_of: Some(right_as_of.to_proto()),
+                    join_expr: on.as_ref().map(|condition| condition.to_proto()),
+                    using_columns: using_columns.clone(),
+                    join_type: join_type.clone(),
+                    tolerance: tolerance.as_ref().map(|tolerance| tolerance.to_proto()),
+                    allow_exact_matches: *allow_exact_matches,
+                    direction: direction.clone(),
+                };
+                relation.rel_type = Some(proto::relation::RelType::AsOfJoin(Box::new(aj)));
             }
 
             LogicalPlan::LateralJoin {
