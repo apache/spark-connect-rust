@@ -16,6 +16,7 @@ fn kind_to_pyspark_class_name(kind: SparkErrorKind) -> &'static str {
         SparkErrorKind::AttributeError => "PySparkAttributeError",
         SparkErrorKind::KeyError => "PySparkKeyError",
         SparkErrorKind::RuntimeError => "PySparkRuntimeError",
+        SparkErrorKind::RecursionError => "RecursionError",
         SparkErrorKind::NotImplementedError => "PySparkNotImplementedError",
         SparkErrorKind::AssertionError => "PySparkAssertionError",
         SparkErrorKind::PicklingError => "PySparkPicklingError",
@@ -189,6 +190,10 @@ fn callback_exception(err: &SparkError) -> Option<PyErr> {
 pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
     if let Some(exception) = callback_exception(&err) {
         return exception;
+    }
+    if err.kind == SparkErrorKind::RecursionError {
+        // A builtin, as PySpark's recursion limit raises it.
+        return pyo3::exceptions::PyRecursionError::new_err(err.message());
     }
     let msg = err.message();
     let operation_id = err.operation_id.clone();

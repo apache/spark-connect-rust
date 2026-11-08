@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use spark_connect_core::channel::ChannelBuilder;
 use spark_connect_core::client::{ExecutePlanHook, SparkConnectClient};
 use spark_connect_core::error::{Result, SparkError};
-use spark_connect_core::runtime::block_on;
+use spark_connect_core::runtime::{block_on, check_callback_depth, CallbackGuard};
 use spark_connect_core::thread_entries::forget_when_thread_ends;
 use spark_connect_proto as proto;
 
@@ -286,6 +286,8 @@ impl SparkSession {
             return;
         }
         let update = update();
+        // A handler may run a query of its own, whose progress calls the handlers again.
+        let _callback = CallbackGuard::enter();
         for h in handlers {
             h(&update);
         }
@@ -303,6 +305,7 @@ impl SparkSession {
             .get_or_insert_with(|| uuid::Uuid::new_v4().to_string())
             .clone();
         // Before the request: an execution that fails to start ends, as done, too.
+        check_callback_depth()?;
         let progress = ProgressTracker::new(self, Some(operation_id));
         let stream = block_on(self.client().execute_plan_reattachable(request))?;
         Ok(ExecutionStream::new(stream, progress))
