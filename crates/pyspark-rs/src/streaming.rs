@@ -153,6 +153,17 @@ impl PyDataStreamReader {
 
 #[pymethods]
 impl PyDataStreamReader {
+    /// Set the schema, if any, and the options of `options` that are not None, through its own
+    /// `schema` and `option`, as PySpark's `OptionUtils._set_opts`, which pandas-on-Spark calls.
+    #[pyo3(signature = (schema=None, **options))]
+    fn _set_opts(
+        slf: &Bound<'_, Self>,
+        schema: Option<Bound<'_, PyAny>>,
+        options: Option<Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<()> {
+        crate::readwriter::set_opts(slf.as_any(), schema.as_ref(), options.as_ref())
+    }
+
     /// Set the source format. As PySpark's, None unsets it, so that the server reads its
     /// default source.
     fn format<'py>(

@@ -3231,6 +3231,17 @@ fn apply_write_common(
 
 #[pymethods]
 impl PyDataFrameWriter {
+    /// Set the schema, if any, and the options of `options` that are not None, through its own
+    /// `schema` and `option`, as PySpark's `OptionUtils._set_opts`, which pandas-on-Spark calls.
+    #[pyo3(signature = (schema=None, **options))]
+    fn _set_opts(
+        slf: &Bound<'_, Self>,
+        schema: Option<Bound<'_, PyAny>>,
+        options: Option<Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<()> {
+        crate::readwriter::set_opts(slf.as_any(), schema.as_ref(), options.as_ref())
+    }
+
     /// The save mode, as PySpark's: `None` keeps the default, "error".
     fn mode<'py>(slf: &Bound<'py, Self>, saveMode: Option<&str>) -> PyResult<Bound<'py, Self>> {
         if let Some(save_mode) = saveMode {
@@ -3636,6 +3647,17 @@ impl PyDataFrameWriterV2 {}
 
 #[pymethods]
 impl PyDataFrameWriterV2 {
+    /// Set the schema, if any, and the options of `options` that are not None, through its own
+    /// `schema` and `option`, as PySpark's `OptionUtils._set_opts`, which pandas-on-Spark calls.
+    #[pyo3(signature = (schema=None, **options))]
+    fn _set_opts(
+        slf: &Bound<'_, Self>,
+        schema: Option<Bound<'_, PyAny>>,
+        options: Option<Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<()> {
+        crate::readwriter::set_opts(slf.as_any(), schema.as_ref(), options.as_ref())
+    }
+
     fn using<'py>(slf: &Bound<'py, Self>, provider: &str) -> PyResult<Bound<'py, Self>> {
         slf.borrow().inner.update(|w| w.using(provider));
         Ok(slf.clone())
