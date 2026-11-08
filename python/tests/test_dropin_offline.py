@@ -8271,6 +8271,44 @@ def test_schema_cache_cold_children_keep_independent_caches(mock_connect):
     assert df.columns == ["id"]
 
 
+def test_map_and_group_functions_reject_a_non_struct_return_type_as_pyspark(mock_connect):
+    # As PySpark's MapPartitions, GroupMap, CoGroupMap and ApplyInPandasWithState, which check
+    # the return type of their UDF when they are built: a type that is not a struct raises
+    # INVALID_RETURN_TYPE_FOR_PANDAS_UDF, or INVALID_RETURN_TYPE_FOR_ARROW_UDF for an Arrow
+    # function, at the call, before the server sees the plan.
+    from pyspark.errors import PySparkTypeError
+
+    spark, service = mock_connect
+    df = spark.range(1)
+    grouped = df.groupBy("id")
+    cogrouped = grouped.cogroup(df.groupBy("id"))
+    pandas_error = "INVALID_RETURN_TYPE_FOR_PANDAS_UDF"
+    arrow_error = "INVALID_RETURN_TYPE_FOR_ARROW_UDF"
+    cases = [
+        (lambda: df.mapInPandas(lambda it: it, T.IntegerType()), pandas_error, "IntegerType()"),
+        (lambda: df.mapInPandas(lambda it: it, "int"), pandas_error, "IntegerType()"),
+        (lambda: df.mapInArrow(lambda it: it, "long"), pandas_error, "LongType()"),
+        (lambda: grouped.applyInPandas(lambda pdf: pdf, "int"), pandas_error, "IntegerType()"),
+        (lambda: grouped.applyInPandas(lambda pdf: pdf, T.ArrayType(T.IntegerType())),
+         pandas_error, "ArrayType(IntegerType(), True)"),
+        (lambda: grouped.applyInArrow(lambda table: table, T.LongType()), arrow_error, "LongType()"),
+        (lambda: cogrouped.applyInPandas(lambda left, right: left, "int"),
+         pandas_error, "IntegerType()"),
+        (lambda: cogrouped.applyInArrow(lambda left, right: left, "long"),
+         arrow_error, "LongType()"),
+        (lambda: grouped.applyInPandasWithState(
+            lambda key, pdfs, state: iter([]), T.IntegerType(),
+            T.StructType([T.StructField("c", T.LongType())]), "append", "NoTimeout"),
+         pandas_error, "IntegerType()"),
+    ]
+    for call, condition, return_type in cases:
+        with pytest.raises(PySparkTypeError) as e:
+            call()
+        assert e.value.getCondition() == condition
+        assert e.value.getMessageParameters()["return_type"] == return_type
+    assert service.execute_requests == []
+
+
 @pytest.mark.parametrize("transform", [
     pytest.param(lambda df: df.selectExpr("id AS renamed"), id="select"),
     pytest.param(lambda df: df.zipWithIndex(), id="zipWithIndex"),

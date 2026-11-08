@@ -3958,6 +3958,18 @@ pub(crate) fn build_map_udf(
 ) -> PyResult<CommonInlineUserDefinedFunctionExpression> {
     let name = udf_name(func)?;
     let return_type = resolve_datatype(py, session, schema)?;
+    // As PySpark's `MapPartitions`, `GroupMap` and the other map nodes do when they build the
+    // UDF, the return type is checked for the eval type: a map or group function returns a
+    // struct, so another type raises `INVALID_RETURN_TYPE_FOR_PANDAS_UDF` here, not at the action.
+    py.import("pyspark.sql.udf")?
+        .getattr("UserDefinedFunction")?
+        .call_method1(
+            "_check_return_type",
+            (
+                crate::types::data_type_to_py(py, &return_type)?,
+                eval_type_id,
+            ),
+        )?;
     // The worker reads the pickled type as a `DataType`, so a DDL string is pickled as the
     // type it parses to, as the reference client pickles the type of `_parse_ddl`.
     let pickled_type = if schema.is_instance_of::<pyo3::types::PyString>() {
