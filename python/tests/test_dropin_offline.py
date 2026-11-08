@@ -1226,6 +1226,55 @@ def test_functions_exports_fresh_process():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_query_context_loggers_log_the_grpc_error_of_the_call_as_pyspark():
+    # As PySpark Connect, which builds the exception of an error of the server, of a DataFrame
+    # query context, as it handles the gRPC error of the call: the DataFrameQueryContextLogger
+    # logs that error as the exception, and the exception is raised from it (from None).
+    import io
+    import logging
+
+    from pyspark.errors import ArithmeticException
+    from pyspark.errors.exceptions.connect import _convert_server_error
+    from pyspark.logger import PySparkLogger
+    from pyspark.logger.logger import JSONFormatter
+
+    logger = PySparkLogger.getLogger("DataFrameQueryContextLogger")
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(JSONFormatter())
+    logger.addHandler(handler)
+    context = {
+        "context_type": "DataFrame", "object_type": "", "object_name": "", "start_index": -1,
+        "stop_index": -1, "fragment": "__truediv__", "call_site": "app.py:3", "summary": "",
+    }
+    try:
+        error = _convert_server_error(
+            classes=["org.apache.spark.SparkArithmeticException", "java.lang.ArithmeticException"],
+            sql_state="22012",
+            error_class="DIVIDE_BY_ZERO", reason=None,
+            message="[DIVIDE_BY_ZERO] Division by zero. SQLSTATE: 22012",
+            message_parameters={"config": '"spark.sql.ansi.enabled"'}, stacktrace=None,
+            display_server_stacktrace=False, contexts=[context], grpc_status_code=13,
+            breaking_change_info=None,
+        )
+    finally:
+        logger.removeHandler(handler)
+    assert isinstance(error, ArithmeticException)
+    record = json.loads(stream.getvalue().strip().splitlines()[-1])
+    assert record["context"] == {
+        "file": "app.py", "line": "3", "fragment": "__truediv__", "errorClass": "DIVIDE_BY_ZERO",
+    }
+    exception = record["exception"]
+    assert exception["class"] == "_MultiThreadedRendezvous"
+    assert exception["msg"].startswith(
+        "<_MultiThreadedRendezvous of RPC that terminated with:\n\tstatus = StatusCode.INTERNAL\n"
+        '\tdetails = "[DIVIDE_BY_ZERO] Division by zero. SQLSTATE: 22012"\n'
+    )
+    assert set(exception["stacktrace"][0]) == {"class", "method", "file", "line"}
+    assert type(error.__context__).__name__ == "_MultiThreadedRendezvous"
+    assert error.__suppress_context__
+
+
 def test_sql_utils_reexports_the_exceptions_of_pyspark(mock_connect):
     # As PySpark's pyspark.sql.utils: the exceptions of pyspark.errors, of their import path
     # before it, which the errors of the server are instances of.
