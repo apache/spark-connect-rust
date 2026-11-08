@@ -20,10 +20,7 @@ User-defined table function (UDTF) support for the Spark Connect client.
 Mirrors pyspark.sql.connect.udtf and pyspark.sql.functions.udtf.
 """
 
-from pyspark._pyspark import (
-    AnalyzeArgument, PartitioningColumn, OrderingColumn, SelectedColumn,
-    SkipRestOfInputTableException,
-)
+from pyspark._pyspark import SkipRestOfInputTableException
 
 import inspect
 import pickle
@@ -33,7 +30,7 @@ from typing import Any, Optional, Sequence, Type
 
 from pyspark.errors import PySparkAttributeError, PySparkPicklingError, PySparkTypeError
 from pyspark.serializers import CloudPickleSerializer
-from pyspark.sql.types import StructType
+from pyspark.sql.types import DataType, StructType
 
 __all__ = [
     "AnalyzeArgument",
@@ -49,6 +46,96 @@ __all__ = [
 SQL_TABLE_UDF = 300
 SQL_ARROW_TABLE_UDF = 301
 SQL_ARROW_UDTF = 302
+
+
+# Verbatim from PySpark (pyspark.sql.udtf): the frozen dataclasses of the analyze method of a
+# UDTF, which a handler that the client pickles may capture, and which the Python worker of
+# the server unpickles as PySpark's of the same names.
+@dataclass(frozen=True)
+class AnalyzeArgument:
+    """
+    The argument for Python UDTF's analyze static method.
+
+    Parameters
+    ----------
+    dataType : :class:`DataType`
+        The argument's data type
+    value : any, optional
+        The calculated value if the argument is foldable; otherwise None
+    isTable : bool
+        If True, the argument is a table argument.
+    isConstantExpression : bool
+        If True, the argument is a constant-foldable scalar expression. Then the 'value' field
+        contains None if the argument is a NULL literal, or a non-None value if the argument is a
+        non-NULL literal. In this way, we can distinguish between a literal NULL argument and other
+        types of arguments such as complex expression trees or table arguments where the 'value'
+        field is always None.
+    """
+
+    dataType: DataType
+    value: Optional[Any]
+    isTable: bool
+    isConstantExpression: bool
+
+
+@dataclass(frozen=True)
+class PartitioningColumn:
+    """
+    Represents an expression that the UDTF is specifying for Catalyst to partition the input table
+    by. This can be either the name of a single column from the input table (such as "columnA"), or
+    a SQL expression based on the column names of the input table (such as "columnA + columnB").
+
+    Parameters
+    ----------
+    name : str
+        The contents of the partitioning column name or expression represented as a SQL string.
+    """
+
+    name: str
+
+
+@dataclass(frozen=True)
+class OrderingColumn:
+    """
+    Represents an expression that the UDTF is specifying for Catalyst to order the input partition
+    by. This can be either the name of a single column from the input table (such as "columnA"),
+    or a SQL expression based on the column names of the input table (such as "columnA + columnB").
+
+    Parameters
+    ----------
+    name : str
+        The contents of the ordering column name or expression represented as a SQL string.
+    ascending : bool, default True
+        This is if this expression specifies an ascending sorting order.
+    overrideNullsFirst : str, optional
+        If this is None, use the default behavior to sort NULL values first when sorting in
+        ascending order, or last when sorting in descending order. Otherwise, if this is
+        True or False, we override the default behavior accordingly.
+    """
+
+    name: str
+    ascending: bool = True
+    overrideNullsFirst: Optional[bool] = None
+
+
+@dataclass(frozen=True)
+class SelectedColumn:
+    """
+    Represents an expression that the UDTF is specifying for Catalyst to evaluate against the
+    columns in the input TABLE argument. The UDTF then receives one input column for each expression
+    in the list, in the order they are listed.
+
+    Parameters
+    ----------
+    name : str
+        The contents of the selected column name or expression represented as a SQL string.
+    alias : str, default ''
+        If non-empty, this is the alias for the column or expression as visible from the UDTF's
+        'eval' method. This is required if the expression is not a simple column reference.
+    """
+
+    name: str
+    alias: str = ""
 
 
 @dataclass

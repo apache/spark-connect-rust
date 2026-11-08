@@ -2790,6 +2790,45 @@ def test_udtf_analyze_result_subclass_preserves_custom_state():
     assert list(handler(analysis).eval(None)) == [("kept",)]
 
 
+def test_udtf_analysis_classes_are_the_frozen_dataclasses_of_pyspark():
+    # As PySpark's: the arguments and the columns of the analysis of a UDTF are frozen dataclasses,
+    # which a handler that captures them pickles with, by reference, of which the Python worker
+    # of the server unpickles PySpark's.
+    import dataclasses
+    from pyspark.serializers import CloudPickleSerializer
+    from pyspark.sql.udtf import (
+        AnalyzeArgument, AnalyzeResult, OrderingColumn, PartitioningColumn, SelectedColumn,
+    )
+
+    missing = dataclasses.MISSING
+    for cls, fields in [
+        (AnalyzeArgument, [("dataType", missing), ("value", missing), ("isTable", missing),
+                           ("isConstantExpression", missing)]),
+        (PartitioningColumn, [("name", missing)]),
+        (OrderingColumn, [("name", missing), ("ascending", True), ("overrideNullsFirst", None)]),
+        (SelectedColumn, [("name", missing), ("alias", "")]),
+    ]:
+        assert dataclasses.is_dataclass(cls) and cls.__dataclass_params__.frozen, cls
+        assert cls.__module__ == "pyspark.sql.udtf"
+        assert [(f.name, f.default) for f in dataclasses.fields(cls)] == fields
+    ordering = OrderingColumn("a", ascending=False)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        ordering.name = "b"
+    assert ordering == OrderingColumn("a", False) and hash(ordering) == hash(OrderingColumn("a", False))
+    assert repr(ordering) == "OrderingColumn(name='a', ascending=False, overrideNullsFirst=None)"
+    result = AnalyzeResult(
+        T.StructType().add("a", T.StringType()), partitionBy=[PartitioningColumn("a")],
+        orderBy=[ordering], select=[SelectedColumn("a", alias="b")],
+    )
+
+    def analyze():
+        return result
+
+    serializer = CloudPickleSerializer()
+    assert serializer.loads(serializer.dumps(analyze))() == result
+    assert serializer.loads(serializer.dumps(PartitioningColumn("a"))) == PartitioningColumn("a")
+
+
 def test_variant_spatial_and_user_defined_values_are_sent_as_pyspark(mock_connect):
     # As PySpark's LocalDataToArrowConversion: a VariantVal is the struct of its value and
     # metadata, a Geometry or a Geography that of its srid and WKB, whose metadata tags the
