@@ -661,6 +661,29 @@ def test_transform_with_state_in_pandas_takes_a_ddl_output_type(session, tmp_pat
             session.conf.unset(key)
 
 
+def test_writers_shared_by_threads_write_one_at_a_time_as_pyspark(session, tmp_path):
+    # As PySpark's: a writer is a plain Python object, so threads may write with one
+    # DataFrameWriter or DataFrameWriterV2 at once, while the main thread sets its format.
+    from concurrent.futures import ThreadPoolExecutor
+
+    df = session.range(300000)
+    writer = df.write.mode("overwrite")
+    table = f"r48_shared_writer_{os.getpid()}"
+    writer_v2 = df.writeTo(table).using("parquet")
+    try:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            writes = [pool.submit(writer.parquet, str(tmp_path / f"p{i}")) for i in range(3)]
+            writes.append(pool.submit(writer_v2.create))
+            assert writer.format("parquet") is writer
+            for write in writes:
+                write.result(timeout=300)
+        for i in range(3):
+            assert session.read.parquet(str(tmp_path / f"p{i}")).count() == 300000
+        assert session.table(table).count() == 300000
+    finally:
+        session.sql(f"DROP TABLE IF EXISTS {table}")
+
+
 def test_transform_with_state_returns_the_rows_of_its_output_schema(session, tmp_path):
     # As PySpark's, transformWithState sends its output schema, a DDL string or a
     # StructType, which the server reads as the schema of the rows of the processor.

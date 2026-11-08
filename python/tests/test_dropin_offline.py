@@ -1620,6 +1620,33 @@ def test_map_functions_send_the_names_of_their_functions_as_pyspark(mock_connect
     assert sent_name(stateful, 34, 3) == "with_state"
 
 
+def test_writers_shared_by_threads_run_their_requests_as_pyspark(mock_connect):
+    # As PySpark's: a writer is a plain Python object, so threads may call its methods while
+    # a request waits for the server, which releases the GIL. Two threads save with one
+    # DataFrameWriter and one thread appends with a DataFrameWriterV2, while the main thread
+    # sets the format and the provider of the writers meanwhile.
+    spark, service = mock_connect
+    writer = spark.range(1).write.mode("overwrite")
+    writer_v2 = spark.range(1).writeTo("shared_writer")
+    service.block_execute = True
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        requests = [pool.submit(writer.parquet, f"/tmp/shared_writer/p{i}") for i in range(2)]
+        requests.append(pool.submit(writer_v2.append))
+        try:
+            for _ in range(500):
+                if service.execute_calls >= 3:
+                    break
+                time.sleep(0.01)
+            else:
+                raise AssertionError("The writes never reached the server")
+            assert writer.format("parquet") is writer
+            assert writer_v2.using("parquet") is writer_v2
+        finally:
+            service.release_response()
+        for request in requests:
+            request.result(timeout=10)
+
+
 def test_try_cast_and_isin_take_their_arguments_as_pyspark():
     # As PySpark Connect's: try_cast raises NOT_EXPECTED_TYPE for a type that is neither a
     # DataType nor a str, and isin unpacks a single list or set, but not a tuple, which is a
