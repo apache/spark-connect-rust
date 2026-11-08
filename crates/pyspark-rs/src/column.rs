@@ -591,6 +591,14 @@ impl PyColumn {
         Ok(PyColumn::new(self.column.clone().div(other_col)))
     }
 
+    /// Division (/), of the name of Python 2, as PySpark's Column has it, which pandas-on-Spark
+    /// calls: as `__truediv__`.
+    fn __div__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
+        let _origin = crate::origin::with_origin("__div__");
+        let other_col = to_column(&other.bind(py))?;
+        Ok(PyColumn::new(self.column.clone().div(other_col)))
+    }
+
     /// Modulo (%)
     fn __mod__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("__mod__");
@@ -690,6 +698,12 @@ impl PyColumn {
         let o = to_column(&other.bind(py))?;
         Ok(PyColumn::new(o.div(self.column.clone())))
     }
+    /// Reverse division, of the name of Python 2, as PySpark's Column has it: as `__rtruediv__`.
+    fn __rdiv__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
+        let _origin = crate::origin::with_origin("__rdiv__");
+        let o = to_column(&other.bind(py))?;
+        Ok(PyColumn::new(o.div(self.column.clone())))
+    }
     fn __rmod__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("__rmod__");
         let o = to_column(&other.bind(py))?;
@@ -760,6 +774,16 @@ impl PyColumn {
             "CANNOT_CONVERT_COLUMN_INTO_BOOL",
             &[("column", &self.column.expression().render())],
         ))
+    }
+
+    /// `__bool__` of the name of Python 2, as PySpark's Column has it.
+    fn __nonzero__(&self, py: Python<'_>) -> PyResult<bool> {
+        self.__bool__(py)
+    }
+
+    /// The arguments of `__new__` of this column, as PySpark Connect's: its expression.
+    fn __getnewargs__(&self) -> (PyColumnExpression,) {
+        (self._expr(),)
     }
 
     // --- named Column methods (PySpark camelCase) ---
