@@ -8078,10 +8078,13 @@ with session() as (spark, payload):
 def test_decimal_public_pure_python_alias_native_pandas_uses_float():
     # Type caches are process-local: set the public alias before the extension is loaded,
     # while leaving the C accelerator available. Inspect the inline IPC without an RPC.
+    # This pins "Decimal class rebinding" in dev/parity/known-differences.md; update the
+    # expected lossy values if pure-Python alias values become recognized as Decimals.
     import subprocess
     import sys
     from pathlib import Path
 
+    pytest.importorskip("_decimal")
     pytest.importorskip("pandas")
     pytest.importorskip("pyarrow")
     script = r'''
@@ -8118,10 +8121,21 @@ for schema in (None, ["v"]):
     assert actual.schema == expected.schema
     assert actual.equals(expected)
 '''
-    result = subprocess.run(
-        [sys.executable, "-c", script, str(Path(__file__).resolve().parent)],
-        capture_output=True, text=True, timeout=60,
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(Path(__file__).resolve().parent)],
+            capture_output=True, text=True, timeout=60,
+        )
+    except subprocess.TimeoutExpired as error:
+        output = []
+        for name, value in (("stdout", error.stdout), ("stderr", error.stderr)):
+            if isinstance(value, bytes):
+                value = value.decode(errors="replace")
+            output.append(f"{name}:\n{value or ''}")
+        pytest.fail(
+            "Decimal public-alias child exceeded 60 seconds.\n" + "\n".join(output),
+            pytrace=False,
+        )
     assert result.returncode == 0, result.stdout + result.stderr
 
 

@@ -3052,8 +3052,10 @@ pub(crate) fn datetime_to_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
     Ok((timestamp_f64 * 1_000_000.0).round() as i64)
 }
 
-/// If `obj` is a `decimal.Decimal`, return it as a `Value::Decimal` (string value + scale
-/// from its exponent); otherwise `None`. Checked before int/float in `py_to_value` because
+/// If `obj` is an instance of the cached Decimal class (C `_decimal.Decimal`, else the
+/// public fallback), return it as a `Value::Decimal` (string value + scale from its
+/// exponent); otherwise `None`. See the class-rebinding entry in
+/// `dev/parity/known-differences.md`. Checked before int/float in `py_to_value` because
 /// Decimal defines `__float__`/`__int__`.
 fn decimal_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Option<Value>> {
     let py = obj.py();
@@ -3068,8 +3070,9 @@ fn decimal_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Option<Value>> {
     // of `1E+1000000000` would not be.
     let dec_str: String = obj.str()?.extract()?;
     let scale = if crate::infer::is_exact_c_decimal(obj, c_decimal) {
-        // Exact Decimal strings preserve the coefficient's trailing zeros and exponent.
-        // Subclasses may override either __str__ or as_tuple, so keep their old path.
+        // Exact C Decimal strings preserve the coefficient's trailing zeros and exponent.
+        // Subclasses and pure-Python Decimals can override __str__ or as_tuple, so keep
+        // their tuple hooks.
         decimal_string_scale(&dec_str)
     } else {
         let as_tuple = obj.call_method0("as_tuple")?;
