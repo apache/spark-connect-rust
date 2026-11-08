@@ -3919,8 +3919,10 @@ pub(crate) fn resolve_datatype(
     session: &spark_connect::session::SparkSession,
     schema: &Bound<'_, PyAny>,
 ) -> PyResult<spark_connect::types::DataType> {
-    if let Ok(dt) = schema.extract::<PyRef<PyDataType>>() {
-        return Ok(dt.inner.clone());
+    // The live conversion, not the base snapshot: an edit in place of a StructType's fields or
+    // metadata after it was built is kept, as PySpark does.
+    if schema.extract::<PyRef<PyDataType>>().is_ok() {
+        return crate::types::py_to_data_type(schema);
     }
     if schema.is_instance_of::<pyo3::types::PyString>() {
         return crate::types::schema_data_type(py, session, schema);

@@ -592,6 +592,19 @@ def test_udtf_handlers_that_capture_analysis_columns_run_as_pyspark(session):
         Partitioned().collect()
 
 
+def test_map_schemas_keep_the_metadata_edited_in_place_on_the_server_as_pyspark(session):
+    # As PySpark's: the schema of mapInPandas, mapInArrow and applyInPandas is the StructType
+    # with the metadata edited in place after it was built, so the result has it.
+    st = StructType([StructField("a", IntegerType()), StructField("b", StringType())])
+    st["a"].metadata["comment"] = "the a"
+    df = session.createDataFrame([(1, "x")], "a int, b string")
+    assert df.mapInPandas(lambda it: it, st).schema["a"].metadata == {"comment": "the a"}
+    assert df.mapInArrow(lambda it: it, st).schema["a"].metadata == {"comment": "the a"}
+    grouped = df.groupBy("a")
+    assert grouped.applyInPandas(lambda pdf: pdf, st).schema["a"].metadata == {
+        "comment": "the a"}
+
+
 def test_arrow_udtf_takes_and_returns_arrow_data_as_pyspark(session):
     # As PySpark's arrow_udtf(), a PyArrow-native UDTF: eval() takes a pyarrow array of the
     # argument, and returns pyarrow tables.
