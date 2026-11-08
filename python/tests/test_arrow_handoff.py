@@ -5030,6 +5030,7 @@ def test_arrow_string_label_descriptors_decline_without_binding(monkeypatch, met
 
 @pytest.mark.parametrize("storage_kind", [
     "plain_array", "nonstring", "invalid_utf8", "bad_storage", "spoofed_array",
+    "short_storage", "long_storage",
 ])
 def test_arrow_string_storage_normalization_and_fallback(monkeypatch, storage_kind):
     import importlib
@@ -5047,6 +5048,10 @@ def test_arrow_string_storage_normalization_and_fallback(monkeypatch, storage_ki
         assert isinstance(storage, pa.Array)
     elif storage_kind == "nonstring":
         storage = pa.chunked_array([pa.array([1, None], type=pa.int64())])
+    elif storage_kind in ("short_storage", "long_storage"):
+        count = 1 if storage_kind == "short_storage" else 3
+        storage = pa.chunked_array([pa.array(["é"] * count, type=pa.string())])
+        assert len(storage) != len(frame)
     elif storage_kind == "invalid_utf8":
         invalid = pa.Array.from_buffers(pa.string(), 2, [
             None, pa.py_buffer(struct.pack("<iii", 0, 5, 6)), pa.py_buffer(b"valid\xff"),

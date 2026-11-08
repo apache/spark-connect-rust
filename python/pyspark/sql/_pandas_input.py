@@ -840,6 +840,8 @@ def _arrow_string_table(frame, schema, dtypes):
             values = pa.chunked_array([values])
         elif type(values) is not pa.ChunkedArray:
             return None
+        if len(values) != len(frame):
+            return None
         if values.type not in (pa.string(), pa.large_string()):
             return None
         try:
