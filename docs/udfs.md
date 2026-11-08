@@ -87,7 +87,7 @@ cargo run
 
 ## Supported types
 
-Arguments and results cross the WASM boundary with a length-prefixed binary ABI
+Arguments and results cross the WASM boundary in a binary ABI
 (`spark_connect::wasm_udf::AbiType`), inferred from the Rust signature:
 
 | Rust        | Spark SQL type       |
@@ -104,6 +104,10 @@ Arguments and results cross the WASM boundary with a length-prefixed binary ABI
 
 These nest arbitrarily - e.g. `Vec<Option<String>>` -> `ArrayType(StringType, nullable)`.
 
+A UDF whose arguments and result are all scalars, `String`, `Vec<u8>`, or one
+`Option` of those is sent as a scalar Arrow UDF and called once per Arrow batch;
+any other UDF is called once per row.
+
 ## How it works
 
 ```text
@@ -115,7 +119,8 @@ client       udf::add_one(col) builds a standard PythonUDF: a tiny Python runner
              `wasmtime` - nothing to pre-deploy.
 
 executors    the Python worker instantiates the module with wasmtime and invokes
-             the exported entrypoint once per input row over the binary ABI.
+             the exported entrypoint once per Arrow batch, or once per input row
+             for signatures with arrays or nested Options.
 ```
 
 The user never writes WASM, never touches the ABI, and never loads a `.wasm`
@@ -144,6 +149,16 @@ generates a builder `udf::<name>_udf()`:
 ```{.rust .no-run}
 udf::add_one_udf()
     .as_nondeterministic()
+    .call(vec![col("id")])?;
+```
+
+To call a UDF once per row instead of once per batch, set its eval type:
+
+```{.rust .no-run}
+use spark_connect::udf::eval_type;
+
+udf::add_one_udf()
+    .with_eval_type(eval_type::SQL_ARROW_BATCHED_UDF)
     .call(vec![col("id")])?;
 ```
 

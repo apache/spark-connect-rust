@@ -314,10 +314,11 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Install Rust toolchain
+      - name: Install Rust toolchain (+ wasm32 target)
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
+          rustup target add wasm32-unknown-unknown
 
       - name: Cache cargo & target
         uses: actions/cache@v4
@@ -334,10 +335,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
 
-      - name: Install Python dependencies (server-side UDF workers)
+      - name: Install Python dependencies (server-side UDF workers, WASM UDF packer)
         run: |
           python -m pip install --upgrade pip
-          python -m pip install 'pandas>=2.2,<3.0' pyarrow numpy
+          python -m pip install 'pandas>=2.2,<3.0' pyarrow numpy wasmtime "pyspark==${SPARK_VERSION}"
 
       - name: Cache Spark ${{ env.SPARK_VERSION }} distribution
         uses: actions/cache@v4
@@ -392,6 +393,11 @@ jobs:
             --test e2e_functions --test e2e_columns --test e2e_dataframe \
             --test e2e_coverage --test e2e_linear_svc --test e2e_integration \
             -- --test-threads=1
+
+      - name: Rust WASM UDF e2e test (against the live server)
+        env:
+          SPARK_REMOTE: sc://localhost:15002
+        run: cargo test --manifest-path tests/wasm-udf/Cargo.toml --test e2e_wasm_udf
 
   # ---------------------------------------------------------------------------
   # E2E performance benchmark: our client vs reference, same 4.3.0 server.
