@@ -1043,6 +1043,14 @@ def test_create_dataframe_from_arrow_table(session, schema, expected):
     assert _rows(df) == ARROW_TABLE_ROWS
 
 
+def test_catalog_function_class_name_is_none_without_a_class_as_pyspark(session):
+    # As PySpark's, the className of a builtin that has no class (`!=`, `||`) is None.
+    functions = {f.name: f for f in session.catalog.listFunctions()}
+    assert functions["!="].className is None and functions["||"].className is None
+    assert functions["abs"].className.startswith("org.apache.spark.sql.catalyst.")
+    assert session.catalog.getFunction("abs").className == functions["abs"].className
+
+
 def test_spark_conf_and_task_context_are_those_of_pyspark(session):
     # As PySpark's: pyspark exports the SparkConf, whose settings the builder sets on the
     # session, and the TaskContext, which a UDF uses on the server.

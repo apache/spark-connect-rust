@@ -7906,6 +7906,27 @@ def test_create_dataframe_of_a_numpy_array_as_pyspark(mock_connect):
         spark.createDataFrame(np.array([]))
     assert e.value.getCondition() == "CANNOT_INFER_EMPTY_SCHEMA"
 
+
+def test_catalog_function_class_name_is_none_without_a_class_as_pyspark(mock_connect):
+    import pyarrow as pa
+
+    spark, service = mock_connect
+    # As PySpark's, a function whose className is null (a builtin such as `!=`) has None for
+    # it, not an empty string. The mock answers with the rows of the catalog's Function.
+    table = pa.table({
+        "name": ["!=", "abs"], "catalog": [None, None], "namespace": [None, None],
+        "description": ["d1", "d2"], "className": [None, "org.a.Abs"],
+        "isTemporary": [True, True]})
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    # ExecutePlanResponse.arrow_batch=2: ArrowBatch.row_count=1, data=2.
+    service.execute_payload = message_field(2, varint_field(1, table.num_rows) + message_field(
+        2, sink.getvalue().to_pybytes()))
+    functions = spark.catalog.listFunctions()
+    assert [(f.name, f.className) for f in functions] == [("!=", None), ("abs", "org.a.Abs")]
+
+
 def test_create_dataframe_of_a_dataframe_raises_as_pyspark():
     from pyspark.errors import PySparkTypeError
 

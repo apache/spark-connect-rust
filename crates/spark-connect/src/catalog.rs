@@ -55,7 +55,7 @@ pub struct Function {
     pub catalog: Option<String>,
     pub namespace: Option<Vec<String>>,
     pub description: Option<String>,
-    pub class_name: String,
+    pub class_name: Option<String>,
     pub is_temporary: bool,
 }
 
@@ -115,7 +115,7 @@ fn parse_function(r: &Row) -> Function {
         catalog: row_opt_str(r, 1),
         namespace: row_opt_namespace(r, 2),
         description: row_opt_str(r, 3),
-        class_name: row_str(r, 4),
+        class_name: row_opt_str(r, 4),
         is_temporary: row_bool(r, 5),
     }
 }
