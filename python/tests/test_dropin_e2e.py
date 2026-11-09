@@ -2079,6 +2079,18 @@ def test_collected_rows_take_the_names_of_the_schema_of_the_result_as_pyspark(se
     assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION"
     assert e.value.getMessageParameters() == {"data_type": "month_day_nano_interval"}
 
+
+def test_collect_of_a_string_that_is_not_utf8_raises_as_pyspark(session):
+    # As PySpark's: the bytes of the string are not UTF-8, and collect raises the UnicodeDecodeError
+    # of Python's decoder for them, while a valid string of the same query collects.
+    with pytest.raises(UnicodeDecodeError) as e:
+        session.sql("SELECT CAST(X'C3' AS STRING) AS s").collect()
+    assert type(e.value) is UnicodeDecodeError
+    assert str(e.value) == (
+        "'utf-8' codec can't decode byte 0xc3 in position 0: unexpected end of data")
+    assert session.sql("SELECT CAST(X'61' AS STRING) AS s").collect() == [Row(s="a")]
+
+
 def test_collect_reads_a_result_across_stream_ends(session):
     # Takes several response streams when the server's senderMaxStreamSize is small.
     n = 300_000

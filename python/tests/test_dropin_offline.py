@@ -1068,6 +1068,69 @@ def test_collected_rows_take_the_names_of_the_schema_of_the_result_as_pyspark(mo
         spark.range(1).collect()
     assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION"
     assert e.value.getMessageParameters() == {"data_type": "month_day_nano_interval"}
+
+
+def test_collect_of_a_string_that_is_not_utf8_raises_as_pyspark(mock_connect):
+    # As PySpark's: a result is converted column by column, so the first invalid string of the
+    # first column raises the UnicodeDecodeError of Python's decoder, whether it is a top-level
+    # string or nested in an array.
+    import pyarrow as pa
+    from _mock_connect_server import data_type_proto
+
+    spark, service = mock_connect
+
+    def strings(*values):
+        # The bytes of the values as a string array: pyarrow does not check that they are UTF-8.
+        offsets, total = [0], 0
+        for value in values:
+            total += len(value)
+            offsets.append(total)
+        return pa.Array.from_buffers(pa.string(), len(values), [
+            None, pa.array(offsets, pa.int32()).buffers()[1],
+            pa.py_buffer(b"".join(values))])
+
+    def respond(schema, table):
+        sink = pa.BufferOutputStream()
+        with pa.ipc.new_stream(sink, table.schema) as writer:
+            writer.write_table(table)
+        # ExecutePlanResponse.schema=7 and arrow_batch=2: ArrowBatch.row_count=1, data=2.
+        service.execute_payload = message_field(7, schema) + message_field(
+            2, varint_field(1, table.num_rows) + message_field(2, sink.getvalue().to_pybytes()))
+
+    def python_error(value):
+        with pytest.raises(UnicodeDecodeError) as e:
+            value.decode("utf-8")
+        return e.value
+
+    def string_field(name):
+        return {"name": name, "type": "string", "nullable": True, "metadata": {}}
+
+    respond(data_type_proto({"type": "struct", "fields": [string_field("s")]}),
+            pa.table({"s": strings(b"a", b"\xc3")}))
+    with pytest.raises(UnicodeDecodeError) as e:
+        spark.range(1).collect()
+    assert type(e.value) is UnicodeDecodeError
+    assert str(e.value) == str(python_error(b"\xc3"))
+
+    respond(data_type_proto({"type": "struct", "fields": [{
+        "name": "a", "type": {"type": "array", "elementType": "string", "containsNull": True},
+        "nullable": True, "metadata": {}}]}),
+        pa.table({"a": pa.ListArray.from_arrays([0, 1, 2], strings(b"a", b"\xc3"))}))
+    with pytest.raises(UnicodeDecodeError) as e:
+        spark.range(1).collect()
+    assert str(e.value) == str(python_error(b"\xc3"))
+
+    # Row 0 of column b is invalid too, but PySpark raises for the first column, at its row 1.
+    respond(data_type_proto({"type": "struct", "fields": [
+        string_field("a"), string_field("b")]}),
+        pa.table({"a": strings(b"a", b"\xc3"), "b": strings(b"\xc4", b"b")}))
+    with pytest.raises(UnicodeDecodeError) as e:
+        spark.range(1).collect()
+    assert str(e.value) == str(python_error(b"\xc3"))
+
+    respond(data_type_proto({"type": "struct", "fields": [string_field("s")]}),
+            pa.table({"s": strings(b"a")}))
+    assert spark.range(1).collect() == [Row(s="a")]
     assert len(list(spark.range(1).toLocalIterator())) == 1
 
 def test_tags_are_those_of_each_thread_as_pyspark(mock_connect):
