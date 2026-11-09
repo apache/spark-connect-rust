@@ -270,6 +270,34 @@ def test_repr_shows_the_rows_with_eager_evaluation_as_pyspark(session):
     assert repr(df) == "DataFrame[id: bigint]"
 
 
+def test_server_session_id_is_observed_and_a_changed_one_closes_the_session_as_pyspark():
+    # SparkConnectClient._server_session_id: None before the first response, then the server's
+    # ID; a changed one makes the next response close the client, as a server-side change does.
+    import uuid
+
+    from pyspark.errors.exceptions.connect import SparkConnectException
+    from pyspark.sql.connect.session import SparkSession as ConnectSession
+
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("SPARK_REMOTE is required for live-server tests")
+    session = ConnectSession(connection=remote)
+    try:
+        assert session._client._server_session_id is None
+        assert session.range(3).count() == 3
+        assert session._client._server_session_id
+        assert not session.is_stopped
+
+        session._client._server_session_id = str(uuid.uuid4())
+        with pytest.raises(SparkConnectException) as error:
+            session.range(3).collect()
+        assert "SESSION_CHANGED" in str(error.value)
+        assert session.is_stopped
+    finally:
+        session.release_session_on_close = False
+        session.stop()
+
+
 def test_udtfs_and_udfs_of_a_dataframe_or_the_session_raise_no_active_session_as_pyspark(session):
     # As PySpark Connect's: a UDTF or a UDF that captures a DataFrame or the session pickles it
     # of its session, which raises NO_ACTIVE_SESSION on the Python worker of the server, where

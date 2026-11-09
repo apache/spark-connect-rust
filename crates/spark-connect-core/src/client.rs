@@ -265,6 +265,8 @@ pub type ExecutePlanHook =
 pub struct SparkConnectClient {
     /// The tonic gRPC channel.
     channel: Channel,
+    /// The display host of the endpoint of the channel, as `ChannelBuilder::host`.
+    host: String,
     /// The generated gRPC client stub.
     stub: SparkConnectServiceClient<Channel>,
     /// Session ID (UUID v4) identifying this session on the server.
@@ -403,6 +405,7 @@ impl SparkConnectClient {
 
         Ok(Self {
             channel,
+            host: builder.host().to_string(),
             stub,
             session_id,
             user_id: builder.user_id().map(String::from).or_else(default_user_id),
@@ -430,6 +433,7 @@ impl SparkConnectClient {
     pub fn with_new_session_id(&self) -> Self {
         SparkConnectClient {
             channel: self.channel.clone(),
+            host: self.host.clone(),
             stub: self.stub.clone(),
             session_id: Uuid::new_v4().to_string(),
             user_id: self.user_id.clone(),
@@ -471,9 +475,24 @@ impl SparkConnectClient {
         Ok(())
     }
 
-    /// The server-side session ID that the responses have carried, if one has.
-    fn observed_server_session_id(&self) -> Option<String> {
+    /// The server-side session ID that the responses have carried, if one has, as PySpark's
+    /// `_server_session_id`: None before the first response.
+    pub fn observed_server_session_id(&self) -> Option<String> {
         observed_of(&self.server_session_id)
+    }
+
+    /// Set the server-side session ID that the requests observe, as PySpark's
+    /// `_server_session_id` is settable: a response that carries another one closes the client.
+    pub fn set_observed_server_session_id(&self, id: Option<String>) {
+        *self
+            .server_session_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = id;
+    }
+
+    /// The display host of the endpoint of the channel, as PySpark's `SparkConnectClient.host`.
+    pub fn host(&self) -> &str {
+        &self.host
     }
 
     /// Sets the observed server-side session ID of a request, once a response has set it, as
@@ -2670,5 +2689,25 @@ mod tests {
             vec![first[1].clone()]
         );
         assert_eq!(extension_ids(&client), vec![main, late]);
+    }
+
+    #[test]
+    fn host_and_observed_server_session_id_of_the_client() {
+        let client = connect_blocking("sc://Other:114");
+        assert_eq!(client.host(), "other");
+        assert_eq!(client.observed_server_session_id(), None);
+        client.set_observed_server_session_id(Some("server-a".to_string()));
+        assert_eq!(
+            client.observed_server_session_id().as_deref(),
+            Some("server-a")
+        );
+        // The clones of a client share its observed ID, and a client of a new session has none.
+        assert_eq!(
+            client.clone().observed_server_session_id().as_deref(),
+            Some("server-a")
+        );
+        let other = client.with_new_session_id();
+        assert_eq!(other.host(), "other");
+        assert_eq!(other.observed_server_session_id(), None);
     }
 }
