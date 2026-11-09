@@ -16,6 +16,7 @@
 #
 """Streaming listener lifecycle tests against the separately hosted mock service."""
 
+import json
 import subprocess
 import sys
 import tempfile
@@ -26,7 +27,7 @@ from pathlib import Path
 
 import pytest
 
-from pyspark.sql.streaming.listener import StreamingQueryListener
+from pyspark.sql.streaming.listener import QueryIdleEvent, StreamingQueryListener
 
 
 class IdleListener(StreamingQueryListener):
@@ -73,18 +74,304 @@ def run_listener_case(*arguments):
             )
         except subprocess.TimeoutExpired:
             output.seek(0)
-            pytest.fail("Concurrent listener shutdown timed out:\n" + output.read())
+            pytest.fail(f"Listener case {arguments} timed out:\n" + output.read())
         output.seek(0)
         assert result.returncode == 0, output.read()
 
 
-def listener_warnings(caught):
-    prefixes = ("Failed to add the listener", "Failed to remove the listener")
+_LIFECYCLE_WARNING_PREFIXES = ("Failed to add the listener", "Failed to remove the listener")
+_HANDLER_WARNING_PREFIX = (
+    "StreamingQueryListenerBus Handler thread received exception, all client side "
+    "listeners are removed and handler thread is terminated. The error is: "
+)
+
+
+def warnings_with_prefixes(caught, prefixes):
     return [str(item.message) for item in caught
             if issubclass(item.category, UserWarning) and str(item.message).startswith(prefixes)]
 
 
+def listener_warnings(caught):
+    return warnings_with_prefixes(caught, _LIFECYCLE_WARNING_PREFIXES)
+
+
+def listener_event_warnings(caught):
+    return warnings_with_prefixes(
+        caught, (_HANDLER_WARNING_PREFIX, "Listener ", *_LIFECYCLE_WARNING_PREFIXES)
+    )
+
+
+def emit_unrelated_warnings():
+    warnings.warn("unrelated streaming test deprecation", DeprecationWarning)
+    warnings.warn("unrelated streaming test user warning", UserWarning)
+
+
+def wait_for_empty_bus(manager, message="failed stream kept its registrations"):
+    deadline = time.monotonic() + 5
+    while manager._sqlb._listener_bus:
+        assert time.monotonic() < deadline, message
+        time.sleep(0.01)
+
+
+def start_response(event_json):
+    from _mock_connect_server import message_field
+
+    # WriteStreamOperationStartResult: query_id=1, query_started_event_json=3.
+    return message_field(
+        8,
+        message_field(1, message_field(1, "q") + message_field(2, "r"))
+        + message_field(3, event_json),
+    )
+
+
 class TestStreamingListenerLifecycle:
+    @pytest.mark.parametrize("method", ["start", "toTable"])
+    @pytest.mark.parametrize("registered", [False, True])
+    @pytest.mark.parametrize("event_json, exception", [
+        ("", json.JSONDecodeError), ("{", json.JSONDecodeError), ("{}", KeyError),
+    ], ids=["empty-json", "invalid-json", "missing-fields"])
+    def test_streaming_started_event_decode_error_propagates(
+        self, mock_connect, method, registered, event_json, exception,
+    ):
+        spark, service = mock_connect
+        service.listener_bus_enabled = True
+        listener = IdleListener()
+        try:
+            if registered:
+                spark.streams.addListener(listener)
+            service.execute_payload = start_response(event_json)
+            writer = spark.readStream.format("rate").load().writeStream
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                emit_unrelated_warnings()
+                with pytest.raises(exception):
+                    getattr(writer, method)(*(["table"] if method == "toTable" else []))
+            assert not listener_event_warnings(caught)
+            assert spark.streams._sqlb._listener_bus == ([listener] if registered else [])
+        finally:
+            spark.streams.close()
+
+    @pytest.mark.parametrize("method", ["start", "toTable"])
+    def test_streaming_started_callbacks_share_typed_event_and_isolate_exceptions(
+        self, mock_connect, method,
+    ):
+        spark, service = mock_connect
+        service.listener_bus_enabled = True
+        events = []
+
+        class StartedListener(IdleListener):
+            def onQueryStarted(self, event):
+                events.append(event)
+                if len(events) == 1:
+                    raise ValueError("started callback failed")
+
+        listener = StartedListener()
+        try:
+            # Duplicate registrations receive the same deserialized event, synchronously.
+            spark.streams.addListener(listener)
+            spark.streams.addListener(listener)
+            service.execute_payload = start_response(json.dumps({
+                "id": "00000000-0000-4000-8000-000000000001",
+                "runId": "00000000-0000-4000-8000-000000000002",
+                "name": "query", "timestamp": "started", "jobTags": ["tag"],
+            }))
+            writer = spark.readStream.format("rate").load().writeStream
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                emit_unrelated_warnings()
+                query = getattr(writer, method)(*(["table"] if method == "toTable" else []))
+            assert query.id == "q"
+            relevant = listener_event_warnings(caught)
+            assert len(relevant) == 1 and "started callback failed" in relevant[0]
+            assert len(events) == 2 and events[0] is events[1]
+            assert events[0].timestamp == "started" and events[0].jobTags == {"tag"}
+            assert spark.streams._sqlb._listener_bus == [listener, listener]
+        finally:
+            spark.streams.close()
+
+    @pytest.mark.parametrize("event_type, event_json", [
+        (None, ""),
+        (3, ""),
+        (3, "{"),
+        (3, "{}"),
+        (99, "{}"),
+        (0, "{}"),
+        (-1, "{}"),
+    ], ids=["transport", "empty-json", "invalid-json", "missing-fields", "unknown-type",
+            "unspecified-type", "async-started-type"])
+    def test_streaming_bus_errors_warn_once_clear_all_and_allow_reregistration(
+        self, mock_connect, event_type, event_json,
+    ):
+        spark, service = mock_connect
+        service.listener_bus_enabled = True
+        manager = spark.streams
+        first, second = IdleListener(), IdleListener()
+        try:
+            manager.addListener(first)
+            manager.addListener(first)
+            manager.addListener(second)
+            emit_idle(service, spark, "before-error")
+            first.wait_for("before-error")
+            second.wait_for("before-error")
+            if event_type is None:
+                from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+
+                # Compare the entire error rendering with a normal RPC abort carrying
+                # the same status and details as the listener-stream abort.
+                previous_failure = service.execute_failure
+                service.execute_failure = "listener event stream failed"
+                try:
+                    with pytest.raises(SparkConnectGrpcException) as error:
+                        spark.range(1).collect()
+                    expected_error = str(error.value)
+                finally:
+                    service.execute_failure = previous_failure
+            elif event_type == 3:
+                # Derive the complete reference string from the vendored event decoder,
+                # independently of the native bus and its exception round trip.
+                with pytest.raises((json.JSONDecodeError, KeyError)) as error:
+                    QueryIdleEvent.fromJson(json.loads(event_json))
+                expected_error = str(error.value)
+            else:
+                from pyspark.errors import PySparkValueError
+
+                expected_error = str(PySparkValueError(
+                    errorClass="UNKNOWN_VALUE_FOR",
+                    messageParameters={"var": f"proto.StreamingQueryEventType: {event_type}"},
+                ))
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                emit_unrelated_warnings()
+                if event_type is None:
+                    assert service.end_listener_stream(spark.session_id, failure=True)
+                else:
+                    service.listener_event_json(spark.session_id, event_type, event_json)
+                wait_for_empty_bus(manager)
+            messages = listener_event_warnings(caught)
+            assert len(messages) == 1
+            assert messages[0] == _HANDLER_WARNING_PREFIX + expected_error
+            assert first.timestamps == ["before-error", "before-error"]
+            assert second.timestamps == ["before-error"]
+            assert service.wait_listener_streams_finished(1)
+            assert service.listener_removals == 0
+
+            manager.addListener(second)
+            assert service.listener_subscriptions == 2
+            emit_idle(service, spark, "after-error")
+            second.wait_for("after-error")
+            assert manager._sqlb._listener_bus == [second]
+            assert first.timestamps == ["before-error", "before-error"]
+            manager.removeListener(second)
+            assert service.wait_listener_streams_finished(2)
+        finally:
+            manager.close()
+
+    def test_streaming_callback_exceptions_warn_and_leave_the_bus_running(self, mock_connect):
+        spark, service = mock_connect
+        service.listener_bus_enabled = True
+
+        class FailingListener(IdleListener):
+            def onQueryIdle(self, event):
+                super().onQueryIdle(event)
+                raise ValueError("idle callback failed")
+
+        first, second = FailingListener(), IdleListener()
+        try:
+            spark.streams.addListener(first)
+            spark.streams.addListener(second)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                emit_unrelated_warnings()
+                for timestamp in ("first-callback", "second-callback"):
+                    emit_idle(service, spark, timestamp)
+                    second.wait_for(timestamp)
+            relevant = listener_event_warnings(caught)
+            assert len(relevant) == 2
+            assert relevant == [f"Listener {first} threw an exception\nidle callback failed"] * 2
+            assert first.timestamps == second.timestamps == ["first-callback", "second-callback"]
+            assert spark.streams._sqlb._listener_bus == [first, second]
+            assert service.listener_subscriptions == 1
+        finally:
+            spark.streams.close()
+
+    def test_streaming_duplicate_async_listeners_share_one_decoded_event(
+        self, mock_connect, monkeypatch,
+    ):
+        from pyspark.sql.streaming import query as query_module
+
+        spark, service = mock_connect
+        service.listener_bus_enabled = True
+        decoded, received = [], []
+        deserialize = query_module._deserialize_listener_event
+
+        def count_decode(*args, **kwargs):
+            event = deserialize(*args, **kwargs)
+            decoded.append(event)
+            return event
+
+        monkeypatch.setattr(query_module, "_deserialize_listener_event", count_decode)
+
+        class SharedListener(IdleListener):
+            def onQueryIdle(self, event):
+                with self.condition:
+                    received.append(event)
+                    self.condition.notify_all()
+
+        listener = SharedListener()
+        try:
+            spark.streams.addListener(listener)
+            spark.streams.addListener(listener)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                emit_unrelated_warnings()
+                emit_idle(service, spark, "shared-event")
+                with listener.condition:
+                    assert listener.condition.wait_for(lambda: len(received) == 2, timeout=5)
+            assert not listener_event_warnings(caught)
+            assert len(decoded) == 1
+            assert received[0] is received[1] is decoded[0]
+            assert received[0].timestamp == "shared-event"
+        finally:
+            spark.streams.close()
+
+    @pytest.mark.parametrize("failure", ["base-exception", "warning-as-error"])
+    def test_streaming_unisolated_callback_errors_clear_the_bus(self, mock_connect, failure):
+        spark, service = mock_connect
+        service.listener_bus_enabled = True
+
+        class CallbackExit(BaseException):
+            pass
+
+        class FailingListener(IdleListener):
+            def onQueryIdle(self, event):
+                super().onQueryIdle(event)
+                if failure == "base-exception":
+                    raise CallbackExit("uncaught callback exit")
+                raise ValueError("callback warning becomes an error")
+
+        first, second = FailingListener(), IdleListener()
+        try:
+            spark.streams.addListener(first)
+            spark.streams.addListener(second)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                warnings.filterwarnings("error", message="Listener ", category=UserWarning)
+                emit_unrelated_warnings()
+                emit_idle(service, spark, "unisolated-error")
+                wait_for_empty_bus(spark.streams)
+            relevant = listener_event_warnings(caught)
+            assert len(relevant) == 1
+            expected_error = (
+                "uncaught callback exit" if failure == "base-exception"
+                else f"Listener {first} threw an exception\ncallback warning becomes an error"
+            )
+            assert relevant[0] == _HANDLER_WARNING_PREFIX + expected_error
+            assert first.timestamps == ["unisolated-error"]
+            assert second.timestamps == []
+            assert service.wait_listener_streams_finished(1)
+        finally:
+            spark.streams.close()
+
     @pytest.mark.parametrize("remove_failure, callback_action", [
         (False, "remove"), (True, "remove"), (False, "stop"), (True, "stop"), (False, "add"),
         (False, "remove_duplicate"), (True, "remove_duplicate"),
@@ -725,10 +1012,7 @@ def ended_stream_case(termination):
             # or with a nonretryable server error. Server completion precedes native cleanup.
             assert service.end_listener_stream(spark.session_id, failure=termination == "error")
             assert service.wait_listener_streams_finished(1)
-            deadline = time.monotonic() + 5
-            while manager._sqlb._listener_bus:
-                assert time.monotonic() < deadline, "ended stream kept its registrations"
-                time.sleep(0.01)
+            wait_for_empty_bus(manager, "ended stream kept its registrations")
             assert listener._rust_listener_ids == stale_ids
             manager.removeListener(listener)
             assert listener._rust_listener_ids == stale_ids

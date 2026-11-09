@@ -7,41 +7,169 @@ use spark_connect::streaming::{
     StreamingQueryListener, StreamingQueryListenerEvent, StreamingQueryManager, Trigger,
 };
 use spark_connect::udf::PythonUDFPayload;
+use spark_connect_core::error::{Result as SparkResult, SparkError};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::dataframe::{PyDataFrame, WriterState};
 use crate::errors::ResultExt;
 
-/// Adapts a Python `StreamingQueryListener` to the native Rust listener trait: on each
-/// event it acquires the GIL and calls the Python-side dispatch helper (which builds the
-/// typed event object and invokes the right `onQuery*` callback).
+/// Adapts Python listeners to the native bus: deserialize one typed event for the whole
+/// snapshot, then dispatch it through Python's callback-exception isolation helper. Decode
+/// errors return to the bus, and terminal failures produce the reference handler warning.
 struct PyListenerAdapter {
     listener: Py<PyAny>,
 }
 
+/// An unisolated dispatch failure. Keep Python errors intact so synchronous starts
+/// can re-raise their original type; native listener errors remain typed SparkErrors.
+enum ListenerDispatchError {
+    Python(PyErr),
+    Native(Box<SparkError>),
+}
+
+impl From<PyErr> for ListenerDispatchError {
+    fn from(error: PyErr) -> Self {
+        Self::Python(error)
+    }
+}
+
+/// Decode before any callback, sharing one Python object across every registration.
+/// The same path handles synchronous starts and asynchronous protocol events, including
+/// mixed native/Python snapshots. Keep native errors typed until the reporting boundary.
+fn post_listener_event<'a>(
+    py: Python<'_>,
+    listeners: impl IntoIterator<Item = &'a dyn StreamingQueryListener>,
+    event: &StreamingQueryListenerEvent,
+    started: bool,
+) -> std::result::Result<(), ListenerDispatchError> {
+    let module = py.import("pyspark.sql.streaming.query")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("started", started)?;
+    let decoded = module.call_method(
+        "_deserialize_listener_event",
+        (event.event_type, event.event_json.as_str()),
+        Some(&kwargs),
+    )?;
+    for listener in listeners {
+        match listener
+            .as_any()
+            .and_then(|any| any.downcast_ref::<PyListenerAdapter>())
+        {
+            Some(adapter) => {
+                module.call_method1(
+                    "_dispatch_listener_event",
+                    (adapter.listener.bind(py), &decoded),
+                )?;
+            }
+            // Native callbacks keep their usual ability to wait for Python work.
+            None if started => py.detach(|| listener.on_event(event)),
+            None => py
+                .detach(|| listener.try_on_event(event).map_err(Box::new))
+                .map_err(ListenerDispatchError::Native)?,
+        }
+    }
+    Ok(())
+}
+
+/// Any Python exception not isolated by the helper terminates the subscription: this
+/// includes decoding errors, callback BaseException, and warnings promoted to errors.
+/// Async reporting keeps only str(), without allocating an unconsumed callback-registry id.
+fn async_dispatch_error(py: Python<'_>, error: ListenerDispatchError) -> Box<SparkError> {
+    match error {
+        ListenerDispatchError::Python(error) => {
+            Box::new(SparkError::connect_msg(error.value(py).to_string()))
+        }
+        ListenerDispatchError::Native(error) => error,
+    }
+}
+
 impl StreamingQueryListener for PyListenerAdapter {
     fn on_event(&self, event: &StreamingQueryListenerEvent) {
+        // This infallible entry point is also used by the core's default synchronous
+        // start handler. Python writer calls use post_started_event to propagate errors.
         Python::attach(|py| {
-            let dispatch = py
-                .import("pyspark.sql.streaming.query")
-                .and_then(|m| m.getattr("_dispatch_listener_event"));
-            if let Ok(dispatch) = dispatch {
-                // Swallow listener/callback errors so one bad listener cannot kill the
-                // dispatch thread (reference pyspark also isolates callback exceptions).
-                let _ = dispatch.call1((
-                    self.listener.bind(py),
-                    event.event_type,
-                    event.event_json.as_str(),
-                ));
-            }
+            let _ = post_listener_event(
+                py,
+                std::iter::once(self as &dyn StreamingQueryListener),
+                event,
+                true,
+            );
         });
+    }
+
+    fn try_on_event(&self, event: &StreamingQueryListenerEvent) -> SparkResult<()> {
+        Python::attach(|py| {
+            post_listener_event(
+                py,
+                std::iter::once(self as &dyn StreamingQueryListener),
+                event,
+                false,
+            )
+            .map_err(|error| async_dispatch_error(py, error))
+        })
+        .map_err(|error| *error)
+    }
+
+    fn try_post_to_all(
+        &self,
+        listeners: &[Arc<dyn StreamingQueryListener>],
+        event: &StreamingQueryListenerEvent,
+    ) -> Option<SparkResult<()>> {
+        Some(
+            Python::attach(|py| {
+                post_listener_event(py, listeners.iter().map(Arc::as_ref), event, false)
+                    .map_err(|error| async_dispatch_error(py, error))
+            })
+            .map_err(|error| *error),
+        )
+    }
+
+    fn on_stream_error(&self, error: &SparkError) -> bool {
+        Python::attach(|py| {
+            let message = crate::errors::spark_error_to_py_exception(error.clone())
+                .value(py)
+                .str()
+                .and_then(|text| Ok(text.to_cow()?.into_owned()))
+                .unwrap_or_else(|_| error.message());
+            let _ = warn(
+                py,
+                format!(
+                    "StreamingQueryListenerBus Handler thread received exception, all client side \
+                     listeners are removed and handler thread is terminated. The error is: {}",
+                    message
+                ),
+            );
+        });
+        true
     }
 
     /// The adapter, of which `StreamingQueryManager._sqlb` gives back the Python listener.
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         Some(self)
     }
+}
+
+/// Parse a synchronous started event once, including when there are no listeners, and
+/// dispatch its typed object before start/toTable returns. Preserve the original Python
+/// decoding exception across the detached core call.
+#[allow(clippy::result_large_err)] // The core started-event handler requires SparkResult.
+fn post_started_event(
+    manager: &StreamingQueryManager,
+    event: &StreamingQueryListenerEvent,
+) -> SparkResult<()> {
+    Python::attach(|py| {
+        let listeners = manager.listeners();
+        post_listener_event(py, listeners.iter().map(Arc::as_ref), event, true).map_err(|error| {
+            match error {
+                ListenerDispatchError::Python(error) => {
+                    Box::new(crate::errors::callback_error(error))
+                }
+                ListenerDispatchError::Native(error) => error,
+            }
+        })
+    })
+    .map_err(|error| *error)
 }
 
 /// Apply a named read option to a streaming reader when supplied (mirrors the batch
@@ -856,8 +984,11 @@ impl PyDataStreamWriter {
     ) -> PyResult<PyStreamingQuery> {
         let writer = self.apply_write_opts(format, outputMode, partitionBy, queryName, options)?;
         // Memory/console/foreach sinks take no path; the core treats "" as unset.
-        let query =
-            crate::dataframe::detached(py, || writer.start(path.unwrap_or("")).map_err(Box::new))?;
+        let query = crate::dataframe::detached(py, || {
+            writer
+                .start_with_event_handler(path.unwrap_or(""), post_started_event)
+                .map_err(Box::new)
+        })?;
         Ok(PyStreamingQuery::new(query))
     }
 
@@ -874,8 +1005,11 @@ impl PyDataStreamWriter {
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyStreamingQuery> {
         let writer = self.apply_write_opts(format, outputMode, partitionBy, queryName, options)?;
-        let query =
-            crate::dataframe::detached(py, || writer.to_table(tableName).map_err(Box::new))?;
+        let query = crate::dataframe::detached(py, || {
+            writer
+                .to_table_with_event_handler(tableName, post_started_event)
+                .map_err(Box::new)
+        })?;
         Ok(PyStreamingQuery::new(query))
     }
 

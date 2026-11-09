@@ -384,19 +384,49 @@ impl DataStreamWriter {
     }
 
     /// Start the streaming query writing to a path, returning a StreamingQuery handle.
-    pub fn start(mut self, path: &str) -> Result<StreamingQuery> {
+    pub fn start(self, path: &str) -> Result<StreamingQuery> {
+        self.start_with_event_handler(path, |manager, event| {
+            manager.post_to_all(event);
+            Ok(())
+        })
+    }
+
+    /// Start a query with a language-specific handler for its synchronous started event.
+    /// The handler runs even when no listeners are registered and must deserialize the event
+    /// before dispatching it. A handler error is returned instead of the query handle.
+    pub fn start_with_event_handler(
+        mut self,
+        path: &str,
+        on_started: impl FnOnce(&StreamingQueryManager, &StreamingQueryListenerEvent) -> Result<()>,
+    ) -> Result<StreamingQuery> {
         self.path = Some(path.to_string());
-        self._start_internal()
+        self._start_internal(on_started)
     }
 
     /// Start the streaming query writing to a table, returning a StreamingQuery handle.
-    pub fn to_table(mut self, table_name: &str) -> Result<StreamingQuery> {
+    pub fn to_table(self, table_name: &str) -> Result<StreamingQuery> {
+        self.to_table_with_event_handler(table_name, |manager, event| {
+            manager.post_to_all(event);
+            Ok(())
+        })
+    }
+
+    /// The table-writing counterpart of
+    /// [`start_with_event_handler`](Self::start_with_event_handler).
+    pub fn to_table_with_event_handler(
+        mut self,
+        table_name: &str,
+        on_started: impl FnOnce(&StreamingQueryManager, &StreamingQueryListenerEvent) -> Result<()>,
+    ) -> Result<StreamingQuery> {
         self.table_name = Some(table_name.to_string());
-        self._start_internal()
+        self._start_internal(on_started)
     }
 
     /// Internal method to build and execute the write stream command.
-    fn _start_internal(self) -> Result<StreamingQuery> {
+    fn _start_internal(
+        self,
+        on_started: impl FnOnce(&StreamingQueryManager, &StreamingQueryListenerEvent) -> Result<()>,
+    ) -> Result<StreamingQuery> {
         let mut write_op = proto::WriteStreamOperationStart::default();
         write_op.input = Some(crate::plan::relation_with_ids(
             &self.plan,
@@ -490,12 +520,13 @@ impl DataStreamWriter {
         // with the result of its start, as the session has client-side listeners, and the client
         // posts it to them before it gives back the query.
         if let Some(event_json) = started_event {
-            self.session
-                .streams()
-                .post_to_all(&StreamingQueryListenerEvent {
+            on_started(
+                &self.session.streams(),
+                &StreamingQueryListenerEvent {
                     event_type: QUERY_STARTED_EVENT,
                     event_json,
-                });
+                },
+            )?;
         }
 
         Ok(StreamingQuery {
@@ -910,6 +941,39 @@ pub struct StreamingQueryListenerEvent {
 pub trait StreamingQueryListener: Send + Sync {
     fn on_event(&self, event: &StreamingQueryListenerEvent);
 
+    /// Optionally handle an asynchronous bus event for the whole listener snapshot, for
+    /// adapters that deserialize a shared event object once before invoking any callback.
+    /// Synchronous started events instead use [`DataStreamWriter::start_with_event_handler`] or
+    /// [`DataStreamWriter::to_table_with_event_handler`] for shared deserialization.
+    /// The first adapter returning `Some` owns dispatch for every entry, including native
+    /// listeners and duplicates. Returning `None` must not invoke callbacks; the bus then
+    /// tries the next adapter or falls back to each listener's
+    /// [`try_on_event`](Self::try_on_event).
+    fn try_post_to_all(
+        &self,
+        _listeners: &[Arc<dyn StreamingQueryListener>],
+        _event: &StreamingQueryListenerEvent,
+    ) -> Option<Result<()>> {
+        None
+    }
+
+    /// Deserialize and dispatch an asynchronous event. An error is any failure the adapter
+    /// does not isolate, including protocol/deserialization errors and adapter-defined
+    /// unisolated callback failures. It terminates this subscription and clears its registrations.
+    fn try_on_event(&self, event: &StreamingQueryListenerEvent) -> Result<()> {
+        self.on_event(event);
+        Ok(())
+    }
+
+    /// Report a terminal subscription failure from transport, deserialization or dispatch.
+    /// Return true when reported, so the bus emits only one notification even if a listener
+    /// is registered more than once. The bus invokes this without its state lock, before
+    /// clearing the failed generation. Like an event callback, a concurrent removal
+    /// of a non-last listener from another thread waits for this hook to return.
+    fn on_stream_error(&self, _error: &SparkError) -> bool {
+        false
+    }
+
     /// This listener as `Any`, for a client that wraps its own listeners to find them among
     /// [`StreamingQueryManager::listeners`]. `None` by default.
     fn as_any(&self) -> Option<&dyn std::any::Any> {
@@ -934,13 +998,13 @@ struct ListenerBusState {
     phase: ListenerBusPhase,
     worker_id: Option<std::thread::ThreadId>,
     generation: u64,
-    /// The generation whose worker is delivering an event to its snapshot of the listeners.
-    /// PySpark's bus holds its lock while it delivers an event, so a removal from another
-    /// thread waits for it.
+    /// The generation whose worker is delivering an event, or reporting a terminal
+    /// failure, to its snapshot of the listeners. PySpark's bus holds its lock during
+    /// delivery, so a removal from another thread waits for it.
     dispatching: Option<u64>,
 }
 
-/// The delivery of one event by the worker of `generation`, until it is dropped.
+/// An event delivery or terminal failure notification by the worker of `generation`.
 struct Dispatch<'a> {
     bus: &'a Weak<ListenerBus>,
     generation: u64,
@@ -995,14 +1059,13 @@ impl ListenerBus {
 /// The worker retains neither the session nor its bus. The stream owns only transport
 /// and progress-handler state; dropping the last session/manager cancels the reader.
 fn run_listener_event_loop(
-    mut stream: ListenerEventStream,
+    stream: impl IntoIterator<Item = Result<(i32, String)>>,
     bus: Weak<ListenerBus>,
     generation: u64,
 ) {
+    let mut stream = stream.into_iter();
+    let mut failure = None;
     for item in &mut stream {
-        let Ok((event_type, event_json)) = item else {
-            break;
-        };
         let Some(owner) = bus.upgrade() else {
             break;
         };
@@ -1023,12 +1086,39 @@ fn run_listener_event_loop(
             bus: &bus,
             generation,
         };
+        let (event_type, event_json) = match item {
+            Ok(event) => event,
+            Err(error) => {
+                failure = Some((listeners, error, dispatch));
+                break;
+            }
+        };
         let event = StreamingQueryListenerEvent {
             event_type,
             event_json,
         };
+        let dispatched = listeners
+            .iter()
+            .find_map(|listener| listener.try_post_to_all(&listeners, &event))
+            .unwrap_or_else(|| {
+                listeners
+                    .iter()
+                    .try_for_each(|listener| listener.try_on_event(&event))
+            });
+        if let Err(error) = dispatched {
+            failure = Some((listeners, error, dispatch));
+            break;
+        }
+        drop(dispatch);
+    }
+    if let Some((listeners, error, dispatch)) = failure {
+        // A removal from another thread waits for this terminal notification, just
+        // as it waits for an ordinary event. No state lock or strong bus owner is
+        // held across either callback path; the worker can still remove itself.
         for listener in listeners {
-            listener.on_event(&event);
+            if listener.on_stream_error(&error) {
+                break;
+            }
         }
         drop(dispatch);
     }
@@ -1176,10 +1266,10 @@ impl StreamingQueryManager {
             };
             if state.listeners.len() > 1 {
                 state.listeners.remove(index);
-                // As PySpark's bus, whose delivery of an event holds the lock of its removal:
-                // the removal returns once the event in delivery has been delivered, also to
-                // the removed listener, which gets no events after it. A callback of the bus
-                // does not wait, as it would wait for its own delivery.
+                // As in PySpark's bus, a removal waits for delivery to the snapshot,
+                // including the removed listener, to finish. This also covers a
+                // terminal error notification. A callback of the bus does not wait,
+                // as it would wait for its own delivery.
                 if state.worker_id != Some(std::thread::current().id()) {
                     let generation = state.generation;
                     while state.dispatching == Some(generation) {
@@ -1679,6 +1769,385 @@ mod tests {
         finished
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("only terminal close eventually cancels the current worker");
+    }
+
+    #[test]
+    fn listener_bus_reports_transport_and_decode_failures_once_before_clearing() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Listener {
+            bus: Weak<ListenerBus>,
+            events: AtomicUsize,
+            errors: Mutex<Vec<String>>,
+        }
+        impl StreamingQueryListener for Listener {
+            fn on_event(&self, _: &StreamingQueryListenerEvent) {
+                self.events.fetch_add(1, Ordering::SeqCst);
+            }
+
+            fn try_on_event(&self, event: &StreamingQueryListenerEvent) -> Result<()> {
+                if event.event_json == "invalid" {
+                    return Err(SparkError::connect_msg("event decode failed"));
+                }
+                self.on_event(event);
+                Ok(())
+            }
+
+            fn on_stream_error(&self, error: &SparkError) -> bool {
+                // Reporting runs before cleanup, without holding the bus lock.
+                let bus = self.bus.upgrade().unwrap();
+                let state = bus.state.lock().unwrap();
+                assert_eq!(state.listeners.len(), 2);
+                assert_eq!(state.dispatching, Some(0));
+                drop(state);
+                self.errors.lock().unwrap().push(error.message());
+                true
+            }
+        }
+
+        for decode_failure in [false, true] {
+            let bus = Arc::new(ListenerBus::default());
+            let listener = Arc::new(Listener {
+                bus: Arc::downgrade(&bus),
+                events: AtomicUsize::new(0),
+                errors: Mutex::new(vec![]),
+            });
+            {
+                let mut state = bus.state.lock().unwrap();
+                state
+                    .listeners
+                    .push(("first".to_string(), listener.clone()));
+                state
+                    .listeners
+                    .push(("second".to_string(), listener.clone()));
+            }
+            let failure = if decode_failure {
+                Ok((QUERY_IDLE_EVENT, "invalid".to_string()))
+            } else {
+                Err(SparkError::connect_msg("transport failed"))
+            };
+            run_listener_event_loop(
+                vec![failure, Ok((QUERY_IDLE_EVENT, "valid".to_string()))],
+                Arc::downgrade(&bus),
+                0,
+            );
+            assert_eq!(listener.events.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                *listener.errors.lock().unwrap(),
+                vec![if decode_failure {
+                    "event decode failed"
+                } else {
+                    "transport failed"
+                }],
+            );
+            let state = bus.state.lock().unwrap();
+            assert!(state.listeners.is_empty());
+            assert!(state.dispatching.is_none());
+        }
+    }
+
+    #[test]
+    fn nonlast_removal_waits_for_transport_decode_and_batch_error_notifications() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        struct ReleaseOnDrop(mpsc::Sender<()>);
+        impl Drop for ReleaseOnDrop {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+
+        struct Listener {
+            batch_failure: bool,
+            entered: mpsc::Sender<()>,
+            release: Mutex<mpsc::Receiver<()>>,
+            order: Arc<Mutex<Vec<&'static str>>>,
+            events: AtomicUsize,
+            errors: AtomicUsize,
+        }
+        impl StreamingQueryListener for Listener {
+            fn on_event(&self, _: &StreamingQueryListenerEvent) {
+                self.events.fetch_add(1, Ordering::SeqCst);
+            }
+
+            fn try_post_to_all(
+                &self,
+                _: &[Arc<dyn StreamingQueryListener>],
+                _: &StreamingQueryListenerEvent,
+            ) -> Option<Result<()>> {
+                self.batch_failure
+                    .then(|| Err(SparkError::connect_msg("batch decode failed")))
+            }
+
+            fn try_on_event(&self, _: &StreamingQueryListenerEvent) -> Result<()> {
+                Err(SparkError::connect_msg("event decode failed"))
+            }
+
+            fn on_stream_error(&self, _: &SparkError) -> bool {
+                self.errors.fetch_add(1, Ordering::SeqCst);
+                self.order.lock().unwrap().push("reporting");
+                self.entered.send(()).unwrap();
+                self.release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(15))
+                    .expect("the test releases the terminal notification");
+                self.order.lock().unwrap().push("reported");
+                true
+            }
+        }
+
+        for failure_kind in ["transport", "decode", "batch"] {
+            let spark = session();
+            let manager = spark.streams();
+            let (entered, reporting) = mpsc::channel();
+            let (release, released) = mpsc::channel();
+            let order = Arc::new(Mutex::new(vec![]));
+            let listener = Arc::new(Listener {
+                batch_failure: failure_kind == "batch",
+                entered,
+                release: Mutex::new(released),
+                order: Arc::clone(&order),
+                events: AtomicUsize::new(0),
+                errors: AtomicUsize::new(0),
+            });
+            {
+                let mut state = manager.bus.state.lock().unwrap();
+                state
+                    .listeners
+                    .push(("first".to_string(), listener.clone()));
+                state
+                    .listeners
+                    .push(("second".to_string(), listener.clone()));
+            }
+            let failure = if failure_kind == "transport" {
+                Err(SparkError::connect_msg("transport failed"))
+            } else {
+                Ok((QUERY_IDLE_EVENT, "event".to_string()))
+            };
+            let bus = Arc::downgrade(&manager.bus);
+            let (start, started) = mpsc::channel();
+            let (removed, removal) = mpsc::channel();
+            std::thread::scope(|scope| {
+                // Release the hook before scoped threads are joined even if a
+                // main-thread assertion fails while it is blocked.
+                let _release_on_drop = ReleaseOnDrop(release.clone());
+                let worker = scope.spawn(move || {
+                    started.recv_timeout(Duration::from_secs(5)).unwrap();
+                    run_listener_event_loop(vec![failure], bus, 0);
+                });
+                manager.bus.state.lock().unwrap().worker_id = Some(worker.thread().id());
+                start.send(()).unwrap();
+                reporting.recv_timeout(Duration::from_secs(5)).unwrap();
+                let removal_order = Arc::clone(&order);
+                let manager = &manager;
+                let remover = scope.spawn(move || {
+                    assert!(manager.remove_listener_found("second").unwrap());
+                    removal_order.lock().unwrap().push("removed");
+                    removed.send(()).unwrap();
+                });
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    if manager.bus.state.lock().unwrap().listeners.len() == 1 {
+                        break;
+                    }
+                    assert!(Instant::now() < deadline, "remover did not reach the bus");
+                    std::thread::yield_now();
+                }
+                assert!(matches!(
+                    removal.recv_timeout(Duration::from_millis(100)),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                ));
+                release.send(()).unwrap();
+                let removal_result = removal.recv_timeout(Duration::from_secs(5));
+                if removal_result.is_err() {
+                    // Keep a broken guard-release regression from stranding the
+                    // scoped remover while the assertion reports its failure.
+                    let mut state = manager.bus.state.lock().unwrap();
+                    if state.dispatching == Some(0) {
+                        state.dispatching = None;
+                        manager.bus.changed.notify_all();
+                    }
+                }
+                worker.join().unwrap();
+                remover.join().unwrap();
+                assert!(
+                    removal_result.is_ok(),
+                    "removal did not finish after reporting"
+                );
+            });
+            assert_eq!(*order.lock().unwrap(), ["reporting", "reported", "removed"]);
+            assert_eq!(listener.events.load(Ordering::SeqCst), 0);
+            assert_eq!(listener.errors.load(Ordering::SeqCst), 1);
+            let state = manager.bus.state.lock().unwrap();
+            assert!(state.listeners.is_empty());
+            assert!(state.dispatching.is_none());
+        }
+    }
+
+    #[test]
+    fn a_terminal_error_notification_does_not_keep_the_listener_bus_alive() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        struct Listener {
+            entered: mpsc::Sender<()>,
+            release: Mutex<mpsc::Receiver<()>>,
+        }
+        impl StreamingQueryListener for Listener {
+            fn on_event(&self, _: &StreamingQueryListenerEvent) {}
+
+            fn on_stream_error(&self, _: &SparkError) -> bool {
+                self.entered.send(()).unwrap();
+                self.release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("the test releases the terminal notification");
+                true
+            }
+        }
+
+        let bus = Arc::new(ListenerBus::default());
+        let weak = Arc::downgrade(&bus);
+        let (entered, reporting) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        bus.state.lock().unwrap().listeners.push((
+            "listener".to_string(),
+            Arc::new(Listener {
+                entered,
+                release: Mutex::new(released),
+            }),
+        ));
+        let worker_bus = weak.clone();
+        let worker = std::thread::spawn(move || {
+            run_listener_event_loop(
+                vec![Err(SparkError::connect_msg("transport failed"))],
+                worker_bus,
+                0,
+            );
+        });
+        reporting.recv_timeout(Duration::from_secs(5)).unwrap();
+        drop(bus);
+        assert!(weak.upgrade().is_none());
+        release.send(()).unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn a_stale_worker_does_not_report_errors_to_a_new_generation() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Listener(AtomicUsize);
+        impl StreamingQueryListener for Listener {
+            fn on_event(&self, _: &StreamingQueryListenerEvent) {
+                panic!("a stale worker must not dispatch events");
+            }
+
+            fn on_stream_error(&self, _: &SparkError) -> bool {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                true
+            }
+        }
+        let bus = Arc::new(ListenerBus::default());
+        let listener = Arc::new(Listener(AtomicUsize::new(0)));
+        {
+            let mut state = bus.state.lock().unwrap();
+            state.generation = 2;
+            state
+                .listeners
+                .push(("current".to_string(), listener.clone()));
+        }
+        run_listener_event_loop(
+            vec![Err(SparkError::connect_msg("old transport failed"))],
+            Arc::downgrade(&bus),
+            1,
+        );
+        assert_eq!(listener.0.load(Ordering::SeqCst), 0);
+        assert_eq!(bus.state.lock().unwrap().listeners.len(), 1);
+    }
+
+    #[test]
+    fn listener_bus_batch_hook_runs_once_per_event_before_any_callback() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct NativeListener(AtomicUsize);
+        impl StreamingQueryListener for NativeListener {
+            fn on_event(&self, _: &StreamingQueryListenerEvent) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        struct BatchListener {
+            fail: bool,
+            prepared: AtomicUsize,
+            callbacks: AtomicUsize,
+            errors: AtomicUsize,
+        }
+        impl StreamingQueryListener for BatchListener {
+            fn on_event(&self, _: &StreamingQueryListenerEvent) {
+                self.callbacks.fetch_add(1, Ordering::SeqCst);
+            }
+
+            fn try_post_to_all(
+                &self,
+                listeners: &[Arc<dyn StreamingQueryListener>],
+                event: &StreamingQueryListenerEvent,
+            ) -> Option<Result<()>> {
+                self.prepared.fetch_add(1, Ordering::SeqCst);
+                if self.fail {
+                    return Some(Err(SparkError::connect_msg("batch decode failed")));
+                }
+                for listener in listeners {
+                    listener.on_event(event);
+                }
+                Some(Ok(()))
+            }
+
+            fn on_stream_error(&self, _: &SparkError) -> bool {
+                self.errors.fetch_add(1, Ordering::SeqCst);
+                true
+            }
+        }
+
+        for fail in [false, true] {
+            let bus = Arc::new(ListenerBus::default());
+            let native = Arc::new(NativeListener(AtomicUsize::new(0)));
+            let batch = Arc::new(BatchListener {
+                fail,
+                prepared: AtomicUsize::new(0),
+                callbacks: AtomicUsize::new(0),
+                errors: AtomicUsize::new(0),
+            });
+            {
+                let mut state = bus.state.lock().unwrap();
+                // A native listener precedes duplicate adapter registrations. Batch
+                // preparation must run before even that first native callback.
+                state.listeners.push(("native".to_string(), native.clone()));
+                state.listeners.push(("batch-1".to_string(), batch.clone()));
+                state.listeners.push(("batch-2".to_string(), batch.clone()));
+            }
+            run_listener_event_loop(
+                vec![
+                    Ok((QUERY_IDLE_EVENT, "first".to_string())),
+                    Ok((QUERY_IDLE_EVENT, "second".to_string())),
+                ],
+                Arc::downgrade(&bus),
+                0,
+            );
+            assert_eq!(
+                batch.prepared.load(Ordering::SeqCst),
+                if fail { 1 } else { 2 }
+            );
+            assert_eq!(native.0.load(Ordering::SeqCst), if fail { 0 } else { 2 });
+            assert_eq!(
+                batch.callbacks.load(Ordering::SeqCst),
+                if fail { 0 } else { 4 }
+            );
+            assert_eq!(batch.errors.load(Ordering::SeqCst), usize::from(fail));
+            assert!(bus.state.lock().unwrap().listeners.is_empty());
+        }
     }
 
     #[test]
