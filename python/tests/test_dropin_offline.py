@@ -5502,6 +5502,51 @@ def test_functions_next_day():
     assert type(F.next_day(c, "Monday")).__name__ == "Column"
 
 
+def test_unpicklable_functions_raise_picklingerror_as_pyspark(mock_connect):
+    # As PySpark's CloudPickleSerializer().dumps: a function of applyInPandas, applyInArrow,
+    # mapInPandas, mapInArrow, cogroup, transformWithState(InPandas) or a data source class
+    # that does not pickle raises pickle.PicklingError "Could not serialize object: ...", not
+    # the bare TypeError of cloudpickle.
+    import pickle
+    import threading
+
+    from pyspark.sql.datasource import DataSource
+
+    spark, _ = mock_connect
+    df = spark.range(2)
+    grouped = df.groupBy("id")
+    lock = threading.Lock()
+
+    class Processor:
+        def __init__(self):
+            self.lock = lock
+
+    class Source(DataSource):
+        @classmethod
+        def name(cls):
+            return "unpicklable"
+
+        def reader(self, schema):
+            return lock
+
+    unpicklable = [
+        lambda: grouped.applyInPandas(lambda pdf: (lock, pdf)[1], "id long"),
+        lambda: grouped.applyInArrow(lambda table: (lock, table)[1], "id long"),
+        lambda: df.mapInPandas(lambda it: ((lock, p)[1] for p in it), "id long"),
+        lambda: df.mapInArrow(lambda it: ((lock, p)[1] for p in it), "id long"),
+        lambda: grouped.cogroup(grouped).applyInPandas(lambda a, b: (lock, a)[1], "id long"),
+        lambda: grouped.cogroup(grouped).applyInArrow(lambda a, b: (lock, a)[1], "id long"),
+        lambda: grouped.transformWithStateInPandas(Processor(), "id long", "append", "NoTimeMode"),
+        lambda: grouped.transformWithState(Processor(), "id long", "append", "NoTimeMode"),
+        lambda: spark.dataSource.register(Source),
+    ]
+    for call in unpicklable:
+        with pytest.raises(pickle.PicklingError, match="^Could not serialize object: ") as e:
+            call()
+        assert type(e.value) is pickle.PicklingError
+        assert "cannot pickle" in str(e.value)
+
+
 def test_functions_quarter():
     """Test quarter function."""
     from pyspark.sql import functions as F

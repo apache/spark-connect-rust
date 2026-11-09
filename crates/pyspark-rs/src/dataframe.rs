@@ -3999,11 +3999,15 @@ pub(crate) fn detached<T: Send>(
 /// cloudpickle an arbitrary Python object to bytes (mirrors the scalar UDF path,
 /// where the client serializes the callable for server-side execution).
 ///
-/// Uses the bundled `pyspark.cloudpickle` (the skin vendors it, matching the worker's
-/// `pyspark.cloudpickle`), so there is no external `cloudpickle` runtime dependency.
+/// Uses `CloudPickleSerializer().dumps` as PySpark does, which raises a `pickle.PicklingError`
+/// ("Could not serialize object: ...") for an object that does not pickle, rather than the
+/// bare pickling error of `cloudpickle`.
 pub(crate) fn py_cloudpickle(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
-    let cp = py.import("pyspark.cloudpickle")?;
-    cp.call_method1("dumps", (obj,))?.extract()
+    let serializer = py
+        .import("pyspark.serializers")?
+        .getattr("CloudPickleSerializer")?
+        .call0()?;
+    serializer.call_method1("dumps", (obj,))?.extract()
 }
 
 /// The running Python's "major.minor" (recorded in the UDF payload).
