@@ -304,6 +304,83 @@ fn dataframe_metadata_json_semantics() {
     assert_eq!(parts.len(), 2);
 }
 
+/// `GroupedData.pivot` takes explicit values of the types of the Spark literals, dates,
+/// timestamps and decimals too: they give the columns of the pivot without values, which PySpark
+/// computes for the same data. PySpark itself rejects those types as values (NOT_EXPECTED_TYPE),
+/// and a NULL value, as it does; `dropna` rejects a `how` other than "any" or "all"
+/// (VALUE_NOT_ALLOWED), as PySpark does.
+#[test]
+fn pivot_values_of_dates_timestamps_and_decimals_match_discovered_pivots() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::row::Value;
+    let s = session();
+    let df = s
+        .sql(
+            "SELECT * FROM VALUES (DATE'2020-01-01', TIMESTAMP'2020-01-01 00:00:00', \
+             CAST(1.50 AS DECIMAL(5,2)), 'a', 1), \
+             (DATE'2020-01-02', TIMESTAMP'2020-01-02 00:00:00', CAST(2.00 AS DECIMAL(5,2)), 'b', 2) \
+             AS t(d, ts, dec, k, v)",
+        )
+        .unwrap();
+    let pivot = |column: &str, values: Option<Vec<Value>>| {
+        named_rows(
+            &df.group_by(vec![col("k")])
+                .pivot(col(column), values)
+                .unwrap()
+                .sum(vec!["v"])
+                .unwrap(),
+        )
+    };
+    let decimal = |value: &str| Value::Decimal {
+        value: value.to_string(),
+        precision: Some(5),
+        scale: Some(2),
+    };
+    // Days since the epoch of 2020-01-01 and 2020-01-02, and their micros in UTC.
+    assert_eq!(
+        pivot("d", Some(vec![Value::Date(18262), Value::Date(18263)])),
+        pivot("d", None)
+    );
+    assert_eq!(
+        pivot(
+            "ts",
+            Some(vec![
+                Value::Timestamp(1_577_836_800_000_000),
+                Value::Timestamp(1_577_923_200_000_000),
+            ])
+        ),
+        pivot("ts", None)
+    );
+    assert_eq!(
+        pivot("dec", Some(vec![decimal("1.50"), decimal("2.00")])),
+        pivot("dec", None)
+    );
+    let err = df
+        .group_by(vec![col("k")])
+        .pivot(col("k"), Some(vec![Value::Null]))
+        .err()
+        .expect("an error");
+    assert_eq!(err.get_condition().as_deref(), Some("NOT_EXPECTED_TYPE"));
+    assert_eq!(
+        err.get_message_parameters().unwrap()["arg_type"],
+        "NoneType"
+    );
+
+    // As PySpark's `dropna(how="bogus")`.
+    for how in ["bogus", "ANY"] {
+        let err = df.dropna(Some(how), None, None).err().expect("an error");
+        assert_eq!(err.get_condition().as_deref(), Some("VALUE_NOT_ALLOWED"));
+        assert_eq!(err.get_message_parameters().unwrap()["arg_name"], "how");
+        assert!(df.na().drop(Some(how), None, None).is_err());
+    }
+    assert_eq!(
+        df.dropna(Some("all"), None, None).unwrap().count().unwrap(),
+        2
+    );
+}
+
 #[test]
 fn day_time_interval_input_roundtrips() {
     if !should_run() {

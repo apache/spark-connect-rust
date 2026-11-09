@@ -1788,14 +1788,24 @@ impl DataFrame {
         DataFrame::new(self.session.clone(), plan)
     }
 
-    /// Drop NA values.
+    /// Drop NA values. Mirrors `DataFrame.dropna`: `how` is "any" (the default) or "all", else
+    /// a `VALUE_NOT_ALLOWED` error, as PySpark's; `thresh` overrides it.
     pub fn dropna(
         &self,
         how: Option<&str>,
         thresh: Option<i32>,
         subset: Option<Vec<&str>>,
-    ) -> DataFrame {
-        let how_str = how.unwrap_or("any").to_string();
+    ) -> Result<DataFrame> {
+        let how_str = match how {
+            None | Some("any") => "any",
+            Some("all") => "all",
+            Some(_) => {
+                return Err(SparkError::value(
+                    "VALUE_NOT_ALLOWED",
+                    &[("arg_name", "how"), ("allowed_values", "['any', 'all']")],
+                ))
+            }
+        };
         let columns = subset
             .map(|v| v.iter().map(|s| s.to_string()).collect())
             .unwrap_or_default();
@@ -1803,11 +1813,11 @@ impl DataFrame {
         // and `thresh` in `NADrop::to_proto` (mirrors pyspark's translation).
         let plan = LogicalPlan::NADrop {
             input: Arc::clone(&self.plan),
-            how: how_str,
+            how: how_str.to_string(),
             min_non_null: thresh,
             columns,
         };
-        DataFrame::new(self.session.clone(), plan)
+        Ok(DataFrame::new(self.session.clone(), plan))
     }
 
     /// Replace values, each given as a string: a numeric-looking string is a double, otherwise
@@ -4822,6 +4832,25 @@ mod plan_construction_tests {
         // Any server-side handling of those plans remains separate from client validation.
         for weights in [vec![f64::NAN], vec![f64::INFINITY]] {
             assert_eq!(df.random_split(weights, Some(42)).unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn dropna_takes_how_any_or_all_as_pyspark() {
+        let df = session().range(1).unwrap();
+        for how in [None, Some("any"), Some("all")] {
+            assert!(df.dropna(how, None, None).is_ok());
+            assert!(df.na().drop(how, Some(1), None).is_ok());
+        }
+        // A bad `how` is rejected even when `thresh` would override it, as PySpark's.
+        for how in ["ANY", "all ", "", "some"] {
+            for thresh in [None, Some(1)] {
+                let err = df.dropna(Some(how), thresh, None).err().expect("an error");
+                assert_eq!(err.get_condition().as_deref(), Some("VALUE_NOT_ALLOWED"));
+                let parameters = err.get_message_parameters().unwrap();
+                assert_eq!(parameters["arg_name"], "how");
+                assert_eq!(parameters["allowed_values"], "['any', 'all']");
+            }
         }
     }
 
