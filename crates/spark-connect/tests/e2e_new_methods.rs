@@ -85,6 +85,23 @@ fn checkpoints_and_input_files_local() {
 }
 
 #[test]
+fn is_local_on_server_is_the_servers_answer() {
+    if !should_run() {
+        return;
+    }
+    let spark = session();
+    // A VALUES relation is local on the server, whatever the plan the client built.
+    let values = spark.sql("VALUES (1)").expect("sql");
+    assert!(values.is_local_on_server().expect("isLocal"));
+    assert!(values.is_local_on_server().expect("isLocal again"));
+    assert!(!spark
+        .range(1)
+        .expect("range")
+        .is_local_on_server()
+        .expect("isLocal"));
+}
+
+#[test]
 fn stat_corr_cov_sample_by() {
     if !should_run() {
         return;

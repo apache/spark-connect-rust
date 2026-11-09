@@ -1943,10 +1943,11 @@ impl PyDataFrame {
         py.detach(|| self.dataframe.input_files()).to_pyerr()
     }
 
-    /// Whether collect/take can run without a Spark job (a local relation).
+    /// Whether the server answers that this DataFrame is local (a local relation).
     #[pyo3(name = "isLocal")]
-    fn is_local(&self) -> bool {
-        self.dataframe.is_local()
+    fn is_local(&self, py: Python<'_>) -> PyResult<bool> {
+        py.detach(|| self.dataframe.is_local_on_server().map_err(Box::new))
+            .to_pyerr()
     }
 
     /// Whether this (cached) DataFrame is cached.
