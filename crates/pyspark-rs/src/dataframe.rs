@@ -2412,6 +2412,7 @@ impl PyDataFrame {
     #[getter]
     fn schema(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let schema = py.detach(|| self.dataframe.schema()).to_pyerr()?;
+        check_nanosecond_timestamps(py, Some(&schema))?;
         crate::types::data_type_to_py(py, &schema)
     }
 
@@ -2451,6 +2452,9 @@ impl PyDataFrame {
     /// Column names (a property, mirroring `DataFrame.columns`).
     #[getter]
     fn columns(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        // The schema is cached, so the names come from it without another request.
+        let schema = py.detach(|| self.dataframe.schema()).to_pyerr()?;
+        check_nanosecond_timestamps(py, Some(&schema))?;
         py.detach(|| self.dataframe.columns().to_pyerr())
     }
 
@@ -2539,6 +2543,7 @@ impl PyDataFrame {
             _ => None,
         };
         let schema = py.detach(|| self.dataframe.schema().to_pyerr())?;
+        check_nanosecond_timestamps(py, Some(&schema))?;
         let depth = level
             .map(crate::types::normalize_tree_depth)
             .transpose()?
@@ -2551,9 +2556,9 @@ impl PyDataFrame {
     /// Get the schema as a list of (name, type) tuples.
     #[getter]
     fn dtypes(&self, py: Python<'_>) -> PyResult<Vec<(String, String)>> {
-        let spark_connect::types::DataType::Struct { fields } =
-            py.detach(|| self.dataframe.schema().to_pyerr())?
-        else {
+        let schema = py.detach(|| self.dataframe.schema().to_pyerr())?;
+        check_nanosecond_timestamps(py, Some(&schema))?;
+        let spark_connect::types::DataType::Struct { fields } = schema else {
             unreachable!("schema() validates struct responses")
         };
         // As PySpark, a user-defined type is named by its simpleString(), such as `vector`,
@@ -4298,10 +4303,11 @@ fn nanosecond_timestamp_text(data_type: &spark_connect::types::DataType) -> Opti
     }
 }
 
-/// Raises as PySpark does for a result of `schema` with a nanosecond-precision timestamp, which
-/// PySpark cannot convert from the proto of the schema: the collecting APIs raise, though the
-/// Rust core collects these values in microseconds.
-fn check_nanosecond_timestamps(
+/// Raises as PySpark does for a schema with a nanosecond-precision timestamp, which PySpark cannot
+/// convert from the proto of the schema: the collecting APIs and every schema surface raise (the
+/// schema, columns, dtypes, printSchema, a DDL string of a schema), though the Rust core keeps
+/// these values, and count, show and describe work.
+pub(crate) fn check_nanosecond_timestamps(
     py: Python<'_>,
     schema: Option<&spark_connect::types::DataType>,
 ) -> PyResult<()> {

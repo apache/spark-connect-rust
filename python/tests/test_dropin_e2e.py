@@ -484,11 +484,16 @@ def _run_in_time_zone(code, zone):
 def test_nanosecond_timestamps_are_not_collected_as_pyspark(session):
     # As PySpark's conversion of the schema from its proto: a TIMESTAMP_NTZ(p) or TIMESTAMP_LTZ(p)
     # with p > 6, also nested, raises UNSUPPORTED_OPERATION from every collecting API, toPandas
-    # and toArrow, while count, show and the microsecond timestamps keep working.
+    # and toArrow, and from every schema surface (the schema, columns, dtypes, printSchema, repr
+    # and json, and the DDL strings of the types), while count, show and the microsecond
+    # timestamps keep working.
     import datetime
     import re
 
     from pyspark.errors import PySparkValueError
+
+    from pyspark.sql.functions import from_json, lit
+    from pyspark.sql.types import DataType, StructType
 
     def message(proto_text):
         return r"\[UNSUPPORTED_OPERATION\] data type " + re.escape(proto_text) + r" is not supported\."
@@ -524,6 +529,27 @@ def test_nanosecond_timestamps_are_not_collected_as_pyspark(session):
             ):
                 with pytest.raises(PySparkValueError, match=message(proto_text)):
                     collect(df)
+            # The schema surfaces raise too: PySpark converts a schema from its proto, so the
+            # schema of the frame, its columns and types, and the schema of a DDL string do not.
+            for surface in (
+                lambda d: d.schema,
+                lambda d: d.columns,
+                lambda d: d.dtypes,
+                lambda d: d.printSchema(),
+                lambda d: repr(d),
+                lambda d: d.schema.json(),
+            ):
+                with pytest.raises(PySparkValueError, match=message(proto_text)):
+                    surface(df)
+        # The DDL strings of the types, as the server parses them.
+        for surface in (
+            lambda: session.createDataFrame([(1,)], "a timestamp_ntz(9)"),
+            lambda: DataType.fromDDL("timestamp_ntz(9)"),
+            lambda: StructType.fromDDL("a struct<x: timestamp_ntz(9)>"),
+            lambda: session.range(1).select(from_json(lit('{"a": 1}'), "a timestamp_ntz(9)")).schema,
+        ):
+            with pytest.raises(PySparkValueError, match=message(ntz9)):
+                surface()
         # Spark Connect and PySpark both count and show these results.
         df = session.sql("SELECT CAST('2020-01-01 00:00:00.123456789' AS TIMESTAMP_NTZ(9)) c")
         assert df.count() == 1

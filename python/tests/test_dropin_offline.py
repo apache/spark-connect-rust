@@ -7580,6 +7580,33 @@ def test_nanosecond_timestamps_are_not_collected_as_pyspark(
     with pytest.raises(PySparkValueError, match=(
             r"\[UNSUPPORTED_OPERATION\] data type " + re.escape(proto_text) + r" is not supported\.")):
         collect(df)
+    # The schema surfaces raise as well, as PySpark's, which converts a schema from its proto: the
+    # analyzed schema of the frame and of a DDL string (the mock answers any DDL it does not parse
+    # with its data type) are the struct, and CANNOT_PARSE_DATATYPE for a name of the type.
+    from pyspark.sql import functions as F
+
+    service.data_type = struct
+    # repr reads the settings of the eager evaluation of the session, which the server has.
+    service.confs = {"spark.sql.repl.eagerEval.enabled": "false",
+                     "spark.sql.repl.eagerEval.maxNumRows": "20",
+                     "spark.sql.repl.eagerEval.truncate": "20"}
+    message = (r"\[UNSUPPORTED_OPERATION\] data type " + re.escape(proto_text) + r" is not supported\.")
+    for surface in (
+            lambda: df.schema,
+            lambda: df.columns,
+            lambda: df.dtypes,
+            lambda: df.printSchema(),
+            lambda: repr(df),
+            lambda: df.schema.json(),
+            lambda: spark.createDataFrame([(1,)], "a timestamp_ntz(9)"),
+            lambda: T.DataType.fromDDL("timestamp_ntz(9)"),
+            lambda: T.StructType.fromDDL("a timestamp_ntz(9)"),
+            lambda: spark.range(1).select(F.from_json(F.lit("{}"), "a timestamp_ntz(9)")).schema,
+    ):
+        with pytest.raises(PySparkValueError, match=message):
+            surface()
+    with pytest.raises(PySparkValueError, match=r"CANNOT_PARSE_DATATYPE.*timestamp_ntz\(9\)"):
+        T.StructType().add("t", "timestamp_ntz(9)")
 
 
 def test_udf_and_pandas_udf_decorator_forms(mock_connect):
