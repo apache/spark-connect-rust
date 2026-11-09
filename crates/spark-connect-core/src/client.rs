@@ -35,6 +35,23 @@ use crate::thread_entries::forget_when_thread_ends;
 /// to a down server would hang forever instead of raising `UNAVAILABLE`.
 const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Apply the keepalive of the connection string, as PySpark's channel options do (SPARK-58094):
+/// HTTP2 PINGs detect a connection that a NAT gateway or load balancer dropped silently, so that
+/// a blocked call fails with `UNAVAILABLE`, which the client retries or reattaches, instead of
+/// waiting on the dead connection forever.
+fn with_keepalive(
+    endpoint: tonic::transport::Endpoint,
+    builder: &ChannelBuilder,
+) -> tonic::transport::Endpoint {
+    match builder.keepalive() {
+        Some(keepalive) => endpoint
+            .http2_keep_alive_interval(keepalive.time)
+            .keep_alive_timeout(keepalive.timeout)
+            .keep_alive_while_idle(keepalive.without_calls),
+        None => endpoint,
+    }
+}
+
 /// gRPC/HTTP header carrying the connection-string `token` as `Bearer <token>`.
 /// Named here (rather than as a string literal) so the key is written once.
 const AUTHORIZATION_HEADER: &str = "authorization";
@@ -346,18 +363,22 @@ impl SparkConnectClient {
                 .domain_name(domain)
                 .with_native_roots();
 
-            tonic::transport::Channel::from_shared(format!("https://{endpoint}"))
-                .map_err(|e| SparkError::connect_msg(format!("Invalid endpoint: {}", e)))?
-                .tls_config(tls_config)
-                .map_err(|e| SparkError::connect_msg(format!("Failed to configure TLS: {}", e)))?
-                .connect_timeout(READY_TIMEOUT)
-                .connect_lazy()
+            let tls_endpoint =
+                tonic::transport::Channel::from_shared(format!("https://{endpoint}"))
+                    .map_err(|e| SparkError::connect_msg(format!("Invalid endpoint: {}", e)))?
+                    .tls_config(tls_config)
+                    .map_err(|e| {
+                        SparkError::connect_msg(format!("Failed to configure TLS: {}", e))
+                    })?
+                    .connect_timeout(READY_TIMEOUT);
+            with_keepalive(tls_endpoint, builder).connect_lazy()
         } else {
             // Plaintext connection (for localhost development)
-            tonic::transport::Channel::from_shared(format!("http://{endpoint}"))
-                .map_err(|e| SparkError::connect_msg(format!("Invalid endpoint: {}", e)))?
-                .connect_timeout(READY_TIMEOUT)
-                .connect_lazy()
+            let plain_endpoint =
+                tonic::transport::Channel::from_shared(format!("http://{endpoint}"))
+                    .map_err(|e| SparkError::connect_msg(format!("Invalid endpoint: {}", e)))?
+                    .connect_timeout(READY_TIMEOUT);
+            with_keepalive(plain_endpoint, builder).connect_lazy()
         };
 
         // Raise the message-size cap from tonic's 4 MiB default (too small for real Arrow
