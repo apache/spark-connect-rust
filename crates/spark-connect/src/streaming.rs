@@ -934,6 +934,28 @@ struct ListenerBusState {
     phase: ListenerBusPhase,
     worker_id: Option<std::thread::ThreadId>,
     generation: u64,
+    /// The generation whose worker is delivering an event to its snapshot of the listeners.
+    /// PySpark's bus holds its lock while it delivers an event, so a removal from another
+    /// thread waits for it.
+    dispatching: Option<u64>,
+}
+
+/// The delivery of one event by the worker of `generation`, until it is dropped.
+struct Dispatch<'a> {
+    bus: &'a Weak<ListenerBus>,
+    generation: u64,
+}
+
+impl Drop for Dispatch<'_> {
+    fn drop(&mut self) {
+        if let Some(bus) = self.bus.upgrade() {
+            let mut state = bus.state.lock().unwrap();
+            if state.dispatching == Some(self.generation) {
+                state.dispatching = None;
+                bus.changed.notify_all();
+            }
+        }
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -981,21 +1003,26 @@ fn run_listener_event_loop(
         let Ok((event_type, event_json)) = item else {
             break;
         };
-        let Some(bus) = bus.upgrade() else {
+        let Some(owner) = bus.upgrade() else {
             break;
         };
         let listeners: Vec<Arc<dyn StreamingQueryListener>> = {
-            let state = bus.state.lock().unwrap();
+            let mut state = owner.state.lock().unwrap();
             if state.generation != generation || state.listeners.is_empty() {
                 break;
             }
+            state.dispatching = Some(generation);
             state
                 .listeners
                 .iter()
                 .map(|(_, listener)| Arc::clone(listener))
                 .collect()
         };
-        drop(bus);
+        drop(owner);
+        let dispatch = Dispatch {
+            bus: &bus,
+            generation,
+        };
         let event = StreamingQueryListenerEvent {
             event_type,
             event_json,
@@ -1003,6 +1030,7 @@ fn run_listener_event_loop(
         for listener in listeners {
             listener.on_event(&event);
         }
+        drop(dispatch);
     }
     if let Some(bus) = bus.upgrade() {
         bus.finish_generation(generation);
@@ -1148,6 +1176,16 @@ impl StreamingQueryManager {
             };
             if state.listeners.len() > 1 {
                 state.listeners.remove(index);
+                // As PySpark's bus, whose delivery of an event holds the lock of its removal:
+                // the removal returns once the event in delivery has been delivered, also to
+                // the removed listener, which gets no events after it. A callback of the bus
+                // does not wait, as it would wait for its own delivery.
+                if state.worker_id != Some(std::thread::current().id()) {
+                    let generation = state.generation;
+                    while state.dispatching == Some(generation) {
+                        state = self.bus.changed.wait(state).unwrap();
+                    }
+                }
                 return Ok(true);
             }
         }
