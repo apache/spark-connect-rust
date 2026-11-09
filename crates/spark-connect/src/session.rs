@@ -1263,7 +1263,11 @@ fn row_width_mismatch(row_index: usize, actual: usize, expected: usize) -> Spark
 /// more than the transfer.
 const LOCAL_RELATION_SETTINGS_BYTES: usize = 64 << 10;
 
-fn rows_to_arrow_batch(
+/// Internal binding bridge for encoding already converted local rows. The Python
+/// binding also uses it for native columns beside imported pandas Arrow columns.
+/// Not a stable public API.
+#[doc(hidden)]
+pub fn rows_to_arrow_batch(
     rows: &[Row],
     schema: &DataType,
 ) -> Result<arrow::record_batch::RecordBatch> {

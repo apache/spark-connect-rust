@@ -391,12 +391,14 @@ def serve(connection):
         # server does for an error that it raised: INTERNAL, with a google.rpc.Status of an
         # ErrorInfo of `reason` and `metadata` in grpc-status-details-bin.
         execute_error = None
-        # FetchErrorDetails returns `error_details` (raw FetchErrorDetailsResponse fields) and
-        # records the error id asked for. Config Get returns the values in `confs`, or else
-        # those of `default_confs`, the defaults of SQL configs of the server, and fails for a
-        # key without one, as the server does for an unset config; it records the keys, as
-        # does GetWithDefault, which returns the values in `confs` or else the defaults that
-        # it is given. Config Set records the pairs and the silent flag of each request.
+        # FetchErrorDetails returns `error_details` (raw FetchErrorDetailsResponse fields)
+        # and records the error id asked for. Config Get returns the values in `confs`, or
+        # else those of `default_confs`, the defaults of SQL configs of the server, and
+        # fails for a key without one, as the server does for an unset config. A key
+        # stored as None is returned without the optional value. Get records the keys, as
+        # does GetWithDefault, which returns the values in `confs` or else the defaults
+        # that it is given. Config Set records the pairs and the silent flag of each
+        # request.
         error_details = b""
         fetched_error_ids = []
         confs = {}
@@ -692,7 +694,11 @@ def serve(connection):
                 context.abort(grpc.StatusCode.INTERNAL, "[SQL_CONF_NOT_FOUND]")
             # The response names the session, as the server's does.
             return message_field(1, request[1][0]) + b"".join(
-                message_field(2, message_field(1, key) + message_field(2, confs[key]))
+                message_field(
+                    2,
+                    message_field(1, key)
+                    + (b"" if confs[key] is None else message_field(2, confs[key])),
+                )
                 for key in keys
             )
 
@@ -727,6 +733,9 @@ def serve(connection):
                     connection.send(getattr(service, command[1]))
                 elif command[0] == "set":
                     setattr(service, command[1], command[2])
+                    connection.send(None)
+                elif command[0] == "del":
+                    delattr(service, command[1])
                     connection.send(None)
                 elif command[0] == "release":
                     service.response_gate.set()
@@ -779,6 +788,13 @@ class RemoteService:
 
     def __setattr__(self, name, value):
         self.connection.send(("set", name, value))
+        assert self.connection.poll(10), "Mock server did not respond"
+        self.connection.recv()
+
+    def __delattr__(self, name):
+        # pytest 9's monkeypatch undoes an attribute that the instance did not hold with
+        # delattr, which removes the override of the service's class attribute.
+        self.connection.send(("del", name))
         assert self.connection.poll(10), "Mock server did not respond"
         self.connection.recv()
 

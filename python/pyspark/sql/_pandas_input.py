@@ -1236,6 +1236,197 @@ def pyarrow_available():
         return False
 
 
+def inferred_pandas_row_columns(rows, width, candidates=None):
+    """Return inferred columns containing Rows, with their values viewed as sequences.
+
+    Walk only the columns of the indices ``candidates``, in increasing order, when
+    given: the caller passes those whose pandas dtype can hold Python objects.
+
+    Present tuple-backed Rows positionally. Keep field metadata out of this
+    conversion, as Arrow does when it infers a column containing tuple Rows.
+    Find Rows directly in cells or nested in list, tuple and dict instances, including
+    subclasses. Other cell containers are not traversed by this adaptation.
+    Walk iteratively and reject cycles among these containers with ValueError. Ordinary
+    discovery errors retain their column index, even if that column contains no Row.
+    Frames have already run the row path's normalization hooks. Inspect only the plain
+    rows produced by pandas; customized row containers keep their existing conversion.
+    """
+    from pyspark._pyspark import Row
+
+    unchanged = object()
+
+    class Frame:
+        """One active container; non-Row output is copied only after a changed child."""
+
+        __slots__ = ("original", "kind", "iterator", "items", "index", "pending",
+                     "key", "pending_value", "next_is_value", "visiting_key", "key_has_row")
+
+        def __init__(self, original, kind, iterator):
+            self.original = original
+            self.kind = kind
+            self.iterator = iterator
+            self.items = [] if kind == "row" else None
+            self.index = -1
+            self.pending = None
+            self.key = None
+            self.pending_value = None
+            self.next_is_value = False
+            self.visiting_key = False
+            self.key_has_row = False
+
+        def next_child(self):
+            if self.kind == "dict":
+                if self.next_is_value:
+                    self.next_is_value = False
+                    self.visiting_key = False
+                    return self.pending_value
+                self.key, self.pending_value = next(self.iterator)
+                self.next_is_value = True
+                self.visiting_key = True
+                return self.key
+            self.pending = next(self.iterator)
+            self.index += 1
+            return self.pending
+
+        def accept(self, converted):
+            if self.kind == "row":
+                self.items.append(self.pending if converted is unchanged else converted)
+            elif self.kind == "dict":
+                if self.visiting_key:
+                    self.key_has_row = converted is not unchanged
+                elif self.key_has_row or converted is not unchanged:
+                    if self.items is None:
+                        self.items = dict.copy(self.original)
+                    # Keep invalid Row keys intact for Arrow's rejection/cause wording.
+                    if converted is not unchanged:
+                        # Replacement hashes the original key and may compare keys;
+                        # callback counts follow normal Python dict behavior.
+                        self.items[self.key] = converted
+            elif converted is not unchanged:
+                if self.items is None:
+                    # This single shallow copy does not repeat discovery or scalar hooks.
+                    self.items = (list.copy(self.original) if self.kind == "list"
+                                  else list(tuple.__iter__(self.original)))
+                self.items[self.index] = converted
+
+        def finish(self):
+            if self.items is None:
+                return unchanged
+            return tuple(self.items) if self.kind == "row" or self.kind == "tuple" else self.items
+
+    def frame_for(value):
+        cls = type(value)
+        # Exact builtin scalars cannot contain Rows. Keep checking every cell:
+        # a later value in the same column may contain a Row at any nesting depth.
+        # Identity checks avoid invoking a custom metaclass's equality or hash hooks.
+        if (value is None or cls is bool or cls is int or cls is float
+                or cls is complex or cls is str or cls is bytes or cls is bytearray):
+            return None
+        if type.__subclasscheck__(Row, cls):
+            return Frame(value, "row", tuple.__iter__(value))
+        if type.__subclasscheck__(list, cls):
+            return Frame(value, "list", list.__iter__(value))
+        if type.__subclasscheck__(tuple, cls):
+            return Frame(value, "tuple", tuple.__iter__(value))
+        if type.__subclasscheck__(dict, cls):
+            return Frame(value, "dict", iter(dict.items(value)))
+        return None
+
+    def scalar(value):
+        cls = type(value)
+        return (value is None or cls is bool or cls is int or cls is float
+                or cls is complex or cls is str or cls is bytes or cls is bytearray)
+
+    def flat(value):
+        # Exact builtin scalars, and exact lists, tuples and dicts of them, the most
+        # common cells, cannot hold a Row: skip their walk. Read them with the same
+        # builtin iterators as the walk, so that no other hook of a cell runs.
+        cls = type(value)
+        if cls is list:
+            return all(map(scalar, list.__iter__(value)))
+        if cls is tuple:
+            return all(map(scalar, tuple.__iter__(value)))
+        if cls is dict:
+            return all(scalar(key) and scalar(item) for key, item in dict.items(value))
+        return scalar(value)
+
+    def positional(value):
+        if flat(value):
+            return unchanged
+        first = frame_for(value)
+        if first is None:
+            return unchanged
+        stack = [first]
+        # Active IDs detect back edges, not shared acyclic subtrees. Frames retain
+        # their original objects so these IDs cannot be reused during traversal.
+        active = {id(value)}
+        while stack:
+            frame = stack[-1]
+            try:
+                child = frame.next_child()
+            except StopIteration:
+                converted = frame.finish()
+                active.remove(id(frame.original))
+                stack.pop()
+                if not stack:
+                    return converted
+                stack[-1].accept(converted)
+                continue
+            if id(child) in active:
+                raise ValueError("cyclic container in inferred pandas Row discovery")
+            nested = frame_for(child)
+            if nested is None:
+                frame.accept(unchanged)
+            else:
+                active.add(id(child))
+                stack.append(nested)
+
+    if any(type(row) is not list or len(row) != width for row in list.__iter__(rows)):
+        return []
+    columns = []
+    for index in range(width) if candidates is None else candidates:
+        values = None
+        try:
+            for row_index, row in enumerate(list.__iter__(rows)):
+                converted = positional(row[index])
+                if converted is not unchanged:
+                    if values is None:
+                        values = [item[index] for item in list.__iter__(rows)]
+                    values[row_index] = converted
+        except Exception as error:
+            # Retain the column index so an earlier native failure still wins.
+            columns.append((index, error))
+            continue
+        if values is not None:
+            columns.append((index, values))
+    return columns
+
+
+def prepare_inferred_pandas_row_column(values, name, timezone, safecheck,
+                                       prefers_large_types, infer_dict_as_map,
+                                       prefer_timestamp_ntz):
+    """Infer an adapted Row column with the same whole-column Arrow conversion as pandas.
+
+    Other columns keep native conversion, including their string and Decimal hooks.
+    Use the existing pandas helper for recursive inference, mixed-value errors and the
+    inferPandasDictAsMap option rather than guessing an element type from the first Row.
+    Return the inferred Spark type and the original one-column Arrow table.
+    """
+    from pandas.core.frame import DataFrame
+    from pyspark.sql.pandas.types import from_arrow_type
+
+    frame = DataFrame({name: values}, dtype=object)
+    table, _ = prepare_inferred_pandas_table(
+        frame, timezone, safecheck, prefers_large_types, infer_dict_as_map,
+        prefer_timestamp_ntz,
+    )
+    # Infer from the resulting Arrow timezone, as the server does: a timestamp
+    # without a timezone is NTZ. Dict-as-map coercion has already applied the
+    # session preference to the Arrow type. Keep the arrays to avoid re-encoding
+    # naive wall clocks, large variable-width types or nested nullability.
+    return from_arrow_type(table.column(0).type), table
+
+
 def prepare_inferred_pandas_table(frame, timezone, safecheck, prefers_large_types,
                                   infer_dict_as_map, prefer_timestamp_ntz):
     """Convert a pandas frame without a schema, or of names, as PySpark Connect does.
