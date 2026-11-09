@@ -286,7 +286,27 @@ pub struct SparkConnectClient {
 #[derive(Debug, Default)]
 struct UserContextExtensions {
     global: Vec<(String, prost_types::Any)>,
-    by_thread: std::collections::HashMap<std::thread::ThreadId, Vec<(String, prost_types::Any)>>,
+    by_thread: std::collections::HashMap<std::thread::ThreadId, SharedUserContextExtensions>,
+}
+
+/// The user context extensions of a thread, shared with the threads that are given them by
+/// [`SparkConnectClient::share_threadlocal_user_context_extensions`]. As the threads of PySpark's
+/// `inheritable_thread_target` share the copy of the `thread_local` of the client of the thread
+/// that decorated their function: an extension that one of them adds is in the list of all, while
+/// one that removes or clears its extensions keeps its own list from then on.
+#[derive(Clone, Debug, Default)]
+pub struct SharedUserContextExtensions(
+    std::sync::Arc<std::sync::Mutex<Vec<(String, prost_types::Any)>>>,
+);
+
+impl SharedUserContextExtensions {
+    fn new(extensions: Vec<(String, prost_types::Any)>) -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(extensions)))
+    }
+
+    fn snapshot(&self) -> Vec<(String, prost_types::Any)> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
 }
 
 /// Forget the extensions of a thread that ends, as PySpark's `thread_local` is freed with its
@@ -544,12 +564,38 @@ impl SparkConnectClient {
         if !extensions.by_thread.contains_key(&thread) {
             forget_when_thread_ends(&self.user_context_extensions, forget_thread_extensions);
         }
-        extensions
-            .by_thread
-            .entry(thread)
-            .or_default()
+        let own = extensions.by_thread.entry(thread).or_default().clone();
+        own.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .push((id.clone(), extension));
         id
+    }
+
+    /// A copy of the user context extensions of the current thread, as of now, which the threads
+    /// that are given it with [`SparkConnectClient::share_threadlocal_user_context_extensions`]
+    /// share. Mirrors how PySpark's `inheritable_thread_target(session)` deep-copies the
+    /// `thread_local` of the client of the thread that decorates a function.
+    pub fn copy_threadlocal_user_context_extensions(&self) -> SharedUserContextExtensions {
+        SharedUserContextExtensions::new(self.threadlocal_user_context_extensions())
+    }
+
+    /// Make `extensions` the user context extensions of the current thread, which it shares with
+    /// the other threads given them, as PySpark's `inheritable_thread_target` sets the copy of the
+    /// `thread_local` of the client in each thread that runs the function.
+    pub fn share_threadlocal_user_context_extensions(
+        &self,
+        extensions: &SharedUserContextExtensions,
+    ) {
+        let mut all = self
+            .user_context_extensions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let thread = std::thread::current().id();
+        if !all.by_thread.contains_key(&thread) {
+            forget_when_thread_ends(&self.user_context_extensions, forget_thread_extensions);
+        }
+        all.by_thread.insert(thread, extensions.clone());
     }
 
     /// Add `extension` to the user context of the requests of all the threads, and return its
@@ -573,7 +619,14 @@ impl SparkConnectClient {
             .unwrap_or_else(|e| e.into_inner());
         if extension_id.starts_with("threadlocal_") {
             if let Some(own) = extensions.by_thread.get_mut(&std::thread::current().id()) {
-                own.retain(|(id, _)| id != extension_id);
+                // As PySpark rebinds the list of the thread, which other threads that share it
+                // keep as it was.
+                let kept = own
+                    .snapshot()
+                    .into_iter()
+                    .filter(|(id, _)| id != extension_id)
+                    .collect();
+                *own = SharedUserContextExtensions::new(kept);
             }
         } else if extension_id.starts_with("global_") {
             extensions.global.retain(|(id, _)| id != extension_id);
@@ -599,7 +652,7 @@ impl SparkConnectClient {
             .unwrap_or_else(|e| e.into_inner())
             .by_thread
             .get(&std::thread::current().id())
-            .cloned()
+            .map(SharedUserContextExtensions::snapshot)
             .unwrap_or_default()
     }
 
@@ -621,8 +674,11 @@ impl SparkConnectClient {
             .user_context_extensions
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let own = extensions.by_thread.get(&std::thread::current().id());
-        if extensions.global.is_empty() && own.is_none_or(Vec::is_empty) {
+        let own = extensions
+            .by_thread
+            .get(&std::thread::current().id())
+            .map(|own| own.0.lock().unwrap_or_else(|e| e.into_inner()));
+        if extensions.global.is_empty() && own.as_ref().is_none_or(|own| own.is_empty()) {
             return;
         }
         let context = context.get_or_insert_with(UserContext::default);
@@ -630,7 +686,7 @@ impl SparkConnectClient {
             extensions
                 .global
                 .iter()
-                .chain(own.into_iter().flatten())
+                .chain(own.iter().flat_map(|own| own.iter()))
                 .map(|(_, extension)| extension.clone()),
         );
     }
@@ -2532,5 +2588,65 @@ mod tests {
             .unwrap()
             .by_thread
             .is_empty());
+    }
+
+    fn any_of(type_url: &str) -> prost_types::Any {
+        prost_types::Any {
+            type_url: type_url.to_string(),
+            value: Vec::new(),
+        }
+    }
+
+    fn extension_ids(client: &SparkConnectClient) -> Vec<String> {
+        client
+            .threadlocal_user_context_extensions()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn threadlocal_user_context_extensions_of_a_copy_are_shared_as_pyspark() {
+        // As PySpark's inheritable_thread_target: the threads given a copy of the extensions of a
+        // thread share it, an extension that one of them adds is in the copy of all of them, and
+        // one that it removes is removed for it alone. An extension added later is not in the copy.
+        let builder = ChannelBuilder::parse("sc://localhost").unwrap();
+        let client = std::sync::Arc::new(SparkConnectClient::connect(&builder).await.unwrap());
+        let main = client.add_threadlocal_user_context_extension(any_of("main"));
+        let copy = client.copy_threadlocal_user_context_extensions();
+        let late = client.add_threadlocal_user_context_extension(any_of("late"));
+        let run = |work: fn(&SparkConnectClient) -> Vec<Vec<String>>| {
+            let client = client.clone();
+            let copy = copy.clone();
+            std::thread::spawn(move || {
+                client.share_threadlocal_user_context_extensions(&copy);
+                work(&client)
+            })
+            .join()
+            .unwrap()
+        };
+        let first = run(|client| {
+            let mut seen = vec![extension_ids(client)];
+            client.add_threadlocal_user_context_extension(any_of("added"));
+            seen.push(extension_ids(client));
+            let main_id = seen[0][0].clone();
+            client.remove_user_context_extension(&main_id);
+            seen.push(extension_ids(client));
+            seen
+        });
+        assert_eq!(first[0], vec![main.clone()]);
+        assert_eq!(first[1].len(), 2);
+        assert_eq!(first[1][0], main);
+        assert_eq!(first[2].len(), 1);
+        assert_ne!(first[2][0], main);
+        assert_eq!(
+            run(|client| vec![extension_ids(client)]),
+            vec![first[1].clone()]
+        );
+        assert_eq!(
+            run(|client| vec![extension_ids(client)]),
+            vec![first[1].clone()]
+        );
+        assert_eq!(extension_ids(&client), vec![main, late]);
     }
 }

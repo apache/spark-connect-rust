@@ -904,6 +904,27 @@ impl SparkSession {
         self.client.clear_user_context_extensions();
     }
 
+    /// A copy of the user context extensions of the current thread, which the threads that are
+    /// given it with [`SparkSession::share_threadlocal_user_context_extensions`] share. Mirrors
+    /// how PySpark's `inheritable_thread_target(session)` copies the `thread_local` of the client
+    /// of the thread that decorates a function.
+    pub fn copy_threadlocal_user_context_extensions(
+        &self,
+    ) -> spark_connect_core::client::SharedUserContextExtensions {
+        self.client.copy_threadlocal_user_context_extensions()
+    }
+
+    /// Make `extensions` the user context extensions of the current thread, which it shares with
+    /// the other threads given them, as `inheritable_thread_target` gives every thread that runs
+    /// its function the copy of the `thread_local` of the client.
+    pub fn share_threadlocal_user_context_extensions(
+        &self,
+        extensions: &spark_connect_core::client::SharedUserContextExtensions,
+    ) {
+        self.client
+            .share_threadlocal_user_context_extensions(extensions);
+    }
+
     /// Return the Spark version of the connected server.
     ///
     /// Mirrors `pyspark.sql.SparkSession.version`.
@@ -2922,6 +2943,56 @@ mod tests {
     fn session_builder_without_remote_fails() {
         let result = SparkSessionBuilder::new().get_or_create();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn threadlocal_user_context_extensions_of_a_copy_are_shared_as_pyspark() {
+        // As the threads of PySpark's inheritable_thread_target: the threads given a copy of the
+        // extensions of the thread that decorated their function share it, an extension that one
+        // of them adds is in the copy of all, and one that it removes is removed for it alone.
+        fn any_of(type_url: &str) -> prost_types::Any {
+            prost_types::Any {
+                type_url: type_url.to_string(),
+                value: Vec::new(),
+            }
+        }
+        fn ids(spark: &SparkSession) -> Vec<String> {
+            spark
+                .threadlocal_user_context_extensions()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect()
+        }
+        let spark = session();
+        let main = spark.add_threadlocal_user_context_extension(any_of("main"));
+        let copy = spark.copy_threadlocal_user_context_extensions();
+        let late = spark.add_threadlocal_user_context_extension(any_of("late"));
+        let run = |work: fn(&SparkSession) -> Vec<Vec<String>>| {
+            let spark = spark.clone();
+            let copy = copy.clone();
+            std::thread::spawn(move || {
+                spark.share_threadlocal_user_context_extensions(&copy);
+                work(&spark)
+            })
+            .join()
+            .unwrap()
+        };
+        let first = run(|spark| {
+            let mut seen = vec![ids(spark)];
+            spark.add_threadlocal_user_context_extension(any_of("added"));
+            seen.push(ids(spark));
+            let main_id = seen[0][0].clone();
+            spark.remove_user_context_extension(&main_id);
+            seen.push(ids(spark));
+            seen
+        });
+        assert_eq!(first[0], vec![main.clone()]);
+        assert_eq!(first[1].len(), 2);
+        assert_eq!(first[1][0], main);
+        assert_eq!(first[2].len(), 1);
+        assert_eq!(run(|spark| vec![ids(spark)]), vec![first[1].clone()]);
+        assert_eq!(run(|spark| vec![ids(spark)]), vec![first[1].clone()]);
+        assert_eq!(ids(&spark), vec![main, late]);
     }
 
     #[test]
