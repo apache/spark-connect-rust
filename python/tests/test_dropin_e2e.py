@@ -453,6 +453,53 @@ def _run_in_time_zone(code, zone):
     return result.stdout
 
 
+def test_nanosecond_timestamps_are_not_collected_as_pyspark(session):
+    # As PySpark's conversion of the schema from its proto: a TIMESTAMP_NTZ(p) or TIMESTAMP_LTZ(p)
+    # with p > 6, also nested, raises UNSUPPORTED_OPERATION from every collecting API, toPandas
+    # and toArrow, while count, show and the microsecond timestamps keep working.
+    import datetime
+    import re
+
+    from pyspark.errors import PySparkValueError
+
+    def message(proto_text):
+        return r"\[UNSUPPORTED_OPERATION\] data type " + re.escape(proto_text) + r" is not supported\."
+
+    ntz9 = "timestamp_ntz_nanos {\n  precision: 9\n}\n"
+    ltz7 = "timestamp_ltz_nanos {\n  precision: 7\n}\n"
+    ltz9 = "timestamp_ltz_nanos {\n  precision: 9\n}\n"
+    cases = [
+        ("SELECT CAST('2020-01-01 00:00:00.123456789' AS TIMESTAMP_NTZ(9)) c", ntz9),
+        ("SELECT CAST('2020-01-01 00:00:00.1234567' AS TIMESTAMP_LTZ(7)) c", ltz7),
+        ("SELECT named_struct('a', CAST('2020-01-01 00:00:00.123456789' AS TIMESTAMP_NTZ(9))) c",
+         ntz9),
+        ("SELECT array(CAST('2020-01-01 00:00:00.123456789' AS TIMESTAMP_LTZ(9))) c", ltz9),
+        ("SELECT map('k', CAST('2020-01-01 00:00:00.123456789' AS TIMESTAMP_NTZ(9))) c", ntz9),
+    ]
+    for query, proto_text in cases:
+        df = session.sql(query)
+        for collect in (
+            lambda d: d.collect(),
+            lambda d: d.first(),
+            lambda d: d.head(),
+            lambda d: d.head(1),
+            lambda d: d.take(1),
+            lambda d: d.tail(1),
+            lambda d: list(d.toLocalIterator()),
+            lambda d: d.toPandas(),
+            lambda d: d.toArrow(),
+        ):
+            with pytest.raises(PySparkValueError, match=message(proto_text)):
+                collect(df)
+    # Spark Connect and PySpark both count and show these results.
+    df = session.sql("SELECT CAST('2020-01-01 00:00:00.123456789' AS TIMESTAMP_NTZ(9)) c")
+    assert df.count() == 1
+    df.show()
+    # Microsecond timestamps still collect.
+    micros = session.sql("SELECT CAST('2020-01-01 00:00:00.123456' AS TIMESTAMP_NTZ(6)) c")
+    assert micros.collect()[0].c == datetime.datetime(2020, 1, 1, 0, 0, 0, 123456)
+
+
 def test_ntz_collect_is_the_wall_clock_in_the_client_time_zone_as_pyspark():
     # As PySpark's Arrow conversion: a TIMESTAMP_NTZ is the wall clock, whatever the time zone of
     # the client, from year 1 to year 9999 and inside arrays, maps and structs, while a TIMESTAMP

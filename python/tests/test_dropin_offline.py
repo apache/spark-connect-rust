@@ -7324,6 +7324,61 @@ def test_udf_string_arg_is_column_name_not_literal():
     assert repr(c) == repr(u(col("id")))
 
 
+@pytest.mark.parametrize("collect", [
+    lambda df: df.collect(),
+    lambda df: df.first(),
+    lambda df: df.head(1),
+    lambda df: df.take(1),
+    lambda df: df.tail(1),
+    lambda df: list(df.toLocalIterator()),
+    lambda df: df.toArrow(),
+])
+@pytest.mark.parametrize("nesting, proto_text", [
+    (None, "timestamp_ntz_nanos {\n  precision: 9\n}\n"),
+    ("array", "timestamp_ltz_nanos {\n  precision: 7\n}\n"),
+    ("struct", "timestamp_ntz_nanos {\n  precision: 9\n}\n"),
+])
+def test_nanosecond_timestamps_are_not_collected_as_pyspark(
+        mock_connect, collect, nesting, proto_text):
+    # As PySpark's conversion of the schema from its proto: TIMESTAMP_NTZ(p) and TIMESTAMP_LTZ(p)
+    # with p > 6 raise UNSUPPORTED_OPERATION, also nested, from the collecting APIs, as the message
+    # of the proto of the first such type. The Arrow data is empty; toPandas is checked live.
+    import re
+
+    import pyarrow as pa
+    from pyspark.errors import PySparkValueError
+
+    # DataType.timestamp_ntz_nanos=29, timestamp_ltz_nanos=30; precision=1 of both messages.
+    is_ltz = "ltz" in proto_text
+    leaf = message_field(30 if is_ltz else 29, varint_field(1, 7 if is_ltz else 9))
+    arrow_type = pa.timestamp("ns", tz="UTC" if is_ltz else None)
+    if nesting == "array":
+        # Array.element_type=1, contains_null=2; DataType.array=20.
+        field_type = message_field(20, message_field(1, leaf) + varint_field(2, 1))
+        arrow_type = pa.list_(arrow_type)
+    elif nesting == "struct":
+        # Struct.fields=1; StructField: name=1, data_type=2, nullable=3; DataType.struct=21.
+        field_type = message_field(21, message_field(1, message_field(1, "s")
+                                                     + message_field(2, leaf) + b"\x18\x01"))
+        arrow_type = pa.struct([("s", arrow_type)])
+    else:
+        field_type = leaf
+    struct = message_field(21, message_field(1, message_field(1, "c")
+                                             + message_field(2, field_type) + b"\x18\x01"))
+
+    spark, service = mock_connect
+    table = pa.table({"c": pa.array([], arrow_type)})
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    batch = varint_field(1, table.num_rows) + message_field(2, sink.getvalue().to_pybytes())
+    service.execute_payload = message_field(7, struct) + message_field(2, batch)
+    df = spark.range(1)
+    with pytest.raises(PySparkValueError, match=(
+            r"\[UNSUPPORTED_OPERATION\] data type " + re.escape(proto_text) + r" is not supported\.")):
+        collect(df)
+
+
 def test_udf_and_pandas_udf_decorator_forms(mock_connect):
     # @udf(returnType) / @pandas_udf(returnType) return a decorator that wraps a function.
     from pyspark.sql.functions import udf, pandas_udf
