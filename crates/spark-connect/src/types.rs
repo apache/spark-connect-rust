@@ -167,6 +167,7 @@ impl DataType {
     /// - Complex types: array<...>, map<...,...>, struct<name:type,...>
     /// - Top-level struct can omit the "struct<>" wrapper for backward compatibility
     /// - DDL like "a INT, b STRING" is parsed as a struct
+    /// - A field may end with `NOT NULL` and `COMMENT 'text'`, as `StructType.toDDL` writes them
     ///
     /// Examples:
     /// ```ignore
@@ -248,15 +249,21 @@ impl DataType {
             DataType::TimestampNtzNanos { precision } => format!("timestamp_ntz({})", precision),
             DataType::TimestampLtzNanos { precision } => format!("timestamp_ltz({})", precision),
             DataType::CalendarInterval => "interval".to_string(),
-            DataType::YearMonthInterval { .. } => "interval".to_string(),
-            DataType::DayTimeInterval { .. } => "interval".to_string(),
+            DataType::YearMonthInterval { .. } => "yearmonthinterval".to_string(),
+            DataType::DayTimeInterval { .. } => "daytimeinterval".to_string(),
             DataType::Array { .. } => "array".to_string(),
             DataType::Map { .. } => "map".to_string(),
             DataType::Struct { .. } => "struct".to_string(),
             DataType::Variant => "variant".to_string(),
             DataType::Geometry { .. } => "geometry".to_string(),
             DataType::Geography { .. } => "geography".to_string(),
-            DataType::Udt { .. } => "udt".to_string(),
+            // UserDefinedType.typeName() is the lower-cased class name, the whole of it.
+            DataType::Udt { python_class, .. } => python_class
+                .as_deref()
+                .and_then(|c| c.rsplit('.').next())
+                .filter(|class_name| !class_name.is_empty())
+                .map(str::to_lowercase)
+                .unwrap_or_else(|| "udt".to_string()),
             DataType::Unparsed { .. } => "unparsed".to_string(),
         }
     }
@@ -1011,17 +1018,6 @@ impl DataType {
             | DataType::Time { .. }
             | DataType::YearMonthInterval { .. }
             | DataType::DayTimeInterval { .. } => self.simple_string(),
-            DataType::Udt {
-                python_class: Some(python_class),
-                ..
-            } => python_class
-                .rsplit('.')
-                .next()
-                .filter(|class_name| !class_name.is_empty())
-                // UserDefinedType.typeName() preserves the entire class name,
-                // unlike DataType.typeName(), which strips the "Type" suffix.
-                .map(str::to_lowercase)
-                .unwrap_or_else(|| self.type_name()),
             _ => self.type_name(),
         }
     }
@@ -1858,6 +1854,10 @@ fn spatial_srid(crs: &str) -> Option<i32> {
 /// Handles primitive types, complex types (array, map, struct), and top-level schemas.
 fn parse_datatype_string(input: &str) -> Result<DataType> {
     let trimmed = input.trim();
+    // An empty schema is an empty struct, as the server's parser gives it.
+    if trimmed.is_empty() {
+        return Ok(DataType::Struct { fields: vec![] });
+    }
 
     // A top-level schema is "a INT, b STRING" (multiple fields) OR a single "a INT"
     // (one field, no comma) -- both parse to a StructType, matching PySpark's
@@ -1876,91 +1876,302 @@ fn parse_datatype_string(input: &str) -> Result<DataType> {
     parse_single_type(trimmed)
 }
 
-/// Whether `s` has a top-level whitespace char (outside `<>`/`()`), i.e. it looks like a
+/// Whether `s` has a top-level whitespace char (outside `<>`/`()` and quotes), i.e. it looks like a
 /// "name type" field rather than a bare type such as `int` or `array<int>`.
 fn contains_top_level_whitespace(s: &str) -> bool {
-    let mut depth = 0;
-    for c in s.chars() {
-        match c {
-            '<' | '(' => depth += 1,
-            '>' | ')' => depth -= 1,
-            _ if depth == 0 && c.is_whitespace() => return true,
-            _ => {}
-        }
-    }
-    false
+    top_level_positions(s)
+        .into_iter()
+        .any(|i| s[i..].chars().next().is_some_and(char::is_whitespace))
 }
 
-/// Check if a string contains a comma at the top level (not inside brackets/parens)
+/// Check if a string contains a comma at the top level (not inside brackets/parens/quotes)
 fn contains_top_level_comma(s: &str) -> bool {
+    top_level_positions(s)
+        .into_iter()
+        .any(|i| s.as_bytes()[i] == b',')
+}
+
+/// The byte positions of the chars of `s` outside `<>`/`()` and outside quoted strings and
+/// backquoted names, so that a comment such as `'x, y'` does not split a field.
+fn top_level_positions(s: &str) -> Vec<usize> {
+    let bytes = s.as_bytes();
+    let mut positions = Vec::new();
     let mut depth = 0;
-    for c in s.chars() {
-        match c {
-            '<' | '(' => depth += 1,
-            '>' | ')' => depth -= 1,
-            ',' if depth == 0 => return true,
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' | b'"' | b'`' => match quoted_end(s, i) {
+                Some(end) => {
+                    i = end;
+                    continue;
+                }
+                // An unterminated quote: the rest is not a field, so the parse fails later.
+                None => break,
+            },
+            b'<' | b'(' => depth += 1,
+            b'>' | b')' => depth -= 1,
+            _ if depth == 0 && s.is_char_boundary(i) => positions.push(i),
             _ => {}
         }
+        i += 1;
     }
-    false
+    positions
+}
+
+/// The byte index just after the quoted string or backquoted name that opens at `start`, or
+/// `None` if it is not closed. A doubled quote is one quote. A backslash escapes the next char in
+/// a string, and a raw string (`R'...'`) has no escapes, as Spark's lexer reads them.
+fn quoted_end(s: &str, start: usize) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let quote = *bytes.get(start)?;
+    let raw = quote != b'`'
+        && start > 0
+        && matches!(bytes[start - 1], b'R' | b'r')
+        && (start < 2 || !is_ident_byte(bytes[start - 2]));
+    let mut i = start + 1;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'\\' && quote != b'`' && !raw {
+            i += 2;
+        } else if c == quote {
+            if !raw && bytes.get(i + 1) == Some(&quote) {
+                i += 2;
+            } else {
+                return Some(i + 1);
+            }
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 /// Parse a top-level schema like "a INT, b STRING" or "a: int, b: string"
 fn parse_top_level_schema(input: &str) -> Result<DataType> {
     let mut fields = Vec::new();
-    let parts = split_top_level_comma(input);
-
-    for part in parts {
-        let trimmed = part.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        // Parse "name type" or "name: type" format
-        let (name, type_str) = if let Some(colon_idx) = trimmed.find(':') {
-            let name = trimmed[..colon_idx].trim();
-            let type_str = trimmed[colon_idx + 1..].trim();
-            (name, type_str)
-        } else {
-            // Assume first word is name, rest is type
-            let parts: Vec<&str> = trimmed.splitn(2, char::is_whitespace).collect();
-            if parts.len() != 2 {
-                return Err(SparkError::value(
-                    "INVALID_DATATYPE_FORMAT",
-                    &[("detail", &format!("Cannot parse field: {}", trimmed))],
-                ));
-            }
-            (parts[0], parts[1])
-        };
-
-        let data_type = parse_single_type(type_str)?;
-        fields.push(StructField {
-            name: name.to_string(),
-            data_type,
-            nullable: true,
-            metadata: BTreeMap::new(),
-        });
+    for part in split_top_level_comma(input) {
+        fields.push(parse_struct_field(part.trim())?);
     }
 
     Ok(DataType::Struct { fields })
 }
 
-/// Split by top-level commas (respecting angle brackets and parentheses)
+/// Parses one field, `name [:] type [NOT NULL] [COMMENT 'string']`, as Spark's `colType` and
+/// `complexColType` grammar: the name is a backquoted name or an identifier, the keywords are in
+/// any case, `!NULL` is `NOT NULL`, and the comment is one or more adjacent string literals.
+fn parse_struct_field(part: &str) -> Result<StructField> {
+    let (name, rest) = parse_field_name(part)?;
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix(':').unwrap_or(rest).trim_start();
+    let (type_str, not_null, comment) = split_type_and_clause(rest, part)?;
+    let data_type = parse_single_type(type_str)?;
+    let metadata = comment
+        .map(|c| BTreeMap::from([("comment".to_string(), serde_json::Value::String(c))]))
+        .unwrap_or_default();
+    Ok(StructField {
+        name,
+        data_type,
+        nullable: !not_null,
+        metadata,
+    })
+}
+
+/// The name at the start of a field, and the text after it.
+fn parse_field_name(part: &str) -> Result<(String, &str)> {
+    let invalid = || {
+        SparkError::value(
+            "INVALID_DATATYPE_FORMAT",
+            &[("detail", &format!("Cannot parse field: {}", part))],
+        )
+    };
+    if part.starts_with('`') {
+        let end = quoted_end(part, 0).ok_or_else(invalid)?;
+        let name = part[1..end - 1].replace("``", "`");
+        return Ok((name, &part[end..]));
+    }
+    // An unquoted identifier is ASCII letters, digits and underscores, as Spark's parser accepts
+    // them: it rejects others, such as `이름`, with INVALID_IDENTIFIER (back quote them).
+    let end = part
+        .find(|c: char| c.is_whitespace() || c == ':')
+        .unwrap_or(part.len());
+    if end == 0 || !part.as_bytes()[..end].iter().all(|&b| is_ident_byte(b)) {
+        return Err(invalid());
+    }
+    Ok((part[..end].to_string(), &part[end..]))
+}
+
+/// Splits the text after a field name into its type and its `NOT NULL` and `COMMENT` clauses, in
+/// that order. Returns whether the field is `NOT NULL` and its comment, unescaped.
+fn split_type_and_clause<'a>(rest: &'a str, part: &str) -> Result<(&'a str, bool, Option<String>)> {
+    let invalid = || {
+        SparkError::value(
+            "INVALID_DATATYPE_FORMAT",
+            &[("detail", &format!("Cannot parse field: {}", part))],
+        )
+    };
+    let clause_start = top_level_positions(rest)
+        .into_iter()
+        .find(|&i| is_clause_start(rest, i));
+    let (type_str, clause) = match clause_start {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, ""),
+    };
+    let mut clause = clause.trim_start();
+    let mut not_null = false;
+    let mut comment = None;
+    if let Some(after) = strip_keyword(clause, "NOT").or_else(|| clause.strip_prefix('!')) {
+        let after = strip_keyword(after.trim_start(), "NULL").ok_or_else(invalid)?;
+        not_null = true;
+        clause = after.trim_start();
+    }
+    if let Some(after) = strip_keyword(clause, "COMMENT") {
+        let mut text = String::new();
+        let mut s = after.trim_start();
+        loop {
+            let (literal, next) = string_literal(s).ok_or_else(invalid)?;
+            text.push_str(&literal);
+            s = next.trim_start();
+            if !starts_string_literal(s) {
+                break;
+            }
+        }
+        comment = Some(text);
+        clause = s;
+    }
+    if !clause.is_empty() || type_str.trim().is_empty() {
+        return Err(invalid());
+    }
+    Ok((type_str.trim_end(), not_null, comment))
+}
+
+/// Whether the text at `i` starts the `NOT NULL`, `!NULL` or `COMMENT` clause of a field type.
+fn is_clause_start(rest: &str, i: usize) -> bool {
+    let tail = &rest[i..];
+    if tail.starts_with('!') {
+        return true;
+    }
+    let after_ident = rest[..i]
+        .chars()
+        .last()
+        .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+    !after_ident
+        && (strip_keyword(tail, "NOT").is_some() || strip_keyword(tail, "COMMENT").is_some())
+}
+
+/// The text after a keyword at the start of `s`, if `s` starts with it (in any case) at a word
+/// boundary.
+fn strip_keyword<'a>(s: &'a str, keyword: &str) -> Option<&'a str> {
+    let head = s.get(..keyword.len())?;
+    let after = &s[keyword.len()..];
+    let boundary = after
+        .chars()
+        .next()
+        .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'));
+    (head.eq_ignore_ascii_case(keyword) && boundary).then_some(after)
+}
+
+fn starts_string_literal(s: &str) -> bool {
+    let raw = s.len() > 1
+        && matches!(s.as_bytes()[0], b'R' | b'r')
+        && matches!(s.as_bytes()[1], b'\'' | b'"');
+    raw || matches!(s.as_bytes().first(), Some(b'\'' | b'"'))
+}
+
+/// The value of the string literal at the start of `s`, and the text after it: a single-quoted
+/// or double-quoted string with Spark's escapes, or a raw string `R'...'`.
+fn string_literal(s: &str) -> Option<(String, &str)> {
+    if !starts_string_literal(s) {
+        return None;
+    }
+    let start = if s.as_bytes()[0].is_ascii_alphabetic() {
+        1
+    } else {
+        0
+    };
+    let end = quoted_end(s, start)?;
+    let token = &s[start..end];
+    let text = if start == 1 {
+        token[1..token.len() - 1].to_string()
+    } else {
+        unescape_sql_string(token)
+    };
+    Some((text, &s[end..]))
+}
+
+/// The value of a quoted string token, as Spark's `unescapeSQLString` reads it: the quotes are
+/// removed, a doubled quote is one quote, and the escapes `\0 \b \n \r \t \Z`, `\uXXXX`,
+/// `\UXXXXXXXX` and three-digit octal `\NNN` are decoded. Any other escaped char is itself, except
+/// `\%` and `\_`, which keep their backslash.
+fn unescape_sql_string(token: &str) -> String {
+    let quote = token.as_bytes()[0] as char;
+    let chars: Vec<char> = token[1..token.len() - 1].chars().collect();
+    let n = chars.len();
+    let hex = |range: std::ops::Range<usize>| {
+        !range.is_empty() && chars[range].iter().all(|c| c.is_ascii_hexdigit())
+    };
+    let code_point = |range: std::ops::Range<usize>, radix: u32| {
+        let digits: String = chars[range].iter().collect();
+        u32::from_str_radix(&digits, radix)
+            .ok()
+            .and_then(char::from_u32)
+            .unwrap_or('\u{FFFD}')
+    };
+    let mut out = String::new();
+    let mut i = 0;
+    while i < n {
+        let c = chars[i];
+        if c == quote && chars.get(i + 1) == Some(&quote) {
+            out.push(quote);
+            i += 2;
+        } else if c != '\\' || i + 1 == n {
+            out.push(c);
+            i += 1;
+        } else {
+            i += 1;
+            let escaped = chars[i];
+            if escaped == 'u' && i + 5 <= n && hex(i + 1..i + 5) {
+                out.push(code_point(i + 1..i + 5, 16));
+                i += 5;
+            } else if escaped == 'U' && i + 9 <= n && hex(i + 1..i + 9) {
+                out.push(code_point(i + 1..i + 9, 16));
+                i += 9;
+            } else if i + 3 <= n
+                && matches!(chars[i], '0' | '1')
+                && chars[i + 1..i + 3].iter().all(|c| ('0'..='7').contains(c))
+            {
+                out.push(code_point(i..i + 3, 8));
+                i += 3;
+            } else {
+                match escaped {
+                    '0' => out.push('\0'),
+                    'b' => out.push('\u{8}'),
+                    'n' => out.push('\n'),
+                    'r' => out.push('\r'),
+                    't' => out.push('\t'),
+                    'Z' => out.push('\u{1A}'),
+                    // As Spark does, `\%` and `\_` keep their backslash.
+                    '%' | '_' => out.push_str(&format!("\\{escaped}")),
+                    other => out.push(other),
+                }
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Split by top-level commas (respecting angle brackets, parentheses and quotes)
 fn split_top_level_comma(s: &str) -> Vec<&str> {
     let mut result = Vec::new();
     let mut start = 0;
-    let mut depth = 0;
-    let bytes = s.as_bytes();
-
-    for (i, &b) in bytes.iter().enumerate() {
-        match b {
-            b'<' | b'(' => depth += 1,
-            b'>' | b')' => depth -= 1,
-            b',' if depth == 0 => {
-                result.push(&s[start..i]);
-                start = i + 1;
-            }
-            _ => {}
+    for i in top_level_positions(s) {
+        if s.as_bytes()[i] == b',' {
+            result.push(&s[start..i]);
+            start = i + 1;
         }
     }
     result.push(&s[start..]);
@@ -2124,24 +2335,7 @@ fn parse_map_type(input: &str) -> Result<DataType> {
 
 /// Split map key and value types by comma at the top level
 fn split_map_parts(s: &str) -> Result<Vec<&str>> {
-    let mut depth = 0;
-    let mut parts = Vec::new();
-    let mut start = 0;
-
-    for (i, c) in s.char_indices() {
-        match c {
-            '<' | '(' => depth += 1,
-            '>' | ')' => depth -= 1,
-            ',' if depth == 0 => {
-                parts.push(&s[start..i]);
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    parts.push(&s[start..]);
-
-    Ok(parts)
+    Ok(split_top_level_comma(s))
 }
 
 /// Parse struct<field1:type1,field2:type2,...>
@@ -2160,71 +2354,11 @@ fn parse_struct_type(input: &str) -> Result<DataType> {
     }
 
     let mut fields = Vec::new();
-    let parts = split_struct_fields(inner);
-
-    for part in parts {
-        let part_trimmed = part.trim();
-        if part_trimmed.is_empty() {
-            continue;
-        }
-
-        // Find the colon separating field name from type
-        if let Some(colon_idx) = find_unbracketed_colon(part_trimmed) {
-            let name = part_trimmed[..colon_idx].trim();
-            let type_str = part_trimmed[colon_idx + 1..].trim();
-
-            let data_type = parse_single_type(type_str)?;
-            fields.push(StructField {
-                name: name.to_string(),
-                data_type,
-                nullable: true,
-                metadata: BTreeMap::new(),
-            });
-        } else {
-            return Err(SparkError::value(
-                "INVALID_DATATYPE_FORMAT",
-                &[("detail", &format!("Invalid struct field: {}", part_trimmed))],
-            ));
-        }
+    for part in split_top_level_comma(inner) {
+        fields.push(parse_struct_field(part.trim())?);
     }
 
     Ok(DataType::Struct { fields })
-}
-
-/// Split struct fields by comma at the top level
-fn split_struct_fields(s: &str) -> Vec<&str> {
-    let mut depth = 0;
-    let mut parts = Vec::new();
-    let mut start = 0;
-
-    for (i, c) in s.char_indices() {
-        match c {
-            '<' | '(' => depth += 1,
-            '>' | ')' => depth -= 1,
-            ',' if depth == 0 => {
-                parts.push(&s[start..i]);
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    parts.push(&s[start..]);
-
-    parts
-}
-
-/// Find the position of an unbracketed colon
-fn find_unbracketed_colon(s: &str) -> Option<usize> {
-    let mut depth = 0;
-    for (i, c) in s.char_indices() {
-        match c {
-            '<' | '(' => depth += 1,
-            '>' | ')' => depth -= 1,
-            ':' if depth == 0 => return Some(i),
-            _ => {}
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -2694,7 +2828,7 @@ mod tests {
                     end_field: 3,
                 },
                 expected_simple: "interval day to second",
-                expected_type_name: "interval",
+                expected_type_name: "daytimeinterval",
             },
             TestCase {
                 dt: DataType::YearMonthInterval {
@@ -2702,7 +2836,7 @@ mod tests {
                     end_field: 1,
                 },
                 expected_simple: "interval year to month",
-                expected_type_name: "interval",
+                expected_type_name: "yearmonthinterval",
             },
             TestCase {
                 dt: DataType::Variant,
