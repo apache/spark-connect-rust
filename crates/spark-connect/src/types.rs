@@ -1222,14 +1222,16 @@ fn quote_if_needed(name: &str) -> String {
 }
 
 /// The ` NOT NULL` and ` COMMENT '...'` suffix of a field, as `StructField.toDDL` writes it. The
-/// single quotes of the comment are escaped as Spark's `escapeSingleQuotedString` does.
+/// backslashes and single quotes of the comment are escaped as Spark's `escapeSingleQuotedString`
+/// does: the backslashes first, so that the escape of a quote is not escaped again.
 fn field_ddl_suffix(field: &StructField) -> String {
     let mut s = String::new();
     if !field.nullable {
         s.push_str(" NOT NULL");
     }
     if let Some(comment) = field.metadata.get("comment").and_then(|c| c.as_str()) {
-        s.push_str(&format!(" COMMENT '{}'", comment.replace('\'', "\\'")));
+        let escaped = comment.replace('\\', "\\\\").replace('\'', "\\'");
+        s.push_str(&format!(" COMMENT '{escaped}'"));
     }
     s
 }
