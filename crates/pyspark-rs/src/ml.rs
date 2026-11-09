@@ -731,15 +731,19 @@ pub struct PyBinaryClassificationEvaluator {
 #[pymethods]
 impl PyBinaryClassificationEvaluator {
     #[new]
-    #[pyo3(signature = (labelCol=None, scoreCol=None, metricName=None))]
+    #[pyo3(signature = (labelCol=None, rawPredictionCol=None, metricName=None))]
     #[allow(non_snake_case)]
-    fn new(labelCol: Option<String>, scoreCol: Option<String>, metricName: Option<String>) -> Self {
+    fn new(
+        labelCol: Option<String>,
+        rawPredictionCol: Option<String>,
+        metricName: Option<String>,
+    ) -> Self {
         let mut e = BinaryClassificationEvaluator::new();
         if let Some(c) = labelCol {
             e = e.set_label_col(&c);
         }
-        if let Some(c) = scoreCol {
-            e = e.set_score_col(&c);
+        if let Some(c) = rawPredictionCol {
+            e = e.set_raw_prediction_col(&c);
         }
         if let Some(m) = metricName {
             e = e.set_metric_name(&m);
@@ -752,10 +756,10 @@ impl PyBinaryClassificationEvaluator {
             inner: self.inner.clone().set_label_col(col),
         }
     }
-    #[pyo3(name = "setScoreCol")]
-    fn set_score_col(&self, col: &str) -> Self {
+    #[pyo3(name = "setRawPredictionCol")]
+    fn set_raw_prediction_col(&self, col: &str) -> Self {
         PyBinaryClassificationEvaluator {
-            inner: self.inner.clone().set_score_col(col),
+            inner: self.inner.clone().set_raw_prediction_col(col),
         }
     }
     #[pyo3(name = "setMetricName")]

@@ -44,10 +44,10 @@ fn ml_estimators_setters_getters_proto() {
 
     let be = BinaryClassificationEvaluator::new()
         .set_label_col("l")
-        .set_score_col("s")
+        .set_raw_prediction_col("s")
         .set_metric_name("areaUnderROC");
     assert_eq!(be.label_col(), "l");
-    assert_eq!(be.score_col(), "s");
+    assert_eq!(be.raw_prediction_col(), "s");
     assert_eq!(be.metric_name(), "areaUnderROC");
 
     let mce = MulticlassClassificationEvaluator::new()

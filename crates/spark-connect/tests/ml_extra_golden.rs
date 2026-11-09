@@ -165,7 +165,7 @@ fn test_binary_classification_evaluator_metrics() {
     let eval = BinaryClassificationEvaluator::new().set_metric_name("areaUnderPR");
     assert_eq!(eval.metric_name(), "areaUnderPR");
     assert_eq!(eval.label_col(), "label");
-    assert_eq!(eval.score_col(), "prediction");
+    assert_eq!(eval.raw_prediction_col(), "rawPrediction");
 }
 
 #[test]

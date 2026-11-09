@@ -1194,15 +1194,56 @@ fn ml_estimators_and_transformers() {
         )
         .expect("ml sample");
 
-    // This smoke test covers request construction and tolerates server rejection.
     // LogisticRegression has separate tests below that assert successful training
     // and learned predictions.
 
-    // Transformer.transform builds a fetch of the transform relation.
+    // VectorAssembler: the server assembles `a` and `b` into [id, 2 * id], as PySpark does.
     let mut va = VectorAssembler::new()
         .set_input_cols(vec!["a", "b"])
         .set_output_col("assembled");
-    let _ = va.transform(&df).and_then(|d| d.count());
+    let assembled = va
+        .transform(&df)
+        .expect("transform VectorAssembler")
+        .with_column(
+            "values",
+            spark_connect::Column::new(spark_connect::expression::Expression::function(
+                "vector_to_array",
+                vec![
+                    col("assembled").expression().clone(),
+                    lit_string("float64").expression().clone(),
+                ],
+            )),
+        )
+        .select(vec![col("a"), col("values")])
+        .collect()
+        .expect("collect assembled vectors");
+    let mut assembled: Vec<(f64, Vec<f64>)> = assembled
+        .iter()
+        .map(|row| {
+            let a = match row.get_by_name("a") {
+                Some(spark_connect::row::Value::Double(a)) => *a,
+                other => panic!("unexpected a: {other:?}"),
+            };
+            let values = match row.get_by_name("values") {
+                Some(spark_connect::row::Value::List(items)) => items
+                    .iter()
+                    .map(|v| match v {
+                        spark_connect::row::Value::Double(d) => *d,
+                        other => panic!("unexpected element: {other:?}"),
+                    })
+                    .collect(),
+                other => panic!("unexpected values: {other:?}"),
+            };
+            (a, values)
+        })
+        .collect();
+    assembled.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap());
+    assert_eq!(
+        assembled,
+        (0..20)
+            .map(|i| (i as f64, vec![i as f64, 2.0 * i as f64]))
+            .collect::<Vec<_>>()
+    );
 
     // The server fits each scaler and indexer, and the transform of the model uses the cached
     // model. The scalers take ML vector features.
@@ -1244,13 +1285,20 @@ fn ml_estimators_and_transformers() {
         .set_metric_name("rmse");
     assert_eq!(reg_eval.evaluate(&eval_df).unwrap(), 0.0);
 
-    // BinaryClassificationEvaluator: the client build+submit path runs; the server
-    // needs a vector score column for a real AUC, so tolerate a shape rejection.
+    // BinaryClassificationEvaluator scores the rawPredictionCol, here a double column as the JVM
+    // accepts (a vector is the classifier output): the scores 0.1, 0.4 (label 0) and 0.35, 0.8
+    // (label 1) give an AUC of 0.75, as PySpark gives.
+    let bin_df = s
+        .sql(
+            "SELECT CAST(l AS DOUBLE) AS label, CAST(p AS DOUBLE) AS rawPrediction \
+             FROM VALUES (0, 0.1), (0, 0.4), (1, 0.35), (1, 0.8) AS t(l, p)",
+        )
+        .expect("binary evaluator df");
     let bin_eval = BinaryClassificationEvaluator::new()
         .set_label_col("label")
-        .set_score_col("prediction")
+        .set_raw_prediction_col("rawPrediction")
         .set_metric_name("areaUnderROC");
-    let _ = bin_eval.evaluate(&eval_df);
+    assert_eq!(bin_eval.evaluate(&bin_df).unwrap(), 0.75);
 
     // Pipeline carries stage names as params; this smoke test tolerates rejection.
     let mut pipeline = Pipeline::new().set_stages(vec!["scaler", "lr"]);
