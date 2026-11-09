@@ -1879,11 +1879,12 @@ impl PySparkSession {
 
     /// Stop this Spark session. Best-effort and idempotent, mirroring pyspark: a failure
     /// to release the session on the server is logged, not raised. Also clears the
-    /// active session and the cached `SQLContext` if they belong to this session.
+    /// active session and the cached `SQLContext` if they belong to this session. Listener
+    /// callbacks are not joined; the current event's listener snapshot may finish afterward.
     fn stop(&self, py: Python<'_>) -> PyResult<()> {
         crate::progress::forget_session(&self.session);
         crate::profiler::forget_session(&self.session);
-        if let Err(e) = py.detach(|| self.session.stop()) {
+        if let Err(e) = py.detach(|| self.session.stop().map_err(Box::new)) {
             let logger = py
                 .import("logging")?
                 .call_method1("getLogger", ("pyspark",))?;
@@ -2155,8 +2156,9 @@ impl PySparkSession {
     }
 
     /// Close the session without releasing it on the server, for `client.close`.
-    fn _close(&self) {
-        self.session.close();
+    /// Do not join listener callbacks; the current event's listener snapshot may finish afterward.
+    fn _close(&self, py: Python<'_>) {
+        py.detach(|| self.session.close());
     }
 
     /// The client of the session, as PySpark Connect's `SparkSession._client`, which the

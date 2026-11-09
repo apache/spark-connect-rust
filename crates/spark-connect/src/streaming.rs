@@ -4,10 +4,10 @@
 //! for building and executing streaming workloads.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use uuid;
 
-use spark_connect_core::error::{Result, SparkError};
+use spark_connect_core::error::{Result, SparkError, SparkErrorKind};
 use spark_connect_core::runtime::block_on;
 use spark_connect_proto as proto;
 
@@ -755,15 +755,49 @@ pub struct ListenerEventStream {
     stream: crate::progress::ExecutionStream,
     buffered_events: std::vec::IntoIter<(i32, String)>,
     done: bool,
+    cancel: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 impl ListenerEventStream {
+    /// Read the next response unless canceled, checking cancellation before a ready response.
+    /// Cancellation consumes its oneshot receiver and ends the stream like EOF; once done,
+    /// the transport is never polled again.
+    fn message(&mut self) -> Result<Option<proto::ExecutePlanResponse>> {
+        if self.done {
+            return Ok(None);
+        }
+        let response = block_on(async {
+            if let Some(cancel) = &mut self.cancel {
+                tokio::select! {
+                    biased;
+                    _ = cancel => None,
+                    response = self.stream.message() => Some(response),
+                }
+            } else {
+                Some(self.stream.message().await)
+            }
+        });
+        match response {
+            None | Some(Ok(None)) => {
+                // A completed oneshot must never be polled again.
+                self.cancel.take();
+                self.done = true;
+                Ok(None)
+            }
+            Some(Err(error)) => {
+                self.done = true;
+                Err(error)
+            }
+            Some(response) => response,
+        }
+    }
+
     /// Read the responses of the server until the one that tells that it added the listener of
     /// the session (`listener_bus_listener_added`), keeping the events of them, which the
     /// iterator gives first, as PySpark Connect's `_register_server_side_listener` waits for it.
     fn wait_until_listener_added(&mut self) -> Result<()> {
         loop {
-            match block_on(self.stream.message()) {
+            match self.message() {
                 Ok(Some(resp)) => {
                     if let Some(
                         proto::execute_plan_response::ResponseType::StreamingQueryListenerEventsResult(res),
@@ -785,6 +819,9 @@ impl ListenerEventStream {
                     }
                 }
                 Ok(None) => {
+                    // Terminal cancellation ends this wait like EOF. Teardown marks the
+                    // session stopped first; add_listener's post-wait check rejects this
+                    // outcome instead of publishing a worker on the canceled stream.
                     self.done = true;
                     return Ok(());
                 }
@@ -811,7 +848,7 @@ impl Iterator for ListenerEventStream {
         }
 
         loop {
-            match block_on(self.stream.message()) {
+            match self.message() {
                 Ok(Some(resp)) => {
                     if let Some(
                         proto::execute_plan_response::ResponseType::StreamingQueryListenerEventsResult(res),
@@ -880,26 +917,44 @@ pub trait StreamingQueryListener: Send + Sync {
     }
 }
 
-/// The client-side listener bus of the streaming queries of a session, which all of its
-/// `StreamingQueryManager`s share, as PySpark Connect's `StreamingQueryListenerBus` of
-/// `spark.streams`: the registered listeners, in their order, and the thread that posts the
-/// events of the server to them, from the first listener to the removal of the last. `ops`
-/// serializes the additions and removals, which talk to the server, while the thread takes
-/// `state` only to read the listeners, and calls them without any lock.
+/// The client-side listener bus of one session. Handles of the same session share it;
+/// a new server session has a separate bus. It never owns a session or a manager.
 #[derive(Default)]
 pub(crate) struct ListenerBus {
-    ops: Mutex<()>,
     state: Mutex<ListenerBusState>,
+    changed: Condvar,
 }
 
 #[derive(Default)]
 struct ListenerBusState {
     listeners: Vec<(String, Arc<dyn StreamingQueryListener>)>,
     thread: Option<std::thread::JoinHandle<()>>,
+    // Dropping the bus wakes a blocked reader, so its worker does not retain a session.
+    cancel: Option<tokio::sync::oneshot::Sender<()>>,
+    phase: ListenerBusPhase,
+    worker_id: Option<std::thread::ThreadId>,
+    generation: u64,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+enum ListenerBusPhase {
+    #[default]
+    Idle,
+    Starting,
+    Stopping,
 }
 
 impl ListenerBus {
-    /// Post `event` to every listener, as PySpark Connect's `post_to_all`.
+    /// Clear only the registrations of the worker that has finished this generation.
+    fn finish_generation(&self, generation: u64) {
+        let mut state = self.state.lock().unwrap();
+        if state.generation == generation {
+            state.listeners.clear();
+            state.cancel.take();
+        }
+    }
+
+    /// Post a synchronous start event without holding the state lock across callbacks.
     fn post_to_all(&self, event: &StreamingQueryListenerEvent) {
         let listeners: Vec<Arc<dyn StreamingQueryListener>> = self
             .state
@@ -909,28 +964,48 @@ impl ListenerBus {
             .iter()
             .map(|(_, listener)| Arc::clone(listener))
             .collect();
-        for listener in &listeners {
+        for listener in listeners {
             listener.on_event(event);
         }
     }
 }
 
-/// The background dispatch loop: posts each event of the stream of the server, on which the
-/// server has added the listener of the session, to the listeners. It ends when the stream does,
-/// as when the server was asked to remove its listener (`RemoveListenerBusListener`). An error
-/// of the stream removes all the listeners, as PySpark Connect's handler thread does.
-fn run_listener_event_loop(stream: ListenerEventStream, bus: Arc<ListenerBus>) {
-    for item in stream {
-        match item {
-            Ok((event_type, event_json)) => bus.post_to_all(&StreamingQueryListenerEvent {
-                event_type,
-                event_json,
-            }),
-            Err(_) => {
-                bus.state.lock().unwrap().listeners.clear();
-                return;
+/// The worker retains neither the session nor its bus. The stream owns only transport
+/// and progress-handler state; dropping the last session/manager cancels the reader.
+fn run_listener_event_loop(
+    mut stream: ListenerEventStream,
+    bus: Weak<ListenerBus>,
+    generation: u64,
+) {
+    for item in &mut stream {
+        let Ok((event_type, event_json)) = item else {
+            break;
+        };
+        let Some(bus) = bus.upgrade() else {
+            break;
+        };
+        let listeners: Vec<Arc<dyn StreamingQueryListener>> = {
+            let state = bus.state.lock().unwrap();
+            if state.generation != generation || state.listeners.is_empty() {
+                break;
             }
+            state
+                .listeners
+                .iter()
+                .map(|(_, listener)| Arc::clone(listener))
+                .collect()
+        };
+        drop(bus);
+        let event = StreamingQueryListenerEvent {
+            event_type,
+            event_json,
+        };
+        for listener in listeners {
+            listener.on_event(&event);
         }
+    }
+    if let Some(bus) = bus.upgrade() {
+        bus.finish_generation(generation);
     }
 }
 
@@ -945,61 +1020,130 @@ pub struct StreamingQueryManager {
 }
 
 impl StreamingQueryManager {
-    /// Create a new StreamingQueryManager, of the listener bus of `session`.
+    /// Create a handle to this session's shared StreamingQueryManager state.
     pub(crate) fn new(session: SparkSession) -> Self {
         let bus = session.listener_bus();
         StreamingQueryManager { session, bus }
     }
 
-    /// Register a client-side listener. Returns an id that can be passed to
-    /// [`StreamingQueryManager::remove_listener`]. Mirrors `StreamingQueryManager.addListener`:
-    /// for the first listener of the session, the server adds its listener before this returns,
-    /// so that the queries started then send their started events, and a thread posts the events
-    /// of the server to the listeners. Should the server fail to add it, the listener is not
-    /// added.
-    pub fn add_listener(&self, listener: Arc<dyn StreamingQueryListener>) -> Result<String> {
-        let id = uuid::Uuid::new_v4().to_string();
-        let _ops = self.bus.ops.lock().unwrap();
-        let first = {
-            let mut state = self.bus.state.lock().unwrap();
-            state.listeners.push((id.clone(), listener));
-            state.listeners.len() == 1
-        };
-        if first {
-            let registered = self.listener_event_stream().and_then(|mut stream| {
-                stream.wait_until_listener_added()?;
-                Ok(stream)
-            });
-            let stream = match registered {
-                Ok(stream) => stream,
-                Err(e) => {
-                    self.bus.state.lock().unwrap().listeners.clear();
-                    return Err(e);
+    /// Wait for another caller's start/stop operation without holding a lock needed by
+    /// callbacks. A callback during shutdown may remove/close the bus as a no-op, but
+    /// cannot wait for its own worker to finish in order to start a new subscription.
+    fn idle_state(&self, removing: bool) -> Result<Option<MutexGuard<'_, ListenerBusState>>> {
+        let mut state = self.bus.state.lock().unwrap();
+        while state.phase != ListenerBusPhase::Idle {
+            if state.worker_id == Some(std::thread::current().id()) {
+                if removing && state.phase == ListenerBusPhase::Stopping {
+                    return Ok(None);
                 }
-            };
-            let bus = Arc::clone(&self.bus);
-            let thread = std::thread::spawn(move || run_listener_event_loop(stream, bus));
-            self.bus.state.lock().unwrap().thread = Some(thread);
+                return Err(SparkError::connect_msg(
+                    "cannot change the listener bus from its own callback while another \
+                     lifecycle operation is in progress",
+                ));
+            }
+            state = self.bus.changed.wait(state).unwrap();
         }
-        Ok(id)
+        Ok(Some(state))
     }
 
-    /// Remove a client-side listener by id, which does nothing for an id of no listener. Mirrors
-    /// `StreamingQueryManager.removeListener`: for the last listener, the server is asked to
-    /// remove its listener, which ends its stream, and this returns once the thread has posted
-    /// the events left. Should that request fail, the listener stays, and the error is returned.
+    /// The error of registering a listener on a stopped session, as PySpark Connect's client.
+    fn no_active_session() -> SparkError {
+        SparkError::classed(SparkErrorKind::Connect, "NO_ACTIVE_SESSION", &[])
+    }
+
+    /// Register a listener, waiting for the server's acknowledgement when opening the bus.
+    /// The returned id can be removed through any manager handle of this session.
+    /// A terminal event-stream error or end clears all registrations; add the listeners
+    /// again to open a new subscription. Terminal teardown cancels acknowledgement waits
+    /// once the RPC stream is established. Establishing the stream itself follows the
+    /// transport's deadline and retry policy; a stopped session then reports NO_ACTIVE_SESSION.
+    pub fn add_listener(&self, listener: Arc<dyn StreamingQueryListener>) -> Result<String> {
+        let mut state = self.idle_state(false)?.expect("adding obtains the state");
+        if self.session.is_stopped() {
+            return Err(Self::no_active_session());
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        if !state.listeners.is_empty() {
+            state.listeners.push((id.clone(), listener));
+            return Ok(id);
+        }
+        state.phase = ListenerBusPhase::Starting;
+        // An earlier worker must not clear this registration's cancellation sender.
+        state.generation = state.generation.wrapping_add(1);
+        let generation = state.generation;
+        let (cancel, receiver) = tokio::sync::oneshot::channel();
+        state.cancel = Some(cancel);
+        let previous = state.thread.take();
+        drop(state);
+        Self::join_listener_thread(previous);
+        let stream = self.listener_event_stream().and_then(|mut stream| {
+            // Cancel a pending acknowledgement once the RPC stream exists. Establishing
+            // the stream above still follows the transport's deadline and retry policy.
+            stream.cancel = Some(receiver);
+            stream.wait_until_listener_added()?;
+            Ok(stream)
+        });
+        let mut state = self.bus.state.lock().unwrap();
+        state.phase = ListenerBusPhase::Idle;
+        self.bus.changed.notify_all();
+        // Terminal teardown sets stopped before canceling the stream. Its acknowledgement
+        // wait treats cancellation like EOF, so this check rejects a canceled registration.
+        if self.session.is_stopped() {
+            state.cancel.take();
+            return Err(Self::no_active_session());
+        }
+        match stream {
+            Ok(stream) => {
+                state.listeners.push((id.clone(), listener));
+                let bus = Arc::downgrade(&self.bus);
+                let worker = std::thread::spawn(move || {
+                    run_listener_event_loop(stream, bus, generation);
+                });
+                state.worker_id = Some(worker.thread().id());
+                state.thread = Some(worker);
+                Ok(id)
+            }
+            Err(error) => {
+                state.cancel.take();
+                Err(error)
+            }
+        }
+    }
+
+    /// Remove a listener by id. Unknown ids do nothing. Removing the last listener drains
+    /// the server event stream before returning, as PySpark's removeListener does.
+    /// A callback during another caller's shutdown returns without waiting for its own
+    /// worker; that caller owns the final result and may retry a failed removal.
     pub fn remove_listener(&self, id: &str) -> Result<()> {
         self.remove_listener_found(id).map(|_| ())
     }
 
-    /// As [`remove_listener`](Self::remove_listener), which returns whether the listener of `id`
-    /// was in this bus (and so is removed now), for a client that keeps the ids of its listeners
-    /// per bus, as the ids of another session's bus are not in this one.
+    /// As [`remove_listener`](Self::remove_listener), returning whether a registration of `id`
+    /// was removed from this bus. An absent id or a callback coalesced with an in-progress
+    /// shutdown returns false, so a wrapper retains its token if that shutdown later fails.
+    /// An id from another session's bus is absent here and leaves that registration untouched.
     pub fn remove_listener_found(&self, id: &str) -> Result<bool> {
-        let _ops = self.bus.ops.lock().unwrap();
-        {
-            let mut state = self.bus.state.lock().unwrap();
-            let Some(index) = state.listeners.iter().position(|(lid, _)| lid == id) else {
+        self.remove_listeners(Some(id))
+    }
+
+    /// Remove all listeners and stop this session's shared dispatch thread.
+    /// A server removal failure retains the registrations and worker so closing can be retried.
+    pub fn close(&self) -> Result<()> {
+        self.remove_listeners(None).map(|_| ())
+    }
+
+    fn remove_listeners(&self, id: Option<&str>) -> Result<bool> {
+        let Some(mut state) = self.idle_state(true)? else {
+            // Another caller waits for this callback. It owns the shutdown result; keep
+            // the registration token until that caller has actually removed the listener.
+            return Ok(false);
+        };
+        if let Some(id) = id {
+            let Some(index) = state
+                .listeners
+                .iter()
+                .position(|(listener_id, _)| listener_id == id)
+            else {
                 return Ok(false);
             };
             if state.listeners.len() > 1 {
@@ -1007,32 +1151,44 @@ impl StreamingQueryManager {
                 return Ok(true);
             }
         }
-        self.remove_server_listener()?;
-        self.join_listener_thread();
-        self.bus
-            .state
-            .lock()
-            .unwrap()
-            .listeners
-            .retain(|(lid, _)| lid != id);
-        Ok(true)
+        let had_listeners = !state.listeners.is_empty();
+        let generation = state.generation;
+        state.phase = ListenerBusPhase::Stopping;
+        let worker = state.thread.take();
+        drop(state);
+        let removal = if had_listeners {
+            self.remove_server_listener()
+        } else {
+            Ok(())
+        };
+        self.finish_listener_removal(generation, worker, removal)
+            .map(|_| had_listeners)
     }
 
-    /// Remove all client-side listeners and stop the dispatch thread. Mirrors
-    /// `StreamingQueryManager.close`. Should the server fail to remove its listener, the thread
-    /// is left to end with its stream.
-    pub fn close(&self) -> Result<()> {
-        let _ops = self.bus.ops.lock().unwrap();
-        if self.bus.state.lock().unwrap().listeners.is_empty() {
-            return Ok(());
-        }
-        if self.remove_server_listener().is_ok() {
-            self.join_listener_thread();
-        }
+    /// Reconcile an unlocked removal RPC, joining canceled generations outside the state lock.
+    fn finish_listener_removal(
+        &self,
+        generation: u64,
+        worker: Option<std::thread::JoinHandle<()>>,
+        removal: Result<()>,
+    ) -> Result<()> {
         let mut state = self.bus.state.lock().unwrap();
-        state.listeners.clear();
-        state.thread = None;
-        Ok(())
+        if removal.is_err() && state.generation == generation {
+            // A failed ordinary removal keeps its registrations and worker for a retry.
+            state.thread = worker;
+        } else {
+            // Keep worker_id and Stopping until after the join: callbacks must still be
+            // able to recognize their worker and coalesce a concurrent remove/close.
+            drop(state);
+            Self::join_listener_thread(worker);
+            state = self.bus.state.lock().unwrap();
+            state.listeners.clear();
+            state.cancel.take();
+            state.worker_id = None;
+        }
+        state.phase = ListenerBusPhase::Idle;
+        self.bus.changed.notify_all();
+        removal
     }
 
     /// The client-side listeners of the session, in the order that they were added, as the
@@ -1053,28 +1209,46 @@ impl StreamingQueryManager {
         self.bus.post_to_all(event);
     }
 
-    /// Ask the server to remove the listener of the session, which ends its stream of events.
+    /// Locally cancel registration and dispatch of a stopped/closed session before or
+    /// without server cleanup. Do not wait for callbacks: the current event's listener
+    /// snapshot may finish, but the generation change prevents another event dispatch.
+    /// Never wait for a lifecycle phase: this can be called by its worker callback while
+    /// another caller is already draining that worker. That caller keeps its join handle.
+    pub(crate) fn cancel_listener_bus(&self) {
+        let worker = {
+            let mut state = self.bus.state.lock().unwrap();
+            state.listeners.clear();
+            state.cancel.take();
+            state.generation = state.generation.wrapping_add(1);
+            state.thread.take()
+        };
+        // A callback may wait for an RPC ended by ReleaseSession, or for a lock held
+        // by the terminal caller. Detach instead of making teardown wait for it.
+        drop(worker);
+    }
+
+    /// Join the event worker unless called from that worker itself.
+    fn join_listener_thread(handle: Option<std::thread::JoinHandle<()>>) {
+        if let Some(handle) = handle {
+            // A listener may remove itself from its callback. It cannot join itself;
+            // after the callback returns the stopped stream lets its worker exit.
+            if handle.thread().id() != std::thread::current().id() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    /// Send RemoveListenerBusListener so the server ends the event stream.
     fn remove_server_listener(&self) -> Result<()> {
-        let mut lb = proto::StreamingQueryListenerBusCommand::default();
-        lb.command = Some(
+        let mut command = proto::StreamingQueryListenerBusCommand::default();
+        command.command = Some(
             proto::streaming_query_listener_bus_command::Command::RemoveListenerBusListener(true),
         );
         crate::dataframe::execute_command_collect(
             &self.session,
-            proto::command::CommandType::StreamingQueryListenerBusCommand(lb),
-        )
-        .map(|_| ())
-    }
-
-    /// Wait for the dispatch thread to post the events left of its ended stream, unless this is
-    /// that thread, as when a listener removes the last listener.
-    fn join_listener_thread(&self) {
-        let thread = self.bus.state.lock().unwrap().thread.take();
-        if let Some(thread) = thread {
-            if thread.thread().id() != std::thread::current().id() {
-                let _ = thread.join();
-            }
-        }
+            proto::command::CommandType::StreamingQueryListenerBusCommand(command),
+        )?;
+        Ok(())
     }
 
     /// Get all active streaming queries.
@@ -1262,6 +1436,7 @@ impl StreamingQueryManager {
             stream: response_stream,
             buffered_events: vec![].into_iter(),
             done: false,
+            cancel: None,
         })
     }
 
@@ -1305,6 +1480,167 @@ mod tests {
             .remote("sc://localhost:15002")
             .get_or_create()
             .expect("failed to build session")
+    }
+
+    #[test]
+    fn progress_tracker_does_not_keep_listener_bus_alive() {
+        let session = session();
+        let bus = Arc::downgrade(&session.listener_bus());
+        let tracker = crate::progress::ProgressTracker::new(&session, None);
+        drop(session);
+        assert!(bus.upgrade().is_none());
+        drop(tracker);
+    }
+
+    #[test]
+    fn a_callback_coalesced_with_shutdown_does_not_consume_its_registration() {
+        struct Listener;
+        impl StreamingQueryListener for Listener {
+            fn on_event(&self, _: &StreamingQueryListenerEvent) {}
+        }
+        let spark = session();
+        let manager = spark.streams();
+        {
+            let mut state = manager.bus.state.lock().unwrap();
+            state
+                .listeners
+                .push(("registered".to_string(), Arc::new(Listener)));
+            state.phase = ListenerBusPhase::Stopping;
+            state.worker_id = Some(std::thread::current().id());
+        }
+        assert!(!manager.remove_listener_found("registered").unwrap());
+        assert_eq!(manager.listeners().len(), 1);
+        let mut state = manager.bus.state.lock().unwrap();
+        state.phase = ListenerBusPhase::Idle;
+        state.worker_id = None;
+    }
+
+    #[test]
+    fn removing_a_duplicate_registration_preserves_other_and_foreign_ids() {
+        struct Listener;
+        impl StreamingQueryListener for Listener {
+            fn on_event(&self, _: &StreamingQueryListenerEvent) {}
+        }
+        let spark = session();
+        let manager = spark.streams();
+        let listener: Arc<dyn StreamingQueryListener> = Arc::new(Listener);
+        {
+            let mut state = manager.bus.state.lock().unwrap();
+            state
+                .listeners
+                .push(("first".to_string(), Arc::clone(&listener)));
+            state
+                .listeners
+                .push(("second".to_string(), Arc::clone(&listener)));
+        }
+        assert!(!manager.remove_listener_found("foreign").unwrap());
+        assert_eq!(manager.listeners().len(), 2);
+        assert!(manager.remove_listener_found("first").unwrap());
+        let state = manager.bus.state.lock().unwrap();
+        assert_eq!(state.listeners.len(), 1);
+        assert_eq!(state.listeners[0].0, "second");
+        assert!(Arc::ptr_eq(&state.listeners[0].1, &listener));
+    }
+
+    /// Install a synthetic quiet worker to check cancellation sender/receiver wiring.
+    /// This bypasses run_listener_event_loop and does not establish its Weak bus ownership.
+    fn waiting_listener_worker(session: &SparkSession) -> std::sync::mpsc::Receiver<()> {
+        struct Listener;
+        impl StreamingQueryListener for Listener {
+            fn on_event(&self, _: &StreamingQueryListenerEvent) {}
+        }
+
+        let (cancel, receiver) = tokio::sync::oneshot::channel();
+        let (finished, observed) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _ = block_on(receiver);
+            let _ = finished.send(());
+        });
+        let bus = session.listener_bus();
+        let mut state = bus.state.lock().unwrap();
+        state
+            .listeners
+            .push(("listener".to_string(), Arc::new(Listener)));
+        state.cancel = Some(cancel);
+        state.worker_id = Some(worker.thread().id());
+        state.thread = Some(worker);
+        observed
+    }
+
+    #[test]
+    fn dropping_the_last_native_session_cancels_its_listener_worker() {
+        let session = session();
+        let finished = waiting_listener_worker(&session);
+        drop(session);
+        finished
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("dropping the bus cancels its quiet worker");
+    }
+
+    #[test]
+    fn closing_a_session_eventually_cancels_its_listener_worker() {
+        let session = session();
+        let finished = waiting_listener_worker(&session);
+        session.close();
+        assert!(session.is_stopped());
+        assert!(session.streams().listeners().is_empty());
+        finished
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("close eventually cancels the quiet worker without joining it");
+    }
+
+    #[test]
+    fn a_failed_removal_joins_its_terminally_canceled_worker() {
+        let session = session();
+        let finished = waiting_listener_worker(&session);
+        let manager = session.streams();
+        let (generation, worker) = {
+            let mut state = manager.bus.state.lock().unwrap();
+            state.phase = ListenerBusPhase::Stopping;
+            (state.generation, state.thread.take())
+        };
+        // The in-flight removal owns the join handle, so terminal close only cancels it.
+        session.close();
+        let error = manager
+            .finish_listener_removal(
+                generation,
+                worker,
+                Err(SparkError::connect_msg("listener removal failed")),
+            )
+            .expect_err("the caller still receives its removal failure");
+        assert_eq!(error.to_string(), "listener removal failed");
+        finished
+            .try_recv()
+            .expect("failed removal joins a generation canceled during its RPC");
+        let state = manager.bus.state.lock().unwrap();
+        assert_eq!(state.phase, ListenerBusPhase::Idle);
+        assert!(state.worker_id.is_none());
+        assert!(state.thread.is_none());
+        assert!(state.listeners.is_empty());
+    }
+
+    #[test]
+    fn an_old_generation_cannot_clear_new_listeners_or_cancel_their_worker() {
+        let session = session();
+        let finished = waiting_listener_worker(&session);
+        let bus = session.listener_bus();
+        let old_generation = {
+            let mut state = bus.state.lock().unwrap();
+            let old_generation = state.generation;
+            state.generation = state.generation.wrapping_add(1);
+            old_generation
+        };
+        bus.finish_generation(old_generation);
+        {
+            let state = bus.state.lock().unwrap();
+            assert_eq!(state.listeners.len(), 1);
+            assert!(state.cancel.is_some());
+            assert!(!state.thread.as_ref().unwrap().is_finished());
+        }
+        session.close();
+        finished
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("only terminal close eventually cancels the current worker");
     }
 
     #[test]

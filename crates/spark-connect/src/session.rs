@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use spark_connect_core::channel::ChannelBuilder;
 use spark_connect_core::client::{ExecutePlanHook, SparkConnectClient};
 use spark_connect_core::error::{Result, SparkError};
-use spark_connect_core::runtime::{block_on, check_callback_depth, CallbackGuard};
+use spark_connect_core::runtime::{block_on, check_callback_depth};
 use spark_connect_core::thread_entries::forget_when_thread_ends;
 use spark_connect_proto as proto;
 
@@ -23,6 +23,9 @@ use crate::types::DataType;
 /// called with each progress of the server that has tasks, and once more, as done, when the
 /// execution ends. Mirrors `SparkSession.registerProgressHandler`.
 pub type ProgressHandler = Arc<dyn Fn(&ProgressUpdate) + Send + Sync>;
+
+/// The shared registry of progress handlers and their ids, without retaining a session.
+pub(crate) type ProgressHandlers = Arc<Mutex<Vec<(u64, ProgressHandler)>>>;
 
 /// Metrics captured from the last executed query. Mirrors the data behind
 /// `pyspark.sql.DataFrame.executionInfo` / `client.core.ExecutionInfo`.
@@ -140,7 +143,7 @@ pub struct SparkSession {
     last_execution: Arc<Mutex<Option<ExecutionInfo>>>,
     /// Registered progress handlers, keyed by id (for removal). Invoked with each progress of
     /// an execution, and when it ends. Mirrors `registerProgressHandler`.
-    progress_handlers: Arc<Mutex<Vec<(u64, ProgressHandler)>>>,
+    progress_handlers: ProgressHandlers,
     /// Monotonic id source for `register_progress_handler`.
     progress_handler_id: Arc<AtomicU64>,
     /// The handler of the updates of the Python accumulators of its executions.
@@ -268,29 +271,9 @@ impl SparkSession {
         self.progress_handlers.lock().unwrap().clear();
     }
 
-    /// Invoke all registered progress handlers with the progress of an execution, which
-    /// `update` builds only when there is a handler. Called by the progress of executions; not
-    /// part of the public API.
-    pub(crate) fn notify_progress(&self, update: impl FnOnce() -> ProgressUpdate) {
-        // Clone the handler `Arc`s out of the lock so a handler can't deadlock by
-        // touching the session's handler list.
-        let handlers: Vec<ProgressHandler> = {
-            self.progress_handlers
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|(_, h)| Arc::clone(h))
-                .collect()
-        };
-        if handlers.is_empty() {
-            return;
-        }
-        let update = update();
-        // A handler may run a query of its own, whose progress calls the handlers again.
-        let _callback = CallbackGuard::enter();
-        for h in handlers {
-            h(&update);
-        }
+    /// Share the progress-handler registry without retaining the session or its listener bus.
+    pub(crate) fn progress_handlers(&self) -> ProgressHandlers {
+        Arc::clone(&self.progress_handlers)
     }
 
     /// Execute `request` on the server, with the progress of the execution for the progress
@@ -1147,13 +1130,20 @@ impl SparkSession {
     ///
     /// Idempotent, mirroring pyspark: the session is marked stopped even if releasing it
     /// on the server fails, and stopping an already stopped session is a no-op.
+    ///
+    /// Cancel local listener registration/dispatch first, release the server session, then
+    /// close the client even if release fails. As PySpark's stop, this does not make a
+    /// separate listener-removal RPC: ReleaseSession releases the server's listeners too.
+    /// Teardown does not wait for listener callbacks; the current event's listener snapshot
+    /// may finish after stop returns, while no later event is dispatched.
     pub fn stop(&self) -> Result<()> {
         if self.stopped.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
-        // As PySpark's `stop()`, the client is closed after the session is released, so that
-        // its requests raise `NO_ACTIVE_SESSION` from now on.
+        self.streams().cancel_listener_bus();
         let released = block_on(self.client.release_session());
+        // As PySpark's `stop()`, close the client even if server cleanup fails, so its
+        // future requests raise `NO_ACTIVE_SESSION`.
         self.client.close();
         released
     }
@@ -1165,9 +1155,12 @@ impl SparkSession {
     }
 
     /// Close this session without releasing it on the server, as `SparkConnectClient.close`
-    /// closes its channel: it is stopped, and `stop()` does nothing more.
+    /// closes its channel: it is stopped, and `stop()` does nothing more. Cancel local listener
+    /// registration/dispatch before closing the client. Callbacks are not joined; the current
+    /// event's listener snapshot may finish after close returns.
     pub fn close(&self) {
         self.stopped.store(true, Ordering::SeqCst);
+        self.streams().cancel_listener_bus();
         self.client.close();
     }
 

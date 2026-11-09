@@ -1244,6 +1244,8 @@ impl PyStreamingQueryManager {
     /// it. The id of each registration is appended to the listener's `_rust_listener_ids`, as a
     /// listener added twice is in the bus twice. Should the server fail to add its listener, this
     /// warns, as PySpark Connect's does.
+    /// A terminal event-stream end or error clears the registrations; add listeners again
+    /// to open a new subscription.
     fn addListener(&self, py: Python<'_>, listener: Py<PyAny>) -> PyResult<()> {
         let session = crate::session::session_object(py, &self.session)?;
         listener
@@ -1277,6 +1279,9 @@ impl PyStreamingQueryManager {
     /// the bus of the session, the first one that the bus has (as the bus removes the first
     /// occurrence), and the others, which are of other buses, stay. Should the server fail to
     /// remove its listener, this warns, and the listener stays, as PySpark Connect's does.
+    /// A callback coalesced with another caller's in-progress last-listener removal or close
+    /// keeps its ids so a failed operation can be retried. Only a completed removal consumes
+    /// one matching id from this session's bus.
     fn removeListener(&self, py: Python<'_>, listener: Py<PyAny>) -> PyResult<()> {
         let bound = listener.bind(py);
         let Ok(ids) = bound.getattr("_rust_listener_ids") else {
@@ -1319,9 +1324,21 @@ impl PyStreamingQueryManager {
     }
 
     /// Remove all client-side listeners and stop the dispatch thread. Mirrors
-    /// `StreamingQueryManager.close`.
+    /// `StreamingQueryManager.close`. A server removal failure warns and keeps the
+    /// listeners registered, as PySpark Connect's does, so close can be retried.
     fn close(&self, py: Python<'_>) -> PyResult<()> {
-        crate::dataframe::detached(py, || self.inner.close().map_err(Box::new))
+        if let Err(error) = crate::dataframe::detached(py, || self.inner.close().map_err(Box::new))
+        {
+            return warn(
+                py,
+                format!(
+                    "Failed to remove the listener because of exception: {}\n\
+                     The listener is not removed, please remove it again.",
+                    error.value(py)
+                ),
+            );
+        }
+        Ok(())
     }
 
     fn streamListenerEvents(&self, py: Python<'_>) -> PyResult<PyListenerEventStream> {

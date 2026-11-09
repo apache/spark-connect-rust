@@ -38,6 +38,7 @@ from pyspark.sql import Row, SparkSession, types as T
 from binary_configuration_cases import TestBinaryConfiguration  # noqa: F401
 from day_time_interval_cases import DayTimeIntervalTests  # noqa: F401
 from interval_input_cases import IntervalInputConversionTests  # noqa: F401
+from streaming_listener_cases import TestStreamingListenerLifecycle  # noqa: F401
 
 
 def test_create_dataframe_input_names_offline():
