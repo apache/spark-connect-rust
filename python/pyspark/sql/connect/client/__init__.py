@@ -18,13 +18,205 @@
 """Compatibility shim for pyspark.sql.connect.client: ``SparkConnectClient``, the class of
 ``SparkSession.client``, and related classes."""
 
-__all__ = ["SparkConnectClient"]
+__all__ = ["ChannelBuilder", "DefaultChannelBuilder", "SparkConnectClient"]
 
 
+import copy
+import os
+import sys
+import urllib.parse
+import uuid
 import weakref
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
+from pyspark.errors import PySparkNotImplementedError, PySparkValueError
 from pyspark.sql.metrics import ObservedMetrics
+
+
+class ChannelBuilder:
+    """The parameters of a Spark Connect connection, as PySpark Connect's ``ChannelBuilder``:
+    what ``SparkSession.builder.channelBuilder`` and ``SparkSession(connection=...)`` take. The
+    Rust transport opens the channel of the session from the ``host``, the ``port`` and the
+    ``_params`` of the builder, as a ``sc://`` connection string, so the endpoint and the
+    parameters apply. A custom gRPC channel (``toChannel``), its interceptors and its channel
+    options do not: the transport has no gRPC channel to give them to."""
+
+    PARAM_USE_SSL = "use_ssl"
+    PARAM_TOKEN = "token"
+    PARAM_USER_ID = "user_id"
+    PARAM_SESSION_ID = "session_id"
+
+    def __init__(
+        self,
+        channelOptions: Optional[List[Tuple[str, Any]]] = None,
+        params: Optional[Dict[str, str]] = None,
+    ):
+        if channelOptions:
+            raise PySparkNotImplementedError(
+                errorClass="NOT_IMPLEMENTED", messageParameters={"feature": "channelOptions"}
+            )
+        self._params: Dict[str, str] = params or dict()
+
+    def get(self, key: str) -> Any:
+        """The value of the parameter ``key``; raises ``KeyError`` if it is not set."""
+        return self._params[key]
+
+    def getDefault(self, key: str, default: Any) -> Any:
+        """The value of the parameter ``key``, or ``default`` if it is not set."""
+        return self._params.get(key, default)
+
+    def set(self, key: str, value: Any) -> None:
+        """Set the parameter ``key`` to ``value``."""
+        self._params[key] = value
+
+    @property
+    def host(self) -> str:
+        """The hostname where this client intends to connect."""
+        raise PySparkNotImplementedError(
+            errorClass="NOT_IMPLEMENTED", messageParameters={"feature": "host"}
+        )
+
+    @property
+    def userId(self) -> Optional[str]:
+        """The user_id, extracted from the connection string or configured by other means."""
+        return self._params.get(ChannelBuilder.PARAM_USER_ID, None)
+
+    @property
+    def token(self) -> Optional[str]:
+        """The authentication token: of the parameters, else of the environment variable
+        ``SPARK_CONNECT_AUTHENTICATE_TOKEN``."""
+        return self._params.get(
+            ChannelBuilder.PARAM_TOKEN, os.environ.get("SPARK_CONNECT_AUTHENTICATE_TOKEN")
+        )
+
+    @property
+    def session_id(self) -> Optional[str]:
+        """The session_id of the parameters, or None if it is not set."""
+        session_id = self._params.get(ChannelBuilder.PARAM_SESSION_ID, None)
+        if session_id is not None:
+            try:
+                uuid.UUID(session_id, version=4)
+            except ValueError as ve:
+                raise PySparkValueError(
+                    errorClass="INVALID_SESSION_UUID_ID",
+                    messageParameters={"arg_name": "session_id", "origin": str(ve)},
+                )
+        return session_id
+
+    def metadata(self) -> Iterable[Tuple[str, str]]:
+        """The parameters that are not used by the channel, as gRPC metadata of each request."""
+        reserved = [
+            ChannelBuilder.PARAM_TOKEN,
+            ChannelBuilder.PARAM_USE_SSL,
+            ChannelBuilder.PARAM_USER_ID,
+            "user_agent",
+            ChannelBuilder.PARAM_SESSION_ID,
+            "grpc_keepalive_enabled",
+            "grpc_keepalive_time_ms",
+            "grpc_keepalive_timeout_ms",
+            "grpc_keepalive_without_calls",
+        ]
+        return [(k, self._params[k]) for k in self._params if k not in reserved]
+
+
+class DefaultChannelBuilder(ChannelBuilder):
+    """The channel builder of a ``sc://`` connection string, as PySpark Connect's
+    ``DefaultChannelBuilder``.
+
+    Examples
+    --------
+    >>> cb = DefaultChannelBuilder("sc://localhost")
+    >>> cb.endpoint
+    'localhost:15002'
+    >>> cb = DefaultChannelBuilder("sc://localhost/;use_ssl=true;token=aaa")
+    >>> cb.secure
+    True
+    """
+
+    @staticmethod
+    def default_port() -> int:
+        # The port of a Spark Connect server, which the drop-in does not discover from a local
+        # JVM as PySpark does in the testing mode.
+        return 15002
+
+    def __init__(self, url: str, channelOptions: Optional[List[Tuple[str, Any]]] = None) -> None:
+        """Construct a channel builder of the connection string ``url``, such as
+        ``sc://hostname:port/;key=value``."""
+        super().__init__(channelOptions=channelOptions)
+
+        # Explicitly check the scheme of the URL.
+        if url[:5] != "sc://":
+            raise PySparkValueError(
+                errorClass="INVALID_CONNECT_URL",
+                messageParameters={
+                    "detail": "The URL must start with 'sc://'. Please update the URL to "
+                    "follow the correct format, e.g., 'sc://hostname:port'.",
+                },
+            )
+        # Rewrite the URL to use http as the scheme so that we can leverage Python's parser.
+        tmp_url = "http" + url[2:]
+        self.url = urllib.parse.urlparse(tmp_url)
+        if len(self.url.path) > 0 and self.url.path != "/":
+            raise PySparkValueError(
+                errorClass="INVALID_CONNECT_URL",
+                messageParameters={
+                    "detail": f"The path component '{self.url.path}' must be empty. Please update "
+                    f"the URL to follow the correct format, e.g., 'sc://hostname:port'.",
+                },
+            )
+        self._extract_attributes()
+
+    def _extract_attributes(self) -> None:
+        if len(self.url.params) > 0:
+            parts = self.url.params.split(";")
+            for p in parts:
+                kv = p.split("=")
+                if len(kv) != 2:
+                    raise PySparkValueError(
+                        errorClass="INVALID_CONNECT_URL",
+                        messageParameters={
+                            "detail": f"Parameter '{p}' should be provided as a "
+                            f"key-value pair separated by an equal sign (=). Please update "
+                            f"the parameter to follow the correct format, e.g., 'key=value'.",
+                        },
+                    )
+                self.set(kv[0], urllib.parse.unquote(kv[1]))
+
+        if not self.url.hostname:
+            raise PySparkValueError(
+                errorClass="INVALID_CONNECT_URL",
+                messageParameters={
+                    "detail": f"Hostname is missing in the URL: '{self.url.geturl()}'. "
+                    "Please update the URL to follow the correct format, "
+                    "e.g., 'sc://hostname:port'.",
+                },
+            )
+        self._host = f"[{self.url.hostname}]" if ":" in self.url.hostname else self.url.hostname
+        self._port = self.url.port if self.url.port is not None else self.default_port()
+
+    @property
+    def secure(self) -> bool:
+        """Whether the connection is secured: by TLS, or by a token."""
+        return self.use_ssl or self.token is not None
+
+    @property
+    def use_ssl(self) -> bool:
+        return self.getDefault(ChannelBuilder.PARAM_USE_SSL, "").lower() == "true"
+
+    @property
+    def host(self) -> str:
+        """The hostname where this client intends to connect."""
+        return self._host
+
+    @property
+    def port(self) -> int:
+        """The port where this client intends to connect."""
+        return self._port
+
+    @property
+    def endpoint(self) -> str:
+        """The ``host:port`` of the connection."""
+        return f"{self._host}:{self._port}"
 
 
 class _UnsupportedLiteral:
@@ -136,14 +328,101 @@ class SparkConnectClient:
         return _extensions_of(self._session._user_context_extensions(True))
 
     @property
-    def _server_session_id(self) -> str:
-        return self._session.session_id
+    def host(self) -> str:
+        """The hostname where this client intends to connect, as SparkConnectClient's ``host``."""
+        return self._session._endpoint_host()
+
+    @property
+    def _server_session_id(self) -> Optional[str]:
+        """The server-side session ID that the responses carried, or None before the first
+        response, as SparkConnectClient's. Set it to simulate a server-side session change: the
+        next response then closes the client, as a changed ID does."""
+        return self._session._observed_server_session_id()
+
+    @_server_session_id.setter
+    def _server_session_id(self, value: Optional[str]) -> None:
+        self._session._set_observed_server_session_id(value)
+
+    @property
+    def _closed(self) -> bool:
+        """Whether the client is closed, as SparkConnectClient's ``_closed``. Setting it to True
+        closes the session, which the session registry then no longer returns; a closed client
+        stays closed."""
+        return self._session.is_stopped
+
+    @_closed.setter
+    def _closed(self, value: bool) -> None:
+        if value:
+            self._session._close()
 
     @property
     def is_closed(self) -> bool:
         """Whether the session of the client is stopped, as SparkConnectClient's ``is_closed``,
         whether its channel is closed."""
         return self._session.is_stopped
+
+    def _proto_to_string(self, p: Any, truncate: bool = False) -> str:
+        """A one-line string of the protobuf message ``p``, truncated if ``truncate``, as
+        SparkConnectClient's ``_proto_to_string``, which plan logging uses."""
+        from google.protobuf import text_format
+
+        try:
+            max_level = 8 if truncate else sys.maxsize
+            p2 = self._truncate(p, max_level) if truncate else p
+            return text_format.MessageToString(p2, as_one_line=True)
+        except RecursionError:
+            return "<Truncated message due to recursion error>"
+        except Exception:
+            return "<Truncated message due to truncation error>"
+
+    def _truncate(self, p: Any, allowed_recursion_depth: int) -> Any:
+        """A copy of ``p`` with its nested messages cut at ``allowed_recursion_depth``, and its
+        long strings and bytes cut, as SparkConnectClient's ``_truncate``."""
+
+        def truncate_str(s: str) -> str:
+            if len(s) > 1024:
+                return s[:1024] + "[truncated]"
+            return s
+
+        def truncate_bytes(b: bytes) -> bytes:
+            if len(b) > 8:
+                return b[:8] + b"[truncated]"
+            return b
+
+        p2 = copy.deepcopy(p)
+
+        for descriptor, value in p.ListFields():
+            if value is not None:
+                field_name = descriptor.name
+
+                if descriptor.type == descriptor.TYPE_MESSAGE:
+                    if allowed_recursion_depth == 0:
+                        p2.ClearField(field_name)
+                    elif descriptor.label == descriptor.LABEL_REPEATED:
+                        p2.ClearField(field_name)
+                        getattr(p2, field_name).extend(
+                            [self._truncate(v, allowed_recursion_depth - 1) for v in value]
+                        )
+                    else:
+                        getattr(p2, field_name).CopyFrom(
+                            self._truncate(value, allowed_recursion_depth - 1)
+                        )
+
+                elif descriptor.type == descriptor.TYPE_STRING:
+                    if descriptor.label == descriptor.LABEL_REPEATED:
+                        p2.ClearField(field_name)
+                        getattr(p2, field_name).extend([truncate_str(v) for v in value])
+                    else:
+                        setattr(p2, field_name, truncate_str(value))
+
+                elif descriptor.type == descriptor.TYPE_BYTES:
+                    if descriptor.label == descriptor.LABEL_REPEATED:
+                        p2.ClearField(field_name)
+                        getattr(p2, field_name).extend([truncate_bytes(v) for v in value])
+                    else:
+                        setattr(p2, field_name, truncate_bytes(value))
+
+        return p2
 
     def get_configs(self, *keys: str) -> Tuple[Optional[str], ...]:
         """The values of the configurations ``keys``, in one request, as SparkConnectClient's

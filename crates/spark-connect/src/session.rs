@@ -893,6 +893,22 @@ impl SparkSession {
         self.client.session_id()
     }
 
+    /// The display host of the endpoint of this session, as PySpark's `SparkConnectClient.host`.
+    pub fn host(&self) -> &str {
+        self.client.host()
+    }
+
+    /// The server-side session ID that the responses of this session carried, or None before the
+    /// first response, as PySpark's `SparkConnectClient._server_session_id`.
+    pub fn server_session_id(&self) -> Option<String> {
+        self.client.observed_server_session_id()
+    }
+
+    /// Set the server-side session ID that the requests of this session observe.
+    pub fn set_server_session_id(&self, id: Option<String>) {
+        self.client.set_observed_server_session_id(id);
+    }
+
     /// Add `extension` to the user context of the requests that the current thread sends from
     /// this session, and return its ID. Mirrors PySpark's
     /// `SparkConnectClient.add_threadlocal_user_context_extension`.
@@ -3818,5 +3834,21 @@ mod tests {
             "stop() does not release a closed client"
         );
         assert!(spark.stopped.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn host_and_server_session_id_are_the_clients_of_the_session() {
+        let spark = session();
+        assert_eq!(spark.host(), "localhost");
+        assert_eq!(spark.server_session_id(), None);
+        spark.set_server_session_id(Some("server-a".to_string()));
+        assert_eq!(spark.server_session_id().as_deref(), Some("server-a"));
+        // The session is a clone of the same client, which shares the observed ID.
+        assert_eq!(
+            spark.clone().server_session_id().as_deref(),
+            Some("server-a")
+        );
+        spark.set_server_session_id(None);
+        assert_eq!(spark.server_session_id(), None);
     }
 }

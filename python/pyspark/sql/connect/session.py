@@ -17,9 +17,22 @@
 """Rust-backed SparkSession under the connect import path (testing/connectutils imports from here)."""
 from typing import Callable, Tuple
 
+from pyspark.errors import PySparkRuntimeError, PySparkValueError
 from pyspark.sql.session import SparkSession
 
 __all__ = ["SparkSession"]
+
+
+class _ConnectUrlNotSetError(PySparkRuntimeError, PySparkValueError):
+    """``CONNECT_URL_NOT_SET``, which the one builder of the drop-in raises when neither a URL
+    nor a channel builder is given. PySpark raises it as a RuntimeError from its builder, and
+    as a ValueError (``SESSION_NEED_CONN_STR_OR_BUILDER``) from the Connect builder: this is both,
+    so that either is caught."""
+
+
+def _connect_url_not_set_error() -> Exception:
+    """The ``CONNECT_URL_NOT_SET`` error of the builder, see ``_ConnectUrlNotSetError``."""
+    return _ConnectUrlNotSetError(errorClass="CONNECT_URL_NOT_SET", messageParameters={})
 
 
 def _reduce_session(session_id: str) -> Tuple[Callable[[str], "SparkSession"], Tuple[str]]:

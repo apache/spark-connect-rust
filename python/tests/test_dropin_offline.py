@@ -2111,6 +2111,170 @@ def test_udf_and_udtf_calls_pass_named_arguments_as_pyspark(mock_connect):
     assert parse_message(first[2][0])[1] == [b"x"] and key == "b" and set(value) == {1}
 
 
+def test_channel_builder_parses_the_connection_string_and_the_session_honors_it_as_pyspark():
+    # ChannelBuilder and DefaultChannelBuilder of pyspark.sql.connect.client, as PySpark's: the
+    # endpoint and the parameters of a sc:// URL, which channelBuilder hands to the transport.
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql.connect.client import ChannelBuilder, DefaultChannelBuilder
+
+    builder = DefaultChannelBuilder("sc://Other:114/;token=abc;user_id=bob")
+    assert isinstance(builder, ChannelBuilder)
+    assert (builder.host, builder.port, builder.endpoint) == ("other", 114, "other:114")
+    assert builder._params == {"token": "abc", "user_id": "bob"}
+    assert builder.get("token") == "abc" and builder.getDefault("missing", 1) == 1
+    assert builder.userId == "bob"
+    assert builder.secure and not builder.use_ssl
+    assert list(builder.metadata()) == []
+    builder.set("x-custom", "1")
+    assert list(builder.metadata()) == [("x-custom", "1")]
+    with pytest.raises(PySparkValueError) as error:
+        DefaultChannelBuilder("http://other")
+    assert error.value.getCondition() == "INVALID_CONNECT_URL"
+
+    session = SparkSession.builder.channelBuilder(DefaultChannelBuilder("sc://other:114")).create()
+    try:
+        assert session.client.host == "other"
+        assert session.client._server_session_id is None
+    finally:
+        session.release_session_on_close = False
+        session.stop()
+
+
+def test_session_constructor_and_its_flags_as_pyspark_connect():
+    import threading
+
+    from pyspark.sql.connect.client import DefaultChannelBuilder
+    from pyspark.sql.connect.session import SparkSession as ConnectSession
+
+    shared = SparkSession.getActiveSession()
+    session = ConnectSession(connection="sc://other:114", userId="alice")
+    other = ConnectSession(connection=DefaultChannelBuilder("sc://other:115"))
+    try:
+        # The constructor makes a session of its own: neither the default nor the active one.
+        assert session is not SparkSession.getActiveSession()
+        assert ConnectSession._default_session is not session
+        assert session.release_session_on_close is True
+        assert session.client.host == "other" and other.client.host == "other"
+        assert other.is_stopped is False
+        # The session of a DataFrame is the object of the session, as the other sessions are.
+        assert other.range(2).sparkSession is other
+        assert SparkSession.getActiveSession() is shared
+        # A stopped session is not the default one, and the lock is an RLock.
+        assert isinstance(ConnectSession._lock, type(threading.RLock()))
+    finally:
+        for s in (session, other):
+            s.release_session_on_close = False
+            s.stop()
+    assert session.is_stopped and other.is_stopped
+
+
+def test_session_registry_is_the_class_attributes_of_the_connect_session_as_pyspark():
+    from pyspark.sql.connect.session import SparkSession as ConnectSession
+
+    saved_default = ConnectSession._default_session
+    saved_active = ConnectSession._active_session.session
+    try:
+        ConnectSession._default_session = None
+        ConnectSession._active_session.session = None
+        assert ConnectSession._get_default_session() is None
+        assert ConnectSession.getActiveSession() is None
+
+        session = ConnectSession.builder.remote("sc://other:114").create()
+        assert ConnectSession._default_session is session
+        assert ConnectSession._get_default_session() is session
+        assert ConnectSession._active_session.session is session
+        assert ConnectSession.getActiveSession() is session
+        assert ConnectSession.builder.remote("sc://other:114").getOrCreate() is session
+
+        # Setting the attribute changes the registry, as in PySpark: the default session of
+        # the thread is cleared, so the next getOrCreate makes a session.
+        ConnectSession._active_session.session = None
+        assert ConnectSession.getActiveSession() is None
+        assert ConnectSession.active() is session
+
+        session.release_session_on_close = False
+        session.stop()
+        assert ConnectSession._default_session is None
+        assert ConnectSession._get_default_session() is None
+    finally:
+        ConnectSession._default_session = saved_default
+        ConnectSession._active_session.session = saved_active
+
+
+def test_connect_builder_errors_as_pyspark_connect(monkeypatch):
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql.connect.client import DefaultChannelBuilder
+    from pyspark.sql.connect.session import SparkSession as ConnectSession
+
+    monkeypatch.delenv("SPARK_REMOTE", raising=False)
+    # A channel builder and a URL are mutually exclusive, whatever the order.
+    with pytest.raises(PySparkValueError) as error:
+        builder = ConnectSession.builder.channelBuilder(DefaultChannelBuilder("sc://a"))
+        builder.remote("sc://b").create()
+    assert error.value.getCondition() == "SESSION_NEED_CONN_STR_OR_BUILDER"
+    with pytest.raises(PySparkValueError):
+        builder = ConnectSession.builder.remote("sc://b")
+        builder.channelBuilder(DefaultChannelBuilder("sc://a")).create()
+    # Neither is: a ValueError as PySpark Connect's builder, and CONNECT_URL_NOT_SET as the
+    # RuntimeError of the builder of pyspark.sql, which is the same class here.
+    with pytest.raises(ValueError) as error:
+        ConnectSession.builder.create()
+    assert isinstance(error.value, RuntimeError)
+    assert error.value.getCondition() == "CONNECT_URL_NOT_SET"
+    # A session of a channel builder, not the URL of SPARK_REMOTE, is what PySpark connects.
+    monkeypatch.setenv("SPARK_REMOTE", "sc://elsewhere:1")
+    builder = ConnectSession.builder.channelBuilder(DefaultChannelBuilder("sc://other:114"))
+    session = builder.create()
+    try:
+        assert session.client.host == "other"
+    finally:
+        session.release_session_on_close = False
+        session.stop()
+
+
+def test_stop_releases_the_session_on_the_server_unless_released_on_close_is_false(mock_connect):
+    from pyspark.sql.connect.session import SparkSession as ConnectSession
+
+    spark, service = mock_connect
+    before = service.release_session_calls
+    session = ConnectSession(connection=service.remote)
+    session.release_session_on_close = False
+    session.stop()
+    assert session.is_stopped
+    assert service.release_session_calls == before
+
+    session = ConnectSession(connection=service.remote)
+    session.stop()
+    assert session.is_stopped
+    assert service.release_session_calls == before + 1
+    session.stop()
+    assert service.release_session_calls == before + 1
+
+
+def test_plan_logging_string_of_a_protobuf_message_as_pyspark_connect():
+    # SparkConnectClient._proto_to_string: the one-line text of a plan, truncated when asked,
+    # and the placeholder of a message too deep for text formatting.
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.client import SparkConnectClient
+
+    class Session:
+        session_id = "x"
+
+    client = SparkConnectClient(Session())
+    relation = pb2.Relation()
+    relation.sql.query = "q" * 2000
+    text = client._proto_to_string(relation, True)
+    assert "[truncated]" in text and "q" * 1100 not in text
+    assert "q" * 2000 in client._proto_to_string(relation)
+
+    deep = pb2.Relation()
+    node = deep
+    for _ in range(400):
+        node.project.input.SetInParent()
+        node = node.project.input
+    assert "recursion" in client._proto_to_string(deep)
+
+
 def test_subqueries_are_sent_with_the_plans_they_refer_to_as_pyspark(mock_connect):
     # As PySpark's DataFrame.scalar(), DataFrame.exists() and Column.isin(df): Columns of
     # SubqueryExpressions of the plan of the DataFrame, sent in a WithRelations of the plans

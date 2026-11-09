@@ -194,3 +194,47 @@ difference is intentional or tracked for a fix.
   by the fixed-hash passes. API inspection records the public-base and
   concrete-class differences; inherited signature and annotation differences remain.
   These results do not establish complete DataFrame or ML parity.
+
+## Session and client (Connect)
+
+- **Custom gRPC channels** (intentional; the transport is native). `ChannelBuilder` and
+  `DefaultChannelBuilder` parse the connection string and hold its parameters, `host`,
+  `port`, `endpoint`, `get`, `set`, `userId`, `token`, `session_id`, `use_ssl`, `secure`
+  and `metadata()`. The transport reads them as a `sc://` URL, so they apply. The gRPC
+  channel members do not: `toChannel`, `add_interceptor`, `setChannelOption`, the
+  keepalive properties and `userAgent`. A `channelOptions` argument raises
+  `NOT_IMPLEMENTED` instead of being ignored. A subclass that overrides `userId` or
+  `token` is not read by the transport, which uses the parameters.
+- **Retry and reattach** (intentional; DESIGN). `RpcDeadlines`, `client.retries`
+  (`RetryPolicy`, `Retrying`, `DefaultPolicy`, `RetryException`) and `client.reattach`
+  are not provided. Retries and reattachment live in the Rust transport, which has no
+  policy to configure from Python.
+- **Default port** (intentional). `DefaultChannelBuilder.default_port()` is 15002. PySpark
+  takes the port of a local JVM server in its testing mode; the drop-in has no JVM.
+- **Missing URL error** (intentional). The one builder of the drop-in serves
+  `pyspark.sql.SparkSession.builder` and `pyspark.sql.connect.session.SparkSession.builder`.
+  Without a URL or a channel builder it raises `CONNECT_URL_NOT_SET`, which is both a
+  `PySparkRuntimeError` (the unified builder) and a `PySparkValueError` (the Connect
+  builder's `SESSION_NEED_CONN_STR_OR_BUILDER` family). Giving both a channel builder and
+  a URL raises `SESSION_NEED_CONN_STR_OR_BUILDER`. A channel builder without a host is
+  rejected at `channelBuilder(...)`, not when the session is created.
+- **Plan logging of a deep DataFrame** (intentional; DESIGN). `DataFrame._plan` is a
+  placeholder over the relation of the Rust core, so `_plan.to_proto` is not provided.
+  Python protobuf refuses to decode a relation nested beyond its limit (`too many levels
+  of nesting`), and the drop-in never decodes a deep plan. `SparkConnectClient._proto_to_string`
+  renders any message, including a deep one built in Python, as PySpark's does. Plan
+  logging of a deep DataFrame therefore does not reach the recursion handling that the
+  test `test_recursion_handling_for_plan_logging` exercises.
+- **Client session ID** (not provided). `SparkConnectClient._session_id` is not exposed and
+  is not settable; the session ID belongs to the Rust core. `_server_session_id` is
+  exposed and settable, as PySpark's, and a changed value closes the session.
+- **`_closed`** (tracked). Reading `_closed` gives the session's stopped state. Setting it
+  to True closes the session, as a test's stand-in for the client's close. Setting it to
+  False does not reopen a closed session.
+- **Session registry lock** (intentional). `SparkSession._lock` is a `threading.RLock`
+  for the Python code that takes it. The drop-in serializes its own session creation with
+  a Rust lock, not with this one.
+- **Direct construction** (intentional). `SparkSession(connection=..., userId=...,
+  hook_factories=...)` makes a session that is neither default nor active, as PySpark's
+  constructor does. `userId` is added to the URL unless the URL has a `user_id`, which
+  takes precedence, as PySpark's does.

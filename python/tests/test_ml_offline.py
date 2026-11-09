@@ -573,11 +573,16 @@ def test_ml_session_client_is_one_object_of_the_session(ml_mock):
     client = spark.client
     assert isinstance(client, SparkConnectClient)
     assert spark.client is client
-    assert client._server_session_id == spark.session_id
+    # The server-side session ID is None until a response carries one, as PySpark's is, and
+    # it is settable, as PySpark's tests set it.
+    assert client._server_session_id is None
+    client._server_session_id = "srv-A"
+    assert client._server_session_id == "srv-A"
+    client._server_session_id = None
     other = SparkSession.builder.remote(service.remote).create()
     try:
         assert other.client is not client
-        assert other.client._server_session_id == other.session_id
+        assert other.client._server_session_id is None
     finally:
         other.stop()
 
