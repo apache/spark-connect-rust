@@ -8867,6 +8867,54 @@ def test_create_dataframe_of_a_numpy_array_as_pyspark(mock_connect):
     assert e.value.getCondition() == "CANNOT_INFER_EMPTY_SCHEMA"
 
 
+@pytest.mark.parametrize(
+    "labels", ["datetime", "timedelta", "period", "interval", "multi_datetime"])
+@pytest.mark.parametrize("cells, arrow_type, values", [
+    # A mixed int and float column is a double, as PySpark infers it, not a row error.
+    ("int_float", lambda pa: pa.float64(), [1.0, 2.5]),
+    # A naive datetime of a list is a timestamp_ntz, not a time of the session time zone.
+    ("naive_list", lambda pa: pa.list_(pa.timestamp("us")),
+     [[datetime.datetime(2020, 1, 2, 3)], None]),
+    # A dict is a struct of the value types of its keys, mixed or not, and not a map.
+    ("dict", lambda pa: pa.struct([("u", pa.int64()), ("v", pa.string())]),
+     [{"u": 1, "v": "a"}, None]),
+    # A NaN in a list is a null, as PySpark has it.
+    ("nan_list", lambda pa: pa.list_(pa.float64()), [[1.0, None], None]),
+    # A NumPy int32 is an int, as PySpark infers it.
+    ("np_int32", lambda pa: pa.int32(), [1, 2]),
+])
+def test_datetimelike_labels_convert_cells_as_pyspark(
+    mock_connect, labels, cells, arrow_type, values
+):
+    # A plain frame whose labels are a DatetimeIndex, TimedeltaIndex, PeriodIndex or IntervalIndex
+    # (or a MultiIndex with a DatetimeIndex level) converts with Arrow, as one with default labels:
+    # its cells take the types that PySpark infers.
+    import numpy as np
+    import pyarrow as pa
+
+    pd = pytest.importorskip("pandas")
+    column = {
+        "int_float": [1, 2.5],
+        "naive_list": [[datetime.datetime(2020, 1, 2, 3)], None],
+        "dict": [{"u": 1, "v": "a"}, None],
+        "nan_list": [[1.0, float("nan")], None],
+        "np_int32": [np.int32(1), np.int32(2)],
+    }[cells]
+    columns = {
+        "datetime": pd.DatetimeIndex(["2020-01-01"]),
+        "timedelta": pd.TimedeltaIndex(["1s"]),
+        "period": pd.period_range("2020-01", periods=1, freq="M"),
+        "interval": pd.interval_range(0, 1),
+        "multi_datetime": pd.MultiIndex.from_tuples([(pd.Timestamp("2020-01-01"), "x")]),
+    }[labels]
+    data = pd.DataFrame({0: pd.Series(column, dtype=object)})
+    data.columns = columns
+    table = _native_number_input_table(mock_connect, data)
+    assert table.num_columns == 1
+    assert table.schema.field(0).type == arrow_type(pa)
+    assert table.column(0).to_pylist() == values
+
+
 def test_catalog_function_class_name_is_none_without_a_class_as_pyspark(mock_connect):
     import pyarrow as pa
 
