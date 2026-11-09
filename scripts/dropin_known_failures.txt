@@ -1,0 +1,37 @@
+# Known failures of the official Spark Connect test suite run against OUR drop-in
+# (run_official_tests.py --dropin). Format as scripts/parity_known_failures.txt:
+#   <relpath>                    # whole file skipped: by design for the drop-in
+#   <relpath>::Class::method     # one test deselected: environmental, or as the reference fails
+# relpath is relative to the overlay's python/ dir (the Spark python/ layout).
+#
+# Only BY-DESIGN and ENVIRONMENTAL entries belong here. A real drop-in gap (a test the
+# official suite passes on PySpark 4.3.0 and our drop-in fails) must stay visible: the gate
+# then fails until it is fixed. Known open gaps at the time of writing (not listed on purpose):
+# test_connect_session.py, test_connect_context.py, test_connect_error.py,
+# test_connect_column.py (import), ml/tests/connect/test_connect_cache.py and
+# test_connect_model_offloading.py.
+
+# --- whole files: the gRPC client internals, which the Rust transport replaces by design ---
+pyspark/sql/tests/connect/client/test_client.py  # tests grpcio channel/stub internals; this client's transport is Rust (SPARK-61111 module audit)
+pyspark/sql/tests/connect/client/test_client_retries.py  # tests the grpcio retry policy of the Python client; the Rust transport has its own
+pyspark/sql/tests/connect/client/test_client_call_stack_trace.py  # tests the Python client's call-stack trace plumbing, which the Rust transport replaces
+pyspark/sql/tests/connect/test_connect_channel.py  # tests the grpcio channel builder; ChannelBuilder is Rust-backed here
+pyspark/sql/tests/connect/test_connect_retry.py  # tests the grpcio retry policy of the Python client; the Rust transport has its own
+pyspark/sql/tests/connect/test_connect_local_server.py  # starts a local grpcio server for the Python client; the Rust transport has no such server
+pyspark/sql/tests/connect/test_connect_plan.py  # tests the Python client's proto plan internals (LogicalPlan classes), built in Rust here
+
+# --- whole files: the deprecated torch-based pyspark.ml.connect API, replaced by the native ML API ---
+pyspark/ml/tests/connect/test_connect_classification.py  # imports LogisticRegressionModel from the torch-based pyspark.ml.connect; this client has the native ML API (dev/parity/4.3.0-module-audit.md)
+pyspark/ml/tests/connect/test_connect_feature.py  # imports MaxAbsScalerModel from the torch-based pyspark.ml.connect; native ML API (module audit)
+pyspark/ml/tests/connect/test_legacy_mode_classification.py  # legacy mode of the torch-based pyspark.ml.connect (classic SparkContext); native ML API (module audit)
+pyspark/ml/tests/connect/test_legacy_mode_evaluation.py  # legacy mode of the torch-based pyspark.ml.connect (classic SparkContext); native ML API (module audit)
+pyspark/ml/tests/connect/test_legacy_mode_feature.py  # legacy mode of the torch-based pyspark.ml.connect (classic SparkContext); native ML API (module audit)
+pyspark/ml/tests/connect/test_legacy_mode_pipeline.py  # legacy mode of the torch-based pyspark.ml.connect (classic SparkContext); native ML API (module audit)
+pyspark/ml/tests/connect/test_legacy_mode_summarizer.py  # legacy mode of the torch-based pyspark.ml.connect (classic SparkContext); native ML API (module audit)
+pyspark/ml/tests/connect/test_legacy_mode_tuning.py  # legacy mode of the torch-based pyspark.ml.connect (classic SparkContext); native ML API (module audit)
+
+# --- tests the reference client (official PySpark 4.3.0 over the same server) also fails here ---
+pyspark/sql/tests/connect/test_parity_dataframe.py::DataFrameParityTests::test_metadata_column  # requires InMemoryCatalog for 'testcat' - a test-only catalog class absent from the Spark distribution
+pyspark/sql/tests/connect/test_parity_window.py::DataFrameParityTests::test_metadata_column  # same test-only 'testcat' InMemoryCatalog as the DataFrame test; the reference fails it too
+pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_enum_literals  # the reference client fails it on this machine too; the parity gate passes it in CI
+pyspark/sql/tests/connect/pandas/test_parity_pandas_udf_scalar.py::PandasUDFScalarParityTests::test_vectorized_udf_invalid_length  # the reference client fails it on this machine too; the parity gate passes it in CI
