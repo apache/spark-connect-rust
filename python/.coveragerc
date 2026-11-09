@@ -65,6 +65,15 @@ omit =
     */pyspark/sql/connect/logging.py
     */pyspark/sql/connect/_typing.py
     */pyspark/sql/connect/conversion.py
+    # The other files that scripts/check_vendored_upstream.sh keeps byte-identical to the tag
+    # (scripts/tests/test_coverage_scope.py checks that every vendored file is omitted here).
+    */pyspark/conf.py
+    */pyspark/taskcontext.py
+    */pyspark/traceback_utils.py
+    */pyspark/sql/geo_utils.py
+    */pyspark/sql/sql_formatter.py
+    */pyspark/sql/connect/profiler.py
+    */pyspark/sql/connect/shell/progress.py
     # The native extension and its embedded Row source, which has a synthetic filename.
     */pyspark/_pyspark*
     */pyspark/_row.py
