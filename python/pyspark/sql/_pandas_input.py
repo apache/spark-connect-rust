@@ -145,6 +145,20 @@ def _has_canonical_arrow_string_array(array):
                    + ("astype", "dtype", "_hasna"))
 
 
+def _has_canonical_range_columns(columns, range_module):
+    """Accept the default RangeIndex of column labels, which iterates its own int range.
+
+    As for an Index, subclasses and instance overrides keep the row path.
+    """
+    RangeIndex = range_module.RangeIndex
+    if (RangeIndex.__getattribute__ is not object.__getattribute__
+            or "__iter__" in vars(columns) or "__len__" in vars(columns)
+            or not _defined_in(RangeIndex.__iter__, "__iter__", range_module)
+            or not _defined_in(RangeIndex.__len__, "__len__", range_module)):
+        return False
+    return type(vars(columns).get("_range")) is range
+
+
 def _has_canonical_columns(columns):
     """Decline label containers whose row-path iteration can run custom hooks."""
     import sys
@@ -153,6 +167,11 @@ def _has_canonical_columns(columns):
     import pandas as pd
     from pandas.core import base as base_module
     from pandas.core.indexes import base as index_module
+    from pandas.core.indexes import range as range_module
+
+    # A default RangeIndex (pd.DataFrame of a list or ndarray) takes the Arrow routes too.
+    if pd.RangeIndex is range_module.RangeIndex and type(columns) is pd.RangeIndex:
+        return _has_canonical_range_columns(columns, range_module)
 
     Index = index_module.Index
     if (pd.Index is not Index or type(columns) is not Index

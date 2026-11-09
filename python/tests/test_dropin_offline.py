@@ -9158,12 +9158,18 @@ def test_container_input_values_and_errors(container_input_capture_input, contai
     value = container([container([1, None]), container([2]), container()])
     table = container_input_capture_input([(value,)], nested_schema)
     assert table.column(0)[0].as_py() == [[1, None], [2], []]
-    with pytest.raises(TypeError, match="unsupported value type"):
+    # A plain frame with default labels converts with Arrow, as PySpark does, not with the row
+    # path, so the error is the Arrow conversion's (PySpark gives the same error).
+    from pyspark.errors import PySparkValueError
+
+    with pytest.raises(PySparkValueError, match="Exception thrown when converting pandas.Series"):
         container_input_capture_input([(container([object()]),)], array_schema)
 
 
 @pytest.mark.parametrize("container", [list, tuple])
 def test_container_input_subclass_numeric_precedence(container_input_capture_input, container):
+    from pyspark.errors import PySparkValueError
+
     trace = []
 
     class Indexed(container):
@@ -9180,14 +9186,18 @@ def test_container_input_subclass_numeric_precedence(container_input_capture_inp
         def __iter__(self):
             raise AssertionError("existing built-in iterator must remain in use")
 
-    cases = [(Indexed([1, 2]), T.LongType(), 42),
-             (Floating([1, 2]), T.DoubleType(), 1.25),
-             (Iterated([1, 2]), T.ArrayType(T.LongType()), [1, 2])]
-    for value, dtype, expected in cases:
-        schema = T.StructType([T.StructField("value", dtype)])
-        table = container_input_capture_input([(value,)], schema)
-        assert table.column(0)[0].as_py() == expected
-    assert trace == ["index", "float"]
+    # The Arrow conversion of a plain frame, as PySpark's, reads __index__ of a long column,
+    # but neither __float__ of a double column nor __iter__ of an array column.
+    table = container_input_capture_input(
+        [(Indexed([1, 2]),)], T.StructType([T.StructField("value", T.LongType())]))
+    assert table.column(0)[0].as_py() == 42
+    with pytest.raises(PySparkValueError, match="Exception thrown when converting pandas.Series"):
+        container_input_capture_input(
+            [(Floating([1, 2]),)], T.StructType([T.StructField("value", T.DoubleType())]))
+    array_schema = T.StructType([T.StructField("value", T.ArrayType(T.LongType()))])
+    with pytest.raises(AssertionError, match="existing built-in iterator must remain in use"):
+        container_input_capture_input([(Iterated([1, 2]),)], array_schema)
+    assert trace == ["index"]
 
 
 def test_container_input_recursive_leaf_and_row_types(container_input_capture_input):
@@ -15892,6 +15902,42 @@ def test_print_schema_default_reuses_cached_schema(mock_connect, capsys):
         assert capsys.readouterr().out == _PRINT_SCHEMA_FULL
     assert service.calls == 1
     assert service.execute_calls == 0
+
+
+@pytest.mark.parametrize("frame, schema, expected", [
+    (lambda pd, np: pd.DataFrame([[None], [3]]), "x int", [[None, 3]]),
+    (lambda pd, np: pd.DataFrame([[None], [3]]), "x long", [[None, 3]]),
+    (lambda pd, np: pd.DataFrame(np.array([[1.0, np.nan], [2.0, 3.0]])), "a int, b int",
+     [[1, 2], [None, 3]]),
+])
+def test_default_range_index_frame_takes_arrow_route(mock_connect, frame, schema, expected):
+    # A plain frame with default (RangeIndex) column labels converts with Arrow, as PySpark
+    # does: the NaN of a float column is a null, not a "Type mismatch in row data" error.
+    pd = pytest.importorskip("pandas")
+    np = pytest.importorskip("numpy")
+    data = frame(pd, np)
+    assert isinstance(data.columns, pd.RangeIndex)
+    table = _native_number_input_table(mock_connect, data, schema)
+    assert [table.column(i).to_pylist() for i in range(table.num_columns)] == expected
+
+
+def test_default_range_index_labels_keep_row_path_for_overrides(monkeypatch):
+    from pyspark.sql._pandas_input import _has_canonical_columns
+
+    pd = pytest.importorskip("pandas")
+    columns = pd.DataFrame([[1, 2]]).columns
+    assert _has_canonical_columns(columns)
+    # A subclass, or an instance or class override of iteration, keeps the row path as for an Index.
+
+    class RangeSubclass(pd.RangeIndex):
+        pass
+
+    assert not _has_canonical_columns(RangeSubclass(2))
+    overridden = pd.RangeIndex(2)
+    vars(overridden)["__iter__"] = lambda: iter(())
+    assert not _has_canonical_columns(overridden)
+    monkeypatch.setattr(pd.RangeIndex, "__len__", lambda self: 2)
+    assert not _has_canonical_columns(pd.RangeIndex(2))
 
 
 @pytest.mark.parametrize("level", [None, []])
