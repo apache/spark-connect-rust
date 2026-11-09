@@ -599,6 +599,45 @@ fn test_completed_execution_is_released() {
     });
 }
 
+/// A progress handler that panics during an execution of a local iterator panics in the caller,
+/// with prefetching as without, instead of ending the rows early without an error.
+#[test]
+fn test_a_panicking_progress_handler_reaches_the_caller_of_a_local_iterator() {
+    if !should_run() {
+        return;
+    }
+    let spark = SparkSession::builder()
+        .remote(&remote_url())
+        .get_or_create()
+        .expect("session");
+    // Updates every 10 ms (2 s by default), so the tasks below report progress.
+    spark
+        .conf()
+        .set("spark.connect.progress.reportInterval", "10ms")
+        .expect("conf");
+    spark.register_progress_handler(|update| {
+        if !update.done {
+            panic!("a progress handler panics");
+        }
+    });
+    for prefetch in [true, false] {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            spark
+                .sql("SELECT id, reflect('java.lang.Thread', 'sleep', 500L) AS s FROM range(0, 4, 1, 4)")
+                .expect("sql")
+                .to_local_iterator(prefetch)
+                .expect("iterator")
+                .collect::<Result<Vec<_>, _>>()
+                .map(|rows| rows.len())
+        }));
+        assert!(
+            result.is_err(),
+            "prefetch={prefetch}: the panic of the handler must reach the caller, got {result:?}"
+        );
+    }
+    let _ = spark.stop();
+}
+
 /// A stream dropped before its result is complete releases its execution as well.
 #[test]
 fn test_dropped_stream_releases_its_execution() {

@@ -1009,6 +1009,10 @@ struct ListenerBusState {
     /// The threads delivering a synchronous started event in `start`/`toTable`, one entry
     /// per delivery. As with `dispatching`, a removal from another thread waits for them.
     started_dispatches: Vec<std::thread::ThreadId>,
+    /// Set when the worker of the current generation failed in a callback, so the server still
+    /// holds its listener: the server removes it only on REMOVE_LISTENER_BUS_LISTENER, and
+    /// refuses a new ADD_LISTENER_BUS_LISTENER until then. A new subscription removes it first.
+    server_registration_held: bool,
 }
 
 /// A synchronous started event in delivery by the calling thread of `start`/`toTable`.
@@ -1067,6 +1071,15 @@ impl ListenerBus {
         }
     }
 
+    /// Record that the server still holds the listener of `generation`, whose worker failed in
+    /// a callback or a decoder (not in the transport, which may have ended the server's side).
+    fn mark_server_registration_held(&self, generation: u64) {
+        let mut state = self.state.lock().unwrap();
+        if state.generation == generation {
+            state.server_registration_held = true;
+        }
+    }
+
     /// Post a synchronous start event without holding the state lock across callbacks.
     fn post_to_all(&self, event: &StreamingQueryListenerEvent) {
         let listeners: Vec<Arc<dyn StreamingQueryListener>> = self
@@ -1083,6 +1096,32 @@ impl ListenerBus {
     }
 }
 
+/// Ends the generation of a worker when its loop returns or unwinds, so the registrations
+/// of a worker that is gone never stay on the bus.
+struct FinishGeneration {
+    bus: Weak<ListenerBus>,
+    generation: u64,
+}
+
+impl Drop for FinishGeneration {
+    fn drop(&mut self) {
+        if let Some(bus) = self.bus.upgrade() {
+            bus.finish_generation(self.generation);
+        }
+    }
+}
+
+/// The error of a panic in a native listener's callback: a failure of that callback, as a
+/// returned error from it.
+fn listener_panic_error(payload: &(dyn std::any::Any + Send)) -> SparkError {
+    let message = payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("a non-string payload");
+    SparkError::connect_msg(format!("a streaming query listener panicked: {message}"))
+}
+
 /// The worker retains neither the session nor its bus. The stream owns only transport
 /// and progress-handler state; dropping the last session/manager cancels the reader.
 fn run_listener_event_loop(
@@ -1090,6 +1129,11 @@ fn run_listener_event_loop(
     bus: Weak<ListenerBus>,
     generation: u64,
 ) {
+    // Declared first so it runs last, after the dispatch guard, also when a callback unwinds.
+    let _finish = FinishGeneration {
+        bus: bus.clone(),
+        generation,
+    };
     let mut stream = stream.into_iter();
     let mut failure = None;
     for item in &mut stream {
@@ -1124,15 +1168,22 @@ fn run_listener_event_loop(
             event_type,
             event_json,
         };
-        let dispatched = listeners
-            .iter()
-            .find_map(|listener| listener.try_post_to_all(&listeners, &event))
-            .unwrap_or_else(|| {
-                listeners
-                    .iter()
-                    .try_for_each(|listener| listener.try_on_event(&event))
-            });
+        // A panic of a callback is a failure of the subscription, as a returned error is.
+        let dispatched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            listeners
+                .iter()
+                .find_map(|listener| listener.try_post_to_all(&listeners, &event))
+                .unwrap_or_else(|| {
+                    listeners
+                        .iter()
+                        .try_for_each(|listener| listener.try_on_event(&event))
+                })
+        }))
+        .unwrap_or_else(|payload| Err(listener_panic_error(payload.as_ref())));
         if let Err(error) = dispatched {
+            if let Some(owner) = bus.upgrade() {
+                owner.mark_server_registration_held(generation);
+            }
             failure = Some((listeners, error, dispatch));
             break;
         }
@@ -1143,14 +1194,14 @@ fn run_listener_event_loop(
         // as it waits for an ordinary event. No state lock or strong bus owner is
         // held across either callback path; the worker can still remove itself.
         for listener in listeners {
-            if listener.on_stream_error(&error) {
+            let reported = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                listener.on_stream_error(&error)
+            }));
+            if reported.unwrap_or(false) {
                 break;
             }
         }
         drop(dispatch);
-    }
-    if let Some(bus) = bus.upgrade() {
-        bus.finish_generation(generation);
     }
 }
 
@@ -1208,10 +1259,18 @@ impl StreamingQueryManager {
             return Err(Self::no_active_session());
         }
         let id = uuid::Uuid::new_v4().to_string();
-        if !state.listeners.is_empty() {
+        let worker_alive = state
+            .thread
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished());
+        if !state.listeners.is_empty() && worker_alive {
             state.listeners.push((id.clone(), listener));
             return Ok(id);
         }
+        // The registrations of a worker that has ended get no more events: they are
+        // cleared, and this listener opens a new subscription.
+        let stale = std::mem::take(&mut state.listeners);
+        let release_server = std::mem::take(&mut state.server_registration_held);
         state.phase = ListenerBusPhase::Starting;
         // An earlier worker must not clear this registration's cancellation sender.
         state.generation = state.generation.wrapping_add(1);
@@ -1220,7 +1279,13 @@ impl StreamingQueryManager {
         state.cancel = Some(cancel);
         let previous = state.thread.take();
         drop(state);
+        drop(stale);
         Self::join_listener_thread(previous);
+        if release_server {
+            // Best effort: the server's listener is gone if the removal fails, and then the
+            // add below reports it.
+            let _ = self.remove_server_listener();
+        }
         let stream = self.listener_event_stream().and_then(|mut stream| {
             // Cancel a pending acknowledgement once the RPC stream exists. Establishing
             // the stream above still follows the transport's deadline and retry policy.
@@ -2083,6 +2148,59 @@ mod tests {
         assert!(weak.upgrade().is_none());
         release.send(()).unwrap();
         worker.join().unwrap();
+    }
+
+    /// A panic of a native listener's callback fails the subscription as a returned error does:
+    /// the listeners are told, the registrations are cleared, and no later event is read.
+    #[test]
+    fn a_panicking_native_listener_fails_the_subscription_like_an_error() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Listener {
+            events: AtomicUsize,
+            errors: Mutex<Vec<String>>,
+        }
+        impl StreamingQueryListener for Listener {
+            fn on_event(&self, _: &StreamingQueryListenerEvent) {
+                self.events.fetch_add(1, Ordering::SeqCst);
+                panic!("listener panic on event");
+            }
+
+            fn on_stream_error(&self, error: &SparkError) -> bool {
+                self.errors.lock().unwrap().push(error.message());
+                true
+            }
+        }
+        let bus = Arc::new(ListenerBus::default());
+        let listener = Arc::new(Listener {
+            events: AtomicUsize::new(0),
+            errors: Mutex::new(vec![]),
+        });
+        {
+            let mut state = bus.state.lock().unwrap();
+            state.generation = 3;
+            state
+                .listeners
+                .push(("first".to_string(), listener.clone()));
+        }
+        run_listener_event_loop(
+            vec![
+                Ok((QUERY_IDLE_EVENT, "panics".to_string())),
+                Ok((QUERY_IDLE_EVENT, "never read".to_string())),
+            ],
+            Arc::downgrade(&bus),
+            3,
+        );
+        assert_eq!(listener.events.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *listener.errors.lock().unwrap(),
+            vec!["a streaming query listener panicked: listener panic on event".to_string()],
+        );
+        let state = bus.state.lock().unwrap();
+        assert!(state.listeners.is_empty());
+        assert!(state.dispatching.is_none());
+        assert!(state.cancel.is_none());
+        assert!(state.server_registration_held);
     }
 
     #[test]
