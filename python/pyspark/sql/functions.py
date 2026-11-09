@@ -302,21 +302,17 @@ def _dict_to_options_column(options_dict):
     """Convert a Python dict[str, str] to a Column map literal.
 
     This is used for avro/protobuf options which are dictionaries in the Python API
-    but need to be Column map literals in the Rust API.
+    but need to be Column map literals in the Rust API. As in PySpark's _options_to_col,
+    the options are read through items(), so a non-mapping such as a Column is rejected.
     """
-    if options_dict is None:
-        return None
-    if isinstance(options_dict, dict):
-        # Convert dict to alternating keys and values: [k1, v1, k2, v2, ...]
-        args = []
-        for k, v in options_dict.items():
-            args.append(str(k))
-            args.append(str(v))
-        # Use create_map with literal strings - we'll build the Column through _call_function
-        # since create_map is auto-generated
-        return _call_function("create_map", *[_pyfunc_lit(arg) for arg in args])
-    # If already a Column, pass through
-    return options_dict
+    # Convert dict to alternating keys and values: [k1, v1, k2, v2, ...]
+    args = []
+    for k, v in options_dict.items():
+        args.append(str(k))
+        args.append(str(v))
+    # Use create_map with literal strings - we'll build the Column through _call_function
+    # since create_map is auto-generated
+    return _call_function("create_map", *[_pyfunc_lit(arg) for arg in args])
 
 # Import UDF / UDTF functions
 from pyspark.sql.udf import udf
