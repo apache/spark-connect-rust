@@ -643,6 +643,8 @@ impl SparkSession {
     /// Internal binding bridge for Arrow IPC already validated and encoded from
     /// local rows or columns. Retains the row path's transport policy: inline, unless the
     /// IPC is large enough to consult the server's local-relation settings.
+    /// Large IPC is decoded and its map field names normalized before re-encoding;
+    /// smaller IPC is passed through unchanged.
     #[doc(hidden)]
     pub fn create_dataframe_from_inline_arrow_ipc(
         &self,
@@ -673,6 +675,10 @@ impl SparkSession {
     /// `schema` optionally supplies the Spark schema applied by the server. With
     /// `None`, Spark infers it from Arrow. All batches must share the same Arrow
     /// schema; IPC serialization is still required for transport.
+    /// Map child fields are normalized to Spark's `entries`, `key`, and `value`
+    /// names, including nested maps, without copying their data buffers.
+    /// Columns rebuilt for map names are validated against the schema before any
+    /// RPC, rejecting incompatible child types or union ordering.
     /// Non-empty inputs read the server's local-relation configuration. Large inputs
     /// are uploaded as cache artifacts and referenced by hash in the resulting plan.
     pub fn create_dataframe_from_arrow(
