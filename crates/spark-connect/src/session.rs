@@ -1143,17 +1143,24 @@ impl SparkSession {
     /// Idempotent, mirroring pyspark: the session is marked stopped even if releasing it
     /// on the server fails, and stopping an already stopped session is a no-op.
     ///
-    /// Cancel local listener registration/dispatch first, release the server session, then
-    /// close the client even if release fails. As PySpark's stop, this does not make a
-    /// separate listener-removal RPC: ReleaseSession releases the server's listeners too.
+    /// Release the server session first, then cancel local listener registration/dispatch and
+    /// close the client even if release fails. ReleaseSession makes the server send the
+    /// terminated events of the queries still running, which the listeners must still receive.
+    /// As PySpark's stop, a client that is already closed, by a server-side session change, is
+    /// not released. This does not make a separate listener-removal RPC: ReleaseSession
+    /// releases the server's listeners too.
     /// Teardown does not wait for listener callbacks; the current event's listener snapshot
     /// may finish after stop returns, while no later event is dispatched.
     pub fn stop(&self) -> Result<()> {
         if self.stopped.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
+        let released = if self.client.is_closed() {
+            Ok(())
+        } else {
+            block_on(self.client.release_session())
+        };
         self.streams().cancel_listener_bus();
-        let released = block_on(self.client.release_session());
         // As PySpark's `stop()`, close the client even if server cleanup fails, so its
         // future requests raise `NO_ACTIVE_SESSION`.
         self.client.close();
@@ -1176,10 +1183,11 @@ impl SparkSession {
         self.client.close();
     }
 
-    /// Whether `stop()` has been called on this session. Mirrors
-    /// `pyspark.sql.connect.session.SparkSession.is_stopped`.
+    /// Whether `stop()` has been called on this session, or its client is closed, as after a
+    /// server-side session change. Mirrors `pyspark.sql.connect.session.SparkSession.is_stopped`,
+    /// which is the client's `is_closed`.
     pub fn is_stopped(&self) -> bool {
-        self.stopped.load(Ordering::SeqCst)
+        self.stopped.load(Ordering::SeqCst) || self.client.is_closed()
     }
 }
 
@@ -3664,5 +3672,30 @@ mod tests {
                 assert_eq!(actual.values(), expected.values());
             }
         }
+    }
+
+    #[test]
+    fn a_session_whose_client_closed_is_stopped_and_is_not_released() {
+        // Port 1: nothing listens, so a ReleaseSession that reached the wire would fail. As
+        // PySpark's stop(), a client that a server-side session change closed is not released.
+        let spark = SparkSession::builder()
+            .remote("sc://localhost:1")
+            .get_or_create()
+            .expect("failed to build session");
+        let other = spark.clone();
+        spark.client.close();
+        assert!(
+            spark.is_stopped(),
+            "a closed client makes the session stopped"
+        );
+        assert!(
+            other.is_stopped(),
+            "the closed client is shared across clones"
+        );
+        assert!(
+            spark.stop().is_ok(),
+            "stop() does not release a closed client"
+        );
+        assert!(spark.stopped.load(Ordering::SeqCst));
     }
 }
