@@ -14259,6 +14259,51 @@ def test_lit_of_a_numpy_array_is_an_array_of_its_type_as_pyspark():
         assert repr(F.lit(value)).lower() == f"column<'{expected}'>"
 
 
+def test_datetime_literals_are_exact_micros_as_pyspark(mock_connect, monkeypatch):
+    # As PySpark's TimestampType.toInternal: the microseconds of a datetime are exact over the
+    # whole range (a float of seconds loses them after the year 2255), and a naive datetime is
+    # in the local time zone (the micros of year 1 of a naive datetime are platform-dependent).
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+
+    def micros(column):
+        spark.range(1).select(column).collect()
+        # Project.expressions=3; Expression.literal=1, Literal.timestamp=17 (an int64).
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        expression = parse_message(parse_message(parse_message(plan)[3][0])[3][0])
+        value = parse_message(expression[1][0])[17][0]
+        return value - (1 << 64) if value >= 1 << 63 else value
+
+    utc = datetime.timezone.utc
+    cases = [
+        (datetime.datetime(1, 1, 1, 0, 0, 0, 1, tzinfo=utc), -62135596799999999),
+        (datetime.datetime(1969, 12, 31, 23, 59, 59, 999999, tzinfo=utc), -1),
+        (datetime.datetime(2300, 1, 1, 0, 0, 0, 123457, tzinfo=utc), 10413792000123457),
+        (datetime.datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=utc), 253402300799999999),
+    ]
+    for value, expected in cases:
+        assert micros(F.lit(value)) == expected
+    # The naive values of the same instants in a zone nine hours east of UTC, which has no DST.
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset is not available")
+    zone, offset = os.environ.get("TZ"), 9 * 3600 * 1_000_000
+    os.environ["TZ"] = "Etc/GMT-9"
+    time.tzset()
+    try:
+        assert micros(F.lit(datetime.datetime(1969, 12, 31, 23, 59, 59, 999999))) == -1 - offset
+        assert micros(F.lit(datetime.datetime(2300, 1, 1, 0, 0, 0, 123457))) == (
+            10413792000123457 - offset)
+        assert micros(F.lit(datetime.datetime(9999, 12, 31, 23, 59, 59, 999999))) == (
+            253402300799999999 - offset)
+    finally:
+        if zone is None:
+            del os.environ["TZ"]
+        else:
+            os.environ["TZ"] = zone
+        time.tzset()
+
+
 def test_lit_errors_as_pyspark():
     np = pytest.importorskip("numpy")
     from pyspark.errors import PySparkTypeError, PySparkValueError

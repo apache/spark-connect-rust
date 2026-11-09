@@ -3155,6 +3155,45 @@ def test_functions_send_their_optional_arguments_as_pyspark(session):
     assert nulls.groupBy("g").agg(F.first("v", ignorenulls=True)).first()[1] == 5
 
 
+def test_datetime_literals_collect_the_exact_values_of_pyspark():
+    # As PySpark's TimestampType: a datetime literal is the instant of its micros, exact from year
+    # 1 to year 9999 (a float of seconds lost the micros after the year 2255), and a naive one is
+    # in the client's time zone. A TIMESTAMP that is past the year 9999 in the zone of the client
+    # (here nine hours ahead of UTC) raises OverflowError on collect, as PySpark does.
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("SPARK_REMOTE is required for live-server tests")
+    out = _run_in_time_zone("""
+import datetime
+from pyspark.sql import SparkSession, functions as F
+spark = SparkSession.builder.remote(%r).getOrCreate()
+utc = datetime.timezone.utc
+values = [
+    ("aware_1", datetime.datetime(1, 1, 1, 0, 0, 0, 1, tzinfo=utc)),
+    ("aware_1969", datetime.datetime(1969, 12, 31, 23, 59, 59, 999999, tzinfo=utc)),
+    ("aware_2300", datetime.datetime(2300, 1, 1, 0, 0, 0, 123457, tzinfo=utc)),
+    ("aware_9999", datetime.datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=utc)),
+    ("naive_1969", datetime.datetime(1969, 12, 31, 23, 59, 59, 999999)),
+    ("naive_2300", datetime.datetime(2300, 1, 1, 0, 0, 0, 123457)),
+    ("naive_9999", datetime.datetime(9999, 12, 31, 23, 59, 59, 999999)),
+]
+for name, value in values:
+    try:
+        print(name, repr(spark.range(1).select(F.lit(value).alias("v")).collect()[0][0]))
+    except Exception as error:
+        print(name, type(error).__name__)
+""" % remote, "Asia/Seoul")
+    assert out.splitlines() == [
+        "aware_1 datetime.datetime(1, 1, 1, 8, 27, 52, 1)",
+        "aware_1969 datetime.datetime(1970, 1, 1, 8, 59, 59, 999999)",
+        "aware_2300 datetime.datetime(2300, 1, 1, 9, 0, 0, 123457)",
+        "aware_9999 OverflowError",
+        "naive_1969 datetime.datetime(1969, 12, 31, 23, 59, 59, 999999)",
+        "naive_2300 datetime.datetime(2300, 1, 1, 0, 0, 0, 123457)",
+        "naive_9999 datetime.datetime(9999, 12, 31, 23, 59, 59, 999999)",
+    ]
+
+
 def test_window_frames_return_the_rows_of_pyspark(session):
     # As PySpark's: a range frame of a boundary out of the range of an int, which was
     # truncated, and the frames of the bounds of -sys.maxsize and sys.maxsize, unbounded.
