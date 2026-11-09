@@ -28,18 +28,76 @@ pub fn get_runtime() -> &'static Runtime {
 /// and wait for its result. This should be called with the GIL released
 /// in a Python context.
 ///
+/// The synchronous API may be called from any thread, including inside a Tokio runtime of
+/// either flavor: the call blocks the calling thread until the future completes. Inside a
+/// multi-thread runtime the thread is blocked in place; inside a `current_thread` runtime it
+/// cannot block in place, so the future runs on a thread of its own, which the calling thread
+/// waits for (see [`block_on_other_thread`]).
+///
 /// Also called from a callback that runs inside the runtime (a progress handler, or a
 /// session hook of the executions), which may run a query itself: as PySpark does, the
 /// nested query runs. The thread is then in the runtime's context, which `block_in_place`
-/// leaves for the nested `block_on`. A `current_thread` runtime cannot block in place, so the
-/// call keeps failing there.
-pub fn block_on<F: std::future::Future>(f: F) -> F::Output {
+/// leaves for the nested `block_on`.
+pub fn block_on<F>(f: F) -> F::Output
+where
+    F: std::future::Future + Send,
+    F::Output: Send,
+{
     match tokio::runtime::Handle::try_current() {
         Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
             tokio::task::block_in_place(|| get_runtime().block_on(f))
         }
+        Ok(_) => block_on_other_thread(f),
         _ => get_runtime().block_on(f),
     }
+}
+
+/// Run a future to completion on the shared runtime, on a thread of its own, while the calling
+/// thread waits for it: the calling thread is inside a `current_thread` runtime, which cannot
+/// block in place and cannot start another runtime.
+///
+/// The future is polled on the other thread, so the state that the client keeps per thread is
+/// that of the caller: [`calling_thread_id`] is the caller's ID there, and the callback depth
+/// and the recursion failure of the caller carry over, then back, so a call made from inside a
+/// callback bounds its recursion as on the caller's own thread.
+fn block_on_other_thread<F>(f: F) -> F::Output
+where
+    F: std::future::Future + Send,
+    F::Output: Send,
+{
+    let caller = std::thread::current().id();
+    let depth = CALLBACK_DEPTH.with(std::cell::Cell::get);
+    let recursion_failed = CALLBACK_RECURSION_FAILED.with(std::cell::Cell::get);
+    let (output, recursion_failed) = std::thread::scope(|scope| {
+        let worker = scope.spawn(move || {
+            CALLER_THREAD.with(|caller_thread| caller_thread.set(Some(caller)));
+            CALLBACK_DEPTH.with(|d| d.set(depth));
+            CALLBACK_RECURSION_FAILED.with(|failed| failed.set(recursion_failed));
+            let output = get_runtime().block_on(f);
+            (output, CALLBACK_RECURSION_FAILED.with(std::cell::Cell::get))
+        });
+        match worker.join() {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    });
+    CALLBACK_RECURSION_FAILED.with(|failed| failed.set(recursion_failed));
+    output
+}
+
+thread_local! {
+    /// The thread that the calls of this thread act for, while [`block_on_other_thread`] runs a
+    /// future on this thread for it.
+    static CALLER_THREAD: std::cell::Cell<Option<std::thread::ThreadId>> = const { std::cell::Cell::new(None) };
+}
+
+/// The thread whose per-thread state the calls on this thread use: the thread that calls the
+/// synchronous API, also while a future of such a call is polled on another thread (see
+/// [`block_on`]). Its operation tags and user context extensions are keyed by it.
+pub fn calling_thread_id() -> std::thread::ThreadId {
+    CALLER_THREAD
+        .with(std::cell::Cell::get)
+        .unwrap_or_else(|| std::thread::current().id())
 }
 
 /// How many progress handlers and hooks may run nested on a thread, each one running a query
@@ -147,5 +205,65 @@ mod tests {
             x + y
         });
         assert_eq!(result, 30);
+    }
+
+    fn current_thread_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_block_on_inside_current_thread_runtime() {
+        // The default flavor of `#[tokio::test]`: the sync API blocks the thread, which the
+        // runtime cannot block in place.
+        let result = current_thread_runtime().block_on(async { block_on(async { 42 }) });
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn test_block_on_nested_inside_current_thread_runtime() {
+        // A callback of the execution runs a query, which runs inside the current_thread runtime.
+        let result = current_thread_runtime()
+            .block_on(async { block_on(async { block_on(async { 7 }) + 1 }) });
+        assert_eq!(result, 8);
+    }
+
+    #[test]
+    fn test_block_on_inside_current_thread_runtime_keeps_caller_thread() {
+        // The per-thread state (tags and extensions) of the caller is read as on its own thread.
+        let caller = std::thread::current().id();
+        let seen =
+            current_thread_runtime().block_on(async { block_on(async { calling_thread_id() }) });
+        assert_eq!(seen, caller);
+        assert_eq!(calling_thread_id(), caller);
+    }
+
+    #[test]
+    fn test_block_on_inside_current_thread_runtime_keeps_callback_depth() {
+        // A call from a callback at the bound fails with a RecursionError on the other thread too.
+        let guards: Vec<CallbackGuard> = (0..MAX_CALLBACK_DEPTH)
+            .map(|_| CallbackGuard::enter())
+            .collect();
+        let err = current_thread_runtime()
+            .block_on(async { block_on(async { check_callback_depth() }) })
+            .unwrap_err();
+        assert_eq!(err.kind, crate::error::SparkErrorKind::RecursionError);
+        drop(guards);
+        // The failure is released with the outermost callback, as on this thread.
+        assert!(current_thread_runtime()
+            .block_on(async { block_on(async { check_callback_depth() }) })
+            .is_ok());
+    }
+
+    #[test]
+    fn test_block_on_inside_current_thread_runtime_propagates_panic() {
+        let result = std::panic::catch_unwind(|| {
+            current_thread_runtime().block_on(async {
+                block_on(async { panic!("from the future") });
+            })
+        });
+        assert!(result.is_err());
     }
 }

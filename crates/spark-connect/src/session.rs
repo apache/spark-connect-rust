@@ -2978,14 +2978,12 @@ mod tests {
     fn version_cache_recovers_after_lookup_panics() {
         let spark = session();
         let handle = spark.clone();
-        // Like other synchronous RPC helpers, version() cannot run inside a current-thread
-        // Tokio runtime, which cannot block in place. That caller's panic must not
-        // permanently break this session's cache.
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
+        // A panic under the cache lock, as a panicking lookup leaves it, must not permanently
+        // break this session's cache.
+        let cache = std::sync::Arc::clone(&spark.server_version);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            runtime.block_on(async { spark.version() })
+            let _held = cache.lock().unwrap();
+            panic!("a lookup panics while the cache lock is held");
         }));
         assert!(result.is_err());
         assert!(spark.server_version.is_poisoned());

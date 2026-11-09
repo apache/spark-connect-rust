@@ -4036,27 +4036,18 @@ mod cache_tests {
             .unwrap();
         let df = spark.range(3).unwrap();
         let cloned = df.clone();
-        // A current-thread runtime: the synchronous API cannot block in place in it.
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-
-        // Calling the synchronous API inside a runtime panics during analysis.
-        // A clone must still attempt analysis afterward, rather than returning
-        // a permanent cache-poisoning error.
-        for frame in [&df, &cloned] {
-            let result = runtime.block_on(async {
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| frame.schema()))
-            });
-            assert!(result.is_err());
-            // Poisoning proves the lock spans the analysis boundary without
-            // relying on thread scheduling to produce contended cache misses.
-            assert!(
-                frame.schema_cache.is_poisoned(),
-                "schema analysis must hold the shared cache lock"
-            );
-        }
+        // A panic under the cache lock, as a panicking analysis leaves it: the clones must still
+        // analyze afterward, rather than returning a permanent cache-poisoning error.
+        let cache = Arc::clone(&df.schema_cache);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = cache.lock().unwrap();
+            panic!("an analysis panics while the cache lock is held");
+        }));
+        assert!(result.is_err());
+        assert!(
+            df.schema_cache.is_poisoned(),
+            "the cache lock must be poisoned for this test"
+        );
         let mut cached = df.schema_cache.lock().unwrap_err().into_inner();
         assert!(cached.is_none());
         let schema = DataType::Struct { fields: vec![] };

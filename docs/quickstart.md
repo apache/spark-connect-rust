@@ -64,6 +64,14 @@ df
     .show(20)?;
 ```
 
+## Using it from an async runtime
+
+The API is synchronous and can be called from any thread, including inside a Tokio runtime of
+either flavor. The call blocks the thread it runs on until the server answers, so keep it out of
+tasks that must keep the rest of their runtime running. A `current_thread` runtime, such as the
+one of `#[tokio::test]`, works too: the query runs on a thread of its own while the calling
+thread waits, and it keeps the tags and user context extensions of the calling thread.
+
 ## Next Steps
 
 - [DataFrames](dataframes.md) - column operations, joins, window functions
