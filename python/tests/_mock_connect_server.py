@@ -315,7 +315,7 @@ def serve(connection):
                 self.listener_removals = 0
                 self.listener_streams_finished = 0
                 self.listener_condition.notify_all()
-            for name in ("listener_register_gate", "listener_remove_gate"):
+            for name in ("listener_register_gate", "listener_remove_gate", "release_session_gate"):
                 gate = getattr(self, name, None)
                 if gate is not None:
                     gate.set()
@@ -328,6 +328,11 @@ def serve(connection):
             self.listener_remove_gate = Event()
             self.release_session_failure = False
             self.release_session_calls = 0
+            # The listener events that a release sends, as a server that stops the running
+            # queries of the session, and a gate that holds the release's response.
+            self.release_session_events = []
+            self.release_session_blocked = False
+            self.release_session_gate = Event()
 
         def analyze(self, request, context):
             # AnalyzePlanRequest.session_id=1, echoed as AnalyzePlanResponse.session_id=1, as the
@@ -431,6 +436,17 @@ def serve(connection):
                 # retain independent response and session-release behavior.
                 if self.release_session_unblocks_execute:
                     self.response_gate.set()
+                # ReleaseSessionRequest.session_id = 1.
+                session_id = parse_message(request).get(1, [b""])[0].decode()
+                queue = self.listener_queues.get(session_id)
+                events = list(self.release_session_events)
+                blocked = self.release_session_blocked
+                gate = self.release_session_gate
+            if queue is not None:
+                for event in events:
+                    queue.put(event)
+            if blocked and not gate.wait(15):
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT, "release gate was not released")
             if self.release_session_failure:
                 context.abort(grpc.StatusCode.INVALID_ARGUMENT, "session release failed")
             return b""
@@ -773,6 +789,9 @@ def serve(connection):
                 elif command[0] == "release_listener_removal":
                     service.listener_remove_gate.set()
                     connection.send(None)
+                elif command[0] == "release_session_release":
+                    service.release_session_gate.set()
+                    connection.send(None)
         finally:
             server.stop(0).wait()
 
@@ -849,6 +868,11 @@ class RemoteService:
 
     def release_listener_removal(self):
         self.connection.send(("release_listener_removal",))
+        assert self.connection.poll(10), "Mock server did not respond"
+        self.connection.recv()
+
+    def release_session_release(self):
+        self.connection.send(("release_session_release",))
         assert self.connection.poll(10), "Mock server did not respond"
         self.connection.recv()
 
