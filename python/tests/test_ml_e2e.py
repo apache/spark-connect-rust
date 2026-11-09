@@ -244,12 +244,15 @@ def test_ml_deep_dataframes_fit_and_transform_as_pyspark(session):
     # As PySpark: a DataFrame of 120 chained withColumn calls, nested deeper than a protobuf
     # decoder parses, is fitted and transformed, and so is OneVsRest over 12 classes, whose
     # transform adds a layer per class. Their predictions are those of the shallow DataFrames.
+    # The chains are over a repartition of the local data: over a local relation, the optimizer
+    # folds one projection per iteration, which a server in testing mode (SPARK_TESTING, as in
+    # CI) fails past its 100 iterations, for PySpark too.
     from pyspark.ml.classification import LogisticRegression, OneVsRest
     from pyspark.ml.linalg import Vectors
     from pyspark.sql import functions as F
 
     rows = [(float(i % 2), Vectors.dense([float(i % 7), float(i % 5)])) for i in range(40)]
-    base = session.createDataFrame(rows, ["label", "features"])
+    base = session.createDataFrame(rows, ["label", "features"]).repartition(1)
     deep = base
     for i in range(120):
         deep = deep.withColumn(f"c{i}", F.lit(i))
@@ -260,7 +263,7 @@ def test_ml_deep_dataframes_fit_and_transform_as_pyspark(session):
     assert predictions == sorted(r.prediction for r in model.transform(base).collect())
 
     rows12 = [(float(i % 12), Vectors.dense([float(i % 7), float(i % 5)])) for i in range(60)]
-    base12 = session.createDataFrame(rows12, ["label", "features"])
+    base12 = session.createDataFrame(rows12, ["label", "features"]).repartition(1)
     deep12 = base12
     for i in range(120):
         deep12 = deep12.withColumn(f"c{i}", F.lit(i))
