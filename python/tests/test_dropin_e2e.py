@@ -36,6 +36,7 @@ from pyspark.sql.types import (
     DoubleType,
     IntegerType,
     LongType,
+    MapType,
     StringType,
     StructField,
     StructType,
@@ -3074,6 +3075,60 @@ def test_pandas_frames_of_duplicate_nested_field_names_are_created_as_pyspark(se
         session.conf.unset("spark.sql.execution.arrow.pyspark.enabled")
 
 
+
+
+def test_maps_with_user_defined_keys_collect_their_deserialized_keys_as_pyspark(session):
+    # As PySpark: the keys of a map of a user-defined type are deserialized, at the top level,
+    # in a struct, in an array and in the value of a map, for collect, toLocalIterator, head,
+    # first and take.
+    from pyspark.sql.types import UserDefinedType
+
+    class PairUDT(UserDefinedType):
+        @classmethod
+        def sqlType(cls):
+            return ArrayType(DoubleType(), False)
+
+        @classmethod
+        def module(cls):
+            return __name__
+
+        def serialize(self, obj):
+            return [obj[0], obj[1]]
+
+        def deserialize(self, datum):
+            return (datum[0], datum[1])
+
+        def __eq__(self, other):
+            return isinstance(other, PairUDT)
+
+        def __hash__(self):
+            return 1
+
+    pair = PairUDT()
+    schema = StructType([
+        StructField("m", MapType(pair, IntegerType())),
+        StructField("s", StructType([StructField("k", MapType(pair, StringType()))])),
+        StructField("a", ArrayType(MapType(pair, IntegerType()))),
+        StructField("v", MapType(StringType(), MapType(pair, IntegerType()))),
+    ])
+    expected = Row(
+        m={(1.0, 2.0): 1, (3.0, 4.0): None},
+        s=Row(k={(1.0, 2.0): "x"}),
+        a=[{(5.0, 6.0): 7}],
+        v={"a": {(1.0, 2.0): 3}},
+    )
+    df = session.createDataFrame(
+        [({(1.0, 2.0): 1, (3.0, 4.0): None}, {"k": {(1.0, 2.0): "x"}}, [{(5.0, 6.0): 7}],
+          {"a": {(1.0, 2.0): 3}})],
+        schema,
+    )
+    assert df.collect() == [expected]
+    assert list(df.toLocalIterator()) == [expected]
+    assert df.head() == df.first() == expected
+    assert df.take(1) == [expected]
+    # A list key is unhashable, as in PySpark, also in a map with user-defined keys.
+    with pytest.raises(TypeError, match="unhashable"):
+        session.sql("SELECT map(array(1), 'x') AS m").collect()
 
 
 def test_maps_keep_their_entries_in_order_with_keys_of_their_type(session):

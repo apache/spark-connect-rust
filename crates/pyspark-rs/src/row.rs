@@ -1,6 +1,6 @@
 //! Conversion of native Spark values into tuple-backed Python Rows.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use pyo3::prelude::*;
@@ -41,6 +41,8 @@ enum NestedFieldPath {
 pub(crate) struct NestedFieldNames {
     path: Vec<NestedFieldPath>,
     fields: HashMap<Vec<NestedFieldPath>, Py<PyList>>,
+    /// The schema paths of the maps whose keys have a user-defined type.
+    udt_key_maps: HashSet<Vec<NestedFieldPath>>,
 }
 
 impl NestedFieldNames {
@@ -48,6 +50,14 @@ impl NestedFieldNames {
     pub(crate) fn clear(&mut self) {
         self.path.clear();
         self.fields.clear();
+        self.udt_key_maps.clear();
+    }
+
+    /// Record the maps of `schema` whose keys have a user-defined type. Their keys are
+    /// deserialized by the converters, so such a map is passed on as its (key, value) pairs.
+    pub(crate) fn note_udt_key_maps(&mut self, schema: &spark_connect::types::DataType) {
+        let mut path = Vec::new();
+        collect_udt_key_maps(schema, &mut path, &mut self.udt_key_maps);
     }
 
     /// Convert one schema step below this path, restoring it even if conversion fails.
@@ -77,6 +87,50 @@ impl NestedFieldNames {
         self.fields
             .insert(self.path.clone(), fields.clone().unbind());
         Ok(fields)
+    }
+}
+
+/// Collect the paths of the maps in `data_type` whose keys have a user-defined type, along
+/// the same steps that `value_to_py` takes through the values.
+fn collect_udt_key_maps(
+    data_type: &spark_connect::types::DataType,
+    path: &mut Vec<NestedFieldPath>,
+    out: &mut HashSet<Vec<NestedFieldPath>>,
+) {
+    use spark_connect::types::DataType;
+    match data_type {
+        DataType::Struct { fields } => {
+            for (index, field) in fields.iter().enumerate() {
+                path.push(NestedFieldPath::Field(index));
+                collect_udt_key_maps(&field.data_type, path, out);
+                path.pop();
+            }
+        }
+        DataType::Array { element_type, .. } => {
+            path.push(NestedFieldPath::ArrayElement);
+            collect_udt_key_maps(element_type, path, out);
+            path.pop();
+        }
+        DataType::Map {
+            key_type,
+            value_type,
+            ..
+        } => {
+            if crate::types::has_udt(key_type) {
+                out.insert(path.clone());
+            }
+            path.push(NestedFieldPath::MapKey);
+            collect_udt_key_maps(key_type, path, out);
+            path.pop();
+            path.push(NestedFieldPath::MapValue);
+            collect_udt_key_maps(value_type, path, out);
+            path.pop();
+        }
+        DataType::Udt {
+            sql_type: Some(sql_type),
+            ..
+        } => collect_udt_key_maps(sql_type, path, out),
+        _ => {}
     }
 }
 
@@ -247,6 +301,19 @@ fn value_to_py<'py>(
                 )?)?;
             }
             list.into_any()
+        }
+        Value::Map(m) if nested_fields.udt_key_maps.contains(&nested_fields.path) => {
+            // The keys are deserialized from their user-defined type by the converter of the
+            // field, which builds the dict, so the entries are passed on as pairs.
+            let pairs = PyList::empty(py);
+            for (k, val) in m {
+                let key =
+                    nested_fields.value_at(py, k, binary_as_bytes, NestedFieldPath::MapKey)?;
+                let val =
+                    nested_fields.value_at(py, val, binary_as_bytes, NestedFieldPath::MapValue)?;
+                pairs.append(PyTuple::new(py, [key, val])?)?;
+            }
+            pairs.into_any()
         }
         Value::Map(m) => {
             // Keys of their own type, in order; an unhashable key, such as an array, raises
