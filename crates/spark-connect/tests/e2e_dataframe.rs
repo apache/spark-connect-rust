@@ -83,6 +83,175 @@ fn dataframe_transforms_and_setops() {
     assert_eq!(m.count().unwrap(), 4);
 }
 
+/// The column names of `df`, then its rows as display strings, sorted.
+fn named_rows(df: &DataFrame) -> (Vec<String>, Vec<Vec<String>>) {
+    let columns = df.columns().unwrap();
+    let mut rows: Vec<Vec<String>> = df
+        .collect()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (0..columns.len())
+                .map(|i| row.get(i).map_or_else(String::new, |v| v.to_string()))
+                .collect()
+        })
+        .collect();
+    rows.sort();
+    (columns, rows)
+}
+
+/// `GroupedData.sum`, `avg`, `mean`, `min` and `max` aggregate every numeric column without
+/// columns, and reject a given column that is not a numeric one, as PySpark's `_numeric_agg`
+/// does, for groupBy, rollup, cube, grouping sets and pivot.
+#[test]
+fn group_numeric_aggregates_follow_pyspark() {
+    use spark_connect::row::Value;
+    use spark_connect::SparkErrorKind;
+    if !should_run() {
+        return;
+    }
+    let s = session();
+    // k: grouping string; i int, l long, d double (NULL in group b), s string, p pivot string.
+    let df = s
+        .sql(
+            "SELECT * FROM VALUES ('a', 1, 10L, 1.5D, 'x', 'p'), ('a', 2, 20L, 2.5D, 'y', 'q'), \
+             ('b', 3, 30L, CAST(NULL AS DOUBLE), 'z', 'p') AS t(k, i, l, d, s, p)",
+        )
+        .unwrap();
+    let names = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<String>>();
+    let rows = |rows: &[&[&str]]| {
+        rows.iter()
+            .map(|r| r.iter().map(|v| v.to_string()).collect::<Vec<String>>())
+            .collect::<Vec<Vec<String>>>()
+    };
+
+    // Every numeric column, in schema order, with PySpark's names (`sum(i)`, ...).
+    let (cols, got) = named_rows(&df.group_by(vec![col("k")]).sum(vec![]).unwrap());
+    assert_eq!(cols, names(&["k", "sum(i)", "sum(l)", "sum(d)"]));
+    assert_eq!(
+        got,
+        rows(&[&["a", "3", "30", "4"], &["b", "3", "30", "NULL"]])
+    );
+    let (cols, got) = named_rows(&df.group_by(vec![col("k")]).avg(vec![]).unwrap());
+    assert_eq!(cols, names(&["k", "avg(i)", "avg(l)", "avg(d)"]));
+    assert_eq!(
+        got,
+        rows(&[&["a", "1.5", "15", "2"], &["b", "3", "30", "NULL"]])
+    );
+    let (cols, got) = named_rows(&df.group_by(vec![col("k")]).mean(vec![]).unwrap());
+    assert_eq!(cols, names(&["k", "avg(i)", "avg(l)", "avg(d)"]));
+    assert_eq!(
+        got,
+        rows(&[&["a", "1.5", "15", "2"], &["b", "3", "30", "NULL"]])
+    );
+    let (cols, got) = named_rows(&df.group_by(vec![col("k")]).min(vec![]).unwrap());
+    assert_eq!(cols, names(&["k", "min(i)", "min(l)", "min(d)"]));
+    assert_eq!(
+        got,
+        rows(&[&["a", "1", "10", "1.5"], &["b", "3", "30", "NULL"]])
+    );
+    let (cols, got) = named_rows(&df.group_by(vec![col("k")]).max(vec![]).unwrap());
+    assert_eq!(cols, names(&["k", "max(i)", "max(l)", "max(d)"]));
+    assert_eq!(
+        got,
+        rows(&[&["a", "2", "20", "2.5"], &["b", "3", "30", "NULL"]])
+    );
+
+    // A given numeric column only.
+    let (cols, got) = named_rows(&df.group_by(vec![col("k")]).sum(vec!["d", "i"]).unwrap());
+    assert_eq!(cols, names(&["k", "sum(d)", "sum(i)"]));
+    assert_eq!(got, rows(&[&["a", "4", "3"], &["b", "NULL", "3"]]));
+
+    // Rollup, cube and grouping sets (`GROUPING SETS ((k), ())` is `ROLLUP(k)`).
+    let (cols, got) = named_rows(&df.rollup(vec![col("k")]).sum(vec![]).unwrap());
+    assert_eq!(cols, names(&["k", "sum(i)", "sum(l)", "sum(d)"]));
+    assert_eq!(
+        got,
+        rows(&[
+            &["NULL", "6", "60", "4"],
+            &["a", "3", "30", "4"],
+            &["b", "3", "30", "NULL"]
+        ])
+    );
+    // With one grouping column, a cube is a rollup.
+    assert_eq!(
+        named_rows(&df.cube(vec![col("k")]).sum(vec![]).unwrap()),
+        named_rows(&df.rollup(vec![col("k")]).sum(vec![]).unwrap())
+    );
+    let grouping_sets = df
+        .grouping_sets(vec![vec![col("k")], vec![]])
+        .sum(vec![])
+        .unwrap();
+    assert_eq!(
+        named_rows(&grouping_sets).1,
+        named_rows(&df.rollup(vec![col("k")]).sum(vec![]).unwrap()).1
+    );
+
+    // Pivot: the numeric columns of each pivot value, or the given one.
+    let pivot = |grouped: spark_connect::group::GroupedData| {
+        grouped
+            .pivot(
+                col("p"),
+                Some(vec![Value::String("p".into()), Value::String("q".into())]),
+            )
+            .unwrap()
+    };
+    let (cols, got) = named_rows(&pivot(df.group_by(vec![col("k")])).sum(vec![]).unwrap());
+    assert_eq!(
+        cols,
+        names(&["k", "p_sum(i)", "p_sum(l)", "p_sum(d)", "q_sum(i)", "q_sum(l)", "q_sum(d)"])
+    );
+    assert_eq!(
+        got,
+        rows(&[
+            &["a", "1", "10", "1.5", "2", "20", "2.5"],
+            &["b", "3", "30", "NULL", "NULL", "NULL", "NULL"]
+        ])
+    );
+    let (cols, got) = named_rows(&pivot(df.group_by(vec![col("k")])).sum(vec!["i"]).unwrap());
+    assert_eq!(cols, names(&["k", "p", "q"]));
+    assert_eq!(got, rows(&[&["a", "1", "2"], &["b", "3", "NULL"]]));
+
+    // A column that is not numeric, or not in the schema, is NOT_NUMERIC_COLUMNS with the
+    // invalid columns in PySpark's order.
+    let check = |err: spark_connect::SparkError, invalid: &str| {
+        assert_eq!(err.kind, SparkErrorKind::TypeError);
+        assert_eq!(err.get_condition().as_deref(), Some("NOT_NUMERIC_COLUMNS"));
+        assert_eq!(
+            err.params.get("invalid_columns").map(String::as_str),
+            Some(invalid)
+        );
+    };
+    check(
+        df.group_by(vec![col("k")])
+            .sum(vec!["s"])
+            .err()
+            .expect("a string column"),
+        "['s']",
+    );
+    check(
+        df.group_by(vec![col("k")])
+            .min(vec!["i", "nope", "s"])
+            .err()
+            .expect("a missing and a string column"),
+        "['nope', 's']",
+    );
+    check(
+        pivot(df.group_by(vec![col("k")]))
+            .sum(vec!["s"])
+            .err()
+            .expect("a string column of a pivot"),
+        "['s']",
+    );
+    check(
+        df.rollup(vec![col("k")])
+            .avg(vec!["s"])
+            .err()
+            .expect("a string column of a rollup"),
+        "['s']",
+    );
+}
+
 #[test]
 fn dataframe_metadata_json_semantics() {
     if !should_run() {
