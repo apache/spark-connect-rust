@@ -2042,14 +2042,14 @@ impl PyDataFrame {
     /// `df.transform(func, *args, **kwargs)` == `func(df, *args, **kwargs)`.
     #[pyo3(signature = (func, *args, **kwargs))]
     fn transform(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         func: &Bound<'_, PyAny>,
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let this = Py::new(py, PyDataFrame::new(self.dataframe.clone()))?;
-        let mut call_args: Vec<Py<PyAny>> = vec![this.into_any()];
+        // As PySpark's, which passes `self`: a subclass of DataFrame keeps its methods and type.
+        let py = slf.py();
+        let mut call_args: Vec<Py<PyAny>> = vec![slf.clone().into_any().unbind()];
         for a in args.iter() {
             call_args.push(a.unbind());
         }
@@ -2440,10 +2440,11 @@ impl PyDataFrame {
         }
     }
 
-    /// Get the first n rows.
-    fn take(&self, py: Python<'_>, num: usize) -> PyResult<Vec<Py<PyAny>>> {
+    /// Get the first n rows, as PySpark's `DataFrame.take`, which is `limit(num).collect()`, so
+    /// the server checks `num`.
+    fn take(&self, py: Python<'_>, num: i32) -> PyResult<Vec<Py<PyAny>>> {
         let (rows, schema) = py
-            .detach(|| self.dataframe.take_with_schema(num))
+            .detach(|| self.dataframe.limit(num).collect_with_schema())
             .to_pyerr()?;
         rows_to_py(py, &self.dataframe, &rows, schema.as_ref())
     }
