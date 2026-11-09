@@ -252,6 +252,21 @@ fn retry_exception_bound_passed(
         .is_some_and(|ms| since.elapsed() >= Duration::from_millis(ms))
 }
 
+/// Let the server split the Arrow batches too large for one message into chunks, which the
+/// stream of the execution joins, as PySpark's client does, without a preferred chunk size.
+fn allow_arrow_batch_chunking(request: &mut ExecutePlanRequest) {
+    use spark_connect_proto::execute_plan_request::request_option::RequestOption as Kind;
+    use spark_connect_proto::execute_plan_request::RequestOption;
+    request.request_options.push(RequestOption {
+        request_option: Some(Kind::ResultChunkingOptions(
+            spark_connect_proto::ResultChunkingOptions {
+                allow_arrow_batch_chunking: true,
+                preferred_arrow_chunk_size: None,
+            },
+        )),
+    });
+}
+
 /// A hook of the executions of a client, as PySpark's `SparkSession.Hook.on_execute_plan`: it is
 /// called with each `ExecutePlanRequest` before the client sends it, and returns the request to
 /// send, which keeps the operation ID of the original.
@@ -776,6 +791,7 @@ impl SparkConnectClient {
         self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
         self.observe_on(&mut request.client_observed_server_side_session_id);
+        allow_arrow_batch_chunking(&mut request);
         let request = self.hooked(request)?;
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
@@ -972,6 +988,7 @@ impl SparkConnectClient {
         // is of the request that the hooks return.
         self.fill_user_context(&mut request.user_context);
         self.observe_on(&mut request.client_observed_server_side_session_id);
+        allow_arrow_batch_chunking(&mut request);
         let request = self.hooked(request)?;
         let iter = ExecutePlanResponseReattachableIterator::new(request);
         let start = iter.request().clone();

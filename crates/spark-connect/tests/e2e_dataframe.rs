@@ -3,7 +3,7 @@
 //! surface of dataframe.rs (set ops, dedup, joins, reshape, metadata, JSON, temp
 //! views, semantics). Run with SPARK_REMOTE set.
 
-use spark_connect::column::{col, lit};
+use spark_connect::column::{col, lit, lit_string};
 use spark_connect::dataframe::DataFrame;
 use spark_connect::functions as f;
 use spark_connect::plan::JoinType;
@@ -542,4 +542,24 @@ fn subqueries_return_the_rows_of_pyspark() {
         int_pairs(&t1.filter(f::r#struct(vec![col("a"), col("b")]).isin_subquery(&pairs))),
         vec![(1, 2)]
     );
+}
+
+/// A value over the 128 MiB message limit arrives as the chunks of its Arrow batch, which
+/// `collect` joins.
+#[test]
+fn collect_joins_the_chunks_of_a_value_over_the_message_limit() {
+    if !should_run() {
+        return;
+    }
+    let s = session();
+    let len: i64 = 129 * 1024 * 1024;
+    let df = s
+        .range(1)
+        .expect("range")
+        .select(vec![f::repeat(lit_string("x"), lit(len))]);
+    let rows = df.collect().unwrap();
+    assert_eq!(rows.len(), 1);
+    let value = rows[0].get(0).unwrap().as_str().unwrap();
+    assert_eq!(value.len(), len as usize);
+    assert!(value.bytes().all(|b| b == b'x'));
 }

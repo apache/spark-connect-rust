@@ -9,6 +9,7 @@ use spark_connect_core::error::Result;
 use spark_connect_core::runtime::CallbackGuard;
 use spark_connect_proto as proto;
 
+use crate::arrow_chunks::ArrowChunkAssembler;
 use crate::session::{ProgressHandler, ProgressHandlers, SparkSession};
 
 /// The progress of a stage of an execution, as PySpark's `StageInfo`.
@@ -124,24 +125,33 @@ impl Drop for ProgressTracker {
 pub(crate) struct ExecutionStream {
     stream: ReattachableResponseStream,
     progress: ProgressTracker,
+    chunks: ArrowChunkAssembler,
 }
 
 impl ExecutionStream {
     pub(crate) fn new(stream: ReattachableResponseStream, progress: ProgressTracker) -> Self {
-        ExecutionStream { stream, progress }
+        ExecutionStream {
+            stream,
+            progress,
+            chunks: ArrowChunkAssembler::default(),
+        }
     }
 
-    /// The next response of the execution, as `ReattachableResponseStream::message`.
+    /// The next response of the execution, as `ReattachableResponseStream::message`, with the
+    /// chunks of an Arrow batch joined into the batch: the response of a chunk that is not the
+    /// last one has no batch.
     pub(crate) async fn message(&mut self) -> Result<Option<proto::ExecutePlanResponse>> {
-        let response = self.stream.message().await?;
-        if let Some(response) = &response {
-            if let Some(proto::execute_plan_response::ResponseType::ExecutionProgress(progress)) =
-                &response.response_type
-            {
-                self.progress.update(progress, &response.operation_id);
-            }
+        let Some(mut response) = self.stream.message().await? else {
+            self.chunks.finish()?;
+            return Ok(None);
+        };
+        if let Some(proto::execute_plan_response::ResponseType::ExecutionProgress(progress)) =
+            &response.response_type
+        {
+            self.progress.update(progress, &response.operation_id);
         }
-        Ok(response)
+        self.chunks.push(&mut response)?;
+        Ok(Some(response))
     }
 }
 
