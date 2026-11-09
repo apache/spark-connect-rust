@@ -35,4 +35,4 @@ pyspark/sql/tests/connect/test_parity_dataframe.py::DataFrameParityTests::test_m
 pyspark/sql/tests/connect/test_parity_window.py::DataFrameParityTests::test_metadata_column  # same test-only 'testcat' InMemoryCatalog as the DataFrame test; the reference fails it too
 
 # --- tests by design for the drop-in ---
-pyspark/sql/tests/connect/test_connect_error.py::SparkConnectErrorTests::test_recursion_handling_for_plan_logging  # logs the Python plan of a deep DataFrame; the Rust core builds plans, so DataFrame._plan has no Python proto (dev/parity/known-differences.md)
+pyspark/sql/tests/connect/test_connect_error.py::SparkConnectErrorTests::test_recursion_handling_for_plan_logging  # by design: the official 4.3.0 reference passes it on the same server; ours fails at the test's spark._client / DataFrame._plan.to_proto (the Rust core builds plans, so there is no Python proto; dev/parity/known-differences.md)
