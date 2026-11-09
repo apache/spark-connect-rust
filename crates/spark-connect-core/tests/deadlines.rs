@@ -824,3 +824,49 @@ async fn reattach_of_a_stream_whose_client_was_closed_raises_no_active_session()
     assert!(fixture.state.reattaches.lock().unwrap().is_empty());
     assert_eq!(*fixture.state.executes.lock().unwrap(), 1);
 }
+
+#[tokio::test]
+async fn retry_of_an_execution_whose_client_was_closed_raises_no_active_session() {
+    // As the reference: each attempt of a call goes through the stub of the client, which
+    // raises NO_ACTIVE_SESSION once the client is closed. An execution that waits to retry when
+    // its session is stopped raises that error at its next attempt, and sends nothing more.
+    let fixture = Fixture::start(
+        (0..1000)
+            .map(|_| Step::Fail(Status::unavailable("server unavailable")))
+            .collect(),
+        vec![],
+        RetryPolicy {
+            max_retries: Some(1000),
+            initial_backoff_ms: 20,
+            max_backoff_ms: Some(20),
+            ..RetryPolicy::default()
+        },
+    )
+    .await;
+    let client = fixture.client.clone();
+    let call = tokio::spawn(async move {
+        client
+            .execute_plan_reattachable(execute_request())
+            .await
+            .map(|_| ())
+    });
+    // The execution is retried before its session stops.
+    let state = fixture.state.clone();
+    bounded(async {
+        while *state.executes.lock().unwrap() < 2 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+
+    fixture.client.close();
+    let error = bounded(call).await.unwrap().unwrap_err();
+    assert_eq!(
+        error.get_condition().as_deref(),
+        Some("NO_ACTIVE_SESSION"),
+        "{error:?}"
+    );
+    let sent = *fixture.state.executes.lock().unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(*fixture.state.executes.lock().unwrap(), sent);
+}

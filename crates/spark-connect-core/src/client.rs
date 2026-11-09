@@ -843,6 +843,10 @@ impl SparkConnectClient {
                     if self.retry_policy.can_retry(&status) {
                         if let Some(wait_ms) = state.next_attempt(None) {
                             tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                            // As the reference's `_stub`, through which each attempt goes: once
+                            // the client is closed (its session stopped while the call waited),
+                            // the retry raises NO_ACTIVE_SESSION and sends nothing.
+                            self.ensure_open()?;
                             continue;
                         }
                     }
@@ -1574,6 +1578,8 @@ impl SparkConnectClient {
                     if self.retry_policy.can_retry(&status) {
                         if let Some(wait_ms) = state.next_attempt(None) {
                             tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                            // As in `with_retry`: a closed client sends no more attempts.
+                            self.ensure_open()?;
                             continue;
                         }
                     }
