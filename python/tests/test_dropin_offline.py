@@ -9247,6 +9247,47 @@ def test_decimal_rescaling_follows_pyspark(
     assert not payload.exists()
 
 
+def test_non_nullable_null_type_is_rejected_before_the_rpc_as_pyspark(mock_connect):
+    # As PySpark's to_arrow_schema, which local rows of a non-empty createDataFrame go through:
+    # a null type that is not nullable, as a field, an array element, a map value or a map key,
+    # at any depth, raises ValueError before anything is sent, never a panic or an Arrow error.
+    # Empty data is not converted, and a nullable null type is accepted.
+    spark, service = mock_connect
+    null = T.NullType
+
+    def struct(*fields):
+        return T.StructType([T.StructField(name, typ, nullable) for name, typ, nullable in fields])
+
+    rejected = [
+        ([(None,)], struct(("a", null(), False))),
+        ([Row(a=[])], struct(("a", T.ArrayType(null(), False), True))),
+        ([Row(a=[None])], struct(("a", T.ArrayType(null(), False), True))),
+        ([Row(a=[[]])], struct(("a", T.ArrayType(T.ArrayType(null(), False)), True))),
+        ([Row(a=[Row(x=None)])], struct(("a", T.ArrayType(struct(("x", null(), False))), True))),
+        ([Row(m={})], struct(("m", T.MapType(T.StringType(), null(), False), True))),
+        ([Row(m={"k": None})], struct(("m", T.MapType(T.StringType(), null(), False), True))),
+        ([Row(m={})], struct(("m", T.MapType(null(), T.StringType(), True), True))),
+        ([Row(s=Row(x=None))], struct(("s", struct(("x", null(), False)), True))),
+    ]
+    for data, schema in rejected:
+        calls = service.execute_calls
+        with pytest.raises(ValueError) as error:
+            spark.createDataFrame(data, schema)
+        assert type(error.value) is ValueError
+        assert str(error.value) == "A null type field may not be non-nullable"
+        assert service.execute_calls == calls
+    accepted = [
+        ([], struct(("a", null(), False))),
+        ([Row(a=[])], struct(("a", T.ArrayType(null(), True), True))),
+        ([Row(a=[None])], struct(("a", T.ArrayType(null(), True), True))),
+        ([(None,)], struct(("a", null(), True))),
+    ]
+    calls = service.execute_calls
+    for data, schema in accepted:
+        spark.createDataFrame(data, schema)
+    assert service.execute_calls == calls
+
+
 @pytest.mark.parametrize("kind", ["tuples", "pandas"])
 @pytest.mark.parametrize("schema_mode", ["explicit", "names", "inferred"])
 @pytest.mark.parametrize("texts", [

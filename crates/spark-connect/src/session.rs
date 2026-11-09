@@ -1679,12 +1679,15 @@ fn values_to_arrow(values: &[&Value], dt: &DataType) -> Result<Arc<dyn arrow::ar
                 datatype_to_arrow(element_type)?,
                 *contains_null,
             ));
-            Ok(Arc::new(ListArray::new(
+            // A non-nullable element that has nulls is an error, not a panic, as for a struct.
+            ListArray::try_new(
                 field,
                 OffsetBuffer::new(offsets.into()),
                 child_arr,
                 Some(NullBuffer::new(valid.finish())),
-            )))
+            )
+            .map(|array| Arc::new(array) as Arc<dyn Array>)
+            .map_err(|e| SparkError::connect_msg(format!("list build: {e}")))
         }
         // The struct of a VARIANT's value and metadata, and of a GEOMETRY's or a GEOGRAPHY's
         // srid and WKB, as `datatype_to_arrow` declares; their fields are not nullable, so a
@@ -2524,6 +2527,26 @@ mod tests {
             dedup_field_names(["a", "a", "b", "a"]),
             vec!["a_0", "a_1", "b", "a_2"]
         );
+    }
+
+    #[test]
+    fn a_non_nullable_element_with_nulls_is_an_error_not_a_panic() {
+        // An array of a non-nullable NullType that has a null element: Arrow rejects the
+        // element field, which must be an error, as for a struct field with nulls.
+        let array = DataType::Array {
+            element_type: Box::new(DataType::Null),
+            contains_null: false,
+        };
+        let value = Value::List(vec![Value::Null]);
+        let error = values_to_arrow(&[&value], &array)
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("list build"), "{error}");
+        assert!(error.contains("cannot contain nulls"), "{error}");
+        // An empty list has no null element, which Arrow accepts.
+        let empty = Value::List(vec![]);
+        assert!(values_to_arrow(&[&empty], &array).is_ok());
     }
 
     #[test]
