@@ -1513,6 +1513,33 @@ def test_create_dataframe_with_a_schema_edited_in_place(session):
     assert df.collect() == [Row(a=1, b="x", c=2.0)]
 
 
+def test_create_dataframe_of_datetime_labels_keeps_ntz_values_as_pyspark(session):
+    # As PySpark's: a datetime64 column under a DatetimeIndex label (`.T` of a time-indexed
+    # frame) reads back unchanged with an explicit timestamp_ntz. The naive values are not
+    # shifted by a time zone, of the session or of the client's local time, which is set to
+    # Asia/Seoul here as well: a client in UTC does not show the shift.
+    import pandas as pd
+
+    frame = pd.DataFrame({"x": pd.Series(pd.to_datetime(["2020-01-02 03:00", None]))})
+    frame.columns = pd.DatetimeIndex(["2020-01-01"])
+    previous = session.conf.get("spark.sql.session.timeZone")
+    previous_local = os.environ.get("TZ")
+    session.conf.set("spark.sql.session.timeZone", "Asia/Seoul")
+    os.environ["TZ"] = "Asia/Seoul"
+    time.tzset()
+    try:
+        df = session.createDataFrame(frame, "p timestamp_ntz")
+        assert df.schema.simpleString() == "struct<p:timestamp_ntz>"
+        assert df.collect() == [Row(p=datetime(2020, 1, 2, 3)), Row(p=None)]
+    finally:
+        session.conf.set("spark.sql.session.timeZone", previous)
+        if previous_local is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_local
+        time.tzset()
+
+
 def test_create_dataframe_from_empty_arrow_table(session):
     empty = pa.table({"a": pa.array([], pa.int64()), "b": pa.array([], pa.string())})
     df = session.createDataFrame(empty, "a long, b string")
