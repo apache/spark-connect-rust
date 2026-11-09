@@ -520,8 +520,12 @@ impl DataStreamWriter {
         // with the result of its start, as the session has client-side listeners, and the client
         // posts it to them before it gives back the query.
         if let Some(event_json) = started_event {
+            let manager = self.session.streams();
+            // Mark the delivery before its listener snapshot is taken, so that a removal
+            // from another thread waits for it, as PySpark's bus holds its lock for it.
+            let _dispatch = manager.started_dispatch();
             on_started(
-                &self.session.streams(),
+                &manager,
                 &StreamingQueryListenerEvent {
                     event_type: QUERY_STARTED_EVENT,
                     event_json,
@@ -1002,6 +1006,29 @@ struct ListenerBusState {
     /// failure, to its snapshot of the listeners. PySpark's bus holds its lock during
     /// delivery, so a removal from another thread waits for it.
     dispatching: Option<u64>,
+    /// The threads delivering a synchronous started event in `start`/`toTable`, one entry
+    /// per delivery. As with `dispatching`, a removal from another thread waits for them.
+    started_dispatches: Vec<std::thread::ThreadId>,
+}
+
+/// A synchronous started event in delivery by the calling thread of `start`/`toTable`.
+struct StartedDispatch {
+    bus: Arc<ListenerBus>,
+    thread: std::thread::ThreadId,
+}
+
+impl Drop for StartedDispatch {
+    fn drop(&mut self) {
+        let mut state = self.bus.state.lock().unwrap();
+        if let Some(index) = state
+            .started_dispatches
+            .iter()
+            .rposition(|thread| *thread == self.thread)
+        {
+            state.started_dispatches.remove(index);
+        }
+        self.bus.changed.notify_all();
+    }
 }
 
 /// An event delivery or terminal failure notification by the worker of `generation`.
@@ -1270,9 +1297,15 @@ impl StreamingQueryManager {
                 // including the removed listener, to finish. This also covers a
                 // terminal error notification. A callback of the bus does not wait,
                 // as it would wait for its own delivery.
-                if state.worker_id != Some(std::thread::current().id()) {
+                let current = std::thread::current().id();
+                if state.worker_id != Some(current) {
                     let generation = state.generation;
-                    while state.dispatching == Some(generation) {
+                    while state.dispatching == Some(generation)
+                        || state
+                            .started_dispatches
+                            .iter()
+                            .any(|thread| *thread != current)
+                    {
                         state = self.bus.changed.wait(state).unwrap();
                     }
                 }
@@ -1330,6 +1363,22 @@ impl StreamingQueryManager {
             .iter()
             .map(|(_, listener)| Arc::clone(listener))
             .collect()
+    }
+
+    /// Mark the calling thread as delivering a synchronous started event until the returned
+    /// guard drops. Take it before the listener snapshot of the delivery.
+    fn started_dispatch(&self) -> StartedDispatch {
+        let thread = std::thread::current().id();
+        self.bus
+            .state
+            .lock()
+            .unwrap()
+            .started_dispatches
+            .push(thread);
+        StartedDispatch {
+            bus: Arc::clone(&self.bus),
+            thread,
+        }
     }
 
     /// Post `event` to the client-side listeners of the session.
@@ -2328,5 +2377,96 @@ mod tests {
         let streams = spark.streams();
         assert!(!streams.remove_listener_found("no-such-id").unwrap());
         streams.remove_listener("no-such-id").unwrap();
+    }
+
+    #[test]
+    fn nonlast_removal_waits_for_a_started_event_in_delivery_from_another_thread() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        struct Listener;
+        impl StreamingQueryListener for Listener {
+            fn on_event(&self, _: &StreamingQueryListenerEvent) {}
+        }
+
+        let spark = session();
+        let manager = spark.streams();
+        {
+            let mut state = manager.bus.state.lock().unwrap();
+            state
+                .listeners
+                .push(("first".to_string(), Arc::new(Listener)));
+            state
+                .listeners
+                .push(("second".to_string(), Arc::new(Listener)));
+        }
+        let dispatch = manager.started_dispatch();
+        let (removed, removal) = mpsc::channel();
+        std::thread::scope(|scope| {
+            // Drop the delivery guard even if an assertion fails, so the scoped remover
+            // is released before the scope joins it.
+            let dispatch = dispatch;
+            let manager = &manager;
+            scope.spawn(move || {
+                assert!(manager.remove_listener_found("second").unwrap());
+                removed.send(()).unwrap();
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if manager.bus.state.lock().unwrap().listeners.len() == 1 {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "remover did not reach the bus");
+                std::thread::yield_now();
+            }
+            assert!(matches!(
+                removal.recv_timeout(Duration::from_millis(100)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ));
+            drop(dispatch);
+            removal
+                .recv_timeout(Duration::from_secs(5))
+                .expect("removal finishes once the started event is delivered");
+        });
+        let state = manager.bus.state.lock().unwrap();
+        assert!(state.started_dispatches.is_empty());
+        assert_eq!(state.listeners.len(), 1);
+    }
+
+    #[test]
+    fn nonlast_removal_from_the_started_event_thread_does_not_wait_for_itself() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        struct Listener;
+        impl StreamingQueryListener for Listener {
+            fn on_event(&self, _: &StreamingQueryListenerEvent) {}
+        }
+
+        let spark = session();
+        {
+            let bus = spark.listener_bus();
+            let mut state = bus.state.lock().unwrap();
+            state
+                .listeners
+                .push(("first".to_string(), Arc::new(Listener)));
+            state
+                .listeners
+                .push(("second".to_string(), Arc::new(Listener)));
+        }
+        let (result, returned) = mpsc::channel();
+        // The delivery and its callback removal run on one thread; a self-wait would hang.
+        std::thread::spawn(move || {
+            let manager = spark.streams();
+            let _dispatch = manager.started_dispatch();
+            result
+                .send(manager.remove_listener_found("second"))
+                .unwrap();
+        });
+        let removed = returned
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a removal from its own started event does not wait for itself")
+            .unwrap();
+        assert!(removed);
     }
 }
