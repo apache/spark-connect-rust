@@ -1406,6 +1406,38 @@ fn date_days(obj: &Bound<'_, PyAny>) -> PyResult<i32> {
     Ok(c_int_from_python(obj, 32, Some("Integer too large for date32"))? as i32)
 }
 
+/// Whether a field of `fields`, or a type in one, is a null type that is not nullable. PyArrow
+/// rejects such a field when it builds it, `pa.field(name, pa.null(), nullable=False)`, which
+/// PySpark's `to_arrow_schema` does. A map key is never nullable.
+pub(crate) fn has_non_nullable_null_type(fields: &[StructField]) -> bool {
+    fn in_type(dt: &DataType) -> bool {
+        match dt {
+            DataType::Struct { fields } => has_non_nullable_null_type(fields),
+            DataType::Array {
+                element_type,
+                contains_null,
+            } => {
+                (!contains_null && matches!(**element_type, DataType::Null))
+                    || in_type(element_type)
+            }
+            DataType::Map {
+                key_type,
+                value_type,
+                value_contains_null,
+            } => {
+                matches!(**key_type, DataType::Null)
+                    || (!value_contains_null && matches!(**value_type, DataType::Null))
+                    || in_type(key_type)
+                    || in_type(value_type)
+            }
+            _ => false,
+        }
+    }
+    fields
+        .iter()
+        .any(|f| (!f.nullable && matches!(f.data_type, DataType::Null)) || in_type(&f.data_type))
+}
+
 /// The `UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION` of the first char, varchar, year-month or
 /// calendar interval type of `dt`, depth first, which PySpark's `to_arrow_schema` raises when it
 /// converts the schema of local rows to Arrow: it has no Arrow type of these types.

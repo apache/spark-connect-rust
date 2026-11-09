@@ -886,8 +886,13 @@ impl PySparkSession {
                 }
             }
         }
-        // Then, as PySpark, the schema converts to Arrow, which has no char, varchar, year-month or
-        // calendar interval type.
+        // Then, as PySpark, the schema converts to Arrow, which rejects a null type that is not
+        // nullable, and has no char, varchar, year-month or calendar interval type.
+        if infer::has_non_nullable_null_type(&fields) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "A null type field may not be non-nullable",
+            ));
+        }
         for field in &fields {
             if let Some(err) = infer::unsupported_arrow_type(py, &field.data_type)? {
                 return Err(err);
