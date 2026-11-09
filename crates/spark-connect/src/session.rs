@@ -372,6 +372,10 @@ impl SparkSession {
         &self.plan_ids
     }
 
+    pub(crate) fn plan_ids_shared(&self) -> &Arc<PlanIds> {
+        &self.plan_ids
+    }
+
     /// Get the underlying client.
     pub(crate) fn client(&self) -> &Arc<SparkConnectClient> {
         &self.client
@@ -788,12 +792,14 @@ impl SparkSession {
 
     /// Execute `command`, a command built outside the core, such as the ML commands of
     /// `pyspark.ml`, and return the responses of the server, as the Python client's
-    /// `execute_command` reads them. Not a stable API.
+    /// `execute_command` reads them. The placeholders of its relations are replaced, as
+    /// `DataFrame::from_relation` does. Not a stable API.
     #[doc(hidden)]
     pub fn execute_command_proto(
         &self,
-        command: spark_connect_proto::Command,
+        mut command: spark_connect_proto::Command,
     ) -> Result<Vec<spark_connect_proto::ExecutePlanResponse>> {
+        crate::plan::resolve_command(&mut command)?;
         let Some(command_type) = command.command_type else {
             return Err(SparkError::value_msg("a command of no command type"));
         };

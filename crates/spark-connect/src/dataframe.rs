@@ -1064,9 +1064,21 @@ impl DataFrame {
 
     /// A DataFrame of `relation`, a relation built outside the core, such as the plans of
     /// `pyspark.ml`, which the core sends as it is, keeping `owner`, if any, alive while any
-    /// DataFrame of it is. Not a stable API.
+    /// DataFrame of it is. The placeholders of `relation`, which stand for the DataFrames that
+    /// the plans of `pyspark.ml` take as input (see `placeholder_relation`), are replaced by
+    /// the relations of those DataFrames. Not a stable API.
     #[doc(hidden)]
     pub fn from_relation(
+        session: SparkSession,
+        mut relation: proto::Relation,
+        owner: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    ) -> Result<DataFrame> {
+        crate::plan::resolve_relation(&mut relation)?;
+        Ok(DataFrame::from_raw_relation(session, relation, owner))
+    }
+
+    /// The DataFrame of `relation`, as `from_relation`, of a relation without placeholders.
+    fn from_raw_relation(
         session: SparkSession,
         relation: proto::Relation,
         owner: Option<Arc<dyn std::any::Any + Send + Sync>>,
@@ -1087,7 +1099,7 @@ impl DataFrame {
     #[doc(hidden)]
     pub fn from_sent_relation(session: SparkSession, relation: proto::Relation) -> DataFrame {
         let plan_id = relation.common.as_ref().and_then(|common| common.plan_id);
-        let dataframe = DataFrame::from_relation(session, relation, None);
+        let dataframe = DataFrame::from_raw_relation(session, relation, None);
         if let Some(plan_id) = plan_id {
             dataframe
                 .session
@@ -1102,6 +1114,16 @@ impl DataFrame {
     #[doc(hidden)]
     pub fn to_relation(&self) -> proto::Relation {
         build_input_relation(&self.plan, &self.session)
+    }
+
+    /// A relation that stands for the relation of this DataFrame, `to_relation`, in a relation
+    /// built outside the core, such as a plan of `pyspark.ml`, which the core replaces by that
+    /// relation when the relation reaches it (`from_relation`, `execute_command_proto`). It
+    /// is shallow, so it is cheap to build and to decode whatever the depth of this DataFrame.
+    /// Not a stable API.
+    #[doc(hidden)]
+    pub fn placeholder_relation(&self) -> proto::Relation {
+        crate::plan::placeholder_relation(&self.plan, self.session.plan_ids_shared())
     }
 
     /// Get the schema of this DataFrame.

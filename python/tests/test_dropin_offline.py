@@ -10372,6 +10372,65 @@ def test_arrow_input_explicit_schema_matching_width(schema, values):
     assert names is None
 
 
+def test_ml_plans_send_a_deep_dataframe_without_parsing_it_as_pyspark(mock_connect):
+    # As PySpark's pyspark.ml, which builds its plans over the relation of a DataFrame without
+    # parsing it: a DataFrame of 120 chained withColumn calls is nested deeper than a protobuf
+    # decoder parses. A plan over it holds a shallow placeholder of that relation, which the core
+    # replaces with the relation when the plan reaches it, so the server receives the relation.
+    import gc
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.plan import LogicalPlan
+
+    class Transform(LogicalPlan):
+        # The plan of a transformer of pyspark.ml.connect.proto, over its input.
+        def __init__(self, child, name):
+            super().__init__(child)
+            self._name = name
+
+        def plan(self, session):
+            plan = self._create_proto_relation()
+            plan.ml_relation.transform.input.CopyFrom(self._child.plan(session))
+            plan.ml_relation.transform.obj_ref.CopyFrom(pb2.ObjectRef(id=self._name))
+            return plan
+
+    spark, service = mock_connect
+    deep = spark.range(2)
+    for i in range(120):
+        deep = deep.withColumn(f"c{i}", F.lit(i))
+    relation = deep._relation_bytes()
+    # The placeholder of the relation is shallow, whatever the depth of the DataFrame.
+    assert len(deep._plan.plan(spark.client).SerializeToString()) < 128
+    # Two plans of transformers, one over the other, over the DataFrame. The request is read as
+    # bytes, as the deep relation is not parsed by protobuf: ExecutePlanRequest.plan=3,
+    # Plan.root=1, Relation.ml_relation=300, MlRelation.transform=1, Transform.input=3,
+    # Transform.obj_ref=1 and ObjectRef.id=1.
+    nested = DataFrame(Transform(Transform(deep._plan, "m1"), "m2"), spark)
+    nested.collect()
+    root = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+    outer = parse_message(parse_message(root)[300][0])[1][0]
+    assert parse_message(parse_message(outer)[1][0]) == {1: [b"m2"]}
+    inner = parse_message(parse_message(outer)[3][0])
+    inner_transform = parse_message(parse_message(inner[300][0])[1][0])
+    assert parse_message(inner_transform[1][0]) == {1: [b"m1"]}
+    assert inner_transform[3][0] == relation
+
+    # A placeholder of a DataFrame that is gone is an error, and keeps nothing alive.
+    gone = spark.range(3)
+    placeholder = gone._plan.plan(spark.client)
+    del gone
+    gc.collect()
+
+    class Gone(LogicalPlan):
+        def plan(self, session):
+            return placeholder
+
+    with pytest.raises(Exception, match="no longer exists"):
+        DataFrame(Gone(None), spark)
+
+
 @pytest.mark.parametrize("schema", [
     T.StructType([]),
     T.StructType([T.StructField("x", T.LongType()), T.StructField("y", T.LongType())]),
