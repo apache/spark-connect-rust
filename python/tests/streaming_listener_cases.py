@@ -345,6 +345,54 @@ class TestStreamingListenerLifecycle:
         assert service.release_session_calls == 0
 
 
+    def test_streaming_listener_removal_waits_for_the_event_in_delivery(self, mock_connect):
+        # As PySpark's bus, whose delivery of an event holds the lock of its removal: a
+        # listener removed by another thread while an event is delivered gets that event
+        # before removeListener returns, and no event after it.
+        spark, service = mock_connect
+        service.listener_bus_enabled = True
+        order = []
+        entered, release = threading.Event(), threading.Event()
+
+        class Blocking(IdleListener):
+            def onQueryIdle(self, event):
+                order.append("first " + event.timestamp)
+                entered.set()
+                assert release.wait(5)
+                super().onQueryIdle(event)
+
+        class Recording(IdleListener):
+            def onQueryIdle(self, event):
+                order.append("second " + event.timestamp)
+                super().onQueryIdle(event)
+
+        def remove():
+            spark.streams.removeListener(second)
+            order.append("removed")
+
+        first, second = Blocking(), Recording()
+        try:
+            spark.streams.addListener(first)
+            spark.streams.addListener(second)
+            emit_idle(service, spark, "in-delivery")
+            assert entered.wait(5)
+            removal = threading.Thread(target=remove)
+            removal.start()
+            # The first listener holds the delivery, so the removal waits for it.
+            removal.join(0.5)
+            assert removal.is_alive()
+            release.set()
+            removal.join(5)
+            assert not removal.is_alive()
+            assert order == ["first in-delivery", "second in-delivery", "removed"]
+            emit_idle(service, spark, "after")
+            first.wait_for("after")
+            assert second.timestamps == ["in-delivery"]
+        finally:
+            release.set()
+            spark.streams.close()
+
+
 def concurrent_close_case(remove_failure, callback_action):
     from _mock_connect_server import mock_connect_session
 
