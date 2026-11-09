@@ -122,6 +122,65 @@ class _Color(enum.Enum):
 _UTF8 = 'string { collation: "UTF8_BINARY" }'
 
 
+def test_ml_cache_queries_are_those_of_pyspark(ml_mock):
+    # As PySpark Connect's SparkConnectClient._get_ml_cache_info and _query_model_size: the
+    # get_cache_info and get_model_size commands, and the JSON of the cached objects, or the size
+    # of the model, of their results.
+    spark, service = ml_mock
+    client = spark.client
+    cached = [pb2.Expression.Literal(string='{"class": "a"}'), pb2.Expression.Literal(string="{}")]
+    service.execute_payload = _ml_result(
+        param=pb2.Expression.Literal(array=pb2.Expression.Literal.Array(elements=cached))
+    )
+    assert client._get_ml_cache_info() == ['{"class": "a"}', "{}"]
+    (command,) = _commands(service)
+    assert command.ml_command.HasField("get_cache_info")
+
+    service.execute_payload = _operator_info("ref-1")
+    assert client._get_ml_cache_info() == []
+
+    service.execute_payload = _ml_result(param=pb2.Expression.Literal(long=42))
+    assert client._query_model_size("ref-1") == 42
+    command = _commands(service)[-1]
+    assert command.ml_command.get_model_size.model_ref == pb2.ObjectRef(id="ref-1")
+
+
+def test_ml_connect_fitted_scalers_transform_the_cached_model(ml_mock):
+    # As the fitted models of PySpark Connect: fit sends an MlCommand.Fit of the estimator, and the
+    # transform of the fitted model refers to the object that the server cached for the fit, not to
+    # a transformer of the estimator's name, which the server rejects.
+    from pyspark.ml.connect.feature import MaxAbsScaler, StandardScaler, StringIndexer
+
+    spark, service = ml_mock
+    df = spark.range(1).selectExpr("array(1.0D, 2.0D) AS f", "'a' AS s")
+    models = []  # Kept alive, so that no model is released during the checks.
+    for cls, name, column in [
+        (StandardScaler, "org.apache.spark.ml.feature.StandardScaler", "f"),
+        (MaxAbsScaler, "org.apache.spark.ml.feature.MaxAbsScaler", "f"),
+        (StringIndexer, "org.apache.spark.ml.feature.StringIndexer", "s"),
+    ]:
+        sent = len(service.execute_requests)
+        service.execute_payload = _operator_info("model-1")
+        estimator = cls(inputCol=column, outputCol="o")
+        models.append(estimator.fit(df))
+        fit = _commands(service)[sent].ml_command.fit
+        assert fit.estimator.name == name
+        assert fit.estimator.type == pb2.MlOperator.OPERATOR_TYPE_ESTIMATOR
+        assert dict(fit.params.params) == {
+            "inputCol": pb2.Expression.Literal(string=column),
+            "outputCol": pb2.Expression.Literal(string="o"),
+        }
+        assert fit.dataset == _relation(df)
+
+        scaled = models[-1].transform(df)
+        assert len(service.execute_requests) == sent + 1
+        transform = _relation(scaled).ml_relation.transform
+        assert transform.obj_ref == pb2.ObjectRef(id="model-1")
+        assert not transform.HasField("transformer")
+        assert transform.input == _relation(df)
+        assert transform.params.params["outputCol"] == pb2.Expression.Literal(string="o")
+
+
 @pytest.mark.parametrize(
     "value, expected",
     [

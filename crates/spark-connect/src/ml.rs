@@ -401,6 +401,23 @@ impl StandardScaler {
     pub fn output_col(&self) -> &str {
         &self.output_col
     }
+
+    fn model_from_info(
+        &self,
+        info: proto::ml_command_result::MlOperatorInfo,
+        session: &SparkSession,
+    ) -> spark_connect_core::error::Result<StandardScalerModel> {
+        let cached = CachedModel::from_info(&info, session, "StandardScaler")?;
+        Ok(StandardScalerModel {
+            operator: MlOperator::with_uid(
+                "org.apache.spark.ml.feature.StandardScalerModel",
+                info.uid.as_deref().unwrap_or(&self.operator.uid),
+                OperatorType::Model,
+            ),
+            params: self.params.clone(),
+            cached,
+        })
+    }
 }
 
 impl Default for StandardScaler {
@@ -426,25 +443,20 @@ impl Estimator for StandardScaler {
         &mut self.params
     }
 
-    fn fit_impl(&mut self, _df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
-        // Create a StandardScalerModel from this estimator
-        let model = StandardScalerModel {
-            operator: MlOperator::with_uid(
-                &self.operator.name,
-                &self.operator.uid,
-                OperatorType::Model,
-            ),
-            params: self.params.clone(),
-        };
-        Ok(Box::new(model))
+    fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
+        // The server fits the scaler and caches the model, as PySpark does.
+        let info = fit_via_command(&self.operator, &self.params, df)?;
+        Ok(Box::new(self.model_from_info(info, &df.session)?))
     }
 }
 
-/// StandardScalerModel: fitted model from StandardScaler.
+/// StandardScalerModel: a StandardScaler fitted by Spark Connect and cached for its fitting
+/// session. Its transform refers to the cached model, as a fitted PySpark model's does.
 #[derive(Debug, Clone)]
 pub struct StandardScalerModel {
     operator: MlOperator,
     params: Params,
+    cached: CachedModel,
 }
 
 impl Transformer for StandardScalerModel {
@@ -464,23 +476,12 @@ impl Transformer for StandardScalerModel {
         &mut self.params
     }
 
+    fn build_ml_relation(&self, input: &DataFrame) -> proto::MlRelation {
+        self.cached.build_ml_relation(input, &self.params)
+    }
+
     fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
-        // Build an MlRelation for transformation
-        let ml_relation = self.build_ml_relation(df);
-
-        // Wrap it in a Relation
-        let mut relation = proto::Relation::default();
-        relation.common = Some(proto::RelationCommon::default());
-        relation.rel_type = Some(proto::relation::RelType::MlRelation(Box::new(ml_relation)));
-
-        // Wrap the built MlRelation as the plan; its `to_proto` emits the relation as-is.
-        let plan = LogicalPlan::MlTransform {
-            ml_relation: relation,
-            input: df.plan.clone(),
-            owner: None,
-        };
-
-        Ok(DataFrame::new(df.session.clone(), plan))
+        self.cached.transform(df, &self.params)
     }
 }
 
@@ -613,6 +614,23 @@ impl StringIndexer {
     pub fn output_col(&self) -> &str {
         &self.output_col
     }
+
+    fn model_from_info(
+        &self,
+        info: proto::ml_command_result::MlOperatorInfo,
+        session: &SparkSession,
+    ) -> spark_connect_core::error::Result<StringIndexerModel> {
+        let cached = CachedModel::from_info(&info, session, "StringIndexer")?;
+        Ok(StringIndexerModel {
+            operator: MlOperator::with_uid(
+                "org.apache.spark.ml.feature.StringIndexerModel",
+                info.uid.as_deref().unwrap_or(&self.operator.uid),
+                OperatorType::Model,
+            ),
+            params: self.params.clone(),
+            cached,
+        })
+    }
 }
 
 impl Default for StringIndexer {
@@ -638,28 +656,20 @@ impl Estimator for StringIndexer {
         &mut self.params
     }
 
-    fn fit_impl(&mut self, _df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
-        let model = StringIndexerModel {
-            operator: MlOperator::with_uid(
-                &self.operator.name,
-                &self.operator.uid,
-                OperatorType::Model,
-            ),
-            params: self.params.clone(),
-            input_col: self.input_col.clone(),
-            output_col: self.output_col.clone(),
-        };
-        Ok(Box::new(model))
+    fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
+        // The server fits the indexer and caches the model, as PySpark does.
+        let info = fit_via_command(&self.operator, &self.params, df)?;
+        Ok(Box::new(self.model_from_info(info, &df.session)?))
     }
 }
 
-/// StringIndexerModel: fitted model from StringIndexer.
+/// StringIndexerModel: a StringIndexer fitted by Spark Connect and cached for its fitting
+/// session. Its transform refers to the cached model, as a fitted PySpark model's does.
 #[derive(Debug, Clone)]
 pub struct StringIndexerModel {
     pub operator: MlOperator,
     pub params: Params,
-    pub input_col: String,
-    pub output_col: String,
+    cached: CachedModel,
 }
 
 impl Transformer for StringIndexerModel {
@@ -679,17 +689,12 @@ impl Transformer for StringIndexerModel {
         &mut self.params
     }
 
+    fn build_ml_relation(&self, input: &DataFrame) -> proto::MlRelation {
+        self.cached.build_ml_relation(input, &self.params)
+    }
+
     fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
-        let ml_relation = self.build_ml_relation(df);
-        let mut relation = proto::Relation::default();
-        relation.common = Some(proto::RelationCommon::default());
-        relation.rel_type = Some(proto::relation::RelType::MlRelation(Box::new(ml_relation)));
-        let plan = LogicalPlan::MlTransform {
-            ml_relation: relation,
-            input: df.plan.clone(),
-            owner: None,
-        };
-        Ok(DataFrame::new(df.session.clone(), plan))
+        self.cached.transform(df, &self.params)
     }
 }
 
@@ -740,6 +745,23 @@ impl MaxAbsScaler {
     pub fn output_col(&self) -> &str {
         &self.output_col
     }
+
+    fn model_from_info(
+        &self,
+        info: proto::ml_command_result::MlOperatorInfo,
+        session: &SparkSession,
+    ) -> spark_connect_core::error::Result<MaxAbsScalerModel> {
+        let cached = CachedModel::from_info(&info, session, "MaxAbsScaler")?;
+        Ok(MaxAbsScalerModel {
+            operator: MlOperator::with_uid(
+                "org.apache.spark.ml.feature.MaxAbsScalerModel",
+                info.uid.as_deref().unwrap_or(&self.operator.uid),
+                OperatorType::Model,
+            ),
+            params: self.params.clone(),
+            cached,
+        })
+    }
 }
 
 impl Default for MaxAbsScaler {
@@ -765,28 +787,20 @@ impl Estimator for MaxAbsScaler {
         &mut self.params
     }
 
-    fn fit_impl(&mut self, _df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
-        let model = MaxAbsScalerModel {
-            operator: MlOperator::with_uid(
-                &self.operator.name,
-                &self.operator.uid,
-                OperatorType::Model,
-            ),
-            params: self.params.clone(),
-            input_col: self.input_col.clone(),
-            output_col: self.output_col.clone(),
-        };
-        Ok(Box::new(model))
+    fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
+        // The server fits the scaler and caches the model, as PySpark does.
+        let info = fit_via_command(&self.operator, &self.params, df)?;
+        Ok(Box::new(self.model_from_info(info, &df.session)?))
     }
 }
 
-/// MaxAbsScalerModel: fitted model from MaxAbsScaler.
+/// MaxAbsScalerModel: a MaxAbsScaler fitted by Spark Connect and cached for its fitting
+/// session. Its transform refers to the cached model, as a fitted PySpark model's does.
 #[derive(Debug, Clone)]
 pub struct MaxAbsScalerModel {
     pub operator: MlOperator,
     pub params: Params,
-    pub input_col: String,
-    pub output_col: String,
+    cached: CachedModel,
 }
 
 impl Transformer for MaxAbsScalerModel {
@@ -806,17 +820,12 @@ impl Transformer for MaxAbsScalerModel {
         &mut self.params
     }
 
+    fn build_ml_relation(&self, input: &DataFrame) -> proto::MlRelation {
+        self.cached.build_ml_relation(input, &self.params)
+    }
+
     fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
-        let ml_relation = self.build_ml_relation(df);
-        let mut relation = proto::Relation::default();
-        relation.common = Some(proto::RelationCommon::default());
-        relation.rel_type = Some(proto::relation::RelType::MlRelation(Box::new(ml_relation)));
-        let plan = LogicalPlan::MlTransform {
-            ml_relation: relation,
-            input: df.plan.clone(),
-            owner: None,
-        };
-        Ok(DataFrame::new(df.session.clone(), plan))
+        self.cached.transform(df, &self.params)
     }
 }
 
@@ -2143,14 +2152,12 @@ mod tests {
             Box::new(StringIndexerModel {
                 operator: MlOperator::new("test", OperatorType::Model),
                 params: Params::new(),
-                input_col: "in".to_string(),
-                output_col: "out".to_string(),
+                cached: cached_model(&offline_session(), "indexer-1"),
             }),
             Box::new(MaxAbsScalerModel {
                 operator: MlOperator::new("test", OperatorType::Model),
                 params: Params::new(),
-                input_col: "in".to_string(),
-                output_col: "out".to_string(),
+                cached: cached_model(&offline_session(), "max-abs-1"),
             }),
         ];
 
@@ -2207,6 +2214,37 @@ mod tests {
             .expect("session")
     }
 
+    /// The model that a fit of the server returns as the object `id`, cached for `s`.
+    fn cached_model(s: &SparkSession, id: &str) -> CachedModel {
+        let info = proto::ml_command_result::MlOperatorInfo {
+            r#type: Some(proto::ml_command_result::ml_operator_info::Type::ObjRef(
+                proto::ObjectRef { id: id.to_string() },
+            )),
+            uid: Some("uid".to_string()),
+            ..Default::default()
+        };
+        CachedModel::from_info(&info, s, "test").expect("cached model")
+    }
+
+    /// The object reference of the model that the transform of `df` refers to.
+    fn transform_model_ref(df: &DataFrame) -> String {
+        let LogicalPlan::MlTransform { ml_relation, .. } = df.plan.as_ref() else {
+            panic!("expected an ML transform plan");
+        };
+        let Some(proto::relation::RelType::MlRelation(ml)) = &ml_relation.rel_type else {
+            panic!("expected an ML relation");
+        };
+        let Some(proto::ml_relation::MlType::Transform(transform)) = &ml.ml_type else {
+            panic!("expected a transform");
+        };
+        match &transform.operator {
+            Some(proto::ml_relation::transform::Operator::ObjRef(reference)) => {
+                reference.id.clone()
+            }
+            other => panic!("expected the model reference, found {other:?}"),
+        }
+    }
+
     #[test]
     fn params_int_and_proto_roundtrip() {
         let p = Params::new()
@@ -2257,17 +2295,23 @@ mod tests {
         let out = va.transform(&df).unwrap();
         assert!(matches!(out.plan.as_ref(), LogicalPlan::MlTransform { .. }));
 
-        // StandardScaler fits locally into a model; the model transform also builds
-        // an MlTransform plan, and Model::clone_box works.
-        let mut ss = StandardScaler::new()
+        // A fitted StandardScaler transforms through the model that the server cached: the
+        // transform refers to its object reference, as PySpark's transform of a fitted
+        // model does. The fit itself needs a server, so the cached model is built here.
+        let ss = StandardScaler::new()
             .set_input_col("features")
             .set_output_col("scaled");
-        let mut model = ss.fit(&df).unwrap();
+        let mut model = StandardScalerModel {
+            operator: MlOperator::new("test", OperatorType::Model),
+            params: ss.params().clone(),
+            cached: cached_model(&s, "scaler-1"),
+        };
         let scaled = model.transform(&df).unwrap();
         assert!(matches!(
             scaled.plan.as_ref(),
             LogicalPlan::MlTransform { .. }
         ));
+        assert_eq!(transform_model_ref(&scaled), "scaler-1");
         let _cloned = model.clone_box();
     }
 
@@ -2322,21 +2366,28 @@ mod tests {
     fn offline_estimators_fit_and_models_transform() {
         let s = offline_session();
         let df = s.range(3).unwrap();
-        // Each estimator fits locally and its model transform builds a plan; this
-        // exercises the offline model wrappers. LogisticRegression is tested against a server.
-        let mut mas = MaxAbsScaler::new().set_input_col("f").set_output_col("o");
+        // The models of the server-fitted estimators transform through their cached model;
+        // this exercises the offline model wrappers. The fits are tested against a server.
+        let mas = MaxAbsScaler::new().set_input_col("f").set_output_col("o");
         assert_eq!(mas.input_col(), "f");
-        let mut m = mas.fit(&df).unwrap();
-        assert!(matches!(
-            m.transform(&df).unwrap().plan.as_ref(),
-            LogicalPlan::MlTransform { .. }
-        ));
+        let mut m = MaxAbsScalerModel {
+            operator: MlOperator::new("test", OperatorType::Model),
+            params: mas.params().clone(),
+            cached: cached_model(&s, "max-abs-1"),
+        };
+        let out = m.transform(&df).unwrap();
+        assert_eq!(transform_model_ref(&out), "max-abs-1");
         let _ = m.clone_box();
 
-        let mut si = StringIndexer::new().set_input_col("s").set_output_col("si");
+        let si = StringIndexer::new().set_input_col("s").set_output_col("si");
         assert_eq!(si.output_col(), "si");
-        let mut m = si.fit(&df).unwrap();
-        let _ = m.transform(&df).unwrap();
+        let mut m = StringIndexerModel {
+            operator: MlOperator::new("test", OperatorType::Model),
+            params: si.params().clone(),
+            cached: cached_model(&s, "indexer-1"),
+        };
+        let out = m.transform(&df).unwrap();
+        assert_eq!(transform_model_ref(&out), "indexer-1");
         let _ = m.clone_box();
 
         let mut pipe = Pipeline::new().set_stages(vec!["a", "b"]);
