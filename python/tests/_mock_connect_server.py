@@ -391,12 +391,14 @@ def serve(connection):
         # server does for an error that it raised: INTERNAL, with a google.rpc.Status of an
         # ErrorInfo of `reason` and `metadata` in grpc-status-details-bin.
         execute_error = None
-        # FetchErrorDetails returns `error_details` (raw FetchErrorDetailsResponse fields) and
-        # records the error id asked for. Config Get returns the values in `confs`, or else
-        # those of `default_confs`, the defaults of SQL configs of the server, and fails for a
-        # key without one, as the server does for an unset config; it records the keys, as
-        # does GetWithDefault, which returns the values in `confs` or else the defaults that
-        # it is given. Config Set records the pairs and the silent flag of each request.
+        # FetchErrorDetails returns `error_details` (raw FetchErrorDetailsResponse fields)
+        # and records the error id asked for. Config Get returns the values in `confs`, or
+        # else those of `default_confs`, the defaults of SQL configs of the server, and
+        # fails for a key without one, as the server does for an unset config. A key
+        # stored as None is returned without the optional value. Get records the keys, as
+        # does GetWithDefault, which returns the values in `confs` or else the defaults
+        # that it is given. Config Set records the pairs and the silent flag of each
+        # request.
         error_details = b""
         fetched_error_ids = []
         confs = {}
@@ -692,7 +694,11 @@ def serve(connection):
                 context.abort(grpc.StatusCode.INTERNAL, "[SQL_CONF_NOT_FOUND]")
             # The response names the session, as the server's does.
             return message_field(1, request[1][0]) + b"".join(
-                message_field(2, message_field(1, key) + message_field(2, confs[key]))
+                message_field(
+                    2,
+                    message_field(1, key)
+                    + (b"" if confs[key] is None else message_field(2, confs[key])),
+                )
                 for key in keys
             )
 
