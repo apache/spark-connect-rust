@@ -632,6 +632,91 @@ class TestStreamingListenerLifecycle:
         assert service.release_session_calls == 0
 
 
+    def test_streaming_listener_start_removal_waits_for_the_started_event_in_delivery(
+        self, mock_connect,
+    ):
+        # As PySpark's bus, whose delivery of the started event of start() holds the lock of
+        # its removal: a listener removed by another thread gets that event before
+        # removeListener returns. A removal from the callback that receives the event does
+        # not wait for its own delivery.
+        spark, service = mock_connect
+        service.listener_bus_enabled = True
+        service.execute_payload = start_response(json.dumps({
+            "id": "00000000-0000-4000-8000-000000000001",
+            "runId": "00000000-0000-4000-8000-000000000002",
+            "name": "query", "timestamp": "started", "jobTags": [],
+        }))
+        order = []
+        outcome = {}
+        entered, release = threading.Event(), threading.Event()
+
+        class Blocking(IdleListener):
+            def onQueryStarted(self, event):
+                order.append("first started")
+                entered.set()
+                assert release.wait(5)
+
+        class Recording(IdleListener):
+            def onQueryStarted(self, event):
+                order.append("second started")
+
+        def start_query():
+            try:
+                outcome["query"] = spark.readStream.format("rate").load().writeStream.start()
+            except BaseException as error:
+                outcome["error"] = error
+
+        def remove(listener):
+            spark.streams.removeListener(listener)
+            order.append("removed")
+
+        first, second = Blocking(), Recording()
+        try:
+            spark.streams.addListener(first)
+            spark.streams.addListener(second)
+            starter = threading.Thread(target=start_query, daemon=True)
+            starter.start()
+            assert entered.wait(5)
+            removal = threading.Thread(target=remove, args=(second,), daemon=True)
+            removal.start()
+            # The started event is in delivery to the first listener, so the removal waits.
+            removal.join(0.5)
+            assert removal.is_alive()
+            release.set()
+            removal.join(5)
+            starter.join(5)
+            assert not removal.is_alive() and not starter.is_alive()
+            assert "error" not in outcome
+            assert order == ["first started", "second started", "removed"]
+            emit_idle(service, spark, "after")
+            first.wait_for("after")
+            assert second.timestamps == []
+        finally:
+            release.set()
+            spark.streams.close()
+
+        # A removal from the callback that receives the started event returns at once.
+        removed_listener = Recording()
+        order.clear()
+
+        class Removing(IdleListener):
+            def onQueryStarted(self, event):
+                order.append("removing started")
+                spark.streams.removeListener(removed_listener)
+                order.append("removed in callback")
+
+        try:
+            spark.streams.addListener(Removing())
+            spark.streams.addListener(removed_listener)
+            starter = threading.Thread(target=start_query, daemon=True)
+            starter.start()
+            starter.join(5)
+            assert not starter.is_alive()
+            assert "error" not in outcome
+            assert order[:2] == ["removing started", "removed in callback"]
+        finally:
+            spark.streams.close()
+
     def test_streaming_listener_removal_waits_for_the_event_in_delivery(self, mock_connect):
         # As PySpark's bus, whose delivery of an event holds the lock of its removal: a
         # listener removed by another thread while an event is delivered gets that event
