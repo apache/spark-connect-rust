@@ -2863,6 +2863,18 @@ def test_to_arrow_casts_to_the_arrow_schema_of_the_schema_as_pyspark(session):
         session.sql("SELECT named_struct('a', 1, 'a', 2) AS v").toArrow()
     assert e.value.getCondition() == "DUPLICATED_FIELD_NAME_IN_ARROW_STRUCT"
 
+def test_a_derived_dataframe_of_a_local_checkpoint_outlives_the_checkpoint_as_pyspark(session):
+    # The checkpoint is released when its last DataFrame goes: a DataFrame derived from it keeps
+    # working after the checkpoint itself is deleted and collected.
+    import gc
+
+    checkpoint = session.range(5).localCheckpoint()
+    derived = checkpoint.filter(F.col("id") > 1)
+    del checkpoint
+    gc.collect()
+    assert derived.count() == 3
+    assert [row.id for row in derived.orderBy("id").collect()] == [2, 3, 4]
+
 def test_to_pandas_converts_the_columns_as_pyspark(session):
     # As official PySpark 4.3.0's SparkConnectClient.to_pandas: each column by its Spark type,
     # in the session time zone, with the metrics of the execution in attrs.

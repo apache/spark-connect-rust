@@ -828,6 +828,33 @@ impl SparkSession {
                 )),
             })),
         };
+        self.execute_command_in_background(command);
+    }
+
+    /// Remove the cached remote relation `relation_id` on the server, as PySpark's
+    /// `CachedRemoteRelation.__del__` does when its DataFrame goes. Like `release_ml_objects`,
+    /// it does not wait for the server, and its errors are ignored. A stopped session is not
+    /// released: stopping it released its server state already, as PySpark skips a closed
+    /// client. Safe to call from `Drop`.
+    pub(crate) fn release_cached_remote_relation(&self, relation_id: String) {
+        if self.is_stopped() {
+            return;
+        }
+        let command = proto::Command {
+            command_type: Some(
+                proto::command::CommandType::RemoveCachedRemoteRelationCommand(
+                    proto::RemoveCachedRemoteRelationCommand {
+                        relation: Some(proto::CachedRemoteRelation { relation_id }),
+                    },
+                ),
+            ),
+        };
+        self.execute_command_in_background(command);
+    }
+
+    /// Execute `command` on the server without waiting for its responses, on the shared
+    /// runtime. Its errors are ignored; safe to call from `Drop`.
+    fn execute_command_in_background(&self, command: proto::Command) {
         let mut plan = proto::Plan::default();
         plan.op_type = Some(proto::plan::OpType::Command(command));
         let request = proto::ExecutePlanRequest {

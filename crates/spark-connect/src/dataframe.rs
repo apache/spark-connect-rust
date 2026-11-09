@@ -11,12 +11,27 @@ use spark_connect_proto as proto;
 
 use crate::column::Column;
 use crate::expression::{Expression, ExpressionNode};
-use crate::plan::{AggregateGroupType, JoinType, LogicalPlan, SetOpType};
+use crate::plan::{AggregateGroupType, JoinType, LogicalPlan, RelationOwner, SetOpType};
 use crate::progress::ExecutionStream;
 use crate::row::{Row, StructValue, Value};
 use crate::session::{ExecutionInfo, SparkSession};
 use crate::types::DataType;
 use crate::udf::CommonInlineUserDefinedFunctionExpression;
+
+/// The server's checkpointed relation, shared by the plans of a checkpoint and of every DataFrame
+/// derived from it (through their [`RelationOwner`]). The last one to drop removes the relation
+/// on the server, as PySpark's `CachedRemoteRelation.__del__` does.
+struct CheckpointRef {
+    relation_id: String,
+    session: SparkSession,
+}
+
+impl Drop for CheckpointRef {
+    fn drop(&mut self) {
+        self.session
+            .release_cached_remote_relation(self.relation_id.clone());
+    }
+}
 
 /// A Spark DataFrame, lazily evaluated.
 ///
@@ -1405,10 +1420,15 @@ impl DataFrame {
                 &resp.response_type
             {
                 if let Some(rel) = &res.relation {
+                    let checkpoint = CheckpointRef {
+                        relation_id: rel.relation_id.clone(),
+                        session: self.session.clone(),
+                    };
                     return Ok(DataFrame::new(
                         self.session.clone(),
                         LogicalPlan::CachedRemoteRelation {
                             relation_id: rel.relation_id.clone(),
+                            owner: Some(RelationOwner(Arc::new(checkpoint))),
                         },
                     ));
                 }
