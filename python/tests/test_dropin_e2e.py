@@ -4259,3 +4259,49 @@ def test_linear_regression_weights_and_iterative_losses(session):
     ).withColumn("features", array_to_vector("xs"))
     robust = LinearRegression(loss="huber", solver="l-bfgs", maxIter=200, tol=1e-8).fit(robust_training)
     assert robust.transform(held_out).first().prediction == pytest.approx(7, abs=0.2)
+
+
+def test_sample_split_and_sample_by_without_a_seed_follow_python_random_as_pyspark(
+        session, tmp_path):
+    # As PySpark's: without a seed, sample, randomSplit and sampleBy draw one from Python's
+    # random, so random.seed(42) gives the same rows in every process. The rows are those of
+    # the reference client for the same seed.
+    import json
+    import subprocess
+    import sys
+
+    script = tmp_path / "seeded_rows.py"
+    script.write_text(
+        "import json, os, random\n"
+        "from pyspark.sql import SparkSession\n"
+        "spark = SparkSession.builder.remote(os.environ['SPARK_REMOTE']).getOrCreate()\n"
+        "df = spark.range(40)\n"
+        "def ids(frame):\n"
+        "    return sorted(row.id for row in frame.collect())\n"
+        "random.seed(42)\n"
+        "sample = ids(df.sample(0.5))\n"
+        "random.seed(42)\n"
+        "splits = [ids(part) for part in df.randomSplit([0.5, 0.5])]\n"
+        "stratified = spark.range(40).selectExpr('id', 'id % 3 AS k')\n"
+        "random.seed(42)\n"
+        "by = ids(stratified.sampleBy('k', {0: 0.5, 1: 0.5, 2: 0.5}))\n"
+        "print(json.dumps([sample, *splits, by]))\n"
+        "spark.stop()\n")
+
+    def rows():
+        result = subprocess.run(
+            [sys.executable, str(script)], env=os.environ, capture_output=True, text=True,
+            timeout=300)
+        assert result.returncode == 0, result.stderr
+        return json.loads(result.stdout.splitlines()[-1])
+
+    expected = [
+        [1, 2, 5, 7, 11, 12, 14, 15, 17, 19, 26, 29, 34, 35, 38],
+        [1, 2, 5, 7, 11, 12, 14, 15, 17, 19, 26, 29, 34, 35, 38],
+        [0, 3, 4, 6, 8, 9, 10, 13, 16, 18, 20, 21, 22, 23, 24, 25, 27, 28, 30, 31, 32, 33,
+         36, 37, 39],
+        [1, 2, 5, 7, 11, 12, 14, 15, 17, 19, 26, 29, 34, 35, 38],
+    ]
+    # Verified against the reference client 4.3.0 on the same server, with the same seeding.
+    assert rows() == expected
+    assert rows() == expected

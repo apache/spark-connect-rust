@@ -3,7 +3,7 @@
 use pyo3::prelude::*;
 use spark_connect::group::StatFunctions;
 
-use crate::dataframe::PyDataFrame;
+use crate::dataframe::{python_random_seed, PyDataFrame};
 
 /// Python wrapper for DataFrame statistical functions.
 #[pyclass(
@@ -84,8 +84,17 @@ impl PyStatFunctions {
         fractions: &Bound<'_, PyAny>,
         seed: Option<i64>,
     ) -> PyResult<PyDataFrame> {
+        let py = col.py();
         let (col, fractions) = sample_by_arguments(col, fractions)?;
-        Ok(PyDataFrame::new(self.stat.sample_by(col, fractions, seed)))
+        let seed = match seed {
+            Some(seed) => seed,
+            None => python_random_seed(py)?,
+        };
+        Ok(PyDataFrame::new(self.stat.sample_by(
+            col,
+            fractions,
+            Some(seed),
+        )))
     }
 
     /// Approximate quantiles of a column, or of each of a list or tuple of columns, at the

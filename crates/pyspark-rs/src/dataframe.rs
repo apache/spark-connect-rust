@@ -1824,7 +1824,8 @@ impl PyDataFrame {
         crate::stat_arguments::cov(py, &self.dataframe.stat(), col1, col2)
     }
 
-    /// Stratified sample without replacement per key.
+    /// Stratified sample without replacement per key. Without a seed, the client draws one
+    /// from Python's `random`, as PySpark Connect's `sampleBy` does.
     #[pyo3(name = "sampleBy", signature = (col, fractions, seed=None))]
     fn sample_by(
         &self,
@@ -1832,10 +1833,17 @@ impl PyDataFrame {
         fractions: &Bound<'_, PyAny>,
         seed: Option<i64>,
     ) -> PyResult<PyDataFrame> {
+        let py = col.py();
         let (col, fractions) = crate::stat::sample_by_arguments(col, fractions)?;
-        Ok(PyDataFrame::new(
-            self.dataframe.stat().sample_by(col, fractions, seed),
-        ))
+        let seed = match seed {
+            Some(seed) => seed,
+            None => python_random_seed(py)?,
+        };
+        Ok(PyDataFrame::new(self.dataframe.stat().sample_by(
+            col,
+            fractions,
+            Some(seed),
+        )))
     }
 
     /// Replace values, as PySpark's `DataFrame.replace`: `to_replace` is a {old: new} dict, or
@@ -1923,6 +1931,11 @@ impl PyDataFrame {
                 return Err(not_positive("weights", &weight)?);
             }
         }
+        // Drawn before the sum is checked, as PySpark does, so that a failing sum uses one too.
+        let seed = match seed {
+            Some(seed) => seed,
+            None => python_random_seed(py)?,
+        };
         let total = py.import("builtins")?.call_method1("sum", (weights,))?;
         if total.le(0)? {
             return Err(not_positive("sum(weights)", &total)?);
@@ -1930,7 +1943,7 @@ impl PyDataFrame {
         let weights: Vec<f64> = weights.extract()?;
         Ok(self
             .dataframe
-            .random_split(weights, seed)
+            .random_split(weights, Some(seed))
             .to_pyerr()?
             .into_iter()
             .map(PyDataFrame::new)
@@ -2519,9 +2532,15 @@ impl PyDataFrame {
                 ));
             }
         };
-        Ok(PyDataFrame::new(
-            self.dataframe.sample_opt(frac, replace, seed),
-        ))
+        let seed = match seed {
+            Some(seed) => seed,
+            None => python_random_seed(py)?,
+        };
+        Ok(PyDataFrame::new(self.dataframe.sample_opt(
+            frac,
+            replace,
+            Some(seed),
+        )))
     }
 
     /// Check if the DataFrame is empty.
@@ -4349,6 +4368,15 @@ fn read_binary_as_bytes(py: Python<'_>, dataframe: &DataFrame) -> PyResult<bool>
             .map_err(Box::new)
     })?;
     Ok(value.is_some_and(|value| value.eq_ignore_ascii_case("true")))
+}
+
+/// The seed of a sample without one, drawn from Python's `random` as PySpark's
+/// `random.randint(0, sys.maxsize)`, so that `random.seed` makes the rows repeat.
+pub(crate) fn python_random_seed(py: Python<'_>) -> PyResult<i64> {
+    let max_size = py.import("sys")?.getattr("maxsize")?;
+    py.import("random")?
+        .call_method1("randint", (0, max_size))?
+        .extract()
 }
 
 /// The collected `rows` of a result of `schema`, with configured binary values and
