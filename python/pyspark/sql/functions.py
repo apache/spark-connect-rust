@@ -512,14 +512,11 @@ _call_named_function = _functions.pyfunc_call_named_function
 # dispatch allowlist). Mirrors pyspark.sql.connect.functions._invoke_function.
 _invoke_function = _functions.pyfunc_invoke_function
 
-# Global monotonic counter, mirroring UnresolvedNamedLambdaVariable._nextVarNameId.
-_lambda_var_name_id = [0]
-
-
 def _fresh_lambda_var_name(name):
-    _id = _lambda_var_name_id[0]
-    _lambda_var_name_id[0] += 1
-    return f"{name}_{_id}"
+    # The counter of UnresolvedNamedLambdaVariable, as PySpark Connect's, which a test resets.
+    from pyspark.sql.connect.expressions import UnresolvedNamedLambdaVariable
+
+    return UnresolvedNamedLambdaVariable.fresh_var_name(name)
 
 
 def _get_lambda_parameters(f):

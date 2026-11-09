@@ -41,6 +41,39 @@ from interval_input_cases import IntervalInputConversionTests  # noqa: F401
 from streaming_listener_cases import TestStreamingListenerLifecycle  # noqa: F401
 
 
+def test_connect_expressions_distributed_sequence_id_and_lambda_names_offline():
+    # The expressions that the official test_connect_column imports: DistributedSequenceID, and
+    # UnresolvedNamedLambdaVariable, whose counter names the lambda variables, as PySpark's does.
+    from pyspark.sql.connect import functions as CF
+    from pyspark.sql.connect.expressions import DistributedSequenceID, UnresolvedNamedLambdaVariable
+
+    assert repr(DistributedSequenceID()) == "DistributedSequenceID()"
+    plan = DistributedSequenceID().to_plan(None)
+    assert plan.unresolved_function.function_name == "distributed_sequence_id"
+    assert not plan.unresolved_function.is_distinct
+    assert len(plan.unresolved_function.arguments) == 0
+
+    var = UnresolvedNamedLambdaVariable(["x", "y"])
+    assert repr(var) == "x, y"
+    assert list(var.to_plan(None).unresolved_named_lambda_variable.name_parts) == ["x", "y"]
+
+    UnresolvedNamedLambdaVariable._nextVarNameId = 0
+    c = CF.array_sort("data", lambda x, y: CF.length(x) - CF.length(y))
+    assert str(c) == (
+        "Column<'array_sort(data, LambdaFunction(-(length(x_0), length(y_1)), x_0, y_1))'>"
+    )
+    assert UnresolvedNamedLambdaVariable.fresh_var_name("z") == "z_2"
+
+
+def test_connect_resource_profile_module_offline():
+    # PySpark Connect's module of ResourceProfile, which the client packages ship; the profile id
+    # that `ResourceProfile.id` gives is the server's, as PySpark's is.
+    from pyspark.sql.connect.resource.profile import ResourceProfile
+    from pyspark.resource import ResourceProfile as ClientResourceProfile
+
+    assert ResourceProfile is ClientResourceProfile
+
+
 def test_create_dataframe_input_names_offline():
     # Keep the fixture's active session out of this process's offline tests.
     import subprocess
