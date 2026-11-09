@@ -7833,6 +7833,367 @@ def test_create_dataframe_types_pandas_columns_as_arrow(mock_connect):
         spark.createDataFrame(pd.DataFrame({"m": [{None: 1}]}))
 
 
+# The paths of the drop-in's types.py that the other offline tests do not reach: the internal
+# values of the types, the inference, merging and verification of the types of Python values,
+# and the converters of the values. Where PySpark has the same helper, the expected values are
+# PySpark 4.3.0's, checked with the same cases.
+
+
+class _CovUDT(T.UserDefinedType):
+    """A user-defined type of a long, whose Python values hold the long of their SQL value."""
+
+    @classmethod
+    def sqlType(cls):
+        return T.LongType()
+
+    @classmethod
+    def module(cls):
+        return __name__
+
+    def serialize(self, obj):
+        return obj.value * 10
+
+    def deserialize(self, datum):
+        return datum // 10
+
+
+class _CovUDTValue:
+    __UDT__ = _CovUDT()
+
+    def __init__(self, value):
+        self.value = value
+
+
+def test_user_defined_type_null_and_json_errors_as_pyspark():
+    from pyspark.errors import PySparkTypeError, PySparkValueError
+
+    # A null SQL value is a null of the UDT. As PySpark, a pyClass must name an importable
+    # UserDefinedType: otherwise it is an unsupported operation (no such class) or a field type
+    # mismatch (another class), and a JSON type that is no data type is unsupported.
+    assert _CovUDT().fromInternal(None) is None
+    assert _CovUDT().toInternal(None) is None
+    with pytest.raises(PySparkValueError) as missing:
+        T.UserDefinedType.fromJson({"pyClass": "pyspark.sql.types.NoSuchUDT"})
+    assert missing.value.getCondition() == "UNSUPPORTED_OPERATION"
+    assert missing.value.getMessageParameters() == {"operation": "unpickling user defined types"}
+    for py_class in ("pyspark.sql.types.Row", "pyspark.sql.types.StringType"):
+        with pytest.raises(PySparkTypeError) as not_udt:
+            T.UserDefinedType.fromJson({"pyClass": py_class})
+        assert not_udt.value.getCondition() == "FIELD_TYPE_MISMATCH"
+        assert not_udt.value.getMessageParameters() == {
+            "obj": f"<class '{py_class}'>", "data_type": "UserDefinedType"}
+    with pytest.raises(PySparkValueError) as unknown:
+        T._parse_datatype_json_value({"type": "foo"})
+    assert unknown.value.getCondition() == "UNSUPPORTED_DATA_TYPE"
+    assert unknown.value.getMessageParameters() == {"data_type": "foo"}
+
+
+def test_numpy_dtypes_map_to_spark_types_as_pyspark():
+    np = pytest.importorskip("numpy")
+
+    # As PySpark's _from_numpy_type: a bool, an int8 and a str array map to their types, and
+    # another dtype (an object array) has none.
+    assert T._from_numpy_type(np.dtype("bool")) == T.BooleanType()
+    assert T._from_numpy_type(np.dtype("int8")) == T.ByteType()
+    assert T._from_numpy_type(np.dtype("str")) == T.StringType()
+    assert T._from_numpy_type(np.dtype("O")) is None
+
+
+def test_null_and_empty_internal_values_as_pyspark():
+    # As PySpark: a null is a null in the internal and the Python form of each of these types;
+    # a value that needs no conversion is returned as it is; a variant or a spatial value
+    # without its keys is None.
+    null_types = [
+        T.TimeType(), T.TimestampType(), T.TimestampNTZType(), T.DayTimeIntervalType(),
+        T.GeometryType(4326), T.GeographyType(4326), T.VariantType(),
+    ]
+    for data_type in null_types:
+        assert data_type.toInternal(None) is None
+        assert data_type.fromInternal(None) is None
+    assert T.VariantType().fromInternal({"value": b"x"}) is None
+    assert T.GeometryType(4326).fromInternal({"srid": 4326}) is None
+
+    values = [1, 2]
+    assert T.ArrayType(T.LongType()).toInternal(values) is values
+    assert T.ArrayType(T.LongType()).fromInternal(values) is values
+    mapping = {"a": 1}
+    assert T.MapType(T.StringType(), T.LongType()).toInternal(mapping) is mapping
+    assert T.MapType(T.StringType(), T.LongType()).fromInternal(mapping) is mapping
+    assert T.ArrayType(T.DateType()).toInternal(None) is None
+    assert T.ArrayType(T.DateType()).toInternal([]) == []
+    assert T.MapType(T.StringType(), T.DateType()).toInternal({}) == {}
+    assert T.MapType(T.StringType(), T.DateType()).toInternal(
+        {"a": datetime.date(1970, 1, 2)}) == {"a": 1}
+    assert T.MapType(T.StringType(), T.DateType()).fromInternal(
+        {"a": 1}) == {"a": datetime.date(1970, 1, 2)}
+
+    date_struct = T.StructType([T.StructField("d", T.DateType())])
+    assert date_struct.toInternal(None) is None
+    assert date_struct.fromInternal(None) is None
+    row = Row(d=5)
+    assert date_struct.fromInternal(row) is row
+
+
+def test_struct_internal_values_of_each_input_as_pyspark():
+    from types import SimpleNamespace
+
+    from pyspark.errors import PySparkValueError
+
+    # As PySpark's StructType.toInternal and fromInternal: a struct of fields that need no
+    # conversion takes its values from a dict, a tuple, a list, an object or a Row, and a struct
+    # of a date converts the date of each input the same way. Another value is an unexpected
+    # tuple, and a variant is not a row.
+    nums = T.StructType([T.StructField("a", T.LongType()), T.StructField("b", T.LongType())])
+    for value in [{"a": 1, "b": 2}, (1, 2), [1, 2], SimpleNamespace(a=1, b=2), Row(a=1, b=2)]:
+        assert nums.toInternal(value) == (1, 2)
+    with pytest.raises(PySparkValueError) as unexpected:
+        nums.toInternal(5)
+    assert unexpected.value.getCondition() == "UNEXPECTED_TUPLE_WITH_STRUCT"
+    assert unexpected.value.getMessageParameters() == {"tuple": "5"}
+    variant = T.VariantVal(b"\x0c\x01", b"\x01\x00\x00")
+    with pytest.raises(PySparkValueError, match="Rows cannot be of type VariantVal"):
+        nums.toInternal(variant)
+
+    dates = T.StructType([T.StructField("d", T.DateType())])
+    day = datetime.date(1970, 1, 2)
+    for value in [{"d": day}, (day,), SimpleNamespace(d=day)]:
+        assert dates.toInternal(value) == (1,)
+    assert dates.toInternal({}) == (None,)
+    with pytest.raises(PySparkValueError) as unexpected_dates:
+        dates.toInternal(5)
+    assert unexpected_dates.value.getCondition() == "UNEXPECTED_TUPLE_WITH_STRUCT"
+    with pytest.raises(PySparkValueError, match="Rows cannot be of type VariantVal"):
+        dates.toInternal(variant)
+
+    assert nums.fromInternal((1, 2)) == Row(a=1, b=2)
+    assert dates.fromInternal((1,)) == Row(d=day)
+
+
+def test_infer_type_of_each_kind_of_value_as_pyspark():
+    import array as _array
+    from types import SimpleNamespace
+
+    from pyspark.errors import PySparkTypeError
+
+    # A value that carries its UDT is typed by it.
+    assert T._infer_type(_CovUDTValue(1)) is _CovUDTValue.__UDT__
+
+    # As PySpark: a Geography or a Geometry is typed by its SRID, a timedelta is a day-time
+    # interval, and a variant value is a variant.
+    wkb = b"\x01\x01\x00\x00\x00" + bytes(16)
+    assert T._infer_type(T.Geography.fromWKB(wkb, 4326)) == T.GeographyType(4326)
+    assert T._infer_type(T.Geometry.fromWKB(wkb, 4326)) == T.GeometryType(4326)
+    assert T._infer_type(datetime.timedelta(1)) == T.DayTimeIntervalType()
+    assert T._infer_type(T.VariantVal(b"\x0c\x01", b"\x01\x00\x00")) == T.VariantType()
+
+    # A dict inferred as a struct skips the fields with a null name or value.
+    assert T._infer_type({"a": None, "b": 1}, infer_dict_as_struct=True) == T.StructType(
+        [T.StructField("b", T.LongType(), True)])
+
+    # A dict inferred from its first pair: the first pair with neither key nor value null, or
+    # a map of nulls when there is none.
+    assert T._infer_type({"a": 1}, infer_map_from_first_pair=True) == T.MapType(
+        T.StringType(), T.LongType(), True)
+    assert T._infer_type({}, infer_map_from_first_pair=True) == T.MapType(
+        T.NullType(), T.NullType(), True)
+    assert T._infer_type({None: 1, "a": None}, infer_map_from_first_pair=True) == T.MapType(
+        T.NullType(), T.NullType(), True)
+    assert T._infer_type({None: 1, "b": 2}, infer_map_from_first_pair=True) == T.MapType(
+        T.StringType(), T.LongType(), True)
+
+    # A dict of unknown keys and values: the types of its non-null keys and values.
+    assert T._infer_type({None: 1}) == T.MapType(T.NullType(), T.LongType(), True)
+    assert T._infer_type({"a": None}) == T.MapType(T.StringType(), T.NullType(), True)
+    assert T._infer_type({"a": 1, "b": None}) == T.MapType(T.StringType(), T.LongType(), True)
+
+    assert T._infer_type([]) == T.ArrayType(T.NullType(), True)
+    assert T._infer_type(_array.array("f", [1.0])) == T.ArrayType(T.FloatType(), False)
+    with pytest.raises(PySparkTypeError) as bad_array:
+        T._infer_type(_array.array("q", [1]))
+    assert bad_array.value.getCondition() == "UNSUPPORTED_DATA_TYPE"
+    assert bad_array.value.getMessageParameters() == {"data_type": "array(q)"}
+    with pytest.raises(PySparkTypeError) as bad_value:
+        T._infer_type({1})
+    assert bad_value.value.getCondition() == "UNSUPPORTED_DATA_TYPE"
+    assert bad_value.value.getMessageParameters() == {"data_type": "set"}
+
+    # A schema of a namedtuple takes its fields, and a tuple names them _1, _2, ...
+    point = namedtuple("point", ["x", "y"])
+    assert T._infer_schema(point(1, "a")).names == ["x", "y"]
+    assert T._infer_schema((1, "a")).names == ["_1", "_2"]
+    with pytest.raises(PySparkTypeError) as bad_field:
+        T._infer_schema(SimpleNamespace(a={1}))
+    assert bad_field.value.getCondition() == "CANNOT_INFER_TYPE_FOR_FIELD"
+    assert bad_field.value.getMessageParameters() == {"field_name": "a"}
+    with pytest.raises(PySparkTypeError) as bad_schema:
+        T._infer_schema(object())
+    assert bad_schema.value.getCondition() == "CANNOT_INFER_SCHEMA_FOR_TYPE"
+
+
+def test_has_null_type_and_merge_types_as_pyspark():
+    # As PySpark's _has_nulltype: a null type anywhere in a nested type, but not in a type of
+    # non-null types.
+    assert T._has_nulltype(T.ArrayType(T.NullType()))
+    assert T._has_nulltype(T.MapType(T.StringType(), T.NullType()))
+    assert T._has_nulltype(T.MapType(T.NullType(), T.StringType()))
+    assert not T._has_nulltype(T.MapType(T.StringType(), T.ArrayType(T.LongType())))
+
+    # As PySpark's _merge_type: a timestamp and a timestamp without time zone merge to the
+    # timestamp, a string absorbs an atomic type, and spatial types of other SRIDs merge to ANY.
+    assert T._merge_type(T.TimestampType(), T.TimestampNTZType()) == T.TimestampType()
+    assert T._merge_type(T.TimestampNTZType(), T.TimestampType()) == T.TimestampType()
+    assert T._merge_type(T.StringType(), T.LongType()) == T.StringType()
+    assert T._merge_type(T.LongType(), T.StringType()) == T.StringType()
+    assert T._merge_type(T.LongType(), T.LongType()) == T.LongType()
+    assert T._merge_type(T.GeometryType(4326), T.GeometryType(4326)) == T.GeometryType(4326)
+    assert T._merge_type(T.GeometryType(4326), T.GeometryType(3857)) == T.GeometryType("ANY")
+    assert T._merge_type(T.GeographyType(4326), T.GeographyType("ANY")) == T.GeographyType("ANY")
+    assert T._merge_type(
+        T.MapType(T.StringType(), T.LongType()), T.MapType(T.StringType(), T.NullType())
+    ) == T.MapType(T.StringType(), T.LongType(), True)
+    # A nested struct merges its fields by name, two levels down too.
+    inner = T.StructType([T.StructField("b", T.LongType())])
+    merged = T._merge_type(
+        T.StructType([T.StructField("a", inner)]),
+        T.StructType([T.StructField("a", T.StructType([
+            T.StructField("b", T.NullType()), T.StructField("c", T.LongType())]))]),
+    )
+    assert merged == T.StructType([T.StructField("a", T.StructType([
+        T.StructField("b", T.LongType()), T.StructField("c", T.LongType())]))])
+
+
+def test_converters_of_values_as_pyspark():
+    from types import SimpleNamespace
+
+    from pyspark.errors import PySparkTypeError
+
+    # As PySpark's _need_converter: a struct, a null type or a string needs a conversion, and so
+    # does an array or a map of one; a number or a variant does not.
+    assert not T._need_converter(T.ArrayType(T.LongType()))
+    assert T._need_converter(T.ArrayType(T.StringType()))
+    assert not T._need_converter(T.MapType(T.LongType(), T.LongType()))
+    assert T._need_converter(T.MapType(T.StringType(), T.LongType()))
+    assert not T._need_converter(T.VariantType())
+
+    # As PySpark's _create_converter: strings are the strings of their values (a bool is
+    # lowercase), and nulls stay null, in arrays, maps and structs too.
+    assert T._create_converter(T.ArrayType(T.StringType()))([1, None, True]) == ["1", None, "true"]
+    assert T._create_converter(T.ArrayType(T.StringType()))(None) is None
+    assert T._create_converter(T.ArrayType(T.StructType([
+        T.StructField("a", T.StringType())])))([Row(a=1), {"a": 2}]) == [("1",), ("2",)]
+    assert T._create_converter(T.MapType(T.StringType(), T.NullType()))(
+        {"a": None, 1: 2}) == {"a": None, "1": None}
+    assert T._create_converter(T.MapType(T.StringType(), T.NullType()))(None) is None
+    assert T._create_converter(T.NullType())(5) is None
+    assert T._create_converter(T.StringType())(None) is None
+    assert T._create_converter(T.StringType())(True) == "true"
+    assert T._create_converter(T.StringType())(5) == "5"
+    struct = T.StructType([T.StructField("a", T.StringType())])
+    assert T._create_converter(struct)(None) is None
+    assert T._create_converter(struct)(SimpleNamespace(a=5)) == ("5",)
+    with pytest.raises(PySparkTypeError) as bad_struct:
+        T._create_converter(struct)(object())
+    assert bad_struct.value.getCondition() == "UNSUPPORTED_DATA_TYPE"
+    assert bad_struct.value.getMessageParameters() == {"data_type": "object"}
+
+    # The row of a JVM row takes its values in the order of the fields, as PySpark's
+    # _create_row_inbound_converter.
+    pair = T.StructType([T.StructField("a", T.LongType()), T.StructField("b", T.StringType())])
+    assert T._create_row_inbound_converter(pair)(1, "x") == Row(a=1, b="x")
+    dated = T.StructType([T.StructField("d", T.DateType())])
+    assert T._create_row_inbound_converter(dated)(1) == Row(d=datetime.date(1970, 1, 2))
+
+
+def test_verify_values_of_each_type_as_pyspark():
+    from types import SimpleNamespace
+
+    from pyspark.errors import PySparkTypeError, PySparkValueError
+
+    wkb = b"\x01\x01\x00\x00\x00" + bytes(16)
+    verify = T._make_type_verifier
+
+    # As PySpark's verifier: the bounds of a long, and the errors of a struct's length, of its
+    # values and of a non-struct, with the name of the field when it has one.
+    verify(T.LongType())(2**63 - 1)
+    with pytest.raises(PySparkValueError) as too_long:
+        verify(T.LongType())(2**63)
+    assert too_long.value.getCondition() == "VALUE_OUT_OF_BOUNDS"
+    assert too_long.value.getMessageParameters() == {
+        "arg_name": "obj", "lower_bound": "-9223372036854775808",
+        "upper_bound": "9223372036854775807", "actual": "9223372036854775808"}
+
+    # A null type is not an acceptable type, which its verifier asserts (as PySpark's).
+    with pytest.raises(AssertionError, match=r"unknown datatype: NullType\(\) for object 5"):
+        verify(T.NullType())(5)
+    with pytest.raises(AssertionError, match="nm: unknown datatype"):
+        verify(T.NullType(), name="nm")(5)
+
+    # A user-defined type takes the values that carry its UDT, the named error otherwise.
+    verify(_CovUDT())(_CovUDTValue(7))
+    with pytest.raises(PySparkValueError) as mismatch:
+        verify(_CovUDT())(5)
+    assert mismatch.value.getCondition() == "FIELD_TYPE_MISMATCH"
+    with pytest.raises(PySparkValueError) as named_mismatch:
+        verify(_CovUDT(), name="pt")(5)
+    assert named_mismatch.value.getCondition() == "FIELD_TYPE_MISMATCH_WITH_NAME"
+    assert named_mismatch.value.getMessageParameters()["field_name"] == "pt"
+
+    pair = T.StructType([T.StructField("a", T.LongType()), T.StructField("b", T.LongType())])
+    with pytest.raises(PySparkValueError) as short:
+        verify(pair)((1,))
+    assert short.value.getCondition() == "FIELD_STRUCT_LENGTH_MISMATCH"
+    with pytest.raises(PySparkValueError) as short_named:
+        verify(pair, name="s")((1,))
+    assert short_named.value.getCondition() == "FIELD_STRUCT_LENGTH_MISMATCH_WITH_NAME"
+    assert short_named.value.getMessageParameters() == {
+        "field_name": "s", "object_length": "1", "field_length": "2"}
+
+    integer_struct = T.StructType([T.StructField("a", T.IntegerType())])
+    verify(integer_struct)(SimpleNamespace(a=1))
+    with pytest.raises(PySparkValueError) as wide:
+        verify(integer_struct)(SimpleNamespace(a=2**40))
+    assert wide.value.getCondition() == "VALUE_OUT_OF_BOUNDS"
+    with pytest.raises(PySparkTypeError) as not_struct:
+        verify(integer_struct)(5)
+    assert not_struct.value.getCondition() == "FIELD_DATA_TYPE_UNACCEPTABLE"
+    with pytest.raises(PySparkTypeError) as not_struct_named:
+        verify(integer_struct, name="s")(5)
+    assert not_struct_named.value.getCondition() == "FIELD_DATA_TYPE_UNACCEPTABLE_WITH_NAME"
+    assert not_struct_named.value.getMessageParameters()["field_name"] == "s"
+
+    # A variant takes any value, and a null variant only when it is nullable.
+    verify(T.VariantType())(object())
+    verify(T.VariantType())(None)
+    with pytest.raises(PySparkValueError) as null_variant:
+        verify(T.VariantType(), nullable=False)(None)
+    assert null_variant.value.getCondition() == "FIELD_NOT_NULLABLE"
+
+    # A geometry or a geography takes its own values only.
+    verify(T.GeometryType(4326))(T.Geometry.fromWKB(wkb, 4326))
+    verify(T.GeographyType(4326))(T.Geography.fromWKB(wkb, 4326))
+    for data_type in [T.GeometryType(4326), T.GeographyType(4326)]:
+        with pytest.raises(PySparkTypeError) as not_spatial:
+            verify(data_type)(5)
+        assert not_spatial.value.getCondition() == "FIELD_DATA_TYPE_UNACCEPTABLE"
+        assert not_spatial.value.getMessageParameters()["data_type"] == str(data_type)
+
+
+def test_udt_converters_of_null_structs_and_maps():
+    # The converters of the collected values: a null struct is null, the UDT of a struct's field
+    # is deserialized in its row, and a map of pairs (as the Rust client passes it) is converted
+    # as a map.
+    from pyspark.sql.types import _udt_converter, _udt_field_converters
+
+    struct = T.StructType([T.StructField("v", _CovUDT())])
+    assert _udt_converter(struct)(None) is None
+    converted = _udt_converter(struct)((70,))
+    assert converted == Row(v=7) and converted.v == 7
+    assert _udt_converter(T.MapType(T.StringType(), _CovUDT()))({"k": 70}) == {"k": 7}
+    assert _udt_converter(T.MapType(T.StringType(), _CovUDT()))([("k", 70)]) == {"k": 7}
+    assert _udt_field_converters(T.StructType([
+        T.StructField("m", T.MapType(T.StringType(), T.LongType()))])) is None
+
+
 def test_timedelta_values_convert_as_pyspark():
     import datetime
     import re
