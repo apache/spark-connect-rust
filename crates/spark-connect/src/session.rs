@@ -504,7 +504,7 @@ impl SparkSession {
         // returns a relation of its result; for a query it returns the query's relation, which
         // then runs at an action.
         let command = proto::SqlCommand {
-            input: Some(crate::dataframe::build_input_relation(&plan, self)),
+            input: Some(crate::dataframe::build_input_relation(&plan, self)?),
             ..Default::default()
         };
         let responses = crate::dataframe::execute_command_collect(

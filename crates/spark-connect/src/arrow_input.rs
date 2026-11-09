@@ -580,13 +580,14 @@ mod tests {
         assert_eq!(before.values().to_data(), after.values().to_data());
         assert_eq!(before.offsets(), after.offsets());
 
+        let relation = inline_relation(std::slice::from_ref(&batch), None).unwrap();
         let LogicalPlan::LocalRelation {
             data: Some(data), ..
-        } = inline_relation(std::slice::from_ref(&batch), None).unwrap()
+        } = &relation
         else {
             panic!("expected inline data");
         };
-        let mut reader = StreamReader::try_new(Cursor::new(data), None).unwrap();
+        let mut reader = StreamReader::try_new(Cursor::new(data.clone()), None).unwrap();
         assert_canonical_map(reader.schema().field(0).data_type());
         assert_eq!(reader.next().unwrap().unwrap(), expected);
         assert!(reader.next().is_none());
@@ -887,13 +888,14 @@ mod tests {
         assert_eq!(fields[0].metadata().get("schema_tag").unwrap(), "preserved");
         let after = after.as_any().downcast_ref::<StructArray>().unwrap();
         assert_map_values_unchanged(&maps, after.column(0));
+        let relation = inline_relation(std::slice::from_ref(&batch), None).unwrap();
         let LogicalPlan::LocalRelation {
             data: Some(data), ..
-        } = inline_relation(std::slice::from_ref(&batch), None).unwrap()
+        } = &relation
         else {
             panic!("expected inline relation");
         };
-        let mut reader = StreamReader::try_new(Cursor::new(data), None).unwrap();
+        let mut reader = StreamReader::try_new(Cursor::new(data.clone()), None).unwrap();
         let decoded = reader.next().unwrap().unwrap();
         decoded.column(0).to_data().validate_full().unwrap();
         assert_eq!(decoded.schema(), normalized[0].schema());
@@ -909,7 +911,7 @@ mod tests {
             .create_dataframe_from_arrow(vec![map_batch(0)], None)
             .unwrap();
         let Some(spark_connect_proto::relation::RelType::LocalRelation(local)) =
-            dataframe.to_relation().rel_type
+            dataframe.to_relation().unwrap().rel_type
         else {
             panic!("expected zero-row inline relation");
         };
@@ -952,13 +954,14 @@ mod tests {
         .unwrap();
         let prepared = normalize_map_names(std::slice::from_ref(&batch)).unwrap();
         assert!(matches!(prepared, Cow::Borrowed(_)));
+        let relation = inline_relation(std::slice::from_ref(&batch), None).unwrap();
         let LogicalPlan::LocalRelation {
             data: Some(data), ..
-        } = inline_relation(std::slice::from_ref(&batch), None).unwrap()
+        } = &relation
         else {
             panic!("expected inline relation");
         };
-        let mut reader = StreamReader::try_new(Cursor::new(data), None).unwrap();
+        let mut reader = StreamReader::try_new(Cursor::new(data.clone()), None).unwrap();
         assert_canonical_map(reader.schema().field(0).data_type());
         let decoded = reader.next().unwrap().unwrap();
         assert_canonical_map(decoded.schema().field(0).data_type());

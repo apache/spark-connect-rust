@@ -1154,7 +1154,7 @@ impl DataFrame {
     /// The relation of this DataFrame as it is sent, with the plan IDs of its session, for a
     /// plan built outside the core over it, such as of `pyspark.ml`. Not a stable API.
     #[doc(hidden)]
-    pub fn to_relation(&self) -> proto::Relation {
+    pub fn to_relation(&self) -> Result<proto::Relation> {
         build_input_relation(&self.plan, &self.session)
     }
 
@@ -1260,13 +1260,13 @@ impl DataFrame {
 
     /// This DataFrame's relation for a request. Its plan nodes keep the same plan IDs each
     /// time, as in PySpark, so the server can reuse the plans it already resolved.
-    pub(crate) fn relation(&self) -> proto::Relation {
+    pub(crate) fn relation(&self) -> Result<proto::Relation> {
         crate::plan::relation_with_ids(&self.plan, self.session.plan_ids())
     }
 
     /// Build an ExecutePlanRequest from the logical plan.
     fn build_execute_request(&self) -> Result<proto::ExecutePlanRequest> {
-        let relation = self.relation();
+        let relation = self.relation()?;
 
         let mut request = proto::ExecutePlanRequest::default();
         request.session_id = self.session.client().session_id().to_string();
@@ -1282,7 +1282,7 @@ impl DataFrame {
 
     /// Build an AnalyzePlanRequest from the logical plan.
     fn build_analyze_request(&self) -> Result<proto::AnalyzePlanRequest> {
-        let relation = self.relation();
+        let relation = self.relation()?;
 
         let mut plan = proto::Plan::default();
         plan.op_type = Some(proto::plan::OpType::Root(relation));
@@ -1376,7 +1376,7 @@ impl DataFrame {
     /// Mirrors `pyspark.sql.DataFrame.persist(storageLevel)`.
     pub fn persist(&self, storage_level: proto::StorageLevel) -> Result<DataFrame> {
         let persist = proto::analyze_plan_request::Persist {
-            relation: Some(self.relation()),
+            relation: Some(self.relation()?),
             storage_level: Some(storage_level),
         };
         let request = self.analyze_request(proto::analyze_plan_request::Analyze::Persist(persist));
@@ -1387,7 +1387,7 @@ impl DataFrame {
     /// Remove this DataFrame from cache. Mirrors `DataFrame.unpersist(blocking)`.
     pub fn unpersist(&self, blocking: bool) -> Result<DataFrame> {
         let unpersist = proto::analyze_plan_request::Unpersist {
-            relation: Some(self.relation()),
+            relation: Some(self.relation()?),
             blocking: Some(blocking),
         };
         let request =
@@ -1433,7 +1433,7 @@ impl DataFrame {
         storage_level: Option<proto::StorageLevel>,
     ) -> Result<DataFrame> {
         let mut cmd = proto::CheckpointCommand::default();
-        cmd.relation = Some(self.relation());
+        cmd.relation = Some(self.relation()?);
         cmd.local = local;
         cmd.eager = eager;
         cmd.storage_level = storage_level;
@@ -1489,7 +1489,7 @@ impl DataFrame {
     /// Build + execute a real `CreateDataFrameViewCommand` (was previously a
     /// silent no-op that passed the query relation through and never created a view).
     fn create_view(&self, name: &str, replace: bool, global: bool) -> Result<()> {
-        let input = self.relation();
+        let input = self.relation()?;
         let mut cmd = proto::CreateDataFrameViewCommand::default();
         cmd.input = Some(input);
         cmd.name = name.to_string();
@@ -1540,7 +1540,7 @@ impl DataFrame {
             }
         };
         let plan = proto::Plan {
-            op_type: Some(proto::plan::OpType::Root(self.relation())),
+            op_type: Some(proto::plan::OpType::Root(self.relation()?)),
         };
         let request = proto::AnalyzePlanRequest {
             session_id: self.session.client().session_id().to_string(),
@@ -1638,7 +1638,7 @@ impl DataFrame {
 
     /// Get the input files for this DataFrame. Mirrors `pyspark.sql.DataFrame.inputFiles`.
     pub fn input_files(&self) -> Result<Vec<String>> {
-        let relation = self.relation();
+        let relation = self.relation()?;
         let mut plan = proto::Plan::default();
         plan.op_type = Some(proto::plan::OpType::Root(relation));
         let mut inp = proto::analyze_plan_request::InputFiles::default();
@@ -2046,7 +2046,7 @@ impl DataFrame {
     /// Get the storage level of this DataFrame. Mirrors `DataFrame.storageLevel`.
     pub fn storage_level(&self) -> Result<proto::StorageLevel> {
         let get = proto::analyze_plan_request::GetStorageLevel {
-            relation: Some(self.relation()),
+            relation: Some(self.relation()?),
         };
         let request =
             self.analyze_request(proto::analyze_plan_request::Analyze::GetStorageLevel(get));
@@ -2082,7 +2082,7 @@ impl DataFrame {
     /// Compute the server-side semantic hash of this DataFrame's logical plan,
     /// mirroring `DataFrame.semanticHash()` (an AnalyzePlan request).
     pub fn semantic_hash(&self) -> Result<i32> {
-        let relation = self.relation();
+        let relation = self.relation()?;
         let mut plan = proto::Plan::default();
         plan.op_type = Some(proto::plan::OpType::Root(relation));
         let mut request = proto::AnalyzePlanRequest::default();
@@ -2103,8 +2103,8 @@ impl DataFrame {
     /// Whether two DataFrames have the same semantics, mirroring
     /// `DataFrame.sameSemantics(other)` (a server-side AnalyzePlan comparison).
     pub fn same_semantics(&self, other: &DataFrame) -> Result<bool> {
-        let self_rel = self.relation();
-        let other_rel = other.relation();
+        let self_rel = self.relation()?;
+        let other_rel = other.relation()?;
         let mut target_plan = proto::Plan::default();
         target_plan.op_type = Some(proto::plan::OpType::Root(self_rel));
         let mut other_plan = proto::Plan::default();
@@ -2266,7 +2266,7 @@ impl DataFrame {
             analyze: Some(proto::analyze_plan_request::Analyze::IsStreaming(
                 proto::analyze_plan_request::IsStreaming {
                     plan: Some(proto::Plan {
-                        op_type: Some(proto::plan::OpType::Root(self.relation())),
+                        op_type: Some(proto::plan::OpType::Root(self.relation()?)),
                     }),
                 },
             )),
@@ -2444,7 +2444,7 @@ impl DataFrame {
 pub(crate) fn build_input_relation(
     plan: &Arc<LogicalPlan>,
     session: &SparkSession,
-) -> proto::Relation {
+) -> Result<proto::Relation> {
     crate::plan::relation_with_ids(plan, session.plan_ids())
 }
 
@@ -4277,6 +4277,29 @@ mod plan_construction_tests {
     }
 
     #[test]
+    fn actions_of_a_plan_past_the_depth_bound_are_recursion_errors_without_a_request() {
+        // Offline: the plan is refused before any request, so no server is needed.
+        let spark = session();
+        let mut df = spark.range(10).unwrap();
+        for _ in 0..10_000 {
+            df = df.filter(crate::functions::col("id").gt(crate::column::lit(0)));
+        }
+        let errors = [
+            df.count().unwrap_err(),
+            df.collect().unwrap_err(),
+            df.schema().unwrap_err(),
+            df.explain_string("simple").unwrap_err(),
+        ];
+        for error in errors {
+            assert_eq!(
+                error.kind,
+                spark_connect_core::error::SparkErrorKind::RecursionError,
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
     fn is_local_only_for_a_local_relation_itself() {
         let spark = session();
         let local = spark.empty_data_frame().unwrap();
@@ -4322,7 +4345,7 @@ mod plan_construction_tests {
             ..Default::default()
         }));
         assert!(!query.is_local());
-        let relation = build_input_relation(&query.plan, &spark);
+        let relation = build_input_relation(&query.plan, &spark).unwrap();
         match relation.rel_type {
             Some(RelType::Sql(sql)) => assert_eq!(sql.query, "SELECT 1"),
             other => panic!("expected the returned SQL relation, got {other:?}"),
@@ -4467,8 +4490,8 @@ mod plan_construction_tests {
 
         // As in PySpark, a shared node has one plan ID wherever it occurs, and serializing
         // the same plan again gives the same relation.
-        let first = build_input_relation(&joined.plan, &spark);
-        let second = build_input_relation(&joined.plan, &spark);
+        let first = build_input_relation(&joined.plan, &spark).unwrap();
+        let second = build_input_relation(&joined.plan, &spark).unwrap();
         assert_eq!(first, second);
         let ids = plan_ids_of(&first);
         assert_eq!(ids.len(), 5);
@@ -4634,18 +4657,21 @@ mod plan_construction_tests {
 
         let spark = session();
         let base = spark.range(3).unwrap().select(vec![col("id")]);
-        let base_relation = base.relation();
+        let base_relation = base.relation().unwrap();
         let derived = base.filter(col("id").gt(lit(1)));
-        let derived_relation = derived.relation();
+        let derived_relation = derived.relation().unwrap();
         let Some(proto::relation::RelType::Filter(filter)) = &derived_relation.rel_type else {
             panic!("expected filter");
         };
         assert_eq!(filter.input.as_deref(), Some(&base_relation));
-        assert_eq!(derived.relation(), derived_relation);
+        assert_eq!(derived.relation().unwrap(), derived_relation);
         // Separately built plans, even equal ones, are distinct nodes with distinct IDs.
         let other = spark.range(3).unwrap().select(vec![col("id")]);
         assert_eq!(other.plan.to_proto(), base.plan.to_proto());
-        let (mine, theirs) = (plan_ids_of(&base_relation), plan_ids_of(&other.relation()));
+        let (mine, theirs) = (
+            plan_ids_of(&base_relation),
+            plan_ids_of(&other.relation().unwrap()),
+        );
         assert!(mine.iter().all(|id| !theirs.contains(id)));
     }
 
@@ -4654,18 +4680,18 @@ mod plan_construction_tests {
         // A session of its own, so that other tests' plans do not change its entries.
         let spark = session().new_session();
         let kept = spark.range(1).unwrap();
-        let kept_ids = plan_ids_of(&kept.relation());
+        let kept_ids = plan_ids_of(&kept.relation().unwrap());
         let mut seen: std::collections::HashSet<i64> = kept_ids.iter().copied().collect();
         // Each plan is dropped at once, so pruning frees its allocation for a later plan to
         // reuse. A new node must still never get the ID of a dropped one.
         for end in 0..5000 {
-            for id in plan_ids_of(&spark.range(end).unwrap().relation()) {
+            for id in plan_ids_of(&spark.range(end).unwrap().relation().unwrap()) {
                 assert!(seen.insert(id), "plan ID {id} was assigned twice");
             }
             // With one live node, pruning keeps the map at most MIN_PRUNE_AT entries.
             assert!(spark.plan_ids().len() <= 1024, "{}", spark.plan_ids().len());
         }
-        assert_eq!(plan_ids_of(&kept.relation()), kept_ids);
+        assert_eq!(plan_ids_of(&kept.relation().unwrap()), kept_ids);
     }
 
     #[test]
@@ -4677,7 +4703,7 @@ mod plan_construction_tests {
         let mut seen = std::collections::HashSet::new();
         for end in 0..10 {
             for plans in [&one, &two] {
-                for id in plan_ids_of(&plans.range(end).unwrap().relation()) {
+                for id in plan_ids_of(&plans.range(end).unwrap().relation().unwrap()) {
                     assert!(seen.insert(id), "plan ID {id} was assigned twice");
                 }
             }
@@ -4804,7 +4830,7 @@ mod plan_construction_tests {
         let splits = df.random_split(vec![1.0, 0.0, 3.0], Some(42)).unwrap();
         assert_eq!(splits.len(), 3);
         for (split, (lower, upper)) in splits.iter().zip([(0.0, 0.25), (0.25, 0.25), (0.25, 1.0)]) {
-            let Some(RelType::Sample(sample)) = split.relation().rel_type else {
+            let Some(RelType::Sample(sample)) = split.relation().unwrap().rel_type else {
                 panic!("expected a serialized Sample relation");
             };
             assert_eq!(sample.lower_bound, lower);
@@ -4895,7 +4921,7 @@ mod plan_construction_tests {
         let df2 = spark.range(5).unwrap();
         let e = || col("id").expression().clone();
         let ser = |d: &DataFrame| {
-            build_input_relation(&d.plan, &spark);
+            build_input_relation(&d.plan, &spark).unwrap();
         };
 
         ser(&df.select(vec![col("id")]));
@@ -4961,7 +4987,7 @@ mod plan_construction_tests {
         use crate::streaming::Trigger;
         let spark = session();
         let ser = |d: &DataFrame| {
-            build_input_relation(&d.plan, &spark);
+            build_input_relation(&d.plan, &spark).unwrap();
         };
         ser(&spark
             .read_stream()
@@ -5066,7 +5092,7 @@ mod plan_construction_tests {
 
         let spark = session();
         let ser = |d: &DataFrame| {
-            build_input_relation(&d.plan, &spark);
+            build_input_relation(&d.plan, &spark).unwrap();
         };
         let df = spark.range(5).unwrap();
         let df2 = spark.range(5).unwrap();
@@ -5120,7 +5146,7 @@ mod plan_construction_tests {
                 PythonUDFPayload::new(DataType::Integer, 205, vec![1], "3.11".to_string()),
             )
         };
-        let sent = |mapped: DataFrame| match mapped.relation().rel_type {
+        let sent = |mapped: DataFrame| match mapped.relation().unwrap().rel_type {
             Some(RelType::MapPartitions(map)) => (map.profile_id, map.is_barrier),
             other => panic!("expected MapPartitions, got {other:?}"),
         };
@@ -5713,7 +5739,7 @@ mod plan_id_column_tests {
                 JoinType::Inner,
             )
             .select(vec![left.col("id"), right.star(), left.col_regex("`i.*`")]);
-        let relation = joined.relation();
+        let relation = joined.relation().unwrap();
         let Some(RelType::Project(project)) = &relation.rel_type else {
             panic!("expected Project: {relation:?}");
         };
@@ -5799,7 +5825,7 @@ mod subquery_tests {
             .unwrap()
             .select(vec![col("id"), inner.scalar().alias("m")]);
 
-        let relation = df.relation();
+        let relation = df.relation().unwrap();
         let (root, references) = with_relations(&relation);
         assert_eq!(plan_id(&relation), Some(spark.plan_ids().id_of(&df.plan)));
         assert!(plan_id(root).is_some() && plan_id(root) != plan_id(&relation));
@@ -5817,9 +5843,9 @@ mod subquery_tests {
         );
         assert_eq!(references.len(), 1);
         assert_eq!(plan_id(&references[0]), Some(scalar.plan_id));
-        assert_eq!(references[0], inner.relation());
+        assert_eq!(references[0], inner.relation().unwrap());
         // The plan IDs are stable, as PySpark's.
-        assert_eq!(df.relation(), relation);
+        assert_eq!(df.relation().unwrap(), relation);
         // Without plan IDs, the relation is sent the same way.
         let Some(RelType::WithRelations(with)) = df.plan.to_proto().rel_type else {
             panic!("expected WithRelations");
@@ -5827,7 +5853,7 @@ mod subquery_tests {
         assert_eq!(with.references.len(), 1);
         // A plan without subqueries is sent as it is.
         assert!(matches!(
-            inner.relation().rel_type,
+            inner.relation().unwrap().rel_type,
             Some(RelType::Project(_))
         ));
     }
@@ -5845,7 +5871,7 @@ mod subquery_tests {
             .filter(col("id").isin_subquery(&filtered))
             .filter(t2.exists());
 
-        let relation = df.relation();
+        let relation = df.relation().unwrap();
         let (root, references) = with_relations(&relation);
         let Some(RelType::Filter(outer)) = &root.rel_type else {
             panic!("expected Filter: {root:?}");
@@ -5875,7 +5901,7 @@ mod subquery_tests {
         assert!(matches!(filtered_root.rel_type, Some(RelType::Filter(_))));
         assert_eq!(
             filtered_references,
-            std::slice::from_ref(&smallest.relation())
+            std::slice::from_ref(&smallest.relation().unwrap())
         );
     }
 

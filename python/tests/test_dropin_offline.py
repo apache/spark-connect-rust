@@ -8932,6 +8932,22 @@ def test_create_dataframe_converts_numpy_scalars_as_pyarrow():
             _local_create_dataframe([(value,)], schema)
 
 
+def test_a_plan_too_deep_to_send_raises_recursion_error_without_a_request(mock_connect):
+    # As PySpark, whose client raises RecursionError while it builds the proto of a plan a few
+    # hundred levels deep, before any request, rather than overflowing the native stack.
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    df = spark.range(10)
+    for _ in range(10_000):
+        df = df.filter(F.col("id") >= 0)
+    for action in [df.count, df.collect, lambda: df.schema, df.explain]:
+        with pytest.raises(RecursionError, match="a plan of 1000[12] levels"):
+            action()
+    assert service.execute_requests == []
+    assert service.analyze_requests == []
+
+
 def test_create_dataframe_raises_recursion_error_for_a_value_that_contains_itself():
     class Node:
         def __init__(self):

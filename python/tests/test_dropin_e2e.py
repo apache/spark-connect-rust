@@ -1275,6 +1275,42 @@ print(spark.range(0, 2000, 1, 4).repartition(20).selectExpr("sum(id) as t").coll
     assert "RecursionError" in result.stderr, (result.stdout, result.stderr)
 
 
+def test_a_deep_plan_raises_recursion_error_as_pyspark():
+    # As official PySpark 4.3.0, which raises RecursionError for each of these depths while it
+    # builds the plan, before any request. The server rejected 1,000 and 1,500 levels without a
+    # reason, and from 2,000 the process crashed (SIGSEGV), so this runs in a process of its own.
+    # The session works afterwards.
+    import subprocess
+    import sys
+
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("SPARK_REMOTE is required for live-server tests")
+    result = subprocess.run([sys.executable, "-c", """
+from pyspark.sql import SparkSession, functions as F
+spark = SparkSession.builder.remote(%r).getOrCreate()
+for levels in [1000, 1500, 2000, 3000, 5000, 10000]:
+    df = spark.range(10)
+    for _ in range(levels):
+        df = df.filter(F.col("id") >= 0)
+    try:
+        df.count()
+    except RecursionError:
+        print(levels, "RecursionError")
+print(spark.range(3).count())
+""" % remote], capture_output=True, text=True, timeout=300)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "1000 RecursionError",
+        "1500 RecursionError",
+        "2000 RecursionError",
+        "3000 RecursionError",
+        "5000 RecursionError",
+        "10000 RecursionError",
+        "3",
+    ], result.stdout
+
+
 def test_progress_handler_runs_a_query_of_its_own_as_pyspark(session):
     # As PySpark's: a handler runs while the execution runs, and a query of the handler runs
     # too, the progress of the execution having no effect on it.

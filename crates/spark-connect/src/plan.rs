@@ -700,7 +700,7 @@ pub(crate) fn resolve_relation(relation: &mut proto::Relation) -> Result<()> {
             let (node, ids) = placeholder_target(marker).ok_or_else(|| {
                 SparkError::value_msg("a placeholder of a DataFrame that no longer exists")
             })?;
-            *relation = relation_with_ids(&node, &ids);
+            *relation = relation_with_ids(&node, &ids)?;
             return Ok(());
         }
     }
@@ -775,10 +775,47 @@ pub fn resolve_request(request: &mut proto::ExecutePlanRequest) -> Result<()> {
     }
 }
 
+/// How many levels deep a plan may be to be sent. PySpark builds the proto of a plan by
+/// recursing in Python, so under Python's default recursion limit of 1000 it raises
+/// `RecursionError` for a plan of about 245 levels or more, before any request is sent. A plan
+/// deeper than this bound fails in the same way. The server itself rejects a plan of about 510
+/// levels or more, with an error that gives no reason.
+pub const MAX_PLAN_DEPTH: usize = 256;
+
+/// Plans up to this deep are serialized on the calling thread. A level takes about 5 KiB of
+/// native stack, so these fit any thread; a deeper plan is serialized on a thread with a stack
+/// of its own, sized for it, as the calling thread may have as little as 512 KiB.
+const INLINE_PLAN_DEPTH: usize = 32;
+
+/// Native stack for each level of a plan serialized on a thread of its own: three times what a
+/// level takes in a release build, for the larger frames of a debug build.
+const STACK_PER_PLAN_LEVEL: usize = 16 << 10;
+
 /// Serialize a shared plan node for a request: the node and every node below it carry
-/// their stable plan IDs.
-pub(crate) fn relation_with_ids(node: &Arc<LogicalPlan>, ids: &PlanIds) -> proto::Relation {
-    relation_of(node, Some(ids))
+/// their stable plan IDs. A plan deeper than [`MAX_PLAN_DEPTH`] is a `RecursionError`, as in
+/// PySpark, instead of a request that overflows the stack of the thread.
+pub(crate) fn relation_with_ids(node: &Arc<LogicalPlan>, ids: &PlanIds) -> Result<proto::Relation> {
+    let depth = node.depth();
+    if depth > MAX_PLAN_DEPTH {
+        return Err(SparkError::recursion_msg(format!(
+            "maximum recursion depth exceeded while serializing a plan of {depth} levels; \
+             a plan may be at most {MAX_PLAN_DEPTH} levels deep"
+        )));
+    }
+    if depth <= INLINE_PLAN_DEPTH {
+        return Ok(relation_of(node, Some(ids)));
+    }
+    std::thread::scope(|scope| {
+        let serializing = std::thread::Builder::new()
+            .name("spark-connect-plan".to_string())
+            .stack_size((1 << 20) + depth * STACK_PER_PLAN_LEVEL)
+            .spawn_scoped(scope, || relation_of(node, Some(ids)))
+            .map_err(|e| SparkError::connect_msg(format!("cannot serialize the plan: {e}")))?;
+        match serializing.join() {
+            Ok(relation) => Ok(relation),
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    })
 }
 
 /// Serialize a child node, with its stable plan ID when `ids` is given.
@@ -873,7 +910,165 @@ fn relation_with_references(
     }
 }
 
+/// The plans that `$plan` reads, as references of the same mutability as `$plan`.
+macro_rules! inputs_of {
+    ($plan:expr) => {{
+        let mut inputs = Vec::new();
+        match $plan {
+            LogicalPlan::Project { input, .. }
+            | LogicalPlan::Filter { input, .. }
+            | LogicalPlan::Aggregate { input, .. }
+            | LogicalPlan::Limit { input, .. }
+            | LogicalPlan::Offset { input, .. }
+            | LogicalPlan::Tail { input, .. }
+            | LogicalPlan::ShowString { input, .. }
+            | LogicalPlan::HtmlString { input, .. }
+            | LogicalPlan::Deduplicate { input, .. }
+            | LogicalPlan::Sort { input, .. }
+            | LogicalPlan::Sample { input, .. }
+            | LogicalPlan::Repartition { input, .. }
+            | LogicalPlan::RepartitionByExpression { input, .. }
+            | LogicalPlan::WithColumns { input, .. }
+            | LogicalPlan::WithColumnMetadata { input, .. }
+            | LogicalPlan::WithColumnsRenamed { input, .. }
+            | LogicalPlan::Drop { input, .. }
+            | LogicalPlan::ToDF { input, .. }
+            | LogicalPlan::ToSchema { input, .. }
+            | LogicalPlan::Hint { input, .. }
+            | LogicalPlan::Parse { input, .. }
+            | LogicalPlan::Unpivot { input, .. }
+            | LogicalPlan::NAFill { input, .. }
+            | LogicalPlan::NAFillColumns { input, .. }
+            | LogicalPlan::NADrop { input, .. }
+            | LogicalPlan::NAReplace { input, .. }
+            | LogicalPlan::Describe { input, .. }
+            | LogicalPlan::Summary { input, .. }
+            | LogicalPlan::ColRegex { input, .. }
+            | LogicalPlan::SubqueryAlias { input, .. }
+            | LogicalPlan::WithWatermark { input, .. }
+            | LogicalPlan::RepartitionByRange { input, .. }
+            | LogicalPlan::StatCrosstab { input, .. }
+            | LogicalPlan::StatFreqItems { input, .. }
+            | LogicalPlan::StatApproxQuantile { input, .. }
+            | LogicalPlan::StatCorr { input, .. }
+            | LogicalPlan::StatCov { input, .. }
+            | LogicalPlan::StatSampleBy { input, .. }
+            | LogicalPlan::Observe { input, .. }
+            | LogicalPlan::MlTransform { input, .. }
+            | LogicalPlan::Transpose { input, .. }
+            | LogicalPlan::MapPartitions { input, .. }
+            | LogicalPlan::ApplyInPandasWithState { input, .. } => inputs.push(input),
+            LogicalPlan::Join { left, right, .. }
+            | LogicalPlan::LateralJoin { left, right, .. }
+            | LogicalPlan::SetOperation { left, right, .. }
+            | LogicalPlan::Zip { left, right, .. }
+            | LogicalPlan::AsOfJoin { left, right, .. }
+            | LogicalPlan::NearestByJoin { left, right, .. } => {
+                inputs.push(left);
+                inputs.push(right);
+            }
+            LogicalPlan::CoGroupMap { input, other, .. } => {
+                inputs.push(input);
+                inputs.push(other);
+            }
+            LogicalPlan::GroupMap {
+                input,
+                initial_input,
+                ..
+            } => {
+                inputs.push(input);
+                inputs.extend(initial_input);
+            }
+            LogicalPlan::WithRelations { root, references } => {
+                inputs.push(root);
+                inputs.extend(references);
+            }
+            LogicalPlan::Range { .. }
+            | LogicalPlan::Sql { .. }
+            | LogicalPlan::Raw { .. }
+            | LogicalPlan::LocalRelation { .. }
+            | LogicalPlan::ChunkedCachedLocalRelation { .. }
+            | LogicalPlan::CachedRemoteRelation { .. }
+            | LogicalPlan::CachedRelation { .. }
+            | LogicalPlan::Read { .. }
+            | LogicalPlan::RelationChanges { .. }
+            | LogicalPlan::UnresolvedTableValuedFunction { .. }
+            | LogicalPlan::Catalog { .. }
+            | LogicalPlan::CommonInlineUdtf { .. } => {}
+        }
+        inputs
+    }};
+}
+
+/// A leaf that a dropped node leaves in place of each of its inputs, so that the inputs are
+/// dropped one at a time rather than each inside the drop of the node above it.
+static DROPPED_INPUT: LazyLock<Arc<LogicalPlan>> = LazyLock::new(|| {
+    Arc::new(LogicalPlan::Range {
+        start: 0,
+        end: 0,
+        step: 1,
+        num_partitions: None,
+    })
+});
+
+impl Drop for LogicalPlan {
+    /// Drop the plans below this one that nothing else holds, without recursing: a plan of
+    /// many levels would otherwise overflow the stack of the thread that drops it.
+    fn drop(&mut self) {
+        let mut pending: Vec<Arc<LogicalPlan>> = Vec::new();
+        let take_inputs = |plan: &mut LogicalPlan, pending: &mut Vec<Arc<LogicalPlan>>| {
+            for input in inputs_of!(plan) {
+                if !Arc::ptr_eq(input, &DROPPED_INPUT) {
+                    pending.push(std::mem::replace(input, Arc::clone(&DROPPED_INPUT)));
+                }
+            }
+        };
+        take_inputs(self, &mut pending);
+        while let Some(input) = pending.pop() {
+            if let Some(mut plan) = Arc::into_inner(input) {
+                take_inputs(&mut plan, &mut pending);
+            }
+        }
+    }
+}
+
 impl LogicalPlan {
+    /// The plans that this one reads directly.
+    fn inputs(&self) -> Vec<&Arc<LogicalPlan>> {
+        inputs_of!(self)
+    }
+
+    /// The number of levels of this plan: one for a leaf, and one more than its deepest input
+    /// otherwise. Computed without recursing, and once for each node that several plans share.
+    pub fn depth(&self) -> usize {
+        let mut depths: HashMap<*const LogicalPlan, usize> = HashMap::new();
+        let mut pending: Vec<(&LogicalPlan, bool)> = vec![(self, false)];
+        while let Some((plan, inputs_done)) = pending.pop() {
+            let key: *const LogicalPlan = plan;
+            if depths.contains_key(&key) {
+                continue;
+            }
+            let inputs = plan.inputs();
+            if inputs_done {
+                let deepest = inputs
+                    .iter()
+                    .map(|input| depths[&Arc::as_ptr(input)])
+                    .max()
+                    .unwrap_or(0);
+                depths.insert(key, deepest + 1);
+            } else {
+                pending.push((plan, true));
+                pending.extend(
+                    inputs
+                        .into_iter()
+                        .filter(|input| !depths.contains_key(&Arc::as_ptr(input)))
+                        .map(|input| (input.as_ref(), false)),
+                );
+            }
+        }
+        depths[&(self as *const LogicalPlan)]
+    }
+
     /// Convert this logical plan to a `spark.connect.Relation` protobuf, without plan IDs.
     pub fn to_proto(&self) -> proto::Relation {
         relation_with_references(self, None, None)
@@ -2628,7 +2823,7 @@ mod with_relations_tests {
             root: Arc::new(sql("SELECT * FROM v")),
             references: vec![Arc::new(subquery_alias(df.clone(), "v"))],
         });
-        let relation = relation_with_ids(&plan, &ids);
+        let relation = relation_with_ids(&plan, &ids).unwrap();
         let Some(proto::relation::RelType::WithRelations(with)) = &relation.rel_type else {
             panic!("expected WithRelations: {relation:?}");
         };
@@ -2743,7 +2938,7 @@ mod placeholder_tests {
                     limit: 3,
                 });
             }
-            let relation = relation_with_ids(&node, &ids);
+            let relation = relation_with_ids(&node, &ids).unwrap();
             let shallow = placeholder(&node, &ids);
             assert!(shallow.encoded_len() < 128, "{}", shallow.encoded_len());
             let mut resolved = transform_of(shallow.clone());
@@ -2773,7 +2968,7 @@ mod placeholder_tests {
     fn placeholders_resolve_in_every_position_that_the_ml_plans_build_over_their_inputs() {
         let ids = Arc::new(PlanIds::new());
         let node = Arc::new(range(0, 3, 1));
-        let relation = relation_with_ids(&node, &ids);
+        let relation = relation_with_ids(&node, &ids).unwrap();
         let shallow = placeholder(&node, &ids);
         let fetch = || proto::Fetch {
             obj_ref: None,
@@ -2869,7 +3064,7 @@ mod placeholder_tests {
     fn the_ml_commands_resolve_their_datasets_and_fetched_arguments() {
         let ids = Arc::new(PlanIds::new());
         let node = Arc::new(range(0, 3, 1));
-        let relation = relation_with_ids(&node, &ids);
+        let relation = relation_with_ids(&node, &ids).unwrap();
         let shallow = placeholder(&node, &ids);
         let command = |ml_command: proto::ml_command::Command| proto::Command {
             command_type: Some(proto::command::CommandType::MlCommand(proto::MlCommand {
@@ -2941,7 +3136,7 @@ mod placeholder_tests {
     fn relations_without_placeholders_are_left_as_they_are() {
         let ids = Arc::new(PlanIds::new());
         let node = Arc::new(range(0, 3, 1));
-        let mut relation = relation_with_ids(&node, &ids);
+        let mut relation = relation_with_ids(&node, &ids).unwrap();
         let before = relation.clone();
         resolve_relation(&mut relation).unwrap();
         assert_eq!(relation, before);
@@ -2974,5 +3169,111 @@ mod placeholder_tests {
         };
         let error = resolve_relation(&mut relation).unwrap_err();
         assert!(error.to_string().contains("no marker"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod deep_plan_tests {
+    use super::*;
+    use spark_connect_core::error::SparkErrorKind;
+
+    /// A plan of `levels` levels: a range under limits.
+    fn chain(levels: usize) -> Arc<LogicalPlan> {
+        let mut plan = Arc::new(range(0, 10, 1));
+        for _ in 1..levels {
+            plan = Arc::new(limit(plan, 1));
+        }
+        plan
+    }
+
+    /// Run `f` on a thread with a stack of 512 KiB, the smallest that the client supports.
+    fn on_a_small_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+        std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(512 << 10)
+                .spawn_scoped(scope, f)
+                .unwrap()
+                .join()
+                .unwrap()
+        })
+    }
+
+    /// How many relations are nested in `relation`, following the inputs of limits.
+    fn nested_limits(relation: &proto::Relation) -> usize {
+        let mut levels = 1;
+        let mut relation = relation;
+        while let Some(proto::relation::RelType::Limit(limit)) = &relation.rel_type {
+            relation = limit.input.as_deref().expect("input");
+            levels += 1;
+        }
+        levels
+    }
+
+    #[test]
+    fn depth_counts_the_levels_of_the_deepest_input() {
+        assert_eq!(chain(1).depth(), 1);
+        assert_eq!(chain(5).depth(), 5);
+        let with = LogicalPlan::WithRelations {
+            root: chain(3),
+            references: vec![chain(2), chain(7)],
+        };
+        assert_eq!(with.depth(), 8);
+    }
+
+    #[test]
+    fn depth_visits_an_input_that_plans_share_once() {
+        // Each level refers to the one below twice: 2^64 paths, but 65 nodes.
+        let mut plan = Arc::new(range(0, 10, 1));
+        for _ in 0..64 {
+            plan = Arc::new(LogicalPlan::WithRelations {
+                root: Arc::clone(&plan),
+                references: vec![plan],
+            });
+        }
+        assert_eq!(plan.depth(), 65);
+    }
+
+    #[test]
+    fn a_plan_at_the_bound_is_serialized_on_a_thread_with_a_small_stack() {
+        let plan = chain(MAX_PLAN_DEPTH);
+        let ids = PlanIds::new();
+        let relation = on_a_small_stack(|| relation_with_ids(&plan, &ids).unwrap());
+        assert_eq!(nested_limits(&relation), MAX_PLAN_DEPTH);
+    }
+
+    #[test]
+    fn a_plan_past_the_bound_is_a_recursion_error_as_in_pyspark() {
+        for levels in [MAX_PLAN_DEPTH + 1, 2_000, 100_000] {
+            let plan = chain(levels);
+            let error = on_a_small_stack(|| relation_with_ids(&plan, &PlanIds::new()).unwrap_err());
+            assert_eq!(
+                error.kind,
+                SparkErrorKind::RecursionError,
+                "{levels}: {error}"
+            );
+            assert!(
+                error
+                    .message()
+                    .contains(&format!("a plan of {levels} levels")),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn dropping_a_deep_plan_does_not_overflow_a_small_stack() {
+        on_a_small_stack(|| std::mem::drop(chain(1_000_000)));
+    }
+
+    #[test]
+    fn dropping_a_plan_keeps_the_inputs_that_another_plan_holds() {
+        let shared = chain(10);
+        let other = Arc::new(limit(Arc::clone(&shared), 1));
+        std::mem::drop(chain(3));
+        std::mem::drop(Arc::new(limit(Arc::clone(&shared), 1)));
+        assert_eq!(shared.depth(), 10);
+        assert_eq!(other.depth(), 11);
+        let relation = relation_with_ids(&other, &PlanIds::new()).unwrap();
+        assert_eq!(nested_limits(&relation), 11);
     }
 }

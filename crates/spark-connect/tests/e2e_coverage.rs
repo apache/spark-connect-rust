@@ -1552,8 +1552,12 @@ fn logistic_regression_fits_and_predicts_with_cached_models() {
     let mut first = estimator.fit(&training).expect("train first model");
     let flipped = training.with_column("target", lit(1) - col("target"));
     let mut second = estimator.fit(&flipped).expect("train opposite labels");
-    let first_operator = first.build_ml_relation(&held_out).ml_type.unwrap();
-    let second_operator = second.build_ml_relation(&held_out).ml_type.unwrap();
+    let first_operator = first.build_ml_relation(&held_out).unwrap().ml_type.unwrap();
+    let second_operator = second
+        .build_ml_relation(&held_out)
+        .unwrap()
+        .ml_type
+        .unwrap();
     let model_ref = |kind: spark_connect_proto::ml_relation::MlType| {
         let spark_connect_proto::ml_relation::MlType::Transform(t) = kind else {
             panic!("expected transform");
