@@ -3921,3 +3921,70 @@ def test_linear_svc_fits_the_labels_and_predicts_on_new_rows(session, use_setter
         estimator.fit(training.withColumn("target", F.lit(2.0)))
     with pytest.raises(Exception):
         estimator.setRegParam(-1.0).fit(training)
+
+
+def _linear_regression():
+    try:
+        from pyspark._pyspark import LinearRegression
+    except ImportError:
+        from pyspark.ml.regression import LinearRegression
+    return LinearRegression
+
+
+@pytest.mark.parametrize("use_setters", [False, True], ids=["constructor", "setters"])
+def test_linear_regression_learns_the_data_and_predicts_unseen_rows(session, use_setters):
+    from pyspark.ml.connect.functions import array_to_vector
+    LinearRegression = _linear_regression()
+    training = session.sql(
+        "SELECT array(CAST(x AS DOUBLE)) AS xs, CAST(2*x+3 AS DOUBLE) AS target, 1.0D AS weight "
+        "FROM VALUES (-4), (-3), (-2), (-1), (1), (2), (3), (4) AS t(x)"
+    ).withColumn("input", array_to_vector("xs"))
+    held_out = session.sql(
+        "SELECT id, array(CAST(x AS DOUBLE)) AS xs, CAST(2*x+3 AS DOUBLE) AS target "
+        "FROM VALUES (0, -1.5), (1, 0.5), (2, 4.5) AS t(id,x)"
+    ).withColumn("input", array_to_vector("xs"))
+    kwargs = dict(featuresCol="input", labelCol="target", predictionCol="pred",
+                  maxIter=100, regParam=0.0, elasticNetParam=0.0, tol=1e-8,
+                  fitIntercept=True, standardization=False, solver="normal",
+                  weightCol="weight", aggregationDepth=2, loss="squaredError",
+                  epsilon=1.35, maxBlockSizeInMB=1.0)
+    estimator = LinearRegression() if use_setters else LinearRegression(**kwargs)
+    if use_setters:
+        for name, value in kwargs.items():
+            if name == "loss" and type(estimator).__module__ == "pyspark.ml.regression":
+                # Upstream 4.3.0 setLoss uses the nonexistent lossType parameter.
+                # Compare the intended loss setting through its working setParams API.
+                assert estimator.setParams(loss=value) is estimator
+            else:
+                assert getattr(estimator, "set" + name[0].upper() + name[1:])(value) is estimator
+    first = estimator.fit(training)
+    second = estimator.fit(training.withColumn("target", F.lit(10.0) - F.col("target")))
+    assert [r.pred for r in first.transform(held_out).orderBy("id").collect()] == pytest.approx([0, 4, 12], abs=1e-6)
+    assert [r.pred for r in second.transform(held_out).orderBy("id").collect()] == pytest.approx([10, 6, -2], abs=1e-6)
+    with pytest.raises(Exception):
+        estimator.fit(session.range(3))
+    with pytest.raises(Exception):
+        estimator.setRegParam(-1.0).fit(training)
+
+
+def test_linear_regression_weights_and_iterative_losses(session):
+    from pyspark.ml.connect.functions import array_to_vector
+    LinearRegression = _linear_regression()
+    training = session.sql(
+        "SELECT array(CAST(x AS DOUBLE)) AS xs, CAST(y AS DOUBLE) AS label, CAST(w AS DOUBLE) AS weight "
+        "FROM VALUES (-3,-3,1), (-2,-1,1), (2,7,1), (3,9,1), (100,-1000,0) AS t(x,y,w)"
+    ).withColumn("features", array_to_vector("xs"))
+    held_out = session.sql("SELECT array(2.0D) AS xs").withColumn("features", array_to_vector("xs"))
+    default = LinearRegression().fit(training.filter(F.col("weight") > 0))
+    weighted = LinearRegression(weightCol="weight").fit(training)
+    assert default.transform(held_out).first().prediction == pytest.approx(7, abs=1e-6)
+    assert weighted.transform(held_out).first().prediction == pytest.approx(7, abs=1e-6)
+    regularized = LinearRegression(solver="l-bfgs", regParam=1.0, elasticNetParam=0.5).fit(
+        training.filter(F.col("weight") > 0))
+    assert 3 < regularized.transform(held_out).first().prediction < 6.9
+    robust_training = session.sql(
+        "SELECT array(CAST(x AS DOUBLE)) AS xs, CAST(y AS DOUBLE) AS label "
+        "FROM VALUES (-3,-3.01), (-2,-0.98), (-1,1.02), (1,4.98), (2,7.01), (3,8.99), (0,1000) AS t(x,y)"
+    ).withColumn("features", array_to_vector("xs"))
+    robust = LinearRegression(loss="huber", solver="l-bfgs", maxIter=200, tol=1e-8).fit(robust_training)
+    assert robust.transform(held_out).first().prediction == pytest.approx(7, abs=0.2)

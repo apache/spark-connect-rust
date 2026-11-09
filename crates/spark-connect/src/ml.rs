@@ -42,6 +42,22 @@ impl Params {
         self
     }
 
+    /// Encode an ML parameter whose JVM type is a 32-bit integer.
+    fn set_param_int32(mut self, name: &str, value: i32) -> Self {
+        let literal = proto::expression::Literal {
+            literal_type: Some(proto::expression::literal::LiteralType::Integer(value)),
+            ..Default::default()
+        };
+        self.params.insert(
+            name.to_string(),
+            proto::Expression {
+                expr_type: Some(proto::expression::ExprType::Literal(literal)),
+                ..Default::default()
+            },
+        );
+        self
+    }
+
     /// Set a parameter to a double value.
     pub fn set_param_double(mut self, name: &str, value: f64) -> Self {
         let mut literal = proto::Expression::default();
@@ -1283,6 +1299,200 @@ impl Model for LinearSVCModel {
     }
 }
 
+/// Linear regression using Spark's JVM implementation and ML vector features.
+///
+/// Supports squared-error and Huber loss. Unset parameters use Spark's defaults.
+#[derive(Debug, Clone)]
+pub struct LinearRegression {
+    operator: MlOperator,
+    params: Params,
+}
+
+impl LinearRegression {
+    pub fn new() -> Self {
+        Self {
+            operator: MlOperator::new(
+                "org.apache.spark.ml.regression.LinearRegression",
+                OperatorType::Estimator,
+            ),
+            params: Params::new(),
+        }
+    }
+
+    /// Feature vector column.
+    pub fn set_feature_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("featuresCol", value);
+        self
+    }
+
+    /// Numeric label column.
+    pub fn set_label_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("labelCol", value);
+        self
+    }
+
+    /// Prediction output column.
+    pub fn set_prediction_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("predictionCol", value);
+        self
+    }
+
+    /// Maximum number of optimizer iterations.
+    pub fn set_max_iter(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("maxIter", value);
+        self
+    }
+
+    /// Regularization strength.
+    pub fn set_reg_param(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("regParam", value);
+        self
+    }
+
+    /// Elastic-net mixing: 0 for L2, 1 for L1.
+    pub fn set_elastic_net_param(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("elasticNetParam", value);
+        self
+    }
+
+    /// Convergence tolerance.
+    pub fn set_tol(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("tol", value);
+        self
+    }
+
+    /// Whether to fit an intercept.
+    pub fn set_fit_intercept(mut self, value: bool) -> Self {
+        self.params = self.params.set_param_bool("fitIntercept", value);
+        self
+    }
+
+    /// Whether to standardize training features.
+    pub fn set_standardization(mut self, value: bool) -> Self {
+        self.params = self.params.set_param_bool("standardization", value);
+        self
+    }
+
+    /// Solver: auto, normal or l-bfgs.
+    pub fn set_solver(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("solver", value);
+        self
+    }
+
+    /// Optional instance weight column.
+    pub fn set_weight_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("weightCol", value);
+        self
+    }
+
+    /// Tree aggregation depth.
+    pub fn set_aggregation_depth(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("aggregationDepth", value);
+        self
+    }
+
+    /// Loss function: squaredError or huber.
+    pub fn set_loss(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("loss", value);
+        self
+    }
+
+    /// Huber loss shape parameter; must be greater than 1.
+    pub fn set_epsilon(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("epsilon", value);
+        self
+    }
+
+    /// Maximum size in MB of stacked input blocks.
+    pub fn set_max_block_size_in_mb(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("maxBlockSizeInMB", value);
+        self
+    }
+
+    fn model_from_info(
+        &self,
+        info: proto::ml_command_result::MlOperatorInfo,
+        session: &SparkSession,
+    ) -> spark_connect_core::error::Result<LinearRegressionModel> {
+        let cached = CachedModel::from_info(&info, session, "LinearRegression")?;
+        Ok(LinearRegressionModel {
+            operator: MlOperator::with_uid(
+                "org.apache.spark.ml.regression.LinearRegressionModel",
+                info.uid.as_deref().unwrap_or(&self.operator.uid),
+                OperatorType::Model,
+            ),
+            params: self.params.clone(),
+            cached,
+        })
+    }
+}
+
+impl Default for LinearRegression {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Estimator for LinearRegression {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
+        let info = fit_via_command(&self.operator, &self.params, df)?;
+        Ok(Box::new(self.model_from_info(info, &df.session)?))
+    }
+}
+
+/// A linear regression model fitted by Spark Connect.
+///
+/// Obtain it through [`Estimator::fit`]. The model, its clones and transformed
+/// DataFrames retain the server-cached object until the last owner is dropped.
+#[derive(Debug, Clone)]
+pub struct LinearRegressionModel {
+    operator: MlOperator,
+    params: Params,
+    cached: CachedModel,
+}
+
+impl Transformer for LinearRegressionModel {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn build_ml_relation(&self, input: &DataFrame) -> proto::MlRelation {
+        self.cached.build_ml_relation(input, &self.params)
+    }
+
+    fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
+        self.cached.transform(df, &self.params)
+    }
+}
+
+impl Model for LinearRegressionModel {
+    fn clone_box(&self) -> Box<dyn Model> {
+        Box::new(self.clone())
+    }
+}
+
 /// RegressionEvaluator: evaluates regression models.
 #[derive(Debug, Clone)]
 pub struct RegressionEvaluator {
@@ -2304,5 +2514,74 @@ mod tests {
         assert!(estimator
             .model_from_info(Default::default(), &session)
             .is_err());
+    }
+
+    #[test]
+    fn linear_regression_model_validates_the_reference_and_retains_its_metadata() {
+        let session = offline_session();
+        let estimator = LinearRegression::default().set_prediction_col("pred");
+        assert_eq!(
+            estimator.operator().name,
+            "org.apache.spark.ml.regression.LinearRegression"
+        );
+        for kind in [
+            None,
+            Some(proto::ml_command_result::ml_operator_info::Type::Name(
+                "model".into(),
+            )),
+            Some(proto::ml_command_result::ml_operator_info::Type::ObjRef(
+                proto::ObjectRef::default(),
+            )),
+        ] {
+            assert!(estimator
+                .model_from_info(
+                    proto::ml_command_result::MlOperatorInfo {
+                        r#type: kind,
+                        ..Default::default()
+                    },
+                    &session
+                )
+                .is_err());
+        }
+        let mut model = estimator
+            .model_from_info(
+                proto::ml_command_result::MlOperatorInfo {
+                    r#type: Some(proto::ml_command_result::ml_operator_info::Type::ObjRef(
+                        proto::ObjectRef {
+                            id: "trained-model".into(),
+                        },
+                    )),
+                    uid: Some("returned-uid".into()),
+                    ..Default::default()
+                },
+                &session,
+            )
+            .unwrap();
+        assert_eq!(model.operator().uid, "returned-uid");
+        assert_eq!(
+            model.operator().name,
+            "org.apache.spark.ml.regression.LinearRegressionModel"
+        );
+        assert_eq!(model.operator().op_type, OperatorType::Model);
+        let df = session.range(2).unwrap();
+        let proto::ml_relation::MlType::Transform(t) =
+            model.build_ml_relation(&df).ml_type.unwrap()
+        else {
+            panic!("transform")
+        };
+        assert_eq!(
+            t.operator,
+            Some(proto::ml_relation::transform::Operator::ObjRef(
+                proto::ObjectRef {
+                    id: "trained-model".into()
+                }
+            ))
+        );
+        assert_eq!(*t.input.unwrap(), df.relation());
+        assert!(t.params.unwrap().params.contains_key("predictionCol"));
+        assert!(model
+            .transform(&session.new_session().range(2).unwrap())
+            .is_err());
+        assert!(model.clone_box().transform(&df).is_ok());
     }
 }
