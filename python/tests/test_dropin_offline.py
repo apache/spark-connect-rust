@@ -12717,6 +12717,76 @@ def completion_analyzed():
         child.close()
 
 
+@pytest.mark.parametrize("value, wire_type", [
+    (-(2**63), "long"),
+    (-(2**31) - 1, "long"),
+    (-(2**31), "integer"),
+    (-1, "integer"),
+    (0, "integer"),
+    (2**31 - 1, "integer"),
+    (2**31, "long"),
+    (2**63 - 1, "long"),
+])
+def test_integer_literal_wire_boundaries(value, wire_type):
+    from enum import IntEnum
+
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect import proto
+
+    class IntegerSubclass(int):
+        pass
+
+    class IntegerEnum(IntEnum):
+        VALUE = value
+
+    expected = proto.Expression.Literal()
+    setattr(expected, wire_type, value)
+    for scalar in (value, IntegerSubclass(value), IntegerEnum.VALUE):
+        literal = F.lit(scalar)._expr.to_plan(None).literal
+        compared = (F.col("id") == scalar)._expr.to_plan(None)
+        assert literal == expected
+        assert compared.unresolved_function.arguments[1].literal == expected
+
+
+def test_exact_integer_operators_skip_numpy_probes(monkeypatch):
+    import sys
+    from enum import IntEnum
+
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect import proto
+
+    class IntegerSubclass(int):
+        pass
+
+    class IntegerEnum(IntEnum):
+        VALUE = 5
+
+    class ProbeSentinel:
+        @property
+        def ndarray(self):
+            raise RuntimeError("NumPy probe reached")
+
+    column = F.col("id")
+    with monkeypatch.context() as patch:
+        patch.setitem(sys.modules, "numpy", ProbeSentinel())
+        compared = (column == 5)._expr.to_plan(None)
+        assert compared.unresolved_function.arguments[1].literal == proto.Expression.Literal(integer=5)
+        for value in (IntegerSubclass(5), IntegerEnum.VALUE, True, 2**63):
+            with pytest.raises(RuntimeError, match="NumPy probe reached"):
+                column == value
+
+
+def test_boolean_literals_keep_their_wire_type():
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect import proto
+
+    for value in (False, True):
+        expected = proto.Expression.Literal(boolean=value)
+        assert F.lit(value)._expr.to_plan(None).literal == expected
+        compared = (F.col("flag") == value)._expr.to_plan(None)
+        assert compared.unresolved_function.arguments[1].literal == expected
+
+
 def test_int_literals_beyond_a_long_raise_value_not_between_as_pyspark():
     # As PySpark's LiteralExpression._infer_type: an int beyond the range of a long is an error,
     # not a double, which would make `col == 2**63` match the rows of the longs next to it. The
