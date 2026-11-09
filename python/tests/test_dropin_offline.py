@@ -7850,6 +7850,38 @@ def test_create_dataframe_name_width_errors_as_pyspark(data, schema, expected, a
         "expected_length": expected, "actual_length": actual}
 
 
+@pytest.mark.parametrize("labels", ["multi2", "multi3", "categorical"])
+@pytest.mark.parametrize("cell, arrow_type", [
+    # A naive datetime of a list is a timestamp_ntz, not a time of the session time zone.
+    ([datetime.datetime(2020, 1, 2, 3)], lambda pa: pa.list_(pa.timestamp("us"))),
+    # Decimals of a list take the smallest precision and scale that hold them, as PySpark does.
+    ([decimal.Decimal("1.5"), decimal.Decimal("10.25")],
+     lambda pa: pa.list_(pa.decimal128(4, 2))),
+    # A dict cell is a struct of the value types of its keys, mixed or not, not a map.
+    ({"u": 1, "v": "a"}, lambda pa: pa.struct([("u", pa.int64()), ("v", pa.string())])),
+    ({"u": 1, "v": 2}, lambda pa: pa.struct([("u", pa.int64()), ("v", pa.int64())])),
+])
+def test_multi_and_categorical_labels_convert_cells_as_pyspark(
+    mock_connect, labels, cell, arrow_type
+):
+    # A plain frame whose labels are a MultiIndex or a CategoricalIndex converts with Arrow,
+    # as one with default labels: its cells take the types that PySpark infers, and not the
+    # ones of the row path (a timestamp in the session time zone, a map, or an error).
+    import pyarrow as pa
+
+    pd = pytest.importorskip("pandas")
+    columns = {
+        "multi2": pd.MultiIndex.from_tuples([("a", "x")]),
+        "multi3": pd.MultiIndex.from_tuples([("a", "x", "p")]),
+        "categorical": pd.CategoricalIndex(["a"]),
+    }[labels]
+    data = pd.DataFrame([[cell]], columns=columns, dtype=object)
+    table = _native_number_input_table(mock_connect, data)
+    assert table.num_columns == 1
+    assert table.schema.field(0).type == arrow_type(pa)
+    assert table.column(0).to_pylist() == [cell]
+
+
 def test_create_dataframe_pandas_errors_as_pyspark():
     pd = pytest.importorskip("pandas")
     from pyspark.errors import PySparkTypeError, PySparkValueError
