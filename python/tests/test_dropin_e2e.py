@@ -476,28 +476,35 @@ def test_nanosecond_timestamps_are_not_collected_as_pyspark(session):
         ("SELECT array(CAST('2020-01-01 00:00:00.123456789' AS TIMESTAMP_LTZ(9))) c", ltz9),
         ("SELECT map('k', CAST('2020-01-01 00:00:00.123456789' AS TIMESTAMP_NTZ(9))) c", ntz9),
     ]
-    for query, proto_text in cases:
-        df = session.sql(query)
-        for collect in (
-            lambda d: d.collect(),
-            lambda d: d.first(),
-            lambda d: d.head(),
-            lambda d: d.head(1),
-            lambda d: d.take(1),
-            lambda d: d.tail(1),
-            lambda d: list(d.toLocalIterator()),
-            lambda d: d.toPandas(),
-            lambda d: d.toArrow(),
-        ):
-            with pytest.raises(PySparkValueError, match=message(proto_text)):
-                collect(df)
-    # Spark Connect and PySpark both count and show these results.
-    df = session.sql("SELECT CAST('2020-01-01 00:00:00.123456789' AS TIMESTAMP_NTZ(9)) c")
-    assert df.count() == 1
-    df.show()
-    # Microsecond timestamps still collect.
-    micros = session.sql("SELECT CAST('2020-01-01 00:00:00.123456' AS TIMESTAMP_NTZ(6)) c")
-    assert micros.collect()[0].c == datetime.datetime(2020, 1, 1, 0, 0, 0, 123456)
+    # The types need spark.sql.timestampNanosTypes.enabled, which is on by default only on a
+    # server under SPARK_TESTING, as CI's servers are: turn it on, and back to the server's
+    # default after, so that the test runs against any server.
+    session.conf.set("spark.sql.timestampNanosTypes.enabled", "true")
+    try:
+        for query, proto_text in cases:
+            df = session.sql(query)
+            for collect in (
+                lambda d: d.collect(),
+                lambda d: d.first(),
+                lambda d: d.head(),
+                lambda d: d.head(1),
+                lambda d: d.take(1),
+                lambda d: d.tail(1),
+                lambda d: list(d.toLocalIterator()),
+                lambda d: d.toPandas(),
+                lambda d: d.toArrow(),
+            ):
+                with pytest.raises(PySparkValueError, match=message(proto_text)):
+                    collect(df)
+        # Spark Connect and PySpark both count and show these results.
+        df = session.sql("SELECT CAST('2020-01-01 00:00:00.123456789' AS TIMESTAMP_NTZ(9)) c")
+        assert df.count() == 1
+        df.show()
+        # Microsecond timestamps still collect.
+        micros = session.sql("SELECT CAST('2020-01-01 00:00:00.123456' AS TIMESTAMP_NTZ(6)) c")
+        assert micros.collect()[0].c == datetime.datetime(2020, 1, 1, 0, 0, 0, 123456)
+    finally:
+        session.conf.unset("spark.sql.timestampNanosTypes.enabled")
 
 
 def test_ntz_collect_is_the_wall_clock_in_the_client_time_zone_as_pyspark():
