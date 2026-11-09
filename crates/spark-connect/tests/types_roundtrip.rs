@@ -456,3 +456,75 @@ fn spatial_json_names_the_crs_as_pyspark() {
         DataType::Geography { srid: -1 }
     );
 }
+
+/// The COMMENT of `toDDL` escapes the backslashes and the single quotes of a comment as Spark's
+/// `escapeSingleQuotedString` does, so that the parser reads back the comment as it is.
+#[test]
+fn to_ddl_escapes_the_comments_as_spark_does() {
+    fn with_comment(comment: &str, nullable: bool) -> DataType {
+        DataType::Struct {
+            fields: vec![StructField {
+                name: "c".to_string(),
+                data_type: DataType::Integer,
+                nullable,
+                metadata: BTreeMap::from([(
+                    "comment".to_string(),
+                    serde_json::Value::String(comment.to_string()),
+                )]),
+            }],
+        }
+    }
+    for (comment, ddl) in [
+        ("a\\b", r"c INT COMMENT 'a\\b'"),
+        ("it's", r"c INT COMMENT 'it\'s'"),
+        (r"it\'s", r"c INT COMMENT 'it\\\'s'"),
+        ("ends\\", r"c INT COMMENT 'ends\\'"),
+        ("line\nbreak", "c INT COMMENT 'line\nbreak'"),
+    ] {
+        assert_eq!(
+            with_comment(comment, true).to_ddl().unwrap(),
+            ddl,
+            "{comment:?}"
+        );
+    }
+    // A NOT NULL field keeps its comment's escapes, after the NOT NULL.
+    assert_eq!(
+        with_comment("a\\b", false).to_ddl().unwrap(),
+        r"c INT NOT NULL COMMENT 'a\\b'"
+    );
+}
+
+/// The comments that `toDDL` writes come back from the server's DDL parser as they were, with the
+/// backslashes and quotes of the comment. Runs only with `SPARK_REMOTE` set.
+#[test]
+fn to_ddl_comments_round_trip_through_the_server_parser() {
+    let Ok(url) = std::env::var("SPARK_REMOTE") else {
+        return;
+    };
+    let session = spark_connect::session::SparkSession::builder()
+        .remote(&url)
+        .get_or_create()
+        .expect("session");
+    for comment in ["a\\b", "it's", "it\\'s", "ends\\", "line\nbreak"] {
+        let schema = DataType::Struct {
+            fields: vec![StructField {
+                name: "c".to_string(),
+                data_type: DataType::Integer,
+                nullable: true,
+                metadata: BTreeMap::from([(
+                    "comment".to_string(),
+                    serde_json::Value::String(comment.to_string()),
+                )]),
+            }],
+        };
+        let parsed = session.parse_ddl(&schema.to_ddl().unwrap()).unwrap();
+        let DataType::Struct { fields } = parsed else {
+            panic!("expected a struct");
+        };
+        assert_eq!(
+            fields[0].metadata.get("comment"),
+            Some(&serde_json::Value::String(comment.to_string())),
+            "{comment:?}"
+        );
+    }
+}
