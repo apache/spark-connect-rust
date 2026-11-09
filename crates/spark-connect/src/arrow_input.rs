@@ -180,9 +180,10 @@ pub(crate) fn create_relation(
     let mut pending_size = 0;
     let mut total_size = 0;
     let mut hashes = Vec::new();
-    let mut enqueue = |chunk: Vec<u8>| -> Result<()> {
+    let mut enqueue = |chunk: Vec<u8>, is_data: bool| -> Result<()> {
         total_size += chunk.len();
-        if total_size > options.size_limit {
+        // As PySpark, the schema chunk counts toward the size, and the limit applies to the data.
+        if is_data && total_size > options.size_limit {
             return Err(SparkError::classed(
                 SparkErrorKind::Analysis,
                 "LOCAL_RELATION_SIZE_LIMIT_EXCEEDED",
@@ -203,9 +204,9 @@ pub(crate) fn create_relation(
         Ok(())
     };
     if let Some(schema) = &schema {
-        enqueue(schema.json().into_bytes())?;
+        enqueue(schema.json().into_bytes(), false)?;
     }
-    serialize_chunks(&batches, options, &mut enqueue)?;
+    serialize_chunks(&batches, options, &mut |chunk| enqueue(chunk, true))?;
     hashes.extend(block_on(client.cache_artifacts(pending))?);
     let schema_hash = schema.map(|_| hashes.remove(0));
     Ok(LogicalPlan::ChunkedCachedLocalRelation {
