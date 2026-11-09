@@ -1774,7 +1774,7 @@ mod tests {
     /// A session with no server behind it whose requests fail at once: the default retry policy
     /// would retry them for a minute, so a test that needs a failing request uses this one.
     fn unreachable_session_without_retries() -> SparkSession {
-        let builder = spark_connect_core::channel::ChannelBuilder::parse("sc://localhost:15002")
+        let builder = spark_connect_core::channel::ChannelBuilder::parse("sc://127.0.0.1:1")
             .expect("valid URL");
         let mut client = block_on(spark_connect_core::client::SparkConnectClient::connect(
             &builder,
