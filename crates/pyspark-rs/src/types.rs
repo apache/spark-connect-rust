@@ -2209,35 +2209,19 @@ impl PyStructField {
         };
         Ok(format!("{provider}.{collation}"))
     }
-    /// Parse a single-field DDL string (e.g. "a INT" or "a: int") into a StructField.
-    /// Mirrors `StructField.fromDDL`.
+    /// The type of the DDL string `ddl`, as PySpark's `DataType.fromDDL`, which `StructField`
+    /// inherits: the parsed type (a StructType for "a int"), not a StructField.
     #[classmethod]
     #[pyo3(name = "fromDDL")]
     fn __sf_from_ddl(
         _cls: &Bound<'_, pyo3::types::PyType>,
         py: Python<'_>,
         ddl: &str,
-    ) -> PyResult<PyStructField> {
-        let trimmed = ddl.trim();
-        // Split "name type" at the first run of whitespace; tolerate a "name:" colon.
-        let split = trimmed.find(char::is_whitespace).ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "fromDDL expects 'name type', e.g. 'a INT'",
-            )
-        })?;
-        let name = trimmed[..split].trim_end_matches(':').to_string();
-        let type_str = trimmed[split..].trim();
-        let data_type = DataType::from_ddl(type_str)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        PyStructField::from_field(
-            py,
-            StructField {
-                name,
-                data_type,
-                nullable: true,
-                metadata: BTreeMap::new(),
-            },
-        )
+    ) -> PyResult<Py<PyAny>> {
+        Ok(py
+            .import("pyspark.sql.types")?
+            .call_method1("_parse_datatype_string", (ddl,))?
+            .unbind())
     }
 
     #[classmethod]
