@@ -27,6 +27,10 @@ from threading import Condition, Event
 
 # The drop-in package does not ship generated service protobuf classes, so these
 # encoders provide just the messages needed by this test server.
+# The key that a client reads on its first plan, to compress the plans of the session.
+PLAN_COMPRESSION_LOOKUP = b"spark.connect.session.planCompression.threshold"
+
+
 def varint(value):
     result = bytearray()
     while value > 127:
@@ -292,6 +296,7 @@ def serve(connection):
             self.confs = {}
             self.read_confs = []
             self.config_requests = []
+            self.plan_compression_lookups = 0
             self.config_failure = None
             self.block_config = False
             self.rpc_events = []
@@ -424,6 +429,7 @@ def serve(connection):
         }
         read_confs = []
         config_requests = []
+        plan_compression_lookups = 0
         config_failure = None
         block_config = False
         rpc_events = []
@@ -653,8 +659,14 @@ def serve(connection):
         def config(self, request, context):
             # ConfigRequest.session_id=1, operation=3, Operation.get=2, Get.keys=1;
             # ConfigResponse.session_id=1, pairs=2, KeyValue.key=1, value=2.
-            self.config_requests.append(request)
-            self.rpc_events.append("config")
+            # The plan compression lookup of a client, which PySpark makes on its first plan, is
+            # not recorded, so that the tests of the other requests count only their own.
+            lookup = PLAN_COMPRESSION_LOOKUP in request
+            if lookup:
+                self.plan_compression_lookups += 1
+            if not lookup:
+                self.config_requests.append(request)
+                self.rpc_events.append("config")
             if self.block_config and not self.response_gate.wait(5):
                 context.abort(
                     grpc.StatusCode.DEADLINE_EXCEEDED,
@@ -704,7 +716,8 @@ def serve(connection):
                     "only Get, GetWithDefault, Set and Unset are served",
                 )
             keys = [key.decode() for key in parse_message(operation[2][0]).get(1, [])]
-            self.read_confs.extend(keys)
+            if not lookup:
+                self.read_confs.extend(keys)
             confs = {**self.default_confs, **self.confs}
             if any(key not in confs for key in keys):
                 context.abort(grpc.StatusCode.INTERNAL, "[SQL_CONF_NOT_FOUND]")

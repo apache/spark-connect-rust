@@ -29,6 +29,7 @@ regex = "1"
 prost-types.workspace = true
 crc32fast = "1"
 sha2 = "0.10"
+zstd = "0.13"
 
 [target.'cfg(all(target_arch = "aarch64", not(target_os = "windows")))'.dependencies]
 # sha2 0.10 requires this feature for ARM hardware acceleration; sha2-asm excludes Windows.
