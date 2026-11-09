@@ -58,6 +58,47 @@ def session():
         session.stop()
 
 
+def test_a_query_running_at_stop_sends_its_terminated_event_to_the_listeners_as_pyspark(session):
+    # As PySpark's stop(): the session is released before its client closes, so the terminated
+    # event that the server sends for a query still running at stop reaches the listeners.
+    import threading
+
+    from pyspark.sql.streaming import StreamingQueryListener
+
+    started, terminated = threading.Event(), threading.Event()
+    terminated_ids = []
+
+    class Listener(StreamingQueryListener):
+        def onQueryStarted(self, event):
+            started.set()
+
+        def onQueryProgress(self, event):
+            pass
+
+        def onQueryIdle(self, event):
+            pass
+
+        def onQueryTerminated(self, event):
+            terminated_ids.append(str(event.id))
+            terminated.set()
+
+    other = session.newSession()
+    other.streams.addListener(Listener())
+    query = other.readStream.format("rate").load().writeStream.format("noop").start()
+    try:
+        assert started.wait(timeout=120)
+        other.stop()
+        assert terminated.wait(timeout=120)
+        assert terminated_ids == [query.id]
+    finally:
+        try:
+            query.stop()
+        except Exception:
+            # The session is stopped, so the query is no longer reachable.
+            pass
+        other.stop()
+
+
 @pytest.mark.parametrize("prefetch", [False, True])
 def test_to_local_iterator_raises_the_error_of_the_execution_as_pyspark(session, prefetch):
     # As official PySpark 4.3.0: the error of a query that fails while it is iterated is

@@ -3256,6 +3256,76 @@ def test_spatial_types_are_parsed_of_their_json_as_pyspark():
         assert e.value.getCondition() == condition
 
 
+def test_a_server_side_session_change_stops_the_session_as_pyspark():
+    # As PySpark's, a server-side session ID that changes closes the client: the session is
+    # stopped and no longer the active session, getOrCreate() makes a working session, and
+    # stop() of the closed session sends no ReleaseSession.
+    import grpc
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.errors import PySparkAssertionError
+
+    pytest.importorskip("grpc")
+    server_side_ids = ["srv-A"]
+    released = []
+
+    def config(raw, context):
+        request = pb2.ConfigRequest.FromString(raw)
+        if request.operation.HasField("get"):
+            keys = list(request.operation.get.keys)
+        else:
+            keys = [pair.key for pair in request.operation.get_with_default.pairs]
+        response = pb2.ConfigResponse(
+            session_id=request.session_id, server_side_session_id=server_side_ids[0]
+        )
+        for key in keys:
+            response.pairs.add(key=key, value="value")
+        return response.SerializeToString()
+
+    def release_session(raw, context):
+        request = pb2.ReleaseSessionRequest.FromString(raw)
+        released.append(request.session_id)
+        return pb2.ReleaseSessionResponse(
+            session_id=request.session_id, server_side_session_id=server_side_ids[0]
+        ).SerializeToString()
+
+    server = grpc.server(ThreadPoolExecutor(max_workers=4))
+    server.add_generic_rpc_handlers(
+        (
+            grpc.method_handlers_generic_handler(
+                "spark.connect.SparkConnectService",
+                {
+                    "Config": grpc.unary_unary_rpc_method_handler(config),
+                    "ReleaseSession": grpc.unary_unary_rpc_method_handler(release_session),
+                },
+            ),
+        )
+    )
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    remote = f"sc://127.0.0.1:{port}"
+    key = "spark.sql.shuffle.partitions"
+    try:
+        spark = SparkSession.builder.remote(remote).getOrCreate()
+        assert spark.conf.get(key) == "value"
+        assert not spark.is_stopped
+
+        server_side_ids[0] = "srv-B"
+        with pytest.raises(PySparkAssertionError, match="server side session identifier"):
+            spark.conf.get(key)
+        assert spark.is_stopped and spark._client.is_closed
+        assert SparkSession.getActiveSession() is None
+
+        new = SparkSession.builder.remote(remote).getOrCreate()
+        try:
+            assert new is not spark and not new.is_stopped
+            assert new.conf.get(key) == "value"
+            spark.stop()
+            assert released == []
+        finally:
+            new.stop()
+        assert len(released) == 1
+    finally:
+        server.stop(0).wait()
 
 
 def test_variant_and_geo_values():
