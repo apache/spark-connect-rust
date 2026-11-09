@@ -4604,6 +4604,66 @@ def test_row_fields():
     }
 
 
+def test_struct_type_add_with_metadata_is_linear_and_matches_the_constructor(monkeypatch):
+    # As in PySpark, whose add reads no field of the struct but the new one: a loop of adds with
+    # metadata is quick, also of fields of nested types, and its struct is the one the
+    # constructor gives. The bounds are generous: the add that read every field and its metadata
+    # on each call took about 17 s for the 2000 fields, and 10 s for the 1500 nested ones.
+    count = 2000
+    started = time.perf_counter()
+    st = T.StructType()
+    for i in range(count):
+        st.add(f"c{i}", T.StringType(), True, {"comment": f"col {i}"})
+    elapsed = time.perf_counter() - started
+    assert elapsed < 3.0, elapsed
+    fields = [
+        T.StructField(f"c{i}", T.StringType(), True, {"comment": f"col {i}"})
+        for i in range(count)
+    ]
+    expected = T.StructType(fields)
+    assert st == expected and st.json() == expected.json()
+    assert st.simpleString() == expected.simpleString()
+    assert st._needConversion == expected._needConversion
+    assert st.names == expected.names and st.fieldNames() == expected.fieldNames()
+    # A set dataType is seen by the next add, for all fields, as in PySpark's add.
+    st["c0"].dataType = T.DateType()
+    st.add("d", T.IntegerType())
+    assert st._needConversion[0] is True and st._needConversion[-1] is False
+    assert st._needSerializeAnyField is True
+
+    # Fields of a struct, an array and a map of a struct, and an array of a long, with metadata
+    # in the nested struct too.
+    def nested_type(i):
+        inner = T.StructType([T.StructField("x", T.IntegerType(), True, {"comment": f"x {i}"})])
+        return [inner, T.ArrayType(inner), T.MapType(T.StringType(), inner)][i % 3]
+
+    started = time.perf_counter()
+    nested = T.StructType()
+    for i in range(1500):
+        nested.add(f"n{i}", nested_type(i), True, {"comment": f"col {i}"})
+    nested.add("longs", T.ArrayType(T.LongType()))
+    elapsed = time.perf_counter() - started
+    assert elapsed < 3.0, elapsed
+    expected = T.StructType(
+        [T.StructField(f"n{i}", nested_type(i), True, {"comment": f"col {i}"}) for i in range(1500)]
+        + [T.StructField("longs", T.ArrayType(T.LongType()))]
+    )
+    assert nested == expected and nested.json() == expected.json()
+    assert nested._needConversion == expected._needConversion
+    assert nested._needConversion[-2:] == [True, False]
+
+    # The needConversion of a year-month interval follows PYSPARK_YM_INTERVAL_LEGACY at each add.
+    monkeypatch.delenv("PYSPARK_YM_INTERVAL_LEGACY", raising=False)
+    ym = T.StructType().add("y", T.YearMonthIntervalType())
+    assert ym._needConversion == [True]
+    monkeypatch.setenv("PYSPARK_YM_INTERVAL_LEGACY", "1")
+    ym.add("z", T.IntegerType())
+    assert ym._needConversion == [False, False]
+    monkeypatch.delenv("PYSPARK_YM_INTERVAL_LEGACY")
+    ym.add("w", T.IntegerType())
+    assert ym._needConversion == [True, False, False]
+
+
 def test_row_as_dict():
     from pyspark.errors import PySparkTypeError
     from pyspark.sql import Row
