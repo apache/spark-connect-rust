@@ -1493,6 +1493,187 @@ impl Model for LinearRegressionModel {
     }
 }
 
+/// K-means clustering using Spark's JVM implementation and ML vector features.
+///
+/// Supports Euclidean and cosine distance. Unset parameters use Spark's defaults.
+/// Set a seed explicitly for reproducible initialization.
+#[derive(Debug, Clone)]
+pub struct KMeans {
+    operator: MlOperator,
+    params: Params,
+}
+
+impl KMeans {
+    pub fn new() -> Self {
+        Self {
+            operator: MlOperator::new(
+                "org.apache.spark.ml.clustering.KMeans",
+                OperatorType::Estimator,
+            ),
+            params: Params::new(),
+        }
+    }
+
+    /// Feature vector column.
+    pub fn set_feature_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("featuresCol", value);
+        self
+    }
+
+    /// Cluster assignment output column.
+    pub fn set_prediction_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("predictionCol", value);
+        self
+    }
+
+    /// Number of clusters; must be greater than 1.
+    pub fn set_k(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("k", value);
+        self
+    }
+
+    /// Initialization mode: random or k-means||.
+    pub fn set_init_mode(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("initMode", value);
+        self
+    }
+
+    /// Number of steps in k-means|| initialization.
+    pub fn set_init_steps(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("initSteps", value);
+        self
+    }
+
+    /// Convergence tolerance.
+    pub fn set_tol(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("tol", value);
+        self
+    }
+
+    /// Maximum number of clustering iterations.
+    pub fn set_max_iter(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("maxIter", value);
+        self
+    }
+
+    /// Random seed for initialization.
+    pub fn set_seed(mut self, value: i64) -> Self {
+        // PySpark uses the narrowest integer literal that holds the seed.
+        self.params = match i32::try_from(value) {
+            Ok(value) => self.params.set_param_int32("seed", value),
+            Err(_) => self.params.set_param_int("seed", value),
+        };
+        self
+    }
+
+    /// Distance measure: euclidean or cosine.
+    pub fn set_distance_measure(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("distanceMeasure", value);
+        self
+    }
+
+    /// Optional instance weight column.
+    pub fn set_weight_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("weightCol", value);
+        self
+    }
+
+    /// Solver: auto, row or block.
+    pub fn set_solver(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("solver", value);
+        self
+    }
+
+    /// Maximum size in MB of stacked input blocks.
+    pub fn set_max_block_size_in_mb(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("maxBlockSizeInMB", value);
+        self
+    }
+
+    fn model_from_info(
+        &self,
+        info: proto::ml_command_result::MlOperatorInfo,
+        session: &SparkSession,
+    ) -> spark_connect_core::error::Result<KMeansModel> {
+        let cached = CachedModel::from_info(&info, session, "KMeans")?;
+        Ok(KMeansModel {
+            operator: MlOperator::with_uid(
+                "org.apache.spark.ml.clustering.KMeansModel",
+                info.uid.as_deref().unwrap_or(&self.operator.uid),
+                OperatorType::Model,
+            ),
+            params: self.params.clone(),
+            cached,
+        })
+    }
+}
+
+impl Default for KMeans {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Estimator for KMeans {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
+        let info = fit_via_command(&self.operator, &self.params, df)?;
+        Ok(Box::new(self.model_from_info(info, &df.session)?))
+    }
+}
+
+/// A K-means model fitted by Spark Connect.
+///
+/// Obtain it through [`Estimator::fit`]. The model, its clones and transformed
+/// DataFrames retain the cached server model until the last owner is dropped.
+#[derive(Debug, Clone)]
+pub struct KMeansModel {
+    operator: MlOperator,
+    params: Params,
+    cached: CachedModel,
+}
+
+impl Transformer for KMeansModel {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn build_ml_relation(&self, input: &DataFrame) -> proto::MlRelation {
+        self.cached.build_ml_relation(input, &self.params)
+    }
+
+    fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
+        self.cached.transform(df, &self.params)
+    }
+}
+
+impl Model for KMeansModel {
+    fn clone_box(&self) -> Box<dyn Model> {
+        Box::new(self.clone())
+    }
+}
+
 /// RegressionEvaluator: evaluates regression models.
 #[derive(Debug, Clone)]
 pub struct RegressionEvaluator {
@@ -2579,6 +2760,76 @@ mod tests {
         );
         assert_eq!(*t.input.unwrap(), df.relation());
         assert!(t.params.unwrap().params.contains_key("predictionCol"));
+        assert!(model
+            .transform(&session.new_session().range(2).unwrap())
+            .is_err());
+        assert!(model.clone_box().transform(&df).is_ok());
+    }
+
+    #[test]
+    fn kmeans_validates_fitted_references_and_model_metadata() {
+        let session = offline_session();
+        let estimator = KMeans::default().set_prediction_col("cluster");
+        assert_eq!(
+            estimator.operator().name,
+            "org.apache.spark.ml.clustering.KMeans"
+        );
+        assert_eq!(estimator.operator().op_type, OperatorType::Estimator);
+        for kind in [
+            None,
+            Some(proto::ml_command_result::ml_operator_info::Type::Name(
+                "model".into(),
+            )),
+            Some(proto::ml_command_result::ml_operator_info::Type::ObjRef(
+                proto::ObjectRef::default(),
+            )),
+        ] {
+            assert!(estimator
+                .model_from_info(
+                    proto::ml_command_result::MlOperatorInfo {
+                        r#type: kind,
+                        ..Default::default()
+                    },
+                    &session
+                )
+                .is_err());
+        }
+        let info = |uid| proto::ml_command_result::MlOperatorInfo {
+            r#type: Some(proto::ml_command_result::ml_operator_info::Type::ObjRef(
+                proto::ObjectRef {
+                    id: "trained-kmeans".into(),
+                },
+            )),
+            uid,
+            ..Default::default()
+        };
+        let mut model = estimator
+            .model_from_info(info(Some("returned-uid".into())), &session)
+            .unwrap();
+        assert_eq!(model.operator().uid, "returned-uid");
+        assert_eq!(
+            model.operator().name,
+            "org.apache.spark.ml.clustering.KMeansModel"
+        );
+        assert_eq!(model.operator().op_type, OperatorType::Model);
+        let fallback = estimator.model_from_info(info(None), &session).unwrap();
+        assert_eq!(fallback.operator().uid, estimator.operator().uid);
+        let df = session.range(2).unwrap();
+        let proto::ml_relation::MlType::Transform(t) =
+            model.build_ml_relation(&df).ml_type.unwrap()
+        else {
+            panic!("transform")
+        };
+        assert_eq!(
+            t.operator,
+            Some(proto::ml_relation::transform::Operator::ObjRef(
+                proto::ObjectRef {
+                    id: "trained-kmeans".into()
+                }
+            ))
+        );
+        assert_eq!(*t.input.unwrap(), df.relation());
+        assert_eq!(t.params.unwrap(), estimator.params().to_proto());
         assert!(model
             .transform(&session.new_session().range(2).unwrap())
             .is_err());

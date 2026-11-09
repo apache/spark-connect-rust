@@ -76,6 +76,23 @@ executed later. When the last of them is dropped, the cached model is deleted on
 server, as `pyspark.ml` does, without waiting for the server; a fit that is dropped
 at once leaves nothing cached.
 
+## Native KMeans
+
+`spark_connect::ml::KMeans` fits Spark's JVM K-means estimator with ML vector
+features through the Connect ML protocol. Rust builder setters cover all 12
+constructor parameters, including `set_k`, `set_seed`, `set_weight_col`,
+`set_distance_measure` and `set_solver`. Unset parameters use Spark's defaults;
+set a seed explicitly for reproducible initialization. Cluster numbers are
+arbitrary: compare membership rather than relying on particular numeric labels.
+
+The native Python binding is available as `pyspark.ml.connect.clustering.KMeans`
+and `pyspark.ml.connect.KMeans`, with the upstream keyword-only constructor and
+mutating parameter setters. Fitted models expose DataFrame `transform` in the
+fitting session. Models, clones and transformed DataFrames keep the cached server
+model alive until the last owner is dropped. Cluster-center access, training
+summaries, single-vector prediction and persistence are not exposed by this native
+addition. The vendored `pyspark.ml.clustering` API is unchanged.
+
 ## Native LinearRegression
 
 `spark_connect::ml::LinearRegression` fits Spark's JVM linear regression estimator
