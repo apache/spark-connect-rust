@@ -734,6 +734,9 @@ def serve(connection):
                 elif command[0] == "set":
                     setattr(service, command[1], command[2])
                     connection.send(None)
+                elif command[0] == "del":
+                    delattr(service, command[1])
+                    connection.send(None)
                 elif command[0] == "release":
                     service.response_gate.set()
                     connection.send(None)
@@ -785,6 +788,13 @@ class RemoteService:
 
     def __setattr__(self, name, value):
         self.connection.send(("set", name, value))
+        assert self.connection.poll(10), "Mock server did not respond"
+        self.connection.recv()
+
+    def __delattr__(self, name):
+        # pytest 9's monkeypatch undoes an attribute that the instance did not hold with
+        # delattr, which removes the override of the service's class attribute.
+        self.connection.send(("del", name))
         assert self.connection.poll(10), "Mock server did not respond"
         self.connection.recv()
 

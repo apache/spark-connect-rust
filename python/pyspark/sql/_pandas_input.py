@@ -1236,8 +1236,11 @@ def pyarrow_available():
         return False
 
 
-def inferred_pandas_row_columns(rows, width):
+def inferred_pandas_row_columns(rows, width, candidates=None):
     """Return inferred columns containing Rows, with their values viewed as sequences.
+
+    Walk only the columns of the indices ``candidates``, in increasing order, when
+    given: the caller passes those whose pandas dtype can hold Python objects.
 
     Present tuple-backed Rows positionally. Keep field metadata out of this
     conversion, as Arrow does when it infers a column containing tuple Rows.
@@ -1329,7 +1332,27 @@ def inferred_pandas_row_columns(rows, width):
             return Frame(value, "dict", iter(dict.items(value)))
         return None
 
+    def scalar(value):
+        cls = type(value)
+        return (value is None or cls is bool or cls is int or cls is float
+                or cls is complex or cls is str or cls is bytes or cls is bytearray)
+
+    def flat(value):
+        # Exact builtin scalars, and exact lists, tuples and dicts of them, the most
+        # common cells, cannot hold a Row: skip their walk. Read them with the same
+        # builtin iterators as the walk, so that no other hook of a cell runs.
+        cls = type(value)
+        if cls is list:
+            return all(map(scalar, list.__iter__(value)))
+        if cls is tuple:
+            return all(map(scalar, tuple.__iter__(value)))
+        if cls is dict:
+            return all(scalar(key) and scalar(item) for key, item in dict.items(value))
+        return scalar(value)
+
     def positional(value):
+        if flat(value):
+            return unchanged
         first = frame_for(value)
         if first is None:
             return unchanged
@@ -1361,7 +1384,7 @@ def inferred_pandas_row_columns(rows, width):
     if any(type(row) is not list or len(row) != width for row in list.__iter__(rows)):
         return []
     columns = []
-    for index in range(width):
+    for index in range(width) if candidates is None else candidates:
         values = None
         try:
             for row_index, row in enumerate(list.__iter__(rows)):

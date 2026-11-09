@@ -1244,6 +1244,7 @@ impl PySparkSession {
                 &data,
                 &row_names,
                 &labels,
+                &dtypes,
                 infer_dict_as_map_allowed,
             )?
         } else {
@@ -1597,16 +1598,30 @@ impl PySparkSession {
         data: &Bound<'_, PyList>,
         row_names: &[String],
         labels: &[String],
+        dtypes: &[String],
         allow_dict_as_map: bool,
     ) -> PyResult<PandasRowColumns> {
         let mut prepared = PandasRowColumns::empty(row_names.len(), data.len());
+        // Only a column of Python objects can hold a Row: walk the cells of those alone,
+        // so that frames of numeric, boolean, string or datetime columns pay nothing.
+        let candidates: Vec<usize> = (0..row_names.len())
+            .filter(|&i| {
+                matches!(
+                    pandas_dtype_type(dtypes.get(i).map_or("object", String::as_str)),
+                    DataType::Null
+                )
+            })
+            .collect();
+        if candidates.is_empty() {
+            return Ok(prepared);
+        }
         let helper = py.import("pyspark.sql._pandas_input")?;
         if !helper.getattr("pyarrow_available")?.call0()?.is_truthy()? {
             return Ok(prepared);
         }
         let columns: Vec<(usize, Bound<'_, PyAny>)> = helper
             .getattr("inferred_pandas_row_columns")?
-            .call1((data, row_names.len()))?
+            .call1((data, row_names.len(), candidates))?
             .extract()?;
         let Some((first_index, _)) = columns.first() else {
             return Ok(prepared);

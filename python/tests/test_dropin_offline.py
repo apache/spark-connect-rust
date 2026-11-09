@@ -8537,8 +8537,8 @@ def test_customized_pandas_helper_reported_row_error_follows_column_order(
                if failure_kind == "discovery" else LookupError("Row values unavailable"))
     calls = []
 
-    def reported_error(rows, width):
-        calls.append((len(rows), width))
+    def reported_error(rows, width, candidates):
+        calls.append((len(rows), width, list(candidates)))
         return [(1, failure)]
 
     def unexpected(*args):
@@ -8557,8 +8557,33 @@ def test_customized_pandas_helper_reported_row_error_follows_column_order(
         spark.createDataFrame(frame)
     if not native_invalid:
         assert error.value is failure
-    assert calls == [(1, 2)]
+    assert calls == [(1, 2, [0, 1])]
     assert len(service.execute_requests) == before
+
+
+def test_customized_pandas_row_discovery_walks_only_object_columns(mock_connect, monkeypatch):
+    from pyspark.sql import _pandas_input
+
+    pd = pytest.importorskip("pandas")
+    spark, _ = mock_connect
+    walk = _pandas_input.inferred_pandas_row_columns
+    calls = []
+
+    def recorded(rows, width, candidates):
+        calls.append(list(candidates))
+        return walk(rows, width, candidates)
+
+    monkeypatch.setattr(_pandas_input, "inferred_pandas_row_columns", recorded)
+    # Only a column of Python objects can hold a Row, so the cells of numeric, boolean,
+    # string and datetime columns are not walked, and a frame of them not at all.
+    frame = _RowPathFrame(pd)({
+        "n": [1, 2], "f": [0.5, None], "rows": [Row(a=1, b=2), Row(a=3, b=4)],
+        "b": [True, False], "t": pd.to_datetime(["2024-01-01", None]),
+    })
+    spark.createDataFrame(frame)
+    assert calls == [[2]]
+    spark.createDataFrame(_RowPathFrame(pd)({"n": [1, 2], "f": [0.5, None]}))
+    assert calls == [[2]]
 
 
 @pytest.mark.parametrize("native_invalid", [False, True])
