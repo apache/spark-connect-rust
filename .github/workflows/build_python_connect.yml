@@ -396,6 +396,10 @@ jobs:
         run: |
           SPARK_HOME="${{ steps.spark-download.outputs.SPARK_HOME }}"
           echo "Starting Connect server on ${SPARK_CONNECT_TESTING_REMOTE}"
+          # The server resolves the relative data paths of the official tests (such as the
+          # data/mllib files of the ML tests) against its working directory, as Apache's CI,
+          # which starts it from SPARK_HOME.
+          cd "${SPARK_HOME}"
           # Same server settings as the parity gate (see connect-parity).
           "${SPARK_HOME}/sbin/start-connect-server.sh" \
             --driver-memory 3g \
