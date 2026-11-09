@@ -543,3 +543,38 @@ fn subqueries_return_the_rows_of_pyspark() {
         vec![(1, 2)]
     );
 }
+
+/// `repartition_by_range` splits the ids into contiguous ranges, as PySpark's
+/// `repartitionByRange` does; a hash split of the same column would not.
+#[test]
+fn repartition_by_range_splits_into_contiguous_ranges() {
+    if !should_run() {
+        return;
+    }
+    let s = session();
+    let rows = s
+        .range(100)
+        .unwrap()
+        .repartition_by_range(4, vec![col("id").expression().clone()])
+        .with_column("p", f::spark_partition_id())
+        .group_by(vec![col("p")])
+        .agg(vec![
+            f::min(col("id")).alias("lo").expression().clone(),
+            f::max(col("id")).alias("hi").expression().clone(),
+            f::count(col("id")).alias("n").expression().clone(),
+        ])
+        .order_by(vec![col("p").expression().clone()])
+        .collect()
+        .unwrap();
+    let ranges: Vec<(i64, i64, i64)> = rows
+        .iter()
+        .map(|row| {
+            let get = |name: &str| row.get_by_name(name).and_then(|v| v.as_i64()).unwrap();
+            (get("lo"), get("hi"), get("n"))
+        })
+        .collect();
+    assert_eq!(
+        ranges,
+        vec![(0, 24, 25), (25, 49, 25), (50, 74, 25), (75, 99, 25)]
+    );
+}
