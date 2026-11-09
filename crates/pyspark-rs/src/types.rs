@@ -279,6 +279,42 @@ fn need_conversion_of(py: Python<'_>, fields: &[StructField]) -> PyResult<Vec<bo
         .collect()
 }
 
+/// The `needConversion` of each of the `StructField` objects of `fields`, as they are now.
+fn need_conversion_of_fields(py: Python<'_>, fields: &Bound<'_, PyList>) -> PyResult<Vec<bool>> {
+    fields
+        .iter()
+        .map(|item| as_struct_field(&item)?.borrow().need_conversion_now(py))
+        .collect()
+}
+
+/// The `needConversion` of the data type object `obj`, as PySpark's: a struct and a user-defined
+/// type always need a conversion, and an array or a map when one of its element types does. The
+/// fields of a struct are not read, nor their metadata, so this does not grow with the struct.
+fn need_conversion_of_object(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    fn of_child(py: Python<'_>, kept: &KeptType, snapshot: &DataType) -> PyResult<bool> {
+        match kept.kept(py) {
+            Some(object) => need_conversion_of_object(py, object.bind(py)),
+            None => need_conversion(py, snapshot),
+        }
+    }
+    if obj.is_instance_of::<PyStructType>() {
+        return Ok(true);
+    }
+    if let Ok(array) = obj.cast::<PyArrayType>() {
+        let array = array.borrow();
+        return of_child(py, &array.element_object, &array.element_type);
+    }
+    if let Ok(map) = obj.cast::<PyMapType>() {
+        let map = map.borrow();
+        return Ok(of_child(py, &map.key_object, &map.key_type)?
+            || of_child(py, &map.value_object, &map.value_type)?);
+    }
+    if is_udt(obj)? {
+        return Ok(true);
+    }
+    need_conversion(py, &py_to_data_type(obj)?)
+}
+
 /// The `StructField` object of `item`, which a `StructType` holds in its `fields`.
 fn as_struct_field<'py>(item: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyStructField>> {
     item.cast::<PyStructField>().cloned().map_err(|_| {
@@ -1979,6 +2015,10 @@ pub struct PyStructField {
     /// is the metadata of the field. `field.metadata` is only its snapshot at the time it was
     /// made, so the metadata is read through `current_field`.
     metadata: Py<pyo3::types::PyDict>,
+    /// The `needConversion` of the type, kept while the type cannot change: an atomic type
+    /// object is not changed in place, so `add` need not read it again for each field. Reset by
+    /// a set `dataType`.
+    need_conversion_of_type: std::sync::OnceLock<bool>,
 }
 
 impl PyStructField {
@@ -1989,6 +2029,7 @@ impl PyStructField {
             field,
             metadata,
             data_type_object: KeptType::default(),
+            need_conversion_of_type: std::sync::OnceLock::new(),
         })
     }
 
@@ -2009,7 +2050,45 @@ impl PyStructField {
             field,
             metadata,
             data_type_object,
+            need_conversion_of_type: std::sync::OnceLock::new(),
         })
+    }
+
+    /// The `needConversion` of the type as it is now (see `need_conversion_of_type`).
+    fn need_conversion_now(&self, py: Python<'_>) -> PyResult<bool> {
+        if let Some(&need) = self.need_conversion_of_type.get() {
+            return Ok(need);
+        }
+        // The type is read from its object when the field has one, without reading the fields
+        // of a nested struct, or else from the snapshot. The value is kept only for a type that
+        // does not change: not a container, which can be edited in place, nor a year-month
+        // interval, whose value follows `PYSPARK_YM_INTERVAL_LEGACY`.
+        let (need, fixed) = match self.data_type_object.kept(py) {
+            Some(object) => {
+                let object = object.bind(py);
+                let fixed = !(object.is_instance_of::<PyStructType>()
+                    || object.is_instance_of::<PyArrayType>()
+                    || object.is_instance_of::<PyMapType>()
+                    || object.is_instance_of::<PyYearMonthIntervalType>()
+                    || is_udt(object)?);
+                (need_conversion_of_object(py, object)?, fixed)
+            }
+            None => {
+                let data_type = &self.field.data_type;
+                let fixed = !(matches!(
+                    data_type,
+                    DataType::Array { .. }
+                        | DataType::Map { .. }
+                        | DataType::Struct { .. }
+                        | DataType::YearMonthInterval { .. }
+                ) || has_udt(data_type));
+                (need_conversion(py, data_type)?, fixed)
+            }
+        };
+        if fixed {
+            let _ = self.need_conversion_of_type.set(need);
+        }
+        Ok(need)
     }
 
     /// The core field, with the metadata of the dict as it is now.
@@ -2223,6 +2302,7 @@ impl PyStructField {
     fn set_data_type(&mut self, dataType: &Bound<'_, PyAny>) -> PyResult<()> {
         self.field.data_type = py_to_data_type(dataType)?;
         self.data_type_object = KeptType::of(dataType);
+        self.need_conversion_of_type = std::sync::OnceLock::new();
         Ok(())
     }
     /// The field's metadata dict (mirrors `StructField.metadata`; values may be any type).
@@ -2461,17 +2541,22 @@ impl PyStructType {
             )?;
             (object.into_bound(py).into_any(), name)
         };
-        {
+        // Only the types are read here, not the metadata: `add` is then linear in the fields
+        // (a loop of adds with metadata would otherwise encode every field's metadata each time).
+        let new_field = as_struct_field(&object)?.borrow().current_field(py)?;
+        let need_conversion = {
             let me = slf.borrow();
             me.fields.bind(py).append(object)?;
             me.names.bind(py).append(name)?;
-        }
-        // The base `DataType` is what `resolve_datatype` reads for the schemas of `mapInArrow`
-        // and friends, so it must follow the fields too.
-        let fields = slf.borrow().current_fields(py)?;
-        let need_conversion = need_conversion_of(py, &fields)?;
+            need_conversion_of_fields(py, me.fields.bind(py))?
+        };
+        // The base `DataType` is a snapshot, which only the bare-base fallback of
+        // `py_to_data_type` reads (a struct is read from its live fields), so it takes the new
+        // field, as the fields of `add` do.
         let mut me = slf.borrow_mut();
-        me.as_super().inner = DataType::Struct { fields };
+        if let DataType::Struct { fields } = &mut me.as_super().inner {
+            fields.push(new_field);
+        }
         me.need_conversion = need_conversion;
         drop(me);
         Ok(slf)
