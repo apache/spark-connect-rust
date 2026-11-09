@@ -2631,6 +2631,25 @@ def test_sql_runs_statements_eagerly(session):
     assert [tuple(r) for r in query.collect()] == [(1,)]
 
 
+def test_struct_field_from_ddl_parses_as_data_type_from_ddl_as_pyspark(session):
+    # As PySpark: StructField inherits DataType.fromDDL, so it parses a DDL string to the type
+    # that DataType.fromDDL gives, with the same errors, and a StructType creates a DataFrame.
+    from pyspark.errors import ParseException
+    from pyspark.sql import types as T
+
+    for ddl in ["a int", "`x y` int", "a int not null", "b: string", "a int, b string", "int"]:
+        assert T.StructField.fromDDL(ddl) == T.DataType.fromDDL(ddl)
+    assert T.StructField.fromDDL("`x y` int") == T.StructType([
+        T.StructField("x y", T.IntegerType()),
+    ])
+    df = session.createDataFrame([(1,)], T.StructField.fromDDL("a int"))
+    assert df.collect() == [Row(a=1)]
+    for ddl, condition in [("a INT,", "PARSE_SYNTAX_ERROR"), ("a BOGUS", "UNSUPPORTED_DATATYPE")]:
+        with pytest.raises(ParseException) as error:
+            T.StructField.fromDDL(ddl)
+        assert error.value.getCondition() == condition
+
+
 def test_struct_types_take_their_keys_and_fields_as_pyspark(session):
     # As PySpark's StructType: add takes the JSON value of a data type, and a missing field is
     # KEY_NOT_EXISTS.

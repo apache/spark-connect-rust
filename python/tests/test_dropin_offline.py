@@ -2977,7 +2977,7 @@ def test_udf_registration_has_java_methods():
         assert hasattr(UDFRegistration, m), f"UDFRegistration missing {m}"
 
 
-def test_udf_udtf_determinism_and_extras():
+def test_udf_udtf_determinism_and_extras(mock_connect):
     from pyspark.sql import functions as F
     from pyspark.sql.udf import udf, UserDefinedFunction
     from pyspark.sql.udtf import udtf
@@ -3000,9 +3000,9 @@ def test_udf_udtf_determinism_and_extras():
 
     # functions.random is an alias for rand.
     assert F.random is F.rand
-    # StructField.fromDDL.
-    assert T.StructField.fromDDL("a int").simpleString() == "a:int"
-    assert T.StructField.fromDDL("b: string").simpleString() == "b:string"
+    # StructField.fromDDL is DataType.fromDDL, which parses a list of fields to a StructType.
+    assert T.StructField.fromDDL("a int").simpleString() == "struct<a:int>"
+    assert T.StructField.fromDDL("b: string").simpleString() == "struct<b:string>"
 
 
 def test_catalog_result_classes():
@@ -4772,16 +4772,16 @@ def test_row_as_dict():
         assert error.value.getCondition() == "CANNOT_CONVERT_TYPE"
 
 
-def test_datatype_from_ddl_parsing():
+def test_datatype_from_ddl_parsing(mock_connect):
     """Test DataType.fromDDL parsing of DDL strings."""
     # StructField DDL parsing
     import pyspark.sql.types as types_module
-    # StructField.fromDDL is what works offline
+    # StructField.fromDDL is DataType.fromDDL, which works offline
     sf = T.StructField.fromDDL("a int")
-    assert sf.simpleString() == "a:int"
+    assert sf.simpleString() == "struct<a:int>"
 
     sf2 = T.StructField.fromDDL("b: string")
-    assert sf2.simpleString() == "b:string"
+    assert sf2.simpleString() == "struct<b:string>"
 
 
 def test_decimal_type_methods():
@@ -6420,6 +6420,20 @@ def test_functions_stack():
     # stack creates rows from arguments; as in PySpark, the count is a Column too.
     result = F.stack(F.lit(2), F.col("a"), F.col("b"))
     assert type(result).__name__ == "Column"
+
+
+def test_struct_field_from_ddl_is_data_type_from_ddl_as_pyspark(mock_connect):
+    # As PySpark: StructField inherits DataType.fromDDL, so it returns the parsed type, a
+    # StructType for a list of fields (its errors are checked against the server, live).
+    assert T.StructField.fromDDL("a int") == T.StructType([T.StructField("a", T.IntegerType())])
+    assert T.StructField.fromDDL("int") == T.IntegerType()
+    assert T.StructField.fromDDL("`x y` int") == T.StructType([
+        T.StructField("x y", T.IntegerType()),
+    ])
+    assert T.StructField.fromDDL("a int not null").simpleString() == "struct<a:int>"
+    assert T.StructField.fromDDL("st struct<a:int,b:double>").simpleString() == (
+        "struct<st:struct<a:int,b:double>>"
+    )
 
 
 def test_functions_sort_array():
