@@ -674,9 +674,10 @@ impl SparkConnectClient {
             .user_context_extensions
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        // The thread that calls the API, also when this future is polled on another thread.
         let own = extensions
             .by_thread
-            .get(&std::thread::current().id())
+            .get(&crate::runtime::calling_thread_id())
             .map(|own| own.0.lock().unwrap_or_else(|e| e.into_inner()));
         if extensions.global.is_empty() && own.as_ref().is_none_or(|own| own.is_empty()) {
             return;

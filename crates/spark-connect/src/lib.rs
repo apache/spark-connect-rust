@@ -2,6 +2,16 @@
 //!
 //! This crate provides the core data types and operations for interacting with
 //! Apache Spark via the Spark Connect protocol.
+//!
+//! # Synchronous API
+//!
+//! Every method is synchronous: it returns once the server has answered. The API may be called
+//! from any thread, including inside a Tokio runtime of either flavor. The call blocks the
+//! calling thread until it completes, as any blocking call does, so avoid it in a task that
+//! must keep other tasks of the same runtime running. In a multi-thread runtime the thread is
+//! blocked in place. In a `current_thread` runtime (the default of `#[tokio::test]` and of
+//! `#[tokio::main(flavor = "current_thread")]`) the work runs on a thread of its own while the
+//! calling thread waits, and it uses the tags and user context extensions of the calling thread.
 
 #![allow(clippy::result_large_err)] // SparkError is large; changing the type would break the API
 
