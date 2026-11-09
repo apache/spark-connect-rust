@@ -453,26 +453,31 @@ fn agg_na_stat_reshape_surface() {
     let _ = df
         .group_by(vec![col("id")])
         .sum(vec!["val"])
+        .unwrap()
         .collect()
         .unwrap();
     let _ = df
         .group_by(vec![col("id")])
         .avg(vec!["val"])
+        .unwrap()
         .collect()
         .unwrap();
     let _ = df
         .group_by(vec![col("id")])
         .min(vec!["val"])
+        .unwrap()
         .collect()
         .unwrap();
     let _ = df
         .group_by(vec![col("id")])
         .max(vec!["val"])
+        .unwrap()
         .collect()
         .unwrap();
     let _ = df
         .group_by(vec![col("id")])
         .mean(vec!["val"])
+        .unwrap()
         .collect()
         .unwrap();
     let _ = df.rollup(vec![col("id")]).count().collect().unwrap();
