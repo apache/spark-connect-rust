@@ -135,7 +135,7 @@ fn replace_to_with_metadata_random_split() {
     assert_eq!(with_md.collect().expect("with_metadata collect").len(), 5);
 
     // randomSplit returns multiple DataFrames whose row counts sum to the input.
-    let parts = df.random_split(vec![0.5, 0.5], Some(1));
+    let parts = df.random_split(vec![0.5, 0.5], Some(1)).unwrap();
     let total: usize = parts
         .iter()
         .map(|p| p.clone().collect().expect("split collect").len())

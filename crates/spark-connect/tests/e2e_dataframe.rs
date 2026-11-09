@@ -131,7 +131,7 @@ fn dataframe_metadata_json_semantics() {
     assert_eq!(s.table("cov_df_view").unwrap().count().unwrap(), 4);
     let _ = df.create_or_replace_global_temp_view("cov_df_gview");
     // random_split returns the requested number of frames
-    let parts = df.random_split(vec![0.5, 0.5], Some(1));
+    let parts = df.random_split(vec![0.5, 0.5], Some(1)).unwrap();
     assert_eq!(parts.len(), 2);
 }
 

@@ -1914,6 +1914,8 @@ impl PyDataFrame {
                 ],
             ))
         };
+        // Keep Python's checks so arg_value uses str() of the original objects, as in
+        // PySpark. The core also validates the extracted weights for native Rust callers.
         for weight in weights.try_iter()? {
             let weight = weight?;
             if weight.lt(0.0)? {
@@ -1928,6 +1930,7 @@ impl PyDataFrame {
         Ok(self
             .dataframe
             .random_split(weights, seed)
+            .to_pyerr()?
             .into_iter()
             .map(PyDataFrame::new)
             .collect())

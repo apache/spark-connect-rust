@@ -1932,11 +1932,39 @@ impl DataFrame {
     }
 
     /// Randomly split this DataFrame into multiple parts.
-    pub fn random_split(&self, weights: Vec<f64>, seed: Option<i64>) -> Vec<DataFrame> {
+    ///
+    /// # Errors
+    ///
+    /// Returns `VALUE_NOT_POSITIVE` for the first negative weight, or for weights whose
+    /// sum is nonpositive, including an empty list. These are the same checks as PySpark's
+    /// `randomSplit`; zero weights are allowed when the total is positive.
+    /// The native `arg_value` uses Rust's `f64` display format (for example, `-1`);
+    /// the Python wrapper retains PySpark's `str()` formatting of the original inputs.
+    ///
+    /// This method returns a `Result`: callers must handle the error (for example, with
+    /// `?`) before using the split DataFrames.
+    pub fn random_split(&self, weights: Vec<f64>, seed: Option<i64>) -> Result<Vec<DataFrame>> {
+        for weight in &weights {
+            if *weight < 0.0 {
+                return Err(SparkError::value(
+                    "VALUE_NOT_POSITIVE",
+                    &[("arg_name", "weights"), ("arg_value", &weight.to_string())],
+                ));
+            }
+        }
         // As PySpark's: one seed of every split, of the client without a seed, and the input
         // in a deterministic order, so that the splits are disjoint and have every row.
         let seed = Some(seed.unwrap_or_else(random_seed));
-        let total: f64 = weights.iter().sum();
+        let total = weights.iter().fold(0.0, |sum, weight| sum + weight);
+        if total <= 0.0 {
+            return Err(SparkError::value(
+                "VALUE_NOT_POSITIVE",
+                &[
+                    ("arg_name", "sum(weights)"),
+                    ("arg_value", &total.to_string()),
+                ],
+            ));
+        }
         let normalized: Vec<f64> = weights.iter().map(|w| w / total).collect();
 
         let mut results = vec![];
@@ -1956,7 +1984,7 @@ impl DataFrame {
             cumulative = upper;
         }
 
-        results
+        Ok(results)
     }
 
     /// Print the schema of this DataFrame.
@@ -4663,6 +4691,7 @@ mod plan_construction_tests {
         let df = spark.range(10).unwrap();
         let seeds: Vec<(Option<i64>, bool)> = df
             .random_split(vec![0.5, 0.5], None)
+            .unwrap()
             .iter()
             .map(|split| match split.plan.as_ref() {
                 LogicalPlan::Sample {
@@ -4690,7 +4719,7 @@ mod plan_construction_tests {
     fn random_split_plan() {
         let spark = session();
         let df = spark.range(10).unwrap();
-        let dfs = df.random_split(vec![0.7, 0.3], None);
+        let dfs = df.random_split(vec![0.7, 0.3], None).unwrap();
         assert_eq!(dfs.len(), 2);
         // Each split is a different DataFrame with its own plan
         for split_df in &dfs {
@@ -4703,6 +4732,56 @@ mod plan_construction_tests {
                 }
                 _ => panic!("expected Sample plan"),
             }
+        }
+    }
+
+    #[test]
+    fn random_split_rejects_invalid_weights_before_building_plans() {
+        let df = session().range(10).unwrap();
+        for (weights, argument, value) in [
+            (vec![-1.0, 2.0], "weights", "-1"),
+            (vec![0.0, -2.0, -1.0], "weights", "-2"),
+            (vec![f64::NAN, -1.0], "weights", "-1"),
+            (vec![0.0, 0.0], "sum(weights)", "0"),
+            (vec![], "sum(weights)", "0"),
+        ] {
+            let error = match df.random_split(weights.clone(), Some(42)) {
+                Err(error) => error,
+                Ok(_) => panic!("expected invalid weights to fail: {weights:?}"),
+            };
+            assert!(matches!(error.kind, SparkErrorKind::ValueError));
+            assert_eq!(error.error_class, "VALUE_NOT_POSITIVE", "{weights:?}");
+            assert_eq!(error.params["arg_name"], argument, "{weights:?}");
+            assert_eq!(error.params["arg_value"], value, "{weights:?}");
+        }
+    }
+
+    #[test]
+    fn random_split_serializes_normalized_bounds_shared_seed_and_ordering() {
+        use proto::relation::RelType;
+
+        let df = session().range(10).unwrap();
+        let splits = df.random_split(vec![1.0, 0.0, 3.0], Some(42)).unwrap();
+        assert_eq!(splits.len(), 3);
+        for (split, (lower, upper)) in splits.iter().zip([(0.0, 0.25), (0.25, 0.25), (0.25, 1.0)]) {
+            let Some(RelType::Sample(sample)) = split.relation().rel_type else {
+                panic!("expected a serialized Sample relation");
+            };
+            assert_eq!(sample.lower_bound, lower);
+            assert_eq!(sample.upper_bound, upper);
+            assert_eq!(sample.seed, Some(42));
+            assert_eq!(sample.with_replacement, Some(false));
+            assert!(sample.deterministic_order);
+        }
+    }
+
+    #[test]
+    fn random_split_keeps_pyspark_nonfinite_comparison_semantics() {
+        let df = session().range(10).unwrap();
+        // PySpark checks w < 0 and total <= 0; neither comparison rejects NaN or +inf.
+        // Any server-side handling of those plans remains separate from client validation.
+        for weights in [vec![f64::NAN], vec![f64::INFINITY]] {
+            assert_eq!(df.random_split(weights, Some(42)).unwrap().len(), 1);
         }
     }
 
