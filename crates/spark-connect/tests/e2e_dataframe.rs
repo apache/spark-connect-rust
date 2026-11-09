@@ -428,6 +428,67 @@ fn int_pairs(df: &DataFrame) -> Vec<(i32, i32)> {
     pairs
 }
 
+/// Reads `relation` as a DataFrame, polling until the server no longer has it, as a release
+/// sent without waiting takes effect. Returns the condition of the error the read fails with.
+fn wait_until_relation_is_released(s: &SparkSession, relation: &spark_connect_proto::Relation) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        if let Err(error) = DataFrame::from_sent_relation(s.clone(), relation.clone()).count() {
+            assert_eq!(
+                error.get_condition().as_deref(),
+                Some("CONNECT_INVALID_PLAN.DATAFRAME_NOT_FOUND"),
+                "the released relation is not found: {error}"
+            );
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the server still has the relation of the dropped checkpoint"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+#[test]
+fn a_dropped_checkpoint_releases_its_relation_on_the_server() {
+    // As PySpark's CachedRemoteRelation.__del__: the last DataFrame of a checkpoint that is
+    // dropped removes the relation on the server, and only then is it gone.
+    if !should_run() {
+        return;
+    }
+    let s = session();
+    // checkpoint() needs a checkpoint directory, which the test server does not set.
+    let checkpoint = s.range(5).unwrap().local_checkpoint().unwrap();
+    let relation = checkpoint.to_relation();
+    assert_eq!(checkpoint.count().unwrap(), 5);
+    drop(checkpoint);
+    wait_until_relation_is_released(&s, &relation);
+}
+
+#[test]
+fn a_checkpoint_stays_while_a_dataframe_derived_from_it_is_alive() {
+    // The derived DataFrame keeps the checkpoint alive: it still counts after the checkpoint
+    // itself is dropped, and the relation is released only once the derived one is dropped.
+    if !should_run() {
+        return;
+    }
+    let s = session();
+    let checkpoint = s.range(5).unwrap().local_checkpoint().unwrap();
+    let relation = checkpoint.to_relation();
+    let derived = checkpoint.filter(col("id").gt(lit(1)));
+    drop(checkpoint);
+    assert_eq!(derived.count().unwrap(), 3);
+    assert_eq!(
+        DataFrame::from_sent_relation(s.clone(), relation.clone())
+            .count()
+            .unwrap(),
+        5,
+        "the relation is still on the server while the derived DataFrame lives"
+    );
+    drop(derived);
+    wait_until_relation_is_released(&s, &relation);
+}
+
 #[test]
 fn subqueries_return_the_rows_of_pyspark() {
     // As PySpark's DataFrame.scalar(), DataFrame.exists() and Column.isin(df): scalar,
