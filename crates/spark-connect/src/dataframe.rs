@@ -870,7 +870,9 @@ impl DataFrame {
         crate::group::GroupedData::new(self.clone(), group_cols, AggregateGroupType::GroupBy)
     }
 
-    /// Collect all rows into memory.
+    /// Collect all rows into memory. A `TIMESTAMP(p)` or `TIMESTAMP_NTZ(p)` value with p > 6
+    /// is collected in microseconds, its sub-microsecond digits rounded down (`to_arrow` keeps
+    /// them); the Python client refuses to collect these types, as PySpark does.
     pub fn collect(&self) -> Result<Vec<Row>> {
         self.collect_with_schema().map(|(rows, _)| rows)
     }
@@ -2997,8 +2999,10 @@ impl<'a> ArrowValueLayout<'a> {
                 arr.value(index) * 1_000,
                 arr.timezone().is_some(),
             )),
+            // Collect gives microseconds: floor, so a pre-1970 value keeps its sign and its
+            // sub-microsecond digits round down as Spark's micros do (`to_arrow` keeps nanos).
             ArrowValueDecoder::TimestampNanosecond(arr) => Ok(timestamp_value(
-                arr.value(index) / 1_000,
+                arr.value(index).div_euclid(1_000),
                 arr.timezone().is_some(),
             )),
             ArrowValueDecoder::Date64(arr) => {
@@ -5219,8 +5223,9 @@ mod arrow_value_tests {
                 Value::Timestamp(-1_000),
             ),
             (
+                // Collect floors nanoseconds to microseconds: -1.999 us is -2 us.
                 Arc::new(TimestampNanosecondArray::from(vec![-1999]).with_timezone_utc()),
-                Value::Timestamp(-1),
+                Value::Timestamp(-2),
             ),
             // Without a time zone, as TIMESTAMP_NTZ is declared.
             (
@@ -5442,6 +5447,54 @@ mod arrow_value_tests {
             arrow_value_at(&Date64Array::from(vec![86_400_000i64]), 0).unwrap(),
             Value::Date(_)
         ));
+    }
+
+    #[test]
+    fn nanosecond_timestamps_floor_to_micros_at_top_level_and_nested() {
+        use arrow::buffer::OffsetBuffer;
+        use arrow::datatypes::TimeUnit;
+
+        // Division toward zero put a pre-1970 value with sub-microsecond digits one microsecond
+        // too high; collect floors to micros instead, and keeps post-1970 values.
+        let times = [-876_543_300i64, -1, -1_000, 1_577_836_800_123_456_789];
+        let expected = [-876_544i64, -1, -1, 1_577_836_800_123_456];
+        for (index, micros) in expected.into_iter().enumerate() {
+            let array = TimestampNanosecondArray::from(times.to_vec());
+            assert_eq!(
+                arrow_value_at(&array, index).unwrap(),
+                Value::TimestampNtz(micros)
+            );
+            let zoned = TimestampNanosecondArray::from(times.to_vec()).with_timezone_utc();
+            assert_eq!(
+                arrow_value_at(&zoned, index).unwrap(),
+                Value::Timestamp(micros)
+            );
+        }
+
+        let nanos_type = ArrowDataType::Timestamp(TimeUnit::Nanosecond, None);
+        let field = Arc::new(Field::new("t", nanos_type.clone(), false));
+        let col: ArrayRef = Arc::new(TimestampNanosecondArray::from(vec![-876_543_300i64]));
+        let s = StructArray::from(vec![(field, col)]);
+        match arrow_value_at(&s, 0).unwrap() {
+            Value::Struct(row) => assert_eq!(row.values()[0], Value::TimestampNtz(-876_544)),
+            other => panic!("expected a struct, got {other:?}"),
+        }
+
+        let item = Arc::new(Field::new("item", nanos_type, true));
+        let values = TimestampNanosecondArray::from(vec![-1i64, 1_000_001]);
+        let list = ListArray::new(
+            item,
+            OffsetBuffer::from_lengths([2]),
+            Arc::new(values),
+            None,
+        );
+        match arrow_value_at(&list, 0).unwrap() {
+            Value::List(items) => assert_eq!(
+                items,
+                vec![Value::TimestampNtz(-1), Value::TimestampNtz(1_000)]
+            ),
+            other => panic!("expected a list, got {other:?}"),
+        }
     }
 
     #[test]

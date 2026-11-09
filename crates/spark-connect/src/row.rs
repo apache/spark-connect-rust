@@ -31,10 +31,12 @@ pub enum Value {
     Binary(Vec<u8>),
     /// Date (days since epoch)
     Date(i32),
-    /// Timestamp with local time zone (`TimestampType`), in microseconds since the epoch.
+    /// Timestamp with local time zone (`TimestampType`), in microseconds since the epoch. Collect
+    /// floors a nanosecond-precision value (p > 6) to microseconds.
     Timestamp(i64),
     /// Timestamp without time zone (`TimestampNTZType`), in microseconds of its wall clock
-    /// since 1970-01-01 00:00:00, which the time zone of the client does not shift.
+    /// since 1970-01-01 00:00:00, which the time zone of the client does not shift. Collect
+    /// floors a nanosecond-precision value (p > 6) to microseconds.
     TimestampNtz(i64),
     /// TIME, in nanoseconds since midnight, as PySpark's internal value of `TimeType`.
     Time(i64),
