@@ -2264,7 +2264,13 @@ def test_plan_logging_string_of_a_protobuf_message_as_pyspark_connect():
     relation = pb2.Relation()
     relation.sql.query = "q" * 2000
     text = client._proto_to_string(relation, True)
-    assert "[truncated]" in text and "q" * 1100 not in text
+    try:
+        # PySpark's truncation reads FieldDescriptor.label, which protobuf 7 no longer has.
+        relation.DESCRIPTOR.fields_by_name["sql"].label
+    except Exception:
+        assert text == "<Truncated message due to truncation error>"
+    else:
+        assert "[truncated]" in text and "q" * 1100 not in text
     assert "q" * 2000 in client._proto_to_string(relation)
 
     deep = pb2.Relation()
