@@ -4827,6 +4827,73 @@ def test_column_guard_rails():
         bool(c)
 
 
+def test_inheritable_thread_targets_carry_the_user_context_extensions_as_pyspark(mock_connect):
+    # As PySpark Connect's inheritable_thread_target: the function gets a copy of the user context
+    # extensions of the thread that decorates it, which the threads that run it share, as the
+    # tags: an extension that one of them adds is in the list of all of them, while one that it
+    # removes is removed for it alone. Extensions added after the decoration do not reach it.
+    # InheritableThread takes none, as PySpark's.
+    import threading
+
+    from google.protobuf import any_pb2
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark import InheritableThread, inheritable_thread_target
+
+    spark, service = mock_connect
+
+    def packed(graph_id):
+        extension = any_pb2.Any()
+        extension.Pack(pb2.PipelineAnalysisContext(dataflow_graph_id=graph_id))
+        return extension
+
+    def sent():
+        # The user context extensions of the request of a query, as the server received them.
+        spark.range(1).collect()
+        request = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+        return list(request.user_context.extensions)
+
+    main = spark.client.add_threadlocal_user_context_extension(packed("main"))
+    seen = {}
+
+    @inheritable_thread_target(spark)
+    def target(name):
+        seen[name] = sent()
+        if name == "first":
+            added = spark.client.add_threadlocal_user_context_extension(packed("added"))
+            seen["added"] = sent()
+            spark.client.remove_user_context_extension(main)
+            seen["removed"] = sent()
+            seen["added_id"] = added
+
+    for name in ("first", "second"):
+        thread = threading.Thread(target=target, args=(name,))
+        thread.start()
+        thread.join()
+    late = spark.client.add_threadlocal_user_context_extension(packed("late"))
+    thread = threading.Thread(target=target, args=("third",))
+    thread.start()
+    thread.join()
+
+    assert seen["first"] == [packed("main")]
+    assert seen["added"] == [packed("main"), packed("added")]
+    assert seen["removed"] == [packed("added")]
+    assert seen["second"] == [packed("main"), packed("added")]
+    assert seen["third"] == [packed("main"), packed("added")]
+    assert seen["added_id"].startswith("threadlocal_")
+    assert [i for i, _ in spark.client.thread_local.user_context_extensions] == [main, late]
+
+    inherited = {}
+
+    def child():
+        inherited["sent"] = sent()
+
+    thread = InheritableThread(target=child, session=spark)
+    thread.start()
+    thread.join()
+    assert inherited["sent"] == []
+
+
 def test_functions_null_and_misc():
     """Test miscellaneous functions that may have low coverage."""
     from pyspark.sql import functions as F

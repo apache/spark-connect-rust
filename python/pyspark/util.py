@@ -141,9 +141,10 @@ def inheritable_thread_target(f: Union[Callable, "SparkSession"]) -> Callable:
     >>> Thread(target=inheritable_thread_target(session)(target_func)).start()  # doctest: +SKIP
     """
     # As PySpark's of Spark Connect, the only mode of this client: `f` is the session, whose
-    # tags, those of this thread when the function is decorated, the threads of the function
-    # inherit, with the session as their active one. As PySpark's, which gives each thread the
-    # one copy of the `thread_local` of the client, the threads share that copy of the tags.
+    # tags and user context extensions, those of this thread when the function is decorated, the
+    # threads of the function inherit, with the session as their active one. As PySpark's, which
+    # gives each thread the one copy of the `thread_local` of the client, the threads share that
+    # copy of the tags and of the extensions.
     from pyspark.sql import SparkSession
 
     session = f
@@ -153,6 +154,7 @@ def inheritable_thread_target(f: Union[Callable, "SparkSession"]) -> Callable:
             "f is expected to be SparkSession for spark connect"
         )
         tags = session._copy_thread_tags()
+        extensions = session._copy_thread_user_context_extensions()
 
         @functools.wraps(ff)
         def inner(*args: Any, **kwargs: Any) -> Any:
@@ -162,8 +164,9 @@ def inheritable_thread_target(f: Union[Callable, "SparkSession"]) -> Callable:
             )
 
             SparkSession._set_default_and_active_session(session)
-            # Set the tags of the session in the child thread.
+            # Set the tags and the user context extensions of the session in the child thread.
             session._share_thread_tags(tags)
+            session._share_thread_user_context_extensions(extensions)
             return ff(*args, **kwargs)
 
         return inner

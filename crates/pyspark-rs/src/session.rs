@@ -629,6 +629,16 @@ impl PyHook {
 #[pyclass(name = "_SharedTags", module = "pyspark.sql.session", frozen)]
 pub struct PySharedTags(spark_connect::session::SharedTags);
 
+/// A copy of the user context extensions of a thread, which the threads that
+/// `_share_thread_user_context_extensions` gives it share, for
+/// `pyspark.util.inheritable_thread_target`.
+#[pyclass(
+    name = "_SharedUserContextExtensions",
+    module = "pyspark.sql.session",
+    frozen
+)]
+pub struct PySharedUserContextExtensions(spark_connect_core::client::SharedUserContextExtensions);
+
 /// A tag of `addTag` or `removeTag`: `CANNOT_BE_NONE` for None, as PySpark Connect's.
 fn tag_of(py: Python<'_>, tag: &Bound<'_, PyAny>) -> PyResult<String> {
     if tag.is_none() {
@@ -2870,6 +2880,21 @@ impl PySparkSession {
     /// function the copy of the `thread_local` of the client of PySpark Connect.
     fn _share_thread_tags(&self, tags: &PySharedTags) {
         self.session.share_thread_tags(&tags.0)
+    }
+
+    /// A copy of the user context extensions of the current thread, which
+    /// `pyspark.util.inheritable_thread_target` makes when it decorates a function, as PySpark
+    /// Connect's deep-copies the `thread_local` of the client.
+    fn _copy_thread_user_context_extensions(&self) -> PySharedUserContextExtensions {
+        PySharedUserContextExtensions(self.session.copy_threadlocal_user_context_extensions())
+    }
+
+    /// Make `extensions` the user context extensions of the current thread, which it shares with
+    /// the other threads given them, as `pyspark.util.inheritable_thread_target` sets the copy of
+    /// the `thread_local` of the client in each thread that runs its function.
+    fn _share_thread_user_context_extensions(&self, extensions: &PySharedUserContextExtensions) {
+        self.session
+            .share_threadlocal_user_context_extensions(&extensions.0)
     }
 
     /// Add local files, or `file:` URIs, as artifacts of the session, as PySpark's
