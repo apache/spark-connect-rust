@@ -70,11 +70,82 @@ difference is intentional or tracked for a fix.
 
 ## `DataFrame`
 
-- **A subclass of `DataFrame` created with `object.__new__`** (intentional, a PyO3 limit).
-  `DataFrame` is a class of the Rust extension, so `object.__new__(cls)` of a subclass raises
-  `TypeError: object.__new__(cls) is not safe`. `MockDataset` of `pyspark.testing.mlutils`
-  creates itself so, and two of Apache Spark's ML parity tests that use it
-  (`test_parity_pipeline.py`'s `test_pipeline` and `test_identity_pipeline`) fail for that
-  reason only. The rest of `pyspark/ml/tests/connect/test_parity_*.py` pass with this client,
-  except for a test that reads `data/mllib` of the Spark source tree from the working directory
-  of the server.
+- **Public base and native MRO.** `pyspark.sql.DataFrame` is implemented as a
+  Python base/factory, allowing subclasses such as
+  `pyspark.testing.mlutils.MockDataset` to allocate their own Python state with
+  `object.__new__`. The concrete class remains
+  `pyspark.sql.connect.dataframe.DataFrame`, implemented by the Rust extension. It is
+  registered as a virtual subclass of the public base: `isinstance` and `issubclass`
+  recognize it, while its actual MRO stays native. Consequently, `super` and MRO
+  introspection do not treat a native frame as inheriting from the public base.
+
+- **Metaclass and subclass serialization.** The public base uses an `ABCMeta`
+  subclass for virtual registration and attribute forwarding, while official
+  PySpark uses `type`. It exposes `register()`, and
+  multiple inheritance with an unrelated metaclass requires a combined metaclass.
+  Ordinary Python subclasses use the standard `abc.ABCMeta` so by-value
+  cloudpickling names an importable metaclass on official Python workers. Explicit
+  user metaclass subclasses are preserved and retain their own serialization
+  requirements. A local subclass and a closure capturing that subclass were
+  cloudpickled by the native client and reconstructed and exercised in an
+  official-only Python process without importing the native extension. This does
+  not establish portability of instances, explicit user metaclasses or server UDFs.
+
+- **Public class mutation and dispatch.** Public-base method and property calls
+  look up the concrete implementation at call time, including concrete-class
+  patches made after import. Assigning or deleting user extensions directly on the
+  public class also updates the native class, so added helpers and overridden
+  methods reach existing native frames;
+  assignments on Python subclasses remain local to those subclasses.
+  Deleting an initial public method or property removes its public-base exposure
+  and restores the concrete implementation that preceded a public override, while
+  preserving any later independent concrete patch. Deleting an added
+  helper removes the forwarded helper; deleting a temporary extension that shadows
+  a native-only attribute restores that native attribute.
+  Class layout, constructor, import/ABC metadata and instance attribute protocols
+  `__getattribute__`, `__setattr__` and `__delattr__` stay on the public base. Those
+  protocols follow ordinary Python inheritance on independent subclasses; virtual
+  native membership does not inherit them.
+
+- **Attribute resolution.** Explicit public `__getattr__` calls use the native
+  column resolver, including existing attribute names, unsupported JVM names, and
+  dunder/legacy column validation. While a user override of public `__getattr__`
+  is active, native frames use generic Python attribute lookup before calling that
+  hook. Undo restores the saved native lookup entry and prior hook state, including
+  absence of a native `__getattr__` entry. Importing the public base does not alter
+  the native lookup entries. The native-only private method
+  `_get_column_by_attribute` bridges explicit public lookup to the Rust resolver;
+  it is an intentional extra name in concrete-class introspection and completion.
+
+- **Independent Python subclasses and construction.** Python subclasses override
+  operations for their own data model. As in PySpark, inherited public properties
+  read `None`, while native-dispatched methods,
+  including `repr`, `dir`, and missing-attribute `__getattr__`, raise
+  `NOT_IMPLEMENTED` on independent Python data. Consequently, `hasattr` for an
+  unknown name also raises that exception, including on `MockDataset`.
+  The official undecorated empty methods `checkpoint`, `localCheckpoint`,
+  `lateralJoin`, `nearestByJoin`, `toPandas`, `asTable`, `scalar` and `exists` return
+  `None` after argument binding. The inherited `__arrow_c_stream__` uses the
+  generic `SparkArrowCStreamer` helper with the independent frame and requested
+  schema, as on the official public base.
+  Internal `_session` and `_plan` remain ordinary instance state on those subclasses.
+  `is_cached` is an annotation and assignable instance state, as on the official
+  public base. Concrete getters for these names are not installed as public
+  properties.
+  A public-base subclass that inherits the factory's `__new__` receives a plain
+  concrete frame, and its own `__init__` is not called. Define `__new__` using
+  `object.__new__` for independent Python data, or subclass
+  `pyspark.sql.connect.dataframe.DataFrame` for native-backed subclass behavior.
+  A direct native subclass must use the native constructor to initialize its Rust
+  payload; `object.__new__` cannot safely allocate that payload.
+
+- **Validation status.** All 22 subclass cases passed in the native offline suite.
+  The unchanged official pipeline, tuning and one-vs-rest selection passed on both
+  the official and native high-level clients with `PYTHONHASHSEED=0`: 16 passed and
+  four upstream-disabled GC tests skipped on each client. This includes
+  `test_pipeline` and `test_identity_pipeline`. An earlier run with independent
+  default Python hash seeds failed native Random Forest cross-validation on a
+  one-class training fold; that failure is retained, and its cause is not proven
+  by the fixed-hash passes. API inspection records the public-base and
+  concrete-class differences; inherited signature and annotation differences remain.
+  These results do not establish complete DataFrame or ML parity.

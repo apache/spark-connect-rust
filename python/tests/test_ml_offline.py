@@ -780,6 +780,789 @@ def test_ml_dataframes_of_plans_keep_their_plans(ml_mock):
     assert alive() is None
 
 
+def test_public_dataframe_base_factory_and_native_dispatch(ml_mock):
+    import inspect
+    import pickle
+
+    from pyspark import cloudpickle
+    from pyspark.sql import DataFrame
+    from pyspark.sql.connect.dataframe import DataFrame as ConnectDataFrame
+    from pyspark.sql.connect.plan import LogicalPlan
+
+    spark, service = ml_mock
+
+    class SQLPlan(LogicalPlan):
+        def __init__(self):
+            super().__init__(None)
+
+        def plan(self, session):
+            relation = self._create_proto_relation()
+            relation.sql.query = "SELECT 1 AS a"
+            return relation
+
+    frame = DataFrame(plan=SQLPlan(), session=spark)
+    assert type(frame) is ConnectDataFrame
+    assert isinstance(frame, DataFrame)
+    assert issubclass(ConnectDataFrame, DataFrame)
+    assert DataFrame.__module__ == "pyspark.sql.dataframe"
+    assert ConnectDataFrame.__module__ == "pyspark.sql.connect.dataframe"
+    assert DataFrame.__doc__ == ConnectDataFrame.__doc__
+    assert inspect.signature(DataFrame) == inspect.signature(ConnectDataFrame)
+    assert inspect.signature(DataFrame.select) == inspect.signature(ConnectDataFrame.select)
+    assert DataFrame.select.__doc__ == ConnectDataFrame.select.__doc__
+    assert {
+        name for name in dir(ConnectDataFrame)
+        if not name.startswith("_") and name != "is_cached"
+    } <= set(dir(DataFrame))
+
+    # Public-base unbound methods and properties dispatch to the real native frame;
+    # ordinary frame calls keep the native implementation and result type.
+    projected = DataFrame.select(frame, "a")
+    assert type(projected) is ConnectDataFrame
+    assert isinstance(projected, DataFrame)
+    assert DataFrame.sparkSession.fget(frame) is spark
+    assert DataFrame.sparkSession.fget.__name__ == "sparkSession"
+    assert DataFrame.sparkSession.fget.__module__ == "pyspark.sql.dataframe"
+    assert DataFrame.sparkSession.fget.__qualname__ == "DataFrame.sparkSession"
+    assert repr(DataFrame.__getitem__(frame, "a")) == "Column<'a'>"
+    restored = cloudpickle.loads(cloudpickle.dumps(frame))
+    assert type(restored) is ConnectDataFrame
+    assert _relation(restored).sql.query == "SELECT 1 AS a"
+    assert pickle.loads(pickle.dumps(DataFrame)) is DataFrame
+    assert pickle.loads(pickle.dumps(ConnectDataFrame)) is ConnectDataFrame
+
+    init_calls = []
+
+    class InheritedFactoryFrame(DataFrame):
+        def __init__(self, plan, session):
+            init_calls.append(self)
+
+    # As PySpark's public factory: inherited __new__ returns a concrete frame, so
+    # Python does not run the independent subclass's initializer.
+    factory_frame = InheritedFactoryFrame(plan=SQLPlan(), session=spark)
+    assert type(factory_frame) is ConnectDataFrame
+    assert not isinstance(factory_frame, InheritedFactoryFrame)
+    assert init_calls == []
+
+    class NativeFrame(ConnectDataFrame):
+        def __init__(self, plan, session):
+            self.marker = "native-subclass-state"
+
+    native_subclass = NativeFrame(plan=SQLPlan(), session=spark)
+    assert type(native_subclass) is NativeFrame
+    assert isinstance(native_subclass, DataFrame)
+    assert native_subclass.marker == "native-subclass-state"
+    assert type(native_subclass.select("a")) is ConnectDataFrame
+    assert service.execute_requests == []
+
+
+def test_public_dataframe_extensions_reach_native_frames_and_restore(ml_mock, monkeypatch):
+    import inspect
+
+    from pyspark.sql import DataFrame
+    from pyspark.sql.connect.dataframe import DataFrame as ConnectDataFrame
+
+    spark, service = ml_mock
+    frame = spark.range(1)
+    original_public_count = vars(DataFrame)["count"]
+    original_native_count = vars(ConnectDataFrame)["count"]
+    original_public_schema = vars(DataFrame)["schema"]
+    original_native_schema = vars(ConnectDataFrame)["schema"]
+    original_native_session = vars(ConnectDataFrame)["_session"]
+    missing = object()
+
+    class LocalFrame(DataFrame):
+        def __new__(cls):
+            return object.__new__(cls)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(DataFrame, "compatibility_helper", lambda self: 42, raising=False)
+        assert frame.compatibility_helper() == 42
+        assert LocalFrame().compatibility_helper() == 42
+        with monkeypatch.context() as local_patch:
+            local_patch.setattr(LocalFrame, "compatibility_helper", lambda self: 7)
+            assert LocalFrame().compatibility_helper() == 7
+            assert frame.compatibility_helper() == 42
+        assert LocalFrame().compatibility_helper() == 42
+    assert "compatibility_helper" not in vars(DataFrame)
+    assert "compatibility_helper" not in vars(ConnectDataFrame)
+    assert inspect.getattr_static(frame, "compatibility_helper", missing) is missing
+
+    with monkeypatch.context() as patch:
+        patch.setattr(DataFrame, "count", lambda self: 99)
+        assert frame.count() == 99
+        assert DataFrame.count(frame) == 99
+    assert vars(DataFrame)["count"] is original_public_count
+    assert vars(ConnectDataFrame)["count"] is original_native_count
+
+    with monkeypatch.context() as patch:
+        patch.delattr(DataFrame, "count")
+        assert "count" not in vars(DataFrame)
+        assert vars(ConnectDataFrame)["count"] is original_native_count
+        assert frame.count.__self__ is frame
+        assert frame.count.__name__ == "count"
+    assert vars(DataFrame)["count"] is original_public_count
+    assert vars(ConnectDataFrame)["count"] is original_native_count
+
+    with monkeypatch.context() as patch:
+        patch.setattr(DataFrame, "count", lambda self: 99)
+        assert frame.count() == 99
+        del DataFrame.count
+        assert "count" not in vars(DataFrame)
+        assert vars(ConnectDataFrame)["count"] is original_native_count
+        assert frame.count.__self__ is frame
+    assert vars(DataFrame)["count"] is original_public_count
+    assert vars(ConnectDataFrame)["count"] is original_native_count
+
+    native_attributes = dict(vars(ConnectDataFrame))
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            DataFrame,
+            "__subclasshook__",
+            classmethod(lambda cls, subclass: NotImplemented),
+        )
+        assert dict(vars(ConnectDataFrame)) == native_attributes
+    assert dict(vars(ConnectDataFrame)) == native_attributes
+
+    with monkeypatch.context() as patch:
+        patch.setattr(DataFrame, "schema", property(lambda self: "custom-schema"))
+        assert frame.schema == "custom-schema"
+        assert LocalFrame().schema == "custom-schema"
+    assert vars(DataFrame)["schema"] is original_public_schema
+    assert vars(ConnectDataFrame)["schema"] is original_native_schema
+
+    # Explicit public calls must follow concrete-class patches at call time.
+    # Undoing or deleting a public override must preserve a concrete patch that
+    # was already in place, rather than reinstating an import-time descriptor.
+    with monkeypatch.context() as concrete_patch:
+        concrete_count = lambda self: 73
+        concrete_schema = property(lambda self: "concrete-schema")
+        concrete_patch.setattr(ConnectDataFrame, "count", concrete_count)
+        concrete_patch.setattr(ConnectDataFrame, "schema", concrete_schema)
+        assert DataFrame.count(frame) == frame.count() == 73
+        assert DataFrame.schema.fget(frame) == frame.schema == "concrete-schema"
+        with monkeypatch.context() as public_patch:
+            public_patch.setattr(DataFrame, "count", lambda self: 99)
+            public_patch.setattr(DataFrame, "schema", property(lambda self: "public-schema"))
+            assert DataFrame.count(frame) == frame.count() == 99
+            assert DataFrame.schema.fget(frame) == frame.schema == "public-schema"
+        assert vars(ConnectDataFrame)["count"] is concrete_count
+        assert vars(ConnectDataFrame)["schema"] is concrete_schema
+        assert DataFrame.count(frame) == 73
+        assert DataFrame.schema.fget(frame) == "concrete-schema"
+        with monkeypatch.context() as public_patch:
+            public_patch.delattr(DataFrame, "count")
+            public_patch.delattr(DataFrame, "schema")
+            assert frame.count() == 73
+            assert frame.schema == "concrete-schema"
+        assert DataFrame.count(frame) == 73
+        assert DataFrame.schema.fget(frame) == "concrete-schema"
+    assert vars(ConnectDataFrame)["count"] is original_native_count
+    assert vars(ConnectDataFrame)["schema"] is original_native_schema
+
+    try:
+        with monkeypatch.context() as public_patch:
+            public_patch.setattr(DataFrame, "count", lambda self: 99)
+            concrete_count = lambda self: 74
+            # A concrete patch installed after the public override also survives
+            # its undo. This assignment is owned by the surrounding finally.
+            setattr(ConnectDataFrame, "count", concrete_count)
+        assert vars(ConnectDataFrame)["count"] is concrete_count
+        assert DataFrame.count(frame) == frame.count() == 74
+    finally:
+        setattr(ConnectDataFrame, "count", original_native_count)
+    assert vars(DataFrame)["count"] is original_public_count
+
+    try:
+        with monkeypatch.context() as public_patch:
+            public_patch.setattr(DataFrame, "count", lambda self: 99)
+            concrete_count = lambda self: 75
+            setattr(ConnectDataFrame, "count", concrete_count)
+            public_patch.setattr(DataFrame, "count", lambda self: 100)
+            assert frame.count() == 100
+        assert vars(ConnectDataFrame)["count"] is concrete_count
+        assert DataFrame.count(frame) == frame.count() == 75
+    finally:
+        setattr(ConnectDataFrame, "count", original_native_count)
+    assert vars(DataFrame)["count"] is original_public_count
+
+    # Added helpers obey the same ownership rule as initial members, including
+    # deletion after a concrete patch and repeated public overrides.
+    for repeat_public_override in (False, True):
+        try:
+            with monkeypatch.context() as public_patch:
+                public_patch.setattr(
+                    DataFrame, "compatibility_helper", lambda self: 1, raising=False
+                )
+                concrete_helper = lambda self: 76
+                setattr(ConnectDataFrame, "compatibility_helper", concrete_helper)
+                if repeat_public_override:
+                    public_patch.setattr(DataFrame, "compatibility_helper", lambda self: 2)
+                    assert frame.compatibility_helper() == 2
+                public_patch.delattr(DataFrame, "compatibility_helper")
+                assert "compatibility_helper" not in vars(DataFrame)
+                assert vars(ConnectDataFrame)["compatibility_helper"] is concrete_helper
+                assert frame.compatibility_helper() == 76
+            assert "compatibility_helper" not in vars(DataFrame)
+            assert vars(ConnectDataFrame)["compatibility_helper"] is concrete_helper
+        finally:
+            if "compatibility_helper" in vars(ConnectDataFrame):
+                delattr(ConnectDataFrame, "compatibility_helper")
+
+    # A public extension may temporarily shadow a native-only descriptor. Removing
+    # that extension must recover the native getter rather than deleting it.
+    assert "_session" not in vars(DataFrame)
+    with monkeypatch.context() as patch:
+        patch.setattr(DataFrame, "_session", property(lambda self: "custom-session"), raising=False)
+        assert frame._session == "custom-session"
+    assert "_session" not in vars(DataFrame)
+    assert vars(ConnectDataFrame)["_session"] is original_native_session
+    assert frame._session is spark
+
+    def set_custom_value(self, value):
+        self.custom_value = value
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            DataFrame,
+            "compatibility_property",
+            property(lambda self: self.custom_value, set_custom_value),
+            raising=False,
+        )
+        frame.compatibility_property = 5
+        assert frame.compatibility_property == 5
+    assert "compatibility_property" not in vars(DataFrame)
+    assert "compatibility_property" not in vars(ConnectDataFrame)
+    assert service.execute_requests == []
+
+
+def test_public_dataframe_wrappers_call_the_concrete_attributes_they_captured(
+    ml_mock, monkeypatch
+):
+    # A wrapper of a public-base attribute often calls the attribute it captured before
+    # the patch. That reaches the implementation that the wrapper replaced, as on master
+    # and in PySpark, and not the wrapper again, which recursed without end.
+    from pyspark.sql import DataFrame
+
+    spark, service = ml_mock
+    frame = spark.range(3)
+    original_limit = vars(DataFrame)["limit"]
+    original_session = vars(DataFrame)["sparkSession"]
+    original_getattr = vars(DataFrame)["__getattr__"]
+    calls = []
+
+    def limit(self, num):
+        calls.append(("limit", num))
+        return original_limit(self, num)
+
+    def get_attribute(self, name):
+        calls.append(("__getattr__", name))
+        return original_getattr(self, name)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(DataFrame, "limit", limit)
+        patch.setattr(
+            DataFrame,
+            "sparkSession",
+            property(lambda self: ("wrapped", original_session.fget(self))),
+        )
+        patch.setattr(DataFrame, "__getattr__", get_attribute)
+        assert isinstance(frame.limit(1), DataFrame)
+        assert frame.sparkSession == ("wrapped", spark)
+        assert repr(frame.missing_column) == repr(frame["missing_column"])
+        # A wrapper of a wrapper reaches the concrete method through both.
+        inner = DataFrame.limit
+        patch.setattr(DataFrame, "limit", lambda self, num: ("outer", inner(self, num)))
+        outer, limited = frame.limit(2)
+        assert outer == "outer" and isinstance(limited, DataFrame)
+        assert calls == [("limit", 1), ("__getattr__", "missing_column"), ("limit", 2)]
+    assert vars(DataFrame)["limit"] is original_limit
+    assert frame.sparkSession is spark
+    assert service.execute_requests == []
+
+
+def test_public_dataframe_attribute_dispatch_and_restore(ml_mock, monkeypatch):
+    import inspect
+
+    from pyspark.errors import PySparkAttributeError
+    from pyspark.sql import DataFrame
+    from pyspark.sql.column import Column
+    from pyspark.sql.connect.column import Column as ConnectColumn
+    from pyspark.sql.connect.dataframe import DataFrame as ConnectDataFrame
+
+    spark, service = ml_mock
+    frame = spark.range(1)
+    monkeypatch.delenv("PYSPARK_VALIDATE_COLUMN_NAME_LEGACY", raising=False)
+    original_public_getattr = vars(DataFrame)["__getattr__"]
+    original_native_lookup = vars(ConnectDataFrame)["__getattribute__"]
+    original_native_attributes = dict(vars(ConnectDataFrame))
+    native_resolver = vars(ConnectDataFrame)["_get_column_by_attribute"]
+    getattr_signature = inspect.signature(DataFrame.__getattr__)
+    assert getattr_signature.parameters["name"].annotation is str
+    assert getattr_signature.return_annotation is Column
+    assert Column is ConnectColumn
+    assert "__getattr__" not in vars(ConnectDataFrame)
+    assert "__getattr__" in dir(DataFrame)
+    assert "_get_column_by_attribute" in dir(ConnectDataFrame)
+    assert "_get_column_by_attribute" not in vars(DataFrame)
+    assert repr(native_resolver(frame, "count")) == "Column<'count'>"
+    assert repr(DataFrame.__getattr__(frame, "a")) == "Column<'a'>"
+    # Explicit __getattr__ resolves a column even when a method has that name.
+    assert repr(DataFrame.__getattr__(frame, "count")) == "Column<'count'>"
+    for name, condition in (
+        ("rdd", "JVM_ATTRIBUTE_NOT_SUPPORTED"),
+        ("__missing_column__", "ATTRIBUTE_NOT_SUPPORTED"),
+    ):
+        with pytest.raises(PySparkAttributeError) as error:
+            DataFrame.__getattr__(frame, name)
+        assert error.value.getCondition() == condition
+        assert error.value.getMessageParameters() == {"attr_name": name}
+    with monkeypatch.context() as patch:
+        patch.setenv("PYSPARK_VALIDATE_COLUMN_NAME_LEGACY", "1")
+        with pytest.raises(PySparkAttributeError) as error:
+            DataFrame.__getattr__(frame, "missing_column")
+        assert error.value.getCondition() == "ATTRIBUTE_NOT_SUPPORTED"
+        assert error.value.getMessageParameters() == {"attr_name": "missing_column"}
+
+    delegated_calls = []
+
+    class NativeFrame(ConnectDataFrame):
+        def __getattr__(self, name):
+            delegated_calls.append(name)
+            return DataFrame.__getattr__(self, name)
+
+    native_subclass = NativeFrame(plan=frame._plan, session=spark)
+    assert repr(NativeFrame.__getattr__(native_subclass, "count")) == "Column<'count'>"
+    assert delegated_calls == ["count"]
+    forwarded_calls = []
+
+    def custom_getattr(self, name):
+        forwarded_calls.append((self, name))
+        return ("custom", name)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(DataFrame, "__getattr__", custom_getattr)
+        assert vars(ConnectDataFrame)["__getattribute__"] is object.__getattribute__
+        assert frame.missing_column == ("custom", "missing_column")
+        assert DataFrame.__getattr__(frame, "count") == ("custom", "count")
+        assert len(forwarded_calls) == 2
+        assert all(item[0] is frame for item in forwarded_calls)
+        assert [item[1] for item in forwarded_calls] == ["missing_column", "count"]
+        assert frame.count.__self__ is frame
+        patch.setattr(DataFrame, "__getattr__", lambda self, name: ("second", name))
+        assert frame.missing_column == ("second", "missing_column")
+    assert vars(DataFrame)["__getattr__"] is original_public_getattr
+    assert "__getattr__" not in vars(ConnectDataFrame)
+    assert vars(ConnectDataFrame)["__getattribute__"] is original_native_lookup
+    assert dict(vars(ConnectDataFrame)) == original_native_attributes
+    assert repr(frame.a) == "Column<'a'>"
+    assert frame.count.__self__ is frame
+    assert repr(DataFrame.__getattr__(frame, "count")) == "Column<'count'>"
+    with pytest.raises(PySparkAttributeError) as error:
+        frame.__missing_column__
+    assert error.value.getCondition() == "ATTRIBUTE_NOT_SUPPORTED"
+    assert error.value.getMessageParameters() == {"attr_name": "__missing_column__"}
+
+    with monkeypatch.context() as patch:
+        patch.setattr(DataFrame, "__getattr__", custom_getattr)
+        patch.delattr(DataFrame, "__getattr__")
+        assert "__getattr__" not in vars(ConnectDataFrame)
+        assert vars(ConnectDataFrame)["__getattribute__"] is original_native_lookup
+        assert repr(frame.a) == "Column<'a'>"
+        assert frame.count.__self__ is frame
+    assert vars(DataFrame)["__getattr__"] is original_public_getattr
+    assert "__getattr__" not in vars(ConnectDataFrame)
+    assert vars(ConnectDataFrame)["__getattribute__"] is original_native_lookup
+    assert dict(vars(ConnectDataFrame)) == original_native_attributes
+    assert repr(frame.a) == "Column<'a'>"
+    assert service.execute_requests == []
+
+
+@pytest.mark.parametrize("lookup_first", [False, True])
+@pytest.mark.parametrize("undo_lookup_first", [False, True])
+def test_public_dataframe_lookup_protocol_is_local_during_hook_overrides(
+    ml_mock, monkeypatch, lookup_first, undo_lookup_first
+):
+    from pyspark.errors import PySparkNotImplementedError
+    from pyspark.sql import DataFrame
+    from pyspark.sql.connect.dataframe import DataFrame as ConnectDataFrame
+
+    spark, service = ml_mock
+    frame = spark.range(1)
+    monkeypatch.delenv("PYSPARK_VALIDATE_COLUMN_NAME_LEGACY", raising=False)
+    original_native_attributes = dict(vars(ConnectDataFrame))
+    original_public_attributes = dict(vars(DataFrame))
+    original_native_lookup = vars(ConnectDataFrame)["__getattribute__"]
+    local_lookup_calls, hook_calls = [], []
+
+    class BeforeFrame(DataFrame):
+        def __new__(cls):
+            return object.__new__(cls)
+
+    before_frame = BeforeFrame()
+
+    def local_lookup(self, name):
+        if name == "local_marker":
+            local_lookup_calls.append(id(self))
+            return "local-value"
+        return object.__getattribute__(self, name)
+
+    def forwarded_hook(self, name):
+        hook_calls.append((id(self), name))
+        return ("forwarded", name)
+
+    with monkeypatch.context() as lookup_patch, monkeypatch.context() as hook_patch:
+        install_order = ("lookup", "hook") if lookup_first else ("hook", "lookup")
+        for protocol in install_order:
+            native_before = dict(vars(ConnectDataFrame))
+            if protocol == "lookup":
+                lookup_patch.setattr(DataFrame, "__getattribute__", local_lookup)
+                assert dict(vars(ConnectDataFrame)) == native_before
+            else:
+                hook_patch.setattr(DataFrame, "__getattr__", forwarded_hook)
+                assert vars(ConnectDataFrame)["__getattribute__"] is object.__getattribute__
+
+        class DuringFrame(BeforeFrame):
+            pass
+
+        during_frame = DuringFrame()
+        for independent in (before_frame, during_frame):
+            assert independent.local_marker == "local-value"
+            assert independent.missing_value == ("forwarded", "missing_value")
+        assert local_lookup_calls == [id(before_frame), id(during_frame)]
+        assert frame.local_marker == ("forwarded", "local_marker")
+        assert local_lookup_calls == [id(before_frame), id(during_frame)]
+        assert frame.missing_value == ("forwarded", "missing_value")
+        assert hook_calls[-1] == (id(frame), "missing_value")
+        assert frame.count.__self__ is frame
+
+        undo_order = ("lookup", "hook") if undo_lookup_first else ("hook", "lookup")
+        for protocol in undo_order:
+            native_before = dict(vars(ConnectDataFrame))
+            if protocol == "lookup":
+                lookup_patch.undo()
+                assert dict(vars(ConnectDataFrame)) == native_before
+            else:
+                hook_patch.undo()
+                assert dict(vars(ConnectDataFrame)) == original_native_attributes
+                assert vars(ConnectDataFrame)["__getattribute__"] is original_native_lookup
+                assert "__getattr__" not in vars(ConnectDataFrame)
+                assert repr(frame.a) == "Column<'a'>"
+                assert frame.count.__self__ is frame
+
+    assert dict(vars(DataFrame)) == original_public_attributes
+    assert dict(vars(ConnectDataFrame)) == original_native_attributes
+    assert repr(frame.a) == "Column<'a'>"
+    for independent in (before_frame, during_frame):
+        with pytest.raises(PySparkNotImplementedError) as error:
+            independent.local_marker
+        assert error.value.getCondition() == "NOT_IMPLEMENTED"
+        assert error.value.getMessageParameters() == {"feature": "DataFrame.__getattr__"}
+    assert service.execute_requests == []
+
+
+def test_public_dataframe_state_protocols_apply_only_to_python_subclasses(ml_mock, monkeypatch):
+    from pyspark.sql import DataFrame
+    from pyspark.sql.connect.dataframe import DataFrame as ConnectDataFrame
+
+    spark, service = ml_mock
+    frame = spark.range(1)
+    original_native_attributes = dict(vars(ConnectDataFrame))
+    original_public_attributes = dict(vars(DataFrame))
+    set_calls, delete_calls = [], []
+
+    class BeforeFrame(DataFrame):
+        def __new__(cls):
+            return object.__new__(cls)
+
+    before_frame = BeforeFrame()
+
+    def local_setattr(self, name, value):
+        set_calls.append((id(self), name, value))
+        object.__setattr__(self, name, value)
+
+    def local_delattr(self, name):
+        delete_calls.append((id(self), name))
+        object.__delattr__(self, name)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(DataFrame, "__setattr__", local_setattr)
+        patch.setattr(DataFrame, "__delattr__", local_delattr)
+        assert dict(vars(ConnectDataFrame)) == original_native_attributes
+
+        class DuringFrame(BeforeFrame):
+            pass
+
+        during_frame = DuringFrame()
+        for independent in (before_frame, during_frame):
+            independent.value = 8
+            assert independent.value == 8
+            del independent.value
+            assert "value" not in vars(independent)
+        assert set_calls == [(id(before_frame), "value", 8), (id(during_frame), "value", 8)]
+        assert delete_calls == [(id(before_frame), "value"), (id(during_frame), "value")]
+        frame._protocol_state = 9
+        assert frame._protocol_state == 9
+        del frame._protocol_state
+        assert "_protocol_state" not in vars(frame)
+        assert set_calls == [(id(before_frame), "value", 8), (id(during_frame), "value", 8)]
+        assert delete_calls == [(id(before_frame), "value"), (id(during_frame), "value")]
+        assert dict(vars(ConnectDataFrame)) == original_native_attributes
+
+    assert dict(vars(DataFrame)) == original_public_attributes
+    assert dict(vars(ConnectDataFrame)) == original_native_attributes
+    before_frame.value = 10
+    del before_frame.value
+    assert len(set_calls) == len(delete_calls) == 2
+    assert service.execute_requests == []
+
+
+def test_python_dataframe_subclasses_can_own_their_state():
+    from pyspark.errors import PySparkNotImplementedError
+    from pyspark.sql import DataFrame
+    from pyspark.sql.connect.dataframe import DataFrame as ConnectDataFrame
+
+    class MemoryFrame(DataFrame):
+        def __new__(cls, values):
+            return object.__new__(cls)
+
+        def __init__(self, values):
+            self.values = list(values)
+            self._session = "own-session"
+            self._plan = "own-plan"
+            self.is_cached = False
+
+        def collect(self):
+            return list(self.values)
+
+        def count(self):
+            return len(self.collect())
+
+    class CountedFrame(MemoryFrame):
+        def count(self):
+            return super().count() + 1
+
+    frame = CountedFrame([1, 2])
+    assert isinstance(frame, DataFrame)
+    assert not isinstance(frame, ConnectDataFrame)
+    assert issubclass(CountedFrame, DataFrame)
+    assert frame.collect() == [1, 2]
+    assert frame.count() == 3
+    assert vars(frame) == {
+        "values": [1, 2], "_session": "own-session", "_plan": "own-plan", "is_cached": False
+    }
+    assert frame._session == "own-session" and frame._plan == "own-plan"
+    assert frame.is_cached is False
+    frame.is_cached = True
+    assert frame.is_cached is True
+    assert DataFrame.__annotations__["is_cached"] is bool
+    assert "is_cached" not in vars(DataFrame)
+    # Official public properties have empty bodies; independent subclasses can
+    # override them, and otherwise read None without disrupting hasattr.
+    assert frame.sparkSession is None
+    assert frame.schema is None
+    assert DataFrame.columns.fget(frame) is None
+    assert hasattr(frame, "schema")
+    # Public-base methods, including repr and dir, use PySpark's dispatch contract:
+    # native operations cannot operate on an independent Python data model.
+    for operation, name in (
+        (lambda: DataFrame.count(frame), "count"),
+        (lambda: repr(frame), "__repr__"),
+        (lambda: dir(frame), "__dir__"),
+        (lambda: frame.missing_attribute, "__getattr__"),
+        (lambda: hasattr(frame, "missing_attribute"), "__getattr__"),
+    ):
+        with pytest.raises(PySparkNotImplementedError) as error:
+            operation()
+        assert error.value.getCondition() == "NOT_IMPLEMENTED"
+        assert error.value.getMessageParameters() == {"feature": f"DataFrame.{name}"}
+
+
+@pytest.mark.parametrize("name,args,kwargs", [
+    ("checkpoint", (False,), {}),
+    ("localCheckpoint", (), {"eager": False, "storageLevel": "own-storage"}),
+    ("lateralJoin", ("other",), {"on": "condition", "how": "join-type"}),
+    (
+        "nearestByJoin", ("other", "ranking", 3, "exact", "distance"),
+        {"joinType": "left"},
+    ),
+    ("toPandas", (), {}),
+    ("asTable", (), {}),
+    ("scalar", (), {}),
+    ("exists", (), {}),
+])
+def test_python_dataframe_undecorated_methods_keep_official_fallbacks(name, args, kwargs):
+    from pyspark.sql import DataFrame
+
+    class MemoryFrame(DataFrame):
+        def __new__(cls):
+            return object.__new__(cls)
+
+    frame = MemoryFrame()
+    method = getattr(frame, name)
+    assert method(*args, **kwargs) is None
+    assert getattr(DataFrame, name)(frame, *args, **kwargs) is None
+    if name in {"checkpoint", "localCheckpoint"}:
+        assert method() is None
+    # Official empty methods enforce arity before returning None, without
+    # validating or converting the supplied values.
+    with pytest.raises(TypeError):
+        method(*args, **kwargs, unexpected=True)
+    with pytest.raises(TypeError):
+        method(*args, *([None] * 8), **kwargs)
+    if name in {"lateralJoin", "nearestByJoin"}:
+        with pytest.raises(TypeError):
+            method()
+    if name == "nearestByJoin":
+        with pytest.raises(TypeError):
+            method(*args, "left")
+
+
+def test_python_dataframe_arrow_stream_uses_generic_helper(monkeypatch):
+    from pyspark.sql import DataFrame, interchange
+
+    class MemoryFrame(DataFrame):
+        def __new__(cls):
+            return object.__new__(cls)
+
+    frame = MemoryFrame()
+    requested_schema = object()
+    stream = object()
+    calls = []
+
+    class Streamer:
+        def __init__(self, dataframe):
+            assert dataframe is frame
+
+        def __arrow_c_stream__(self, schema):
+            calls.append(schema)
+            return stream
+
+    monkeypatch.setattr(interchange, "SparkArrowCStreamer", Streamer)
+    assert frame.__arrow_c_stream__() is stream
+    assert frame.__arrow_c_stream__(requested_schema) is stream
+    assert DataFrame.__arrow_c_stream__(frame, requested_schema=requested_schema) is stream
+    assert calls == [None, requested_schema, requested_schema]
+    with pytest.raises(TypeError):
+        frame.__arrow_c_stream__(requested_schema, requested_schema)
+    with pytest.raises(TypeError):
+        frame.__arrow_c_stream__(unexpected=True)
+    with pytest.raises(TypeError):
+        frame.__arrow_c_stream__(requested_schema, requested_schema=requested_schema)
+    assert calls == [None, requested_schema, requested_schema]
+
+
+def test_public_dataframe_fallback_methods_still_dispatch_to_native(ml_mock, monkeypatch):
+    from pyspark.sql import DataFrame
+    from pyspark.sql.connect.dataframe import DataFrame as ConnectDataFrame
+
+    spark, service = ml_mock
+    frame = spark.range(1)
+    marker = object()
+    result = object()
+    calls = []
+
+    def implementation(self, value, *, option):
+        calls.append((self, value, option))
+        return result
+
+    for name in (
+        "checkpoint", "localCheckpoint", "lateralJoin", "nearestByJoin", "toPandas",
+        "asTable", "scalar", "exists", "__arrow_c_stream__",
+    ):
+        with monkeypatch.context() as patch:
+            patch.setattr(ConnectDataFrame, name, implementation)
+            # A native receiver uses the current concrete implementation's
+            # signature, even when the independent fallback has another arity.
+            assert getattr(DataFrame, name)(frame, marker, option=marker) is result
+            assert calls[-1] == (frame, marker, marker)
+    assert len(calls) == 9
+    assert service.execute_requests == []
+
+
+def test_local_dataframe_subclasses_cloudpickle_with_importable_metaclass():
+    from abc import ABCMeta
+
+    from pyspark import cloudpickle
+    from pyspark.sql import DataFrame
+
+    class MemoryFrame(DataFrame):
+        def __new__(cls, values):
+            return object.__new__(cls)
+
+        def __init__(self, values):
+            self.values = list(values)
+
+        def count(self):
+            return len(self.values)
+
+    class CountedFrame(MemoryFrame):
+        def count(self):
+            return super().count() + 1
+
+    def count_values(values):
+        return CountedFrame(values).count()
+
+    assert type(MemoryFrame) is ABCMeta
+    assert type(CountedFrame) is ABCMeta
+    payload = cloudpickle.dumps((CountedFrame, count_values))
+    assert b"_DataFrameMeta" not in payload
+    restored_class, restored_function = cloudpickle.loads(payload)
+    assert issubclass(restored_class, DataFrame)
+    assert restored_class([1, 2]).count() == 3
+    assert restored_function([1, 2, 3]) == 4
+
+    class UserMeta(type(DataFrame)):
+        pass
+
+    class UserFrame(DataFrame, metaclass=UserMeta):
+        def __new__(cls):
+            return object.__new__(cls)
+
+    assert type(UserFrame) is UserMeta
+    assert isinstance(UserFrame(), DataFrame)
+
+
+def test_python_dataframe_subclass_with_official_mock_pipeline():
+    # This is the no-server behavior of official PipelineTestsMixin.test_pipeline,
+    # using its actual vendored MockDataset, estimators and transformers.
+    from pyspark.errors import PySparkNotImplementedError
+    from pyspark.ml import Pipeline
+    from pyspark.sql import DataFrame
+    from pyspark.testing.mlutils import MockDataset, MockEstimator, MockTransformer
+
+    dataset = MockDataset()
+    assert isinstance(dataset, DataFrame)
+    with pytest.raises(PySparkNotImplementedError) as error:
+        hasattr(dataset, "missing_attribute")
+    assert error.value.getCondition() == "NOT_IMPLEMENTED"
+    assert error.value.getMessageParameters() == {"feature": "DataFrame.__getattr__"}
+    estimator0, transformer1 = MockEstimator(), MockTransformer()
+    estimator2, transformer3 = MockEstimator(), MockTransformer()
+    model = Pipeline(stages=[estimator0, transformer1, estimator2, transformer3]).fit(
+        dataset, {estimator0.fake: 0, transformer1.fake: 1}
+    )
+    model0, transformer1, model2, transformer3 = model.stages
+    assert model0.dataset_index == 0 and model0.getFake() == 0
+    assert transformer1.dataset_index == 1 and transformer1.getFake() == 1
+    assert dataset.index == 2
+    assert model2.dataset_index is None and transformer3.dataset_index is None
+    assert model.transform(dataset) is dataset
+    assert [stage.dataset_index for stage in model.stages] == [2, 3, 4, 5]
+    assert dataset.index == 6
+
+
+def test_python_dataframe_subclass_with_official_identity_pipeline():
+    from pyspark.ml import Pipeline
+    from pyspark.testing.mlutils import MockDataset
+
+    dataset = MockDataset()
+    assert Pipeline(stages=[]).fit(dataset).transform(dataset) is dataset
+    assert dataset.index == 0
+    with pytest.raises(KeyError):
+        Pipeline().fit(dataset)
+
+
 def test_ml_logical_plan_ids_as_pyspark():
     # As PySpark Connect's LogicalPlan: a plan ID of each plan, and another of a plan with
     # references, which _plan_id is.
