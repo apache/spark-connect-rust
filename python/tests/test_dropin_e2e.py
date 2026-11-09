@@ -4259,3 +4259,85 @@ def test_linear_regression_weights_and_iterative_losses(session):
     ).withColumn("features", array_to_vector("xs"))
     robust = LinearRegression(loss="huber", solver="l-bfgs", maxIter=200, tol=1e-8).fit(robust_training)
     assert robust.transform(held_out).first().prediction == pytest.approx(7, abs=0.2)
+
+
+def _kmeans():
+    try:
+        from pyspark._pyspark import KMeans
+    except ImportError:
+        from pyspark.ml.clustering import KMeans
+    return KMeans
+
+
+def _assert_cluster_partition(actual, expected):
+    assert len(actual) == len(expected)
+    assert all((a == b) == (x == y)
+               for a, x in zip(actual, expected) for b, y in zip(actual, expected))
+
+
+@pytest.mark.parametrize("use_setters", [False, True], ids=["constructor", "setters"])
+def test_kmeans_learns_clusters_from_the_supplied_training_data(session, use_setters):
+    from pyspark.ml.connect.functions import array_to_vector
+    KMeans = _kmeans()
+    def vectors(sql):
+        return session.sql(sql).withColumn("input", array_to_vector("xs"))
+    training = vectors("SELECT array(CAST(x AS DOUBLE)) AS xs, 1.0D AS weight "
+                       "FROM VALUES (-11),(-10),(-9),(9),(10),(11) AS t(x)")
+    shifted = vectors("SELECT array(CAST(x AS DOUBLE)) AS xs, 1.0D AS weight "
+                      "FROM VALUES (9),(10),(11),(29),(30),(31) AS t(x)")
+    held_out = vectors("SELECT id, array(CAST(x AS DOUBLE)) AS xs "
+                       "FROM VALUES (0,-10),(1,-1),(2,10),(3,21),(4,30) AS t(id,x)")
+    kwargs = dict(featuresCol="input", predictionCol="cluster", k=2, initMode="k-means||",
+                  initSteps=3, tol=1e-6, maxIter=50, seed=42, distanceMeasure="euclidean",
+                  weightCol="weight", solver="block" if use_setters else "row", maxBlockSizeInMB=1.0)
+    estimator = KMeans() if use_setters else KMeans(**kwargs)
+    if use_setters:
+        for name, value in kwargs.items():
+            assert getattr(estimator, "set" + name[0].upper() + name[1:])(value) is estimator
+    first = estimator.fit(training)
+    second = estimator.fit(shifted)
+    predictions = lambda model: [r.cluster for r in model.transform(held_out).orderBy("id").collect()]
+    original = predictions(first)
+    _assert_cluster_partition(original, [0,0,1,1,1])
+    _assert_cluster_partition(predictions(second), [0,0,0,1,1])
+    assert original == predictions(estimator.fit(training))
+    with pytest.raises(Exception):
+        estimator.fit(session.range(3))
+
+
+def test_kmeans_weights_move_the_cluster_boundary(session):
+    from pyspark.ml.connect.functions import array_to_vector
+    KMeans = _kmeans()
+    training = session.sql(
+        "SELECT array(CAST(x AS DOUBLE)) AS xs, CAST(w AS DOUBLE) AS weight "
+        "FROM VALUES (0,1),(2,9),(10,1),(12,9) AS t(x,w)"
+    ).withColumn("features", array_to_vector("xs"))
+    held_out = session.sql(
+        "SELECT id, array(CAST(x AS DOUBLE)) AS xs FROM VALUES (0,0),(1,6.5),(2,12) AS t(id,x)"
+    ).withColumn("features", array_to_vector("xs"))
+    plain = KMeans(seed=42).fit(training)
+    weighted = KMeans(seed=42, weightCol="weight").fit(training)
+    predictions = lambda model: [r.prediction for r in model.transform(held_out).orderBy("id").collect()]
+    _assert_cluster_partition(predictions(plain), [0,1,1])
+    _assert_cluster_partition(predictions(weighted), [0,0,1])
+    with pytest.raises(Exception):
+        KMeans(k=1).fit(training)
+    with pytest.raises(Exception):
+        KMeans(solver="invalid").fit(training)
+    with pytest.raises(Exception):
+        KMeans(weightCol="weight").fit(training.withColumn("weight", F.lit(-1.0)))
+
+
+def test_kmeans_cosine_distance_groups_vectors_by_direction(session):
+    from pyspark.ml.connect.functions import array_to_vector
+    KMeans = _kmeans()
+    training = session.sql(
+        "SELECT array(CAST(x AS DOUBLE),CAST(y AS DOUBLE)) AS xs "
+        "FROM VALUES (1,0),(2,0),(0,1),(0,2) AS t(x,y)"
+    ).withColumn("features", array_to_vector("xs"))
+    held_out = session.sql(
+        "SELECT id, array(CAST(x AS DOUBLE),CAST(y AS DOUBLE)) AS xs "
+        "FROM VALUES (0,100,1),(1,1,0.01),(2,1,100),(3,0.01,1) AS t(id,x,y)"
+    ).withColumn("features", array_to_vector("xs"))
+    model = KMeans(seed=42, distanceMeasure="cosine", solver="row").fit(training)
+    _assert_cluster_partition([r.prediction for r in model.transform(held_out).orderBy("id").collect()], [0,0,1,1])
